@@ -3,6 +3,7 @@ import {
   TERMINAL_WATCH_SCHEMA,
   TERMINAL_WATCH_VERSION,
   assertTerminalWatch,
+  initialTerminalWatchObservationCheckpoint,
   terminalWatchIdentityFingerprint,
   terminalWatchNotificationId,
   terminalWatchNotificationIdempotencyKey,
@@ -11,6 +12,7 @@ import {
   type TerminalWatchAnchor,
   type TerminalWatchNotification,
   type TerminalWatchNotificationKind,
+  type TerminalWatchObservationCheckpoint,
   type TerminalWatchStatus,
   type TerminalWatchStore,
   type TerminalWatchTerminalIdentity,
@@ -20,6 +22,8 @@ import type { ExecutorKind } from "./executors.js";
 
 const DEFAULT_NOTIFICATION_LEASE_MS = 30_000;
 const DEFAULT_NOTIFICATION_RETRY_DELAY_MS = 5_000;
+const DEFAULT_NOTIFICATION_MAX_RETRY_DELAY_MS = 60_000;
+const DEFAULT_RECONCILIATION_DELIVERY_LIMIT = 1;
 
 export interface CreateTerminalWatchInput {
   watch_id?: string;
@@ -43,10 +47,16 @@ export interface TerminalWatchObservationFence {
 interface TerminalWatchObservationBase extends TerminalWatchObservationFence {
   observed_at: string;
   last_activity_at?: string;
+  safe_resume_offset_bytes?: number;
+  observation_checkpoint?: TerminalWatchObservationCheckpoint;
 }
 
 export type TerminalWatchObservation =
   | (TerminalWatchObservationBase & { kind: "pending" })
+  | (TerminalWatchObservationBase & {
+      kind: "unavailable";
+      reason_code?: string;
+    })
   | (TerminalWatchObservationBase & {
       kind: "approval";
       evidence_fingerprint: string;
@@ -69,7 +79,6 @@ export type TerminalWatchObservation =
 export interface TerminalWatchDeliveryInput {
   watch: TerminalWatch;
   notification: TerminalWatchNotification;
-  idempotencyKey: string;
 }
 
 export interface TerminalWatchServiceDependencies {
@@ -80,39 +89,10 @@ export interface TerminalWatchServiceDependencies {
   deliver(input: TerminalWatchDeliveryInput): Promise<void>;
   notificationLeaseMs?: number;
   notificationRetryDelayMs?: number | ((attempt: number) => number);
+  notificationMaxRetryDelayMs?: number;
+  reconciliationDeliveryLimit?: number;
   classifyDeliveryError?(error: unknown): string;
 }
-
-export interface ClaimedTerminalWatchNotification {
-  watch: TerminalWatch;
-  notification: TerminalWatchNotification;
-  attempt_id: string;
-}
-
-export interface TerminalWatchNotificationFinishResult {
-  settled: boolean;
-  watch: TerminalWatch;
-  reason?: "notification_missing" | "claim_changed";
-}
-
-export type TerminalWatchDeliveryResult =
-  | { status: "none"; watch: TerminalWatch }
-  | {
-      status: "delivered";
-      watch: TerminalWatch;
-      notification_id: string;
-    }
-  | {
-      status: "failed";
-      watch: TerminalWatch;
-      notification_id: string;
-      error_code: string;
-    }
-  | {
-      status: "claim_changed";
-      watch: TerminalWatch;
-      notification_id: string;
-    };
 
 export interface TerminalWatchReconciliationItem {
   watch_id: string;
@@ -137,18 +117,6 @@ export interface TerminalWatchService {
   list(): TerminalWatch[];
   reconcile(watchId: string): Promise<TerminalWatch>;
   reconcileAll(): Promise<TerminalWatchReconciliationSummary>;
-  claimNextNotification(
-    watchId: string
-  ): ClaimedTerminalWatchNotification | undefined;
-  finishNotification(
-    watchId: string,
-    notificationId: string,
-    attemptId: string,
-    outcome:
-      | { delivered: true }
-      | { delivered: false; error_code: string }
-  ): TerminalWatchNotificationFinishResult;
-  deliverNextNotification(watchId: string): Promise<TerminalWatchDeliveryResult>;
 }
 
 export class ActiveTerminalWatchConflictError extends Error {
@@ -172,7 +140,11 @@ export class ActiveTerminalWatchConflictError extends Error {
 export function createTerminalWatchService(
   dependencies: TerminalWatchServiceDependencies
 ): TerminalWatchService {
-  const { notificationLeaseMs, retryDelay } =
+  const {
+    notificationLeaseMs,
+    reconciliationDeliveryLimit,
+    retryDelay
+  } =
     terminalWatchNotificationDeliveryPolicy(dependencies);
 
   function create(input: CreateTerminalWatchInput): TerminalWatch {
@@ -191,6 +163,8 @@ export function createTerminalWatchService(
       agent: input.agent,
       terminal: input.terminal,
       anchor: input.anchor,
+      observation_checkpoint:
+        initialTerminalWatchObservationCheckpoint(input.anchor),
       openclaw_session: input.openclaw_session,
       openclaw_bin: input.openclaw_bin,
       created_at: createdAt,
@@ -232,7 +206,7 @@ export function createTerminalWatchService(
         version: 1,
         watch_id: current.watch_id,
         kind: "cancelled",
-        anchor_fingerprint: current.anchor.evidence_fingerprint
+        anchor_fingerprint: current.anchor.anchor_fingerprint
       });
       return saveSettlement(current, {
         kind: "cancelled",
@@ -287,7 +261,7 @@ export function createTerminalWatchService(
       watch_id: current.watch_id,
       kind: "timed_out",
       deadline_at: current.deadline_at,
-      anchor_fingerprint: current.anchor.evidence_fingerprint
+      anchor_fingerprint: current.anchor.anchor_fingerprint
     });
     return saveSettlement(current, {
       kind: "timed_out",
@@ -303,18 +277,34 @@ export function createTerminalWatchService(
     observation: TerminalWatchObservation,
     now: string
   ): TerminalWatch {
+    const checkpoint = nextObservationCheckpoint(current, observation);
+    const checkpointAdvanced = checkpoint.safe_resume_offset_bytes >
+      current.observation_checkpoint.safe_resume_offset_bytes;
     const activityAt = latestActivityAt(
       current.last_activity_at,
-      observation.kind === "approval"
+      checkpointAdvanced
         ? observation.last_activity_at ?? observation.observed_at
         : observation.last_activity_at
     );
+    if (observation.kind === "unavailable") {
+      if (!checkpointAdvanced) return current;
+      return dependencies.repository.save({
+        ...current,
+        observation_checkpoint: checkpoint,
+        last_activity_at: activityAt,
+        updated_at: now
+      }, { expectedRevision: terminalWatchRevision(current) });
+    }
     if (observation.kind === "pending") {
-      if (activityAt === current.last_activity_at) {
+      if (
+        activityAt === current.last_activity_at &&
+        !checkpointAdvanced
+      ) {
         return current;
       }
       return dependencies.repository.save({
         ...current,
+        observation_checkpoint: checkpoint,
         last_activity_at: activityAt,
         updated_at: now
       }, { expectedRevision: terminalWatchRevision(current) });
@@ -325,17 +315,22 @@ export function createTerminalWatchService(
         notification.evidence_fingerprint === observation.evidence_fingerprint
       );
       if (duplicate) {
-        if (activityAt === current.last_activity_at) {
+        if (
+          activityAt === current.last_activity_at &&
+          !checkpointAdvanced
+        ) {
           return current;
         }
         return dependencies.repository.save({
           ...current,
+          observation_checkpoint: checkpoint,
           last_activity_at: activityAt,
           updated_at: now
         }, { expectedRevision: terminalWatchRevision(current) });
       }
       const next = withApprovalNotification({
         ...current,
+        observation_checkpoint: checkpoint,
         last_activity_at: activityAt,
         updated_at: now
       }, {
@@ -418,12 +413,60 @@ export function createTerminalWatchService(
 
   function claimNextNotification(
     watchId: string
-  ): ClaimedTerminalWatchNotification | undefined {
-    return claimNextTerminalWatchNotification(
-      dependencies,
-      notificationLeaseMs,
-      watchId
-    );
+  ) {
+    return dependencies.repository.withWatchLock(watchId, () => {
+      let current = dependencies.repository.load(watchId);
+      const now = canonicalNow(dependencies.now());
+      let index = firstUnresolvedNotificationIndex(current);
+      const first = current.notification_outbox[index];
+      if (
+        current.status !== "active" &&
+        first?.kind === "approval" &&
+        notificationIsClaimable(first, now)
+      ) {
+        current = dependencies.repository.save({
+          ...current,
+          updated_at: now,
+          notification_outbox: replaceAt(
+            current.notification_outbox,
+            index,
+            supersededApprovalNotification(first, now)
+          )
+        }, { expectedRevision: terminalWatchRevision(current) });
+        index = firstUnresolvedNotificationIndex(current);
+      }
+      if (
+        index < 0 ||
+        !notificationIsClaimable(current.notification_outbox[index], now)
+      ) {
+        return { watch: current };
+      }
+      const selected = current.notification_outbox[index];
+      const attemptId = dependencies.randomUUID();
+      const claimed = withNotificationReceipt(selected, {
+        status: "delivering",
+        attempts: selected.attempts + 1,
+        last_attempt_at: now,
+        attempt_id: attemptId,
+        attempt_lease_expires_at: new Date(
+          Date.parse(now) + notificationLeaseMs
+        ).toISOString()
+      });
+      const saved = dependencies.repository.save({
+        ...current,
+        updated_at: now,
+        notification_outbox: replaceAt(
+          current.notification_outbox,
+          index,
+          claimed
+        )
+      }, { expectedRevision: terminalWatchRevision(current) });
+      return {
+        watch: saved,
+        notification: saved.notification_outbox[index],
+        attempt_id: attemptId
+      };
+    });
   }
 
   function finishNotification(
@@ -433,47 +476,35 @@ export function createTerminalWatchService(
     outcome:
       | { delivered: true }
       | { delivered: false; error_code: string }
-  ): TerminalWatchNotificationFinishResult {
+  ) {
     return dependencies.repository.withWatchLock(watchId, () => {
       const current = dependencies.repository.load(watchId);
       const index = current.notification_outbox.findIndex(
         (notification) => notification.notification_id === notificationId
       );
       if (index < 0) {
-        return { settled: false, watch: current, reason: "notification_missing" };
+        return { settled: false, watch: current };
       }
       const selected = current.notification_outbox[index];
       if (
         selected.status !== "delivering" ||
         selected.attempt_id !== attemptId
       ) {
-        return { settled: false, watch: current, reason: "claim_changed" };
+        return { settled: false, watch: current };
       }
       const now = canonicalNow(dependencies.now());
       const settled: TerminalWatchNotification = outcome.delivered
-        ? {
-            notification_id: selected.notification_id,
-            idempotency_key: selected.idempotency_key,
-            kind: selected.kind,
-            evidence_fingerprint: selected.evidence_fingerprint,
-            reason_code: selected.reason_code,
+        ? withNotificationReceipt(selected, {
             status: "delivered",
             attempts: selected.attempts,
-            created_at: selected.created_at,
             last_attempt_at: selected.last_attempt_at,
             delivered_at: now
-          }
+          })
         : selected.kind === "approval" && current.status !== "active"
           ? supersededApprovalNotification(selected, now)
-          : {
-            notification_id: selected.notification_id,
-            idempotency_key: selected.idempotency_key,
-            kind: selected.kind,
-            evidence_fingerprint: selected.evidence_fingerprint,
-            reason_code: selected.reason_code,
+          : withNotificationReceipt(selected, {
             status: "failed",
             attempts: selected.attempts,
-            created_at: selected.created_at,
             last_attempt_at: selected.last_attempt_at,
             failed_at: now,
             next_attempt_at: new Date(
@@ -483,7 +514,7 @@ export function createTerminalWatchService(
               outcome.error_code,
               "callback_delivery_failed"
             )
-          };
+          });
       const saved = dependencies.repository.save({
         ...current,
         updated_at: now,
@@ -499,125 +530,56 @@ export function createTerminalWatchService(
 
   async function deliverNextNotification(
     watchId: string
-  ): Promise<TerminalWatchDeliveryResult> {
+  ): Promise<TerminalWatchNotificationDeliveryResult> {
     const claim = claimNextNotification(watchId);
-    if (!claim) {
-      return { status: "none", watch: dependencies.repository.load(watchId) };
+    if (!claim.notification || !claim.attempt_id) {
+      return { status: "none", watch: claim.watch };
     }
+    let errorCode: string | undefined;
     try {
       await dependencies.deliver({
         watch: claim.watch,
-        notification: claim.notification,
-        idempotencyKey: claim.notification.idempotency_key
+        notification: claim.notification
       });
-      const finished = finishNotification(
-        watchId,
-        claim.notification.notification_id,
-        claim.attempt_id,
-        { delivered: true }
-      );
-      return finished.settled
-        ? {
-            status: "delivered",
-            watch: finished.watch,
-            notification_id: claim.notification.notification_id
-          }
-        : {
-            status: "claim_changed",
-            watch: finished.watch,
-            notification_id: claim.notification.notification_id
-          };
     } catch (error) {
-      const errorCode = safeReasonCode(
+      errorCode = safeReasonCode(
         dependencies.classifyDeliveryError?.(error),
         "callback_delivery_failed"
       );
-      const finished = finishNotification(
-        watchId,
-        claim.notification.notification_id,
-        claim.attempt_id,
-        { delivered: false, error_code: errorCode }
-      );
-      return finished.settled
-        ? {
-            status: "failed",
-            watch: finished.watch,
-            notification_id: claim.notification.notification_id,
-            error_code: errorCode
-          }
-        : {
-            status: "claim_changed",
-            watch: finished.watch,
-            notification_id: claim.notification.notification_id
-          };
     }
+    const notificationId = claim.notification.notification_id;
+    const finished = finishNotification(
+      watchId,
+      notificationId,
+      claim.attempt_id,
+      errorCode === undefined
+        ? { delivered: true }
+        : { delivered: false, error_code: errorCode }
+    );
+    if (!finished.settled) {
+      return {
+        status: "claim_changed",
+        watch: finished.watch,
+        notification_id: notificationId
+      };
+    }
+    return errorCode === undefined
+      ? { status: "delivered", watch: finished.watch, notification_id: notificationId }
+      : {
+          status: "failed",
+          watch: finished.watch,
+          notification_id: notificationId,
+          error_code: errorCode
+        };
   }
 
   async function reconcileAll(): Promise<TerminalWatchReconciliationSummary> {
-    const listed = dependencies.repository.list();
-    const summary: TerminalWatchReconciliationSummary = {
-      checked: listed.length,
-      changed: 0,
-      callbacks_delivered: 0,
-      errors: 0,
-      items: []
-    };
-    for (const item of listed) {
-      const beforeRevision = terminalWatchRevision(item);
-      let callbacksDelivered = 0;
-      let errorCode: string | undefined;
-      let current = item;
-      try {
-        current = item.status === "active"
-          ? await reconcile(item.watch_id)
-          : dependencies.repository.load(item.watch_id);
-      } catch (error) {
-        errorCode = safeReasonCode(
-          dependencies.classifyDeliveryError?.(error),
-          "terminal_watch_observation_failed"
-        );
-        current = safeLoadWatch(dependencies.repository, item.watch_id, item);
-      }
-      try {
-        const deliveryLimit = current.notification_outbox.length + 1;
-        for (let attempt = 0; attempt < deliveryLimit; attempt += 1) {
-          const delivery = await deliverNextNotification(item.watch_id);
-          current = delivery.watch;
-          if (delivery.status === "delivered") {
-            callbacksDelivered += 1;
-            continue;
-          }
-          if (delivery.status === "failed") {
-            errorCode = errorCode ?? delivery.error_code;
-          } else if (delivery.status === "claim_changed") {
-            errorCode = errorCode ?? "callback_claim_changed";
-          }
-          break;
-        }
-      } catch (error) {
-        errorCode = errorCode ?? safeReasonCode(
-          dependencies.classifyDeliveryError?.(error),
-          "terminal_watch_callback_recovery_failed"
-        );
-        current = safeLoadWatch(
-          dependencies.repository,
-          item.watch_id,
-          current
-        );
-      }
-      const changed = terminalWatchRevision(current) !== beforeRevision;
-      if (changed) summary.changed += 1;
-      summary.callbacks_delivered += callbacksDelivered;
-      if (errorCode) summary.errors += 1;
-      summary.items.push({
-        watch_id: item.watch_id,
-        status: current.status,
-        changed,
-        callbacks_delivered: callbacksDelivered,
-        error_code: errorCode
-      });
-    }
-    return summary;
+    return reconcileAllTerminalWatches({
+      dependencies,
+      reconciliationDeliveryLimit,
+      reconcile,
+      deliverNextNotification
+    });
   }
 
   return Object.freeze({
@@ -626,76 +588,140 @@ export function createTerminalWatchService(
     get: (watchId: string) => dependencies.repository.load(watchId),
     list: () => dependencies.repository.list(),
     reconcile,
-    reconcileAll,
-    claimNextNotification,
-    finishNotification,
-    deliverNextNotification
+    reconcileAll
   });
 }
 
-function claimNextTerminalWatchNotification(
-  dependencies: Pick<
-    TerminalWatchServiceDependencies,
-    "repository" | "now" | "randomUUID"
-  >,
-  notificationLeaseMs: number,
-  watchId: string
-): ClaimedTerminalWatchNotification | undefined {
-  return dependencies.repository.withWatchLock(watchId, () => {
-    let current = dependencies.repository.load(watchId);
-    const now = canonicalNow(dependencies.now());
-    let index = firstUnresolvedNotificationIndex(current);
-    const first = current.notification_outbox[index];
-    if (
-      current.status !== "active" &&
-      first?.kind === "approval" &&
-      notificationIsClaimable(first, now)
-    ) {
-      current = dependencies.repository.save({
-        ...current,
-        updated_at: now,
-        notification_outbox: replaceAt(
-          current.notification_outbox,
-          index,
-          supersededApprovalNotification(first, now)
-        )
-      }, { expectedRevision: terminalWatchRevision(current) });
-      index = firstUnresolvedNotificationIndex(current);
+type TerminalWatchNotificationDeliveryResult =
+  | { status: "none"; watch: TerminalWatch }
+  | {
+      status: "claim_changed" | "delivered";
+      watch: TerminalWatch;
+      notification_id: string;
     }
-    if (
-      index < 0 ||
-      !notificationIsClaimable(current.notification_outbox[index], now)
-    ) {
-      return undefined;
+  | {
+      status: "failed";
+      watch: TerminalWatch;
+      notification_id: string;
+      error_code: string;
+    };
+
+async function reconcileAllTerminalWatches(input: {
+  dependencies: TerminalWatchServiceDependencies;
+  reconciliationDeliveryLimit: number;
+  reconcile(watchId: string): Promise<TerminalWatch>;
+  deliverNextNotification(
+    watchId: string
+  ): Promise<TerminalWatchNotificationDeliveryResult>;
+}): Promise<TerminalWatchReconciliationSummary> {
+  const {
+    dependencies,
+    reconciliationDeliveryLimit,
+    reconcile,
+    deliverNextNotification
+  } = input;
+  const scan = dependencies.repository.scanForReconciliation();
+  const work = scan.watches
+    .filter((watch) => watch.status === "active" || hasUnresolvedNotification(watch))
+    .map((watch) => ({
+      beforeRevision: terminalWatchRevision(watch),
+      callbacksDelivered: 0,
+      current: watch,
+      errorCode: undefined as string | undefined
+    }));
+
+  // Observation has priority over callback transport. A slow or permanently
+  // failing OpenClaw callback must never prevent another active Watch from
+  // learning that its exact task completed or became invalid.
+  for (const item of work) {
+    if (item.current.status !== "active") continue;
+    try {
+      item.current = await reconcile(item.current.watch_id);
+    } catch (error) {
+      item.errorCode = safeReasonCode(
+        dependencies.classifyDeliveryError?.(error),
+        "terminal_watch_observation_failed"
+      );
+      item.current = safeLoadWatch(
+        dependencies.repository,
+        item.current.watch_id,
+        item.current
+      );
     }
-    const selected = current.notification_outbox[index];
-    const attemptId = dependencies.randomUUID();
-    const claimed: TerminalWatchNotification = {
-      notification_id: selected.notification_id,
-      idempotency_key: selected.idempotency_key,
-      kind: selected.kind,
-      evidence_fingerprint: selected.evidence_fingerprint,
-      reason_code: selected.reason_code,
-      status: "delivering",
-      attempts: selected.attempts + 1,
-      created_at: selected.created_at,
-      last_attempt_at: now,
-      attempt_id: attemptId,
-      attempt_lease_expires_at: new Date(
-        Date.parse(now) + notificationLeaseMs
-      ).toISOString()
-    };
-    const saved = dependencies.repository.save({
-      ...current,
-      updated_at: now,
-      notification_outbox: replaceAt(current.notification_outbox, index, claimed)
-    }, { expectedRevision: terminalWatchRevision(current) });
-    return {
-      watch: saved,
-      notification: saved.notification_outbox[index],
-      attempt_id: attemptId
-    };
-  });
+  }
+
+  // Delivery is a separate, bounded and fair phase. At most one notification
+  // per Watch can be attempted in this reconciliation, and oldest attempts
+  // win so a recently failed callback cannot remain permanently at the head.
+  const deliveryNow = canonicalNow(dependencies.now());
+  const deliveryCandidates = work
+    .flatMap((item) => {
+      const notification = firstClaimableNotification(item.current, deliveryNow);
+      return notification ? [{ item, notification }] : [];
+    })
+    .sort((left, right) =>
+      notificationFairnessTime(left.notification).localeCompare(
+        notificationFairnessTime(right.notification)
+      ) || left.item.current.watch_id.localeCompare(right.item.current.watch_id)
+    )
+    .slice(0, reconciliationDeliveryLimit);
+
+  for (const candidate of deliveryCandidates) {
+    const item = candidate.item;
+    try {
+      const delivery = await deliverNextNotification(item.current.watch_id);
+      item.current = delivery.watch;
+      if (delivery.status === "delivered") {
+        item.callbacksDelivered += 1;
+      } else if (delivery.status === "failed") {
+        item.errorCode = item.errorCode ?? delivery.error_code;
+      } else if (delivery.status === "claim_changed") {
+        item.errorCode = item.errorCode ?? "callback_claim_changed";
+      }
+    } catch (error) {
+      item.errorCode = item.errorCode ?? safeReasonCode(
+        dependencies.classifyDeliveryError?.(error),
+        "terminal_watch_callback_recovery_failed"
+      );
+      item.current = safeLoadWatch(
+        dependencies.repository,
+        item.current.watch_id,
+        item.current
+      );
+    }
+  }
+
+  const summary: TerminalWatchReconciliationSummary = {
+    checked: work.length + scan.errors.length,
+    changed: 0,
+    callbacks_delivered: 0,
+    errors: 0,
+    items: []
+  };
+  for (const item of work) {
+    const changed = terminalWatchRevision(item.current) !== item.beforeRevision;
+    if (changed) summary.changed += 1;
+    summary.callbacks_delivered += item.callbacksDelivered;
+    if (item.errorCode) summary.errors += 1;
+    summary.items.push({
+      watch_id: item.current.watch_id,
+      status: item.current.status,
+      changed,
+      callbacks_delivered: item.callbacksDelivered,
+      error_code: item.errorCode
+    });
+  }
+  for (const error of scan.errors) {
+    summary.errors += 1;
+    summary.items.push({
+      watch_id: error.watch_id,
+      status: "error",
+      changed: false,
+      callbacks_delivered: 0,
+      error_code: error.error_code
+    });
+  }
+  return summary;
 }
 
 function firstUnresolvedNotificationIndex(watch: TerminalWatch): number {
@@ -703,6 +729,27 @@ function firstUnresolvedNotificationIndex(watch: TerminalWatch): number {
     notification.status !== "delivered" &&
     notification.status !== "superseded"
   );
+}
+
+function hasUnresolvedNotification(watch: TerminalWatch): boolean {
+  return firstUnresolvedNotificationIndex(watch) >= 0;
+}
+
+function firstClaimableNotification(
+  watch: TerminalWatch,
+  now: string
+): TerminalWatchNotification | undefined {
+  const index = firstUnresolvedNotificationIndex(watch);
+  const notification = watch.notification_outbox[index];
+  return notification && notificationIsClaimable(notification, now)
+    ? notification
+    : undefined;
+}
+
+function notificationFairnessTime(
+  notification: TerminalWatchNotification
+): string {
+  return notification.last_attempt_at ?? notification.created_at;
 }
 
 function safeLoadWatch(
@@ -721,22 +768,69 @@ function terminalWatchNotificationDeliveryPolicy(
   dependencies: TerminalWatchServiceDependencies
 ): {
   notificationLeaseMs: number;
+  reconciliationDeliveryLimit: number;
   retryDelay(attempt: number): number;
 } {
+  const maximumRetryDelay = positiveMilliseconds(
+    dependencies.notificationMaxRetryDelayMs,
+    DEFAULT_NOTIFICATION_MAX_RETRY_DELAY_MS,
+    "terminal Watch maximum notification retry delay"
+  );
+  const configuredRetryDelay = dependencies.notificationRetryDelayMs;
   return {
     notificationLeaseMs: positiveMilliseconds(
       dependencies.notificationLeaseMs,
       DEFAULT_NOTIFICATION_LEASE_MS,
       "terminal Watch notification lease"
     ),
+    reconciliationDeliveryLimit: positiveMilliseconds(
+      dependencies.reconciliationDeliveryLimit,
+      DEFAULT_RECONCILIATION_DELIVERY_LIMIT,
+      "terminal Watch reconciliation delivery limit"
+    ),
     retryDelay: (attempt) => nonNegativeMilliseconds(
-      typeof dependencies.notificationRetryDelayMs === "function"
-        ? dependencies.notificationRetryDelayMs(attempt)
-        : dependencies.notificationRetryDelayMs,
+      Math.min(
+        maximumRetryDelay,
+        typeof configuredRetryDelay === "function"
+          ? configuredRetryDelay(attempt)
+          : (configuredRetryDelay ?? DEFAULT_NOTIFICATION_RETRY_DELAY_MS) *
+            2 ** Math.max(0, attempt - 1)
+      ),
       DEFAULT_NOTIFICATION_RETRY_DELAY_MS,
       "terminal Watch notification retry delay"
     )
   };
+}
+
+function nextObservationCheckpoint(
+  watch: TerminalWatch,
+  observation: TerminalWatchObservation
+): TerminalWatch["observation_checkpoint"] {
+  const suppliedCheckpoint = observation.observation_checkpoint;
+  const suppliedOffset = observation.safe_resume_offset_bytes;
+  if (
+    suppliedCheckpoint !== undefined &&
+    suppliedOffset !== undefined &&
+    suppliedCheckpoint.safe_resume_offset_bytes !== suppliedOffset
+  ) {
+    throw new Error("terminal Watch observation checkpoints disagree");
+  }
+  if (suppliedCheckpoint === undefined && suppliedOffset === undefined) {
+    return watch.observation_checkpoint;
+  }
+  const candidate = suppliedCheckpoint ?? {
+    safe_resume_offset_bytes: suppliedOffset as number
+  };
+  if (
+    !Number.isSafeInteger(candidate.safe_resume_offset_bytes) ||
+    candidate.safe_resume_offset_bytes <
+      watch.observation_checkpoint.safe_resume_offset_bytes
+  ) {
+    throw new Error("terminal Watch observation checkpoint is invalid");
+  }
+  const candidateWatch = { ...watch, observation_checkpoint: candidate };
+  assertTerminalWatch(candidateWatch, watch.watch_id);
+  return candidate;
 }
 
 export function terminalWatchObservationFence(
@@ -745,7 +839,7 @@ export function terminalWatchObservationFence(
   return {
     watch_id: watch.watch_id,
     terminal_identity_fingerprint: terminalWatchIdentityFingerprint(watch),
-    anchor_fingerprint: watch.anchor.evidence_fingerprint
+    anchor_fingerprint: watch.anchor.anchor_fingerprint
   };
 }
 
@@ -775,6 +869,35 @@ function assertObservationForWatch(
     if (Date.parse(observation.last_activity_at) > Date.parse(now)) {
       throw new Error("terminal Watch activity cannot come from the future");
     }
+  }
+  if (observation.safe_resume_offset_bytes !== undefined) {
+    if (
+      !Number.isSafeInteger(observation.safe_resume_offset_bytes) ||
+      observation.safe_resume_offset_bytes <
+        watch.observation_checkpoint.safe_resume_offset_bytes
+    ) {
+      throw new Error("terminal Watch observation checkpoint is invalid");
+    }
+  }
+  if (
+    observation.observation_checkpoint !== undefined &&
+    (
+      observation.observation_checkpoint.safe_resume_offset_bytes <
+        watch.observation_checkpoint.safe_resume_offset_bytes ||
+      (
+        observation.safe_resume_offset_bytes !== undefined &&
+        observation.safe_resume_offset_bytes !==
+          observation.observation_checkpoint.safe_resume_offset_bytes
+      )
+    )
+  ) {
+    throw new Error("terminal Watch observation checkpoint is invalid");
+  }
+  if (observation.kind === "unavailable") {
+    if (observation.reason_code !== undefined) {
+      safeReasonCode(observation.reason_code, undefined);
+    }
+    return;
   }
   if (observation.kind !== "pending") {
     assertSha256(
@@ -832,7 +955,6 @@ function withApprovalNotification(
   );
   return {
     ...watch,
-    approval_fingerprint: input.evidenceFingerprint,
     notification_outbox: [...watch.notification_outbox, notification]
   };
 }
@@ -888,16 +1010,36 @@ function supersededApprovalNotification(
   notification: TerminalWatchNotification,
   supersededAt: string
 ): TerminalWatchNotification {
+  return withNotificationReceipt(notification, {
+    status: "superseded",
+    attempts: notification.attempts,
+    superseded_at: supersededAt
+  });
+}
+
+type TerminalWatchNotificationReceipt = Omit<
+  TerminalWatchNotification,
+  | "notification_id"
+  | "idempotency_key"
+  | "kind"
+  | "evidence_fingerprint"
+  | "reason_code"
+  | "created_at"
+>;
+
+/** Replace the mutable delivery receipt without leaking stale lease/error data. */
+function withNotificationReceipt(
+  notification: TerminalWatchNotification,
+  receipt: TerminalWatchNotificationReceipt
+): TerminalWatchNotification {
   return {
     notification_id: notification.notification_id,
     idempotency_key: notification.idempotency_key,
     kind: notification.kind,
     evidence_fingerprint: notification.evidence_fingerprint,
     reason_code: notification.reason_code,
-    status: "superseded",
-    attempts: notification.attempts,
     created_at: notification.created_at,
-    superseded_at: supersededAt
+    ...receipt
   };
 }
 

@@ -19,15 +19,12 @@ import {
   turnIdForConversation,
   type Conversation
 } from "./protocol.js";
-import {
-  decideTerminalWatchExternalTaskAuthority,
-  type TerminalDispatchOwnership
-} from "./terminal-action-projection.js";
 import type {
   ResolvedTerminalConversation,
   TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
 import {
+  formatTerminalConversationId,
   parseTerminalConversationId,
   type TerminalControlRef,
   type TerminalRuntimeIdentity
@@ -169,25 +166,18 @@ export interface TerminalStatusReconciliationPorts {
   terminalBridgeEnabled(conversation: Conversation): boolean;
 }
 
-interface TerminalStatusDispatchOwnership {
-  state: "none" | "current" | "conflict";
-  conversation?: Conversation;
-  conflict?: Record<string, unknown>;
-}
-
 export interface TerminalStatusWatchHintAuthorityPorts {
-  terminalDispatchOwnership(
-    terminalControl: TerminalControlRef
-  ): TerminalStatusDispatchOwnership;
-  terminalIncarnationBlockingTurns(
-    storeDir: string,
-    terminalControl: TerminalControlRef
-  ): Conversation[];
-  hasActiveTerminalWatch(storeDir: string, terminalId: string): boolean;
-  hasWatchAction(
+  terminalListObservation(
     options: TerminalStatusCliOptions,
     terminalId: string
-  ): Promise<boolean>;
+  ): Promise<TerminalStatusListObservation | undefined>;
+}
+
+export interface TerminalStatusListObservation {
+  activityState: TerminalBridgeStatus["activity_state"];
+  activityReason: string;
+  watchActionAvailable: boolean;
+  terminalStatus?: TerminalBridgeStatus;
 }
 
 export interface TerminalStatusCliDependencies {
@@ -317,25 +307,33 @@ async function runTerminalControlStatus(
     options,
     terminal: terminalConversation
   });
-  const terminalStatus = await facade.terminalStatusForControl(
-    terminalConversation.agent,
-    terminalConversation.terminalControl,
+  const terminalId = exactTerminalId(terminalConversation);
+  const terminalListObservation = await authoritativeTerminalListObservation({
+    dependencies,
     options,
-    {
-      pid: terminalConversation.pid,
-      cwd: terminalConversation.terminalControl.currentPath,
-      conversationId: terminalConversation.conversationId,
-      terminalTarget: terminalConversation.terminalControl.target
-    }
-  );
+    terminalId
+  });
+  const terminalStatus = terminalListObservation?.terminalStatus ??
+    terminalStatusWithOptionalListActivity(
+      await facade.terminalStatusForControl(
+        terminalConversation.agent,
+        terminalConversation.terminalControl,
+        options,
+        {
+          pid: terminalConversation.pid,
+          cwd: terminalConversation.terminalControl.currentPath,
+          conversationId: terminalConversation.conversationId,
+          terminalTarget: terminalConversation.terminalControl.target
+        }
+      ),
+      terminalListObservation
+    );
   const context = await terminalStatusContext(
     dependencies, facade, terminalConversation, terminalStatus, options);
   const terminalWatchHint = await terminalWatchHintForRawTerminal({
     dependencies,
-    options,
-    storeDir,
-    terminalConversation,
-    terminalStatus
+    terminalId,
+    terminalListObservation
   });
   writeCliJson({
     conversation_id: terminalConversation.conversationId,
@@ -358,75 +356,99 @@ async function runTerminalControlStatus(
   });
 }
 
-async function terminalWatchHintForRawTerminal(input: {
+function terminalStatusWithOptionalListActivity(
+  terminalStatus: TerminalBridgeStatus,
+  observation: TerminalStatusListObservation | undefined
+): TerminalBridgeStatus {
+  return observation
+    ? terminalStatusWithListActivity(terminalStatus, observation)
+    : terminalStatus;
+}
+
+function terminalStatusWithListActivity(
+  terminalStatus: TerminalBridgeStatus,
+  observation: TerminalStatusListObservation
+): TerminalBridgeStatus {
+  const descriptors = Object.getOwnPropertyDescriptors(terminalStatus);
+  descriptors.activity_state = {
+    configurable: true,
+    enumerable: true,
+    value: observation.activityState,
+    writable: true
+  };
+  descriptors.activity_reason = {
+    configurable: true,
+    enumerable: true,
+    value: observation.activityReason,
+    writable: true
+  };
+  return Object.create(
+    Object.getPrototypeOf(terminalStatus),
+    descriptors
+  ) as TerminalBridgeStatus;
+}
+
+async function authoritativeTerminalListObservation(input: {
   dependencies: TerminalStatusCliDependencies;
   options: TerminalStatusCliOptions;
-  storeDir: string;
-  terminalConversation: ResolvedTerminalConversation;
-  terminalStatus: TerminalBridgeStatus;
-}): Promise<Record<string, unknown> | undefined> {
-  if (
-    input.terminalStatus.activity_state !== "working" &&
-    input.terminalStatus.activity_state !== "awaiting_approval"
-  ) {
-    return undefined;
-  }
-  const { watchAuthority } = input.dependencies;
+  terminalId: string;
+}): Promise<TerminalStatusListObservation | undefined> {
   try {
-    const blockingTurn = watchAuthority.terminalIncarnationBlockingTurns(
-      input.storeDir,
-      input.terminalConversation.terminalControl
-    )[0];
-    const authority = decideTerminalWatchExternalTaskAuthority({
-      blockingTurn,
-      dispatchOwnership: blockingTurn
-        ? { state: "none" }
-        : exactTerminalWatchDispatchOwnership(
-            watchAuthority.terminalDispatchOwnership(
-              input.terminalConversation.terminalControl
-            )
-          )
+    const observation = await input.dependencies.watchAuthority.terminalListObservation(
+      input.options,
+      input.terminalId
+    );
+    return observation ?? {
+      activityState: "unknown",
+      activityReason:
+        "durable terminal activity evidence is unavailable",
+      watchActionAvailable: false
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    cliRuntimeLog("warn", "terminal_list_observation_unavailable", {
+      terminal_id: input.terminalId,
+      reason
     });
-    if (
-      authority.state !== "external_task" ||
-      watchAuthority.hasActiveTerminalWatch(
-        input.storeDir,
-        input.terminalConversation.conversationId
-      ) ||
-      !await watchAuthority.hasWatchAction(
-        input.options,
-        input.terminalConversation.conversationId
-      )
-    ) {
+    return {
+      activityState: "unknown",
+      activityReason:
+        `durable terminal activity evidence is unavailable: ${reason}`,
+      watchActionAvailable: false
+    };
+  }
+}
+
+async function terminalWatchHintForRawTerminal(input: {
+  dependencies: TerminalStatusCliDependencies;
+  terminalId: string;
+  terminalListObservation?: TerminalStatusListObservation;
+}): Promise<Record<string, unknown> | undefined> {
+  try {
+    if (input.terminalListObservation?.watchActionAvailable !== true) {
       return undefined;
     }
     return terminalWatchDiscoveryHint(
-      input.terminalConversation.conversationId
+      input.terminalId
     );
   } catch (error) {
     cliRuntimeLog("warn", "terminal_watch_hint_unavailable", {
-      terminal_id: input.terminalConversation.conversationId,
+      terminal_id: input.terminalId,
       reason: error instanceof Error ? error.message : String(error)
     });
     return undefined;
   }
 }
 
-function exactTerminalWatchDispatchOwnership(
-  ownership: TerminalStatusDispatchOwnership
-): TerminalDispatchOwnership<Conversation, Record<string, unknown>> {
-  if (ownership.state === "none") {
-    return { state: "none" };
-  }
-  if (ownership.state === "current" && ownership.conversation) {
-    return { state: "current", conversation: ownership.conversation };
-  }
-  return {
-    state: "conflict",
-    conflict: ownership.conflict ?? {
-      reason: "terminal dispatch ownership is incomplete"
-    }
-  };
+function exactTerminalId(
+  terminal: ResolvedTerminalConversation
+): string {
+  return formatTerminalConversationId({
+    agent: terminal.agent,
+    target: terminal.terminalControl.target,
+    pid: terminal.pid,
+    kind: terminal.terminalControl.kind
+  });
 }
 
 async function runManagedConversationStatus(

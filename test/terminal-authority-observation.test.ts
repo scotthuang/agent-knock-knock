@@ -9,10 +9,16 @@ import {
   decideTerminalSendAuthority
 } from "../src/terminal-dispatch-policy.js";
 import {
+  deferredCandidateSourceTurnHistory,
   deferredCodexForegroundDispatchSnapshot,
+  observeDeferredCodexAuthority,
   type DeferredForegroundAuthorityAdapterPorts
 } from "../src/deferred-foreground-authority-cli-adapter.js";
 import type { ManagedSessionState } from "../src/managed-session.js";
+import {
+  createConversation,
+  type Conversation
+} from "../src/protocol.js";
 import { assertSafeTerminalSend } from "../src/terminal-authority-policy.js";
 import type { TerminalBridgeStatus } from "../src/terminal-agent-bridge.js";
 import {
@@ -71,14 +77,21 @@ function canonicalTmuxControl({
 }
 
 function deferredAuthorityPorts(
-  ledger: Record<string, any> | undefined
+  ledger: Record<string, any> | undefined,
+  {
+    turns = [],
+    attention = () => false
+  }: {
+    turns?: Conversation[];
+    attention?: (turn: Conversation) => boolean;
+  } = {}
 ): DeferredForegroundAuthorityAdapterPorts {
   return {
     turn: {
       terminalControl: () => undefined,
       storeDir: () => undefined,
-      turnsForSession: () => [],
-      needsAttention: () => false,
+      turnsForSession: () => turns,
+      needsAttention: attention,
       readEvents: () => []
     },
     ledger: {
@@ -105,6 +118,102 @@ function deferredAuthorityPorts(
     transition: {
       hasUnresolved: () => false,
       hasAny: () => false
+    }
+  };
+}
+
+function candidateTurn({
+  id,
+  bindingId,
+  bindingGeneration,
+  nativeThreadId,
+  status = "idle",
+  gatewayMethod = "sessions_send",
+  callbackStatus = "delivered",
+  submissionStatus,
+  userRequest = "managed request"
+}: {
+  id: string;
+  bindingId: string;
+  bindingGeneration: number;
+  nativeThreadId: string;
+  status?: Conversation["status"];
+  gatewayMethod?: string | null;
+  callbackStatus?: string | null;
+  submissionStatus?: string;
+  userRequest?: string;
+}): Conversation {
+  return {
+    ...createConversation({
+      userRequest,
+      sessionId: "session-binding-history",
+      turnId: id,
+      workspace: "/repo",
+      executorKind: "codex",
+      now: new Date("2026-08-21T03:00:00.000Z")
+    }),
+    status,
+    terminal_binding_id: bindingId,
+    terminal_binding_generation: bindingGeneration,
+    native_thread_id: nativeThreadId,
+    gateway_method: gatewayMethod ?? undefined,
+    callback_delivery: callbackStatus
+      ? { status: callbackStatus }
+      : undefined,
+    native_session_takeover: submissionStatus
+      ? { terminal_bridge_submission: { status: submissionStatus } }
+      : undefined
+  };
+}
+
+function legacyCandidateTurn({
+  id,
+  status = "closed",
+  callbackStatus = "delivered",
+  submissionStatus = "submitted",
+  withStrongProcessIdentity = true
+}: {
+  id: string;
+  status?: Conversation["status"];
+  callbackStatus?: string | null;
+  submissionStatus?: string;
+  withStrongProcessIdentity?: boolean;
+}): Conversation {
+  const control = session("legacy-fixture").binding!.terminal_control;
+  return {
+    ...candidateTurn({
+      id,
+      bindingId: "unused-legacy-binding",
+      bindingGeneration: 1,
+      nativeThreadId: THREAD_B,
+      status,
+      callbackStatus,
+      submissionStatus
+    }),
+    terminal_binding_id: undefined,
+    terminal_binding_generation: undefined,
+    native_thread_id: undefined,
+    native_session_takeover: {
+      native_session_id: "terminal:v2:tmux:codex:work:0.0:4100",
+      terminal_control: control,
+      terminal_agent_pid: 4_100,
+      terminal_agent_session_id: THREAD_B,
+      terminal_agent_process_uuid: "codex-pid:4100:birth:12345",
+      terminal_agent_process_birth: "12345",
+      ...(withStrongProcessIdentity
+        ? {
+            terminal_agent_rollout: {
+              fd: "21",
+              device: "1",
+              inode: "100",
+              path: "/repo/legacy.jsonl"
+            }
+          }
+        : {}),
+      terminal_bridge_submission: {
+        message_id: `message-${id}`,
+        status: submissionStatus
+      }
     }
   };
 }
@@ -342,6 +451,319 @@ test("resolved dispatch route tolerance remains closed to noncanonical and chang
       /does not have exact resolved dispatch authority/u,
       fixture.name
     );
+  }
+});
+
+test("candidate history scopes authority to the current binding generation", () => {
+  const base = session("session-binding-history");
+  const source: ManagedSessionState = {
+    ...base,
+    binding: {
+      ...base.binding!,
+      binding_id: "binding-current",
+      generation: 5,
+      native_thread_id: THREAD_A,
+      native_process: {
+        ...base.binding!.native_process,
+        rollout: {
+          fd: "21",
+          device: "1",
+          inode: "101",
+          path: "/repo/current.jsonl"
+        }
+      }
+    }
+  };
+  const legacyWithoutPersistedBinding = legacyCandidateTurn({
+    id: "turn-legacy-delivered"
+  });
+  const acceptedWithoutCallback = candidateTurn({
+    id: "turn-prior-accepted-without-callback",
+    bindingId: "binding-prior-3",
+    bindingGeneration: 3,
+    nativeThreadId: THREAD_B,
+    status: "closed",
+    callbackStatus: null,
+    submissionStatus: "agent_accepted"
+  });
+  acceptedWithoutCallback.native_session_takeover = {
+    ...(acceptedWithoutCallback.native_session_takeover as Record<string, any>),
+    terminal_bridge_submission: {
+      message_id: "message-prior-accepted",
+      status: "agent_accepted"
+    },
+    terminal_bridge_submission_receipts: [{
+      message_id: "message-prior-accepted",
+      status: "agent_accepted"
+    }]
+  };
+  const oldCallbackAndSubmissionDebt = candidateTurn({
+    id: "turn-prior-callback-debt",
+    bindingId: "binding-prior-4",
+    bindingGeneration: 4,
+    nativeThreadId: THREAD_B,
+    status: "closed",
+    callbackStatus: "failed",
+    submissionStatus: "uncertain"
+  });
+  const oldCancelled = candidateTurn({
+    id: "turn-prior-cancelled",
+    bindingId: "binding-prior-4",
+    bindingGeneration: 4,
+    nativeThreadId: THREAD_B,
+    status: "cancelled",
+    callbackStatus: null,
+    submissionStatus: "agent_accepted"
+  });
+  const current = candidateTurn({
+    id: "turn-current",
+    bindingId: "binding-current",
+    bindingGeneration: 5,
+    nativeThreadId: THREAD_A
+  });
+  const turns = [
+    legacyWithoutPersistedBinding,
+    acceptedWithoutCallback,
+    oldCallbackAndSubmissionDebt,
+    oldCancelled,
+    current
+  ];
+  const ports = deferredAuthorityPorts(undefined, {
+    turns,
+    attention: (turn) => turn.turn_id === oldCallbackAndSubmissionDebt.turn_id
+  });
+
+  const history = deferredCandidateSourceTurnHistory(
+    ports,
+    "/store",
+    source
+  );
+  assert.deepEqual(history?.map((turn) => turn.turn_id), ["turn-current"]);
+  assert.equal(history?.[0].binding_id, "binding-current");
+  assert.equal(history?.[0].binding_generation, 5);
+  assert.equal(history?.[0].native_thread_id, THREAD_A);
+
+  const changedCurrent = {
+    ...current,
+    user_request: "mutated current-generation request"
+  };
+  const changedHistory = deferredCandidateSourceTurnHistory(
+    deferredAuthorityPorts(undefined, {
+      turns: [
+        legacyWithoutPersistedBinding,
+        acceptedWithoutCallback,
+        oldCallbackAndSubmissionDebt,
+        oldCancelled,
+        changedCurrent
+      ],
+      attention: (turn) => turn.turn_id === oldCallbackAndSubmissionDebt.turn_id
+    }),
+    "/store",
+    source
+  );
+  assert.notEqual(
+    changedHistory?.[0].turn_fingerprint,
+    history?.[0].turn_fingerprint,
+    "the complete current-generation Turn remains fingerprinted"
+  );
+
+  const frozenObservation = observeDeferredCodexAuthority(ports, {
+    mode: "boundary_transitioning",
+    storeDir: "/store",
+    context: {
+      terminalId: source.binding!.terminal_id,
+      terminalControl: source.binding!.terminal_control,
+      pid: source.binding!.native_process.pid,
+      workspace: source.workspace
+    },
+    sourceSession: source,
+    candidateInventory: {
+      schema: "agent-knock-knock/codex-open-root-rollout-inventory",
+      version: 1,
+      status: "verified_absent",
+      pid: source.binding!.native_process.pid,
+      processUuid: "different-process",
+      processBirth: "different-birth",
+      roots: [],
+      inventoryFingerprint: "not-authoritative-for-this-test"
+    },
+    abandonment: "never",
+    fixedSourceRolloutAuthority: "present",
+    fixedDispatchSnapshot: { status: "none", fingerprint: "none" }
+  });
+  assert.deepEqual(
+    frozenObservation?.sourceTurnHistory?.map((turn) => turn.turn_id),
+    ["turn-current"],
+    "the frozen boundary uses the same binding-generation scope"
+  );
+});
+
+test("candidate history rejects ambiguous or live binding epochs", () => {
+  const base = session("session-binding-history");
+  const source: ManagedSessionState = {
+    ...base,
+    binding: {
+      ...base.binding!,
+      binding_id: "binding-current",
+      generation: 5,
+      native_thread_id: THREAD_A
+    }
+  };
+  const current = candidateTurn({
+    id: "turn-current",
+    bindingId: "binding-current",
+    bindingGeneration: 5,
+    nativeThreadId: THREAD_A
+  });
+  const partialLegacy = legacyCandidateTurn({
+    id: "turn-partial-legacy"
+  });
+  partialLegacy.terminal_binding_id = "binding-partial";
+  const fixtures: Array<{ name: string; turn: Conversation }> = [
+    {
+      name: "non-released prior Turn",
+      turn: candidateTurn({
+        id: "turn-prior-stalled",
+        bindingId: "binding-prior",
+        bindingGeneration: 4,
+        nativeThreadId: THREAD_B,
+        status: "stalled"
+      })
+    },
+    {
+      name: "same generation with another binding",
+      turn: candidateTurn({
+        id: "turn-same-generation",
+        bindingId: "binding-other",
+        bindingGeneration: 5,
+        nativeThreadId: THREAD_B
+      })
+    },
+    {
+      name: "future binding generation",
+      turn: candidateTurn({
+        id: "turn-future-binding",
+        bindingId: "binding-future",
+        bindingGeneration: 6,
+        nativeThreadId: THREAD_B
+      })
+    },
+    {
+      name: "partial legacy binding identity",
+      turn: partialLegacy
+    },
+    {
+      name: "quarantined legacy migration",
+      turn: legacyCandidateTurn({
+        id: "turn-quarantined-legacy",
+        withStrongProcessIdentity: false
+      })
+    }
+  ];
+
+  for (const fixture of fixtures) {
+    const history = deferredCandidateSourceTurnHistory(
+      deferredAuthorityPorts(undefined, {
+        turns: [fixture.turn, current]
+      }),
+      "/store",
+      source
+    );
+    assert.equal(history, undefined, fixture.name);
+  }
+
+  const generationOneSource: ManagedSessionState = {
+    ...source,
+    binding: { ...source.binding!, generation: 1 }
+  };
+  assert.equal(deferredCandidateSourceTurnHistory(
+    deferredAuthorityPorts(undefined, {
+      turns: [legacyCandidateTurn({ id: "turn-legacy-not-earlier" })]
+    }),
+    "/store",
+    generationOneSource
+  ), undefined, "a migrated legacy generation must be strictly earlier");
+});
+
+test("candidate history keeps current-generation callback and attention gates", () => {
+  const base = session("session-binding-history");
+  const source: ManagedSessionState = {
+    ...base,
+    binding: {
+      ...base.binding!,
+      binding_id: "binding-current",
+      generation: 5,
+      native_thread_id: THREAD_A
+    }
+  };
+  const fixtures: Array<{
+    name: string;
+    turn: Conversation;
+    attention?: boolean;
+  }> = [
+    {
+      name: "pending callback",
+      turn: candidateTurn({
+        id: "turn-current-pending",
+        bindingId: "binding-current",
+        bindingGeneration: 5,
+        nativeThreadId: THREAD_A,
+        callbackStatus: "pending"
+      })
+    },
+    {
+      name: "failed callback",
+      turn: candidateTurn({
+        id: "turn-current-failed",
+        bindingId: "binding-current",
+        bindingGeneration: 5,
+        nativeThreadId: THREAD_A,
+        callbackStatus: "failed"
+      })
+    },
+    {
+      name: "accepted without callback",
+      turn: candidateTurn({
+        id: "turn-current-accepted-without-callback",
+        bindingId: "binding-current",
+        bindingGeneration: 5,
+        nativeThreadId: THREAD_A,
+        status: "closed",
+        callbackStatus: null,
+        submissionStatus: "agent_accepted"
+      })
+    },
+    {
+      name: "uncertain undelivered submission",
+      turn: candidateTurn({
+        id: "turn-current-uncertain",
+        bindingId: "binding-current",
+        bindingGeneration: 5,
+        nativeThreadId: THREAD_A,
+        callbackStatus: null,
+        submissionStatus: "uncertain"
+      })
+    },
+    {
+      name: "attention",
+      turn: candidateTurn({
+        id: "turn-current-attention",
+        bindingId: "binding-current",
+        bindingGeneration: 5,
+        nativeThreadId: THREAD_A
+      }),
+      attention: true
+    }
+  ];
+  for (const fixture of fixtures) {
+    assert.equal(deferredCandidateSourceTurnHistory(
+      deferredAuthorityPorts(undefined, {
+        turns: [fixture.turn],
+        attention: () => fixture.attention === true
+      }),
+      "/store",
+      source
+    ), undefined, fixture.name);
   }
 });
 

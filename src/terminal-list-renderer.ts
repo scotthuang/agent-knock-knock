@@ -17,11 +17,9 @@ type JsonRecord = Record<string, unknown>;
 const TERMINAL_WATCH_ACTION_USE =
   "Monitor this human-started external task and notify OpenClaw when it " +
   "needs attention or finishes, instead of polling. Do not use Terminal " +
-  "Watch for an AKK-managed Turn. Forward this action's entire arguments " +
-  "object verbatim to agent_knock_knock_watch; do not retype, shorten, " +
-  "summarize, or change any character, and never replace content with ... " +
-  "or …. If the complete arguments are unavailable, refresh AKK list and " +
-  "do not call Watch.";
+  "Watch for an AKK-managed Turn. Call agent_knock_knock_watch with this " +
+  "exact terminal_id; AKK refreshes and revalidates current observation " +
+  "authority internally.";
 
 export interface AvailableListActionFacts {
   terminalBridgeReady: boolean;
@@ -80,20 +78,20 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 17,
+    version: 18,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Either nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
-      "The session_exact scope uses session_id only when it is prefilled by the listed send action. A rollout-backed managed Codex pane instead uses the terminal_follow_current scope with its exact selector plus expected_terminal_token because even one materialized rollout does not prove the current TUI foreground thread. A turn id is never an ordinary send target.",
-      "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, may omit expected_terminal_token for convenience. If that terminal already has one rollout-backed managed Codex source, AKK captures an equivalent fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. Unmanaged first attach retains its existing behavior.",
-      "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations also use the listed expected_binding_token and never create a Turn.",
-      "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id/token; AKK status does not execute a native slash command.",
-      "Terminal Watch observes one exact human-started active task without sending terminal input or creating an AKK Session or Turn. Start it only from terminals[].available_actions.watch, forward that action's entire arguments object verbatim without retyping, shortening, summarizing, or using ... or …, and use watch_id for later status or unwatch operations. If the complete arguments are unavailable, refresh list instead of calling Watch.",
-      "A verified, idle human native-thread switch may expose a terminal-scoped send with expected_terminal_token; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound send only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source or any otherwise eligible quiescent rollout-backed source with a complete nonempty pinned open-rollout inventory may also expose this exact action. One materialized rollout does not prove the current Codex TUI foreground thread, and a /clear resume hint is diagnostic only. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. An explicitly closed uncertain Turn may authorize only a future candidate send when its exact resolved close ledger, append-only uncertain receipt, frozen predecessor history, and complete current rollout inventory prove that the old bound rollout is absent and every candidate is unclaimed; close never forges the lost callback, and uncertain submissions cannot be renewed. Other binding conflicts remain fail-closed and may expose only exact low-level reconcile_binding recovery.",
+      "The session_exact scope uses session_id only when it is prefilled by the listed send action. A rollout-backed managed Codex pane instead uses the terminal_follow_current scope with its exact terminal_id because even one materialized rollout does not prove the current TUI foreground thread. AKK derives and revalidates current terminal authority internally. A turn id is never an ordinary send target.",
+      "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, is only a discovery choice. If that terminal already has one rollout-backed managed Codex source, AKK captures fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. Unmanaged first attach retains its existing behavior.",
+      "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations use terminal_id and, for resume, one complete native_thread_id; AKK resolves and revalidates current lifecycle authority internally. They never create a Turn.",
+      "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id. AKK resolves current lifecycle authority internally, and AKK status does not execute a native slash command.",
+      "Terminal Watch observes one exact human-started active task without sending terminal input or creating an AKK Session or Turn. Start it only from terminals[].available_actions.watch, pass that action's exact terminal_id, and use watch_id for later status or unwatch operations. AKK refreshes and revalidates current observation authority internally.",
+      "A verified, idle human native-thread switch may expose a terminal-scoped send; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound operation only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source or any otherwise eligible quiescent rollout-backed source with a complete nonempty pinned open-rollout inventory may also expose this exact action. One materialized rollout does not prove the current Codex TUI foreground thread, and a /clear resume hint is diagnostic only. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. An explicitly closed uncertain Turn may authorize only a future candidate send when its exact resolved close ledger, append-only uncertain receipt, frozen predecessor history, and complete current rollout inventory prove that the old bound rollout is absent and every candidate is unclaimed; close never forges the lost callback, and uncertain submissions cannot be renewed. Other binding conflicts remain fail-closed and may expose only exact low-level reconcile_binding recovery.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
-      "Use a terminal selector only when explicitly named by the user or prefilled by that terminal row's send action. A handoff action also carries expected_terminal_token; never infer, guess, or reuse either value.",
+      "Structured follow-current actions use only the exact terminal_id prefilled by that terminal row. Human slash commands may use an explicitly named discovery selector. AKK resolves and revalidates current action authority internally; never infer or guess a target.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
-      "Approval fingerprint v2 binds stable terminal, process, and action fields plus an unredacted exact prompt-region digest. Whole-screen digests and scrollback excerpts are diagnostic only and never authorize approval. A keys-mode prompt without exact prompt-region evidence is not approvable and exposes no approve action.",
-      "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action. When a Codex managed prompt has no usable AKK Turn owner, list may expose one manual terminal-scoped approve carrying expected_terminal_token; copy the complete action after explicit human confirmation. It does not mutate the Turn or Session binding, has no durable dispatch receipt, and is never eligible for automatic approval. If its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly. Never construct, guess, or reuse either selector or token.",
+      "Manual approval binds the exact prompt the user reviewed. After explicit confirmation, call only the currently advertised approve action; AKK keeps the prompt authority private and recaptures the exact terminal, process, request, and prompt before sending a decision key. A prompt without complete exact evidence is not approvable.",
+      "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action. When a Codex managed prompt has no usable AKK Turn owner, list may expose one manual terminal-scoped approve action after exact observation. It does not mutate the Turn or Session binding, has no durable dispatch receipt, and is never eligible for automatic approval. If its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
       "Authoritative full IDs are prefilled; short_ref is for display and human input.",
       "Availability is a snapshot. AKK revalidates process, provider-owned terminal identity, workspace, activity, approval, and recovery state before side effects."
@@ -115,9 +113,8 @@ export function listActionContracts(): JsonRecord {
         current_turn: "the authoritative dispatch-ledger owner, never inferred from history",
         recent_turn: "the latest visible non-owning turn in the current managed session",
         session_id:
-          "the continuing agent context; it is an ordinary-send target only when the listed send action explicitly prefills it, and rollout-backed Codex uses selector/token instead",
+          "the continuing agent context; it is an ordinary-send target only when the listed send action explicitly prefills it, and rollout-backed Codex uses the listed follow-current terminal action instead",
         binding_id: "the immutable terminal-binding generation currently authorized for this Session",
-        binding_token: "an optimistic concurrency token required by native-thread mutations",
         history: "older turns, present only with --all"
       },
       available_actions: {
@@ -160,23 +157,23 @@ export function listActionContracts(): JsonRecord {
       send: {
         tool: "agent_knock_knock_send",
         target_argument: "session_id",
-        initial_attach_target_argument: "selector",
+        initial_attach_target_argument: "terminal_id",
         managed_scopes: {
           session_exact: {
             target_arguments: ["session_id"],
             follows_current_terminal: false
           },
           terminal_follow_current: {
-            target_arguments: ["selector", "expected_terminal_token"],
+            target_arguments: ["terminal_id"],
             follows_current_terminal: true
           }
         },
         initial_attach_scope:
-          "A discovery selector explicitly named by the user, the selector prefilled by an unmanaged raw-terminal row's available send action, or an omitted selector delegated only when exactly one eligible raw pane exists; never infer, guess, or reuse a selector or token. For an already managed rollout-backed Codex pane, an explicit or unique raw delegation without a token internally captures fresh v3 candidate authority under lock; it never becomes a strict Session continuation.",
+          "A structured call uses the terminal_id prefilled by an unmanaged raw-terminal row's available send action, or omits the target only when exactly one eligible raw pane exists. Human slash commands may preserve a discovery selector explicitly named by the user. For an already managed rollout-backed Codex pane, an explicit or unique raw delegation internally captures fresh v3 candidate authority under lock; it never becomes a strict Session continuation.",
         required: ["request"],
         optional: [
-          "selector",
-          "expected_terminal_token",
+          "session_id",
+          "terminal_id",
           "type",
           "idleTimeoutMinutes",
           "agentTimeoutMinutes",
@@ -184,16 +181,16 @@ export function listActionContracts(): JsonRecord {
         ],
         unsupported: ["timeoutSeconds"],
         status_card_only_deferred_scope:
-          "A zero-Turn Codex status-card binding has no rollout; only its listed selector/token send creates an isolated provisional Session and binds it after exact request acceptance. Until promotion commits, strict managed controls, native lifecycle, native_inspect, and callback authority remain unavailable; an uncertain dispatch, acceptance, or post-submit binding must not be retried automatically.",
+          "A zero-Turn Codex status-card binding has no rollout; only its listed follow-current send creates an isolated provisional Session and binds it after exact request acceptance. Until promotion commits, strict managed controls, native lifecycle, native_inspect, and callback authority remain unavailable; an uncertain dispatch, acceptance, or post-submit binding must not be retried automatically.",
         candidate_rollout_deferred_scope:
-          "A quiescent rollout-backed Codex source uses a listed selector/token send whenever AKK can pin a complete nonempty candidate inventory. Inventory status resolved means only that one rollout is materialized; it does not prove the current TUI foreground thread. Released predecessor Turn history stays read-only while a separate provisional Session sends once and waits for one unique post-anchor request acceptance. A /clear resume hint is diagnostic only and is not token or routing authority. Same-UUID and different-UUID results keep separate Session lineages; zero, multiple, drifted, or uncertain acceptance is never retried blindly. Explicit close can abandon an uncertain receipt for future-send liveness only while the exact resolved close ledger, append-only receipt, frozen history, absent old rollout, and unclaimed candidate set remain authoritative; it never synthesizes callback delivery.",
+          "A quiescent rollout-backed Codex source uses a listed follow-current send whenever AKK can pin a complete nonempty candidate inventory. Inventory status resolved means only that one rollout is materialized; it does not prove the current TUI foreground thread. Released predecessor Turn history stays read-only while a separate provisional Session sends once and waits for one unique post-anchor request acceptance. A /clear resume hint is diagnostic only and is not routing authority. Same-UUID and different-UUID results keep separate Session lineages; zero, multiple, drifted, or uncertain acceptance is never retried blindly. Explicit close can abandon an uncertain receipt for future-send liveness only while the exact resolved close ledger, append-only receipt, frozen history, absent old rollout, and unclaimed candidate set remain authoritative; it never synthesizes callback delivery.",
         ordinary_use:
-          "Create a new managed Turn through the exact action listed for the pane. An explicit session_id never follows the pane and is unavailable for rollout-backed Codex Sessions; their listed selector/token action binds only the unique exact rollout that accepts the submitted request. A user-explicit or uniquely delegated raw send without a token receives the same fresh under-lock candidate authority when it resolves to an already managed rollout-backed Codex source. A live terminal selector can also attach an unmanaged pane, adopt one verified human-selected native context, detach a verified-empty Codex source, or replace an eligible status-card/candidate-rollout source."
+          "Create a new managed Turn through the exact action listed for the pane. An explicit session_id never follows the pane and is unavailable for rollout-backed Codex Sessions; their listed follow-current action binds only the unique exact rollout that accepts the submitted request. A user-explicit or uniquely delegated raw send receives the same fresh under-lock candidate authority when it resolves to an already managed rollout-backed Codex source. A live terminal selector can also attach an unmanaged pane, adopt one verified human-selected native context, detach a verified-empty Codex source, or replace an eligible status-card/candidate-rollout source."
       },
       watch: {
         tool: "agent_knock_knock_watch",
         target_argument: "terminal_id",
-        required: ["terminal_id", "expected_binding_token"],
+        required: ["terminal_id"],
         optional: ["hardTimeoutMinutes"],
         creates_turn: false,
         creates_session: false,
@@ -214,7 +211,7 @@ export function listActionContracts(): JsonRecord {
       new_thread: {
         tool: "agent_knock_knock_new_thread",
         target_argument: "terminal_id",
-        required: ["terminal_id", "expected_binding_token"],
+        required: ["terminal_id"],
         creates_turn: false,
         creates_session: true,
         requires_user_intent: true
@@ -228,7 +225,7 @@ export function listActionContracts(): JsonRecord {
       native_inspect: {
         tool: "agent_knock_knock_native_inspect",
         target_argument: "terminal_id",
-        required: ["terminal_id", "inspection", "expected_binding_token"],
+        required: ["terminal_id", "inspection"],
         supported_inspections: ["status"],
         creates_turn: false,
         creates_session: false,
@@ -241,9 +238,7 @@ export function listActionContracts(): JsonRecord {
         target_argument: "terminal_id",
         required: [
           "terminal_id",
-          "native_thread_id",
-          "expected_binding_token",
-          "candidate_token"
+          "native_thread_id"
         ],
         creates_turn: false,
         requires_user_intent: true,
@@ -254,10 +249,7 @@ export function listActionContracts(): JsonRecord {
         target_argument: "terminal_id",
         required: [
           "terminal_id",
-          "conflicting_session_id",
-          "expected_session_revision",
-          "expected_binding_token",
-          "expected_terminal_token"
+          "conflicting_session_id"
         ],
         creates_turn: false,
         sends_terminal_input: false,
@@ -289,17 +281,16 @@ export function listActionContracts(): JsonRecord {
       },
       approve: {
         tool: "agent_knock_knock_approve",
-        target_argument: "turn_id",
-        compatibility_target_argument: "conversation_id",
-        compatibility_scope:
-          "A deprecated legacy Turn alias, or only the exact selector prefilled by a raw-terminal or manual terminal-scoped Codex approval action; never construct, guess, or reuse it.",
-        required: ["turn_id", "expected_approval_fingerprint"],
-        optional: ["expected_terminal_token"],
+        target_arguments: {
+          exactly_one_of: ["turn_id", "terminal_id"]
+        },
+        managed_target_argument: "turn_id",
+        terminal_target_argument: "terminal_id",
+        required: [],
+        optional: [],
         terminal_scoped_scope:
-          "Only the latest list-prefilled Codex conversation_id/token action may approve a managed current prompt without a usable Turn owner. It remains human-confirmed, revalidates exact terminal/process/Session/dispatch/prompt state before keys, never mutates managed state, has no durable dispatch receipt, cannot be auto-approved, and must not be blindly retried after an interrupted result.",
-        fingerprint_contract: "v2_prompt_region",
-        fingerprint_authority:
-          "Stable terminal, process, and action fields plus the unredacted exact prompt-region digest; whole-screen digests and scrollback excerpts are diagnostic only.",
+          "Only the latest list-prefilled Codex terminal_id action may approve a managed current prompt without a usable Turn owner. It remains human-confirmed, uses private server-bound reviewed-prompt authority, revalidates exact terminal/process/Session/dispatch/prompt state before keys, never mutates managed state, has no durable dispatch receipt, cannot be auto-approved, and must not be blindly retried after an interrupted result.",
+        approval_authority: "private_server_bound_reviewed_prompt",
         missing_prompt_region_evidence: "not_approvable",
         requires_explicit_user_confirmation: true,
         requires_fresh_status: true
@@ -341,12 +332,11 @@ export function listActionContracts(): JsonRecord {
         optional: [
           "reason",
           "expected_message_id",
-          "expected_transition_id",
-          "expected_handoff_token"
+          "expected_transition_id"
         ],
         requires_explicit_user_confirmation: true,
         handoff_scope:
-          "expected_handoff_token is valid only by copying the complete nested action from terminals[].handoff_decision.choices.take_over_current; never construct, guess, or reuse it."
+          "Use only the complete nested action from terminals[].handoff_decision.choices.take_over_current after explicit confirmation. AKK binds and revalidates the current handoff decision privately."
       }
     }
   };
@@ -559,8 +549,7 @@ function appendTerminalWatchAction(input: {
   input.actions.watch = {
     tool: "agent_knock_knock_watch",
     arguments: {
-      terminal_id: input.id,
-      expected_binding_token: input.lifecycleBindingToken
+      terminal_id: input.id
     },
     requires_user_intent: true,
     use: TERMINAL_WATCH_ACTION_USE
@@ -582,8 +571,7 @@ export function terminalWatchDiscoveryHint(terminalId: string): JsonRecord {
 
 export function exactTerminalWatchAction(
   entry: unknown,
-  terminalId: string,
-  expectedBindingToken: string
+  terminalId: string
 ): JsonRecord | undefined {
   if (!isRecord(entry) || !isRecord(entry.available_actions)) {
     return undefined;
@@ -595,7 +583,7 @@ export function exactTerminalWatchAction(
   return watch?.tool === "agent_knock_knock_watch" &&
     watch.requires_user_intent === true &&
     args?.terminal_id === terminalId &&
-    args?.expected_binding_token === expectedBindingToken
+    Object.keys(args).length === 1
     ? watch
     : undefined;
 }

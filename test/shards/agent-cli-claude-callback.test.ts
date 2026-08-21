@@ -321,7 +321,17 @@ test("hookless Claude tmux approval is bound to a managed callback and sends exa
     );
     assert.match(
       callbackParams.message.body,
-      /do not approve from the hash or summary alone/u
+      /do not approve from the summary alone/u
+    );
+    assert.equal(
+      callbackParams.message.body.includes(
+        `- turn_id: ${conversation.conversation_id}`
+      ),
+      true
+    );
+    assert.doesNotMatch(
+      callbackParams.message.body,
+      /expected_approval_fingerprint|conversation_id:/u
     );
     assert.deepEqual(
       callbackParams.message.metadata.terminal_status.approval_state.keys,

@@ -94,12 +94,42 @@ export interface CaptureClaudeHumanStartedActiveTaskOptions
 export interface ObserveClaudeHumanStartedActiveTaskOptions
   extends DetectClaudeTranscriptCompletionOptions {
   anchor: ClaudeHumanStartedActiveTaskAnchor;
+  /** Last complete, stable JSONL boundary returned by a prior observation. */
+  resumeOffsetBytes?: number;
+  checkpoint?: ClaudeHumanStartedActiveTaskCheckpoint;
+}
+
+export interface ClaudeHumanStartedActiveTaskCheckpointToolUse {
+  tool_use_id: string;
+  owner_uuid: string;
+}
+
+/**
+ * Privacy-safe continuation state for streaming one anchored Claude turn.
+ * It contains only opaque native IDs, hashes, and bounded redacted output.
+ */
+export interface ClaudeHumanStartedActiveTaskCheckpoint {
+  schema: "agent-knock-knock/claude-human-started-active-task-checkpoint";
+  version: 1;
+  anchor_fingerprint: string;
+  safe_resume_offset_bytes: number;
+  last_record_uuid: string;
+  record_count: number;
+  chain_fingerprint: string;
+  unresolved_tool_uses: ClaudeHumanStartedActiveTaskCheckpointToolUse[];
+  assistant_message_id?: string;
+  assistant_text?: string;
+  end_turn_message_id?: string;
+  end_turn_assistant_uuid?: string;
+  checkpoint_fingerprint: string;
 }
 
 export type ClaudeHumanStartedActiveTaskObservation =
   | {
       status: "pending";
       observedEndOffsetBytes: number;
+      safeResumeOffsetBytes: number;
+      checkpoint: ClaudeHumanStartedActiveTaskCheckpoint;
     }
   | {
       status: "completed";
@@ -110,6 +140,11 @@ export type ClaudeHumanStartedActiveTaskObservation =
   | {
       status: "invalidated";
       reason: string;
+    }
+  | {
+      status: "unavailable";
+      reason: string;
+      retryable: true;
     };
 
 export interface DetectClaudeTranscriptCompletionOptions {
@@ -747,7 +782,9 @@ export function captureClaudeHumanStartedActiveTaskAnchor(
       return undefined;
     }
     if (!fileEndsWithNewline(opened.fd, before.size)) {
-      return undefined;
+      throw new Error(
+        "Claude active-task transcript has an incomplete JSONL tail; retry"
+      );
     }
     const recordEntries = readBoundedCompleteJsonlTail(
       opened.fd,
@@ -757,7 +794,9 @@ export function captureClaudeHumanStartedActiveTaskAnchor(
     const records = recordEntries.map((entry) => entry.record);
     const after = fs.fstatSync(opened.fd);
     if (!sameStableTranscriptFile(before, after)) {
-      return undefined;
+      throw new Error(
+        "Claude active-task transcript changed while it was captured; retry"
+      );
     }
     const promptEntry = latestClaudeRootHumanPromptEntry(recordEntries);
     if (!promptEntry) {
@@ -844,98 +883,122 @@ export function observeClaudeHumanStartedActiveTask(
 ): ClaudeHumanStartedActiveTaskObservation {
   try {
     const anchor = validateClaudeHumanStartedActiveTaskAnchor(options.anchor);
+    const checkpoint = claudeActiveTaskObservationCheckpoint(anchor, options);
+    const resumeOffsetBytes = checkpoint.safe_resume_offset_bytes;
     const projectsRoot = projectsRootPath(
       path.resolve(options.claudeHome ?? defaultClaudeHome())
     );
     if (!isRealDirectory(projectsRoot)) {
-      throw new Error("Claude transcript projects directory is unavailable");
+      return claudeActiveTaskUnavailable(
+        "Claude transcript projects directory is unavailable"
+      );
     }
-    const opened = openAnchoredTranscript(
-      projectsRoot,
-      claudeTranscriptAnchorForHumanStartedTask(anchor)
-    );
+    let opened: OpenTranscript | undefined;
+    try {
+      opened = openAnchoredTranscript(
+        projectsRoot,
+        claudeTranscriptAnchorForHumanStartedTask(anchor)
+      );
+    } catch (error) {
+      if (
+        isRetryableClaudeProviderIoError(error) ||
+        (error instanceof Error &&
+          error.message === "Claude transcript disappeared after the managed send")
+      ) {
+        return claudeActiveTaskUnavailable(
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+      throw error;
+    }
     if (!opened) {
-      throw new Error("the anchored Claude transcript is unavailable");
+      return claudeActiveTaskUnavailable(
+        "the anchored Claude transcript is unavailable"
+      );
     }
     try {
       const before = opened.stat;
       if (
         String(before.dev) !== anchor.device ||
-        String(before.ino) !== anchor.inode ||
-        before.size < anchor.observed_end_offset_bytes ||
-        before.size <= anchor.turn_start_offset_bytes
+        String(before.ino) !== anchor.inode
       ) {
         throw new Error("Claude active-task transcript identity changed after capture");
       }
-      const bytesToRead = before.size - anchor.turn_start_offset_bytes;
-      if (bytesToRead > positiveClaudeByteLimit(options.maxTurnBytes)) {
-        throw new Error("Claude active task exceeded the bounded local read limit");
+      if (
+        before.size < anchor.observed_end_offset_bytes ||
+        before.size <= anchor.turn_start_offset_bytes
+      ) {
+        throw new Error("Claude active-task transcript was truncated after capture");
       }
-      const records = readCompleteJsonlRecordEntries(
+      if (before.size < resumeOffsetBytes) {
+        throw new Error("Claude active-task transcript was truncated after observation");
+      }
+      assertClaudeActiveTaskResumeBoundary(opened.fd, resumeOffsetBytes);
+      const maxTurnBytes = positiveClaudeByteLimit(options.maxTurnBytes);
+      const availableBytes = before.size - resumeOffsetBytes;
+      const bytesToRead = Math.min(availableBytes, maxTurnBytes);
+      if (bytesToRead === 0) {
+        assertObservableClaudeActiveTaskAgent(options.agentRows, anchor);
+        return {
+          status: "pending",
+          observedEndOffsetBytes: before.size,
+          safeResumeOffsetBytes: resumeOffsetBytes,
+          checkpoint
+        };
+      }
+      const suffixBuffer = readExactTranscriptBytes(
         opened.fd,
-        anchor.turn_start_offset_bytes,
-        bytesToRead,
-        { allowTrailingPartial: true }
+        resumeOffsetBytes,
+        bytesToRead
+      );
+      const completeLength = completeTranscriptJsonlPrefixLength(suffixBuffer);
+      if (completeLength === 0 && availableBytes > maxTurnBytes) {
+        throw new Error(
+          "Claude active-task JSONL record exceeded the bounded local read limit"
+        );
+      }
+      const safeResumeOffsetBytes = resumeOffsetBytes + completeLength;
+      const suffixRecords = readCompleteJsonlRecordEntries(
+        opened.fd,
+        resumeOffsetBytes,
+        completeLength,
+        { preReadBuffer: suffixBuffer.subarray(0, completeLength) }
       ).map((entry) => entry.record);
       const after = fs.fstatSync(opened.fd);
       if (!sameStableTranscriptFile(before, after)) {
         assertObservableClaudeActiveTaskAgent(options.agentRows, anchor);
         return {
           status: "pending",
-          observedEndOffsetBytes: after.size
+          observedEndOffsetBytes: after.size,
+          safeResumeOffsetBytes: resumeOffsetBytes,
+          checkpoint
         };
       }
-      const snapshot: ClaudeTranscriptTurnSnapshot = {
-        anchor: claudeTranscriptAnchorForHumanStartedTask(anchor),
-        sessionId: anchor.session_id,
-        cwd: anchor.cwd,
-        expectedRequestHash: anchor.request_hash,
-        expectedPromptUuid: anchor.prompt_uuid,
-        records,
-        transcriptFileId: anchor.transcript_file_id,
-        observedEndOffsetBytes: before.size
-      };
-      const prompt = matchingManagedPrompt(snapshot);
-      if (!prompt || nonEmptyString(prompt.version) !== anchor.claude_version) {
-        throw new Error("Claude anchored root prompt identity changed");
-      }
-      const promptIndex = records.indexOf(prompt);
-      const hasLaterHumanPrompt = records.some((record, index) =>
-        index > promptIndex && isClaudeRootHumanPrompt(record)
+      const advanced = advanceClaudeHumanStartedActiveTaskCheckpoint(
+        anchor,
+        checkpoint,
+        suffixRecords,
+        safeResumeOffsetBytes
       );
-      const completion = completionFromRecords(snapshot, {
-        requireVerifiableCompletionSignal: false
-      });
-      if (completion) {
-        if (completion.outcome !== "success" && completion.outcome !== "failure") {
-          throw new Error("Claude active-task completion has no exact outcome");
-        }
-        return {
-          status: "completed",
-          completion: completion as TerminalCompletionEvidence & {
-            outcome: "success" | "failure";
-          }
-        };
-      }
-      if (hasLaterHumanPrompt) {
-        throw new Error(
-          "a later Claude human prompt appeared before the anchored task completed"
-        );
+      if (advanced.completion) {
+        return { status: "completed", completion: advanced.completion };
       }
       assertObservableClaudeActiveTaskAgent(options.agentRows, anchor);
-      if (!pendingApprovalTurn(snapshot)) {
-        throw new Error(
-          "Claude anchored task no longer has a unique unfinished foreground chain"
-        );
-      }
       return {
         status: "pending",
-        observedEndOffsetBytes: before.size
+        observedEndOffsetBytes: before.size,
+        safeResumeOffsetBytes,
+        checkpoint: advanced.checkpoint
       };
     } finally {
       fs.closeSync(opened.fd);
     }
   } catch (error) {
+    if (isRetryableClaudeProviderIoError(error)) {
+      return claudeActiveTaskUnavailable(
+        error instanceof Error ? error.message : String(error)
+      );
+    }
     return {
       status: "invalidated",
       reason: error instanceof Error ? error.message : String(error)
@@ -943,7 +1006,7 @@ export function observeClaudeHumanStartedActiveTask(
   }
 }
 
-function validateClaudeHumanStartedActiveTaskAnchor(
+export function validateClaudeHumanStartedActiveTaskAnchor(
   value: unknown
 ): ClaudeHumanStartedActiveTaskAnchor {
   if (
@@ -973,6 +1036,9 @@ function validateClaudeHumanStartedActiveTaskAnchor(
   const inode = nonEmptyString(value.inode);
   const turnStartOffset = nonNegativeInteger(value.turn_start_offset_bytes);
   const observedEndOffset = positiveInteger(value.observed_end_offset_bytes);
+  const capturedAt = typeof value.captured_at === "string"
+    ? value.captured_at
+    : undefined;
   if (
     !sessionId ||
     sessionId !== value.session_id ||
@@ -981,11 +1047,25 @@ function validateClaudeHumanStartedActiveTaskAnchor(
     !cwd ||
     !path.isAbsolute(cwd) ||
     path.resolve(cwd) !== cwd ||
+    typeof value.pid !== "number" ||
     pid === undefined ||
+    typeof value.agent_started_at_ms !== "number" ||
     startedAt === undefined ||
-    validTimestampMs(value.captured_at) === undefined ||
+    !capturedAt ||
+    validTimestampMs(capturedAt) === undefined ||
+    new Date(capturedAt).toISOString() !== capturedAt ||
     !relativePath ||
+    relativePath.includes("\0") ||
+    path.posix.isAbsolute(relativePath) ||
+    path.win32.isAbsolute(relativePath) ||
+    relativePath.split(/[\\/]/u).length !== 2 ||
+    relativePath.split(/[\\/]/u).some((segment) =>
+      !segment || segment === "." || segment === ".."
+    ) ||
+    path.basename(relativePath) !== `${sessionId}.jsonl` ||
+    typeof value.turn_start_offset_bytes !== "number" ||
     turnStartOffset === undefined ||
+    typeof value.observed_end_offset_bytes !== "number" ||
     observedEndOffset === undefined ||
     turnStartOffset >= observedEndOffset ||
     !decimalFileIdentity(device) ||
@@ -1078,6 +1158,590 @@ function positiveClaudeByteLimit(value: number | undefined): number {
     throw new Error("Claude active-task byte limit is invalid");
   }
   return result;
+}
+
+const CLAUDE_ACTIVE_TASK_CHECKPOINT_SCHEMA =
+  "agent-knock-knock/claude-human-started-active-task-checkpoint" as const;
+const CLAUDE_ACTIVE_TASK_MAX_UNRESOLVED_TOOLS = 64;
+const CLAUDE_ACTIVE_TASK_MAX_OPAQUE_ID_LENGTH = 256;
+
+type ClaudeHumanStartedActiveTaskCheckpointBase = Omit<
+  ClaudeHumanStartedActiveTaskCheckpoint,
+  "checkpoint_fingerprint"
+>;
+
+export function initialClaudeHumanStartedActiveTaskCheckpoint(
+  value: ClaudeHumanStartedActiveTaskAnchor
+): ClaudeHumanStartedActiveTaskCheckpoint {
+  const anchor = validateClaudeHumanStartedActiveTaskAnchor(value);
+  return signedClaudeActiveTaskCheckpoint({
+    schema: CLAUDE_ACTIVE_TASK_CHECKPOINT_SCHEMA,
+    version: 1,
+    anchor_fingerprint: anchor.anchor_fingerprint,
+    safe_resume_offset_bytes: anchor.turn_start_offset_bytes,
+    last_record_uuid: anchor.prompt_uuid,
+    record_count: 0,
+    chain_fingerprint: sha256Hex(
+      `claude-active-task-checkpoint\0${anchor.anchor_fingerprint}`
+    ),
+    unresolved_tool_uses: []
+  });
+}
+
+export function validateClaudeHumanStartedActiveTaskCheckpoint(
+  value: unknown,
+  anchorValue: ClaudeHumanStartedActiveTaskAnchor
+): ClaudeHumanStartedActiveTaskCheckpoint {
+  const anchor = validateClaudeHumanStartedActiveTaskAnchor(anchorValue);
+  if (!isRecord(value)) {
+    throw new Error("Claude active-task checkpoint is invalid");
+  }
+  const allowedKeys = new Set([
+    "schema", "version", "anchor_fingerprint", "safe_resume_offset_bytes",
+    "last_record_uuid", "record_count", "chain_fingerprint",
+    "unresolved_tool_uses", "assistant_message_id", "assistant_text",
+    "end_turn_message_id", "end_turn_assistant_uuid",
+    "checkpoint_fingerprint"
+  ]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw new Error("Claude active-task checkpoint has unsupported fields");
+  }
+  const safeOffset = nonNegativeInteger(value.safe_resume_offset_bytes);
+  const recordCount = nonNegativeInteger(value.record_count);
+  const lastRecordUuid = uuidValue(value.last_record_uuid);
+  const assistantMessageId = value.assistant_message_id === undefined
+    ? undefined
+    : uuidValue(value.assistant_message_id);
+  const endTurnMessageId = value.end_turn_message_id === undefined
+    ? undefined
+    : uuidValue(value.end_turn_message_id);
+  const endTurnAssistantUuid = value.end_turn_assistant_uuid === undefined
+    ? undefined
+    : uuidValue(value.end_turn_assistant_uuid);
+  const assistantText = value.assistant_text;
+  if (
+    value.schema !== CLAUDE_ACTIVE_TASK_CHECKPOINT_SCHEMA ||
+    value.version !== 1 ||
+    value.anchor_fingerprint !== anchor.anchor_fingerprint ||
+    typeof value.safe_resume_offset_bytes !== "number" ||
+    safeOffset === undefined ||
+    safeOffset < anchor.turn_start_offset_bytes ||
+    typeof value.record_count !== "number" ||
+    recordCount === undefined ||
+    !lastRecordUuid ||
+    lastRecordUuid !== value.last_record_uuid ||
+    (recordCount === 0 && lastRecordUuid !== anchor.prompt_uuid) ||
+    !sha256String(value.chain_fingerprint) ||
+    !sha256String(value.checkpoint_fingerprint) ||
+    (value.assistant_message_id !== undefined && !assistantMessageId) ||
+    (value.end_turn_message_id !== undefined && !endTurnMessageId) ||
+    (value.end_turn_assistant_uuid !== undefined && !endTurnAssistantUuid) ||
+    (endTurnMessageId === undefined) !== (endTurnAssistantUuid === undefined) ||
+    (endTurnMessageId !== undefined &&
+      assistantMessageId !== endTurnMessageId) ||
+    (assistantText !== undefined &&
+      (
+        typeof assistantText !== "string" ||
+        !assistantText ||
+        assistantText.length > 4000 ||
+        boundedRedactedText(assistantText) !== assistantText ||
+        assistantMessageId === undefined
+      ))
+  ) {
+    throw new Error("Claude active-task checkpoint identity is invalid");
+  }
+  if (
+    !Array.isArray(value.unresolved_tool_uses) ||
+    value.unresolved_tool_uses.length >
+      CLAUDE_ACTIVE_TASK_MAX_UNRESOLVED_TOOLS
+  ) {
+    throw new Error("Claude active-task checkpoint tool state is invalid");
+  }
+  const seenToolIds = new Set<string>();
+  for (const entry of value.unresolved_tool_uses) {
+    if (
+      !isRecord(entry) ||
+      Object.keys(entry).some((key) =>
+        key !== "tool_use_id" && key !== "owner_uuid"
+      ) ||
+      !checkpointOpaqueId(entry.tool_use_id) ||
+      !uuidValue(entry.owner_uuid) ||
+      uuidValue(entry.owner_uuid) !== entry.owner_uuid ||
+      seenToolIds.has(String(entry.tool_use_id))
+    ) {
+      throw new Error("Claude active-task checkpoint tool state is invalid");
+    }
+    seenToolIds.add(String(entry.tool_use_id));
+  }
+  const candidate = value as unknown as ClaudeHumanStartedActiveTaskCheckpoint;
+  if (
+    claudeActiveTaskCheckpointFingerprint(candidate) !==
+      candidate.checkpoint_fingerprint
+  ) {
+    throw new Error("Claude active-task checkpoint fingerprint does not match");
+  }
+  return candidate;
+}
+
+function claudeActiveTaskObservationCheckpoint(
+  anchor: ClaudeHumanStartedActiveTaskAnchor,
+  options: ObserveClaudeHumanStartedActiveTaskOptions
+): ClaudeHumanStartedActiveTaskCheckpoint {
+  const checkpoint = options.checkpoint === undefined
+    ? initialClaudeHumanStartedActiveTaskCheckpoint(anchor)
+    : validateClaudeHumanStartedActiveTaskCheckpoint(options.checkpoint, anchor);
+  if (
+    options.resumeOffsetBytes !== undefined &&
+    (
+      !Number.isSafeInteger(options.resumeOffsetBytes) ||
+      options.resumeOffsetBytes !== checkpoint.safe_resume_offset_bytes
+    )
+  ) {
+    throw new Error(
+      "Claude active-task resume offset does not match its continuation checkpoint"
+    );
+  }
+  return checkpoint;
+}
+
+function signedClaudeActiveTaskCheckpoint(
+  base: ClaudeHumanStartedActiveTaskCheckpointBase
+): ClaudeHumanStartedActiveTaskCheckpoint {
+  const checkpoint = {
+    ...base,
+    checkpoint_fingerprint: ""
+  } satisfies ClaudeHumanStartedActiveTaskCheckpoint;
+  return {
+    ...checkpoint,
+    checkpoint_fingerprint: claudeActiveTaskCheckpointFingerprint(checkpoint)
+  };
+}
+
+function claudeActiveTaskCheckpointFingerprint(
+  value: Omit<ClaudeHumanStartedActiveTaskCheckpoint, "checkpoint_fingerprint"> |
+    ClaudeHumanStartedActiveTaskCheckpoint
+): string {
+  return sha256Hex(JSON.stringify({
+    schema: value.schema,
+    version: value.version,
+    anchor_fingerprint: value.anchor_fingerprint,
+    safe_resume_offset_bytes: value.safe_resume_offset_bytes,
+    last_record_uuid: value.last_record_uuid,
+    record_count: value.record_count,
+    chain_fingerprint: value.chain_fingerprint,
+    unresolved_tool_uses: value.unresolved_tool_uses,
+    ...(value.assistant_message_id === undefined
+      ? {}
+      : { assistant_message_id: value.assistant_message_id }),
+    ...(value.assistant_text === undefined
+      ? {}
+      : { assistant_text: value.assistant_text }),
+    ...(value.end_turn_message_id === undefined
+      ? {}
+      : { end_turn_message_id: value.end_turn_message_id }),
+    ...(value.end_turn_assistant_uuid === undefined
+      ? {}
+      : { end_turn_assistant_uuid: value.end_turn_assistant_uuid })
+  }));
+}
+
+function sha256String(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
+}
+
+function checkpointOpaqueId(value: unknown): value is string {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= CLAUDE_ACTIVE_TASK_MAX_OPAQUE_ID_LENGTH &&
+    /^[A-Za-z0-9_.:-]+$/u.test(value);
+}
+
+interface ClaudeActiveTaskCheckpointAdvance {
+  checkpoint: ClaudeHumanStartedActiveTaskCheckpoint;
+  completion?: TerminalCompletionEvidence & {
+    outcome: "success" | "failure";
+  };
+}
+
+function advanceClaudeHumanStartedActiveTaskCheckpoint(
+  anchor: ClaudeHumanStartedActiveTaskAnchor,
+  checkpoint: ClaudeHumanStartedActiveTaskCheckpoint,
+  records: readonly TranscriptRecord[],
+  safeResumeOffsetBytes: number
+): ClaudeActiveTaskCheckpointAdvance {
+  let lastRecordUuid = checkpoint.last_record_uuid;
+  let recordCount = checkpoint.record_count;
+  let chainFingerprint = checkpoint.chain_fingerprint;
+  const unresolvedToolUses = new Map(
+    checkpoint.unresolved_tool_uses.map((entry) => [entry.tool_use_id, {
+      tool_use_id: entry.tool_use_id,
+      owner_uuid: entry.owner_uuid
+    }])
+  );
+  let assistantMessageId = checkpoint.assistant_message_id;
+  let assistantText = checkpoint.assistant_text;
+  let endTurnMessageId = checkpoint.end_turn_message_id;
+  let endTurnAssistantUuid = checkpoint.end_turn_assistant_uuid;
+  let completion: ClaudeActiveTaskCheckpointAdvance["completion"];
+  let durationSeen = false;
+
+  for (const record of records) {
+    if (recordCount === 0) {
+      assertClaudeActiveTaskCheckpointPrompt(record, anchor);
+      lastRecordUuid = anchor.prompt_uuid;
+      ({ recordCount, chainFingerprint } = advanceClaudeCheckpointDigest(
+        recordCount,
+        chainFingerprint,
+        record
+      ));
+      continue;
+    }
+    if (isClaudeRootHumanPrompt(record)) {
+      if (completion) {
+        break;
+      }
+      throw new Error(
+        "a later Claude human prompt appeared before the anchored task completed"
+      );
+    }
+    const recordUuid = claudeCheckpointRecordUuid(
+      record,
+      anchor,
+      lastRecordUuid
+    );
+    if (recordUuid) {
+      lastRecordUuid = recordUuid;
+    }
+    if (
+      hasUnresolvedBackgroundWork(record) ||
+      record.subtype === "stop_hook_summary"
+    ) {
+      throw new Error(
+        "Claude anchored task acquired unsupported background or stop-hook work"
+      );
+    }
+
+    advanceClaudeCheckpointToolState(
+      record,
+      recordUuid,
+      unresolvedToolUses
+    );
+
+    if (record.type === "assistant") {
+      const message = isRecord(record.message) ? record.message : undefined;
+      if (message?.role !== "assistant") {
+        throw new Error("Claude assistant record has an unsupported message role");
+      }
+      const rawMessageId = nonEmptyString(message.id);
+      const messageId = rawMessageId === undefined
+        ? undefined
+        : uuidValue(rawMessageId);
+      if (rawMessageId !== undefined && !messageId) {
+        throw new Error("Claude assistant message has no stable UUID");
+      }
+      if (messageId && messageId !== assistantMessageId) {
+        if (endTurnMessageId !== undefined) {
+          throw new Error(
+            "Claude assistant message changed after an end-turn signal"
+          );
+        }
+        assistantMessageId = messageId;
+        assistantText = undefined;
+      }
+      const recordText = textFromAssistantRecord(record);
+      if (recordText) {
+        if (!messageId || messageId !== assistantMessageId) {
+          throw new Error("Claude assistant text has no stable message identity");
+        }
+        assistantText = appendBoundedRedactedClaudeText(
+          assistantText,
+          recordText
+        );
+      }
+      if (record.isApiErrorMessage === true) {
+        if (!recordUuid || validTimestampMs(record.timestamp) === undefined) {
+          throw new Error("Claude API-error completion identity is invalid");
+        }
+        if (unresolvedToolUses.size > 0) {
+          throw new Error("Claude API error left unresolved tool use state");
+        }
+        const error = safeErrorCode(record.error);
+        completion = {
+          source: "durable",
+          outcome: "failure",
+          text: assistantText || `Claude Code stopped with ${error}.`,
+          timestamp: nonEmptyString(record.timestamp),
+          id: recordUuid,
+          confidence: "high",
+          metadata: {
+            match: "claude_transcript_api_error",
+            session_id: anchor.session_id,
+            prompt_uuid: anchor.prompt_uuid,
+            error,
+            transcript_schema: "claude_code_jsonl_v2",
+            transcript_file_id: anchor.transcript_file_id
+          }
+        };
+      } else {
+        const stopReason = nonEmptyString(message.stop_reason);
+        if (stopReason === "end_turn") {
+          if (!recordUuid || !messageId) {
+            throw new Error("Claude end-turn signal has no stable identity");
+          }
+          if (
+            endTurnMessageId !== undefined &&
+            endTurnMessageId !== messageId
+          ) {
+            throw new Error(
+              "Claude active task contains multiple end-turn message identities"
+            );
+          }
+          endTurnMessageId = messageId;
+          endTurnAssistantUuid = recordUuid;
+        } else if (stopReason !== undefined && stopReason !== "tool_use") {
+          throw new Error(
+            "Claude active task contains an unsupported terminal stop reason"
+          );
+        }
+      }
+    }
+
+    if (record.type === "system" && record.subtype === "turn_duration") {
+      if (durationSeen) {
+        throw new Error("Claude transcript turn contains multiple turn_duration records");
+      }
+      durationSeen = true;
+      if (
+        !recordUuid ||
+        validTimestampMs(record.timestamp) === undefined ||
+        !endTurnMessageId ||
+        !endTurnAssistantUuid ||
+        assistantMessageId !== endTurnMessageId ||
+        !assistantText ||
+        unresolvedToolUses.size > 0
+      ) {
+        throw new Error(
+          "Claude turn_duration has no complete incremental completion chain"
+        );
+      }
+      completion = {
+        source: "durable",
+        outcome: "success",
+        text: assistantText,
+        timestamp: nonEmptyString(record.timestamp),
+        id: recordUuid,
+        confidence: "high",
+        metadata: {
+          match: "claude_transcript_turn_duration",
+          session_id: anchor.session_id,
+          prompt_uuid: anchor.prompt_uuid,
+          assistant_message_id: endTurnMessageId,
+          claude_version: anchor.claude_version,
+          transcript_schema: "claude_code_jsonl_v2",
+          transcript_file_id: anchor.transcript_file_id
+        }
+      };
+    }
+
+    ({ recordCount, chainFingerprint } = advanceClaudeCheckpointDigest(
+      recordCount,
+      chainFingerprint,
+      record
+    ));
+  }
+
+  const nextCheckpoint = signedClaudeActiveTaskCheckpoint({
+    schema: CLAUDE_ACTIVE_TASK_CHECKPOINT_SCHEMA,
+    version: 1,
+    anchor_fingerprint: anchor.anchor_fingerprint,
+    safe_resume_offset_bytes: safeResumeOffsetBytes,
+    last_record_uuid: lastRecordUuid,
+    record_count: recordCount,
+    chain_fingerprint: chainFingerprint,
+    unresolved_tool_uses: [...unresolvedToolUses.values()],
+    ...(assistantMessageId === undefined
+      ? {}
+      : { assistant_message_id: assistantMessageId }),
+    ...(assistantText === undefined ? {} : { assistant_text: assistantText }),
+    ...(endTurnMessageId === undefined
+      ? {}
+      : { end_turn_message_id: endTurnMessageId }),
+    ...(endTurnAssistantUuid === undefined
+      ? {}
+      : { end_turn_assistant_uuid: endTurnAssistantUuid })
+  });
+  return { checkpoint: nextCheckpoint, ...(completion ? { completion } : {}) };
+}
+
+function assertClaudeActiveTaskCheckpointPrompt(
+  record: TranscriptRecord,
+  anchor: ClaudeHumanStartedActiveTaskAnchor
+): void {
+  assertSupportedRecord(record, anchor.session_id, anchor.cwd);
+  const promptText = userPromptText(record);
+  if (
+    !isClaudeRootHumanPrompt(record) ||
+    uuidValue(record.uuid) !== anchor.prompt_uuid ||
+    exactRequestFingerprint(promptText) !== anchor.request_hash ||
+    nonEmptyString(record.version) !== anchor.claude_version
+  ) {
+    throw new Error("Claude anchored root prompt identity changed");
+  }
+}
+
+function claudeCheckpointRecordUuid(
+  record: TranscriptRecord,
+  anchor: ClaudeHumanStartedActiveTaskAnchor,
+  expectedParentUuid: string
+): string | undefined {
+  assertSupportedRecord(record, anchor.session_id, anchor.cwd);
+  const recordUuid = uuidValue(record.uuid);
+  const requiresIdentity = record.type === "user" ||
+    record.type === "assistant" ||
+    record.type === "system" ||
+    record.type === "attachment" ||
+    hasTurnCompletionSignal(record);
+  if (!recordUuid) {
+    if (requiresIdentity) {
+      throw new Error(
+        "Claude active-task record has no stable UUID"
+      );
+    }
+    return undefined;
+  }
+  if (nonEmptyString(record.version) !== anchor.claude_version) {
+    throw new Error(
+      "Claude transcript turn changed schema versions while it was running"
+    );
+  }
+  if (uuidValue(record.parentUuid) !== expectedParentUuid) {
+    throw new Error(
+      "Claude active-task record is not the next exact descendant"
+    );
+  }
+  return recordUuid;
+}
+
+function advanceClaudeCheckpointToolState(
+  record: TranscriptRecord,
+  recordUuid: string | undefined,
+  unresolved: Map<string, ClaudeHumanStartedActiveTaskCheckpointToolUse>
+): void {
+  const message = isRecord(record.message) ? record.message : undefined;
+  const content = Array.isArray(message?.content) ? message.content : [];
+  for (const block of content) {
+    if (!isRecord(block)) {
+      continue;
+    }
+    if (block.type === "tool_use") {
+      const id = checkpointOpaqueId(block.id) ? block.id : undefined;
+      if (!id || !recordUuid || unresolved.has(id)) {
+        throw new Error("Claude active task contains invalid tool-use identity");
+      }
+      if (unresolved.size >= CLAUDE_ACTIVE_TASK_MAX_UNRESOLVED_TOOLS) {
+        throw new Error("Claude active task has too many unresolved tool uses");
+      }
+      unresolved.set(id, { tool_use_id: id, owner_uuid: recordUuid });
+    }
+    if (block.type === "tool_result") {
+      const id = checkpointOpaqueId(block.tool_use_id)
+        ? block.tool_use_id
+        : undefined;
+      const pending = id ? unresolved.get(id) : undefined;
+      if (
+        !id ||
+        !pending ||
+        uuidValue(record.parentUuid) !== pending.owner_uuid ||
+        uuidValue(record.sourceToolAssistantUUID) !== pending.owner_uuid
+      ) {
+        throw new Error("Claude active task contains invalid tool-result identity");
+      }
+      unresolved.delete(id);
+    }
+  }
+}
+
+function advanceClaudeCheckpointDigest(
+  recordCount: number,
+  chainFingerprint: string,
+  record: TranscriptRecord
+): { recordCount: number; chainFingerprint: string } {
+  if (recordCount >= Number.MAX_SAFE_INTEGER) {
+    throw new Error("Claude active-task checkpoint record count overflowed");
+  }
+  return {
+    recordCount: recordCount + 1,
+    chainFingerprint: sha256Hex(
+      `${chainFingerprint}\0${sha256Hex(JSON.stringify(record))}`
+    )
+  };
+}
+
+function appendBoundedRedactedClaudeText(
+  current: string | undefined,
+  value: string
+): string | undefined {
+  const redacted = boundedRedactedText(value);
+  if (!redacted) {
+    return current;
+  }
+  return boundedRedactedText(current ? `${current}\n${redacted}` : redacted);
+}
+
+function assertClaudeActiveTaskResumeBoundary(fd: number, offset: number): void {
+  if (offset > 0 && byteAt(fd, offset - 1) !== 0x0a) {
+    throw new Error("Claude active-task resume offset is not a JSONL boundary");
+  }
+}
+
+function readExactTranscriptBytes(
+  fd: number,
+  offset: number,
+  length: number
+): Buffer {
+  const buffer = Buffer.allocUnsafe(length);
+  let readTotal = 0;
+  while (readTotal < length) {
+    const bytesRead = fs.readSync(
+      fd,
+      buffer,
+      readTotal,
+      length - readTotal,
+      offset + readTotal
+    );
+    if (bytesRead === 0) {
+      break;
+    }
+    readTotal += bytesRead;
+  }
+  if (readTotal !== length) {
+    throw new Error("Claude transcript changed while it was being read");
+  }
+  return buffer;
+}
+
+function completeTranscriptJsonlPrefixLength(buffer: Buffer): number {
+  if (buffer.length === 0) {
+    return 0;
+  }
+  const newline = buffer.lastIndexOf(0x0a);
+  return newline < 0 ? 0 : newline + 1;
+}
+
+function claudeActiveTaskUnavailable(
+  reason: string
+): ClaudeHumanStartedActiveTaskObservation {
+  return { status: "unavailable", reason, retryable: true };
+}
+
+function isRetryableClaudeProviderIoError(error: unknown): boolean {
+  if (!isRecord(error) || typeof error.code !== "string") {
+    return false;
+  }
+  return new Set([
+    "EACCES", "EAGAIN", "EBUSY", "EIO", "EMFILE", "ENFILE", "ENOENT",
+    "EPERM", "ESTALE", "ETIMEDOUT"
+  ]).has(error.code);
 }
 
 /**
@@ -2170,25 +2834,13 @@ function readCompleteJsonlRecordEntries(
   options: {
     allowLeadingPartial?: boolean;
     allowTrailingPartial?: boolean;
+    preReadBuffer?: Buffer;
   } = {}
 ): TranscriptRecordAtOffset[] {
-  const buffer = Buffer.allocUnsafe(length);
-  let readTotal = 0;
-  while (readTotal < length) {
-    const bytesRead = fs.readSync(
-      fd,
-      buffer,
-      readTotal,
-      length - readTotal,
-      offset + readTotal
-    );
-    if (bytesRead === 0) {
-      break;
-    }
-    readTotal += bytesRead;
-  }
-  if (readTotal !== length) {
-    throw new Error("Claude transcript changed while it was being read");
+  const buffer = options.preReadBuffer ??
+    readExactTranscriptBytes(fd, offset, length);
+  if (buffer.length !== length) {
+    throw new Error("Claude transcript pre-read boundary is invalid");
   }
   if (buffer.length === 0) {
     return [];

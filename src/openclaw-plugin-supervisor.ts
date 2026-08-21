@@ -28,9 +28,9 @@ export function createMonitorReconciliationService(
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
     return args;
   };
-  const watchReconciliationArgs = (reason: string): string[] => {
+  const watchReconciliationArgs = (): string[] => {
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-    const args = ["reconcile-watches", "--reason", reason];
+    const args = ["reconcile-watches"];
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
     return args;
   };
@@ -98,7 +98,7 @@ export function createMonitorReconciliationService(
     try {
       const watches = await runCliAsync(
         api,
-        watchReconciliationArgs("watch_supervision")
+        watchReconciliationArgs()
       );
       reportWatches(watches, "watch_supervision");
     } catch (error) {
@@ -124,7 +124,7 @@ export function createMonitorReconciliationService(
     try {
       const watches = await runCliAsync(
         api,
-        watchReconciliationArgs("startup_reconciliation")
+        watchReconciliationArgs()
       );
       reportWatches(watches, "startup_reconciliation");
     } catch (error) {

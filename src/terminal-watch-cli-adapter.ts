@@ -3,8 +3,7 @@ import path from "node:path";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
   captureClaudeHumanStartedActiveTaskAnchor,
-  observeClaudeHumanStartedActiveTask,
-  type ClaudeHumanStartedActiveTaskAnchor
+  observeClaudeHumanStartedActiveTask
 } from "./claude-local-transcript-provider.js";
 import type { ExecutorKind } from "./executors.js";
 import {
@@ -19,7 +18,6 @@ import { exactTerminalWatchAction } from "./terminal-list-renderer.js";
 import {
   captureCodexHumanStartedActiveTaskAnchor,
   observeCodexHumanStartedActiveTask,
-  type CodexHumanStartedActiveTaskAnchor,
   type CodexRolloutAcceptanceIdentity
 } from "./terminal-submission-acceptance.js";
 import type { TerminalControlRef } from "./terminal-control-ref.js";
@@ -39,12 +37,12 @@ import {
   type TerminalWatchService
 } from "./terminal-watch-service.js";
 import {
-  activeTaskAnchorForTerminalWatch,
   createTerminalWatchStore,
   terminalWatchIdentityFingerprint,
   type TerminalWatch,
   type TerminalWatchAnchor,
   type TerminalWatchNotification,
+  type TerminalWatchObservationCheckpoint,
   type TerminalWatchTerminalIdentity
 } from "./terminal-watch-store.js";
 import {
@@ -56,9 +54,7 @@ const DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES = 720;
 
 export interface TerminalWatchCliOptions {
   claudeHome?: string;
-  expectedBindingToken?: string;
   hardTimeoutMinutes?: number | string;
-  logDir?: string;
   openclawBin?: string;
   openclawSession?: string;
   storeDir?: string;
@@ -67,9 +63,23 @@ export interface TerminalWatchCliOptions {
   [option: string]: unknown;
 }
 
-interface TerminalWatchScan {
-  terminalControlled: Array<Record<string, unknown>>;
-}
+type ExactTerminalWatchObservation =
+  | {
+      state: "available";
+      rawTerminal: Record<string, unknown>;
+      terminal: Record<string, unknown>;
+      summary: Record<string, unknown>;
+    }
+  | {
+      state: "absent";
+      reason?: string;
+      summary: Record<string, unknown>;
+    }
+  | {
+      state: "unavailable";
+      reason?: string;
+      summary: Record<string, unknown>;
+    };
 
 export interface TerminalWatchCliDependencies {
   acquireFileLock(lockPath: string): () => void;
@@ -77,11 +87,10 @@ export interface TerminalWatchCliDependencies {
     storeDir: string,
     terminalControl: TerminalControlRef
   ): () => void;
-  buildTerminalListGroup(request: {
+  observeExactTerminal(request: {
     options: TerminalWatchCliOptions;
-    agentFilter?: ExecutorKind;
-    statusFilter?: string;
-  }): Promise<TerminalWatchScan>;
+    terminalId: string;
+  }): Promise<ExactTerminalWatchObservation>;
   loadClaudeAgentRows(
     options: TerminalWatchCliOptions,
     observation?: { required?: boolean }
@@ -109,6 +118,13 @@ export interface TerminalWatchCliFacade {
     storeDir: string,
     options?: { includeAll?: boolean }
   ): Array<Record<string, unknown>>;
+  scanPublicWatchesForExactObservation(
+    storeDir: string,
+    options?: { includeAll?: boolean }
+  ): {
+    watches: Array<Record<string, unknown>>;
+    activeOverlayTrusted: boolean;
+  };
 }
 
 export function createTerminalWatchCliAdapter(
@@ -129,11 +145,10 @@ export function createTerminalWatchCliAdapter(
       now: dependencies.now,
       randomUUID: dependencies.randomUUID,
       observe: (watch) => observeTerminalWatch(watch, options, dependencies),
-      deliver: async ({ watch, notification, idempotencyKey }) => {
+      deliver: async ({ watch, notification }) => {
         callback.deliver({
           watchId: watch.watch_id,
-          notificationId: notification.notification_id,
-          idempotencyKey,
+          idempotencyKey: notification.idempotency_key,
           event: callbackEvent(notification),
           agent: watch.agent,
           terminalId: watch.terminal.terminal_id,
@@ -151,23 +166,21 @@ export function createTerminalWatchCliAdapter(
 
   async function runWatch(options: TerminalWatchCliOptions): Promise<void> {
     const terminalId = requiredString(options.terminal, "--terminal");
-    const expectedBindingToken = requiredSha256(
-      options.expectedBindingToken,
-      "--expected-binding-token"
-    );
     const openclawSession = requiredString(
       options.openclawSession,
       "--openclaw-session"
     );
     const storeDir = dependencies.storeDirFromOptions(options);
-    const initiallyObservedTerminal = await exactTerminalForWatch(
+    const initiallyObserved = await exactTerminalForWatch(
       terminalId,
-      expectedBindingToken,
       options,
       dependencies
     );
+    const initiallyObservedBindingToken = bindingTokenForWatch(
+      initiallyObserved.rawTerminal
+    );
     const initialTerminalControl = terminalControlForWatch(
-      initiallyObservedTerminal
+      initiallyObserved.rawTerminal
     );
     const releaseTerminal = dependencies.acquireTerminalLock(
       storeDir,
@@ -175,17 +188,19 @@ export function createTerminalWatchCliAdapter(
     );
     let watch: TerminalWatch;
     try {
-      const terminal = await exactTerminalForWatch(
+      const observed = await exactTerminalForWatch(
         terminalId,
-        expectedBindingToken,
         options,
         dependencies
       );
-      const terminalControl = terminalControlForWatch(terminal);
+      const rawTerminal = observed.rawTerminal;
+      const projectedTerminal = observed.terminal;
+      const expectedBindingToken = bindingTokenForWatch(rawTerminal);
+      const terminalControl = terminalControlForWatch(rawTerminal);
       if (!sameTerminalControlEvidenceIncarnation(
         initialTerminalControl,
         terminalControl
-      )) {
+      ) || expectedBindingToken !== initiallyObservedBindingToken) {
         throw new Error(
           "terminal binding changed while AKK acquired authority; refresh " +
           "AKK list and retry"
@@ -208,14 +223,13 @@ export function createTerminalWatchCliAdapter(
         );
       }
       assertExactPublicWatchAction(
-        terminal,
-        terminalId,
-        expectedBindingToken
+        projectedTerminal,
+        terminalId
       );
-      const agent = terminalAgent(terminal);
+      const agent = terminalAgent(rawTerminal);
       const anchor = captureTerminalWatchAnchor(
         agent,
-        terminal,
+        rawTerminal,
         options,
         dependencies
       );
@@ -227,10 +241,8 @@ export function createTerminalWatchCliAdapter(
       watch = watchService.create({
         agent,
         terminal: terminalWatchIdentity(
-          terminal,
-          agent,
-          expectedBindingToken,
-          dependencies.loadClaudeAgentRows(options)
+          rawTerminal,
+          expectedBindingToken
         ),
         anchor,
         openclaw_session: openclawSession,
@@ -239,8 +251,8 @@ export function createTerminalWatchCliAdapter(
           options.hardTimeoutMinutes,
           DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES
         ) * 60_000,
-        approval_fingerprint: approvalFingerprint(terminal),
-        approval_reason_code: approvalFingerprint(terminal)
+        approval_fingerprint: approvalFingerprint(projectedTerminal),
+        approval_reason_code: approvalFingerprint(projectedTerminal)
           ? "terminal_waiting_for_approval"
           : undefined
       });
@@ -272,7 +284,31 @@ export function createTerminalWatchCliAdapter(
     options: { includeAll?: boolean } = {}
   ): Array<Record<string, unknown>> {
     const service = serviceFor({ storeDir });
-    return service.list()
+    return publicTerminalWatches(service.list(), options);
+  }
+
+  function scanPublicWatchesForExactObservation(
+    storeDir: string,
+    options: { includeAll?: boolean } = {}
+  ): {
+    watches: Array<Record<string, unknown>>;
+    activeOverlayTrusted: boolean;
+  } {
+    const repository = createTerminalWatchStore(storeDir, {
+      acquire: dependencies.acquireFileLock
+    });
+    const scan = repository.scanForReconciliation();
+    return {
+      watches: publicTerminalWatches(scan.watches, options),
+      activeOverlayTrusted: scan.errors.length === 0
+    };
+  }
+
+  function publicTerminalWatches(
+    watches: readonly TerminalWatch[],
+    options: { includeAll?: boolean }
+  ): Array<Record<string, unknown>> {
+    return watches
       .filter((watch) => options.includeAll || watch.status === "active")
       .map(publicTerminalWatch);
   }
@@ -282,43 +318,48 @@ export function createTerminalWatchCliAdapter(
     runUnwatch,
     runWatchStatus,
     runReconcileWatches,
-    listPublicWatches
+    listPublicWatches,
+    scanPublicWatchesForExactObservation
   });
 }
 
 async function exactTerminalForWatch(
   terminalId: string,
-  expectedBindingToken: string,
   options: TerminalWatchCliOptions,
   dependencies: TerminalWatchCliDependencies
-): Promise<Record<string, unknown>> {
-  const scan = await dependencies.buildTerminalListGroup({ options });
-  const matches = scan.terminalControlled.filter(
-    (terminal) => stringValue(terminal.id) === terminalId
+): Promise<Extract<ExactTerminalWatchObservation, { state: "available" }>> {
+  const observation = await dependencies.observeExactTerminal({
+    options,
+    terminalId
+  });
+  if (observation.state === "unavailable") {
+    throw new Error(
+      "authoritative observation of the exact terminal is temporarily " +
+      "unavailable; retry after refreshing AKK list"
+    );
+  }
+  if (observation.state === "absent") {
+    throw new Error(`expected exact terminal ${terminalId}; observed none`);
+  }
+  return observation;
+}
+
+function bindingTokenForWatch(
+  terminal: Record<string, unknown>
+): string {
+  return requiredSha256(
+    terminal.lifecycle_binding_token,
+    "current terminal binding token"
   );
-  if (matches.length !== 1) {
-    throw new Error(
-      `expected one exact terminal ${terminalId}; observed ${matches.length}`
-    );
-  }
-  const terminal = matches[0];
-  if (stringValue(terminal.lifecycle_binding_token) !== expectedBindingToken) {
-    throw new Error(
-      "terminal binding changed after it was listed; refresh AKK list and retry"
-    );
-  }
-  return terminal;
 }
 
 function assertExactPublicWatchAction(
   terminal: Record<string, unknown>,
-  terminalId: string,
-  expectedBindingToken: string
+  terminalId: string
 ): void {
   if (!exactTerminalWatchAction(
     terminal,
-    terminalId,
-    expectedBindingToken
+    terminalId
   )) {
     throw new Error(
       "the exact terminal is not currently watchable; refresh AKK list and " +
@@ -377,24 +418,12 @@ function captureTerminalWatchAnchor(
   dependencies: TerminalWatchCliDependencies
 ): TerminalWatchAnchor | undefined {
   if (agent === "codex") {
-    const captured = captureCodexHumanStartedActiveTaskAnchor({
+    return captureCodexHumanStartedActiveTaskAnchor({
       currentIdentity: codexIdentity(terminal),
       now: dependencies.now()
     });
-    return captured && {
-      kind: "codex_rollout",
-      native_task_id: captured.turn_id,
-      captured_at: captured.captured_at,
-      request_hash: captured.request_hash,
-      codex_version: captured.codex_version,
-      rollout: captured.rollout,
-      task_started_offset_bytes: captured.task_started_offset_bytes,
-      user_message_offset_bytes: captured.user_message_offset_bytes,
-      observed_end_offset_bytes: captured.observed_end_offset_bytes,
-      evidence_fingerprint: captured.anchor_fingerprint
-    };
   }
-  const captured = captureClaudeHumanStartedActiveTaskAnchor({
+  return captureClaudeHumanStartedActiveTaskAnchor({
     sessionId: requiredString(
       terminal.native_agent_session_id,
       "Claude native session id"
@@ -405,22 +434,6 @@ function captureTerminalWatchAnchor(
     agentRows: dependencies.loadClaudeAgentRows(options, { required: true }),
     now: dependencies.now()
   });
-  return captured && {
-    kind: "claude_transcript",
-    root_prompt_uuid: captured.prompt_uuid,
-    captured_at: captured.captured_at,
-    request_hash: captured.request_hash,
-    claude_version: captured.claude_version,
-    transcript_file_id: captured.transcript_file_id,
-    turn_start_offset_bytes: captured.turn_start_offset_bytes,
-    transcript: {
-      relative_path: captured.relative_path,
-      device: captured.device,
-      inode: captured.inode
-    },
-    observed_end_offset_bytes: captured.observed_end_offset_bytes,
-    evidence_fingerprint: captured.anchor_fingerprint
-  };
 }
 
 async function observeTerminalWatch(
@@ -430,22 +443,38 @@ async function observeTerminalWatch(
 ): Promise<TerminalWatchObservation> {
   const observedAt = dependencies.now().toISOString();
   const fence = terminalWatchObservationFence(watch);
-  const terminal = await currentTerminalForWatch(watch, options, dependencies);
-  const terminalMatches = terminal
-    ? terminalMatchesWatch(terminal, watch, dependencies, options)
+  const exactTerminal = await currentTerminalForWatch(
+    watch,
+    options,
+    dependencies
+  );
+  const rawTerminal = exactTerminal.state === "available"
+    ? exactTerminal.rawTerminal
+    : undefined;
+  const projectedTerminal = exactTerminal.state === "available"
+    ? exactTerminal.terminal
+    : undefined;
+  const terminalMatches = rawTerminal
+    ? terminalMatchesWatch(rawTerminal, watch)
     : false;
-  const anchor = activeTaskAnchorForTerminalWatch(watch);
-  const observation = watch.agent === "codex"
+  const observation =
+    watch.anchor.schema ===
+      "agent-knock-knock/codex-human-started-active-task-anchor"
     ? observeCodexHumanStartedActiveTask({
-        anchor: anchor as CodexHumanStartedActiveTaskAnchor,
-        currentIdentity: terminal
-          ? codexIdentity(terminal)
-          : codexIdentityForWatch(watch)
+        anchor: watch.anchor,
+        currentIdentity: rawTerminal
+          ? codexIdentity(rawTerminal)
+          : codexIdentityForWatch(watch),
+        resumeOffsetBytes:
+          watch.observation_checkpoint.safe_resume_offset_bytes
       })
     : observeClaudeHumanStartedActiveTask({
-        anchor: anchor as ClaudeHumanStartedActiveTaskAnchor,
+        anchor: watch.anchor,
         claudeHome: stringValue(options.claudeHome),
-        agentRows: dependencies.loadClaudeAgentRows(options)
+        agentRows: dependencies.loadClaudeAgentRows(options, { required: true }),
+        resumeOffsetBytes:
+          watch.observation_checkpoint.safe_resume_offset_bytes,
+        checkpoint: claudeObservationCheckpoint(watch)
       });
   if (observation.status === "invalidated") {
     return invalidatedObservation(watch, observedAt, "task_anchor_invalidated");
@@ -462,7 +491,7 @@ async function observeTerminalWatch(
         watch_id: watch.watch_id,
         completion_id: completion.id ?? null,
         completion_timestamp: completion.timestamp ?? null,
-        anchor_fingerprint: watch.anchor.evidence_fingerprint
+        anchor_fingerprint: watch.anchor.anchor_fingerprint
       }),
       reason_code: completion.outcome === "failure"
         ? "anchored_task_failed"
@@ -472,65 +501,101 @@ async function observeTerminalWatch(
       completion_timestamp: completion.timestamp
     };
   }
-  if (terminal && !terminalMatches) {
+  if (observation.status === "unavailable") {
+    return {
+      ...fence,
+      kind: "unavailable",
+      observed_at: observedAt,
+      reason_code: "provider_observation_unavailable"
+    };
+  }
+  const safeResumeOffsetBytes = observation.safeResumeOffsetBytes;
+  const observationCheckpoint = "checkpoint" in observation
+    ? observation.checkpoint as TerminalWatchObservationCheckpoint
+    : undefined;
+  if (exactTerminal.state === "unavailable") {
+    return {
+      ...fence,
+      kind: "unavailable",
+      observed_at: observedAt,
+      safe_resume_offset_bytes: safeResumeOffsetBytes,
+      observation_checkpoint: observationCheckpoint,
+      reason_code: "terminal_observation_unavailable"
+    };
+  }
+  if (rawTerminal && !terminalMatches) {
     return invalidatedObservation(
       watch,
       observedAt,
       "terminal_identity_changed"
     );
   }
-  if (!terminal) {
+  if (exactTerminal.state === "absent") {
     return invalidatedObservation(
       watch,
       observedAt,
       "terminal_process_unavailable"
     );
   }
-  const approval = approvalFingerprint(terminal);
+  if (!projectedTerminal) {
+    throw new Error("exact terminal observation is inconsistent");
+  }
+  const approval = approvalFingerprint(projectedTerminal);
   if (approval) {
     return {
       ...fence,
       kind: "approval",
       observed_at: observedAt,
       last_activity_at: observedAt,
+      safe_resume_offset_bytes: safeResumeOffsetBytes,
+      observation_checkpoint: observationCheckpoint,
       evidence_fingerprint: approval,
       reason_code: "terminal_waiting_for_approval"
     };
   }
-  return { ...fence, kind: "pending", observed_at: observedAt };
+  return {
+    ...fence,
+    kind: "pending",
+    observed_at: observedAt,
+    safe_resume_offset_bytes: safeResumeOffsetBytes,
+    observation_checkpoint: observationCheckpoint
+  };
+}
+
+function claudeObservationCheckpoint(
+  watch: TerminalWatch
+) {
+  const checkpoint = watch.observation_checkpoint;
+  if (
+    !("schema" in checkpoint) ||
+    checkpoint.schema !==
+      "agent-knock-knock/claude-human-started-active-task-checkpoint"
+  ) {
+    throw new Error("Claude terminal Watch has no continuation checkpoint");
+  }
+  return checkpoint;
 }
 
 async function currentTerminalForWatch(
   watch: TerminalWatch,
   options: TerminalWatchCliOptions,
   dependencies: TerminalWatchCliDependencies
-): Promise<Record<string, unknown> | undefined> {
-  const scan = await dependencies.buildTerminalListGroup({
+): Promise<ExactTerminalWatchObservation> {
+  return dependencies.observeExactTerminal({
     options,
-    agentFilter: watch.agent
+    terminalId: watch.terminal.terminal_id
   });
-  const matches = scan.terminalControlled.filter(
-    (terminal) => stringValue(terminal.id) === watch.terminal.terminal_id
-  );
-  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function terminalMatchesWatch(
   terminal: Record<string, unknown>,
-  watch: TerminalWatch,
-  dependencies: TerminalWatchCliDependencies,
-  options: TerminalWatchCliOptions
+  watch: TerminalWatch
 ): boolean {
   try {
     const agent = terminalAgent(terminal);
     const current = terminalWatchIdentity(
       terminal,
-      agent,
-      requiredSha256(
-        terminal.lifecycle_binding_token,
-        "current terminal binding token"
-      ),
-      dependencies.loadClaudeAgentRows(options)
+      bindingTokenForWatch(terminal)
     );
     return agent === watch.agent &&
       terminalWatchIdentityFingerprint({
@@ -549,43 +614,14 @@ function terminalMatchesWatch(
 
 function terminalWatchIdentity(
   terminal: Record<string, unknown>,
-  agent: ExecutorKind,
-  bindingToken: string,
-  claudeRows: readonly ClaudeAgentRow[]
+  bindingToken: string
 ): TerminalWatchTerminalIdentity {
   const terminalControl = terminal.terminal_control as TerminalControlRef;
-  const pid = positiveInteger(terminal.pid, "terminal agent PID");
-  const nativeThreadId = requiredString(
-    terminal.native_agent_session_id,
-    "terminal native thread id"
-  );
-  const lifecycle = isRecord(terminal.native_thread_lifecycle)
-    ? terminal.native_thread_lifecycle
-    : {};
-  const processStartedAt = agent === "claude"
-    ? uniqueClaudeProcessStart(claudeRows, pid, nativeThreadId)
-    : undefined;
   return {
     terminal_id: requiredString(terminal.id, "terminal id"),
     terminal_endpoint: terminalControlEvidence(terminalControl),
-    agent_pid: pid,
-    process_uuid: requiredString(
-      terminal.native_agent_process_uuid,
-      "terminal process UUID"
-    ),
-    process_birth: requiredString(
-      terminal.native_agent_process_birth,
-      "terminal process birth"
-    ),
-    process_started_at_ms: processStartedAt,
-    native_thread_id: nativeThreadId,
     workspace: terminalWorkspace(terminal),
-    binding_token: bindingToken,
-    agent_version: requiredString(terminal.agent_version, "terminal agent version"),
-    behavior_profile: requiredString(
-      lifecycle.behaviorProfile,
-      "terminal behavior profile"
-    )
+    binding_token: bindingToken
   };
 }
 
@@ -629,29 +665,19 @@ function codexIdentity(
 function codexIdentityForWatch(
   watch: TerminalWatch
 ): CodexRolloutAcceptanceIdentity {
-  if (watch.agent !== "codex" || watch.anchor.kind !== "codex_rollout") {
+  if (
+    watch.agent !== "codex" ||
+    watch.anchor.schema !==
+      "agent-knock-knock/codex-human-started-active-task-anchor"
+  ) {
     throw new Error("terminal Watch has no Codex identity");
   }
   return {
-    sessionId: watch.terminal.native_thread_id,
-    processUuid: watch.terminal.process_uuid,
-    processBirth: watch.terminal.process_birth,
+    sessionId: watch.anchor.native_thread_id,
+    processUuid: watch.anchor.process_uuid,
+    processBirth: watch.anchor.process_birth,
     rollout: watch.anchor.rollout
   };
-}
-
-function uniqueClaudeProcessStart(
-  rows: readonly ClaudeAgentRow[],
-  pid: number,
-  nativeThreadId: string
-): number {
-  const matches = rows.filter((row) =>
-    row.pid === pid && row.sessionId === nativeThreadId
-  );
-  if (matches.length !== 1) {
-    throw new Error("Claude terminal has no unique exact process row");
-  }
-  return positiveInteger(matches[0].startedAt, "Claude process start time");
 }
 
 function publicTerminalWatch(watch: TerminalWatch): Record<string, unknown> {
@@ -663,7 +689,11 @@ function publicTerminalWatch(watch: TerminalWatch): Record<string, unknown> {
     source: "human_started_terminal_watch",
     agent: watch.agent,
     terminal_id: watch.terminal.terminal_id,
-    native_thread_id: watch.terminal.native_thread_id,
+    native_thread_id:
+      watch.anchor.schema ===
+        "agent-knock-knock/codex-human-started-active-task-anchor"
+        ? watch.anchor.native_thread_id
+        : watch.anchor.session_id,
     workspace: watch.terminal.workspace,
     status: watch.status,
     activity_state: watch.status === "active" ? "watching" : "settled",
@@ -746,7 +776,7 @@ function invalidatedObservation(
     evidence_fingerprint: sha256({
       watch_id: watch.watch_id,
       reason_code: reasonCode,
-      anchor_fingerprint: watch.anchor.evidence_fingerprint
+      anchor_fingerprint: watch.anchor.anchor_fingerprint
     }),
     reason_code: reasonCode
   };
@@ -790,19 +820,8 @@ function requiredString(value: unknown, label: string): string {
 function requiredSha256(value: unknown, label: string): string {
   const result = requiredString(value, label);
   if (!/^[a-f0-9]{64}$/u.test(result)) {
-    const characters = Array.from(result);
-    const invalidCharacterCount = characters.filter(
-      (character) => !/^[a-f0-9]$/u.test(character)
-    ).length;
     throw new Error(
-      `${label} is invalid: received ${characters.length} characters; ` +
-      "invalid-character count outside lowercase ASCII hexadecimal " +
-      `[a-f0-9]: ${invalidCharacterCount}. It must be exactly 64 lowercase ` +
-      "ASCII " +
-      "hexadecimal characters. Do not retry this Watch command with the " +
-      "same arguments. Refresh AKK list and copy the current terminal's " +
-      "entire available_actions.watch.arguments object verbatim; do not " +
-      "retype, shorten, summarize, or use ... or …."
+      `${label} must be exactly 64 lowercase ASCII hexadecimal characters`
     );
   }
   return result;

@@ -1167,8 +1167,8 @@ function validatePublicContracts(value, {
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 17) {
-    fail("list action contract version must remain 17");
+  if (actions.version !== 18) {
+    fail("list action contract version must remain 18");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -1185,8 +1185,8 @@ function validatePublicContracts(value, {
   assertSourcePattern(
     repoRoot,
     "src/terminal-list-renderer.ts",
-    /version:\s*17\b/u,
-    "list action contract version 17"
+    /version:\s*18\b/u,
+    "list action contract version 18"
   );
 
   const openclaw = assertExactKeys(contracts.openclaw_tools, [

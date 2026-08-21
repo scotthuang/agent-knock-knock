@@ -1,13 +1,223 @@
 import path from "node:path";
 import { recordValue } from "./value-guards.js";
 
+const MODEL_FACING_PRIVATE_AUTHORITY_PARTS = [
+  ["expected", "terminal", "token"],
+  ["expected", "binding", "token"],
+  ["expected", "handoff", "token"],
+  ["candidate", "token"],
+  ["expected", "approval", "fingerprint"],
+  ["approval", "fingerprint"],
+  ["expected", "session", "revision"],
+  ["lifecycle", "binding", "token"],
+  ["binding", "token"],
+  ["binding", "id"],
+  ["binding", "generation"],
+  ["terminal", "binding", "id"],
+  ["terminal", "binding", "generation"],
+  ["selection", "handle"],
+  ["selection", "snapshot"],
+  ["selection", "scope"],
+  ["expected", "callback", "conversation", "id"],
+  ["expected", "callback", "session", "id"],
+  ["expected", "callback", "turn", "id"],
+  ["expected", "callback", "message", "id"],
+  ["expected", "callback", "openclaw", "session"]
+] as const;
+
+// The optional separator accepts the three spellings that can be emitted by
+// old CLI/JSON diagnostics: snake_case, kebab-case, and camelCase.  These are
+// exact AKK authority names rather than generic words such as "token" or
+// "revision", so ordinary user and agent text remains intact.
+const MODEL_FACING_PRIVATE_AUTHORITY_NAME = `(?:${
+  MODEL_FACING_PRIVATE_AUTHORITY_PARTS
+    .map((parts) => parts.join("[_-]?"))
+    .join("|")
+})`;
+const MODEL_FACING_SCALAR =
+  `(?:"(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|` +
+  "`(?:\\\\.|[^`\\\\])*`|true|false|null|" +
+  `-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?|[^\\s,;}\\]]+)`;
+const MODEL_FACING_PRIVATE_AUTHORITY_JSON = new RegExp(
+  `"${MODEL_FACING_PRIVATE_AUTHORITY_NAME}"\\s*:\\s*${MODEL_FACING_SCALAR}`,
+  "giu"
+);
+const MODEL_FACING_PRIVATE_AUTHORITY_CLI = new RegExp(
+  `--${MODEL_FACING_PRIVATE_AUTHORITY_NAME}(?:=|\\s+)${MODEL_FACING_SCALAR}`,
+  "giu"
+);
+const MODEL_FACING_PRIVATE_AUTHORITY_ASSIGNMENT = new RegExp(
+  `(^|[^A-Za-z0-9])${MODEL_FACING_PRIVATE_AUTHORITY_NAME}` +
+    `\\s*(?:=|:)\\s*${MODEL_FACING_SCALAR}`,
+  "gimu"
+);
+const MODEL_FACING_PRIVATE_AUTHORITY_LINE = new RegExp(
+  `^\\s*(?:[-*]\\s*)?(?:` +
+    `(?:["']?${MODEL_FACING_PRIVATE_AUTHORITY_NAME}["']?\\s*(?:=|:))|` +
+    `(?:--${MODEL_FACING_PRIVATE_AUTHORITY_NAME}(?:=|\\s+)))`,
+  "iu"
+);
+const LEGACY_APPROVAL_TAIL_MARKER =
+  "If the user approves, call `agent_knock_knock_approve`";
+const LEGACY_APPROVAL_TERMINAL_INSTRUCTION =
+  "Do not use raw tmux, shell, or manual key presses for this approval. Do not approve without explicit user confirmation.";
+
+const MODEL_OPAQUE_AUTHORITY_FIELDS = new Set([
+  "acceptanceevidence",
+  "candidaterollouts",
+  "claudetranscriptanchor",
+  "codexopenrootrolloutinventory",
+  "codexrolloutacceptanceanchor",
+  "challenge",
+  "etag",
+  "expectedapprovalfingerprint",
+  "expectedcallbackconversationid",
+  "expectedcallbackmessageid",
+  "expectedcallbackopenclawsession",
+  "expectedcallbacksessionid",
+  "expectedcallbackturnid",
+  "generationid",
+  "livenativethreadid",
+  "nativesessiontakeover",
+  "nonce",
+  "proof",
+  "selectionhandle",
+  "selectionsnapshot",
+  "selectionscope",
+  "snapshotid"
+]);
+
+export function normalizeAkkModelFacingFieldName(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/gu, "");
+}
+
+export function isAkkModelFacingPrivateAuthorityField(key: string): boolean {
+  const compact = normalizeAkkModelFacingFieldName(key);
+  return compact.endsWith("token") ||
+    compact.endsWith("fingerprint") ||
+    compact.endsWith("hash") ||
+    compact.endsWith("sha256") ||
+    compact.endsWith("digest") ||
+    compact.endsWith("revision") ||
+    compact.endsWith("revisions") ||
+    compact.endsWith("bindingid") ||
+    compact.endsWith("bindingids") ||
+    compact.endsWith("bindinggeneration") ||
+    compact.endsWith("bindinggenerations") ||
+    compact === "generation" ||
+    MODEL_OPAQUE_AUTHORITY_FIELDS.has(compact);
+}
+
+export function isAkkModelFacingDiagnosticField(key: string | undefined): boolean {
+  if (!key) return false;
+  const separated = key
+    .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
+    .toLowerCase();
+  return /(?:^|[_-])(?:reasons?|errors?|warnings?|diagnostics?)$/u.test(
+    separated
+  ) || /(?:^|[_-])(?:error|warning|diagnostic)_message$/u.test(separated);
+}
+
+function sanitizeAkkModelFacingEmbeddedAuthorityText(
+  value: string
+): string {
+  return value
+    .replace(
+      MODEL_FACING_PRIVATE_AUTHORITY_JSON,
+      '"internal_authority":"[retained by AKK]"'
+    )
+    .replace(
+      MODEL_FACING_PRIVATE_AUTHORITY_CLI,
+      "[AKK internal authority omitted]"
+    )
+    .replace(
+      MODEL_FACING_PRIVATE_AUTHORITY_ASSIGNMENT,
+      (_match, prefix: string) =>
+        `${prefix}[AKK internal authority omitted]`
+    );
+}
+
+/**
+ * Remove only AKK-generated pre-v18 authority instructions from callback/event
+ * text.  Exact authority-looking text outside one of these fixed machine-owned
+ * forms is business content and must remain byte-for-byte visible.
+ */
+export function sanitizeAkkModelFacingLegacyAuthorityInstructionText(
+  value: string
+): string {
+  const reviewOnly = stripAkkLegacyApprovalInstructionTail(value);
+  let machineAuthorityBlock = false;
+  return reviewOnly.split("\n").map((line) => {
+    const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+    const carriageReturn = line.endsWith("\r") ? "\r" : "";
+    if (
+      /^\s*(?:\[?AKK\]?\s+)?(?:approval|internal) authority\s*:?\s*$/iu
+        .test(text)
+    ) {
+      machineAuthorityBlock = true;
+      return line;
+    }
+    if (text.trim().length === 0) {
+      machineAuthorityBlock = false;
+      return line;
+    }
+    const fixedCommand = /^\s*(?:equivalent (?:user )?command|AKK (?:approval )?command)\s*:/iu
+      .test(text) && containsEmbeddedPrivateAuthority(text);
+    const blockAuthority = machineAuthorityBlock &&
+      containsEmbeddedPrivateAuthority(text);
+    if (fixedCommand || blockAuthority) {
+      return `${text.match(/^\s*/u)?.[0] ?? ""}` +
+        `[AKK internal authority omitted]${carriageReturn}`;
+    }
+    if (machineAuthorityBlock) machineAuthorityBlock = false;
+    return line;
+  }).join("\n");
+}
+
+/** Remove only the exact legacy approval instruction appended by AKK. */
+export function stripAkkLegacyApprovalInstructionTail(value: string): string {
+  const markerIndex = value.lastIndexOf(LEGACY_APPROVAL_TAIL_MARKER);
+  const markerSuffix = markerIndex === -1 ? "" : value.slice(markerIndex);
+  const fixedTail = markerIndex !== -1 && (
+    markerSuffix.trimEnd().endsWith(LEGACY_APPROVAL_TERMINAL_INSTRUCTION) ||
+    markerSuffix.split(/\r?\n/u).some(isLegacyMachineAuthorityLine)
+  );
+  return fixedTail ? value.slice(0, markerIndex) : value;
+}
+
+function isLegacyMachineAuthorityLine(line: string): boolean {
+  return containsEmbeddedPrivateAuthority(line) && (
+    MODEL_FACING_PRIVATE_AUTHORITY_LINE.test(line) ||
+    /^\s*(?:equivalent (?:user )?command|AKK (?:approval )?command)\s*:/iu
+      .test(line)
+  );
+}
+
+function containsEmbeddedPrivateAuthority(value: string): boolean {
+  return sanitizeAkkModelFacingEmbeddedAuthorityText(value) !== value;
+}
+
+export function sanitizeAkkModelFacingDiagnosticText(
+  message: string
+): string {
+  const sanitized = sanitizeAkkModelFacingEmbeddedAuthorityText(message);
+  if (
+    sanitized !== message ||
+    /(?:\bexpected\s+(?:session\s+)?revision\b|\bactual\s+(?:session\s+)?revision\b|\b(?:terminal|binding|handoff|candidate)\s+token\b|\bapproval\s+fingerprint\b|\bbinding\s+(?:id|generation)\b|\bcompare-and-swap\b|\bCAS\b)/iu.test(
+      message
+    )
+  ) {
+    return "AKK's private authority changed or could not be verified. Refresh AKK list/status and retry only the currently advertised semantic action.";
+  }
+  return sanitized;
+}
+
 export const AKK_CALLBACK_METHOD = "agent-knock-knock.callback";
 export type AkkResumeSelection =
   | { kind: "exact"; nativeThreadId: string }
   | { kind: "previous" }
   | { kind: "number"; selectionNumber: number }
-  | { kind: "short-id"; shortId: string }
-  | { kind: "snapshot-handle"; selectionHandle: string };
+  | { kind: "short-id"; shortId: string };
 type AkkCloseCommand = {
   action: "close";
   turnId: string;
@@ -47,7 +257,6 @@ export type AkkCommand =
   | {
       action: "approve";
       turnId: string;
-      expectedApprovalFingerprint: string;
     }
   | { action: "cancel"; turnId: string }
   | { action: "renew"; turnId: string; minutes?: string }
@@ -131,7 +340,7 @@ function parseAkkLifecycleCommand(
   if (action === "resume-thread") {
     const usage =
       "Usage: /akk resume-thread <exact-terminal-id> " +
-      "[native-thread-uuid|previous|刚才那个|number|@short-id|snapshot-handle]";
+      "[native-thread-uuid|previous|刚才那个|number|@short-id]";
     const { token: terminalId, rest: nativeInput } = takeRequiredToken(
       rest,
       usage
@@ -196,20 +405,14 @@ function parseAkkTurnCommand(
   if (action === "approve") {
     const { token: turnId, rest: approvalInput } = takeRequiredToken(
       rest,
-      "Usage: /akk approve <turn-selector> --expected-approval-fingerprint <fingerprint>"
+      "Usage: /akk approve <turn-selector>"
     );
-    const approval = /^--expected-approval-fingerprint\s+(\S+)$/u.exec(
-      approvalInput.trim()
-    );
-    if (!approval) {
-      throw new Error(
-        "Usage: /akk approve <turn-selector> --expected-approval-fingerprint <fingerprint>"
-      );
+    if (approvalInput.trim()) {
+      throw new Error("Usage: /akk approve <turn-selector>");
     }
     return {
       action: "approve",
-      turnId,
-      expectedApprovalFingerprint: approval[1]
+      turnId
     };
   }
   if (action === "cancel" || action === "stop") {
@@ -300,11 +503,11 @@ export function akkUsageText(): string {
     "/akk threads <exact-terminal-id>",
     "/akk new-thread <exact-terminal-id>",
     "/akk clear-thread <exact-terminal-id>",
-    "/akk resume-thread <exact-terminal-id> [uuid|previous|number|@short-id|snapshot-handle]",
+    "/akk resume-thread <exact-terminal-id> [uuid|previous|number|@short-id]",
     "/akk doctor",
     "/akk status [turn-selector|terminal-watch-id]",
     "/akk respond <turn-selector>: <answer>",
-    "/akk approve <turn-selector> --expected-approval-fingerprint <fingerprint>",
+    "/akk approve <turn-selector>",
     "/akk cancel <turn-selector>"
   ].join("\n");
 }
@@ -486,41 +689,6 @@ export function formatAkkTerminalWatchHint(
   ];
 }
 
-export function akkWatchUnavailableMessage(
-  terminal: Record<string, unknown>,
-  terminalWatches: unknown[],
-  terminalId: string
-): string {
-  const managed = recordValue(terminal.managed);
-  const currentTurn = recordValue(managed?.current_turn);
-  if (currentTurn) {
-    const turnId = nonEmptyString(currentTurn.turn_id) ??
-      nonEmptyString(currentTurn.conversation_id) ?? "unknown";
-    const status = nonEmptyString(currentTurn.status) ?? "unknown";
-    return `terminal ${terminalId} already belongs to AKK Turn ${turnId} ` +
-      `(${status}) and is covered by the managed Turn monitor/callback path; ` +
-      "use AKK status for that Turn instead of Terminal Watch";
-  }
-  const managementConflict = recordValue(terminal.management_conflict);
-  if (managementConflict) {
-    const reason = nonEmptyString(managementConflict.reason) ??
-      "terminal ownership is conflicted";
-    return `terminal ${terminalId} cannot be watched because AKK cannot ` +
-      `prove it is external work: ${reason}`;
-  }
-  const activeWatch = terminalWatches
-    .map(recordValue)
-    .find((watch) =>
-      watch?.status === "active" && watch.terminal_id === terminalId
-    );
-  if (activeWatch) {
-    return `terminal ${terminalId} is already monitored by Terminal Watch ` +
-      `${nonEmptyString(activeWatch.watch_id) ?? "unknown"}; use watch-status`;
-  }
-  return `terminal ${terminalId} does not currently advertise an exact ` +
-    "watch action; refresh AKK list and use only available_actions.watch";
-}
-
 export function formatAkkRespondCommandResult(
   result: Record<string, unknown>
 ): { text: string; isError: boolean } {
@@ -635,7 +803,6 @@ export function formatAkkThreadsCommandResult(
       nonEmptyString(thread.native_thread_id) ?? "unknown";
     const selectionNumber = finiteNumber(thread.selection_number);
     const shortId = nonEmptyString(thread.short_id);
-    const selectionHandle = nonEmptyString(thread.selection_handle);
     const status = thread.resumable === true
       ? "resumable"
       : nonEmptyString(thread.unavailable_reason) ?? "unavailable";
@@ -643,11 +810,10 @@ export function formatAkkThreadsCommandResult(
       nonEmptyString(thread.title),
       nonEmptyString(thread.preview)
     ].filter((value): value is string => Boolean(value)).join(" · ");
-    const selector = selectionNumber !== undefined || shortId || selectionHandle
+    const selector = selectionNumber !== undefined || shortId
       ? [
           selectionNumber !== undefined ? `${selectionNumber}.` : undefined,
-          shortId,
-          selectionHandle ? `[${selectionHandle}]` : undefined
+          shortId
         ].filter(Boolean).join(" ")
       : `- ${nativeThreadId}`;
     const previousMarker = nativeThreadId === previousNativeThreadId
@@ -676,7 +842,7 @@ export function formatAkkThreadsCommandResult(
     ...(resumableCount > 0
       ? [
           `next: /akk resume-thread ${terminalId} <native-thread-uuid>`,
-          `shortcuts: /akk resume-thread ${terminalId} <number|@short-id|snapshot-handle>`,
+          `shortcuts: /akk resume-thread ${terminalId} <number|@short-id>`,
           ...(previousNativeThreadId
             ? [`previous: /akk resume-thread ${terminalId} previous`]
             : []),
@@ -703,7 +869,11 @@ export function formatAkkThreadTransitionCommandResult(
         ? [`transition: ${nonEmptyString(result.transition_id)}`]
         : []),
       ...(nonEmptyString(result.reason)
-        ? [`reason: ${nonEmptyString(result.reason)}`]
+        ? [
+            `reason: ${sanitizeAkkModelFacingDiagnosticText(
+              nonEmptyString(result.reason) ?? ""
+            )}`
+          ]
         : []),
       "No AKK Turn was created.",
       "Next: do not retry automatically; refresh /akk list and use only its exact lifecycle recovery action."
@@ -729,9 +899,6 @@ export function formatAkkThreadTransitionCommandResult(
         ]
       : []),
     `native thread: ${nonEmptyString(result.native_thread_id) ?? "unknown"}`,
-    ...(finiteNumber(result.binding_generation) !== undefined
-      ? [`binding generation: ${finiteNumber(result.binding_generation)}`]
-      : []),
     "No AKK Turn was created. The next ordinary send creates the first Turn in this native context."
   ].join("\n");
 }
@@ -784,9 +951,7 @@ export function buildAkkCommandCliArgs(
         [
           "watch-terminal",
           "--terminal",
-          command.terminalId,
-          "--expected-binding-token",
-          requiredExpectedBindingToken(context.expectedBindingToken)
+          command.terminalId
         ],
         ["--store-dir", storeDir],
         [
@@ -872,21 +1037,6 @@ export function buildAkkCommandCliArgs(
           ["--codex-home", codexHome]
         );
       }
-      if (command.selection.kind === "snapshot-handle") {
-        return withOptionalArgs(
-          [
-            "resume-thread",
-            "--terminal",
-            command.terminalId,
-            "--selection-handle",
-            command.selection.selectionHandle,
-            "--selection-scope",
-            requiredSelectionScope(context.selectionScope)
-          ],
-          ["--store-dir", storeDir],
-          ["--codex-home", codexHome]
-        );
-      }
       return withOptionalArgs(
         [
           "resume-thread",
@@ -955,16 +1105,9 @@ export function buildAkkCommandCliArgs(
         ["--store-dir", storeDir]
       );
     case "approve":
-      return withOptionalArgs(
-        [
-          "approve",
-          "--turn",
-          command.turnId,
-          "--expected-approval-fingerprint",
-          command.expectedApprovalFingerprint
-        ],
-        ["--store-dir", storeDir]
-      );
+      // The OpenClaw command adapter resolves the current private approval
+      // authority immediately before invoking the CLI.
+      return undefined;
     case "renew":
       return withOptionalArgs(
         ["renew", "--turn", command.turnId],
@@ -1071,9 +1214,6 @@ function parseAkkResumeSelection(
   }
   if (/^@[a-f0-9]{8,32}$/u.test(normalized)) {
     return { kind: "short-id", shortId: normalized };
-  }
-  if (/^rs_[A-Za-z0-9_-]{22}:[1-9][0-9]*$/u.test(value)) {
-    return { kind: "snapshot-handle", selectionHandle: value };
   }
   throw new Error(
     `${usage}; use a complete UUID or a selection exactly returned by /akk threads`

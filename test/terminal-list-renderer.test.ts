@@ -102,9 +102,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v17 includes durable Terminal Watch", () => {
+test("the public action contract v18 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 17);
+  assert.equal(contracts.version, 18);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -133,6 +133,44 @@ test("the public action contract v17 includes durable Terminal Watch", () => {
     (contracts.actions as Record<string, any>).status.required,
     []
   );
+  const encoded = JSON.stringify(contracts);
+  for (const forbidden of [
+    "expected_terminal_token",
+    "expected_binding_token",
+    "candidate_token",
+    "expected_handoff_token",
+    "expected_approval_fingerprint",
+    "binding_token",
+    "lifecycle_binding_token"
+  ]) {
+    assert.equal(encoded.includes(forbidden), false, forbidden);
+  }
+  const actions = contracts.actions as Record<string, any>;
+  assert.deepEqual(actions.send.managed_scopes.terminal_follow_current, {
+    target_arguments: ["terminal_id"],
+    follows_current_terminal: true
+  });
+  assert.deepEqual(actions.new_thread.required, ["terminal_id"]);
+  assert.deepEqual(actions.native_inspect.required, [
+    "terminal_id",
+    "inspection"
+  ]);
+  assert.deepEqual(actions.resume_thread.required, [
+    "terminal_id",
+    "native_thread_id"
+  ]);
+  assert.deepEqual(actions.reconcile_binding.required, [
+    "terminal_id",
+    "conflicting_session_id"
+  ]);
+  assert.deepEqual(actions.approve.target_arguments, {
+    exactly_one_of: ["turn_id", "terminal_id"]
+  });
+  assert.deepEqual(actions.close.optional, [
+    "reason",
+    "expected_message_id",
+    "expected_transition_id"
+  ]);
 });
 
 test("raw active terminals expose only an exact prefilled watch action", () => {
@@ -148,26 +186,23 @@ test("raw active terminals expose only an exact prefilled watch action", () => {
   assert.deepEqual(working.watch, {
     tool: "agent_knock_knock_watch",
     arguments: {
-      terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
-      expected_binding_token: "fresh-binding-token"
+      terminal_id: "terminal:v2:tmux:codex:work:0.0:1234"
     },
     requires_user_intent: true,
     use:
       "Monitor this human-started external task and notify OpenClaw when it " +
       "needs attention or finishes, instead of polling. Do not use Terminal " +
-      "Watch for an AKK-managed Turn. Forward this action's entire arguments " +
-      "object verbatim to agent_knock_knock_watch; do not retype, shorten, " +
-      "summarize, or change any character, and never replace content with ... " +
-      "or …. If the complete arguments are unavailable, refresh AKK list and " +
-      "do not call Watch."
+      "Watch for an AKK-managed Turn. Call agent_knock_knock_watch with this " +
+      "exact terminal_id; AKK refreshes and revalidates current observation " +
+      "authority internally."
   });
   assert.equal(exactTerminalWatchAction({
     available_actions: working
-  }, "terminal:v2:tmux:codex:work:0.0:1234", "fresh-binding-token"),
+  }, "terminal:v2:tmux:codex:work:0.0:1234"),
   working.watch);
   assert.equal(exactTerminalWatchAction({
     available_actions: working
-  }, "terminal:v2:tmux:codex:work:0.0:1234", "stale-binding-token"),
+  }, "terminal:v2:tmux:codex:work:0.0:9999"),
   undefined);
 
   const awaitingApproval = renderAvailableListActions({

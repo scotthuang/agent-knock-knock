@@ -2767,7 +2767,7 @@ retaining this commit as the historical comparison point.
 Issue #206 adds Terminal Watch as a new aggregate beside, not inside, the
 managed Session/Turn architecture. The v16 action-contract and 14-tool sections
 above remain immutable historical snapshots; the current public delta is list
-action-contract v17 and 16 registered OpenClaw tools.
+action-contract v18 and 16 registered OpenClaw tools.
 
 ### Aggregate and persistence boundary
 
@@ -2777,34 +2777,38 @@ receipt, monitor owner, or terminal-input authority. Creating or reconciling it
 does not send input, adopt or claim the work, reserve the terminal, block later
 human activity, or create callback authority for a managed Turn.
 
-Each strict record contains `watch_id`, revision, agent, exact terminal endpoint
-and process incarnation, native thread/task identity, workspace, binding token,
-exact version/behavior profile, a privacy-safe provider anchor, originating
-OpenClaw session/binary, creation/update/deadline timestamps, status, last
-activity, optional approval fingerprint and terminal settlement, and an
-append-only notification outbox. Status is one of `active`, `completed`,
+Each strict record contains `watch_id`, revision, agent, exact terminal endpoint,
+workspace and internally resolved binding token; one privacy-safe provider anchor
+owns the process incarnation, native thread/task and supported agent-version
+evidence. The record also retains the originating OpenClaw session/binary,
+creation/update/deadline timestamps, status, last activity, optional terminal
+settlement, and an append-only notification outbox whose approval entries carry
+their own evidence fingerprints.
+Status is one of `active`, `completed`,
 `failed`, `timed_out`, `invalidated`, or `cancelled`. The files live at
 `<store>/terminal-watches/<watch_id>.json`, with a `0700` directory, `0600`
 owner-private atomic JSON, strict path/symlink/shape validation, and revision
 CAS. The independent namespace is admitted by the Store root allowlist without
 changing Store format 1 or writer protocol 5.
 
-Codex anchors losslessly retain the exact rollout device/inode/path, native
+Codex anchors retain the exact process identity, rollout device/inode/path, native
 task, request hash, version, task-start/user-message/observed-end byte offsets,
 capture time, and evidence fingerprint. Claude anchors retain the exact
-transcript relative path/device/inode/file identity, root prompt, request hash,
-version, current-turn/observed-end byte offsets, capture time, and fingerprint.
-The terminal identity independently binds endpoint/incarnation, PID/process
-birth, native thread, workspace, binding token, and exact behavior profile. The
-Store can reconstruct either provider anchor without raw prompt or command text.
+process/session identity, workspace, transcript relative path/device/inode/file
+identity, root prompt, request hash, version, current-turn/observed-end byte
+offsets, capture time, and fingerprint. The compact terminal record separately
+binds endpoint/incarnation, workspace, and the internal creation-time binding
+token. The Store validates the provider-owned anchor directly, without a mirrored
+Watch-specific shape or any raw prompt or command text.
 
 ### State, locking, and callback recovery
 
 The user flow is human TUI start → fresh `/akk list` → copy only the advertised
-`terminals[].available_actions.watch` action → create Watch → address it only by
-`watch_id` for status or unwatch. The creation path revalidates the complete
-`terminal_id`/`expected_binding_token`, captures one unique active-task anchor,
-then creates with expected revision `null`. All mutations acquire the canonical
+`terminals[].available_actions.watch` action's exact `terminal_id` → create Watch
+→ address it only by `watch_id` for status or unwatch. The creation path resolves
+the current binding token internally, acquires the terminal lock, rescans and
+revalidates the exact terminal incarnation and token, captures one unique
+active-task anchor, then creates with expected revision `null`. All mutations acquire the canonical
 Store writer lease before the per-Watch file lock. Observation occurs outside
 that write scope; settlement reloads under `writer -> watch`, checks the exact
 terminal and anchor fingerprints plus deadline, and commits one CAS transition.
@@ -2839,18 +2843,42 @@ remaining Watches.
 
 The 16-tool OpenClaw surface adds `agent_knock_knock_watch` and
 `agent_knock_knock_unwatch`; the existing status tool accepts exactly one of a
-managed Turn target, compatibility selector, or `watch_id`. List projects
+managed Turn target, semantic terminal target, or `watch_id`. List projects
 active Watches in `terminal_watches[]` and advertises `watch` only for an exact,
 supported terminal currently classified as working or awaiting approval. Slash
 routing is `/akk watch <exact-terminal-id>`, `/akk status <watch-id>`, and
 `/akk unwatch <watch-id>`. The internal CLI boundary has exactly four entries:
 
 ```text
-watch-terminal --terminal <exact-terminal-id> --expected-binding-token <token> ...
+watch-terminal --terminal <exact-terminal-id> ...
 watch-status --watch <watch-id> ...
 unwatch-terminal --watch <watch-id> ...
 reconcile-watches ...
 ```
+
+Action-contract v18 establishes a zero-token model boundary. Structured actions
+carry semantic identities and user intent only:
+
+- ordinary send is `{session_id, request}` for strict continuation or
+  `{terminal_id, request}` for follow-current; the target fields are mutually
+  exclusive and may both be absent only when AKK must prove one unique target;
+- Terminal Watch is `{terminal_id}` only;
+- native inspection is `{terminal_id, inspection}`, new is `{terminal_id}`, and
+  resume is `{terminal_id, native_thread_id}`;
+- managed approval is `{turn_id}`, terminal-scoped approval is `{terminal_id}`,
+  reconcile is `{terminal_id, conflicting_session_id}`, and handoff takeover is
+  `{turn_id, reason:"superseded_by_human_context_switch"}`.
+
+Approval, reconcile, and handoff still require explicit user confirmation. The
+trusted plugin/CLI retains that confirmation offer, derives fresh terminal,
+binding, candidate, approval, handoff, revision, and compare-and-swap fences,
+and revalidates them under the canonical locks immediately before mutation.
+None of those opaque values—including live native UUIDs used only as a handoff
+fence—crosses the model-facing boundary. Human slash selectors remain a CLI
+discovery layer. Orphan close keeps `expected_message_id` and
+`expected_transition_id` because they are durable entity identities rather than
+authority tokens. This projection change does not alter Store format 1, writer
+protocol 5, or the private persisted authority evidence.
 
 The existing non-overlapping OpenClaw supervisor now coordinates two independent
 steps at startup and every five seconds: managed-Turn monitor reconciliation and
@@ -2861,6 +2889,6 @@ not mutate Session/Turn state or replay terminal input.
 
 The deterministic fast witnesses cover provider-anchor drift, Store privacy and
 CAS, service restart/dedupe/timeout/claim-crash/retry behavior, callback
-projection, list/action v17, slash/tool routing, and documentation. Per the
+projection, list/action v18, slash/tool routing, and documentation. Per the
 repository test policy, integration/full/release tests remain reserved for the
 immediate pre-publication gate of an actual npm or ClawHub release.

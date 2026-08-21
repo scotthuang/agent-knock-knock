@@ -63,8 +63,13 @@ import {
 import {
   exactCodexReadyStyledComposerCapture,
   TerminalAgentBridge,
-  type ResolvedTerminalConversation
+  type ResolvedTerminalConversation,
+  type TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
+import {
+  captureCodexHumanStartedActiveTaskAnchor,
+  type CodexRolloutAcceptanceIdentity
+} from "./terminal-submission-acceptance.js";
 import {
   applySessionAuthorityToDispatch,
   authoritativeTerminalIdentity,
@@ -218,7 +223,7 @@ interface DeferredCodexAuthorityObservation {
   exactSource: boolean;
 }
 
-interface TerminalListScanEntry {
+export interface TerminalListScanEntry {
   agent?: string;
   activity_state?: string;
   cwd?: string;
@@ -229,13 +234,30 @@ interface TerminalListScanEntry {
   [field: string]: unknown;
 }
 
-interface TerminalListScan {
+export interface TerminalListScan {
   terminalControlled: TerminalListScanEntry[];
   summary: {
     error?: string;
     [field: string]: unknown;
   };
 }
+
+export type ExactTerminalListObservation =
+  | {
+      state: "available";
+      rawTerminal: TerminalListScanEntry;
+      terminal: TerminalListScanEntry;
+      summary: TerminalListScan["summary"];
+    }
+  | {
+      state: "absent";
+      summary: TerminalListScan["summary"];
+    }
+  | {
+      state: "unavailable";
+      reason?: string;
+      summary: TerminalListScan["summary"];
+    };
 
 type TerminalDispatchOwnershipResult = TerminalDispatchOwnership<
   Conversation,
@@ -341,6 +363,13 @@ export interface TerminalListStoreObservationPorts {
     storeDir: string,
     options?: { includeAll?: boolean }
   ): JsonObject[];
+  scanTerminalWatchesForExactObservation?(
+    storeDir: string,
+    options?: { includeAll?: boolean }
+  ): {
+    watches: JsonObject[];
+    activeOverlayTrusted: boolean;
+  };
   managedSessionStoreDirForConversation(conversation: Conversation): string | undefined;
   managedTurnsForSession(storeDir: string, sessionId: string): Conversation[];
   matchesConfiguredWorkspace(configured: unknown, observed: unknown): boolean;
@@ -420,7 +449,12 @@ export interface TerminalListCliFacade {
     options: TerminalListCliOptions;
     agentFilter?: ExecutorKind;
     statusFilter?: string;
+    terminalId?: string;
   }): Promise<TerminalListScan>;
+  observeExactTerminal(request: {
+    options: TerminalListCliOptions;
+    terminalId: string;
+  }): Promise<ExactTerminalListObservation>;
   provisionalManagedBindingTurnCount(
     storeDir: string,
     session: ManagedSessionState
@@ -499,6 +533,8 @@ export function createTerminalListCliFacade(
   return {
     runList: (options) => call(() => runList(options)),
     buildTerminalListGroup: (request) => call(() => buildTerminalListGroup(request)),
+    observeExactTerminal: (request) =>
+      call(() => observeExactTerminal(request)),
     provisionalManagedBindingTurnCount: (storeDir, session) =>
       call(() => provisionalManagedBindingTurnCount(storeDir, session)),
     managedSessionHasUnresolvedNativeTransition: (storeDir, session) =>
@@ -546,25 +582,89 @@ async function runList(options: TerminalListCliOptions) {
         status: "disabled",
         reason: "standalone list is read-only unless --reconcile is supplied"
       };
-  const includeAll = Boolean(options.all);
   const agentFilter = options.agent ? resolveExecutor({ kind: options.agent }).kind : undefined;
   const statusFilter = options.status;
-  const allStoredConversations = listConversations(storeDir);
-  const allManagedConversations = allStoredConversations
+  const terminalScan = await buildTerminalListGroup({ options, agentFilter, statusFilter });
+  const projected = projectTerminalListScan({
+    options,
+    storeDir,
+    store,
+    terminalScan,
+    agentFilter,
+    statusFilter
+  });
+
+  printJson({
+    store_dir: storeDir,
+    store,
+    reconciliation,
+    action_contracts: listActionContracts(),
+    terminals: projected.terminals,
+    terminal_watches: projected.terminalWatches,
+    unavailable_managed_turns: projected.unavailableManagedTurns,
+    terminal_scan: {
+      ...terminalScan.summary,
+      terminal_count: projected.terminals.length
+    }
+  });
+  runtimeLog("info", "terminals_listed", {
+    store_dir: storeDir,
+    terminal_count: projected.terminals.length,
+    unavailable_managed_turn_count: projected.unavailableManagedTurns.length,
+    terminal_scan_error: terminalScan.summary.error,
+    include_all: projected.includeAll,
+    agent_filter: agentFilter,
+    status_filter: statusFilter,
+    reconciliation
+  });
+}
+
+function projectTerminalListScan(input: {
+  options: TerminalListCliOptions;
+  storeDir: string;
+  store: ReturnType<typeof inspectStoreCompatibility>;
+  terminalScan: TerminalListScan;
+  agentFilter?: ExecutorKind;
+  statusFilter?: string;
+  tolerateInvalidWatchRecords?: boolean;
+}) {
+  const {
+    options,
+    storeDir,
+    store,
+    terminalScan,
+    agentFilter,
+    statusFilter,
+    tolerateInvalidWatchRecords
+  } = input;
+  const includeAll = Boolean(options.all);
+  const allManagedConversations = listConversations(storeDir)
     .filter(terminalListRuntime().isDiscoverableTmuxConversation);
   const managedSessions = store.readable
     ? listManagedSessions(storeDir)
     : [];
-  const storedConversations = allManagedConversations
-    .filter((conversation) => includeAll || terminalListRuntime().isActiveStatus(conversation.status))
+  const displayedConversations = allManagedConversations
     .filter((conversation) =>
-      terminalListRuntime().matchesConfiguredWorkspace(options.workspace, conversation.workspace)
+      includeAll || terminalListRuntime().isActiveStatus(conversation.status)
+    )
+    .filter((conversation) =>
+      terminalListRuntime().matchesConfiguredWorkspace(
+        options.workspace,
+        conversation.workspace
+      )
     )
     .filter((conversation) =>
       !agentFilter || executorForConversation(conversation).kind === agentFilter
     )
-    .filter((conversation) => !statusFilter || conversation.status === statusFilter);
-  const terminalScan = await buildTerminalListGroup({ options, agentFilter, statusFilter });
+    .filter((conversation) =>
+      !statusFilter || conversation.status === statusFilter
+    );
+  const workspaceConversations = allManagedConversations.filter((conversation) =>
+    terminalListRuntime().matchesConfiguredWorkspace(
+      options.workspace,
+      conversation.workspace
+    )
+  );
   const physicalTerminals = terminalScan.terminalControlled.filter((entry) =>
     terminalListRuntime().matchesConfiguredWorkspace(
       options.workspace,
@@ -577,19 +677,25 @@ async function runList(options: TerminalListCliOptions) {
     managedSessions,
     sessionAuthorityRequired:
       Number(store.writer_protocol) >= STORE_SESSION_AUTHORITY_PROTOCOL,
-    allConversations: allManagedConversations.filter((conversation) =>
-      terminalListRuntime().matchesConfiguredWorkspace(options.workspace, conversation.workspace)
-    ),
-    displayedConversations: storedConversations,
+    allConversations: workspaceConversations,
+    displayedConversations,
     includeAll,
     managedOnly: options.managedOnly === true,
     statusFilter,
     mutationsAllowed: store.writable === true
   });
-  const observedTerminalWatches = terminalListRuntime().listTerminalWatches?.(
-    storeDir,
-    { includeAll }
-  ) ?? [];
+  const exactWatchScan = terminalListRuntime()
+    .scanTerminalWatchesForExactObservation;
+  const watchObservation = tolerateInvalidWatchRecords && exactWatchScan
+    ? exactWatchScan(storeDir, { includeAll })
+    : {
+        watches: terminalListRuntime().listTerminalWatches?.(
+          storeDir,
+          { includeAll }
+        ) ?? [],
+        activeOverlayTrusted: true
+      };
+  const observedTerminalWatches = watchObservation.watches;
   const terminalWatches = options.managedOnly
     ? []
     : observedTerminalWatches
@@ -606,34 +712,64 @@ async function runList(options: TerminalListCliOptions) {
       .filter((terminalId): terminalId is string => terminalId !== undefined)
   );
   const terminals = projection.terminals.map((terminal) =>
-    activeWatchedTerminals.has(stringValue(terminal.id) ?? "")
-      ? withoutAvailableAction(terminal, "watch")
+    !watchObservation.activeOverlayTrusted ||
+      activeWatchedTerminals.has(stringValue(terminal.id) ?? "")
+      ? withoutTerminalWatchAuthority(terminal)
       : terminal
   );
-
-  printJson({
-    store_dir: storeDir,
-    store,
-    reconciliation,
-    action_contracts: listActionContracts(),
+  return {
+    includeAll,
     terminals,
-    terminal_watches: terminalWatches,
-    unavailable_managed_turns: projection.unavailableManagedTurns,
-    terminal_scan: {
-      ...terminalScan.summary,
-      terminal_count: terminals.length
-    }
+    terminalWatches,
+    unavailableManagedTurns: projection.unavailableManagedTurns
+  };
+}
+
+async function observeExactTerminal(request: {
+  options: TerminalListCliOptions;
+  terminalId: string;
+}): Promise<ExactTerminalListObservation> {
+  const { options, terminalId } = request;
+  const storeDir = expandHome(
+    options.storeDir ?? options.logDir ?? defaultStoreDir(cliCwd())
+  );
+  const store = inspectStoreCompatibility(storeDir);
+  const scan = await buildTerminalListGroup({ options, terminalId });
+  const matches = scan.terminalControlled.filter(
+    (terminal) => stringValue(terminal.id) === terminalId
+  );
+  if (matches.length !== 1) {
+    return scan.summary.error
+      ? {
+          state: "unavailable",
+          reason: scan.summary.error,
+          summary: scan.summary
+        }
+      : { state: "absent", summary: scan.summary };
+  }
+  const projected = projectTerminalListScan({
+    options,
+    storeDir,
+    store,
+    terminalScan: scan,
+    tolerateInvalidWatchRecords: true
   });
-  runtimeLog("info", "terminals_listed", {
-    store_dir: storeDir,
-    terminal_count: terminals.length,
-    unavailable_managed_turn_count: projection.unavailableManagedTurns.length,
-    terminal_scan_error: terminalScan.summary.error,
-    include_all: includeAll,
-    agent_filter: agentFilter,
-    status_filter: statusFilter,
-    reconciliation
-  });
+  const projectedMatches = projected.terminals.filter(
+    (terminal) => stringValue(terminal.id) === terminalId
+  );
+  if (projectedMatches.length !== 1) {
+    return {
+      state: "unavailable",
+      reason: "the exact terminal could not be projected authoritatively",
+      summary: scan.summary
+    };
+  }
+  return {
+    state: "available",
+    rawTerminal: matches[0],
+    terminal: projectedMatches[0],
+    summary: scan.summary
+  };
 }
 
 function withoutAvailableAction(
@@ -644,6 +780,14 @@ function withoutAvailableAction(
   const actions = { ...terminal.available_actions };
   delete actions[action];
   return { ...terminal, available_actions: actions };
+}
+
+function withoutTerminalWatchAuthority(terminal: JsonObject): JsonObject {
+  const projected = withoutAvailableAction(terminal, "watch");
+  if (!Object.hasOwn(projected, "terminal_watch_hint")) return projected;
+  const safe = { ...projected };
+  delete safe.terminal_watch_hint;
+  return safe;
 }
 
 async function reconcileStoreForList(storeDir, options) {
@@ -688,11 +832,13 @@ async function reconcileStoreForList(storeDir, options) {
 async function buildTerminalListGroup({
   options,
   agentFilter,
-  statusFilter
+  statusFilter,
+  terminalId
 }: {
   options: TerminalListCliOptions;
   agentFilter?: ExecutorKind;
   statusFilter?: string;
+  terminalId?: string;
 }): Promise<TerminalListScan> {
   const empty = {
     terminalControlled: [],
@@ -749,13 +895,25 @@ async function buildTerminalListGroup({
       (session) => session.terminalControl !== undefined
     );
     activeCount = controlledSessions.length;
-    for (const session of controlledSessions) {
-      terminalControlled.push(await terminalControlledListEntry(
-        session,
-        activeSessions,
-        options,
-        bridge
-      ));
+    const selectedSessions = terminalId
+      ? controlledSessions.filter(
+          (session) => bridge.terminalConversationId(session) === terminalId
+        )
+      : controlledSessions;
+    for (const session of selectedSessions) {
+      try {
+        terminalControlled.push(await terminalControlledListEntry(
+          session,
+          activeSessions,
+          options,
+          bridge
+        ));
+      } catch (error) {
+        errors.push(
+          `terminal process ${session.pid}: ` +
+            (error instanceof Error ? error.message : String(error))
+        );
+      }
     }
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error));
@@ -878,18 +1036,33 @@ async function terminalControlledListEntry(
     options,
     bridge
   );
+  const effectiveTerminalState = effectiveTerminalListState({
+    session,
+    terminalState,
+    nativeIdentityObservation,
+    nativeAgentIdentity,
+    nativeProcessUuid,
+    nativeProcessBirth
+  });
+  const terminalStatusSnapshot = effectiveTerminalState._terminal_status_snapshot
+    ? terminalBridgeStatusWithActivity(
+        effectiveTerminalState._terminal_status_snapshot,
+        effectiveTerminalState.activity_state,
+        effectiveTerminalState.activity_reason
+      )
+    : undefined;
   const statusCardObservation = session.agent === "codex" &&
-      typeof terminalState.screen_excerpt === "string"
+      typeof effectiveTerminalState.screen_excerpt === "string"
     ? bridge.registry.require("codex").observeThreadLifecycle?.({
         operation: { kind: "new_thread" },
         phase: "before",
-        screen: terminalState.screen_excerpt
+        screen: effectiveTerminalState.screen_excerpt
       })
     : undefined;
   const statusCardNativeThreadId =
     statusCardObservation?.status === "observed" &&
-      terminalState.activity_state === "idle" &&
-      terminalState.approval_state.blocked !== true &&
+      effectiveTerminalState.activity_state === "idle" &&
+      effectiveTerminalState.approval_state.blocked !== true &&
       isExactNativeThreadId(statusCardObservation.nativeThreadId)
       ? statusCardObservation.nativeThreadId
       : undefined;
@@ -915,7 +1088,7 @@ async function terminalControlledListEntry(
     };
   const codexLatentClearResumeObservationValue = session.agent === "codex"
     ? terminalListRuntime().codexLatentClearResumeObservation({
-        screen: terminalState.screen_excerpt,
+        screen: effectiveTerminalState.screen_excerpt,
         agentVersion
       })
     : undefined;
@@ -940,7 +1113,7 @@ async function terminalControlledListEntry(
   const automatedInputComposerReady = await observeAutomatedInputComposerReady({
     session,
     terminalControl,
-    terminalState,
+    terminalState: effectiveTerminalState,
     nativeIdentityObservation,
     codexOpenRootRolloutInventory,
     options
@@ -978,9 +1151,15 @@ async function terminalControlledListEntry(
     confidence: session.confidence,
     reason: session.reason,
     terminal_control: terminalControl,
-    approval_state: terminalState.approval_state,
-    activity_state: terminalState.activity_state,
-    activity_reason: terminalState.activity_reason,
+    approval_state: effectiveTerminalState.approval_state,
+    activity_state: effectiveTerminalState.activity_state,
+    activity_reason: effectiveTerminalState.activity_reason,
+    // Internal exact-observation evidence. The public projection strips this
+    // object; raw terminal status reuses it so screen, approval, and activity
+    // all describe the same capture.
+    ...(terminalStatusSnapshot
+      ? { _terminal_status_snapshot: terminalStatusSnapshot }
+      : {}),
     // Internal action-projection evidence. terminalFirstListProjection strips
     // this field after gating every automated-input action that can follow a
     // human native-thread switch.
@@ -1021,50 +1200,20 @@ async function terminalControlledListEntry(
           }
         }
       : {}),
-    commands: {
-      send: !terminalHasBlockingTurn,
-      approve: terminalControl.capabilities.includes("terminal_approval") &&
-        terminalState.approval_state.approvable === true,
-      status: true,
-      cancel: terminalControl.capabilities.includes("terminal_cancel"),
-      close: orphanedDispatch !== undefined,
-      new_thread:
-        lifecycleCapability.status === "supported" &&
-        lifecycleCapability.newThread === true &&
-        codexLifecycleIncarnationAvailable &&
-        !terminalHasBlockingTurn,
-      list_resumable_threads:
-        lifecycleCapability.status === "supported" &&
-        lifecycleCapability.resumeExact === true &&
-        codexLifecycleIncarnationAvailable,
-      native_inspect:
-        nativeInspectionCapability.status === "supported" &&
-        nativeInspectionCapability.statusInspection === true &&
-        terminalState.activity_state === "idle" &&
-        automatedInputComposerReady &&
-        terminalControl.capabilities.includes("send_keys") &&
-        terminalControl.capabilities.includes("screen_status") &&
-        (
-          session.agent === "codex"
-            ? codexLifecycleIncarnationAvailable
-            : Boolean(
-                nativeAgentIdentity?.sessionId &&
-                nativeAgentIdentity.processUuid
-              )
-        ) &&
-        orphanedDispatch === undefined &&
-        !terminalHasBlockingTurn,
-      watch:
-        lifecycleCapability.status === "supported" &&
-        (terminalState.activity_state === "working" ||
-          terminalState.activity_state === "awaiting_approval") &&
-        Boolean(nativeAgentIdentity?.sessionId) &&
-        (session.agent !== "codex" || Boolean(nativeAgentIdentity?.rollout)) &&
-        Boolean(nativeProcessUuid) &&
-        Boolean(nativeProcessBirth) &&
-        orphanedDispatch === undefined &&
-        !terminalHasBlockingTurn
-    }
+    commands: terminalListCommands({
+      agent: session.agent,
+      terminalControl,
+      terminalState: effectiveTerminalState,
+      lifecycleCapability,
+      nativeInspectionCapability,
+      nativeAgentIdentity,
+      nativeProcessUuid,
+      nativeProcessBirth,
+      codexLifecycleIncarnationAvailable,
+      automatedInputComposerReady,
+      hasOrphanedDispatch: orphanedDispatch !== undefined,
+      terminalHasBlockingTurn
+    })
   };
   const availableActions = renderAvailableListActions(entry);
   const { commands: _commands, ...publicEntry } = entry;
@@ -1072,6 +1221,207 @@ async function terminalControlledListEntry(
     ...publicEntry,
     available_actions: availableActions
   };
+}
+
+function terminalListCommands(input: {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  terminalState: TerminalListState;
+  lifecycleCapability: {
+    status: string;
+    newThread: boolean;
+    resumeExact: boolean;
+  };
+  nativeInspectionCapability: {
+    status: string;
+    statusInspection: boolean;
+  };
+  nativeAgentIdentity?: TerminalNativeIdentity;
+  nativeProcessUuid?: string;
+  nativeProcessBirth?: string;
+  codexLifecycleIncarnationAvailable: boolean;
+  automatedInputComposerReady: boolean;
+  hasOrphanedDispatch: boolean;
+  terminalHasBlockingTurn: boolean;
+}) {
+  const {
+    agent,
+    terminalControl,
+    terminalState,
+    lifecycleCapability,
+    nativeInspectionCapability,
+    nativeAgentIdentity,
+    nativeProcessUuid,
+    nativeProcessBirth,
+    codexLifecycleIncarnationAvailable,
+    automatedInputComposerReady,
+    hasOrphanedDispatch,
+    terminalHasBlockingTurn
+  } = input;
+  return {
+    send: !terminalHasBlockingTurn,
+    approve: terminalControl.capabilities.includes("terminal_approval") &&
+      terminalState.approval_state.approvable === true,
+    status: true,
+    cancel: terminalControl.capabilities.includes("terminal_cancel"),
+    close: hasOrphanedDispatch,
+    new_thread:
+      lifecycleCapability.status === "supported" &&
+      lifecycleCapability.newThread === true &&
+      codexLifecycleIncarnationAvailable &&
+      !terminalHasBlockingTurn,
+    list_resumable_threads:
+      lifecycleCapability.status === "supported" &&
+      lifecycleCapability.resumeExact === true &&
+      codexLifecycleIncarnationAvailable,
+    native_inspect:
+      nativeInspectionCapability.status === "supported" &&
+      nativeInspectionCapability.statusInspection === true &&
+      terminalState.activity_state === "idle" &&
+      automatedInputComposerReady &&
+      terminalControl.capabilities.includes("send_keys") &&
+      terminalControl.capabilities.includes("screen_status") &&
+      (
+        agent === "codex"
+          ? codexLifecycleIncarnationAvailable
+          : Boolean(
+              nativeAgentIdentity?.sessionId &&
+              nativeAgentIdentity.processUuid
+            )
+      ) &&
+      !hasOrphanedDispatch &&
+      !terminalHasBlockingTurn,
+    watch:
+      lifecycleCapability.status === "supported" &&
+      (terminalState.activity_state === "working" ||
+        terminalState.activity_state === "awaiting_approval") &&
+      Boolean(nativeAgentIdentity?.sessionId) &&
+      (agent !== "codex" || Boolean(nativeAgentIdentity?.rollout)) &&
+      Boolean(nativeProcessUuid) &&
+      Boolean(nativeProcessBirth) &&
+      !hasOrphanedDispatch &&
+      !terminalHasBlockingTurn
+  };
+}
+
+interface TerminalListState {
+  approval_state: TerminalBridgeStatus["approval_state"] & {
+    screen_excerpt?: string;
+    error?: string;
+  };
+  activity_state: TerminalBridgeStatus["activity_state"];
+  activity_reason: string;
+  capability_limitation?: string;
+  screen_excerpt?: string;
+  _terminal_status_snapshot?: TerminalBridgeStatus;
+}
+
+function effectiveTerminalListState(input: {
+  session: ActiveTerminalProcess;
+  terminalState: TerminalListState;
+  nativeIdentityObservation: TerminalNativeIdentityObservation;
+  nativeAgentIdentity?: TerminalNativeIdentity;
+  nativeProcessUuid?: string;
+  nativeProcessBirth?: string;
+}): TerminalListState {
+  const {
+    session,
+    terminalState,
+    nativeIdentityObservation,
+    nativeAgentIdentity,
+    nativeProcessUuid,
+    nativeProcessBirth
+  } = input;
+  if (
+    session.agent !== "codex" ||
+    terminalState.activity_state === "working" ||
+    terminalState.activity_state === "awaiting_approval" ||
+    terminalState.approval_state.blocked === true
+  ) {
+    return terminalState;
+  }
+  if (nativeIdentityObservation.status === "verified_absent") {
+    return terminalState;
+  }
+  if (
+    nativeIdentityObservation.status !== "resolved" ||
+    !nativeAgentIdentity?.rollout ||
+    !nativeAgentIdentity.sessionId ||
+    !nativeProcessUuid ||
+    !nativeProcessBirth
+  ) {
+    return terminalListStateWithUnavailableDurableActivity(
+      terminalState,
+      nativeIdentityObservation.status === "unavailable"
+        ? nativeIdentityObservation.reason ??
+          "exact Codex identity observation failed"
+        : "exact Codex rollout/process identity is incomplete"
+    );
+  }
+  const currentIdentity: CodexRolloutAcceptanceIdentity = {
+    sessionId: nativeAgentIdentity.sessionId,
+    processUuid: nativeProcessUuid,
+    processBirth: nativeProcessBirth,
+    rollout: nativeAgentIdentity.rollout
+  };
+  try {
+    if (!captureCodexHumanStartedActiveTaskAnchor({ currentIdentity })) {
+      return terminalState;
+    }
+    return {
+      ...terminalState,
+      activity_state: "working",
+      activity_reason:
+        "Codex rollout contains an exact unfinished human-started task"
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    runtimeLog("warn", "terminal_durable_activity_unavailable", {
+      agent: session.agent,
+      pid: session.pid,
+      reason
+    });
+    return terminalListStateWithUnavailableDurableActivity(
+      terminalState,
+      reason
+    );
+  }
+}
+
+function terminalListStateWithUnavailableDurableActivity(
+  terminalState: TerminalListState,
+  reason: string
+): TerminalListState {
+  return {
+    ...terminalState,
+    activity_state: "unknown",
+    activity_reason:
+      `durable Codex activity evidence is unavailable: ${reason}`
+  };
+}
+
+function terminalBridgeStatusWithActivity(
+  status: TerminalBridgeStatus,
+  activityState: TerminalBridgeStatus["activity_state"],
+  activityReason: string
+): TerminalBridgeStatus {
+  const descriptors = Object.getOwnPropertyDescriptors(status);
+  descriptors.activity_state = {
+    configurable: true,
+    enumerable: true,
+    value: activityState,
+    writable: true
+  };
+  descriptors.activity_reason = {
+    configurable: true,
+    enumerable: true,
+    value: activityReason,
+    writable: true
+  };
+  return Object.create(
+    Object.getPrototypeOf(status),
+    descriptors
+  ) as TerminalBridgeStatus;
 }
 
 interface TerminalNativeListIdentityObservation {
@@ -1285,6 +1635,7 @@ function observeTerminalListBindingAuthority(
     _automated_input_composer_ready: automatedInputComposerReady,
     _codex_open_root_rollout_inventory: codexOpenRootRolloutInventoryValue,
     _codex_latent_clear_resume: codexLatentClearResumeValue,
+    _terminal_status_snapshot: _terminalStatusSnapshot,
     ...publicTerminal
   } = terminal;
   const codexOpenRootRolloutInventory = isRecord(
@@ -3323,7 +3674,7 @@ async function listStateForTerminal(
   options,
   bridge: TerminalAgentBridge = terminalListRuntime().createTerminalAgentBridge(options),
   runtime?: TerminalRuntimeIdentity
-) {
+): Promise<TerminalListState> {
   if (options.noApprovalScan) {
     return {
       approval_state: {
@@ -3349,6 +3700,7 @@ async function listStateForTerminal(
       activity_state: status.activity_state,
       activity_reason: status.activity_reason,
       capability_limitation: status.capability_limitation,
+      _terminal_status_snapshot: status,
       // Internal projection evidence; terminalControlledListEntry selects all
       // public fields explicitly and never exposes the pane excerpt itself.
       screen_excerpt: status.screen.excerpt

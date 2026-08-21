@@ -486,6 +486,80 @@ test("schema rejects ineligible source and provisional binding drift", () => {
   );
 });
 
+test("schema follows a canonical Herdr resource across route refresh only", () => {
+  const bindingAt = ({
+    target,
+    paneId,
+    terminalId = "stable-terminal-1",
+    panePid = 100
+  }: {
+    target: string;
+    paneId: string;
+    terminalId?: string;
+    panePid?: number;
+  }): ManagedTerminalBinding => terminalBindingFrom({
+    terminalId: `terminal:v2:herdr:codex:${target}:200`,
+    terminalControl: {
+      ...terminalControl,
+      target,
+      paneId,
+      terminalId,
+      panePid
+    },
+    pid: 200,
+    nativeThreadId: SOURCE_UUID,
+    processUuid: "codex-pid:200:birth:fixture",
+    processBirth: "fixture",
+    evidence: "codex_status_card+process_birth",
+    generation: 1,
+    now: new Date(T0)
+  });
+  const current = bindingAt({ target: "workspace:0.0", paneId: "p0" });
+  const previousRoute = bindingAt({
+    target: "workspace:0.1",
+    paneId: "p1"
+  });
+  const transfer = {
+    ...prepared(),
+    terminal_id: current.terminal_id,
+    terminal_endpoint: current.terminal_endpoint!,
+    source_before_binding: previousRoute,
+    source_binding_token: managedSessionBindingToken({
+      session_id: "session-status-card",
+      status: "bound",
+      binding: previousRoute
+    })
+  };
+
+  assertValid(transfer);
+
+  for (const incompatible of [
+    bindingAt({
+      target: "workspace:0.1",
+      paneId: "p1",
+      terminalId: "different-stable-terminal"
+    }),
+    bindingAt({
+      target: "workspace:0.1",
+      paneId: "p1",
+      panePid: 101
+    })
+  ]) {
+    assert.throws(
+      () => assertDeferredForegroundTransfer({
+        ...transfer,
+        source_before_binding: incompatible,
+        source_binding_token: managedSessionBindingToken({
+          session_id: "session-status-card",
+          status: "bound",
+          binding: incompatible
+        })
+      }, undefined, { allowMissingRevision: true }),
+      /source binding disagrees/u
+    );
+  }
+});
+
 test("version 2 freezes exact rollout-backed source history while version 1 remains readable", () => {
   assertValid(prepared());
   const candidate = candidatePrepared();

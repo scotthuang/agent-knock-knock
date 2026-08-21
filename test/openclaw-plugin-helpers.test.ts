@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import {
   AKK_CALLBACK_METHOD,
-  akkWatchUnavailableMessage,
   akkUsageText,
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
@@ -14,9 +13,14 @@ import {
   formatAkkUnwatchCommandResult,
   formatAkkWatchCommandResult,
   formatAkkWatchStatusCommandResult,
+  isAkkModelFacingDiagnosticField,
+  isAkkModelFacingPrivateAuthorityField,
   isAkkNativeSubmissionAccepted,
   parseAkkCommand,
-  resolvePluginStoreDir
+  resolvePluginStoreDir,
+  sanitizeAkkModelFacingDiagnosticText,
+  sanitizeAkkModelFacingLegacyAuthorityInstructionText,
+  stripAkkLegacyApprovalInstructionTail
 } from "../src/openclaw-plugin-helpers.js";
 import {
   statusParameters,
@@ -27,6 +31,66 @@ import {
 const exactTerminalId = "terminal:v2:tmux:codex:work:0.0:1234";
 const currentNativeThreadId = "11111111-1111-4111-8111-111111111111";
 const resumableNativeThreadId = "22222222-2222-4222-8222-222222222222";
+
+test("model-facing authority policy normalizes fields and preserves ordinary content", () => {
+  for (const field of [
+    "expected_session_revision",
+    "expectedSessionRevision",
+    "expected-session-revision",
+    "terminalBindingGeneration",
+    "terminal-binding-id"
+  ]) {
+    assert.equal(isAkkModelFacingPrivateAuthorityField(field), true, field);
+  }
+  for (const field of [
+    "bookkeeping_warning",
+    "stalledReason",
+    "terminal-scan-error",
+    "diagnostics"
+  ]) {
+    assert.equal(isAkkModelFacingDiagnosticField(field), true, field);
+  }
+
+  const privateText = [
+    "Approval authority",
+    '{"expectedSessionRevision":7}',
+    '{"expected-binding-token":false}',
+    "bindingGeneration: null",
+    "--expected-callback-message-id callback-private"
+  ].join("\n");
+  const sanitized = sanitizeAkkModelFacingLegacyAuthorityInstructionText(
+    privateText
+  );
+  assert.doesNotMatch(
+    sanitized,
+    /expectedSessionRevision|expected-binding-token|bindingGeneration|callback-private/u
+  );
+  assert.match(sanitized, /AKK internal authority omitted/u);
+
+  const businessText = [
+    `inspect token_fingerprint.ts at commit ${"e".repeat(64)};`,
+    "expected_session_revision: 7",
+    "--expected-binding-token foo",
+    "the request discusses tokens, fingerprints, revisions, and CAS"
+  ].join("\n");
+  assert.equal(
+    sanitizeAkkModelFacingLegacyAuthorityInstructionText(businessText),
+    businessText
+  );
+  const legacyTail = [
+    businessText,
+    "If the user approves, call `agent_knock_knock_approve` with:",
+    `- expected_approval_fingerprint: ${"a".repeat(64)}`,
+    "Do not use raw tmux, shell, or manual key presses for this approval. Do not approve without explicit user confirmation."
+  ].join("\n");
+  assert.equal(stripAkkLegacyApprovalInstructionTail(legacyTail), `${businessText}\n`);
+  assert.match(
+    sanitizeAkkModelFacingDiagnosticText(
+      "bookkeeping conflict: expected revision 7, actual revision 8"
+    ),
+    /private authority changed/u
+  );
+});
 
 test("bare /akk task leaves routing unset for unique-pane selection", () => {
   assert.deepEqual(
@@ -103,10 +167,11 @@ test("/akk watch and unwatch require authoritative exact identities", () => {
 });
 
 test("Terminal Watch tool schemas require exact and mutually exclusive targets", () => {
-  assert.deepEqual(watchParameters.required, [
-    "terminal_id",
-    "expected_binding_token"
-  ]);
+  assert.deepEqual(watchParameters.required, ["terminal_id"]);
+  assert.equal(
+    Object.hasOwn(watchParameters.properties, "expected_binding_token"),
+    false
+  );
   assert.equal(
     watchParameters.properties.terminal_id.pattern,
     "^terminal:v[0-9]+:\\S+$"
@@ -187,13 +252,9 @@ test("/akk native-thread commands require exact identities and keep clear as an 
     }
   );
   const snapshotHandle = "rs_abcdefghijklmnopqrstuv:2";
-  assert.deepEqual(
-    parseAkkCommand(`resume-thread ${exactTerminalId} ${snapshotHandle}`),
-    {
-      action: "resume-thread",
-      terminalId: exactTerminalId,
-      selection: { kind: "snapshot-handle", selectionHandle: snapshotHandle }
-    }
+  assert.throws(
+    () => parseAkkCommand(`resume-thread ${exactTerminalId} ${snapshotHandle}`),
+    /selection exactly returned by \/akk threads/u
   );
   assert.throws(
     () => parseAkkCommand("threads @a1b2c3d4"),
@@ -320,7 +381,7 @@ test("/akk lifecycle CLI arguments use a fresh internal binding token", () => {
   );
 });
 
-test("/akk Terminal Watch CLI arguments preserve observation authority", () => {
+test("/akk Terminal Watch CLI arguments expose only the terminal id", () => {
   assert.deepEqual(
     buildAkkCommandCliArgs(
       parseAkkCommand(`watch ${exactTerminalId}`),
@@ -330,16 +391,13 @@ test("/akk Terminal Watch CLI arguments preserve observation authority", () => {
         agentHardTimeoutMinutes: 45
       },
       {
-        sessionKey: "agent:test:main",
-        expectedBindingToken: "watch-binding-token"
+        sessionKey: "agent:test:main"
       }
     ),
     [
       "watch-terminal",
       "--terminal",
       exactTerminalId,
-      "--expected-binding-token",
-      "watch-binding-token",
       "--store-dir",
       "/private/akk-store",
       "--hard-timeout-minutes",
@@ -375,13 +433,6 @@ test("/akk Terminal Watch CLI arguments preserve observation authority", () => {
       "--store-dir",
       "/private/akk-store"
     ]
-  );
-  assert.throws(
-    () => buildAkkCommandCliArgs(
-      parseAkkCommand(`watch ${exactTerminalId}`),
-      {}
-    ),
-    /expected binding token is required/u
   );
 });
 
@@ -424,11 +475,6 @@ test("/akk forwards configured codexHome through every lifecycle discovery and m
         selectionScope: "openclaw:scope",
         selectionSnapshotId: "rs_abcdefghijklmnopqrstuv"
       }
-    },
-    {
-      input:
-        `resume-thread ${exactTerminalId} rs_abcdefghijklmnopqrstuv:2`,
-      context: { selectionScope: "openclaw:scope" }
     },
     {
       input: `resume-thread ${exactTerminalId} ${resumableNativeThreadId}`,
@@ -564,7 +610,6 @@ test("runtime command arguments never include the removed top-level workspace", 
     "status conversation-1",
     "@a1b2c3d4: continue",
     "respond conversation-1: use JSON",
-    "approve conversation-1 --expected-approval-fingerprint approval-1",
     "cancel conversation-1",
     "renew conversation-1 20",
     "retry-callback conversation-1",
@@ -785,7 +830,6 @@ test("/akk stateful commands consistently use the trusted plugin store", () => {
     "status conversation-1",
     "@a1b2c3d4: continue",
     "respond conversation-1: use JSON",
-    "approve conversation-1 --expected-approval-fingerprint approval-1",
     "cancel conversation-1",
     "renew conversation-1 20",
     "retry-callback conversation-1",
@@ -830,30 +874,28 @@ test("/akk terminal send configures a real OpenClaw callback", () => {
   assert.equal(args.includes("--background"), true);
 });
 
-test("/akk approve requires and forwards an exact approval fingerprint", () => {
-  assert.throws(
-    () => parseAkkCommand("approve conversation-1"),
-    /expected-approval-fingerprint/u
-  );
+test("/akk approve accepts only a semantic Turn and delegates private fencing", () => {
+  const command = parseAkkCommand("approve conversation-1");
+  assert.deepEqual(command, {
+    action: "approve",
+    turnId: "conversation-1"
+  });
   assert.deepEqual(
     buildAkkCommandCliArgs(
-      parseAkkCommand(
-        "approve conversation-1 --expected-approval-fingerprint approval-1"
-      ),
+      command,
       {
         workspace: "/work/project",
         storeDir: "/private/akk-store"
       }
     ),
-    [
-      "approve",
-      "--turn",
-      "conversation-1",
-      "--expected-approval-fingerprint",
-      "approval-1",
-      "--store-dir",
-      "/private/akk-store"
-    ]
+    undefined,
+    "the command adapter privately derives the approval fingerprint immediately before dispatch"
+  );
+  assert.throws(
+    () => parseAkkCommand(
+      "approve conversation-1 --expected-approval-fingerprint approval-1"
+    ),
+    /Usage: \/akk approve <turn-selector>/u
   );
 });
 
@@ -926,8 +968,7 @@ test("/akk list renders watchable terminals and durable watch rows", () => {
       available_actions: {
         watch: {
           arguments: {
-            terminal_id: exactTerminalId,
-            expected_binding_token: "watch-binding-token"
+            terminal_id: exactTerminalId
           }
         }
       }
@@ -1021,35 +1062,6 @@ test("status Watch guidance requires an explicit non-authoritative hint", () => 
     },
     terminal_status: { activity_state: "working" }
   }), []);
-});
-
-test("forced Watch calls explain managed Turn, conflict, and existing Watch authority", () => {
-  assert.match(akkWatchUnavailableMessage({
-    managed: {
-      current_turn: {
-        turn_id: "turn-managed-watch",
-        status: "waiting_for_agent"
-      }
-    }
-  }, [], exactTerminalId),
-  /already belongs to AKK Turn turn-managed-watch \(waiting_for_agent\).*managed Turn monitor\/callback.*AKK status/u);
-
-  assert.match(akkWatchUnavailableMessage({
-    management_conflict: { reason: "two durable owners disagree" }
-  }, [], exactTerminalId),
-  /cannot be watched.*cannot prove it is external work.*two durable owners disagree/u);
-
-  assert.match(akkWatchUnavailableMessage({}, [{
-    watch_id: "terminal-watch-existing",
-    terminal_id: exactTerminalId,
-    status: "active"
-  }], exactTerminalId),
-  /already monitored by Terminal Watch terminal-watch-existing.*watch-status/u);
-
-  assert.match(
-    akkWatchUnavailableMessage({}, [], exactTerminalId),
-    /refresh AKK list.*available_actions\.watch/u
-  );
 });
 
 test("/akk list exposes the exact orphaned terminal dispatch recovery command", () => {
@@ -1230,8 +1242,9 @@ test("/akk threads renders exact candidates without exposing the CAS token", () 
   assert.match(text, new RegExp(resumableNativeThreadId, "u"));
   assert.match(text, /already_active/u);
   assert.match(text, /1 resumable/u);
-  assert.match(text, /1\. @11111111 \[rs_abcdefghijklmnopqrstuv:1\]/u);
-  assert.match(text, /2\. @22222222 \[rs_abcdefghijklmnopqrstuv:2\]/u);
+  assert.match(text, /1\. @11111111/u);
+  assert.match(text, /2\. @22222222/u);
+  assert.doesNotMatch(text, /rs_abcdefghijklmnopqrstuv/u);
   assert.match(text, /previous \/ 刚才那个/u);
   assert.match(text, /resume-thread[^\n]+ previous/u);
   assert.match(text, /refer only to this displayed snapshot/u);
@@ -1262,7 +1275,7 @@ test("/akk thread transition output distinguishes Session switching from Turn cr
 
   assert.match(text, /started and verified a new native thread/u);
   assert.match(text, /^session: session-after$/mu);
-  assert.match(text, /^binding generation: 2$/mu);
+  assert.doesNotMatch(text, /binding generation/iu);
   assert.match(text, /No AKK Turn was created/u);
 });
 

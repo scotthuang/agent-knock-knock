@@ -4,30 +4,20 @@ export const sendParameters = {
   type: "object",
   additionalProperties: false,
   required: ["request"],
-  not: {
-    anyOf: [
-      { required: ["session_id", "selector"] },
-      { required: ["session_id", "expected_terminal_token"] }
-    ]
-  },
+  not: { required: ["session_id", "terminal_id"] },
   properties: {
     session_id: {
       type: "string",
       minLength: 1,
       description:
-        "Strict session-scoped AKK id only when the current list action prefills it. This preserves that exact native context and never follows the pane after a human switches threads. A rollout-backed Codex Session is a continuing context label but is not a direct ordinary-send target; use that terminal row's selector/token action instead. Discovery selectors, terminal ids, and turn ids are never session_id destinations."
+        "Strict session-scoped AKK id only when the current list action prefills it. This preserves that exact native context and never follows the pane after a human switches threads. A rollout-backed Codex Session is a continuing context label but is not a direct ordinary-send target; use that terminal row's follow-current selector action instead. Discovery selectors, terminal ids, and turn ids are never session_id destinations."
     },
-    selector: {
+    terminal_id: {
       type: "string",
       minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Terminal-scoped selector: codex, claude, only, latest, an @short-ref, or a live terminal id. Use one only when explicitly named by the user or prefilled by list; never infer it. A follow-current handoff action uses the exact full terminal id together with expected_terminal_token. Legacy discovery selectors remain supported. Omit both target fields only when AKK should attach the unique eligible idle pane."
-    },
-    expected_terminal_token: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Fresh terminal snapshot token prefilled by the same terminal row's follow-current send action. Preserve it exactly with that action's full terminal selector; never infer, copy, reuse, or combine it with session_id."
+        "Exact full terminal_id from the current terminal-scoped send action. AKK derives and revalidates current terminal authority internally. Human discovery selectors remain slash-command inputs and are not structured-tool authority. Omit both target fields only when AKK should attach the unique eligible idle pane."
     },
     request: {
       type: "string",
@@ -106,22 +96,14 @@ export const listParameters = {
 export const watchParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["terminal_id", "expected_binding_token"],
+  required: ["terminal_id"],
   properties: {
     terminal_id: {
       type: "string",
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the same current watch action as expected_binding_token. The task must already have been started by the human in this terminal."
-    },
-    expected_binding_token: {
-      type: "string",
-      minLength: 64,
-      maxLength: 64,
-      pattern: "^[a-f0-9]{64}$",
-      description:
-        "Fresh 64-character lowercase hexadecimal compare-and-swap token prefilled by this terminal's current watch action. Forward that action's entire arguments object verbatim. Never retype, shorten, summarize, construct, or replace any characters with ... or …; if the complete arguments are unavailable, refresh agent_knock_knock_list instead of calling Watch."
+        "Exact full terminal_id from the current watch action. The task must already have been started by the human in this terminal. AKK resolves and revalidates current observation authority internally."
     },
     hardTimeoutMinutes: {
       type: "number",
@@ -164,26 +146,20 @@ export const listResumableThreadsParameters = {
 export const nativeInspectParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["terminal_id", "inspection", "expected_binding_token"],
+  required: ["terminal_id", "inspection"],
   properties: {
     terminal_id: {
       type: "string",
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the same current native_inspect action as expected_binding_token. Never use a short ref, Session id, Turn id, or constructed selector."
+        "Exact full terminal_id from the current native_inspect action. Never use a short ref, Session id, Turn id, or constructed selector. AKK refreshes and revalidates the binding internally."
     },
     inspection: {
       type: "string",
       enum: ["status"],
       description:
         "Closed adapter-owned inspection kind. Exact Codex 0.146.0/0.146.1/0.147.0/0.148.0 and Claude Code 2.1.218/2.1.226/2.1.237 /status profiles are supported; this is never an arbitrary native command string."
-    },
-    expected_binding_token: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Fresh snapshot-bound terminal and binding token prefilled by this terminal's current native_inspect action. Never guess, construct, or reuse it after another terminal action."
     }
   }
 };
@@ -191,20 +167,14 @@ export const nativeInspectParameters = {
 export const newThreadParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["terminal_id", "expected_binding_token"],
+  required: ["terminal_id"],
   properties: {
     terminal_id: {
       type: "string",
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the same current lifecycle snapshot as expected_binding_token."
-    },
-    expected_binding_token: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Fresh compare-and-swap token prefilled by this terminal's available new_thread action or returned by agent_knock_knock_list_resumable_threads. Never guess, construct, or reuse it after another terminal action."
+        "Exact full terminal_id from the current new_thread action. AKK refreshes and revalidates the lifecycle binding internally."
     }
   }
 };
@@ -214,10 +184,7 @@ export const reconcileBindingParameters = {
   additionalProperties: false,
   required: [
     "terminal_id",
-    "conflicting_session_id",
-    "expected_session_revision",
-    "expected_binding_token",
-    "expected_terminal_token"
+    "conflicting_session_id"
   ],
   properties: {
     terminal_id: {
@@ -225,31 +192,13 @@ export const reconcileBindingParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the same current reconcile_binding action as every expected token."
+        "Exact full terminal_id from the current reconcile_binding action."
     },
     conflicting_session_id: {
       type: "string",
       minLength: 1,
       description:
         "Exact conflicting managed Session id prefilled by AKK list. Never choose or construct one independently."
-    },
-    expected_session_revision: {
-      type: "integer",
-      minimum: 1,
-      description:
-        "Exact managed Session revision from the advertised reconcile_binding action."
-    },
-    expected_binding_token: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Fresh fingerprint of the conflicting binding from the advertised action."
-    },
-    expected_terminal_token: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Fresh fingerprint of the live terminal process incarnation from the same advertised action."
     }
   }
 };
@@ -259,9 +208,7 @@ export const resumeThreadParameters = {
   additionalProperties: false,
   required: [
     "terminal_id",
-    "native_thread_id",
-    "expected_binding_token",
-    "candidate_token"
+    "native_thread_id"
   ],
   properties: {
     terminal_id: {
@@ -277,18 +224,6 @@ export const resumeThreadParameters = {
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
       description:
         "Complete native thread UUID from a resumable=true row returned for this exact terminal. Never truncate, guess, or select an unavailable row."
-    },
-    expected_binding_token: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Fresh compare-and-swap token from the same agent_knock_knock_list_resumable_threads result as native_thread_id."
-    },
-    candidate_token: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Opaque fingerprint from the selected resumable thread row in the same current list result. It binds resume to that exact historical file/evidence snapshot; never construct or reuse it."
     }
   }
 };
@@ -413,10 +348,7 @@ export const closeParameters = {
   not: {
     anyOf: [
       { required: ["turn_id", "conversation_id"] },
-      { required: ["expected_message_id", "expected_transition_id"] },
-      { required: ["expected_handoff_token", "conversation_id"] },
-      { required: ["expected_handoff_token", "expected_message_id"] },
-      { required: ["expected_handoff_token", "expected_transition_id"] }
+      { required: ["expected_message_id", "expected_transition_id"] }
     ]
   },
   anyOf: [
@@ -446,11 +378,6 @@ export const closeParameters = {
       type: "string",
       description:
         "Required only to recover an unresolved native-thread lifecycle transition shown by AKK list. Must exactly match that entry's current transition_id and must not be combined with expected_message_id."
-    },
-    expected_handoff_token: {
-      type: "string",
-      description:
-        "Snapshot fence for the exact managed Turn close advertised only by terminals[].handoff_decision.choices.take_over_current.action. Copy that complete action only after explicit user confirmation; it requires turn_id and reason=superseded_by_human_context_switch, and cannot be combined with a raw-terminal target or another close fence."
     }
   }
 };
@@ -458,38 +385,22 @@ export const closeParameters = {
 export const approveParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["expected_approval_fingerprint"],
-  not: { required: ["turn_id", "conversation_id"] },
+  not: { required: ["turn_id", "terminal_id"] },
   anyOf: [
     { required: ["turn_id"] },
-    { required: ["conversation_id"] }
-  ],
-  allOf: [
-    {
-      if: { required: ["expected_terminal_token"] },
-      then: { required: ["conversation_id"] }
-    }
+    { required: ["terminal_id"] }
   ],
   properties: {
     turn_id: {
       type: "string",
       description: "Authoritative AKK turn id containing the approval prompt."
     },
-    conversation_id: {
+    terminal_id: {
       type: "string",
-      deprecated: true,
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled by that terminal row's available approval action. Managed Turn approval must use turn_id; never construct or guess a raw-terminal selector."
-    },
-    expected_approval_fingerprint: {
-      type: "string",
-      description:
-        "Exact approval fingerprint returned by the latest status or approval-required callback. The prompt is captured again and must still match before keys are sent."
-    },
-    expected_terminal_token: {
-      type: "string",
-      description:
-        "Only for a terminal-scoped manual Codex approval prefilled by the latest AKK list action. Preserve it exactly with that action's full conversation_id; never construct, reuse, or use it for automatic approval."
+        "Exact full terminal_id from the current terminal-scoped approval action. Managed Turn approval must use turn_id. AKK binds the user's reviewed prompt and revalidates terminal authority internally."
     }
   }
 };

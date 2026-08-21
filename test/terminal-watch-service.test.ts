@@ -6,11 +6,13 @@ import os from "node:os";
 import path from "node:path";
 import {
   createTerminalWatchStore,
+  pathsForTerminalWatch,
   terminalWatchRevision,
-  type CodexTerminalWatchAnchor,
   type TerminalWatch,
   type TerminalWatchTerminalIdentity
 } from "../src/terminal-watch-store.js";
+import type { CodexHumanStartedActiveTaskAnchor } from
+  "../src/terminal-submission-acceptance.js";
 import {
   ActiveTerminalWatchConflictError,
   createTerminalWatchService,
@@ -52,14 +54,8 @@ function exactInput(
       paneId: "pane-1",
       terminalId: "terminal-resource-service"
     }),
-    agent_pid: 801,
-    process_uuid: "codex-process-service",
-    process_birth: "codex-birth-service",
-    native_thread_id: THREAD_ID,
     workspace: "/workspace/project",
-    binding_token: "d".repeat(64),
-    agent_version: "0.148.0",
-    behavior_profile: "codex-0.148.0-exact"
+    binding_token: "d".repeat(64)
   };
   const rollout = {
     fd: "9",
@@ -68,31 +64,23 @@ function exactInput(
     path: "/workspace/project/rollout.jsonl"
   };
   const providerAnchor = {
-    schema: "agent-knock-knock/codex-human-started-active-task-anchor",
-    version: 1,
-    native_thread_id: terminal.native_thread_id,
-    process_uuid: terminal.process_uuid,
-    process_birth: terminal.process_birth,
+    schema: "agent-knock-knock/codex-human-started-active-task-anchor" as const,
+    version: 1 as const,
+    native_thread_id: THREAD_ID,
+    process_uuid: "codex-process-service",
+    process_birth: "codex-birth-service",
     captured_at: START,
     rollout,
     turn_id: TASK_ID,
     request_hash: REQUEST_HASH,
-    codex_version: terminal.agent_version,
+    codex_version: "0.148.0",
     task_started_offset_bytes: 10,
     user_message_offset_bytes: 20,
     observed_end_offset_bytes: 30
   };
-  const anchor: CodexTerminalWatchAnchor = {
-    kind: "codex_rollout",
-    native_task_id: TASK_ID,
-    captured_at: START,
-    request_hash: REQUEST_HASH,
-    codex_version: terminal.agent_version,
-    rollout,
-    task_started_offset_bytes: 10,
-    user_message_offset_bytes: 20,
-    observed_end_offset_bytes: 30,
-    evidence_fingerprint: digest(providerAnchor)
+  const anchor: CodexHumanStartedActiveTaskAnchor = {
+    ...providerAnchor,
+    anchor_fingerprint: digest(providerAnchor)
   };
   return {
     watch_id: "terminal-watch-service-fixture",
@@ -108,6 +96,7 @@ function exactInput(
 
 interface Harness {
   service: TerminalWatchService;
+  storeDir: string;
   restart(): TerminalWatchService;
   advance(milliseconds: number): void;
   observations: Array<(watch: TerminalWatch) => TerminalWatchObservation>;
@@ -115,13 +104,19 @@ interface Harness {
     id: string;
     key: string;
     kind: string;
+    watchId: string;
     settlementText?: string;
   }>;
-  deliveryOutcomes: Array<"success" | "failure">;
+  deliveryOutcomes: Array<"success" | "failure" | (() => Promise<void>)>;
   observeCalls(): number;
 }
 
-function harness(t: test.TestContext): Harness {
+function harness(
+  t: test.TestContext,
+  policy: {
+    notificationMaxRetryDelayMs?: number;
+  } = {}
+): Harness {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-watch-service-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const storeDir = path.join(directory, "store");
@@ -149,19 +144,23 @@ function harness(t: test.TestContext): Harness {
             observed_at: new Date(nowMs).toISOString()
           };
     },
-    deliver: async ({ watch, notification, idempotencyKey }) => {
+    deliver: async ({ watch, notification }) => {
       deliveries.push({
         id: notification.notification_id,
-        key: idempotencyKey,
+        key: notification.idempotency_key,
         kind: notification.kind,
+        watchId: watch.watch_id,
         settlementText: watch.settlement?.completion_text
       });
-      if (deliveryOutcomes.shift() === "failure") {
+      const outcome = deliveryOutcomes.shift();
+      if (typeof outcome === "function") await outcome();
+      if (outcome === "failure") {
         throw new Error("sensitive transport failure detail");
       }
     },
     notificationLeaseMs: 1_000,
     notificationRetryDelayMs: 500,
+    notificationMaxRetryDelayMs: policy.notificationMaxRetryDelayMs,
     classifyDeliveryError: () => "transport_failed"
   });
   let service = makeService();
@@ -169,6 +168,7 @@ function harness(t: test.TestContext): Harness {
     get service() {
       return service;
     },
+    storeDir,
     restart() {
       service = makeService();
       return service;
@@ -247,13 +247,50 @@ test("approval remains active and enqueues once per exact fingerprint", async (t
   assert.equal(terminalWatchRevision(duplicate), terminalWatchRevision(approval));
   assert.equal(duplicate.notification_outbox.length, 1);
 
-  const delivered = await state.service.deliverNextNotification(created.watch_id);
-  assert.equal(delivered.status, "delivered");
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 1);
   assert.equal(state.deliveries.length, 1);
-  assert.equal(
-    (await state.service.deliverNextNotification(created.watch_id)).status,
-    "none"
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 0);
+});
+
+test("pending observations advance only the durable provider checkpoint", async (t) => {
+  const state = harness(t);
+  const created = state.service.create(exactInput());
+  state.advance(1_000);
+  const observedAt = "2026-08-21T00:00:01.000Z";
+  state.observations.push((watch) => observed(watch, "pending", observedAt, {
+    safe_resume_offset_bytes: 48
+  }));
+  const advanced = await state.service.reconcile(created.watch_id);
+  assert.deepEqual(advanced.observation_checkpoint, {
+    safe_resume_offset_bytes: 48
+  });
+  assert.equal(advanced.last_activity_at, observedAt);
+
+  const revision = terminalWatchRevision(advanced);
+  state.advance(1_000);
+  state.observations.push((watch) => observed(watch, "unavailable",
+    "2026-08-21T00:00:02.000Z", {
+      reason_code: "provider_temporarily_unavailable"
+    }));
+  const unavailable = await state.service.reconcile(created.watch_id);
+  assert.equal(unavailable.status, "active");
+  assert.equal(terminalWatchRevision(unavailable), revision);
+  assert.deepEqual(unavailable.observation_checkpoint,
+    advanced.observation_checkpoint);
+
+  state.advance(1_000);
+  state.observations.push((watch) => observed(watch, "unavailable",
+    "2026-08-21T00:00:03.000Z", {
+      reason_code: "terminal_observation_unavailable",
+      safe_resume_offset_bytes: 64
+    }));
+  const progressedWhileUnavailable = await state.service.reconcile(
+    created.watch_id
   );
+  assert.equal(progressedWhileUnavailable.status, "active");
+  assert.deepEqual(progressedWhileUnavailable.observation_checkpoint, {
+    safe_resume_offset_bytes: 64
+  });
 });
 
 test("completion settles once, retains bounded result, and callback reads settlement", async (t) => {
@@ -276,11 +313,11 @@ test("completion settles once, retains bounded result, and callback reads settle
     terminalWatchRevision(await state.service.reconcile(created.watch_id)),
     terminalWatchRevision(completed)
   );
-  assert.equal(
-    (await state.service.deliverNextNotification(created.watch_id)).status,
-    "delivered"
-  );
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 1);
   assert.equal(state.deliveries[0].settlementText, "redacted completion");
+  const cold = await state.service.reconcileAll();
+  assert.equal(cold.checked, 0);
+  assert.deepEqual(cold.items, []);
 });
 
 test("terminal settlement supersedes every undelivered approval before callback delivery", async (t) => {
@@ -313,19 +350,13 @@ test("terminal settlement supersedes every undelivered approval before callback 
     ]
   );
 
-  assert.equal(
-    (await state.service.deliverNextNotification(created.watch_id)).status,
-    "delivered"
-  );
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 1);
   assert.deepEqual(state.deliveries.map(({ kind }) => kind), ["completed"]);
   assert.equal(
     state.deliveries[0].settlementText,
     "completion wins over stale approval"
   );
-  assert.equal(
-    (await state.service.deliverNextNotification(created.watch_id)).status,
-    "none"
-  );
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 0);
 });
 
 test("a claimed approval serializes terminal settlement callback delivery", async (t) => {
@@ -338,8 +369,20 @@ test("a claimed approval serializes terminal settlement callback delivery", asyn
     reason_code: "approval_required"
   }));
   await state.service.reconcile(created.watch_id);
-  const approvalClaim = state.service.claimNextNotification(created.watch_id);
-  assert.ok(approvalClaim);
+  let releaseDelivery = () => {};
+  let deliveryStarted = () => {};
+  const started = new Promise<void>((resolve) => {
+    deliveryStarted = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    releaseDelivery = resolve;
+  });
+  state.deliveryOutcomes.push(async () => {
+    deliveryStarted();
+    await blocked;
+  });
+  const draining = state.service.reconcileAll();
+  await started;
 
   state.advance(500);
   const completedAt = "2026-08-21T00:00:01.500Z";
@@ -359,24 +402,21 @@ test("a claimed approval serializes terminal settlement callback delivery", asyn
     ]
   );
   assert.equal(
-    state.service.claimNextNotification(created.watch_id),
-    undefined,
+    (await state.restart().reconcileAll()).callbacks_delivered,
+    0,
     "a later completion cannot overtake an in-flight approval"
   );
+  releaseDelivery();
+  assert.equal((await draining).callbacks_delivered, 1);
   assert.equal(
-    state.service.finishNotification(
-      created.watch_id,
-      approvalClaim.notification.notification_id,
-      approvalClaim.attempt_id,
-      { delivered: true }
-    ).settled,
-    true
+    (await state.restart().reconcileAll()).callbacks_delivered,
+    1,
+    "one Watch delivers at most one notification in each reconciliation"
   );
-  assert.equal(
-    (await state.service.deliverNextNotification(created.watch_id)).status,
-    "delivered"
+  assert.deepEqual(
+    state.deliveries.map(({ kind }) => kind),
+    ["approval", "completed"]
   );
-  assert.deepEqual(state.deliveries.map(({ kind }) => kind), ["completed"]);
 });
 
 test("settlement supersedes an expired approval claim before crash recovery", async (t) => {
@@ -389,7 +429,20 @@ test("settlement supersedes an expired approval claim before crash recovery", as
     reason_code: "approval_required"
   }));
   await state.service.reconcile(created.watch_id);
-  assert.ok(state.service.claimNextNotification(created.watch_id));
+  let releaseDelivery = () => {};
+  let deliveryStarted = () => {};
+  const started = new Promise<void>((resolve) => {
+    deliveryStarted = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    releaseDelivery = resolve;
+  });
+  state.deliveryOutcomes.push(async () => {
+    deliveryStarted();
+    await blocked;
+  });
+  const staleWorker = state.service.reconcileAll();
+  await started;
 
   state.advance(500);
   const completedAt = "2026-08-21T00:00:01.500Z";
@@ -403,19 +456,21 @@ test("settlement supersedes an expired approval claim before crash recovery", as
   await state.service.reconcile(created.watch_id);
   state.advance(600);
 
-  const recovered = state.restart().claimNextNotification(created.watch_id);
-  assert.ok(recovered);
-  assert.equal(recovered.notification.kind, "completed");
+  const recovery = await state.restart().reconcileAll();
+  assert.equal(recovery.callbacks_delivered, 1);
+  const recovered = state.service.get(created.watch_id);
   assert.deepEqual(
-    recovered.watch.notification_outbox.map(({ kind, status }) => ({
+    recovered.notification_outbox.map(({ kind, status }) => ({
       kind,
       status
     })),
     [
       { kind: "approval", status: "superseded" },
-      { kind: "completed", status: "delivering" }
+      { kind: "completed", status: "delivered" }
     ]
   );
+  releaseDelivery();
+  await staleWorker;
 });
 
 test("deadline wins without observing the terminal", async (t) => {
@@ -442,24 +497,39 @@ test("cancel is idempotent and has no terminal mutation effect port", (t) => {
   );
 });
 
-test("expired delivery claim retries with one deterministic notification identity", (t) => {
+test("expired delivery claim retries with one deterministic notification identity", async (t) => {
   const state = harness(t);
   const created = state.service.create(exactInput({
     approval_fingerprint: APPROVAL_FINGERPRINT,
     approval_reason_code: "approval_required"
   }));
-  const first = state.service.claimNextNotification(created.watch_id);
-  assert.ok(first);
-  assert.equal(first.notification.attempts, 1);
-  assert.equal(state.restart().claimNextNotification(created.watch_id), undefined);
+  let releaseDelivery = () => {};
+  let deliveryStarted = () => {};
+  const started = new Promise<void>((resolve) => {
+    deliveryStarted = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    releaseDelivery = resolve;
+  });
+  state.deliveryOutcomes.push(async () => {
+    deliveryStarted();
+    await blocked;
+  });
+  const staleWorker = state.service.reconcileAll();
+  await started;
+  const first = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(first.attempts, 1);
+  assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 0);
 
   state.advance(1_001);
-  const second = state.restart().claimNextNotification(created.watch_id);
-  assert.ok(second);
-  assert.equal(second.notification.attempts, 2);
-  assert.equal(second.notification.notification_id, first.notification.notification_id);
-  assert.equal(second.notification.idempotency_key, first.notification.idempotency_key);
+  assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 1);
+  const second = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(second.attempts, 2);
+  assert.equal(second.notification_id, first.notification_id);
+  assert.equal(second.idempotency_key, first.idempotency_key);
   assert.notEqual(second.attempt_id, first.attempt_id);
+  releaseDelivery();
+  await staleWorker;
 });
 
 test("failed callback persists retry and reuses the same idempotency key", async (t) => {
@@ -469,23 +539,105 @@ test("failed callback persists retry and reuses the same idempotency key", async
     approval_reason_code: "approval_required"
   }));
   state.deliveryOutcomes.push("failure", "success");
-  const failed = await state.service.deliverNextNotification(created.watch_id);
-  assert.equal(failed.status, "failed");
+  const failed = await state.service.reconcileAll();
+  assert.equal(failed.errors, 1);
   assert.equal(
-    failed.watch.notification_outbox[0].last_error_code,
+    state.service.get(created.watch_id).notification_outbox[0].last_error_code,
     "transport_failed"
   );
   assert.equal(
-    (await state.restart().deliverNextNotification(created.watch_id)).status,
-    "none"
+    (await state.restart().reconcileAll()).callbacks_delivered,
+    0
   );
 
   state.advance(500);
-  const delivered = await state.restart().deliverNextNotification(created.watch_id);
-  assert.equal(delivered.status, "delivered");
+  const delivered = await state.restart().reconcileAll();
+  assert.equal(delivered.callbacks_delivered, 1);
   assert.equal(state.deliveries.length, 2);
   assert.equal(state.deliveries[0].key, state.deliveries[1].key);
-  assert.equal(delivered.watch.notification_outbox[0].attempts, 2);
+  assert.equal(state.service.get(created.watch_id).notification_outbox[0].attempts, 2);
+});
+
+test("callback retries back off with a cap and remain recoverable", async (t) => {
+  const state = harness(t, {
+    notificationMaxRetryDelayMs: 600
+  });
+  const created = state.service.create(exactInput({
+    approval_fingerprint: APPROVAL_FINGERPRINT,
+    approval_reason_code: "approval_required"
+  }));
+  state.deliveryOutcomes.push("failure", "failure", "failure", "success");
+
+  await state.service.reconcileAll();
+  let notification = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(notification.next_attempt_at, "2026-08-21T00:00:00.500Z");
+  state.advance(500);
+  await state.service.reconcileAll();
+  notification = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(notification.next_attempt_at, "2026-08-21T00:00:01.100Z");
+  state.advance(600);
+  await state.service.reconcileAll();
+  notification = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(notification.status, "failed");
+  assert.equal(notification.attempts, 3);
+  assert.equal(notification.next_attempt_at, "2026-08-21T00:00:01.700Z");
+
+  state.advance(600);
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 1);
+  notification = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(notification.status, "delivered");
+  assert.equal(state.deliveries.length, 4);
+});
+
+test("callback scheduling is fair after one Watch fails", async (t) => {
+  const state = harness(t);
+  const first = state.service.create(exactInput({
+    approval_fingerprint: APPROVAL_FINGERPRINT,
+    approval_reason_code: "approval_required"
+  }));
+  const secondInput = exactInput({
+    watch_id: "terminal-watch-service-second",
+    approval_fingerprint: "e".repeat(64),
+    approval_reason_code: "approval_required"
+  });
+  const second = state.service.create({
+    ...secondInput,
+    terminal: {
+      ...secondInput.terminal,
+      terminal_id: "terminal:v2:service-fixture-second",
+      binding_token: "f".repeat(64)
+    }
+  });
+  state.deliveryOutcomes.push("failure", "success");
+
+  await state.service.reconcileAll();
+  assert.equal(state.deliveries[0].watchId, first.watch_id);
+  await state.service.reconcileAll();
+  assert.equal(state.deliveries[1].watchId, second.watch_id);
+});
+
+test("reconcile isolates one malformed named Watch while checking healthy work", async (t) => {
+  const state = harness(t);
+  const healthy = state.service.create(exactInput());
+  const corruptId = "terminal-watch-corrupt-record";
+  const corruptPath = pathsForTerminalWatch(corruptId, state.storeDir).statePath;
+  fs.writeFileSync(corruptPath, "{bad-json}\n", { mode: 0o600 });
+
+  const summary = await state.service.reconcileAll();
+  assert.equal(summary.checked, 2);
+  assert.equal(summary.errors, 1);
+  assert.equal(summary.items.some((item) =>
+    item.watch_id === healthy.watch_id && item.status === "active"
+  ), true);
+  assert.deepEqual(summary.items.find((item) =>
+    item.watch_id === corruptId
+  ), {
+    watch_id: corruptId,
+    status: "error",
+    changed: false,
+    callbacks_delivered: 0,
+    error_code: "terminal_watch_record_invalid"
+  });
 });
 
 test("reconcileAll reports settlement and delivered callback after restart", async (t) => {

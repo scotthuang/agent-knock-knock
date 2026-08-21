@@ -52,7 +52,7 @@
       ]
     },
     "list_action": {
-      "version": 17,
+      "version": 18,
       "actions": [
         "send",
         "watch",
@@ -74,7 +74,7 @@
         "src/terminal-list-renderer.ts"
       ],
       "witnesses": [
-        "action-v17-unit",
+        "action-v18-unit",
         "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
@@ -160,10 +160,10 @@
   },
   "witnesses": [
     {
-      "id": "action-v17-unit",
+      "id": "action-v18-unit",
       "path": "test/terminal-list-renderer.test.ts",
       "tier": "fast",
-      "needle": "the public action contract v17 includes durable Terminal Watch"
+      "needle": "the public action contract v18 exposes semantic arguments only"
     },
     {
       "id": "callback-cli-boundary",
@@ -746,13 +746,13 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The imported command service and pure renderer preserve action-contract v17 ordering, exact selectors, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v18 ordering, semantic model-facing arguments, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
         "management-list-in-process",
         "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
-        "action-v17-unit"
+        "action-v18-unit"
       ],
       "retained_boundary_witnesses": [
         "codex-binding-boundary",

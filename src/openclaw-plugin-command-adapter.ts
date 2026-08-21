@@ -10,7 +10,6 @@ import {
   AKK_CALLBACK_METHOD,
   akkUsageText,
   buildAkkCommandCliArgs,
-  akkWatchUnavailableMessage,
   formatAkkListCommandResult,
   formatAkkRespondCommandResult,
   formatAkkTerminalWatchHint,
@@ -19,10 +18,15 @@ import {
   formatAkkUnwatchCommandResult,
   formatAkkWatchCommandResult,
   formatAkkWatchStatusCommandResult,
+  isAkkModelFacingDiagnosticField,
+  isAkkModelFacingPrivateAuthorityField,
   isAkkNativeSubmissionAccepted,
   isAkkThreadTransitionSuccess,
+  normalizeAkkModelFacingFieldName,
   parseAkkCommand,
-  resolvePluginStoreDir
+  resolvePluginStoreDir,
+  sanitizeAkkModelFacingDiagnosticText,
+  sanitizeAkkModelFacingLegacyAuthorityInstructionText
 } from "./openclaw-plugin-helpers.js";
 import {
   approveParameters,
@@ -42,8 +46,18 @@ import {
   unwatchParameters,
   watchParameters
 } from "./openclaw-plugin-schemas.js";
+import {
+  consumeOpenClawPrivateAuthorityOffer,
+  openClawApprovalAuthorityOfferKey,
+  rememberOpenClawPrivateAuthorityOffer,
+  type OpenClawPrivateAuthorityOfferKey,
+  type OpenClawPrivateAuthorityOfferPayload,
+  type OpenClawPrivateAuthorityTarget
+} from "./openclaw-private-authority-offers.js";
 
 const MAX_DISPLAYED_RESUME_SNAPSHOTS = 512;
+const OPENCLAW_HANDOFF_AUTHORITY_KIND = "handoff";
+const OPENCLAW_RECONCILE_BINDING_AUTHORITY_KIND = "reconcile_binding";
 const CALLBACK_METHOD = AKK_CALLBACK_METHOD;
 export const defaultOpenClawRelayPath = fileURLToPath(
   new URL("./cli.js", import.meta.url)
@@ -70,7 +84,7 @@ export function registerOpenClawCommands(
       default: "AKK is handling the request..."
     },
     agentPromptGuidance: [
-      "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Use /akk codex: <task>, /akk claude: <task>, or another selector returned by /akk list to target an existing pane. Use session_id only when the current list action prefills it. A rollout-backed Codex pane instead uses terminal_follow_current: an exact list-prefilled terminal selector plus expected_terminal_token, or an explicitly named/uniquely selected pane whose equivalent fresh candidate authority AKK derives under its terminal lock. AKK sends the ordinary task once within the complete exact rollout inventory and binds only the uniquely accepting native thread. Never infer or reuse a listed token. Use /akk watch only from a currently advertised watch action to observe one human-started active task; it sends no input and creates no Session or Turn. Use /akk threads, /akk new-thread or clear-thread, and /akk resume-thread only with an exact full terminal_id returned by /akk list; these switch native context without creating a Turn. Resume numbers and short IDs are bound to the last displayed snapshot, while previous is available only from the latest verified committed transition. For native Codex or Claude status, use only an advertised agent_knock_knock_native_inspect action; agent_knock_knock_status inspects AKK Turn or Terminal Watch state and does not execute /status. AKK never starts a coding-agent process."
+      "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Structured tools use only semantic identifiers returned by AKK: session_id for an exact managed context, terminal_id for the currently verified pane, turn_id for one managed Turn, watch_id for one Terminal Watch, and native_thread_id for one resumable native thread. AKK keeps all opaque freshness authority private and revalidates it under its locks. Use /akk watch only from a currently advertised watch action to observe one human-started active task; it sends no input and creates no Session or Turn. New/clear/resume, approval, reconciliation, handoff, and recovery still require the documented user intent or explicit confirmation. AKK never starts a coding-agent process."
     ],
     handler: async (ctx) => handleAkkCommand(
       api,
@@ -81,7 +95,7 @@ export function registerOpenClawCommands(
 
   registerCliTool(api, {
     name: "agent_knock_knock_list",
-    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources, plus durable terminal_watches[] records. Each terminal may include managed.current_turn or managed.recent_turn; all=true also includes older managed.history and retained unavailable history. By default, unavailable_managed_turns contains attention-needed records whose pane is unavailable. A live human thread switch remains management_state=conflict and exposes handoff_state as adoptable or blocked without mutating the Store. Use only each row's available_actions and authoritative prefilled arguments, except for two explicit-confirmation nested recovery paths: handoff_decision.choices.take_over_current.action and blocking_turns[].recovery_action. The latter is only for collateral blockers; an active handoff source Turn remains exclusively snapshot-fenced by handoff_decision. Refresh list immediately after either nested action. A watch action observes one exact human-started active task without terminal input, Session, or Turn ownership. A session_exact session-scoped send targets session_id only when that action is listed and never redirects to the pane's replacement context. A rollout-backed Codex row instead advertises terminal_follow_current as a terminal-scoped follow-current send with its exact selector and expected_terminal_token; AKK pins the complete exact rollout inventory, sends the task once, and binds only the unique exact acceptor. Explicit discovery selectors remain compatible and derive equivalent fresh candidate authority under the terminal lock. respond targets the exact in-flight turn; native_inspect runs only a closed, exact-version Codex or Claude status profile with the current terminal/binding token; read-only thread listing targets the exact terminal, while new/resume mutations also require the current binding token and create no Turn; reconcile_binding remains a low-level conflict recovery action; managed controls target the exact turn; a raw terminal row may prefill its own compatibility selector for status or recovery controls. Never construct identifiers or tokens. AKK revalidates every terminal side effect and never starts a coding-agent process.",
+    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources, plus durable terminal_watches[] records. Use only advertised actions and their semantic IDs. AKK keeps opaque freshness authority private and revalidates terminal, binding, candidate, approval, and handoff state before every side effect. A session_exact send uses session_id; terminal_follow_current and Watch use terminal_id; managed controls use turn_id; lifecycle resume additionally uses the complete native_thread_id. Recovery actions remain explicit-confirmation operations. AKK never starts a coding-agent process.",
     parameters: listParameters,
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -110,7 +124,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_watch",
     description:
-      "Start one durable Terminal Watch for the exact supported human-started task already active in a listed Codex or Claude Code terminal. Call only from that terminal row's current watch action and forward its entire arguments object verbatim; never retype, shorten, summarize, or replace any characters with ... or …. If the complete action is unavailable, refresh agent_knock_knock_list instead of calling Watch. This observes external work, creates no AKK Session or Turn, sends no terminal input, and never adopts or blocks the human's terminal task.",
+      "Start one durable Terminal Watch for the exact supported human-started task already active in a listed Codex or Claude Code terminal. Call only from that terminal row's current watch action and pass its exact terminal_id. AKK refreshes and revalidates current observation authority internally. This observes external work, creates no AKK Session or Turn, sends no terminal input, and never adopts or blocks the human's terminal task.",
     parameters: watchParameters,
     normalizeTurnIdentity: false,
     buildArgs: (params, toolContext) => {
@@ -121,9 +135,7 @@ export function registerOpenClawCommands(
       const args = [
         "watch-terminal",
         "--terminal",
-        requiredString(params.terminal_id, "terminal_id"),
-        "--expected-binding-token",
-        requiredWatchBindingToken(params.expected_binding_token)
+        requiredString(params.terminal_id, "terminal_id")
       ];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       pushOptional(
@@ -159,7 +171,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_list_resumable_threads",
     description:
-      "List verified native Codex or Claude Code threads for one exact terminal. Call this only from that terminal row's available list_resumable_threads action. The result includes the current native identity, a fresh expected_binding_token, exact candidate UUIDs with opaque candidate_token fingerprints, and an exact previous action only when the latest committed transition has one uniquely resumable source. Resume only a row with resumable=true or that previous action, preserving all full prefilled arguments from the same result. Number/short/handle fields are human display aids, never exact tool arguments. This is read-only for Session/Turn state and creates no AKK Turn.",
+      "List verified native Codex or Claude Code threads for one exact terminal. Resume only a row with resumable=true by passing this terminal_id and that row's complete native_thread_id. AKK retains candidate and binding freshness evidence privately. Number and short-id fields are slash-command display aids, never tool arguments. This is read-only for Session/Turn state and creates no AKK Turn.",
     parameters: listResumableThreadsParameters,
     normalizeTurnIdentity: false,
     buildArgs: (params) => {
@@ -178,7 +190,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_native_inspect",
     description:
-      "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal without ordinary Turn delivery. Call only from that terminal row's current native_inspect action and preserve its exact terminal_id, inspection=status, and expected_binding_token. Supported profiles are Codex 0.146.0/0.146.1/0.147.0/0.148.0 and Claude Code 2.1.218/2.1.226/2.1.237; Claude's exact Status panel is parsed and safely dismissed before success. Arbitrary slash commands, /usage, /cost, /stats, /usage-credits, /model, and /compact remain unavailable. Bare Codex /usage opens an interactive menu whose later Enter can select an account-side usage-limit reset. This creates no AKK Session, Turn, receipt, monitor, or callback. agent_knock_knock_status is different: it inspects AKK Turn state and the bounded current screen without executing native /status.",
+      "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal. Pass only terminal_id and inspection=status; AKK refreshes binding authority privately. Arbitrary slash commands remain unavailable. This creates no AKK Session, Turn, receipt, monitor, or callback.",
     parameters: nativeInspectParameters,
     normalizeTurnIdentity: false,
     buildArgs: (params) => {
@@ -187,16 +199,22 @@ export function registerOpenClawCommands(
       if (inspection !== "status") {
         throw new Error("inspection must be status");
       }
+      const terminalId = requiredString(params.terminal_id, "terminal_id");
+      const action = privateTerminalActionArguments(
+        api,
+        terminalId,
+        "agent_knock_knock_native_inspect"
+      );
       const args = [
         "native-inspect",
         "--terminal",
-        requiredString(params.terminal_id, "terminal_id"),
+        terminalId,
         "--inspection",
         inspection,
         "--expected-binding-token",
         requiredString(
-          params.expected_binding_token,
-          "expected_binding_token"
+          action.expected_binding_token,
+          "current internal native-inspect binding authority"
         )
       ];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
@@ -208,20 +226,26 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_new_thread",
     description:
-      "Start and verify a clean native coding-agent thread in the same exact terminal. Call only from a current available new_thread action, using its exact terminal_id and expected_binding_token, or immediately after agent_knock_knock_list_resumable_threads using that result's token. Never send /clear as ordinary task text. This lifecycle transition creates a new AKK Session but no Turn; use ordinary send afterward.",
+      "Start and verify a clean native coding-agent thread in the exact terminal_id after explicit user intent. AKK refreshes lifecycle authority privately. Never send /clear as ordinary task text. This creates a new AKK Session but no Turn.",
     parameters: newThreadParameters,
     normalizeTurnIdentity: false,
     isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const terminalId = requiredString(params.terminal_id, "terminal_id");
+      const action = privateTerminalActionArguments(
+        api,
+        terminalId,
+        "agent_knock_knock_new_thread"
+      );
       const args = [
         "new-thread",
         "--terminal",
-        requiredString(params.terminal_id, "terminal_id"),
+        terminalId,
         "--expected-binding-token",
         requiredString(
-          params.expected_binding_token,
-          "expected_binding_token"
+          action.expected_binding_token,
+          "current internal new-thread binding authority"
         )
       ];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
@@ -233,12 +257,29 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_reconcile_binding",
     description:
-      "Detach one exact conflicting managed Session binding without adopting the live replacement thread. Call only after the user explicitly requests recovery and only from a current terminal row's advertised reconcile_binding action. Preserve its terminal_id, conflicting_session_id, Session revision, binding token, and terminal token exactly. This action sends no coding-agent input and creates no Turn; refresh AKK list afterward.",
+      "Detach one exact conflicting managed Session binding without adopting the live replacement thread. Pass only the advertised terminal_id and conflicting_session_id after explicit user confirmation; AKK refreshes all revision and binding authority privately. This sends no coding-agent input and creates no Turn.",
     parameters: reconcileBindingParameters,
     normalizeTurnIdentity: false,
-    buildArgs: (params) => {
+    buildArgs: (params, toolContext) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      const revision = Number(params.expected_session_revision);
+      const terminalId = requiredString(params.terminal_id, "terminal_id");
+      const conflictingSessionId = requiredString(
+        params.conflicting_session_id,
+        "conflicting_session_id"
+      );
+      const action = consumeDisplayedPrivateAction(api, {
+        sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
+        sessionId: requiredOpenClawSessionId(toolContext?.sessionId),
+        kind: OPENCLAW_RECONCILE_BINDING_AUTHORITY_KIND,
+        target: { type: "terminal_id", id: terminalId },
+        tool: "agent_knock_knock_reconcile_binding",
+        terminalId,
+        matches: (argumentsValue) =>
+          stringValue(argumentsValue.terminal_id) === terminalId &&
+          stringValue(argumentsValue.conflicting_session_id) ===
+            conflictingSessionId
+      });
+      const revision = Number(action.expected_session_revision);
       if (!Number.isSafeInteger(revision) || revision < 1) {
         throw new Error(
           "expected_session_revision must be a positive safe integer"
@@ -247,23 +288,23 @@ export function registerOpenClawCommands(
       const args = [
         "reconcile-binding",
         "--terminal",
-        requiredString(params.terminal_id, "terminal_id"),
+        terminalId,
         "--conflicting-session",
         requiredString(
-          params.conflicting_session_id,
+          conflictingSessionId,
           "conflicting_session_id"
         ),
         "--expected-session-revision",
         String(revision),
         "--expected-binding-token",
         requiredString(
-          params.expected_binding_token,
-          "expected_binding_token"
+          action.expected_binding_token,
+          "current internal conflicting binding authority"
         ),
         "--expected-terminal-token",
         requiredString(
-          params.expected_terminal_token,
-          "expected_terminal_token"
+          action.expected_terminal_token,
+          "current internal terminal authority"
         )
       ];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
@@ -275,27 +316,45 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_resume_thread",
     description:
-      "Resume one exact verified historical native thread in the same terminal. First call agent_knock_knock_list_resumable_threads, then pass its exact terminal_id and expected_binding_token plus one complete native_thread_id whose row says resumable=true and that same row's candidate_token. Never guess, truncate, or reuse IDs or tokens, and never send a resume slash command as ordinary task text. This creates or reactivates an AKK Session but creates no Turn.",
+      "Resume one exact verified historical native thread after explicit user intent. Pass only terminal_id and one complete native_thread_id from a resumable=true row; AKK refreshes binding and candidate evidence privately. This creates or reactivates an AKK Session but no Turn.",
     parameters: resumeThreadParameters,
     normalizeTurnIdentity: false,
     isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const terminalId = requiredString(params.terminal_id, "terminal_id");
+      const nativeThreadId = requiredString(
+        params.native_thread_id,
+        "native_thread_id"
+      );
+      const discovery = privateThreadDiscovery(api, terminalId);
+      const candidate = Array.isArray(discovery.threads)
+        ? discovery.threads.find((thread) =>
+            isRecord(thread) &&
+            thread.resumable === true &&
+            stringValue(thread.native_thread_id) === nativeThreadId
+          )
+        : undefined;
+      if (!isRecord(candidate)) {
+        throw new Error(
+          `native thread ${nativeThreadId} is not resumable in the current lifecycle snapshot`
+        );
+      }
       const args = [
         "resume-thread",
         "--terminal",
-        requiredString(params.terminal_id, "terminal_id"),
+        terminalId,
         "--native-thread",
-        requiredString(params.native_thread_id, "native_thread_id"),
+        nativeThreadId,
         "--expected-binding-token",
         requiredString(
-          params.expected_binding_token,
-          "expected_binding_token"
+          discovery.expected_binding_token,
+          "current internal lifecycle binding authority"
         ),
         "--candidate-token",
         requiredString(
-          params.candidate_token,
-          "candidate_token"
+          candidate.candidate_token,
+          "current internal resume candidate authority"
         )
       ];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
@@ -305,18 +364,29 @@ export function registerOpenClawCommands(
   });
 
   api.registerTool(
-    (_toolContext) => ({
+    (toolContext) => ({
       label: "AKK Status",
       name: "agent_knock_knock_status",
       description:
         "Inspect one exact AKK-managed Turn by its authoritative turn_id, one durable Terminal Watch by its authoritative watch_id, or use only a raw terminal row's own prefilled compatibility selector. These targets are mutually exclusive. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. Watch status describes observed external work and never claims AKK sent or adopted the task. AKK never starts a coding agent.",
       parameters: statusParameters,
       async execute(_toolCallId, params) {
-        const result = runCli(
-          api,
-          buildStatusCliArgs(api, isRecord(params) ? params : {})
-        );
-        return toolResult(result);
+        try {
+          const result = runCli(
+            api,
+            buildStatusCliArgs(api, isRecord(params) ? params : {})
+          );
+          const rendered = toolResult(result);
+          rememberDisplayedApprovalOffer(
+            api,
+            toolContext?.sessionKey,
+            toolContext?.sessionId,
+            result
+          );
+          return rendered;
+        } catch (error) {
+          throw modelFacingToolError(error);
+        }
       }
     }),
     { name: "agent_knock_knock_status", optional: true }
@@ -327,21 +397,25 @@ export function registerOpenClawCommands(
       label: "AKK Send",
       name: "agent_knock_knock_send",
       description:
-        "Start a new AKK Turn. A session_exact session-scoped send uses session_id only when the current list action prefills it; it preserves that Session's native context and never redirects to a thread the human selected later in the pane. Rollout-backed Codex uses terminal_follow_current terminal-scoped follow-current instead: preserve the exact list-prefilled full terminal selector and fresh expected_terminal_token, or preserve a selector explicitly named by the user. AKK pins the complete exact rollout inventory under the terminal lock, sends the request once, and binds only the unique exact rollout that accepts it. Never infer, copy, or reuse a listed token. Both target fields may be omitted only when AKK should require one unique eligible idle pane and derive the same fresh candidate authority. Never pass a turn id or selector as session_id. To answer an in-flight question, use agent_knock_knock_respond instead. For ordinary use omit monitoring timeouts unless the user explicitly asks to change them. timeoutSeconds is unsupported. AKK never starts a coding agent. This is asynchronous: after acceptance, yield and wait for the callback or a later explicit status request.",
+        "Start a new AKK Turn. Use session_id only for an advertised session_exact action, or terminal_id for an advertised terminal_follow_current action; omit both only when AKK should require one unique eligible idle pane. AKK derives all terminal freshness authority privately, revalidates the exact pane/process/context under lock, sends once, and binds only the unique accepting native thread. Never pass a Turn id as a destination. This is asynchronous: after acceptance, yield and wait for the callback or an explicit status request.",
       parameters: sendParameters,
       async execute(toolCallId, params) {
-        const result = await runSendRequest(
-          api,
-          isRecord(params) ? params : {},
-          toolContext,
-          terminalMessageIdForToolCall({
-            toolCallId,
-            sessionKey: toolContext?.sessionKey,
-            sessionId: toolContext?.sessionId,
-            toolName: "agent_knock_knock_send"
-          })
-        );
-        return toolResult(result, { submissionErrors: true });
+        try {
+          const result = await runSendRequest(
+            api,
+            isRecord(params) ? params : {},
+            toolContext,
+            terminalMessageIdForToolCall({
+              toolCallId,
+              sessionKey: toolContext?.sessionKey,
+              sessionId: toolContext?.sessionId,
+              toolName: "agent_knock_knock_send"
+            })
+          );
+          return toolResult(result, { submissionErrors: true });
+        } catch (error) {
+          throw modelFacingToolError(error);
+        }
       }
     }),
     { name: "agent_knock_knock_send", optional: true }
@@ -382,46 +456,12 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_approve",
     description:
-      "Manually approve a permission request only after the user reviews and explicitly confirms it. Managed approval uses exact turn_id. An unmanaged raw terminal, or a managed Codex pane whose current prompt has no usable AKK Turn owner, may be approved only through its own latest list-prefilled action; preserve its full conversation_id and expected_terminal_token exactly. Terminal-scoped approval never enters automatic approval, never changes managed Turn or Session binding, and has no durable dispatch receipt: if its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly. Claude Code uses no Hooks: this manual path accepts only an exact one-time Bash permission screen, then recaptures its short-lived evidence and process identity before sending Enter. Separately, trusted default-disabled plugin configuration can auto-approve an exact Claude command/workspace match without exposing policy control to the model. Hook-free durable completion is independently verified from the local Claude transcript.",
+      "Manually approve the current exact permission request only after the user reviews and explicitly confirms it. Use turn_id for a managed Turn or terminal_id for a separately advertised terminal-scoped approval. AKK privately refreshes the approval prompt and terminal authority, then the CLI recaptures the same prompt under lock before sending keys. Never retry an interrupted approval blindly. This tool cannot enable automatic approval.",
     parameters: approveParameters,
-    buildArgs: (params) => {
-      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      const args = ["approve"];
-      pushTurnTarget(args, params);
-      pushOptional(
-        args,
-        "--expected-approval-fingerprint",
-        requiredString(params.expected_approval_fingerprint, "expected_approval_fingerprint")
-      );
-      const expectedTerminalToken = Object.hasOwn(
-        params,
-        "expected_terminal_token"
-      )
-        ? requiredString(
-            params.expected_terminal_token,
-            "expected_terminal_token"
-          )
-        : undefined;
-      if (
-        expectedTerminalToken &&
-        !Object.hasOwn(params, "conversation_id")
-      ) {
-        throw new Error(
-          "expected_terminal_token requires the exact list-prefilled conversation_id"
-        );
-      }
-      pushOptional(
-        args,
-        "--expected-terminal-token",
-        expectedTerminalToken
-      );
-      pushOptional(
-        args,
-        "--store-dir",
-        resolvePluginStoreDir(config)
-      );
-      return args;
-    }
+    buildArgs: (params, toolContext) => buildPrivateApprovalArgs(api, params, {
+      sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
+      sessionId: requiredOpenClawSessionId(toolContext?.sessionId)
+    })
   });
 
   registerCliTool(api, {
@@ -468,13 +508,32 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_close",
     description:
-      "Close an AKK-managed turn record without terminating the shared terminal pane. For a list-prefilled raw-terminal recovery, the user must explicitly request it and provide the exact expected_message_id or expected_transition_id reported by that AKK list entry. When a verified human native-thread switch conflicts with one active Turn, only the complete nested handoff_decision take_over_current action is authoritative: it requires explicit user confirmation and its exact turn_id, supersede reason, and expected_handoff_token. When list exposes blocking_turns[], its complete nested recovery_action is likewise authoritative only after explicit user confirmation; copy it unchanged and refresh list after the Store-only close.",
+      "Close one managed Turn record without terminating the shared pane. Ordinary close uses turn_id. Orphan dispatch/lifecycle recovery may additionally use its exact expected_message_id or expected_transition_id. Human-context handoff uses the advertised turn_id plus reason=superseded_by_human_context_switch after explicit confirmation; AKK resolves the current handoff authority privately. Refresh list afterward.",
     parameters: closeParameters,
     isErrorResult: isBlockedTerminalDispatchResult,
-    buildArgs: (params) => {
+    buildArgs: (params, toolContext) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const args = ["close"];
       assertExclusiveRecoveryFence(params);
+      const handoffReason = stringValue(params.reason) ===
+        "superseded_by_human_context_switch";
+      const handoffAction = handoffReason
+        ? consumeDisplayedPrivateAction(api, {
+            sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
+            sessionId: requiredOpenClawSessionId(toolContext?.sessionId),
+            kind: OPENCLAW_HANDOFF_AUTHORITY_KIND,
+            target: {
+              type: "turn_id",
+              id: requiredString(params.turn_id, "turn_id")
+            },
+            tool: "agent_knock_knock_close",
+            matches: (argumentsValue) =>
+              stringValue(argumentsValue.turn_id) ===
+                stringValue(params.turn_id) &&
+              stringValue(argumentsValue.reason) ===
+                "superseded_by_human_context_switch"
+          })
+        : undefined;
       pushTurnTarget(args, params);
       pushOptional(args, "--reason", stringValue(params.reason));
       pushOptional(
@@ -490,7 +549,12 @@ export function registerOpenClawCommands(
       pushOptional(
         args,
         "--expected-handoff-token",
-        stringValue(params.expected_handoff_token)
+        handoffAction
+          ? requiredString(
+              handoffAction.expected_handoff_token,
+              "current internal handoff authority"
+            )
+          : undefined
       );
       pushOptional(
         args,
@@ -591,9 +655,6 @@ async function handleAkkCommand(
       };
     }
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-    if (parsed.action === "watch") {
-      return handleAkkWatchCommand(api, ctx, parsed, config);
-    }
     if (
       parsed.action === "list-resumable-threads" ||
       parsed.action === "new-thread" ||
@@ -607,9 +668,14 @@ async function handleAkkCommand(
         displayedResumeSnapshots
       );
     }
-    const args = buildAkkCommandCliArgs(parsed, config, {
-      sessionKey: ctx.sessionKey
-    });
+    const args = parsed.action === "approve"
+      ? buildPrivateApprovalArgs(api, { turn_id: parsed.turnId }, {
+          sessionKey: requiredOpenClawSessionKey(ctx.sessionKey),
+          sessionId: requiredOpenClawSessionId(ctx.sessionId)
+        })
+      : buildAkkCommandCliArgs(parsed, config, {
+          sessionKey: ctx.sessionKey
+        });
     if (!args) {
       return { text: akkUsageText(), isError: true };
     }
@@ -626,6 +692,8 @@ async function handleAkkCommand(
         };
       case "list":
         return { text: formatAkkListCommandResult(result) };
+      case "watch":
+        return { text: formatAkkWatchCommandResult(result) };
       case "unwatch":
         return { text: formatAkkUnwatchCommandResult(result) };
       case "status":
@@ -654,68 +722,12 @@ async function handleAkkCommand(
         };
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = modelFacingErrorMessage(error);
     return {
       text: `AKK command failed: ${message}`,
       isError: true
     };
   }
-}
-
-function handleAkkWatchCommand(api, ctx, parsed, config) {
-  const discoveryArgs = buildAkkCommandCliArgs(
-    { action: "list" },
-    config
-  );
-  if (!discoveryArgs) {
-    throw new Error("could not build Terminal Watch discovery command");
-  }
-  const discovery = runCli(api, discoveryArgs);
-  const terminal = Array.isArray(discovery.terminals)
-    ? discovery.terminals.find((entry) =>
-        isRecord(entry) && stringValue(entry.id) === parsed.terminalId
-      )
-    : undefined;
-  if (!isRecord(terminal)) {
-    throw new Error(
-      `terminal ${parsed.terminalId} is not present in the current AKK list`
-    );
-  }
-  const actions = isRecord(terminal.available_actions)
-    ? terminal.available_actions
-    : undefined;
-  const watchAction = isRecord(actions?.watch)
-    ? actions.watch
-    : undefined;
-  const actionArguments = isRecord(watchAction?.arguments)
-    ? watchAction.arguments
-    : undefined;
-  if (
-    watchAction?.tool !== "agent_knock_knock_watch" ||
-    stringValue(actionArguments?.terminal_id) !== parsed.terminalId
-  ) {
-    throw new Error(akkWatchUnavailableMessage(
-      terminal,
-      Array.isArray(discovery.terminal_watches)
-        ? discovery.terminal_watches
-        : [],
-      parsed.terminalId
-    ));
-  }
-  const expectedBindingToken = requiredString(
-    actionArguments?.expected_binding_token,
-    "expected_binding_token from the current watch action"
-  );
-  const mutationArgs = buildAkkCommandCliArgs(parsed, config, {
-    sessionKey: ctx.sessionKey,
-    expectedBindingToken
-  });
-  if (!mutationArgs) {
-    throw new Error("could not build Terminal Watch command");
-  }
-  return {
-    text: formatAkkWatchCommandResult(runCli(api, mutationArgs))
-  };
 }
 
 async function handleAkkLifecycleCommand(
@@ -740,20 +752,21 @@ async function handleAkkLifecycleCommand(
   if (
     parsed.action === "resume-thread" &&
     parsed.selection &&
-    ["number", "short-id", "snapshot-handle"].includes(
+    ["number", "short-id"].includes(
       parsed.selection.kind
     )
   ) {
+    requiredString(
+      ctx.sessionId,
+      "OpenClaw conversation incarnation is required for number or short-id Resume; run /akk threads again in the current conversation or use the complete UUID"
+    );
     const mutationArgs = buildAkkCommandCliArgs(parsed, config, {
       sessionKey: ctx.sessionKey,
       selectionScope,
-      selectionSnapshotId:
-        parsed.selection.kind === "snapshot-handle"
-          ? undefined
-          : currentDisplayedResumeSnapshotId(
-              displayedResumeSnapshots,
-              snapshotCacheKey
-            )
+      selectionSnapshotId: currentDisplayedResumeSnapshotId(
+        displayedResumeSnapshots,
+        snapshotCacheKey
+      )
     });
     if (!mutationArgs) {
       throw new Error("could not build snapshot-bound resume command");
@@ -1200,7 +1213,9 @@ function formatApproveCommandResult(result) {
     `session: ${sessionId}`,
     `turn: ${turnId}`,
     `status: ${conversation.status ?? "unknown"}`,
-    ...(result.reason ? [`reason: ${result.reason}`] : [])
+    ...(result.reason
+      ? [`reason: ${sanitizeAkkModelFacingDiagnosticText(String(result.reason))}`]
+      : [])
   ].join("\n");
 }
 
@@ -1216,7 +1231,10 @@ function formatCloseCommandResult(result) {
         ...(stringValue(result.transition_id)
           ? [`transition: ${stringValue(result.transition_id)}`]
           : []),
-        `reason: ${stringValue(result.reason) ?? "the recorded lifecycle outcome could not be verified"}`,
+        `reason: ${sanitizeAkkModelFacingDiagnosticText(
+          stringValue(result.reason) ??
+            "the recorded lifecycle outcome could not be verified"
+        )}`,
         "This terminal remains blocked. Do not retry or continue automatically; inspect the pane and use the fresh recovery action from /akk list."
       ].join("\n");
     }
@@ -1336,40 +1354,39 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
       "ordinary send type must be task; use agent_knock_knock_respond for an in-flight response"
     );
   }
-  if (Object.hasOwn(params, "session_id") && Object.hasOwn(params, "selector")) {
-    throw new Error("ordinary send accepts only one of session_id or selector");
+  if (Object.hasOwn(params, "session_id") && Object.hasOwn(params, "terminal_id")) {
+    throw new Error("ordinary send accepts only one of session_id or terminal_id");
   }
   const sessionId = Object.hasOwn(params, "session_id")
     ? authoritativeManagedId(params.session_id, "session_id")
     : undefined;
-  const selector = Object.hasOwn(params, "selector")
-    ? requiredString(params.selector, "selector")
+  const terminalId = Object.hasOwn(params, "terminal_id")
+    ? requiredString(params.terminal_id, "terminal_id")
     : undefined;
-  const expectedTerminalToken = Object.hasOwn(
-    params,
-    "expected_terminal_token"
-  )
-    ? requiredString(
-        params.expected_terminal_token,
-        "expected_terminal_token"
-      )
-    : undefined;
-  if (expectedTerminalToken && !selector) {
+  if (terminalId && !/^terminal:v[0-9]+:\S+$/u.test(terminalId)) {
     throw new Error(
-      "expected_terminal_token requires a terminal-scoped selector and cannot be used with session_id"
+      "terminal_id must be the exact full terminal identifier returned by AKK list"
     );
   }
-  if (
-    expectedTerminalToken &&
-    !/^terminal:v[0-9]+:/u.test(selector ?? "")
-  ) {
-    throw new Error(
-      "expected_terminal_token requires the exact full terminal selector prefilled by AKK list"
-    );
-  }
-  if (!sessionId && !selector) {
+  if (!sessionId && !terminalId) {
     return runDelegate(api, { ...params, messageId }, toolContext);
   }
+
+  const terminalAction = terminalId
+    ? privateActionArguments(api, {
+        tool: "agent_knock_knock_send",
+        terminalId,
+        matches: (argumentsValue) =>
+          stringValue(argumentsValue.selector) === terminalId ||
+          stringValue(argumentsValue.terminal_id) === terminalId
+      })
+    : undefined;
+  const expectedTerminalToken = terminalAction
+    ? requiredString(
+        terminalAction.expected_terminal_token,
+        "current internal terminal send authority"
+      )
+    : undefined;
 
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const openclawSession =
@@ -1381,7 +1398,7 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
   if (sessionId) {
     args.push("--session", sessionId);
   } else {
-    args.push("--conversation", requiredString(selector, "selector"));
+    args.push("--conversation", requiredString(terminalId, "terminal_id"));
   }
   pushOptional(
     args,
@@ -1434,17 +1451,492 @@ function toolResult(
   } = {}
 ) {
   const normalized = normalizeTurnIdentity ? withTurnIdentity(result) : result;
+  const modelFacing = sanitizeModelFacingValue(normalized);
   const submissionError = submissionErrors && isSubmissionError(normalized);
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(normalized, null, 2)
+        text: JSON.stringify(modelFacing, null, 2)
       }
     ],
-    details: normalized,
+    details: modelFacing,
     ...(submissionError || forceError ? { isError: true } : {})
   };
+}
+
+function privateList(api): Record<string, unknown> {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const args = ["list", "--reconcile"];
+  pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+  pushOptional(
+    args,
+    "--idle-timeout-minutes",
+    numberString(config.idleTimeoutMinutes)
+  );
+  return runCli(api, args);
+}
+
+function privateThreadDiscovery(
+  api,
+  terminalId: string
+): Record<string, unknown> {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const args = [
+    "list-resumable-threads",
+    "--terminal",
+    terminalId
+  ];
+  pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+  pushOptional(args, "--codex-home", stringValue(config.codexHome));
+  return runCli(api, args);
+}
+
+function privateTerminalActionArguments(
+  api,
+  terminalId: string,
+  tool: string
+): Record<string, unknown> {
+  return privateActionArguments(api, {
+    tool,
+    terminalId,
+    matches: (argumentsValue) =>
+      stringValue(argumentsValue.terminal_id) === terminalId
+  });
+}
+
+function privateActionArguments(
+  api,
+  input: {
+    tool: string;
+    terminalId?: string;
+    matches: (argumentsValue: Record<string, unknown>) => boolean;
+  }
+): Record<string, unknown> {
+  const result = privateList(api);
+  const terminals = input.terminalId
+    ? terminalRows(result).filter((terminal) =>
+        stringValue(terminal.id) === input.terminalId
+      )
+    : terminalRows(result);
+  if (input.terminalId && terminals.length !== 1) {
+    throw new Error(
+      `terminal ${input.terminalId} is not uniquely present in the current AKK list`
+    );
+  }
+  const candidates = (
+    input.tool === "agent_knock_knock_close"
+      ? authoritativeHandoffActionArguments(terminals)
+      : terminals.flatMap((terminal) =>
+          authoritativeTerminalActionArguments(terminal, input.tool)
+        )
+  ).filter(input.matches);
+  const uniqueCandidates = [...new Map(candidates.map((candidate) => [
+    JSON.stringify(candidate),
+    candidate
+  ])).values()];
+  if (uniqueCandidates.length !== 1) {
+    throw new Error(
+      `the current AKK list does not advertise one exact ${input.tool} action for the requested semantic target`
+    );
+  }
+  return uniqueCandidates[0]!;
+}
+
+function rememberDisplayedPrivateAuthorityOffers(
+  api: object,
+  sessionKeyValue: unknown,
+  sessionIdValue: unknown,
+  result: unknown
+): void {
+  const sessionKey = stringValue(sessionKeyValue);
+  const sessionId = stringValue(sessionIdValue);
+  if (!sessionKey || !sessionId || !isRecord(result)) return;
+  rememberDisplayedHandoffActions(api, sessionKey, sessionId, result);
+  rememberDisplayedReconcileActions(api, sessionKey, sessionId, result);
+}
+
+function rememberDisplayedHandoffActions(
+  api: object,
+  sessionKey: string,
+  sessionId: string,
+  result: Record<string, unknown>
+): void {
+  for (const args of uniqueArgumentObjects(
+    authoritativeHandoffActionArguments(terminalRows(result))
+  )) {
+    const turnId = stringValue(args.turn_id ?? args.conversation_id);
+    if (
+      !turnId ||
+      stringValue(args.reason) !== "superseded_by_human_context_switch" ||
+      !stringValue(args.expected_handoff_token)
+    ) {
+      continue;
+    }
+    rememberOpenClawPrivateAuthorityOffer(
+      api,
+      privateAuthorityOfferKey(
+        sessionKey,
+        sessionId,
+        OPENCLAW_HANDOFF_AUTHORITY_KIND,
+        { type: "turn_id", id: turnId }
+      ),
+      { args }
+    );
+  }
+}
+
+function rememberDisplayedReconcileActions(
+  api: object,
+  sessionKey: string,
+  sessionId: string,
+  result: Record<string, unknown>
+): void {
+  for (const args of uniqueArgumentObjects(
+    terminalRows(result).flatMap((terminal) =>
+      authoritativeTerminalActionArguments(
+        terminal,
+        "agent_knock_knock_reconcile_binding"
+      )
+    )
+  )) {
+    const terminalId = stringValue(args.terminal_id);
+    const conflictingSessionId = stringValue(args.conflicting_session_id);
+    if (!terminalId || !conflictingSessionId) continue;
+    rememberOpenClawPrivateAuthorityOffer(
+      api,
+      privateAuthorityOfferKey(
+        sessionKey,
+        sessionId,
+        OPENCLAW_RECONCILE_BINDING_AUTHORITY_KIND,
+        { type: "terminal_id", id: terminalId }
+      ),
+      { args }
+    );
+  }
+}
+
+function rememberDisplayedApprovalOffer(
+  api: object,
+  sessionKeyValue: unknown,
+  sessionIdValue: unknown,
+  result: unknown
+): void {
+  const sessionKey = stringValue(sessionKeyValue);
+  const sessionId = stringValue(sessionIdValue);
+  if (!sessionKey || !sessionId || !isRecord(result)) return;
+  const fingerprints = currentApprovalFingerprints(result);
+  if (fingerprints.length !== 1) return;
+  const target = approvalTargetFromStatus(result);
+  if (!target) return;
+  rememberOpenClawPrivateAuthorityOffer(
+    api,
+    openClawApprovalAuthorityOfferKey(sessionKey, sessionId, target),
+    { fingerprint: fingerprints[0]! }
+  );
+}
+
+function approvalTargetFromStatus(
+  result: Record<string, unknown>
+): OpenClawPrivateAuthorityTarget | undefined {
+  const conversationId = stringValue(result.conversation_id);
+  if (
+    stringValue(result.source) === "terminal_control" ||
+    conversationId?.startsWith("terminal:")
+  ) {
+    return conversationId
+      ? { type: "terminal_id", id: conversationId }
+      : undefined;
+  }
+  const { turnId } = publicTurnIdentity(result);
+  return turnId && turnId !== "unknown"
+    ? { type: "turn_id", id: turnId }
+    : undefined;
+}
+
+function uniqueArgumentObjects(
+  candidates: Record<string, unknown>[]
+): Record<string, unknown>[] {
+  return [...new Map(
+    candidates.map((args) => [
+      JSON.stringify(args),
+      args
+    ])
+  ).values()];
+}
+
+function privateAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  kind: string,
+  target: OpenClawPrivateAuthorityTarget
+): OpenClawPrivateAuthorityOfferKey {
+  return { sessionKey, sessionId, kind, target };
+}
+
+function consumeDisplayedPrivateAction(
+  api: object,
+  input: {
+    sessionKey: string;
+    sessionId: string;
+    kind: string;
+    target: OpenClawPrivateAuthorityTarget;
+    tool: string;
+    terminalId?: string;
+    matches: (argumentsValue: Record<string, unknown>) => boolean;
+  }
+): Record<string, unknown> {
+  const offered = consumeOpenClawPrivateAuthorityOffer(api, {
+    sessionKey: input.sessionKey,
+    sessionId: input.sessionId,
+    kind: input.kind,
+    target: input.target
+  });
+  if (!offered || !isRecord(offered.args)) {
+    throw new Error(
+      `${input.tool} requires a current action shown by AKK list in this OpenClaw session; refresh list, review it, and explicitly confirm again`
+    );
+  }
+  const current = privateActionArguments(api, input);
+  if (JSON.stringify(current) !== JSON.stringify(offered.args)) {
+    throw new Error(
+      `${input.tool} authority changed after it was shown; refresh AKK list, review the current action, and explicitly confirm again`
+    );
+  }
+  return current;
+}
+
+function terminalRows(result: Record<string, unknown>): Record<string, unknown>[] {
+  return Array.isArray(result.terminals)
+    ? result.terminals.filter(isRecord)
+    : [];
+}
+
+function authoritativeTerminalActionArguments(
+  terminal: Record<string, unknown>,
+  tool: string
+): Record<string, unknown>[] {
+  const availableActions = isRecord(terminal.available_actions)
+    ? terminal.available_actions
+    : undefined;
+  if (!availableActions) return [];
+  return Object.values(availableActions).flatMap((action) =>
+    isRecord(action) && action.tool === tool && isRecord(action.arguments)
+      ? [action.arguments]
+      : []
+  );
+}
+
+function authoritativeHandoffActionArguments(
+  terminals: Record<string, unknown>[]
+): Record<string, unknown>[] {
+  return terminals.flatMap((terminal) => {
+    const decision = isRecord(terminal.handoff_decision)
+      ? terminal.handoff_decision
+      : undefined;
+    const choices = isRecord(decision?.choices) ? decision.choices : undefined;
+    const takeOver = isRecord(choices?.take_over_current)
+      ? choices.take_over_current
+      : undefined;
+    const action = isRecord(takeOver?.action) ? takeOver.action : undefined;
+    return decision?.kind === "active_turn_requires_decision" &&
+        action?.tool === "agent_knock_knock_close" &&
+        action.requires_explicit_user_confirmation === true &&
+        isRecord(action.arguments)
+      ? [action.arguments]
+      : [];
+  });
+}
+
+function currentApprovalFingerprint(result: unknown): string {
+  const unique = isRecord(result) ? currentApprovalFingerprints(result) : [];
+  if (unique.length !== 1) {
+    throw new Error(
+      "the current status does not contain one exact approvable prompt; refresh status and ask the user to review it again"
+    );
+  }
+  return unique[0]!;
+}
+
+function buildPrivateApprovalArgs(
+  api,
+  params: Record<string, unknown>,
+  { sessionKey, sessionId }: { sessionKey: string; sessionId: string }
+): string[] {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const turnId = stringValue(params.turn_id);
+  const terminalId = stringValue(params.terminal_id);
+  if (Boolean(turnId) === Boolean(terminalId)) {
+    throw new Error("approve requires exactly one of turn_id or terminal_id");
+  }
+  const target: OpenClawPrivateAuthorityTarget = terminalId
+    ? { type: "terminal_id", id: terminalId }
+    : { type: "turn_id", id: requiredString(turnId, "turn_id") };
+  const offered = consumeOpenClawPrivateAuthorityOffer<
+    OpenClawPrivateAuthorityOfferPayload
+  >(api, openClawApprovalAuthorityOfferKey(sessionKey, sessionId, target));
+  const offeredFingerprint = stringValue(offered?.fingerprint) ??
+    (isRecord(offered?.args)
+      ? stringValue(offered.args.expected_approval_fingerprint)
+      : undefined);
+  if (!isExactApprovalFingerprint(offeredFingerprint)) {
+    throw new Error(
+      "approve requires a current approval request shown by agent_knock_knock_status in this OpenClaw conversation; refresh status, ask the user to review it, and explicitly confirm again"
+    );
+  }
+  const action = terminalId
+    ? privateActionArguments(api, {
+        tool: "agent_knock_knock_approve",
+        terminalId,
+        matches: (argumentsValue) => stringValue(
+          argumentsValue.terminal_id ?? argumentsValue.conversation_id
+        ) === terminalId
+      })
+    : undefined;
+  const statusArgs = ["status", "--reconcile"];
+  if (terminalId) {
+    statusArgs.push("--conversation", terminalId);
+  } else {
+    statusArgs.push("--turn", requiredString(turnId, "turn_id"));
+  }
+  pushOptional(statusArgs, "--store-dir", resolvePluginStoreDir(config));
+  const args = ["approve"];
+  if (terminalId) {
+    args.push("--conversation", terminalId);
+  } else {
+    args.push("--turn", requiredString(turnId, "turn_id"));
+  }
+  const currentFingerprint = currentApprovalFingerprint(runCli(api, statusArgs));
+  if (currentFingerprint !== offeredFingerprint) {
+    throw new Error(
+      "the approval request changed after it was shown; refresh AKK status, ask the user to review the current request, and explicitly confirm again"
+    );
+  }
+  args.push("--expected-approval-fingerprint", currentFingerprint);
+  if (terminalId) {
+    args.push(
+      "--expected-terminal-token",
+      requiredString(
+        action?.expected_terminal_token,
+        "current internal terminal approval authority"
+      )
+    );
+  }
+  pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+  return args;
+}
+
+function isExactApprovalFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function currentApprovalFingerprints(
+  result: Record<string, unknown>
+): string[] {
+  const terminalStatus = isRecord(result.terminal_status)
+    ? result.terminal_status
+    : undefined;
+  const states = [
+    isRecord(result.approval_state) ? result.approval_state : undefined,
+    isRecord(terminalStatus?.approval_state)
+      ? terminalStatus.approval_state
+      : undefined
+  ];
+  return [...new Set(states.flatMap((state) => {
+    const fingerprint = state?.approvable === true
+      ? stringValue(state.fingerprint)
+      : undefined;
+    return fingerprint && /^[a-f0-9]{64}$/u.test(fingerprint)
+      ? [fingerprint]
+      : [];
+  }))];
+}
+
+function sanitizeModelFacingValue(
+  value: unknown,
+  parentKey?: string,
+  path: readonly string[] = []
+): unknown {
+  if (Array.isArray(value)) {
+    if (parentKey === "missing_required") {
+      return value.filter((item) =>
+        typeof item !== "string" ||
+          !isAkkModelFacingPrivateAuthorityField(item)
+      );
+    }
+    return value.map((item, index) =>
+      sanitizeModelFacingValue(item, parentKey, [...path, String(index)])
+    );
+  }
+  if (!isRecord(value)) {
+    if (typeof value !== "string") {
+      return value;
+    }
+    if (isAkkModelFacingDiagnosticField(parentKey)) {
+      return sanitizeAkkModelFacingDiagnosticText(value);
+    }
+    return isLegacyAuthorityInstructionPath(path)
+      ? sanitizeAkkModelFacingLegacyAuthorityInstructionText(value)
+      : value;
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (
+      isAkkModelFacingPrivateAuthorityField(key) ||
+      key === "selection_snapshot" ||
+      key === "live_native_thread_id" ||
+      (key === "fingerprint" && parentKey === "approval_state")
+    ) {
+      continue;
+    }
+    output[key] = sanitizeModelFacingValue(item, key, [...path, key]);
+  }
+  if (output.tool === "agent_knock_knock_send" && isRecord(output.arguments)) {
+    const selector = stringValue(output.arguments.selector);
+    if (selector && /^terminal:v[0-9]+:\S+$/u.test(selector)) {
+      const { selector: _selector, ...argumentsValue } = output.arguments;
+      output.arguments = { ...argumentsValue, terminal_id: selector };
+    }
+  }
+  if (output.tool === "agent_knock_knock_approve" && isRecord(output.arguments)) {
+    const conversationId = stringValue(output.arguments.conversation_id);
+    if (conversationId && /^terminal:v[0-9]+:\S+$/u.test(conversationId)) {
+      const { conversation_id: _conversationId, ...argumentsValue } =
+        output.arguments;
+      output.arguments = { ...argumentsValue, terminal_id: conversationId };
+    }
+    const approvalArguments = isRecord(output.arguments)
+      ? output.arguments
+      : {};
+    const terminalId = stringValue(approvalArguments.terminal_id);
+    output.before_call = {
+      tool: "agent_knock_knock_status",
+      arguments: terminalId
+        ? { conversation_id: terminalId }
+        : { ...approvalArguments },
+      use:
+        "Show the current approval request to the user. After explicit confirmation, call approve with only this semantic target; AKK revalidates the prompt privately."
+    };
+    delete output.missing_required;
+  }
+  return output;
+}
+
+function isLegacyAuthorityInstructionPath(path: readonly string[]): boolean {
+  const normalized = path.map(normalizeAkkModelFacingFieldName);
+  if (normalized.at(-1) !== "body") return false;
+  const callbackMessageBody = normalized.slice(-3).join(".") ===
+    "callbackdelivery.message.body";
+  return callbackMessageBody || normalized.includes("recentevents");
+}
+
+function modelFacingToolError(error: unknown): Error {
+  return new Error(modelFacingErrorMessage(error));
+}
+
+function modelFacingErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return sanitizeAkkModelFacingDiagnosticText(message);
 }
 
 function isBlockedTerminalDispatchResult(result: unknown): boolean {
@@ -1785,20 +2277,33 @@ function registerCliTool(
       description,
       parameters,
       async execute(toolCallId, params) {
-        const result = runCli(
-          api,
-          buildArgs(
-            isRecord(params) ? params : {},
-            toolContext,
-            toolCallId
-          )
-        );
-        return toolResult(result, {
-          submissionErrors: name === "agent_knock_knock_respond",
-          normalizeTurnIdentity,
-          forceError:
-            typeof isErrorResult === "function" && isErrorResult(result) === true
-        });
+        try {
+          const result = runCli(
+            api,
+            buildArgs(
+              isRecord(params) ? params : {},
+              toolContext,
+              toolCallId
+            )
+          );
+          const rendered = toolResult(result, {
+            submissionErrors: name === "agent_knock_knock_respond",
+            normalizeTurnIdentity,
+            forceError:
+              typeof isErrorResult === "function" && isErrorResult(result) === true
+          });
+          if (name === "agent_knock_knock_list") {
+            rememberDisplayedPrivateAuthorityOffers(
+              api,
+              toolContext?.sessionKey,
+              toolContext?.sessionId,
+              result
+            );
+          }
+          return rendered;
+        } catch (error) {
+          throw modelFacingToolError(error);
+        }
       }
     }),
     { name, optional: true }
@@ -1983,33 +2488,22 @@ function authoritativeManagedId(value, name) {
 function assertExclusiveRecoveryFence(params) {
   const expectedMessageId = stringValue(params.expected_message_id);
   const expectedTransitionId = stringValue(params.expected_transition_id);
-  const expectedHandoffToken = stringValue(params.expected_handoff_token);
-  const closeFenceCount = [
-    expectedMessageId,
-    expectedTransitionId,
-    expectedHandoffToken
-  ].filter(Boolean).length;
+  const closeFenceCount = [expectedMessageId, expectedTransitionId]
+    .filter(Boolean).length;
   if (closeFenceCount > 1) {
     throw new Error(
-      "close accepts only one of expected_message_id, expected_transition_id, or expected_handoff_token"
+      "close accepts only one of expected_message_id or expected_transition_id"
     );
   }
   const handoffReason = stringValue(params.reason) ===
     "superseded_by_human_context_switch";
-  if (expectedHandoffToken) {
-    if (!stringValue(params.turn_id) || stringValue(params.conversation_id)) {
-      throw new Error(
-        "expected_handoff_token requires the exact managed turn_id from the advertised handoff_decision action"
-      );
-    }
-    if (!handoffReason) {
-      throw new Error(
-        "expected_handoff_token requires reason=superseded_by_human_context_switch"
-      );
-    }
-  } else if (handoffReason) {
+  if (handoffReason && (
+    !stringValue(params.turn_id) ||
+    stringValue(params.conversation_id) ||
+    closeFenceCount > 0
+  )) {
     throw new Error(
-      "reason=superseded_by_human_context_switch requires expected_handoff_token from the advertised handoff_decision action"
+      "human-context handoff requires only the exact managed turn_id and supersede reason"
     );
   }
 }
@@ -2039,27 +2533,17 @@ function requiredString(value, name) {
   return value;
 }
 
-function requiredWatchBindingToken(value) {
-  if (typeof value !== "string") {
-    throw new Error("expected_binding_token is required");
-  }
-  if (/^[a-f0-9]{64}$/u.test(value)) {
-    return value;
-  }
-  const characters = Array.from(value);
-  const invalidCharacterCount = characters.filter(
-    (character) => !/^[a-f0-9]$/u.test(character)
-  ).length;
-  throw new Error(
-    "expected_binding_token is invalid: received " +
-    `${characters.length} characters; invalid-character count outside ` +
-    `lowercase ASCII hexadecimal [a-f0-9]: ${invalidCharacterCount}. ` +
-    "It must be exactly " +
-    "64 lowercase ASCII hexadecimal characters. Do not retry " +
-    "agent_knock_knock_watch with the same arguments. Refresh " +
-    "agent_knock_knock_list and forward the current terminal's entire " +
-    "available_actions.watch.arguments object verbatim; do not retype, " +
-    "shorten, summarize, or use ... or …."
+function requiredOpenClawSessionKey(value: unknown): string {
+  return requiredString(
+    value,
+    "OpenClaw session identity for this confirmed action"
+  );
+}
+
+function requiredOpenClawSessionId(value: unknown): string {
+  return requiredString(
+    value,
+    "OpenClaw conversation incarnation for this confirmed action"
   );
 }
 

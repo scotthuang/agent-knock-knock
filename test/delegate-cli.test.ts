@@ -713,20 +713,38 @@ function codexNativeIdentityFixture(options: {
 }): Record<string, unknown> {
   const sessionId =
     `00000000-0000-4000-8000-${String(options.codexPid).padStart(12, "0")}`;
+  const rolloutPath = path.join(
+    options.workspace,
+    ".codex",
+    "sessions",
+    `${sessionId}.jsonl`
+  );
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(
+    rolloutPath,
+    `${JSON.stringify({
+      timestamp: "2026-08-21T00:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: sessionId,
+        cwd: options.workspace,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: "0.148.0"
+      }
+    })}\n`,
+    { mode: 0o600 }
+  );
+  const rolloutStat = fs.statSync(rolloutPath);
   return {
     sessionId,
     processUuid: `codex-process-${options.codexPid}`,
     processBirth: `fixture-process-birth-${options.codexPid}`,
     rollout: {
       fd: "17",
-      device: `fixture-device-${options.codexPid}`,
-      inode: String(100_000 + options.codexPid),
-      path: path.join(
-        options.workspace,
-        ".codex",
-        "sessions",
-        `${sessionId}.jsonl`
-      )
+      device: String(rolloutStat.dev),
+      inode: String(rolloutStat.ino),
+      path: rolloutPath
     },
     evidence: "static_exact_fixture"
   };

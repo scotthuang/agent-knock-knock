@@ -40,6 +40,14 @@ export interface AutoApprovalAttempt {
   monitor_pid?: number | null;
 }
 
+export interface AutoApprovalCallbackAuthority {
+  conversationId: string;
+  messageId: string;
+  openclawSession: string;
+  sessionId: string;
+  turnId: string;
+}
+
 export function approvalCandidateFromMessage(message: unknown): ApprovalCandidate | undefined {
   if (!isRecord(message)) {
     return undefined;
@@ -154,12 +162,14 @@ export function autoApprovalCliArgs({
   statePath,
   candidate,
   decision,
-  policy
+  policy,
+  callbackAuthority
 }: {
   statePath: string;
   candidate: ApprovalCandidate;
   decision: ApprovalPolicyDecision;
   policy: unknown;
+  callbackAuthority?: AutoApprovalCallbackAuthority;
 }): string[] | undefined {
   const serializedPolicy = JSON.stringify(policy);
   if (
@@ -182,7 +192,8 @@ export function autoApprovalCliArgs({
     "--policy-fingerprint",
     decision.policyFingerprint,
     "--auto-approval-policy-json",
-    serializedPolicy
+    serializedPolicy,
+    ...autoApprovalCallbackAuthorityCliArgs(callbackAuthority)
   ];
 }
 
@@ -190,11 +201,13 @@ export function attemptAutoApproval({
   message,
   policy,
   statePath,
+  callbackAuthority,
   execute
 }: {
   message: unknown;
   policy: unknown;
   statePath?: string;
+  callbackAuthority?: AutoApprovalCallbackAuthority;
   execute: (args: string[]) => Record<string, any>;
 }): AutoApprovalAttempt | undefined {
   const candidate = approvalCandidateFromMessage(message);
@@ -209,13 +222,20 @@ export function attemptAutoApproval({
   });
   const cliArgs = statePath
     ? decision.action === "approve"
-      ? autoApprovalCliArgs({ statePath, candidate, decision, policy })
+      ? autoApprovalCliArgs({
+          statePath,
+          candidate,
+          decision,
+          policy,
+          callbackAuthority
+        })
       : deferredDecision
         ? deferredAutoApprovalCliArgs({
             statePath,
             candidate,
             policy,
-            policyFingerprint: deferredDecision.policyFingerprint
+            policyFingerprint: deferredDecision.policyFingerprint,
+            callbackAuthority
           })
         : undefined
     : undefined;
@@ -305,12 +325,14 @@ function deferredAutoApprovalCliArgs({
   statePath,
   candidate,
   policy,
-  policyFingerprint
+  policyFingerprint,
+  callbackAuthority
 }: {
   statePath: string;
   candidate: ApprovalCandidate;
   policy: unknown;
   policyFingerprint: string;
+  callbackAuthority?: AutoApprovalCallbackAuthority;
 }): string[] | undefined {
   const serializedPolicy = JSON.stringify(policy);
   if (!statePath || typeof serializedPolicy !== "string") {
@@ -326,7 +348,28 @@ function deferredAutoApprovalCliArgs({
     "--policy-fingerprint",
     policyFingerprint,
     "--auto-approval-policy-json",
-    serializedPolicy
+    serializedPolicy,
+    ...autoApprovalCallbackAuthorityCliArgs(callbackAuthority)
+  ];
+}
+
+function autoApprovalCallbackAuthorityCliArgs(
+  authority: AutoApprovalCallbackAuthority | undefined
+): string[] {
+  if (!authority) {
+    return [];
+  }
+  return [
+    "--expected-callback-conversation-id",
+    authority.conversationId,
+    "--expected-callback-session-id",
+    authority.sessionId,
+    "--expected-callback-turn-id",
+    authority.turnId,
+    "--expected-callback-message-id",
+    authority.messageId,
+    "--expected-callback-openclaw-session",
+    authority.openclawSession
   ];
 }
 

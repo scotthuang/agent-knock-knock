@@ -483,8 +483,17 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       terminal_target: "codex-work:0.1",
       decision_mode: "keys"
     });
-    assert.match(monitoredParsed.message.body, new RegExp(`AKK approve ${conversationId}`));
-    assert.match(monitoredParsed.message.body, new RegExp(`AKK cancel ${conversationId}`));
+    assert.equal(
+      monitoredParsed.message.body.match(
+        new RegExp(`- turn_id: ${conversationId}`, "gu")
+      )?.length,
+      2,
+      "approve and cancel instructions must use only the semantic Turn id"
+    );
+    assert.doesNotMatch(
+      monitoredParsed.message.body,
+      /AKK (?:approve|cancel)|expected_approval_fingerprint|conversation_id:/u
+    );
     assert.match(monitoredParsed.message.body, /agent_knock_knock_approve/);
     assert.match(monitoredParsed.message.body, /agent_knock_knock_cancel/);
     assert.match(monitoredParsed.message.body, /\$ npm install/);
@@ -497,7 +506,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     assert.equal(gatewayParams.message.type, "question");
     assert.equal(
       gatewayParams.message.metadata.approve_command,
-      `AKK approve ${conversationId} --expected-approval-fingerprint ${monitoredParsed.message.metadata.approval_fingerprint}`
+      `AKK approve ${conversationId}`
     );
     assert.equal(gatewayParams.message.metadata.deny_command, `AKK cancel ${conversationId}`);
     assert.equal(gatewayParams.message.metadata.approval_candidate.command, "npm install");

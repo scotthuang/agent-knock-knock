@@ -22,9 +22,8 @@ test("Terminal Watch callback uses one deterministic chat.send delivery", () => 
     }
   });
 
-  const result = adapter.deliver({
+  adapter.deliver({
     watchId: "watch:v1:00000000-0000-4000-8000-000000000001",
-    notificationId: "completion:1",
     idempotencyKey: "agent-knock-knock:terminal-watch:watch-1:completion-1",
     event: "completed",
     agent: "codex",
@@ -35,11 +34,6 @@ test("Terminal Watch callback uses one deterministic chat.send delivery", () => 
     completionText: "Implemented the requested change."
   });
 
-  assert.deepEqual(result, {
-    runId:
-      "agent-knock-knock:terminal-watch:watch-1:completion-1",
-    status: "started"
-  });
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.command, "/opt/openclaw");
   assert.deepEqual(calls[0]?.args.slice(0, 3), [
@@ -73,7 +67,6 @@ test("Terminal Watch approval callback forbids automatic approval", () => {
   });
   adapter.deliver({
     watchId: "watch:v1:00000000-0000-4000-8000-000000000002",
-    notificationId: "approval:sha256:test",
     idempotencyKey: "agent-knock-knock:terminal-watch:watch-2:approval-1",
     event: "approval_required",
     agent: "claude",
@@ -93,7 +86,6 @@ test("Terminal Watch callback rejects malformed or mismatched acknowledgements",
   assert.throws(
     () => malformed.deliver({
       watchId: "watch:v1:00000000-0000-4000-8000-000000000003",
-      notificationId: "failure:1",
       idempotencyKey: "agent-knock-knock:terminal-watch:watch-3:failure-1",
       event: "failed",
       agent: "codex",
@@ -113,14 +105,13 @@ test("Terminal Watch callback rejects malformed or mismatched acknowledgements",
   assert.throws(
     () => mismatch.deliver({
       watchId: "watch:v1:00000000-0000-4000-8000-000000000004",
-      notificationId: "timeout:1",
       idempotencyKey: "agent-knock-knock:terminal-watch:watch-4:timeout-1",
       event: "timed_out",
       agent: "claude",
       terminalId: "terminal:v1:tmux:%4",
       openclawSession: "agent:main:main"
     }),
-    /does not match its idempotency key/u
+    /does not match/u
   );
 
   const rejected = createTerminalWatchCallbackCliAdapter({
@@ -139,7 +130,6 @@ test("Terminal Watch callback rejects malformed or mismatched acknowledgements",
   assert.throws(
     () => rejected.deliver({
       watchId: "terminal-watch-00000000-0000-4000-8000-000000000005",
-      notificationId: "terminal-watch-notification-error",
       idempotencyKey:
         "agent-knock-knock:terminal-watch:watch-5:cancelled-1",
       event: "cancelled",

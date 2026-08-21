@@ -308,7 +308,7 @@ test("a submitted waiting owner in Store A blocks Store B before Session creatio
   }
 });
 
-test("a stale pane ledger still preserves same-UUID Store authority", async () => {
+test("a stale pane ledger is history even when it names the same native UUID", async () => {
   const fixture = createOwnershipFixture({ includeOwnerProcess: false });
   try {
     const staleStore = path.join(fixture.root, "stale-pane-store-a");
@@ -320,10 +320,11 @@ test("a stale pane ledger still preserves same-UUID Store authority", async () =
       "submitted"
     );
 
-    const sent = await fixture.send("the native UUID remains owned across pane restart");
-    assert.equal(sent.status, 1, String(sent.stderr || sent.stdout));
-    assert.match(String(sent.stderr), /authoritative in another Store/u);
-    assert.equal(listManagedSessions(fixture.storeDir).length, 0);
+    const sent = await fixture.send("treat the replacement pane as new work");
+    assert.equal(sent.status, 0, String(sent.stderr || sent.stdout));
+    assert.equal(JSON.parse(String(sent.stdout)).delivered, true);
+    assert.equal(listManagedSessions(staleStore).length, 0);
+    assert.equal(listManagedSessions(fixture.storeDir).length, 1);
   } finally {
     fixture.cleanup();
   }

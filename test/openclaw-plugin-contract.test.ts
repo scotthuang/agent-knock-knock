@@ -11,6 +11,30 @@ import plugin, {
   createOpenClawPluginForTest
 } from "../src/openclaw-plugin.js";
 import * as openclawPluginRuntime from "../src/openclaw-plugin.js";
+import {
+  approveParameters,
+  closeParameters,
+  nativeInspectParameters,
+  newThreadParameters,
+  reconcileBindingParameters,
+  resumeThreadParameters,
+  sendParameters,
+  unwatchParameters,
+  watchParameters
+} from "../src/openclaw-plugin-schemas.js";
+import { registerOpenClawCallbackGateway } from
+  "../src/openclaw-plugin-callback-adapter.js";
+import { isAkkModelFacingPrivateAuthorityField } from
+  "../src/openclaw-plugin-helpers.js";
+import {
+  OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT,
+  OPENCLAW_PRIVATE_AUTHORITY_OFFER_TTL_MS,
+  consumeOpenClawPrivateAuthorityOffer,
+  openClawApprovalAuthorityOfferKey,
+  peekOpenClawPrivateAuthorityOffer,
+  rememberOpenClawPrivateAuthorityOffer
+} from "../src/openclaw-private-authority-offers.js";
+import { createConversation, createMessage } from "../src/protocol.js";
 
 type Manifest = {
   description?: string;
@@ -51,6 +75,10 @@ type ToolDefinition = {
     toolCallId: string,
     params: Record<string, unknown>
   ) => Promise<{
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
     details?: Record<string, unknown>;
     isError?: boolean;
   }>;
@@ -87,6 +115,399 @@ type GatewayMethodHandler = (context: {
     }
   ): void;
 }) => Promise<void>;
+
+function assertNoModelOpaqueAuthority(
+  value: unknown,
+  pathLabel = "$"
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      assertNoModelOpaqueAuthority(item, `${pathLabel}[${index}]`)
+    );
+    return;
+  }
+  if (!isRecord(value)) {
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    const forbidden = isAkkModelFacingPrivateAuthorityField(key);
+    assert.equal(
+      forbidden,
+      false,
+      `${pathLabel}.${key} must not cross the model-facing contract`
+    );
+    assertNoModelOpaqueAuthority(item, `${pathLabel}.${key}`);
+  }
+}
+
+function assertModelToolResultHasNoOpaqueAuthority(
+  result: Awaited<ReturnType<NonNullable<ToolDefinition["execute"]>>> | undefined
+): void {
+  assert.ok(result, "the model-facing tool result must exist");
+  assertNoModelOpaqueAuthority(result.details, "$.details");
+  const textBlocks = result.content?.filter((item) => item.type === "text") ?? [];
+  assert.ok(textBlocks.length > 0, "the model-facing tool result must contain text");
+  for (const [index, block] of textBlocks.entries()) {
+    assertNoModelOpaqueAuthority(
+      JSON.parse(String(block.text ?? "null")),
+      `$.content[${index}]`
+    );
+  }
+}
+
+test("OpenClaw model-facing mutation schemas contain only semantic targets", () => {
+  const mutationSchemas = {
+    send: sendParameters,
+    native_inspect: nativeInspectParameters,
+    new_thread: newThreadParameters,
+    reconcile_binding: reconcileBindingParameters,
+    resume_thread: resumeThreadParameters,
+    approve: approveParameters,
+    close: closeParameters,
+    watch: watchParameters,
+    unwatch: unwatchParameters
+  };
+  assertNoModelOpaqueAuthority(mutationSchemas, "$.mutationSchemas");
+  assert.deepEqual(sendParameters.not, {
+    required: ["session_id", "terminal_id"]
+  });
+  assert.deepEqual(nativeInspectParameters.required, [
+    "terminal_id",
+    "inspection"
+  ]);
+  assert.deepEqual(newThreadParameters.required, ["terminal_id"]);
+  assert.deepEqual(reconcileBindingParameters.required, [
+    "terminal_id",
+    "conflicting_session_id"
+  ]);
+  assert.deepEqual(resumeThreadParameters.required, [
+    "terminal_id",
+    "native_thread_id"
+  ]);
+  assert.deepEqual(approveParameters.anyOf, [
+    { required: ["turn_id"] },
+    { required: ["terminal_id"] }
+  ]);
+  assert.deepEqual(approveParameters.not, {
+    required: ["turn_id", "terminal_id"]
+  });
+  assert.deepEqual(watchParameters.required, ["terminal_id"]);
+  assert.deepEqual(unwatchParameters.required, ["watch_id"]);
+  assert.ok(closeParameters.properties.expected_message_id);
+  assert.ok(closeParameters.properties.expected_transition_id);
+});
+
+test("private authority offers are isolated, bounded, merged, expiring, and single-use", () => {
+  const api = {};
+  const otherApi = {};
+  const key = openClawApprovalAuthorityOfferKey(
+    "agent:main:offers",
+    "openclaw-conversation-a",
+    {
+    type: "turn_id",
+    id: "turn-offer"
+    }
+  );
+  const nowMs = 1_000;
+
+  rememberOpenClawPrivateAuthorityOffer(api, key, {
+    args: { terminal_id: "terminal:one", keep: true }
+  }, nowMs);
+  rememberOpenClawPrivateAuthorityOffer(api, key, {
+    args: { terminal_id: "terminal:two" },
+    fingerprint: "a".repeat(64)
+  }, nowMs + 1);
+  assert.equal(
+    peekOpenClawPrivateAuthorityOffer(api, key, nowMs + 2),
+    undefined,
+    "changed authority must invalidate rather than replace a displayed offer"
+  );
+  rememberOpenClawPrivateAuthorityOffer(api, key, {
+    args: { terminal_id: "terminal:two" },
+    fingerprint: "a".repeat(64)
+  }, nowMs + 2);
+  assert.equal(
+    peekOpenClawPrivateAuthorityOffer(api, key, nowMs + 3),
+    undefined,
+    "passive rediscovery must not reactivate changed authority"
+  );
+  assert.equal(
+    consumeOpenClawPrivateAuthorityOffer(api, key, nowMs + 3),
+    undefined,
+    "the first rejected mutation attempt clears the invalidation tombstone"
+  );
+  rememberOpenClawPrivateAuthorityOffer(api, key, {
+    args: { terminal_id: "terminal:two", keep: true },
+    fingerprint: "a".repeat(64)
+  }, nowMs + 4);
+
+  const merged = peekOpenClawPrivateAuthorityOffer(api, key, nowMs + 5);
+  assert.deepEqual(merged, {
+    args: { terminal_id: "terminal:two", keep: true },
+    fingerprint: "a".repeat(64)
+  });
+  assert.equal(Object.isFrozen(merged), true);
+  assert.equal(Object.isFrozen(merged?.args), true);
+  assert.equal(peekOpenClawPrivateAuthorityOffer(otherApi, key, nowMs + 5), undefined);
+  assert.equal(
+    peekOpenClawPrivateAuthorityOffer(
+      api,
+      openClawApprovalAuthorityOfferKey(
+        "agent:main:offers",
+        "openclaw-conversation-b",
+        { type: "turn_id", id: "turn-offer" }
+      ),
+      nowMs + 5
+    ),
+    undefined,
+    "a /new or /reset conversation incarnation cannot consume an old offer"
+  );
+  assert.deepEqual(
+    consumeOpenClawPrivateAuthorityOffer(api, key, nowMs + 5),
+    merged
+  );
+  assert.equal(consumeOpenClawPrivateAuthorityOffer(api, key, nowMs + 5), undefined);
+
+  rememberOpenClawPrivateAuthorityOffer(api, key, { fingerprint: "b" }, nowMs);
+  assert.equal(
+    peekOpenClawPrivateAuthorityOffer(
+      api,
+      key,
+      nowMs + OPENCLAW_PRIVATE_AUTHORITY_OFFER_TTL_MS
+    ),
+    undefined
+  );
+
+  for (let index = 0; index <= OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT; index += 1) {
+    rememberOpenClawPrivateAuthorityOffer(
+      api,
+      openClawApprovalAuthorityOfferKey(
+        "agent:main:offers",
+        "openclaw-conversation-a",
+        {
+        type: "turn_id",
+        id: `turn-${index}`
+        }
+      ),
+      { sequence: index },
+      nowMs + index
+    );
+  }
+  assert.equal(
+    peekOpenClawPrivateAuthorityOffer(
+      api,
+      openClawApprovalAuthorityOfferKey(
+        "agent:main:offers",
+        "openclaw-conversation-a",
+        {
+        type: "turn_id",
+        id: "turn-0"
+        }
+      ),
+      nowMs + OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT + 1
+    ),
+    undefined
+  );
+  assert.deepEqual(
+    peekOpenClawPrivateAuthorityOffer(
+      api,
+      openClawApprovalAuthorityOfferKey(
+        "agent:main:offers",
+        "openclaw-conversation-a",
+        {
+        type: "turn_id",
+        id: `turn-${OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT}`
+        }
+      ),
+      nowMs + OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT + 1
+    ),
+    { sequence: OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT }
+  );
+});
+
+test("approval callbacks preserve review text but require incarnation-bound status", async () => {
+  let callbackHandler: GatewayMethodHandler | undefined;
+  let capturedInjection: Record<string, unknown> | undefined;
+  let response: { ok: boolean; result?: Record<string, any> } | undefined;
+  const fingerprint = "c".repeat(64);
+  const reviewedCommit = "e".repeat(64);
+  const conversation = {
+    ...createConversation({
+      userRequest: "approval callback",
+      sessionId: "session-approval",
+      turnId: "turn-approval",
+      openclawSession: "agent:main:approval",
+      executorKind: "codex",
+      executorSession: "codex-approval"
+    }),
+    native_session_takeover: {
+      terminal_bridge_approval: { fingerprint }
+    }
+  };
+  const message = createMessage({
+    conversation,
+    id: "message-approval",
+    from: "codex",
+    to: "openclaw",
+    type: "question",
+    requiresResponse: true,
+    body: [
+      "Codex is waiting for approval.",
+      "Ask the user to review the request.",
+      `Command: inspect token_fingerprint.ts at commit ${reviewedCommit}`,
+      "expected_session_revision: 7",
+      "--expected-binding-token business-approval-example",
+      "If the user approves, call `agent_knock_knock_approve` with:",
+      `- expected_approval_fingerprint: ${fingerprint}`,
+      `Equivalent user command: \`AKK approve turn-approval --expected-approval-fingerprint ${fingerprint}\``
+    ].join("\n"),
+    metadata: {
+      source: "terminal_bridge",
+      reason: "approval_required",
+      approval_fingerprint: fingerprint,
+      approval_candidate: { fingerprint },
+      terminal_status: {
+        approval_state: { fingerprint }
+      }
+    }
+  });
+  const api: Record<string, any> = {
+    pluginConfig: {},
+    logger: { info() {}, warn() {} },
+    session: {
+      workflow: {
+        async enqueueNextTurnInjection(injection: Record<string, unknown>) {
+          capturedInjection = injection;
+          return {
+            enqueued: true,
+            id: "approval-injection",
+            sessionKey: injection.sessionKey
+          };
+        }
+      }
+    },
+    registerGatewayMethod(method: string, handler: GatewayMethodHandler) {
+      if (method === "agent-knock-knock.callback") callbackHandler = handler;
+    }
+  };
+  registerOpenClawCallbackGateway(api);
+
+  await callbackHandler?.({
+    params: {
+      sessionKey: "agent:main:approval",
+      conversation,
+      message
+    },
+    respond(ok, result) {
+      response = {
+        ok,
+        ...(isRecord(result) ? { result } : {})
+      };
+    }
+  });
+
+  assert.equal(response?.ok, true);
+  const key = openClawApprovalAuthorityOfferKey(
+    "agent:main:approval",
+    "openclaw-conversation-a",
+    { type: "turn_id", id: "turn-approval" }
+  );
+  assert.equal(peekOpenClawPrivateAuthorityOffer(api, key), undefined);
+  const visible = [
+    String(capturedInjection?.text ?? ""),
+    String((response?.result?.chat_send as Record<string, unknown>)?.message ?? "")
+  ].join("\n");
+  assert.match(visible, /agent_knock_knock_status/u);
+  assert.match(visible, /Do not call approve/u);
+  assert.match(visible, /\{"turn_id":"turn-approval"\}/u);
+  assert.match(
+    visible,
+    new RegExp(`token_fingerprint\\.ts at commit ${reviewedCommit}`, "u")
+  );
+  assert.match(visible, /expected_session_revision: 7/u);
+  assert.match(
+    visible,
+    /--expected-binding-token business-approval-example/u
+  );
+  assert.doesNotMatch(visible, /agent_knock_knock_respond/u);
+  assert.doesNotMatch(
+    visible,
+    /expected_approval_fingerprint|--expected-approval-fingerprint/iu
+  );
+  assert.doesNotMatch(visible, new RegExp(fingerprint, "u"));
+});
+
+test("approval callbacks fail closed to status when private authority is incomplete", async () => {
+  let callbackHandler: GatewayMethodHandler | undefined;
+  let capturedText = "";
+  let responseOk = false;
+  const conversation = createConversation({
+    userRequest: "incomplete approval callback",
+    sessionId: "session-incomplete",
+    turnId: "turn-incomplete",
+    openclawSession: "agent:main:incomplete",
+    executorKind: "codex",
+    executorSession: "codex-incomplete"
+  });
+  const message = createMessage({
+    conversation,
+    id: "message-incomplete",
+    from: "codex",
+    to: "openclaw",
+    type: "question",
+    requiresResponse: true,
+    body: "Codex is waiting for approval.",
+    metadata: {
+      source: "terminal_bridge",
+      reason: "approval_required",
+      approval_fingerprint: "d".repeat(64)
+    }
+  });
+  const api: Record<string, any> = {
+    pluginConfig: {},
+    logger: { info() {}, warn() {} },
+    session: {
+      workflow: {
+        async enqueueNextTurnInjection(injection: Record<string, unknown>) {
+          capturedText = String(injection.text ?? "");
+          return { enqueued: true };
+        }
+      }
+    },
+    registerGatewayMethod(method: string, handler: GatewayMethodHandler) {
+      if (method === "agent-knock-knock.callback") callbackHandler = handler;
+    }
+  };
+  registerOpenClawCallbackGateway(api);
+
+  await callbackHandler?.({
+    params: {
+      sessionKey: "agent:main:incomplete",
+      conversation,
+      message
+    },
+    respond(ok) {
+      responseOk = ok;
+    }
+  });
+
+  assert.equal(responseOk, true);
+  assert.match(capturedText, /agent_knock_knock_status/u);
+  assert.match(capturedText, /\{"turn_id":"turn-incomplete"\}/u);
+  assert.match(capturedText, /Do not call approve yet/u);
+  assert.doesNotMatch(capturedText, /fingerprint|token|--expected-/iu);
+  assert.equal(
+    peekOpenClawPrivateAuthorityOffer(
+      api,
+      openClawApprovalAuthorityOfferKey(
+        "agent:main:incomplete",
+        "openclaw-conversation-a",
+        { type: "turn_id", id: "turn-incomplete" }
+      )
+    ),
+    undefined
+  );
+});
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -134,6 +555,13 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     }
   ).register(api);
 
+  for (const [name, definition] of toolDefinitions) {
+    assertNoModelOpaqueAuthority(
+      definition.parameters,
+      `$.registeredTools.${name}.parameters`
+    );
+  }
+
   const contractedTools = requiredStringArray(
     manifest.contracts?.tools,
     "contracts.tools"
@@ -171,7 +599,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "b2b22e475342c8a4c07f08c7541b7b76d3840755039813e26696808c9454bd8e"
+    "4c58a5fbd06da36d11c6cfcf5e7a8a36fbf197ffe4dc2d96852fb772e82bcc21"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -187,12 +615,12 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   const listTool = toolDefinitions.get("agent_knock_knock_list");
   assert.ok(listTool);
   assert.match(listTool.description ?? "", /terminals\[\]/u);
-  assert.match(listTool.description ?? "", /managed\.current_turn/u);
-  assert.match(listTool.description ?? "", /respond targets the exact in-flight turn/u);
-  assert.match(listTool.description ?? "", /session-scoped send/u);
-  assert.match(listTool.description ?? "", /terminal-scoped follow-current/u);
-  assert.match(listTool.description ?? "", /handoff_state as adoptable or blocked/u);
-  assert.match(listTool.description ?? "", /low-level conflict recovery/u);
+  assert.match(listTool.description ?? "", /terminal_watches\[\]/u);
+  assert.match(listTool.description ?? "", /semantic IDs/u);
+  assert.match(listTool.description ?? "", /session_exact.*session_id/u);
+  assert.match(listTool.description ?? "", /terminal_follow_current.*terminal_id/u);
+  assert.match(listTool.description ?? "", /managed controls use turn_id/u);
+  assert.match(listTool.description ?? "", /freshness authority private/u);
   assert.doesNotMatch(listTool.description ?? "", /follow_up/u);
   assert.doesNotMatch(
     listTool.description ?? "",
@@ -241,6 +669,390 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   ).configSchema?.properties ?? {};
   assert.equal("defaultAgent" in configProperties, false);
   assert.equal("workspace" in configProperties, false);
+});
+
+test("OpenClaw list, threads, and status results expose semantic ids only", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-plugin-model-boundary-")
+  );
+  const fakeCli = path.join(tempDir, "model-boundary.cjs");
+  const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";
+  const tools = new Map<string, ToolDefinition>();
+  const fixtures = {
+    list: {
+      expected_session_revision: 7,
+      session_revisions: [6, 7],
+      binding_ids: ["private-binding-id"],
+      terminal_binding_id: "private-terminal-binding-id",
+      terminal_binding_generation: 5,
+      binding_token: "private-binding-token",
+      lifecycle_binding_token: "private-lifecycle-token",
+      recovery: {
+        expected_message_id: "message-semantic-id",
+        expected_transition_id: "transition-semantic-id"
+      },
+      terminals: [{
+        id: terminalId,
+        handoff_decision: {
+          live_native_thread_id: "private-handoff-live-native-id"
+        },
+        approval_state: {
+          approvable: true,
+          fingerprint: "private-approval-fingerprint"
+        },
+        available_actions: {
+          send: {
+            tool: "agent_knock_knock_send",
+            arguments: {
+              selector: terminalId,
+              expected_terminal_token: "private-terminal-token",
+              request: "continue"
+            }
+          },
+          approve: {
+            tool: "agent_knock_knock_approve",
+            arguments: {
+              conversation_id: terminalId,
+              expected_approval_fingerprint: "private-approval-fingerprint",
+              expected_terminal_token: "private-terminal-token"
+            }
+          },
+          close: {
+            tool: "agent_knock_knock_close",
+            arguments: {
+              turn_id: "turn-handoff",
+              reason: "superseded_by_human_context_switch",
+              expected_handoff_token: "private-handoff-token"
+            }
+          }
+        }
+      }]
+    },
+    "list-resumable-threads": {
+      terminal_id: terminalId,
+      expected_binding_token: "private-binding-token",
+      selection_snapshot: {
+        snapshot_id: "private-selection-snapshot",
+        expected_session_revision: 9
+      },
+      threads: [{
+        native_thread_id: "22222222-2222-4222-8222-222222222222",
+        resumable: true,
+        candidate_token: "private-candidate-token",
+        selection_handle: "private-selection-handle"
+      }]
+    },
+    status: {
+      conversation_id: "turn-status",
+      session_id: "session-status",
+      turn_id: "turn-status",
+      conversation: {
+        conversation_id: "turn-status",
+        session_id: "session-status",
+        turn_id: "turn-status",
+        callback_delivery: {
+          message: {
+            body:
+              `Approval authority\nexpected_approval_fingerprint: ${"f".repeat(64)}\n` +
+              "inspect token_fingerprint.ts after approval\n" +
+              "expected_session_revision: 7\n" +
+              "--expected-binding-token business-callback-example"
+          }
+        },
+        native_session_takeover: {
+          codex_rollout_acceptance_anchor: {
+            candidate_rollouts: [{
+              native_thread_id: "private-anchor-thread",
+              rollout: {
+                path: "/private/rollout.jsonl",
+                device: 1,
+                inode: 2
+              },
+              offset_bytes: 123
+            }]
+          },
+          terminal_bridge_submission: {
+            acceptance_evidence: {
+              requestHash: "c".repeat(64),
+              acceptanceId: "private-acceptance-id"
+            }
+          }
+        }
+      },
+      status: "waiting_for_agent",
+      bookkeeping_warning: "expected revision 5, actual revision 6",
+      request:
+        `inspect token_fingerprint.ts at commit ${"1".repeat(64)}; ` +
+        "tokens, fingerprints, revisions, and CAS are ordinary request text\n" +
+        "expected_session_revision: 7\n" +
+        "--expected-binding-token business-request-example",
+      completion:
+        `completed token_fingerprint.ts at commit ${"2".repeat(64)}\n` +
+        "expected_session_revision: 7\n" +
+        "--expected-binding-token business-completion-example",
+      terminal_screen:
+        `screen mentions token_fingerprint.ts at commit ${"3".repeat(64)}\n` +
+        "expected_session_revision: 7\n" +
+        "--expected-binding-token business-screen-example",
+      recent_events: [{
+        body:
+          `Equivalent command: --expected-approval-fingerprint ${"f".repeat(64)}\n` +
+          "ordinary token wording remains visible\n" +
+          "expected_session_revision: 7\n" +
+          "--expected-binding-token business-event-example"
+      }],
+      approval_state: {
+        approvable: true,
+        fingerprint: "private-status-fingerprint",
+        policy_evidence: {
+          command_sha256: "d".repeat(64)
+        },
+        request_detail:
+          "inspect token_fingerprint.ts at commit eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n" +
+          "expected_session_revision: 7\n" +
+          "--expected-binding-token business-request-detail-example"
+      },
+      nested: {
+        reason: "expected revision 7, actual revision 8",
+        stalledReason: "expected revision 9, actual revision 10",
+        expected_binding_token: "private-status-token",
+        expected_session_revision: 11,
+        expectedSessionRevision: 12,
+        "expected-session-revision": 13,
+        terminal_binding_id: "private-status-binding-id",
+        terminal_binding_generation: 6,
+        terminalBindingGeneration: 7,
+        nonce: "private-status-nonce",
+        terminal_bridge_request_hash: "a".repeat(64),
+        approval_snapshot_digest: "b".repeat(64),
+        screen: {
+          approval: {
+            policyEvidence: {
+              commandSha256: "e".repeat(64)
+            }
+          }
+        },
+        missing_required: [
+          "expected_terminal_token",
+          "expected_message_id"
+        ],
+        expected_message_id: "message-status-id",
+        expected_transition_id: "transition-status-id"
+      }
+    }
+  };
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      [
+        `const fixtures = ${JSON.stringify(fixtures)};`,
+        `const action = process.argv[2];`,
+        `if (action === "renew") { process.stderr.write("expected revision 7, actual revision 8; terminal token ${"f".repeat(64)}"); process.exit(9); }`,
+        `process.stdout.write(JSON.stringify(fixtures[action] ?? {}));`
+      ].join("\n"),
+      "utf8"
+    );
+    (
+      createOpenClawPluginForTest(fakeCli) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: {},
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand() {},
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        const definition = typeof tool === "function"
+          ? tool({ sessionKey: "agent:test:model-boundary" } as never)
+          : tool;
+        if (options?.name) {
+          tools.set(options.name, definition);
+        }
+      }
+    });
+
+    const listed = await tools.get("agent_knock_knock_list")?.execute?.(
+      "list-model-boundary",
+      {}
+    );
+    const threads = await tools
+      .get("agent_knock_knock_list_resumable_threads")
+      ?.execute?.("threads-model-boundary", { terminal_id: terminalId });
+    const status = await tools.get("agent_knock_knock_status")?.execute?.(
+      "status-model-boundary",
+      { turn_id: "turn-status" }
+    );
+
+    for (const result of [listed, threads, status]) {
+      assertModelToolResultHasNoOpaqueAuthority(result);
+      const encoded = JSON.stringify(result);
+      for (const privateValue of [
+        "private-binding-token",
+        "private-terminal-token",
+        "private-candidate-token",
+        "private-handoff-token",
+        "private-approval-fingerprint",
+        "private-status-fingerprint"
+      ]) {
+        assert.equal(encoded.includes(privateValue), false, privateValue);
+      }
+    }
+
+    const listDetails = listed?.details ?? {};
+    const terminals = Array.isArray(listDetails.terminals)
+      ? listDetails.terminals
+      : [];
+    const terminal = isRecord(terminals[0]) ? terminals[0] : {};
+    const actions = isRecord(terminal.available_actions)
+      ? terminal.available_actions
+      : {};
+    const send = isRecord(actions.send) && isRecord(actions.send.arguments)
+      ? actions.send.arguments
+      : {};
+    const approve = isRecord(actions.approve) &&
+        isRecord(actions.approve.arguments)
+      ? actions.approve.arguments
+      : {};
+    assert.equal(send.terminal_id, terminalId);
+    assert.equal(Object.hasOwn(send, "selector"), false);
+    assert.equal(approve.terminal_id, terminalId);
+    assert.equal(Object.hasOwn(approve, "conversation_id"), false);
+    const approveBeforeCall = isRecord(actions.approve) &&
+        isRecord(actions.approve.before_call)
+      ? actions.approve.before_call
+      : {};
+    assert.deepEqual(approveBeforeCall.arguments, {
+      conversation_id: terminalId
+    });
+    assert.equal(Object.hasOwn(listDetails, "session_revisions"), false);
+    assert.equal(Object.hasOwn(listDetails, "binding_ids"), false);
+    assert.equal(Object.hasOwn(listDetails, "terminal_binding_id"), false);
+    assert.equal(
+      Object.hasOwn(listDetails, "terminal_binding_generation"),
+      false
+    );
+    assert.equal(
+      isRecord(terminal.handoff_decision) &&
+        Object.hasOwn(terminal.handoff_decision, "live_native_thread_id"),
+      false
+    );
+    assert.equal(
+      isRecord(listDetails.recovery)
+        ? listDetails.recovery.expected_message_id
+        : undefined,
+      "message-semantic-id"
+    );
+    assert.equal(
+      isRecord(listDetails.recovery)
+        ? listDetails.recovery.expected_transition_id
+        : undefined,
+      "transition-semantic-id"
+    );
+    const statusNested = isRecord(status?.details?.nested)
+      ? status.details.nested
+      : {};
+    assert.equal(
+      isRecord(status?.details?.conversation) &&
+        Object.hasOwn(status.details.conversation, "native_session_takeover"),
+      false
+    );
+    assert.equal(Object.hasOwn(statusNested, "terminal_binding_id"), false);
+    assert.equal(
+      Object.hasOwn(statusNested, "terminal_binding_generation"),
+      false
+    );
+    assert.equal(
+      isRecord(status?.details?.approval_state)
+        ? status.details.approval_state.request_detail
+        : undefined,
+      "inspect token_fingerprint.ts at commit eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n" +
+        "expected_session_revision: 7\n" +
+        "--expected-binding-token business-request-detail-example"
+    );
+    const callbackBody = isRecord(status?.details?.conversation) &&
+        isRecord(status.details.conversation.callback_delivery) &&
+        isRecord(status.details.conversation.callback_delivery.message)
+      ? String(status.details.conversation.callback_delivery.message.body)
+      : "";
+    assert.match(callbackBody, /inspect token_fingerprint\.ts after approval/u);
+    assert.match(callbackBody, /expected_session_revision: 7/u);
+    assert.match(
+      callbackBody,
+      /--expected-binding-token business-callback-example/u
+    );
+    assert.doesNotMatch(
+      callbackBody,
+      /expected_approval_fingerprint|[f]{64}/u
+    );
+    const recentEventBody = Array.isArray(status?.details?.recent_events) &&
+        isRecord(status.details.recent_events[0])
+      ? String(status.details.recent_events[0].body)
+      : "";
+    assert.match(recentEventBody, /ordinary token wording remains visible/u);
+    assert.match(recentEventBody, /expected_session_revision: 7/u);
+    assert.match(
+      recentEventBody,
+      /--expected-binding-token business-event-example/u
+    );
+    assert.doesNotMatch(
+      recentEventBody,
+      /expected-approval-fingerprint|[f]{64}/u
+    );
+    assert.match(String(statusNested.reason), /private authority changed/u);
+    assert.doesNotMatch(String(statusNested.reason), /revision|7|8/iu);
+    assert.match(
+      String(status?.details?.bookkeeping_warning),
+      /private authority changed/u
+    );
+    assert.match(String(statusNested.stalledReason), /private authority changed/u);
+    assert.equal(Object.hasOwn(statusNested, "expectedSessionRevision"), false);
+    assert.equal(Object.hasOwn(statusNested, "expected-session-revision"), false);
+    assert.equal(Object.hasOwn(statusNested, "terminalBindingGeneration"), false);
+    assert.equal(Object.hasOwn(statusNested, "nonce"), false);
+    assert.equal(
+      status?.details?.request,
+      `inspect token_fingerprint.ts at commit ${"1".repeat(64)}; ` +
+        "tokens, fingerprints, revisions, and CAS are ordinary request text\n" +
+        "expected_session_revision: 7\n" +
+        "--expected-binding-token business-request-example"
+    );
+    assert.equal(
+      status?.details?.completion,
+      `completed token_fingerprint.ts at commit ${"2".repeat(64)}\n` +
+        "expected_session_revision: 7\n" +
+        "--expected-binding-token business-completion-example"
+    );
+    assert.equal(
+      status?.details?.terminal_screen,
+      `screen mentions token_fingerprint.ts at commit ${"3".repeat(64)}\n` +
+        "expected_session_revision: 7\n" +
+        "--expected-binding-token business-screen-example"
+    );
+    assert.deepEqual(statusNested.missing_required, ["expected_message_id"]);
+    assert.equal(statusNested.expected_transition_id, "transition-status-id");
+    await assert.rejects(
+      () => tools.get("agent_knock_knock_renew")!.execute!(
+        "renew-private-error",
+        { turn_id: "turn-status" }
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /private authority changed/u);
+        assert.doesNotMatch(
+          error.message,
+          /token|fingerprint|revision|[a-f0-9]{64}/iu
+        );
+        return true;
+      }
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("OpenClaw split authorities retain approval, lifecycle, and supervisor contracts", () => {
@@ -306,9 +1118,21 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   );
   assert.match(
     schemasSource,
-    /export const approveParameters =[\s\S]*?required: \["expected_approval_fingerprint"\][\s\S]*?anyOf: \[[\s\S]*?required: \["turn_id"\][\s\S]*?required: \["conversation_id"\]/u
+    /export const approveParameters =[\s\S]*?not: \{ required: \["turn_id", "terminal_id"\] \}[\s\S]*?anyOf: \[[\s\S]*?required: \["turn_id"\][\s\S]*?required: \["terminal_id"\]/u
   );
-  assert.match(commandSource, /--expected-approval-fingerprint/u);
+  for (const privateCliFence of [
+    "--expected-approval-fingerprint",
+    "--expected-binding-token",
+    "--expected-terminal-token",
+    "--candidate-token",
+    "--expected-handoff-token"
+  ]) {
+    assert.match(
+      commandSource,
+      new RegExp(privateCliFence, "u"),
+      `${privateCliFence} remains an adapter-private CLI fence`
+    );
+  }
   assert.match(commandSource, /name: "agent_knock_knock_renew"/u);
   assert.match(commandSource, /name: "agent_knock_knock_watch"/u);
   assert.match(commandSource, /name: "agent_knock_knock_unwatch"/u);
@@ -319,7 +1143,27 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.match(commandSource, /name: "agent_knock_knock_resume_thread"/u);
   assert.match(
     commandSource,
-    /Managed approval uses exact turn_id[\s\S]*?Claude Code uses no Hooks:[\s\S]*?exact one-time Bash permission screen[\s\S]*?trusted default-disabled plugin configuration[\s\S]*?auto-approve[\s\S]*?durable completion[\s\S]*?local Claude transcript/u
+    /rememberDisplayedPrivateAuthorityOffers[\s\S]*?rememberDisplayedHandoffActions[\s\S]*?rememberDisplayedReconcileActions/u
+  );
+  assert.match(
+    commandSource,
+    /authoritativeHandoffActionArguments[\s\S]*?handoff_decision[\s\S]*?take_over_current/u
+  );
+  assert.match(
+    commandSource,
+    /authoritativeTerminalActionArguments[\s\S]*?available_actions/u
+  );
+  assert.doesNotMatch(
+    commandSource,
+    /collectToolActionArguments|collectApprovalFingerprints/u
+  );
+  assert.match(
+    commandSource,
+    /consumeDisplayedPrivateAction[\s\S]*?authority changed after it was shown/u
+  );
+  assert.match(
+    commandSource,
+    /buildPrivateApprovalArgs[\s\S]*?consumeOpenClawPrivateAuthorityOffer[\s\S]*?currentFingerprint !== offeredFingerprint/u
   );
   assert.doesNotMatch(
     commandSource,
@@ -336,15 +1180,11 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   );
   assert.match(
     supervisorSource,
-    /const args = \["reconcile-watches", "--reason", reason\][\s\S]*?monitor supervision deferred after error[\s\S]*?watchReconciliationArgs\("watch_supervision"\)[\s\S]*?Terminal Watch supervision deferred after error/u
+    /const args = \["reconcile-watches"\][\s\S]*?monitor supervision deferred after error[\s\S]*?watchReconciliationArgs\(\)[\s\S]*?Terminal Watch supervision deferred after error/u
   );
   assert.match(
     supervisorSource,
-    /const reconcileStartup = async[\s\S]*?runCliAsync\([\s\S]*?reconciliationArgs\("startup_reconciliation"\)[\s\S]*?runCliAsync\([\s\S]*?watchReconciliationArgs\("startup_reconciliation"\)[\s\S]*?inFlight = reconcileStartup\(\)/u
-  );
-  assert.match(
-    terminalListSource,
-    /watch:[\s\S]*?session\.agent !== "codex" \|\| Boolean\(nativeAgentIdentity\?\.rollout\)/u
+    /const reconcileStartup = async[\s\S]*?runCliAsync\([\s\S]*?reconciliationArgs\("startup_reconciliation"\)[\s\S]*?runCliAsync\([\s\S]*?watchReconciliationArgs\(\)[\s\S]*?inFlight = reconcileStartup\(\)/u
   );
   assert.match(
     terminalListSource,
@@ -473,11 +1313,19 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
         `const fs = require("node:fs");`,
         `const args = process.argv.slice(2);`,
         `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
-        `process.stdout.write(JSON.stringify({`,
+        `const terminalId = ${JSON.stringify(terminalId)};`,
+        `const result = args[0] === "list" ? { terminals: [{`,
+        `  id: terminalId, available_actions: { native_inspect: {`,
+        `    tool: "agent_knock_knock_native_inspect",`,
+        `    arguments: { terminal_id: terminalId, expected_binding_token: "fresh-inspection-token" }`,
+        `  } }`,
+        `}] } : {`,
         `  status: "observed", inspection: "status", agent: "codex",`,
-        `  agent_version: "0.146.1", terminal_id: ${JSON.stringify(terminalId)},`,
+        `  agent_version: "0.146.1", terminal_id: terminalId,`,
+        `  expected_binding_token: "must-not-reach-model",`,
         `  turn_created: false, session_created: false`,
-        `}));`
+        `};`,
+        `process.stdout.write(JSON.stringify(result));`
       ].join("\n"),
       "utf8"
     );
@@ -510,13 +1358,11 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
     assert.ok(inspectTool);
     assert.deepEqual(inspectTool.parameters?.required, [
       "terminal_id",
-      "inspection",
-      "expected_binding_token"
+      "inspection"
     ]);
     assert.equal(inspectTool.parameters?.additionalProperties, false);
     const properties = inspectTool.parameters?.properties ?? {};
     assert.deepEqual(sorted(Object.keys(properties)), [
-      "expected_binding_token",
       "inspection",
       "terminal_id"
     ]);
@@ -530,28 +1376,32 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
       : {};
     assert.match(String(terminalSchema.pattern ?? ""), /terminal:v/u);
     assert.match(
-      inspectTool.description ?? "",
-      /Codex 0\.146\.0\/0\.146\.1\/0\.147\.0/u
+      String(inspectionSchema.description ?? ""),
+      /Codex 0\.146\.0\/0\.146\.1\/0\.147\.0\/0\.148\.0/u
+    );
+    assert.match(
+      String(inspectionSchema.description ?? ""),
+      /Claude Code 2\.1\.218\/2\.1\.226\/2\.1\.237/u
     );
     assert.match(
       inspectTool.description ?? "",
-      /Claude Code 2\.1\.218\/2\.1\.226/u
+      /creates no AKK Session, Turn, receipt, monitor, or callback/u
     );
-    assert.match(inspectTool.description ?? "", /safely dismissed/u);
-    assert.match(inspectTool.description ?? "", /creates no AKK Session, Turn/u);
-    assert.match(inspectTool.description ?? "", /agent_knock_knock_status is different/u);
     assert.match(inspectTool.description ?? "", /arbitrary slash commands/iu);
-    assert.match(inspectTool.description ?? "", /usage-limit reset/u);
 
     const result = await inspectTool.execute?.("native-status", {
       terminal_id: terminalId,
-      inspection: "status",
-      expected_binding_token: "fresh-inspection-token"
+      inspection: "status"
     });
     assert.equal(result?.details?.status, "observed");
     assert.equal(result?.details?.turn_created, false);
+    assertModelToolResultHasNoOpaqueAuthority(result);
+    const calls = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
     assert.deepEqual(
-      JSON.parse(fs.readFileSync(callsPath, "utf8").trim()),
+      calls[1],
       [
         "native-inspect",
         "--terminal",
@@ -570,24 +1420,16 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
     await assert.rejects(
       () => inspectTool.execute!("unsupported-inspection", {
         terminal_id: terminalId,
-        inspection: "usage",
-        expected_binding_token: "fresh-inspection-token"
+        inspection: "usage"
       }),
       /inspection must be status/u
-    );
-    await assert.rejects(
-      () => inspectTool.execute!("missing-inspection-token", {
-        terminal_id: terminalId,
-        inspection: "status"
-      }),
-      /expected_binding_token is required/u
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("OpenClaw native-thread tools keep explicit CAS while slash commands refresh it internally", async () => {
+test("OpenClaw native-thread tools keep CLI fences private while semantic calls refresh them", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-plugin-native-thread-")
   );
@@ -620,7 +1462,12 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
         `const terminalId = ${JSON.stringify(terminalId)};`,
         `const currentThreadId = ${JSON.stringify(currentThreadId)};`,
         `const resumeThreadId = ${JSON.stringify(resumeThreadId)};`,
-        `const result = action === "list-resumable-threads" ? {`,
+        `const result = action === "list" ? { terminals: [{`,
+        `  id: terminalId, available_actions: {`,
+        `    new_thread: { tool: "agent_knock_knock_new_thread", arguments: { terminal_id: terminalId, expected_binding_token: "fresh-binding-token" } },`,
+        `    reconcile_binding: { tool: "agent_knock_knock_reconcile_binding", arguments: { terminal_id: terminalId, conflicting_session_id: "session-conflict", expected_session_revision: 7, expected_binding_token: "fresh-conflict-binding-token", expected_terminal_token: "fresh-terminal-token" } }`,
+        `  }`,
+        `}] } : action === "list-resumable-threads" ? {`,
         `  terminal_id: terminalId,`,
         `  current_session_id: "session-current",`,
         `  current_native_thread_id: currentThreadId,`,
@@ -629,7 +1476,7 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
         `} : failureStatus && (action === "new-thread" || action === "resume-thread") ? {`,
         `  status: failureStatus, operation: action === "new-thread" ? "new_thread" : "resume_thread", terminal_id: terminalId,`,
         `  transition_id: "transition-recovery-required", do_not_retry: true, turn_created: false,`,
-        `  reason: "lifecycle outcome requires exact recovery"`,
+        `  reason: "expected revision 7, actual revision 8"`,
         `} : action === "new-thread" ? {`,
         `  status: "committed", operation: "new_thread", terminal_id: terminalId,`,
         `  previous_session_id: "session-current", session_id: "session-new",`,
@@ -668,7 +1515,12 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
         tool: ToolDefinition | ToolFactory,
         options?: { name?: string }
       ) {
-        const definition = typeof tool === "function" ? tool({}) : tool;
+        const definition = typeof tool === "function"
+          ? tool({
+              sessionKey: "agent:test:lifecycle",
+              sessionId: "openclaw-conversation-a"
+            } as never)
+          : tool;
         if (options?.name) {
           tools.set(options.name, definition);
         }
@@ -676,30 +1528,24 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
     });
 
     const listTool = tools.get("agent_knock_knock_list_resumable_threads");
+    const terminalListTool = tools.get("agent_knock_knock_list");
     const newTool = tools.get("agent_knock_knock_new_thread");
     const reconcileTool = tools.get("agent_knock_knock_reconcile_binding");
     const resumeTool = tools.get("agent_knock_knock_resume_thread");
     assert.ok(listTool);
+    assert.ok(terminalListTool);
     assert.ok(newTool);
     assert.ok(reconcileTool);
     assert.ok(resumeTool);
     assert.deepEqual(listTool.parameters?.required, ["terminal_id"]);
-    assert.deepEqual(newTool.parameters?.required, [
-      "terminal_id",
-      "expected_binding_token"
-    ]);
+    assert.deepEqual(newTool.parameters?.required, ["terminal_id"]);
     assert.deepEqual(resumeTool.parameters?.required, [
       "terminal_id",
-      "native_thread_id",
-      "expected_binding_token",
-      "candidate_token"
+      "native_thread_id"
     ]);
     assert.deepEqual(reconcileTool.parameters?.required, [
       "terminal_id",
-      "conflicting_session_id",
-      "expected_session_revision",
-      "expected_binding_token",
-      "expected_terminal_token"
+      "conflicting_session_id"
     ]);
     assert.equal(listTool.parameters?.additionalProperties, false);
     assert.equal(newTool.parameters?.additionalProperties, false);
@@ -718,47 +1564,41 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       );
     }
     assert.match(newTool.description ?? "", /no Turn/u);
-    assert.match(reconcileTool.description ?? "", /explicitly requests/u);
+    assert.match(reconcileTool.description ?? "", /explicit user confirmation/u);
     assert.match(reconcileTool.description ?? "", /creates no Turn/u);
     assert.match(resumeTool.description ?? "", /resumable=true/u);
 
     const listed = await listTool.execute?.("list-threads", {
       terminal_id: terminalId
     });
-    assert.equal(listed?.details?.expected_binding_token, "fresh-binding-token");
+    assertModelToolResultHasNoOpaqueAuthority(listed);
+    assert.equal(
+      Object.hasOwn(listed?.details ?? {}, "expected_binding_token"),
+      false
+    );
     const created = await newTool.execute?.("new-thread", {
-      terminal_id: terminalId,
-      expected_binding_token: "tool-binding-token"
+      terminal_id: terminalId
     });
     assert.equal(created?.details?.session_id, "session-new");
     assert.equal(Object.hasOwn(created?.details ?? {}, "turn_id"), false);
     const resumed = await resumeTool.execute?.("resume-thread", {
       terminal_id: terminalId,
-      native_thread_id: resumeThreadId,
-      expected_binding_token: "tool-resume-token",
-      candidate_token: "tool-candidate-token"
+      native_thread_id: resumeThreadId
     });
     assert.equal(resumed?.details?.session_id, "session-resumed");
     assert.equal(Object.hasOwn(resumed?.details ?? {}, "turn_id"), false);
+    const terminalList = await terminalListTool.execute?.(
+      "list-reconcile-authority",
+      {}
+    );
+    assertModelToolResultHasNoOpaqueAuthority(terminalList);
     const reconciled = await reconcileTool.execute?.("reconcile-binding", {
       terminal_id: terminalId,
-      conflicting_session_id: "session-conflict",
-      expected_session_revision: 7,
-      expected_binding_token: "tool-conflict-binding-token",
-      expected_terminal_token: "tool-live-terminal-token"
+      conflicting_session_id: "session-conflict"
     });
     assert.equal(reconciled?.details?.status, "reconciled");
     assert.equal(reconciled?.details?.terminal_input_sent, false);
     assert.equal(reconciled?.details?.turn_created, false);
-    await assert.rejects(
-      () => resumeTool.execute!("resume-without-candidate-token", {
-        terminal_id: terminalId,
-        native_thread_id: resumeThreadId,
-        expected_binding_token: "tool-resume-token"
-      }),
-      /candidate_token is required/u
-    );
-
     const threadsSlash = await command?.handler?.({
       args: `threads ${terminalId}`,
       sessionKey: "agent:test:lifecycle"
@@ -798,29 +1638,29 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       "--codex-home",
       "/private/custom-codex"
     ]);
-    assert.deepEqual(calls[1]?.slice(0, 7), [
-      "new-thread",
-      "--terminal",
-      terminalId,
-      "--expected-binding-token",
-      "tool-binding-token",
-      "--store-dir",
-      "/private/akk-store"
-    ]);
-    assert.deepEqual(calls[2]?.slice(0, 11), [
-      "resume-thread",
-      "--terminal",
-      terminalId,
-      "--native-thread",
-      resumeThreadId,
-      "--expected-binding-token",
-      "tool-resume-token",
-      "--candidate-token",
-      "tool-candidate-token",
-      "--store-dir",
-      "/private/akk-store"
-    ]);
-    assert.deepEqual(calls[3]?.slice(0, 15), [
+    const newThreadCalls = calls.filter(([action]) => action === "new-thread");
+    const resumeThreadCalls = calls.filter(
+      ([action]) => action === "resume-thread"
+    );
+    const reconcileCalls = calls.filter(
+      ([action]) => action === "reconcile-binding"
+    );
+    assert.equal(newThreadCalls.length, 3);
+    assert.equal(resumeThreadCalls.length, 2);
+    assert.equal(reconcileCalls.length, 1);
+    for (const args of [...newThreadCalls, ...resumeThreadCalls]) {
+      assert.equal(
+        args[args.indexOf("--expected-binding-token") + 1],
+        "fresh-binding-token"
+      );
+    }
+    for (const args of resumeThreadCalls) {
+      assert.equal(
+        args[args.indexOf("--candidate-token") + 1],
+        "fresh-candidate-token"
+      );
+    }
+    assert.deepEqual(reconcileCalls[0]?.slice(0, 15), [
       "reconcile-binding",
       "--terminal",
       terminalId,
@@ -829,64 +1669,40 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
       "--expected-session-revision",
       "7",
       "--expected-binding-token",
-      "tool-conflict-binding-token",
+      "fresh-conflict-binding-token",
       "--expected-terminal-token",
-      "tool-live-terminal-token",
+      "fresh-terminal-token",
       "--store-dir",
       "/private/akk-store",
       "--codex-home",
       "/private/custom-codex"
     ]);
-    for (const args of calls) {
+    for (const args of calls.filter((candidate) =>
+      candidate[0] !== "list"
+    )) {
       assert.equal(
         args[args.indexOf("--codex-home") + 1],
         "/private/custom-codex"
       );
     }
-    const slashMutationCalls = calls.slice(6).filter((args) =>
-      args[0] === "new-thread" || args[0] === "resume-thread"
-    );
-    assert.equal(slashMutationCalls.length, 3);
-    for (const args of slashMutationCalls) {
-      assert.equal(
-        args[args.indexOf("--expected-binding-token") + 1],
-        "fresh-binding-token"
-      );
-    }
-    const slashResume = slashMutationCalls.find(
-      (args) => args[0] === "resume-thread"
-    );
-    assert.equal(
-      slashResume?.[slashResume.indexOf("--candidate-token") + 1],
-      "fresh-candidate-token"
-    );
-    assert.deepEqual(calls.slice(6).map((args) => args[0]), [
-      "list-resumable-threads",
-      "new-thread",
-      "list-resumable-threads",
-      "new-thread",
-      "list-resumable-threads",
-      "resume-thread"
-    ]);
 
     fs.writeFileSync(lifecycleFailurePath, "uncertain");
     const uncertainNewTool = await newTool.execute?.("new-thread-uncertain", {
-      terminal_id: terminalId,
-      expected_binding_token: "tool-binding-token-uncertain"
+      terminal_id: terminalId
     });
     const uncertainResumeTool = await resumeTool.execute?.(
       "resume-thread-uncertain",
       {
         terminal_id: terminalId,
-        native_thread_id: resumeThreadId,
-        expected_binding_token: "tool-resume-token-uncertain",
-        candidate_token: "tool-candidate-token-uncertain"
+        native_thread_id: resumeThreadId
       }
     );
     for (const failed of [uncertainNewTool, uncertainResumeTool]) {
       assert.equal(failed?.isError, true);
       assert.equal(failed?.details?.status, "uncertain");
       assert.equal(failed?.details?.do_not_retry, true);
+      assert.match(String(failed?.details?.reason), /private authority changed/u);
+      assert.doesNotMatch(String(failed?.details?.reason), /revision|7|8/iu);
     }
 
     fs.writeFileSync(lifecycleFailurePath, "verified_recovery_required");
@@ -899,6 +1715,8 @@ test("OpenClaw native-thread tools keep explicit CAS while slash commands refres
     assert.match(failedResumeSlash?.text ?? "", /do not retry automatically/iu);
     assert.match(failedResumeSlash?.text ?? "", /exact lifecycle recovery action/u);
     assert.doesNotMatch(failedResumeSlash?.text ?? "", /resumed and verified/u);
+    assert.match(failedResumeSlash?.text ?? "", /private authority changed/u);
+    assert.doesNotMatch(failedResumeSlash?.text ?? "", /revision|7|8/iu);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -988,11 +1806,6 @@ test("OpenClaw Resume shortcuts preserve the displayed snapshot and previous exa
       sessionId: "openclaw-conversation-a"
     });
     await command?.handler?.({
-      args: `resume-thread ${terminalId} ${snapshotId}:2`,
-      sessionKey: "agent:test:snapshot",
-      sessionId: "openclaw-conversation-a"
-    });
-    await command?.handler?.({
       args: `resume-thread ${terminalId} previous`,
       sessionKey: "agent:test:snapshot",
       sessionId: "openclaw-conversation-a"
@@ -1006,7 +1819,6 @@ test("OpenClaw Resume shortcuts preserve the displayed snapshot and previous exa
       "list-resumable-threads",
       "resume-thread",
       "list-resumable-threads",
-      "resume-thread",
       "resume-thread",
       "list-resumable-threads",
       "resume-thread"
@@ -1024,10 +1836,9 @@ test("OpenClaw Resume shortcuts preserve the displayed snapshot and previous exa
       ]
     );
     assert.equal(calls[3][calls[3].indexOf("--selection-short-id") + 1], "@22222222");
-    assert.equal(calls[4][calls[4].indexOf("--selection-handle") + 1], `${snapshotId}:2`);
-    assert.equal(calls[6][calls[6].indexOf("--native-thread") + 1], secondThreadId);
-    assert.equal(calls[6][calls[6].indexOf("--expected-binding-token") + 1], "previous-binding");
-    assert.equal(calls[6][calls[6].indexOf("--candidate-token") + 1], "previous-candidate");
+    assert.equal(calls[5][calls[5].indexOf("--native-thread") + 1], secondThreadId);
+    assert.equal(calls[5][calls[5].indexOf("--expected-binding-token") + 1], "previous-binding");
+    assert.equal(calls[5][calls[5].indexOf("--candidate-token") + 1], "previous-candidate");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1039,6 +1850,8 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
   const callsPath = path.join(tempDir, "calls.ndjson");
   const statePath = path.join(tempDir, "state.json");
   const eventLogPath = path.join(tempDir, "events.ndjson");
+  const followCurrentTerminalId =
+    "terminal:v2:tmux:codex:work:0.0:1234";
   let sendTool: ToolDefinition | undefined;
   let sendToolFactory: ToolFactory | undefined;
   let respondTool: ToolDefinition | undefined;
@@ -1051,8 +1864,10 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     fs.writeFileSync(
       fakeCli,
       [
-        `require("node:fs").appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
-        `const result = ${JSON.stringify({
+        `const args = process.argv.slice(2);`,
+        `require("node:fs").appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+        `const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";`,
+        `const sendResult = ${JSON.stringify({
           conversation: {
             conversation_id: "turn-1",
             session_id: "session-1",
@@ -1072,6 +1887,12 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
           delivered: true,
           background: true
         })};`,
+        `const result = args[0] === "list" ? { terminals: [{`,
+        `  id: terminalId, available_actions: { send: {`,
+        `    tool: "agent_knock_knock_send",`,
+        `    arguments: { selector: terminalId, expected_terminal_token: "terminal-token-current", request: "continue" }`,
+        `  } }`,
+        `}] } : sendResult;`,
         "process.stdout.write(JSON.stringify(result));"
       ].join("\n")
     );
@@ -1118,10 +1939,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.equal(sendTool?.parameters?.additionalProperties, false);
     assert.deepEqual(sendTool?.parameters?.required, ["request"]);
     assert.deepEqual(sendTool?.parameters?.not, {
-      anyOf: [
-        { required: ["session_id", "selector"] },
-        { required: ["session_id", "expected_terminal_token"] }
-      ]
+      required: ["session_id", "terminal_id"]
     });
     assert.equal(
       "timeoutSeconds" in (sendTool?.parameters?.properties ?? {}),
@@ -1134,8 +1952,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     for (const field of [
       "session_id",
-      "selector",
-      "expected_terminal_token",
+      "terminal_id",
       "request"
     ]) {
       const schema = sendTool?.parameters?.properties?.[field];
@@ -1152,17 +1969,9 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
         : "",
       /idle or completed AKK Turn record is retained/u
     );
-    assert.match(sendTool?.description ?? "", /timeoutSeconds is unsupported/u);
-    assert.match(sendTool?.description ?? "", /session-scoped send/u);
-    assert.match(sendTool?.description ?? "", /terminal-scoped follow-current/u);
-    const expectedTerminalTokenSchema =
-      sendTool?.parameters?.properties?.expected_terminal_token;
-    assert.match(
-      isRecord(expectedTerminalTokenSchema)
-        ? String(expectedTerminalTokenSchema.description ?? "")
-        : "",
-      /never infer, copy, reuse, or combine it with session_id/u
-    );
+    assert.match(sendTool?.description ?? "", /session_id/u);
+    assert.match(sendTool?.description ?? "", /terminal_id/u);
+    assert.match(sendTool?.description ?? "", /freshness authority privately/u);
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {
         request: "Do not route this as an ordinary send",
@@ -1181,41 +1990,23 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     await assert.rejects(
       () => sendTool!.execute!("tool-call-ambiguous-target", {
         session_id: "session-1",
-        selector: "@a1b2c3d4",
+        terminal_id: followCurrentTerminalId,
         request: "Do not choose one target silently"
       }),
-      /only one of session_id or selector/u
+      /only one of session_id or terminal_id/u
     );
     await assert.rejects(
-      () => sendTool!.execute!("tool-call-session-token", {
-        session_id: "session-1",
-        expected_terminal_token: "terminal-token-current",
-        request: "Do not redirect this strict Session send"
-      }),
-      /requires a terminal-scoped selector and cannot be used with session_id/u
-    );
-    await assert.rejects(
-      () => sendTool!.execute!("tool-call-unscoped-token", {
-        expected_terminal_token: "terminal-token-current",
-        request: "Do not guess the terminal for this snapshot"
-      }),
-      /requires a terminal-scoped selector/u
-    );
-    await assert.rejects(
-      () => sendTool!.execute!("tool-call-short-selector-token", {
-        selector: "@a1b2c3d4",
-        expected_terminal_token: "terminal-token-current",
+      () => sendTool!.execute!("tool-call-short-terminal", {
+        terminal_id: "@a1b2c3d4",
         request: "Do not expand a short selector under a terminal fence"
       }),
-      /requires the exact full terminal selector/u
+      /terminal_id must be the exact full terminal identifier/u
     );
     for (const [field, value] of [
       ["session_id", ""],
       ["session_id", "   "],
-      ["selector", ""],
-      ["selector", "   "],
-      ["expected_terminal_token", ""],
-      ["expected_terminal_token", "   "]
+      ["terminal_id", ""],
+      ["terminal_id", "   "]
     ] as const) {
       await assert.rejects(
         () => sendTool!.execute!(`tool-call-empty-${field}`, {
@@ -1240,7 +2031,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       request: "Start a distinct turn"
     });
     await sendTool?.execute?.("tool-call-3", {
-      selector: "@a1b2c3d4",
+      terminal_id: followCurrentTerminalId,
       request: "Discover the initial terminal"
     });
     assert.deepEqual(respondTool?.parameters?.required, ["turn_id", "request"]);
@@ -1274,17 +2065,26 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     await nextConversationSend?.execute?.("tool-call-1", {
       request: "Verify a reset OpenClaw conversation is isolated"
     });
-    const followCurrentTerminalId =
-      "terminal:v2:tmux:codex:work:0.0:1234";
     await sendTool?.execute?.("tool-call-follow-current", {
-      selector: followCurrentTerminalId,
-      expected_terminal_token: "terminal-token-current",
+      terminal_id: followCurrentTerminalId,
       request: "Continue in the human-selected terminal context"
     });
-    const calls = fs.readFileSync(callsPath, "utf8")
+    await reconciliationService?.stop?.();
+    const allCalls = fs.readFileSync(callsPath, "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
+    const reconciliationCalls = allCalls.filter(
+      ([command]) => command === "reconcile-monitors" ||
+        command === "reconcile-watches"
+    );
+    const privateListCalls = allCalls.filter(([command]) => command === "list");
+    const calls = allCalls.filter(
+      ([command]) => command !== "reconcile-monitors" &&
+        command !== "reconcile-watches" &&
+        command !== "list"
+    );
+    assert.equal(privateListCalls.length, 2);
     assert.equal(calls[0]?.[0], "delegate");
     assert.equal(calls[0]?.includes("--agent"), false);
     assert.equal(calls[0]?.includes("--workspace"), false);
@@ -1328,10 +2128,14 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.deepEqual(calls[3]?.slice(0, 5), [
       "send",
       "--conversation",
-      "@a1b2c3d4",
-      "--message",
-      "Discover the initial terminal"
+      followCurrentTerminalId,
+      "--expected-terminal-token",
+      "terminal-token-current"
     ]);
+    assert.equal(
+      optionValue(calls[3] ?? [], "--message"),
+      "Discover the initial terminal"
+    );
     assert.equal(
       optionValue(calls[3] ?? [], "--message-id"),
       `msg-openclaw-${createHash("sha256").update(JSON.stringify([
@@ -1368,26 +2172,28 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       optionValue(calls[4] ?? [], "--openclaw-session"),
       "agent:test:main"
     );
-    assert.equal(calls[6]?.[0], "reconcile-monitors");
-    assert.equal(calls[6]?.includes("--workspace"), false);
-    assert.equal(calls[7]?.[0], "reconcile-watches");
-    assert.equal(calls[7]?.includes("--workspace"), false);
+    assert.deepEqual(
+      reconciliationCalls.map(([command]) => command),
+      ["reconcile-monitors", "reconcile-watches"]
+    );
+    assert.equal(reconciliationCalls[0]?.includes("--workspace"), false);
+    assert.equal(reconciliationCalls[1]?.includes("--workspace"), false);
     assert.notEqual(
-      optionValue(calls[8] ?? [], "--message-id"),
+      optionValue(calls[6] ?? [], "--message-id"),
       expectedToolCall1MessageId,
       "the same tool call id in another OpenClaw Session must be isolated"
     );
     assert.notEqual(
-      optionValue(calls[9] ?? [], "--message-id"),
+      optionValue(calls[7] ?? [], "--message-id"),
       expectedToolCall1MessageId,
       "send and respond must have separate idempotency domains"
     );
     assert.notEqual(
-      optionValue(calls[10] ?? [], "--message-id"),
+      optionValue(calls[8] ?? [], "--message-id"),
       expectedToolCall1MessageId,
       "a new OpenClaw conversation incarnation must not replay an old receipt"
     );
-    assert.deepEqual(calls[11]?.slice(0, 5), [
+    assert.deepEqual(calls[9]?.slice(0, 5), [
       "send",
       "--conversation",
       followCurrentTerminalId,
@@ -1395,7 +2201,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       "terminal-token-current"
     ]);
     assert.equal(
-      optionValue(calls[11] ?? [], "--message"),
+      optionValue(calls[9] ?? [], "--message"),
       "Continue in the human-selected terminal context"
     );
   } finally {
@@ -1502,9 +2308,9 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     assert.equal(starts[2]?.args[0], "reconcile-monitors");
     assert.equal(starts[3]?.args[0], "reconcile-watches");
     assert.equal(optionAfter(starts[0]?.args ?? [], "--reason"), "startup_reconciliation");
-    assert.equal(optionAfter(starts[1]?.args ?? [], "--reason"), "startup_reconciliation");
     assert.equal(optionAfter(starts[2]?.args ?? [], "--reason"), "monitor_supervision");
-    assert.equal(optionAfter(starts[3]?.args ?? [], "--reason"), "watch_supervision");
+    assert.equal(starts[1]?.args.includes("--reason"), false);
+    assert.equal(starts[3]?.args.includes("--reason"), false);
     assert.equal(starts[0]?.args.includes("--terminal-monitors-only"), false);
     assert.equal(starts[1]?.args.includes("--terminal-monitors-only"), false);
     assert.equal(starts[2]?.args.includes("--terminal-monitors-only"), true);
@@ -1612,10 +2418,17 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-turn-controls-"));
   const fakeCli = path.join(tempDir, "controls.cjs");
   const callsPath = path.join(tempDir, "calls.ndjson");
+  const changedAuthorityPath = path.join(tempDir, "changed-authority");
   const tools = new Map<string, ToolDefinition>();
-  const watchBindingToken = "a".repeat(64);
+  const toolFactories = new Map<string, ToolFactory>();
   let command:
-    | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
+    | {
+        handler?: (context: {
+          args: string;
+          sessionKey: string;
+          sessionId?: string;
+        }) => Promise<any>;
+      }
     | undefined;
 
   try {
@@ -1624,8 +2437,32 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       [
         `const args = process.argv.slice(2);`,
         `require("node:fs").appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+        `const fs = require("node:fs");`,
+        `const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";`,
+        `const changed = fs.existsSync(${JSON.stringify(changedAuthorityPath)});`,
+        `const approvalFingerprint = (changed ? "b" : "a").repeat(64);`,
+        `const terminalToken = changed ? "terminal-token-changed" : "terminal-token-current";`,
+        `const listResult = { terminals: [{ id: terminalId,`,
+        `  available_actions: {`,
+        `    approve: { tool: "agent_knock_knock_approve", arguments: { conversation_id: terminalId, expected_approval_fingerprint: approvalFingerprint, expected_terminal_token: terminalToken } },`,
+        `    reconcile_binding: { tool: "agent_knock_knock_reconcile_binding", arguments: { terminal_id: terminalId, conflicting_session_id: "session-conflict", expected_session_revision: 7, expected_binding_token: "conflict-binding-current", expected_terminal_token: terminalToken } }`,
+        `  },`,
+        `  handoff_decision: { kind: "active_turn_requires_decision", choices: { take_over_current: { action: { tool: "agent_knock_knock_close", arguments: { turn_id: "turn-active", reason: "superseded_by_human_context_switch", expected_handoff_token: "handoff-current" }, requires_explicit_user_confirmation: true } } } },`,
+        `  audit_history: {`,
+        `    reconcile: { tool: "agent_knock_knock_reconcile_binding", arguments: { terminal_id: terminalId, conflicting_session_id: "session-conflict", expected_session_revision: 6, expected_binding_token: "stale-conflict-binding", expected_terminal_token: "stale-terminal-token" } },`,
+        `    handoff: { tool: "agent_knock_knock_close", arguments: { turn_id: "turn-active", reason: "superseded_by_human_context_switch", expected_handoff_token: "stale-handoff" } }`,
+        `  },`,
+        `  managed: { current_turn: { turn_id: "turn-approve", available_actions: {`,
+        `    approve: { tool: "agent_knock_knock_approve", arguments: { turn_id: "turn-approve", expected_approval_fingerprint: approvalFingerprint } }`,
+        `  } } }`,
+        `}] };`,
         `const unresolvedLifecycle = args.includes("transition-current") || args.includes("transition-from-list");`,
-        `process.stdout.write(JSON.stringify(unresolvedLifecycle ? {`,
+        `const turnIndex = args.indexOf("--turn");`,
+        `const conversationIndex = args.indexOf("--conversation");`,
+        `const statusTarget = turnIndex >= 0 ? args[turnIndex + 1] : conversationIndex >= 0 ? args[conversationIndex + 1] : undefined;`,
+        `const staleCallback = { message: { metadata: { terminal_status: { approval_state: { approvable: true, fingerprint: "f".repeat(64) } } } } };`,
+        `const statusResult = statusTarget?.startsWith("terminal:") ? { source: "terminal_control", conversation_id: statusTarget, approval_state: { approvable: true, fingerprint: approvalFingerprint }, callback_delivery: staleCallback } : { conversation_id: statusTarget, session_id: "session-controls", turn_id: statusTarget, approval_state: { approvable: true, fingerprint: approvalFingerprint }, callback_delivery: staleCallback };`,
+        `const result = args[0] === "list" ? listResult : args[0] === "status" ? statusResult : args[0] === "reconcile-binding" ? { status: "reconciled", terminal_id: terminalId, turn_created: false } : unresolvedLifecycle ? {`,
         `  source: "terminal_control",`,
         `  terminal_control: { target: "work:0.0" },`,
         `  closed: false,`,
@@ -1634,7 +2471,8 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         `  blocked: true,`,
         `  do_not_retry: true,`,
         `  reason: "live identity mismatch"`,
-        `} : {}));`
+        `} : {};`,
+        `process.stdout.write(JSON.stringify(result));`
       ].join("\n"),
       "utf8"
     );
@@ -1654,9 +2492,17 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         tool: ToolDefinition | ToolFactory,
         options?: { name?: string }
       ) {
-        const definition = typeof tool === "function" ? tool({}) : tool;
+        const definition = typeof tool === "function"
+          ? tool({
+              sessionKey: "agent:test:controls",
+              sessionId: "openclaw-conversation-a"
+            } as never)
+          : tool;
         if (options?.name) {
           tools.set(options.name, definition);
+          if (typeof tool === "function") {
+            toolFactories.set(options.name, tool);
+          }
         }
       }
     });
@@ -1680,23 +2526,18 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     });
     const watchTool = tools.get("agent_knock_knock_watch");
     assert.ok(watchTool, "agent_knock_knock_watch must be registered");
-    assert.deepEqual(watchTool.parameters?.required, [
-      "terminal_id",
-      "expected_binding_token"
-    ]);
+    assert.deepEqual(watchTool.parameters?.required, ["terminal_id"]);
     assert.equal(watchTool.parameters?.additionalProperties, false);
-    const watchBindingTokenSchema =
-      watchTool.parameters?.properties?.expected_binding_token;
-    assert.equal(watchBindingTokenSchema?.minLength, 64);
-    assert.equal(watchBindingTokenSchema?.maxLength, 64);
-    assert.equal(watchBindingTokenSchema?.pattern, "^[a-f0-9]{64}$");
-    assert.match(
-      String(watchBindingTokenSchema?.description ?? ""),
-      /entire arguments object verbatim.*\.\.\..*…/u
+    assert.equal(
+      Object.hasOwn(
+        watchTool.parameters?.properties ?? {},
+        "expected_binding_token"
+      ),
+      false
     );
     assert.match(
       watchTool.description ?? "",
-      /entire arguments object verbatim.*refresh agent_knock_knock_list/u
+      /exact terminal_id.*revalidates current observation authority internally/u
     );
     const unwatchTool = tools.get("agent_knock_knock_unwatch");
     assert.ok(unwatchTool, "agent_knock_knock_unwatch must be registered");
@@ -1704,7 +2545,6 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     assert.equal(unwatchTool.parameters?.additionalProperties, false);
 
     for (const name of [
-      "agent_knock_knock_approve",
       "agent_knock_knock_renew",
       "agent_knock_knock_retry_callback",
       "agent_knock_knock_cancel",
@@ -1729,18 +2569,6 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
                     "expected_message_id",
                     "expected_transition_id"
                   ]
-                },
-                {
-                  required: ["expected_handoff_token", "conversation_id"]
-                },
-                {
-                  required: ["expected_handoff_token", "expected_message_id"]
-                },
-                {
-                  required: [
-                    "expected_handoff_token",
-                    "expected_transition_id"
-                  ]
                 }
               ]
             }
@@ -1756,7 +2584,6 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     );
     for (const name of [
       "agent_knock_knock_status",
-      "agent_knock_knock_approve",
       "agent_knock_knock_cancel",
       "agent_knock_knock_close"
     ]) {
@@ -1772,39 +2599,45 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     assert.equal(closeTool?.parameters?.additionalProperties, false);
     assert.ok(closeTool?.parameters?.properties?.expected_message_id);
     assert.ok(closeTool?.parameters?.properties?.expected_transition_id);
-    assert.ok(closeTool?.parameters?.properties?.expected_handoff_token);
-    assert.match(closeTool?.description ?? "", /expected_transition_id/u);
-    assert.match(closeTool?.description ?? "", /handoff_decision/u);
-    const expectedHandoffTokenSchema =
-      closeTool?.parameters?.properties?.expected_handoff_token;
-    assert.match(
-      isRecord(expectedHandoffTokenSchema)
-        ? String(expectedHandoffTokenSchema.description ?? "")
-        : "",
-      /explicit user confirmation/u
-    );
-    const approveTool = tools.get("agent_knock_knock_approve");
-    assert.ok(approveTool?.parameters?.properties?.expected_terminal_token);
-    assert.deepEqual(approveTool?.parameters?.allOf, [
-      {
-        if: { required: ["expected_terminal_token"] },
-        then: { required: ["conversation_id"] }
-      }
-    ]);
-    assert.match(
-      String(
-        approveTool?.parameters?.properties?.expected_terminal_token
-          ?.description ?? ""
+    assert.equal(
+      Object.hasOwn(
+        closeTool?.parameters?.properties ?? {},
+        "expected_handoff_token"
       ),
-      /manual Codex approval.*never construct.*automatic approval/iu
+      false
+    );
+    assert.match(closeTool?.description ?? "", /expected_transition_id/u);
+    assert.match(closeTool?.description ?? "", /handoff authority privately/u);
+    const approveTool = tools.get("agent_knock_knock_approve");
+    assert.ok(approveTool);
+    assert.deepEqual(approveTool.parameters?.anyOf, [
+      { required: ["turn_id"] },
+      { required: ["terminal_id"] }
+    ]);
+    assert.deepEqual(approveTool.parameters?.not, {
+      required: ["turn_id", "terminal_id"]
+    });
+    assertNoModelOpaqueAuthority(
+      approveTool.parameters,
+      "$.agent_knock_knock_approve.parameters"
     );
     await assert.rejects(
-      () => approveTool!.execute!("managed-terminal-token", {
+      () => approveTool.execute!("ambiguous-approval-target", {
         turn_id: "turn-managed",
-        expected_approval_fingerprint: "fingerprint-managed",
-        expected_terminal_token: "terminal-token-must-not-cross-scope"
+        terminal_id: "terminal:v2:tmux:codex:work:0.0:1234"
       }),
-      /expected_terminal_token requires the exact list-prefilled conversation_id/u
+      /approve requires exactly one of turn_id or terminal_id/u
+    );
+    await assert.rejects(
+      () => approveTool.execute!("approval-without-offer", {
+        turn_id: "turn-no-offer"
+      }),
+      /requires a current approval request shown by agent_knock_knock_status in this OpenClaw conversation/u
+    );
+    assert.equal(
+      fs.existsSync(callsPath),
+      false,
+      "missing model-session authority must fail before spawning the CLI"
     );
 
     await assert.rejects(
@@ -1813,43 +2646,26 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         expected_message_id: "message-current",
         expected_transition_id: "transition-current"
       }),
-      /only one of expected_message_id, expected_transition_id, or expected_handoff_token/u
+      /only one of expected_message_id or expected_transition_id/u
     );
     await assert.rejects(
       () => closeTool!.execute!("ambiguous-handoff-fence", {
         turn_id: "turn-active",
         reason: "superseded_by_human_context_switch",
-        expected_message_id: "message-current",
-        expected_handoff_token: "handoff-current"
+        expected_message_id: "message-current"
       }),
-      /only one of expected_message_id, expected_transition_id, or expected_handoff_token/u
+      /requires only the exact managed turn_id and supersede reason/u
     );
     await assert.rejects(
       () => closeTool!.execute!("raw-handoff-target", {
         conversation_id: "terminal:v2:tmux:codex:work:0.0:1234",
-        reason: "superseded_by_human_context_switch",
-        expected_handoff_token: "handoff-current"
-      }),
-      /requires the exact managed turn_id/u
-    );
-    await assert.rejects(
-      () => closeTool!.execute!("unfenced-handoff-reason", {
-        turn_id: "turn-active",
         reason: "superseded_by_human_context_switch"
       }),
-      /requires expected_handoff_token/u
-    );
-    await assert.rejects(
-      () => closeTool!.execute!("handoff-token-without-reason", {
-        turn_id: "turn-active",
-        expected_handoff_token: "handoff-current"
-      }),
-      /requires reason=superseded_by_human_context_switch/u
+      /requires only the exact managed turn_id and supersede reason/u
     );
 
     for (const name of [
       "agent_knock_knock_status",
-      "agent_knock_knock_approve",
       "agent_knock_knock_renew",
       "agent_knock_knock_retry_callback",
       "agent_knock_knock_cancel",
@@ -1858,10 +2674,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       await assert.rejects(
         () => tools.get(name)!.execute!("ambiguous-turn-target", {
           turn_id: "turn-modern",
-          conversation_id: "turn-legacy-other",
-          ...(name === "agent_knock_knock_approve"
-            ? { expected_approval_fingerprint: "fingerprint-ambiguous" }
-            : {})
+          conversation_id: "turn-legacy-other"
         }),
         /only one of turn_id or conversation_id/u,
         name
@@ -1911,56 +2724,87 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       );
     }
 
-    const abbreviatedWatchToken = "a".repeat(6) + "…" + "b".repeat(6);
+    const displayedList = await tools.get("agent_knock_knock_list")?.execute?.(
+      "list-private-authority",
+      {}
+    );
+    assertModelToolResultHasNoOpaqueAuthority(displayedList);
+    const displayedApproval = await tools
+      .get("agent_knock_knock_status")
+      ?.execute?.("status-private-approval", {
+        turn_id: "turn-approve"
+      });
+    assertModelToolResultHasNoOpaqueAuthority(displayedApproval);
+    const foreignApprove = toolFactories
+      .get("agent_knock_knock_approve")
+      ?.({
+        sessionKey: "agent:test:controls",
+        sessionId: "openclaw-conversation-b"
+      } as never);
     await assert.rejects(
-      () => watchTool.execute!("abbreviated-watch-token", {
-        terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
-        expected_binding_token: abbreviatedWatchToken
+      () => foreignApprove!.execute!("cross-session-approval", {
+        turn_id: "turn-approve"
       }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /received 13 characters/u);
-        assert.match(error.message, /invalid-character count.*: 1/u);
-        assert.match(error.message, /exactly 64 lowercase ASCII hexadecimal/u);
-        assert.match(error.message, /Do not retry agent_knock_knock_watch with the same arguments/u);
-        assert.match(error.message, /Refresh agent_knock_knock_list/u);
-        assert.match(error.message, /entire available_actions\.watch\.arguments object verbatim/u);
-        assert.equal(error.message.includes(abbreviatedWatchToken), false);
-        return true;
-      }
+      /in this OpenClaw conversation/u
     );
-    assert.equal(
-      fs.existsSync(callsPath),
-      false,
-      "invalid Watch authority must fail before the CLI process is spawned"
+    const foreignReconcile = toolFactories
+      .get("agent_knock_knock_reconcile_binding")
+      ?.({
+        sessionKey: "agent:test:controls",
+        sessionId: "openclaw-conversation-b"
+      } as never);
+    await assert.rejects(
+      () => foreignReconcile!.execute!("cross-session-reconcile", {
+        terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
+        conflicting_session_id: "session-conflict"
+      }),
+      /in this OpenClaw session/u
     );
-
-    await tools.get("agent_knock_knock_status")?.execute?.("status", {
-      turn_id: "turn-status"
-    });
+    const foreignClose = toolFactories
+      .get("agent_knock_knock_close")
+      ?.({
+        sessionKey: "agent:test:controls",
+        sessionId: "openclaw-conversation-b"
+      } as never);
+    await assert.rejects(
+      () => foreignClose!.execute!("cross-session-handoff", {
+        turn_id: "turn-active",
+        reason: "superseded_by_human_context_switch"
+      }),
+      /in this OpenClaw session/u
+    );
     await statusTool.execute?.("watch-status", {
       watch_id: "terminal-watch-status"
     });
     await watchTool.execute?.("watch", {
       terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
-      expected_binding_token: watchBindingToken,
       hardTimeoutMinutes: 30
     });
     await unwatchTool.execute?.("unwatch", {
       watch_id: "terminal-watch-status"
     });
     await tools.get("agent_knock_knock_approve")?.execute?.("approve", {
-      conversation_id: "legacy-turn",
-      expected_approval_fingerprint: "fingerprint-1"
+      turn_id: "turn-approve"
     });
+    const displayedTerminalApproval = await tools
+      .get("agent_knock_knock_status")
+      ?.execute?.("terminal-status-private-approval", {
+        conversation_id: "terminal:v2:tmux:codex:work:0.0:1234"
+      });
+    assertModelToolResultHasNoOpaqueAuthority(displayedTerminalApproval);
     await tools.get("agent_knock_knock_approve")?.execute?.(
       "terminal-scoped-approve",
       {
-        conversation_id: "terminal:v2:tmux:codex:work:0.0:1234",
-        expected_approval_fingerprint: "fingerprint-terminal",
-        expected_terminal_token: "terminal-token-current"
+        terminal_id: "terminal:v2:tmux:codex:work:0.0:1234"
       }
     );
+    const reconciled = await tools
+      .get("agent_knock_knock_reconcile_binding")
+      ?.execute?.("reconcile-semantic-only", {
+        terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
+        conflicting_session_id: "session-conflict"
+      });
+    assert.equal(reconciled?.details?.status, "reconciled");
     await tools.get("agent_knock_knock_renew")?.execute?.("renew", {
       turn_id: "turn-renew"
     });
@@ -1975,8 +2819,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     });
     await tools.get("agent_knock_knock_close")?.execute?.("take-over-current", {
       turn_id: "turn-active",
-      reason: "superseded_by_human_context_switch",
-      expected_handoff_token: "handoff-current"
+      reason: "superseded_by_human_context_switch"
     });
     const blockedCloseTool = await tools.get("agent_knock_knock_close")?.execute?.(
       "recover-lifecycle",
@@ -2004,62 +2847,93 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     assert.match(slashRecovery?.text ?? "", /Do not retry/u);
     assert.doesNotMatch(slashRecovery?.text ?? "", /Turn record closed/u);
 
+    await tools.get("agent_knock_knock_status")?.execute?.(
+      "status-before-authority-change",
+      { turn_id: "turn-approve" }
+    );
+    const approveCallsBeforeChange = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[])
+      .filter(([action]) => action === "approve").length;
+    fs.writeFileSync(changedAuthorityPath, "changed", "utf8");
+    await assert.rejects(
+      () => approveTool.execute!("approval-authority-changed", {
+        turn_id: "turn-approve"
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /approval request changed after it was shown/u);
+        assert.doesNotMatch(
+          error.message,
+          /(?:a{64}|b{64}|terminal-token|fingerprint)/iu
+        );
+        return true;
+      }
+    );
+
     const calls = fs.readFileSync(callsPath, "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
-    assert.deepEqual(calls.map((args) => args.slice(0, 4)), [
-      ["status", "--reconcile", "--turn", "turn-status"],
-      ["watch-status", "--watch", "terminal-watch-status"],
-      [
-        "watch-terminal",
-        "--terminal",
-        "terminal:v2:tmux:codex:work:0.0:1234",
-        "--expected-binding-token"
-      ],
-      ["unwatch-terminal", "--watch", "terminal-watch-status"],
-      ["approve", "--conversation", "legacy-turn", "--expected-approval-fingerprint"],
-      [
-        "approve",
-        "--conversation",
-        "terminal:v2:tmux:codex:work:0.0:1234",
-        "--expected-approval-fingerprint"
-      ],
-      ["renew", "--turn", "turn-renew"],
-      ["retry-callback", "--turn", "turn-retry"],
-      ["cancel", "--turn", "turn-cancel"],
-      ["close", "--turn", "turn-close"],
-      ["close", "--turn", "turn-active", "--reason"],
-      [
-        "close",
-        "--conversation",
-        "terminal:v2:tmux:codex:work:0.0:1234",
-        "--expected-transition-id"
-      ],
-      [
-        "close",
-        "--turn",
-        "terminal:v2:tmux:codex:work:0.0:1234",
-        "--reason"
-      ]
-    ]);
-    assert.deepEqual(calls[2], [
+    assert.equal(
+      calls.filter(([action]) => action === "approve").length,
+      approveCallsBeforeChange,
+      "changed authority must fail before the approve CLI is spawned"
+    );
+    const callFor = (action: string): string[] | undefined =>
+      calls.find(([candidate]) => candidate === action);
+    assert.deepEqual(callFor("watch-terminal"), [
       "watch-terminal",
       "--terminal",
       "terminal:v2:tmux:codex:work:0.0:1234",
-      "--expected-binding-token",
-      watchBindingToken,
       "--hard-timeout-minutes",
       "30",
       "--openclaw-session",
-      "agent:main:main"
+      "agent:test:controls"
     ]);
-    assert.deepEqual(calls[3], [
+    assert.deepEqual(callFor("unwatch-terminal"), [
       "unwatch-terminal",
       "--watch",
       "terminal-watch-status"
     ]);
-    assert.deepEqual(calls.at(-3), [
+    assert.deepEqual(callFor("reconcile-binding"), [
+      "reconcile-binding",
+      "--terminal",
+      "terminal:v2:tmux:codex:work:0.0:1234",
+      "--conflicting-session",
+      "session-conflict",
+      "--expected-session-revision",
+      "7",
+      "--expected-binding-token",
+      "conflict-binding-current",
+      "--expected-terminal-token",
+      "terminal-token-current"
+    ]);
+    const approveCalls = calls.filter(([action]) => action === "approve");
+    assert.deepEqual(approveCalls, [
+      [
+        "approve",
+        "--turn",
+        "turn-approve",
+        "--expected-approval-fingerprint",
+        "a".repeat(64)
+      ],
+      [
+        "approve",
+        "--conversation",
+        "terminal:v2:tmux:codex:work:0.0:1234",
+        "--expected-approval-fingerprint",
+        "a".repeat(64),
+        "--expected-terminal-token",
+        "terminal-token-current"
+      ]
+    ]);
+    const handoffClose = calls.find((args) =>
+      args[0] === "close" &&
+      args.includes("superseded_by_human_context_switch")
+    );
+    assert.deepEqual(handoffClose, [
       "close",
       "--turn",
       "turn-active",
@@ -2068,23 +2942,20 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       "--expected-handoff-token",
       "handoff-current"
     ]);
-    assert.deepEqual(calls[5], [
-      "approve",
-      "--conversation",
-      "terminal:v2:tmux:codex:work:0.0:1234",
-      "--expected-approval-fingerprint",
-      "fingerprint-terminal",
-      "--expected-terminal-token",
-      "terminal-token-current"
-    ]);
-    assert.deepEqual(calls.at(-2)?.slice(0, 5), [
+    const recoveryClose = calls.find((args) =>
+      args[0] === "close" && args.includes("transition-current")
+    );
+    assert.deepEqual(recoveryClose?.slice(0, 5), [
       "close",
       "--conversation",
       "terminal:v2:tmux:codex:work:0.0:1234",
       "--expected-transition-id",
       "transition-current"
     ]);
-    assert.deepEqual(calls.at(-1), [
+    const slashRecoveryClose = calls.find((args) =>
+      args[0] === "close" && args.includes("transition-from-list")
+    );
+    assert.deepEqual(slashRecoveryClose, [
       "close",
       "--turn",
       "terminal:v2:tmux:codex:work:0.0:1234",
@@ -2316,12 +3187,6 @@ process.stdout.write(JSON.stringify(result));
         action: "cancel",
         sessionId: "session-cancel",
         turnId: "turn-cancel"
-      },
-      {
-        args: "approve turn-approve --expected-approval-fingerprint fingerprint-1",
-        action: "approve",
-        sessionId: "session-approve",
-        turnId: "turn-approve"
       },
       {
         args: "close turn-close done",
@@ -3129,8 +3994,17 @@ test("callback auto approval keeps its rule workspace boundary without global wo
     assert.equal(typeof callbackHandler, "function");
     const invokeApprovalCallback = async (
       messageId: string,
-      cwd: string
+      cwd: string,
+      options: {
+        legacy?: boolean;
+        splitFingerprint?: boolean;
+      } = {}
     ) => {
+      const turnId = "turn-autoapprove-workspace";
+      const sessionId = "session-autoapprove-workspace";
+      const approvalFingerprint = createHash("sha256")
+        .update(messageId)
+        .digest("hex");
       let callbackResponse:
         | {
             ok: boolean;
@@ -3138,33 +4012,54 @@ test("callback auto approval keeps its rule workspace boundary without global wo
             error?: { code?: string; message?: string };
           }
         | undefined;
+      const callbackConversation: Record<string, unknown> = {
+        conversation_id: turnId,
+        session_id: sessionId,
+        turn_id: turnId,
+        openclaw_session: "agent:test:autoapprove",
+        state_path: statePath
+      };
+      const callbackMessage: Record<string, any> = {
+        id: messageId,
+        conversation_id: turnId,
+        session_id: sessionId,
+        turn_id: turnId,
+        type: "question",
+        requires_response: true,
+        body: "Codex needs approval",
+        metadata: {
+          source: "terminal_bridge",
+          reason: "approval_required",
+          approval_candidate: {
+            agent: "codex",
+            kind: "run_command",
+            command: "git status",
+            cwd,
+            fingerprint: approvalFingerprint,
+            terminal_target: "codex-work:0.0"
+          },
+          approval_fingerprint: approvalFingerprint,
+          terminal_status: {
+            approval_state: {
+              fingerprint: options.splitFingerprint
+                ? "0".repeat(64)
+                : approvalFingerprint
+            }
+          }
+        }
+      };
+      if (options.legacy) {
+        delete callbackConversation.session_id;
+        delete callbackConversation.turn_id;
+        delete callbackMessage.session_id;
+        delete callbackMessage.turn_id;
+      }
       await callbackHandler?.({
         params: {
           sessionKey: "agent:test:autoapprove",
           statePath,
-          conversation: {
-            conversation_id: "autoapprove-workspace",
-            openclaw_session: "agent:test:autoapprove"
-          },
-          message: {
-            id: messageId,
-            conversation_id: "autoapprove-workspace",
-            type: "question",
-            requires_response: true,
-            body: "Codex needs approval",
-            metadata: {
-              source: "terminal_bridge",
-              reason: "approval_required",
-              approval_candidate: {
-                agent: "codex",
-                kind: "run_command",
-                command: "git status",
-                cwd,
-                fingerprint: `fingerprint-${messageId}`,
-                terminal_target: "codex-work:0.0"
-              }
-            }
-          }
+          conversation: callbackConversation,
+          message: callbackMessage
         },
         respond(ok, result, error) {
           callbackResponse = {
@@ -3194,12 +4089,45 @@ test("callback auto approval keeps its rule workspace boundary without global wo
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.[0], "approve");
     assert.equal(calls[0]?.includes("--workspace"), false);
+    assert.deepEqual(
+      calls[0]?.slice(-10),
+      [
+        "--expected-callback-conversation-id",
+        "turn-autoapprove-workspace",
+        "--expected-callback-session-id",
+        "session-autoapprove-workspace",
+        "--expected-callback-turn-id",
+        "turn-autoapprove-workspace",
+        "--expected-callback-message-id",
+        "approval-allowed",
+        "--expected-callback-openclaw-session",
+        "agent:test:autoapprove"
+      ]
+    );
     const policyIndex = calls[0]?.indexOf("--auto-approval-policy-json") ?? -1;
     assert.notEqual(policyIndex, -1);
     assert.deepEqual(
       JSON.parse(calls[0]?.[policyIndex + 1] ?? "{}"),
       policy
     );
+
+    const splitFingerprint = await invokeApprovalCallback(
+      "approval-split-fingerprint",
+      allowedWorkspace,
+      { splitFingerprint: true }
+    );
+    assert.equal(splitFingerprint.ok, true);
+    assert.equal(splitFingerprint.result?.auto_approved, undefined);
+    assert.equal(splitFingerprint.result?.enqueued, true);
+
+    const legacy = await invokeApprovalCallback(
+      "approval-legacy",
+      allowedWorkspace,
+      { legacy: true }
+    );
+    assert.equal(legacy.ok, true);
+    assert.equal(legacy.result?.auto_approved, undefined);
+    assert.equal(legacy.result?.enqueued, true);
 
     const outside = await invokeApprovalCallback(
       "approval-outside",
@@ -3208,7 +4136,7 @@ test("callback auto approval keeps its rule workspace boundary without global wo
     assert.equal(outside.ok, true);
     assert.equal(outside.result?.auto_approved, undefined);
     assert.equal(outside.result?.enqueued, true);
-    assert.equal(injections.length, 1);
+    assert.equal(injections.length, 3);
     assert.equal(
       fs.readFileSync(callsPath, "utf8").trim().split("\n").length,
       1,

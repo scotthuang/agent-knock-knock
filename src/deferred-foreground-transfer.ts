@@ -16,6 +16,7 @@ import {
   type ManagedTerminalBinding
 } from "./managed-session.js";
 import {
+  sameTerminalControlEvidenceIncarnation,
   terminalEndpointIdentityFromEvidence,
   type TerminalControlEvidence
 } from "./terminal-control-ref.js";
@@ -483,15 +484,18 @@ function assertDeferredForegroundTransferSourceBinding(
   const statusCardSource = sourceKind === "status_card_only";
   const candidateRolloutSource =
     sourceKind === "candidate_rollout_quiescent";
+  const sameTerminalIncarnation =
+    sameTerminalControlEvidenceIncarnation(
+      value.source_before_binding.terminal_endpoint,
+      value.terminal_endpoint
+    );
   if (
     value.source_before_binding.native_process.pid !== value.process_pid ||
     value.source_before_binding.native_process.process_uuid !==
       value.process_uuid ||
     value.source_before_binding.native_process.process_birth !==
       value.process_birth ||
-    value.source_before_binding.terminal_id !== value.terminal_id ||
-    JSON.stringify(value.source_before_binding.terminal_endpoint) !==
-      JSON.stringify(value.terminal_endpoint) ||
+    !sameTerminalIncarnation ||
     !isExactNativeThreadId(value.source_before_binding.native_thread_id) ||
     (
       statusCardSource &&

@@ -47,17 +47,20 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed `send` action[\s\S]*prefilled arguments unchanged/u
+    /refresh `\/akk list`[\s\S]*listed v18 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
-    /`session_exact` action carries `session_id`[\s\S]*`terminal_follow_current` action[\s\S]*`selector` plus `expected_terminal_token`/u
+    /`session_exact` action carries `session_id`[\s\S]*`terminal_follow_current` action carries `terminal_id`[\s\S]*never carries a selector or opaque token/u
   );
   assert.match(tmux, /`respond` action with its prefilled `turn_id`/u);
   assert.match(tmux, /\/akk threads <exact-terminal-id>/u);
   assert.match(tmux, /previous.*刚才那个/u);
   assert.match(tmux, /collision-safe `@short-id`/u);
-  assert.match(tmux, /latest list shown in the same OpenClaw session/u);
+  assert.match(
+    tmux,
+    /latest list shown in the same OpenClaw conversation incarnation/u
+  );
   assert.match(tmux, /creates or activates an AKK Session but creates no Turn/u);
   assert.match(tmux, /multiple canonical roots/u);
   assert.match(tmux, /autoApprove\.rules\[\]\.workspaces/u);
@@ -172,10 +175,10 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.match(document, /`session_id`/u);
     assert.match(document, /`turn_id`/u);
     assert.match(document, /`respond`/u);
-    assert.match(document, /`expected_binding_token`/u);
+    assert.doesNotMatch(document, /`expected_binding_token`/u);
     assert.match(document, /`native_thread_id`/u);
-    assert.match(document, /`candidate_token`/u);
-    assert.match(document, /v16 `action_contracts`/u);
+    assert.doesNotMatch(document, /`candidate_token`/u);
+    assert.match(document, /v18 `action_contracts`/u);
     assert.match(
       document,
       /`session_exact`[\s\S]*`terminal_follow_current`/u
@@ -186,19 +189,22 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     );
     assert.match(
       document,
-      /`\/clear` resume hint is only an advisory routing and diagnostic signal[\s\S]{0,180}not token, UUID, foreground, rollout, or acceptance authority[\s\S]{0,180}disappearance does not invalidate an otherwise fresh candidate action/u
+      /`\/clear` resume hint is advisory only[\s\S]{0,100}(?:never routing or acceptance authority|Under the terminal lock)/u
     );
     assert.match(
       document,
-      /rollout-backed Codex row[\s\S]{0,100}advertises `terminal_follow_current`, not `session_exact`[\s\S]{0,180}cached or direct `session_exact` attempt[\s\S]{0,180}rejects before task text[\s\S]{0,100}never downgrades/u
+      /rollout-backed Codex row[\s\S]{0,120}advertises `terminal_follow_current`[\s\S]{0,80}not `session_exact`[\s\S]{0,200}(?:cached or direct `session_exact` attempt|cached strict Session attempt)[\s\S]{0,180}rejects before task text[\s\S]{0,100}never downgrades/u
     );
     assert.match(document, /status-card-only/u);
     assert.match(document, /manual (?:Codex )?`\/clear`/u);
-    assert.match(document, /complete (?:set of exact Codex rollout candidates|open-rollout candidate inventory)/u);
+    assert.match(
+      document,
+      /(?:complete exact inventory domain|complete open-rollout candidate inventory|complete set of exact Codex rollout candidates)/u
+    );
     assert.match(document, /zero-UUID provisional/u);
     assert.match(
       document,
-      /exact full (?:terminal )?`selector` and (?:a )?fresh `expected_terminal_token`/u
+      /freshly listed semantic-ID action/u
     );
     assert.match(document, /exact (?:request acceptance|native acceptance)/u);
     assert.match(document, /at least 80 columns/u);
@@ -214,10 +220,13 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       document,
       /If (?:terminal )?delivery or (?:native )?acceptance is uncertain[\s\S]{0,100}(?:does not retry|do not retry automatically)/u
     );
-    assert.match(document, /terminal-scoped manual Codex approval/u);
     assert.match(
       document,
-      /v16[\s\S]{0,120}approval fingerprints?[\s\S]{0,120}(?:prompt-scoped|to the approval prompt rather than the whole terminal screen)/iu
+      /[Tt]erminal-scoped (?:manual )?(?:Codex )?approval/u
+    );
+    assert.match(
+      document,
+      /(?:private approval fence|confirmation offer private|prompt-scoped)/iu
     );
     assert.match(
       document,
@@ -232,7 +241,10 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       /change (?:inside|within) the (?:exact )?region[\s\S]{0,240}(?:secret|command)[\s\S]{0,300}(?:zero (?:approval )?keys|sends zero keys)/iu
     );
     assert.match(document, /never (?:available to|participates? in) auto-?approv/iu);
-    assert.match(document, /(?:released[- ]owner|dispatch owner is already released)/u);
+    assert.match(
+      document,
+      /(?:released[- ]owner|dispatch owner is already released|released predecessor Turn history|frozen predecessor history)/iu
+    );
     assert.match(document, /(?:must not|mustn.t|do not) be retried blindly/u);
     assert.match(document, /creates no (?:AKK )?Turn/u);
     assert.match(document, /previous/u);
@@ -245,16 +257,20 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     );
     assert.match(
       document,
-      /(?:prefilled[^.\n]*unmanaged raw-terminal row|unmanaged raw-terminal row[^.\n]*prefilled)/ui
+      /(?:prefilled[^.\n]*unmanaged raw-terminal row|unmanaged raw-terminal row[^.\n]*prefilled)[^.\n]*`terminal_id`/ui
     );
     assert.match(
       document,
-      /(?:terminal-scoped manual Codex approval|raw (?:terminal|status))[\s\S]*prefill(?:ed|s)?(?: its(?: exact)?| the exact)? `conversation_id`/ui
+      /(?:terminal-scoped (?:manual )?Codex approval|raw[- ](?:terminal|status))[\s\S]*prefill(?:ed|s)?(?: with)?(?: its(?: exact)?| the exact)? `terminal_id`/ui
     );
     assert.match(document, /never construct[\s\S]*guess/ui);
+    assert.doesNotMatch(
+      document,
+      /expected_approval_fingerprint|--expected-approval-fingerprint/u
+    );
     assert.match(
       document,
-      /\/akk approve @a1b2c3d4 --expected-approval-fingerprint <fresh-fingerprint>/u
+      /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
   assert.match(readme, /current writer protocol is 5/u);
@@ -268,7 +284,7 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
   );
   assert.match(
     readme,
-    /If `previous` is present, use only its exact prefilled action for a natural-language “刚才那个” request/u
+    /If `previous` is present, use only its exact prefilled (?:semantic-ID )?action for a natural-language “刚才那个” request/u
   );
   assert.match(
     skill,
@@ -276,11 +292,11 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
   );
   assert.match(
     skill,
-    /For “previous” \/ “刚才那个”[^\n]*`previous\.available_actions\.resume_thread`[^\n]*use that exact action; never substitute the newest row/u
+    /For “previous” \/ “刚才那个”[^\n]*`previous\.available_actions\.resume_thread`[^\n]*use that exact (?:semantic-ID )?action(?: and|;) never substitute the newest row/u
   );
   assert.match(
     readme,
-    /Numbers, short IDs, and handles are human display\/navigation aids, never tool arguments or authoritative native identity/u
+    /number and short-ID resume forms[^.]*displayed snapshot[^.]*neither is a durable identity or model authority/iu
   );
   for (const document of [readme, protocol, quickstart]) {
     assert.match(document, /five(?:-| )minute(?:s)?/u);

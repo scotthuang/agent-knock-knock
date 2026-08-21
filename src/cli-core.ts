@@ -64,7 +64,8 @@ import {
 } from "./terminal-control-ref.js";
 import {
   TerminalAgentBridge,
-  type ResolvedTerminalConversation
+  type ResolvedTerminalConversation,
+  type TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
 import {
   createTerminalRuntimeCliAdapter,
@@ -1050,30 +1051,61 @@ const terminalStatusCliFacade = createTerminalStatusCliFacade({
     terminalBridgeEnabled
   },
   watchAuthority: {
-    terminalDispatchOwnership: (terminalControl) =>
-      terminalListCliFacade.terminalDispatchOwnership(terminalControl),
-    terminalIncarnationBlockingTurns: (storeDir, terminalControl) =>
-      terminalListCliFacade.terminalIncarnationBlockingTurns(
-        storeDir,
-        terminalControl
-      ),
-    hasActiveTerminalWatch: (storeDir, terminalId) =>
-      terminalWatchCliFacade.listPublicWatches(storeDir).some(
-        (watch) => stringValue(watch.terminal_id) === terminalId
-      ),
-    hasWatchAction: async (options, terminalId) => {
-      const scan = await terminalListCliFacade.buildTerminalListGroup({
-        options: options as TerminalListCliOptions
+    terminalListObservation: async (options, terminalId) => {
+      const observation = await terminalListCliFacade.observeExactTerminal({
+        options: options as TerminalListCliOptions,
+        terminalId
       });
-      const matches = scan.terminalControlled.filter(
-        (terminal) => stringValue(terminal.id) === terminalId
-      );
-      if (matches.length !== 1) return false;
-      const terminal = matches[0];
-      const token = stringValue(terminal.lifecycle_binding_token);
-      return Boolean(
-        token && exactTerminalWatchAction(terminal, terminalId, token)
-      );
+      if (observation.state === "unavailable") {
+        return {
+          activityState: "unknown",
+          activityReason:
+            observation.reason ?? "authoritative terminal observation is unavailable",
+          watchActionAvailable: false
+        };
+      }
+      if (observation.state !== "available") {
+        return {
+          activityState: "unknown",
+          activityReason:
+            "the exact terminal is no longer available for authoritative observation",
+          watchActionAvailable: false
+        };
+      }
+      const terminal = observation.terminal;
+      const rawTerminal = observation.rawTerminal;
+      const activityState = terminal.activity_state;
+      const activityReason = stringValue(terminal.activity_reason);
+      if (
+        (
+          activityState !== "awaiting_approval" &&
+          activityState !== "working" &&
+          activityState !== "idle" &&
+          activityState !== "unknown"
+        ) ||
+        !activityReason
+      ) {
+        return {
+          activityState: "unknown",
+          activityReason:
+            "authoritative terminal activity evidence is incomplete",
+          watchActionAvailable: false
+        };
+      }
+      return {
+        activityState,
+        activityReason,
+        watchActionAvailable: Boolean(
+          exactTerminalWatchAction(terminal, terminalId)
+        ),
+        ...(isRecord(rawTerminal._terminal_status_snapshot)
+          ? {
+              terminalStatus:
+                rawTerminal._terminal_status_snapshot as unknown as
+                  TerminalBridgeStatus
+            }
+          : {})
+      };
     }
   },
   projection: {
@@ -1118,6 +1150,11 @@ const terminalListCliFacade = createTerminalListCliFacade({
     loadTerminalDispatchLedgerOwner,
     listTerminalWatches: (storeDir, options) =>
       terminalWatchCliFacade.listPublicWatches(storeDir, options),
+    scanTerminalWatchesForExactObservation: (storeDir, options) =>
+      terminalWatchCliFacade.scanPublicWatchesForExactObservation(
+        storeDir,
+        options
+      ),
     managedSessionStoreDirForConversation: (conversation) =>
       terminalAcceptanceCliFacade.storeDirForConversation(conversation),
     managedTurnsForSession: (storeDir, sessionId) =>
@@ -1158,7 +1195,7 @@ const terminalWatchCliFacade = createTerminalWatchCliAdapter({
     acquireTerminalBridgeSendLock(storeDir, terminalControl, {
       timeoutMs: 30_000
     }),
-  buildTerminalListGroup: terminalListCliFacade.buildTerminalListGroup,
+  observeExactTerminal: terminalListCliFacade.observeExactTerminal,
   loadClaudeAgentRows,
   now: cliNow,
   randomUUID,
@@ -1598,7 +1635,7 @@ function usage() {
   agent-knock-knock --version
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
   agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--reconcile] [--no-approval-scan] [--terminal-debug]
-  agent-knock-knock watch-terminal --terminal <exact-terminal-id> --expected-binding-token <token> --openclaw-session <session> [--hard-timeout-minutes <minutes>] [--store-dir <dir>] [--openclaw-bin <path>]
+  agent-knock-knock watch-terminal --terminal <exact-terminal-id> --openclaw-session <session> [--hard-timeout-minutes <minutes>] [--store-dir <dir>] [--openclaw-bin <path>]
   agent-knock-knock watch-status --watch <terminal-watch-id> [--store-dir <dir>]
   agent-knock-knock unwatch-terminal --watch <terminal-watch-id> [--store-dir <dir>]
   agent-knock-knock reconcile-watches [--store-dir <dir>]

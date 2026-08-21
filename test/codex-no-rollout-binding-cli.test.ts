@@ -1834,6 +1834,7 @@ for (const crashCase of [
           (candidate) => candidate.user_request === message
         );
         assert.ok(acceptedTurn);
+        appendFixtureCompletion(fixture, NATIVE_THREAD_ID);
         const closed = await runCli([
           "close",
           "--turn",
@@ -2147,6 +2148,7 @@ for (const historyCase of [
             candidate.status === "waiting_for_agent"
         );
         assert.ok(acceptedTurn);
+        appendFixtureCompletion(fixture, NATIVE_THREAD_ID);
         const closed = await runCli([
           "close",
           "--turn",
@@ -2308,6 +2310,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
         candidate.status === "waiting_for_agent"
     );
     assert.ok(acceptedTurn);
+    appendFixtureCompletion(fixture, NATIVE_THREAD_ID);
     const closed = await runCli([
       "close",
       "--turn",

@@ -1,7 +1,8 @@
 import type { CallbackSpawnSync } from "./openclaw-callback-transport.js";
-import { createOpenClawCallbackTransport } from
-  "./openclaw-callback-transport.js";
-import { isRecord, nonBlankString } from "./value-guards.js";
+import {
+  createOpenClawCallbackTransport,
+  parseChatSendAcknowledgement
+} from "./openclaw-callback-transport.js";
 
 export type TerminalWatchCallbackEvent =
   | "approval_required"
@@ -13,7 +14,6 @@ export type TerminalWatchCallbackEvent =
 
 export interface TerminalWatchCallbackInput {
   watchId: string;
-  notificationId: string;
   idempotencyKey: string;
   event: TerminalWatchCallbackEvent;
   agent: "codex" | "claude";
@@ -24,14 +24,8 @@ export interface TerminalWatchCallbackInput {
   completionText?: string;
 }
 
-export interface TerminalWatchCallbackAcknowledgement {
-  runId: string;
-  status: "started" | "in_flight" | "ok" | "error" | "timeout";
-}
-
 export interface TerminalWatchCallbackCliAdapter {
-  deliver(input: TerminalWatchCallbackInput):
-    TerminalWatchCallbackAcknowledgement;
+  deliver(input: TerminalWatchCallbackInput): void;
 }
 
 export function createTerminalWatchCallbackCliAdapter(
@@ -65,7 +59,7 @@ export function createTerminalWatchCallbackCliAdapter(
           `Terminal Watch callback failed with status ${delivery.status}`
         );
       }
-      const acknowledgement = parseAcknowledgement(
+      const acknowledgement = parseChatSendAcknowledgement(
         delivery.stdout,
         input.idempotencyKey
       );
@@ -77,7 +71,6 @@ export function createTerminalWatchCallbackCliAdapter(
           `Terminal Watch chat.send was not accepted: ${acknowledgement.status}`
         );
       }
-      return acknowledgement;
     }
   });
 }
@@ -105,40 +98,4 @@ function terminalWatchCallbackMessage(
       ? ["", "Bounded completion text:", input.completionText]
       : [])
   ].join("\n");
-}
-
-function parseAcknowledgement(
-  text: string,
-  expectedRunId: string
-): TerminalWatchCallbackAcknowledgement {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("Terminal Watch chat.send returned malformed JSON");
-  }
-  if (!isRecord(parsed)) {
-    throw new Error("Terminal Watch chat.send returned malformed JSON");
-  }
-  const runId = nonBlankString(parsed.runId);
-  const status = nonBlankString(parsed.status);
-  if (runId !== expectedRunId) {
-    throw new Error(
-      "Terminal Watch chat.send acknowledgement does not match its idempotency key"
-    );
-  }
-  if (
-    !status ||
-    !["started", "in_flight", "ok", "error", "timeout"].includes(status)
-  ) {
-    throw new Error(
-      `Terminal Watch chat.send returned unexpected status ${JSON.stringify(
-        status ?? null
-      )}`
-    );
-  }
-  return {
-    runId,
-    status: status as TerminalWatchCallbackAcknowledgement["status"]
-  };
 }
