@@ -895,7 +895,10 @@ async function verifyAkkDoctorCommand({
         /AKK doctor: (?:ready|needs attention)/u.test(text) &&
         /Gateway: healthy/u.test(text);
     });
-    if (assistant) {
+    if (
+      assistant &&
+      history.sessionInfo?.hasActiveRun === false
+    ) {
       break;
     }
     await delay(500);
@@ -917,7 +920,11 @@ async function verifyAkkDoctorCommand({
   assert.equal(assistant.usage?.input ?? 0, 0);
   assert.equal(assistant.usage?.output ?? 0, 0);
   assert.equal(assistant.usage?.totalTokens ?? 0, 0);
-  assert.equal(history.sessionInfo?.hasActiveRun, false);
+  assert.equal(
+    history.sessionInfo?.hasActiveRun,
+    false,
+    "/akk doctor run must settle after its injected reply"
+  );
 }
 
 function messageText(message) {
