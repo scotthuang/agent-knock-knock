@@ -409,10 +409,12 @@ test("virgin Codex binding recovery closes both post-Enter crash windows without
       const reconcileArgs = [
         "reconcile-monitors",
         ...codexNoRolloutStoreArgs(fixture),
-        "--terminal-monitors-only"
+        "--terminal-monitors-only",
+        "--disable-terminal-bridge-monitor"
       ];
       const recovered = await runCli(reconcileArgs, fixture.environment);
       assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+      assert.equal(JSON.parse(recovered.stdout).launched, 0);
 
       const afterTurn = listConversations(fixture.storeDir)[0];
       const afterSession = loadManagedSession(
@@ -4407,12 +4409,14 @@ test("active candidate transfer protects expired idle source history from reconc
       "--all",
       ...codexNoRolloutStoreArgs(fixture),
       "--idle-timeout-minutes",
-      "1"
+      "1",
+      "--disable-terminal-bridge-monitor"
     ], fixture.environment);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const output = JSON.parse(listed.stdout);
     assert.equal(output.reconciliation.status, "completed");
     assert.equal(output.reconciliation.closed, 0);
+    assert.equal(output.reconciliation.monitors_launched, 0);
     assert.ok(output.reconciliation.skipped >= 1, listed.stdout);
     assert.deepEqual(fs.readFileSync(statePath), beforeState);
     assert.deepEqual(
