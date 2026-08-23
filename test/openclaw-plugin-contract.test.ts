@@ -2797,6 +2797,10 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     );
     assert.match(closeTool?.description ?? "", /expected_transition_id/u);
     assert.match(closeTool?.description ?? "", /handoff authority privately/u);
+    assert.match(
+      closeTool?.description ?? "",
+      /linked deferred AKK management[\s\S]*explicit confirmation[\s\S]*does not prepare or retry another callback[\s\S]*callback attempt already in flight or accepted by the host may still arrive[\s\S]*sends no terminal input[\s\S]*does not interrupt or stop Codex[\s\S]*Watch/ui
+    );
     const approveTool = tools.get("agent_knock_knock_approve");
     assert.ok(approveTool);
     assert.deepEqual(approveTool.parameters?.anyOf, [
@@ -3326,6 +3330,12 @@ if (action === "retry-callback") {
   delete result.summary.turn_id;
   result.conversation.callback_delivery = { attempts: 2 };
 }
+if (action === "close" && process.argv.includes("user-abandon-test")) {
+  result.disposition = "user_abandoned_management";
+  result.coding_agent_stopped = false;
+  result.terminal_input_sent = false;
+  result.management_released = true;
+}
 process.stdout.write(JSON.stringify(result));
 `,
       "utf8"
@@ -3403,6 +3413,16 @@ process.stdout.write(JSON.stringify(result));
     });
     assert.match(closeResult?.text ?? "", /AKK Turn record closed\./u);
     assert.doesNotMatch(closeResult?.text ?? "", /AKK session closed/u);
+
+    const abandoned = await command?.handler?.({
+      args: "close turn-close user-abandon-test",
+      sessionKey: "agent:test:public-wording"
+    });
+    assert.match(
+      abandoned?.text ?? "",
+      /released its management[\s\S]*disposition: user_abandoned_management[\s\S]*terminal input sent: no[\s\S]*coding agent stopped: no[\s\S]*does not prepare or retry another callback[\s\S]*callback attempt already in flight or accepted by the host may still arrive[\s\S]*Codex may continue[\s\S]*Refresh AKK list[\s\S]*Watch action/ui
+    );
+    assert.doesNotMatch(abandoned?.text ?? "", /cancel requested/u);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

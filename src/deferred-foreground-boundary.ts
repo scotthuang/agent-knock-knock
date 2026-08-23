@@ -71,6 +71,7 @@ export interface DeferredForegroundApplicationScope {
   ): ManagedSessionState;
   assertBoundary(boundary: DeferredForegroundBindingBoundary): void;
   transferBelongsToTurn(transfer: DeferredForegroundTransfer): boolean;
+  transferMatchesTerminal(transfer: DeferredForegroundTransfer): boolean;
   terminalMatches(
     transfer: DeferredForegroundTransfer,
     boundary: DeferredForegroundBindingBoundary

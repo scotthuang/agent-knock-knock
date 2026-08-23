@@ -172,7 +172,8 @@ export interface TerminalMonitorStateCliDependencies {
     >;
     handoff: Pick<
       TerminalHandoffCliFacade,
-      "recoverDeferredCodexForegroundTransferBeforeMutation"
+      "recoverDeferredCodexForegroundTransferBeforeMutation" |
+        "recoverDeferredForegroundUserAbandonmentBeforeMutation"
     >;
     assertBindingCurrent(
       conversation: Conversation,
@@ -236,6 +237,12 @@ export interface TerminalMonitorStateCliAdapter {
     paths: TerminalMonitorStatePaths;
     includeCallbackRecovery: boolean;
   }): Promise<TerminalMonitorStateReconciliation>;
+  recoverDeferredUserAbandonmentBeforeMutation(input: {
+    options: MonitorCliOptions;
+    storeDir: string;
+    conversation: Conversation;
+    statePath: string;
+  }): Promise<TerminalMonitorUserAbandonmentStartup>;
   eligibility(conversation: Conversation): TerminalMonitorEligibility;
   prepareLaunch(input: {
     statePath: string;
@@ -321,6 +328,45 @@ interface TerminalMonitorActivityInput {
   hardTimeoutMinutes: number;
 }
 
+export type TerminalMonitorUserAbandonmentStartup =
+  | { action: "continue"; conversation: Conversation }
+  | { action: "released"; conversation: Conversation };
+
+export async function settleDeferredUserAbandonmentBeforeMonitorMutation(
+  input: {
+    conversation: Conversation;
+    observeStatus(): DeferredForegroundTransfer["status"];
+    recover(): Promise<Conversation>;
+  }
+): Promise<TerminalMonitorUserAbandonmentStartup> {
+  const initialStatus = input.observeStatus();
+  if (initialStatus === "user_abandoned") {
+    return { action: "released", conversation: input.conversation };
+  }
+  if (initialStatus !== "user_abandoning") {
+    return { action: "continue", conversation: input.conversation };
+  }
+  const recovered = await input.recover();
+  const recoveredStatus = input.observeStatus();
+  if (recoveredStatus !== "user_abandoned") {
+    throw new Error(
+      "deferred foreground user abandonment did not converge before " +
+      "terminal monitor startup"
+    );
+  }
+  return { action: "released", conversation: recovered };
+}
+
+export function deferredUserAbandonmentCollateralAction(
+  status: DeferredForegroundTransfer["status"] | undefined
+): "repair" | "recover" | "released" {
+  return status === "user_abandoning"
+    ? "recover"
+    : status === "user_abandoned"
+      ? "released"
+      : "repair";
+}
+
 /** Invocation-local monitor state and reconciliation CLI boundary. */
 export function createTerminalMonitorStateCliAdapter(
   dependencies: TerminalMonitorStateCliDependencies
@@ -334,6 +380,8 @@ export function createTerminalMonitorStateCliAdapter(
     stallOther: (input) => application.stallOther(input),
     statePaths: (listed, storeDir) => application.statePaths(listed, storeDir),
     reconcileState: (input) => application.reconcileState(input),
+    recoverDeferredUserAbandonmentBeforeMutation: (input) =>
+      application.recoverDeferredUserAbandonmentBeforeMutation(input),
     eligibility: (conversation) => application.eligibility(conversation),
     prepareLaunch: (input) => application.prepareLaunch(input)
   });
@@ -354,8 +402,19 @@ class TerminalMonitorStateCliApplication {
 
   async runService(input: Parameters<TerminalMonitorStateCliAdapter["runService"]>[0]):
     Promise<void> {
+    const startup = await this.recoverDeferredUserAbandonmentBeforeMutation({
+      options: input.options,
+      storeDir: this.#dependencies.acceptance.storeDirForConversation(
+        input.initialConversation
+      ) ?? this.#dependencies.runtime.storeDir(input.options),
+      conversation: input.initialConversation,
+      statePath: input.statePath
+    });
+    if (startup.action === "released") {
+      return;
+    }
     await runTerminalMonitorService({
-      initialConversation: input.initialConversation,
+      initialConversation: startup.conversation,
       expectedTerminalMessageId: input.expectedTerminalMessageId,
       lifecycle: input.lifecycle,
       configuration: () => {
@@ -408,6 +467,18 @@ class TerminalMonitorStateCliApplication {
   }
 
   eligibility(conversation: Conversation): TerminalMonitorEligibility {
+    const storeDir = this.#dependencies.acceptance.storeDirForConversation(
+      conversation
+    );
+    const abandonmentStatus = storeDir
+      ? this.#linkedDeferredUserAbandonmentStatus(storeDir, conversation)
+      : undefined;
+    if (abandonmentStatus) {
+      return {
+        eligible: false,
+        reason: `deferred_foreground_transfer_${abandonmentStatus}`
+      };
+    }
     const staged = terminalMonitorReconciliationEligibility(conversation);
     let step = staged.next();
     while (!step.done) {
@@ -454,13 +525,59 @@ class TerminalMonitorStateCliApplication {
   async reconcileState(
     input: Parameters<TerminalMonitorStateCliAdapter["reconcileState"]>[0]
   ): Promise<TerminalMonitorStateReconciliation> {
+    const startup = await this.recoverDeferredUserAbandonmentBeforeMutation({
+      options: input.options,
+      storeDir: input.storeDir,
+      conversation: input.listed,
+      statePath: input.paths.statePath
+    });
+    if (startup.action === "released") {
+      return {
+        kind: "handled",
+        counter: "skipped",
+        item: {
+          conversation_id: startup.conversation.conversation_id,
+          status: "released",
+          reason: "deferred_user_abandonment_released"
+        }
+      };
+    }
     return reconcileTerminalMonitorStateCandidate({
       storeDir: input.storeDir,
-      listed: input.listed,
+      listed: startup.conversation,
       paths: input.paths,
       includeCallbackRecovery: input.includeCallbackRecovery,
       callbackRetryDelayMs: input.options.callbackRetryDelayMs,
       ports: this.#stateReconciliationPorts(input.options)
+    });
+  }
+
+  async recoverDeferredUserAbandonmentBeforeMutation(input: {
+    options: MonitorCliOptions;
+    storeDir: string;
+    conversation: Conversation;
+    statePath: string;
+  }): Promise<TerminalMonitorUserAbandonmentStartup> {
+    const transferId = nonBlankString(
+      takeoverFor(input.conversation)?.deferred_foreground_transfer_id
+    );
+    if (!transferId) {
+      return { action: "continue", conversation: input.conversation };
+    }
+    return settleDeferredUserAbandonmentBeforeMonitorMutation({
+      conversation: input.conversation,
+      observeStatus: () => loadDeferredForegroundTransfer(
+        input.storeDir,
+        transferId
+      ).status,
+      recover: async () => {
+        await this.#dependencies.authority.handoff
+          .recoverDeferredForegroundUserAbandonmentBeforeMutation({
+            options: input.options,
+            conversation: input.conversation
+          });
+        return loadState(input.statePath);
+      }
     });
   }
 
@@ -559,6 +676,12 @@ class TerminalMonitorStateCliApplication {
     initialConversation: Conversation,
     paths: TerminalMonitorStatePaths
   ): Promise<Conversation> {
+    if (this.#linkedDeferredUserAbandonmentStatus(
+      storeDir,
+      initialConversation
+    )) {
+      return initialConversation;
+    }
     const initialAttempt = loadTerminalSubmissionRetry(paths.statePath);
     if (!initialAttempt) {
       return initialConversation;
@@ -595,6 +718,12 @@ class TerminalMonitorStateCliApplication {
         );
         try {
           let conversation = loadState(paths.statePath);
+          if (this.#linkedDeferredUserAbandonmentStatus(
+            storeDir,
+            conversation
+          )) {
+            return conversation;
+          }
           const takeover = takeoverFor(conversation);
           const control = terminalControlFromTakeover(takeover);
           const attempt = loadTerminalSubmissionRetry(paths.statePath);
@@ -814,6 +943,9 @@ class TerminalMonitorStateCliApplication {
       return initialConversation;
     }
     const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
+    if (["user_abandoning", "user_abandoned"].includes(transfer.status)) {
+      return initialConversation;
+    }
     if (isFinalDeferredForegroundTransferStatus(transfer.status)) {
       return initialConversation;
     }
@@ -844,6 +976,22 @@ class TerminalMonitorStateCliApplication {
     const conversation = loadState(paths.statePath);
     this.#assertExactPendingDeferred(conversation, storeDir, transferId);
     return conversation;
+  }
+
+  #linkedDeferredUserAbandonmentStatus(
+    storeDir: string,
+    conversation: Conversation
+  ): "user_abandoning" | "user_abandoned" | undefined {
+    const transferId = nonBlankString(
+      takeoverFor(conversation)?.deferred_foreground_transfer_id
+    );
+    if (!transferId) {
+      return undefined;
+    }
+    const status = loadDeferredForegroundTransfer(storeDir, transferId).status;
+    return status === "user_abandoning" || status === "user_abandoned"
+      ? status
+      : undefined;
   }
 
   #assertExactPendingDeferred(
@@ -1072,6 +1220,11 @@ class TerminalMonitorStateCliApplication {
               acquireState: () =>
                 this.#stateFileLock.acquire(`${input.statePath}.lock`),
               loadConversation: () => loadState(input.statePath),
+              userAbandonmentStatus: (conversation) =>
+                this.#linkedDeferredUserAbandonmentStatus(
+                  stateStoreDir(),
+                  conversation
+                ),
               loadLedger: this.#dependencies.dispatch.repository.load,
               saveLedger: this.#dependencies.dispatch.repository.save,
               saveConversation: (conversation) =>
@@ -1114,6 +1267,11 @@ class TerminalMonitorStateCliApplication {
               acquireState: () =>
                 this.#stateFileLock.acquire(`${input.statePath}.lock`),
               loadConversation: () => loadState(input.statePath),
+              userAbandonmentStatus: (conversation) =>
+                this.#linkedDeferredUserAbandonmentStatus(
+                  stateStoreDir(),
+                  conversation
+                ),
               loadLedger: this.#dependencies.dispatch.repository.load,
               reconcileLedger:
                 this.#dependencies.dispatch.recovery.reconcilePrepared,
@@ -1145,6 +1303,11 @@ class TerminalMonitorStateCliApplication {
             saveLedger: this.#dependencies.dispatch.repository.save,
             submission: terminalBridgeSubmission,
             loadConversation: () => loadState(input.statePath),
+            userAbandonmentStatus: (conversation) =>
+              this.#linkedDeferredUserAbandonmentStatus(
+                stateStoreDir(),
+                conversation
+              ),
             terminalControl: (conversation) =>
               terminalControlFromTakeover(takeoverFor(conversation)),
             sameIncarnation: terminalControlsShareIncarnation,
@@ -1517,13 +1680,47 @@ class TerminalMonitorStateCliApplication {
     storeDir: string,
     conversationId?: string
   ): Promise<TerminalBridgeCollateralStallReconciliation> {
-    return withStoreWriterLeaseAsync(storeDir, async () =>
-      this.#reconcileCollateralLocked(storeDir, conversationId));
+    const abandonmentRecoveries: Conversation[] = [];
+    const result = await withStoreWriterLeaseAsync(storeDir, async () =>
+      this.#reconcileCollateralLocked(
+        storeDir,
+        conversationId,
+        abandonmentRecoveries
+      ));
+    for (const conversation of abandonmentRecoveries) {
+      try {
+        await this.#dependencies.authority.handoff
+          .recoverDeferredForegroundUserAbandonmentBeforeMutation({
+            options: { storeDir },
+            conversation
+          });
+        const status = this.#linkedDeferredUserAbandonmentStatus(
+          storeDir,
+          loadState(nonBlankString(conversation.state_path)!)
+        );
+        if (status !== "user_abandoned") {
+          throw new Error(
+            "deferred foreground user abandonment did not converge before " +
+            "collateral reconciliation"
+          );
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        result.errors.push(`${conversation.conversation_id}: ${reason}`);
+        result.items.push({
+          conversation_id: conversation.conversation_id,
+          status: "error",
+          reason
+        });
+      }
+    }
+    return result;
   }
 
   #reconcileCollateralLocked(
     storeDir: string,
-    conversationId?: string
+    conversationId: string | undefined,
+    abandonmentRecoveries: Conversation[]
   ): TerminalBridgeCollateralStallReconciliation {
     const reservedSourceTurnIds = new Set(
       listDeferredForegroundTransfers(storeDir)
@@ -1554,7 +1751,12 @@ class TerminalMonitorStateCliApplication {
       items: []
     };
     for (const listed of candidates) {
-      this.#reconcileCollateralCandidate(storeDir, listed, result);
+      this.#reconcileCollateralCandidate(
+        storeDir,
+        listed,
+        result,
+        abandonmentRecoveries
+      );
     }
     return result;
   }
@@ -1562,7 +1764,8 @@ class TerminalMonitorStateCliApplication {
   #reconcileCollateralCandidate(
     storeDir: string,
     listed: Conversation,
-    result: TerminalBridgeCollateralStallReconciliation
+    result: TerminalBridgeCollateralStallReconciliation,
+    abandonmentRecoveries: Conversation[]
   ): void {
     const statePath = nonBlankString(listed.state_path);
     if (!statePath) {
@@ -1573,6 +1776,25 @@ class TerminalMonitorStateCliApplication {
     try {
       release = this.#stateFileLock.acquire(`${statePath}.lock`);
       const current = loadState(statePath);
+      const abandonmentStatus = this.#linkedDeferredUserAbandonmentStatus(
+        storeDir,
+        current
+      );
+      const abandonmentAction = deferredUserAbandonmentCollateralAction(
+        abandonmentStatus
+      );
+      if (abandonmentAction !== "repair") {
+        result.skipped += 1;
+        result.items.push({
+          conversation_id: current.conversation_id,
+          status: "released",
+          reason: `deferred_foreground_transfer_${abandonmentStatus}`
+        });
+        if (abandonmentAction === "recover") {
+          abandonmentRecoveries.push(current);
+        }
+        return;
+      }
       const evidence = this.#exactCollateralRepairEvidence(current, storeDir);
       if (!evidence) {
         result.skipped += 1;

@@ -109,7 +109,7 @@ export interface TerminalDispatchRecoveryCliDependencies {
     assertNoDeferredTransfer(input: {
       storeDir: string;
       conversation: Conversation;
-      action: "approve" | "cancel";
+      action: "approve" | "cancel" | "settle local completion for";
     }): void;
     assertTurnBindingCurrent(conversation: Conversation, operation: string): void;
     storeDirForConversation(conversation: Conversation): string | undefined;
@@ -1103,6 +1103,11 @@ class TerminalDispatchRecoveryCliApplication {
         };
         try {
           const conversation = loadState(request.statePath);
+          this.#dependencies.authority.assertNoDeferredTransfer({
+            storeDir: request.storeDir,
+            conversation,
+            action: "settle local completion for"
+          });
           const scope = new ConcreteRecoveryScope(
             request.storeDir,
             request.statePath,

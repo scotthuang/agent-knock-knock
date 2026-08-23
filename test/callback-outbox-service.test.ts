@@ -11,6 +11,8 @@ import {
   type Conversation
 } from "../src/protocol.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import { supersedeUnacceptedCallbackDeliveries } from
+  "../src/callback-outbox-policy.js";
 import { callbackRouteFingerprint } from
   "../src/callback-route-authority.js";
 import {
@@ -102,6 +104,14 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
           return operation();
         } finally {
           order.push("release");
+        }
+      },
+      withWriter(_statePath, operation) {
+        order.push("writer:acquire");
+        try {
+          return operation();
+        } finally {
+          order.push("writer:release");
         }
       },
       storeDirForStatePath(statePath) {
@@ -335,6 +345,197 @@ test("prepared delivery derives writer authority from its current state path", (
     /stop after writer authority check/u
   );
   assert.equal(assertedStoreDir, "/other");
+});
+
+test("close supersedes a prepared callback before transport starts", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  harness.ports.state.save(STATE_PATH, supersedeUnacceptedCallbackDeliveries(
+    harness.stored(),
+    { at: NOW.toISOString(), reason: "user_abandoned_management" }
+  ));
+  let transports = 0;
+  harness.ports.delivery.deliver = () => {
+    transports += 1;
+    throw new Error("superseded delivery must not start transport");
+  };
+
+  const result = harness.service.runPrepared(prepared);
+
+  assert.equal(result.delivered, false);
+  assert.equal(result.duplicate, true);
+  assert.equal(transports, 0);
+  assert.equal(
+    (harness.stored().callback_delivery as Record<string, unknown>).status,
+    "superseded"
+  );
+});
+
+test("transport-start wins only the external send and close still supersedes settlement", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  let transports = 0;
+  harness.ports.delivery.deliver = () => {
+    transports += 1;
+    const started = harness.stored().callback_delivery as
+      Record<string, unknown>;
+    assert.equal(started.transport_started_at, NOW.toISOString());
+    assert.equal(started.transport_started_lane, "lifecycle");
+    assert.equal(started.transport_started_attempt, prepared.deliveryAttempt);
+    assert.equal(started.transport_started_attempt_id,
+      prepared.deliveryAttemptId);
+    assert.equal(started.transport_started_pid, 3102);
+    harness.ports.state.save(STATE_PATH, supersedeUnacceptedCallbackDeliveries(
+      harness.stored(),
+      { at: NOW.toISOString(), reason: "user_abandoned_management" }
+    ));
+    return {
+      kind: "local_ipc_v1",
+      injection: { status: "accepted", accepted_at: NOW.toISOString() },
+      wake: { status: "accepted", accepted_at: NOW.toISOString() },
+      attempt_outcome: {
+        disposition: "accepted",
+        accepted_at: NOW.toISOString(),
+        acceptance_id: "accepted-after-management-release"
+      }
+    };
+  };
+
+  const result = harness.service.runPrepared(prepared);
+
+  assert.equal(transports, 1);
+  assert.equal(result.delivered, true);
+  const delivery = harness.stored().callback_delivery as
+    Record<string, unknown>;
+  assert.equal(delivery.status, "superseded");
+  assert.equal(delivery.transport_started_attempt_id,
+    prepared.deliveryAttemptId);
+  assert.ok(harness.order.includes("append:callback_delivery_settle_skipped"));
+  assert.equal(harness.retryMonitors.length, 1);
+});
+
+test("prepared transport fails closed on a partial start marker", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  const delivery = harness.stored().callback_delivery as
+    Record<string, unknown>;
+  harness.ports.state.save(STATE_PATH, {
+    ...harness.stored(),
+    callback_delivery: { ...delivery, transport_started_at: NOW.toISOString() }
+  });
+  let transports = 0;
+  harness.ports.delivery.deliver = () => {
+    transports += 1;
+    throw new Error("malformed start authority must not deliver");
+  };
+
+  assert.throws(
+    () => harness.service.runPrepared(prepared),
+    /callback transport-start authority is invalid/u
+  );
+  assert.equal(transports, 0);
+});
+
+test("abandonment intent fences prepared transport before marker or delivery", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  const before = JSON.stringify(harness.stored());
+  harness.ports.authority.assertNoDeferredTransfer = () => {
+    throw new Error("linked transfer is user_abandoning");
+  };
+  let transports = 0;
+  harness.ports.delivery.deliver = () => {
+    transports += 1;
+    throw new Error("abandonment intent must fence transport");
+  };
+
+  assert.throws(
+    () => harness.service.runPrepared(prepared),
+    /linked transfer is user_abandoning/u
+  );
+  assert.equal(transports, 0);
+  assert.equal(JSON.stringify(harness.stored()), before);
+  assert.equal(
+    (harness.stored().callback_delivery as Record<string, unknown>)
+      .transport_started_at,
+    undefined
+  );
+});
+
+test("crash after transport-start leaves a durable uncertain no-retry claim", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  harness.ports.runtime.crashCheckpoint = (name) => {
+    if (name === "after_callback_transport_started") {
+      throw new Error("simulated callback process crash");
+    }
+  };
+  let transports = 0;
+  harness.ports.delivery.deliver = () => {
+    transports += 1;
+    throw new Error("crash checkpoint must precede transport");
+  };
+
+  assert.throws(
+    () => harness.service.runPrepared(prepared),
+    /simulated callback process crash/u
+  );
+  assert.equal(transports, 0);
+  const delivery = harness.stored().callback_delivery as
+    Record<string, unknown>;
+  assert.equal(delivery.status, "pending");
+  assert.equal(delivery.transport_started_attempt_id,
+    prepared.deliveryAttemptId);
+  assert.deepEqual(harness.service.retryDisposition(delivery), {
+    state: "uncertain",
+    attempt: 1,
+    reason: "callback_transport_started_without_final_outcome"
+  });
 });
 
 test("non-retryable requests preserve the two fresh disposition observations", () => {

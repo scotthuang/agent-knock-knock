@@ -9,6 +9,10 @@ import type {
 import type { Conversation } from "../src/protocol.js";
 import type { MonitorVerifiedDeadResult } from
   "../src/terminal-monitor-application-service.js";
+import {
+  deferredUserAbandonmentCollateralAction,
+  settleDeferredUserAbandonmentBeforeMonitorMutation
+} from "../src/terminal-monitor-state-cli-adapter.js";
 import type { TerminalMonitorEligibility } from
   "../src/terminal-monitor-reconciliation-eligibility.js";
 import {
@@ -274,6 +278,186 @@ test("monitor state reconciliation preserves exact order and resource identity",
     conversation: fixture.virgin,
     eligibility: fixture.eligibility
   });
+});
+
+test("user abandonment startup settlement is idempotent and has no live or callback ports", async () => {
+  const initial = conversation("turn-abandoning");
+  const released = {
+    ...initial,
+    status: "closed" as const,
+    disposition: "user_abandoned_management"
+  };
+  let status: "user_abandoning" | "user_abandoned" = "user_abandoning";
+  const trace: string[] = [];
+  let liveCalls = 0;
+  let callbackCalls = 0;
+  const recover = async () => {
+    trace.push("recover-no-live");
+    status = "user_abandoned";
+    return released;
+  };
+  const observeStatus = () => {
+    trace.push(`observe:${status}`);
+    return status;
+  };
+
+  const first = await settleDeferredUserAbandonmentBeforeMonitorMutation({
+    conversation: initial,
+    observeStatus,
+    recover
+  });
+  const replay = await settleDeferredUserAbandonmentBeforeMonitorMutation({
+    conversation: released,
+    observeStatus,
+    recover
+  });
+
+  assert.deepEqual(first, { action: "released", conversation: released });
+  assert.deepEqual(replay, { action: "released", conversation: released });
+  assert.deepEqual(trace, [
+    "observe:user_abandoning",
+    "recover-no-live",
+    "observe:user_abandoned",
+    "observe:user_abandoned"
+  ]);
+  assert.equal(liveCalls, 0);
+  assert.equal(callbackCalls, 0);
+  void liveCalls;
+  void callbackCalls;
+});
+
+test("collateral repair rechecks a close intent after an outer normal gate", () => {
+  let status: "target_prepared" | "user_abandoning" = "target_prepared";
+  let repairs = 0;
+  let recoveries = 0;
+  assert.equal(deferredUserAbandonmentCollateralAction(status), "repair");
+
+  // The close intent wins before the writer/state transaction resumes.
+  status = "user_abandoning";
+  const lockedAction = deferredUserAbandonmentCollateralAction(status);
+  if (lockedAction === "repair") {
+    repairs += 1;
+  } else if (lockedAction === "recover") {
+    recoveries += 1;
+  }
+  assert.equal(lockedAction, "recover");
+  assert.equal(repairs, 0);
+  assert.equal(recoveries, 1);
+  assert.equal(
+    deferredUserAbandonmentCollateralAction("user_abandoned"),
+    "released"
+  );
+});
+
+test("user abandonment preflight precedes every monitor startup side effect", () => {
+  const runService = compiledMonitorStateSource(
+    "async runService(",
+    "deferralPorts("
+  );
+  assertSourceOrder(runService, [
+    "recoverDeferredUserAbandonmentBeforeMutation",
+    'startup.action === "released"',
+    "runTerminalMonitorService"
+  ]);
+  const reconcileState = compiledMonitorStateSource(
+    "async reconcileState(",
+    "#stateReconciliationPorts("
+  );
+  assertSourceOrder(reconcileState, [
+    "recoverDeferredUserAbandonmentBeforeMutation",
+    'startup.action === "released"',
+    "reconcileTerminalMonitorStateCandidate"
+  ]);
+  const submissionRetry = compiledMonitorStateSource(
+    "async #recoverSubmissionRetry(",
+    "async #recoverDeferred("
+  );
+  assertSourceOrder(submissionRetry, [
+    "#linkedDeferredUserAbandonmentStatus",
+    "loadTerminalSubmissionRetry",
+    "dispatch.repository.acquire",
+    "withStoreWriterLeaseAsync",
+    "loadState(paths.statePath)",
+    "#linkedDeferredUserAbandonmentStatus",
+    "loadTerminalSubmissionRetry"
+  ]);
+  const eligibility = compiledMonitorStateSource(
+    "eligibility(conversation)",
+    "async reconcileState("
+  );
+  assertSourceOrder(eligibility, [
+    "#linkedDeferredUserAbandonmentStatus",
+    "terminalMonitorReconciliationEligibility",
+    "dispatch.repository.load"
+  ]);
+  const abandonment = compiledMonitorStateSource(
+    "async recoverDeferredUserAbandonmentBeforeMutation(",
+    "#stateReconciliationPorts("
+  );
+  assertSourceOrder(abandonment, [
+    "loadDeferredForegroundTransfer",
+    "recoverDeferredForegroundUserAbandonmentBeforeMutation",
+    "loadState"
+  ]);
+  assert.doesNotMatch(
+    abandonment,
+    /createBridge|resolveStoredTerminal|callbacks|recoverSubmissionRetry|verifiedDead|dispatch\.repository\.acquire/u
+  );
+
+  const collateral = compiledMonitorStateSource(
+    "async reconcileCollateral(",
+    "#appendCollateralRepairEvent("
+  );
+  assertSourceOrder(collateral, [
+    "withStoreWriterLeaseAsync",
+    "#stateFileLock.acquire",
+    "loadState(statePath)",
+    "#linkedDeferredUserAbandonmentStatus",
+    "deferredUserAbandonmentCollateralAction",
+    'abandonmentAction !== "repair"',
+    "#exactCollateralRepairEvidence",
+    "#persistCollateralRepair"
+  ]);
+});
+
+test("callback and verified-dead transactions fence deferred abandonment under fresh locks", () => {
+  const callback = fs.readFileSync(
+    new URL("../src/callback-outbox-service.js", import.meta.url),
+    "utf8"
+  );
+  const callbackStart = callback.indexOf("function reconcileCallbackDelivery(");
+  const callbackEnd = callback.indexOf(
+    "function runCallbackRetryMonitor(",
+    callbackStart
+  );
+  const callbackTransaction = callback.slice(callbackStart, callbackEnd);
+  assertSourceOrder(callbackTransaction, [
+    "ports.state.withTransaction",
+    "ports.state.load(statePath)",
+    '!["pending", "failed"].includes',
+    "ports.authority.assertNoDeferredTransfer",
+    "ports.retry.startMonitor",
+    "ports.state.save"
+  ]);
+
+  const recovery = fs.readFileSync(
+    new URL("../src/terminal-dispatch-recovery-cli-adapter.js", import.meta.url),
+    "utf8"
+  );
+  const verifiedStart = recovery.indexOf("async #withVerifiedDeadLocks(");
+  const verifiedEnd = recovery.indexOf(
+    "#withLocalCompletionTransaction(",
+    verifiedStart
+  );
+  const verifiedTransaction = recovery.slice(verifiedStart, verifiedEnd);
+  assertSourceOrder(verifiedTransaction, [
+    "repository.acquire",
+    "withStoreWriterLeaseAsync",
+    "#stateFileLock.acquire",
+    "loadState(request.statePath)",
+    "acceptedTurnCanBeStalled(request.storeDir, current)",
+    "operation({"
+  ]);
 });
 
 test("startup retry recovery preserves terminal outcomes and finalizes accepted crash lags", () => {

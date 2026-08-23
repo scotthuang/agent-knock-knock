@@ -3,12 +3,15 @@ import assert from "node:assert/strict";
 import {
   actionsForManagedSessionBinding,
   currentTerminalActions,
+  exactDeferredUserAbandonCloseAction,
+  exactDeferredUserAbandonManagedTurn,
   exactTerminalWatchAction,
   listActionContracts,
   readOnlyManagedTurn,
   renderAvailableListActions,
   renderCurrentManagedTurn,
   renderManagedTurnListEntry,
+  renderUnavailableManagedTurn,
   retargetConversationAction,
   safeTerminalActionsDuringConflict,
   safeUnavailableManagedTurnActions,
@@ -103,9 +106,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v18 exposes semantic arguments only", () => {
+test("the public action contract v19 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 18);
+  assert.equal(contracts.version, 19);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -189,6 +192,12 @@ test("the public action contract v18 exposes semantic arguments only", () => {
     "expected_message_id",
     "expected_transition_id"
   ]);
+  assert.equal(actions.close.sends_terminal_input, false);
+  assert.equal(actions.close.stops_coding_agent, false);
+  assert.match(
+    actions.close.explicit_user_abandon_scope,
+    /exact current blocked Turn[\s\S]*user_abandoned_management[\s\S]*does not prepare or retry another callback[\s\S]*callback attempt already in flight or accepted by the host may still arrive[\s\S]*Codex may continue independently[\s\S]*Refresh list[\s\S]*Watch/ui
+  );
 });
 
 test("raw active terminals expose only an exact prefilled watch action", () => {
@@ -340,6 +349,87 @@ test("terminal list action policies expose only their exact safe subsets", () =>
     conversation_id: "turn-1",
     available_actions: { status: { tool: "status" } }
   });
+});
+
+test("exact deferred user abandon retains only status and confirmed close", () => {
+  const managedTurn = {
+    conversation_id: "turn-deferred-current",
+    available_actions: {
+      status: { tool: "agent_knock_knock_status" },
+      retry_submission: { tool: "agent_knock_knock_send" },
+      cancel: { tool: "agent_knock_knock_cancel" },
+      close: {
+        tool: "agent_knock_knock_close",
+        arguments: { turn_id: "turn-deferred-current" },
+        requires_explicit_user_confirmation: true
+      }
+    }
+  };
+  const projected = exactDeferredUserAbandonManagedTurn(managedTurn);
+  assert.deepEqual(Object.keys(projected.available_actions as object), [
+    "status",
+    "close"
+  ]);
+  const close = exactDeferredUserAbandonCloseAction(projected);
+  assert.equal(close?.tool, "agent_knock_knock_close");
+  assert.deepEqual(close?.arguments, {
+    turn_id: "turn-deferred-current"
+  });
+  assert.equal(close?.requires_explicit_user_confirmation, true);
+  assert.equal(close?.scope, "exact_deferred_user_abandonment");
+  assert.equal(close?.disposition, "user_abandoned_management");
+  assert.equal(close?.terminal_input_sent, false);
+  assert.equal(close?.coding_agent_stopped, false);
+  assert.equal(close?.management_released, true);
+  assert.match(
+    String(close?.use),
+    /release its linked deferred terminal management[\s\S]*does not prepare or retry another callback[\s\S]*callback attempt already in flight or accepted by the host may still arrive[\s\S]*sends no terminal input[\s\S]*does not interrupt or stop Codex[\s\S]*watch action/ui
+  );
+  assert.deepEqual(
+    exactDeferredUserAbandonManagedTurn({
+      conversation_id: "turn-without-close",
+      available_actions: {
+        status: { tool: "agent_knock_knock_status" },
+        cancel: { tool: "agent_knock_knock_cancel" }
+      }
+    }),
+    {
+      conversation_id: "turn-without-close",
+      available_actions: {
+        status: { tool: "agent_knock_knock_status" }
+      }
+    }
+  );
+  const unavailableExact = renderUnavailableManagedTurn(managedTurn, {
+    mutationsAllowed: true,
+    hasNonterminalDeferredTransfer: true,
+    exactDeferredUserAbandonTarget: true
+  });
+  assert.deepEqual(Object.keys(unavailableExact.available_actions as object), [
+    "status",
+    "close"
+  ]);
+  assert.match(
+    String(exactDeferredUserAbandonCloseAction(unavailableExact)?.use),
+    /sends no terminal input[\s\S]*does not interrupt or stop Codex/u
+  );
+  for (const facts of [
+    {
+      mutationsAllowed: false,
+      hasNonterminalDeferredTransfer: true,
+      exactDeferredUserAbandonTarget: true
+    },
+    {
+      mutationsAllowed: true,
+      hasNonterminalDeferredTransfer: true,
+      exactDeferredUserAbandonTarget: false
+    }
+  ]) {
+    assert.deepEqual(
+      renderUnavailableManagedTurn(managedTurn, facts).available_actions,
+      { status: { tool: "agent_knock_knock_status" } }
+    );
+  }
 });
 
 test("managed binding actions are retargeted without weakening snapshot authority", () => {

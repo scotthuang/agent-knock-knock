@@ -281,6 +281,10 @@ function callbackOutboxService(): CallbackOutboxService {
         const releaseState = runtime.state.acquireFileLock(`${statePath}.lock`);
         try { return operation(); } finally { releaseState(); }
       },
+      withWriter: (statePath, operation) => runtime.state.withWriter(
+        callbackStoreDir(statePath),
+        operation
+      ),
       storeDirForStatePath: callbackStoreDir, logPathForStatePath
     },
     authority: runtime.authority,
@@ -289,8 +293,17 @@ function callbackOutboxService(): CallbackOutboxService {
       now: cliNow, nowMs: cliNowMs, pid: cliPid, log: cliRuntimeLog,
       textSummary: runtime.runtime.textSummary,
       sleepSync: cliSleepSync,
-      crashCheckpoint: () => {
-        if (cliEnv().AKK_TEST_EXIT_AFTER_LOCAL_COMPLETION_STATE === "1") {
+      crashCheckpoint: (name) => {
+        if (
+          name === "after_local_completion_state" &&
+          cliEnv().AKK_TEST_EXIT_AFTER_LOCAL_COMPLETION_STATE === "1"
+        ) {
+          cliExit(86);
+        }
+        if (
+          name === "after_callback_transport_started" &&
+          cliEnv().AKK_TEST_EXIT_AFTER_CALLBACK_TRANSPORT_STARTED === "1"
+        ) {
           cliExit(86);
         }
       }

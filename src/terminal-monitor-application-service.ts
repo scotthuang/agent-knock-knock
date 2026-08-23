@@ -116,7 +116,8 @@ export type TerminalMonitorPresentation =
 export type MonitorSubmissionReconciliation =
   | { outcome: "accepted"; conversation: Conversation }
   | { outcome: "pending" }
-  | { outcome: "not_accepted"; conversation: Conversation };
+  | { outcome: "not_accepted"; conversation: Conversation }
+  | { outcome: "released"; conversation: Conversation };
 
 export interface MonitorPollObservation {
   kind: "observed";
@@ -788,6 +789,10 @@ async function reconcileDispatchedSubmission({
           kind: "submission_not_accepted",
           conversation: reconciliation.conversation
         });
+        return "finished";
+      }
+      if (reconciliation.outcome === "released") {
+        state.conversation = reconciliation.conversation;
         return "finished";
       }
       return "pending";

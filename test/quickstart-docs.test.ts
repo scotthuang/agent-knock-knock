@@ -47,7 +47,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v18 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v19 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -178,7 +178,7 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.doesNotMatch(document, /`expected_binding_token`/u);
     assert.match(document, /`native_thread_id`/u);
     assert.doesNotMatch(document, /`candidate_token`/u);
-    assert.match(document, /v18 `action_contracts`/u);
+    assert.match(document, /v19 `action_contracts`/u);
     assert.match(
       document,
       /`session_exact`[\s\S]*`terminal_follow_current`/u
@@ -290,6 +290,16 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     skill,
     /A top-level `previous` block, when present, is the only authority for a “previous\/刚才那个” request/u
   );
+  for (const document of [readme, skill]) {
+    assert.match(
+      document,
+      /exact blocked Turn[\s\S]*linked nonterminal deferred transfer[\s\S]*user_abandoned_management(?=[\s\S]*does not prepare or retry another callback)(?=[\s\S]*callback attempt already in flight or accepted by the host may still arrive)(?=[\s\S]*(?:sends no terminal input[\s\S]*does not (?:interrupt or )?stop Codex|without sending terminal input[\s\S]*stopping Codex))[\s\S]*continue independently[\s\S]*Watch/ui
+    );
+    assert.match(
+      document,
+      /Source history|source history/u
+    );
+  }
   assert.match(
     skill,
     /For “previous” \/ “刚才那个”[^\n]*`previous\.available_actions\.resume_thread`[^\n]*use that exact (?:semantic-ID )?action(?: and|;) never substitute the newest row/u

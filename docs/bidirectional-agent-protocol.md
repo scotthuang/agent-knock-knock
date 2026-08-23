@@ -29,7 +29,9 @@ tmux terminal / verified process incarnation
 - A `watch_id` identifies an observation-only aggregate for one task that the human started directly in the TUI. It is never a Session, Turn, dispatch receipt, or terminal owner.
 - A terminal binding generation identifies one verified terminal-to-native-thread attachment. Native lifecycle transitions advance it even though they create no Turn.
 
-Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v18 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `native_inspect({terminal_id,inspection})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, managed `approve({turn_id})` or terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Approval, handoff takeover, and reconciliation require explicit user confirmation. The trusted plugin/CLI privately derives and revalidates terminal, binding, candidate, prompt, handoff, revision, and compare-and-swap fences under canonical locks; the model never transports them. Store format remains 1 and writer protocol remains 5.
+Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v19 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `native_inspect({terminal_id,inspection})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, managed `approve({turn_id})` or terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Approval, handoff takeover, and reconciliation require explicit user confirmation. The trusted plugin/CLI privately derives and revalidates terminal, binding, candidate, prompt, handoff, revision, and compare-and-swap fences under canonical locks; the model never transports them. Store format remains 1 and writer protocol remains 5.
+
+The v19 close extension preserves the same semantic-ID boundary. A current conflict row or exact `unavailable_managed_turns[]` entry may advertise `close({turn_id})` only when one blocked Turn durably matches its takeover, nonterminal deferred transfer, target Session, state route, message generation, and terminal endpoint. Dispatch authority must be the exact current ledger, one unique immutable receipt behind a newer ledger owner, or a verified absent ledger; malformed, unreadable, or ambiguous evidence remains non-actionable. An exact `closed` Turn whose linked transfer is still `user_abandoning` retains the same idempotent close so crash recovery can finish cleanup. Process visibility is not required because the action sends no terminal input. After explicit user confirmation, close records `user_abandoned_management` and releases only its AKK management records. After the abandonment intent, AKK does not prepare or retry another callback. A callback attempt already in flight or accepted by the host may still arrive. It does not stop Codex, so the live task may continue independently and become eligible for a fresh Terminal Watch after relisting. Source history, ambiguous transfers, and mismatched Turns remain non-actionable.
 
 ## Turn Flow
 
@@ -61,7 +63,7 @@ The core outbox, managed-Turn monitor, stall notification, and Terminal Watch
 use the host-neutral route/envelope/outcome boundary; OpenClaw-specific
 `sessionKey`, Gateway calls, executable paths, and credentials remain inside
 the trusted OpenClaw adapter. No route, profile, controller-session identity,
-token, or transport evidence is exposed through the v18 model-facing contract.
+token, or transport evidence is exposed through the v19 model-facing contract.
 This boundary alone does not provide a standalone supervisor or enable another
 controller host; those require their own trusted session-context adapter and
 runtime integration.
@@ -82,7 +84,7 @@ Codex anchors bind the exact process/thread, rollout file identity and the human
 
 An approval observation appends at most one notification per exact fingerprint and leaves the Watch active. It never sends approval keys and never enters automatic approval; a human must inspect and decide in the TUI. Completion, failure, timeout, invalidation, or explicit `unwatch` settles once and enqueues one terminal notification. Deterministic notification IDs and idempotency keys, append-only receipts, claim leases, and retry timestamps make callback recovery crash-safe: transport is at-least-once, while the idempotency key makes the logical notification effectively at-most-once.
 
-The current OpenClaw surface has 16 registered tools and emits list action-contract v18. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls.
+The current OpenClaw surface has 16 registered tools and emits list action-contract v19. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls.
 
 ## Native Thread Transitions
 

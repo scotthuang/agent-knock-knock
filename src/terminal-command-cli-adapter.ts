@@ -29,6 +29,7 @@ import {
 import {
   deferredForegroundActiveMessageId,
   isDeferredForegroundSubmissionRetryPending,
+  loadDeferredForegroundTransfer,
   type DeferredForegroundTransfer
 } from "./deferred-foreground-transfer.js";
 import type {
@@ -2749,6 +2750,71 @@ interface TerminalSubmissionRetryLockedAuthority {
   lifecycleSettled: boolean;
 }
 
+function assertTerminalSubmissionRetryNotUserAbandoned(input: {
+  storeDir: string;
+  statePath: string;
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+}): void {
+  const takeover = isRecord(input.conversation.native_session_takeover)
+    ? input.conversation.native_session_takeover
+    : undefined;
+  const transferId = stringValue(
+    takeover?.deferred_foreground_transfer_id
+  );
+  if (!transferId) return;
+  const transfer = loadDeferredForegroundTransfer(input.storeDir, transferId);
+  if (
+    transfer.status !== "user_abandoning" &&
+    transfer.status !== "user_abandoned"
+  ) {
+    return;
+  }
+  const turnId = turnIdForConversation(input.conversation);
+  const activeMessageId = deferredForegroundActiveMessageId(transfer);
+  if (
+    transfer.turn_id !== turnId ||
+    transfer.target_session_id !==
+      sessionIdForConversation(input.conversation) ||
+    transfer.terminal_id !== stringValue(takeover?.native_session_id) ||
+    transfer.workspace !== input.conversation.workspace ||
+    transfer.workspace !== stringValue(takeover?.source_cwd) ||
+    transfer.process_pid !== Number(takeover?.terminal_agent_pid) ||
+    transfer.process_uuid !==
+      stringValue(takeover?.terminal_agent_process_uuid) ||
+    transfer.process_birth !==
+      stringValue(takeover?.terminal_agent_process_birth) ||
+    !transfer.state_path ||
+    path.resolve(transfer.state_path) !== path.resolve(input.statePath) ||
+    !activeMessageId ||
+    activeMessageId !==
+      stringValue(takeover?.terminal_bridge_message_id) ||
+    transfer.request_hash !==
+      stringValue(takeover?.terminal_bridge_request_hash) ||
+    !terminalControlEvidenceMatches(
+      transfer.terminal_endpoint,
+      input.terminalControl,
+      { requireCurrentRoute: true, requireProcessAnchor: false }
+    )
+  ) {
+    throw new Error(
+      `deferred foreground transfer ${transfer.transfer_id} user ` +
+      `abandonment does not match exact Turn ${turnId}; no terminal input ` +
+      "was sent"
+    );
+  }
+  if (transfer.status === "user_abandoning") {
+    throw new Error(
+      `Turn ${turnId} AKK management abandonment cleanup is in progress; ` +
+      "send --turn is unavailable and no terminal input was sent"
+    );
+  }
+  throw new Error(
+    `Turn ${turnId} AKK management is released and the Turn is settled/closed; ` +
+    "send --turn is unavailable and no terminal input was sent"
+  );
+}
+
 function loadTerminalSubmissionRetryLockedAuthority(input: {
   invocation: TerminalSubmissionRetryInvocation;
   scopes: CanonicalStateMutationScopes;
@@ -2780,6 +2846,12 @@ function loadTerminalSubmissionRetryLockedAuthority(input: {
       "Turn or terminal authority changed before submission retry; no terminal input was sent"
     );
   }
+  assertTerminalSubmissionRetryNotUserAbandoned({
+    storeDir,
+    statePath,
+    conversation,
+    terminalControl: lockedControl
+  });
   let submission = terminalBridgeSubmission(conversation);
   if (!submission) {
     throw new Error(
@@ -3771,28 +3843,60 @@ async function runTerminalSubmissionRetry(
       "terminal submission retry is supported only for Codex; no terminal input was sent"
     );
   }
-  const bridge = createTerminalAgentBridge(options);
-  const live = await bridge.resolveStoredTerminal(
-    "codex",
-    pid,
-    storedControl,
-    terminalRuntimeIdentityForConversation(loaded.conversation, storedControl)
-  );
-  if (!terminalControlsShareIncarnation(live.terminalControl, storedControl)) {
-    throw new Error(
-      "terminal control changed before submission retry; no terminal input was sent"
-    );
-  }
-  const terminalControl = live.terminalControl;
+  assertTerminalSubmissionRetryNotUserAbandoned({
+    storeDir,
+    statePath,
+    conversation: loaded.conversation,
+    terminalControl: storedControl
+  });
   await withCanonicalMutationLocks(
-    terminalWriterMutationLocks(storeDir, terminalControl),
+    terminalWriterMutationLocks(storeDir, storedControl),
     async (scopes, resources) => withTerminalDispatchStateScope(
       scopes,
       resources,
       statePath,
       logPath,
-      async (dispatchScopes, dispatchResources) =>
-        runTerminalSubmissionRetryLocked({
+      async (dispatchScopes, dispatchResources) => {
+        const conversation = loadState(statePath);
+        const takeover = isRecord(conversation.native_session_takeover)
+          ? conversation.native_session_takeover
+          : undefined;
+        const terminalControl = terminalControlFromTakeover(takeover);
+        const currentPid = Number(takeover?.terminal_agent_pid);
+        if (
+          turnIdForConversation(conversation) !== exactTurnId ||
+          executorForConversation(conversation).kind !== "codex" ||
+          !terminalControl ||
+          !terminalControlsShareIncarnation(terminalControl, storedControl) ||
+          !Number.isSafeInteger(currentPid) ||
+          currentPid <= 1
+        ) {
+          throw new Error(
+            "Turn or terminal authority changed before submission retry; no terminal input was sent"
+          );
+        }
+        assertTerminalSubmissionRetryNotUserAbandoned({
+          storeDir,
+          statePath,
+          conversation,
+          terminalControl
+        });
+        const bridge = createTerminalAgentBridge(options);
+        const live = await bridge.resolveStoredTerminal(
+          "codex",
+          currentPid,
+          terminalControl,
+          terminalRuntimeIdentityForConversation(conversation, terminalControl)
+        );
+        if (!terminalControlsShareIncarnation(
+          live.terminalControl,
+          terminalControl
+        )) {
+          throw new Error(
+            "terminal control changed before submission retry; no terminal input was sent"
+          );
+        }
+        return runTerminalSubmissionRetryLocked({
           invocation: {
             options,
             exactTurnId,
@@ -3801,11 +3905,12 @@ async function runTerminalSubmissionRetry(
             storeDir,
             bridge,
             live,
-            terminalControl
+            terminalControl: live.terminalControl
           },
           scopes: dispatchScopes,
           resources: dispatchResources
-        })
+        });
+      }
     )
   );
 }

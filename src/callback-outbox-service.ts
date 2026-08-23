@@ -30,6 +30,8 @@ import type {
 } from "./callback-outbox-policy.js";
 import {
   beginCallbackRetryPolicy,
+  callbackDeliveryHasAcceptedTransport,
+  callbackDeliveryHasStartedTransport,
   reduceCallbackRetryPolicy,
   supersedeCallbackNotificationDelivery
 } from "./callback-outbox-policy.js";
@@ -207,6 +209,10 @@ export interface CallbackOutboxServicePorts {
       statePath: string,
       operation: () => Result
     ): Result;
+    withWriter<Result>(
+      statePath: string,
+      operation: () => Result
+    ): Result;
     storeDirForStatePath(statePath: string): string;
     logPathForStatePath(statePath: string): string;
   };
@@ -245,7 +251,9 @@ export interface CallbackOutboxServicePorts {
     ): void;
     textSummary(value: unknown): unknown;
     sleepSync(milliseconds: number): void;
-    crashCheckpoint(name: "after_local_completion_state"): void;
+    crashCheckpoint(
+      name: "after_local_completion_state" | "after_callback_transport_started"
+    ): void;
   };
   delivery: {
     deliver(input: DeliverCallbackInput): CallbackDeliveryOutcome;
@@ -464,6 +472,64 @@ function assertDispatchCallbackRouteAuthority(
       "callback route conflicts with immutable terminal dispatch authority"
     );
   }
+}
+
+function beginPreparedCallbackTransport(
+  ports: CallbackOutboxServicePorts,
+  prepared: PreparedCallbackDelivery
+): { started: boolean; conversation: Conversation } {
+  return ports.state.withWriter(prepared.statePath, () => {
+    ports.state.assertWriterCompatible(
+      ports.state.storeDirForStatePath(prepared.statePath)
+    );
+    return ports.state.withTransaction(prepared.statePath, () => {
+      const current = ports.state.load(prepared.statePath);
+      ports.authority.assertNoDeferredTransfer({
+        storeDir: ports.state.storeDirForStatePath(prepared.statePath),
+        conversation: current,
+        action: "start callback transport for"
+      });
+      const lane = prepared.callbackOutboxLane;
+      const field = callbackOutboxField(lane);
+      const currentDelivery = isRecord(current[field])
+        ? current[field]
+        : undefined;
+      const currentMessage = isRecord(currentDelivery?.message)
+        ? currentDelivery.message
+        : undefined;
+      const exactPendingClaim = currentDelivery?.status === "pending" &&
+        currentMessage?.id === prepared.message.id &&
+        canonicalJson(currentMessage) === canonicalJson(prepared.message) &&
+        Number(currentDelivery.attempts) === prepared.deliveryAttempt &&
+        currentDelivery.attempt_id === prepared.deliveryAttemptId &&
+        Number(currentDelivery.attempt_pid) === ports.runtime.pid();
+      if (
+        !exactPendingClaim ||
+        callbackDeliveryHasAcceptedTransport(currentDelivery)
+      ) {
+        return { started: false, conversation: current };
+      }
+      if (callbackDeliveryHasStartedTransport(currentDelivery, lane)) {
+        return { started: false, conversation: current };
+      }
+      const startedAt = ports.runtime.now().toISOString();
+      const conversation: Conversation = {
+        ...current,
+        [field]: {
+          ...currentDelivery,
+          transport_started_at: startedAt,
+          transport_started_lane: lane,
+          transport_started_attempt: prepared.deliveryAttempt,
+          transport_started_attempt_id: prepared.deliveryAttemptId,
+          transport_started_pid: ports.runtime.pid(),
+          updated_at: startedAt
+        },
+        updated_at: startedAt
+      };
+      ports.state.save(prepared.statePath, conversation);
+      return { started: true, conversation };
+    });
+  });
 }
 
 export function createCallbackOutboxService(
@@ -817,26 +883,37 @@ export function createCallbackOutboxService(
       };
     }
 
-    ports.state.assertWriterCompatible(
-      ports.state.storeDirForStatePath(prepared.statePath)
-    );
+    const authorized = beginPreparedCallbackTransport(ports, prepared);
+    if (!authorized.started) {
+      return {
+        delivered: false,
+        duplicate: true,
+        conversation: authorized.conversation,
+        message: prepared.message
+      };
+    }
+    const activePrepared: PreparedCallbackDelivery = {
+      ...prepared,
+      conversation: authorized.conversation
+    };
+    ports.runtime.crashCheckpoint("after_callback_transport_started");
     let acceptedDelivery: CallbackDeliveryOutcome | undefined;
     let delivery: CallbackDeliveryOutcome;
     try {
       delivery = ports.delivery.deliver({
-        options: prepared.options,
-        statePath: prepared.statePath,
-        logPath: prepared.logPath,
-        conversation: prepared.conversation,
-        message: prepared.message,
+        options: activePrepared.options,
+        statePath: activePrepared.statePath,
+        logPath: activePrepared.logPath,
+        conversation: activePrepared.conversation,
+        message: activePrepared.message,
         attempt: {
-          number: prepared.deliveryAttempt,
-          id: prepared.deliveryAttemptId
+          number: activePrepared.deliveryAttempt,
+          id: activePrepared.deliveryAttemptId
         },
-        route: prepared.callbackRoute,
-        envelope: prepared.callbackEnvelope,
+        route: activePrepared.callbackRoute,
+        envelope: activePrepared.callbackEnvelope,
         onProgress: (progress) => {
-          settlement.persistDeliveryProgress(prepared, progress);
+          settlement.persistDeliveryProgress(activePrepared, progress);
         },
         onAccepted: (accepted) => {
           acceptedDelivery = accepted;
@@ -856,19 +933,21 @@ export function createCallbackOutboxService(
         return {
           delivered: true,
           duplicate: false,
-          conversation: settlement.settleDelivery(prepared, {
+          conversation: settlement.settleDelivery(activePrepared, {
             delivered: true,
             delivery: acceptedAfterError
           }),
-          message: prepared.message,
+          message: activePrepared.message,
           delivery: acceptedAfterError.kind
         };
       }
-      const settled = settlement.settleDelivery(prepared, {
+      const settled = settlement.settleDelivery(activePrepared, {
         delivered: false,
         error
       });
-      const settledOutbox = callbackOutboxField(prepared.callbackOutboxLane);
+      const settledOutbox = callbackOutboxField(
+        activePrepared.callbackOutboxLane
+      );
       const settledDelivery = isRecord(settled[settledOutbox])
         ? settled[settledOutbox]
         : undefined;
@@ -877,7 +956,7 @@ export function createCallbackOutboxService(
           delivered: true,
           duplicate: false,
           conversation: settled,
-          message: prepared.message,
+          message: activePrepared.message,
           delivery: "accepted_before_observation_error"
         };
       }
@@ -893,13 +972,15 @@ export function createCallbackOutboxService(
           `callback transport ${attemptOutcome.disposition}: ` +
             attemptOutcome.error_code
       );
-      const settled = settlement.settleDelivery(prepared, {
+      const settled = settlement.settleDelivery(activePrepared, {
         delivered: false,
         delivery,
         outcome: attemptOutcome,
         error
       });
-      const settledOutbox = callbackOutboxField(prepared.callbackOutboxLane);
+      const settledOutbox = callbackOutboxField(
+        activePrepared.callbackOutboxLane
+      );
       const settledDelivery = isRecord(settled[settledOutbox])
         ? settled[settledOutbox]
         : undefined;
@@ -908,7 +989,7 @@ export function createCallbackOutboxService(
           delivered: true,
           duplicate: false,
           conversation: settled,
-          message: prepared.message,
+          message: activePrepared.message,
           delivery: delivery.kind
         };
       }
@@ -917,12 +998,12 @@ export function createCallbackOutboxService(
     return {
       delivered: true,
       duplicate: false,
-      conversation: settlement.settleDelivery(prepared, {
+      conversation: settlement.settleDelivery(activePrepared, {
         delivered: true,
         delivery,
         outcome: attemptOutcome
       }),
-      message: prepared.message,
+      message: activePrepared.message,
       delivery: delivery.kind
     };
   }

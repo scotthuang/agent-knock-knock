@@ -35,6 +35,44 @@ function deferredGate(): DeferredGate {
   };
 }
 
+function compiledListProjectionSource(startToken: string, endToken: string): string {
+  const source = fs.readFileSync(
+    new URL("../src/terminal-list-cli-adapter.js", import.meta.url),
+    "utf8"
+  );
+  const start = source.indexOf(startToken);
+  const end = source.indexOf(endToken, start + startToken.length);
+  assert.notEqual(start, -1, `missing ${startToken}`);
+  assert.notEqual(end, -1, `missing ${endToken}`);
+  return source.slice(start, end);
+}
+
+test("deferred abandon projection mirrors global and exact ledger authority", () => {
+  const projection = compiledListProjectionSource(
+    "function exactCurrentDeferredUserAbandonTurn(",
+    "function deferredReleaseRelatedConversations("
+  );
+  for (const evidence of [
+    "input.nonterminalDeferredTransfers.some",
+    "candidate.transfer_id !== transfer.transfer_id",
+    "transferSessionIds.has(candidate.source_session_id)",
+    "transferSessionIds.has(candidate.target_session_id)",
+    "candidate.source_turn_history?.some",
+    "exactDeferredForegroundUserAbandonmentLedger",
+    "deferredForegroundUserAbandonmentLedgerPlan",
+    "plan.fingerprint === fingerprint",
+    "globalSessionTransferConflict",
+    "targetIsSourceHistory",
+    "frozenLedgerPlanMatches"
+  ]) {
+    assert.match(projection, new RegExp(evidence.replace(/[?.()]/gu, "\\$&"), "u"));
+  }
+  assert.doesNotMatch(
+    projection,
+    /deferredUserAbandonLedgerGenerationMatches|exactDeferredUserAbandonLedgerRecord/u
+  );
+});
+
 function facadeDependencies(
   marker: "A" | "B",
   events: string[],

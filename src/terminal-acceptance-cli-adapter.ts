@@ -15,6 +15,7 @@ import {
   createConversation,
   createMessage,
   executorForConversation,
+  isWaitingForAgentStatus,
   isSessionSendBlockingStatus,
   resolveExecutor,
   sessionIdForConversation,
@@ -296,6 +297,7 @@ export interface TerminalAcceptanceCliFacade {
     | { outcome: "accepted"; conversation: Conversation }
     | { outcome: "pending" }
     | { outcome: "not_accepted"; conversation: Conversation }
+    | { outcome: "released"; conversation: Conversation }
   >;
   markUncertain(input: {
     conversation: Conversation;
@@ -797,6 +799,7 @@ class TerminalAcceptanceCliApplication {
     | { outcome: "accepted"; conversation: Conversation }
     | { outcome: "pending" }
     | { outcome: "not_accepted"; conversation: Conversation }
+    | { outcome: "released"; conversation: Conversation }
   > {
     const deferred = await this.#reconcileDeferredAcceptance(input);
     if (deferred) return deferred;
@@ -859,6 +862,7 @@ class TerminalAcceptanceCliApplication {
     | { outcome: "accepted"; conversation: Conversation }
     | { outcome: "pending" }
     | { outcome: "not_accepted"; conversation: Conversation }
+    | { outcome: "released"; conversation: Conversation }
     | undefined
   > {
     const transferId = nonBlankString(
@@ -867,6 +871,9 @@ class TerminalAcceptanceCliApplication {
     if (!transferId) return undefined;
     const storeDir = pathsForConversationDir(path.dirname(input.statePath)).storeDir;
     let transfer = this.#dependencies.deferred.loadTransfer(storeDir, transferId);
+    if (["user_abandoning", "user_abandoned"].includes(transfer.status)) {
+      return { outcome: "released", conversation: loadState(input.statePath) };
+    }
     const pid = safeInteger(
       takeoverFor(input.conversation)?.terminal_agent_pid
     );
@@ -889,6 +896,9 @@ class TerminalAcceptanceCliApplication {
       });
       transfer = this.#dependencies.deferred.loadTransfer(storeDir, transferId);
       conversation = loadState(input.statePath);
+      if (["user_abandoning", "user_abandoned"].includes(transfer.status)) {
+        return { outcome: "released", conversation };
+      }
       if (!isFinalDeferredForegroundTransferStatus(transfer.status)) {
         return { outcome: "pending" };
       }
@@ -896,6 +906,12 @@ class TerminalAcceptanceCliApplication {
     if (transfer.status === "abort_resolved") {
       assertDeferredAbortReceipt(conversation, transfer);
       return { outcome: "not_accepted", conversation };
+    }
+    if (transfer.status !== "resolved") {
+      throw new Error(
+        `deferred foreground transfer ${transfer.transfer_id} has an ` +
+        `unsupported final acceptance status ${transfer.status}`
+      );
     }
     return this.#acceptedDeferredAuthority(storeDir, terminal, transfer);
   }
@@ -1130,7 +1146,12 @@ class TerminalAcceptanceCliApplication {
         `${input.statePath}.lock`
       );
       try {
-        return this.#markUncertainLocked(input, messageId, uncertainAt);
+        return this.#markUncertainLocked(
+          input,
+          messageId,
+          uncertainAt,
+          storeDir
+        );
       } finally {
         releaseState();
       }
@@ -1145,9 +1166,25 @@ class TerminalAcceptanceCliApplication {
       reason: string;
     },
     messageId: string | undefined,
-    uncertainAt: string
+    uncertainAt: string,
+    storeDir: string
   ): Conversation {
     const current = loadState(input.statePath);
+    if (!isWaitingForAgentStatus(current.status)) {
+      return current;
+    }
+    const transferId = nonBlankString(
+      takeoverFor(current)?.deferred_foreground_transfer_id
+    );
+    if (transferId) {
+      const transfer = this.#dependencies.deferred.loadTransfer(
+        storeDir,
+        transferId
+      );
+      if (["user_abandoning", "user_abandoned"].includes(transfer.status)) {
+        return current;
+      }
+    }
     const submission = terminalBridgeSubmission(current);
     if (
       !messageId ||

@@ -16,12 +16,24 @@ import {
 } from "../src/deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from
   "../src/deferred-foreground-transfer-policy.js";
+import { deferredForegroundUserAbandonmentLedgerPlan } from
+  "../src/deferred-foreground-user-abandonment-ledger.js";
+import { ensureDeferredForegroundUserAbandonmentCloseEvent } from
+  "../src/deferred-foreground-user-abandonment-event.js";
+import { deferredForegroundUserAbandonmentTurnAuthority,
+  exactDeferredForegroundUserAbandonmentTurnReceipt } from
+  "../src/deferred-foreground-user-abandonment-turn.js";
 import {
   managedSessionBindingToken,
   terminalBindingFrom,
   type ManagedTerminalBinding
 } from "../src/managed-session.js";
 import type { TerminalControlRef } from "../src/terminal-control-ref.js";
+import { createConversation } from "../src/protocol.js";
+import { appendEvent } from "../src/store.js";
+import { createTerminalHandoffCliFacade,
+  type TerminalHandoffCliDependencies } from
+  "../src/terminal-handoff-cli-adapter.js";
 
 const SOURCE_UUID = "00000000-0000-4000-8000-000000000401";
 const OTHER_UUID = "00000000-0000-4000-8000-000000000402";
@@ -48,6 +60,8 @@ test("deferred foreground final status policy is exhaustive and fail closed", ()
     ["committed", false],
     ["aborted", false],
     ["uncertain", false],
+    ["user_abandoning", false],
+    ["user_abandoned", true],
     [undefined, false],
     [null, false],
     [42, false],
@@ -59,6 +73,705 @@ test("deferred foreground final status policy is exhaustive and fail closed", ()
   assert.doesNotThrow(() =>
     isFinalDeferredForegroundTransferStatus(nonCoercible));
   assert.equal(isFinalDeferredForegroundTransferStatus(nonCoercible), false);
+});
+
+test("generic Turn mutation rejects every unmatched nonfinal target claim", async (t) => {
+  const unavailable = new Proxy({}, {
+    get(_target, property) {
+      throw new Error(`unexpected handoff dependency ${String(property)}`);
+    }
+  });
+  const handoff = createTerminalHandoffCliFacade({
+    runtime: unavailable,
+    identity: unavailable,
+    acceptance: unavailable,
+    authority: unavailable,
+    repository: unavailable
+  } as TerminalHandoffCliDependencies);
+  for (const scenario of [
+    "missing_takeover",
+    "wrong_takeover",
+    "duplicate",
+    "missing_state_path",
+    "mismatched_state_path"
+  ] as const) {
+    await t.test(scenario, () => {
+      const sandbox = fs.mkdtempSync(path.join(
+        os.tmpdir(),
+        `akk-target-claim-${scenario}-`
+      ));
+      try {
+        const storeDir = path.join(sandbox, "store");
+        const statePath = path.join(
+          storeDir,
+          "conversations",
+          "turn-target-claim",
+          "state.json"
+        );
+        const persistTarget = (
+          transferId: string,
+          targetStatePath: string
+        ): DeferredForegroundTransfer => {
+          const created = saveDeferredForegroundTransfer(storeDir, {
+            ...prepared(),
+            transfer_id: transferId,
+            target_session_id: "session-target-claim"
+          }, { expectedRevision: null });
+          const reserved = saveDeferredForegroundTransfer(storeDir, {
+            ...sourceReserved(created),
+            revision: created.revision
+          }, { expectedRevision: created.revision! });
+          const target = targetPrepared(reserved).transfer;
+          return saveDeferredForegroundTransfer(storeDir, {
+            ...target,
+            revision: reserved.revision,
+            turn_id: "turn-target-claim",
+            state_path: targetStatePath
+          }, { expectedRevision: reserved.revision! });
+        };
+        const savedFirst = persistTarget(
+          "target-claim-one",
+          scenario === "mismatched_state_path"
+            ? path.join(storeDir, "conversations", "other", "state.json")
+            : statePath
+        );
+        if (scenario === "missing_state_path") {
+          const malformed = { ...savedFirst } as Record<string, unknown>;
+          delete malformed.state_path;
+          fs.writeFileSync(
+            pathsForDeferredForegroundTransfer(
+              savedFirst.transfer_id,
+              storeDir
+            ).statePath,
+            `${JSON.stringify(malformed, null, 2)}\n`,
+            { mode: 0o600 }
+          );
+        }
+        if (scenario === "duplicate") {
+          persistTarget("target-claim-two", statePath);
+        }
+        const conversation = {
+          ...createConversation({
+            userRequest: "generic close must not orphan target authority",
+            sessionId: savedFirst.target_session_id,
+            turnId: savedFirst.turn_id!,
+            executorKind: "codex",
+            now: new Date(T3)
+          }),
+          state_path: statePath,
+          native_session_takeover: scenario !== "wrong_takeover"
+            ? {}
+            : { deferred_foreground_transfer_id: "wrong-transfer-id" }
+        };
+        fs.mkdirSync(path.dirname(statePath), { recursive: true });
+        fs.writeFileSync(
+          statePath,
+          `${JSON.stringify(conversation, null, 2)}\n`,
+          { mode: 0o600 }
+        );
+        const stateBefore = fs.readFileSync(statePath, "utf8");
+        const transferIds = scenario === "duplicate"
+          ? ["target-claim-one", "target-claim-two"]
+          : ["target-claim-one"];
+        const transferBytesBefore = transferIds.map((transferId) =>
+          fs.readFileSync(
+            pathsForDeferredForegroundTransfer(transferId, storeDir).statePath,
+            "utf8"
+          ));
+
+        assert.throws(() =>
+          handoff.assertConversationHasNoNonterminalDeferredForegroundTransfer({
+            storeDir,
+            conversation,
+            action: "close"
+          }), scenario === "duplicate"
+          ? /multiple nonfinal deferred foreground transfers/u
+          : scenario === "mismatched_state_path"
+            ? /mismatched canonical state authority/u
+            : scenario === "missing_state_path"
+              ? /requires its target\/Turn identity/u
+              : /target authority|does not exist|ENOENT/u);
+        assert.equal(fs.readFileSync(statePath, "utf8"), stateBefore);
+        assert.deepEqual(
+          transferIds.map((transferId) => fs.readFileSync(
+            pathsForDeferredForegroundTransfer(transferId, storeDir).statePath,
+            "utf8"
+          )),
+          transferBytesBefore
+        );
+      } finally {
+        fs.rmSync(sandbox, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("user abandonment persists one intent CAS and one final CAS", () => {
+  const sandbox = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-deferred-user-abandonment-"
+  ));
+  const storeDir = path.join(sandbox, "store");
+  try {
+    const created = saveDeferredForegroundTransfer(storeDir, prepared(), {
+      expectedRevision: null
+    });
+    const reserved = saveDeferredForegroundTransfer(storeDir, {
+      ...sourceReserved(created),
+      revision: created.revision
+    }, { expectedRevision: created.revision! });
+    const target = saveDeferredForegroundTransfer(storeDir, {
+      ...targetPrepared(reserved).transfer,
+      revision: reserved.revision
+    }, { expectedRevision: reserved.revision! });
+    const fingerprint = "d".repeat(64);
+    const intent = saveDeferredForegroundTransfer(storeDir, {
+      ...target,
+      status: "user_abandoning",
+      user_abandonment_disposition: "user_abandoned_management",
+      user_abandonment_origin_status: "target_prepared",
+      user_abandonment_origin_revision: target.revision,
+      user_abandonment_turn_id: target.turn_id,
+      user_abandonment_turn_fingerprint: fingerprint,
+      user_abandonment_requested_at: T3,
+      user_abandonment_close_reason: "closed by request",
+      user_abandonment_ledger_disposition: "absent",
+      user_abandonment_ledger_fingerprint: fingerprint
+    }, { expectedRevision: target.revision! });
+    assert.equal(intent.revision, Number(target.revision) + 1);
+    assert.equal(intent.status, "user_abandoning");
+
+    const final = saveDeferredForegroundTransfer(storeDir, {
+      ...intent,
+      status: "user_abandoned",
+      user_abandonment_completed_at: T4,
+      user_abandonment_source_disposition: "already_released",
+      user_abandonment_source_fingerprint: fingerprint,
+      user_abandonment_target_disposition: "already_released",
+      user_abandonment_target_fingerprint: fingerprint
+    }, { expectedRevision: intent.revision! });
+    assert.equal(final.revision, Number(target.revision) + 2);
+    assert.equal(final.status, "user_abandoned");
+    assert.equal(isFinalDeferredForegroundTransferStatus(final.status), true);
+    assert.throws(() => assertDeferredForegroundTransfer({
+      ...final,
+      user_abandonment_origin_revision:
+        Number(final.user_abandonment_origin_revision) + 1
+    }), /user abandonment intent is invalid/u);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("user abandonment ledger plan is exact, stable, and fail closed", () => {
+  const transfer = {
+    ...targetPrepared().transfer,
+    state_path: "/tmp/akk-store/conversations/turn-deferred/state.json"
+  };
+  const statePath = transfer.state_path;
+  const logPath = path.join(path.dirname(statePath), "events.ndjson");
+  const storeDir = "/tmp/akk-store";
+  const exact = {
+    version: 2,
+    terminal_endpoint: transfer.terminal_endpoint,
+    status: "prepared",
+    generation_id: transfer.message_id,
+    conversation_id: transfer.turn_id,
+    session_id: transfer.target_session_id,
+    turn_id: transfer.turn_id,
+    message_id: transfer.message_id,
+    message_type: "task",
+    request_hash: transfer.request_hash,
+    prepared_at: transfer.prepared_at,
+    store_dir: storeDir,
+    state_path: statePath,
+    event_log_path: logPath,
+    deferred_foreground_transfer_id: transfer.transfer_id,
+    callback_expected: true,
+    dispatcher_pid: 99
+  };
+  const plan = deferredForegroundUserAbandonmentLedgerPlan({
+    current: exact,
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  });
+  assert.equal(plan.disposition, "resolved");
+  assert.equal(plan.next?.status, "resolved");
+  assert.equal(plan.next?.resolved_at, T3);
+  assert.equal(plan.next?.callback_expected, false);
+
+  const applied = deferredForegroundUserAbandonmentLedgerPlan({
+    current: plan.next,
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  });
+  assert.equal(applied.disposition, "already_released");
+  assert.equal(applied.fingerprint, plan.fingerprint);
+  assert.deepEqual(applied.next, plan.next);
+
+  const legacyResolved = deferredForegroundUserAbandonmentLedgerPlan({
+    current: {
+      ...exact,
+      status: "resolved",
+      resolved_at: T2,
+      dispatcher_pid: 99,
+      callback_expected: true
+    },
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  });
+  assert.equal(legacyResolved.disposition, "already_released");
+  assert.equal(legacyResolved.next?.dispatcher_pid, null);
+  assert.equal(legacyResolved.next?.callback_expected, false);
+
+  const acceptedEvidenceBase = {
+    source: "codex_rollout" as const,
+    kind: "native_user_turn" as const,
+    nativeThreadId: OTHER_UUID,
+    requestHash: transfer.request_hash,
+    acceptanceId: "acceptance-after-resolve",
+    acceptedAt: T1,
+    anchorFingerprint: "a".repeat(64)
+  };
+  const acceptedEvidence = {
+    ...acceptedEvidenceBase,
+    evidenceFingerprint: createHash("sha256")
+      .update(JSON.stringify(acceptedEvidenceBase))
+      .digest("hex")
+  };
+  for (const resolvedReceipt of [
+    {
+      ...exact,
+      status: "resolved",
+      agent_accepted_at: T1,
+      acceptance_evidence: acceptedEvidence,
+      resolved_at: T2
+    },
+    {
+      ...exact,
+      status: "resolved",
+      uncertain_at: T1,
+      resolved_at: T2
+    },
+    {
+      ...exact,
+      status: "resolved",
+      aborted_at: T1,
+      safe_to_retry: false,
+      resolved_at: T2
+    }
+  ]) {
+    const resolvedPlan = deferredForegroundUserAbandonmentLedgerPlan({
+      current: resolvedReceipt,
+      transfer,
+      terminalControl,
+      storeDir,
+      statePath,
+      logPath,
+      resolvedAt: T3
+    });
+    assert.equal(resolvedPlan.disposition, "already_released");
+    assert.equal(resolvedPlan.next?.dispatcher_pid, null);
+    assert.equal(resolvedPlan.next?.callback_expected, false);
+  }
+
+  const absent = deferredForegroundUserAbandonmentLedgerPlan({
+    current: undefined,
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  });
+  assert.equal(absent.disposition, "absent");
+  assert.equal(absent.next, undefined);
+
+  const oldReceipt = {
+    ...exact,
+    version: undefined,
+    status: "text_injected",
+    text_injected_at: T1
+  };
+  const replacementRequestHash = "e".repeat(64);
+  const replacementPreparedAt = T3;
+  const replacementStatePath =
+    "/tmp/akk-store/conversations/turn-new/state.json";
+  const replacementLogPath =
+    "/tmp/akk-store/conversations/turn-new/events.ndjson";
+  const replacement = {
+    ...exact,
+    generation_id: "message-new",
+    message_id: "message-new",
+    conversation_id: "turn-new",
+    turn_id: "turn-new",
+    session_id: "session-new",
+    request_hash: replacementRequestHash,
+    prepared_at: replacementPreparedAt,
+    state_path: replacementStatePath,
+    event_log_path: replacementLogPath,
+    deferred_foreground_transfer_id: "transfer-new",
+    callback_expected: false,
+    terminal_submission_receipts: [oldReceipt]
+  };
+  const replacementOwner = {
+    ...createConversation({
+      userRequest: "newer terminal owner",
+      sessionId: "session-new",
+      turnId: "turn-new",
+      executorKind: "codex",
+      now: new Date(replacementPreparedAt)
+    }),
+    status: "waiting_for_agent" as const,
+    state_path: replacementStatePath,
+    event_log_path: replacementLogPath,
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_control: terminalControl,
+      terminal_bridge_message_id: "message-new",
+      terminal_bridge_request_hash: replacementRequestHash,
+      terminal_bridge_submission: {
+        status: "prepared",
+        message_id: "message-new",
+        message_type: "task",
+        request_hash: replacementRequestHash,
+        prepared_at: replacementPreparedAt
+      }
+    }
+  };
+  const superseded = deferredForegroundUserAbandonmentLedgerPlan({
+    current: replacement,
+    currentOwner: replacementOwner,
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  });
+  const evolved = deferredForegroundUserAbandonmentLedgerPlan({
+    current: { ...replacement, updated_at: T8 },
+    currentOwner: replacementOwner,
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  });
+  assert.equal(superseded.disposition, "superseded");
+  assert.equal(evolved.fingerprint, superseded.fingerprint);
+
+  for (const malformedCurrent of [
+    {
+      ...replacement,
+      generation_id: undefined,
+      message_id: undefined,
+      conversation_id: undefined,
+      turn_id: undefined,
+      state_path: undefined,
+      event_log_path: undefined
+    },
+    {
+      ...replacement,
+      generation_id: exact.generation_id,
+      message_id: exact.message_id
+    },
+    {
+      ...replacement,
+      conversation_id: exact.conversation_id,
+      turn_id: exact.turn_id,
+      state_path: exact.state_path,
+      event_log_path: exact.event_log_path
+    }
+  ]) {
+    assert.throws(() => deferredForegroundUserAbandonmentLedgerPlan({
+      current: malformedCurrent,
+      currentOwner: replacementOwner,
+      transfer,
+      terminalControl,
+      storeDir,
+      statePath,
+      logPath,
+      resolvedAt: T3
+    }), /neither its exact generation/u);
+  }
+
+  assert.throws(() => deferredForegroundUserAbandonmentLedgerPlan({
+    current: {
+      ...replacement,
+      terminal_submission_receipts: [oldReceipt, { ...oldReceipt }]
+    },
+    currentOwner: replacementOwner,
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  }), /duplicated/u);
+  assert.throws(() => deferredForegroundUserAbandonmentLedgerPlan({
+    current: { ...exact, kind: "lifecycle" },
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  }), /neither its exact generation/u);
+  assert.throws(() => deferredForegroundUserAbandonmentLedgerPlan({
+    current: {
+      ...exact,
+      terminal_endpoint: {
+        ...transfer.terminal_endpoint,
+        route_key: "different-terminal-route"
+      }
+    },
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  }), /neither its exact generation/u);
+  for (const malformedExact of [
+    { ...exact, status: "garbage" },
+    { ...exact, message_type: undefined },
+    { ...exact, prepared_at: undefined },
+    { ...exact, callback_expected: "yes" },
+    { ...exact, dispatcher_pid: 1 }
+  ]) {
+    assert.throws(() => deferredForegroundUserAbandonmentLedgerPlan({
+      current: malformedExact,
+      transfer,
+      terminalControl,
+      storeDir,
+      statePath,
+      logPath,
+      resolvedAt: T3
+    }), /neither its exact generation/u);
+  }
+  assert.throws(() => deferredForegroundUserAbandonmentLedgerPlan({
+    current: replacement,
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  }), /neither its exact generation/u);
+  assert.throws(() => deferredForegroundUserAbandonmentLedgerPlan({
+    current: replacement,
+    currentOwner: {
+      ...replacementOwner,
+      native_session_takeover: {
+        ...replacementOwner.native_session_takeover,
+        terminal_bridge_message_id: "wrong-message"
+      }
+    },
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: T3
+  }), /neither its exact generation/u);
+});
+
+test("user abandonment Turn receipt is exact and recovery trusts frozen intent", () => {
+  const target = targetPrepared().transfer;
+  const transfer: DeferredForegroundTransfer = {
+    ...target,
+    revision: 4,
+    status: "user_abandoning",
+    user_abandonment_disposition: "user_abandoned_management",
+    user_abandonment_origin_status: "target_prepared",
+    user_abandonment_origin_revision: 3,
+    user_abandonment_turn_id: target.turn_id,
+    user_abandonment_turn_fingerprint: "d".repeat(64),
+    user_abandonment_requested_at: T3,
+    user_abandonment_close_reason: "closed by request",
+    user_abandonment_ledger_disposition: "absent",
+    user_abandonment_ledger_fingerprint: "e".repeat(64)
+  };
+  const open = {
+    ...createConversation({
+      userRequest: "abandon management",
+      sessionId: target.target_session_id,
+      turnId: target.turn_id!,
+      executorKind: "codex",
+      now: new Date(T2)
+    }),
+    status: "waiting_for_agent" as const,
+    updated_at: T8
+  };
+  assert.equal(
+    deferredForegroundUserAbandonmentTurnAuthority(open, transfer)
+      .turnFingerprint,
+    transfer.user_abandonment_turn_fingerprint
+  );
+  const closed = {
+    ...open,
+    status: "closed" as const,
+    disposition: "user_abandoned_management",
+    callback_expected: false,
+    closed_at: T3,
+    close_reason: "closed by request",
+    management_abandonment: {
+      version: 1,
+      disposition: "user_abandoned_management",
+      transfer_id: transfer.transfer_id,
+      transfer_origin_revision: transfer.user_abandonment_origin_revision,
+      turn_fingerprint: transfer.user_abandonment_turn_fingerprint,
+      requested_at: transfer.user_abandonment_requested_at,
+      close_reason: transfer.user_abandonment_close_reason
+    }
+  };
+  assert.equal(
+    exactDeferredForegroundUserAbandonmentTurnReceipt(closed, transfer),
+    true
+  );
+  for (const malformed of [
+    { ...closed, callback_expected: true },
+    {
+      ...closed,
+      management_abandonment: {
+        ...closed.management_abandonment,
+        transfer_origin_revision: 2
+      }
+    },
+    {
+      ...closed,
+      management_abandonment: {
+        ...closed.management_abandonment,
+        requested_at: T4
+      }
+    }
+  ]) {
+    assert.equal(
+      exactDeferredForegroundUserAbandonmentTurnReceipt(malformed, transfer),
+      false
+    );
+  }
+});
+
+test("user abandonment close event is append-once and conflict exact", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-abandon-event-"));
+  try {
+    const transfer = {
+      ...targetPrepared().transfer,
+      status: "user_abandoning" as const,
+      user_abandonment_requested_at: T3,
+      user_abandonment_close_reason: "closed by request"
+    };
+    const conversation = {
+      ...createConversation({
+        userRequest: "close event",
+        sessionId: transfer.target_session_id,
+        turnId: transfer.turn_id!,
+        executorKind: "codex",
+        now: new Date(T2)
+      }),
+      status: "closed" as const,
+      close_reason: "closed by request"
+    };
+    const eventPath = (name: string) => path.join(
+      sandbox,
+      name,
+      "conversations",
+      conversation.conversation_id,
+      "events.ndjson"
+    );
+    const exactPath = eventPath("exact");
+    ensureDeferredForegroundUserAbandonmentCloseEvent({
+      logPath: exactPath,
+      conversation,
+      transfer
+    });
+    ensureDeferredForegroundUserAbandonmentCloseEvent({
+      logPath: exactPath,
+      conversation,
+      transfer
+    });
+    assert.equal(
+      fs.readFileSync(exactPath, "utf8").trim().split("\n").length,
+      1
+    );
+
+    const conflictPath = eventPath("conflict");
+    appendEvent(conflictPath, {
+      ts: T4,
+      conversation_id: conversation.conversation_id,
+      event: "conversation_closed",
+      status: "closed",
+      reason: conversation.close_reason,
+      disposition: "user_abandoned_management",
+      transfer_id: transfer.transfer_id,
+      terminal_input_sent: false,
+      coding_agent_stopped: false,
+      management_release_pending: true
+    });
+    assert.throws(() => ensureDeferredForegroundUserAbandonmentCloseEvent({
+      logPath: conflictPath,
+      conversation,
+      transfer
+    }), /close event conflicts/u);
+
+    const extraPath = eventPath("extra");
+    appendEvent(extraPath, {
+      ts: T3,
+      conversation_id: conversation.conversation_id,
+      event: "conversation_closed",
+      status: "closed",
+      reason: conversation.close_reason,
+      disposition: "user_abandoned_management",
+      transfer_id: transfer.transfer_id,
+      terminal_input_sent: false,
+      coding_agent_stopped: false,
+      management_release_pending: true,
+      unexpected_authority: "must fail closed"
+    });
+    assert.throws(() => ensureDeferredForegroundUserAbandonmentCloseEvent({
+      logPath: extraPath,
+      conversation,
+      transfer
+    }), /close event conflicts/u);
+
+    const duplicatePath = eventPath("duplicate");
+    const duplicate = {
+      ts: T3,
+      conversation_id: conversation.conversation_id,
+      event: "conversation_closed",
+      status: "closed",
+      reason: conversation.close_reason,
+      disposition: "user_abandoned_management",
+      transfer_id: transfer.transfer_id,
+      terminal_input_sent: false,
+      coding_agent_stopped: false,
+      management_release_pending: true
+    };
+    appendEvent(duplicatePath, duplicate);
+    appendEvent(duplicatePath, duplicate);
+    assert.throws(() => ensureDeferredForegroundUserAbandonmentCloseEvent({
+      logPath: duplicatePath,
+      conversation,
+      transfer
+    }), /duplicate user abandonment close events/u);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 const terminalControl: TerminalControlRef = {

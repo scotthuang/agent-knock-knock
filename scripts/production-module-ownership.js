@@ -60,7 +60,9 @@ const CANONICAL_STATUS_TABLE_RULES = Object.freeze([
   Object.freeze({
     name: "deferred_foreground_final",
     owner: "src/deferred-foreground-transfer-policy.ts",
-    statuses: Object.freeze(["abort_resolved", "resolved"]),
+    statuses: Object.freeze([
+      "abort_resolved", "resolved", "user_abandoned"
+    ]),
     expectedOccurrences: 1
   }),
   Object.freeze({

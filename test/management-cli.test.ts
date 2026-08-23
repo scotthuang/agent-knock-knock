@@ -160,7 +160,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 18);
+    assert.equal(listed.action_contracts.version, 19);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -200,6 +200,10 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /explicitly closed uncertain Turn[\s\S]*exact resolved close ledger[\s\S]*append-only uncertain receipt[\s\S]*close never forges the lost callback[\s\S]*cannot be renewed/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /exact current blocked Turn[\s\S]*unavailable_managed_turns[\s\S]*durable Turn, transfer[\s\S]*terminal-endpoint identities[\s\S]*Process visibility is not required[\s\S]*sends no terminal input[\s\S]*abandons only AKK management[\s\S]*does not prepare or retry another callback[\s\S]*callback attempt already in flight or accepted by the host may still arrive[\s\S]*does not stop Codex[\s\S]*human task may then expose Watch[\s\S]*Never infer[\s\S]*source history[\s\S]*ambiguous transfer[\s\S]*different Turn/ui
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -461,6 +465,18 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         "expected_message_id",
         "expected_transition_id"
       ]
+    );
+    assert.equal(
+      listed.action_contracts.actions.close.sends_terminal_input,
+      false
+    );
+    assert.equal(
+      listed.action_contracts.actions.close.stops_coding_agent,
+      false
+    );
+    assert.match(
+      listed.action_contracts.actions.close.explicit_user_abandon_scope,
+      /exact current blocked Turn[\s\S]*user_abandoned_management[\s\S]*does not prepare or retry another callback[\s\S]*callback attempt already in flight or accepted by the host may still arrive[\s\S]*Codex may continue independently[\s\S]*Refresh list[\s\S]*Watch/ui
     );
     const approvalActions = terminal.available_actions;
     assert.deepEqual(

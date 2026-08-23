@@ -3,6 +3,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
+import { supersedeUnacceptedCallbackDeliveries } from
+  "./callback-outbox-policy.js";
 import { canonicalJson } from "./canonical-json.js";
 import { cliCwd, cliEnv, cliExit, cliNow, cliPid,
   cliRuntimeLog as runtimeLog } from "./cli-runtime-context.js";
@@ -12,11 +14,20 @@ import { DeferredForegroundApplicationService } from "./deferred-foreground-appl
 import { TerminalHandoffApplicationService } from "./terminal-handoff-application-service.js";
 import { bindDeferredForegroundApplicationScope,
   bindDeferredForegroundWriterScope } from "./deferred-foreground-capability.js";
-import { createDeferredForegroundTransferId, listDeferredForegroundTransfers,
+import { createDeferredForegroundTransferId,
+  deferredForegroundActiveMessageId, listDeferredForegroundTransfers,
   loadDeferredForegroundTransfer, type DeferredForegroundTransfer } from
   "./deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from
   "./deferred-foreground-transfer-policy.js";
+import { deferredForegroundUserAbandonmentLedgerPlan } from
+  "./deferred-foreground-user-abandonment-ledger.js";
+import { assertDeferredForegroundUserAbandonmentCloseEvent,
+  ensureDeferredForegroundUserAbandonmentCloseEvent,
+  preflightDeferredForegroundUserAbandonmentCloseEvent } from
+  "./deferred-foreground-user-abandonment-event.js";
+import { exactDeferredForegroundUserAbandonmentTurnReceipt } from
+  "./deferred-foreground-user-abandonment-turn.js";
 import { DeferredForegroundRecoveryService } from "./deferred-foreground-recovery-service.js";
 import * as deferredRecoveryAdapter from "./deferred-foreground-recovery-cli-adapter.js";
 import { prepareDeferredForegroundBinding } from "./deferred-foreground-preparation-service.js";
@@ -41,7 +52,8 @@ import { sessionIdForConversation, turnIdForConversation, type Conversation } fr
 import { commitVerifiedLifecycleTransition, listManagedSessions,
   loadManagedSession, loadNativeThreadTransition, saveManagedSession,
   saveNativeThreadTransition, tryLoadManagedSession } from "./session-store.js";
-import { pathsForConversation, pathsForConversationDir } from "./store.js";
+import { appendEvent, loadState, pathsForConversation,
+  pathsForConversationDir, saveState } from "./store.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import type { ResolvedTerminalConversation, TerminalAgentBridge,
   TerminalBridgeStatus } from "./terminal-agent-bridge.js";
@@ -60,6 +72,7 @@ import { nativeThreadTransitionRevision, terminalSubmissionPayload,
   type NativeAgentSessionIdentityObservation } from
   "./terminal-dispatch-execution.js";
 import { nativeThreadLifecycleLedger as lifecycleLedger,
+  sameCanonicalStatePath,
   type TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
 import { terminalBridgeRequestFingerprint, terminalBridgeSubmission,
@@ -947,7 +960,15 @@ function deferredForegroundApplication(
           target_accepted: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_ACCEPTED",
           committed: "AKK_TEST_EXIT_AFTER_DEFERRED_COMMITTED",
           source_detached: "AKK_TEST_EXIT_AFTER_DEFERRED_SOURCE_DETACHED",
-          target_bound: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_BOUND"
+          target_bound: "AKK_TEST_EXIT_AFTER_DEFERRED_TARGET_BOUND",
+          user_abandonment_intent:
+            "AKK_TEST_EXIT_AFTER_DEFERRED_USER_ABANDONMENT_INTENT",
+          user_abandonment_source_released:
+            "AKK_TEST_EXIT_AFTER_DEFERRED_USER_ABANDONMENT_SOURCE_RELEASED",
+          user_abandonment_target_released:
+            "AKK_TEST_EXIT_AFTER_DEFERRED_USER_ABANDONMENT_TARGET_RELEASED",
+          user_abandonment_completed:
+            "AKK_TEST_EXIT_AFTER_DEFERRED_USER_ABANDONMENT_COMPLETED"
         }[point];
         if (cliEnv()[key] === "1") cliExit(86);
       },
@@ -1725,11 +1746,64 @@ function assertConversationHasNoNonterminalDeferredForegroundTransfer({
   action: string;
 }): void {
   const turnId = turnIdForConversation(conversation);
-  const sourceTransfer = listDeferredForegroundTransfers(storeDir).find(
+  const transfers = listDeferredForegroundTransfers(storeDir);
+  const finalAbandonmentClaim = transfers.find(
+    (candidate) => candidate.status === "user_abandoned" &&
+      candidate.turn_id === turnId
+  );
+  if (finalAbandonmentClaim) {
+    throw new Error(
+      `cannot ${action} Turn ${turnId}; final deferred foreground transfer ` +
+      `${finalAbandonmentClaim.transfer_id} requires its exact management ` +
+      "abandonment receipt"
+    );
+  }
+  const nonfinal = transfers.filter(
+    (candidate) => !isFinalDeferredForegroundTransferStatus(candidate.status)
+  );
+  const statePath = stringValue(conversation.state_path);
+  const turnTargetClaims = nonfinal.filter(
+    (candidate) => candidate.turn_id === turnId
+  );
+  if (
+    turnTargetClaims.some((candidate) =>
+      !sameCanonicalStatePath(candidate.state_path, statePath)
+    )
+  ) {
+    throw new Error(
+      `cannot ${action} Turn ${turnId}; a nonfinal deferred foreground ` +
+      "target claim has mismatched canonical state authority"
+    );
+  }
+  const targetClaims = turnTargetClaims;
+  if (targetClaims.length > 1) {
+    throw new Error(
+      `cannot ${action} Turn ${turnId}; multiple nonfinal deferred ` +
+      "foreground transfers claim its target authority"
+    );
+  }
+  if (targetClaims.length === 1) {
+    const exact = exactTargetDeferredForegroundTransfer({
+      storeDir,
+      conversation
+    });
+    if (!exact || exact.transfer_id !== targetClaims[0]?.transfer_id) {
+      throw new Error(
+        `cannot ${action} Turn ${turnId}; deferred foreground transfer ` +
+        `${targetClaims[0]?.transfer_id} claims its target authority but the ` +
+        "Turn has no matching exact takeover authority"
+      );
+    }
+    throw new Error(
+      `cannot ${action} Turn ${turnId} while deferred foreground transfer ` +
+      `${exact.transfer_id} is ${exact.status}; dedicated transfer recovery ` +
+      "must finish first"
+    );
+  }
+  const sourceTransfer = nonfinal.find(
     (candidate) =>
       candidate.version === 2 &&
       candidate.source_kind === "candidate_rollout_quiescent" &&
-      !isFinalDeferredForegroundTransferStatus(candidate.status) &&
       (candidate.source_turn_history ?? []).some(
         (sourceTurn) => sourceTurn.turn_id === turnId
       )
@@ -1738,25 +1812,72 @@ function assertConversationHasNoNonterminalDeferredForegroundTransfer({
     throw new Error(
       `cannot ${action} Turn ${turnId} while deferred foreground transfer ` +
       `${sourceTransfer.transfer_id} reserves it as immutable source ` +
-      `history in ${sourceTransfer.status}; dedicated transfer recovery ` +
-      "must finish first"
+      `history in ${sourceTransfer.status}; close its managed target Turn ` +
+      "to release that transfer first"
     );
   }
+  const transfer = exactTargetDeferredForegroundTransfer({
+    storeDir,
+    conversation
+  });
+  if (!transfer || isFinalDeferredForegroundTransferStatus(transfer.status)) {
+    return;
+  }
+  throw new Error(
+    `cannot ${action} Turn ${turnId} while deferred foreground transfer ` +
+    `${transfer.transfer_id} is ${transfer.status}; dedicated transfer ` +
+    "recovery must finish first"
+  );
+}
+
+function exactTargetDeferredForegroundTransfer({
+  storeDir,
+  conversation
+}: {
+  storeDir: string;
+  conversation: Conversation;
+}): DeferredForegroundTransfer | undefined {
   const takeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
   const transferId = stringValue(takeover?.deferred_foreground_transfer_id);
   if (!transferId) {
-    return;
+    return undefined;
   }
   const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
-  if (!isFinalDeferredForegroundTransferStatus(transfer.status)) {
+  const statePath = stringValue(conversation.state_path);
+  const messageId = stringValue(takeover?.terminal_bridge_message_id);
+  const activeMessageId = deferredForegroundActiveMessageId(transfer);
+  const terminalControl = terminalControlFromTakeover(takeover);
+  if (
+    !statePath || !messageId || !activeMessageId || !terminalControl ||
+    transfer.turn_id !== turnIdForConversation(conversation) ||
+    transfer.target_session_id !== sessionIdForConversation(conversation) ||
+    transfer.terminal_id !== stringValue(takeover?.native_session_id) ||
+    transfer.workspace !== conversation.workspace ||
+    transfer.workspace !== stringValue(takeover?.source_cwd) ||
+    transfer.process_pid !== Number(takeover?.terminal_agent_pid) ||
+    transfer.process_uuid !==
+      stringValue(takeover?.terminal_agent_process_uuid) ||
+    transfer.process_birth !==
+      stringValue(takeover?.terminal_agent_process_birth) ||
+    transfer.state_path === undefined ||
+    path.resolve(transfer.state_path) !== path.resolve(statePath) ||
+    activeMessageId !== messageId ||
+    transfer.request_hash !==
+      stringValue(takeover?.terminal_bridge_request_hash) ||
+    !terminalControlEvidenceMatches(
+      transfer.terminal_endpoint,
+      terminalControl,
+      { requireCurrentRoute: true, requireProcessAnchor: false }
+    )
+  ) {
     throw new Error(
-      `cannot ${action} Turn ${turnIdForConversation(conversation)} while ` +
-      `deferred foreground transfer ${transfer.transfer_id} is ` +
-      `${transfer.status}; dedicated transfer recovery must finish first`
+      `deferred foreground transfer ${transfer.transfer_id} does not match ` +
+      `the exact durable target Turn ${turnIdForConversation(conversation)}`
     );
   }
+  return transfer;
 }
 
 function assertTerminalHasNoNonterminalDeferredForegroundTransfer({
@@ -1787,6 +1908,221 @@ function assertTerminalHasNoNonterminalDeferredForegroundTransfer({
     `foreground transfer ${transfer.transfer_id} is ${transfer.status}; ` +
     "dedicated transfer recovery must finish first"
   );
+}
+
+async function recoverDeferredForegroundUserAbandonmentBeforeMutation({
+  options,
+  conversation
+}: {
+  options: Record<string, any>;
+  conversation: Conversation;
+}): Promise<Conversation> {
+  const storeDir = storeDirFromOptions(options);
+  const transfer = exactTargetDeferredForegroundTransfer({
+    storeDir,
+    conversation
+  });
+  if (!transfer || transfer.status !== "user_abandoning") {
+    return conversation;
+  }
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const terminalControl = terminalControlFromTakeover(takeover);
+  if (!terminalControl || !transfer.state_path) {
+    throw new Error(
+      `deferred foreground transfer ${transfer.transfer_id} lost its stored ` +
+      "terminal/Turn abandonment authority"
+    );
+  }
+  const statePath = path.resolve(transfer.state_path);
+  const paths = pathsForConversationDir(path.dirname(statePath));
+  const locks = terminalWriterMutationLocks(storeDir, terminalControl);
+  await withCanonicalMutationLocks(locks, async (scopes, resources) => {
+    await withDeferredForegroundRecoveryScope({
+      scopes,
+      resources,
+      transfer,
+      operation: async (scope) => {
+        await completeDeferredForegroundUserAbandonment({
+          options,
+          storeDir,
+          scope,
+          transfer: scope.loadTransfer(transfer.transfer_id),
+          terminalControl,
+          statePath,
+          logPath: paths.logPath
+        });
+      }
+    });
+  });
+  return loadState(statePath);
+}
+
+async function completeDeferredForegroundUserAbandonment({
+  options,
+  storeDir,
+  scope,
+  transfer,
+  terminalControl,
+  statePath,
+  logPath
+}: {
+  options: Record<string, any>;
+  storeDir: string;
+  scope: DeferredForegroundApplicationScope;
+  transfer: DeferredForegroundTransfer;
+  terminalControl: TerminalControlRef;
+  statePath: string;
+  logPath: string;
+}): Promise<void> {
+  if (transfer.status !== "user_abandoning") return;
+  let conversation = loadState(statePath);
+  const exact = exactTargetDeferredForegroundTransfer({
+    storeDir,
+    conversation
+  });
+  if (!exact || exact.transfer_id !== transfer.transfer_id) {
+    throw new Error(
+      `deferred foreground transfer ${transfer.transfer_id} lost its exact ` +
+      "target Turn during user abandonment recovery"
+    );
+  }
+  const fingerprint = transfer.user_abandonment_turn_fingerprint;
+  if (
+    !fingerprint ||
+    (conversation.status === "closed"
+      ? !exactDeferredForegroundUserAbandonmentTurnReceipt(
+          conversation,
+          transfer
+        )
+      : isRecord(conversation.management_abandonment))
+  ) {
+    throw new Error(
+      `deferred foreground transfer ${transfer.transfer_id} Turn ` +
+      "abandonment receipt changed"
+    );
+  }
+  const requestedAt = transfer.user_abandonment_requested_at;
+  const closeReason = transfer.user_abandonment_close_reason;
+  const ledgerDisposition = transfer.user_abandonment_ledger_disposition;
+  const ledgerFingerprint = transfer.user_abandonment_ledger_fingerprint;
+  if (!requestedAt || !closeReason || !ledgerDisposition ||
+    !ledgerFingerprint) {
+    throw new Error(
+      `deferred foreground transfer ${transfer.transfer_id} lost its frozen ` +
+      "dispatch ledger abandonment plan"
+    );
+  }
+  const currentLedger = loadTerminalBridgeDispatchLedger(terminalControl);
+  const ledger = deferredForegroundUserAbandonmentLedgerPlan({
+    current: currentLedger,
+    currentOwner: currentLedger
+      ? loadDeferredForegroundLedgerOwner(currentLedger, storeDir)
+      : undefined,
+    transfer,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    resolvedAt: requestedAt
+  });
+  if (ledger.fingerprint !== ledgerFingerprint) {
+    throw new Error(
+      `deferred foreground transfer ${transfer.transfer_id} dispatch ledger ` +
+      "no longer matches its frozen user abandonment plan"
+    );
+  }
+  const closeEventPlan =
+    preflightDeferredForegroundUserAbandonmentCloseEvent({
+      logPath,
+      conversationId: conversation.conversation_id,
+      transferId: transfer.transfer_id,
+      requestedAt,
+      closeReason
+    });
+  const alreadyClosed = conversation.status === "closed";
+  const now = cliNow().toISOString();
+  const callbacksFenced = supersedeUnacceptedCallbackDeliveries(
+    conversation,
+    {
+      at: requestedAt,
+      reason: "superseded_by_user_management_abandonment"
+    }
+  );
+  if (!alreadyClosed) {
+    conversation = {
+      ...callbacksFenced,
+      status: "closed",
+      closed_at: requestedAt,
+      close_reason: closeReason,
+      disposition: "user_abandoned_management",
+      callback_expected: false,
+      management_abandonment: {
+        version: 1,
+        disposition: "user_abandoned_management",
+        transfer_id: transfer.transfer_id,
+        transfer_origin_revision: transfer.user_abandonment_origin_revision,
+        turn_fingerprint: fingerprint,
+        requested_at: transfer.user_abandonment_requested_at,
+        close_reason: transfer.user_abandonment_close_reason
+      },
+      updated_at: now
+    };
+    saveState(statePath, conversation);
+  } else if (canonicalJson(callbacksFenced) !== canonicalJson(conversation)) {
+    throw new Error(
+      `closed Turn ${turnIdForConversation(conversation)} changed its ` +
+      "callback abandonment fence after finalization"
+    );
+  }
+  if (
+    ledger.next &&
+    canonicalJson(ledger.next) !== canonicalJson(
+      loadTerminalBridgeDispatchLedger(terminalControl)
+    )
+  ) {
+    saveTerminalBridgeDispatchLedger(terminalControl, ledger.next);
+  }
+  deferredForegroundApplication(options).completeUserAbandonment({
+    scope,
+    transferId: transfer.transfer_id,
+    ledgerDisposition,
+    ledgerFingerprint,
+    ensureCloseEvent: () => ensureDeferredForegroundUserAbandonmentCloseEvent({
+      logPath,
+      conversation,
+      transfer,
+      plan: closeEventPlan
+    }),
+    assertCloseEvent: () => assertDeferredForegroundUserAbandonmentCloseEvent({
+      logPath,
+      conversation,
+      transfer,
+      plan: closeEventPlan
+    })
+  });
+}
+
+function loadDeferredForegroundLedgerOwner(
+  ledger: TerminalDispatchLedgerDocument,
+  storeDir: string
+): Conversation | undefined {
+  const statePath = stringValue(ledger.state_path);
+  if (!statePath) return undefined;
+  try {
+    const paths = pathsForConversationDir(path.dirname(path.resolve(statePath)));
+    if (path.resolve(paths.storeDir) !== path.resolve(storeDir) ||
+      path.resolve(paths.statePath) !== path.resolve(statePath)) {
+      return undefined;
+    }
+    const owner = loadState(paths.statePath);
+    return owner.conversation_id === stringValue(ledger.conversation_id)
+      ? owner
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function recoverDeferredCodexForegroundTransferBeforeMutation({
@@ -1972,7 +2308,26 @@ async function recoverDeferredCodexForegroundTransferWhileWriterLease({
           terminal,
           transfer,
           scope
-        }).anchor.version
+        }).anchor.version,
+      completeUserAbandonment: async (scope, transfer) => {
+        if (!transfer.state_path) {
+          throw new Error(
+            `deferred foreground transfer ${transfer.transfer_id} lost its ` +
+            "target Turn path during user abandonment recovery"
+          );
+        }
+        const statePath = path.resolve(transfer.state_path);
+        const paths = pathsForConversationDir(path.dirname(statePath));
+        await completeDeferredForegroundUserAbandonment({
+          options,
+          storeDir,
+          scope,
+          transfer: scope.loadTransfer(transfer.transfer_id),
+          terminalControl: terminal.terminalControl,
+          statePath,
+          logPath: paths.logPath
+        });
+      }
     },
     runtime: {
       terminalTarget: terminal.terminalControl.target,
@@ -2018,7 +2373,9 @@ const terminalHandoffOperations = {
   maybeAdoptObservedExternalThread,
   assertObservedHandoffTransportBoundary,
   assertConversationHasNoNonterminalDeferredForegroundTransfer,
+  exactTargetDeferredForegroundTransfer,
   assertTerminalHasNoNonterminalDeferredForegroundTransfer,
+  recoverDeferredForegroundUserAbandonmentBeforeMutation,
   recoverDeferredCodexForegroundTransferBeforeMutation,
   recoverDeferredCodexForegroundTransferWhileWriterLease
 };

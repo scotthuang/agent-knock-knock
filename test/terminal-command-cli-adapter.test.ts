@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,9 +10,29 @@ import type { TerminalCommandCliDependencies } from
   "../src/terminal-command-cli-adapter.js";
 import type { ResolvedTerminalConversation } from
   "../src/terminal-agent-bridge.js";
+import {
+  loadDeferredForegroundTransfer,
+  saveDeferredForegroundTransfer,
+  type DeferredForegroundTransfer
+} from "../src/deferred-foreground-transfer.js";
+import {
+  managedSessionBindingToken,
+  terminalBindingFrom
+} from "../src/managed-session.js";
+import {
+  canonicalMutationResource,
+  type CanonicalMutationResources,
+  type CanonicalMutationScopes,
+  type CanonicalStateMutationResources,
+  type CanonicalStateMutationScopes
+} from "../src/mutation-transaction.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 import { loadState, pathsForConversation, saveState } from "../src/store.js";
+import type { TerminalControlRef } from
+  "../src/terminal-agent-adapter.js";
+import { terminalSubmissionRetryPath } from
+  "../src/terminal-submission-retry-service.js";
 
 interface DeferredGate {
   promise: Promise<void>;
@@ -107,6 +128,195 @@ function facadeDependencies(
   };
 }
 
+interface RetryAbandonmentFixture {
+  storeDir: string;
+  statePath: string;
+  logPath: string;
+  control: TerminalControlRef;
+  conversation: Conversation;
+  transfer: DeferredForegroundTransfer;
+}
+
+function createRetryAbandonmentFixture(root: string): RetryAbandonmentFixture {
+  const storeDir = path.join(root, "store");
+  const turnId = "turn-retry-abandonment";
+  const sessionId = "session-retry-abandonment";
+  const paths = pathsForConversation(turnId, storeDir);
+  const control: TerminalControlRef = {
+    kind: "herdr",
+    target: "retry-abandonment:pane-1",
+    session: "retry-abandonment",
+    socketPath: path.join(root, "herdr.sock"),
+    sessionDir: root,
+    workspaceId: "retry-abandonment",
+    tabId: "tab-1",
+    paneId: "pane-1",
+    terminalId: "terminal-1",
+    panePid: 200,
+    currentPath: "/workspace/retry-abandonment",
+    capabilities: ["screen_status", "send_keys"]
+  };
+  const terminalId =
+    "terminal:v2:herdr:codex:retry-abandonment:pane-1:200";
+  const processUuid = "codex-pid:200:birth:retry-abandonment";
+  const processBirth = "retry-abandonment";
+  const preparedAt = "2026-08-23T01:00:00.000Z";
+  const sourceBinding = terminalBindingFrom({
+    terminalId,
+    terminalControl: control,
+    pid: 200,
+    nativeThreadId: "00000000-0000-4000-8000-000000000501",
+    processUuid,
+    processBirth,
+    evidence: "codex_status_card+process_birth",
+    generation: 1,
+    now: new Date(preparedAt)
+  });
+  const targetBinding = terminalBindingFrom({
+    terminalId,
+    terminalControl: control,
+    pid: 200,
+    processUuid,
+    processBirth,
+    evidence: "codex_process_birth",
+    generation: 1,
+    now: new Date(preparedAt)
+  });
+  const requestText = "retry only if management is still active";
+  const requestHash = createHash("sha256").update(requestText).digest("hex");
+  let transfer = saveDeferredForegroundTransfer(storeDir, {
+    schema: "agent-knock-knock/deferred-foreground-transfer",
+    version: 1,
+    transfer_id: "deferred-transfer-retry-abandonment",
+    status: "prepared",
+    input_stage: "none",
+    terminal_id: terminalId,
+    terminal_endpoint: sourceBinding.terminal_endpoint!,
+    process_pid: 200,
+    process_uuid: processUuid,
+    process_birth: processBirth,
+    workspace: "/workspace/retry-abandonment",
+    source_session_id: "session-retry-source",
+    source_expected_revision: 1,
+    source_binding_token: managedSessionBindingToken({
+      session_id: "session-retry-source",
+      status: "bound",
+      binding: sourceBinding
+    }),
+    source_before_binding: sourceBinding,
+    target_session_id: sessionId,
+    target_expected_revision: null,
+    previous_dispatch_status: "none",
+    previous_dispatch_fingerprint: createHash("sha256")
+      .update("no previous retry dispatch")
+      .digest("hex"),
+    request_hash: requestHash,
+    dispatcher_pid: 999,
+    prepared_at: preparedAt
+  }, { expectedRevision: null });
+  transfer = saveDeferredForegroundTransfer(storeDir, {
+    ...transfer,
+    status: "source_reserved",
+    source_reserved_at: "2026-08-23T01:00:01.000Z"
+  }, { expectedRevision: transfer.revision! });
+  transfer = saveDeferredForegroundTransfer(storeDir, {
+    ...transfer,
+    status: "target_prepared",
+    target_prepared_at: "2026-08-23T01:00:02.000Z",
+    target_prepared_revision: 1,
+    target_prepared_status: "transitioning",
+    target_prepared_last_transition_id: transfer.transfer_id,
+    target_prepared_binding_token: managedSessionBindingToken({
+      session_id: sessionId,
+      status: "transitioning",
+      binding: targetBinding
+    }),
+    target_before_binding: targetBinding,
+    message_id: "message-retry-abandonment",
+    turn_id: turnId,
+    state_path: paths.statePath
+  }, { expectedRevision: transfer.revision! });
+  const conversation = {
+    ...createConversation({
+      userRequest: requestText,
+      sessionId,
+      turnId,
+      executorKind: "codex"
+    }),
+    status: "stalled" as const,
+    workspace: transfer.workspace,
+    store_dir: storeDir,
+    conversation_dir: paths.conversationDir,
+    state_path: paths.statePath,
+    event_log_path: paths.logPath,
+    native_session_takeover: {
+      agent: "codex",
+      native_session_id: terminalId,
+      terminal_agent_pid: transfer.process_pid,
+      terminal_agent_process_uuid: transfer.process_uuid,
+      terminal_agent_process_birth: transfer.process_birth,
+      source_cwd: transfer.workspace,
+      terminal_control: control,
+      terminal_endpoint: transfer.terminal_endpoint,
+      terminal_bridge: true,
+      terminal_bridge_message_id: transfer.message_id,
+      terminal_bridge_request_text: requestText,
+      terminal_bridge_request_hash: transfer.request_hash,
+      deferred_foreground_transfer_id: transfer.transfer_id
+    }
+  };
+  saveState(paths.statePath, conversation);
+  return {
+    storeDir,
+    statePath: paths.statePath,
+    logPath: paths.logPath,
+    control,
+    conversation,
+    transfer
+  };
+}
+
+function persistRetryManagementAbandonment(
+  fixture: RetryAbandonmentFixture,
+  final: boolean
+): DeferredForegroundTransfer {
+  let transfer = loadDeferredForegroundTransfer(
+    fixture.storeDir,
+    fixture.transfer.transfer_id
+  );
+  if (transfer.status === "target_prepared") {
+    const fingerprint = createHash("sha256")
+      .update("exact retry management abandonment")
+      .digest("hex");
+    transfer = saveDeferredForegroundTransfer(fixture.storeDir, {
+      ...transfer,
+      status: "user_abandoning",
+      user_abandonment_disposition: "user_abandoned_management",
+      user_abandonment_origin_status: "target_prepared",
+      user_abandonment_origin_revision: transfer.revision,
+      user_abandonment_turn_id: transfer.turn_id,
+      user_abandonment_turn_fingerprint: fingerprint,
+      user_abandonment_requested_at: "2026-08-23T01:00:03.000Z",
+      user_abandonment_close_reason: "closed by explicit user request",
+      user_abandonment_ledger_disposition: "absent",
+      user_abandonment_ledger_fingerprint: fingerprint
+    }, { expectedRevision: transfer.revision! });
+  }
+  if (final && transfer.status === "user_abandoning") {
+    const fingerprint = transfer.user_abandonment_turn_fingerprint!;
+    transfer = saveDeferredForegroundTransfer(fixture.storeDir, {
+      ...transfer,
+      status: "user_abandoned",
+      user_abandonment_completed_at: "2026-08-23T01:00:04.000Z",
+      user_abandonment_source_disposition: "already_released",
+      user_abandonment_source_fingerprint: fingerprint,
+      user_abandonment_target_disposition: "already_released",
+      user_abandonment_target_fingerprint: fingerprint
+    }, { expectedRevision: transfer.revision! });
+  }
+  return transfer;
+}
+
 test("terminal command facade preserves fake-port order and isolates async runtimes", async (t) => {
   assert.deepEqual(
     Object.keys(terminalCommandCliAdapter),
@@ -165,16 +375,213 @@ test("exact Turn submission retry rejects mixed send options before terminal res
   assert.deepEqual(events, ["A:required:--turn is required"]);
 });
 
+test("send --turn abandonment fence precedes every retry sidecar state and terminal I/O", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-send-retry-abandonment-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = createRetryAbandonmentFixture(root);
+  const sidecarPath = terminalSubmissionRetryPath(fixture.statePath);
+  const events: string[] = [];
+  const implemented = {
+    required<Value>(value: Value | null | undefined, label: string): Value {
+      if (value === undefined || value === null) throw new Error(label);
+      return value;
+    },
+    loadConversationFromOptions() {
+      events.push("load-conversation");
+      return {
+        conversation: loadState(fixture.statePath),
+        statePath: fixture.statePath,
+        logPath: fixture.logPath
+      };
+    },
+    terminalControlFromTakeover() {
+      events.push("stored-control");
+      return fixture.control;
+    },
+    createTerminalAgentBridge() {
+      events.push("terminal-bridge");
+      throw new Error("abandonment fence must precede terminal resolution");
+    },
+    terminalWriterMutationLocks() {
+      events.push("mutation-locks");
+      throw new Error("settled abandonment must precede mutation locks");
+    }
+  } satisfies Partial<TerminalCommandPorts>;
+  const ports = new Proxy(implemented, {
+    get(target, property, receiver) {
+      if (Reflect.has(target, property)) {
+        return Reflect.get(target, property, receiver);
+      }
+      throw new Error(`unexpected terminal command port ${String(property)}`);
+    }
+  }) as unknown as TerminalCommandPorts;
+  const facade = terminalCommandCliAdapter.createTerminalCommandCliFacade({
+    ports
+  });
+  const sidecarStates = [
+    undefined,
+    "replacement_reserved",
+    "replacement_text_reserved",
+    "enter_reserved",
+    "enter_dispatched",
+    "agent_accepted"
+  ] as const;
+
+  for (const final of [false, true]) {
+    persistRetryManagementAbandonment(fixture, final);
+    for (const sidecarState of sidecarStates) {
+      if (sidecarState === undefined) {
+        fs.rmSync(sidecarPath, { force: true });
+      } else {
+        fs.writeFileSync(
+          sidecarPath,
+          `${JSON.stringify({ state: sidecarState, sentinel: true })}\n`,
+          { mode: 0o600 }
+        );
+      }
+      const before = fs.existsSync(sidecarPath)
+        ? fs.readFileSync(sidecarPath, "utf8")
+        : undefined;
+      events.length = 0;
+      await assert.rejects(
+        facade.runSend({ turn: "turn-retry-abandonment" }),
+        final
+          ? /management is released.*settled\/closed.*no terminal input was sent/u
+          : /management abandonment cleanup is in progress.*no terminal input was sent/u
+      );
+      assert.equal(
+        fs.existsSync(sidecarPath)
+          ? fs.readFileSync(sidecarPath, "utf8")
+          : undefined,
+        before,
+        `${String(sidecarState ?? "absent")} sidecar must remain byte-identical`
+      );
+      assert.deepEqual(events, ["load-conversation", "stored-control"]);
+    }
+  }
+});
+
+test("send --turn rechecks abandonment intent under canonical locks", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-send-retry-abandonment-race-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = createRetryAbandonmentFixture(root);
+  const sidecarPath = terminalSubmissionRetryPath(fixture.statePath);
+  const sentinel = `${JSON.stringify({
+    state: "enter_reserved",
+    sentinel: "close-won"
+  })}\n`;
+  fs.writeFileSync(sidecarPath, sentinel, { mode: 0o600 });
+  const events: string[] = [];
+  const implemented = {
+    required<Value>(value: Value | null | undefined, label: string): Value {
+      if (value === undefined || value === null) throw new Error(label);
+      return value;
+    },
+    loadConversationFromOptions() {
+      events.push("load-conversation");
+      return {
+        conversation: loadState(fixture.statePath),
+        statePath: fixture.statePath,
+        logPath: fixture.logPath
+      };
+    },
+    terminalControlFromTakeover() {
+      events.push("stored-control");
+      return fixture.control;
+    },
+    terminalWriterMutationLocks() {
+      return {
+        resources: {
+          terminal: canonicalMutationResource(
+            "terminal:retry-abandonment",
+            fixture.control
+          ),
+          storeWriter: canonicalMutationResource(
+            path.resolve(fixture.storeDir),
+            path.resolve(fixture.storeDir)
+          )
+        },
+        acquireTerminal: () => {
+          events.push("terminal-lock:close-intent");
+          persistRetryManagementAbandonment(fixture, false);
+          return () => events.push("terminal-unlock");
+        },
+        withStoreWriter: async <Result>(
+          operation: () => Promise<Result>
+        ): Promise<Result> => {
+          events.push("writer-lock");
+          return operation();
+        }
+      };
+    },
+    async withTerminalDispatchStateScope<Result>(
+      scopes: CanonicalMutationScopes,
+      resources: CanonicalMutationResources,
+      _statePath: string,
+      _logPath: string,
+      operation: (
+        scopes: CanonicalStateMutationScopes,
+        resources: CanonicalStateMutationResources
+      ) => Promise<Result>
+    ): Promise<Result> {
+      events.push("state-lock");
+      return operation(
+        scopes as CanonicalStateMutationScopes,
+        resources as CanonicalStateMutationResources
+      );
+    },
+    createTerminalAgentBridge() {
+      events.push("terminal-bridge");
+      throw new Error("locked abandonment fence must precede terminal I/O");
+    }
+  } satisfies Partial<TerminalCommandPorts>;
+  const ports = new Proxy(implemented, {
+    get(target, property, receiver) {
+      if (Reflect.has(target, property)) {
+        return Reflect.get(target, property, receiver);
+      }
+      throw new Error(`unexpected terminal command port ${String(property)}`);
+    }
+  }) as unknown as TerminalCommandPorts;
+  const facade = terminalCommandCliAdapter.createTerminalCommandCliFacade({
+    ports
+  });
+
+  await assert.rejects(
+    facade.runSend({ turn: "turn-retry-abandonment" }),
+    /management abandonment cleanup is in progress.*no terminal input was sent/u
+  );
+  assert.equal(fs.readFileSync(sidecarPath, "utf8"), sentinel);
+  assert.deepEqual(events, [
+    "load-conversation",
+    "stored-control",
+    "terminal-lock:close-intent",
+    "writer-lock",
+    "state-lock",
+    "stored-control",
+    "terminal-unlock"
+  ]);
+});
+
 test("exact Turn retry wires durable authority before composer input", () => {
   const command = compiledFunctionSource(
     "runTerminalSubmissionRetry",
     "runTerminalSubmissionExactDraftEnter"
   );
   assertOrdered(command, [
-    "resolveStoredTerminal",
-    "terminalControlsShareIncarnation",
+    "assertTerminalSubmissionRetryNotUserAbandoned",
     "withCanonicalMutationLocks",
     "withTerminalDispatchStateScope",
+    "loadState(statePath)",
+    "assertTerminalSubmissionRetryNotUserAbandoned",
+    "resolveStoredTerminal",
+    "terminalControlsShareIncarnation",
     "runTerminalSubmissionRetryLocked"
   ]);
   const authority = compiledFunctionSource(
@@ -184,6 +591,7 @@ test("exact Turn retry wires durable authority before composer input", () => {
   assertOrdered(authority, [
     "bindTerminalDispatchRoute",
     "loadState",
+    "assertTerminalSubmissionRetryNotUserAbandoned",
     "loadTerminalSubmissionRetry",
     "validateStoredTerminalSubmissionMatch",
     "mutationDispatchLedger.load",
@@ -191,6 +599,22 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "assertTerminalSubmissionRetryAttemptIdentity",
     "assertTerminalSubmissionRetryGeneration"
   ]);
+  const abandonment = compiledFunctionSource(
+    "assertTerminalSubmissionRetryNotUserAbandoned",
+    "loadTerminalSubmissionRetryLockedAuthority"
+  );
+  assertOrdered(abandonment, [
+    "loadDeferredForegroundTransfer",
+    'transfer.status !== "user_abandoning"',
+    'transfer.status !== "user_abandoned"',
+    "terminalControlEvidenceMatches",
+    'transfer.status === "user_abandoning"',
+    "settled/closed"
+  ]);
+  assert.doesNotMatch(
+    abandonment,
+    /loadTerminalSubmissionRetry|saveTerminalSubmissionRetry|createTerminalAgentBridge|resolveStoredTerminal|observeCodexComposer|sendText|sendEnter/u
+  );
   const deferred = compiledFunctionSource(
     "prepareTerminalSubmissionRetryDeferredContext",
     "assertTerminalSubmissionRetryDeferredTransferAuthority"

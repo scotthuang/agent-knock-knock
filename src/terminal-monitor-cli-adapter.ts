@@ -36,6 +36,7 @@ import {
 
 type Release = () => void;
 type EventRecord = { event: string; [key: string]: unknown };
+type MonitorUserAbandonmentStatus = "user_abandoning" | "user_abandoned";
 
 export function terminalMonitorStoreOperationTimeout(error: unknown):
   | { code: string; lockKind: string }
@@ -69,6 +70,9 @@ export interface PreparedMonitorRecoveryPorts {
   withWriter<T>(use: () => Promise<T>): Promise<T>;
   acquireState(): Release;
   loadConversation(): Conversation;
+  userAbandonmentStatus(
+    conversation: Conversation
+  ): MonitorUserAbandonmentStatus | undefined;
   loadLedger(control: TerminalControlRef): UnknownRecord | undefined;
   saveLedger(control: TerminalControlRef, ledger: UnknownRecord): void;
   saveConversation(conversation: Conversation): void;
@@ -99,6 +103,9 @@ export interface LaggingAcceptedMonitorAuthorityRepairPorts {
   withWriter<T>(use: () => Promise<T>): Promise<T>;
   acquireState(): Release;
   loadConversation(): Conversation;
+  userAbandonmentStatus(
+    conversation: Conversation
+  ): MonitorUserAbandonmentStatus | undefined;
   loadLedger(control: TerminalControlRef): UnknownRecord | undefined;
   reconcileLedger(
     control: TerminalControlRef,
@@ -133,6 +140,10 @@ export async function repairLaggingAcceptedMonitorAuthority(input: {
       const releaseState = input.ports.acquireState();
       try {
         const current = input.ports.loadConversation();
+        if (input.ports.userAbandonmentStatus(current)) {
+          conversation = current;
+          return;
+        }
         const submission = input.ports.submission(current);
         if (!isLegacyEnterDispatchedAuthorityGap(
           submission,
@@ -172,13 +183,19 @@ export async function recoverPreparedMonitorSubmission(
   input: RecoverPreparedMonitorInput
 ): Promise<Conversation> {
   let conversation = input.conversation;
+  let abandonmentFenced = false;
   const releaseTerminal = input.ports.acquireTerminal(input.terminalControl);
   try {
     await input.ports.withWriter(async () => {
-      const ledger = input.ports.loadLedger(input.terminalControl);
       const releaseState = input.ports.acquireState();
       try {
         const current = input.ports.loadConversation();
+        if (input.ports.userAbandonmentStatus(current)) {
+          conversation = current;
+          abandonmentFenced = true;
+          return;
+        }
+        const ledger = input.ports.loadLedger(input.terminalControl);
         const submission = input.ports.submission(current);
         const takeover = takeoverFor(current);
         if (!isExpectedPrepared(input.currentMessageId, takeover, submission)) {
@@ -206,7 +223,10 @@ export async function recoverPreparedMonitorSubmission(
       } finally {
         releaseState();
       }
-      if (input.ports.submission(conversation)?.status === "uncertain") {
+      if (
+        !abandonmentFenced &&
+        input.ports.submission(conversation)?.status === "uncertain"
+      ) {
         input.ports.stallCollateral({
           terminalControl: input.terminalControl,
           currentConversationId: conversation.conversation_id,
@@ -427,6 +447,9 @@ export interface MonitorPollAdapterPorts {
   saveLedger(control: TerminalControlRef, ledger: UnknownRecord): void;
   submission(conversation: Conversation): UnknownRecord | undefined;
   loadConversation(): Conversation;
+  userAbandonmentStatus(
+    conversation: Conversation
+  ): MonitorUserAbandonmentStatus | undefined;
   terminalControl(conversation: Conversation): TerminalControlRef | undefined;
   sameIncarnation(left: TerminalControlRef, right: TerminalControlRef): boolean;
   runtime(
@@ -477,6 +500,12 @@ export async function pollTerminalMonitor(input: {
 }): Promise<MonitorPollResult> {
   const release = input.ports.acquireTerminal(input.terminalControl);
   try {
+    const current = input.ports.loadConversation();
+    const abandonmentStatus = input.ports.userAbandonmentStatus(current);
+    if (abandonmentStatus) {
+      input.onFenced(abandonmentStatus);
+      return { kind: "fenced", ledgerStatus: abandonmentStatus };
+    }
     const ledger = repairPollLedger(input);
     const ledgerStatus = nonBlankString(ledger?.status);
     const ledgerMessageId = nonBlankString(ledger?.message_id);

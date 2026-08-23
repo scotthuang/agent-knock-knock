@@ -3579,6 +3579,20 @@ test("deferred send without exact request acceptance stays uncertain and blocks 
     assert.equal(transfer.input_stage, "enter_dispatched");
     assertSingleTaskInput(fixture, message);
 
+    const listed = await listFixtureTerminal(fixture);
+    assert.equal(listed.management_state, "conflict");
+    assert.deepEqual(listed.available_actions.close?.arguments, {
+      turn_id: output.turn_id
+    });
+    assert.equal(
+      listed.available_actions.close?.requires_explicit_user_confirmation,
+      true
+    );
+    assert.match(
+      String(listed.available_actions.close?.use),
+      /release its linked deferred terminal management[\s\S]*does not prepare or retry another callback[\s\S]*callback attempt already in flight or accepted by the host may still arrive[\s\S]*sends no terminal input[\s\S]*does not interrupt or stop Codex[\s\S]*watch action/ui
+    );
+
     const rejected = await runCli(args, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
@@ -3590,6 +3604,43 @@ test("deferred send without exact request acceptance stays uncertain and blocks 
     assert.equal(transfer.status, "uncertain");
     assert.equal(transfer.do_not_retry, true);
     assertSingleTaskInput(fixture, message);
+
+    const competingTransfer = saveDeferredForegroundTransfer(
+      fixture.storeDir,
+      {
+        schema: DEFERRED_FOREGROUND_TRANSFER_SCHEMA,
+        version: DEFERRED_FOREGROUND_TRANSFER_VERSION,
+        transfer_id: createDeferredForegroundTransferId(),
+        status: "prepared",
+        input_stage: "none",
+        terminal_id: transfer.terminal_id,
+        terminal_endpoint: transfer.terminal_endpoint,
+        process_pid: transfer.process_pid,
+        process_uuid: transfer.process_uuid,
+        process_birth: transfer.process_birth,
+        workspace: transfer.workspace,
+        source_session_id: transfer.source_session_id,
+        source_expected_revision: transfer.source_expected_revision,
+        source_binding_token: transfer.source_binding_token,
+        source_before_binding: transfer.source_before_binding,
+        source_kind: "status_card_only",
+        target_session_id: `${transfer.target_session_id}-competing`,
+        target_expected_revision: null,
+        previous_dispatch_status: "none",
+        previous_dispatch_fingerprint: "c".repeat(64),
+        request_hash: "d".repeat(64),
+        dispatcher_pid: process.pid,
+        prepared_at: new Date().toISOString()
+      },
+      { expectedRevision: null }
+    );
+    assert.equal(competingTransfer.status, "prepared");
+    const ambiguous = await listFixtureTerminal(fixture);
+    assert.equal(
+      ambiguous.available_actions.close,
+      undefined,
+      "two nonterminal transfers on one exact endpoint must not advertise close"
+    );
   } finally {
     fixture.cleanup();
   }
@@ -4389,6 +4440,7 @@ test("active candidate transfer protects expired idle source history from reconc
       JSON.parse(pending.stdout).status,
       "submission_pending_acceptance"
     );
+    const pendingTurnId = String(JSON.parse(pending.stdout).turn_id);
     const transfer = soleDeferredForegroundTransfer(fixture);
     assert.equal(transfer.status, "dispatch_started");
     assert.equal(transfer.source_turn_history?.length, 4);
@@ -4418,6 +4470,23 @@ test("active candidate transfer protects expired idle source history from reconc
     assert.equal(output.reconciliation.closed, 0);
     assert.equal(output.reconciliation.monitors_launched, 0);
     assert.ok(output.reconciliation.skipped >= 1, listed.stdout);
+    const terminal = output.terminals[0];
+    assert.deepEqual(terminal.available_actions.close?.arguments, {
+      turn_id: pendingTurnId
+    });
+    const listedSourceTurn = [
+      terminal.managed.current_turn,
+      terminal.managed.recent_turn,
+      ...(terminal.managed.history ?? [])
+    ].find((turn: Record<string, any> | null) =>
+      turn?.turn_id === idleTurn.turn_id
+    );
+    assert.ok(listedSourceTurn, listed.stdout);
+    assert.equal(
+      listedSourceTurn.available_actions?.close,
+      undefined,
+      "source_turn_history must not inherit target transfer-abandon authority"
+    );
     assert.deepEqual(fs.readFileSync(statePath), beforeState);
     assert.deepEqual(
       fs.existsSync(logPath) ? fs.readFileSync(logPath) : Buffer.alloc(0),

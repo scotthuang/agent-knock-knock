@@ -706,7 +706,9 @@ function assertConversationNotReservedByDeferredSourceHistory(
         "resolved",
         "uncertain",
         "aborted",
-        "abort_resolved"
+        "abort_resolved",
+        "user_abandoning",
+        "user_abandoned"
       ].includes(String(value.status)) ||
       (
         Number(value.version) === 2 &&
