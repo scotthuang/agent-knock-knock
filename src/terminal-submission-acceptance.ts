@@ -289,7 +289,7 @@ export function observeCodexHumanStartedActiveTask(
         "active-task suffix"
       );
       const laterTaskOffset = suffixRecords.find(({ value }) =>
-        isLaterCodexHumanTaskRecord(value)
+        isLaterCodexHumanTaskStartedRecord(value)
       )?.offsetBytes;
       const exactCompletionOffset = suffixRecords.find(({ value }) =>
         isExactCodexTaskCompleteRecord(value, anchor.turn_id)
@@ -422,6 +422,7 @@ interface CodexActiveTaskUserRecord {
   offsetBytes: number;
   turnId: string;
   requestHash?: string;
+  pairingIssue?: "hash_mismatch" | "unsupported";
 }
 
 type CodexActiveTaskReverseDecision =
@@ -560,8 +561,10 @@ function latestCodexHumanStartedActiveTask(
   const lowerBound = Math.max(0, endOffset - maxBytes);
   const terminalTurns = new Map<string, "completed" | "aborted">();
   const userRecords: CodexActiveTaskUserRecord[] = [];
+  let userMessageRecordCount = 0;
   let cursor = endOffset;
   let leadingRecord = Buffer.alloc(0);
+  let followingRecord: CodexJsonlRecordAtOffset | undefined;
 
   while (cursor > lowerBound) {
     const readStart = Math.max(
@@ -597,17 +600,24 @@ function latestCodexHumanStartedActiveTask(
     );
     for (let index = records.length - 1; index >= 0; index -= 1) {
       const record = records[index];
+      const absoluteRecord = {
+        value: record.value,
+        offsetBytes: recordsOffset + record.offsetBytes
+      };
+      if (isCodexUserMessageRecord(absoluteRecord.value)) {
+        userMessageRecordCount += 1;
+      }
       const decision = inspectCodexActiveTaskRecordInReverse(
-        {
-          value: record.value,
-          offsetBytes: recordsOffset + record.offsetBytes
-        },
+        absoluteRecord,
         terminalTurns,
-        userRecords
+        userRecords,
+        userMessageRecordCount,
+        followingRecord
       );
       if (decision.status === "resolved") {
         return decision.active;
       }
+      followingRecord = absoluteRecord;
     }
     cursor = readStart;
   }
@@ -623,7 +633,9 @@ function latestCodexHumanStartedActiveTask(
 function inspectCodexActiveTaskRecordInReverse(
   record: CodexJsonlRecordAtOffset,
   terminalTurns: Map<string, "completed" | "aborted">,
-  userRecords: CodexActiveTaskUserRecord[]
+  userRecords: CodexActiveTaskUserRecord[],
+  userMessageRecordCount: number,
+  followingRecord: CodexJsonlRecordAtOffset | undefined
 ): CodexActiveTaskReverseDecision {
   const { value, offsetBytes } = record;
   const payload = isRecord(value.payload) ? value.payload : undefined;
@@ -647,22 +659,13 @@ function inspectCodexActiveTaskRecordInReverse(
     terminalTurns.set(turnId, kind);
     return { status: "continue" };
   }
-  if (
-    value.type === "response_item" &&
-    payload.type === "message" &&
-    payload.role === "user"
-  ) {
-    const metadata = isRecord(payload.internal_chat_message_metadata_passthrough)
-      ? payload.internal_chat_message_metadata_passthrough
-      : undefined;
-    const rawTurnId = optionalString(metadata?.turn_id);
-    if (rawTurnId) {
-      const text = exactCodexUserResponseText(payload.content);
-      userRecords.push({
-        offsetBytes,
-        turnId: rawTurnId.toLowerCase(),
-        ...(text === undefined ? {} : { requestHash: fingerprintText(text) })
-      });
+  if (isCodexUserResponseRecord(value)) {
+    const userRecord = pairedCodexActiveTaskUserRecord(
+      record,
+      followingRecord
+    );
+    if (userRecord) {
+      userRecords.push(userRecord);
     }
     return { status: "continue" };
   }
@@ -674,14 +677,27 @@ function inspectCodexActiveTaskRecordInReverse(
   if (terminalTurns.has(turnId)) {
     return { status: "resolved" };
   }
+  if (userMessageRecordCount === 0) {
+    return { status: "resolved" };
+  }
+  if (userMessageRecordCount !== 1) {
+    throw new Error("Codex active task has multiple user_message events");
+  }
   const matchingUsers = userRecords.filter((user) => user.turnId === turnId);
   if (matchingUsers.length === 0) {
-    return { status: "resolved" };
+    throw new Error(
+      "Codex active task has no exact adjacent root user row for its user_message event"
+    );
   }
   if (matchingUsers.length !== 1) {
     throw new Error("Codex active task has multiple same-turn root user rows");
   }
   const [user] = matchingUsers;
+  if (user.pairingIssue === "hash_mismatch") {
+    throw new Error(
+      "Codex active-task root user row does not match its user_message event"
+    );
+  }
   if (user.requestHash === undefined) {
     throw new Error("Codex active-task root user row has unsupported prompt content");
   }
@@ -710,19 +726,75 @@ function assertBoundedCodexActiveTaskRecord(length: number): void {
   }
 }
 
-function isLaterCodexHumanTaskRecord(value: Record<string, any>): boolean {
+function pairedCodexActiveTaskUserRecord(
+  record: CodexJsonlRecordAtOffset,
+  followingRecord: CodexJsonlRecordAtOffset | undefined
+): CodexActiveTaskUserRecord | undefined {
+  const payload = isRecord(record.value.payload)
+    ? record.value.payload
+    : undefined;
+  const metadata = payload &&
+      isRecord(payload.internal_chat_message_metadata_passthrough)
+    ? payload.internal_chat_message_metadata_passthrough
+    : undefined;
+  const rawTurnId = optionalString(metadata?.turn_id);
+  // Codex writes the human root's user_message event immediately after its
+  // response row. Synthetic user-role context has no such adjacent proof.
+  if (
+    !payload ||
+    !rawTurnId ||
+    !isCodexUserMessageRecord(followingRecord?.value)
+  ) {
+    return undefined;
+  }
+  const text = exactCodexUserResponseText(payload.content);
+  const requestHash = text === undefined ? undefined : fingerprintText(text);
+  const userMessageHash = codexUserMessageHash(followingRecord?.value);
+  const pairingIssue = requestHash === undefined || userMessageHash === undefined
+    ? "unsupported" as const
+    : requestHash !== userMessageHash
+      ? "hash_mismatch" as const
+      : undefined;
+  return {
+    offsetBytes: record.offsetBytes,
+    turnId: exactNativeThreadId(rawTurnId),
+    ...(pairingIssue ? { pairingIssue } : { requestHash })
+  };
+}
+
+function isCodexUserResponseRecord(value: Record<string, any>): boolean {
   const payload = isRecord(value.payload) ? value.payload : undefined;
-  return Boolean(
-    payload &&
-    (
-      (value.type === "event_msg" && payload.type === "task_started") ||
-      (
-        value.type === "response_item" &&
-        payload.type === "message" &&
-        payload.role === "user"
-      )
-    )
-  );
+  return value.type === "response_item" &&
+    payload?.type === "message" &&
+    payload.role === "user";
+}
+
+function codexUserMessageHash(
+  value: Record<string, any> | undefined
+): string | undefined {
+  const payload = value && isRecord(value.payload) ? value.payload : undefined;
+  return value?.type === "event_msg" &&
+    payload?.type === "user_message" &&
+    typeof payload.message === "string"
+    ? fingerprintText(payload.message)
+    : undefined;
+}
+
+function isCodexUserMessageRecord(
+  value: Record<string, any> | undefined
+): boolean {
+  const payload = value && isRecord(value.payload) ? value.payload : undefined;
+  return value?.type === "event_msg" && payload?.type === "user_message";
+}
+
+function isLaterCodexHumanTaskStartedRecord(
+  value: Record<string, any>
+): boolean {
+  const payload = isRecord(value.payload) ? value.payload : undefined;
+  // User-role response rows can be same-turn synthetic context. Only a fresh
+  // task_started record is authoritative evidence that the anchor was passed.
+  return value.type === "event_msg" &&
+    payload?.type === "task_started";
 }
 
 function isExactCodexTaskCompleteRecord(

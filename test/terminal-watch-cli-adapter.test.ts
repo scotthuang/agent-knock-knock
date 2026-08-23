@@ -12,6 +12,7 @@ import type { Conversation } from "../src/protocol.js";
 const THREAD_ID = "019f0000-0000-7000-8000-000000000206";
 const TASK_ID = "019f0000-0000-7000-8000-000000000207";
 const TOKEN = "a".repeat(64);
+type RootUserRowOrder = "human-only" | "synthetic-first" | "human-first";
 
 test("Terminal Watch CLI observes one exact human-started Codex task and delivers its completion", async (t) => {
   const fixture = createFixture(t);
@@ -94,6 +95,79 @@ test("Terminal Watch CLI observes one exact human-started Codex task and deliver
     facade.listPublicWatches(fixture.storeDir, { includeAll: true }).length,
     1
   );
+});
+
+test("Terminal Watch accepts a paired human prompt beside a same-turn synthetic Codex context row", async (t) => {
+  for (const rootUserRowOrder of [
+    "synthetic-first",
+    "human-first"
+  ] as const) {
+    const fixture = createFixture(t, rootUserRowOrder);
+    const printed: unknown[] = [];
+    const callbacks: TerminalWatchCallbackInput[] = [];
+    const facade = createTerminalWatchCliAdapter({
+      acquireFileLock: () => () => {},
+      acquireTerminalLock: () => () => {},
+      observeExactTerminal: async ({ terminalId }) =>
+        exactTerminalObservation([fixture.terminal], terminalId),
+      loadClaudeAgentRows: () => [],
+      now: fixture.now,
+      randomUUID: () => rootUserRowOrder === "synthetic-first"
+        ? "00000000-0000-4000-8000-000000000214"
+        : "00000000-0000-4000-8000-000000000215",
+      storeDirFromOptions: () => fixture.storeDir,
+      terminalDispatchOwnership: () => ({ state: "none" }),
+      terminalIncarnationBlockingTurns: () => [],
+      printJson: (value) => printed.push(value),
+      callback: {
+        deliver(input) {
+          callbacks.push(input);
+          return { runId: input.idempotencyKey, status: "started" };
+        }
+      }
+    });
+
+    await facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      openclawSession: "agent:main:main"
+    });
+    const created = record(record(printed.at(-1)).watch);
+    assert.equal(created.status, "active", rootUserRowOrder);
+    assert.equal(record(created.callback).pending, 0, rootUserRowOrder);
+    assert.equal(callbacks.length, 0, rootUserRowOrder);
+
+    fs.appendFileSync(
+      fixture.rolloutPath,
+      `${JSON.stringify({
+        timestamp: "2026-08-21T01:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: TASK_ID,
+          last_agent_message: `Completed with ${rootUserRowOrder} context`
+        }
+      })}\n`
+    );
+    fixture.advance();
+    await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+
+    assert.equal(callbacks.length, 1, rootUserRowOrder);
+    assert.equal(callbacks[0].event, "completed", rootUserRowOrder);
+    assert.equal(
+      callbacks[0].completionText,
+      `Completed with ${rootUserRowOrder} context`,
+      rootUserRowOrder
+    );
+    facade.runWatchStatus({
+      storeDir: fixture.storeDir,
+      watch: String(created.watch_id)
+    });
+    assert.equal(
+      record(record(printed.at(-1)).watch).status,
+      "completed",
+      rootUserRowOrder
+    );
+  }
 });
 
 test("exact durable completion wins when the terminal switches before reconciliation", async (t) => {
@@ -419,11 +493,49 @@ function exactTerminalObservation(
     : { state: "absent" as const, summary: {} };
 }
 
-function createFixture(t: test.TestContext) {
+function createFixture(
+  t: test.TestContext,
+  rootUserRowOrder: RootUserRowOrder = "human-only"
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-watch-cli-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const rolloutPath = path.join(root, "rollout.jsonl");
   const request = "Human-started task";
+  const humanRootUserRow = {
+    timestamp: "2026-08-21T01:00:00.010Z",
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: request }],
+      internal_chat_message_metadata_passthrough: { turn_id: TASK_ID }
+    }
+  };
+  const syntheticContextRow = {
+    timestamp: rootUserRowOrder === "synthetic-first"
+      ? "2026-08-21T01:00:00.009Z"
+      : "2026-08-21T01:00:00.012Z",
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{
+        type: "input_text",
+        text: `<environment_context>\n  <cwd>${root}</cwd>\n</environment_context>`
+      }],
+      internal_chat_message_metadata_passthrough: { turn_id: TASK_ID }
+    }
+  };
+  const humanUserMessageEvent = {
+    timestamp: "2026-08-21T01:00:00.011Z",
+    type: "event_msg",
+    payload: { type: "user_message", message: request }
+  };
+  const rootTaskRecords = rootUserRowOrder === "human-only"
+    ? [humanRootUserRow, humanUserMessageEvent]
+    : rootUserRowOrder === "synthetic-first"
+      ? [syntheticContextRow, humanRootUserRow, humanUserMessageEvent]
+      : [humanRootUserRow, humanUserMessageEvent, syntheticContextRow];
   fs.writeFileSync(
     rolloutPath,
     [
@@ -444,21 +556,7 @@ function createFixture(t: test.TestContext) {
         type: "event_msg",
         payload: { type: "task_started", turn_id: TASK_ID }
       },
-      {
-        timestamp: "2026-08-21T01:00:00.010Z",
-        type: "response_item",
-        payload: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: request }],
-          internal_chat_message_metadata_passthrough: { turn_id: TASK_ID }
-        }
-      },
-      {
-        timestamp: "2026-08-21T01:00:00.011Z",
-        type: "event_msg",
-        payload: { type: "user_message", message: request }
-      }
+      ...rootTaskRecords
     ].map((value) => JSON.stringify(value)).join("\n") + "\n",
     { mode: 0o600 }
   );

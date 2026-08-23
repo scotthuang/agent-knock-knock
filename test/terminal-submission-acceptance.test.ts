@@ -104,6 +104,244 @@ test("captures and completes one exact human-started Codex task without persisti
   }
 });
 
+test("pairs the human Codex root while ignoring same-turn synthetic context rows", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const nativeTurnId = turnId(916);
+  const taskStarted = {
+    type: "event_msg",
+    payload: { type: "task_started", turn_id: nativeTurnId }
+  };
+  const human = userResponseRecord(REQUEST, nativeTurnId);
+  const userMessage = userMessageRecord(REQUEST);
+  const synthetic = userResponseRecord(
+    "<environment_context>synthetic and not human input</environment_context>",
+    nativeTurnId
+  );
+  for (const records of [
+    [taskStarted, synthetic, human, userMessage],
+    [taskStarted, human, userMessage, synthetic]
+  ]) {
+    const fixture = codexFixture(records);
+    try {
+      const anchor = captureCodexHumanStartedActiveTaskAnchor({
+        currentIdentity: {
+          sessionId: SESSION_ID,
+          processUuid,
+          processBirth,
+          rollout: fixture.identity
+        }
+      });
+      assert.ok(anchor);
+      assert.equal(anchor.turn_id, nativeTurnId);
+      assert.equal(anchor.request_hash, REQUEST_HASH);
+      appendRecords(fixture.path, [taskCompleteRecord(916, "paired task done")]);
+      assert.equal(observeCodexHumanStartedActiveTask({
+        anchor,
+        currentIdentity: {
+          sessionId: SESSION_ID,
+          processUuid,
+          processBirth,
+          rollout: fixture.identity
+        }
+      }).status, "completed");
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("fails closed unless an active Codex turn has exactly one paired human root", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const currentIdentity = (rollout: CodexRolloutIdentity) => ({
+    sessionId: SESSION_ID,
+    processUuid,
+    processBirth,
+    rollout
+  });
+  const mismatchedTurnId = turnId(917);
+  const mismatched = codexFixture([
+    {
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: mismatchedTurnId }
+    },
+    userResponseRecord(REQUEST, mismatchedTurnId),
+    userMessageRecord("a different message")
+  ]);
+  try {
+    assert.throws(
+      () => captureCodexHumanStartedActiveTaskAnchor({
+        currentIdentity: currentIdentity(mismatched.identity)
+      }),
+      /does not match its user_message event/u
+    );
+  } finally {
+    mismatched.cleanup();
+  }
+
+  const noCandidateTurnId = turnId(921);
+  const noCandidate = codexFixture([
+    {
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: noCandidateTurnId }
+    },
+    userResponseRecord(REQUEST, noCandidateTurnId),
+    { type: "event_msg", payload: { type: "agent_message", message: "work" } }
+  ]);
+  try {
+    assert.equal(captureCodexHumanStartedActiveTaskAnchor({
+      currentIdentity: currentIdentity(noCandidate.identity)
+    }), undefined);
+  } finally {
+    noCandidate.cleanup();
+  }
+
+  for (const [suffix, response, userMessage] of [
+    [
+      922,
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId(922) }
+        }
+      },
+      userMessageRecord(REQUEST)
+    ],
+    [
+      923,
+      userResponseRecord(REQUEST, turnId(923)),
+      { type: "event_msg", payload: { type: "user_message", message: 42 } }
+    ]
+  ] as const) {
+    const unsupported = codexFixture([
+      {
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId(suffix) }
+      },
+      response,
+      userMessage
+    ]);
+    try {
+      assert.throws(
+        () => captureCodexHumanStartedActiveTaskAnchor({
+          currentIdentity: currentIdentity(unsupported.identity)
+        }),
+        /root user row has unsupported prompt content/u
+      );
+    } finally {
+      unsupported.cleanup();
+    }
+  }
+
+  const missingMetadataTurnId = turnId(924);
+  const missingMetadata = codexFixture([
+    {
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: missingMetadataTurnId }
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: REQUEST }]
+      }
+    },
+    userMessageRecord(REQUEST)
+  ]);
+  try {
+    assert.throws(
+      () => captureCodexHumanStartedActiveTaskAnchor({
+        currentIdentity: currentIdentity(missingMetadata.identity)
+      }),
+      /no exact adjacent root user row/u
+    );
+  } finally {
+    missingMetadata.cleanup();
+  }
+
+  const unsupportedResponse = (nativeTurnId: string) => ({
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }],
+      internal_chat_message_metadata_passthrough: { turn_id: nativeTurnId }
+    }
+  });
+  for (const [suffix, rows] of [
+    [
+      925,
+      [
+        userResponseRecord(REQUEST, turnId(925)),
+        userMessageRecord(REQUEST),
+        userMessageRecord("orphan user event")
+      ]
+    ],
+    [
+      926,
+      [
+        userResponseRecord(REQUEST, turnId(926)),
+        userMessageRecord(REQUEST),
+        userMessageRecord(REQUEST)
+      ]
+    ],
+    [
+      927,
+      [
+        unsupportedResponse(turnId(927)),
+        userMessageRecord("unsupported human input"),
+        userResponseRecord(REQUEST, turnId(927)),
+        userMessageRecord(REQUEST)
+      ]
+    ]
+  ] as const) {
+    const conflictingEvents = codexFixture([
+      {
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId(suffix) }
+      },
+      ...rows
+    ]);
+    try {
+      assert.throws(
+        () => captureCodexHumanStartedActiveTaskAnchor({
+          currentIdentity: currentIdentity(conflictingEvents.identity)
+        }),
+        /multiple user_message events/u
+      );
+    } finally {
+      conflictingEvents.cleanup();
+    }
+  }
+
+  const ambiguousTurnId = turnId(918);
+  const ambiguous = codexFixture([
+    {
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: ambiguousTurnId }
+    },
+    userResponseRecord("first human message", ambiguousTurnId),
+    userMessageRecord("first human message"),
+    userResponseRecord("second human message", ambiguousTurnId),
+    userMessageRecord("second human message")
+  ]);
+  try {
+    assert.throws(
+      () => captureCodexHumanStartedActiveTaskAnchor({
+        currentIdentity: currentIdentity(ambiguous.identity)
+      }),
+      /multiple user_message events/u
+    );
+  } finally {
+    ambiguous.cleanup();
+  }
+});
+
 test("human-started Codex observation checkpoints only stable complete JSONL", () => {
   const processBirth = "Tue Aug  4 14:15:13 2026";
   const processUuid = `codex-pid:4242:birth:${processBirth}`;
@@ -190,6 +428,55 @@ test("human-started Codex observation resumes at its safe checkpoint", () => {
     assert.equal(completed.status, "completed");
     if (completed.status === "completed") {
       assert.equal(completed.completion.text, "Resumed result");
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("same-turn Codex context rows stay pending across observation checkpoints", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture(acceptedTurnRecords(REQUEST, 919));
+  const currentIdentity = {
+    sessionId: SESSION_ID,
+    processUuid,
+    processBirth,
+    rollout: fixture.identity
+  };
+  const context = "<environment_context>incremental context</environment_context>";
+  try {
+    const anchor = captureCodexHumanStartedActiveTaskAnchor({ currentIdentity });
+    assert.ok(anchor);
+    appendRecords(fixture.path, [userResponseRecord(context, anchor.turn_id)]);
+    const first = observeCodexHumanStartedActiveTask({
+      anchor,
+      currentIdentity
+    });
+    assert.equal(first.status, "pending");
+    assert.ok(first.status === "pending");
+
+    appendRecords(fixture.path, [userMessageRecord(context)]);
+    const second = observeCodexHumanStartedActiveTask({
+      anchor,
+      currentIdentity,
+      resumeOffsetBytes: first.safeResumeOffsetBytes
+    });
+    assert.equal(second.status, "pending");
+    assert.ok(second.status === "pending");
+
+    appendRecords(fixture.path, [{
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId(920) }
+    }]);
+    const laterTask = observeCodexHumanStartedActiveTask({
+      anchor,
+      currentIdentity,
+      resumeOffsetBytes: second.safeResumeOffsetBytes
+    });
+    assert.equal(laterTask.status, "invalidated");
+    if (laterTask.status === "invalidated") {
+      assert.match(laterTask.reason, /later Codex human task/u);
     }
   } finally {
     fixture.cleanup();
@@ -1511,12 +1798,16 @@ function acceptedTurnRecords(request: string, suffix = 1): unknown[] {
       }
     },
     userResponseRecord(request, nativeTurnId),
-    {
-      timestamp: "2026-08-07T01:00:01.011Z",
-      type: "event_msg",
-      payload: { type: "user_message", message: request }
-    }
+    userMessageRecord(request)
   ];
+}
+
+function userMessageRecord(request: string): unknown {
+  return {
+    timestamp: "2026-08-07T01:00:01.011Z",
+    type: "event_msg",
+    payload: { type: "user_message", message: request }
+  };
 }
 
 function taskCompleteRecord(suffix: number, message: string): unknown {
