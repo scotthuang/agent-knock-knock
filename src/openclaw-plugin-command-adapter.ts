@@ -397,7 +397,7 @@ export function registerOpenClawCommands(
       label: "AKK Send",
       name: "agent_knock_knock_send",
       description:
-        "Start a new AKK Turn. Use session_id only for an advertised session_exact action, or terminal_id for an advertised terminal_follow_current action; omit both only when AKK should require one unique eligible idle pane. AKK derives all terminal freshness authority privately, revalidates the exact pane/process/context under lock, sends once, and binds only the unique accepting native thread. Never pass a Turn id as a destination. This is asynchronous: after acceptance, yield and wait for the callback or an explicit status request.",
+        "Start a new AKK Turn, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. Retry submission is the mutually exclusive exact {turn_id} form: the caller cannot supply or change request text, terminal, Session, timeout, or callback route data. AKK may press Enter once for the proven exact original draft, or retransmit the immutable original request once only when durable evidence proves Enter was never attempted and the live composer is positively empty. AKK derives all freshness authority privately, revalidates the exact durable Turn/pane/process/context under lock, and otherwise fails closed. A Turn id is never an ordinary-send destination. This is asynchronous: after acceptance, yield and wait for the callback or an explicit status request.",
       parameters: sendParameters,
       async execute(toolCallId, params) {
         try {
@@ -1346,6 +1346,25 @@ function terminalScreenExcerpt(result): string | undefined {
 }
 
 async function runSendRequest(api, params, toolContext, messageId?: string) {
+  if (Object.hasOwn(params, "turn_id")) {
+    const unexpected = Object.keys(params).filter((key) => key !== "turn_id");
+    if (unexpected.length > 0) {
+      throw new Error(
+        "send retry_submission accepts exactly turn_id; do not pass request, terminal_id, session_id, timeout overrides, or callback route data"
+      );
+    }
+    const turnId = authoritativeManagedId(params.turn_id, "turn_id");
+    privateActionArguments(api, {
+      tool: "agent_knock_knock_send",
+      matches: (argumentsValue) =>
+        Object.keys(argumentsValue).length === 1 &&
+        stringValue(argumentsValue.turn_id) === turnId
+    });
+    const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+    const args = ["send", "--turn", turnId];
+    pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+    return runCli(api, args);
+  }
   const requestedType = Object.hasOwn(params, "type")
     ? stringValue(params.type)
     : "task";

@@ -11,8 +11,13 @@ import {
   "./callback-route-authority.js";
 import type { DeferredForegroundApplicationScope } from
   "./deferred-foreground-boundary.js";
-import type { DeferredForegroundTransfer } from
-  "./deferred-foreground-transfer.js";
+import {
+  deferredForegroundActiveEnterDispatchedAt,
+  deferredForegroundActiveMessageId,
+  deferredForegroundActivePreparedAt,
+  deferredForegroundActiveTextInjectedAt,
+  type DeferredForegroundTransfer
+} from "./deferred-foreground-transfer.js";
 import {
   managedSessionBindingToken,
   managedSessionRevision,
@@ -510,7 +515,8 @@ function deferredTurnStorageMatches(
     )) === path.resolve(storeDir) &&
     stringValue(takeover!.deferred_foreground_transfer_id) ===
       transfer.transfer_id &&
-    stringValue(takeover!.terminal_bridge_message_id) === transfer.message_id
+    stringValue(takeover!.terminal_bridge_message_id) ===
+      deferredForegroundActiveMessageId(transfer)
   );
 }
 
@@ -523,7 +529,8 @@ function deferredTurnRequestMatches(
   return Boolean(
     stringValue(submission!.session_id) === transfer.target_session_id &&
     stringValue(submission!.turn_id) === transfer.turn_id &&
-    stringValue(submission!.message_id) === transfer.message_id &&
+    stringValue(submission!.message_id) ===
+      deferredForegroundActiveMessageId(transfer) &&
     stringValue(submission!.message_type) === "task" &&
     stringValue(submission!.executor_kind) === "codex" &&
     messageBodyHash && /^[0-9a-f]{64}$/u.test(messageBodyHash) &&
@@ -702,16 +709,21 @@ function exactPostDispatchPendingLedger(
   transfer: DeferredForegroundTransfer,
   ledger: Record<string, any>
 ): boolean {
-  return transfer.status === "dispatch_started" &&
+  return ["dispatch_started", "uncertain"].includes(transfer.status) &&
     transfer.input_stage === "enter_dispatched" &&
-    ledger.status === "enter_dispatched" &&
+    ["enter_dispatched", "uncertain"].includes(String(ledger.status)) &&
     ledger.dispatcher_pid === null &&
-    stringValue(ledger.prepared_at) === transfer.prepared_at &&
-    stringValue(ledger.text_injected_at) === transfer.text_injected_at &&
-    stringValue(ledger.enter_dispatched_at) === transfer.enter_dispatched_at &&
+    stringValue(ledger.prepared_at) ===
+      deferredForegroundActivePreparedAt(transfer) &&
+    stringValue(ledger.text_injected_at) ===
+      deferredForegroundActiveTextInjectedAt(transfer) &&
+    stringValue(ledger.enter_dispatched_at) ===
+      deferredForegroundActiveEnterDispatchedAt(transfer) &&
     ledger.agent_accepted_at === undefined &&
     ledger.not_accepted_at === undefined &&
-    ledger.uncertain_at === undefined &&
+    (ledger.status === "uncertain"
+      ? stringValue(ledger.uncertain_at) !== undefined
+      : ledger.uncertain_at === undefined) &&
     ledger.acceptance_evidence === undefined &&
     ledger.safe_to_retry !== true;
 }
@@ -727,11 +739,13 @@ function ledgerOwnerFieldsMatch(context: DeferredLedgerAuthorityContext): boolea
     ports.ledger.matchesControl(ledger, terminal.terminalControl) &&
     stringValue(ledger.deferred_foreground_transfer_id) ===
       transfer.transfer_id &&
-    stringValue(ledger.generation_id) === transfer.message_id &&
+    stringValue(ledger.generation_id) ===
+      deferredForegroundActiveMessageId(transfer) &&
     stringValue(ledger.conversation_id) === transfer.turn_id &&
     stringValue(ledger.session_id) === transfer.target_session_id &&
     stringValue(ledger.turn_id) === transfer.turn_id &&
-    stringValue(ledger.message_id) === transfer.message_id &&
+    stringValue(ledger.message_id) ===
+      deferredForegroundActiveMessageId(transfer) &&
     stringValue(ledger.message_type) === "task" &&
     stringValue(ledger.executor_kind) === "codex" &&
     Boolean(ledgerMessageBodyHash) &&
@@ -762,7 +776,61 @@ function ledgerDispatchFenceMatches(
   const { transfer, ledger } = context;
   return ledger.status === "resolved" || context.exactCommittedAcceptance ||
     context.exactPostDispatchPending ||
+    exactSubmissionRetryLedgerFence(transfer, ledger) ||
     Number(ledger.dispatcher_pid) === transfer.dispatcher_pid;
+}
+
+function exactSubmissionRetryLedgerFence(
+  transfer: DeferredForegroundTransfer,
+  ledger: Record<string, any>
+): boolean {
+  const mode = transfer.submission_retry_mode;
+  const attemptId = transfer.submission_retry_attempt_id;
+  const messageId = transfer.submission_retry_message_id;
+  if (!mode || !attemptId || !messageId) return false;
+  const expected = transfer.submission_retry_enter_dispatched_at
+    ? { state: "enter_dispatched", revision: mode === "replacement_send" ? 5 : 2 }
+    : transfer.submission_retry_enter_reserved_at
+      ? { state: "enter_reserved", revision: mode === "replacement_send" ? 4 : 1 }
+      : transfer.submission_retry_text_injected_at
+        ? { state: "replacement_text_injected", revision: 3 }
+        : transfer.submission_retry_text_reserved_at
+          ? { state: "replacement_text_reserved", revision: 2 }
+          : { state: "replacement_reserved", revision: 1 };
+  const sameOptionalTimestamp = (
+    ledgerValue: unknown,
+    transferValue: string | undefined
+  ) => stringValue(ledgerValue) === transferValue;
+  return stringValue(ledger.submission_retry_attempt_id) === attemptId &&
+    stringValue(ledger.submission_retry_mode) === mode &&
+    stringValue(ledger.submission_retry_original_message_id) ===
+      transfer.message_id &&
+    stringValue(ledger.submission_retry_active_message_id) === messageId &&
+    ledger.submission_retry_state === expected.state &&
+    Number(ledger.submission_retry_revision) === expected.revision &&
+    sameOptionalTimestamp(
+      ledger.submission_retry_replacement_text_reserved_at,
+      transfer.submission_retry_text_reserved_at
+    ) &&
+    sameOptionalTimestamp(
+      ledger.submission_retry_replacement_text_injected_at,
+      transfer.submission_retry_text_injected_at
+    ) &&
+    sameOptionalTimestamp(
+      ledger.submission_retry_enter_reserved_at,
+      transfer.submission_retry_enter_reserved_at
+    ) &&
+    sameOptionalTimestamp(
+      ledger.submission_retry_enter_dispatched_at,
+      transfer.submission_retry_enter_dispatched_at
+    ) &&
+    ["uncertain", "text_injected", "enter_dispatched"].includes(
+      String(ledger.status)
+    ) &&
+    ledger.agent_accepted_at === undefined &&
+    ledger.not_accepted_at === undefined &&
+    ledger.acceptance_evidence === undefined &&
+    ledger.safe_to_retry !== true;
 }
 
 export function assertDeferredForegroundResolvedZeroInputLedger(ports: DeferredForegroundRecoveryAdapterPorts, {
@@ -1201,7 +1269,7 @@ function persistTurnAbort(
       failure_reason: "dispatcher exited before the deferred terminal-input boundary",
       updated_at: abortedAt
     },
-    messageId: transfer.message_id as string,
+    messageId: deferredForegroundActiveMessageId(transfer) as string,
     messageType: "task",
     requestText: String(authority.takeover.terminal_bridge_request_text ?? ""),
     status: "aborted",
@@ -1421,20 +1489,22 @@ function acceptedDeferredConversation(
   acceptedAt: string
 ): Conversation {
   return ports.turn.withSubmission({
-    conversation: ports.turn.withIdentity(
-      authority.conversation,
-      recovered.identity
-    ),
-    messageId: transfer.message_id as string,
+    conversation: ports.turn.withIdentity({
+      ...authority.conversation,
+      status: "waiting_for_agent",
+      stalled_at: undefined,
+      stalled_reason: undefined,
+      updated_at: acceptedAt
+    }, recovered.identity),
+    messageId: deferredForegroundActiveMessageId(transfer) as string,
     messageType: "task",
     requestText: String(authority.takeover.terminal_bridge_request_text ?? ""),
     status: "agent_accepted",
-    preparedAt: stringValue(authority.submission.prepared_at) ??
-      transfer.prepared_at,
-    textInjectedAt: stringValue(authority.submission.text_injected_at) ??
-      transfer.text_injected_at ?? transfer.dispatch_started_at,
-    enterDispatchedAt: stringValue(authority.submission.enter_dispatched_at) ??
-      transfer.enter_dispatched_at ?? transfer.dispatch_started_at,
+    preparedAt: deferredForegroundActivePreparedAt(transfer),
+    textInjectedAt: deferredForegroundActiveTextInjectedAt(transfer) ??
+      stringValue(authority.submission.text_injected_at),
+    enterDispatchedAt: deferredForegroundActiveEnterDispatchedAt(transfer) ??
+      stringValue(authority.submission.enter_dispatched_at),
     agentAcceptedAt: acceptedAt,
     acceptanceEvidence: recovered.evidence
   });
@@ -1492,20 +1562,22 @@ function saveRecoveredAcceptanceLedger(
   facts: RecoveredCommitFacts
 ): void {
   const { terminal, transfer } = input;
+  const textInjectedAt = deferredForegroundActiveTextInjectedAt(transfer);
+  const enterDispatchedAt = deferredForegroundActiveEnterDispatchedAt(transfer);
   ports.ledger.save(terminal.terminalControl, {
     ...facts.ledger,
     ...ports.ledger.bindingFields(facts.acceptedConversation),
     status: "agent_accepted",
-    generation_id: transfer.message_id,
+    generation_id: deferredForegroundActiveMessageId(transfer),
     conversation_id: facts.acceptedConversation.conversation_id,
     session_id: transfer.target_session_id,
     turn_id: transfer.turn_id,
-    message_id: transfer.message_id,
+    message_id: deferredForegroundActiveMessageId(transfer),
     message_type: "task",
     request_hash: transfer.request_hash,
-    prepared_at: transfer.prepared_at,
-    text_injected_at: transfer.text_injected_at ?? transfer.dispatch_started_at,
-    enter_dispatched_at: transfer.enter_dispatched_at ?? transfer.dispatch_started_at,
+    prepared_at: deferredForegroundActivePreparedAt(transfer),
+    ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
+    ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
     agent_accepted_at: facts.acceptedAt,
     acceptance_evidence: facts.recovered.evidence,
     dispatcher_pid: null,
@@ -1550,18 +1622,20 @@ function saveMissingAcceptedStateFailure(
       stalled_reason: reason,
       updated_at: uncertainAt
     },
-    messageId: input.transfer.message_id as string,
+    messageId: deferredForegroundActiveMessageId(input.transfer) as string,
     messageType: "task",
     requestText: String(
       facts.authority.takeover.terminal_bridge_request_text ?? ""
     ),
     status: "uncertain",
     preparedAt: stringValue(facts.authority.submission.prepared_at) ??
-      input.transfer.prepared_at,
+      deferredForegroundActivePreparedAt(input.transfer),
     textInjectedAt: stringValue(facts.authority.submission.text_injected_at) ??
-      input.transfer.text_injected_at ?? input.transfer.dispatch_started_at,
+      deferredForegroundActiveTextInjectedAt(input.transfer) ??
+        input.transfer.dispatch_started_at,
     enterDispatchedAt: stringValue(facts.authority.submission.enter_dispatched_at) ??
-      input.transfer.enter_dispatched_at ?? input.transfer.dispatch_started_at,
+      deferredForegroundActiveEnterDispatchedAt(input.transfer) ??
+        input.transfer.dispatch_started_at,
     uncertainAt,
     error: reason,
     lastProvenStage: "enter_dispatched",
@@ -1814,16 +1888,18 @@ function saveCommittedAcceptanceLedger(
     ...ledger,
     ...ports.ledger.bindingFields(acceptedConversation),
     status: "agent_accepted",
-    generation_id: transfer.message_id,
+    generation_id: deferredForegroundActiveMessageId(transfer),
     conversation_id: acceptedConversation.conversation_id,
     session_id: transfer.target_session_id,
     turn_id: transfer.turn_id,
-    message_id: transfer.message_id,
+    message_id: deferredForegroundActiveMessageId(transfer),
     message_type: "task",
     request_hash: transfer.request_hash,
-    prepared_at: transfer.prepared_at,
-    text_injected_at: transfer.text_injected_at ?? transfer.dispatch_started_at,
-    enter_dispatched_at: transfer.enter_dispatched_at ?? transfer.dispatch_started_at,
+    prepared_at: deferredForegroundActivePreparedAt(transfer),
+    text_injected_at: deferredForegroundActiveTextInjectedAt(transfer) ??
+      transfer.dispatch_started_at,
+    enter_dispatched_at: deferredForegroundActiveEnterDispatchedAt(transfer) ??
+      transfer.dispatch_started_at,
     agent_accepted_at: transfer.agent_accepted_at,
     acceptance_evidence: acceptance,
     dispatcher_pid: null,

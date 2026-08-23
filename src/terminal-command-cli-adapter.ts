@@ -9,7 +9,8 @@ import {
 import path from "node:path";
 import {
   callbackExpectedForConversation,
-  callbackExpectedForConversationWithLegacyFallback
+  callbackExpectedForConversationWithLegacyFallback,
+  callbackRouteFingerprintForConversation
 } from "./callback-route-authority.js";
 import {
   captureClaudeTranscriptAnchor,
@@ -18,13 +19,16 @@ import {
 } from "./claude-local-transcript-provider.js";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
-  type CodexRolloutAcceptanceAnchor
+  type CodexRolloutAcceptanceAnchor,
+  validateCodexRolloutAcceptanceAnchor
 } from "./terminal-submission-acceptance.js";
 import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
 import {
+  deferredForegroundActiveMessageId,
+  isDeferredForegroundSubmissionRetryPending,
   type DeferredForegroundTransfer
 } from "./deferred-foreground-transfer.js";
 import type {
@@ -81,11 +85,24 @@ import {
   terminalControlEvidenceMatches
 } from "./terminal-control-ref.js";
 import {
+  TerminalEnterDispatchNotAttemptedError,
   TerminalInputNotStartedError,
   type TerminalApprovalAuthorizationContext,
   type TerminalAgentBridge,
-  type TerminalBridgeStatus
+  type TerminalBridgeStatus,
+  type TerminalCodexComposerObservation
 } from "./terminal-agent-bridge.js";
+import {
+  decideTerminalSubmissionRetry,
+  loadTerminalSubmissionRetry,
+  projectTerminalSubmissionRetryPending,
+  saveTerminalSubmissionRetry,
+  terminalSubmissionRetryLedgerFields,
+  TERMINAL_SUBMISSION_RETRY_SCHEMA,
+  TERMINAL_SUBMISSION_RETRY_VERSION,
+  type TerminalSubmissionRetryDecision,
+  type TerminalSubmissionRetryRecord
+} from "./terminal-submission-retry-service.js";
 import {
   evaluateApprovalPolicy,
   type ApprovalCandidate
@@ -457,6 +474,24 @@ interface TerminalCommandCliRawPorts {
     options: TerminalCommandCliOptions;
   }): Promise<Conversation>;
   mutationDispatchLedger: {
+    load(
+      scopes: CanonicalMutationScopes,
+      resources: CanonicalMutationResources
+    ): TerminalDispatchLedgerDocument | undefined;
+    save(
+      scopes: CanonicalMutationScopes,
+      resources: CanonicalMutationResources,
+      ledger: TerminalDispatchLedgerDocument
+    ): void;
+    resolve(
+      scopes: CanonicalMutationScopes,
+      resources: CanonicalMutationResources,
+      request: {
+        conversation: Readonly<{ conversation_id: string }>;
+        expectedMessageId?: string;
+        reason: string;
+      }
+    ): boolean;
     beforeMutation(
       scopes: CanonicalMutationScopes,
       resources: CanonicalMutationResources,
@@ -1897,7 +1932,2692 @@ function prepareManagedSend({
   };
 }
 
+function assertTerminalSubmissionRetryOptions(
+  options: TerminalCommandCliOptions
+): string {
+  const turnId = required(stringValue(options.turn), "--turn is required");
+  const allowed = new Set(["turn", "storeDir"]);
+  const conflicts = Object.keys(options).filter(
+    (option) => options[option] !== undefined && !allowed.has(option)
+  );
+  if (conflicts.length > 0) {
+    throw new Error(
+      "send --turn is an exact submission recovery form and cannot be " +
+      `combined with ${conflicts.map((option) => `--${option}`).join(", ")}; ` +
+      "no terminal input was sent"
+    );
+  }
+  return turnId;
+}
+
+function terminalSubmissionRetryBaseRecord(input: {
+  mode: "exact_draft_enter" | "replacement_send";
+  state: TerminalSubmissionRetryRecord["state"];
+  attemptId: string;
+  storeDir: string;
+  statePath: string;
+  conversation: Conversation;
+  originalMessageId: string;
+  activeMessageId: string;
+  requestHash: string;
+  terminalControl: TerminalControlRef;
+  at: string;
+  deferredTransferId?: string;
+}): TerminalSubmissionRetryRecord {
+  return {
+    schema: TERMINAL_SUBMISSION_RETRY_SCHEMA,
+    version: TERMINAL_SUBMISSION_RETRY_VERSION,
+    revision: 1,
+    attempt_id: input.attemptId,
+    mode: input.mode,
+    state: input.state,
+    store_dir: path.resolve(input.storeDir),
+    state_path: path.resolve(input.statePath),
+    session_id: sessionIdForConversation(input.conversation),
+    turn_id: turnIdForConversation(input.conversation),
+    original_message_id: input.originalMessageId,
+    active_message_id: input.activeMessageId,
+    request_hash: input.requestHash,
+    terminal_target: input.terminalControl.target,
+    callback_route_fingerprint:
+      callbackRouteFingerprintForConversation(input.conversation) ?? null,
+    deferred_foreground_transfer_id: input.deferredTransferId ?? null,
+    reserved_at: input.at,
+    updated_at: input.at
+  };
+}
+
+function assertTerminalSubmissionRetryAttemptIdentity(input: {
+  attempt?: TerminalSubmissionRetryRecord;
+  conversation: Conversation;
+  storeDir: string;
+  statePath: string;
+  originalMessageId: string;
+  requestHash: string;
+  terminalControl: TerminalControlRef;
+  deferredTransferId?: string;
+}): void {
+  const attempt = input.attempt;
+  if (!attempt) return;
+  const callbackFingerprint =
+    callbackRouteFingerprintForConversation(input.conversation) ?? null;
+  if (
+    attempt.store_dir !== path.resolve(input.storeDir) ||
+    attempt.state_path !== path.resolve(input.statePath) ||
+    attempt.session_id !== sessionIdForConversation(input.conversation) ||
+    attempt.turn_id !== turnIdForConversation(input.conversation) ||
+    attempt.original_message_id !== input.originalMessageId ||
+    attempt.request_hash !== input.requestHash ||
+    attempt.terminal_target !== input.terminalControl.target ||
+    attempt.callback_route_fingerprint !== callbackFingerprint ||
+    attempt.deferred_foreground_transfer_id !==
+      (input.deferredTransferId ?? null)
+  ) {
+    throw new Error(
+      "terminal submission retry authority changed; no terminal input was sent"
+    );
+  }
+}
+
+function terminalSubmissionRetryMessageType(
+  submission: TerminalDispatchRecord
+): "task" | "answer" {
+  const messageType = stringValue(submission.message_type);
+  if (messageType !== "task" && messageType !== "answer") {
+    throw new Error(
+      "terminal submission retry message type is unavailable; no terminal input was sent"
+    );
+  }
+  return messageType;
+}
+
+function withDeferredTransferSubmissionAuthority(
+  conversation: Conversation,
+  messageId: string,
+  transferId: string
+): Conversation {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const submission = terminalBridgeSubmission(conversation);
+  if (!takeover || !submission || submission.message_id !== messageId) {
+    throw new Error(
+      "cannot upgrade deferred transfer authority on a changed submission"
+    );
+  }
+  const existing = stringValue(submission.deferred_foreground_transfer_id);
+  if (existing && existing !== transferId) {
+    throw new Error("deferred transfer receipt authority conflicts");
+  }
+  const receiptsValue = takeover.terminal_bridge_submission_receipts;
+  if (receiptsValue !== undefined && !Array.isArray(receiptsValue)) {
+    throw new Error("terminal submission receipt history is malformed");
+  }
+  const receipts = (Array.isArray(receiptsValue) ? receiptsValue : []).map(
+    (receipt) => {
+      if (!isRecord(receipt) || !stringValue(receipt.message_id)) {
+        throw new Error("terminal submission receipt history is malformed");
+      }
+      if (receipt.message_id !== messageId) return receipt;
+      const receiptTransferId = stringValue(
+        receipt.deferred_foreground_transfer_id
+      );
+      if (receiptTransferId && receiptTransferId !== transferId) {
+        throw new Error("deferred transfer receipt history conflicts");
+      }
+      return {
+        ...receipt,
+        deferred_foreground_transfer_id: transferId
+      };
+    }
+  );
+  return {
+    ...conversation,
+    native_session_takeover: {
+      ...takeover,
+      deferred_foreground_transfer_id: transferId,
+      terminal_bridge_submission: {
+        ...submission,
+        deferred_foreground_transfer_id: transferId
+      },
+      terminal_bridge_submission_receipts: receipts
+    }
+  };
+}
+
+function terminalSubmissionRetryUnstalled(
+  conversation: Conversation
+): Conversation {
+  const next: Conversation = {
+    ...conversation,
+    status: "waiting_for_agent"
+  };
+  delete next.stalled_at;
+  delete next.stalled_reason;
+  delete next.failed_at;
+  delete next.failure_reason;
+  delete next.idle_since;
+  return next;
+}
+
+function withTerminalSubmissionRetryMonitorEpoch(
+  conversation: Conversation,
+  at: string
+): Conversation {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : {};
+  const configuredInactivity = Number(
+    takeover.terminal_bridge_inactivity_timeout_minutes
+  );
+  const configuredHard = Number(
+    takeover.terminal_bridge_hard_timeout_minutes
+  );
+  const inactivityMinutes = Number.isFinite(configuredInactivity) &&
+      configuredInactivity > 0
+    ? configuredInactivity
+    : DEFAULT_AGENT_TIMEOUT_MINUTES;
+  const hardMinutes = Number.isFinite(configuredHard) && configuredHard > 0
+    ? configuredHard
+    : DEFAULT_AGENT_HARD_TIMEOUT_MINUTES;
+  return {
+    ...conversation,
+    native_session_takeover: {
+      ...takeover,
+      terminal_bridge_started_at: at,
+      terminal_bridge_monitor_started_at: at,
+      terminal_bridge_last_activity_at: at,
+      terminal_bridge_last_activity_reason:
+        "submission retry Enter dispatched",
+      terminal_bridge_inactivity_timeout_minutes: inactivityMinutes,
+      terminal_bridge_hard_timeout_minutes: hardMinutes,
+      terminal_bridge_inactivity_deadline_at: deadlineAt(
+        at,
+        inactivityMinutes
+      ),
+      terminal_bridge_hard_deadline_at: deadlineAt(at, hardMinutes)
+    },
+    updated_at: at
+  };
+}
+
+function terminalSubmissionRetryAccepted(input: {
+  conversation: Conversation;
+  submission: TerminalDispatchRecord;
+  ledger: TerminalDispatchLedgerDocument;
+  evidence: NonNullable<Awaited<ReturnType<
+    TerminalDispatchExecutionService["detectAcceptance"]
+  >>>;
+  requestText: string;
+  at: string;
+  statePath: string;
+  logPath: string;
+  scopes: CanonicalMutationScopes;
+  resources: CanonicalMutationResources;
+  attempt?: TerminalSubmissionRetryRecord;
+  terminalInputSent: boolean;
+}): { conversation: Conversation; attempt?: TerminalSubmissionRetryRecord } {
+  const messageId = required(
+    stringValue(input.submission.message_id),
+    "terminal submission retry message id is unavailable"
+  );
+  const preparedAt = required(
+    stringValue(input.submission.prepared_at),
+    "terminal submission retry prepared timestamp is unavailable"
+  );
+  const acceptedConversation = withTerminalBridgeSubmission({
+    conversation: terminalSubmissionRetryUnstalled(input.conversation),
+    messageId,
+    messageType: terminalSubmissionRetryMessageType(input.submission),
+    requestText: input.requestText,
+    status: "agent_accepted",
+    preparedAt,
+    textInjectedAt: stringValue(input.submission.text_injected_at),
+    enterDispatchedAt: stringValue(input.submission.enter_dispatched_at),
+    agentAcceptedAt: input.at,
+    acceptanceEvidence: input.evidence,
+    lastProvenStage: "agent_accepted"
+  });
+  saveState(input.statePath, acceptedConversation);
+  let acceptedAttempt = input.attempt;
+  if (acceptedAttempt && acceptedAttempt.state !== "agent_accepted") {
+    acceptedAttempt = saveTerminalSubmissionRetry(input.statePath, {
+      ...acceptedAttempt,
+      state: "agent_accepted",
+      agent_accepted_at: input.at,
+      updated_at: input.at
+    }, acceptedAttempt.revision);
+  }
+  mutationDispatchLedger.save(input.scopes, input.resources, {
+    ...input.ledger,
+    ...terminalSubmissionRetryLedgerFields(acceptedAttempt),
+    status: "agent_accepted",
+    text_injected_at: stringValue(input.ledger.text_injected_at),
+    enter_dispatched_at: stringValue(input.ledger.enter_dispatched_at),
+    agent_accepted_at: input.at,
+    acceptance_evidence: input.evidence,
+    dispatcher_pid: null
+  });
+  appendEvent(input.logPath, {
+    ts: input.at,
+    conversation_id: acceptedConversation.conversation_id,
+    event: "terminal_submission_retry_agent_accepted",
+    message_id: messageId,
+    terminal_input_sent: input.terminalInputSent
+  });
+  return { conversation: acceptedConversation, attempt: acceptedAttempt };
+}
+
+function terminalSubmissionRetryTerminalOutcome(input: {
+  conversation: Conversation;
+  submission: TerminalDispatchRecord;
+  ledger: TerminalDispatchLedgerDocument;
+  requestText: string;
+  reason: string;
+  at: string;
+  statePath: string;
+  logPath: string;
+  scopes: CanonicalMutationScopes;
+  resources: CanonicalMutationResources;
+  attempt: TerminalSubmissionRetryRecord;
+  outcome: "not_accepted" | "uncertain";
+}): Conversation {
+  const messageId = required(
+    stringValue(input.submission.message_id),
+    "terminal submission retry message id is unavailable"
+  );
+  const preparedAt = required(
+    stringValue(input.submission.prepared_at),
+    "terminal submission retry prepared timestamp is unavailable"
+  );
+  const stalled: Conversation = {
+    ...input.conversation,
+    status: "stalled",
+    stalled_at: input.at,
+    stalled_reason: input.reason,
+    updated_at: input.at
+  };
+  const conversation = withTerminalBridgeSubmission({
+    conversation: stalled,
+    messageId,
+    messageType: terminalSubmissionRetryMessageType(input.submission),
+    requestText: input.requestText,
+    status: input.outcome,
+    preparedAt,
+    textInjectedAt: stringValue(input.submission.text_injected_at),
+    enterDispatchedAt: stringValue(input.submission.enter_dispatched_at),
+    ...(input.outcome === "not_accepted"
+      ? { notAcceptedAt: input.at }
+      : {
+          uncertainAt: input.at,
+          error: input.reason,
+          safeToRetry: false
+        }),
+    lastProvenStage: "enter_dispatched"
+  });
+  saveState(input.statePath, conversation);
+  mutationDispatchLedger.save(input.scopes, input.resources, {
+    ...input.ledger,
+    ...terminalSubmissionRetryLedgerFields(input.attempt),
+    status: input.outcome,
+    ...(input.outcome === "not_accepted"
+      ? {
+          not_accepted_at: input.at,
+          uncertain_at: undefined,
+          error: undefined,
+          safe_to_retry: undefined
+        }
+      : {
+          not_accepted_at: undefined,
+          uncertain_at: input.at,
+          error: input.reason,
+          safe_to_retry: false
+        }),
+    acceptance_evidence: undefined,
+    agent_accepted_at: undefined,
+    dispatcher_pid: null
+  });
+  appendEvent(input.logPath, {
+    ts: input.at,
+    conversation_id: conversation.conversation_id,
+    event: `terminal_submission_retry_${input.outcome}`,
+    message_id: messageId,
+    terminal_input_sent: true,
+    reason: input.reason,
+    do_not_retry: true
+  });
+  return conversation;
+}
+
+function finalizeDeferredTerminalSubmissionRetryAccepted(input: {
+  statePath: string;
+  scopes: CanonicalMutationScopes;
+  resources: CanonicalMutationResources;
+  attempt?: TerminalSubmissionRetryRecord;
+}): { conversation: Conversation; attempt?: TerminalSubmissionRetryRecord } {
+  const conversation = loadState(input.statePath);
+  const submission = required(
+    terminalBridgeSubmission(conversation),
+    "deferred submission retry acceptance lost its Turn receipt"
+  );
+  const ledger = required(
+    mutationDispatchLedger.load(input.scopes, input.resources),
+    "deferred submission retry acceptance lost its dispatch ledger"
+  );
+  if (
+    submission.status !== "agent_accepted" ||
+    ledger.status !== "agent_accepted"
+  ) {
+    throw new Error(
+      "deferred submission retry acceptance was not durably finalized"
+    );
+  }
+  let attempt = input.attempt;
+  if (attempt && attempt.state !== "agent_accepted") {
+    const acceptedAt = stringValue(submission.agent_accepted_at) ??
+      stringValue(ledger.agent_accepted_at) ?? cliNow().toISOString();
+    attempt = saveTerminalSubmissionRetry(input.statePath, {
+      ...attempt,
+      state: "agent_accepted",
+      agent_accepted_at: acceptedAt,
+      updated_at: acceptedAt
+    }, attempt.revision);
+  }
+  if (attempt) {
+    mutationDispatchLedger.save(input.scopes, input.resources, {
+      ...ledger,
+      ...terminalSubmissionRetryLedgerFields(attempt)
+    });
+  }
+  return { conversation, attempt };
+}
+
+function reconcileTerminalSubmissionRetryPending(input: {
+  conversation: Conversation;
+  submission: TerminalDispatchRecord;
+  ledger: TerminalDispatchLedgerDocument;
+  attempt: TerminalSubmissionRetryRecord;
+  requestText: string;
+  statePath: string;
+  logPath: string;
+  scopes: CanonicalMutationScopes;
+  resources: CanonicalMutationResources;
+  deferred?: TerminalSubmissionRetryDeferredContext;
+}): Conversation {
+  const { attempt, submission, ledger } = input;
+  const projection = projectTerminalSubmissionRetryPending({
+    attempt,
+    submission,
+    ledger
+  });
+  const {
+    messageId,
+    preparedAt,
+    textInjectedAt,
+    enterDispatchedAt
+  } = projection;
+  if (input.deferred) {
+    const transfer = input.deferred.scope.loadTransfer(
+      input.deferred.transfer.transfer_id
+    );
+    if (!isDeferredForegroundSubmissionRetryPending(transfer)) {
+      throw new Error(
+        "deferred submission retry lacks exact pending transfer authority"
+      );
+    }
+    input.deferred.transfer = transfer;
+  }
+  const enteredConversation = withTerminalBridgeSubmission({
+    conversation: withTerminalSubmissionRetryMonitorEpoch(
+      terminalSubmissionRetryUnstalled(input.conversation),
+      enterDispatchedAt
+    ),
+    messageId,
+    messageType: terminalSubmissionRetryMessageType(submission),
+    requestText: input.requestText,
+    status: "enter_dispatched",
+    preparedAt,
+    textInjectedAt,
+    enterDispatchedAt,
+    lastProvenStage: "enter_dispatched"
+  });
+  saveState(input.statePath, enteredConversation);
+  mutationDispatchLedger.save(input.scopes, input.resources, {
+    ...ledger,
+    ...terminalSubmissionRetryLedgerFields(attempt),
+    status: "enter_dispatched",
+    text_injected_at: textInjectedAt,
+    enter_dispatched_at: enterDispatchedAt,
+    enter_not_attempted_at: undefined,
+    enter_not_attempted_reason: undefined,
+    uncertain_at: undefined,
+    safe_to_retry: undefined,
+    acceptance_evidence: undefined,
+    agent_accepted_at: undefined,
+    not_accepted_at: undefined,
+    dispatcher_pid: null
+  });
+  appendEvent(input.logPath, {
+    ts: enterDispatchedAt,
+    conversation_id: enteredConversation.conversation_id,
+    event: "terminal_submission_retry_pending_reconciled",
+    message_id: messageId,
+    terminal_input_sent: false
+  });
+  return enteredConversation;
+}
+
+const TERMINAL_SUBMISSION_RETRY_LEDGER_KEYS = [
+  "submission_retry_attempt_id",
+  "submission_retry_mode",
+  "submission_retry_state",
+  "submission_retry_revision",
+  "submission_retry_original_message_id",
+  "submission_retry_active_message_id",
+  "submission_retry_reserved_at",
+  "submission_retry_replacement_text_reserved_at",
+  "submission_retry_replacement_text_injected_at",
+  "submission_retry_enter_reserved_at",
+  "submission_retry_enter_dispatched_at"
+] as const;
+
+function assertTerminalSubmissionRetryDeferredMirror(input: {
+  attempt: TerminalSubmissionRetryRecord;
+  transfer: DeferredForegroundTransfer;
+  submission: TerminalDispatchRecord;
+}): void {
+  const { attempt, transfer, submission } = input;
+  const replacement = attempt.mode === "replacement_send";
+  const stateRank = terminalSubmissionRetryTransportRank(attempt);
+  const expectedPreparedAt = stringValue(submission.prepared_at);
+  if (
+    transfer.status !== "uncertain" ||
+    transfer.message_id !== attempt.original_message_id ||
+    transfer.submission_retry_attempt_id !== attempt.attempt_id ||
+    transfer.submission_retry_mode !== attempt.mode ||
+    transfer.submission_retry_message_id !== attempt.active_message_id ||
+    transfer.submission_retry_message_id !== transfer.message_id ||
+    transfer.submission_retry_prepared_at !== expectedPreparedAt ||
+    transfer.submission_retry_prepared_at !== transfer.prepared_at ||
+    transfer.submission_retry_text_reserved_at !==
+      (replacement && stateRank >= 1
+        ? attempt.replacement_text_reserved_at
+        : undefined) ||
+    transfer.submission_retry_text_injected_at !==
+      (replacement && stateRank >= 2
+        ? attempt.replacement_text_injected_at
+        : undefined) ||
+    transfer.submission_retry_enter_reserved_at !==
+      (stateRank >= (replacement ? 3 : 0)
+        ? attempt.enter_reserved_at
+        : undefined) ||
+    transfer.submission_retry_enter_dispatched_at !==
+      (stateRank >= (replacement ? 4 : 1)
+        ? attempt.enter_dispatched_at
+        : undefined) ||
+    (attempt.state === "enter_dispatched"
+      ? transfer.input_stage !== "enter_dispatched" ||
+        transfer.enter_dispatched_at !== attempt.enter_dispatched_at
+      : transfer.input_stage !== "text_injected")
+  ) {
+    throw new Error(
+      "deferred submission retry mirror conflicts with its durable attempt"
+    );
+  }
+}
+
+function assertTerminalSubmissionRetryDeferredMirrorCanReconcile(input: {
+  attempt: TerminalSubmissionRetryRecord;
+  transfer: DeferredForegroundTransfer;
+  submission: TerminalDispatchRecord;
+}): void {
+  const { attempt, transfer, submission } = input;
+  const expectedPreparedAt = stringValue(submission.prepared_at);
+  const retryFields = [
+    transfer.submission_retry_attempt_id,
+    transfer.submission_retry_mode,
+    transfer.submission_retry_message_id,
+    transfer.submission_retry_prepared_at,
+    transfer.submission_retry_text_reserved_at,
+    transfer.submission_retry_text_injected_at,
+    transfer.submission_retry_enter_reserved_at,
+    transfer.submission_retry_enter_dispatched_at
+  ];
+  if (transfer.submission_retry_attempt_id === undefined) {
+    const initialAttempt =
+      (attempt.mode === "replacement_send" &&
+        attempt.state === "replacement_reserved") ||
+      (attempt.mode === "exact_draft_enter" &&
+        attempt.state === "enter_reserved");
+    if (!initialAttempt || retryFields.some((value) => value !== undefined)) {
+      throw new Error(
+        "deferred submission retry mirror is missing beyond its first recoverable write"
+      );
+    }
+    return;
+  }
+  if (
+    transfer.submission_retry_attempt_id !== attempt.attempt_id ||
+    transfer.submission_retry_mode !== attempt.mode ||
+    transfer.submission_retry_message_id !== attempt.active_message_id ||
+    transfer.submission_retry_message_id !== transfer.message_id ||
+    transfer.submission_retry_prepared_at !== expectedPreparedAt ||
+    transfer.submission_retry_prepared_at !== transfer.prepared_at
+  ) {
+    throw new Error(
+      "deferred submission retry mirror identity conflicts with its durable attempt"
+    );
+  }
+  const expectedStages = {
+    submission_retry_text_reserved_at:
+      attempt.mode === "replacement_send"
+        ? attempt.replacement_text_reserved_at
+        : undefined,
+    submission_retry_text_injected_at:
+      attempt.mode === "replacement_send"
+        ? attempt.replacement_text_injected_at
+        : undefined,
+    submission_retry_enter_reserved_at: attempt.enter_reserved_at,
+    submission_retry_enter_dispatched_at: attempt.enter_dispatched_at
+  } as const;
+  for (const field of Object.keys(expectedStages) as
+    (keyof typeof expectedStages)[]) {
+    const actual = transfer[field];
+    const expected = expectedStages[field];
+    if (actual !== undefined && actual !== expected) {
+      throw new Error(
+        "deferred submission retry mirror stage conflicts with its durable attempt"
+      );
+    }
+  }
+  const transferRank = attempt.mode === "replacement_send"
+    ? transfer.submission_retry_enter_dispatched_at !== undefined
+      ? 4
+      : transfer.submission_retry_enter_reserved_at !== undefined
+        ? 3
+        : transfer.submission_retry_text_injected_at !== undefined
+          ? 2
+          : transfer.submission_retry_text_reserved_at !== undefined
+            ? 1
+            : 0
+    : transfer.submission_retry_enter_dispatched_at !== undefined
+      ? 1
+      : transfer.submission_retry_enter_reserved_at !== undefined
+        ? 0
+        : -1;
+  const attemptRank = terminalSubmissionRetryTransportRank(attempt);
+  if (transferRank > attemptRank || attemptRank - transferRank > 1) {
+    throw new Error(
+      "deferred submission retry mirror is ahead or more than one stage behind"
+    );
+  }
+}
+
+function terminalSubmissionRetryTransportRank(
+  attempt: TerminalSubmissionRetryRecord
+): number {
+  const order = attempt.mode === "replacement_send"
+    ? [
+        "replacement_reserved", "replacement_text_reserved",
+        "replacement_text_injected", "enter_reserved", "enter_dispatched"
+      ]
+    : ["enter_reserved", "enter_dispatched"];
+  return order.indexOf(attempt.state);
+}
+
+function reconcileTerminalSubmissionRetryLedgerPrefix(input: {
+  attempt: TerminalSubmissionRetryRecord;
+  ledger: TerminalDispatchLedgerDocument;
+}): { ledger: TerminalDispatchLedgerDocument; changed: boolean } {
+  const { attempt, ledger } = input;
+  if (attempt.state === "agent_accepted") {
+    return { ledger, changed: false };
+  }
+  const currentAttemptId = stringValue(ledger.submission_retry_attempt_id);
+  const currentHasRetryFields = TERMINAL_SUBMISSION_RETRY_LEDGER_KEYS.some(
+    (key) => ledger[key] !== undefined
+  );
+  if (!currentAttemptId) {
+    if (currentHasRetryFields || attempt.revision !== 1) {
+      throw new Error(
+        "terminal submission retry ledger has an unsafe missing retry prefix"
+      );
+    }
+    return {
+      ledger: { ...ledger, ...terminalSubmissionRetryLedgerFields(attempt) },
+      changed: true
+    };
+  }
+  const currentState = stringValue(ledger.submission_retry_state);
+  const currentRevision = Number(ledger.submission_retry_revision);
+  const allowedStates = terminalSubmissionRetryLedgerStates(attempt);
+  const same = currentState === attempt.state &&
+    currentRevision === attempt.revision;
+  const immediatelyLagging = currentState === allowedStates.previous &&
+    currentRevision === attempt.revision - 1;
+  if (!same && !immediatelyLagging) {
+    throw new Error(
+      "terminal submission retry ledger is ahead, conflicting, or more than one stage behind"
+    );
+  }
+  const expectedCurrent = terminalSubmissionRetryLedgerFieldsAtState(
+    attempt,
+    currentState as TerminalSubmissionRetryRecord["state"],
+    currentRevision
+  );
+  if (TERMINAL_SUBMISSION_RETRY_LEDGER_KEYS.some(
+    (key) => JSON.stringify(ledger[key]) !== JSON.stringify(expectedCurrent[key])
+  )) {
+    throw new Error(
+      "terminal submission retry ledger prefix conflicts with its durable attempt"
+    );
+  }
+  return same
+    ? { ledger, changed: false }
+    : {
+        ledger: { ...ledger, ...terminalSubmissionRetryLedgerFields(attempt) },
+        changed: true
+      };
+}
+
+function terminalSubmissionRetryLedgerStates(
+  attempt: TerminalSubmissionRetryRecord
+): { previous?: TerminalSubmissionRetryRecord["state"] } {
+  const order: TerminalSubmissionRetryRecord["state"][] =
+    attempt.mode === "replacement_send"
+      ? [
+          "replacement_reserved", "replacement_text_reserved",
+          "replacement_text_injected", "enter_reserved", "enter_dispatched"
+        ]
+      : ["enter_reserved", "enter_dispatched"];
+  const index = order.indexOf(attempt.state);
+  return { previous: index > 0 ? order[index - 1] : undefined };
+}
+
+function terminalSubmissionRetryLedgerFieldsAtState(
+  attempt: TerminalSubmissionRetryRecord,
+  state: TerminalSubmissionRetryRecord["state"],
+  revision: number
+): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
+    ...terminalSubmissionRetryLedgerFields(attempt),
+    submission_retry_state: state,
+    submission_retry_revision: revision
+  };
+  const rank: Record<TerminalSubmissionRetryRecord["state"], number> = {
+    replacement_reserved: 0,
+    replacement_text_reserved: 1,
+    replacement_text_injected: 2,
+    enter_reserved: 3,
+    enter_dispatched: 4,
+    agent_accepted: 5
+  };
+  if (rank[state] < rank.replacement_text_reserved) {
+    delete fields.submission_retry_replacement_text_reserved_at;
+  }
+  if (rank[state] < rank.replacement_text_injected) {
+    delete fields.submission_retry_replacement_text_injected_at;
+  }
+  if (rank[state] < rank.enter_reserved) {
+    delete fields.submission_retry_enter_reserved_at;
+  }
+  if (rank[state] < rank.enter_dispatched) {
+    delete fields.submission_retry_enter_dispatched_at;
+  }
+  return fields;
+}
+
+function printTerminalSubmissionRetryOutcome(input: {
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+  attempt?: TerminalSubmissionRetryRecord;
+  outcome: "agent_accepted" | "enter_dispatched" | "not_accepted" |
+    "refused";
+  terminalInputSent: boolean;
+  reason: string;
+}): void {
+  printJson({
+    session_id: sessionIdForConversation(input.conversation),
+    turn_id: turnIdForConversation(input.conversation),
+    conversation: input.conversation,
+    delivered: input.outcome === "agent_accepted",
+    delivery_receipt: input.outcome === "agent_accepted"
+      ? "agent_accepted"
+      : input.outcome === "enter_dispatched" ||
+          input.outcome === "not_accepted"
+        ? "enter_dispatched"
+        : "uncertain",
+    status: input.outcome === "agent_accepted"
+      ? "async_pending"
+      : input.outcome === "enter_dispatched"
+        ? "submission_pending"
+        : input.outcome === "not_accepted"
+          ? "submission_not_accepted"
+        : "submission_uncertain",
+    submission_outcome: input.outcome === "enter_dispatched"
+      ? "pending_acceptance"
+      : input.outcome === "not_accepted"
+        ? "not_accepted"
+      : input.outcome === "refused"
+        ? "uncertain"
+        : "agent_accepted",
+    replayed: true,
+    terminal_control: input.terminalControl,
+    terminal_input_sent: input.terminalInputSent,
+    callback_expected: ["refused", "not_accepted"].includes(input.outcome)
+      ? false
+      : callbackExpectedForConversation(input.conversation),
+    ...(input.attempt
+      ? {
+          submission_retry_attempt_id: input.attempt.attempt_id,
+          submission_retry_state: input.attempt.state
+        }
+      : {}),
+    do_not_retry: input.outcome !== "agent_accepted",
+    reason: input.reason
+  });
+}
+
+interface TerminalSubmissionRetryDeferredContext {
+  scope: DeferredForegroundApplicationScope;
+  transfer: DeferredForegroundTransfer;
+  boundary: DeferredCodexForegroundBindingBoundary;
+}
+
+interface TerminalSubmissionRetryInvocation {
+  options: TerminalCommandCliOptions;
+  exactTurnId: string;
+  statePath: string;
+  logPath: string;
+  storeDir: string;
+  bridge: TerminalAgentBridge;
+  live: TerminalDispatchTerminal;
+  terminalControl: TerminalControlRef;
+}
+
+interface TerminalSubmissionRetryLockedAuthority {
+  conversation: Conversation;
+  takeover?: Record<string, unknown>;
+  submission: TerminalDispatchRecord;
+  ledger: TerminalDispatchLedgerDocument;
+  attempt?: TerminalSubmissionRetryRecord;
+  currentMessageId: string;
+  originalMessageId: string;
+  requestText: string;
+  requestHash: string;
+  deferredTransferId?: string;
+  lifecycleSettled: boolean;
+}
+
+function loadTerminalSubmissionRetryLockedAuthority(input: {
+  invocation: TerminalSubmissionRetryInvocation;
+  scopes: CanonicalStateMutationScopes;
+  resources: CanonicalStateMutationResources;
+}): TerminalSubmissionRetryLockedAuthority {
+  const {
+    options, exactTurnId, statePath, logPath, storeDir, terminalControl
+  } = input.invocation;
+  const route = bindTerminalDispatchRoute(input.scopes, input.resources);
+  assertTerminalDispatchRouteMatches(route, {
+    terminalControl,
+    terminalKey: terminalBridgeRuntimeKey(terminalControl),
+    storeDir,
+    statePath,
+    logPath
+  });
+  let conversation = loadState(statePath);
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const lockedControl = terminalControlFromTakeover(takeover);
+  if (
+    turnIdForConversation(conversation) !== exactTurnId ||
+    executorForConversation(conversation).kind !== "codex" ||
+    !lockedControl ||
+    !terminalControlsShareIncarnation(lockedControl, terminalControl)
+  ) {
+    throw new Error(
+      "Turn or terminal authority changed before submission retry; no terminal input was sent"
+    );
+  }
+  let submission = terminalBridgeSubmission(conversation);
+  if (!submission) {
+    throw new Error(
+      "Turn has no terminal submission receipt to recover; no terminal input was sent"
+    );
+  }
+  const currentMessageId = required(
+    stringValue(submission.message_id),
+    "terminal submission retry message id is unavailable"
+  );
+  const attempt = loadTerminalSubmissionRetry(statePath);
+  const originalMessageId = attempt?.original_message_id ?? currentMessageId;
+  const requestText = terminalSubmissionPayload(required(
+    stringValue(takeover?.terminal_bridge_request_text),
+    "terminal submission retry request text is unavailable"
+  ));
+  const requestHash = required(
+    terminalBridgeRequestFingerprint(requestText),
+    "terminal submission retry request hash is unavailable"
+  );
+  const messageType = terminalSubmissionRetryMessageType(submission);
+  const messageBodyHash = createHash("sha256").update(requestText).digest("hex");
+  validateStoredTerminalSubmissionMatch({
+    owner: conversation,
+    receipt: submission,
+    options,
+    terminalControl,
+    requestText,
+    requestHash,
+    expectedStoreDir: storeDir,
+    expectedSessionId: sessionIdForConversation(conversation),
+    expectedTurnId: exactTurnId,
+    expectedMessageType: messageType,
+    expectedStatePath: statePath
+  });
+  const ledger = mutationDispatchLedger.load(input.scopes, input.resources);
+  assertTerminalSubmissionRetryLedgerAuthority({
+    ledger,
+    conversation,
+    exactTurnId,
+    currentMessageId,
+    messageType,
+    messageBodyHash,
+    requestHash,
+    storeDir,
+    statePath,
+    terminalControl
+  });
+  let currentLedger = ledger as TerminalDispatchLedgerDocument;
+  const takeoverDeferredTransferId = stringValue(
+    takeover?.deferred_foreground_transfer_id
+  );
+  const ledgerDeferredTransferId = stringValue(
+    currentLedger.deferred_foreground_transfer_id
+  );
+  if (
+    takeoverDeferredTransferId &&
+    takeoverDeferredTransferId === ledgerDeferredTransferId &&
+    stringValue(submission.deferred_foreground_transfer_id) === undefined
+  ) {
+    conversation = withDeferredTransferSubmissionAuthority(
+      conversation,
+      currentMessageId,
+      takeoverDeferredTransferId
+    );
+    saveState(statePath, conversation);
+    submission = required(
+      terminalBridgeSubmission(conversation),
+      "deferred terminal submission receipt upgrade failed"
+    );
+  }
+  const expectedCallbackFingerprint =
+    callbackRouteFingerprintForConversation(conversation) ?? null;
+  if (
+    (currentLedger.callback_route_fingerprint ?? null) !==
+      expectedCallbackFingerprint ||
+    (submission.callback_route_fingerprint ?? null) !==
+      expectedCallbackFingerprint
+  ) {
+    throw new Error(
+      "terminal submission callback route changed; no terminal input was sent"
+    );
+  }
+  const deferredTransferId = exactTerminalSubmissionRetryDeferredTransferId({
+    takeover,
+    submission,
+    ledger: currentLedger
+  });
+  assertTerminalSubmissionRetryAttemptIdentity({
+    attempt,
+    conversation,
+    storeDir,
+    statePath,
+    originalMessageId,
+    requestHash,
+    terminalControl,
+    deferredTransferId
+  });
+  assertTerminalSubmissionRetryGeneration({
+    attempt,
+    takeover,
+    currentMessageId,
+    originalMessageId
+  });
+  const callbackDelivery = isRecord(conversation.callback_delivery)
+    ? conversation.callback_delivery
+    : undefined;
+  return {
+    conversation,
+    takeover,
+    submission,
+    ledger: currentLedger,
+    attempt,
+    currentMessageId,
+    originalMessageId,
+    requestText,
+    requestHash,
+    deferredTransferId,
+    lifecycleSettled: callbackDelivery?.status === "delivered" ||
+      isTerminalDispatchOwnerReleasedStatus(effectiveTurnStatus(conversation))
+  };
+}
+
+function assertTerminalSubmissionRetryLedgerAuthority(input: {
+  ledger?: TerminalDispatchLedgerDocument;
+  conversation: Conversation;
+  exactTurnId: string;
+  currentMessageId: string;
+  messageType: "task" | "answer";
+  messageBodyHash: string;
+  requestHash: string;
+  storeDir: string;
+  statePath: string;
+  terminalControl: TerminalControlRef;
+}): asserts input is typeof input & { ledger: TerminalDispatchLedgerDocument } {
+  const { ledger } = input;
+  if (
+    !ledger || terminalDispatchLedgerLooksLifecycle(ledger) ||
+    stringValue(ledger.conversation_id) !== input.conversation.conversation_id ||
+    stringValue(ledger.session_id) !== sessionIdForConversation(input.conversation) ||
+    stringValue(ledger.turn_id) !== input.exactTurnId ||
+    stringValue(ledger.generation_id) !== input.currentMessageId ||
+    stringValue(ledger.message_id) !== input.currentMessageId ||
+    stringValue(ledger.message_type) !== input.messageType ||
+    stringValue(ledger.message_body_hash) !== input.messageBodyHash ||
+    stringValue(ledger.executor_kind) !== "codex" ||
+    stringValue(ledger.request_hash) !== input.requestHash ||
+    path.resolve(stringValue(ledger.store_dir) ?? "") !==
+      path.resolve(input.storeDir) ||
+    !sameCanonicalStatePath(ledger.state_path, input.statePath) ||
+    !terminalDispatchRecordMatchesControl(ledger, input.terminalControl)
+  ) {
+    throw new Error(
+      "terminal dispatch ledger does not match the exact Turn generation; no terminal input was sent"
+    );
+  }
+}
+
+function exactTerminalSubmissionRetryDeferredTransferId(input: {
+  takeover?: Record<string, unknown>;
+  submission: TerminalDispatchRecord;
+  ledger: TerminalDispatchLedgerDocument;
+}): string | undefined {
+  const references = [
+    stringValue(input.takeover?.deferred_foreground_transfer_id),
+    stringValue(input.submission.deferred_foreground_transfer_id),
+    stringValue(input.ledger.deferred_foreground_transfer_id)
+  ];
+  const hasDeferred = references.some((value) => value !== undefined);
+  if (
+    hasDeferred &&
+    (references.some((value) => value === undefined) ||
+      new Set(references).size !== 1)
+  ) {
+    throw new Error(
+      "deferred transfer references disagree across Turn and ledger; no terminal input was sent"
+    );
+  }
+  return hasDeferred ? references[0] : undefined;
+}
+
+function assertTerminalSubmissionRetryGeneration(input: {
+  attempt?: TerminalSubmissionRetryRecord;
+  takeover?: Record<string, unknown>;
+  currentMessageId: string;
+  originalMessageId: string;
+}): void {
+  const currentGenerationEligible = input.attempt?.mode === "replacement_send"
+    ? input.attempt.state === "replacement_reserved"
+      ? [input.attempt.original_message_id, input.attempt.active_message_id]
+        .includes(input.currentMessageId)
+      : input.currentMessageId === input.attempt.active_message_id
+    : input.currentMessageId === input.originalMessageId;
+  if (
+    stringValue(input.takeover?.terminal_bridge_message_id) !==
+      input.currentMessageId ||
+    !currentGenerationEligible
+  ) {
+    throw new Error(
+      "terminal submission retry generation changed; no terminal input was sent"
+    );
+  }
+}
+
+function reconcileTerminalSubmissionRetryDeferredTransfer(input: {
+  invocation: TerminalSubmissionRetryInvocation;
+  scope: DeferredForegroundApplicationScope;
+  boundary: DeferredCodexForegroundBindingBoundary;
+  transfer: DeferredForegroundTransfer;
+  attempt?: TerminalSubmissionRetryRecord;
+  submission: TerminalDispatchRecord;
+}): DeferredForegroundTransfer {
+  const { attempt } = input;
+  if (!attempt) return input.transfer;
+  const application = deferredForegroundApplication(
+    input.invocation.options,
+    input.invocation.live
+  );
+  const boundary = deferredForegroundBoundaryProjection(input.boundary);
+  let transfer = input.transfer;
+  if (transfer.submission_retry_attempt_id === undefined) {
+    if (
+      attempt.mode === "replacement_send" &&
+      attempt.state === "replacement_reserved"
+    ) {
+      transfer = application.reserveSubmissionRetry({
+        scope: input.scope,
+        boundary,
+        attemptId: attempt.attempt_id,
+        mode: attempt.mode,
+        messageId: attempt.active_message_id,
+        preparedAt: required(
+          stringValue(input.submission.prepared_at),
+          "deferred retry prepared timestamp is unavailable"
+        )
+      });
+    } else if (
+      attempt.mode === "exact_draft_enter" &&
+      attempt.state === "enter_reserved"
+    ) {
+      transfer = application.reserveSubmissionRetry({
+        scope: input.scope,
+        boundary,
+        attemptId: attempt.attempt_id,
+        mode: attempt.mode,
+        messageId: attempt.active_message_id,
+        preparedAt: required(
+          stringValue(input.submission.prepared_at),
+          "deferred retry prepared timestamp is unavailable"
+        )
+      });
+      transfer = application.advanceSubmissionRetry({
+        scope: input.scope,
+        boundary,
+        attemptId: attempt.attempt_id,
+        messageId: attempt.active_message_id,
+        stage: "enter_reserved",
+        at: attempt.enter_reserved_at as string
+      });
+    } else {
+      throw new Error(
+        "deferred retry mirror is incomplete after an irreversible boundary; no terminal input was sent"
+      );
+    }
+  }
+  if (!transfer.submission_retry_attempt_id) return transfer;
+  if (
+    attempt.mode === "replacement_send" &&
+    [
+      "replacement_text_reserved", "replacement_text_injected",
+      "enter_reserved", "enter_dispatched"
+    ].includes(attempt.state) &&
+    !transfer.submission_retry_text_reserved_at
+  ) {
+    transfer = application.advanceSubmissionRetry({
+      scope: input.scope,
+      boundary,
+      attemptId: attempt.attempt_id,
+      messageId: attempt.active_message_id,
+      stage: "text_reserved",
+      at: attempt.replacement_text_reserved_at as string
+    });
+  }
+  if (
+    ["replacement_text_injected", "enter_reserved", "enter_dispatched"]
+      .includes(attempt.state) &&
+    !transfer.submission_retry_text_injected_at
+  ) {
+    transfer = application.advanceSubmissionRetry({
+      scope: input.scope,
+      boundary,
+      attemptId: attempt.attempt_id,
+      messageId: attempt.active_message_id,
+      stage: "text_injected",
+      at: attempt.replacement_text_injected_at ??
+        attempt.enter_reserved_at ?? attempt.reserved_at
+    });
+  }
+  if (
+    ["enter_reserved", "enter_dispatched"].includes(attempt.state) &&
+    !transfer.submission_retry_enter_reserved_at
+  ) {
+    transfer = application.advanceSubmissionRetry({
+      scope: input.scope,
+      boundary,
+      attemptId: attempt.attempt_id,
+      messageId: attempt.active_message_id,
+      stage: "enter_reserved",
+      at: attempt.enter_reserved_at as string
+    });
+  }
+  if (
+    attempt.state === "enter_dispatched" &&
+    !transfer.submission_retry_enter_dispatched_at
+  ) {
+    transfer = application.advanceSubmissionRetry({
+      scope: input.scope,
+      boundary,
+      attemptId: attempt.attempt_id,
+      messageId: attempt.active_message_id,
+      stage: "enter_dispatched",
+      at: attempt.enter_dispatched_at as string
+    });
+  }
+  return transfer;
+}
+
+function prepareTerminalSubmissionRetryDeferredContext(input: {
+  invocation: TerminalSubmissionRetryInvocation;
+  authority: TerminalSubmissionRetryLockedAuthority;
+  scopes: CanonicalStateMutationScopes;
+  resources: CanonicalStateMutationResources;
+}): {
+  deferred?: TerminalSubmissionRetryDeferredContext;
+  ledger: TerminalDispatchLedgerDocument;
+} {
+  const { deferredTransferId, attempt, submission } = input.authority;
+  if (!deferredTransferId) return { ledger: input.authority.ledger };
+  const scope = bindDeferredForegroundApplicationScope(
+    input.scopes,
+    input.resources
+  );
+  const transfer = scope.loadTransfer(deferredTransferId);
+  const boundary = deferredRecoveryAdapter.deferredCodexBoundaryFromTransfer(
+    deferredForegroundRecoveryAdapterPorts(),
+    { terminal: input.invocation.live, transfer }
+  );
+  const projectedBoundary = deferredForegroundBoundaryProjection(boundary);
+  scope.assertBoundary(projectedBoundary);
+  if (attempt && attempt.state !== "agent_accepted") {
+    assertTerminalSubmissionRetryDeferredMirrorCanReconcile({
+      attempt,
+      transfer,
+      submission
+    });
+  }
+  const ledgerMirror = attempt && attempt.state !== "agent_accepted"
+    ? reconcileTerminalSubmissionRetryLedgerPrefix({
+        attempt,
+        ledger: input.authority.ledger
+      })
+    : undefined;
+  const currentTransfer = reconcileTerminalSubmissionRetryDeferredTransfer({
+    invocation: input.invocation,
+    scope,
+    boundary,
+    transfer,
+    attempt,
+    submission
+  });
+  assertTerminalSubmissionRetryDeferredTransferAuthority({
+    invocation: input.invocation,
+    authority: input.authority,
+    transfer: currentTransfer,
+    attempt
+  });
+  deferredForegroundApplication(
+    input.invocation.options,
+    input.invocation.live
+  ).assertTransferAuthority(scope, currentTransfer, projectedBoundary);
+  let ledger = input.authority.ledger;
+  if (attempt && attempt.state !== "agent_accepted") {
+    assertTerminalSubmissionRetryDeferredMirror({
+      attempt,
+      transfer: currentTransfer,
+      submission
+    });
+    if (ledgerMirror?.changed) {
+      mutationDispatchLedger.save(input.scopes, input.resources,
+        ledgerMirror.ledger);
+      ledger = ledgerMirror.ledger;
+    }
+  }
+  return {
+    deferred: { scope, transfer: currentTransfer, boundary },
+    ledger
+  };
+}
+
+function assertTerminalSubmissionRetryDeferredTransferAuthority(input: {
+  invocation: TerminalSubmissionRetryInvocation;
+  authority: TerminalSubmissionRetryLockedAuthority;
+  transfer: DeferredForegroundTransfer;
+  attempt?: TerminalSubmissionRetryRecord;
+}): void {
+  const { transfer, attempt } = input;
+  const plannedReplacement = Boolean(
+    attempt?.mode === "replacement_send" &&
+    attempt.state === "replacement_reserved" &&
+    transfer.submission_retry_text_reserved_at === undefined
+  );
+  const activeMessageId = deferredForegroundActiveMessageId(transfer);
+  const currentMessageId = input.authority.currentMessageId;
+  if (
+    transfer.turn_id !== input.invocation.exactTurnId ||
+    transfer.target_session_id !==
+      sessionIdForConversation(input.authority.conversation) ||
+    transfer.request_hash !== input.authority.requestHash ||
+    !sameCanonicalStatePath(transfer.state_path, input.invocation.statePath) ||
+    transfer.message_id !== input.authority.originalMessageId ||
+    (plannedReplacement
+      ? ![input.authority.originalMessageId, attempt!.active_message_id]
+        .includes(currentMessageId)
+      : activeMessageId !== currentMessageId) ||
+    (attempt
+      ? transfer.submission_retry_attempt_id !== attempt.attempt_id ||
+        transfer.submission_retry_message_id !== attempt.active_message_id
+      : transfer.submission_retry_attempt_id !== undefined)
+  ) {
+    throw new Error(
+      "deferred submission retry transfer authority changed; no terminal input was sent"
+    );
+  }
+}
+
+interface TerminalSubmissionRetryFlowState {
+  conversation: Conversation;
+  submission: TerminalDispatchRecord;
+  ledger: TerminalDispatchLedgerDocument;
+  attempt?: TerminalSubmissionRetryRecord;
+}
+
+interface TerminalSubmissionRetryFlowContext {
+  invocation: TerminalSubmissionRetryInvocation;
+  scopes: CanonicalStateMutationScopes;
+  resources: CanonicalStateMutationResources;
+  execution: TerminalDispatchExecutionService;
+  deferred?: TerminalSubmissionRetryDeferredContext;
+  takeover?: Record<string, unknown>;
+  currentMessageId: string;
+  originalMessageId: string;
+  requestText: string;
+  requestHash: string;
+}
+
+function reconcileTerminalSubmissionRetryDeferredPending(
+  context: TerminalSubmissionRetryFlowContext,
+  state: TerminalSubmissionRetryFlowState
+): boolean {
+  if (
+    !context.deferred || state.attempt?.state !== "enter_dispatched" ||
+    state.submission.status === "agent_accepted" ||
+    state.ledger.status === "agent_accepted"
+  ) {
+    return false;
+  }
+  state.conversation = reconcileTerminalSubmissionRetryPending({
+    conversation: state.conversation,
+    submission: state.submission,
+    ledger: state.ledger,
+    attempt: state.attempt,
+    requestText: context.requestText,
+    statePath: context.invocation.statePath,
+    logPath: context.invocation.logPath,
+    scopes: context.scopes,
+    resources: context.resources,
+    deferred: context.deferred
+  });
+  state.submission = required(
+    terminalBridgeSubmission(state.conversation),
+    "terminal submission retry receipt disappeared during pending reconciliation"
+  );
+  state.ledger = required(
+    mutationDispatchLedger.load(context.scopes, context.resources),
+    "terminal submission retry ledger disappeared during pending reconciliation"
+  );
+  return true;
+}
+
+async function recoverPartialTerminalSubmissionRetryAcceptance(
+  context: TerminalSubmissionRetryFlowContext,
+  state: TerminalSubmissionRetryFlowState
+): Promise<boolean> {
+  const partialAcceptance =
+    state.submission.status === "agent_accepted" ||
+    state.ledger.status === "agent_accepted" ||
+    state.attempt?.state === "agent_accepted";
+  if (!partialAcceptance) return false;
+  const {
+    options, terminalControl, live, statePath, logPath, storeDir
+  } = context.invocation;
+  if (
+    context.deferred &&
+    ["uncertain", "dispatch_started"].includes(context.deferred.transfer.status)
+  ) {
+    const recovered = await deferredRecoveryAdapter
+      .recoverAcceptedDeferredForegroundDispatch(
+        deferredForegroundRecoveryAdapterPorts(),
+        {
+          options,
+          scope: context.deferred.scope,
+          storeDir,
+          terminal: live,
+          transfer: context.deferred.transfer,
+          boundary: context.deferred.boundary
+        }
+      );
+    if (!recovered) {
+      printTerminalSubmissionRetryOutcome({
+        conversation: state.conversation,
+        terminalControl,
+        attempt: state.attempt,
+        outcome: "refused",
+        terminalInputSent: false,
+        reason: "Partial deferred acceptance lacks current native evidence; no terminal input was sent."
+      });
+      return true;
+    }
+    const finalized = finalizeDeferredTerminalSubmissionRetryAccepted({
+      statePath,
+      scopes: context.scopes,
+      resources: context.resources,
+      attempt: state.attempt
+    });
+    state.conversation = finalized.conversation;
+    state.attempt = finalized.attempt;
+    startTerminalBridgeMonitorForConversation({
+      conversation: state.conversation,
+      statePath,
+      logPath,
+      options
+    });
+    printTerminalSubmissionRetryOutcome({
+      conversation: state.conversation,
+      terminalControl,
+      attempt: state.attempt,
+      outcome: "agent_accepted",
+      terminalInputSent: false,
+      reason: "Deferred native acceptance, source/target Sessions, and monitoring were reconciled without terminal input."
+    });
+    return true;
+  }
+  const durableEvidence = await context.execution.detectAcceptance({
+    executor: "codex",
+    conversation: state.conversation,
+    terminalControl
+  });
+  if (!durableEvidence) {
+    printTerminalSubmissionRetryOutcome({
+      conversation: state.conversation,
+      terminalControl,
+      attempt: state.attempt,
+      outcome: "refused",
+      terminalInputSent: false,
+      reason: "Partial acceptance metadata lacks current native evidence; no terminal input was sent."
+    });
+    return true;
+  }
+  const repaired = terminalSubmissionRetryAccepted({
+    conversation: state.conversation,
+    submission: state.submission,
+    ledger: state.ledger,
+    evidence: durableEvidence,
+    requestText: context.requestText,
+    at: stringValue(state.submission.agent_accepted_at) ??
+      stringValue(state.ledger.agent_accepted_at) ?? cliNow().toISOString(),
+    statePath,
+    logPath,
+    scopes: context.scopes,
+    resources: context.resources,
+    attempt: state.attempt,
+    terminalInputSent: false
+  });
+  state.conversation = repaired.conversation;
+  state.attempt = repaired.attempt;
+  startTerminalBridgeMonitorForConversation({
+    conversation: state.conversation,
+    statePath,
+    logPath,
+    options
+  });
+  printTerminalSubmissionRetryOutcome({
+    conversation: state.conversation,
+    terminalControl,
+    attempt: state.attempt,
+    outcome: "agent_accepted",
+    terminalInputSent: false,
+    reason: "Partial durable acceptance was reconciled without terminal input and monitoring was ensured."
+  });
+  return true;
+}
+
+function terminalSubmissionRetryIsEligible(
+  context: TerminalSubmissionRetryFlowContext,
+  state: TerminalSubmissionRetryFlowState
+): boolean {
+  const legacyEligible = !state.attempt &&
+    state.conversation.status === "stalled" &&
+    state.submission.status === "uncertain" &&
+    state.submission.last_proven_stage === "text_injected" &&
+    context.currentMessageId === context.originalMessageId;
+  if (legacyEligible || (state.attempt && state.attempt.state !== "agent_accepted")) {
+    return true;
+  }
+  printTerminalSubmissionRetryOutcome({
+    conversation: state.conversation,
+    terminalControl: context.invocation.terminalControl,
+    attempt: state.attempt,
+    outcome: "refused",
+    terminalInputSent: false,
+    reason: "The Turn is not an eligible incomplete submission recovery; no terminal input was sent."
+  });
+  return false;
+}
+
+async function recoverTerminalSubmissionRetryAcceptance(
+  context: TerminalSubmissionRetryFlowContext,
+  state: TerminalSubmissionRetryFlowState
+): Promise<boolean> {
+  const {
+    options, terminalControl, live, statePath, logPath, storeDir
+  } = context.invocation;
+  const deferredAccepted = context.deferred
+    ? await deferredRecoveryAdapter.recoverAcceptedDeferredForegroundDispatch(
+        deferredForegroundRecoveryAdapterPorts(),
+        {
+          options,
+          scope: context.deferred.scope,
+          storeDir,
+          terminal: live,
+          transfer: context.deferred.transfer,
+          boundary: context.deferred.boundary
+        }
+      )
+    : false;
+  if (deferredAccepted) {
+    const finalized = finalizeDeferredTerminalSubmissionRetryAccepted({
+      statePath,
+      scopes: context.scopes,
+      resources: context.resources,
+      attempt: state.attempt
+    });
+    state.conversation = finalized.conversation;
+    state.attempt = finalized.attempt;
+    startTerminalBridgeMonitorForConversation({
+      conversation: state.conversation,
+      statePath,
+      logPath,
+      options
+    });
+    printTerminalSubmissionRetryOutcome({
+      conversation: state.conversation,
+      terminalControl,
+      attempt: state.attempt,
+      outcome: "agent_accepted",
+      terminalInputSent: false,
+      reason: "Deferred native acceptance and source/target Session bindings were reconciled without terminal input."
+    });
+    return true;
+  }
+  const acceptedEvidence = context.deferred
+    ? undefined
+    : await context.execution.detectAcceptance({
+        executor: "codex",
+        conversation: state.conversation,
+        terminalControl
+      });
+  if (!acceptedEvidence) return false;
+  const repaired = terminalSubmissionRetryAccepted({
+    conversation: state.conversation,
+    submission: state.submission,
+    ledger: state.ledger,
+    evidence: acceptedEvidence,
+    requestText: context.requestText,
+    at: cliNow().toISOString(),
+    statePath,
+    logPath,
+    scopes: context.scopes,
+    resources: context.resources,
+    attempt: state.attempt,
+    terminalInputSent: false
+  });
+  state.conversation = repaired.conversation;
+  state.attempt = repaired.attempt;
+  startTerminalBridgeMonitorForConversation({
+    conversation: state.conversation,
+    statePath,
+    logPath,
+    options
+  });
+  printTerminalSubmissionRetryOutcome({
+    conversation: state.conversation,
+    terminalControl,
+    attempt: state.attempt,
+    outcome: "agent_accepted",
+    terminalInputSent: false,
+    reason: "Native Codex acceptance was reconciled; no terminal input was sent."
+  });
+  return true;
+}
+
+function finishPendingTerminalSubmissionRetry(
+  context: TerminalSubmissionRetryFlowContext,
+  state: TerminalSubmissionRetryFlowState,
+  alreadyReconciled: boolean
+): boolean {
+  if (state.attempt?.state !== "enter_dispatched") return false;
+  if (!alreadyReconciled) {
+    state.conversation = reconcileTerminalSubmissionRetryPending({
+      conversation: state.conversation,
+      submission: state.submission,
+      ledger: state.ledger,
+      attempt: state.attempt,
+      requestText: context.requestText,
+      statePath: context.invocation.statePath,
+      logPath: context.invocation.logPath,
+      scopes: context.scopes,
+      resources: context.resources,
+      deferred: context.deferred
+    });
+  }
+  startTerminalBridgeMonitorForConversation({
+    conversation: state.conversation,
+    statePath: context.invocation.statePath,
+    logPath: context.invocation.logPath,
+    options: context.invocation.options
+  });
+  printTerminalSubmissionRetryOutcome({
+    conversation: state.conversation,
+    terminalControl: context.invocation.terminalControl,
+    attempt: state.attempt,
+    outcome: "enter_dispatched",
+    terminalInputSent: false,
+    reason: "The durable retry Enter was reconciled without additional terminal input; native acceptance remains pending."
+  });
+  return true;
+}
+
+function terminalSubmissionRetryHasInputAuthority(
+  context: TerminalSubmissionRetryFlowContext,
+  state: TerminalSubmissionRetryFlowState
+): boolean {
+  if (
+    !context.deferred ||
+    validateCodexRolloutAcceptanceAnchor(
+      context.takeover?.codex_rollout_acceptance_anchor
+    )?.version === 3
+  ) {
+    return true;
+  }
+  printTerminalSubmissionRetryOutcome({
+    conversation: state.conversation,
+    terminalControl: context.invocation.terminalControl,
+    attempt: state.attempt,
+    outcome: "refused",
+    terminalInputSent: false,
+    reason: "Deferred submission retry requires a candidate-set Codex acceptance anchor before any terminal input; no terminal input was sent."
+  });
+  return false;
+}
+
+async function runTerminalSubmissionRetryNoInputRecovery(
+  context: TerminalSubmissionRetryFlowContext,
+  state: TerminalSubmissionRetryFlowState
+): Promise<boolean> {
+  const pendingRetryReconciled =
+    reconcileTerminalSubmissionRetryDeferredPending(context, state);
+  if (await recoverPartialTerminalSubmissionRetryAcceptance(context, state)) {
+    return true;
+  }
+  if (!terminalSubmissionRetryIsEligible(context, state)) return true;
+  if (await recoverTerminalSubmissionRetryAcceptance(context, state)) {
+    return true;
+  }
+  if (finishPendingTerminalSubmissionRetry(
+    context,
+    state,
+    pendingRetryReconciled
+  )) {
+    return true;
+  }
+  return !terminalSubmissionRetryHasInputAuthority(context, state);
+}
+
+async function runTerminalSubmissionRetryDecision(
+  context: TerminalSubmissionRetryFlowContext,
+  state: TerminalSubmissionRetryFlowState
+): Promise<void> {
+  const {
+    options, bridge, terminalControl, storeDir, statePath, logPath
+  } = context.invocation;
+  if (context.deferred) {
+    await assertDeferredCodexForegroundBindingBoundary({
+      options,
+      scope: context.deferred.scope,
+      boundary: context.deferred.boundary,
+      expectedSourceStatus: "transitioning",
+      requireNoDispatch: false,
+      requireEmptyComposer: false
+    });
+  }
+  const observation = await bridge.observeCodexComposer(
+    terminalControl,
+    context.requestText,
+    { runtime: terminalRuntimeIdentityForConversation(
+      state.conversation,
+      terminalControl
+    ) }
+  );
+  const decision = decideTerminalSubmissionRetry({
+    agent: "codex",
+    exactTurnTarget: true,
+    accepted: false,
+    composer: observation.state,
+    submissionStatus: stringValue(state.submission.status),
+    lastProvenStage: stringValue(state.submission.last_proven_stage),
+    submissionTextInjectedAt: stringValue(state.submission.text_injected_at),
+    enterDispatchedAt: stringValue(state.submission.enter_dispatched_at),
+    enterNotAttemptedAt: stringValue(state.submission.enter_not_attempted_at),
+    enterNotAttemptedReason: stringValue(
+      state.submission.enter_not_attempted_reason
+    ),
+    ledgerStatus: stringValue(state.ledger.status),
+    ledgerTextInjectedAt: stringValue(state.ledger.text_injected_at),
+    ledgerEnterDispatchedAt: stringValue(state.ledger.enter_dispatched_at),
+    ledgerEnterNotAttemptedAt: stringValue(state.ledger.enter_not_attempted_at),
+    ledgerEnterNotAttemptedReason: stringValue(
+      state.ledger.enter_not_attempted_reason
+    ),
+    ledgerAgentAcceptedAt: stringValue(state.ledger.agent_accepted_at),
+    originalMessageId: context.originalMessageId,
+    currentMessageId: stringValue(
+      context.takeover?.terminal_bridge_message_id
+    ),
+    attempt: state.attempt
+  });
+  if (decision.action === "refuse") {
+    printTerminalSubmissionRetryOutcome({
+      conversation: state.conversation,
+      terminalControl,
+      attempt: state.attempt,
+      outcome: "refused",
+      terminalInputSent: false,
+      reason: `${decision.reason}; no terminal input was sent.`
+    });
+    return;
+  }
+  if (decision.action === "repair_accepted") {
+    throw new Error(
+      "retry metadata claims acceptance without native evidence; no terminal input was sent"
+    );
+  }
+  if (
+    decision.action === "start_replacement" ||
+    decision.action === "resume_replacement"
+  ) {
+    await runTerminalSubmissionReplacement({
+      options,
+      bridge,
+      execution: context.execution,
+      observation,
+      decision,
+      conversation: state.conversation,
+      submission: state.submission,
+      ledger: state.ledger,
+      requestText: context.requestText,
+      requestHash: context.requestHash,
+      originalMessageId: context.originalMessageId,
+      terminalControl,
+      storeDir,
+      statePath,
+      logPath,
+      scopes: context.scopes,
+      resources: context.resources,
+      attempt: state.attempt,
+      deferred: context.deferred
+    });
+    return;
+  }
+  await runTerminalSubmissionExactDraftEnter({
+    options,
+    bridge,
+    execution: context.execution,
+    conversation: state.conversation,
+    submission: state.submission,
+    ledger: state.ledger,
+    requestText: context.requestText,
+    requestHash: context.requestHash,
+    originalMessageId: context.originalMessageId,
+    activeMessageId: decision.activeMessageId,
+    terminalControl,
+    storeDir,
+    statePath,
+    logPath,
+    scopes: context.scopes,
+    resources: context.resources,
+    attempt: state.attempt,
+    deferred: context.deferred
+  });
+}
+
+async function runTerminalSubmissionRetryLocked(input: {
+  invocation: TerminalSubmissionRetryInvocation;
+  scopes: CanonicalStateMutationScopes;
+  resources: CanonicalStateMutationResources;
+}): Promise<void> {
+  const authority = loadTerminalSubmissionRetryLockedAuthority(input);
+  if (authority.lifecycleSettled) {
+    printTerminalSubmissionRetryOutcome({
+      conversation: authority.conversation,
+      terminalControl: input.invocation.terminalControl,
+      attempt: authority.attempt,
+      outcome: "refused",
+      terminalInputSent: false,
+      reason: "The Turn lifecycle is already settled; no terminal input was sent."
+    });
+    return;
+  }
+  const prepared = prepareTerminalSubmissionRetryDeferredContext({
+    invocation: input.invocation,
+    authority,
+    scopes: input.scopes,
+    resources: input.resources
+  });
+  const state: TerminalSubmissionRetryFlowState = {
+    conversation: authority.conversation,
+    submission: authority.submission,
+    ledger: prepared.ledger,
+    attempt: authority.attempt
+  };
+  const context: TerminalSubmissionRetryFlowContext = {
+    invocation: input.invocation,
+    scopes: input.scopes,
+    resources: input.resources,
+    execution: terminalDispatchExecution(
+      input.invocation.options,
+      input.invocation.bridge
+    ),
+    deferred: prepared.deferred,
+    takeover: authority.takeover,
+    currentMessageId: authority.currentMessageId,
+    originalMessageId: authority.originalMessageId,
+    requestText: authority.requestText,
+    requestHash: authority.requestHash
+  };
+  if (await runTerminalSubmissionRetryNoInputRecovery(context, state)) return;
+  await runTerminalSubmissionRetryDecision(context, state);
+}
+
+async function runTerminalSubmissionRetry(
+  options: TerminalCommandCliOptions
+): Promise<void> {
+  const exactTurnId = assertTerminalSubmissionRetryOptions(options);
+  const loaded = loadConversationFromOptions(options);
+  const { statePath, logPath } = loaded;
+  const storePaths = pathsForConversationDir(path.dirname(statePath));
+  const storeDir = storePaths.storeDir;
+  if (
+    path.resolve(storePaths.statePath) !== path.resolve(statePath) ||
+    path.basename(storePaths.conversationDir) !== exactTurnId ||
+    turnIdForConversation(loaded.conversation) !== exactTurnId
+  ) {
+    throw new Error(
+      "send --turn did not resolve one canonical Turn; no terminal input was sent"
+    );
+  }
+  const initialTakeover = isRecord(loaded.conversation.native_session_takeover)
+    ? loaded.conversation.native_session_takeover
+    : undefined;
+  const storedControl = terminalControlFromTakeover(initialTakeover);
+  const pid = Number(initialTakeover?.terminal_agent_pid);
+  if (!storedControl || !Number.isSafeInteger(pid) || pid <= 1) {
+    throw new Error(
+      `turn ${exactTurnId} is not attached to a live terminal; no terminal input was sent`
+    );
+  }
+  if (executorForConversation(loaded.conversation).kind !== "codex") {
+    throw new Error(
+      "terminal submission retry is supported only for Codex; no terminal input was sent"
+    );
+  }
+  const bridge = createTerminalAgentBridge(options);
+  const live = await bridge.resolveStoredTerminal(
+    "codex",
+    pid,
+    storedControl,
+    terminalRuntimeIdentityForConversation(loaded.conversation, storedControl)
+  );
+  if (!terminalControlsShareIncarnation(live.terminalControl, storedControl)) {
+    throw new Error(
+      "terminal control changed before submission retry; no terminal input was sent"
+    );
+  }
+  const terminalControl = live.terminalControl;
+  await withCanonicalMutationLocks(
+    terminalWriterMutationLocks(storeDir, terminalControl),
+    async (scopes, resources) => withTerminalDispatchStateScope(
+      scopes,
+      resources,
+      statePath,
+      logPath,
+      async (dispatchScopes, dispatchResources) =>
+        runTerminalSubmissionRetryLocked({
+          invocation: {
+            options,
+            exactTurnId,
+            statePath,
+            logPath,
+            storeDir,
+            bridge,
+            live,
+            terminalControl
+          },
+          scopes: dispatchScopes,
+          resources: dispatchResources
+        })
+    )
+  );
+}
+
+async function runTerminalSubmissionExactDraftEnter(input: {
+  options: TerminalCommandCliOptions;
+  bridge: TerminalAgentBridge;
+  execution: TerminalDispatchExecutionService;
+  conversation: Conversation;
+  submission: TerminalDispatchRecord;
+  ledger: TerminalDispatchLedgerDocument;
+  requestText: string;
+  requestHash: string;
+  originalMessageId: string;
+  activeMessageId: string;
+  terminalControl: TerminalControlRef;
+  storeDir: string;
+  statePath: string;
+  logPath: string;
+  scopes: CanonicalStateMutationScopes;
+  resources: CanonicalStateMutationResources;
+  attempt?: TerminalSubmissionRetryRecord;
+  deferred?: TerminalSubmissionRetryDeferredContext;
+}): Promise<void> {
+  let attempt = input.attempt;
+  const reserveEnter = (): void => {
+    const at = cliNow().toISOString();
+    const persistAttemptLedger = (): void => {
+      mutationDispatchLedger.save(input.scopes, input.resources, {
+        ...mutationDispatchLedger.load(input.scopes, input.resources),
+        ...terminalSubmissionRetryLedgerFields(attempt)
+      });
+    };
+    const advanceDeferred = (
+      stage: "text_injected" | "enter_reserved",
+      stageAt: string
+    ): void => {
+      if (!input.deferred || !attempt) return;
+      input.deferred.transfer = deferredForegroundApplication(
+        input.options,
+        input.deferred.boundary.terminal
+      ).advanceSubmissionRetry({
+        scope: input.deferred.scope,
+        boundary: deferredForegroundBoundaryProjection(
+          input.deferred.boundary
+        ),
+        attemptId: attempt.attempt_id,
+        messageId: attempt.active_message_id,
+        stage,
+        at: stageAt
+      });
+    };
+    if (!attempt) {
+      attempt = saveTerminalSubmissionRetry(input.statePath, {
+        ...terminalSubmissionRetryBaseRecord({
+          mode: "exact_draft_enter",
+          state: "enter_reserved",
+          attemptId: `submission-retry-${randomUUID()}`,
+          storeDir: input.storeDir,
+          statePath: input.statePath,
+          conversation: input.conversation,
+          originalMessageId: input.originalMessageId,
+          activeMessageId: input.activeMessageId,
+          requestHash: input.requestHash,
+          terminalControl: input.terminalControl,
+          at,
+          deferredTransferId: input.deferred?.transfer.transfer_id
+        }),
+        enter_reserved_at: at
+      }, null);
+      if (input.deferred) {
+        input.deferred.transfer = deferredForegroundApplication(
+          input.options,
+          input.deferred.boundary.terminal
+        ).reserveSubmissionRetry({
+          scope: input.deferred.scope,
+          boundary: deferredForegroundBoundaryProjection(
+            input.deferred.boundary
+          ),
+          attemptId: attempt.attempt_id,
+          mode: attempt.mode,
+          messageId: attempt.active_message_id,
+          preparedAt: required(
+            stringValue(input.submission.prepared_at),
+            "deferred retry prepared timestamp is unavailable"
+          )
+        });
+      }
+      advanceDeferred("enter_reserved", at);
+      persistAttemptLedger();
+      return;
+    }
+    if (
+      attempt.mode === "replacement_send" &&
+      attempt.state === "replacement_text_reserved"
+    ) {
+      attempt = saveTerminalSubmissionRetry(input.statePath, {
+        ...attempt,
+        state: "replacement_text_injected",
+        replacement_text_injected_at: at,
+        updated_at: at
+      }, attempt.revision);
+      advanceDeferred("text_injected", at);
+      persistAttemptLedger();
+    }
+    if (attempt.state !== "replacement_text_injected") {
+      throw new Error(
+        "submission retry Enter is no longer reservable; no key was sent"
+      );
+    }
+    const enterReservedAt = cliNow().toISOString();
+    attempt = saveTerminalSubmissionRetry(input.statePath, {
+      ...attempt,
+      state: "enter_reserved",
+      enter_reserved_at: enterReservedAt,
+      updated_at: enterReservedAt
+    }, attempt.revision);
+    advanceDeferred("enter_reserved", enterReservedAt);
+    persistAttemptLedger();
+  };
+  await input.bridge.submitExactCodexDraft(
+    input.terminalControl,
+    input.requestText,
+    {
+      runtime: terminalRuntimeIdentityForConversation(
+        input.conversation,
+        input.terminalControl
+      ),
+      beforeEnterReservation: reserveEnter
+    }
+  );
+  if (!attempt || attempt.state !== "enter_reserved") {
+    throw new Error(
+      "terminal bridge dispatched Enter without a durable retry reservation"
+    );
+  }
+  const enterAt = cliNow().toISOString();
+  attempt = saveTerminalSubmissionRetry(input.statePath, {
+    ...attempt,
+    state: "enter_dispatched",
+    enter_dispatched_at: enterAt,
+    updated_at: enterAt
+  }, attempt.revision);
+  if (input.deferred) {
+    input.deferred.transfer = deferredForegroundApplication(
+      input.options,
+      input.deferred.boundary.terminal
+    ).advanceSubmissionRetry({
+      scope: input.deferred.scope,
+      boundary: deferredForegroundBoundaryProjection(
+        input.deferred.boundary
+      ),
+      attemptId: attempt.attempt_id,
+      messageId: attempt.active_message_id,
+      stage: "enter_dispatched",
+      at: enterAt
+    });
+  }
+  const current = loadState(input.statePath);
+  const currentSubmission = required(
+    terminalBridgeSubmission(current),
+    "terminal submission receipt disappeared after retry Enter"
+  );
+  const enteredConversation = withTerminalBridgeSubmission({
+    conversation: withTerminalSubmissionRetryMonitorEpoch(
+      terminalSubmissionRetryUnstalled(current),
+      enterAt
+    ),
+    messageId: input.activeMessageId,
+    messageType: terminalSubmissionRetryMessageType(currentSubmission),
+    requestText: input.requestText,
+    status: "enter_dispatched",
+    preparedAt: required(
+      stringValue(currentSubmission.prepared_at),
+      "terminal submission retry prepared timestamp is unavailable"
+    ),
+    textInjectedAt:
+      stringValue(currentSubmission.text_injected_at) ??
+        attempt.replacement_text_injected_at ?? attempt.reserved_at,
+    enterDispatchedAt: enterAt,
+    lastProvenStage: "enter_dispatched"
+  });
+  saveState(input.statePath, enteredConversation);
+  let enteredLedger = {
+    ...mutationDispatchLedger.load(input.scopes, input.resources),
+    ...terminalSubmissionRetryLedgerFields(attempt),
+    status: "enter_dispatched",
+    text_injected_at:
+      stringValue(currentSubmission.text_injected_at) ??
+        attempt.replacement_text_injected_at ?? attempt.reserved_at,
+    enter_dispatched_at: enterAt,
+    dispatcher_pid: null
+  };
+  mutationDispatchLedger.save(input.scopes, input.resources, enteredLedger);
+  appendEvent(input.logPath, {
+    ts: enterAt,
+    conversation_id: enteredConversation.conversation_id,
+    event: "terminal_submission_retry_enter_dispatched",
+    message_id: input.activeMessageId,
+    terminal_input_sent: true
+  });
+  if (input.deferred) {
+    const transfer = input.deferred.scope.loadTransfer(
+      input.deferred.transfer.transfer_id
+    );
+    const recovered = await deferredRecoveryAdapter
+      .recoverAcceptedDeferredForegroundDispatch(
+        deferredForegroundRecoveryAdapterPorts(),
+        {
+          options: input.options,
+          scope: input.deferred.scope,
+          storeDir: input.storeDir,
+          terminal: input.deferred.boundary.terminal,
+          transfer,
+          boundary: input.deferred.boundary
+        }
+    );
+    if (recovered) {
+      const finalized = finalizeDeferredTerminalSubmissionRetryAccepted({
+        statePath: input.statePath,
+        scopes: input.scopes,
+        resources: input.resources,
+        attempt
+      });
+      attempt = required(
+        finalized.attempt,
+        "deferred retry attempt disappeared after accepted finalization"
+      );
+      const acceptedConversation = finalized.conversation;
+      startTerminalBridgeMonitorForConversation({
+        conversation: acceptedConversation,
+        statePath: input.statePath,
+        logPath: input.logPath,
+        options: input.options
+      });
+      printTerminalSubmissionRetryOutcome({
+        conversation: acceptedConversation,
+        terminalControl: input.terminalControl,
+        attempt,
+        outcome: "agent_accepted",
+        terminalInputSent: true,
+        reason: "The exact deferred Codex draft was submitted once and its transfer and source/target Sessions were committed."
+      });
+      return;
+    }
+    startTerminalBridgeMonitorForConversation({
+      conversation: enteredConversation,
+      statePath: input.statePath,
+      logPath: input.logPath,
+      options: input.options
+    });
+    printTerminalSubmissionRetryOutcome({
+      conversation: enteredConversation,
+      terminalControl: input.terminalControl,
+      attempt,
+      outcome: "enter_dispatched",
+      terminalInputSent: true,
+      reason: "The exact deferred Codex draft received one Enter; dedicated transfer acceptance remains pending and another retry is forbidden."
+    });
+    return;
+  }
+  const timeoutMs = positiveMilliseconds(
+    input.options.terminalAcceptanceTimeoutMs ??
+      DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS,
+    "--terminal-acceptance-timeout-ms"
+  );
+  const acceptance = await input.execution.pollAcceptance({
+    executor: "codex",
+    conversation: enteredConversation,
+    terminalControl: input.terminalControl,
+    timeoutMs,
+    pollIntervalMs: Math.max(10, Math.min(
+      timeoutMs,
+      Number(input.options.terminalAcceptancePollIntervalMs ??
+        DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS)
+    )),
+    scrollbackLines: Number(input.options.scrollbackLines ?? 240)
+  });
+  if (acceptance.outcome === "agent_accepted") {
+    const repaired = terminalSubmissionRetryAccepted({
+      conversation: enteredConversation,
+      submission: required(
+        terminalBridgeSubmission(enteredConversation),
+        "terminal submission receipt disappeared after retry acceptance"
+      ),
+      ledger: enteredLedger,
+      evidence: acceptance.evidence,
+      requestText: input.requestText,
+      at: cliNow().toISOString(),
+      statePath: input.statePath,
+      logPath: input.logPath,
+      scopes: input.scopes,
+      resources: input.resources,
+      attempt,
+      terminalInputSent: true
+    });
+    startTerminalBridgeMonitorForConversation({
+      conversation: repaired.conversation,
+      statePath: input.statePath,
+      logPath: input.logPath,
+      options: input.options
+    });
+    printTerminalSubmissionRetryOutcome({
+      conversation: repaired.conversation,
+      terminalControl: input.terminalControl,
+      attempt: repaired.attempt,
+      outcome: "agent_accepted",
+      terminalInputSent: true,
+      reason: "The exact existing Codex draft was submitted once and native acceptance was proven."
+    });
+    return;
+  }
+  if (acceptance.outcome === "not_accepted") {
+    const notAcceptedAt = cliNow().toISOString();
+    const notAcceptedConversation = terminalSubmissionRetryTerminalOutcome({
+      conversation: enteredConversation,
+      submission: required(
+        terminalBridgeSubmission(enteredConversation),
+        "terminal submission receipt disappeared after retry rejection"
+      ),
+      ledger: enteredLedger,
+      requestText: input.requestText,
+      reason: acceptance.reason,
+      at: notAcceptedAt,
+      statePath: input.statePath,
+      logPath: input.logPath,
+      scopes: input.scopes,
+      resources: input.resources,
+      attempt,
+      outcome: "not_accepted"
+    });
+    printTerminalSubmissionRetryOutcome({
+      conversation: notAcceptedConversation,
+      terminalControl: input.terminalControl,
+      attempt,
+      outcome: "not_accepted",
+      terminalInputSent: true,
+      reason: "The exact draft remains in the Codex composer after one Enter; it was durably recorded as not accepted and another retry is forbidden."
+    });
+    return;
+  }
+  if (acceptance.outcome === "uncertain") {
+    const uncertainConversation = terminalSubmissionRetryTerminalOutcome({
+      conversation: enteredConversation,
+      submission: required(
+        terminalBridgeSubmission(enteredConversation),
+        "terminal submission receipt disappeared after uncertain retry acceptance"
+      ),
+      ledger: enteredLedger,
+      requestText: input.requestText,
+      reason: acceptance.reason,
+      at: cliNow().toISOString(),
+      statePath: input.statePath,
+      logPath: input.logPath,
+      scopes: input.scopes,
+      resources: input.resources,
+      attempt,
+      outcome: "uncertain"
+    });
+    printTerminalSubmissionRetryOutcome({
+      conversation: uncertainConversation,
+      terminalControl: input.terminalControl,
+      attempt,
+      outcome: "refused",
+      terminalInputSent: true,
+      reason: `Exact-draft acceptance is uncertain (${acceptance.reason}); the terminal outcome is durable and another retry is forbidden.`
+    });
+    return;
+  }
+  startTerminalBridgeMonitorForConversation({
+    conversation: enteredConversation,
+    statePath: input.statePath,
+    logPath: input.logPath,
+    options: input.options
+  });
+  printTerminalSubmissionRetryOutcome({
+    conversation: enteredConversation,
+    terminalControl: input.terminalControl,
+    attempt,
+    outcome: "enter_dispatched",
+    terminalInputSent: true,
+    reason: "The exact existing Codex draft received one Enter; acceptance remains pending and another retry is forbidden."
+  });
+}
+
+async function runTerminalSubmissionReplacement(input: {
+  options: TerminalCommandCliOptions;
+  bridge: TerminalAgentBridge;
+  execution: TerminalDispatchExecutionService;
+  observation: TerminalCodexComposerObservation;
+  decision: Extract<TerminalSubmissionRetryDecision, {
+    action: "start_replacement" | "resume_replacement";
+  }>;
+  conversation: Conversation;
+  submission: TerminalDispatchRecord;
+  ledger: TerminalDispatchLedgerDocument;
+  requestText: string;
+  requestHash: string;
+  originalMessageId: string;
+  terminalControl: TerminalControlRef;
+  storeDir: string;
+  statePath: string;
+  logPath: string;
+  scopes: CanonicalStateMutationScopes;
+  resources: CanonicalStateMutationResources;
+  attempt?: TerminalSubmissionRetryRecord;
+  deferred?: TerminalSubmissionRetryDeferredContext;
+}): Promise<void> {
+  if (input.observation.state !== "exact_empty") {
+    throw new Error(
+      "replacement send lost its positive empty-composer proof; no terminal input was sent"
+    );
+  }
+  let attempt = input.attempt;
+  if (!attempt) {
+    const at = cliNow().toISOString();
+    attempt = saveTerminalSubmissionRetry(input.statePath,
+      terminalSubmissionRetryBaseRecord({
+        mode: "replacement_send",
+        state: "replacement_reserved",
+        attemptId: `submission-retry-${randomUUID()}`,
+        storeDir: input.storeDir,
+        statePath: input.statePath,
+        conversation: input.conversation,
+        originalMessageId: input.originalMessageId,
+        activeMessageId: input.originalMessageId,
+        requestHash: input.requestHash,
+        terminalControl: input.terminalControl,
+        at,
+        deferredTransferId: input.deferred?.transfer.transfer_id
+      }), null);
+    if (input.deferred) {
+      input.deferred.transfer = deferredForegroundApplication(
+        input.options,
+        input.deferred.boundary.terminal
+      ).reserveSubmissionRetry({
+        scope: input.deferred.scope,
+        boundary: deferredForegroundBoundaryProjection(
+          input.deferred.boundary
+        ),
+        attemptId: attempt.attempt_id,
+        mode: attempt.mode,
+        messageId: attempt.active_message_id,
+        preparedAt: required(
+          stringValue(input.submission.prepared_at),
+          "deferred retry prepared timestamp is unavailable"
+          )
+        });
+    }
+    const reservedLedger = required(
+      mutationDispatchLedger.load(input.scopes, input.resources),
+      "terminal submission retry ledger disappeared after reservation"
+    );
+    mutationDispatchLedger.save(input.scopes, input.resources, {
+      ...reservedLedger,
+      ...terminalSubmissionRetryLedgerFields(attempt)
+    });
+  }
+  if (
+    attempt.mode !== "replacement_send" ||
+    attempt.state !== "replacement_reserved"
+  ) {
+    throw new Error(
+      "replacement text transport was already reserved; no additional text was sent"
+    );
+  }
+  const currentAttempt = (): TerminalSubmissionRetryRecord => required(
+    attempt,
+    "terminal submission retry attempt is unavailable"
+  );
+  const saveAttempt = (
+    state: TerminalSubmissionRetryRecord["state"],
+    at: string,
+    fields: Partial<TerminalSubmissionRetryRecord>
+  ): void => {
+    const current = currentAttempt();
+    attempt = saveTerminalSubmissionRetry(input.statePath, {
+      ...current,
+      ...fields,
+      state,
+      updated_at: at
+    }, current.revision);
+  };
+  const persistRetryLedger = (
+    fields: Record<string, unknown> = {}
+  ): TerminalDispatchLedgerDocument => {
+    const current = required(
+      mutationDispatchLedger.load(input.scopes, input.resources),
+      "terminal submission retry ledger disappeared"
+    );
+    const next = {
+      ...current,
+      ...terminalSubmissionRetryLedgerFields(attempt),
+      ...fields
+    };
+    mutationDispatchLedger.save(input.scopes, input.resources, next);
+    return next;
+  };
+  let enteredConversation: Conversation | undefined;
+  let enteredLedger: TerminalDispatchLedgerDocument | undefined;
+  await input.bridge.send(
+    "codex",
+    input.terminalControl,
+    input.requestText,
+    {
+      runtime: terminalRuntimeIdentityForConversation(
+        input.conversation,
+        input.terminalControl
+      ),
+      requireExactComposerBeforeEnter: true,
+      requireExactEmptyComposerAfterBeforeText: {
+        preliminaryComposerDigest: input.observation.digest
+      },
+      beforeText: () => {
+        const at = cliNow().toISOString();
+        saveAttempt("replacement_text_reserved", at, {
+          replacement_text_reserved_at: at
+        });
+        if (input.deferred) {
+          input.deferred.transfer = deferredForegroundApplication(
+            input.options,
+            input.deferred.boundary.terminal
+          ).advanceSubmissionRetry({
+            scope: input.deferred.scope,
+            boundary: deferredForegroundBoundaryProjection(
+              input.deferred.boundary
+            ),
+            attemptId: currentAttempt().attempt_id,
+            messageId: currentAttempt().active_message_id,
+            stage: "text_reserved",
+            at
+          });
+        }
+        persistRetryLedger();
+      },
+      beforeEnter: () => {
+        const at = cliNow().toISOString();
+        saveAttempt("enter_reserved", at, { enter_reserved_at: at });
+        if (input.deferred) {
+          input.deferred.transfer = deferredForegroundApplication(
+            input.options,
+            input.deferred.boundary.terminal
+          ).advanceSubmissionRetry({
+            scope: input.deferred.scope,
+            boundary: deferredForegroundBoundaryProjection(
+              input.deferred.boundary
+            ),
+            attemptId: currentAttempt().attempt_id,
+            messageId: currentAttempt().active_message_id,
+            stage: "enter_reserved",
+            at
+          });
+        }
+        persistRetryLedger();
+      },
+      onTransportStage: ({ stage }) => {
+        const at = cliNow().toISOString();
+        if (stage === "text_injected") {
+          saveAttempt("replacement_text_injected", at, {
+            replacement_text_injected_at: at
+          });
+        } else {
+          saveAttempt("enter_dispatched", at, {
+            enter_dispatched_at: at
+          });
+        }
+        if (input.deferred) {
+          input.deferred.transfer = deferredForegroundApplication(
+            input.options,
+            input.deferred.boundary.terminal
+          ).advanceSubmissionRetry({
+            scope: input.deferred.scope,
+            boundary: deferredForegroundBoundaryProjection(
+              input.deferred.boundary
+            ),
+            attemptId: currentAttempt().attempt_id,
+            messageId: currentAttempt().active_message_id,
+            stage,
+            at
+          });
+        }
+        if (stage === "text_injected") {
+          persistRetryLedger();
+          return;
+        }
+        const current = loadState(input.statePath);
+        const submission = required(
+          terminalBridgeSubmission(current),
+          "terminal submission receipt disappeared after replacement Enter"
+        );
+        enteredConversation = withTerminalBridgeSubmission({
+          conversation: withTerminalSubmissionRetryMonitorEpoch(
+            terminalSubmissionRetryUnstalled(current),
+            at
+          ),
+          messageId: input.originalMessageId,
+          messageType: terminalSubmissionRetryMessageType(submission),
+          requestText: input.requestText,
+          status: "enter_dispatched",
+          preparedAt: required(
+            stringValue(submission.prepared_at),
+            "terminal submission retry prepared timestamp is unavailable"
+          ),
+          textInjectedAt: currentAttempt().replacement_text_injected_at as string,
+          enterDispatchedAt: at,
+          lastProvenStage: "enter_dispatched"
+        });
+        saveState(input.statePath, enteredConversation);
+        enteredLedger = persistRetryLedger({
+          status: "enter_dispatched",
+          text_injected_at: currentAttempt().replacement_text_injected_at,
+          enter_dispatched_at: at,
+          enter_not_attempted_at: undefined,
+          enter_not_attempted_reason: undefined,
+          uncertain_at: undefined,
+          safe_to_retry: undefined,
+          acceptance_evidence: undefined,
+          agent_accepted_at: undefined,
+          not_accepted_at: undefined,
+          dispatcher_pid: null
+        });
+        appendEvent(input.logPath, {
+          ts: at,
+          conversation_id: enteredConversation.conversation_id,
+          event: "terminal_submission_retry_enter_dispatched",
+          message_id: input.originalMessageId,
+          terminal_input_sent: true
+        });
+      }
+    }
+  );
+  if (
+    currentAttempt().state !== "enter_dispatched" ||
+    !enteredConversation || !enteredLedger
+  ) {
+    throw new Error(
+      "replacement transport returned without durable Enter evidence"
+    );
+  }
+  if (input.deferred) {
+    const transfer = input.deferred.scope.loadTransfer(
+      input.deferred.transfer.transfer_id
+    );
+    const recovered = await deferredRecoveryAdapter
+      .recoverAcceptedDeferredForegroundDispatch(
+        deferredForegroundRecoveryAdapterPorts(),
+        {
+          options: input.options,
+          scope: input.deferred.scope,
+          storeDir: input.storeDir,
+          terminal: input.deferred.boundary.terminal,
+          transfer,
+          boundary: input.deferred.boundary
+        }
+    );
+    if (recovered) {
+      const finalized = finalizeDeferredTerminalSubmissionRetryAccepted({
+        statePath: input.statePath,
+        scopes: input.scopes,
+        resources: input.resources,
+        attempt
+      });
+      attempt = required(
+        finalized.attempt,
+        "deferred replacement retry attempt disappeared after accepted finalization"
+      );
+      const acceptedConversation = finalized.conversation;
+      startTerminalBridgeMonitorForConversation({
+        conversation: acceptedConversation,
+        statePath: input.statePath,
+        logPath: input.logPath,
+        options: input.options
+      });
+      printTerminalSubmissionRetryOutcome({
+        conversation: acceptedConversation,
+        terminalControl: input.terminalControl,
+        attempt,
+        outcome: "agent_accepted",
+        terminalInputSent: true,
+        reason: "The missing deferred Codex submission was completed once and its source/target Sessions were committed."
+      });
+      return;
+    }
+  } else {
+    const timeoutMs = positiveMilliseconds(
+      input.options.terminalAcceptanceTimeoutMs ??
+        DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS,
+      "--terminal-acceptance-timeout-ms"
+    );
+    const acceptance = await input.execution.pollAcceptance({
+      executor: "codex",
+      conversation: enteredConversation,
+      terminalControl: input.terminalControl,
+      timeoutMs,
+      pollIntervalMs: Math.max(10, Math.min(
+        timeoutMs,
+        Number(input.options.terminalAcceptancePollIntervalMs ??
+          DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS)
+      )),
+      scrollbackLines: Number(input.options.scrollbackLines ?? 240)
+    });
+    if (acceptance.outcome === "agent_accepted") {
+      const repaired = terminalSubmissionRetryAccepted({
+        conversation: enteredConversation,
+        submission: required(
+          terminalBridgeSubmission(enteredConversation),
+          "terminal submission receipt disappeared after replacement acceptance"
+        ),
+        ledger: enteredLedger,
+        evidence: acceptance.evidence,
+        requestText: input.requestText,
+        at: cliNow().toISOString(),
+        statePath: input.statePath,
+        logPath: input.logPath,
+        scopes: input.scopes,
+        resources: input.resources,
+        attempt,
+        terminalInputSent: true
+      });
+      startTerminalBridgeMonitorForConversation({
+        conversation: repaired.conversation,
+        statePath: input.statePath,
+        logPath: input.logPath,
+        options: input.options
+      });
+      printTerminalSubmissionRetryOutcome({
+        conversation: repaired.conversation,
+        terminalControl: input.terminalControl,
+        attempt: repaired.attempt,
+        outcome: "agent_accepted",
+        terminalInputSent: true,
+        reason: "The missing Codex submission was completed once and native acceptance was proven."
+      });
+      return;
+    }
+    if (acceptance.outcome === "not_accepted") {
+      const notAcceptedConversation = terminalSubmissionRetryTerminalOutcome({
+        conversation: enteredConversation,
+        submission: required(
+          terminalBridgeSubmission(enteredConversation),
+          "terminal submission receipt disappeared after replacement rejection"
+        ),
+        ledger: enteredLedger,
+        requestText: input.requestText,
+        reason: acceptance.reason,
+        at: cliNow().toISOString(),
+        statePath: input.statePath,
+        logPath: input.logPath,
+        scopes: input.scopes,
+        resources: input.resources,
+        attempt,
+        outcome: "not_accepted"
+      });
+      printTerminalSubmissionRetryOutcome({
+        conversation: notAcceptedConversation,
+        terminalControl: input.terminalControl,
+        attempt,
+        outcome: "not_accepted",
+        terminalInputSent: true,
+        reason: "The replacement text remains in the Codex composer after one Enter; it was not accepted and another retry is forbidden."
+      });
+      return;
+    }
+    if (acceptance.outcome === "uncertain") {
+      const uncertainConversation = terminalSubmissionRetryTerminalOutcome({
+        conversation: enteredConversation,
+        submission: required(
+          terminalBridgeSubmission(enteredConversation),
+          "terminal submission receipt disappeared after uncertain replacement acceptance"
+        ),
+        ledger: enteredLedger,
+        requestText: input.requestText,
+        reason: acceptance.reason,
+        at: cliNow().toISOString(),
+        statePath: input.statePath,
+        logPath: input.logPath,
+        scopes: input.scopes,
+        resources: input.resources,
+        attempt,
+        outcome: "uncertain"
+      });
+      printTerminalSubmissionRetryOutcome({
+        conversation: uncertainConversation,
+        terminalControl: input.terminalControl,
+        attempt,
+        outcome: "refused",
+        terminalInputSent: true,
+        reason: `Replacement acceptance is uncertain (${acceptance.reason}); another retry is forbidden.`
+      });
+      return;
+    }
+  }
+  startTerminalBridgeMonitorForConversation({
+    conversation: enteredConversation,
+    statePath: input.statePath,
+    logPath: input.logPath,
+    options: input.options
+  });
+  printTerminalSubmissionRetryOutcome({
+    conversation: enteredConversation,
+    terminalControl: input.terminalControl,
+    attempt,
+    outcome: "enter_dispatched",
+    terminalInputSent: true,
+    reason: "The missing Codex submission received one text injection and one Enter; acceptance remains pending and another retry is forbidden."
+  });
+}
+
 async function runSend(options) {
+  if (options.respond !== true && stringValue(options.turn)) {
+    return runTerminalSubmissionRetry(options);
+  }
   const messageBody = required(options.message ?? options.request, "--message is required");
   // Ordinary send/respond owns Turn creation only. Reject native lifecycle
   // slash commands before resolving or mutating any Session/Turn state so a
@@ -4701,8 +7421,7 @@ function createTerminalDispatchRuntime(
     status: "prepared",
     preparedAt: bridgeStartedAt
   });
-  const previousGenerationId =
-    stringValue(previousDispatchLedger?.generation_id) ??
+  const previousGenerationId = stringValue(previousDispatchLedger?.generation_id) ??
     stringValue(previousDispatchLedger?.message_id);
   const progress: TerminalDispatchProgress = {
     stagedConversation: preparedConversation
@@ -4851,32 +7570,32 @@ function terminalDispatchTransportLifecycle({
                 requireEmptyComposer
               }),
             begin: (at) => deferredForegroundApplication(
-              options,
-              deferredCodexForegroundBinding.terminal
-            ).begin({
-              scope: required(
-                deferredForegroundScope,
-                "deferred foreground mutation scope is unavailable"
-              ),
-              boundary: deferredForegroundBoundaryProjection(
-                deferredCodexForegroundBinding
-              ),
-              at
-            }),
+                  options,
+                  deferredCodexForegroundBinding.terminal
+                ).begin({
+                  scope: required(
+                    deferredForegroundScope,
+                    "deferred foreground mutation scope is unavailable"
+                  ),
+                  boundary: deferredForegroundBoundaryProjection(
+                    deferredCodexForegroundBinding
+                  ),
+                  at
+                }),
             advance: (stage, at) => deferredForegroundApplication(
-              options,
-              deferredCodexForegroundBinding.terminal
-            ).advance({
-              scope: required(
-                deferredForegroundScope,
-                "deferred foreground mutation scope is unavailable"
-              ),
-              boundary: deferredForegroundBoundaryProjection(
-                deferredCodexForegroundBinding
-              ),
-              stage,
-              at
-            })
+                    options,
+                    deferredCodexForegroundBinding.terminal
+                  ).advance({
+                    scope: required(
+                      deferredForegroundScope,
+                      "deferred foreground mutation scope is unavailable"
+                    ),
+                    boundary: deferredForegroundBoundaryProjection(
+                      deferredCodexForegroundBinding
+                    ),
+                    stage,
+                    at
+                  })
           }
         }
       : {}),
@@ -5040,7 +7759,14 @@ function presentTerminalDispatchTransportFailure({
   }
   const uncertainConversation = application.applyUncertain(
     uncertainAt,
-    error
+    error,
+    progress.textInjectedAt && !progress.enterDispatchedAt &&
+      error instanceof TerminalEnterDispatchNotAttemptedError
+      ? {
+          enterNotAttemptedAt: uncertainAt,
+          enterNotAttemptedReason: "pre_key_failure"
+        }
+      : {}
   );
   const stalledConversationIds =
     stallOtherTerminalBridgeConversationsForUncertainDispatch({

@@ -456,7 +456,9 @@ export async function executeCliCommand(
 }
 
 async function dispatchCliCommand(commandName, options) {
-  await terminalListCliFacade.resolveConversationSelectorOption(commandName, options);
+  if (!(commandName === "send" && options.turn)) {
+    await terminalListCliFacade.resolveConversationSelectorOption(commandName, options);
+  }
   preflightStoreWriter(commandName, options);
   if (commandName === "help" || commandName === "--help" || commandName === "-h") {
     usage();

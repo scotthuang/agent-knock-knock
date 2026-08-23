@@ -62,6 +62,11 @@ export interface TerminalMonitorStateReconciliationPorts {
       listed: Conversation,
       paths: TerminalMonitorStatePaths
     ): Promise<Conversation>;
+    recoverSubmissionRetry(
+      storeDir: string,
+      conversation: Conversation,
+      paths: TerminalMonitorStatePaths
+    ): Promise<Conversation>;
     recoverDeferred(
       storeDir: string,
       conversation: Conversation,
@@ -141,6 +146,11 @@ export async function reconcileTerminalMonitorStateCandidate(input: {
     input.listed,
     input.paths
   );
+  conversation = await input.ports.authority.recoverSubmissionRetry(
+    input.storeDir,
+    conversation,
+    input.paths
+  );
   const dead = await input.ports.completion.verifiedDead({
     storeDir: input.storeDir,
     paths: input.paths,
@@ -152,6 +162,14 @@ export async function reconcileTerminalMonitorStateCandidate(input: {
   }
 
   conversation = await input.ports.authority.recoverDeferred(
+    input.storeDir,
+    conversation,
+    input.paths
+  );
+  // A deferred recovery may be the operation that durably commits native
+  // acceptance. Re-run the zero-input retry reconciler so a crash-lagging
+  // retry sidecar/ledger can converge only after that transfer is resolved.
+  conversation = await input.ports.authority.recoverSubmissionRetry(
     input.storeDir,
     conversation,
     input.paths

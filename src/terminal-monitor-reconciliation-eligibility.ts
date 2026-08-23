@@ -3,7 +3,14 @@ import {
   callbackRouteFingerprintForConversation,
   callbackRouteFingerprintFromRecord
 } from "./callback-route-authority.js";
-import type { DeferredForegroundTransfer } from "./deferred-foreground-transfer.js";
+import {
+  deferredForegroundActiveEnterDispatchedAt,
+  deferredForegroundActiveMessageId,
+  deferredForegroundActivePreparedAt,
+  deferredForegroundActiveTextInjectedAt,
+  isDeferredForegroundSubmissionRetryPending,
+  type DeferredForegroundTransfer
+} from "./deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from
   "./deferred-foreground-transfer-policy.js";
 import {
@@ -86,40 +93,26 @@ export function* terminalMonitorReconciliationEligibility(
   const dispatchStore = expectObservation("store", yield { kind: "store" });
   const bindingId = nonBlankString(conversation.terminal_binding_id);
   const bindingGeneration = Number(conversation.terminal_binding_generation);
-  if (
-    !ledger ||
-    nonBlankString(ledger.message_id) !== terminalMessageId ||
-    !terminalControlEvidenceMatches(
-      ledger.terminal_endpoint !== undefined
-        ? ledger.terminal_endpoint
-        : ledger.terminal_control,
-      terminalControl
-    ) ||
-    nonBlankString(ledger.conversation_id) !== conversation.conversation_id ||
-    nonBlankString(ledger.session_id) !== sessionIdForConversation(conversation) ||
-    nonBlankString(ledger.turn_id) !== turnIdForConversation(conversation) ||
-    !statePath || !sameCanonicalStatePath(ledger.state_path, statePath) ||
-    !dispatchStore.storeDir ||
-    path.resolve(nonBlankString(ledger.store_dir) ?? "") !==
-      path.resolve(dispatchStore.storeDir) ||
-    (bindingId !== undefined && nonBlankString(ledger.binding_id) !== bindingId) ||
-    (Number.isSafeInteger(bindingGeneration) &&
-      Number(ledger.binding_generation) !== bindingGeneration) ||
-    !["prepared", "text_injected", "enter_dispatched", "agent_accepted", "submitted"]
-      .includes(String(ledger.status))
-  ) {
-    return ineligible(
-      `terminal_dispatch_${String(
-        ledger?.status ?? "missing_or_generation_replaced"
-      )}`
-    );
+  const dispatchReason = terminalDispatchIneligibilityReason({
+    bindingGeneration,
+    bindingId,
+    conversation,
+    ledger,
+    statePath,
+    storeDir: dispatchStore.storeDir,
+    terminalControl,
+    terminalMessageId
+  });
+  if (dispatchReason) {
+    return ineligible(dispatchReason);
   }
+  const eligibleLedger = ledger as JsonRecord;
 
   const submission = terminalBridgeSubmission(conversation);
   if (!callbackRouteAuthorityEligible({
     conversation,
     submission,
-    ledger,
+    ledger: eligibleLedger,
     terminalMessageId
   })) {
     return ineligible("terminal_dispatch_callback_route_authority_mismatch");
@@ -136,8 +129,7 @@ export function* terminalMonitorReconciliationEligibility(
     "runtime", yield { kind: "runtime", terminalControl }
   );
   const runtime = runtimeObservation.runtime;
-  if (!Number.isInteger(runtime.pid) || Number(runtime.pid) <= 0 ||
-    !nonBlankString(runtime.cwd)) {
+  if (!validTerminalRuntimeIdentity(runtime)) {
     return ineligible("terminal_agent_identity_missing");
   }
 
@@ -148,20 +140,152 @@ export function* terminalMonitorReconciliationEligibility(
       kind: "deferred", storeDir: deferredStore.storeDir, transferId
     });
     const transfer = deferred.transfer;
-    if (!isFinalDeferredForegroundTransferStatus(transfer.status) && (
-      validateCodexRolloutAcceptanceAnchor(
-        nativeTakeover.codex_rollout_acceptance_anchor
-      )?.version !== 3 ||
-      transfer.status !== "dispatch_started" ||
-      submission?.status !== "enter_dispatched" ||
-      transfer.turn_id !== turnIdForConversation(conversation) ||
-      transfer.message_id !== terminalMessageId ||
-      transfer.target_session_id !== sessionIdForConversation(conversation)
-    )) {
+    if (!deferredForegroundMonitorEligible({
+      conversation,
+      ledger: eligibleLedger,
+      nativeTakeover,
+      submission,
+      terminalMessageId,
+      transfer
+    })) {
       return ineligible(`deferred_foreground_transfer_${transfer.status}`);
     }
   }
 
+  const deadlineMetadata = terminalMonitorDeadlineMetadata(nativeTakeover);
+  if (!deadlineMetadata) {
+    return ineligible("terminal_bridge_deadline_metadata_missing");
+  }
+  return {
+    eligible: true,
+    nativeTakeover,
+    terminalMessageId,
+    terminalControl,
+    runtime,
+    ...deadlineMetadata
+  };
+}
+
+function terminalDispatchIneligibilityReason(input: {
+  bindingGeneration: number;
+  bindingId?: string;
+  conversation: Conversation;
+  ledger?: JsonRecord;
+  statePath?: string;
+  storeDir?: string;
+  terminalControl: TerminalControlRef;
+  terminalMessageId: string;
+}): string | undefined {
+  const ledger = input.ledger;
+  const eligible = Boolean(
+    ledger &&
+    nonBlankString(ledger.message_id) === input.terminalMessageId &&
+    terminalControlEvidenceMatches(
+      ledger.terminal_endpoint !== undefined
+        ? ledger.terminal_endpoint
+        : ledger.terminal_control,
+      input.terminalControl
+    ) &&
+    nonBlankString(ledger.conversation_id) === input.conversation.conversation_id &&
+    nonBlankString(ledger.session_id) ===
+      sessionIdForConversation(input.conversation) &&
+    nonBlankString(ledger.turn_id) === turnIdForConversation(input.conversation) &&
+    input.statePath &&
+    sameCanonicalStatePath(ledger.state_path, input.statePath) &&
+    input.storeDir &&
+    path.resolve(nonBlankString(ledger.store_dir) ?? "") ===
+      path.resolve(input.storeDir) &&
+    (
+      input.bindingId === undefined ||
+      nonBlankString(ledger.binding_id) === input.bindingId
+    ) &&
+    (
+      !Number.isSafeInteger(input.bindingGeneration) ||
+      Number(ledger.binding_generation) === input.bindingGeneration
+    ) &&
+    ["prepared", "text_injected", "enter_dispatched", "agent_accepted", "submitted"]
+      .includes(String(ledger.status))
+  );
+  return eligible
+    ? undefined
+    : `terminal_dispatch_${String(
+      ledger?.status ?? "missing_or_generation_replaced"
+    )}`;
+}
+
+function validTerminalRuntimeIdentity(runtime: TerminalRuntimeIdentity): boolean {
+  return Number.isInteger(runtime.pid) && Number(runtime.pid) > 0 &&
+    Boolean(nonBlankString(runtime.cwd));
+}
+
+function deferredForegroundMonitorEligible(input: {
+  conversation: Conversation;
+  ledger: JsonRecord;
+  nativeTakeover: JsonRecord;
+  submission?: JsonRecord;
+  terminalMessageId: string;
+  transfer: DeferredForegroundTransfer;
+}): boolean {
+  if (isFinalDeferredForegroundTransferStatus(input.transfer.status)) {
+    return true;
+  }
+  return validateCodexRolloutAcceptanceAnchor(
+    input.nativeTakeover.codex_rollout_acceptance_anchor
+  )?.version === 3 &&
+    input.submission?.status === "enter_dispatched" &&
+    input.transfer.turn_id === turnIdForConversation(input.conversation) &&
+    input.transfer.target_session_id ===
+      sessionIdForConversation(input.conversation) &&
+    (
+      input.transfer.status === "dispatch_started" &&
+        input.transfer.message_id === input.terminalMessageId ||
+      deferredForegroundRetryMonitorEligible(input)
+    );
+}
+
+function deferredForegroundRetryMonitorEligible(input: {
+  ledger: JsonRecord;
+  submission?: JsonRecord;
+  terminalMessageId: string;
+  transfer: DeferredForegroundTransfer;
+}): boolean {
+  const activeMessageId = deferredForegroundActiveMessageId(input.transfer);
+  return isDeferredForegroundSubmissionRetryPending(input.transfer) &&
+    activeMessageId === input.terminalMessageId &&
+    nonBlankString(input.submission?.message_id) === activeMessageId &&
+    nonBlankString(input.submission?.prepared_at) ===
+      deferredForegroundActivePreparedAt(input.transfer) &&
+    nonBlankString(input.submission?.text_injected_at) ===
+      deferredForegroundActiveTextInjectedAt(input.transfer) &&
+    nonBlankString(input.submission?.enter_dispatched_at) ===
+      deferredForegroundActiveEnterDispatchedAt(input.transfer) &&
+    nonBlankString(input.ledger.message_id) === activeMessageId &&
+    nonBlankString(input.ledger.prepared_at) ===
+      deferredForegroundActivePreparedAt(input.transfer) &&
+    nonBlankString(input.ledger.text_injected_at) ===
+      deferredForegroundActiveTextInjectedAt(input.transfer) &&
+    nonBlankString(input.ledger.enter_dispatched_at) ===
+      deferredForegroundActiveEnterDispatchedAt(input.transfer) &&
+    nonBlankString(input.ledger.submission_retry_attempt_id) ===
+      input.transfer.submission_retry_attempt_id &&
+    nonBlankString(input.ledger.submission_retry_mode) ===
+      input.transfer.submission_retry_mode &&
+    nonBlankString(input.ledger.submission_retry_original_message_id) ===
+      input.transfer.message_id &&
+    nonBlankString(input.ledger.submission_retry_active_message_id) ===
+      input.transfer.submission_retry_message_id &&
+    input.ledger.submission_retry_state === "enter_dispatched";
+}
+
+function terminalMonitorDeadlineMetadata(
+  nativeTakeover: JsonRecord
+): Pick<
+  Extract<TerminalMonitorEligibility, { eligible: true }>,
+  | "inactivityTimeoutMinutes"
+  | "hardTimeoutMinutes"
+  | "inactivityDeadlineAtMs"
+  | "hardDeadlineAtMs"
+> | undefined {
   const inactivityTimeoutMinutes = Number(
     nativeTakeover.terminal_bridge_inactivity_timeout_minutes
   );
@@ -182,14 +306,9 @@ export function* terminalMonitorReconciliationEligibility(
     inactivityDeadlineAtMs === undefined ||
     hardDeadlineAtMs === undefined
   ) {
-    return ineligible("terminal_bridge_deadline_metadata_missing");
+    return undefined;
   }
   return {
-    eligible: true,
-    nativeTakeover,
-    terminalMessageId,
-    terminalControl,
-    runtime,
     inactivityTimeoutMinutes,
     hardTimeoutMinutes,
     inactivityDeadlineAtMs,

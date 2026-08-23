@@ -123,6 +123,14 @@ export interface DeferredForegroundTransfer {
   enter_dispatched_at?: string;
   agent_accepted_at?: string;
   message_id?: string;
+  submission_retry_attempt_id?: string;
+  submission_retry_mode?: "exact_draft_enter" | "replacement_send";
+  submission_retry_message_id?: string;
+  submission_retry_prepared_at?: string;
+  submission_retry_text_reserved_at?: string;
+  submission_retry_text_injected_at?: string;
+  submission_retry_enter_reserved_at?: string;
+  submission_retry_enter_dispatched_at?: string;
   turn_id?: string;
   state_path?: string;
   target_native_thread_id?: string;
@@ -166,6 +174,54 @@ export interface DeferredForegroundTransfer {
 export interface DeferredForegroundTransferSaveOptions {
   /** `null` means create-only; a number is the exact revision to replace. */
   expectedRevision: number | null;
+}
+
+export function deferredForegroundActiveMessageId(
+  transfer: DeferredForegroundTransfer
+): string | undefined {
+  return transfer.submission_retry_message_id ?? transfer.message_id;
+}
+
+export function deferredForegroundActivePreparedAt(
+  transfer: DeferredForegroundTransfer
+): string {
+  return transfer.submission_retry_prepared_at ?? transfer.prepared_at;
+}
+
+export function isDeferredForegroundSubmissionRetryPending(
+  transfer: DeferredForegroundTransfer
+): boolean {
+  const common = transfer.status === "uncertain" &&
+    transfer.input_stage === "enter_dispatched" &&
+    Boolean(transfer.submission_retry_attempt_id) &&
+    Boolean(transfer.submission_retry_mode) &&
+    Boolean(transfer.submission_retry_message_id) &&
+    Boolean(transfer.submission_retry_prepared_at) &&
+    Boolean(transfer.submission_retry_enter_reserved_at) &&
+    Boolean(transfer.submission_retry_enter_dispatched_at) &&
+    deferredForegroundActiveMessageId(transfer) ===
+      transfer.submission_retry_message_id;
+  return common && (transfer.submission_retry_mode === "exact_draft_enter"
+    ? transfer.submission_retry_message_id === transfer.message_id &&
+      transfer.submission_retry_text_reserved_at === undefined &&
+      transfer.submission_retry_text_injected_at === undefined &&
+      Boolean(transfer.text_injected_at)
+    : Boolean(transfer.submission_retry_text_reserved_at) &&
+      Boolean(transfer.submission_retry_text_injected_at));
+}
+
+export function deferredForegroundActiveTextInjectedAt(
+  transfer: DeferredForegroundTransfer
+): string | undefined {
+  return transfer.submission_retry_text_injected_at ??
+    transfer.text_injected_at;
+}
+
+export function deferredForegroundActiveEnterDispatchedAt(
+  transfer: DeferredForegroundTransfer
+): string | undefined {
+  return transfer.submission_retry_enter_dispatched_at ??
+    transfer.enter_dispatched_at;
 }
 
 export class DeferredForegroundTransferConflictError extends Error {
@@ -283,6 +339,14 @@ function assertDeferredForegroundTransferHeader(
     "enter_dispatched_at",
     "agent_accepted_at",
     "message_id",
+    "submission_retry_attempt_id",
+    "submission_retry_mode",
+    "submission_retry_message_id",
+    "submission_retry_prepared_at",
+    "submission_retry_text_reserved_at",
+    "submission_retry_text_injected_at",
+    "submission_retry_enter_reserved_at",
+    "submission_retry_enter_dispatched_at",
     "turn_id",
     "state_path",
     "target_native_thread_id",
@@ -624,6 +688,31 @@ function assertDeferredForegroundTransferTarget(
     assertOptionalTimestamp(value[field], `deferred transfer ${field}`);
   }
   assertOptionalNonEmptyString(value.message_id, "deferred transfer message_id");
+  assertOptionalNonEmptyString(
+    value.submission_retry_attempt_id,
+    "deferred transfer submission retry attempt id"
+  );
+  if (
+    value.submission_retry_mode !== undefined &&
+    !["exact_draft_enter", "replacement_send"].includes(
+      value.submission_retry_mode
+    )
+  ) {
+    throw new Error("deferred transfer submission retry mode is invalid");
+  }
+  assertOptionalNonEmptyString(
+    value.submission_retry_message_id,
+    "deferred transfer submission retry message id"
+  );
+  for (const field of [
+    "submission_retry_prepared_at",
+    "submission_retry_text_reserved_at",
+    "submission_retry_text_injected_at",
+    "submission_retry_enter_reserved_at",
+    "submission_retry_enter_dispatched_at"
+  ] as const) {
+    assertOptionalTimestamp(value[field], `deferred transfer ${field}`);
+  }
   assertOptionalNonEmptyString(value.turn_id, "deferred transfer turn_id");
   if (value.state_path !== undefined) {
     assertAbsolutePath(value.state_path, "deferred transfer state_path");
@@ -751,8 +840,61 @@ function assertDeferredForegroundTransferDispatch(
       `${String(value.status)} deferred transfer requires exact no-input proof`
     );
   }
+  assertDeferredForegroundSubmissionRetryEvidence(value);
   assertTimestampOrder(value as unknown as DeferredForegroundTransfer);
   return provedTerminalInputNotStarted;
+}
+
+function assertDeferredForegroundSubmissionRetryEvidence(
+  value: DeferredForegroundTransfer
+): void {
+  const retryFields = [
+    value.submission_retry_attempt_id,
+    value.submission_retry_mode,
+    value.submission_retry_message_id,
+    value.submission_retry_prepared_at
+  ];
+  const hasAny = retryFields.some((field) => field !== undefined) || [
+    value.submission_retry_text_reserved_at,
+    value.submission_retry_text_injected_at,
+    value.submission_retry_enter_reserved_at,
+    value.submission_retry_enter_dispatched_at
+  ].some((field) => field !== undefined);
+  if (!hasAny) return;
+  const hasCommon = retryFields.every((field) => field !== undefined);
+  const replacement = value.submission_retry_mode === "replacement_send";
+  const exactDraft = value.submission_retry_mode === "exact_draft_enter";
+  const replacementPrefixIsContinuous =
+    value.submission_retry_text_injected_at === undefined ||
+      value.submission_retry_text_reserved_at !== undefined;
+  const enterPrefixIsContinuous =
+    value.submission_retry_enter_reserved_at === undefined ||
+      exactDraft || value.submission_retry_text_injected_at !== undefined;
+  const dispatchPrefixIsContinuous =
+    value.submission_retry_enter_dispatched_at === undefined ||
+      value.submission_retry_enter_reserved_at !== undefined;
+  if (
+    !hasCommon ||
+    !value.uncertain_at ||
+    (!replacement && !exactDraft) ||
+    value.submission_retry_message_id !== value.message_id ||
+    value.submission_retry_prepared_at !== value.prepared_at ||
+    (exactDraft && (
+      value.submission_retry_text_reserved_at !== undefined ||
+      value.submission_retry_text_injected_at !== undefined
+    )) ||
+    !replacementPrefixIsContinuous ||
+    !enterPrefixIsContinuous ||
+    !dispatchPrefixIsContinuous ||
+    (value.input_stage === "enter_dispatched" &&
+      value.submission_retry_enter_dispatched_at === undefined) ||
+    (value.submission_retry_enter_dispatched_at !== undefined &&
+      !["enter_dispatched", "agent_accepted"].includes(value.input_stage))
+  ) {
+    throw new Error(
+      "deferred foreground submission retry stage evidence is inconsistent"
+    );
+  }
 }
 
 function assertDeferredForegroundTransferCommit(
@@ -1275,7 +1417,7 @@ function assertTransferAdvance(
     resolved: [],
     aborted: ["abort_resolved"],
     abort_resolved: [],
-    uncertain: ["committed"]
+    uncertain: ["uncertain", "committed"]
   };
   if (!allowed[current.status].includes(candidate.status)) {
     throw new Error(
@@ -1298,6 +1440,25 @@ function assertTransferAdvance(
     "message_id",
     "turn_id",
     "state_path"
+  ] as const) {
+    if (
+      current[field] !== undefined &&
+      JSON.stringify(current[field]) !== JSON.stringify(candidate[field])
+    ) {
+      throw new Error(
+        `deferred foreground transfer ${current.transfer_id} cannot change ${field}`
+      );
+    }
+  }
+  for (const field of [
+    "submission_retry_attempt_id",
+    "submission_retry_mode",
+    "submission_retry_message_id",
+    "submission_retry_prepared_at",
+    "submission_retry_text_reserved_at",
+    "submission_retry_text_injected_at",
+    "submission_retry_enter_reserved_at",
+    "submission_retry_enter_dispatched_at"
   ] as const) {
     if (
       current[field] !== undefined &&
@@ -1370,6 +1531,49 @@ function assertTransferAdvance(
   ) {
     throw new Error("deferred foreground transfer cannot abort after input may start");
   }
+  if (
+    current.submission_retry_attempt_id === undefined &&
+    candidate.submission_retry_attempt_id !== undefined &&
+    (
+      current.status !== "uncertain" ||
+      candidate.status !== "uncertain" ||
+      current.input_stage !== "text_injected" ||
+      !candidate.submission_retry_mode ||
+      !candidate.submission_retry_message_id ||
+      !candidate.submission_retry_prepared_at
+    )
+  ) {
+    throw new Error(
+      "deferred foreground submission retry requires uncertain/text_injected authority"
+    );
+  }
+  if (
+    candidate.submission_retry_attempt_id !== undefined &&
+    (
+      !candidate.submission_retry_message_id ||
+      !candidate.submission_retry_prepared_at ||
+      !candidate.submission_retry_mode ||
+      !candidate.uncertain_at ||
+      candidate.submission_retry_message_id !== candidate.message_id ||
+      candidate.submission_retry_prepared_at !== candidate.prepared_at ||
+      (candidate.submission_retry_mode === "replacement_send"
+        ? (candidate.submission_retry_text_injected_at !== undefined &&
+            !candidate.submission_retry_text_reserved_at) ||
+          (candidate.submission_retry_enter_reserved_at !== undefined &&
+            !candidate.submission_retry_text_injected_at)
+        : candidate.submission_retry_message_id !== candidate.message_id ||
+          candidate.submission_retry_text_reserved_at !== undefined ||
+          candidate.submission_retry_text_injected_at !== undefined) ||
+      (candidate.submission_retry_enter_dispatched_at !== undefined &&
+        (!candidate.submission_retry_enter_reserved_at ||
+          (candidate.input_stage !== "enter_dispatched" &&
+            candidate.input_stage !== "agent_accepted")))
+    )
+  ) {
+    throw new Error(
+      "deferred foreground submission retry stage evidence is inconsistent"
+    );
+  }
 }
 
 function bindingIsMonotonicTargetRefinement(
@@ -1438,6 +1642,15 @@ function assertTimestampOrder(value: DeferredForegroundTransfer): void {
     value.agent_accepted_at
   ].filter((candidate): candidate is string => candidate !== undefined);
   assertMonotonicTimestamps(inputTimeline);
+  if (value.submission_retry_attempt_id) {
+    assertMonotonicTimestamps([
+      value.uncertain_at,
+      value.submission_retry_text_reserved_at,
+      value.submission_retry_text_injected_at,
+      value.submission_retry_enter_reserved_at,
+      value.submission_retry_enter_dispatched_at
+    ].filter((candidate): candidate is string => candidate !== undefined));
+  }
   const latestInputEvidence = inputTimeline[inputTimeline.length - 1];
   if (value.aborted_at) {
     assertTimestampNotBefore(value.aborted_at, latestInputEvidence);
@@ -1462,8 +1675,9 @@ function assertTimestampOrder(value: DeferredForegroundTransfer): void {
     // Recovery may prove acceptance after uncertainty was recorded, so the
     // uncertainty timestamp is ordered after the evidence known at its own
     // stage, not unconditionally after a later agent_accepted_at.
-    const latestPossibleDispatch = value.enter_dispatched_at ??
-      value.text_injected_at ?? value.dispatch_started_at ??
+    const latestPossibleDispatch = value.submission_retry_attempt_id
+      ? value.text_injected_at ?? value.dispatch_started_at
+      : value.enter_dispatched_at ?? value.text_injected_at ?? value.dispatch_started_at ??
       value.target_prepared_at ?? value.source_reserved_at ?? value.prepared_at;
     assertTimestampNotBefore(value.uncertain_at, latestPossibleDispatch);
     if (value.status === "uncertain" && value.input_stage === "agent_accepted") {

@@ -3,9 +3,34 @@ import { EXECUTOR_KINDS } from "./executors.js";
 export const sendParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["request"],
+  oneOf: [
+    {
+      required: ["request"],
+      not: { required: ["turn_id"] }
+    },
+    {
+      required: ["turn_id"],
+      not: {
+        anyOf: [
+          { required: ["request"] },
+          { required: ["session_id"] },
+          { required: ["terminal_id"] },
+          { required: ["type"] },
+          { required: ["idleTimeoutMinutes"] },
+          { required: ["agentTimeoutMinutes"] },
+          { required: ["agentHardTimeoutMinutes"] }
+        ]
+      }
+    }
+  ],
   not: { required: ["session_id", "terminal_id"] },
   properties: {
+    turn_id: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Exact authoritative Turn id only from a current available_actions.retry_submission action. This retry form is exactly {turn_id}: the caller never supplies request text, terminal or Session target, timeout override, or callback route. AKK may use only the immutable original request, and only after revalidating the durable submission and live composer under lock."
+    },
     session_id: {
       type: "string",
       minLength: 1,

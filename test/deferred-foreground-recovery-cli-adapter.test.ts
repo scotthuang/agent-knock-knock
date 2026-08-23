@@ -80,6 +80,7 @@ function createFixture(input: {
   kind: RecoveryKind;
   routed: boolean;
   ledgerAuthority?: string | null;
+  plannedRetry?: boolean;
 }): Fixture {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-deferred-route-"));
   const storeDir = path.join(root, "store");
@@ -139,7 +140,7 @@ function createFixture(input: {
     : {};
   const messageBodyHash = createHash("sha256").update(requestBody).digest("hex");
   const submission = {
-    status: "enter_dispatched",
+    status: input.plannedRetry ? "uncertain" : "enter_dispatched",
     session_id: targetSessionId,
     turn_id: turnId,
     message_id: messageId,
@@ -152,8 +153,13 @@ function createFixture(input: {
     store_dir: storeDir,
     prepared_at: T0,
     text_injected_at: T1,
-    enter_dispatched_at: T1,
-    last_proven_stage: "enter_dispatched"
+    ...(input.plannedRetry ? {} : { enter_dispatched_at: T1 }),
+    ...(input.plannedRetry
+      ? {
+          uncertain_at: T1,
+          last_proven_stage: "text_injected"
+        }
+      : { last_proven_stage: "enter_dispatched" })
   };
   const conversation: Conversation = {
     ...createConversation({
@@ -163,7 +169,7 @@ function createFixture(input: {
       executorKind: "codex",
       now: new Date(T0)
     }),
-    status: "waiting_for_agent",
+    status: input.plannedRetry ? "stalled" : "waiting_for_agent",
     store_dir: storeDir,
     conversation_dir: conversationPaths.conversationDir,
     state_path: conversationPaths.statePath,
@@ -197,8 +203,8 @@ function createFixture(input: {
     schema: "agent-knock-knock/deferred-foreground-transfer",
     version: 2,
     transfer_id: transferId,
-    status: "dispatch_started",
-    input_stage: "enter_dispatched",
+    status: input.plannedRetry ? "uncertain" : "dispatch_started",
+    input_stage: input.plannedRetry ? "text_injected" : "enter_dispatched",
     terminal_id: terminalId,
     terminal_endpoint: before.terminal_endpoint!,
     process_pid: 4242,
@@ -232,7 +238,17 @@ function createFixture(input: {
     prepared_at: T0,
     dispatch_started_at: T1,
     text_injected_at: T1,
-    enter_dispatched_at: T1,
+    ...(input.plannedRetry
+      ? {
+          uncertain_at: T1,
+          error: "original Enter outcome is uncertain",
+          do_not_retry: true,
+          submission_retry_attempt_id: "retry-planned-1",
+          submission_retry_mode: "replacement_send" as const,
+          submission_retry_message_id: messageId,
+          submission_retry_prepared_at: T0
+        }
+      : { enter_dispatched_at: T1 }),
     message_id: messageId,
     turn_id: turnId,
     state_path: conversationPaths.statePath
@@ -264,7 +280,7 @@ function createFixture(input: {
   );
 
   let ledger: Record<string, unknown> = {
-    status: "enter_dispatched",
+    status: input.plannedRetry ? "uncertain" : "enter_dispatched",
     generation_id: messageId,
     conversation_id: turnId,
     session_id: targetSessionId,
@@ -282,8 +298,20 @@ function createFixture(input: {
     event_log_path: conversationPaths.logPath,
     prepared_at: T0,
     text_injected_at: T1,
-    enter_dispatched_at: T1,
-    dispatcher_pid: input.kind === "committed" ? 7331 : null,
+    ...(input.plannedRetry
+      ? {
+          uncertain_at: T1,
+          submission_retry_attempt_id: "retry-planned-1",
+          submission_retry_mode: "replacement_send",
+          submission_retry_state: "replacement_reserved",
+          submission_retry_revision: 1,
+          submission_retry_original_message_id: messageId,
+          submission_retry_active_message_id: messageId,
+          submission_retry_reserved_at: T1
+        }
+      : { enter_dispatched_at: T1 }),
+    dispatcher_pid: input.kind === "committed" ? 7331 :
+      input.plannedRetry ? 9001 : null,
     ...(input.ledgerAuthority !== undefined
       ? { callback_route_fingerprint: input.ledgerAuthority }
       : {})
@@ -534,6 +562,24 @@ test("deferred accepted recovery upgrades legacy route authority on both paths",
       );
     }
   }
+});
+
+test("planned replacement retry recovers native acceptance before any resend", async (t) => {
+  const fixture = createFixture({
+    kind: "observed",
+    routed: false,
+    plannedRetry: true
+  });
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  await executeFixture(fixture);
+
+  const accepted = terminalBridgeSubmission(loadState(fixture.statePath));
+  assert.equal(accepted?.status, "agent_accepted");
+  assert.equal(accepted?.text_injected_at, T1);
+  assert.equal(accepted?.enter_dispatched_at, undefined);
+  assert.equal(fixture.savedLedger()?.status, "agent_accepted");
+  assert.equal(fixture.savedLedger()?.enter_dispatched_at, undefined);
 });
 
 test("deferred accepted recovery rejects a route redirect before state save", async (t) => {

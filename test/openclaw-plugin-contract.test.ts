@@ -57,6 +57,13 @@ type ToolDefinition = {
   parameters?: {
     additionalProperties?: boolean;
     required?: string[];
+    oneOf?: Array<{
+      required?: string[];
+      not?: {
+        required?: string[];
+        anyOf?: Array<{ required?: string[] }>;
+      };
+    }>;
     anyOf?: Array<{ required?: string[] }>;
     allOf?: Array<{
       if?: { required?: string[] };
@@ -599,7 +606,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "4c58a5fbd06da36d11c6cfcf5e7a8a36fbf197ffe4dc2d96852fb772e82bcc21"
+    "1181b45dc0aa39a873b108b04d5ebac3eea21301d28a4f0422222f0a3b29c64f"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -1989,7 +1996,27 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
 
     assert.equal(typeof sendTool?.execute, "function");
     assert.equal(sendTool?.parameters?.additionalProperties, false);
-    assert.deepEqual(sendTool?.parameters?.required, ["request"]);
+    assert.equal(sendTool?.parameters?.required, undefined);
+    assert.deepEqual(sendTool?.parameters?.oneOf, [
+      {
+        required: ["request"],
+        not: { required: ["turn_id"] }
+      },
+      {
+        required: ["turn_id"],
+        not: {
+          anyOf: [
+            { required: ["request"] },
+            { required: ["session_id"] },
+            { required: ["terminal_id"] },
+            { required: ["type"] },
+            { required: ["idleTimeoutMinutes"] },
+            { required: ["agentTimeoutMinutes"] },
+            { required: ["agentHardTimeoutMinutes"] }
+          ]
+        }
+      }
+    ]);
     assert.deepEqual(sendTool?.parameters?.not, {
       required: ["session_id", "terminal_id"]
     });
@@ -2005,7 +2032,8 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     for (const field of [
       "session_id",
       "terminal_id",
-      "request"
+      "request",
+      "turn_id"
     ]) {
       const schema = sendTool?.parameters?.properties?.[field];
       assert.equal(
@@ -2023,6 +2051,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.match(sendTool?.description ?? "", /session_id/u);
     assert.match(sendTool?.description ?? "", /terminal_id/u);
+    assert.match(sendTool?.description ?? "", /exact \{turn_id\} form/u);
     assert.match(sendTool?.description ?? "", /freshness authority privately/u);
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {
@@ -2258,6 +2287,114 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
   } finally {
     await reconciliationService?.stop?.();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw send retry uses only the currently advertised exact Turn form", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-plugin-send-retry-")
+  );
+  const fakeCli = path.join(tempDir, "send-retry.cjs");
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const turnId = "turn-submission-uncertain";
+  let sendTool: ToolDefinition | undefined;
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      [
+        `const fs = require("node:fs");`,
+        `const args = process.argv.slice(2);`,
+        `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+        `const turnId = ${JSON.stringify(turnId)};`,
+        `const result = args[0] === "list" ? { terminals: [{`,
+        `  id: "terminal:v2:tmux:codex:retry:0.0:1234",`,
+        `  available_actions: { retry_submission: {`,
+        `    tool: "agent_knock_knock_send",`,
+        `    arguments: { turn_id: turnId },`,
+        `    requires_explicit_user_confirmation: true`,
+        `  } }`,
+        `}] } : {`,
+        `  conversation_id: turnId, session_id: "session-retry",`,
+        `  turn_id: turnId, status: "stalled",`,
+        `  submission_outcome: "pending_acceptance"`,
+        `};`,
+        `process.stdout.write(JSON.stringify(result));`
+      ].join("\n"),
+      "utf8"
+    );
+
+    (
+      createOpenClawPluginForTest(fakeCli) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: {},
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand() {},
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        if (options?.name === "agent_knock_knock_send") {
+          sendTool = typeof tool === "function"
+            ? tool({
+                sessionKey: "agent:test:retry",
+                sessionId: "openclaw-retry"
+              } as never)
+            : tool;
+        }
+      }
+    });
+
+    for (const extra of [
+      { request: "never inject replacement text" },
+      { session_id: "session-retry" },
+      { terminal_id: "terminal:v2:tmux:codex:retry:0.0:1234" },
+      { agentTimeoutMinutes: 1 },
+      { openclawSession: "caller-selected-route" }
+    ]) {
+      await assert.rejects(
+        () => sendTool!.execute!("invalid-retry-form", {
+          turn_id: turnId,
+          ...extra
+        }),
+        /retry_submission accepts exactly turn_id/u
+      );
+    }
+    await assert.rejects(
+      () => sendTool!.execute!("invalid-retry-selector", {
+        turn_id: "@deadbeef"
+      }),
+      /turn_id must be an authoritative managed id/u
+    );
+
+    const result = await sendTool?.execute?.("retry-once", {
+      turn_id: turnId
+    });
+    assert.equal(result?.details?.turn_id, turnId);
+
+    const calls = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    assert.deepEqual(calls[0], ["list", "--reconcile"]);
+    assert.deepEqual(calls[1], ["send", "--turn", turnId]);
+    for (const forbidden of [
+      "--message",
+      "--session",
+      "--conversation",
+      "--agent-timeout-minutes",
+      "--openclaw-session",
+      "--gateway-session",
+      "--gateway-method"
+    ]) {
+      assert.equal(calls[1]?.includes(forbidden), false, forbidden);
+    }
+  } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -2627,12 +2764,12 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
           : { required: ["turn_id", "conversation_id"] }
       );
     }
-    assert.equal(
-      Object.hasOwn(
-        tools.get("agent_knock_knock_send")?.parameters?.properties ?? {},
-        "turn_id"
-      ),
-      false
+    const sendTurnSchema = tools.get("agent_knock_knock_send")
+      ?.parameters?.properties?.turn_id;
+    assert.ok(sendTurnSchema);
+    assert.match(
+      String(sendTurnSchema.description ?? ""),
+      /available_actions\.retry_submission[\s\S]*exactly \{turn_id\}/u
     );
     for (const name of [
       "agent_knock_knock_status",

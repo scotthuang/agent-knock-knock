@@ -102,7 +102,7 @@ function facadeDependencies(
     authority: {} as TerminalListAuthorityPorts,
     policy: {
       approvalTtlMs: 60_000,
-      selectorCommands: new Set(["status"]),
+      selectorCommands: new Set(["status", "send"]),
       rememberOriginalExpectedTerminalSelector: () => {
         events.push(`${marker}:selector`);
       }
@@ -194,6 +194,16 @@ test("terminal list facade isolates concurrent async runtimes and exports only i
     expectedTerminalToken: "token-b"
   });
   assert.deepEqual(events.slice(-2), ["A:selector", "B:selector"]);
+
+  const retryOptions = { turn: "turn-exact-retry" };
+  const beforeRetry = [...events];
+  await facadeA.resolveConversationSelectorOption("send", retryOptions);
+  assert.deepEqual(retryOptions, { turn: "turn-exact-retry" });
+  assert.deepEqual(
+    events,
+    beforeRetry,
+    "send --turn must bypass ordinary-send selector discovery"
+  );
 });
 
 test("list promotes an exact unfinished Codex rollout over an idle-looking screen", async (t) => {

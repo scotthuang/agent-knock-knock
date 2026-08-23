@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   assertDeferredForegroundTransfer,
   DeferredForegroundTransferConflictError,
+  isDeferredForegroundSubmissionRetryPending,
   listDeferredForegroundTransfers,
   loadDeferredForegroundTransfer,
   pathsForDeferredForegroundTransfer,
@@ -836,6 +837,71 @@ test("CAS preserves a different-UUID commit and exact resolved evidence", () => 
       }),
       /revision\/status evidence is invalid/u
     );
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("submission retry evidence advances monotonically on the original deferred message", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-deferred-retry-"));
+  try {
+    for (const mode of ["exact_draft_enter", "replacement_send"] as const) {
+      const storeDir = path.join(sandbox, mode);
+      const created = saveDeferredForegroundTransfer(storeDir, prepared(), {
+        expectedRevision: null
+      });
+      const reserved = saveDeferredForegroundTransfer(storeDir, {
+        ...sourceReserved(created),
+        revision: created.revision
+      }, { expectedRevision: 1 });
+      const targetFixture = targetPrepared(reserved);
+      const target = saveDeferredForegroundTransfer(storeDir, {
+        ...targetFixture.transfer,
+        revision: reserved.revision
+      }, { expectedRevision: 2 });
+      let current = saveDeferredForegroundTransfer(storeDir, {
+        ...target,
+        status: "uncertain",
+        input_stage: "text_injected",
+        dispatch_started_at: T3,
+        text_injected_at: T4,
+        uncertain_at: T4,
+        do_not_retry: true,
+        error: "original Enter was not attempted"
+      }, { expectedRevision: 3 });
+      current = saveDeferredForegroundTransfer(storeDir, {
+        ...current,
+        submission_retry_attempt_id: `retry-${mode}`,
+        submission_retry_mode: mode,
+        submission_retry_message_id: current.message_id,
+        submission_retry_prepared_at: current.prepared_at
+      }, { expectedRevision: current.revision as number });
+      if (mode === "replacement_send") {
+        current = saveDeferredForegroundTransfer(storeDir, {
+          ...current,
+          submission_retry_text_reserved_at: T5
+        }, { expectedRevision: current.revision as number });
+        current = saveDeferredForegroundTransfer(storeDir, {
+          ...current,
+          submission_retry_text_injected_at: T6
+        }, { expectedRevision: current.revision as number });
+      }
+      current = saveDeferredForegroundTransfer(storeDir, {
+        ...current,
+        submission_retry_enter_reserved_at: T7
+      }, { expectedRevision: current.revision as number });
+      current = saveDeferredForegroundTransfer(storeDir, {
+        ...current,
+        input_stage: "enter_dispatched",
+        enter_dispatched_at: T8,
+        submission_retry_enter_dispatched_at: T8
+      }, { expectedRevision: current.revision as number });
+      assert.equal(
+        isDeferredForegroundSubmissionRetryPending(current),
+        true,
+        mode
+      );
+    }
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
