@@ -249,6 +249,40 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
   assert.equal(afterBrokenSibling.activity_state, "working");
 });
 
+test("list keeps a Codex task working and watchable beside a same-turn synthetic context row", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-durable-synthetic-context-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  for (const rootUserRowOrder of [
+    "synthetic-first",
+    "human-first"
+  ] as const) {
+    const listed = await listCodexRolloutState(
+      root,
+      "pending",
+      false,
+      rootUserRowOrder
+    );
+    assert.equal(listed.activity_state, "working", rootUserRowOrder);
+    assert.match(
+      String(listed.activity_reason),
+      /exact unfinished human-started task/u,
+      rootUserRowOrder
+    );
+    assert.ok(listed.available_actions.watch, rootUserRowOrder);
+    for (const idleInputAction of ["send", "new_thread", "native_inspect"]) {
+      assert.equal(
+        listed.available_actions[idleInputAction],
+        undefined,
+        `${rootUserRowOrder}:${idleInputAction}`
+      );
+    }
+  }
+});
+
 test("exact terminal observation keeps native facts when a Watch record is corrupt", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-watch-overlay-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -357,12 +391,16 @@ test("exact terminal observation keeps native facts when a Watch record is corru
 async function listCodexRolloutState(
   root: string,
   outcome: "pending" | "completed" | "aborted" | "malformed" | "partial",
-  includeBrokenSibling = false
+  includeBrokenSibling = false,
+  rootUserRowOrder: "human-only" | "synthetic-first" | "human-first" =
+    "human-only"
 ): Promise<Record<string, any>> {
   const fixture = await createCodexRolloutListFixture(
     root,
     outcome,
-    includeBrokenSibling
+    includeBrokenSibling,
+    {},
+    rootUserRowOrder
   );
   if (includeBrokenSibling) {
     assert.match(
@@ -384,13 +422,59 @@ async function createCodexRolloutListFixture(
   root: string,
   outcome: "pending" | "completed" | "aborted" | "malformed" | "partial",
   includeBrokenSibling = false,
-  storeOverrides: Partial<TerminalListStoreObservationPorts> = {}
+  storeOverrides: Partial<TerminalListStoreObservationPorts> = {},
+  rootUserRowOrder: "human-only" | "synthetic-first" | "human-first" =
+    "human-only"
 ) {
   const nativeThreadId = "019f0000-0000-7000-8000-000000000777";
   const nativeTurnId = "019f0000-0000-7000-8000-000000000778";
-  const workspace = path.join(root, outcome);
+  const workspace = path.join(
+    root,
+    rootUserRowOrder === "human-only"
+      ? outcome
+      : `${outcome}-${rootUserRowOrder}`
+  );
   const rolloutPath = path.join(workspace, "rollout.jsonl");
   fs.mkdirSync(workspace, { recursive: true });
+  const humanRootUserRow = {
+    timestamp: "2026-08-21T01:00:01.010Z",
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Human-started durable task" }],
+      internal_chat_message_metadata_passthrough: {
+        turn_id: nativeTurnId
+      }
+    }
+  };
+  const syntheticContextRow = {
+    timestamp: rootUserRowOrder === "synthetic-first"
+      ? "2026-08-21T01:00:01.009Z"
+      : "2026-08-21T01:00:01.012Z",
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{
+        type: "input_text",
+        text: `<environment_context>\n  <cwd>${workspace}</cwd>\n</environment_context>`
+      }],
+      internal_chat_message_metadata_passthrough: {
+        turn_id: nativeTurnId
+      }
+    }
+  };
+  const humanUserMessageEvent = {
+    timestamp: "2026-08-21T01:00:01.011Z",
+    type: "event_msg",
+    payload: { type: "user_message", message: "Human-started durable task" }
+  };
+  const rootTaskRecords = rootUserRowOrder === "human-only"
+    ? [humanRootUserRow, humanUserMessageEvent]
+    : rootUserRowOrder === "synthetic-first"
+      ? [syntheticContextRow, humanRootUserRow, humanUserMessageEvent]
+      : [humanRootUserRow, humanUserMessageEvent, syntheticContextRow];
   const records: unknown[] = [
     {
       timestamp: "2026-08-21T01:00:00.000Z",
@@ -409,23 +493,7 @@ async function createCodexRolloutListFixture(
       type: "event_msg",
       payload: { type: "task_started", turn_id: nativeTurnId }
     },
-    {
-      timestamp: "2026-08-21T01:00:01.010Z",
-      type: "response_item",
-      payload: {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: "Human-started durable task" }],
-        internal_chat_message_metadata_passthrough: {
-          turn_id: nativeTurnId
-        }
-      }
-    },
-    {
-      timestamp: "2026-08-21T01:00:01.011Z",
-      type: "event_msg",
-      payload: { type: "user_message", message: "Human-started durable task" }
-    }
+    ...rootTaskRecords
   ];
   if (outcome === "completed" || outcome === "aborted") {
     records.push({
