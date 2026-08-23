@@ -3,7 +3,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 
 import type { ExecutorKind } from "./executors.js";
-import { supersedeCallbackNotificationDelivery } from
+import {
+  supersedeCallbackNotificationDelivery,
+  supersedeUnacceptedCallbackDeliveries
+} from
   "./callback-outbox-policy.js";
 import type { ManagedSessionState } from "./managed-session.js";
 import {
@@ -17,8 +20,9 @@ import {
   type Conversation, type ConversationStatus
 } from "./protocol.js";
 import {
-  appendEvent, loadState, logPathForStatePath, pathsForConversationDir,
-  saveState, withStoreWriterLeaseAsync
+  appendEvent, appendExplicitUserCloseEvent, loadState, logPathForStatePath,
+  pathsForConversationDir, saveExplicitUserCloseState, saveState,
+  withStoreWriterLeaseAsync
 } from "./store.js";
 import { loadManagedSession, tryLoadManagedSession } from "./session-store.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
@@ -39,6 +43,11 @@ import { loadDeferredForegroundTransfer } from
   "./deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from
   "./deferred-foreground-transfer-policy.js";
+import {
+  cleanupDeferredForegroundUserClose,
+  type DeferredForegroundUserCloseCleanupResult
+} from
+  "./deferred-foreground-user-close.js";
 import { isRecoverableTerminalDispatchStatus } from
   "./terminal-dispatch-policy.js";
 import { decideVerifiedDeadAgentProcess,
@@ -345,8 +354,12 @@ async function runRenew(options: TerminalMaintenanceCliOptions): Promise<void> {
   let renewedTerminalControl = terminalControl;
   let inactivityTimeoutMinutes = 0;
   let hardTimeoutMinutes = 0;
-  const releaseStateLock = acquireFileLock(`${statePath}.lock`);
-  try {
+  const writerStoreDir = pathsForConversationDir(
+    path.dirname(statePath)
+  ).storeDir;
+  await withStoreWriterLease(writerStoreDir, async () => {
+    const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+    try {
     const current = loadState(statePath);
     if (current.status !== "stalled") {
       throw new Error(
@@ -457,9 +470,10 @@ async function runRenew(options: TerminalMaintenanceCliOptions): Promise<void> {
       agent_timeout_minutes: inactivityTimeoutMinutes,
       agent_hard_timeout_minutes: hardTimeoutMinutes
     });
-  } finally {
-    releaseStateLock();
-  }
+    } finally {
+      releaseStateLock();
+    }
+  });
 
   const monitor = startTerminalBridgeMonitorForConversation({
     conversation: renewed,
@@ -611,14 +625,14 @@ async function runTerminalControlCancel({
     terminalControl,
     { timeoutMs: 30000 }
   );
-  let releaseStateLock: (() => void) | undefined;
   try {
-    releaseStateLock = acquireFileLock(`${statePath}.lock`);
     const writerStoreDir = pathsForConversationDir(
       path.dirname(statePath)
     ).storeDir;
     return await withStoreWriterLease(writerStoreDir, async () => {
-    const currentConversation = loadState(statePath);
+    const releaseStateLock = acquireFileLock(`${statePath}.lock`);
+    try {
+      const currentConversation = loadState(statePath);
     if (!["waiting_for_agent", "waiting_for_openclaw"].includes(currentConversation.status)) {
       throw new Error(
         `cannot cancel ${currentConversation.conversation_id}; conversation is ${currentConversation.status}`
@@ -698,13 +712,12 @@ async function runTerminalControlCancel({
       request_id: cancellation.requestId,
       budget: budgetAction(nextConversation)
     });
+    } finally {
+      releaseStateLock();
+    }
     });
   } finally {
-    try {
-      releaseStateLock?.();
-    } finally {
-      releaseTerminalLock();
-    }
+    releaseTerminalLock();
   }
 }
 
@@ -947,216 +960,108 @@ async function runClose(options: TerminalMaintenanceCliOptions): Promise<void> {
     return;
   }
   const loaded = loadConversationFromOptions(options);
-  if (stringValue(options.expectedHandoffToken)) {
-    await runObservedHandoffClose({
-      options,
-      statePath: loaded.statePath,
-      logPath: loaded.logPath,
-      initialConversation: loaded.conversation
-    });
-    return;
-  }
-  if (stringValue(options.reason) === "superseded_by_human_context_switch") {
-    throw new Error(
-      "reason superseded_by_human_context_switch requires the fresh " +
-      "expected_handoff_token advertised by AKK list"
-    );
-  }
   const { statePath, logPath } = loaded;
   const closeStoreDir = pathsForConversationDir(
     path.dirname(statePath)
   ).storeDir;
-  const nativeTakeover = isRecord(loaded.conversation.native_session_takeover)
-    ? loaded.conversation.native_session_takeover
-    : undefined;
-  const terminalControl = terminalControlFromTakeover(nativeTakeover);
-  const releaseTerminalLock = terminalControl
-    ? acquireTerminalBridgeSendLock(
-        closeStoreDir,
-        terminalControl,
-        { timeoutMs: 30000 }
-      )
-    : () => {};
   const closeWithFreshState = async (): Promise<void> => {
     const releaseStateLock = acquireFileLock(`${statePath}.lock`);
     try {
-      const conversation = loadState(statePath);
-      let verifiedDeadProcess: VerifiedDeadTerminalAgentProcessProof | undefined;
-      assertConversationHasNoNonterminalDeferredForegroundTransfer({
-        storeDir: closeStoreDir,
-        conversation,
-        action: "close"
-      });
+      const conversation: Conversation = {
+        ...loadState(statePath),
+        store_dir: path.resolve(closeStoreDir),
+        conversation_dir: path.resolve(path.dirname(statePath)),
+        state_path: path.resolve(statePath),
+        event_log_path: path.resolve(logPath)
+      };
       const currentTakeover = isRecord(conversation.native_session_takeover)
         ? conversation.native_session_takeover
         : undefined;
       const currentTerminalControl = terminalControlFromTakeover(
         currentTakeover
       );
-      if (
-        terminalControl &&
-        !terminalControlsShareIncarnation(
-          currentTerminalControl,
-          terminalControl
-        )
-      ) {
-        throw new Error(
-          "terminal control changed after the close action was listed; refresh AKK list"
-        );
-      }
-      if (conversation.status === "closed" && currentTerminalControl) {
-        const recoveredAuthority =
-          exactVerifiedDeadTerminalAgentProcessAuthority({
-            conversation,
-            storeDir: closeStoreDir,
-            terminalControl: currentTerminalControl,
-            logPath
-          });
-        const recoveredDecision = decideVerifiedDeadAgentProcess({
-          persistedAuthority: recoveredAuthority
-        });
-        if (recoveredDecision.status === "invalid") {
-          throw new Error(
-            `cannot finish close recovery for ${conversation.conversation_id}; ` +
-            recoveredDecision.reason
-          );
-        }
-        if (recoveredDecision.status === "verified_dead") {
-          const audit = ensureVerifiedDeadTerminalAgentProcessEvent({
-            logPath,
-            proof: recoveredDecision.proof,
-            action: "managed_close"
-          });
-          const expectedMessageId = required(
-            stringValue(currentTakeover?.terminal_bridge_message_id),
-            "verified-dead close recovery has no terminal message id"
-          );
-          const dispatchLedgerResolved =
-            resolveVerifiedDeadTerminalBridgeDispatchLedger({
-              terminalControl: currentTerminalControl,
-              conversation,
-              storeDir: closeStoreDir,
-              statePath,
-              logPath,
-              expectedMessageId,
-              reason: "conversation explicitly closed by request"
-            });
-          ensureVerifiedDeadConversationClosedEvent({
-            logPath,
-            conversation,
-            evidenceId: audit.evidenceId
-          });
-          printJson({
-            conversation,
-            closed: true,
-            recovered: true,
-            terminal_dispatch_resolved: dispatchLedgerResolved
-          });
-          return;
-        }
-      }
-      if (terminalControl && currentTerminalControl) {
-        verifiedDeadProcess =
-          await assertGenericCloseDoesNotBypassObservedHandoff({
-            options,
-            storeDir: closeStoreDir,
-            conversation,
-            terminalControl: currentTerminalControl
-          });
-      }
       const now = cliNow().toISOString();
-      const closeReason = stringValue(options.reason) ?? "closed by request";
-      const verifiedDeadAudit = verifiedDeadProcess
-        ? ensureVerifiedDeadTerminalAgentProcessEvent({
-            logPath,
-            proof: verifiedDeadProcess,
-            action: "managed_close"
-          })
-        : undefined;
-      const verifiedDeadMessageId = verifiedDeadAudit
-        ? required(
-            stringValue(currentTakeover?.terminal_bridge_message_id),
-            "verified-dead close has no terminal message id"
-          )
-        : undefined;
-      if (verifiedDeadAudit && currentTerminalControl) {
-        assertVerifiedDeadTerminalBridgeDispatchAuthority({
-          terminalControl: currentTerminalControl,
-          conversation,
-          storeDir: closeStoreDir,
-          statePath,
-          logPath,
-          expectedMessageId: verifiedDeadMessageId as string
-        });
-      }
+      const closedAt = stringValue(conversation.closed_at) ?? now;
+      const closeReason = stringValue(options.reason) ??
+        stringValue(conversation.close_reason) ?? "closed by request";
       const closed = {
-        ...supersedeCallbackNotificationDelivery(conversation, { at: now, reason: "superseded_by_conversation_close" }),
+        ...supersedeUnacceptedCallbackDeliveries(conversation, {
+          at: now,
+          reason: "superseded_by_conversation_close"
+        }),
         status: "closed" as const,
-        closed_at: now,
+        closed_at: closedAt,
         close_reason: closeReason,
-        ...(verifiedDeadAudit
-          ? {
-              terminal_agent_process_disposition: {
-                status: "verified_dead",
-                proof: verifiedDeadAudit.proof,
-                evidence_id: verifiedDeadAudit.evidenceId,
-                recorded_at: verifiedDeadAudit.recordedAt
-              }
-            }
-          : {}),
+        disposition: "user_abandoned_management",
+        callback_expected: false,
         updated_at: now
       };
-      saveState(statePath, closed);
-      if (
-        verifiedDeadAudit &&
-        cliEnv().AKK_TEST_EXIT_AFTER_VERIFIED_DEAD_CLOSE_STATE === "1"
-      ) {
-        cliExit(86);
+      delete closed.idle_since;
+      saveExplicitUserCloseState(statePath, closed);
+
+      let transferCleanup: DeferredForegroundUserCloseCleanupResult;
+      try {
+        transferCleanup = cleanupDeferredForegroundUserClose({
+          storeDir: closeStoreDir,
+          conversation: closed,
+          at: now
+        });
+      } catch (error) {
+        transferCleanup = {
+          transfer_finalized: false,
+          detached_session_ids: [],
+          warnings: [
+            `deferred_transfer_cleanup: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          ]
+        };
       }
       let dispatchLedgerResolved = false;
       let dispatchLedgerWarning: string | undefined;
-      if (currentTerminalControl) {
+      const ledgerTerminalControl = currentTerminalControl;
+      if (ledgerTerminalControl) {
         try {
-          dispatchLedgerResolved = verifiedDeadAudit
-            ? resolveVerifiedDeadTerminalBridgeDispatchLedger({
-                terminalControl: currentTerminalControl,
-                conversation: closed,
-                storeDir: closeStoreDir,
-                statePath,
-                logPath,
-                expectedMessageId: verifiedDeadMessageId as string,
-                reason: "conversation explicitly closed by request"
-              })
-            : resolveTerminalBridgeDispatchLedger(currentTerminalControl, {
-                conversation: closed,
-                expectedMessageId: stringValue(
-                  currentTakeover?.terminal_bridge_message_id
-                ),
-                reason: "conversation explicitly closed by request"
-              });
+          dispatchLedgerResolved = resolveTerminalBridgeDispatchLedger(
+            ledgerTerminalControl,
+            {
+              conversation: closed,
+              expectedMessageId: stringValue(
+                currentTakeover?.terminal_bridge_message_id
+              ),
+              reason: "conversation explicitly closed by request"
+            }
+          );
         } catch (error) {
           dispatchLedgerWarning =
             error instanceof Error ? error.message : String(error);
           runtimeLog("error", "terminal_dispatch_ledger_resolve_failed", {
             conversation_id: closed.conversation_id,
-            terminal_target: currentTerminalControl.target,
+            terminal_target: ledgerTerminalControl.target,
             error: dispatchLedgerWarning
           });
         }
       }
-      if (verifiedDeadAudit) {
-        ensureVerifiedDeadConversationClosedEvent({
-          logPath,
-          conversation: closed,
-          evidenceId: verifiedDeadAudit.evidenceId
-        });
-      } else {
-        appendEvent(logPath, {
-          ts: now,
+      let closeEventWarning: string | undefined;
+      try {
+        appendExplicitUserCloseEvent(logPath, {
+          ts: closedAt,
           conversation_id: conversation.conversation_id,
           event: "conversation_closed",
           status: "closed",
-          reason: closed.close_reason
+          reason: closed.close_reason,
+          disposition: "user_abandoned_management",
+          terminal_input_sent: false,
+          coding_agent_stopped: false,
+          tmux_pane_closed: false
+        });
+      } catch (error) {
+        closeEventWarning = error instanceof Error
+          ? error.message
+          : String(error);
+        runtimeLog("warn", "conversation_close_event_append_failed", {
+          conversation_id: closed.conversation_id,
+          error: closeEventWarning
         });
       }
       runtimeLog("info", "conversation_closed", {
@@ -1169,12 +1074,26 @@ async function runClose(options: TerminalMaintenanceCliOptions): Promise<void> {
       printJson({
         conversation: closed,
         closed: true,
+        management_released: true,
+        terminal_input_sent: false,
+        coding_agent_stopped: false,
+        tmux_pane_closed: false,
+        deferred_transfer: transferCleanup,
         terminal_dispatch_resolved: dispatchLedgerResolved,
-        ...(dispatchLedgerWarning
+        ...(
+          dispatchLedgerWarning ||
+          closeEventWarning ||
+          transferCleanup.warnings.length > 0
           ? {
-              terminal_dispatch_warning:
-                textSummary(dispatchLedgerWarning),
-              do_not_retry: true
+              warnings: [
+                ...transferCleanup.warnings,
+                ...(dispatchLedgerWarning
+                  ? [`terminal_dispatch: ${dispatchLedgerWarning}`]
+                  : []),
+                ...(closeEventWarning
+                  ? [`close_event: ${closeEventWarning}`]
+                  : [])
+              ].map((warning) => textSummary(warning))
             }
           : {})
       });
@@ -1182,18 +1101,7 @@ async function runClose(options: TerminalMaintenanceCliOptions): Promise<void> {
       releaseStateLock();
     }
   };
-  try {
-    if (terminalControl) {
-      await withStoreWriterLeaseAsync(
-        closeStoreDir,
-        closeWithFreshState
-      );
-    } else {
-      await closeWithFreshState();
-    }
-  } finally {
-    releaseTerminalLock();
-  }
+  await withStoreWriterLeaseAsync(closeStoreDir, closeWithFreshState);
 }
 
 async function assertGenericCloseDoesNotBypassObservedHandoff({

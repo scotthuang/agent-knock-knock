@@ -6,6 +6,7 @@ import {
   classifyCallbackProcessFailure,
   reduceCallbackRetryPolicy,
   supersedeCallbackNotificationDelivery,
+  supersedeUnacceptedCallbackDeliveries,
   type CallbackRetryPolicyState
 } from "../src/callback-outbox-policy.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
@@ -449,4 +450,53 @@ test("lifecycle changes supersede only unaccepted notification deliveries", () =
     }),
     accepted
   );
+});
+
+test("explicit Close supersedes both unaccepted callback lanes", () => {
+  const conversation = createConversation({
+    userRequest: "exercise explicit close",
+    sessionId: "session-a",
+    turnId: "turn-a",
+    executorKind: "codex",
+    now: new Date(NOW_ISO)
+  });
+  const pending = {
+    status: "pending",
+    attempts: 1,
+    attempt_pid: 4102,
+    message: MESSAGE,
+    transport_started_at: NOW_ISO
+  };
+  const closed = supersedeUnacceptedCallbackDeliveries({
+    ...conversation,
+    callback_delivery: pending,
+    callback_notification_delivery: { ...pending }
+  }, {
+    at: NOW_ISO,
+    reason: "superseded_by_conversation_close"
+  });
+
+  for (const field of [
+    "callback_delivery",
+    "callback_notification_delivery"
+  ] as const) {
+    const delivery = closed[field] as Record<string, unknown>;
+    assert.equal(delivery.status, "superseded");
+    assert.equal(delivery.transport_started_at, NOW_ISO);
+    assert.equal(delivery.attempt_pid, undefined);
+  }
+});
+
+test("transport-started callback without a final outcome is never retried", () => {
+  assert.deepEqual(disposition(beginCallbackRetryPolicy({
+    status: "pending",
+    attempts: 1,
+    attempt_pid: 999999,
+    message: MESSAGE,
+    transport_started_at: NOW_ISO
+  }, LIMITS)), {
+    state: "uncertain",
+    attempt: 1,
+    reason: "callback transport started without a durable final outcome"
+  });
 });

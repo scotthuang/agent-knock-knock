@@ -20,6 +20,8 @@ import {
   messageEvent,
   pathsForConversation,
   pathsForConversationDir,
+  appendExplicitUserCloseEvent,
+  saveExplicitUserCloseState,
   saveState,
   STORE_DEFERRED_FOREGROUND_TRANSFERS_DIRECTORY,
   STORE_WRITER_PROTOCOL,
@@ -600,7 +602,7 @@ test("protocol 5 fences candidate source history until transfer cleanup is termi
       conversation_id: unrelated.conversation.conversation_id
     });
 
-    for (const status of ["resolved", "abort_resolved"]) {
+    for (const status of ["resolved", "abort_resolved", "user_abandoned"]) {
       const current = JSON.parse(fs.readFileSync(transferStatePath, "utf8"));
       fs.writeFileSync(
         transferStatePath,
@@ -721,6 +723,147 @@ test("protocol 5 fences candidate source history until transfer cleanup is termi
       ...source.conversation,
       updated_at: "2026-08-12T02:03:00.000Z"
     });
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("explicit management-only Close bypasses only the source-history fence", () => {
+  const sandbox = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-store-explicit-close-fence-"
+  ));
+  const storeDir = path.join(sandbox, "store");
+  const turn = storedConversation(storeDir, "turn-explicit-close-fence");
+  const transferId = "transfer-explicit-close-fence";
+  const closedAt = "2026-08-12T04:00:00.000Z";
+  try {
+    saveState(turn.paths.statePath, turn.conversation);
+    appendEvent(turn.paths.logPath, {
+      event: "conversation_created",
+      conversation_id: turn.conversation.conversation_id
+    });
+    writeDeferredSourceHistoryFence(storeDir, transferId, {
+      status: "uncertain",
+      source_turn_history: [{
+        turn_id: turn.conversation.turn_id,
+        status: turn.conversation.status,
+        updated_at: turn.conversation.updated_at,
+        binding_id: "binding-explicit-close-fence",
+        binding_generation: 1,
+        native_thread_id: "00000000-0000-4000-8000-000000000502",
+        turn_fingerprint: "d".repeat(64)
+      }]
+    });
+    const closed = {
+      ...turn.conversation,
+      status: "closed" as const,
+      closed_at: closedAt,
+      close_reason: "explicit user Close",
+      disposition: "user_abandoned_management",
+      callback_expected: false,
+      updated_at: closedAt
+    };
+    const closeEvent = {
+      event: "conversation_closed",
+      conversation_id: turn.conversation.conversation_id,
+      status: "closed",
+      ts: closedAt,
+      reason: closed.close_reason,
+      disposition: "user_abandoned_management",
+      terminal_input_sent: false,
+      coding_agent_stopped: false
+    };
+
+    assert.throws(
+      () => saveState(turn.paths.statePath, closed),
+      new RegExp(`deferred foreground transfer ${transferId} is uncertain`, "u")
+    );
+    assert.throws(
+      () => appendEvent(turn.paths.logPath, closeEvent),
+      new RegExp(`deferred foreground transfer ${transferId} is uncertain`, "u")
+    );
+    assert.throws(
+      () => saveExplicitUserCloseState(turn.paths.statePath, {
+        ...closed,
+        callback_expected: true
+      }),
+      /must be closed management-only authority/u
+    );
+    assert.throws(
+      () => appendExplicitUserCloseEvent(turn.paths.logPath, {
+        ...closeEvent,
+        terminal_input_sent: true
+      }),
+      /must record management-only closure/u
+    );
+    assert.throws(
+      () => appendExplicitUserCloseEvent(turn.paths.logPath, {
+        ...closeEvent,
+        conversation_id: "different-turn"
+      }),
+      /must match its conversation directory/u
+    );
+
+    saveExplicitUserCloseState(turn.paths.statePath, closed);
+    appendExplicitUserCloseEvent(turn.paths.logPath, closeEvent);
+
+    const stored = loadState(turn.paths.statePath);
+    assert.equal(stored.status, "closed");
+    assert.equal(stored.disposition, "user_abandoned_management");
+    assert.equal(stored.callback_expected, false);
+    const events = fs.readFileSync(turn.paths.logPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(events.at(-1), closeEvent);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("explicit user Close is a durable fence against stale Turn reopening", () => {
+  const sandbox = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-store-explicit-close-immutable-"
+  ));
+  const storeDir = path.join(sandbox, "store");
+  const turn = storedConversation(storeDir, "turn-explicit-close-immutable");
+  const closedAt = "2026-08-12T04:05:00.000Z";
+  try {
+    saveState(turn.paths.statePath, turn.conversation);
+    const closed = {
+      ...turn.conversation,
+      status: "closed" as const,
+      closed_at: closedAt,
+      close_reason: "explicit user Close",
+      disposition: "user_abandoned_management",
+      callback_expected: false,
+      updated_at: closedAt
+    };
+    saveExplicitUserCloseState(turn.paths.statePath, closed);
+    const before = fs.readFileSync(turn.paths.statePath);
+
+    assert.throws(
+      () => saveState(turn.paths.statePath, {
+        ...closed,
+        status: "stalled",
+        stalled_at: "2026-08-12T04:06:00.000Z",
+        updated_at: "2026-08-12T04:06:00.000Z"
+      }),
+      /cannot be reopened/u
+    );
+    assert.deepEqual(fs.readFileSync(turn.paths.statePath), before);
+
+    saveState(turn.paths.statePath, {
+      ...closed,
+      callback_delivery: {
+        status: "superseded",
+        superseded_at: closedAt,
+        superseded_reason: "explicit_close"
+      }
+    });
+    assert.equal(loadState(turn.paths.statePath).status, "closed");
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

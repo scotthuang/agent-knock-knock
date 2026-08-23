@@ -13,6 +13,7 @@ import {
   safeTerminalActionsDuringConflict,
   safeUnavailableManagedTurnActions,
   sendActionForManagedSession,
+  userReleasableManagedTurn,
   withoutGenericHandoffSourceClose
 } from "../src/terminal-list-renderer.js";
 import {
@@ -323,7 +324,7 @@ test("terminal list action policies expose only their exact safe subsets", () =>
     available_actions: actions
   })), [
     "status", "respond", "approve", "cancel", "renew", "retry_callback",
-    "retry_submission"
+    "retry_submission", "close"
   ]);
   assert.deepEqual(
     Object.keys(safeTerminalActionsDuringConflict(actions)),
@@ -339,6 +340,18 @@ test("terminal list action policies expose only their exact safe subsets", () =>
   }), {
     conversation_id: "turn-1",
     available_actions: { status: { tool: "status" } }
+  });
+  assert.deepEqual(userReleasableManagedTurn({
+    conversation_id: "turn-closed-crash-lag",
+    status: "closed",
+    available_actions: { status: { tool: "status" } }
+  }).available_actions, {
+    status: { tool: "status" },
+    close: {
+      tool: "agent_knock_knock_close",
+      arguments: { turn_id: "turn-closed-crash-lag" },
+      requires_explicit_user_confirmation: true
+    }
   });
 });
 
@@ -417,10 +430,7 @@ test("approval and handoff action rewrites preserve nested command shape", () =>
   };
   assert.deepEqual(
     withoutGenericHandoffSourceClose(managedTurn, new Set(["turn-1"])),
-    {
-      conversation_id: "turn-1",
-      available_actions: { status: { tool: "status" } }
-    }
+    managedTurn
   );
   assert.equal(
     withoutGenericHandoffSourceClose(managedTurn, new Set()),

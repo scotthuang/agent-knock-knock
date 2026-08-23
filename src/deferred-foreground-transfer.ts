@@ -43,7 +43,13 @@ export type DeferredForegroundTransferStatus =
   | "resolved"
   | "aborted"
   | "abort_resolved"
-  | "uncertain";
+  | "uncertain"
+  | "user_abandoned";
+
+export type DeferredForegroundUserAbandonmentOriginStatus = Exclude<
+  DeferredForegroundTransferStatus,
+  "resolved" | "abort_resolved" | "user_abandoned"
+>;
 
 export type DeferredForegroundTransferInputStage =
   | "none"
@@ -169,6 +175,8 @@ export interface DeferredForegroundTransfer {
   recovered_at?: string;
   error?: string;
   do_not_retry?: boolean;
+  origin_status?: DeferredForegroundUserAbandonmentOriginStatus;
+  user_abandoned_at?: string;
 }
 
 export interface DeferredForegroundTransferSaveOptions {
@@ -291,6 +299,15 @@ export function assertDeferredForegroundTransfer(
     provedTerminalInputNotStarted
   );
   assertDeferredForegroundTransferFailure(transfer);
+  assertDeferredForegroundUserAbandonment(transfer);
+}
+
+function deferredForegroundEvidenceStatus(
+  value: DeferredForegroundTransfer
+): DeferredForegroundTransferStatus {
+  return value.status === "user_abandoned"
+    ? value.origin_status ?? value.status
+    : value.status;
 }
 
 function assertDeferredForegroundTransferHeader(
@@ -382,7 +399,9 @@ function assertDeferredForegroundTransferHeader(
     "uncertain_at",
     "recovered_at",
     "error",
-    "do_not_retry"
+    "do_not_retry",
+    "origin_status",
+    "user_abandoned_at"
   ], "deferred foreground transfer");
   if (
     value.schema !== DEFERRED_FOREGROUND_TRANSFER_SCHEMA ||
@@ -726,13 +745,14 @@ function assertDeferredForegroundTransferTarget(
 function assertDeferredForegroundTransferPreparation(
   value: DeferredForegroundTransfer
 ): void {
+  const evidenceStatus = deferredForegroundEvidenceStatus(value);
   const requiresTargetPrepared = [
     "target_prepared",
     "dispatch_started",
     "committed",
     "resolved",
     "uncertain"
-  ].includes(String(value.status));
+  ].includes(String(evidenceStatus));
   const targetPreparedFields = [
     value.target_prepared_at,
     value.target_prepared_revision,
@@ -755,7 +775,7 @@ function assertDeferredForegroundTransferPreparation(
     (requiresTargetPrepared && !hasAllTargetPreparedFields)
   ) {
     throw new Error(
-      `${String(value.status)} deferred transfer requires its target/Turn identity`
+      `${String(evidenceStatus)} deferred transfer requires its target/Turn identity`
     );
   }
   if (hasAllTargetPreparedFields) {
@@ -779,20 +799,20 @@ function assertDeferredForegroundTransferPreparation(
       "resolved",
       "uncertain"
     ]
-      .includes(String(value.status)) &&
+      .includes(String(evidenceStatus)) &&
     !value.source_reserved_at
   ) {
     throw new Error(
-      `${String(value.status)} deferred transfer requires source_reserved_at`
+      `${String(evidenceStatus)} deferred transfer requires source_reserved_at`
     );
   }
   if (
-    value.status === "prepared" &&
+    evidenceStatus === "prepared" &&
     (value.source_reserved_at !== undefined || hasAnyTargetPreparedField)
   ) {
     throw new Error("prepared deferred transfer cannot carry reservation evidence");
   }
-  if (value.status === "source_reserved" && hasAnyTargetPreparedField) {
+  if (evidenceStatus === "source_reserved" && hasAnyTargetPreparedField) {
     throw new Error(
       "source_reserved deferred transfer cannot carry target evidence"
     );
@@ -802,14 +822,15 @@ function assertDeferredForegroundTransferPreparation(
 function assertDeferredForegroundTransferDispatch(
   value: DeferredForegroundTransfer
 ): boolean {
+  const evidenceStatus = deferredForegroundEvidenceStatus(value);
   if (
     ["dispatch_started", "committed", "resolved", "uncertain"].includes(
-      String(value.status)
+      String(evidenceStatus)
     ) &&
     (!value.dispatch_started_at || value.input_stage === "none")
   ) {
     throw new Error(
-      `${String(value.status)} deferred transfer requires dispatch-start evidence`
+      `${String(evidenceStatus)} deferred transfer requires dispatch-start evidence`
     );
   }
   assertInputStageEvidence(value as unknown as DeferredForegroundTransfer);
@@ -819,25 +840,25 @@ function assertDeferredForegroundTransferDispatch(
       "source_reserved",
       "target_prepared"
     ].includes(
-      String(value.status)
+      String(evidenceStatus)
     ) &&
     value.input_stage !== "none"
   ) {
     throw new Error(
-      `${String(value.status)} deferred transfer cannot carry input evidence`
+      `${String(evidenceStatus)} deferred transfer cannot carry input evidence`
     );
   }
   const provedTerminalInputNotStarted =
-    ["aborted", "abort_resolved"].includes(String(value.status)) &&
+    ["aborted", "abort_resolved"].includes(String(evidenceStatus)) &&
     value.input_stage === "dispatch_started" &&
     value.terminal_input_not_started_at !== undefined;
   if (
-    ["aborted", "abort_resolved"].includes(String(value.status)) &&
+    ["aborted", "abort_resolved"].includes(String(evidenceStatus)) &&
     value.input_stage !== "none" &&
     !provedTerminalInputNotStarted
   ) {
     throw new Error(
-      `${String(value.status)} deferred transfer requires exact no-input proof`
+      `${String(evidenceStatus)} deferred transfer requires exact no-input proof`
     );
   }
   assertDeferredForegroundSubmissionRetryEvidence(value);
@@ -900,7 +921,10 @@ function assertDeferredForegroundSubmissionRetryEvidence(
 function assertDeferredForegroundTransferCommit(
   value: DeferredForegroundTransfer
 ): void {
-  const committed = ["committed", "resolved"].includes(String(value.status));
+  const evidenceStatus = deferredForegroundEvidenceStatus(value);
+  const committed = ["committed", "resolved"].includes(
+    String(evidenceStatus)
+  );
   const committedFields = [
     value.target_native_thread_id,
     value.target_accepted_revision,
@@ -1016,6 +1040,7 @@ function assertDeferredForegroundTransferCommit(
 function assertDeferredForegroundTransferResolution(
   value: DeferredForegroundTransfer
 ): void {
+  const evidenceStatus = deferredForegroundEvidenceStatus(value);
   const resolvedFields = [
     value.target_after_revision,
     value.target_after_status,
@@ -1033,7 +1058,7 @@ function assertDeferredForegroundTransferResolution(
     (field) => field !== undefined
   );
   if (
-    value.status === "resolved"
+    evidenceStatus === "resolved"
       ? !hasAllResolvedFields
       : hasAnyResolvedField
   ) {
@@ -1041,7 +1066,7 @@ function assertDeferredForegroundTransferResolution(
       "resolved deferred transfer requires exact final Session evidence"
     );
   }
-  if (value.status === "resolved") {
+  if (evidenceStatus === "resolved") {
     if (
       !isPositiveSafeInteger(value.target_after_revision) ||
       value.target_after_revision !==
@@ -1093,8 +1118,9 @@ function assertDeferredForegroundTransferAbort(
   value: DeferredForegroundTransfer,
   provedTerminalInputNotStarted: boolean
 ): void {
+  const evidenceStatus = deferredForegroundEvidenceStatus(value);
   if (
-    ["aborted", "abort_resolved"].includes(String(value.status))
+    ["aborted", "abort_resolved"].includes(String(evidenceStatus))
       ? !value.aborted_at || !(
           value.input_stage === "none" || provedTerminalInputNotStarted
         )
@@ -1111,7 +1137,7 @@ function assertDeferredForegroundTransferAbort(
         value.enter_dispatched_at !== undefined ||
         value.agent_accepted_at !== undefined
       : value.input_stage === "dispatch_started" &&
-        ["aborted", "abort_resolved"].includes(String(value.status))
+        ["aborted", "abort_resolved"].includes(String(evidenceStatus))
   ) {
     throw new Error(
       "terminal-input-not-started proof must fence only a dispatch intent"
@@ -1134,7 +1160,7 @@ function assertDeferredForegroundTransferAbort(
     ...abortCleanupSourceFields,
     ...abortCleanupTargetFields
   ].some((field) => field !== undefined);
-  if (value.status === "abort_resolved") {
+  if (evidenceStatus === "abort_resolved") {
     if (abortCleanupSourceFields.some((field) => field === undefined)) {
       throw new Error(
         "resolved deferred abort requires exact source cleanup evidence"
@@ -1229,11 +1255,12 @@ function assertDeferredForegroundTransferAbort(
 function assertDeferredForegroundTransferFailure(
   value: DeferredForegroundTransfer
 ): void {
+  const evidenceStatus = deferredForegroundEvidenceStatus(value);
   if (
-    value.status === "uncertain"
+    evidenceStatus === "uncertain"
       ? !value.uncertain_at || value.do_not_retry !== true ||
         value.input_stage === "none"
-      : ["committed", "resolved"].includes(String(value.status)) &&
+      : ["committed", "resolved"].includes(String(evidenceStatus)) &&
           value.uncertain_at !== undefined
         ? !value.recovered_at || value.do_not_retry !== true
         : value.uncertain_at !== undefined ||
@@ -1251,12 +1278,41 @@ function assertDeferredForegroundTransferFailure(
       "abort_resolved",
       "uncertain",
       ...(value.recovered_at ? ["committed", "resolved"] : [])
-    ].includes(String(value.status))
+    ].includes(String(evidenceStatus))
   ) {
     throw new Error(
       "deferred transfer error is allowed only on failure/recovery receipts"
     );
   }
+}
+
+function assertDeferredForegroundUserAbandonment(
+  value: DeferredForegroundTransfer
+): void {
+  const origin = value.origin_status;
+  const abandonedAt = value.user_abandoned_at;
+  if (value.status !== "user_abandoned") {
+    if (origin !== undefined || abandonedAt !== undefined) {
+      throw new Error(
+        "user abandonment evidence is allowed only on a user_abandoned receipt"
+      );
+    }
+    return;
+  }
+  if (
+    !USER_ABANDONMENT_ORIGIN_STATUSES.has(
+      origin as DeferredForegroundUserAbandonmentOriginStatus
+    ) ||
+    abandonedAt === undefined
+  ) {
+    throw new Error(
+      "user_abandoned deferred transfer requires its origin status and timestamp"
+    );
+  }
+  assertTimestamp(
+    abandonedAt,
+    "deferred transfer user_abandoned_at"
+  );
 }
 
 export function saveDeferredForegroundTransfer(
@@ -1404,20 +1460,24 @@ function assertTransferAdvance(
     DeferredForegroundTransferStatus,
     readonly DeferredForegroundTransferStatus[]
   > = {
-    prepared: ["source_reserved", "aborted"],
-    source_reserved: ["target_prepared", "aborted"],
-    target_prepared: ["dispatch_started", "uncertain", "aborted"],
+    prepared: ["source_reserved", "aborted", "user_abandoned"],
+    source_reserved: ["target_prepared", "aborted", "user_abandoned"],
+    target_prepared: [
+      "dispatch_started", "uncertain", "aborted", "user_abandoned"
+    ],
     dispatch_started: [
       "dispatch_started",
       "committed",
       "uncertain",
-      "aborted"
+      "aborted",
+      "user_abandoned"
     ],
-    committed: ["resolved"],
+    committed: ["resolved", "user_abandoned"],
     resolved: [],
-    aborted: ["abort_resolved"],
+    aborted: ["abort_resolved", "user_abandoned"],
     abort_resolved: [],
-    uncertain: ["uncertain", "committed"]
+    uncertain: ["uncertain", "committed", "user_abandoned"],
+    user_abandoned: []
   };
   if (!allowed[current.status].includes(candidate.status)) {
     throw new Error(
@@ -1509,7 +1569,9 @@ function assertTransferAdvance(
     "uncertain_at",
     "recovered_at",
     "error",
-    "do_not_retry"
+    "do_not_retry",
+    "origin_status",
+    "user_abandoned_at"
   ] as const) {
     if (
       current[field] !== undefined &&
@@ -1519,6 +1581,14 @@ function assertTransferAdvance(
         `deferred foreground transfer ${current.transfer_id} cannot change ${field}`
       );
     }
+  }
+  if (
+    candidate.status === "user_abandoned" &&
+    candidate.origin_status !== current.status
+  ) {
+    throw new Error(
+      "deferred foreground user abandonment must freeze its origin status"
+    );
   }
   if (
     candidate.status === "aborted" &&
@@ -1680,7 +1750,10 @@ function assertTimestampOrder(value: DeferredForegroundTransfer): void {
       : value.enter_dispatched_at ?? value.text_injected_at ?? value.dispatch_started_at ??
       value.target_prepared_at ?? value.source_reserved_at ?? value.prepared_at;
     assertTimestampNotBefore(value.uncertain_at, latestPossibleDispatch);
-    if (value.status === "uncertain" && value.input_stage === "agent_accepted") {
+    if (
+      deferredForegroundEvidenceStatus(value) === "uncertain" &&
+      value.input_stage === "agent_accepted"
+    ) {
       assertTimestampNotBefore(value.uncertain_at, value.agent_accepted_at);
     }
   }
@@ -1695,6 +1768,14 @@ function assertTimestampOrder(value: DeferredForegroundTransfer): void {
   if (value.resolved_at) {
     assertTimestampNotBefore(value.resolved_at, value.committed_at);
     assertTimestampNotBefore(value.resolved_at, value.recovered_at);
+  }
+  if (value.user_abandoned_at) {
+    assertTimestampNotBefore(
+      value.user_abandoned_at,
+      value.abort_cleanup_completed_at ?? value.resolved_at ??
+        value.recovered_at ?? value.committed_at ?? value.aborted_at ??
+        value.uncertain_at ?? latestInputEvidence
+    );
   }
 }
 
@@ -1858,6 +1939,19 @@ const TRANSFER_STATUSES = new Set<DeferredForegroundTransferStatus>([
   "resolved",
   "aborted",
   "abort_resolved",
+  "uncertain",
+  "user_abandoned"
+]);
+
+const USER_ABANDONMENT_ORIGIN_STATUSES = new Set<
+  DeferredForegroundUserAbandonmentOriginStatus
+>([
+  "prepared",
+  "source_reserved",
+  "target_prepared",
+  "dispatch_started",
+  "committed",
+  "aborted",
   "uncertain"
 ]);
 

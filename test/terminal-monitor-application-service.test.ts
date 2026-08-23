@@ -843,15 +843,111 @@ test("prepared recovery releases state, writer, and terminal locks in legacy ord
   assert.deepEqual(trace, [
     "terminal.acquire",
     "writer.acquire",
-    "ledger.load",
     "state.acquire",
     "state.load",
     "submission.read",
+    "ledger.load",
     "submission.apply:submitted",
     "submission.read",
     "state.save",
     "state.release",
     "submission.read",
+    "writer.release",
+    "terminal.release"
+  ]);
+});
+
+test("explicit Close fences prepared recovery both before and inside canonical locks", async () => {
+  const owner = conversation({
+    terminal_bridge_submission: {
+      message_id: "message-1",
+      status: "prepared",
+      prepared_at: "1970-01-01T00:00:00.000Z"
+    }
+  });
+  const closed: Conversation = {
+    ...owner,
+    status: "closed",
+    disposition: "user_abandoned_management",
+    closed_at: "1970-01-01T00:00:01.000Z",
+    close_reason: "closed by request"
+  };
+  let outerOperations = 0;
+  const outer = await recoverPreparedMonitorSubmission({
+    conversation: closed,
+    statePath: "/store/state.json",
+    logPath: "/store/events.ndjson",
+    terminalControl: CONTROL,
+    currentMessageId: "message-1",
+    dispatcherPid: 7331,
+    ports: {
+      acquireTerminal: () => {
+        outerOperations += 1;
+        return () => undefined;
+      }
+    } as never
+  });
+  assert.strictEqual(outer, closed);
+  assert.equal(outerOperations, 0);
+
+  const trace: string[] = [];
+  let writes = 0;
+  const raced = await recoverPreparedMonitorSubmission({
+    conversation: owner,
+    statePath: "/store/state.json",
+    logPath: "/store/events.ndjson",
+    terminalControl: CONTROL,
+    currentMessageId: "message-1",
+    dispatcherPid: 7331,
+    ports: {
+      acquireTerminal: () => {
+        trace.push("terminal.acquire");
+        return () => trace.push("terminal.release");
+      },
+      withWriter: async (use) => {
+        trace.push("writer.acquire");
+        try {
+          return await use();
+        } finally {
+          trace.push("writer.release");
+        }
+      },
+      acquireState: () => {
+        trace.push("state.acquire");
+        return () => trace.push("state.release");
+      },
+      loadConversation: () => {
+        trace.push("state.load");
+        return closed;
+      },
+      loadLedger: () => {
+        trace.push("ledger.load");
+        return undefined;
+      },
+      saveLedger: () => { writes += 1; },
+      saveConversation: () => { writes += 1; },
+      submission: () => {
+        trace.push("submission.read");
+        return undefined;
+      },
+      applySubmission: () => {
+        throw new Error("closed prepared recovery cannot apply a receipt");
+      },
+      requestFingerprint: () => undefined,
+      now: () => new Date(0),
+      appendEvent: () => { writes += 1; },
+      stallCollateral: () => { writes += 1; }
+    }
+  });
+
+  assert.strictEqual(raced, closed);
+  assert.equal(writes, 0);
+  assert.deepEqual(trace, [
+    "terminal.acquire",
+    "writer.acquire",
+    "state.acquire",
+    "state.load",
+    "state.release",
     "writer.release",
     "terminal.release"
   ]);
@@ -1067,6 +1163,82 @@ test("prepared monitor recovery rejects a callback route redirect before writes"
     }
   }), /callback route conflicts with its dispatch ledger/u);
   assert.equal(writes, 0);
+});
+
+test("explicit Close fences lagging accepted authority repair before ledger mutation", async () => {
+  const owner = conversation({
+    terminal_bridge_submission: {
+      message_id: "message-1",
+      status: "enter_dispatched",
+      enter_dispatched_at: "1970-01-01T00:00:01.000Z"
+    }
+  });
+  const closed: Conversation = {
+    ...owner,
+    status: "closed",
+    disposition: "user_abandoned_management",
+    closed_at: "1970-01-01T00:00:02.000Z",
+    close_reason: "closed by request"
+  };
+  const trace: string[] = [];
+  let ledgerMutations = 0;
+  const repaired = await repairLaggingAcceptedMonitorAuthority({
+    conversation: owner,
+    terminalControl: CONTROL,
+    currentMessageId: "message-1",
+    ports: {
+      acquireTerminal: () => {
+        trace.push("terminal.acquire");
+        return () => trace.push("terminal.release");
+      },
+      withWriter: async (use) => {
+        trace.push("writer.acquire");
+        try {
+          return await use();
+        } finally {
+          trace.push("writer.release");
+        }
+      },
+      acquireState: () => {
+        trace.push("state.acquire");
+        return () => trace.push("state.release");
+      },
+      loadConversation: () => {
+        trace.push("state.load");
+        return closed;
+      },
+      loadLedger: () => {
+        trace.push("ledger.load");
+        return undefined;
+      },
+      reconcileLedger: () => {
+        ledgerMutations += 1;
+        return undefined;
+      },
+      submission: (candidate) => {
+        trace.push("submission.read");
+        const takeover = isRecord(candidate.native_session_takeover)
+          ? candidate.native_session_takeover
+          : undefined;
+        return isRecord(takeover?.terminal_bridge_submission)
+          ? takeover.terminal_bridge_submission
+          : undefined;
+      }
+    }
+  });
+
+  assert.strictEqual(repaired, closed);
+  assert.equal(ledgerMutations, 0);
+  assert.deepEqual(trace, [
+    "submission.read",
+    "terminal.acquire",
+    "writer.acquire",
+    "state.acquire",
+    "state.load",
+    "state.release",
+    "writer.release",
+    "terminal.release"
+  ]);
 });
 
 test("restart repairs lagging accepted authority before acceptance or terminal I/O", async () => {
@@ -1352,6 +1524,8 @@ test("restart repairs a state-first accepted authority on the first poll", async
             trace.push("terminal.acquire");
             return () => trace.push("terminal.release");
           },
+          withWriter: async (use) => use(),
+          acquireState: () => () => undefined,
           reconcileLedger: () => {
             trace.push("ledger.reconcile");
             ledger = {
@@ -1420,6 +1594,18 @@ test("fresh poll retry releases the terminal lock and performs no terminal I/O",
         trace.push("terminal.acquire");
         return () => trace.push("terminal.release");
       },
+      withWriter: async (use) => {
+        trace.push("writer.acquire");
+        try {
+          return await use();
+        } finally {
+          trace.push("writer.release");
+        }
+      },
+      acquireState: () => {
+        trace.push("state.acquire");
+        return () => trace.push("state.release");
+      },
       reconcileLedger: () => undefined,
       loadLedger: () => undefined,
       saveLedger: () => trace.push("ledger.save"),
@@ -1435,7 +1621,125 @@ test("fresh poll retry releases the terminal lock and performs no terminal I/O",
   });
 
   assert.deepEqual(result, { kind: "retry", conversation: changed });
-  assert.deepEqual(trace, ["terminal.acquire", "terminal.release"]);
+  assert.deepEqual(trace, [
+    "terminal.acquire",
+    "writer.acquire",
+    "state.acquire",
+    "state.release",
+    "writer.release",
+    "terminal.release"
+  ]);
+});
+
+test("Close winning the poll writer barrier prevents ledger repair and terminal observation", async (t) => {
+  const trace: string[] = [];
+  const listed = conversation();
+  const closed: Conversation = {
+    ...listed,
+    status: "closed",
+    disposition: "user_abandoned_management",
+    closed_at: "1970-01-01T00:00:01.000Z",
+    close_reason: "closed by request",
+    updated_at: "1970-01-01T00:00:01.000Z"
+  };
+  let current = listed;
+  let releaseWriter: (() => void) | undefined;
+  const writerBarrier = new Promise<void>((resolve) => {
+    releaseWriter = resolve;
+  });
+  let reportWriterWait: (() => void) | undefined;
+  const writerWaiting = new Promise<void>((resolve) => {
+    reportWriterWait = resolve;
+  });
+  t.after(() => releaseWriter?.());
+  let ledgerReads = 0;
+  let ledgerWrites = 0;
+  let terminalReads = 0;
+  const pending = pollTerminalMonitor({
+    conversation: listed,
+    terminalControl: CONTROL,
+    currentMessageId: "message-1",
+    executor: listed.executor,
+    screenChangedSinceSend: false,
+    scrollbackLines: 120,
+    terminalBridge: {
+      monitorPoll: async () => {
+        terminalReads += 1;
+        return { status: status() } as TerminalMonitorPoll;
+      }
+    } as never,
+    onFenced: () => trace.push("present:fenced"),
+    ports: {
+      acquireTerminal: () => {
+        trace.push("terminal.acquire");
+        return () => trace.push("terminal.release");
+      },
+      withWriter: async (use) => {
+        trace.push("writer.wait");
+        reportWriterWait?.();
+        await writerBarrier;
+        trace.push("writer.acquire");
+        try {
+          return await use();
+        } finally {
+          trace.push("writer.release");
+        }
+      },
+      acquireState: () => {
+        trace.push("state.acquire");
+        return () => trace.push("state.release");
+      },
+      reconcileLedger: () => {
+        ledgerWrites += 1;
+        return undefined;
+      },
+      loadLedger: () => {
+        ledgerReads += 1;
+        return undefined;
+      },
+      saveLedger: () => { ledgerWrites += 1; },
+      submission: () => undefined,
+      loadConversation: () => {
+        trace.push("state.load");
+        return current;
+      },
+      terminalControl: () => {
+        terminalReads += 1;
+        return CONTROL;
+      },
+      sameIncarnation: () => true,
+      runtime: () => {
+        terminalReads += 1;
+        return { pid: 4242 };
+      },
+      durableRequest: () => {
+        terminalReads += 1;
+        return { context: {} };
+      },
+      appendEvent: () => { ledgerWrites += 1; },
+      now: () => new Date(0)
+    }
+  });
+
+  await writerWaiting;
+  current = closed;
+  releaseWriter?.();
+  const result = await pending;
+
+  assert.deepEqual(result, { kind: "retry", conversation: closed });
+  assert.equal(ledgerReads, 0);
+  assert.equal(ledgerWrites, 0);
+  assert.equal(terminalReads, 0);
+  assert.deepEqual(trace, [
+    "terminal.acquire",
+    "writer.wait",
+    "writer.acquire",
+    "state.acquire",
+    "state.load",
+    "state.release",
+    "writer.release",
+    "terminal.release"
+  ]);
 });
 
 test("poll repair synchronizes callback route authority from the durable Turn", async () => {
@@ -1466,6 +1770,8 @@ test("poll repair synchronizes callback route authority from the durable Turn", 
       onFenced: () => undefined,
       ports: {
         acquireTerminal: () => () => undefined,
+        withWriter: async (use) => use(),
+        acquireState: () => () => undefined,
         reconcileLedger: (_control, current) => current,
         loadLedger: () => ledger,
         saveLedger: (_control, next) => { ledger = next; },
@@ -1516,6 +1822,8 @@ test("poll repair rejects conflicting callback route authority", async () => {
     onFenced: () => undefined,
     ports: {
       acquireTerminal: () => () => undefined,
+      withWriter: async (use) => use(),
+      acquireState: () => () => undefined,
       reconcileLedger: (_control, current) => current,
       loadLedger: () => ({
         message_id: "message-1",
@@ -1560,6 +1868,8 @@ test("dispatch fencing is presented before the poll terminal lock releases", asy
         trace.push("terminal.acquire");
         return () => trace.push("terminal.release");
       },
+      withWriter: async (use) => use(),
+      acquireState: () => () => undefined,
       reconcileLedger: (_control, ledger) => ledger,
       loadLedger: () => ({
         message_id: "message-1",

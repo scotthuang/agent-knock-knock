@@ -20,6 +20,7 @@ import {
   executorForConversation,
   createMessage,
   effectiveTurnStatus,
+  isExplicitUserAbandonedManagementTurn,
   isSessionSendBlockingStatus,
   isTerminalDispatchOwnerReleasedStatus,
   isWaitingForAgentStatus,
@@ -806,6 +807,9 @@ class TerminalMonitorStateCliApplication {
     initialConversation: Conversation,
     paths: TerminalMonitorStatePaths
   ): Promise<Conversation> {
+    if (isExplicitUserAbandonedManagementTurn(initialConversation)) {
+      return initialConversation;
+    }
     const takeover = takeoverFor(initialConversation);
     const transferId = nonBlankString(
       takeover?.deferred_foreground_transfer_id
@@ -813,37 +817,94 @@ class TerminalMonitorStateCliApplication {
     if (!transferId) {
       return initialConversation;
     }
-    const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
-    if (isFinalDeferredForegroundTransferStatus(transfer.status)) {
-      return initialConversation;
-    }
-    const control = terminalControlFromTakeover(takeover);
-    const pid = Number(takeover?.terminal_agent_pid);
-    if (!control || !Number.isSafeInteger(pid) || pid <= 1) {
+    const initialControl = terminalControlFromTakeover(takeover);
+    const initialPid = Number(takeover?.terminal_agent_pid);
+    if (
+      !initialControl ||
+      !Number.isSafeInteger(initialPid) ||
+      initialPid <= 1
+    ) {
       throw new Error(
         `deferred foreground Turn ${initialConversation.conversation_id} ` +
         "lost its exact terminal process authority"
       );
     }
-    const terminal = await this.#dependencies.authority.createBridge(options)
-      .resolveStoredTerminal("codex", pid, control, { pid });
-    const release = this.#dependencies.dispatch.repository.acquire(
+    const releaseTerminal = this.#dependencies.dispatch.repository.acquire(
       storeDir,
-      control,
+      initialControl,
       { timeoutMs: 30000 }
     );
     try {
-      await this.#dependencies.authority.handoff
-        .recoverDeferredCodexForegroundTransferBeforeMutation({
-          options,
-          terminal: terminal as ResolvedTerminalConversation
-        });
+      return await withStoreWriterLeaseAsync(storeDir, async () => {
+        const releaseState = this.#stateFileLock.acquire(
+          `${paths.statePath}.lock`
+        );
+        let conversation: Conversation;
+        try {
+          conversation = loadState(paths.statePath);
+          if (isExplicitUserAbandonedManagementTurn(conversation)) {
+            return conversation;
+          }
+        } finally {
+          releaseState();
+        }
+
+        const currentTakeover = takeoverFor(conversation);
+        const currentTransferId = nonBlankString(
+          currentTakeover.deferred_foreground_transfer_id
+        );
+        const currentControl = terminalControlFromTakeover(currentTakeover);
+        const currentPid = Number(currentTakeover.terminal_agent_pid);
+        if (
+          currentTransferId !== transferId ||
+          !currentControl ||
+          !terminalControlsShareIncarnation(currentControl, initialControl) ||
+          !Number.isSafeInteger(currentPid) ||
+          currentPid !== initialPid
+        ) {
+          throw new Error(
+            `deferred foreground Turn ${conversation.conversation_id} ` +
+            "changed its exact terminal process authority during recovery"
+          );
+        }
+        const transfer = loadDeferredForegroundTransfer(
+          storeDir,
+          transferId
+        );
+        if (isFinalDeferredForegroundTransferStatus(transfer.status)) {
+          return conversation;
+        }
+        const terminal = await this.#dependencies.authority
+          .createBridge(options)
+          .resolveStoredTerminal(
+            "codex",
+            currentPid,
+            currentControl,
+            { pid: currentPid }
+          );
+        await this.#dependencies.authority.handoff
+          .recoverDeferredCodexForegroundTransferBeforeMutation({
+            options,
+            terminal: terminal as ResolvedTerminalConversation
+          });
+        const releaseFinalState = this.#stateFileLock.acquire(
+          `${paths.statePath}.lock`
+        );
+        try {
+          conversation = loadState(paths.statePath);
+          this.#assertExactPendingDeferred(
+            conversation,
+            storeDir,
+            transferId
+          );
+          return conversation;
+        } finally {
+          releaseFinalState();
+        }
+      });
     } finally {
-      release();
+      releaseTerminal();
     }
-    const conversation = loadState(paths.statePath);
-    this.#assertExactPendingDeferred(conversation, storeDir, transferId);
-    return conversation;
   }
 
   #assertExactPendingDeferred(
@@ -889,43 +950,47 @@ class TerminalMonitorStateCliApplication {
   prepareLaunch(
     input: Parameters<TerminalMonitorStateCliAdapter["prepareLaunch"]>[0]
   ): TerminalMonitorLaunchPreparation {
-    const release = this.#stateFileLock.acquire(`${input.statePath}.lock`);
-    try {
-      const conversation = loadState(input.statePath);
-      if (input.requireWaitingForAgentStatus &&
-          conversation.status !== "waiting_for_agent") {
-        return unprepared(
-          `conversation_status_${String(conversation.status ?? "missing")}`
+    const storeDir = pathsForConversationDir(path.dirname(input.statePath))
+      .storeDir;
+    return withStoreWriterLease(storeDir, () => {
+      const release = this.#stateFileLock.acquire(`${input.statePath}.lock`);
+      try {
+        const conversation = loadState(input.statePath);
+        if (input.requireWaitingForAgentStatus &&
+            conversation.status !== "waiting_for_agent") {
+          return unprepared(
+            `conversation_status_${String(conversation.status ?? "missing")}`
+          );
+        }
+        const eligibility = this.eligibility(conversation);
+        if (!eligibility.eligible) {
+          return unprepared(eligibility.reason);
+        }
+        if (eligibility.terminalMessageId !== input.expectedMessageId) {
+          return unprepared("terminal_bridge_task_replaced");
+        }
+        const owner = input.activeOwner(
+          input.statePath,
+          eligibility.terminalMessageId
         );
+        if (owner) {
+          return {
+            prepared: false,
+            alreadyRunning: true,
+            reason: "monitor_lock_owner_alive",
+            ownerPid: owner.ownerPid
+          };
+        }
+        return this.#persistMonitorLockVersion(
+          conversation,
+          eligibility,
+          input.monitorLockVersion,
+          input.statePath
+        );
+      } finally {
+        release();
       }
-      const eligibility = this.eligibility(conversation);
-      if (!eligibility.eligible) {
-        return unprepared(eligibility.reason);
-      }
-      if (eligibility.terminalMessageId !== input.expectedMessageId) {
-        return unprepared("terminal_bridge_task_replaced");
-      }
-      const owner = input.activeOwner(
-        input.statePath,
-        eligibility.terminalMessageId
-      );
-      if (owner) {
-        return {
-          prepared: false,
-          alreadyRunning: true,
-          reason: "monitor_lock_owner_alive",
-          ownerPid: owner.ownerPid
-        };
-      }
-      return this.#persistMonitorLockVersion(
-        conversation,
-        eligibility,
-        input.monitorLockVersion,
-        input.statePath
-      );
-    } finally {
-      release();
-    }
+    });
   }
 
   #persistMonitorLockVersion(
@@ -1139,6 +1204,10 @@ class TerminalMonitorStateCliApplication {
                 control,
                 { timeoutMs: 30000 }
               ),
+            withWriter: (use) =>
+              withStoreWriterLeaseAsync(stateStoreDir(), use),
+            acquireState: () =>
+              this.#stateFileLock.acquire(`${input.statePath}.lock`),
             reconcileLedger:
               this.#dependencies.dispatch.recovery.reconcilePrepared,
             loadLedger: this.#dependencies.dispatch.repository.load,

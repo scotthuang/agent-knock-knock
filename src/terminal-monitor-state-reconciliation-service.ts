@@ -1,6 +1,9 @@
 import type { CallbackExecutionResult, PreparedCallback } from
   "./callback-outbox-service.js";
-import type { Conversation } from "./protocol.js";
+import {
+  isExplicitUserAbandonedManagementTurn,
+  type Conversation
+} from "./protocol.js";
 import type {
   MonitorVerifiedDeadResult
 } from "./terminal-monitor-application-service.js";
@@ -119,6 +122,12 @@ export async function reconcileTerminalMonitorStateCandidate(input: {
   callbackRetryDelayMs?: unknown;
   ports: TerminalMonitorStateReconciliationPorts;
 }): Promise<TerminalMonitorStateReconciliation> {
+  if (isExplicitUserAbandonedManagementTurn(input.listed)) {
+    return handled("skipped", input.listed.conversation_id, {
+      status: "skipped",
+      reason: "explicit_user_close_released_management"
+    });
+  }
   const local = input.ports.completion.settleLocal(input.storeDir, input.paths);
   if (local.handled) {
     return handled("skipped", input.listed.conversation_id, {

@@ -110,6 +110,7 @@ function dependencies(input: {
     CodingAgentSessionProvider["listActiveSessions"]>>;
   monitorResult?: Awaited<ReturnType<
     TerminalStatusCliDependencies["reconciliation"]["reconcileMonitors"]>>;
+  withStoreWriter?: TerminalStatusCliDependencies["reconciliation"]["withStoreWriter"];
   acquireStateLock?: TerminalStatusCliDependencies["reconciliation"]["acquireStateLock"];
   terminalBridgeEnabled?: TerminalStatusCliDependencies["reconciliation"]["terminalBridgeEnabled"];
   terminalControlFromTakeover?: TerminalStatusCliDependencies["selection"]["terminalControlFromTakeover"];
@@ -195,6 +196,8 @@ function dependencies(input: {
       },
       workspaceMatches: (configured, observed) =>
         configured === undefined || configured === observed,
+      withStoreWriter: input.withStoreWriter ?? ((_storeDir, operation) =>
+        operation()),
       acquireStateLock: input.acquireStateLock ?? (() => () => undefined),
       terminalBridgeEnabled: input.terminalBridgeEnabled ?? (() => false)
     },
@@ -908,6 +911,14 @@ test("idle reconciliation reloads under lock, persists then logs, and releases",
     marker: "I",
     events,
     storeDir,
+    withStoreWriter(_storeDir, operation) {
+      events.push("writer");
+      try {
+        return operation();
+      } finally {
+        events.push("writer-release");
+      }
+    },
     acquireStateLock(statePath) {
       events.push(`lock:${path.basename(statePath)}`);
       return () => {
@@ -930,7 +941,9 @@ test("idle reconciliation reloads under lock, persists then logs, and releases",
     skipped: 0,
     idle_timeout_minutes: 1
   });
-  assert.deepEqual(events, ["lock:state.json", "release:state.json"]);
+  assert.deepEqual(events, [
+    "writer", "lock:state.json", "release:state.json", "writer-release"
+  ]);
   assert.equal(loadState(paths.statePath).status, "closed");
   assert.ok(logs.includes("idle_conversation_closed"));
 });

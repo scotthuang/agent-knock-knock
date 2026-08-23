@@ -39,9 +39,12 @@ import {
   type Conversation
 } from "../src/protocol.js";
 import {
+  loadState,
   pathsForConversation,
   saveState
 } from "../src/store.js";
+import { readNdjsonLog } from "../src/transcript.js";
+import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 import type {
   TerminalControlRef
 } from "../src/terminal-agent-adapter.js";
@@ -431,11 +434,11 @@ test("managed cancel retains distinct command and state Store lock keys", async 
     "resolve", "load", "migrate",
     `command-store:${commandStoreDir}`,
     `terminal:acquire:${commandStoreDir}`,
-    `state:acquire:${paths.statePath}.lock`,
     `writer:acquire:${paths.storeDir}`,
+    `state:acquire:${paths.statePath}.lock`,
     `assert:owner:${paths.storeDir}`,
-    `writer:release:${paths.storeDir}`,
     `state:release:${paths.statePath}.lock`,
+    `writer:release:${paths.storeDir}`,
     `terminal:release:${commandStoreDir}`
   ]);
 });
@@ -499,16 +502,16 @@ test("managed cancel preserves parent acquire and release error priority", async
       name: "state acquire failure releases only terminal",
       failures: { stateAcquire: errors.stateAcquire },
       expectedError: errors.stateAcquire,
-      tail: [terminalAcquire, stateAcquire, terminalRelease]
+      tail: [
+        terminalAcquire, writerAcquire, stateAcquire,
+        writerRelease, terminalRelease
+      ]
     },
     {
-      name: "writer acquire failure releases state then terminal",
+      name: "writer acquire failure releases only terminal",
       failures: { writerAcquire: errors.writerAcquire },
       expectedError: errors.writerAcquire,
-      tail: [
-        terminalAcquire, stateAcquire, writerAcquire,
-        stateRelease, terminalRelease
-      ]
+      tail: [terminalAcquire, writerAcquire, terminalRelease]
     },
     {
       name: "writer release overrides the operation error",
@@ -518,9 +521,9 @@ test("managed cancel preserves parent acquire and release error priority", async
       },
       expectedError: errors.writerRelease,
       tail: [
-        terminalAcquire, stateAcquire, writerAcquire,
-        `assert:owner:${paths.storeDir}`, writerRelease,
-        stateRelease, terminalRelease
+        terminalAcquire, writerAcquire, stateAcquire,
+        `assert:owner:${paths.storeDir}`, stateRelease,
+        writerRelease, terminalRelease
       ]
     },
     {
@@ -531,9 +534,9 @@ test("managed cancel preserves parent acquire and release error priority", async
       },
       expectedError: errors.stateRelease,
       tail: [
-        terminalAcquire, stateAcquire, writerAcquire,
-        `assert:owner:${paths.storeDir}`, writerRelease,
-        stateRelease, terminalRelease
+        terminalAcquire, writerAcquire, stateAcquire,
+        `assert:owner:${paths.storeDir}`, stateRelease,
+        writerRelease, terminalRelease
       ]
     },
     {
@@ -544,9 +547,9 @@ test("managed cancel preserves parent acquire and release error priority", async
       },
       expectedError: errors.terminalRelease,
       tail: [
-        terminalAcquire, stateAcquire, writerAcquire,
-        `assert:owner:${paths.storeDir}`, writerRelease,
-        stateRelease, terminalRelease
+        terminalAcquire, writerAcquire, stateAcquire,
+        `assert:owner:${paths.storeDir}`, stateRelease,
+        writerRelease, terminalRelease
       ]
     },
     {
@@ -559,9 +562,9 @@ test("managed cancel preserves parent acquire and release error priority", async
       },
       expectedError: errors.terminalRelease,
       tail: [
-        terminalAcquire, stateAcquire, writerAcquire,
-        `assert:owner:${paths.storeDir}`, writerRelease,
-        stateRelease, terminalRelease
+        terminalAcquire, writerAcquire, stateAcquire,
+        `assert:owner:${paths.storeDir}`, stateRelease,
+        writerRelease, terminalRelease
       ]
     }
   ];
@@ -588,6 +591,152 @@ test("managed cancel preserves parent acquire and release error priority", async
   }
 });
 
+test("explicit Close persists user intent when linked cleanup is missing", async (t) => {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-user-close-"));
+  t.after(() => fs.rmSync(storeDir, { recursive: true, force: true }));
+  const initial = conversation("user-close", "stalled");
+  const paths = pathsForConversation(initial.conversation_id, storeDir);
+  const closeControl: TerminalControlRef = {
+    kind: "tmux",
+    target: "renumbered:0.0",
+    session: "renumbered",
+    window: 0,
+    pane: 0,
+    panePid: 4242,
+    capabilities: []
+  };
+  const stored: Conversation = {
+    ...initial,
+    store_dir: paths.storeDir,
+    conversation_dir: paths.conversationDir,
+    state_path: paths.statePath,
+    event_log_path: paths.logPath,
+    callback_expected: true,
+    callback_delivery: {
+      status: "pending",
+      attempts: 1,
+      message: { id: "callback-user-close" }
+    },
+    callback_notification_delivery: {
+      status: "failed",
+      attempts: 1,
+      message: { id: "notification-user-close" }
+    },
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_control: closeControl,
+      terminal_bridge_message_id: "message-after-route-renumber",
+      deferred_foreground_transfer_id: "deferred-transfer-missing"
+    }
+  };
+  saveState(paths.statePath, stored);
+  const legacyStored = JSON.parse(
+    fs.readFileSync(paths.statePath, "utf8")
+  ) as Record<string, unknown>;
+  delete legacyStored.store_dir;
+  delete legacyStored.conversation_dir;
+  delete legacyStored.state_path;
+  delete legacyStored.event_log_path;
+  fs.writeFileSync(paths.statePath, `${JSON.stringify(legacyStored)}\n`, {
+    mode: 0o600
+  });
+  const facade = createTerminalMaintenanceCliFacade({
+    runtime: strictPorts<TerminalMaintenanceRuntimePorts>({
+      loadConversation() {
+        return {
+          conversation: {
+            ...loadState(paths.statePath),
+            store_dir: path.resolve(paths.storeDir),
+            conversation_dir: path.resolve(paths.conversationDir),
+            state_path: path.resolve(paths.statePath),
+            event_log_path: path.resolve(paths.logPath)
+          },
+          statePath: paths.statePath,
+          logPath: paths.logPath
+        };
+      },
+      textSummary(value) {
+        return String(value);
+      }
+    }, "user-close runtime"),
+    identity: strictPorts<TerminalMaintenanceIdentityPorts>({
+      async resolveTerminalConversationFromOptions() {
+        return undefined;
+      }
+    }, "user-close identity"),
+    authority: strictPorts({}, "user-close authority"),
+    repository: strictPorts<TerminalMaintenanceRepositoryPorts>({
+      acquireFileLock() {
+        return () => {};
+      },
+      async withStoreWriterLease(_storeDir, operation) {
+        return operation();
+      },
+      resolveDispatch(control, request) {
+        assert.equal(control.target, closeControl.target);
+        assert.equal(
+          request.expectedMessageId,
+          "message-after-route-renumber"
+        );
+        throw new Error("malformed terminal dispatch receipt history");
+      }
+    }, "user-close repository")
+  });
+
+  const execution = await runCliCommandExecution(
+    "close",
+    { turn: initial.conversation_id },
+    { now: () => NOW },
+    () => facade.runClose({
+      turn: initial.conversation_id,
+      reason: "user chose to release AKK management"
+    })
+  );
+  const output = JSON.parse(execution.stdout) as Record<string, any>;
+  const closed = loadState(paths.statePath);
+  assert.equal(closed.status, "closed");
+  assert.equal(closed.disposition, "user_abandoned_management");
+  assert.equal(closed.callback_expected, false);
+  assert.equal(closed.close_reason, "user chose to release AKK management");
+  assert.equal(closed.store_dir, path.resolve(paths.storeDir));
+  assert.equal(closed.conversation_dir, path.resolve(paths.conversationDir));
+  assert.equal(closed.state_path, path.resolve(paths.statePath));
+  assert.equal(closed.event_log_path, path.resolve(paths.logPath));
+  assert.equal(
+    (closed.callback_delivery as Record<string, unknown>).status,
+    "superseded"
+  );
+  assert.equal(
+    (closed.callback_notification_delivery as Record<string, unknown>).status,
+    "superseded"
+  );
+  assert.equal(output.closed, true);
+  assert.equal(output.management_released, true);
+  assert.equal(output.terminal_input_sent, false);
+  assert.equal(output.coding_agent_stopped, false);
+  assert.equal(output.tmux_pane_closed, false);
+  assert.equal(output.terminal_dispatch_resolved, false);
+  assert.ok((output.warnings as unknown[]).some((warning) =>
+    /linked_transfer_missing/u.test(String(warning))
+  ));
+  assert.ok((output.warnings as unknown[]).some((warning) =>
+    /malformed terminal dispatch receipt history/u.test(String(warning))
+  ));
+  const events = readNdjsonLog(paths.logPath);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0], {
+    ts: NOW.toISOString(),
+    conversation_id: initial.conversation_id,
+    event: "conversation_closed",
+    status: "closed",
+    reason: "user chose to release AKK management",
+    disposition: "user_abandoned_management",
+    terminal_input_sent: false,
+    coding_agent_stopped: false,
+    tmux_pane_closed: false
+  });
+});
+
 test("maintenance command wiring preserves validation and durable order", () => {
   const renew = compiledFunctionSource("runRenew", "function runCancel");
   assertOrdered(renew, [
@@ -597,6 +746,7 @@ test("maintenance command wiring preserves validation and durable order", () => 
     "isVerifiedDeadTerminalAgentProcess(conversation)",
     "terminalBridgeSubmission(conversation)",
     "createTerminalControlProvider(options)",
+    "withStoreWriterLease(writerStoreDir",
     "acquireFileLock(`${statePath}.lock`)",
     "loadState(statePath)",
     "assertTurnBindingCurrent(current, \"renew\")",
@@ -626,16 +776,16 @@ test("maintenance command wiring preserves validation and durable order", () => 
   assertOrdered(managedCancel, [
     "acquireTerminalBridgeSendLock(",
     "storeDirFromOptions(options)",
-    "acquireFileLock(`${statePath}.lock`)",
     "pathsForConversationDir(",
     "withStoreWriterLease(writerStoreDir",
+    "acquireFileLock(`${statePath}.lock`)",
     "loadState(statePath)",
     "assertManagedTerminalDispatchOwner({",
     "createTerminalAgentBridge(options).cancel(",
     "appendEvent(logPath, {",
     "saveState(statePath, nextConversation)",
     "printJson({",
-    "releaseStateLock?.()",
+    "releaseStateLock()",
     "releaseTerminalLock()"
   ]);
 
@@ -668,16 +818,15 @@ test("maintenance command wiring preserves validation and durable order", () => 
     "resolveTerminalConversationFromOptions(options)",
     "runTerminalDispatchClose({",
     "loadConversationFromOptions(options)",
-    "runObservedHandoffClose({",
-    "acquireTerminalBridgeSendLock(",
-    "assertConversationHasNoNonterminalDeferredForegroundTransfer({",
-    "exactVerifiedDeadTerminalAgentProcessAuthority({",
-    "assertGenericCloseDoesNotBypassObservedHandoff({",
-    "saveState(statePath, closed)",
-    "resolveTerminalBridgeDispatchLedger(currentTerminalControl, {",
-    "appendEvent(logPath, {",
-    "printJson({"
+    "acquireFileLock(`${statePath}.lock`)",
+    "saveExplicitUserCloseState(statePath, closed)",
+    "cleanupDeferredForegroundUserClose({",
+    "resolveTerminalBridgeDispatchLedger(",
+    "appendExplicitUserCloseEvent(logPath, {",
+    "printJson({",
+    "withStoreWriterLeaseAsync(closeStoreDir, closeWithFreshState)"
   ]);
+  assert.doesNotMatch(close, /runObservedHandoffClose|acquireTerminalBridgeSendLock/u);
 
   const dispatchClose = compiledFunctionSource(
     "runTerminalDispatchClose",
@@ -744,8 +893,8 @@ test("maintenance functions remain below the hard LOC and complexity gates", () 
       node.forEachChild(visit);
     };
     sourceFile.forEachChild(visit);
-    assert.equal(Math.max(...metrics.map((entry) => entry.span)), 264);
-    assert.equal(Math.max(...metrics.map((entry) => entry.complexity)), 32);
+    assert.equal(Math.max(...metrics.map((entry) => entry.span)), 222);
+    assert.equal(Math.max(...metrics.map((entry) => entry.complexity)), 29);
     assert.ok(metrics.every((entry) => entry.span < 500));
     assert.ok(metrics.every((entry) => entry.complexity < 50));
   } finally {

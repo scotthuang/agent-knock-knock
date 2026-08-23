@@ -332,26 +332,9 @@ export function terminalDispatchLedgerLooksLifecycle(
 export function terminalDispatchReceiptHistory(
   ledger: TerminalDispatchLedgerDocument | undefined
 ): TerminalDispatchReceipt[] {
+  const receipts = validatedStoredTerminalDispatchReceiptHistory(ledger);
   if (!ledger) {
-    return [];
-  }
-  const value = ledger.terminal_submission_receipts;
-  if (value !== undefined && !Array.isArray(value)) {
-    throw new Error("terminal dispatch receipt history is malformed");
-  }
-  const receipts = (Array.isArray(value) ? value : []).map((receipt) => {
-    if (!isRecord(receipt) || !stringValue(receipt.message_id)) {
-      throw new Error("terminal dispatch receipt history is malformed");
-    }
-    return receipt;
-  });
-  const ids = new Set<string>();
-  for (const receipt of receipts) {
-    const id = String(receipt.message_id);
-    if (ids.has(id)) {
-      throw new Error(`terminal dispatch receipt ${id} is duplicated`);
-    }
-    ids.add(id);
+    return receipts;
   }
   const current = terminalDispatchReceiptCandidate(ledger);
   const currentId = stringValue(current?.message_id);
@@ -373,6 +356,33 @@ export function terminalDispatchReceiptHistory(
   return receipts.map((receipt) =>
     stringValue(receipt.message_id) === currentId ? merged : receipt
   );
+}
+
+function validatedStoredTerminalDispatchReceiptHistory(
+  ledger: TerminalDispatchLedgerDocument | undefined
+): TerminalDispatchReceipt[] {
+  if (!ledger) {
+    return [];
+  }
+  const value = ledger.terminal_submission_receipts;
+  if (value !== undefined && !Array.isArray(value)) {
+    throw new Error("terminal dispatch receipt history is malformed");
+  }
+  const receipts = (Array.isArray(value) ? value : []).map((receipt) => {
+    if (!isRecord(receipt) || !stringValue(receipt.message_id)) {
+      throw new Error("terminal dispatch receipt history is malformed");
+    }
+    return receipt;
+  });
+  const ids = new Set<string>();
+  for (const receipt of receipts) {
+    const id = String(receipt.message_id);
+    if (ids.has(id)) {
+      throw new Error(`terminal dispatch receipt ${id} is duplicated`);
+    }
+    ids.add(id);
+  }
+  return receipts;
 }
 
 export function terminalDispatchReceiptCandidate(
@@ -527,8 +537,14 @@ export function constructTerminalDispatchLedgerDocument({
   terminalControl,
   terminalEndpoint
 }: ConstructTerminalDispatchLedgerOptions): TerminalDispatchLedgerDocument {
-  let baseReceiptHistory = terminalDispatchReceiptHistory(previousLedger);
-  for (const incomingReceipt of terminalDispatchReceiptHistory(incomingLedger)) {
+  const resolvingTopLevel = incomingLedger.status === "resolved";
+  let baseReceiptHistory = resolvingTopLevel
+    ? validatedStoredTerminalDispatchReceiptHistory(previousLedger)
+    : terminalDispatchReceiptHistory(previousLedger);
+  const incomingReceiptHistory = resolvingTopLevel
+    ? validatedStoredTerminalDispatchReceiptHistory(incomingLedger)
+    : terminalDispatchReceiptHistory(incomingLedger);
+  for (const incomingReceipt of incomingReceiptHistory) {
     const incomingId = String(incomingReceipt.message_id);
     const previousReceipt = baseReceiptHistory.find((receipt) =>
       stringValue(receipt.message_id) === incomingId
@@ -547,7 +563,7 @@ export function constructTerminalDispatchLedgerDocument({
     terminal_endpoint: incomingTerminalEndpoint,
     ...ledgerWithoutReceiptHistory
   } = incomingLedger;
-  const nextWithoutHistory = {
+  const nextWithoutHistory: TerminalDispatchLedgerDocument = {
     ...ledgerWithoutReceiptHistory,
     version,
     terminal_key: terminalKey,
@@ -573,9 +589,21 @@ export function constructTerminalDispatchLedgerDocument({
         };
       })()
     : nextWithoutHistory;
-  const nextCandidate = terminalDispatchReceiptCandidate(
-    receiptCandidateLedger
+  const resolvedMessageId = nextWithoutHistory.status === "resolved"
+    ? stringValue(nextWithoutHistory.message_id)
+    : undefined;
+  const resolvedReceiptAlreadyStored = Boolean(
+    resolvedMessageId &&
+    baseReceiptHistory.some((receipt) =>
+      stringValue(receipt.message_id) === resolvedMessageId
+    )
   );
+  // Resolution is terminal-wide ownership metadata, not a new submission
+  // phase. When the exact receipt is already append-only history, never merge
+  // top-level resolved_at/reason back into that historical proof.
+  const nextCandidate = resolvedReceiptAlreadyStored
+    ? undefined
+    : terminalDispatchReceiptCandidate(receiptCandidateLedger);
   let nextReceiptHistory = baseReceiptHistory;
   if (nextCandidate) {
     const messageId = String(nextCandidate.message_id);

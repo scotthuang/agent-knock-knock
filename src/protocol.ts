@@ -148,6 +148,13 @@ export function isTerminalDispatchOwnerReleasedStatus(status: unknown): boolean 
     TERMINAL_DISPATCH_OWNER_RELEASED_STATUSES.has(status as ConversationStatus);
 }
 
+export function isExplicitUserAbandonedManagementTurn(
+  conversation: Partial<Conversation> | null | undefined
+): boolean {
+  return conversation?.status === "closed" &&
+    conversation.disposition === "user_abandoned_management";
+}
+
 export function isSessionSendBlockingStatus(status: unknown): boolean {
   return typeof status === "string" &&
     SESSION_SEND_BLOCKING_STATUSES.has(status as ConversationStatus);

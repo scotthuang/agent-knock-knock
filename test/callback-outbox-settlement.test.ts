@@ -69,6 +69,14 @@ function createHarness({
   const order: string[] = [];
   const events: Array<Record<string, unknown>> = [];
   const state: CallbackOutboxSettlementStatePort = {
+    withWriter(storeDir, operation) {
+      order.push(`writer:enter:${storeDir}`);
+      try {
+        return operation();
+      } finally {
+        order.push("writer:exit");
+      }
+    },
     withStateTransaction(_statePath, operation) {
       order.push("lock:enter");
       try {
@@ -76,6 +84,10 @@ function createHarness({
       } finally {
         order.push("lock:exit");
       }
+    },
+    storeDirForStatePath() {
+      order.push("derive:store-dir");
+      return "/store";
     },
     load() {
       order.push("load");
@@ -139,11 +151,14 @@ test("callback progress preserves lock, save, then event order", async () => {
   });
 
   assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "writer:enter:/store",
     "lock:enter",
     "load",
     "save",
     "append:callback_delivery_stage_updated",
-    "lock:exit"
+    "lock:exit",
+    "writer:exit"
   ]);
   assert.equal(
     (harness.stored().callback_delivery as Record<string, unknown>)
@@ -162,11 +177,14 @@ test("accepted transport settles durably without launching a retry", async () =>
   });
 
   assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "writer:enter:/store",
     "lock:enter",
     "load",
     "save",
     "append:callback_delivery_succeeded",
-    "lock:exit"
+    "lock:exit",
+    "writer:exit"
   ]);
   const delivery = harness.stored().callback_delivery as Record<string, unknown>;
   assert.equal(delivery.status, "delivered");
@@ -195,11 +213,14 @@ test("successful delivery persists delivery evidence before its event", async ()
   });
 
   assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "writer:enter:/store",
     "lock:enter",
     "load",
     "save",
     "append:callback_delivery_succeeded",
-    "lock:exit"
+    "lock:exit",
+    "writer:exit"
   ]);
   const delivery = harness.stored().callback_delivery as Record<string, unknown>;
   assert.equal(delivery.status, "delivered");
@@ -226,10 +247,13 @@ test("changed claims append only a skipped-settlement event", async () => {
   });
 
   assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "writer:enter:/store",
     "lock:enter",
     "load",
     "append:callback_delivery_settle_skipped",
-    "lock:exit"
+    "lock:exit",
+    "writer:exit"
   ]);
   assert.equal(
     (harness.stored().callback_delivery as Record<string, unknown>).status,
@@ -247,13 +271,16 @@ test("failed delivery launches retry before durable failure settlement", async (
   });
 
   assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "writer:enter:/store",
     "lock:enter",
     "load",
     "retry-monitor:start",
     "save",
     "append:callback_delivery_failed",
     "append:callback_retry_monitor_launched",
-    "lock:exit"
+    "lock:exit",
+    "writer:exit"
   ]);
   const delivery = harness.stored().callback_delivery as Record<string, unknown>;
   assert.equal(delivery.status, "failed");
@@ -289,11 +316,14 @@ test("permanent and uncertain outcomes never launch a blind retry", async () => 
     });
 
     assert.deepEqual(harness.order, [
+      "derive:store-dir",
+      "writer:enter:/store",
       "lock:enter",
       "load",
       "save",
       "append:callback_delivery_failed",
-      "lock:exit"
+      "lock:exit",
+      "writer:exit"
     ]);
     const delivery = harness.stored()
       .callback_delivery as Record<string, unknown>;
@@ -326,11 +356,14 @@ test("notification settlement stays isolated and records sent_at only on accepta
     "failed"
   );
   assert.deepEqual(failed.order, [
+    "derive:store-dir",
+    "writer:enter:/store",
     "lock:enter",
     "load",
     "save",
     "append:callback_notification_delivery_failed",
-    "lock:exit"
+    "lock:exit",
+    "writer:exit"
   ]);
 
   const accepted = createHarness({ lane: "notification" });
@@ -390,10 +423,13 @@ test("accepted recovery distinguishes caller-held and service-held locks", async
     });
   });
   assert.deepEqual(serviceHeld.order, [
+    "derive:store-dir",
+    "writer:enter:/store",
     "lock:enter",
     "load",
     "save",
     "append:callback_delivery_succeeded",
-    "lock:exit"
+    "lock:exit",
+    "writer:exit"
   ]);
 });

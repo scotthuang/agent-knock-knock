@@ -339,8 +339,10 @@ test("accepted retry fences a fresh Turn under writer authority before recovery"
     "writer:acquire",
     "assert:no-deferred",
     "writer:release",
+    "writer:acquire",
     `state:acquire:${path.basename(stored.statePath)}.lock`,
     `state:release:${path.basename(stored.statePath)}.lock`,
+    "writer:release",
     "output"
   ]);
 });

@@ -118,6 +118,26 @@ test("repository promotes legacy ownership and preserves exact private JSON byte
     }), false);
     assert.deepEqual(fs.readFileSync(legacyPath), acceptedBytes);
 
+    const receiptBeforeResolve = JSON.stringify(
+      (repository.load(control)?.terminal_submission_receipts as
+        Array<Record<string, unknown>>)[0]
+    );
+    assert.equal(repository.resolve(control, {
+      conversation: { conversation_id: "conversation-1" },
+      expectedMessageId: "message-1",
+      reason: "conversation explicitly closed by request"
+    }), true);
+    const resolved = repository.load(control)!;
+    assert.equal(resolved.status, "resolved");
+    assert.equal(resolved.resolved_at, NOW.toISOString());
+    assert.equal(
+      JSON.stringify(
+        (resolved.terminal_submission_receipts as
+          Array<Record<string, unknown>>)[0]
+      ),
+      receiptBeforeResolve
+    );
+
     associateCanonicalEndpoint(control);
     const canonicalKey = repository.runtimeKey(control);
     const canonicalPath = ledgerPath(runtimeDir, canonicalKey);

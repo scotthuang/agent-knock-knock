@@ -7,6 +7,7 @@ import {
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
   managedTurnNeedsAttention,
+  projectHandoffDecision,
   selectTerminalAvailableActions,
   type TerminalActionSet,
   type TerminalDispatchOwnership,
@@ -53,6 +54,22 @@ import {
 import { isRecord, nonBlankString } from "../src/value-guards.js";
 
 const THREAD_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0101";
+
+test("handoff Close carries only user-owned semantic arguments", () => {
+  const projected = projectHandoffDecision({
+    sourceSessionId: "session-source",
+    sourceTurnId: "turn-source",
+    liveNativeThreadId: THREAD_A,
+    handoffDecisionToken: "private-token"
+  });
+  assert.deepEqual(
+    projected.choices.take_over_current.action.arguments,
+    {
+      turn_id: "turn-source",
+      reason: "superseded_by_human_context_switch"
+    }
+  );
+});
 
 const control: TerminalControlRef = {
   kind: "tmux",

@@ -53,7 +53,9 @@ function adapter(
     store: {
       terminalControlFromTakeover: () => undefined,
       storeDir: () => "/tmp/identity-store",
+      storeDirForStatePath: () => "/tmp/identity-store",
       storeDirForConversation: () => undefined,
+      withWriter: (_storeDir, operation) => operation(),
       turnsForSession: () => [],
       turnMatchesTerminal: () => false,
       isDiscoverableTurn: () => false,
@@ -263,7 +265,7 @@ test("endpoint refinement persists only matching canonical incarnation evidence"
   assert.equal(endpoint.pane_pid, 100);
 });
 
-test("legacy identity migration keeps observation, lock, event, and log order", async () => {
+test("legacy identity migration keeps writer, lock, event, and log order", async () => {
   const trace: string[] = [];
   const fixture = legacyMigrationFixture(trace);
   const result = await runCliCommandExecution("identity-migration", {}, {
@@ -285,7 +287,7 @@ test("legacy identity migration keeps observation, lock, event, and log order", 
   });
   assert.deepEqual(result, { exitCode: 0, stdout: "" });
   assert.deepEqual(trace, [
-    "lock", "load", "save", "unlock", "event",
+    "writer", "lock", "load", "save", "unlock", "writer-release", "event",
     "log:terminal_agent_identity_migrated"
   ]);
 });
@@ -311,8 +313,8 @@ test("legacy identity migration downgrades only observation failure to warning",
   assert.deepEqual(trace, ["log:legacy_terminal_agent_identity_migration_failed"]);
 });
 
-test("legacy identity migration propagates save and event failures after cleanup", async () => {
-  for (const failure of ["save", "event"] as const) {
+test("legacy identity migration propagates writer, save, and event failures after cleanup", async () => {
+  for (const failure of ["writer", "save", "event"] as const) {
     const trace: string[] = [];
     const fixture = legacyMigrationFixture(trace, failure);
     await assert.rejects(() => runCliCommandExecution("identity-migration", {}, {
@@ -327,12 +329,18 @@ test("legacy identity migration propagates save and event failures after cleanup
         options: {}
       });
     }), new RegExp(`${failure} failed`, "u"));
-    assert.equal(trace.includes("unlock"), true);
+    assert.equal(trace.includes("unlock"), failure !== "writer");
     assert.equal(trace.some((entry) => entry.startsWith("log:")), false);
-    if (failure === "save") {
-      assert.deepEqual(trace, ["lock", "load", "save", "unlock"]);
+    if (failure === "writer") {
+      assert.deepEqual(trace, ["writer"]);
+    } else if (failure === "save") {
+      assert.deepEqual(trace, [
+        "writer", "lock", "load", "save", "unlock", "writer-release"
+      ]);
     } else {
-      assert.deepEqual(trace, ["lock", "load", "save", "unlock", "event"]);
+      assert.deepEqual(trace, [
+        "writer", "lock", "load", "save", "unlock", "writer-release", "event"
+      ]);
     }
   }
 });
@@ -348,7 +356,7 @@ function terminalControl(): TerminalControlRef {
 
 function legacyMigrationFixture(
   trace: string[],
-  failure?: "observation" | "save" | "event"
+  failure?: "observation" | "writer" | "save" | "event"
 ): { facade: ReturnType<typeof adapter>; conversation: Conversation } {
   const control = terminalControl();
   const nativeSessionId = "33333333-3333-4333-8333-333333333333";
@@ -382,6 +390,15 @@ function legacyMigrationFixture(
         ]);
     ports.runtime.createControlProvider = () => terminalProvider;
     ports.store.terminalControlFromTakeover = () => control;
+    ports.store.withWriter = (_storeDir, operation) => {
+      trace.push("writer");
+      if (failure === "writer") throw new Error("writer failed");
+      try {
+        return operation();
+      } finally {
+        trace.push("writer-release");
+      }
+    };
     ports.store.acquireStateLock = () => {
       trace.push("lock");
       return () => trace.push("unlock");

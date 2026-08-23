@@ -207,6 +207,7 @@ export interface CallbackOutboxServicePorts {
       statePath: string,
       operation: () => Result
     ): Result;
+    withWriter<Result>(storeDir: string, operation: () => Result): Result;
     storeDirForStatePath(statePath: string): string;
     logPathForStatePath(statePath: string): string;
   };
@@ -471,7 +472,9 @@ export function createCallbackOutboxService(
 ) {
   const settlement = createCallbackOutboxSettlement({
     state: {
+      withWriter: ports.state.withWriter,
       withStateTransaction: ports.state.withTransaction,
+      storeDirForStatePath: ports.state.storeDirForStatePath,
       load: ports.state.load,
       save: ports.state.save,
       append: ports.state.append
@@ -817,9 +820,18 @@ export function createCallbackOutboxService(
       };
     }
 
-    ports.state.assertWriterCompatible(
-      ports.state.storeDirForStatePath(prepared.statePath)
+    const transportConversation = beginPreparedCallbackTransport(
+      ports,
+      prepared
     );
+    if (!transportConversation) {
+      return {
+        delivered: false,
+        duplicate: true,
+        conversation: ports.state.load(prepared.statePath),
+        message: prepared.message
+      };
+    }
     let acceptedDelivery: CallbackDeliveryOutcome | undefined;
     let delivery: CallbackDeliveryOutcome;
     try {
@@ -946,6 +958,42 @@ export function createCallbackOutboxService(
     prepareTerminalCompletion: (input: TerminalCompletionPreparationInput) =>
       prepareTerminalCompletion(ports, prepare, input)
   };
+}
+
+function beginPreparedCallbackTransport(
+  ports: CallbackOutboxServicePorts,
+  prepared: PreparedCallbackDelivery
+): Conversation | undefined {
+  const storeDir = ports.state.storeDirForStatePath(prepared.statePath);
+  return ports.state.withWriter(storeDir, () =>
+    ports.state.withTransaction(prepared.statePath, () => {
+      const current = ports.state.load(prepared.statePath);
+      const field = callbackOutboxField(prepared.callbackOutboxLane);
+      const delivery = isRecord(current[field]) ? current[field] : undefined;
+      const message = isRecord(delivery?.message) ? delivery.message : undefined;
+      if (
+        current.status === "closed" ||
+        delivery?.status !== "pending" ||
+        message?.id !== prepared.message.id ||
+        Number(delivery.attempts) !== prepared.deliveryAttempt ||
+        stringValue(delivery.attempt_id) !== prepared.deliveryAttemptId ||
+        delivery.transport_started_at !== undefined
+      ) {
+        return undefined;
+      }
+      const now = ports.runtime.now().toISOString();
+      const started: Conversation = {
+        ...current,
+        [field]: {
+          ...delivery,
+          transport_started_at: now,
+          updated_at: now
+        }
+      };
+      ports.state.save(prepared.statePath, started);
+      return started;
+    })
+  );
 }
 
 function prepareApprovalNotification(
@@ -1123,7 +1171,9 @@ function prepareTerminalCompletion(
     completionFingerprint,
     outcome: completionOutcome
   });
-  const transaction = ports.state.withTransaction(input.statePath, () => {
+  const storeDir = ports.state.storeDirForStatePath(input.statePath);
+  const transaction = ports.state.withWriter(storeDir, () =>
+    ports.state.withTransaction(input.statePath, () => {
     const claim = claimTerminalCompletion(ports, {
       statePath: input.statePath,
       logPath: input.logPath,
@@ -1217,7 +1267,8 @@ function prepareTerminalCompletion(
       prepared,
       callbackMessageId
     };
-  });
+    })
+  );
   if (!transaction.claimed) {
     return transaction;
   }
@@ -1524,7 +1575,9 @@ function reconcileCallbackDelivery(
     callbackOutboxLane = "lifecycle"
   }: CallbackDeliveryReconciliationInput
 ) {
-  return ports.state.withTransaction(statePath, () => {
+  const storeDir = ports.state.storeDirForStatePath(statePath);
+  return ports.state.withWriter(storeDir, () =>
+    ports.state.withTransaction(statePath, () => {
     const conversation = ports.state.load(statePath);
     const legacyStatusError = stringValue(
       conversation.legacy_callback_status_error
@@ -1666,7 +1719,8 @@ function reconcileCallbackDelivery(
       reason: callbackOutboxEvent(callbackOutboxLane, "reconciliation"),
       monitorPid: retryMonitor.pid
     };
-  });
+    })
+  );
 }
 
 function runCallbackRetryMonitor(

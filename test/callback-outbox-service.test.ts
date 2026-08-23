@@ -104,6 +104,14 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
           order.push("release");
         }
       },
+      withWriter(storeDir, operation) {
+        order.push(`writer:${storeDir}`);
+        try {
+          return operation();
+        } finally {
+          order.push("writer:release");
+        }
+      },
       storeDirForStatePath(statePath) {
         order.push("derive:store-dir");
         return statePath.startsWith("/other/") ? "/other" : "/store";
@@ -163,6 +171,9 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
     ports,
     service: createCallbackOutboxService(ports),
     stored: () => stored,
+    replaceStored: (next: Conversation) => {
+      stored = next;
+    },
     retryMonitors,
     dispositionCalls: () => dispositionCalls
   };
@@ -295,7 +306,14 @@ test("supersede recovery admits only the dedicated callback status policy", () =
     conversation: legacyCallback.harness.conversation,
     reason: "conversation_no_longer_waiting"
   });
-  assert.deepEqual(legacyCallback.harness.order, ["acquire", "load", "release"]);
+  assert.deepEqual(legacyCallback.harness.order, [
+    "derive:store-dir",
+    "writer:/store",
+    "acquire",
+    "load",
+    "release",
+    "writer:release"
+  ]);
 });
 
 test("callback preparation validates its message before state path derivation", () => {
@@ -326,7 +344,7 @@ test("prepared delivery derives writer authority from its current state path", (
 
   prepared.statePath = "/other/turn-a/state.json";
   let assertedStoreDir: string | undefined;
-  harness.ports.state.assertWriterCompatible = (storeDir) => {
+  harness.ports.state.withWriter = (storeDir) => {
     assertedStoreDir = storeDir;
     throw new Error("stop after writer authority check");
   };
@@ -335,6 +353,138 @@ test("prepared delivery derives writer authority from its current state path", (
     /stop after writer authority check/u
   );
   assert.equal(assertedStoreDir, "/other");
+});
+
+test("Close committed after callback preparation prevents transport start", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true,
+      gatewayMethod: "agent-knock-knock.callback"
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  harness.replaceStored({ ...harness.stored(), status: "closed" });
+  let deliveries = 0;
+  harness.ports.delivery.deliver = () => {
+    deliveries += 1;
+    throw new Error("transport must not start");
+  };
+
+  const beforeRun = harness.order.length;
+  const result = harness.service.runPrepared(prepared);
+
+  assert.equal(result.delivered, false);
+  assert.equal(result.duplicate, true);
+  assert.equal(deliveries, 0);
+  assert.equal(
+    (harness.stored().callback_delivery as Record<string, unknown>)
+      .transport_started_at,
+    undefined
+  );
+  assert.deepEqual(harness.order.slice(beforeRun), [
+    "derive:store-dir",
+    "writer:/store",
+    "acquire",
+    "load",
+    "release",
+    "writer:release",
+    "load"
+  ]);
+});
+
+test("Close after callback transport start is not revived by settlement", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true,
+      gatewayMethod: "agent-knock-knock.callback"
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  harness.ports.delivery.deliver = () => {
+    const current = harness.stored();
+    const delivery = current.callback_delivery as Record<string, unknown>;
+    harness.replaceStored({
+      ...current,
+      status: "closed",
+      closed_at: NOW.toISOString(),
+      close_reason: "closed by request",
+      disposition: "user_abandoned_management",
+      callback_expected: false,
+      callback_delivery: {
+        ...delivery,
+        status: "superseded",
+        superseded_at: NOW.toISOString(),
+        superseded_reason: "superseded_by_conversation_close"
+      }
+    });
+    return {
+      kind: "test",
+      injection: { status: "accepted" },
+      wake: { status: "accepted" }
+    };
+  };
+
+  const result = harness.service.runPrepared(prepared);
+
+  assert.equal(result.delivered, true);
+  assert.equal(result.conversation.status, "closed");
+  assert.equal(
+    (result.conversation.callback_delivery as Record<string, unknown>).status,
+    "superseded"
+  );
+  assert.deepEqual(harness.order.slice(-7), [
+    "derive:store-dir",
+    "writer:/store",
+    "acquire",
+    "load",
+    "append:callback_delivery_settle_skipped",
+    "release",
+    "writer:release"
+  ]);
+});
+
+test("callback transport start is durable before the external delivery", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true,
+      gatewayMethod: "agent-knock-knock.callback"
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  harness.ports.delivery.deliver = () => {
+    const delivery = harness.stored().callback_delivery as
+      Record<string, unknown>;
+    assert.equal(delivery.transport_started_at, NOW.toISOString());
+    return {
+      kind: "test",
+      injection: { status: "accepted" },
+      wake: { status: "accepted" }
+    };
+  };
+
+  const result = harness.service.runPrepared(prepared);
+
+  assert.equal(result.delivered, true);
+  assert.equal(
+    (harness.stored().callback_delivery as Record<string, unknown>)
+      .transport_started_at,
+    NOW.toISOString()
+  );
 });
 
 test("non-retryable requests preserve the two fresh disposition observations", () => {
@@ -392,6 +542,8 @@ test("terminal completion holds the state claim through outbox preparation", () 
   assert.equal(result.claimed, true);
   assert.equal(result.prepared.outcome, "record_only");
   assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "writer:/store",
     "acquire",
     "load",
     "save",
@@ -408,6 +560,7 @@ test("terminal completion holds the state claim through outbox preparation", () 
     "log:callback_recorded_only",
     "crash-checkpoint",
     "release",
+    "writer:release",
     "resolve:completion-dispatch"
   ]);
 });
@@ -445,7 +598,14 @@ test("terminal completion claim conflict releases without preparing an outbox", 
     conversation: harness.conversation,
     reason: "terminal_bridge_completion_claim_conflict"
   });
-  assert.deepEqual(harness.order, ["acquire", "load", "release"]);
+  assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "writer:/store",
+    "acquire",
+    "load",
+    "release",
+    "writer:release"
+  ]);
 });
 
 test("approval preparation reuses its persisted callback identity", () => {
@@ -701,6 +861,19 @@ test("startup reconciliation restarts only the notification lane", () => {
     Record<string, unknown>;
   assert.equal(advisory.retry_monitor_pid, 4102);
   assert.equal(advisory.next_attempt_at, "2026-08-14T12:00:07.000Z");
+  assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "writer:/store",
+    "acquire",
+    "load",
+    "derive:store-dir",
+    "assert:no-deferred",
+    "start:retry-monitor",
+    "save",
+    "append:callback_notification_retry_monitor_launched",
+    "release",
+    "writer:release"
+  ]);
 });
 
 test("notification retry reuses its durable payload and settles acceptance", () => {

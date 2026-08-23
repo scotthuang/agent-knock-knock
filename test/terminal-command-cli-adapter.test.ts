@@ -9,9 +9,23 @@ import type { TerminalCommandCliDependencies } from
   "../src/terminal-command-cli-adapter.js";
 import type { ResolvedTerminalConversation } from
   "../src/terminal-agent-bridge.js";
+import type { TerminalAgentBridge } from
+  "../src/terminal-agent-bridge.js";
+import type {
+  CanonicalMutationResources,
+  CanonicalMutationScopes,
+  CanonicalStateMutationResources,
+  CanonicalStateMutationScopes
+} from "../src/mutation-transaction.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 import { loadState, pathsForConversation, saveState } from "../src/store.js";
+import {
+  saveTerminalSubmissionRetry,
+  terminalSubmissionRetryPath,
+  TERMINAL_SUBMISSION_RETRY_SCHEMA,
+  TERMINAL_SUBMISSION_RETRY_VERSION
+} from "../src/terminal-submission-retry-service.js";
 
 interface DeferredGate {
   promise: Promise<void>;
@@ -165,6 +179,225 @@ test("exact Turn submission retry rejects mixed send options before terminal res
   assert.deepEqual(events, ["A:required:--turn is required"]);
 });
 
+test("closed Turn fences new and resumed submission retry before I/O or sidecar advance", async () => {
+  for (const resumed of [false, true]) {
+    const sandbox = fs.mkdtempSync(path.join(
+      os.tmpdir(),
+      resumed ? "akk-closed-retry-resumed-" : "akk-closed-retry-new-"
+    ));
+    const storeDir = path.join(sandbox, "store");
+    const turnId = resumed ? "turn-closed-resumed" : "turn-closed-new";
+    const sessionId = `session-${turnId}`;
+    const paths = pathsForConversation(turnId, storeDir);
+    const terminalControl = {
+      kind: "tmux" as const,
+      target: "closed-retry:0.0",
+      session: "closed-retry",
+      window: 0,
+      pane: 0,
+      panePid: 42,
+      capabilities: ["send_keys" as const, "screen_status" as const]
+    };
+    const openConversation: Conversation = {
+      ...createConversation({
+        userRequest: "retry the uncertain submission",
+        sessionId,
+        turnId,
+        openclawSession: `agent:main:${turnId}`,
+        executorKind: "codex",
+        now: new Date("2026-08-24T01:00:00.000Z")
+      }),
+      status: "stalled",
+      store_dir: paths.storeDir,
+      conversation_dir: paths.conversationDir,
+      event_log_path: paths.logPath,
+      state_path: paths.statePath,
+      native_session_takeover: {
+        terminal_bridge: true,
+        terminal_agent_pid: 42,
+        terminal_bridge_message_id: "message-closed-retry",
+        terminal_bridge_request_text: "retry the uncertain submission",
+        terminal_control: terminalControl
+      },
+      updated_at: "2026-08-24T01:00:01.000Z"
+    };
+    try {
+      saveState(paths.statePath, openConversation);
+      if (resumed) {
+        saveTerminalSubmissionRetry(paths.statePath, {
+          schema: TERMINAL_SUBMISSION_RETRY_SCHEMA,
+          version: TERMINAL_SUBMISSION_RETRY_VERSION,
+          revision: 1,
+          attempt_id: "submission-retry-existing",
+          mode: "replacement_send",
+          state: "replacement_reserved",
+          store_dir: paths.storeDir,
+          state_path: paths.statePath,
+          session_id: sessionId,
+          turn_id: turnId,
+          original_message_id: "message-closed-retry",
+          active_message_id: "message-closed-retry",
+          request_hash: "a".repeat(64),
+          terminal_target: terminalControl.target,
+          callback_route_fingerprint: null,
+          deferred_foreground_transfer_id: null,
+          reserved_at: "2026-08-24T01:00:01.000Z",
+          updated_at: "2026-08-24T01:00:01.000Z"
+        }, null);
+      }
+      const closedConversation: Conversation = {
+        ...openConversation,
+        status: "closed",
+        closed_at: "2026-08-24T01:00:02.000Z",
+        close_reason: "closed by request",
+        updated_at: "2026-08-24T01:00:02.000Z"
+      };
+      saveState(paths.statePath, closedConversation);
+      const retryPath = terminalSubmissionRetryPath(paths.statePath);
+      const stateBefore = fs.readFileSync(paths.statePath, "utf8");
+      const retryBefore = fs.existsSync(retryPath)
+        ? fs.readFileSync(retryPath, "utf8")
+        : undefined;
+      const effects: string[] = [];
+      const bridge = {
+        async resolveStoredTerminal() {
+          effects.push("terminal-read");
+          return {
+            conversationId: "terminal:closed-retry:0.0:42",
+            agent: "codex",
+            pid: 42,
+            legacy: false,
+            adapter: {},
+            terminalControl
+          };
+        },
+        async observeCodexComposer() {
+          effects.push("composer-read");
+          throw new Error("closed retry reached composer observation");
+        },
+        async submitExactCodexDraft() {
+          effects.push("terminal-enter");
+          throw new Error("closed retry reached Enter transport");
+        },
+        async send() {
+          effects.push("terminal-text");
+          throw new Error("closed retry reached text transport");
+        }
+      } as unknown as TerminalAgentBridge;
+      const implemented = {
+        required<Value>(value: Value | null | undefined, label: string): Value {
+          if (value === undefined || value === null) throw new Error(label);
+          return value;
+        },
+        loadConversationFromOptions() {
+          return {
+            conversation: loadState(paths.statePath),
+            statePath: paths.statePath,
+            logPath: paths.logPath
+          };
+        },
+        terminalControlFromTakeover() {
+          return terminalControl;
+        },
+        createTerminalAgentBridge() {
+          return bridge;
+        },
+        terminalRuntimeIdentityForConversation() {
+          return {};
+        },
+        terminalWriterMutationLocks() {
+          return {
+            resources: {
+              terminal: { key: terminalControl.target, value: terminalControl },
+              storeWriter: { key: paths.storeDir, value: paths.storeDir }
+            },
+            acquireTerminal() {
+              effects.push("terminal-lock");
+              return () => effects.push("terminal-unlock");
+            },
+            async withStoreWriter<Result>(
+              operation: () => Promise<Result>
+            ): Promise<Result> {
+              effects.push("writer-lock");
+              try {
+                return await operation();
+              } finally {
+                effects.push("writer-unlock");
+              }
+            }
+          };
+        },
+        async withTerminalDispatchStateScope<Result>(
+          scopes: CanonicalMutationScopes,
+          resources: CanonicalMutationResources,
+          statePath: string,
+          logPath: string,
+          operation: (
+            lockedScopes: CanonicalStateMutationScopes,
+            lockedResources: CanonicalStateMutationResources
+          ) => Promise<Result>
+        ): Promise<Result> {
+          effects.push("state-lock");
+          const lockedScopes = {
+            ...scopes,
+            state: Object.freeze({})
+          } as CanonicalStateMutationScopes;
+          const lockedResources = {
+            ...resources,
+            state: {
+              key: statePath,
+              value: { statePath, logPath }
+            }
+          } as CanonicalStateMutationResources;
+          try {
+            return await operation(lockedScopes, lockedResources);
+          } finally {
+            effects.push("state-unlock");
+          }
+        }
+      } satisfies Partial<TerminalCommandPorts>;
+      const ports = new Proxy(implemented, {
+        get(target, property, receiver) {
+          if (Reflect.has(target, property)) {
+            return Reflect.get(target, property, receiver);
+          }
+          throw new Error(`unexpected closed retry port ${String(property)}`);
+        }
+      }) as unknown as TerminalCommandPorts;
+      const facade = terminalCommandCliAdapter.createTerminalCommandCliFacade({
+        ports
+      });
+      const options = { turn: turnId, storeDir };
+      const execution = await runCliCommandExecution(
+        "send",
+        options,
+        {},
+        () => facade.runSend(options)
+      );
+      const result = JSON.parse(execution.stdout);
+      assert.equal(result.terminal_input_sent, false);
+      assert.equal(result.conversation.status, "closed");
+      assert.match(result.reason, /explicitly closed.*no retry state was changed/u);
+      assert.deepEqual(effects, [
+        "terminal-read",
+        "terminal-lock",
+        "writer-lock",
+        "state-lock",
+        "state-unlock",
+        "writer-unlock",
+        "terminal-unlock"
+      ]);
+      assert.equal(fs.readFileSync(paths.statePath, "utf8"), stateBefore);
+      assert.equal(
+        fs.existsSync(retryPath) ? fs.readFileSync(retryPath, "utf8") : undefined,
+        retryBefore
+      );
+    } finally {
+      fs.rmSync(sandbox, { recursive: true, force: true });
+    }
+  }
+});
+
 test("exact Turn retry wires durable authority before composer input", () => {
   const command = compiledFunctionSource(
     "runTerminalSubmissionRetry",
@@ -183,7 +416,7 @@ test("exact Turn retry wires durable authority before composer input", () => {
   );
   assertOrdered(authority, [
     "bindTerminalDispatchRoute",
-    "loadState",
+    "assertTerminalSubmissionRetryTurnOpen",
     "loadTerminalSubmissionRetry",
     "validateStoredTerminalSubmissionMatch",
     "mutationDispatchLedger.load",
@@ -231,6 +464,9 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "runTerminalSubmissionRetry"
   );
   assertOrdered(locked, [
+    "loadExactTerminalSubmissionRetryTurn",
+    'freshConversation.status === "closed"',
+    "return",
     "loadTerminalSubmissionRetryLockedAuthority",
     "prepareTerminalSubmissionRetryDeferredContext",
     "terminalDispatchExecution",
@@ -248,13 +484,33 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "runTerminalSubmissionReplacement",
     "runSend"
   );
+  const closedFence = compiledFunctionSource(
+    "assertTerminalSubmissionRetryTurnOpen",
+    "saveTerminalSubmissionRetryForOpenTurn"
+  );
+  assertOrdered(closedFence, [
+    "loadExactTerminalSubmissionRetryTurn",
+    'conversation.status === "closed"',
+    "retry state was changed"
+  ]);
+  const sidecarFence = compiledFunctionSource(
+    "saveTerminalSubmissionRetryForOpenTurn",
+    "loadTerminalSubmissionRetryLockedAuthority"
+  );
+  assertOrdered(sidecarFence, [
+    "assertTerminalSubmissionRetryTurnOpen",
+    "saveTerminalSubmissionRetry("
+  ]);
   assertOrdered(replacement, [
     "requireExactEmptyComposerAfterBeforeText",
     "beforeText",
+    "assertTerminalSubmissionRetryTurnOpen",
     'saveAttempt("replacement_text_reserved"',
     "beforeEnter",
+    "assertTerminalSubmissionRetryTurnOpen",
     'saveAttempt("enter_reserved"',
     "onTransportStage",
+    "assertTerminalSubmissionRetryTurnOpen",
     'saveAttempt("replacement_text_injected"',
     'saveAttempt("enter_dispatched"'
   ]);
@@ -276,6 +532,14 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "runTerminalSubmissionExactDraftEnter",
     "runTerminalSubmissionReplacement"
   );
+  assertOrdered(exactDraft, [
+    "const reserveEnter",
+    "assertTerminalSubmissionRetryTurnOpen",
+    "saveTerminalSubmissionRetryForOpenTurn",
+    "submitExactCodexDraft",
+    "assertTerminalSubmissionRetryTurnOpen",
+    'state: "enter_dispatched"'
+  ]);
   assertOrdered(exactDraft, [
     "recoverAcceptedDeferredForegroundDispatch",
     "finalizeDeferredTerminalSubmissionRetryAccepted",

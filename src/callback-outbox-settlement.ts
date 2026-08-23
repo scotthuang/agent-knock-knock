@@ -54,10 +54,12 @@ export interface PreparedCallbackDeliveryClaim {
 }
 
 export interface CallbackOutboxSettlementStatePort {
+  withWriter<Result>(storeDir: string, operation: () => Result): Result;
   withStateTransaction<Result>(
     statePath: string,
     operation: () => Result
   ): Result;
+  storeDirForStatePath(statePath: string): string;
   load(statePath: string): Conversation;
   save(statePath: string, conversation: Conversation): void;
   append(logPath: string, event: Record<string, unknown>): void;
@@ -102,11 +104,21 @@ export function createCallbackOutboxSettlement({
   attemptLeaseMs,
   retryDelaysMs
 }: CallbackOutboxSettlementPorts) {
+  function withSettlementTransaction<Result>(
+    statePath: string,
+    operation: () => Result
+  ): Result {
+    const storeDir = state.storeDirForStatePath(statePath);
+    return state.withWriter(storeDir, () =>
+      state.withStateTransaction(statePath, operation)
+    );
+  }
+
   function persistDeliveryProgress(
     prepared: PreparedCallbackDeliveryClaim,
     progress: Record<string, unknown>
   ): void {
-    state.withStateTransaction(prepared.statePath, () => {
+    withSettlementTransaction(prepared.statePath, () => {
       const current = state.load(prepared.statePath);
       const currentDelivery = pendingDeliveryClaim(current, prepared);
       if (!currentDelivery) {
@@ -152,7 +164,7 @@ export function createCallbackOutboxSettlement({
     prepared: PreparedCallbackDeliveryClaim,
     result: CallbackDeliverySettlementResult
   ): Conversation {
-    return state.withStateTransaction(prepared.statePath, () => {
+    return withSettlementTransaction(prepared.statePath, () => {
       const current = state.load(prepared.statePath);
       const currentDelivery = pendingDeliveryClaim(current, prepared);
       if (!currentDelivery) {
@@ -283,7 +295,7 @@ export function createCallbackOutboxSettlement({
   function settleAccepted(
     input: Omit<SettleAcceptedCallbackInput, "conversation">
   ): Conversation | undefined {
-    return state.withStateTransaction(input.statePath, () =>
+    return withSettlementTransaction(input.statePath, () =>
       settleAcceptedWhileLocked({
         ...input,
         conversation: state.load(input.statePath)

@@ -6,7 +6,11 @@ import {
   callbackRouteFingerprintLedgerFields
 } from
   "./callback-route-authority.js";
-import type { Conversation, ConversationStatus } from "./protocol.js";
+import {
+  isExplicitUserAbandonedManagementTurn,
+  type Conversation,
+  type ConversationStatus
+} from "./protocol.js";
 import type {
   TerminalControlRef,
   TerminalDurableCompletionRequest,
@@ -120,6 +124,9 @@ export async function repairLaggingAcceptedMonitorAuthority(input: {
   currentMessageId: string;
   ports: LaggingAcceptedMonitorAuthorityRepairPorts;
 }): Promise<Conversation> {
+  if (isExplicitUserAbandonedManagementTurn(input.conversation)) {
+    return input.conversation;
+  }
   if (!isLegacyEnterDispatchedAuthorityGap(
     input.ports.submission(input.conversation),
     input.currentMessageId
@@ -133,6 +140,10 @@ export async function repairLaggingAcceptedMonitorAuthority(input: {
       const releaseState = input.ports.acquireState();
       try {
         const current = input.ports.loadConversation();
+        if (isExplicitUserAbandonedManagementTurn(current)) {
+          conversation = current;
+          return;
+        }
         const submission = input.ports.submission(current);
         if (!isLegacyEnterDispatchedAuthorityGap(
           submission,
@@ -171,14 +182,20 @@ export async function repairLaggingAcceptedMonitorAuthority(input: {
 export async function recoverPreparedMonitorSubmission(
   input: RecoverPreparedMonitorInput
 ): Promise<Conversation> {
+  if (isExplicitUserAbandonedManagementTurn(input.conversation)) {
+    return input.conversation;
+  }
   let conversation = input.conversation;
   const releaseTerminal = input.ports.acquireTerminal(input.terminalControl);
   try {
     await input.ports.withWriter(async () => {
-      const ledger = input.ports.loadLedger(input.terminalControl);
       const releaseState = input.ports.acquireState();
       try {
         const current = input.ports.loadConversation();
+        if (isExplicitUserAbandonedManagementTurn(current)) {
+          conversation = current;
+          return;
+        }
         const submission = input.ports.submission(current);
         const takeover = takeoverFor(current);
         if (!isExpectedPrepared(input.currentMessageId, takeover, submission)) {
@@ -188,6 +205,7 @@ export async function recoverPreparedMonitorSubmission(
         const requestText = String(
           takeover?.terminal_bridge_request_text ?? current.user_request ?? ""
         );
+        const ledger = input.ports.loadLedger(input.terminalControl);
         const recovered = recoverFromLedger({
           input,
           current,
@@ -419,6 +437,8 @@ const validDispatcherPid = (pid: number): number | null =>
 
 export interface MonitorPollAdapterPorts {
   acquireTerminal(control: TerminalControlRef): Release;
+  withWriter<T>(use: () => Promise<T>): Promise<T>;
+  acquireState(): Release;
   reconcileLedger(
     control: TerminalControlRef,
     ledger?: UnknownRecord
@@ -475,30 +495,61 @@ export async function pollTerminalMonitor(input: {
   onFenced(ledgerStatus?: string): void;
   ports: MonitorPollAdapterPorts;
 }): Promise<MonitorPollResult> {
+  if (isExplicitUserAbandonedManagementTurn(input.conversation)) {
+    return { kind: "retry", conversation: input.conversation };
+  }
   const release = input.ports.acquireTerminal(input.terminalControl);
   try {
-    const ledger = repairPollLedger(input);
-    const ledgerStatus = nonBlankString(ledger?.status);
-    const ledgerMessageId = nonBlankString(ledger?.message_id);
-    if (ledger && (
-      !["submitted", "agent_accepted"].includes(ledgerStatus ?? "") ||
-      ledgerMessageId !== input.currentMessageId
-    )) {
-      input.ports.appendEvent({
-        ts: input.ports.now().toISOString(),
-        conversation_id: input.conversation.conversation_id,
-        event: "terminal_bridge_monitor_dispatch_fenced",
-        monitor_message_id: input.currentMessageId,
-        dispatch_message_id: ledgerMessageId,
-        dispatch_status: ledgerStatus
-      });
-      input.onFenced(ledgerStatus);
-      return { kind: "fenced", ledgerStatus };
-    }
-    return await pollFreshConversation(input);
+    return await input.ports.withWriter(async () => {
+      const releaseState = input.ports.acquireState();
+      let current: Conversation;
+      try {
+        current = input.ports.loadConversation();
+        if (isExplicitUserAbandonedManagementTurn(current)) {
+          return { kind: "retry", conversation: current };
+        }
+      } finally {
+        releaseState();
+      }
+
+      const freshInput = { ...input, conversation: current };
+      const ledger = repairPollLedger(freshInput);
+      const ledgerStatus = nonBlankString(ledger?.status);
+      const ledgerMessageId = nonBlankString(ledger?.message_id);
+      if (ledger && (
+        !["submitted", "agent_accepted"].includes(ledgerStatus ?? "") ||
+        ledgerMessageId !== input.currentMessageId
+      )) {
+        input.ports.appendEvent({
+          ts: input.ports.now().toISOString(),
+          conversation_id: current.conversation_id,
+          event: "terminal_bridge_monitor_dispatch_fenced",
+          monitor_message_id: input.currentMessageId,
+          dispatch_message_id: ledgerMessageId,
+          dispatch_status: ledgerStatus
+        });
+        input.onFenced(ledgerStatus);
+        return { kind: "fenced", ledgerStatus };
+      }
+      return await pollFreshConversation(input);
+    });
   } finally {
     release();
   }
+}
+
+function pollConversationChanged(
+  input: Parameters<typeof pollTerminalMonitor>[0],
+  current: Conversation
+): boolean {
+  const takeover = takeoverFor(current);
+  const currentControl = input.ports.terminalControl(current);
+  return current.status !== input.conversation.status ||
+    current.updated_at !== input.conversation.updated_at ||
+    nonBlankString(takeover?.terminal_bridge_message_id) !==
+      input.currentMessageId ||
+    !currentControl ||
+    !input.ports.sameIncarnation(currentControl, input.terminalControl);
 }
 
 function repairPollLedger(
@@ -546,15 +597,8 @@ async function pollFreshConversation(
 ): Promise<MonitorPollResult> {
   const locked = input.ports.loadConversation();
   const takeover = takeoverFor(locked);
-  const lockedControl = input.ports.terminalControl(locked);
-  if (
-    locked.status !== input.conversation.status ||
-    locked.updated_at !== input.conversation.updated_at ||
-    nonBlankString(takeover?.terminal_bridge_message_id) !==
-      input.currentMessageId ||
-    !lockedControl ||
-    !input.ports.sameIncarnation(lockedControl, input.terminalControl)
-  ) {
+  if (isExplicitUserAbandonedManagementTurn(locked) ||
+      pollConversationChanged(input, locked)) {
     return { kind: "retry", conversation: locked };
   }
   const requestText = String(

@@ -281,6 +281,7 @@ function callbackOutboxService(): CallbackOutboxService {
         const releaseState = runtime.state.acquireFileLock(`${statePath}.lock`);
         try { return operation(); } finally { releaseState(); }
       },
+      withWriter: runtime.state.withWriter,
       storeDirForStatePath: callbackStoreDir, logPathForStatePath
     },
     authority: runtime.authority,
