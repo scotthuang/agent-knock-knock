@@ -35,6 +35,27 @@ const CONTROL = {
   capabilities: []
 };
 
+function compiledMonitorStateSource(startToken: string, endToken: string): string {
+  const source = fs.readFileSync(
+    new URL("../src/terminal-monitor-state-cli-adapter.js", import.meta.url),
+    "utf8"
+  );
+  const start = source.indexOf(startToken);
+  const end = source.indexOf(endToken, start + startToken.length);
+  assert.notEqual(start, -1, `missing ${startToken}`);
+  assert.notEqual(end, -1, `missing ${endToken}`);
+  return source.slice(start, end);
+}
+
+function assertSourceOrder(source: string, tokens: readonly string[]): void {
+  let cursor = 0;
+  for (const token of tokens) {
+    const found = source.indexOf(token, cursor);
+    assert.notEqual(found, -1, `missing ordered token ${token}`);
+    cursor = found + token.length;
+  }
+}
+
 function conversation(id: string): Conversation {
   return {
     session_id: "session-1",
@@ -117,7 +138,9 @@ function callbackResult(owner: Conversation): CallbackExecutionResult {
 function portsFixture(trace: string[]) {
   const listed = conversation("turn-1");
   const migrated = conversation("turn-migrated");
+  const retried = conversation("turn-retried");
   const deferred = conversation("turn-deferred");
+  const finalized = conversation("turn-retry-finalized");
   const virgin = conversation("turn-virgin");
   const eligibility = eligible();
   const ports: TerminalMonitorStateReconciliationPorts = {
@@ -138,9 +161,9 @@ function portsFixture(trace: string[]) {
       verifiedDead: async (input) => {
         assert.equal(input.storeDir, STORE_DIR);
         assert.strictEqual(input.paths, PATHS);
-        assert.strictEqual(input.conversation, migrated);
+        assert.strictEqual(input.conversation, retried);
         trace.push("verified-dead");
-        return { stalled: false, conversation: migrated };
+        return { stalled: false, conversation: retried };
       }
     },
     callbacks: {
@@ -162,15 +185,26 @@ function portsFixture(trace: string[]) {
         trace.push("migrate");
         return migrated;
       },
+      recoverSubmissionRetry: async (storeDir, candidate, paths) => {
+        assert.equal(storeDir, STORE_DIR);
+        assert.strictEqual(paths, PATHS);
+        if (candidate === migrated) {
+          trace.push("submission-retry");
+          return retried;
+        }
+        assert.strictEqual(candidate, deferred);
+        trace.push("submission-retry-finalize");
+        return finalized;
+      },
       recoverDeferred: async (storeDir, candidate, paths) => {
         assert.equal(storeDir, STORE_DIR);
-        assert.strictEqual(candidate, migrated);
+        assert.strictEqual(candidate, retried);
         assert.strictEqual(paths, PATHS);
         trace.push("deferred");
         return deferred;
       },
       recoverVirgin: async (candidate, paths) => {
-        assert.strictEqual(candidate, deferred);
+        assert.strictEqual(candidate, finalized);
         assert.strictEqual(paths, PATHS);
         trace.push("virgin");
         return virgin;
@@ -187,7 +221,9 @@ function portsFixture(trace: string[]) {
       }
     }
   };
-  return { listed, migrated, deferred, virgin, eligibility, ports };
+  return {
+    listed, migrated, retried, deferred, finalized, virgin, eligibility, ports
+  };
 }
 
 async function reconcile(
@@ -224,8 +260,10 @@ test("monitor state reconciliation preserves exact order and resource identity",
     "callback-reconcile",
     "terminal-bridge",
     "migrate",
+    "submission-retry",
     "verified-dead",
     "deferred",
+    "submission-retry-finalize",
     "virgin",
     "binding",
     "eligibility"
@@ -236,6 +274,38 @@ test("monitor state reconciliation preserves exact order and resource identity",
     conversation: fixture.virgin,
     eligibility: fixture.eligibility
   });
+});
+
+test("startup retry recovery preserves terminal outcomes and finalizes accepted crash lags", () => {
+  const recovery = compiledMonitorStateSource(
+    "async #recoverSubmissionRetry(",
+    "async #recoverDeferred("
+  );
+  assertSourceOrder(recovery, [
+    "decideTerminalSubmissionRetryStartup",
+    'startup.action === "finalize_accepted"',
+    "finalizeTerminalSubmissionRetryStartupAccepted",
+    'startup.action === "repair_terminal_ledger"',
+    "reconcileTerminalSubmissionRetryStartupTerminalLedger",
+    'startup.action === "repair_terminal_state"',
+    "reconcileTerminalSubmissionRetryStartupTerminalState",
+    'startup.action === "no_change"',
+    "return conversation",
+    "const projection",
+    "terminalSubmissionRetryMonitorEpoch"
+  ]);
+  const accepted = compiledMonitorStateSource(
+    "function finalizeTerminalSubmissionRetryStartupAccepted(",
+    "function mirrorDeferredSubmissionRetryEnter("
+  );
+  assertSourceOrder(accepted, [
+    "loadDeferredForegroundTransfer",
+    'transfer.status !== "resolved"',
+    "saveState",
+    "saveTerminalSubmissionRetry",
+    "input.saveLedger",
+    'terminal_input_sent: false'
+  ]);
 });
 
 test("local completion short-circuits lazily with the legacy getter order", async () => {
@@ -361,14 +431,14 @@ test("callback recovery preserves getter order plus explicit zero and null facts
 test("verified-dead recovery forwards prepared byte facts before later authority", async () => {
   const trace: string[] = [];
   const fixture = portsFixture(trace);
-  const callback = prepared(fixture.migrated);
+  const callback = prepared(fixture.retried);
   const preparation = Object.defineProperties({}, {
     claimed: getter("completion.claimed", true),
-    conversation: getter("completion.conversation", fixture.migrated),
+    conversation: getter("completion.conversation", fixture.retried),
     prepared: getter("completion.prepared", callback)
   });
   const dead = Object.defineProperties({
-    conversation: fixture.migrated
+    conversation: fixture.retried
   }, {
     completionPreparation: getter(
       "dead.completionPreparation",
@@ -385,7 +455,7 @@ test("verified-dead recovery forwards prepared byte facts before later authority
     assert.strictEqual(received, callback);
     assert.deepEqual(options, { emit: false });
     assert.equal(received.message.metadata.completion_bytes, 4096);
-    const result = callbackResult(fixture.migrated);
+    const result = callbackResult(fixture.retried);
     Object.defineProperty(result, "delivered", getter("result.delivered", true));
     return result;
   };
@@ -396,6 +466,7 @@ test("verified-dead recovery forwards prepared byte facts before later authority
     "local",
     "terminal-bridge",
     "migrate",
+    "submission-retry",
     "verified-dead",
     "dead.completionPreparation",
     "dead.completionPreparation",
@@ -408,7 +479,7 @@ test("verified-dead recovery forwards prepared byte facts before later authority
     kind: "handled",
     counter: "skipped",
     item: {
-      conversation_id: fixture.migrated.conversation_id,
+      conversation_id: fixture.retried.conversation_id,
       status: "recovered",
       reason: "bound_agent_process_dead_completion_recovered",
       delivered: true
@@ -444,6 +515,7 @@ test("port failures propagate unchanged and suppress all later observations", as
     "local",
     "terminal-bridge",
     "migrate",
+    "submission-retry",
     "verified-dead",
     "deferred"
   ]);

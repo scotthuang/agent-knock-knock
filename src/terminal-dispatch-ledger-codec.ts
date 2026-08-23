@@ -45,6 +45,8 @@ export type TerminalOrdinaryDispatchIdentityFields = Record<
 export interface TerminalOrdinaryDispatchPhaseFields {
   text_injected_at?: string;
   enter_dispatched_at?: string;
+  enter_not_attempted_at?: string;
+  enter_not_attempted_reason?: "pre_key_failure";
   agent_accepted_at?: string;
   acceptance_evidence?: TerminalSubmissionAcceptanceEvidence;
   not_accepted_at?: string;

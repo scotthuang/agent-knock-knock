@@ -300,6 +300,7 @@ async function reconcileRestartCandidate(
       },
       authority: {
         migrateIdentity: async (candidate) => candidate,
+        recoverSubmissionRetry: async (_storeDir, candidate) => candidate,
         recoverDeferred: async (_storeDir, candidate) => candidate,
         recoverVirgin: async (candidate) => candidate,
         assertBindingCurrent: () => undefined,

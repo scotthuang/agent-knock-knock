@@ -26,13 +26,15 @@ export interface AvailableListActionFacts {
   managedApprovalPending: boolean;
   renewEligible: boolean;
   retryCallbackEligible: boolean;
+  retrySubmissionCandidate: boolean;
 }
 
 const NO_AVAILABLE_LIST_ACTION_FACTS: AvailableListActionFacts = {
   terminalBridgeReady: false,
   managedApprovalPending: false,
   renewEligible: false,
-  retryCallbackEligible: false
+  retryCallbackEligible: false,
+  retrySubmissionCandidate: false
 };
 
 export function renderManagedTurnListEntry(
@@ -90,6 +92,7 @@ export function listActionContracts(): JsonRecord {
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "Structured follow-current actions use only the exact terminal_id prefilled by that terminal row. Human slash commands may use an explicitly named discovery selector. AKK resolves and revalidates current action authority internally; never infer or guess a target.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
+      "Retry submission is never automatic. Only when the current exact Turn exposes available_actions.retry_submission, ask for explicit user confirmation and call its prefilled agent_knock_knock_send {turn_id} form unchanged. It never accepts replacement text or caller-selected terminal, Session, timeout, or callback route data, and execution revalidates the durable submission and live terminal under lock before any input.",
       "Manual approval binds the exact prompt the user reviewed. After explicit confirmation, call only the currently advertised approve action; AKK keeps the prompt authority private and recaptures the exact terminal, process, request, and prompt before sending a decision key. A prompt without complete exact evidence is not approvable.",
       "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action. When a Codex managed prompt has no usable AKK Turn owner, list may expose one manual terminal-scoped approve action after exact observation. It does not mutate the Turn or Session binding, has no durable dispatch receipt, and is never eligible for automatic approval. If its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
@@ -186,6 +189,22 @@ export function listActionContracts(): JsonRecord {
           "A quiescent rollout-backed Codex source uses a listed follow-current send whenever AKK can pin a complete nonempty candidate inventory. Inventory status resolved means only that one rollout is materialized; it does not prove the current TUI foreground thread. Released predecessor Turn history stays read-only while a separate provisional Session sends once and waits for one unique post-anchor request acceptance. A /clear resume hint is diagnostic only and is not routing authority. Same-UUID and different-UUID results keep separate Session lineages; zero, multiple, drifted, or uncertain acceptance is never retried blindly. Explicit close can abandon an uncertain receipt for future-send liveness only while the exact resolved close ledger, append-only receipt, frozen history, absent old rollout, and unclaimed candidate set remain authoritative; it never synthesizes callback delivery.",
         ordinary_use:
           "Create a new managed Turn through the exact action listed for the pane. An explicit session_id never follows the pane and is unavailable for rollout-backed Codex Sessions; their listed follow-current action binds only the unique exact rollout that accepts the submitted request. A user-explicit or uniquely delegated raw send receives the same fresh under-lock candidate authority when it resolves to an already managed rollout-backed Codex source. A live terminal selector can also attach an unmanaged pane, adopt one verified human-selected native context, detach a verified-empty Codex source, or replace an eligible status-card/candidate-rollout source."
+      },
+      retry_submission: {
+        tool: "agent_knock_knock_send",
+        target_argument: "turn_id",
+        required: ["turn_id"],
+        accepts_only: ["turn_id"],
+        creates_turn: false,
+        caller_supplies_request_text: false,
+        may_retransmit_original_request_text: true,
+        retransmit_condition:
+          "durable structured proof that Enter was never attempted plus a positively empty live composer",
+        requires_explicit_user_confirmation: true,
+        candidate_source:
+          "the current exact managed Turn's available_actions.retry_submission",
+        scope:
+          "Recover only the original durable submission whose text injection is proven but Enter dispatch remains uncertain. AKK either submits the proven exact existing draft once, or retransmits the immutable original request once only after structured no-Enter proof and a positively empty live composer. It revalidates all terminal, identity, route, composer, and one-shot authority under lock and otherwise fails closed."
       },
       watch: {
         tool: "agent_knock_knock_watch",
@@ -368,18 +387,13 @@ export function renderAvailableListActions(
   const managedApprovalPending = facts.managedApprovalPending;
   const terminalBridgeReady = managed && facts.terminalBridgeReady;
 
-  if (
-    terminalControlled &&
-    commands.send === true &&
-    entry.activity_state === "idle" &&
-    approvalState.blocked !== true
-  ) {
-    actions.send = {
-      tool: "agent_knock_knock_send",
-      arguments: { selector: id },
-      missing_required: ["request"]
-    };
-  }
+  Object.assign(actions, renderTerminalSendAction({
+    commands,
+    entry,
+    id,
+    approvalState,
+    terminalControlled
+  }));
 
   const lifecycleBindingToken = stringValue(entry.lifecycle_binding_token);
   appendTerminalWatchAction({
@@ -390,62 +404,23 @@ export function renderAvailableListActions(
     lifecycleBindingToken,
     terminalControlled
   });
-  if (
-    terminalControlled &&
-    commands.new_thread === true &&
-    entry.activity_state === "idle" &&
-    approvalState.blocked !== true &&
-    lifecycleBindingToken
-  ) {
-    actions.new_thread = {
-      tool: "agent_knock_knock_new_thread",
-      arguments: {
-        terminal_id: id,
-        expected_binding_token: lifecycleBindingToken
-      },
-      requires_user_intent: true
-    };
-  }
-  if (
-    terminalControlled &&
-    commands.list_resumable_threads === true
-  ) {
-    actions.list_resumable_threads = {
-      tool: "agent_knock_knock_list_resumable_threads",
-      arguments: { terminal_id: id }
-    };
-  }
-  if (
-    terminalControlled &&
-    commands.native_inspect === true &&
-    entry.activity_state === "idle" &&
-    approvalState.blocked !== true &&
-    lifecycleBindingToken
-  ) {
-    actions.native_inspect = {
-      tool: "agent_knock_knock_native_inspect",
-      arguments: {
-        terminal_id: id,
-        inspection: "status",
-        expected_binding_token: lifecycleBindingToken
-      }
-    };
-  }
-
-  if (
-    managed &&
-    commands.respond === true &&
-    terminalBridgeReady &&
-    entry.status === "waiting_for_openclaw" &&
-    !managedApprovalPending &&
-    approvalState.blocked !== true
-  ) {
-    actions.respond = {
-      tool: "agent_knock_knock_respond",
-      arguments: { turn_id: id },
-      missing_required: ["request"]
-    };
-  }
+  Object.assign(actions, renderTerminalLifecycleActions({
+    commands,
+    entry,
+    id,
+    approvalState,
+    lifecycleBindingToken,
+    terminalControlled
+  }));
+  Object.assign(actions, renderManagedRespondAction({
+    commands,
+    entry,
+    id,
+    approvalState,
+    managed,
+    managedApprovalPending,
+    terminalBridgeReady
+  }));
 
   const approvalFingerprint = stringValue(approvalState.fingerprint);
   const managedApprovalEligible =
@@ -455,32 +430,15 @@ export function renderAvailableListActions(
       entry.agent !== "claude" ||
       approvalState.decision_mode === "keys"
     );
-  if (
-    commands.approve === true &&
-    approvalState.approvable === true &&
-    approvalFingerprint &&
-    (
-      (
-        terminalControlled &&
-        entry.agent === "codex"
-      ) ||
-      managedApprovalEligible
-    )
-  ) {
-    actions.approve = {
-      tool: "agent_knock_knock_approve",
-      arguments: targetArguments,
-      missing_required: ["expected_approval_fingerprint"],
-      before_call: {
-        tool: "agent_knock_knock_status",
-        arguments: targetArguments,
-        use:
-          "After explicit user confirmation, copy the latest terminal_status.approval_state.fingerprint into expected_approval_fingerprint."
-      },
-      requires_explicit_user_confirmation: true,
-      requires_fresh_status: true
-    };
-  }
+  Object.assign(actions, renderApprovalAction({
+    commands,
+    entry,
+    approvalState,
+    approvalFingerprint,
+    managedApprovalEligible,
+    targetArguments,
+    terminalControlled
+  }));
 
   const cancelAction = renderCancelListAction(
     entry,
@@ -491,41 +449,250 @@ export function renderAvailableListActions(
   if (cancelAction) {
     actions.cancel = cancelAction;
   }
-  if (managed && facts.renewEligible) {
+  Object.assign(
+    actions,
+    renderManagedRecoveryActions({ entry, facts, id, managed, targetArguments })
+  );
+  Object.assign(actions, renderCloseAction({ commands, entry, id, managed }));
+  return actions;
+}
+
+function renderTerminalSendAction(input: {
+  commands: JsonRecord;
+  entry: JsonRecord;
+  id: string;
+  approvalState: JsonRecord;
+  terminalControlled: boolean;
+}): JsonRecord {
+  if (
+    !input.terminalControlled ||
+    input.commands.send !== true ||
+    input.entry.activity_state !== "idle" ||
+    input.approvalState.blocked === true
+  ) {
+    return {};
+  }
+  return {
+    send: {
+      tool: "agent_knock_knock_send",
+      arguments: { selector: input.id },
+      missing_required: ["request"]
+    }
+  };
+}
+
+function renderTerminalLifecycleActions(input: {
+  commands: JsonRecord;
+  entry: JsonRecord;
+  id: string;
+  approvalState: JsonRecord;
+  lifecycleBindingToken?: string;
+  terminalControlled: boolean;
+}): JsonRecord {
+  const actions: JsonRecord = {
+    ...renderNewThreadAction(input)
+  };
+  if (input.terminalControlled && input.commands.list_resumable_threads === true) {
+    actions.list_resumable_threads = {
+      tool: "agent_knock_knock_list_resumable_threads",
+      arguments: { terminal_id: input.id }
+    };
+  }
+  return {
+    ...actions,
+    ...renderNativeInspectAction(input)
+  };
+}
+
+function renderNewThreadAction(input: {
+  commands: JsonRecord;
+  entry: JsonRecord;
+  id: string;
+  approvalState: JsonRecord;
+  lifecycleBindingToken?: string;
+  terminalControlled: boolean;
+}): JsonRecord {
+  if (!terminalIdleLifecycleActionEligible(input, "new_thread")) {
+    return {};
+  }
+  return {
+    new_thread: {
+      tool: "agent_knock_knock_new_thread",
+      arguments: {
+        terminal_id: input.id,
+        expected_binding_token: input.lifecycleBindingToken
+      },
+      requires_user_intent: true
+    }
+  };
+}
+
+function renderNativeInspectAction(input: {
+  commands: JsonRecord;
+  entry: JsonRecord;
+  id: string;
+  approvalState: JsonRecord;
+  lifecycleBindingToken?: string;
+  terminalControlled: boolean;
+}): JsonRecord {
+  if (!terminalIdleLifecycleActionEligible(input, "native_inspect")) {
+    return {};
+  }
+  return {
+    native_inspect: {
+      tool: "agent_knock_knock_native_inspect",
+      arguments: {
+        terminal_id: input.id,
+        inspection: "status",
+        expected_binding_token: input.lifecycleBindingToken
+      }
+    }
+  };
+}
+
+function terminalIdleLifecycleActionEligible(
+  input: {
+    commands: JsonRecord;
+    entry: JsonRecord;
+    approvalState: JsonRecord;
+    lifecycleBindingToken?: string;
+    terminalControlled: boolean;
+  },
+  command: "new_thread" | "native_inspect"
+): boolean {
+  return input.terminalControlled &&
+    input.commands[command] === true &&
+    input.entry.activity_state === "idle" &&
+    input.approvalState.blocked !== true &&
+    Boolean(input.lifecycleBindingToken);
+}
+
+function renderManagedRespondAction(input: {
+  commands: JsonRecord;
+  entry: JsonRecord;
+  id: string;
+  approvalState: JsonRecord;
+  managed: boolean;
+  managedApprovalPending: boolean;
+  terminalBridgeReady: boolean;
+}): JsonRecord {
+  if (
+    !input.managed ||
+    input.commands.respond !== true ||
+    !input.terminalBridgeReady ||
+    input.entry.status !== "waiting_for_openclaw" ||
+    input.managedApprovalPending ||
+    input.approvalState.blocked === true
+  ) {
+    return {};
+  }
+  return {
+    respond: {
+      tool: "agent_knock_knock_respond",
+      arguments: { turn_id: input.id },
+      missing_required: ["request"]
+    }
+  };
+}
+
+function renderApprovalAction(input: {
+  commands: JsonRecord;
+  entry: JsonRecord;
+  approvalState: JsonRecord;
+  approvalFingerprint?: string;
+  managedApprovalEligible: boolean;
+  targetArguments: JsonRecord;
+  terminalControlled: boolean;
+}): JsonRecord {
+  if (
+    input.commands.approve !== true ||
+    input.approvalState.approvable !== true ||
+    !input.approvalFingerprint ||
+    !(
+      input.terminalControlled && input.entry.agent === "codex" ||
+      input.managedApprovalEligible
+    )
+  ) {
+    return {};
+  }
+  return {
+    approve: {
+      tool: "agent_knock_knock_approve",
+      arguments: input.targetArguments,
+      missing_required: ["expected_approval_fingerprint"],
+      before_call: {
+        tool: "agent_knock_knock_status",
+        arguments: input.targetArguments,
+        use:
+          "After explicit user confirmation, copy the latest terminal_status.approval_state.fingerprint into expected_approval_fingerprint."
+      },
+      requires_explicit_user_confirmation: true,
+      requires_fresh_status: true
+    }
+  };
+}
+
+function renderManagedRecoveryActions(input: {
+  entry: JsonRecord;
+  facts: AvailableListActionFacts;
+  id: string;
+  managed: boolean;
+  targetArguments: JsonRecord;
+}): JsonRecord {
+  const actions: JsonRecord = {};
+  if (input.managed && input.facts.renewEligible) {
     actions.renew = {
       tool: "agent_knock_knock_renew",
-      arguments: targetArguments
+      arguments: input.targetArguments
     };
   }
-  if (managed && facts.retryCallbackEligible) {
+  if (input.managed && input.facts.retryCallbackEligible) {
     actions.retry_callback = {
       tool: "agent_knock_knock_retry_callback",
-      arguments: targetArguments
+      arguments: input.targetArguments
     };
   }
-  if (commands.close === true) {
-    const orphanedDispatch = isRecord(entry.orphaned_terminal_dispatch)
-      ? entry.orphaned_terminal_dispatch
-      : undefined;
-    const expectedMessageId = stringValue(orphanedDispatch?.message_id);
-    const expectedTransitionId = stringValue(
-      orphanedDispatch?.transition_id
-    );
-    actions.close = {
+  if (
+    input.managed &&
+    input.entry.agent === "codex" &&
+    input.facts.retrySubmissionCandidate
+  ) {
+    actions.retry_submission = {
+      tool: "agent_knock_knock_send",
+      arguments: { turn_id: input.id },
+      requires_explicit_user_confirmation: true
+    };
+  }
+  return actions;
+}
+
+function renderCloseAction(input: {
+  commands: JsonRecord;
+  entry: JsonRecord;
+  id: string;
+  managed: boolean;
+}): JsonRecord {
+  if (input.commands.close !== true) {
+    return {};
+  }
+  const orphanedDispatch = isRecord(input.entry.orphaned_terminal_dispatch)
+    ? input.entry.orphaned_terminal_dispatch
+    : undefined;
+  const expectedMessageId = stringValue(orphanedDispatch?.message_id);
+  const expectedTransitionId = stringValue(orphanedDispatch?.transition_id);
+  return {
+    close: {
       tool: "agent_knock_knock_close",
       arguments: {
-        ...(managed ? { turn_id: id } : { conversation_id: id }),
-        ...(expectedMessageId
-          ? { expected_message_id: expectedMessageId }
-          : {}),
+        ...(input.managed ? { turn_id: input.id } : { conversation_id: input.id }),
+        ...(expectedMessageId ? { expected_message_id: expectedMessageId } : {}),
         ...(expectedTransitionId
           ? { expected_transition_id: expectedTransitionId }
           : {})
       },
       requires_explicit_user_confirmation: true
-    };
-  }
-  return actions;
+    }
+  };
 }
 
 function appendTerminalWatchAction(input: {
@@ -589,7 +756,8 @@ export function exactTerminalWatchAction(
 }
 
 const CURRENT_TURN_ACTIONS = [
-  "status", "respond", "approve", "cancel", "renew", "retry_callback"
+  "status", "respond", "approve", "cancel", "renew", "retry_callback",
+  "retry_submission"
 ] as const;
 
 export function currentTerminalActions(currentTurn: JsonRecord | undefined): JsonRecord {

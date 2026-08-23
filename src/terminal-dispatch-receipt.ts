@@ -51,6 +51,9 @@ export interface TerminalBridgeSubmissionMutation {
   preparedAt: string;
   textInjectedAt?: string;
   enterDispatchedAt?: string;
+  /** Structured bridge proof that no Enter key call began for this generation. */
+  enterNotAttemptedAt?: string;
+  enterNotAttemptedReason?: "pre_key_failure";
   agentAcceptedAt?: string;
   notAcceptedAt?: string;
   submittedAt?: string;
@@ -136,6 +139,8 @@ export function applyTerminalBridgeSubmission(
     preparedAt,
     textInjectedAt,
     enterDispatchedAt,
+    enterNotAttemptedAt,
+    enterNotAttemptedReason,
     agentAcceptedAt,
     notAcceptedAt,
     submittedAt,
@@ -225,6 +230,12 @@ export function applyTerminalBridgeSubmission(
     executor_kind: executorForConversation(conversation).kind,
     openclaw_session: conversation.openclaw_session,
     callback_route_fingerprint: callbackRouteFingerprint ?? null,
+    ...(nonBlankString(takeover.deferred_foreground_transfer_id)
+      ? {
+          deferred_foreground_transfer_id:
+            nonBlankString(takeover.deferred_foreground_transfer_id)
+        }
+      : {}),
     store_dir: context.storeDir,
     native_thread_id:
       nonBlankString(conversation.native_thread_id) ??
@@ -259,6 +270,13 @@ export function applyTerminalBridgeSubmission(
     last_proven_stage: provenStage,
     ...(textInjectedAt ? { text_injected_at: textInjectedAt } : {}),
     ...(enterDispatchedAt ? { enter_dispatched_at: enterDispatchedAt } : {}),
+    ...(enterNotAttemptedAt
+      ? {
+          enter_not_attempted_at: enterNotAttemptedAt,
+          enter_not_attempted_reason:
+            enterNotAttemptedReason ?? "pre_key_failure"
+        }
+      : {}),
     ...(agentAcceptedAt ? { agent_accepted_at: agentAcceptedAt } : {}),
     ...(notAcceptedAt ? { not_accepted_at: notAcceptedAt } : {}),
     ...(submittedAt ? { submitted_at: submittedAt } : {}),

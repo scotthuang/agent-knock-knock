@@ -83,7 +83,8 @@ test("managed Turn rendering consumes only sampled list facts", () => {
       terminalBridgeReady: true,
       managedApprovalPending: false,
       renewEligible: false,
-      retryCallbackEligible: true
+      retryCallbackEligible: true,
+      retrySubmissionCandidate: false
     }
   });
   assert.equal(entry.commands, undefined);
@@ -109,6 +110,7 @@ test("the public action contract v18 exposes semantic arguments only", () => {
     Object.keys(contracts.actions as object),
     [
       "send",
+      "retry_submission",
       "watch",
       "unwatch",
       "new_thread",
@@ -146,6 +148,22 @@ test("the public action contract v18 exposes semantic arguments only", () => {
     assert.equal(encoded.includes(forbidden), false, forbidden);
   }
   const actions = contracts.actions as Record<string, any>;
+  assert.deepEqual(actions.retry_submission, {
+    tool: "agent_knock_knock_send",
+    target_argument: "turn_id",
+    required: ["turn_id"],
+    accepts_only: ["turn_id"],
+    creates_turn: false,
+    caller_supplies_request_text: false,
+    may_retransmit_original_request_text: true,
+    retransmit_condition:
+      "durable structured proof that Enter was never attempted plus a positively empty live composer",
+    requires_explicit_user_confirmation: true,
+    candidate_source:
+      "the current exact managed Turn's available_actions.retry_submission",
+    scope:
+      "Recover only the original durable submission whose text injection is proven but Enter dispatch remains uncertain. AKK either submits the proven exact existing draft once, or retransmits the immutable original request once only after structured no-Enter proof and a positively empty live composer. It revalidates all terminal, identity, route, composer, and one-shot authority under lock and otherwise fails closed."
+  });
   assert.deepEqual(actions.send.managed_scopes.terminal_follow_current, {
     target_arguments: ["terminal_id"],
     follows_current_terminal: true
@@ -238,6 +256,55 @@ test("raw active terminals expose only an exact prefilled watch action", () => {
   }
 });
 
+test("submission retry is a confirmed exact-Turn form of the existing send tool", () => {
+  const entry = renderManagedTurnListEntry({
+    conversation_id: "turn-uncertain",
+    session_id: "session-uncertain",
+    status: "stalled",
+    agent: "codex"
+  }, {
+    terminalBridge: true,
+    actionFacts: {
+      terminalBridgeReady: true,
+      managedApprovalPending: false,
+      renewEligible: false,
+      retryCallbackEligible: false,
+      retrySubmissionCandidate: true
+    }
+  });
+  const retry = (entry.available_actions as Record<string, any>)
+    .retry_submission;
+  assert.deepEqual(retry, {
+    tool: "agent_knock_knock_send",
+    arguments: { turn_id: "turn-uncertain" },
+    requires_explicit_user_confirmation: true
+  });
+  assert.deepEqual(currentTerminalActions(entry).retry_submission, retry);
+  assert.equal(
+    safeUnavailableManagedTurnActions(
+      entry.available_actions as Record<string, any>
+    ).retry_submission,
+    undefined
+  );
+  const claude = renderManagedTurnListEntry({
+    conversation_id: "turn-claude-uncertain",
+    status: "stalled",
+    agent: "claude"
+  }, {
+    actionFacts: {
+      terminalBridgeReady: true,
+      managedApprovalPending: false,
+      renewEligible: false,
+      retryCallbackEligible: false,
+      retrySubmissionCandidate: true
+    }
+  });
+  assert.equal(
+    (claude.available_actions as Record<string, any>).retry_submission,
+    undefined
+  );
+});
+
 test("terminal list action policies expose only their exact safe subsets", () => {
   const actions = {
     status: { tool: "status" },
@@ -247,13 +314,17 @@ test("terminal list action policies expose only their exact safe subsets", () =>
     cancel: { tool: "cancel" },
     renew: { tool: "renew" },
     retry_callback: { tool: "retry" },
+    retry_submission: { tool: "send", arguments: { turn_id: "turn-1" } },
     close: { tool: "close" },
     malformed: "ignored"
   };
 
   assert.deepEqual(Object.keys(currentTerminalActions({
     available_actions: actions
-  })), ["status", "respond", "approve", "cancel", "renew", "retry_callback"]);
+  })), [
+    "status", "respond", "approve", "cancel", "renew", "retry_callback",
+    "retry_submission"
+  ]);
   assert.deepEqual(
     Object.keys(safeTerminalActionsDuringConflict(actions)),
     ["status", "close"]

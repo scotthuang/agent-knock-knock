@@ -284,6 +284,46 @@ test("possible-input version-three pending recovery never retries or rolls back"
     entry === "recovery:acceptance-once").length, 1);
 });
 
+test("uncertain exact submission-retry pending remains monitorable", async () => {
+  for (const mode of ["exact_draft_enter", "replacement_send"] as const) {
+    const pending = {
+      ...transfer("uncertain", "enter_dispatched"),
+      message_id: "message-1",
+      text_injected_at: "2026-08-15T00:00:01.000Z",
+      enter_dispatched_at: "2026-08-15T00:00:03.000Z",
+      submission_retry_attempt_id: "retry-1",
+      submission_retry_mode: mode,
+      submission_retry_message_id: "message-1",
+      submission_retry_prepared_at: "2026-08-15T00:00:00.000Z",
+      ...(mode === "replacement_send"
+        ? {
+            submission_retry_text_reserved_at:
+              "2026-08-15T00:00:01.000Z",
+            submission_retry_text_injected_at:
+              "2026-08-15T00:00:02.000Z"
+          }
+        : {}),
+      submission_retry_enter_reserved_at: "2026-08-15T00:00:03.000Z",
+      submission_retry_enter_dispatched_at: "2026-08-15T00:00:03.000Z"
+    };
+    const recording = harness({
+      matching: [pending],
+      pendingAnchorVersion: 3
+    });
+    await recording.service.recover();
+    assert.equal(
+      recording.trace.some((entry) => entry.includes("abort")),
+      false,
+      mode
+    );
+    assert.equal(
+      recording.trace.some((entry) => entry.startsWith("transfer:uncertain")),
+      false,
+      mode
+    );
+  }
+});
+
 test("possible-input pending recovery marks uncertain once and fails closed", async () => {
   const recording = harness({
     matching: [transfer("dispatch_started", "text_injected")]

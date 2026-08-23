@@ -281,6 +281,107 @@ export class DeferredForegroundApplicationService {
     return transfer;
   }
 
+  reserveSubmissionRetry(options: {
+    scope: DeferredForegroundApplicationScope;
+    boundary: DeferredCodexForegroundBindingBoundary;
+    attemptId: string;
+    mode: "exact_draft_enter" | "replacement_send";
+    messageId: string;
+    preparedAt: string;
+    textReservedAt?: string;
+    textInjectedAt?: string;
+  }): DeferredForegroundTransfer {
+    let transfer = options.scope.loadTransfer(options.boundary.transferId);
+    this.assertTransferAuthority(options.scope, transfer, options.boundary);
+    this.#assertPreparedTarget(options.scope, transfer);
+    this.#assertReservedSource(options.scope, transfer, options.boundary);
+    if (
+      transfer.status !== "uncertain" ||
+      transfer.input_stage !== "text_injected" ||
+      transfer.submission_retry_attempt_id !== undefined ||
+      options.messageId !== transfer.message_id ||
+      options.preparedAt !== transfer.prepared_at
+    ) {
+      throw new Error(
+        `deferred foreground transfer ${transfer.transfer_id} cannot reserve ` +
+        "a submission retry from its current generation"
+      );
+    }
+    transfer = options.scope.saveTransfer({
+      ...transfer,
+      submission_retry_attempt_id: options.attemptId,
+      submission_retry_mode: options.mode,
+      submission_retry_message_id: options.messageId,
+      submission_retry_prepared_at: options.preparedAt,
+      ...(options.textReservedAt
+        ? { submission_retry_text_reserved_at: options.textReservedAt }
+        : {}),
+      ...(options.textInjectedAt
+        ? { submission_retry_text_injected_at: options.textInjectedAt }
+        : {})
+    }, deferredForegroundTransferRevision(transfer));
+    return transfer;
+  }
+
+  advanceSubmissionRetry(options: {
+    scope: DeferredForegroundApplicationScope;
+    boundary: DeferredCodexForegroundBindingBoundary;
+    attemptId: string;
+    messageId: string;
+    stage: "text_reserved" | "text_injected" | "enter_reserved" |
+      "enter_dispatched";
+    at: string;
+  }): DeferredForegroundTransfer {
+    let transfer = options.scope.loadTransfer(options.boundary.transferId);
+    this.assertTransferAuthority(options.scope, transfer, options.boundary);
+    this.#assertPreparedTarget(options.scope, transfer);
+    this.#assertReservedSource(options.scope, transfer, options.boundary);
+    if (
+      transfer.status !== "uncertain" ||
+      transfer.submission_retry_attempt_id !== options.attemptId ||
+      transfer.submission_retry_message_id !== options.messageId
+    ) {
+      throw new Error(
+        `deferred foreground transfer ${transfer.transfer_id} retry authority changed`
+      );
+    }
+    const exactDraft = transfer.submission_retry_mode === "exact_draft_enter";
+    const invalidStage = options.stage === "text_reserved"
+      ? exactDraft || transfer.submission_retry_text_reserved_at !== undefined
+      : options.stage === "text_injected"
+        ? exactDraft || !transfer.submission_retry_text_reserved_at ||
+          transfer.submission_retry_text_injected_at !== undefined
+        : options.stage === "enter_reserved"
+          ? (exactDraft
+              ? transfer.input_stage !== "text_injected"
+              : !transfer.submission_retry_text_injected_at) ||
+            transfer.submission_retry_enter_reserved_at !== undefined
+        : (!exactDraft && !transfer.submission_retry_text_injected_at) ||
+          !transfer.submission_retry_enter_reserved_at ||
+          transfer.submission_retry_enter_dispatched_at !== undefined;
+    if (invalidStage) {
+      throw new Error(
+        `deferred foreground transfer ${transfer.transfer_id} cannot advance ` +
+        `retry ${options.stage}`
+      );
+    }
+    transfer = options.scope.saveTransfer({
+      ...transfer,
+      ...(options.stage === "text_reserved"
+        ? { submission_retry_text_reserved_at: options.at }
+        : options.stage === "text_injected"
+          ? { submission_retry_text_injected_at: options.at }
+          : options.stage === "enter_reserved"
+            ? { submission_retry_enter_reserved_at: options.at }
+          : {
+            input_stage: "enter_dispatched" as const,
+            enter_dispatched_at: transfer.enter_dispatched_at ?? options.at,
+            submission_retry_enter_dispatched_at: options.at
+          })
+    }, deferredForegroundTransferRevision(transfer));
+    return transfer;
+  }
+
   async commit(request: CommitRequest): Promise<ManagedSessionState> {
     let transfer = request.scope.loadTransfer(request.boundary.transferId);
     this.assertTransferAuthority(request.scope, transfer, request.boundary);

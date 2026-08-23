@@ -96,6 +96,7 @@
     "test/terminal-selector-projection-service.test.ts",
     "test/terminal-status-cli-adapter.test.ts",
     "test/terminal-submission-acceptance.test.ts",
+    "test/terminal-submission-retry-service.test.ts",
     "test/terminal-watch-callback-cli-adapter.test.ts",
     "test/terminal-watch-cli-adapter.test.ts",
     "test/terminal-watch-service.test.ts",

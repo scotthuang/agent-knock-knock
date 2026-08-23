@@ -1,5 +1,7 @@
-import type { DeferredForegroundTransfer } from
-  "./deferred-foreground-transfer.js";
+import {
+  isDeferredForegroundSubmissionRetryPending,
+  type DeferredForegroundTransfer
+} from "./deferred-foreground-transfer.js";
 import type { Conversation } from "./protocol.js";
 import type {
   DeferredForegroundApplicationScope,
@@ -200,10 +202,14 @@ export class DeferredForegroundRecoveryService {
         { cause: error }
       );
     }
+    const pendingCandidateSet =
+      this.#ports.recovery.pendingAnchorVersion(scope, current) === 3;
+    const pendingRetry = isDeferredForegroundSubmissionRetryPending(current);
+    if (pendingCandidateSet && pendingRetry) {
+      return;
+    }
     if (current.status !== "uncertain") {
-      if (this.#ports.recovery.pendingAnchorVersion(scope, current) === 3) {
-        return;
-      }
+      if (pendingCandidateSet) return;
       current = this.#ports.repository.markUncertain(
         scope,
         boundary,

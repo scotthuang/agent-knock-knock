@@ -520,6 +520,72 @@ test("startup monitor launch eligibility requests exact stages and omits absent 
   assert.equal(Object.values(actual.result).some((value) => value === undefined), false);
 });
 
+test("startup monitor accepts exact deferred submission-retry pending authority", () => {
+  const preparedAt = "2026-08-14T00:00:00.000Z";
+  const textAt = "2026-08-14T00:00:02.000Z";
+  const enterAt = "2026-08-14T00:00:03.000Z";
+  for (const mode of ["exact_draft_enter", "replacement_send"] as const) {
+    const retryTextFields = mode === "replacement_send"
+      ? {
+          submission_retry_text_reserved_at:
+            "2026-08-14T00:00:01.000Z",
+          submission_retry_text_injected_at: textAt
+        }
+      : {};
+    const candidate = fixture({
+      takeover: {
+        deferred_foreground_transfer_id: "transfer-1",
+        codex_rollout_acceptance_anchor: candidateSetAnchor({
+          rollout: {
+            fd: "12u",
+            device: "16777231",
+            inode: "42001",
+            path: "/tmp/rollout.jsonl"
+          }
+        }, { inventory_cwd: "/repo/project" })
+      },
+      submission: {
+        message_id: "message-1",
+        status: "enter_dispatched",
+        prepared_at: preparedAt,
+        text_injected_at: textAt,
+        enter_dispatched_at: enterAt
+      },
+      ledger: dispatchLedger({
+        prepared_at: preparedAt,
+        text_injected_at: textAt,
+        enter_dispatched_at: enterAt,
+        submission_retry_attempt_id: "retry-1",
+        submission_retry_mode: mode,
+        submission_retry_original_message_id: "message-1",
+        submission_retry_active_message_id: "message-1",
+        submission_retry_state: "enter_dispatched"
+      }),
+      transfer: {
+        status: "uncertain",
+        input_stage: "enter_dispatched",
+        turn_id: "turn-1",
+        target_session_id: "session-1",
+        message_id: "message-1",
+        prepared_at: preparedAt,
+        text_injected_at: textAt,
+        enter_dispatched_at: enterAt,
+        submission_retry_attempt_id: "retry-1",
+        submission_retry_mode: mode,
+        submission_retry_message_id: "message-1",
+        submission_retry_prepared_at: preparedAt,
+        ...retryTextFields,
+        submission_retry_enter_reserved_at: enterAt,
+        submission_retry_enter_dispatched_at: enterAt
+      }
+    });
+    const actual = decide(candidate, [
+      "control", "dispatch", "store", "runtime", "store", "deferred"
+    ]);
+    assert.equal(actual.result.eligible, true, mode);
+  }
+});
+
 test("startup monitor rejects receipt and ledger route authority mismatch", () => {
   const routeA = `sha256:${"a".repeat(64)}`;
   const routeB = `sha256:${"b".repeat(64)}`;

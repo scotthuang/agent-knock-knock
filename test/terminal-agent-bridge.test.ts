@@ -26,6 +26,8 @@ import {
   NativeInspectionDismissalError,
   NativeInspectionSubmissionError,
   TerminalAgentBridge,
+  TerminalEnterDispatchNotAttemptedError,
+  TerminalEnterDispatchReservedError,
   TerminalInputNotStartedError,
   terminalApprovalFingerprint
 } from "../src/terminal-agent-bridge.js";
@@ -900,6 +902,825 @@ test("Codex multiline settle starts only after the exact composer materializes",
     ).length,
     1
   );
+});
+
+test("Codex multiline send preserves stable-capture opportunity after a slow first capture", async () => {
+  const request = "slow first capture\nstill submit exactly";
+  let nowMs = 0;
+  class SlowFirstCaptureProvider extends RecordingTerminalProvider {
+    private delayed = false;
+
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "› slow first capture",
+        "  still submit exactly",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+
+    override async capture(
+      target: TerminalEndpointRef | string,
+      options: { scrollbackLines?: number; socketPath?: string } = {}
+    ): Promise<string> {
+      if (!this.delayed) {
+        this.delayed = true;
+        nowMs += 2_100;
+      }
+      return super.capture(target, options);
+    }
+  }
+  const provider = new SlowFirstCaptureProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  await bridge.send(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    request
+  );
+
+  assert.ok(nowMs >= 2_100 + 121);
+  assert.equal(
+    provider.operations.filter((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ).length,
+    1
+  );
+});
+
+test("send exposes typed proof when injected text fails before any Enter attempt", async () => {
+  let nowMs = 0;
+  const request = "typed boundary proof\nsecond line";
+  class ExactAfterTextProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        "› typed boundary proof",
+        "  second line",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+  }
+  const provider = new ExactAfterTextProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+  await assert.rejects(
+    bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      request,
+      {
+        beforeEnter() {
+          throw new Error("store fence rejected");
+        }
+      }
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof TerminalEnterDispatchNotAttemptedError);
+      assert.equal(error.stage, "enter_not_attempted");
+      assert.match(error.message, /store fence rejected/u);
+      return true;
+    }
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind === "keys"),
+    false
+  );
+});
+
+test("Codex composer observation returns every closed state without draft text", async (t) => {
+  const expected = "managed exact draft";
+  const cases: Array<{
+    name: string;
+    screen: string;
+    state: "exact_draft" | "exact_empty" | "different_draft" | "working" |
+      "approval_or_modal";
+  }> = [
+    {
+      name: "exact draft",
+      screen: `› ${expected}\ngpt-5.6-sol high · /repo`,
+      state: "exact_draft"
+    },
+    {
+      name: "positively styled empty composer",
+      screen: codexPaddedStyledIdleScreen(80),
+      state: "exact_empty"
+    },
+    {
+      name: "different live draft",
+      screen: "› human-authored draft\ngpt-5.6-sol high · /repo",
+      state: "different_draft"
+    },
+    {
+      name: "working",
+      screen: "• Working (1s • esc to interrupt)",
+      state: "working"
+    },
+    {
+      name: "approval",
+      screen: strictCodexCommandApprovalScreen("npm test"),
+      state: "approval_or_modal"
+    }
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      const provider = new RecordingTerminalProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      const observation = await bridge.observeCodexComposer(
+        terminalControl(codexTerminalAgentAdapter),
+        expected
+      );
+      assert.equal(observation.state, testCase.state);
+      assert.doesNotMatch(JSON.stringify(observation), /managed exact draft/u);
+      if ("stableCaptures" in observation) {
+        assert.ok(observation.stableCaptures >= 3);
+      }
+    });
+  }
+
+  await t.test("identity drift", async () => {
+    const provider = new RecordingTerminalProvider([PANE]);
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      async verifyIdentity() {
+        throw new Error("test identity changed");
+      }
+    });
+    assert.equal((await bridge.observeCodexComposer(
+      terminalControl(codexTerminalAgentAdapter),
+      expected,
+      { runtime: { pid: 110 } }
+    )).state, "identity_drift");
+  });
+
+  await t.test("unavailable", async () => {
+    class UnavailableProvider extends RecordingTerminalProvider {
+      override async capture(): Promise<string> {
+        throw new Error("capture unavailable");
+      }
+    }
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: new UnavailableProvider([PANE])
+    });
+    assert.equal((await bridge.observeCodexComposer(
+      terminalControl(codexTerminalAgentAdapter),
+      expected
+    )).state, "unavailable");
+  });
+});
+
+test("Codex empty composer observation rejects footerless, truncated, and scrollback prompts", async (t) => {
+  const styledPrompt = "› \u001b[2mSummarize recent commits\u001b[0m";
+  const cases = [
+    {
+      name: "missing footer",
+      screen: `Ready\n${styledPrompt}`
+    },
+    {
+      name: "truncated footer",
+      screen: `Ready\n${styledPrompt}\ngpt-5.6-sol high ·`
+    },
+    {
+      name: "scrollback empty prompt",
+      screen: [
+        "Ready",
+        styledPrompt,
+        "gpt-5.6-sol high · /repo",
+        "Assistant output painted after the old composer"
+      ].join("\n")
+    },
+    {
+      name: "styled placeholder with a nonempty continuation row",
+      screen: [
+        "Ready",
+        styledPrompt,
+        "  human-authored continuation",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"),
+      expectedState: "different_draft"
+    }
+  ];
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      const provider = new RecordingTerminalProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      const observation = await bridge.observeCodexComposer(
+        terminalControl(codexTerminalAgentAdapter),
+        "managed exact draft"
+      );
+      assert.equal(
+        observation.state,
+        testCase.expectedState ?? "unavailable"
+      );
+    });
+  }
+});
+
+test("Codex exact composer observation is bounded when its digest never stabilizes", async () => {
+  let nowMs = 0;
+  let captures = 0;
+  const expected = "managed exact draft";
+  class RewrappingProvider extends RecordingTerminalProvider {
+    override async capture(
+      target: TerminalEndpointRef | string,
+      options: { scrollbackLines?: number; socketPath?: string } = {}
+    ): Promise<string> {
+      await super.capture(target, options);
+      captures += 1;
+      return captures % 2 === 0
+        ? "› managed exact\n  draft\ngpt-5.6-sol high · /repo"
+        : `› ${expected}\ngpt-5.6-sol high · /repo`;
+    }
+  }
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: new RewrappingProvider([PANE]),
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  const observation = await bridge.observeCodexComposer(
+    terminalControl(codexTerminalAgentAdapter),
+    expected
+  );
+  assert.equal(observation.state, "unavailable");
+  assert.ok(nowMs >= 5_000);
+  assert.ok(captures < 200, "the post-deadline exact-draft grace must be finite");
+});
+
+test("retry recovery treats a matching-length Codex paste placeholder as opaque", async (t) => {
+  const expected = "x".repeat(1_001);
+  const screen = [
+    "› [Pasted Content 1001 chars]",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+
+  await t.test("observation is unavailable", async () => {
+    let nowMs = 0;
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: new RecordingTerminalProvider([PANE], {
+        [PANE.target]: screen
+      }),
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    assert.equal((await bridge.observeCodexComposer(
+      terminalControl(codexTerminalAgentAdapter),
+      expected
+    )).state, "unavailable");
+  });
+
+  await t.test("exact-draft submit never reserves or presses Enter", async () => {
+    let nowMs = 0;
+    let reserved = false;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: screen
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.submitExactCodexDraft(
+        terminalControl(codexTerminalAgentAdapter),
+        expected,
+        {
+          beforeEnterReservation() {
+            reserved = true;
+          }
+        }
+      ),
+      TerminalEnterDispatchNotAttemptedError
+    );
+    assert.equal(reserved, false);
+    assert.equal(
+      provider.operations.some((operation) => operation.kind === "keys"),
+      false
+    );
+  });
+});
+
+test("fresh Codex send retains immediate large-paste placeholder support", async () => {
+  let nowMs = 0;
+  const request = `${"x".repeat(1_001)}\nsecond line`;
+  class FreshLargePasteProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        `› [Pasted Content ${Array.from(text).length} chars]`,
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+  }
+  const provider = new FreshLargePasteProvider([PANE]);
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  await bridge.send(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    request
+  );
+  assert.equal(
+    provider.operations.filter((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ).length,
+    1
+  );
+});
+
+test("retry replacement reserves before final exact-empty recapture and text delivery", async () => {
+  const timeline: string[] = [];
+  let nowMs = 0;
+  class ReplacementProvider extends TimelineTerminalProvider {
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      timeline.push("sendText");
+      await super.sendText(target, text, options);
+      this.setScreen(target, `› ${text}\ngpt-5.6-sol high · /repo`);
+    }
+  }
+  const provider = new ReplacementProvider(timeline, [PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+  const preliminary = await bridge.observeCodexComposer(
+    terminalControl(codexTerminalAgentAdapter),
+    "replacement request"
+  );
+  assert.equal(preliminary.state, "exact_empty");
+  if (preliminary.state !== "exact_empty") {
+    assert.fail("expected exact-empty replacement authority");
+  }
+  timeline.length = 0;
+  provider.operations.length = 0;
+
+  await bridge.send(
+    "codex",
+    terminalControl(codexTerminalAgentAdapter),
+    "replacement request",
+    {
+      beforeText() {
+        timeline.push("reservation");
+      },
+      requireExactEmptyComposerAfterBeforeText: {
+        preliminaryComposerDigest: preliminary.digest
+      }
+    }
+  );
+
+  const reservationIndex = timeline.indexOf("reservation");
+  const finalCaptureIndex = timeline.indexOf("capture", reservationIndex + 1);
+  const textIndex = timeline.indexOf("sendText");
+  assert.ok(reservationIndex >= 0);
+  assert.ok(reservationIndex < finalCaptureIndex);
+  assert.ok(finalCaptureIndex < textIndex);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "text").length,
+    1
+  );
+});
+
+test("retry replacement consumes its reservation and sends no input after an empty-composer edit", async () => {
+  let nowMs = 0;
+  let reserved = false;
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+  const preliminary = await bridge.observeCodexComposer(
+    terminalControl(codexTerminalAgentAdapter),
+    "replacement request"
+  );
+  assert.equal(preliminary.state, "exact_empty");
+  if (preliminary.state !== "exact_empty") {
+    assert.fail("expected exact-empty replacement authority");
+  }
+  provider.operations.length = 0;
+
+  await assert.rejects(
+    bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      "replacement request",
+      {
+        beforeText() {
+          reserved = true;
+          provider.setScreen(
+            PANE.target,
+            "› human draft\ngpt-5.6-sol high · /repo"
+          );
+        },
+        requireExactEmptyComposerAfterBeforeText: {
+          preliminaryComposerDigest: preliminary.digest
+        }
+      }
+    ),
+    TerminalEnterDispatchReservedError
+  );
+  assert.equal(reserved, true);
+  assert.equal(
+    provider.operations.some((operation) =>
+      operation.kind === "text" || operation.kind === "keys"
+    ),
+    false
+  );
+});
+
+test("retry replacement sends no Enter when the injected draft changes", async () => {
+  let nowMs = 0;
+  let reserved = false;
+  class ChangedAfterTextProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(
+        target,
+        "› human changed injected draft\ngpt-5.6-sol high · /repo"
+      );
+    }
+  }
+  const provider = new ChangedAfterTextProvider([PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+  const preliminary = await bridge.observeCodexComposer(
+    terminalControl(codexTerminalAgentAdapter),
+    "replacement request"
+  );
+  assert.equal(preliminary.state, "exact_empty");
+  if (preliminary.state !== "exact_empty") {
+    assert.fail("expected exact-empty replacement authority");
+  }
+  provider.operations.length = 0;
+
+  await assert.rejects(
+    bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      "replacement request",
+      {
+        beforeText() {
+          reserved = true;
+        },
+        requireExactEmptyComposerAfterBeforeText: {
+          preliminaryComposerDigest: preliminary.digest
+        }
+      }
+    ),
+    TerminalEnterDispatchReservedError
+  );
+  assert.equal(reserved, true);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "text").length,
+    1
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind === "keys"),
+    false
+  );
+});
+
+test("retry replacement consumes its attempt and sends no Enter for an opaque paste placeholder", async () => {
+  let nowMs = 0;
+  let reserved = false;
+  const request = "x".repeat(1_001);
+  class OpaqueReplacementProvider extends RecordingTerminalProvider {
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.setScreen(target, [
+        `› [Pasted Content ${Array.from(text).length} chars]`,
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+  }
+  const provider = new OpaqueReplacementProvider([PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+  const preliminary = await bridge.observeCodexComposer(
+    terminalControl(codexTerminalAgentAdapter),
+    request
+  );
+  assert.equal(preliminary.state, "exact_empty");
+  if (preliminary.state !== "exact_empty") {
+    assert.fail("expected exact-empty replacement authority");
+  }
+  provider.operations.length = 0;
+
+  await assert.rejects(
+    bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      request,
+      {
+        beforeText() {
+          reserved = true;
+        },
+        requireExactEmptyComposerAfterBeforeText: {
+          preliminaryComposerDigest: preliminary.digest
+        }
+      }
+    ),
+    TerminalEnterDispatchReservedError
+  );
+  assert.equal(reserved, true);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "text").length,
+    1
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind === "keys"),
+    false
+  );
+});
+
+test("exact Codex draft submission reserves before final recapture and emits at most one Enter", async () => {
+  const timeline: string[] = [];
+  let nowMs = 0;
+  const expected = "retry this exact draft";
+  const provider = new TimelineTerminalProvider(timeline, [PANE], {
+    [PANE.target]: `› ${expected}\ngpt-5.6-sol high · /repo`
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  const result = await bridge.submitExactCodexDraft(
+    terminalControl(codexTerminalAgentAdapter),
+    expected,
+    {
+      beforeEnterReservation() {
+        timeline.push("reservation");
+      }
+    }
+  );
+  assert.equal(result.enterCount, 1);
+  const reservationIndex = timeline.indexOf("reservation");
+  const finalCaptureIndex = timeline.lastIndexOf("capture");
+  const enterIndex = timeline.indexOf("sendKeys:C-m");
+  assert.ok(timeline.slice(0, reservationIndex).includes("capture"));
+  assert.ok(reservationIndex < finalCaptureIndex);
+  assert.ok(finalCaptureIndex < enterIndex);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "text").length,
+    0
+  );
+  assert.equal(
+    provider.operations.filter((operation) =>
+      operation.kind === "keys" && operation.keys.includes("C-m")
+    ).length,
+    1
+  );
+});
+
+test("exact Codex draft submission fails closed before Enter on drift or reservation failure", async (t) => {
+  const expected = "retry this exact draft";
+  await t.test("persistent different draft times out with zero Enter", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: "› different draft\ngpt-5.6-sol high · /repo"
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.submitExactCodexDraft(
+        terminalControl(codexTerminalAgentAdapter),
+        expected,
+        { beforeEnterReservation() {} }
+      ),
+      TerminalEnterDispatchNotAttemptedError
+    );
+    assert.ok(nowMs >= 5_000);
+    assert.equal(
+      provider.operations.some((operation) => operation.kind === "keys"),
+      false
+    );
+  });
+
+  await t.test("reservation exception emits zero Enter", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: `› ${expected}\ngpt-5.6-sol high · /repo`
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.submitExactCodexDraft(
+        terminalControl(codexTerminalAgentAdapter),
+        expected,
+        {
+          beforeEnterReservation() {
+            throw new Error("reservation rejected");
+          }
+        }
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof TerminalEnterDispatchReservedError);
+        assert.equal(error.doNotRetry, true);
+        assert.match(error.message, /reservation rejected/u);
+        return true;
+      }
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind === "keys"),
+      false
+    );
+  });
+
+  await t.test("human draft edit during reservation consumes the attempt with zero Enter", async () => {
+    let nowMs = 0;
+    let reserved = false;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: `› ${expected}\ngpt-5.6-sol high · /repo`
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.submitExactCodexDraft(
+        terminalControl(codexTerminalAgentAdapter),
+        expected,
+        {
+          beforeEnterReservation() {
+            reserved = true;
+            provider.setScreen(
+              PANE.target,
+              "› human changed this draft\ngpt-5.6-sol high · /repo"
+            );
+          }
+        }
+      ),
+      TerminalEnterDispatchReservedError
+    );
+    assert.equal(reserved, true);
+    assert.equal(
+      provider.operations.some((operation) => operation.kind === "keys"),
+      false
+    );
+  });
+
+  await t.test("identity drift after reservation consumes the attempt with zero Enter", async () => {
+    let nowMs = 0;
+    let reserved = false;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: `› ${expected}\ngpt-5.6-sol high · /repo`
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      async verifyIdentity() {
+        if (reserved) {
+          throw new Error("identity changed after reservation");
+        }
+      },
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.submitExactCodexDraft(
+        terminalControl(codexTerminalAgentAdapter),
+        expected,
+        {
+          runtime: { pid: 110 },
+          beforeEnterReservation() {
+            reserved = true;
+          }
+        }
+      ),
+      TerminalEnterDispatchReservedError
+    );
+    assert.equal(reserved, true);
+    assert.equal(
+      provider.operations.some((operation) => operation.kind === "keys"),
+      false
+    );
+  });
 });
 
 test("unchanged multilingual multiline composer after one Enter is proven not accepted", async () => {

@@ -136,6 +136,8 @@ type TerminalSubmissionProgressFields = Pick<
   TerminalBridgeSubmissionMutation,
   | "textInjectedAt"
   | "enterDispatchedAt"
+  | "enterNotAttemptedAt"
+  | "enterNotAttemptedReason"
   | "agentAcceptedAt"
   | "notAcceptedAt"
   | "submittedAt"
@@ -426,7 +428,14 @@ export class TerminalDispatchApplication {
     return { conversation, status };
   }
 
-  applyUncertain(at: string, error: unknown): Conversation {
+  applyUncertain(
+    at: string,
+    error: unknown,
+    proof: {
+      enterNotAttemptedAt?: string;
+      enterNotAttemptedReason?: "pre_key_failure";
+    } = {}
+  ): Conversation {
     const errorMessage = errorText(error);
     const stalled: Conversation = {
       ...this.#stagedConversation,
@@ -440,6 +449,7 @@ export class TerminalDispatchApplication {
       ...this.#progressFields(),
       uncertainAt: at,
       error: errorMessage,
+      ...proof,
       lastProvenStage: this.#enterDispatchedAt
         ? "enter_dispatched"
         : this.#textInjectedAt
@@ -450,6 +460,13 @@ export class TerminalDispatchApplication {
       state: uncertain,
       ledger: this.#ledgerFor(uncertain, "uncertain", {
         ...this.#phaseFields(),
+        ...(proof.enterNotAttemptedAt
+          ? {
+              enter_not_attempted_at: proof.enterNotAttemptedAt,
+              enter_not_attempted_reason:
+                proof.enterNotAttemptedReason ?? "pre_key_failure"
+            }
+          : {}),
         uncertain_at: at
       }, undefined, { error: textSummary(errorMessage) }),
       event: this.#event(at, "terminal_message_submit_uncertain", {

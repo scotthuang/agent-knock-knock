@@ -305,6 +305,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       Object.keys(listed.action_contracts.actions),
       [
         "send",
+        "retry_submission",
         "watch",
         "unwatch",
         "new_thread",
@@ -324,6 +325,25 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.equal(
       listed.action_contracts.actions.send.target_argument,
       "session_id"
+    );
+    assert.deepEqual(
+      listed.action_contracts.actions.retry_submission,
+      {
+        tool: "agent_knock_knock_send",
+        target_argument: "turn_id",
+        required: ["turn_id"],
+        accepts_only: ["turn_id"],
+        creates_turn: false,
+        caller_supplies_request_text: false,
+        may_retransmit_original_request_text: true,
+        retransmit_condition:
+          "durable structured proof that Enter was never attempted plus a positively empty live composer",
+        requires_explicit_user_confirmation: true,
+        candidate_source:
+          "the current exact managed Turn's available_actions.retry_submission",
+        scope:
+          "Recover only the original durable submission whose text injection is proven but Enter dispatch remains uncertain. AKK either submits the proven exact existing draft once, or retransmits the immutable original request once only after structured no-Enter proof and a positively empty live composer. It revalidates all terminal, identity, route, composer, and one-shot authority under lock and otherwise fails closed."
+      }
     );
     assert.equal(
       listed.action_contracts.actions.send.initial_attach_target_argument,

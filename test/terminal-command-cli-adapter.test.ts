@@ -152,6 +152,148 @@ test("terminal command facade preserves fake-port order and isolates async runti
   ]);
 });
 
+test("exact Turn submission retry rejects mixed send options before terminal resolution", async () => {
+  const events: string[] = [];
+  const gate = deferredGate();
+  const facade = terminalCommandCliAdapter.createTerminalCommandCliFacade(
+    facadeDependencies("A", events, gate)
+  );
+  await assert.rejects(
+    facade.runSend({ turn: "turn-1", message: "caller-controlled text" }),
+    /exact submission recovery form.*--message/u
+  );
+  assert.deepEqual(events, ["A:required:--turn is required"]);
+});
+
+test("exact Turn retry wires durable authority before composer input", () => {
+  const command = compiledFunctionSource(
+    "runTerminalSubmissionRetry",
+    "runTerminalSubmissionExactDraftEnter"
+  );
+  assertOrdered(command, [
+    "resolveStoredTerminal",
+    "terminalControlsShareIncarnation",
+    "withCanonicalMutationLocks",
+    "withTerminalDispatchStateScope",
+    "runTerminalSubmissionRetryLocked"
+  ]);
+  const authority = compiledFunctionSource(
+    "loadTerminalSubmissionRetryLockedAuthority",
+    "assertTerminalSubmissionRetryLedgerAuthority"
+  );
+  assertOrdered(authority, [
+    "bindTerminalDispatchRoute",
+    "loadState",
+    "loadTerminalSubmissionRetry",
+    "validateStoredTerminalSubmissionMatch",
+    "mutationDispatchLedger.load",
+    "exactTerminalSubmissionRetryDeferredTransferId",
+    "assertTerminalSubmissionRetryAttemptIdentity",
+    "assertTerminalSubmissionRetryGeneration"
+  ]);
+  const deferred = compiledFunctionSource(
+    "prepareTerminalSubmissionRetryDeferredContext",
+    "assertTerminalSubmissionRetryDeferredTransferAuthority"
+  );
+  assertOrdered(deferred, [
+    "assertTerminalSubmissionRetryDeferredMirrorCanReconcile",
+    "reconcileTerminalSubmissionRetryLedgerPrefix",
+    "reconcileTerminalSubmissionRetryDeferredTransfer",
+    "assertTerminalSubmissionRetryDeferredTransferAuthority",
+    "assertTransferAuthority",
+    "assertTerminalSubmissionRetryDeferredMirror"
+  ]);
+  const noInput = compiledFunctionSource(
+    "runTerminalSubmissionRetryNoInputRecovery",
+    "runTerminalSubmissionRetryDecision"
+  );
+  assertOrdered(noInput, [
+    "reconcileTerminalSubmissionRetryDeferredPending",
+    "recoverPartialTerminalSubmissionRetryAcceptance",
+    "terminalSubmissionRetryIsEligible",
+    "recoverTerminalSubmissionRetryAcceptance",
+    "finishPendingTerminalSubmissionRetry",
+    "terminalSubmissionRetryHasInputAuthority"
+  ]);
+  const decision = compiledFunctionSource(
+    "runTerminalSubmissionRetryDecision",
+    "runTerminalSubmissionRetryLocked"
+  );
+  assertOrdered(decision, [
+    "assertDeferredCodexForegroundBindingBoundary",
+    "observeCodexComposer",
+    "decideTerminalSubmissionRetry",
+    "runTerminalSubmissionReplacement",
+    "runTerminalSubmissionExactDraftEnter"
+  ]);
+  const locked = compiledFunctionSource(
+    "runTerminalSubmissionRetryLocked",
+    "runTerminalSubmissionRetry"
+  );
+  assertOrdered(locked, [
+    "loadTerminalSubmissionRetryLockedAuthority",
+    "prepareTerminalSubmissionRetryDeferredContext",
+    "terminalDispatchExecution",
+    "runTerminalSubmissionRetryNoInputRecovery",
+    "runTerminalSubmissionRetryDecision"
+  ]);
+  assert.equal(
+    [authority, deferred, noInput, decision, locked, command]
+      .join("\n")
+      .includes("plannedDeferredReplacement"),
+    false,
+    "a reserved replacement must not bypass acceptance-first recovery"
+  );
+  const replacement = compiledFunctionSource(
+    "runTerminalSubmissionReplacement",
+    "runSend"
+  );
+  assertOrdered(replacement, [
+    "requireExactEmptyComposerAfterBeforeText",
+    "beforeText",
+    'saveAttempt("replacement_text_reserved"',
+    "beforeEnter",
+    'saveAttempt("enter_reserved"',
+    "onTransportStage",
+    'saveAttempt("replacement_text_injected"',
+    'saveAttempt("enter_dispatched"'
+  ]);
+  assert.match(
+    compiledFunctionSource(
+      "terminalSubmissionRetryAccepted",
+      "terminalSubmissionRetryTerminalOutcome"
+    ),
+    /terminal_input_sent: input\.terminalInputSent/u
+  );
+  const terminalOutcome = compiledFunctionSource(
+    "terminalSubmissionRetryTerminalOutcome",
+    "finalizeDeferredTerminalSubmissionRetryAccepted"
+  );
+  assert.match(terminalOutcome, /safeToRetry: false/u);
+  assert.match(terminalOutcome, /safe_to_retry: false/u);
+  assert.match(terminalOutcome, /terminal_input_sent: true/u);
+  const exactDraft = compiledFunctionSource(
+    "runTerminalSubmissionExactDraftEnter",
+    "runTerminalSubmissionReplacement"
+  );
+  assertOrdered(exactDraft, [
+    "recoverAcceptedDeferredForegroundDispatch",
+    "finalizeDeferredTerminalSubmissionRetryAccepted",
+    "pollAcceptance",
+    "terminalSubmissionRetryAccepted",
+    "terminalInputSent: true",
+    "terminalSubmissionRetryTerminalOutcome"
+  ]);
+  assertOrdered(replacement, [
+    "recoverAcceptedDeferredForegroundDispatch",
+    "finalizeDeferredTerminalSubmissionRetryAccepted",
+    "pollAcceptance",
+    "terminalSubmissionRetryAccepted",
+    "terminalInputSent: true",
+    "terminalSubmissionRetryTerminalOutcome"
+  ]);
+});
+
 test("callback auto approval rejects a different Turn before migration or terminal I/O", async () => {
   const events: string[] = [];
   const statePath = "/private/store/conversations/turn-b/state.json";

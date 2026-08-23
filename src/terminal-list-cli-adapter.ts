@@ -381,7 +381,11 @@ export interface TerminalListStoreObservationPorts {
   terminalBridgeEnabled(conversation: Conversation | JsonObject): boolean;
   terminalBridgeSubmission(
     conversation: Conversation | JsonObject | undefined
-  ): { status?: string; message_id?: unknown } | undefined;
+  ): {
+    status?: string;
+    message_id?: unknown;
+    last_proven_stage?: unknown;
+  } | undefined;
   terminalControlFromTakeover(value: unknown): TerminalControlRef | undefined;
   terminalDispatchRecordMatchesControl(
     ledger: TerminalDispatchLedgerDocument | undefined,
@@ -971,10 +975,13 @@ function managedTurnListActionFacts(
     terminalListRuntime().terminalBridgeEnabled(conversation) &&
     terminalListRuntime().terminalControlFromTakeover(nativeTakeover) !== undefined
   );
+  const submission = terminalListRuntime().terminalBridgeSubmission(
+    conversation
+  );
   const renewEligible = Boolean(
     terminalBridgeReady &&
     task.status === "stalled" &&
-    terminalListRuntime().terminalBridgeSubmission(conversation)?.status !== "uncertain" &&
+    submission?.status !== "uncertain" &&
     !terminalListRuntime().isVerifiedDeadTerminalAgentProcess(conversation ?? {})
   );
   const callbackDelivery = isRecord(conversation?.callback_delivery)
@@ -986,11 +993,20 @@ function managedTurnListActionFacts(
     terminalListRuntime().callbackRetryDisposition(callbackDelivery).state ===
       "retryable"
   );
+  const retrySubmissionCandidate = Boolean(
+    conversation &&
+    executorForConversation(conversation as Conversation).kind === "codex" &&
+    terminalBridgeReady &&
+    task.status === "stalled" &&
+    submission?.status === "uncertain" &&
+    stringValue(submission.last_proven_stage) === "text_injected"
+  );
   return {
     terminalBridgeReady,
     managedApprovalPending,
     renewEligible,
-    retryCallbackEligible
+    retryCallbackEligible,
+    retrySubmissionCandidate
   };
 }
 
@@ -3765,6 +3781,12 @@ function managedListApprovalState(
 
 async function resolveConversationSelectorOption(commandName, options): Promise<void> {
   const sendOperation = commandName === "send";
+  // Submission retry is already bound to one authoritative managed Turn.
+  // Keep it out of ordinary-send selector discovery so an omitted Session
+  // target cannot be inferred and mixed into the exact `send --turn` form.
+  if (sendOperation && stringValue(options.turn)) {
+    return;
+  }
   if (stringValue(options.expectedTerminalToken)) {
     // Selector resolution may replace an alias (or an omitted selector) with a
     // discovered full terminal id. Preserve the caller's actual authority so
