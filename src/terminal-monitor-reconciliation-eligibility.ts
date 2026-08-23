@@ -1,4 +1,8 @@
 import path from "node:path";
+import {
+  callbackRouteFingerprintForConversation,
+  callbackRouteFingerprintFromRecord
+} from "./callback-route-authority.js";
 import type { DeferredForegroundTransfer } from "./deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from
   "./deferred-foreground-transfer-policy.js";
@@ -112,6 +116,14 @@ export function* terminalMonitorReconciliationEligibility(
   }
 
   const submission = terminalBridgeSubmission(conversation);
+  if (!callbackRouteAuthorityEligible({
+    conversation,
+    submission,
+    ledger,
+    terminalMessageId
+  })) {
+    return ineligible("terminal_dispatch_callback_route_authority_mismatch");
+  }
   if (
     submission &&
     nonBlankString(submission.message_id) === terminalMessageId &&
@@ -183,6 +195,149 @@ export function* terminalMonitorReconciliationEligibility(
     inactivityDeadlineAtMs,
     hardDeadlineAtMs
   };
+}
+
+function callbackRouteAuthorityEligible(input: {
+  conversation: Conversation;
+  submission: JsonRecord | undefined;
+  ledger: JsonRecord;
+  terminalMessageId: string;
+}): boolean {
+  return callbackRouteAuthoritiesMatch(input.submission, input.ledger) ||
+    isRecoverablePreparedAuthorityWriteInterruption({
+      ...input
+    }) ||
+    isRecoverableLaggingAcceptedAuthorityWriteInterruption({
+      ...input
+    }) ||
+    isRecoverableAcceptedAuthorityWriteInterruption({ ...input });
+}
+
+function callbackRouteAuthoritiesMatch(
+  submission: JsonRecord | undefined,
+  ledger: JsonRecord
+): boolean {
+  const stateHasAuthority = Boolean(
+    submission && Object.hasOwn(submission, "callback_route_fingerprint")
+  );
+  const ledgerHasAuthority = Object.hasOwn(
+    ledger,
+    "callback_route_fingerprint"
+  );
+  if (!stateHasAuthority && !ledgerHasAuthority) {
+    return true;
+  }
+  if (!stateHasAuthority || !ledgerHasAuthority) {
+    return false;
+  }
+  const stateAuthority = submission?.callback_route_fingerprint;
+  const ledgerAuthority = ledger.callback_route_fingerprint;
+  if (stateAuthority === null || ledgerAuthority === null) {
+    return stateAuthority === null && ledgerAuthority === null;
+  }
+  return typeof stateAuthority === "string" &&
+    /^sha256:[a-f0-9]{64}$/u.test(stateAuthority) &&
+    stateAuthority === ledgerAuthority;
+}
+
+/**
+ * Admit only the exact crash window created by prepared recovery's
+ * ledger-before-state write order. Identity, binding, control, Store and
+ * generation equality have already been proven above. The relaunched monitor
+ * will replay the prepared receipt under the same locks before terminal or
+ * callback I/O; every other one-sided authority remains fenced.
+ */
+function isRecoverablePreparedAuthorityWriteInterruption(input: {
+  conversation: Conversation;
+  submission: JsonRecord | undefined;
+  ledger: JsonRecord;
+  terminalMessageId: string;
+}): boolean {
+  if (
+    !input.submission ||
+    nonBlankString(input.submission.message_id) !== input.terminalMessageId ||
+    input.submission.status !== "prepared" ||
+    Object.hasOwn(input.submission, "callback_route_fingerprint") ||
+    !["submitted", "agent_accepted"].includes(String(input.ledger.status)) ||
+    !Object.hasOwn(input.ledger, "callback_route_fingerprint")
+  ) {
+    return false;
+  }
+  try {
+    const ledgerAuthority = callbackRouteFingerprintFromRecord(input.ledger);
+    const conversationAuthority =
+      callbackRouteFingerprintForConversation(input.conversation) ?? null;
+    return ledgerAuthority !== undefined && ledgerAuthority === conversationAuthority;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Admit the interrupted legacy upgrade where a durable accepted ledger gained
+ * the canonical authority before its enter-dispatched Turn was upgraded. The
+ * monitor repairs this pair under all dispatch locks before acceptance or
+ * terminal observation.
+ */
+function isRecoverableLaggingAcceptedAuthorityWriteInterruption(input: {
+  conversation: Conversation;
+  submission: JsonRecord | undefined;
+  ledger: JsonRecord;
+  terminalMessageId: string;
+}): boolean {
+  if (
+    !input.submission ||
+    nonBlankString(input.submission.message_id) !== input.terminalMessageId ||
+    input.submission.status !== "enter_dispatched" ||
+    Object.hasOwn(input.submission, "callback_route_fingerprint") ||
+    input.ledger.status !== "agent_accepted" ||
+    !Object.hasOwn(input.ledger, "callback_route_fingerprint")
+  ) {
+    return false;
+  }
+  try {
+    const ledgerAuthority = callbackRouteFingerprintFromRecord(input.ledger);
+    const conversationAuthority =
+      callbackRouteFingerprintForConversation(input.conversation) ?? null;
+    return ledgerAuthority !== undefined && ledgerAuthority === conversationAuthority;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Admit the inverse crash window from ordinary acceptance, whose durable Turn
+ * is committed before its final ledger projection. The first poll reconciles
+ * this exact enter-dispatched ledger under the terminal lock before observing
+ * the terminal. Deferred acceptance is repaired earlier in startup and does
+ * not depend on this exception.
+ */
+function isRecoverableAcceptedAuthorityWriteInterruption(input: {
+  conversation: Conversation;
+  submission: JsonRecord | undefined;
+  ledger: JsonRecord;
+  terminalMessageId: string;
+}): boolean {
+  if (
+    !input.submission ||
+    nonBlankString(input.submission.message_id) !== input.terminalMessageId ||
+    input.submission.status !== "agent_accepted" ||
+    !Object.hasOwn(input.submission, "callback_route_fingerprint") ||
+    !["enter_dispatched", "agent_accepted"].includes(
+      String(input.ledger.status)
+    ) ||
+    Object.hasOwn(input.ledger, "callback_route_fingerprint")
+  ) {
+    return false;
+  }
+  try {
+    const stateAuthority = callbackRouteFingerprintFromRecord(input.submission);
+    const conversationAuthority =
+      callbackRouteFingerprintForConversation(input.conversation) ?? null;
+    return stateAuthority !== undefined && stateAuthority === conversationAuthority;
+  } catch {
+    return false;
+  }
 }
 
 const ineligible = (reason: string): TerminalMonitorEligibility =>

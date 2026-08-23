@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   createCallbackOutboxSettlement,
+  type CallbackOutboxLane,
   type CallbackOutboxSettlementStatePort,
   type PreparedCallbackDeliveryClaim
 } from "../src/callback-outbox-settlement.js";
@@ -20,7 +21,13 @@ const NOW = new Date("2026-08-14T12:00:00.000Z");
 const STATE_PATH = "/store/turn-a/state.json";
 const LOG_PATH = "/store/turn-a/events.ndjson";
 
-function createHarness({ accepted = false } = {}) {
+function createHarness({
+  accepted = false,
+  lane = "lifecycle"
+}: {
+  accepted?: boolean;
+  lane?: CallbackOutboxLane;
+} = {}) {
   const conversation = createConversation({
     userRequest: "exercise the callback outbox",
     sessionId: "session-a",
@@ -37,10 +44,13 @@ function createHarness({ accepted = false } = {}) {
     body: "complete",
     now: NOW
   });
+  const outboxField = lane === "notification"
+    ? "callback_notification_delivery"
+    : "callback_delivery";
   let stored: Conversation = {
     ...conversation,
-    status: "waiting_for_agent",
-    callback_delivery: {
+    status: lane === "notification" ? "stalled" : "waiting_for_agent",
+    [outboxField]: {
       status: "pending",
       message,
       attempts: 2,
@@ -98,7 +108,8 @@ function createHarness({ accepted = false } = {}) {
     logPath: LOG_PATH,
     message,
     deliveryAttempt: 2,
-    deliveryAttemptId: "attempt-a"
+    deliveryAttemptId: "attempt-a",
+    callbackOutboxLane: lane
   };
   return {
     service,
@@ -160,6 +171,12 @@ test("accepted transport settles durably without launching a retry", async () =>
   const delivery = harness.stored().callback_delivery as Record<string, unknown>;
   assert.equal(delivery.status, "delivered");
   assert.equal(delivery.accepted_at, "2026-08-14T11:59:59.000Z");
+  assert.deepEqual(delivery.attempt_outcome, {
+    disposition: "accepted",
+    accepted_at: "2026-08-14T11:59:59.000Z",
+    acceptance_id: "message-a",
+    evidence: { source: "legacy_transport_acceptance_recovery" }
+  });
   assert.equal(harness.events[0].accepted_evidence_recovery, true);
 });
 
@@ -187,6 +204,15 @@ test("successful delivery persists delivery evidence before its event", async ()
   const delivery = harness.stored().callback_delivery as Record<string, unknown>;
   assert.equal(delivery.status, "delivered");
   assert.deepEqual(delivery.wake, { status: "ok" });
+  assert.deepEqual(delivery.attempt_outcome, {
+    disposition: "accepted",
+    accepted_at: NOW.toISOString(),
+    acceptance_id: "message-a",
+    evidence: {
+      source: "legacy_delivery_result",
+      transport_kind: "gateway_method"
+    }
+  });
 });
 
 test("changed claims append only a skipped-settlement event", async () => {
@@ -232,8 +258,110 @@ test("failed delivery launches retry before durable failure settlement", async (
   const delivery = harness.stored().callback_delivery as Record<string, unknown>;
   assert.equal(delivery.status, "failed");
   assert.equal(delivery.last_error, "gateway unavailable");
+  assert.deepEqual(delivery.attempt_outcome, {
+    disposition: "retryable_failure",
+    error_code: "callback_delivery_failed",
+    evidence: { source: "legacy_delivery_exception" }
+  });
   assert.equal(delivery.retry_monitor_pid, 5102);
   assert.equal(delivery.next_attempt_at, "2026-08-14T12:00:15.000Z");
+});
+
+test("permanent and uncertain outcomes never launch a blind retry", async () => {
+  const cases = [
+    {
+      disposition: "permanent_failure" as const,
+      error_code: "profile_not_authorized"
+    },
+    {
+      disposition: "uncertain" as const,
+      error_code: "acceptance_observation_lost",
+      observed_at: NOW.toISOString()
+    }
+  ];
+  for (const outcome of cases) {
+    const harness = createHarness();
+    await withFixedClock(() => {
+      harness.service.settleDelivery(harness.prepared, {
+        delivered: false,
+        outcome
+      });
+    });
+
+    assert.deepEqual(harness.order, [
+      "lock:enter",
+      "load",
+      "save",
+      "append:callback_delivery_failed",
+      "lock:exit"
+    ]);
+    const delivery = harness.stored()
+      .callback_delivery as Record<string, unknown>;
+    assert.equal(delivery.status, "failed");
+    assert.deepEqual(delivery.attempt_outcome, outcome);
+    assert.equal(delivery.retry_monitor_pid, undefined);
+    assert.equal(delivery.next_attempt_at, undefined);
+    assert.equal(harness.events[0].attempt_disposition, outcome.disposition);
+  }
+});
+
+test("notification settlement stays isolated and records sent_at only on acceptance", async () => {
+  const failed = createHarness({ lane: "notification" });
+  await withFixedClock(() => {
+    failed.service.settleDelivery(failed.prepared, {
+      delivered: false,
+      outcome: {
+        disposition: "uncertain",
+        error_code: "acceptance_observation_lost",
+        observed_at: NOW.toISOString()
+      }
+    });
+  });
+  assert.equal(failed.stored().status, "stalled");
+  assert.equal(failed.stored().callback_delivery, undefined);
+  assert.equal(failed.stored().stalled_notification_sent_at, undefined);
+  assert.equal(
+    (failed.stored().callback_notification_delivery as
+      Record<string, unknown>).status,
+    "failed"
+  );
+  assert.deepEqual(failed.order, [
+    "lock:enter",
+    "load",
+    "save",
+    "append:callback_notification_delivery_failed",
+    "lock:exit"
+  ]);
+
+  const accepted = createHarness({ lane: "notification" });
+  await withFixedClock(() => {
+    accepted.service.settleDelivery(accepted.prepared, {
+      delivered: true,
+      outcome: {
+        disposition: "accepted",
+        accepted_at: NOW.toISOString(),
+        acceptance_id: "notification-accepted-a"
+      }
+    });
+  });
+  assert.equal(accepted.stored().status, "stalled");
+  assert.equal(
+    accepted.stored().stalled_notification_sent_at,
+    NOW.toISOString()
+  );
+  assert.equal(
+    accepted.stored().stalled_notification_message_id,
+    "message-a"
+  );
+  assert.equal(
+    (accepted.stored().callback_notification_delivery as
+      Record<string, unknown>).status,
+    "delivered"
+  );
+  assert.equal(
+    accepted.events[0].event,
+    "callback_notification_delivery_succeeded"
+  );
 });
 
 test("accepted recovery distinguishes caller-held and service-held locks", async () => {

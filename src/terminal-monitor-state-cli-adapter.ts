@@ -1,9 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-import { classifyCallbackProcessFailure } from
-  "./callback-outbox-policy.js";
-
 import { validateCodexRolloutAcceptanceAnchor } from
   "./terminal-submission-acceptance.js";
 import {
@@ -81,6 +78,7 @@ import {
   presentTerminalMonitor,
   reconcileMonitorAcceptance,
   recordMonitorApprovalNotification,
+  repairLaggingAcceptedMonitorAuthority,
   recoverPreparedMonitorSubmission,
   type ApprovalNotificationAdapterPorts,
   terminalMonitorStoreLeaseTimeout,
@@ -111,6 +109,9 @@ import type {
 import type { createTerminalIdentityAuthorityCliAdapter } from
   "./terminal-identity-authority-cli-adapter.js";
 import type { CallbackCliFacade } from "./callback-cli-adapter.js";
+import type { PreparedCallback } from "./callback-outbox-service.js";
+import { callbackExpectedForConversation } from
+  "./callback-route-authority.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 
 type MonitorCliOptions = Record<string, unknown>;
@@ -154,7 +155,7 @@ export interface TerminalMonitorStateCliDependencies {
   callbacks: Pick<
     CallbackCliFacade,
     "reconcileDelivery" | "prepareApprovalNotification" | "runPrepared" |
-      "emitPreparedResult" | "deliverGatewayMethod" | "deliverChatSend"
+      "emitPreparedResult" | "prepareStallNotification"
   >;
   runtime: {
     isProcessAlive(pid: number): boolean;
@@ -461,11 +462,20 @@ class TerminalMonitorStateCliApplication {
       callbacks: {
         reconcile: (storeDir, paths, delayMs) => withStoreWriterLease(
           storeDir,
-          () => this.#dependencies.callbacks.reconcileDelivery({
-            statePath: paths.statePath,
-            logPath: paths.logPath,
-            delayMs
-          })
+          () => {
+            const lifecycle = this.#dependencies.callbacks.reconcileDelivery({
+              statePath: paths.statePath,
+              logPath: paths.logPath,
+              delayMs
+            });
+            const notification = this.#dependencies.callbacks.reconcileDelivery({
+              statePath: paths.statePath,
+              logPath: paths.logPath,
+              delayMs,
+              callbackOutboxLane: "notification"
+            });
+            return lifecycle.handled ? lifecycle : notification;
+          }
         ),
         run: (prepared, callbackOptions) =>
           this.#dependencies.callbacks.runPrepared(prepared, callbackOptions)
@@ -793,6 +803,27 @@ class TerminalMonitorStateCliApplication {
                   ...stallRequest
                 });
               }
+            }
+          }),
+        repairLaggingAcceptedAuthority: (request) =>
+          repairLaggingAcceptedMonitorAuthority({
+            ...request,
+            ports: {
+              acquireTerminal: (control) =>
+                this.#dependencies.dispatch.repository.acquire(
+                  commandStoreDir(),
+                  control,
+                  { timeoutMs: 30000 }
+                ),
+              withWriter: (use) =>
+                withStoreWriterLeaseAsync(stateStoreDir(), use),
+              acquireState: () =>
+                this.#stateFileLock.acquire(`${input.statePath}.lock`),
+              loadConversation: () => loadState(input.statePath),
+              loadLedger: this.#dependencies.dispatch.repository.load,
+              reconcileLedger:
+                this.#dependencies.dispatch.recovery.reconcilePrepared,
+              submission: terminalBridgeSubmission
             }
           }),
         assertBindingCurrent: (conversation) =>
@@ -1792,7 +1823,7 @@ class TerminalMonitorStateCliApplication {
     const storeDir = pathsForConversationDir(path.dirname(input.statePath))
       .storeDir;
     let stalledConversation: Conversation | undefined;
-    let stalledMessage: ReturnType<typeof createMessage> | undefined;
+    let stalledNotification: PreparedCallback | undefined;
     let unchangedConversation: Conversation | undefined;
     withStoreWriterLease(storeDir, () => {
       const release = this.#stateFileLock.acquire(`${input.statePath}.lock`);
@@ -1809,7 +1840,7 @@ class TerminalMonitorStateCliApplication {
         }
         const stalled = this.#stalledState(conversation, input);
         stalledConversation = stalled.conversation;
-        stalledMessage = stalled.message;
+        stalledNotification = stalled.prepared;
       } finally {
         release();
       }
@@ -1817,13 +1848,20 @@ class TerminalMonitorStateCliApplication {
     if (unchangedConversation) {
       return unchangedConversation;
     }
-    if (stalledConversation && stalledMessage) {
-      this.#deliverStalledNotification({
-        statePath: input.statePath,
-        logPath: input.logPath,
-        conversation: stalledConversation,
-        message: stalledMessage
-      });
+    if (stalledNotification) {
+      try {
+        stalledConversation = this.#dependencies.callbacks.runPrepared(
+          stalledNotification,
+          { emit: false }
+        ).conversation;
+      } catch (error) {
+        stalledConversation = loadState(input.statePath);
+        cliRuntimeLog("warn", "stalled_notification_delivery_failed", {
+          conversation_id: stalledConversation.conversation_id,
+          message_id: stalledNotification.message.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
     return stalledConversation;
   }
@@ -1832,13 +1870,18 @@ class TerminalMonitorStateCliApplication {
     conversation: Conversation,
     input: { statePath: string; logPath: string; reason: string;
       detail: Record<string, unknown> }
-  ): { conversation: Conversation; message?: ReturnType<typeof createMessage> } {
+  ): { conversation: Conversation; prepared?: PreparedCallback } {
     const now = cliNow().toISOString();
     const executor = executorForConversation(conversation);
     const terminalBridge = terminalBridgeEnabled(conversation);
-    const shouldNotify = Boolean(
-      conversation.gateway_method && !conversation.stalled_notification_sent_at
-    );
+    const notificationDelivery = isRecord(
+      conversation.callback_notification_delivery
+    ) ? conversation.callback_notification_delivery : undefined;
+    const shouldNotify = callbackExpectedForConversation(conversation) &&
+      !conversation.stalled_notification_sent_at &&
+      !["pending", "failed"].includes(
+        String(notificationDelivery?.status ?? "")
+      );
     const message = shouldNotify
       ? stalledMessage(conversation, input.reason, executor, terminalBridge)
       : undefined;
@@ -1847,14 +1890,23 @@ class TerminalMonitorStateCliApplication {
       status: "stalled",
       stalled_at: now,
       stalled_reason: input.reason,
-      stalled_notification_sent_at: shouldNotify
-        ? now
-        : conversation.stalled_notification_sent_at,
       stalled_notification_message_id:
         message?.id ?? conversation.stalled_notification_message_id,
       updated_at: now
     };
-    saveState(input.statePath, nextConversation);
+    const prepared = message
+      ? this.#dependencies.callbacks.prepareStallNotification({
+          options: { statePath: input.statePath },
+          statePath: input.statePath,
+          logPath: input.logPath,
+          conversation: nextConversation,
+          message
+        }).prepared
+      : undefined;
+    const persistedConversation = prepared?.conversation ?? nextConversation;
+    if (!prepared) {
+      saveState(input.statePath, persistedConversation);
+    }
     appendEvent(input.logPath, {
       ts: now,
       conversation_id: conversation.conversation_id,
@@ -1872,64 +1924,7 @@ class TerminalMonitorStateCliApplication {
       reason: input.reason,
       ...input.detail
     });
-    return { conversation: nextConversation, message };
-  }
-
-  #deliverStalledNotification(input: {
-    statePath: string;
-    logPath: string;
-    conversation: Conversation;
-    message: ReturnType<typeof createMessage>;
-    eventPrefix?: string;
-  }): void {
-    if (!input.conversation.gateway_method) {
-      return;
-    }
-    const eventPrefix = input.eventPrefix ?? "stalled";
-    const token = input.conversation.gateway_token;
-    const gatewayUrl = token ? input.conversation.gateway_url : undefined;
-    const delivery = this.#dependencies.callbacks.deliverGatewayMethod({
-      method: input.conversation.gateway_method,
-      openclawBin: input.conversation.openclaw_bin,
-      gatewayUrl,
-      token,
-      sessionKey: input.conversation.gateway_session ??
-        input.conversation.openclaw_session,
-      statePath: input.statePath,
-      logPath: input.logPath,
-      conversation: input.conversation,
-      message: input.message
-    });
-    recordStalledDelivery(
-      input,
-      eventPrefix,
-      "gateway_method_delivery",
-      delivery,
-      true
-    );
-    if (delivery.status !== 0) {
-      return;
-    }
-    const payload = parseOptionalJson(delivery.stdout);
-    const chatSend = isRecord(payload?.chat_send)
-      ? payload.chat_send
-      : undefined;
-    if (!chatSend) {
-      return;
-    }
-    const chatDelivery = this.#dependencies.callbacks.deliverChatSend({
-      openclawBin: input.conversation.openclaw_bin,
-      gatewayUrl,
-      token,
-      params: chatSend
-    });
-    recordStalledDelivery(
-      input,
-      eventPrefix,
-      "chat_send_delivery",
-      chatDelivery,
-      false
-    );
+    return { conversation: persistedConversation, prepared };
   }
 }
 
@@ -2125,63 +2120,6 @@ function stalledMessage(
         : `Use \`AKK status --turn ${turnIdForConversation(conversation)}\` for details or \`AKK close --turn ${turnIdForConversation(conversation)}\` to close this Turn.`
     ].join("\n")
   });
-}
-
-type StalledNotificationInput = {
-  logPath: string;
-  conversation: Conversation;
-  message: ReturnType<typeof createMessage>;
-};
-interface CallbackProcessDelivery {
-  status: number;
-  stdout: string;
-  stderr: string;
-  error?: Error;
-}
-
-function recordStalledDelivery(
-  input: StalledNotificationInput,
-  eventPrefix: string,
-  suffix: "gateway_method_delivery" | "chat_send_delivery",
-  delivery: CallbackProcessDelivery,
-  includeMethod: boolean
-): void {
-  appendEvent(input.logPath, {
-    ts: cliNow().toISOString(),
-    conversation_id: input.conversation.conversation_id,
-    event: `${eventPrefix}_${suffix}`,
-    ...(includeMethod ? { method: input.conversation.gateway_method } : {}),
-    message_id: input.message.id,
-    status: delivery.status,
-    stdout: redactString(delivery.stdout),
-    stderr: redactString(delivery.stderr)
-  });
-  cliRuntimeLog("info", `${eventPrefix}_${suffix}`, {
-    conversation_id: input.conversation.conversation_id,
-    ...(includeMethod ? { method: input.conversation.gateway_method } : {}),
-    message_id: input.message.id,
-    status: delivery.status,
-    failure_kind: classifyCallbackProcessFailure(delivery),
-    stdout: textSummary(delivery.stdout),
-    stderr: textSummary(delivery.stderr)
-  });
-}
-
-function parseOptionalJson(text: unknown): Record<string, unknown> | undefined {
-  try {
-    const parsed: unknown = JSON.parse(String(text));
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function textSummary(text: unknown, maxLength = 240) {
-  const value = String(text ?? "");
-  return {
-    length: value.length,
-    preview: value ? value.slice(0, maxLength) : undefined
-  };
 }
 
 function truncateText(value: unknown, maxLength: number): string {

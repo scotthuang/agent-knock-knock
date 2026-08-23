@@ -222,6 +222,11 @@ export interface TerminalMonitorServicePorts {
       currentMessageId: string;
       dispatcherPid: number;
     }): Promise<Conversation>;
+    repairLaggingAcceptedAuthority(input: {
+      conversation: Conversation;
+      terminalControl: TerminalControlRef;
+      currentMessageId: string;
+    }): Promise<Conversation>;
     assertBindingCurrent(conversation: Conversation): void;
     bindingSuperseded(error: unknown):
       | { code: string; message: string }
@@ -622,6 +627,12 @@ async function runMonitorIteration(
     });
     return "finished";
   }
+
+  state.conversation = await ports.authority.repairLaggingAcceptedAuthority({
+    conversation: state.conversation,
+    terminalControl,
+    currentMessageId
+  });
 
   const submissionResult = await reconcileSubmissionPhase({
     state,

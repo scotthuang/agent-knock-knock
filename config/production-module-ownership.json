@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 1663,
-    "production_physical_loc": 101687,
+    "cli_core_max_physical_loc": 1674,
+    "production_physical_loc": 104930,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -529,6 +529,14 @@
       "owner": "callback-outbox"
     },
     {
+      "path": "src/callback-route-authority.ts",
+      "owner": "callback-transport"
+    },
+    {
+      "path": "src/callback-transport.ts",
+      "owner": "callback-transport"
+    },
+    {
       "path": "src/canonical-json.ts",
       "owner": "value-guards"
     },
@@ -731,6 +739,10 @@
     {
       "path": "src/openclaw-doctor.ts",
       "owner": "openclaw-doctor"
+    },
+    {
+      "path": "src/openclaw-managed-callback-cli-adapter.ts",
+      "owner": "callback-transport"
     },
     {
       "path": "src/openclaw-plugin-callback-adapter.ts",

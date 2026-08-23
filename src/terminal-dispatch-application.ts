@@ -4,6 +4,10 @@ import {
   type Conversation,
   type Executor
 } from "./protocol.js";
+import {
+  callbackExpectedForConversation,
+  callbackRouteFingerprintForConversation
+} from "./callback-route-authority.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import {
   reduceTerminalZeroInputAbort,
@@ -655,7 +659,7 @@ export class TerminalDispatchApplication {
     phaseFields: TerminalOrdinaryDispatchPhaseFields = {},
     dispatcherPid: number | null = this.#context.dispatcherPid,
     postCallbackFields: TerminalOrdinaryDispatchPostCallbackFields = {},
-    callbackExpected = Boolean(conversation.gateway_method)
+    callbackExpected = callbackExpectedForConversation(conversation)
   ): TerminalDispatchLedgerDocument {
     return constructTerminalOrdinaryDispatchLedger({
       bindingFields: this.#context.ledgerBindingFields(conversation),
@@ -675,6 +679,8 @@ export class TerminalDispatchApplication {
       statePath: this.#context.statePath,
       eventLogPath: this.#context.eventLogPath,
       callbackExpected,
+      callbackRouteFingerprint:
+        callbackRouteFingerprintForConversation(conversation) ?? null,
       postCallbackFields,
       previousGenerationId: this.#context.previousGenerationId
     });

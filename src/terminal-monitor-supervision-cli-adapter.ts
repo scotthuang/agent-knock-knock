@@ -1,4 +1,5 @@
 import type { CallbackCliFacade } from "./callback-cli-adapter.js";
+import type { CallbackOutboxLane } from "./callback-outbox-settlement.js";
 import { expandHome, positiveMinutes } from "./cli-command-runtime.js";
 import type { Conversation } from "./protocol.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
@@ -108,6 +109,7 @@ export interface TerminalMonitorSupervisionCliFacade {
   startCallbackRetryMonitor(input: {
     statePath: string;
     delayMs?: unknown;
+    callbackOutboxLane?: CallbackOutboxLane;
   }): DetachedMonitorProcess;
   startTerminalBridgeMonitorForConversation(
     input: TerminalMonitorStartRequest
@@ -276,11 +278,21 @@ class TerminalMonitorSupervisionCliApplication {
 
   startCallbackRetryMonitor({
     statePath,
-    delayMs = DEFAULT_CALLBACK_RETRY_DELAY_MS
+    delayMs = DEFAULT_CALLBACK_RETRY_DELAY_MS,
+    callbackOutboxLane = "lifecycle"
   }: {
     statePath: string;
     delayMs?: unknown;
+    callbackOutboxLane?: CallbackOutboxLane;
   }): DetachedMonitorProcess {
+    if (
+      callbackOutboxLane !== "lifecycle" &&
+      callbackOutboxLane !== "notification"
+    ) {
+      throw new Error(
+        `invalid callback outbox lane: ${String(callbackOutboxLane)}`
+      );
+    }
     const numericDelayMs = Number(delayMs);
     const normalizedDelayMs = Math.max(
       0,
@@ -288,8 +300,7 @@ class TerminalMonitorSupervisionCliApplication {
         ? numericDelayMs
         : DEFAULT_CALLBACK_RETRY_DELAY_MS
     );
-    return this.#spawnDetached({
-      args: [
+    const args = [
         this.#dependencies.runtime.entryPath(),
         "monitor",
         "--callback-retry",
@@ -297,7 +308,12 @@ class TerminalMonitorSupervisionCliApplication {
         statePath,
         "--callback-retry-delay-ms",
         String(normalizedDelayMs)
-      ],
+      ];
+    if (callbackOutboxLane === "notification") {
+      args.push("--callback-outbox-lane", "notification");
+    }
+    return this.#spawnDetached({
+      args,
       environment: monitorLaunch.withoutGatewayTokens(
         this.#dependencies.runtime.environment()
       )
@@ -669,9 +685,15 @@ class TerminalMonitorSupervisionCliApplication {
 
   #runCallbackRetryMonitor(options: MonitorCliOptions): void {
     const statePath = expandHome(required(options.state, "--state is required"));
+    const callbackOutboxLane = callbackOutboxLaneOption(
+      options.callbackOutboxLane
+    );
     this.#dependencies.callbacks.runRetryMonitor({
       statePath,
-      initialDelayMs: options.callbackRetryDelayMs
+      initialDelayMs: options.callbackRetryDelayMs,
+      ...(callbackOutboxLane === "notification"
+        ? { callbackOutboxLane: "notification" as const }
+        : {})
     });
   }
 
@@ -1127,6 +1149,16 @@ class TerminalMonitorSupervisionCliApplication {
       }
     );
   }
+}
+
+function callbackOutboxLaneOption(value: unknown): CallbackOutboxLane {
+  if (value === undefined || value === false || value === "lifecycle") {
+    return "lifecycle";
+  }
+  if (value === "notification") return value;
+  throw new Error(
+    "--callback-outbox-lane must be lifecycle or notification"
+  );
 }
 
 function takeoverFor(

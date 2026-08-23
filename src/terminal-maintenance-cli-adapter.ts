@@ -3,6 +3,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 
 import type { ExecutorKind } from "./executors.js";
+import { supersedeCallbackNotificationDelivery } from
+  "./callback-outbox-policy.js";
 import type { ManagedSessionState } from "./managed-session.js";
 import {
   type CanonicalMutationLockPorts, type CanonicalMutationResources,
@@ -415,7 +417,10 @@ async function runRenew(options: TerminalMaintenanceCliOptions): Promise<void> {
     const inactivityDeadline = deadlineAt(now, inactivityTimeoutMinutes) ??
       new Date(cliNowMs() + inactivityTimeoutMinutes * 60 * 1000).toISOString();
     renewed = {
-      ...current,
+      ...supersedeCallbackNotificationDelivery(current, {
+        at: now,
+        reason: "superseded_by_terminal_monitor_renewal"
+      }),
       status: "waiting_for_agent" as const,
       native_session_takeover: {
         ...currentTakeover,
@@ -875,7 +880,10 @@ async function runObservedHandoffClose({
         }
         const now = cliNow().toISOString();
         const closed: Conversation = {
-          ...conversation,
+          ...supersedeCallbackNotificationDelivery(conversation, {
+            at: now,
+            reason: "superseded_by_human_context_switch"
+          }),
           status: "closed",
           closed_at: now,
           close_reason: "superseded_by_human_context_switch",
@@ -1082,7 +1090,7 @@ async function runClose(options: TerminalMaintenanceCliOptions): Promise<void> {
         });
       }
       const closed = {
-        ...conversation,
+        ...supersedeCallbackNotificationDelivery(conversation, { at: now, reason: "superseded_by_conversation_close" }),
         status: "closed" as const,
         closed_at: now,
         close_reason: closeReason,

@@ -1,15 +1,28 @@
 import { createHash } from "node:crypto";
 import {
+  parseCallbackAttemptOutcome,
+  parseCallbackRoute,
+  type CallbackAttemptOutcome,
+  type CallbackEnvelopeV1,
+  type CallbackRouteV1,
+  type CallbackTransportContextV1,
+  type CallbackTransportDeliverInput
+} from "./callback-transport.js";
+import {
   TERMINAL_WATCH_SCHEMA,
   TERMINAL_WATCH_VERSION,
   assertTerminalWatch,
   initialTerminalWatchObservationCheckpoint,
   terminalWatchIdentityFingerprint,
+  terminalWatchCallbackEnvelope,
+  terminalWatchNotificationCallbackSnapshot,
   terminalWatchNotificationId,
   terminalWatchNotificationIdempotencyKey,
   terminalWatchRevision,
   type TerminalWatch,
   type TerminalWatchAnchor,
+  type TerminalWatchCallbackEvent,
+  type TerminalWatchCallbackMessageInput,
   type TerminalWatchNotification,
   type TerminalWatchNotificationKind,
   type TerminalWatchObservationCheckpoint,
@@ -19,6 +32,15 @@ import {
   type TerminalWatchTerminalStatus
 } from "./terminal-watch-store.js";
 import type { ExecutorKind } from "./executors.js";
+
+export {
+  terminalWatchCallbackEnvelope,
+  terminalWatchCallbackMessage
+} from "./terminal-watch-store.js";
+export type {
+  TerminalWatchCallbackEvent,
+  TerminalWatchCallbackMessageInput
+} from "./terminal-watch-store.js";
 
 const DEFAULT_NOTIFICATION_LEASE_MS = 30_000;
 const DEFAULT_NOTIFICATION_RETRY_DELAY_MS = 5_000;
@@ -76,17 +98,26 @@ export type TerminalWatchObservation =
       reason_code?: string;
     });
 
-export interface TerminalWatchDeliveryInput {
-  watch: TerminalWatch;
-  notification: TerminalWatchNotification;
+export interface TerminalWatchCallbackResolution {
+  route: CallbackRouteV1;
+  context?: CallbackTransportContextV1;
 }
+
+export type TerminalWatchDeliveryInput = CallbackTransportDeliverInput;
 
 export interface TerminalWatchServiceDependencies {
   repository: TerminalWatchStore;
   now(): Date;
   randomUUID(): string;
   observe(watch: TerminalWatch): Promise<TerminalWatchObservation>;
-  deliver(input: TerminalWatchDeliveryInput): Promise<void>;
+  resolveCallback(watch: TerminalWatch): TerminalWatchCallbackResolution;
+  resolveCallbackContext?(
+    watch: TerminalWatch,
+    route: CallbackRouteV1
+  ): CallbackTransportContextV1 | undefined;
+  deliver(
+    input: TerminalWatchDeliveryInput
+  ): Promise<CallbackAttemptOutcome> | CallbackAttemptOutcome;
   notificationLeaseMs?: number;
   notificationRetryDelayMs?: number | ((attempt: number) => number);
   notificationMaxRetryDelayMs?: number;
@@ -146,6 +177,11 @@ export function createTerminalWatchService(
     retryDelay
   } =
     terminalWatchNotificationDeliveryPolicy(dependencies);
+  const deliverNextNotification = createTerminalWatchNotificationDelivery({
+    dependencies,
+    notificationLeaseMs,
+    retryDelay
+  });
 
   function create(input: CreateTerminalWatchInput): TerminalWatch {
     const createdAt = canonicalNow(dependencies.now());
@@ -411,6 +447,32 @@ export function createTerminalWatchService(
     );
   }
 
+  async function reconcileAll(): Promise<TerminalWatchReconciliationSummary> {
+    return reconcileAllTerminalWatches({
+      dependencies,
+      reconciliationDeliveryLimit,
+      reconcile,
+      deliverNextNotification
+    });
+  }
+
+  return Object.freeze({
+    create,
+    cancel,
+    get: (watchId: string) => dependencies.repository.load(watchId),
+    list: () => dependencies.repository.list(),
+    reconcile,
+    reconcileAll
+  });
+}
+
+function createTerminalWatchNotificationDelivery(input: {
+  dependencies: TerminalWatchServiceDependencies;
+  notificationLeaseMs: number;
+  retryDelay(attempt: number): number;
+}) {
+  const { dependencies, notificationLeaseMs, retryDelay } = input;
+
   function claimNextNotification(
     watchId: string
   ) {
@@ -442,8 +504,34 @@ export function createTerminalWatchService(
         return { watch: current };
       }
       const selected = current.notification_outbox[index];
+      let snapshotted = selected;
+      let snapshotErrorCode: string | undefined;
+      if (!terminalWatchNotificationCallbackSnapshot(current, selected)) {
+        let callback: TerminalWatchCallbackResolution | undefined;
+        try {
+          callback = dependencies.resolveCallback(current);
+        } catch {
+          snapshotErrorCode = "callback_route_resolution_failed";
+        }
+        if (callback) {
+          try {
+            const route = parseCallbackRoute(callback.route);
+            snapshotted = {
+              ...selected,
+              callback_route: route,
+              callback_envelope: terminalWatchCallbackEnvelope(
+                current,
+                selected,
+                route
+              )
+            };
+          } catch {
+            snapshotErrorCode = "callback_request_construction_failed";
+          }
+        }
+      }
       const attemptId = dependencies.randomUUID();
-      const claimed = withNotificationReceipt(selected, {
+      const claimed = withNotificationReceipt(snapshotted, {
         status: "delivering",
         attempts: selected.attempts + 1,
         last_attempt_at: now,
@@ -464,7 +552,8 @@ export function createTerminalWatchService(
       return {
         watch: saved,
         notification: saved.notification_outbox[index],
-        attempt_id: attemptId
+        attempt_id: attemptId,
+        snapshot_error_code: snapshotErrorCode
       };
     });
   }
@@ -474,8 +563,14 @@ export function createTerminalWatchService(
     notificationId: string,
     attemptId: string,
     outcome:
-      | { delivered: true }
-      | { delivered: false; error_code: string }
+      | { disposition: "accepted" }
+      | {
+          disposition:
+            | "retryable_failure"
+            | "permanent_failure"
+            | "uncertain";
+          error_code: string;
+        }
   ) {
     return dependencies.repository.withWatchLock(watchId, () => {
       const current = dependencies.repository.load(watchId);
@@ -493,7 +588,8 @@ export function createTerminalWatchService(
         return { settled: false, watch: current };
       }
       const now = canonicalNow(dependencies.now());
-      const settled: TerminalWatchNotification = outcome.delivered
+      const settled: TerminalWatchNotification =
+        outcome.disposition === "accepted"
         ? withNotificationReceipt(selected, {
             status: "delivered",
             attempts: selected.attempts,
@@ -510,10 +606,7 @@ export function createTerminalWatchService(
             next_attempt_at: new Date(
               Date.parse(now) + retryDelay(selected.attempts)
             ).toISOString(),
-            last_error_code: safeReasonCode(
-              outcome.error_code,
-              "callback_delivery_failed"
-            )
+            last_error_code: callbackOutcomeErrorCode(outcome)
           });
       const saved = dependencies.repository.save({
         ...current,
@@ -535,26 +628,113 @@ export function createTerminalWatchService(
     if (!claim.notification || !claim.attempt_id) {
       return { status: "none", watch: claim.watch };
     }
-    let errorCode: string | undefined;
-    try {
-      await dependencies.deliver({
-        watch: claim.watch,
-        notification: claim.notification
-      });
-    } catch (error) {
-      errorCode = safeReasonCode(
-        dependencies.classifyDeliveryError?.(error),
-        "callback_delivery_failed"
-      );
-    }
     const notificationId = claim.notification.notification_id;
+    let outcome: CallbackAttemptOutcome = {
+      disposition: "permanent_failure",
+      error_code: claim.snapshot_error_code ??
+        "callback_request_construction_failed"
+    };
+    const callbackSnapshot = terminalWatchNotificationCallbackSnapshot(
+      claim.watch,
+      claim.notification
+    );
+    if (callbackSnapshot) {
+      let acceptedCheckpoint: Extract<
+        CallbackAttemptOutcome,
+        { disposition: "accepted" }
+      > | undefined;
+      let acceptedSettlement:
+        | ReturnType<typeof finishNotification>
+        | undefined;
+      let invalidCheckpoint = false;
+      const reportCheckpoint = (value: CallbackAttemptOutcome): void => {
+        try {
+          const checkpoint = parseCallbackAttemptOutcome(value);
+          if (checkpoint.disposition === "accepted") {
+            acceptedCheckpoint = checkpoint;
+            acceptedSettlement ??= finishNotification(
+              watchId,
+              notificationId,
+              claim.attempt_id,
+              { disposition: "accepted" }
+            );
+          }
+        } catch {
+          invalidCheckpoint = true;
+        }
+      };
+      let prepared:
+        | ReturnType<typeof prepareTerminalWatchCallbackDelivery>
+        | undefined;
+      try {
+        prepared = prepareTerminalWatchCallbackDelivery({
+          ...callbackSnapshot,
+          context: dependencies.resolveCallbackContext?.(
+            claim.watch,
+            callbackSnapshot.route
+          ),
+          notification: claim.notification,
+          attemptId: claim.attempt_id,
+          reportCheckpoint
+        });
+      } catch {
+        outcome = {
+          disposition: "permanent_failure",
+          error_code: "callback_request_construction_failed"
+        };
+      }
+      let delivered: unknown;
+      let deliveryReturned = false;
+      if (prepared) {
+        try {
+          delivered = await dependencies.deliver(prepared);
+          deliveryReturned = true;
+        } catch {
+          outcome = acceptedCheckpoint ?? terminalWatchUncertainOutcome(
+            dependencies,
+            "callback_transport_threw"
+          );
+        }
+      }
+      if (deliveryReturned) {
+        try {
+          outcome = parseCallbackAttemptOutcome(delivered);
+        } catch {
+          outcome = acceptedCheckpoint ?? terminalWatchUncertainOutcome(
+            dependencies,
+            "callback_transport_contract_violation"
+          );
+        }
+        if (acceptedCheckpoint && outcome.disposition !== "accepted") {
+          outcome = acceptedCheckpoint;
+        } else if (
+          invalidCheckpoint &&
+          outcome.disposition !== "accepted"
+        ) {
+          outcome = terminalWatchUncertainOutcome(
+            dependencies,
+            "callback_transport_contract_violation"
+          );
+        }
+      }
+      if (acceptedSettlement?.settled) {
+        return {
+          status: "delivered",
+          watch: acceptedSettlement.watch,
+          notification_id: notificationId
+        };
+      }
+    }
     const finished = finishNotification(
       watchId,
       notificationId,
       claim.attempt_id,
-      errorCode === undefined
-        ? { delivered: true }
-        : { delivered: false, error_code: errorCode }
+      outcome.disposition === "accepted"
+        ? { disposition: "accepted" }
+        : {
+            disposition: outcome.disposition,
+            error_code: outcome.error_code
+          }
     );
     if (!finished.settled) {
       return {
@@ -563,33 +743,74 @@ export function createTerminalWatchService(
         notification_id: notificationId
       };
     }
-    return errorCode === undefined
-      ? { status: "delivered", watch: finished.watch, notification_id: notificationId }
-      : {
-          status: "failed",
-          watch: finished.watch,
-          notification_id: notificationId,
-          error_code: errorCode
-        };
+    if (outcome.disposition === "accepted") {
+      return {
+        status: "delivered",
+        watch: finished.watch,
+        notification_id: notificationId
+      };
+    }
+    return {
+      status: "failed",
+      watch: finished.watch,
+      notification_id: notificationId,
+      error_code: callbackOutcomeErrorCode(outcome)
+    };
   }
 
-  async function reconcileAll(): Promise<TerminalWatchReconciliationSummary> {
-    return reconcileAllTerminalWatches({
-      dependencies,
-      reconciliationDeliveryLimit,
-      reconcile,
-      deliverNextNotification
-    });
-  }
+  return deliverNextNotification;
+}
 
-  return Object.freeze({
-    create,
-    cancel,
-    get: (watchId: string) => dependencies.repository.load(watchId),
-    list: () => dependencies.repository.list(),
-    reconcile,
-    reconcileAll
-  });
+function prepareTerminalWatchCallbackDelivery(input: {
+  route: CallbackRouteV1;
+  envelope: CallbackEnvelopeV1;
+  context?: CallbackTransportContextV1;
+  notification: TerminalWatchNotification;
+  attemptId: string;
+  reportCheckpoint(outcome: CallbackAttemptOutcome): void;
+}): TerminalWatchDeliveryInput {
+  const route = parseCallbackRoute(input.route);
+  const context = snapshotTerminalWatchCallbackContext(input.context);
+  const attemptNumber = input.notification.attempts;
+  const attemptId = input.attemptId;
+  if (
+    !Number.isSafeInteger(attemptNumber) ||
+    attemptNumber < 1 ||
+    attemptId.trim().length === 0
+  ) {
+    throw new Error("Terminal Watch callback attempt identity is invalid");
+  }
+  return {
+    route,
+    envelope: input.envelope,
+    attempt: { number: attemptNumber, id: attemptId },
+    context,
+    reportCheckpoint: input.reportCheckpoint
+  };
+}
+
+function snapshotTerminalWatchCallbackContext(
+  value: CallbackTransportContextV1 | undefined
+): CallbackTransportContextV1 | undefined {
+  if (!value) return undefined;
+  const { legacyOptions, ...context } = value;
+  return {
+    ...context,
+    ...(legacyOptions
+      ? { legacyOptions: { ...legacyOptions } }
+      : {})
+  };
+}
+
+function terminalWatchUncertainOutcome(
+  dependencies: Pick<TerminalWatchServiceDependencies, "now">,
+  errorCode: string
+): Extract<CallbackAttemptOutcome, { disposition: "uncertain" }> {
+  return {
+    disposition: "uncertain",
+    error_code: errorCode,
+    observed_at: canonicalNow(dependencies.now())
+  };
 }
 
 type TerminalWatchNotificationDeliveryResult =
@@ -631,7 +852,7 @@ async function reconcileAllTerminalWatches(input: {
     }));
 
   // Observation has priority over callback transport. A slow or permanently
-  // failing OpenClaw callback must never prevent another active Watch from
+  // failing callback transport must never prevent another active Watch from
   // learning that its exact task completed or became invalid.
   for (const item of work) {
     if (item.current.status !== "active") continue;
@@ -727,7 +948,14 @@ async function reconcileAllTerminalWatches(input: {
 function firstUnresolvedNotificationIndex(watch: TerminalWatch): number {
   return watch.notification_outbox.findIndex((notification) =>
     notification.status !== "delivered" &&
-    notification.status !== "superseded"
+    notification.status !== "superseded" &&
+    // Permanent and uncertain receipts are terminal for this exact
+    // notification. Keep their evidence, but do not let them become a queue
+    // head that starves a later, distinct approval observation.
+    !(
+      notification.status === "failed" &&
+      isNonRetryableCallbackError(notification.last_error_code)
+    )
   );
 }
 
@@ -1024,6 +1252,8 @@ type TerminalWatchNotificationReceipt = Omit<
   | "kind"
   | "evidence_fingerprint"
   | "reason_code"
+  | "callback_route"
+  | "callback_envelope"
   | "created_at"
 >;
 
@@ -1038,6 +1268,12 @@ function withNotificationReceipt(
     kind: notification.kind,
     evidence_fingerprint: notification.evidence_fingerprint,
     reason_code: notification.reason_code,
+    ...(Object.hasOwn(notification, "callback_route")
+      ? { callback_route: notification.callback_route }
+      : {}),
+    ...(Object.hasOwn(notification, "callback_envelope")
+      ? { callback_envelope: notification.callback_envelope }
+      : {}),
     created_at: notification.created_at,
     ...receipt
   };
@@ -1051,6 +1287,9 @@ function notificationIsClaimable(
     return true;
   }
   if (notification.status === "failed") {
+    if (isNonRetryableCallbackError(notification.last_error_code)) {
+      return false;
+    }
     return Date.parse(notification.next_attempt_at ?? "") <= Date.parse(now);
   }
   if (notification.status === "delivering") {
@@ -1058,6 +1297,32 @@ function notificationIsClaimable(
       Date.parse(now);
   }
   return false;
+}
+
+function callbackOutcomeErrorCode(
+  outcome: {
+    disposition: "retryable_failure" | "permanent_failure" | "uncertain";
+    error_code: string;
+  }
+): string {
+  const errorCode = safeReasonCode(
+    outcome.error_code,
+    "callback_delivery_failed"
+  );
+  const prefix = outcome.disposition === "permanent_failure"
+    ? "callback_permanent_"
+    : outcome.disposition === "uncertain"
+      ? "callback_uncertain_"
+      : "";
+  return safeReasonCode(
+    `${prefix}${errorCode}`,
+    `${prefix}callback_delivery_failed`
+  );
+}
+
+function isNonRetryableCallbackError(errorCode: string | undefined): boolean {
+  return errorCode?.startsWith("callback_permanent_") === true ||
+    errorCode?.startsWith("callback_uncertain_") === true;
 }
 
 function replaceAt<T>(values: readonly T[], index: number, value: T): T[] {

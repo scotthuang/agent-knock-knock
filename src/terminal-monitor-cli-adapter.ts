@@ -1,4 +1,11 @@
 import type { Executor } from "./executors.js";
+import {
+  callbackExpectedForConversation,
+  callbackRouteFingerprintForConversation,
+  callbackRouteFingerprintFromRecord,
+  callbackRouteFingerprintLedgerFields
+} from
+  "./callback-route-authority.js";
 import type { Conversation, ConversationStatus } from "./protocol.js";
 import type {
   TerminalControlRef,
@@ -87,6 +94,79 @@ export interface RecoverPreparedMonitorInput {
   ports: PreparedMonitorRecoveryPorts;
 }
 
+export interface LaggingAcceptedMonitorAuthorityRepairPorts {
+  acquireTerminal(control: TerminalControlRef): Release;
+  withWriter<T>(use: () => Promise<T>): Promise<T>;
+  acquireState(): Release;
+  loadConversation(): Conversation;
+  loadLedger(control: TerminalControlRef): UnknownRecord | undefined;
+  reconcileLedger(
+    control: TerminalControlRef,
+    ledger?: UnknownRecord
+  ): UnknownRecord | undefined;
+  submission(conversation: Conversation): UnknownRecord | undefined;
+}
+
+/**
+ * Repair the one legacy migration window that otherwise reaches acceptance
+ * observation first: an enter-dispatched Turn without route authority and an
+ * accepted ledger that already owns the canonical authority. The existing
+ * lagging-dispatch recovery performs all identity/evidence validation while
+ * these locks prevent either durable image from changing underneath it.
+ */
+export async function repairLaggingAcceptedMonitorAuthority(input: {
+  conversation: Conversation;
+  terminalControl: TerminalControlRef;
+  currentMessageId: string;
+  ports: LaggingAcceptedMonitorAuthorityRepairPorts;
+}): Promise<Conversation> {
+  if (!isLegacyEnterDispatchedAuthorityGap(
+    input.ports.submission(input.conversation),
+    input.currentMessageId
+  )) {
+    return input.conversation;
+  }
+  let conversation = input.conversation;
+  const releaseTerminal = input.ports.acquireTerminal(input.terminalControl);
+  try {
+    await input.ports.withWriter(async () => {
+      const releaseState = input.ports.acquireState();
+      try {
+        const current = input.ports.loadConversation();
+        const submission = input.ports.submission(current);
+        if (!isLegacyEnterDispatchedAuthorityGap(
+          submission,
+          input.currentMessageId
+        )) {
+          conversation = current;
+          return;
+        }
+        const ledger = input.ports.loadLedger(input.terminalControl);
+        assertLaggingAcceptedAuthorityGap({
+          conversation: current,
+          ledger,
+          messageId: input.currentMessageId
+        });
+        input.ports.reconcileLedger(input.terminalControl, ledger);
+        const repaired = input.ports.loadConversation();
+        const repairedLedger = input.ports.loadLedger(input.terminalControl);
+        assertRepairedMonitorAuthority({
+          conversation: repaired,
+          submission: input.ports.submission(repaired),
+          ledger: repairedLedger,
+          messageId: input.currentMessageId
+        });
+        conversation = repaired;
+      } finally {
+        releaseState();
+      }
+    });
+    return conversation;
+  } finally {
+    releaseTerminal();
+  }
+}
+
 /** Recover one abandoned prepared receipt while the CLI owns all raw locks. */
 export async function recoverPreparedMonitorSubmission(
   input: RecoverPreparedMonitorInput
@@ -150,6 +230,73 @@ function isExpectedPrepared(
     submission?.status === "prepared";
 }
 
+function isLegacyEnterDispatchedAuthorityGap(
+  submission: UnknownRecord | undefined,
+  messageId: string
+): boolean {
+  return Boolean(
+    submission?.status === "enter_dispatched" &&
+    nonBlankString(submission.message_id) === messageId &&
+    !Object.hasOwn(submission, "callback_route_fingerprint")
+  );
+}
+
+function assertLaggingAcceptedAuthorityGap(input: {
+  conversation: Conversation;
+  ledger?: UnknownRecord;
+  messageId: string;
+}): void {
+  if (
+    input.ledger?.status !== "agent_accepted" ||
+    nonBlankString(input.ledger.message_id) !== input.messageId ||
+    !Object.hasOwn(input.ledger, "callback_route_fingerprint")
+  ) {
+    throw new Error(
+      "lagging accepted monitor authority no longer owns its exact dispatch ledger"
+    );
+  }
+  const ledgerAuthority = callbackRouteFingerprintFromRecord(input.ledger);
+  const conversationAuthority =
+    callbackRouteFingerprintForConversation(input.conversation) ?? null;
+  if (ledgerAuthority === undefined || ledgerAuthority !== conversationAuthority) {
+    throw new Error(
+      "lagging accepted monitor authority conflicts with the current callback route"
+    );
+  }
+}
+
+function assertRepairedMonitorAuthority(input: {
+  conversation: Conversation;
+  submission?: UnknownRecord;
+  ledger?: UnknownRecord;
+  messageId: string;
+}): void {
+  if (
+    input.submission?.status !== "agent_accepted" ||
+    nonBlankString(input.submission.message_id) !== input.messageId ||
+    input.ledger?.status !== "agent_accepted" ||
+    nonBlankString(input.ledger.message_id) !== input.messageId
+  ) {
+    throw new Error(
+      "lagging accepted monitor authority recovery did not converge"
+    );
+  }
+  const stateAuthority = callbackRouteFingerprintFromRecord(input.submission);
+  const ledgerAuthority = callbackRouteFingerprintFromRecord(input.ledger);
+  const conversationAuthority =
+    callbackRouteFingerprintForConversation(input.conversation) ?? null;
+  if (
+    stateAuthority === undefined ||
+    ledgerAuthority === undefined ||
+    stateAuthority !== conversationAuthority ||
+    ledgerAuthority !== conversationAuthority
+  ) {
+    throw new Error(
+      "lagging accepted monitor authority recovery did not converge"
+    );
+  }
+}
+
 function recoverFromLedger(input: {
   input: RecoverPreparedMonitorInput;
   current: Conversation;
@@ -168,7 +315,7 @@ function recoverFromLedger(input: {
   const at = nonBlankString(ledger.agent_accepted_at) ??
     nonBlankString(ledger.submitted_at) ?? input.input.ports.now().toISOString();
   const agentAccepted = ledger.status === "agent_accepted";
-  return input.input.ports.applySubmission({
+  const recovered = input.input.ports.applySubmission({
     conversation: input.current,
     messageId: input.input.currentMessageId,
     requestText: input.requestText,
@@ -182,6 +329,23 @@ function recoverFromLedger(input: {
         }
       : { submittedAt: at })
   });
+  const callbackRouteLedgerFields = callbackRouteFingerprintLedgerFields({
+    receipt: input.input.ports.submission(recovered),
+    ledger,
+    context: "prepared monitor recovery"
+  });
+  if (
+    Object.hasOwn(callbackRouteLedgerFields, "callback_route_fingerprint") &&
+    !Object.hasOwn(ledger, "callback_route_fingerprint")
+  ) {
+    // Ledger first makes an interrupted state write recoverable: the prepared
+    // Turn can replay this exact authority on the next monitor invocation.
+    input.input.ports.saveLedger(input.input.terminalControl, {
+      ...ledger,
+      ...callbackRouteLedgerFields
+    });
+  }
+  return recovered;
 }
 
 function recordUncertainPrepared(input: {
@@ -245,7 +409,7 @@ function saveUncertainLedger(
     dispatcher_pid: validDispatcherPid(input.input.dispatcherPid),
     state_path: input.input.statePath,
     event_log_path: input.input.logPath,
-    callback_expected: Boolean(conversation.gateway_method),
+    callback_expected: callbackExpectedForConversation(conversation),
     reason: "dispatcher_exited_before_submitted_receipt"
   });
 }
@@ -356,6 +520,11 @@ function repairPollLedger(
   }
   const at = nonBlankString(submission.agent_accepted_at) ??
     nonBlankString(submission.submitted_at) ?? input.ports.now().toISOString();
+  const callbackRouteLedgerFields = callbackRouteFingerprintLedgerFields({
+    receipt: submission,
+    ledger,
+    context: "terminal monitor poll recovery"
+  });
   input.ports.saveLedger(input.terminalControl, {
     ...ledger,
     status: submission.status,
@@ -365,6 +534,7 @@ function repairPollLedger(
           acceptance_evidence: submission.acceptance_evidence
         }
       : { submitted_at: at }),
+    ...callbackRouteLedgerFields,
     reason: "recovered from the durable conversation submission receipt"
   });
   ledger = input.ports.loadLedger(input.terminalControl);

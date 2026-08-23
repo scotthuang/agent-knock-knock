@@ -10,6 +10,7 @@ import type {
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
 import {
   TerminalDispatchRecoveryService,
+  decideLaggingDispatchRecovery,
   decidePreparedDispatchRecovery,
   type LocalCompletionRecoveryContext,
   type TerminalDispatchRecoveryPorts,
@@ -412,6 +413,146 @@ test("prepared keep paths never observe the clock and prior restore replaces", (
       : true,
     false
   );
+  assert.equal(
+    restored.action === "replace_ledger"
+      ? Object.hasOwn(restored.mutation, "callback_route_fingerprint")
+      : true,
+    false
+  );
+});
+
+test("prior generation restore preserves exact callback route authority", () => {
+  const ledger = {
+    lifecycle: false,
+    status: "prepared",
+    dispatcherActive: false,
+    statePath: "/store/turn-1/state.json",
+    eventLogPath: "/store/turn-1/events.ndjson",
+    messageId: "message-new",
+    conversationId: "turn-1"
+  };
+  const fingerprint = `sha256:${"a".repeat(64)}`;
+  for (const authority of [fingerprint, null] as const) {
+    const restored = decidePreparedDispatchRecovery({
+      ledger,
+      owner: {
+        status: "loaded",
+        conversationId: "turn-1",
+        updatedAt: NOW.toISOString(),
+        storedMessageId: "message-prior",
+        submission: {
+          status: "submitted",
+          messageId: "message-prior",
+          preparedAt: NOW.toISOString(),
+          submittedAt: NOW.toISOString(),
+          callbackRouteFingerprint: authority
+        },
+        binding: { executor_kind: "codex" },
+        requestHash: "request-prior",
+        statePath: ledger.statePath,
+        eventLogPath: ledger.eventLogPath,
+        callbackExpected: authority !== null
+      },
+      now: () => {
+        throw new Error("prior restore must not observe the clock");
+      }
+    });
+    assert.equal(restored.action, "replace_ledger");
+    assert.equal(
+      restored.action === "replace_ledger"
+        ? restored.mutation.callback_route_fingerprint
+        : undefined,
+      authority
+    );
+  }
+});
+
+test("active crash recovery preserves hash, null, and legacy route authority", () => {
+  const fingerprint = `sha256:${"c".repeat(64)}`;
+  const authorities = [fingerprint, null, undefined] as const;
+  for (const authority of authorities) {
+    const submission = {
+      status: "submitted",
+      messageId: "message-1",
+      preparedAt: NOW.toISOString(),
+      submittedAt: NOW.toISOString(),
+      ...(authority !== undefined
+        ? { callbackRouteFingerprint: authority }
+        : {})
+    };
+    const prepared = decidePreparedDispatchRecovery({
+      ledger: {
+        lifecycle: false,
+        status: "prepared",
+        dispatcherActive: false,
+        statePath: "/store/turn-1/state.json",
+        eventLogPath: "/store/turn-1/events.ndjson",
+        messageId: "message-1",
+        conversationId: "turn-1"
+      },
+      owner: {
+        status: "loaded",
+        conversationId: "turn-1",
+        updatedAt: NOW.toISOString(),
+        storedMessageId: "message-1",
+        submission,
+        binding: { executor_kind: "codex" },
+        requestHash: "request-1",
+        statePath: "/store/turn-1/state.json",
+        eventLogPath: "/store/turn-1/events.ndjson",
+        callbackExpected: authority !== null
+      },
+      now: () => NOW.toISOString()
+    });
+    assert.equal(prepared.action, "save_ledger");
+    if (prepared.action === "save_ledger") {
+      assert.equal(
+        Object.hasOwn(prepared.mutation, "callback_route_fingerprint"),
+        authority !== undefined
+      );
+      assert.equal(prepared.mutation.callback_route_fingerprint, authority);
+    }
+
+    const acceptance = { source: "codex_rollout" } as never;
+    const accepted = decideLaggingDispatchRecovery({
+      eligible: true,
+      ledgerStatus: "enter_dispatched",
+      stateStatus: "agent_accepted",
+      stateAcceptance: acceptance,
+      submission: {
+        ...submission,
+        status: "agent_accepted",
+        acceptanceEvidence: acceptance
+      },
+      binding: { executor_kind: "codex" },
+      now: NOW.toISOString()
+    });
+    assert.equal(accepted.action, "save_ledger");
+    if (accepted.action === "save_ledger") {
+      assert.equal(
+        Object.hasOwn(accepted.mutation, "callback_route_fingerprint"),
+        authority !== undefined
+      );
+      assert.equal(accepted.mutation.callback_route_fingerprint, authority);
+    }
+
+    const submitted = decideLaggingDispatchRecovery({
+      eligible: true,
+      ledgerStatus: "text_injected",
+      stateStatus: "submitted",
+      submission,
+      binding: { executor_kind: "codex" },
+      now: NOW.toISOString()
+    });
+    assert.equal(submitted.action, "save_ledger");
+    if (submitted.action === "save_ledger") {
+      assert.equal(
+        Object.hasOwn(submitted.mutation, "callback_route_fingerprint"),
+        authority !== undefined
+      );
+      assert.equal(submitted.mutation.callback_route_fingerprint, authority);
+    }
+  }
 });
 
 test("recovery service keeps infrastructure and broad terminal capabilities outside", () => {

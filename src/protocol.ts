@@ -7,6 +7,7 @@ import {
   type ExecutorKind,
   resolveExecutor
 } from "./executors.js";
+import type { CallbackRouteV1 } from "./callback-transport.js";
 import { isRecord } from "./value-guards.js";
 
 export type MessageType = "task" | "question" | "answer" | "progress" | "blocked" | "done" | "error" | "control";
@@ -54,6 +55,7 @@ export interface Conversation {
   gateway_session?: string;
   openclaw_bin?: string;
   gateway_token?: string;
+  callback_route?: CallbackRouteV1;
   store_dir?: string;
   conversation_dir?: string;
   event_log_path?: string;

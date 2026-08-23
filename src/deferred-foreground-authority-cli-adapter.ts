@@ -3,6 +3,8 @@ import path from "node:path";
 
 import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
+import { callbackExpectedForPrimaryOutbox } from
+  "./callback-route-authority.js";
 import { canonicalJson } from "./canonical-json.js";
 import type {
   DeferredForegroundTransfer,
@@ -365,7 +367,7 @@ export function deferredCandidateSourceTurnHistory(
         !callbackDelivered
       ) ||
       (
-        Boolean(turn.gateway_method) &&
+        callbackExpectedForPrimaryOutbox(turn) &&
         !callbackDelivered &&
         !explicitlyAbandonedUncertain &&
         !safelyAbortedBeforeInput

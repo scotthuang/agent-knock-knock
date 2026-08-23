@@ -750,7 +750,31 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
         conversation_id: "turn-status",
         session_id: "session-status",
         turn_id: "turn-status",
+        openclaw_session: "private-openclaw-session",
+        gateway_session: "private-gateway-session",
+        gateway_method: "private-gateway-method",
+        gateway_url: "ws://private-gateway.example",
+        openclaw_bin: "/private/bin/openclaw",
+        callback_route: {
+          schema: "agent-knock-knock/callback-route",
+          version: 1,
+          transport: "openclaw_gateway_v1",
+          profile_id: "private-callback-profile",
+          profile_revision: "private-callback-profile-revision",
+          controller_session_id: "private-controller-session",
+          capabilities: { wake: true, respond: true }
+        },
         callback_delivery: {
+          callback_envelope: {
+            schema: "agent-knock-knock/callback-envelope",
+            version: 1,
+            delivery_id: "private-callback-delivery",
+            message_id: "private-callback-message"
+          },
+          attempt_outcome: {
+            disposition: "accepted",
+            acceptance_id: "private-callback-acceptance"
+          },
           message: {
             body:
               `Approval authority\nexpected_approval_fingerprint: ${"f".repeat(64)}\n` +
@@ -897,7 +921,16 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
         "private-candidate-token",
         "private-handoff-token",
         "private-approval-fingerprint",
-        "private-status-fingerprint"
+        "private-status-fingerprint",
+        "private-callback-profile",
+        "private-controller-session",
+        "private-callback-delivery",
+        "private-callback-acceptance",
+        "private-openclaw-session",
+        "private-gateway-session",
+        "private-gateway-method",
+        "private-gateway.example",
+        "/private/bin/openclaw"
       ]) {
         assert.equal(encoded.includes(privateValue), false, privateValue);
       }
@@ -961,6 +994,25 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
         Object.hasOwn(status.details.conversation, "native_session_takeover"),
       false
     );
+    assert.equal(
+      isRecord(status?.details?.conversation) &&
+        Object.hasOwn(status.details.conversation, "callback_route"),
+      false
+    );
+    for (const field of [
+      "openclaw_session",
+      "gateway_session",
+      "gateway_method",
+      "gateway_url",
+      "openclaw_bin"
+    ]) {
+      assert.equal(
+        isRecord(status?.details?.conversation) &&
+          Object.hasOwn(status.details.conversation, field),
+        false,
+        field
+      );
+    }
     assert.equal(Object.hasOwn(statusNested, "terminal_binding_id"), false);
     assert.equal(
       Object.hasOwn(statusNested, "terminal_binding_generation"),

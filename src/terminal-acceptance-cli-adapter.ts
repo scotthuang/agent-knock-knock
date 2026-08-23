@@ -126,10 +126,17 @@ import {
 import {
   compareManagedConversationRecency
 } from "./terminal-action-projection.js";
+import {
+  callbackRouteFingerprintLedgerFields,
+  callbackRouteForConversation
+} from
+  "./callback-route-authority.js";
+import type { CallbackRouteV1 } from "./callback-transport.js";
 import type { FileLockAcquisitionOptions } from
   "./file-lock-cli-adapter.js";
 
 export interface TerminalAcceptanceCliOptions {
+  callbackRoute?: CallbackRouteV1;
   claudeHome?: string;
   gatewayMethod?: string;
   gatewaySession?: string;
@@ -992,13 +999,19 @@ class TerminalAcceptanceCliApplication {
         "terminal dispatch ledger changed before acceptance reconciliation"
       );
     }
+    const callbackRouteLedgerFields = callbackRouteFingerprintLedgerFields({
+      receipt: terminalBridgeSubmission(accepted),
+      ledger,
+      context: "terminal acceptance"
+    });
     saveState(input.statePath, accepted);
     this.#persistResolvedAcceptanceLedger(
       input.terminalControl,
       accepted,
       ledger,
       request.resolution,
-      resolvedAt
+      resolvedAt,
+      callbackRouteLedgerFields
     );
     this.#appendResolvedAcceptanceEvent(
       input,
@@ -1014,7 +1027,10 @@ class TerminalAcceptanceCliApplication {
     conversation: Conversation,
     ledger: TerminalDispatchLedgerDocument,
     resolution: TerminalAcceptanceResolution,
-    resolvedAt: string
+    resolvedAt: string,
+    callbackRouteLedgerFields: {
+      callback_route_fingerprint?: string | null;
+    }
   ): void {
     try {
       if (cliEnv().AKK_TEST_MONITOR_FINAL_TERMINAL_LEDGER_FAILURE === "1") {
@@ -1032,6 +1048,7 @@ class TerminalAcceptanceCliApplication {
               agent_accepted_at: resolvedAt,
               acceptance_evidence: resolution.evidence
             }),
+        ...callbackRouteLedgerFields,
         dispatcher_pid: null
       } as TerminalDispatchLedgerDocument);
     } catch (error) {
@@ -1696,6 +1713,23 @@ function attachManagedTurn(
     ? takeoverFor(input.previousTurn)
     : undefined;
   const nativeProcess = input.managedSession?.binding?.native_process;
+  const gatewayUrl = input.options.gatewayUrl ??
+    input.previousTurn?.gateway_url ?? "ws://127.0.0.1:18789";
+  const gatewayMethod = input.options.gatewayMethod ??
+    input.previousTurn?.gateway_method;
+  const gatewaySession = input.options.gatewaySession ??
+    input.options.openclawSession ?? input.previousTurn?.gateway_session ??
+    input.previousTurn?.openclaw_session ?? "agent:main:main";
+  const openclawBin = input.options.openclawBin ??
+    input.previousTurn?.openclaw_bin ?? resolveOptionalExecutable("openclaw");
+  const callbackRoute = managedTurnCallbackRoute(input, {
+    gateway_method: gatewayMethod,
+    gateway_session: gatewaySession,
+    openclaw_session: input.options.openclawSession ??
+      input.previousTurn?.openclaw_session ?? "agent:main:main",
+    openclaw_bin: openclawBin,
+    gateway_url: gatewayUrl
+  });
   return withStoragePaths({
     ...base,
     terminal_binding_id: input.managedSession?.binding?.binding_id,
@@ -1706,15 +1740,11 @@ function attachManagedTurn(
     status: "idle",
     idle_since: now.toISOString(),
     updated_at: now.toISOString(),
-    gateway_url: input.options.gatewayUrl ?? input.previousTurn?.gateway_url ??
-      "ws://127.0.0.1:18789",
-    gateway_method: input.options.gatewayMethod ??
-      input.previousTurn?.gateway_method,
-    gateway_session: input.options.gatewaySession ??
-      input.options.openclawSession ?? input.previousTurn?.gateway_session ??
-      input.previousTurn?.openclaw_session ?? "agent:main:main",
-    openclaw_bin: input.options.openclawBin ??
-      input.previousTurn?.openclaw_bin ?? resolveOptionalExecutable("openclaw"),
+    gateway_url: gatewayUrl,
+    gateway_method: gatewayMethod,
+    gateway_session: gatewaySession,
+    openclaw_bin: openclawBin,
+    ...(callbackRoute ? { callback_route: callbackRoute } : {}),
     native_session_takeover: {
       agent: input.agent,
       terminal_agent_identity_protocol: 1,
@@ -1749,6 +1779,34 @@ function attachManagedTurn(
         : {})
     }
   }, paths);
+}
+
+function managedTurnCallbackRoute(
+  input: Parameters<typeof attachManagedTurn>[1],
+  legacy: {
+    gateway_method?: unknown;
+    gateway_session?: unknown;
+    openclaw_session?: unknown;
+    openclaw_bin?: unknown;
+    gateway_url?: unknown;
+  }
+): CallbackRouteV1 | undefined {
+  if (Object.hasOwn(input.options, "callbackRoute")) {
+    return callbackRouteForConversation({
+      callback_route: input.options.callbackRoute
+    });
+  }
+  const previous = input.previousTurn;
+  const inherited = previous && Object.hasOwn(previous, "callback_route")
+    ? callbackRouteForConversation(previous)
+    : undefined;
+  // A trusted host adapter supplies gatewayMethod for each fresh OpenClaw
+  // Turn. Regenerate that Turn's generic route so its controller session and
+  // legacy compatibility fields remain the same authority. Otherwise inherit
+  // an existing generic route before consulting legacy fields.
+  return nonBlankString(input.options.gatewayMethod)
+    ? callbackRouteForConversation(legacy)
+    : inherited ?? callbackRouteForConversation(legacy);
 }
 
 function terminalEndpointTakeoverFields(terminalControl: TerminalControlRef) {

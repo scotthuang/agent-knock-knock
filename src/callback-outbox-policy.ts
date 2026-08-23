@@ -3,12 +3,27 @@ import {
   recordValue
 } from "./value-guards.js";
 import type { AgentMessage, Conversation } from "./protocol.js";
+import {
+  parseCallbackAttemptOutcome,
+  type CallbackAttemptOutcome,
+  type CallbackEnvelopeV1,
+  type CallbackRouteV1,
+  type CallbackTransportAttemptV1
+} from "./callback-transport.js";
+
+export type {
+  CallbackAttemptOutcome,
+  CallbackEnvelopeV1,
+  CallbackRouteV1
+} from "./callback-transport.js";
 
 export interface CallbackDeliveryOutcome {
   kind: string;
   injection: Record<string, unknown>;
   wake: Record<string, unknown>;
   run_observation?: Record<string, unknown>;
+  /** Generic evidence written alongside the legacy OpenClaw shape. */
+  attempt_outcome?: CallbackAttemptOutcome;
 }
 
 export interface CallbackProcessFailureObservation {
@@ -16,6 +31,39 @@ export interface CallbackProcessFailureObservation {
   stdout?: string;
   stderr?: string;
   error?: { message?: string };
+}
+
+/**
+ * Fence an advisory outbox when its underlying Turn moves on. Accepted
+ * transport evidence is retained for settlement; only unaccepted work is
+ * superseded so a late retry cannot notify the previous lifecycle phase.
+ */
+export function supersedeCallbackNotificationDelivery(
+  conversation: Conversation,
+  input: { at: string; reason: string }
+): Conversation {
+  const delivery = recordValue(conversation.callback_notification_delivery);
+  if (
+    !delivery ||
+    !["pending", "failed"].includes(String(delivery.status ?? "")) ||
+    callbackDeliveryHasAcceptedTransport(delivery)
+  ) {
+    return conversation;
+  }
+  return {
+    ...conversation,
+    callback_notification_delivery: {
+      ...delivery,
+      status: "superseded",
+      superseded_at: input.at,
+      superseded_reason: input.reason,
+      attempt_pid: undefined,
+      attempt_lease_expires_at: undefined,
+      retry_monitor_pid: undefined,
+      next_attempt_at: undefined,
+      updated_at: input.at
+    }
+  };
 }
 
 export function classifyCallbackProcessFailure(
@@ -65,6 +113,7 @@ function isRemoteCompactStreamDisconnect(text: unknown): boolean {
 }
 
 export interface CallbackDeliveryOptions {
+  callbackRoute?: CallbackRouteV1;
   gatewayMethod?: string;
   openclawBin?: string;
   gatewayUrl?: string;
@@ -79,6 +128,10 @@ export interface DeliverCallbackInput {
   logPath: string;
   conversation: Conversation;
   message: AgentMessage;
+  /** Immutable prepared outbox claim crossing the transport boundary. */
+  attempt: CallbackTransportAttemptV1;
+  route?: CallbackRouteV1;
+  envelope?: CallbackEnvelopeV1;
   onProgress?: (progress: Record<string, unknown>) => void;
   onAccepted?: (outcome: CallbackDeliveryOutcome) => void;
 }
@@ -93,6 +146,16 @@ export type CallbackRetryDisposition =
       next_attempt_at?: string;
     }
   | { state: "accepted"; attempt: number }
+  | {
+      state: "permanent_failure";
+      attempt: number;
+      reason: string;
+    }
+  | {
+      state: "uncertain";
+      attempt: number;
+      reason: string;
+    }
   | { state: "exhausted"; attempt: number }
   | { state: "unavailable"; attempt: number; reason: string };
 
@@ -151,6 +214,33 @@ export function beginCallbackRetryPolicy(
       attempt,
       reason: "no pending or failed callback outbox is available"
     });
+  }
+  const attemptOutcome = callbackAttemptOutcomeEvidence(delivery);
+  if (attemptOutcome.kind === "invalid") {
+    return decided({
+      state: "unavailable",
+      attempt,
+      reason: attemptOutcome.reason
+    });
+  }
+  if (attemptOutcome.kind === "present") {
+    if (attemptOutcome.outcome.disposition === "accepted") {
+      return decided({ state: "accepted", attempt });
+    }
+    if (attemptOutcome.outcome.disposition === "permanent_failure") {
+      return decided({
+        state: "permanent_failure",
+        attempt,
+        reason: attemptOutcome.outcome.error_code
+      });
+    }
+    if (attemptOutcome.outcome.disposition === "uncertain") {
+      return decided({
+        state: "uncertain",
+        attempt,
+        reason: attemptOutcome.outcome.error_code
+      });
+    }
   }
   if (callbackDeliveryHasAcceptedTransport(delivery)) {
     return decided({ state: "accepted", attempt });
@@ -243,9 +333,54 @@ export function callbackDeliveryHasAcceptedTransport(
   callbackDelivery: unknown
 ): boolean {
   const delivery = recordValue(callbackDelivery);
+  const attemptOutcome = callbackAttemptOutcomeEvidence(delivery);
+  if (attemptOutcome.kind === "invalid") {
+    return false;
+  }
+  if (
+    attemptOutcome.kind === "present" &&
+    attemptOutcome.outcome.disposition === "accepted"
+  ) {
+    return true;
+  }
   const injection = recordValue(delivery?.injection);
   const wake = recordValue(delivery?.wake);
   return injection?.status === "accepted" || wake?.status === "accepted";
+}
+
+export function callbackDeliveryAttemptOutcome(
+  callbackDelivery: unknown
+): CallbackAttemptOutcome | undefined {
+  const delivery = recordValue(callbackDelivery);
+  if (!delivery || !Object.hasOwn(delivery, "attempt_outcome")) {
+    return undefined;
+  }
+  return parseCallbackAttemptOutcome(delivery.attempt_outcome);
+}
+
+type CallbackAttemptOutcomeEvidence =
+  | { kind: "missing" }
+  | { kind: "present"; outcome: CallbackAttemptOutcome }
+  | { kind: "invalid"; reason: string };
+
+function callbackAttemptOutcomeEvidence(
+  delivery: Record<string, unknown> | undefined
+): CallbackAttemptOutcomeEvidence {
+  if (!delivery || !Object.hasOwn(delivery, "attempt_outcome")) {
+    return { kind: "missing" };
+  }
+  try {
+    return {
+      kind: "present",
+      outcome: parseCallbackAttemptOutcome(delivery.attempt_outcome)
+    };
+  } catch (error) {
+    return {
+      kind: "invalid",
+      reason: "callback outbox has invalid attempt outcome: " +
+        (error instanceof Error ? error.message : String(error))
+    };
+  }
 }
 
 function decided(

@@ -496,6 +496,12 @@ test("service and CLI declarations retain narrow canonical facade boundaries", (
     adapterSource,
     /callbackOutboxService|openClawCallbackTransport|runPreparedCallback|emitPreparedCallbackResult/u
   );
+  assert.doesNotMatch(
+    adapterSource,
+    /deliverGatewayMethod|deliverChatSend|#deliverStalledNotification/u
+  );
+  assert.match(adapterSource, /prepareStallNotification/u);
+  assert.match(adapterSource, /callbackOutboxLane: "notification"/u);
   const composition = boundary(
     coreSource,
     "const terminalMonitorStateCliFacade =",

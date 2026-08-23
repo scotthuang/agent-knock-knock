@@ -1,16 +1,26 @@
-import type { CallbackSpawnSync } from "./openclaw-callback-transport.js";
+import type {
+  CallbackSpawnSync,
+  CallbackWakeAcknowledgement
+} from "./openclaw-callback-transport.js";
+import {
+  createLegacyOpenClawCallbackRoute,
+  type CallbackAttemptOutcome,
+  type CallbackRouteV1,
+  type CallbackTransportContextV1,
+  type CallbackTransportDeliverInput
+} from "./callback-transport.js";
 import {
   createOpenClawCallbackTransport,
   parseChatSendAcknowledgement
 } from "./openclaw-callback-transport.js";
+import {
+  terminalWatchCallbackMessage,
+  type TerminalWatchCallbackEvent as TerminalWatchCallbackEventType,
+  type TerminalWatchCallbackResolution
+} from "./terminal-watch-service.js";
+import type { TerminalWatch } from "./terminal-watch-store.js";
 
-export type TerminalWatchCallbackEvent =
-  | "approval_required"
-  | "completed"
-  | "failed"
-  | "timed_out"
-  | "invalidated"
-  | "cancelled";
+export type TerminalWatchCallbackEvent = TerminalWatchCallbackEventType;
 
 export interface TerminalWatchCallbackInput {
   watchId: string;
@@ -18,24 +28,61 @@ export interface TerminalWatchCallbackInput {
   event: TerminalWatchCallbackEvent;
   agent: "codex" | "claude";
   terminalId: string;
-  openclawSession: string;
+  openclawSession?: string;
   openclawBin?: string;
   detail?: string;
   completionText?: string;
 }
 
+export type TerminalWatchTransportDeliveryInput =
+  CallbackTransportDeliverInput;
+
 export interface TerminalWatchCallbackCliAdapter {
   deliver(input: TerminalWatchCallbackInput): void;
+  deliverTransport?(
+    input: TerminalWatchTransportDeliveryInput
+  ): CallbackAttemptOutcome;
+}
+
+export function resolveTerminalWatchOpenClawCallback(
+  watch: Pick<TerminalWatch, "openclaw_session" | "openclaw_bin">
+): TerminalWatchCallbackResolution {
+  return {
+    route: {
+      ...createLegacyOpenClawCallbackRoute({
+        controllerSessionId: watch.openclaw_session,
+        gatewayMethod: "chat.send",
+        openclawBin: watch.openclaw_bin
+      }),
+      capabilities: { wake: true, respond: false }
+    },
+    context: resolveTerminalWatchOpenClawCallbackContext(watch)
+  };
+}
+
+export function resolveTerminalWatchOpenClawCallbackContext(
+  watch: Pick<TerminalWatch, "openclaw_session" | "openclaw_bin">,
+  _route?: CallbackRouteV1
+): CallbackTransportContextV1 {
+  return {
+    legacyOptions: {
+      gatewayMethod: "chat.send",
+      gatewaySession: watch.openclaw_session,
+      openclawBin: watch.openclaw_bin
+    }
+  };
 }
 
 export function createTerminalWatchCallbackCliAdapter(
   options: {
     environment?: () => NodeJS.ProcessEnv;
+    now?: () => Date;
     spawnSync?: CallbackSpawnSync;
   } = {}
 ): TerminalWatchCallbackCliAdapter {
+  const now = options.now ?? (() => new Date());
   const transport = createOpenClawCallbackTransport({
-    now: () => new Date(),
+    now,
     environment: options.environment ?? (() => process.env),
     redactConversation: () => ({}),
     recordCallbackProcessDelivery: () => {},
@@ -44,58 +91,85 @@ export function createTerminalWatchCallbackCliAdapter(
 
   return Object.freeze({
     deliver(input) {
-      const delivery = transport.deliverChatSend({
+      const attempt = attemptOpenClawCallback({
         openclawBin: input.openclawBin,
-        params: {
-          sessionKey: input.openclawSession,
-          message: terminalWatchCallbackMessage(input),
-          idempotencyKey: input.idempotencyKey,
-          deliver: true
-        }
+        sessionKey: requiredString(
+          input.openclawSession,
+          "Terminal Watch OpenClaw session"
+        ),
+        message: terminalWatchCallbackMessage(input),
+        idempotencyKey: input.idempotencyKey
       });
-      if (delivery.status !== 0) {
-        throw new Error(
-          delivery.stderr || delivery.stdout ||
-          `Terminal Watch callback failed with status ${delivery.status}`
-        );
+      if (attempt.disposition !== "accepted") {
+        throw new Error(attempt.errorMessage);
       }
-      const acknowledgement = parseChatSendAcknowledgement(
+    },
+    deliverTransport(input): CallbackAttemptOutcome {
+      return transport.deliver(input);
+    }
+  });
+
+  function attemptOpenClawCallback(input: {
+    openclawBin?: string;
+    sessionKey: string;
+    message: string;
+    idempotencyKey: string;
+  }): OpenClawCallbackAttempt {
+    const delivery = transport.deliverChatSend({
+      openclawBin: input.openclawBin,
+      params: {
+        sessionKey: input.sessionKey,
+        message: input.message,
+        idempotencyKey: input.idempotencyKey,
+        deliver: true
+      }
+    });
+    if (delivery.status !== 0) {
+      return {
+        disposition: "retryable_failure",
+        errorMessage: delivery.stderr || delivery.stdout ||
+          `Terminal Watch callback failed with status ${delivery.status}`
+      };
+    }
+    let acknowledgement: CallbackWakeAcknowledgement;
+    try {
+      acknowledgement = parseChatSendAcknowledgement(
         delivery.stdout,
         input.idempotencyKey
       );
-      if (
-        acknowledgement.status === "error" ||
-        acknowledgement.status === "timeout"
-      ) {
-        throw new Error(
-          `Terminal Watch chat.send was not accepted: ${acknowledgement.status}`
-        );
-      }
+    } catch (error) {
+      return {
+        disposition: "uncertain",
+        errorMessage: error instanceof Error ? error.message : String(error)
+      };
     }
-  });
+    if (
+      acknowledgement.status === "error" ||
+      acknowledgement.status === "timeout"
+    ) {
+      return {
+        disposition: "retryable_failure",
+        errorMessage:
+          `Terminal Watch chat.send was not accepted: ${acknowledgement.status}`
+      };
+    }
+    return { disposition: "accepted", acknowledgement };
+  }
 }
 
-function terminalWatchCallbackMessage(
-  input: TerminalWatchCallbackInput
-): string {
-  const eventInstruction = input.event === "approval_required"
-    ? "Tell the user that the observed TUI task is waiting for approval and ask the human to inspect and decide in the named live TUI. Do not call any AKK approval tool or action, do not send approval keys, and do not use autoApprove."
-    : input.event === "completed"
-      ? "Tell the user that the human-started TUI task completed and summarize only the bounded completion text below."
-      : "Tell the user that Terminal Watch stopped without a verified successful completion and explain the exact reason below.";
-  return [
-    "Continue this OpenClaw conversation from the Agent Knock Knock Terminal Watch event below.",
-    "This is an observation of a task started by the human directly in Codex or Claude Code. It is not an AKK Turn and AKK did not send terminal input.",
-    eventInstruction,
-    "Do not poll files, processes, terminal panes, stdout, or stderr. Use only this structured event.",
-    "",
-    `[AKK Terminal Watch: ${input.event}]`,
-    `Watch: ${input.watchId}`,
-    `Terminal: ${input.terminalId}`,
-    `Agent: ${input.agent}`,
-    ...(input.detail ? [`Detail: ${input.detail}`] : []),
-    ...(input.completionText
-      ? ["", "Bounded completion text:", input.completionText]
-      : [])
-  ].join("\n");
+type OpenClawCallbackAttempt =
+  | {
+      disposition: "accepted";
+      acknowledgement: CallbackWakeAcknowledgement;
+    }
+  | {
+      disposition: "retryable_failure" | "uncertain";
+      errorMessage: string;
+    };
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${label} is required`);
+  }
+  return value;
 }

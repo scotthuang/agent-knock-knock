@@ -25,7 +25,6 @@ import {
   isExecutorKind,
   type ExecutorKind
 } from "./executors.js";
-import { redactString } from "./runtime-log.js";
 import { formatTranscript, readNdjsonLog } from "./transcript.js";
 import {
   appendEvent,
@@ -142,6 +141,8 @@ import {
   type TerminalDispatchCapabilityRepositories
 } from "./terminal-dispatch-capability.js";
 import { createCallbackCliFacade } from "./callback-cli-adapter.js";
+import { createOpenClawManagedCallbackCliAdapter } from
+  "./openclaw-managed-callback-cli-adapter.js";
 import { createTerminalMaintenanceCliFacade } from
   "./terminal-maintenance-cli-adapter.js";
 import {
@@ -171,8 +172,6 @@ import * as deferredRecoveryAdapter from
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import { openClawYieldNextAction } from
   "./terminal-dispatch-presenter.js";
-import { classifyCallbackProcessFailure } from
-  "./callback-outbox-policy.js";
 import { isProcessAlive } from "./terminal-process-source.js";
 import {
   assertConfiguredWorkspace,
@@ -182,6 +181,7 @@ import {
   packageRootDir,
   parseJsonOption,
   positiveMinutes,
+  redactCliOutput,
   required,
   resolveOptionalExecutable,
   writeCliJson as printJson
@@ -699,6 +699,16 @@ const {
   materializeCurrentManagedSession, reattachManagedSessionForNativeIdentity,
   observeDeferredCodexAuthority
 } = terminalIdentityAuthority;
+
+const managedOpenClawCallbackDelivery =
+  createOpenClawManagedCallbackCliAdapter({
+    now: cliNow,
+    environment: cliEnv,
+    redactConversation: redactCliOutput,
+    textSummary,
+    log: runtimeLog
+  });
+
 const callbackCliFacade = createCallbackCliFacade({
   state: { acquireFileLock, loadConversation: loadConversationFromOptions,
     readEvents: (logPath) => terminalDispatchRecovery.readEvents(logPath),
@@ -717,7 +727,8 @@ const callbackCliFacade = createCallbackCliFacade({
     isProcessAlive,
     attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
     delaysMs: CALLBACK_RETRY_DELAYS_MS },
-  runtime: { classifyProcessFailure: classifyCallbackProcessFailure, textSummary }
+  delivery: managedOpenClawCallbackDelivery,
+  runtime: { textSummary }
 });
 const terminalDispatchRecovery = createTerminalDispatchRecoveryCliAdapter({
   repository: terminalDispatchRepository,

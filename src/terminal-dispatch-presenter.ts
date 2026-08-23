@@ -5,6 +5,8 @@ import {
   type Conversation,
   type Executor
 } from "./protocol.js";
+import { callbackExpectedForConversation } from
+  "./callback-route-authority.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import type {
   RecordedTerminalZeroInputAbort,
@@ -274,7 +276,7 @@ export function presentTerminalUncertain(
     status: "submission_uncertain",
     submission_outcome: "uncertain",
     background: true,
-    callback_expected: Boolean(input.conversation.gateway_method),
+    callback_expected: callbackExpectedForConversation(input.conversation),
     terminal_control: context.terminalControl,
     monitor_pid: input.monitorPid ?? null,
     executor: context.executor,
@@ -310,6 +312,7 @@ export function presentTerminalCompleted(
   const outcome = input.acceptance?.outcome;
   const accepted = outcome === "agent_accepted";
   const pending = outcome === "pending_acceptance";
+  const callbackExpected = callbackExpectedForConversation(input.conversation);
   ports.write({
     session_id: sessionIdForConversation(input.conversation),
     turn_id: turnIdForConversation(input.conversation),
@@ -325,9 +328,7 @@ export function presentTerminalCompleted(
           : "submission_uncertain",
     submission_outcome: outcome,
     background: true,
-    callback_expected: Boolean(
-      input.conversation.gateway_method && (accepted || pending)
-    ),
+    callback_expected: callbackExpected && (accepted || pending),
     terminal_control: context.terminalControl,
     monitor_pid: input.monitorPid ?? null,
     executor: context.executor,
@@ -347,7 +348,7 @@ export function presentTerminalCompleted(
           sessionId: sessionIdForConversation(input.conversation),
           turnId: turnIdForConversation(input.conversation),
           source: "terminal_control",
-          callbackExpected: Boolean(input.conversation.gateway_method)
+          callbackExpected
         })
       : {
           action: pending ? "wait_for_acceptance" : "inspect",

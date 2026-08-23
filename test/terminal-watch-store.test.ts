@@ -5,6 +5,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  createCallbackEnvelope,
+  createLegacyOpenClawCallbackRoute,
+  type CallbackEnvelopeV1,
+  type CallbackRouteV1
+} from "../src/callback-transport.js";
+import {
   TERMINAL_WATCH_SCHEMA,
   TERMINAL_WATCH_VERSION,
   TerminalWatchConflictError,
@@ -18,8 +24,11 @@ import {
   scanTerminalWatchesForReconciliation,
   terminalWatchNotificationId,
   terminalWatchNotificationIdempotencyKey,
+  terminalWatchCallbackEnvelope,
+  terminalWatchNotificationCallbackSnapshot,
   terminalWatchRevision,
   type TerminalWatch,
+  type TerminalWatchNotification,
   type TerminalWatchTerminalIdentity
 } from "../src/terminal-watch-store.js";
 import type { ClaudeHumanStartedActiveTaskAnchor } from
@@ -114,6 +123,42 @@ function watch(watchId = "terminal-watch-store-fixture"): TerminalWatch {
   };
 }
 
+function approvalNotification(
+  owner: TerminalWatch,
+  route: CallbackRouteV1 = createLegacyOpenClawCallbackRoute({
+    controllerSessionId: owner.openclaw_session,
+    gatewayMethod: "chat.send",
+    openclawBin: owner.openclaw_bin
+  })
+): TerminalWatchNotification {
+  const notificationId = terminalWatchNotificationId(
+    owner.watch_id,
+    "approval",
+    SHA_B
+  );
+  const idempotencyKey = terminalWatchNotificationIdempotencyKey(
+    owner.watch_id,
+    notificationId
+  );
+  const notification: TerminalWatchNotification = {
+    notification_id: notificationId,
+    idempotency_key: idempotencyKey,
+    kind: "approval",
+    evidence_fingerprint: SHA_B,
+    reason_code: "approval_required",
+    callback_route: route,
+    status: "pending",
+    attempts: 0,
+    created_at: CREATED_AT
+  };
+  notification.callback_envelope = terminalWatchCallbackEnvelope(
+    owner,
+    notification,
+    route
+  );
+  return notification;
+}
+
 function tempStore(t: test.TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-watch-store-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -186,6 +231,216 @@ test("legacy v1 Watch records without a checkpoint remain readable and upgrade o
   assert.deepEqual(
     JSON.parse(fs.readFileSync(statePath, "utf8")).observation_checkpoint,
     upgraded.observation_checkpoint
+  );
+});
+
+test("legacy v1 notifications may omit both callback snapshot fields", (t) => {
+  const storeDir = tempStore(t);
+  const candidate = watch("terminal-watch-legacy-notification");
+  const notification = approvalNotification(candidate);
+  delete notification.callback_route;
+  delete notification.callback_envelope;
+  candidate.notification_outbox = [notification];
+
+  const saved = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  assert.equal(
+    terminalWatchNotificationCallbackSnapshot(
+      saved,
+      saved.notification_outbox[0]
+    ),
+    undefined
+  );
+  assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
+});
+
+test("partial or malformed callback snapshots fail closed on v1 read", (t) => {
+  const storeDir = tempStore(t);
+  const candidate = watch("terminal-watch-invalid-callback-snapshot");
+  candidate.notification_outbox = [approvalNotification(candidate)];
+  const saved = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  const statePath = pathsForTerminalWatch(saved.watch_id, storeDir).statePath;
+  const fixtures: Array<{
+    name: string;
+    mutate(notification: Record<string, unknown>): void;
+  }> = [
+    {
+      name: "route only",
+      mutate(notification) {
+        delete notification.callback_envelope;
+      }
+    },
+    {
+      name: "envelope only",
+      mutate(notification) {
+        delete notification.callback_route;
+      }
+    },
+    {
+      name: "malformed route",
+      mutate(notification) {
+        notification.callback_route = { version: 99 };
+      }
+    },
+    {
+      name: "malformed envelope",
+      mutate(notification) {
+        notification.callback_envelope = {
+          ...(notification.callback_envelope as CallbackEnvelopeV1),
+          delivery_id: "redirected-delivery"
+        };
+      }
+    },
+    {
+      name: "redirected controller",
+      mutate(notification) {
+        const route = {
+          ...(notification.callback_route as CallbackRouteV1),
+          controller_session_id: "redirected-controller-session"
+        };
+        const envelope = notification.callback_envelope as CallbackEnvelopeV1;
+        notification.callback_route = route;
+        notification.callback_envelope = {
+          ...envelope,
+          route: {
+            ...envelope.route,
+            controller_session_id: route.controller_session_id
+          }
+        };
+      }
+    }
+  ];
+
+  for (const fixture of fixtures) {
+    const corrupt = structuredClone(saved) as unknown as Record<string, unknown>;
+    const notifications = corrupt.notification_outbox as Array<
+      Record<string, unknown>
+    >;
+    fixture.mutate(notifications[0]);
+    fs.writeFileSync(statePath, `${JSON.stringify(corrupt)}\n`, { mode: 0o600 });
+    assert.throws(
+      () => loadTerminalWatch(storeDir, saved.watch_id),
+      Error,
+      fixture.name
+    );
+  }
+});
+
+test("legacy callback snapshot backfill is legal only while claiming", (t) => {
+  const storeDir = tempStore(t);
+  const candidate = watch("terminal-watch-backfill-transition");
+  const snapshotted = approvalNotification(candidate);
+  const legacy = { ...snapshotted };
+  delete legacy.callback_route;
+  delete legacy.callback_envelope;
+  candidate.notification_outbox = [legacy];
+  const saved = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+
+  for (const status of ["pending", "delivered"] as const) {
+    assert.throws(
+      () => saveTerminalWatch(storeDir, {
+        ...saved,
+        updated_at: "2026-08-21T00:00:01.000Z",
+        notification_outbox: [{
+          ...snapshotted,
+          status,
+          ...(status === "delivered"
+            ? {
+                attempts: 1,
+                last_attempt_at: "2026-08-21T00:00:01.000Z",
+                delivered_at: "2026-08-21T00:00:01.000Z"
+              }
+            : {})
+        }]
+      }, { expectedRevision: terminalWatchRevision(saved) }),
+      /backfilled only while claiming/u,
+      status
+    );
+  }
+});
+
+test("parsed callback snapshot deep-clones envelope metadata", () => {
+  const owner = watch("terminal-watch-callback-clone");
+  const notification = approvalNotification(owner);
+  owner.notification_outbox = [notification];
+  const snapshot = terminalWatchNotificationCallbackSnapshot(
+    owner,
+    notification
+  );
+  assert.ok(snapshot);
+  assert.notEqual(snapshot.envelope, notification.callback_envelope);
+  assert.notEqual(
+    snapshot.envelope.event.metadata,
+    notification.callback_envelope?.event.metadata
+  );
+  snapshot.envelope.event.metadata!.agent = "mutated-after-parse";
+  assert.equal(notification.callback_envelope?.event.metadata?.agent, "codex");
+});
+
+test("callback route, profile, and envelope body are immutable after snapshot", (t) => {
+  const storeDir = tempStore(t);
+  const candidate = watch("terminal-watch-immutable-callback-snapshot");
+  candidate.notification_outbox = [approvalNotification(candidate)];
+  const saved = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  const original = saved.notification_outbox[0];
+  const changedRoute = {
+    ...original.callback_route!,
+    profile_revision: "sha256:changed-profile"
+  };
+  const changedEnvelope = createCallbackEnvelope({
+    route: changedRoute,
+    deliveryId: original.notification_id,
+    idempotencyKey: original.idempotency_key,
+    source: original.callback_envelope!.source,
+    event: original.callback_envelope!.event
+  });
+
+  assert.throws(
+    () => saveTerminalWatch(storeDir, {
+      ...saved,
+      updated_at: "2026-08-21T00:00:01.000Z",
+      notification_outbox: [{
+        ...original,
+        callback_route: changedRoute,
+        callback_envelope: changedEnvelope,
+        status: "delivering",
+        attempts: 1,
+        last_attempt_at: "2026-08-21T00:00:01.000Z",
+        attempt_id: "attempt-route-drift",
+        attempt_lease_expires_at: "2026-08-21T00:00:31.000Z"
+      }]
+    }, { expectedRevision: terminalWatchRevision(saved) }),
+    /immutable callback_route/u
+  );
+
+  assert.throws(
+    () => saveTerminalWatch(storeDir, {
+      ...saved,
+      updated_at: "2026-08-21T00:00:01.000Z",
+      notification_outbox: [{
+        ...original,
+        callback_envelope: {
+          ...original.callback_envelope!,
+          event: {
+            ...original.callback_envelope!.event,
+            body: "drifted callback body"
+          }
+        },
+        status: "delivering",
+        attempts: 1,
+        last_attempt_at: "2026-08-21T00:00:01.000Z",
+        attempt_id: "attempt-body-drift",
+        attempt_lease_expires_at: "2026-08-21T00:00:31.000Z"
+      }]
+    }, { expectedRevision: terminalWatchRevision(saved) }),
+    /(?:immutable callback_envelope|snapshot does not match)/u
   );
 });
 

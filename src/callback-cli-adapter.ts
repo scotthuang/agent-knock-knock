@@ -6,23 +6,29 @@ import {
   type CallbackDeliveryReconciliationInput, type CallbackExecutionResult,
   type CallbackOutboxServicePorts, type CallbackPreparationOptions,
   type CallbackRetryMonitorInput, type PreparedCallback,
+  type StallNotificationPreparationInput,
   type TerminalCompletionPreparationInput
 } from "./callback-outbox-service.js";
-import type { CallbackRetryDisposition } from "./callback-outbox-policy.js";
+import type {
+  CallbackDeliveryOutcome,
+  CallbackRetryDisposition,
+  DeliverCallbackInput
+} from "./callback-outbox-policy.js";
 import {
-  createOpenClawCallbackTransport, type CallbackProcessDelivery,
-  type CallbackProcessDeliveryObservation, type DeliverChatSendInput,
-  type DeliverGatewayMethodInput,
-  type OpenClawCallbackTransport
-} from "./openclaw-callback-transport.js";
+  parseCallbackAttemptOutcome,
+  type CallbackAttemptOutcome,
+  type CallbackRouteV1,
+  type CallbackTransport,
+  type CallbackTransportDeliverInput
+} from "./callback-transport.js";
 import { budgetAction, type Conversation } from "./protocol.js";
-import { redactString } from "./runtime-log.js";
 import {
   appendEvent, assertStoreWriterCompatible, loadState, logPathForStatePath,
   messageEvent, pathsForConversationDir, saveState
 } from "./store.js";
 import type { TranscriptEvent } from "./transcript.js";
-import { expandHome, redactCliOutput, writeCliJson } from
+import { nonBlankString, recordValue } from "./value-guards.js";
+import { expandHome, writeCliJson } from
   "./cli-command-runtime.js";
 import {
   cliEnv, cliExit, cliNow, cliNowMs, cliPid, cliRuntimeLog,
@@ -36,6 +42,11 @@ export type CallbackCliOptions = Omit<CallbackPreparationOptions, "statePath"> &
   [option: string]: unknown;
 };
 
+type ResolvedCallbackTransportDelivery = Omit<
+  CallbackTransportDeliverInput,
+  "reportCheckpoint"
+>;
+
 export interface CallbackCliDependencies {
   state: {
     acquireFileLock(lockPath: string): () => void;
@@ -47,8 +58,11 @@ export interface CallbackCliDependencies {
   };
   authority: CallbackOutboxServicePorts["authority"];
   retry: CallbackOutboxServicePorts["retry"];
+  delivery: {
+    transport: CallbackTransport;
+    resolve(input: DeliverCallbackInput): ResolvedCallbackTransportDelivery;
+  };
   runtime: {
-    classifyProcessFailure(delivery: CallbackProcessDelivery): string | undefined;
     textSummary(value: unknown): unknown;
   };
 }
@@ -62,12 +76,12 @@ export interface CallbackCliFacade {
   runRetryMonitor(input: CallbackRetryMonitorInput): void;
   prepareApprovalNotification(input: ApprovalNotificationPreparationInput): ReturnType<
     CallbackOutboxService["prepareApprovalNotification"]>;
+  prepareStallNotification(input: StallNotificationPreparationInput): ReturnType<
+    CallbackOutboxService["prepareStallNotification"]>;
   prepareTerminalCompletion(input: TerminalCompletionPreparationInput): ReturnType<
     CallbackOutboxService["prepareTerminalCompletion"]>;
   runPrepared(prepared: PreparedCallback, options?: { emit?: boolean }): CallbackExecutionResult;
   emitPreparedResult(result: CallbackExecutionResult): void;
-  deliverGatewayMethod(input: DeliverGatewayMethodInput): CallbackProcessDelivery;
-  deliverChatSend(input: DeliverChatSendInput): CallbackProcessDelivery;
 }
 const callbackCliContext = new AsyncLocalStorage<CallbackCliDependencies>();
 function callbackRuntime(): CallbackCliDependencies {
@@ -123,6 +137,136 @@ function runCallbackTransaction(options: CallbackPreparationOptions):
   return runPreparedCallback(prepared!);
 }
 
+function deliverCallbackViaTransport(
+  input: DeliverCallbackInput
+): CallbackDeliveryOutcome {
+  const runtime = callbackRuntime();
+  let resolved: ResolvedCallbackTransportDelivery;
+  try {
+    resolved = runtime.delivery.resolve(input);
+  } catch {
+    return callbackDeliveryOutcome(undefined, {
+      disposition: "permanent_failure",
+      error_code: "callback_route_resolution_failed"
+    });
+  }
+  let acceptedCheckpoint: Extract<
+    CallbackAttemptOutcome,
+    { disposition: "accepted" }
+  > | undefined;
+  let invalidCheckpoint = false;
+  const reportCheckpoint = (value: CallbackAttemptOutcome): void => {
+    let outcome: CallbackAttemptOutcome;
+    try {
+      outcome = parseCallbackAttemptOutcome(value);
+    } catch {
+      invalidCheckpoint = true;
+      return;
+    }
+    const delivery = callbackDeliveryOutcome(resolved.route, outcome);
+    if (outcome.disposition === "accepted") {
+      acceptedCheckpoint = outcome;
+      input.onAccepted?.(delivery);
+    }
+    input.onProgress?.({
+      stage: "transport_checkpoint",
+      ...delivery
+    });
+  };
+  let value: unknown;
+  try {
+    value = runtime.delivery.transport.deliver({
+      ...resolved,
+      reportCheckpoint
+    });
+  } catch {
+    return callbackDeliveryOutcome(
+      resolved.route,
+      acceptedCheckpoint ?? callbackTransportContractViolation()
+    );
+  }
+  let outcome: CallbackAttemptOutcome;
+  try {
+    outcome = parseCallbackAttemptOutcome(value);
+  } catch {
+    outcome = acceptedCheckpoint ?? callbackTransportContractViolation();
+  }
+  if (acceptedCheckpoint && outcome.disposition !== "accepted") {
+    outcome = acceptedCheckpoint;
+  } else if (invalidCheckpoint && outcome.disposition !== "accepted") {
+    outcome = callbackTransportContractViolation();
+  }
+  return callbackDeliveryOutcome(resolved.route, outcome);
+}
+
+function callbackTransportContractViolation(): CallbackAttemptOutcome {
+  return {
+    disposition: "uncertain",
+    error_code: "callback_transport_contract_violation",
+    observed_at: cliNow().toISOString()
+  };
+}
+
+function callbackDeliveryOutcome(
+  route: CallbackRouteV1 | undefined,
+  outcome: CallbackAttemptOutcome
+): CallbackDeliveryOutcome {
+  const legacyDelivery = legacyCallbackDelivery(outcome);
+  if (legacyDelivery) {
+    return { ...legacyDelivery, attempt_outcome: outcome };
+  }
+  const accepted = outcome.disposition === "accepted";
+  const uncertain = outcome.disposition === "uncertain";
+  const errorCode = accepted ? undefined : outcome.error_code;
+  const injectionStatus = outcomeEvidenceString(
+    outcome,
+    "injection_status"
+  ) ?? (accepted ? "accepted" : uncertain ? "uncertain" : "failed");
+  const wakeStatus = outcomeEvidenceString(outcome, "wake_status") ??
+    (accepted ? "not_required" : "not_attempted");
+  return {
+    kind: outcomeEvidenceString(outcome, "delivery_kind") ??
+      route?.transport ?? "callback_transport",
+    injection: {
+      status: injectionStatus,
+      ...(accepted
+        ? {
+            accepted_at: outcome.accepted_at
+          }
+        : { error_code: errorCode })
+    },
+    wake: {
+      status: wakeStatus
+    },
+    attempt_outcome: outcome
+  };
+}
+
+function legacyCallbackDelivery(
+  outcome: CallbackAttemptOutcome
+): CallbackDeliveryOutcome | undefined {
+  const value = recordValue(outcome.evidence?.legacy_delivery);
+  const kind = nonBlankString(value?.kind);
+  const injection = recordValue(value?.injection);
+  const wake = recordValue(value?.wake);
+  const runObservation = recordValue(value?.run_observation);
+  if (!kind || !injection || !wake) return undefined;
+  return {
+    kind,
+    injection,
+    wake,
+    ...(runObservation ? { run_observation: runObservation } : {})
+  };
+}
+
+function outcomeEvidenceString(
+  outcome: CallbackAttemptOutcome,
+  field: string
+): string | undefined {
+  const value = outcome.evidence?.[field];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
 function callbackOutboxService(): CallbackOutboxService {
   const runtime = callbackRuntime();
   return createCallbackOutboxService({
@@ -151,8 +295,7 @@ function callbackOutboxService(): CallbackOutboxService {
         }
       }
     },
-    delivery: { deliver: (input) =>
-      openClawCallbackTransport().deliverCallback(input),
+    delivery: { deliver: deliverCallbackViaTransport,
     runTransaction: runCallbackTransaction }
   });
 }
@@ -183,34 +326,6 @@ function runPreparedCallback(
   return result;
 }
 
-function recordCallbackProcessDelivery(
-  observation: CallbackProcessDeliveryObservation
-): void {
-  const { logPath, conversation, message, event, runtimeEvent, delivery } =
-    observation;
-  const detail = observation.detail ?? {};
-  appendEvent(logPath, {
-    ts: cliNow().toISOString(), conversation_id: conversation.conversation_id,
-    event, from: message.from, to: "openclaw", round: message.round, ...detail,
-    status: delivery.status, stdout: redactString(delivery.stdout),
-    stderr: redactString(delivery.stderr)
-  });
-  cliRuntimeLog("info", runtimeEvent, {
-    conversation_id: conversation.conversation_id, ...detail,
-    status: delivery.status,
-    failure_kind: callbackRuntime().runtime.classifyProcessFailure(delivery),
-    stdout: callbackRuntime().runtime.textSummary(delivery.stdout),
-    stderr: callbackRuntime().runtime.textSummary(delivery.stderr)
-  });
-}
-
-function openClawCallbackTransport(): OpenClawCallbackTransport {
-  return createOpenClawCallbackTransport({
-    now: cliNow, environment: cliEnv, redactConversation: redactCliOutput,
-    recordCallbackProcessDelivery
-  });
-}
-
 export function createCallbackCliFacade(
   dependencies: CallbackCliDependencies
 ): CallbackCliFacade {
@@ -227,14 +342,12 @@ export function createCallbackCliFacade(
       callbackOutboxService().runRetryMonitor(input)),
     prepareApprovalNotification: (input) => call(() =>
       callbackOutboxService().prepareApprovalNotification(input)),
+    prepareStallNotification: (input) => call(() =>
+      callbackOutboxService().prepareStallNotification(input)),
     prepareTerminalCompletion: (input) => call(() =>
       callbackOutboxService().prepareTerminalCompletion(input)),
     runPrepared: (prepared, options) => call(() =>
       runPreparedCallback(prepared, options)),
-    emitPreparedResult: (result) => call(() => emitPreparedCallbackResult(result)),
-    deliverGatewayMethod: (input) => call(() =>
-      openClawCallbackTransport().deliverGatewayMethod(input)),
-    deliverChatSend: (input) => call(() =>
-      openClawCallbackTransport().deliverChatSend(input))
+    emitPreparedResult: (result) => call(() => emitPreparedCallbackResult(result))
   });
 }

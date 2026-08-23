@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { callbackRouteFingerprintForConversation } from
+  "../src/callback-route-authority.js";
 import type {
   CallbackExecutionResult,
   PreparedCallback
@@ -17,6 +19,7 @@ import {
   pollTerminalMonitor,
   reconcileMonitorAcceptance,
   recordMonitorApprovalNotification,
+  repairLaggingAcceptedMonitorAuthority,
   recoverPreparedMonitorSubmission,
   terminalMonitorStoreOperationTimeout
 } from "../src/terminal-monitor-cli-adapter.js";
@@ -25,6 +28,12 @@ import {
   runTerminalMonitorWithStoreDeferral,
   type TerminalMonitorServicePorts
 } from "../src/terminal-monitor-application-service.js";
+import {
+  terminalMonitorReconciliationEligibility,
+  type TerminalMonitorEligibilityObservation
+} from "../src/terminal-monitor-reconciliation-eligibility.js";
+import { reconcileTerminalMonitorStateCandidate } from
+  "../src/terminal-monitor-state-reconciliation-service.js";
 import { isRecord } from "../src/value-guards.js";
 
 const CONTROL: TerminalControlRef = {
@@ -180,6 +189,7 @@ function fakePorts(
       markAcceptanceUncertain: ({ conversation: owner }) => owner,
       reconcileAcceptance: async (input) => input.apply({ outcome: "pending" }),
       recoverPreparedSubmission: async ({ conversation: owner }) => owner,
+      repairLaggingAcceptedAuthority: async ({ conversation: owner }) => owner,
       assertBindingCurrent: () => trace.push("binding.assert"),
       bindingSuperseded: () => undefined,
       storeOperationTimeout: () => undefined,
@@ -228,6 +238,75 @@ function fakePorts(
       emit: (result) => trace.push(`present:${result.kind}`)
     }
   };
+}
+
+function restartEligibility(
+  owner: Conversation,
+  ledger: Record<string, unknown>
+) {
+  const staged = terminalMonitorReconciliationEligibility(owner);
+  let step = staged.next();
+  while (!step.done) {
+    const request = step.value;
+    let observation: TerminalMonitorEligibilityObservation;
+    switch (request.kind) {
+      case "control":
+        observation = { kind: "control", terminalControl: CONTROL };
+        break;
+      case "dispatch":
+        observation = { kind: "dispatch", ledger };
+        break;
+      case "store":
+        observation = { kind: "store", storeDir: "/store" };
+        break;
+      case "runtime":
+        observation = {
+          kind: "runtime",
+          runtime: { pid: 4201, cwd: "/workspace" }
+        };
+        break;
+      case "deferred":
+        throw new Error("restart fixture has no deferred transfer");
+    }
+    step = staged.next(observation);
+  }
+  return step.value;
+}
+
+async function reconcileRestartCandidate(
+  owner: Conversation,
+  ledger: Record<string, unknown>
+) {
+  return reconcileTerminalMonitorStateCandidate({
+    storeDir: "/store",
+    listed: owner,
+    paths: {
+      statePath: "/store/conversations/turn-1/state.json",
+      logPath: "/store/conversations/turn-1/events.ndjson"
+    },
+    includeCallbackRecovery: false,
+    ports: {
+      state: { isTerminalBridge: () => true },
+      completion: {
+        settleLocal: () => ({ handled: false }),
+        verifiedDead: async ({ conversation: candidate }) => ({
+          stalled: false,
+          conversation: candidate
+        })
+      },
+      callbacks: {
+        reconcile: () => ({ handled: false }),
+        run: () => { throw new Error("restart fixture has no callback"); }
+      },
+      authority: {
+        migrateIdentity: async (candidate) => candidate,
+        recoverDeferred: async (_storeDir, candidate) => candidate,
+        recoverVirgin: async (candidate) => candidate,
+        assertBindingCurrent: () => undefined,
+        eligibility: (candidate) => restartEligibility(candidate, ledger)
+      }
+    }
+  });
 }
 
 const CONFIGURATION = {
@@ -768,12 +847,553 @@ test("prepared recovery releases state, writer, and terminal locks in legacy ord
     "state.load",
     "submission.read",
     "submission.apply:submitted",
+    "submission.read",
     "state.save",
     "state.release",
     "submission.read",
     "writer.release",
     "terminal.release"
   ]);
+});
+
+test("prepared monitor recovery fences callback authority before a retryable state crash", async () => {
+  for (const routed of [true, false]) {
+    const callbackFields = routed
+      ? {
+          gateway_method: "agent-knock-knock.callback",
+          gateway_session: "agent:controller:prepared-restart"
+        }
+      : {};
+    const authority = callbackRouteFingerprintForConversation(callbackFields) ?? null;
+    let durableConversation: Conversation = {
+      ...conversation({
+        terminal_bridge_request_text: "do work",
+        terminal_bridge_inactivity_timeout_minutes: 5,
+        terminal_bridge_hard_timeout_minutes: 60,
+        terminal_bridge_inactivity_deadline_at: "1970-01-01T00:05:00.000Z",
+        terminal_bridge_hard_deadline_at: "1970-01-01T01:00:00.000Z",
+        terminal_bridge_submission: {
+          message_id: "message-1",
+          status: "prepared",
+          prepared_at: "1970-01-01T00:00:00.000Z"
+        }
+      }),
+      ...callbackFields,
+      store_dir: "/store",
+      state_path: "/store/conversations/turn-1/state.json",
+      event_log_path: "/store/conversations/turn-1/events.ndjson",
+      terminal_binding_id: "binding-1",
+      terminal_binding_generation: 1
+    };
+    let ledger: Record<string, unknown> = {
+      generation_id: "message-1",
+      conversation_id: "turn-1",
+      session_id: "session-1",
+      turn_id: "turn-1",
+      message_id: "message-1",
+      status: "submitted",
+      submitted_at: "1970-01-01T00:00:01.000Z",
+      state_path: "/store/conversations/turn-1/state.json",
+      store_dir: "/store",
+      binding_id: "binding-1",
+      binding_generation: 1,
+      terminal_control: CONTROL,
+      callback_expected: routed
+    };
+    let stateSaveAttempts = 0;
+    const trace: string[] = [];
+    const ports = {
+      acquireTerminal: () => () => undefined,
+      withWriter: async <Value>(use: () => Promise<Value>) => use(),
+      acquireState: () => () => undefined,
+      loadConversation: () => durableConversation,
+      loadLedger: () => ledger,
+      saveLedger: (_control: TerminalControlRef, next: Record<string, unknown>) => {
+        trace.push("ledger.save");
+        ledger = next;
+      },
+      saveConversation: (candidate: Conversation) => {
+        trace.push("state.save");
+        stateSaveAttempts += 1;
+        if (stateSaveAttempts === 1) throw new Error("simulated state crash");
+        durableConversation = candidate as typeof durableConversation;
+      },
+      submission: (candidate: Conversation) => {
+        const takeover = isRecord(candidate.native_session_takeover)
+          ? candidate.native_session_takeover
+          : undefined;
+        return isRecord(takeover?.terminal_bridge_submission)
+          ? takeover.terminal_bridge_submission
+          : undefined;
+      },
+      applySubmission: (mutation: {
+        conversation: Conversation;
+        messageId: string;
+        status: string;
+      }) => ({
+        ...mutation.conversation,
+        native_session_takeover: {
+          ...(isRecord(mutation.conversation.native_session_takeover)
+            ? mutation.conversation.native_session_takeover
+            : {}),
+          terminal_bridge_submission: {
+            message_id: mutation.messageId,
+            status: mutation.status,
+            callback_route_fingerprint: authority
+          }
+        }
+      }),
+      requestFingerprint: () => "request-hash",
+      now: () => new Date(0),
+      appendEvent: () => undefined,
+      stallCollateral: () => undefined
+    };
+    const input = {
+      conversation: durableConversation,
+      statePath: "/store/conversations/turn-1/state.json",
+      logPath: "/store/conversations/turn-1/events.ndjson",
+      terminalControl: CONTROL,
+      currentMessageId: "message-1",
+      dispatcherPid: 7331,
+      ports
+    };
+    await assert.rejects(
+      recoverPreparedMonitorSubmission(input as never),
+      /simulated state crash/u
+    );
+    assert.equal(ledger.callback_route_fingerprint, authority);
+    assert.deepEqual(trace.slice(0, 2), ["ledger.save", "state.save"]);
+
+    const reconciled = await reconcileRestartCandidate(
+      durableConversation,
+      ledger
+    );
+    assert.equal(reconciled.kind, "candidate");
+    if (reconciled.kind !== "candidate") assert.fail("restart must relaunch");
+    const monitorTrace: string[] = [];
+    const monitorPorts = fakePorts(monitorTrace, reconciled.conversation);
+    monitorPorts.state.load = () => {
+      monitorTrace.push("state.load");
+      return durableConversation;
+    };
+    monitorPorts.authority.recoverPreparedSubmission = (request) =>
+      recoverPreparedMonitorSubmission({
+        ...request,
+        statePath: "/store/conversations/turn-1/state.json",
+        logPath: "/store/conversations/turn-1/events.ndjson",
+        ports: ports as never
+      });
+    monitorPorts.authority.poll = async () => {
+      monitorTrace.push("terminal.poll");
+      assert.equal(
+        ports.submission(durableConversation)?.callback_route_fingerprint,
+        authority
+      );
+      return { kind: "fenced", ledgerStatus: "submitted" };
+    };
+    await runTerminalMonitor({
+      initialConversation: reconciled.conversation,
+      expectedTerminalMessageId: "message-1",
+      configuration: () => CONFIGURATION,
+      lifecycle: { startedRecorded: true },
+      ports: monitorPorts
+    });
+    assert.equal(
+      ports.submission(durableConversation)?.callback_route_fingerprint,
+      authority
+    );
+    assert.equal(trace.filter((entry) => entry === "ledger.save").length, 1);
+    assert.equal(trace.at(-1), "state.save");
+    assert.equal(monitorTrace.filter((entry) => entry === "terminal.poll").length, 1);
+    assert.equal(monitorTrace.includes("callback.run"), false);
+  }
+});
+
+test("prepared monitor recovery rejects a callback route redirect before writes", async () => {
+  const owner = conversation({
+    terminal_bridge_submission: {
+      message_id: "message-1",
+      status: "prepared",
+      prepared_at: "1970-01-01T00:00:00.000Z"
+    }
+  });
+  let writes = 0;
+  await assert.rejects(recoverPreparedMonitorSubmission({
+    conversation: owner,
+    statePath: "/store/state.json",
+    logPath: "/store/events.ndjson",
+    terminalControl: CONTROL,
+    currentMessageId: "message-1",
+    dispatcherPid: 7331,
+    ports: {
+      acquireTerminal: () => () => undefined,
+      withWriter: async (use) => use(),
+      acquireState: () => () => undefined,
+      loadConversation: () => owner,
+      loadLedger: () => ({
+        message_id: "message-1",
+        status: "submitted",
+        submitted_at: "1970-01-01T00:00:01.000Z",
+        callback_route_fingerprint: `sha256:${"b".repeat(64)}`
+      }),
+      saveLedger: () => { writes += 1; },
+      saveConversation: () => { writes += 1; },
+      submission: (candidate) => {
+        const takeover = isRecord(candidate.native_session_takeover)
+          ? candidate.native_session_takeover
+          : undefined;
+        return isRecord(takeover?.terminal_bridge_submission)
+          ? takeover.terminal_bridge_submission
+          : undefined;
+      },
+      applySubmission: (mutation) => ({
+        ...mutation.conversation,
+        native_session_takeover: {
+          ...(isRecord(mutation.conversation.native_session_takeover)
+            ? mutation.conversation.native_session_takeover
+            : {}),
+          terminal_bridge_submission: {
+            message_id: mutation.messageId,
+            status: mutation.status,
+            callback_route_fingerprint: `sha256:${"a".repeat(64)}`
+          }
+        }
+      }),
+      requestFingerprint: () => "request-hash",
+      now: () => new Date(0),
+      appendEvent: () => undefined,
+      stallCollateral: () => undefined
+    }
+  }), /callback route conflicts with its dispatch ledger/u);
+  assert.equal(writes, 0);
+});
+
+test("restart repairs lagging accepted authority before acceptance or terminal I/O", async () => {
+  for (const routed of [true, false]) {
+    const callbackFields = routed
+      ? {
+          gateway_method: "agent-knock-knock.callback",
+          gateway_session: "agent:controller:lagging-restart"
+        }
+      : {};
+    const authority = callbackRouteFingerprintForConversation(callbackFields) ?? null;
+    let durableConversation: Conversation = {
+      ...conversation({
+        terminal_bridge_request_text: "do work",
+        terminal_bridge_inactivity_timeout_minutes: 5,
+        terminal_bridge_hard_timeout_minutes: 60,
+        terminal_bridge_inactivity_deadline_at: "1970-01-01T00:05:00.000Z",
+        terminal_bridge_hard_deadline_at: "1970-01-01T01:00:00.000Z",
+        terminal_bridge_submission: {
+          message_id: "message-1",
+          status: "enter_dispatched",
+          enter_dispatched_at: "1970-01-01T00:00:01.000Z"
+        }
+      }),
+      ...callbackFields,
+      store_dir: "/store",
+      state_path: "/store/conversations/turn-1/state.json",
+      event_log_path: "/store/conversations/turn-1/events.ndjson",
+      terminal_binding_id: "binding-1",
+      terminal_binding_generation: 1
+    };
+    const ledger: Record<string, unknown> = {
+      generation_id: "message-1",
+      conversation_id: "turn-1",
+      session_id: "session-1",
+      turn_id: "turn-1",
+      message_id: "message-1",
+      status: "agent_accepted",
+      state_path: "/store/conversations/turn-1/state.json",
+      store_dir: "/store",
+      binding_id: "binding-1",
+      binding_generation: 1,
+      terminal_control: CONTROL,
+      callback_expected: routed,
+      callback_route_fingerprint: authority
+    };
+    const submission = (candidate: Conversation) => {
+      const takeover = isRecord(candidate.native_session_takeover)
+        ? candidate.native_session_takeover
+        : undefined;
+      return isRecord(takeover?.terminal_bridge_submission)
+        ? takeover.terminal_bridge_submission
+        : undefined;
+    };
+    const reconciled = await reconcileRestartCandidate(
+      durableConversation,
+      ledger
+    );
+    assert.equal(reconciled.kind, "candidate");
+    if (reconciled.kind !== "candidate") assert.fail("restart must relaunch");
+
+    const trace: string[] = [];
+    const monitorPorts = fakePorts(trace, reconciled.conversation);
+    monitorPorts.state.load = () => {
+      trace.push("state.load:monitor");
+      return durableConversation;
+    };
+    monitorPorts.authority.reconcileAcceptance = async () => {
+      trace.push("acceptance.observe");
+      throw new Error("authority repair must precede acceptance observation");
+    };
+    monitorPorts.authority.repairLaggingAcceptedAuthority = (request) =>
+      repairLaggingAcceptedMonitorAuthority({
+        ...request,
+        ports: {
+          acquireTerminal: () => {
+            trace.push("terminal.acquire");
+            return () => trace.push("terminal.release");
+          },
+          withWriter: async (use) => {
+            trace.push("writer.acquire");
+            try {
+              return await use();
+            } finally {
+              trace.push("writer.release");
+            }
+          },
+          acquireState: () => {
+            trace.push("state.acquire");
+            return () => trace.push("state.release");
+          },
+          loadConversation: () => {
+            trace.push("state.load:repair");
+            return durableConversation;
+          },
+          loadLedger: () => {
+            trace.push("ledger.load");
+            return ledger;
+          },
+          reconcileLedger: () => {
+            trace.push("ledger.reconcile");
+            const takeover = durableConversation.native_session_takeover as
+              Record<string, unknown>;
+            durableConversation = {
+              ...durableConversation,
+              native_session_takeover: {
+                ...takeover,
+                terminal_bridge_submission: {
+                  ...(takeover.terminal_bridge_submission as
+                    Record<string, unknown>),
+                  status: "agent_accepted",
+                  callback_route_fingerprint: authority
+                }
+              }
+            };
+            return ledger;
+          },
+          submission
+        }
+      });
+    monitorPorts.authority.poll = async () => {
+      trace.push("terminal.observe");
+      return { kind: "fenced", ledgerStatus: "agent_accepted" };
+    };
+    await runTerminalMonitor({
+      initialConversation: reconciled.conversation,
+      expectedTerminalMessageId: "message-1",
+      configuration: () => CONFIGURATION,
+      lifecycle: { startedRecorded: true },
+      ports: monitorPorts
+    });
+
+    assert.equal(
+      submission(durableConversation)?.callback_route_fingerprint,
+      authority
+    );
+    assert.equal(trace.includes("acceptance.observe"), false);
+    assert.equal(trace.includes("callback.run"), false);
+    assert.deepEqual(trace.filter((entry) => [
+      "terminal.acquire",
+      "writer.acquire",
+      "state.acquire",
+      "ledger.reconcile",
+      "state.release",
+      "writer.release",
+      "terminal.release",
+      "terminal.observe"
+    ].includes(entry)), [
+      "terminal.acquire",
+      "writer.acquire",
+      "state.acquire",
+      "ledger.reconcile",
+      "state.release",
+      "writer.release",
+      "terminal.release",
+      "terminal.observe"
+    ]);
+  }
+});
+
+test("lagging accepted authority repair fails closed on a route conflict", async () => {
+  const owner = {
+    ...conversation({
+      terminal_bridge_submission: {
+        message_id: "message-1",
+        status: "enter_dispatched"
+      }
+    }),
+    gateway_method: "agent-knock-knock.callback",
+    gateway_session: "agent:controller:current"
+  };
+  const trace: string[] = [];
+  await assert.rejects(repairLaggingAcceptedMonitorAuthority({
+    conversation: owner,
+    terminalControl: CONTROL,
+    currentMessageId: "message-1",
+    ports: {
+      acquireTerminal: () => {
+        trace.push("terminal.acquire");
+        return () => trace.push("terminal.release");
+      },
+      withWriter: async (use) => {
+        trace.push("writer.acquire");
+        try {
+          return await use();
+        } finally {
+          trace.push("writer.release");
+        }
+      },
+      acquireState: () => {
+        trace.push("state.acquire");
+        return () => trace.push("state.release");
+      },
+      loadConversation: () => owner,
+      loadLedger: () => ({
+        message_id: "message-1",
+        status: "agent_accepted",
+        callback_route_fingerprint: `sha256:${"f".repeat(64)}`
+      }),
+      reconcileLedger: () => {
+        trace.push("ledger.reconcile");
+        return undefined;
+      },
+      submission: (candidate) => {
+        const takeover = candidate.native_session_takeover as
+          Record<string, unknown>;
+        return takeover.terminal_bridge_submission as Record<string, unknown>;
+      }
+    }
+  }), /conflicts with the current callback route/u);
+  assert.deepEqual(trace, [
+    "terminal.acquire",
+    "writer.acquire",
+    "state.acquire",
+    "state.release",
+    "writer.release",
+    "terminal.release"
+  ]);
+});
+
+test("restart repairs a state-first accepted authority on the first poll", async () => {
+  for (const routed of [true, false]) {
+    const callbackFields = routed
+      ? {
+          gateway_method: "agent-knock-knock.callback",
+          gateway_session: "agent:controller:accepted-restart"
+        }
+      : {};
+    const authority = callbackRouteFingerprintForConversation(callbackFields) ?? null;
+    const owner: Conversation = {
+      ...conversation({
+        terminal_bridge_request_text: "do work",
+        terminal_bridge_inactivity_timeout_minutes: 5,
+        terminal_bridge_hard_timeout_minutes: 60,
+        terminal_bridge_inactivity_deadline_at: "1970-01-01T00:05:00.000Z",
+        terminal_bridge_hard_deadline_at: "1970-01-01T01:00:00.000Z",
+        terminal_bridge_submission: {
+          message_id: "message-1",
+          status: "agent_accepted",
+          agent_accepted_at: "1970-01-01T00:00:01.000Z",
+          callback_route_fingerprint: authority
+        }
+      }),
+      ...callbackFields,
+      store_dir: "/store",
+      state_path: "/store/conversations/turn-1/state.json",
+      event_log_path: "/store/conversations/turn-1/events.ndjson",
+      terminal_binding_id: "binding-1",
+      terminal_binding_generation: 1
+    };
+    let ledger: Record<string, unknown> = {
+      generation_id: "message-1",
+      conversation_id: "turn-1",
+      session_id: "session-1",
+      turn_id: "turn-1",
+      message_id: "message-1",
+      status: "enter_dispatched",
+      state_path: "/store/conversations/turn-1/state.json",
+      store_dir: "/store",
+      binding_id: "binding-1",
+      binding_generation: 1,
+      terminal_control: CONTROL,
+      callback_expected: routed
+    };
+    const reconciled = await reconcileRestartCandidate(owner, ledger);
+    assert.equal(reconciled.kind, "candidate");
+    if (reconciled.kind !== "candidate") assert.fail("restart must relaunch");
+
+    const trace: string[] = [];
+    const monitorPorts = fakePorts(trace, owner);
+    monitorPorts.authority.poll = async (request) => {
+      const polled = await pollTerminalMonitor({
+        ...request,
+        scrollbackLines: 120,
+        terminalBridge: {
+          monitorPoll: async () => {
+            trace.push("terminal.observe");
+            return { status: status() } as TerminalMonitorPoll;
+          }
+        } as never,
+        ports: {
+          acquireTerminal: () => {
+            trace.push("terminal.acquire");
+            return () => trace.push("terminal.release");
+          },
+          reconcileLedger: () => {
+            trace.push("ledger.reconcile");
+            ledger = {
+              ...ledger,
+              status: "agent_accepted",
+              callback_route_fingerprint: authority
+            };
+            return ledger;
+          },
+          loadLedger: () => ledger,
+          saveLedger: (_control, next) => { ledger = next; },
+          submission: monitorPorts.authority.submission,
+          loadConversation: () => owner,
+          terminalControl: () => CONTROL,
+          sameIncarnation: () => true,
+          runtime: () => ({ pid: 4201, cwd: "/workspace" }),
+          durableRequest: () => ({ context: {} }),
+          appendEvent: () => undefined,
+          now: () => new Date(0)
+        }
+      });
+      assert.equal(polled.kind, "observed");
+      return { kind: "fenced", ledgerStatus: "agent_accepted" };
+    };
+    await runTerminalMonitor({
+      initialConversation: reconciled.conversation,
+      expectedTerminalMessageId: "message-1",
+      configuration: () => CONFIGURATION,
+      lifecycle: { startedRecorded: true },
+      ports: monitorPorts
+    });
+
+    assert.equal(ledger.callback_route_fingerprint, authority);
+    assert.deepEqual(trace.filter((entry) => [
+      "terminal.acquire", "ledger.reconcile", "terminal.observe",
+      "terminal.release"
+    ].includes(entry)), [
+      "terminal.acquire", "ledger.reconcile", "terminal.observe",
+      "terminal.release"
+    ]);
+    assert.equal(trace.includes("acceptance.observe"), false);
+    assert.equal(trace.includes("callback.run"), false);
+  }
 });
 
 test("fresh poll retry releases the terminal lock and performs no terminal I/O", async () => {
@@ -815,6 +1435,111 @@ test("fresh poll retry releases the terminal lock and performs no terminal I/O",
 
   assert.deepEqual(result, { kind: "retry", conversation: changed });
   assert.deepEqual(trace, ["terminal.acquire", "terminal.release"]);
+});
+
+test("poll repair synchronizes callback route authority from the durable Turn", async () => {
+  const fingerprint = `sha256:${"c".repeat(64)}`;
+  for (const authority of [fingerprint, null, undefined] as const) {
+    const submission = {
+      message_id: "message-1",
+      status: "submitted",
+      submitted_at: "1970-01-01T00:00:01.000Z",
+      ...(authority !== undefined
+        ? { callback_route_fingerprint: authority }
+        : {})
+    };
+    const owner = conversation({ terminal_bridge_submission: submission });
+    const changed = { ...owner, updated_at: "1970-01-01T00:00:02.000Z" };
+    let ledger: Record<string, unknown> = {
+      message_id: "message-1",
+      status: "prepared"
+    };
+    const result = await pollTerminalMonitor({
+      conversation: owner,
+      terminalControl: CONTROL,
+      currentMessageId: "message-1",
+      executor: owner.executor,
+      screenChangedSinceSend: false,
+      scrollbackLines: 120,
+      terminalBridge: {} as never,
+      onFenced: () => undefined,
+      ports: {
+        acquireTerminal: () => () => undefined,
+        reconcileLedger: (_control, current) => current,
+        loadLedger: () => ledger,
+        saveLedger: (_control, next) => { ledger = next; },
+        submission: (candidate) => {
+          const takeover = isRecord(candidate.native_session_takeover)
+            ? candidate.native_session_takeover
+            : undefined;
+          return isRecord(takeover?.terminal_bridge_submission)
+            ? takeover.terminal_bridge_submission
+            : undefined;
+        },
+        loadConversation: () => changed,
+        terminalControl: () => CONTROL,
+        sameIncarnation: () => true,
+        runtime: () => ({ pid: 4242 }),
+        durableRequest: () => ({ context: {} }),
+        appendEvent: () => undefined,
+        now: () => new Date(0)
+      }
+    });
+    assert.equal(result.kind, "retry");
+    assert.equal(
+      Object.hasOwn(ledger, "callback_route_fingerprint"),
+      authority !== undefined
+    );
+    assert.equal(ledger.callback_route_fingerprint, authority);
+  }
+});
+
+test("poll repair rejects conflicting callback route authority", async () => {
+  const owner = conversation({
+    terminal_bridge_submission: {
+      message_id: "message-1",
+      status: "submitted",
+      submitted_at: "1970-01-01T00:00:01.000Z",
+      callback_route_fingerprint: `sha256:${"a".repeat(64)}`
+    }
+  });
+  let writes = 0;
+  await assert.rejects(pollTerminalMonitor({
+    conversation: owner,
+    terminalControl: CONTROL,
+    currentMessageId: "message-1",
+    executor: owner.executor,
+    screenChangedSinceSend: false,
+    scrollbackLines: 120,
+    terminalBridge: {} as never,
+    onFenced: () => undefined,
+    ports: {
+      acquireTerminal: () => () => undefined,
+      reconcileLedger: (_control, current) => current,
+      loadLedger: () => ({
+        message_id: "message-1",
+        status: "prepared",
+        callback_route_fingerprint: `sha256:${"b".repeat(64)}`
+      }),
+      saveLedger: () => { writes += 1; },
+      submission: (candidate) => {
+        const takeover = isRecord(candidate.native_session_takeover)
+          ? candidate.native_session_takeover
+          : undefined;
+        return isRecord(takeover?.terminal_bridge_submission)
+          ? takeover.terminal_bridge_submission
+          : undefined;
+      },
+      loadConversation: () => owner,
+      terminalControl: () => CONTROL,
+      sameIncarnation: () => true,
+      runtime: () => ({ pid: 4242 }),
+      durableRequest: () => ({ context: {} }),
+      appendEvent: () => undefined,
+      now: () => new Date(0)
+    }
+  }), /callback route conflicts with its dispatch ledger/u);
+  assert.equal(writes, 0);
 });
 
 test("dispatch fencing is presented before the poll terminal lock releases", async () => {
