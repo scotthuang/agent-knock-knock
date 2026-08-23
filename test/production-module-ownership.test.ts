@@ -201,7 +201,7 @@ test("canonical status policies reject duplicate definitions and inline tables",
   const original = source(target);
   const duplicate = [
     "function isSessionSendBlockingStatus(_status) { return false; }",
-    "const DUPLICATE_FINAL_DEFERRED = [\"resolved\", \"abort_resolved\", \"user_abandoned\"];"
+    "const DUPLICATE_FINAL_DEFERRED = [\"resolved\", \"abort_resolved\"];"
   ].join("\n") + "\n";
   const tampered = original + duplicate;
   const addedLoc = ownershipModule.physicalLineCount(tampered) -

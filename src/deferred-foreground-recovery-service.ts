@@ -2,8 +2,6 @@ import {
   isDeferredForegroundSubmissionRetryPending,
   type DeferredForegroundTransfer
 } from "./deferred-foreground-transfer.js";
-import { isFinalDeferredForegroundTransferStatus } from
-  "./deferred-foreground-transfer-policy.js";
 import type { Conversation } from "./protocol.js";
 import type {
   DeferredForegroundApplicationScope,
@@ -86,10 +84,6 @@ export interface DeferredForegroundRecoveryPorts {
       scope: DeferredForegroundApplicationScope,
       transfer: DeferredForegroundTransfer
     ): number;
-    completeUserAbandonment(
-      scope: DeferredForegroundApplicationScope,
-      transfer: DeferredForegroundTransfer
-    ): Promise<void>;
   };
   runtime: {
     terminalTarget: string;
@@ -119,8 +113,7 @@ export class DeferredForegroundRecoveryService {
     }
     const matching = this.#ports.repository.matching(writerScope);
     const candidates = matching.filter((transfer) =>
-      !isFinalDeferredForegroundTransferStatus(transfer.status) &&
-      transfer.status !== "aborted"
+      !["resolved", "aborted", "abort_resolved"].includes(transfer.status)
     );
     if (candidates.length === 0) return;
     if (candidates.length !== 1) {
@@ -140,10 +133,6 @@ export class DeferredForegroundRecoveryService {
     scope: DeferredForegroundApplicationScope,
     transfer: DeferredForegroundTransfer
   ): Promise<void> {
-    if (transfer.status === "user_abandoning") {
-      await this.#ports.recovery.completeUserAbandonment(scope, transfer);
-      return;
-    }
     const boundary = this.#ports.recovery.boundary(transfer);
     this.#ports.recovery.assertRoute(scope, transfer, boundary);
     if (transfer.status === "committed") {

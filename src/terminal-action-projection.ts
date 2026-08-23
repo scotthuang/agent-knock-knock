@@ -31,57 +31,6 @@ export type TerminalActionSet<Action> = Partial<{
   [Name in TerminalActionName]: Action;
 }>;
 
-export interface DeferredUserAbandonProjectionFacts {
-  mutationsAllowed: boolean;
-  matchingTransferCount: number;
-  matchingTurnCount: number;
-  globalSessionTransferConflict: boolean;
-  turnManagementReleasable: boolean;
-  closedAbandonmentInProgress: boolean;
-  targetIsSourceHistory: boolean;
-  takeoverTransferMatches: boolean;
-  transferTurnMatches: boolean;
-  transferTargetSessionMatches: boolean;
-  persistedTargetIdentityMatches: boolean;
-  transferStatePathMatches: boolean;
-  takeoverMessageMatches: boolean;
-  terminalRouteMatches: boolean;
-  frozenLedgerPlanMatches: boolean;
-  ledgerAuthority:
-    | "exact"
-    | "superseded"
-    | "absent"
-    | "unreadable"
-    | "mismatch";
-}
-
-export function isDeferredUserAbandonProjectionEligible(
-  facts: DeferredUserAbandonProjectionFacts
-): boolean {
-  return facts.mutationsAllowed &&
-    facts.matchingTransferCount === 1 &&
-    facts.matchingTurnCount === 1 &&
-    !facts.globalSessionTransferConflict &&
-    (facts.turnManagementReleasable || facts.closedAbandonmentInProgress) &&
-    !facts.targetIsSourceHistory &&
-    facts.takeoverTransferMatches &&
-    facts.transferTurnMatches &&
-    facts.transferTargetSessionMatches &&
-    facts.persistedTargetIdentityMatches &&
-    facts.transferStatePathMatches &&
-    facts.takeoverMessageMatches &&
-    facts.terminalRouteMatches &&
-    facts.frozenLedgerPlanMatches &&
-    ["exact", "superseded", "absent"].includes(facts.ledgerAuthority);
-}
-
-export function isDeferredUserAbandonTurnManagementReleasable(
-  status: unknown
-): boolean {
-  return isSessionSendBlockingStatus(status) ||
-    ["idle", "failed", "cancelled"].includes(String(status));
-}
-
 export interface TerminalSendAuthorityFacts {
   readonly ownership: "none" | "current" | "conflict";
   readonly verifiedEmpty?: boolean;

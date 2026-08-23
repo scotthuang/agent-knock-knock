@@ -3,11 +3,9 @@ import assert from "node:assert/strict";
 import {
   beginCallbackRetryPolicy,
   callbackDeliveryHasAcceptedTransport,
-  callbackDeliveryHasStartedTransport,
   classifyCallbackProcessFailure,
   reduceCallbackRetryPolicy,
   supersedeCallbackNotificationDelivery,
-  supersedeUnacceptedCallbackDeliveries,
   type CallbackRetryPolicyState
 } from "../src/callback-outbox-policy.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
@@ -118,63 +116,6 @@ test("pending callback observes process before clock and retains a live lease", 
       next_attempt_at: "2026-08-14T12:03:00.000Z"
     }
   );
-});
-
-test("transport-start without a final outcome is uncertain regardless of process evidence", () => {
-  for (const attemptPid of [undefined, 4412, 9999]) {
-    const delivery = {
-      status: "pending",
-      attempts: 2,
-      attempt_id: "attempt-started-2",
-      message: MESSAGE,
-      ...(attemptPid === undefined ? {} : { attempt_pid: attemptPid }),
-      attempt_lease_expires_at: "2026-08-14T12:02:00.000Z",
-      transport_started_at: NOW_ISO,
-      transport_started_lane: "lifecycle",
-      transport_started_attempt: 2,
-      transport_started_attempt_id: "attempt-started-2",
-      transport_started_pid: 4412
-    };
-    assert.deepEqual(disposition(beginCallbackRetryPolicy(delivery, LIMITS)), {
-      state: "uncertain",
-      attempt: 2,
-      reason: "callback_transport_started_without_final_outcome"
-    });
-  }
-});
-
-test("an explicit retryable outcome remains retryable after transport-start", () => {
-  const delivery = {
-    status: "failed",
-    attempts: 2,
-    attempt_id: "attempt-started-retryable",
-    message: MESSAGE,
-    attempt_outcome: {
-      disposition: "retryable_failure",
-      error_code: "temporarily_unavailable"
-    },
-    transport_started_at: NOW_ISO,
-    transport_started_lane: "lifecycle",
-    transport_started_attempt: 2,
-    transport_started_attempt_id: "attempt-started-retryable",
-    transport_started_pid: 4412
-  };
-  assert.deepEqual(disposition(beginCallbackRetryPolicy(delivery, LIMITS)), {
-    state: "retryable",
-    attempt: 2
-  });
-});
-
-test("retry policy fails closed on malformed transport-start authority", () => {
-  const result = disposition(beginCallbackRetryPolicy({
-    status: "pending",
-    attempts: 1,
-    attempt_id: "attempt-partial",
-    message: MESSAGE,
-    transport_started_at: NOW_ISO
-  }, LIMITS));
-  assert.equal(result.state, "unavailable");
-  assert.match(String(result.reason), /transport-start authority is invalid/u);
 });
 
 test("dead process and missing lease stop before a clock observation", () => {
@@ -508,132 +449,4 @@ test("lifecycle changes supersede only unaccepted notification deliveries", () =
     }),
     accepted
   );
-});
-
-test("management abandonment fences both unaccepted callback lanes including active claims", () => {
-  const conversation = createConversation({
-    userRequest: "release callback management",
-    sessionId: "session-abandon",
-    turnId: "turn-abandon",
-    executorKind: "codex",
-    now: new Date(NOW_ISO)
-  });
-  const pending = {
-    status: "pending",
-    attempts: 2,
-    attempt_pid: 4412,
-    attempt_lease_expires_at: "2026-08-14T12:02:00.000Z",
-    retry_monitor_pid: 4413,
-    next_attempt_at: "2026-08-14T12:03:00.000Z",
-    message: MESSAGE
-  };
-  const fenced = supersedeUnacceptedCallbackDeliveries({
-    ...conversation,
-    callback_delivery: pending,
-    callback_notification_delivery: { ...pending, status: "failed" }
-  }, {
-    at: NOW_ISO,
-    reason: "superseded_by_user_management_abandonment"
-  });
-  for (const field of [
-    "callback_delivery",
-    "callback_notification_delivery"
-  ] as const) {
-    const delivery = fenced[field] as Record<string, unknown>;
-    assert.equal(delivery.status, "superseded");
-    assert.equal(delivery.attempt_pid, undefined);
-    assert.equal(delivery.attempt_lease_expires_at, undefined);
-    assert.equal(delivery.retry_monitor_pid, undefined);
-    assert.equal(delivery.next_attempt_at, undefined);
-    assert.equal(
-      disposition(beginCallbackRetryPolicy(delivery, LIMITS)).state,
-      "unavailable"
-    );
-  }
-});
-
-test("management abandonment preserves accepted callback transport evidence", () => {
-  const conversation = createConversation({
-    userRequest: "preserve accepted callback",
-    sessionId: "session-accepted",
-    turnId: "turn-accepted",
-    executorKind: "codex",
-    now: new Date(NOW_ISO)
-  });
-  const accepted = {
-    status: "pending",
-    attempts: 1,
-    message: MESSAGE,
-    injection: { status: "accepted", accepted_at: NOW_ISO }
-  };
-  const withAccepted: Conversation = {
-    ...conversation,
-    callback_delivery: accepted,
-    callback_notification_delivery: accepted
-  };
-  assert.strictEqual(
-    supersedeUnacceptedCallbackDeliveries(withAccepted, {
-      at: NOW_ISO,
-      reason: "superseded_by_user_management_abandonment"
-    }),
-    withAccepted
-  );
-});
-
-test("management abandonment supersedes transport-started lanes while preserving audit evidence", () => {
-  const conversation = createConversation({
-    userRequest: "release a transport-started callback",
-    sessionId: "session-started",
-    turnId: "turn-started",
-    executorKind: "codex",
-    now: new Date(NOW_ISO)
-  });
-  const started = {
-    status: "pending",
-    attempts: 2,
-    attempt_id: "attempt-started",
-    attempt_pid: 4412,
-    message: MESSAGE,
-    transport_started_at: NOW_ISO,
-    transport_started_lane: "lifecycle",
-    transport_started_attempt: 2,
-    transport_started_attempt_id: "attempt-started",
-    transport_started_pid: 4412
-  };
-  assert.equal(callbackDeliveryHasStartedTransport(started, "lifecycle"), true);
-  const fenced = supersedeUnacceptedCallbackDeliveries({
-    ...conversation,
-    callback_delivery: started
-  }, {
-    at: NOW_ISO,
-    reason: "superseded_by_user_management_abandonment"
-  });
-  const delivery = fenced.callback_delivery as Record<string, unknown>;
-  assert.equal(delivery.status, "superseded");
-  assert.equal(delivery.transport_started_at, NOW_ISO);
-  assert.equal(delivery.transport_started_attempt_id, "attempt-started");
-  assert.equal(delivery.attempt_pid, undefined);
-});
-
-test("management abandonment fails closed on partial transport-start authority", () => {
-  const conversation = createConversation({
-    userRequest: "reject malformed transport-start authority",
-    sessionId: "session-partial-start",
-    turnId: "turn-partial-start",
-    executorKind: "codex",
-    now: new Date(NOW_ISO)
-  });
-  assert.throws(() => supersedeUnacceptedCallbackDeliveries({
-    ...conversation,
-    callback_delivery: {
-      status: "pending",
-      attempts: 1,
-      attempt_id: "attempt-partial",
-      message: MESSAGE,
-      transport_started_at: NOW_ISO
-    }
-  }, {
-    at: NOW_ISO,
-    reason: "superseded_by_user_management_abandonment"
-  }), /callback transport-start authority is invalid/u);
 });

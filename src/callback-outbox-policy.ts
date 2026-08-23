@@ -33,45 +33,10 @@ export interface CallbackProcessFailureObservation {
   error?: { message?: string };
 }
 
-export function callbackDeliveryHasStartedTransport(
-  delivery: unknown,
-  lane: "lifecycle" | "notification"
-): boolean {
-  const value = recordValue(delivery);
-  if (!value) return false;
-  const fields = [
-    value.transport_started_at,
-    value.transport_started_lane,
-    value.transport_started_attempt,
-    value.transport_started_attempt_id,
-    value.transport_started_pid
-  ];
-  if (fields.every((field) => field === undefined)) return false;
-  const startedAt = stringValue(value.transport_started_at);
-  const attempt = Number(value.transport_started_attempt);
-  const deliveryAttempt = Number(value.attempts);
-  const attemptId = stringValue(value.transport_started_attempt_id);
-  const deliveryAttemptId = stringValue(value.attempt_id);
-  const pid = Number(value.transport_started_pid);
-  if (
-    !startedAt || !Number.isFinite(Date.parse(startedAt)) ||
-    value.transport_started_lane !== lane ||
-    !Number.isSafeInteger(attempt) || attempt < 1 ||
-    attempt !== deliveryAttempt ||
-    !attemptId || attemptId !== deliveryAttemptId ||
-    !Number.isSafeInteger(pid) || pid <= 1
-  ) {
-    throw new Error("callback transport-start authority is invalid");
-  }
-  return true;
-}
-
 /**
  * Fence an advisory outbox when its underlying Turn moves on. Accepted
- * transport evidence is retained for settlement. A durable transport-start
- * marker only records that the current attempt may already be outside the
- * writer lock; the durable claim is still superseded so it cannot retry and
- * a late settlement cannot revive it.
+ * transport evidence is retained for settlement; only unaccepted work is
+ * superseded so a late retry cannot notify the previous lifecycle phase.
  */
 export function supersedeCallbackNotificationDelivery(
   conversation: Conversation,
@@ -85,50 +50,9 @@ export function supersedeCallbackNotificationDelivery(
   ) {
     return conversation;
   }
-  callbackDeliveryHasStartedTransport(delivery, "notification");
   return {
     ...conversation,
     callback_notification_delivery: {
-      ...delivery,
-      status: "superseded",
-      superseded_at: input.at,
-      superseded_reason: input.reason,
-      attempt_pid: undefined,
-      attempt_lease_expires_at: undefined,
-      retry_monitor_pid: undefined,
-      next_attempt_at: undefined,
-      updated_at: input.at
-    }
-  };
-}
-
-/**
- * Release-only management close fences both durable retry lanes. A transport
- * already accepted by the host remains immutable evidence and is not
- * represented as revoked. Process leases and transport-start markers are
- * audit evidence, not retry authority, so every unaccepted generation is
- * superseded.
- */
-export function supersedeUnacceptedCallbackDeliveries(
-  conversation: Conversation,
-  input: { at: string; reason: string }
-): Conversation {
-  const withNotification = supersedeCallbackNotificationDelivery(
-    conversation,
-    input
-  );
-  const delivery = recordValue(withNotification.callback_delivery);
-  if (
-    !delivery ||
-    !["pending", "failed"].includes(String(delivery.status ?? "")) ||
-    callbackDeliveryHasAcceptedTransport(delivery)
-  ) {
-    return withNotification;
-  }
-  callbackDeliveryHasStartedTransport(delivery, "lifecycle");
-  return {
-    ...withNotification,
-    callback_delivery: {
       ...delivery,
       status: "superseded",
       superseded_at: input.at,
@@ -320,28 +244,6 @@ export function beginCallbackRetryPolicy(
   }
   if (callbackDeliveryHasAcceptedTransport(delivery)) {
     return decided({ state: "accepted", attempt });
-  }
-  let transportStarted = false;
-  try {
-    transportStarted = callbackDeliveryHasStartedTransport(
-      delivery,
-      String(delivery.transport_started_lane) === "notification"
-        ? "notification"
-        : "lifecycle"
-    );
-  } catch (error) {
-    return decided({
-      state: "unavailable",
-      attempt,
-      reason: error instanceof Error ? error.message : String(error)
-    });
-  }
-  if (transportStarted && attemptOutcome.kind === "missing") {
-    return decided({
-      state: "uncertain",
-      attempt,
-      reason: "callback_transport_started_without_final_outcome"
-    });
   }
   if (!Number.isSafeInteger(attemptValue) || attemptValue < 1) {
     return decided({

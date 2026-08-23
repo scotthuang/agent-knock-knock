@@ -323,14 +323,6 @@ class BoundDeferredForegroundApplicationScope implements
     );
   }
 
-  transferMatchesTerminal(transfer: DeferredForegroundTransfer): boolean {
-    this.#assertActive();
-    return terminalControlEvidenceMatches(
-      transfer.terminal_endpoint,
-      this.#route.terminalControl
-    );
-  }
-
   terminalMatches(
     transfer: DeferredForegroundTransfer,
     boundary: DeferredForegroundBindingBoundary

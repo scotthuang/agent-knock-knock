@@ -21,16 +21,6 @@ const TERMINAL_WATCH_ACTION_USE =
   "exact terminal_id; AKK refreshes and revalidates current observation " +
   "authority internally.";
 
-const DEFERRED_USER_ABANDON_CLOSE_USE =
-  "After explicit user confirmation, close only this exact AKK Turn and " +
-  "release its linked deferred terminal management. After the abandonment " +
-  "intent, AKK does not prepare or retry another callback. A callback " +
-  "attempt already in flight or accepted by the host may still arrive. " +
-  "This sends no terminal input and does not interrupt or stop " +
-  "Codex; the coding task may keep running independently. Refresh list " +
-  "afterward and, if the current human-started task is still active, use " +
-  "only its newly advertised watch action.";
-
 export interface AvailableListActionFacts {
   terminalBridgeReady: boolean;
   managedApprovalPending: boolean;
@@ -90,7 +80,7 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 19,
+    version: 18,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Either nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "The session_exact scope uses session_id only when it is prefilled by the listed send action. A rollout-backed managed Codex pane instead uses the terminal_follow_current scope with its exact terminal_id because even one materialized rollout does not prove the current TUI foreground thread. AKK derives and revalidates current terminal authority internally. A turn id is never an ordinary send target.",
@@ -103,7 +93,6 @@ export function listActionContracts(): JsonRecord {
       "Structured follow-current actions use only the exact terminal_id prefilled by that terminal row. Human slash commands may use an explicitly named discovery selector. AKK resolves and revalidates current action authority internally; never infer or guess a target.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
       "Retry submission is never automatic. Only when the current exact Turn exposes available_actions.retry_submission, ask for explicit user confirmation and call its prefilled agent_knock_knock_send {turn_id} form unchanged. It never accepts replacement text or caller-selected terminal, Session, timeout, or callback route data, and execution revalidates the durable submission and live terminal under lock before any input.",
-      "When an exact current blocked Turn owns one linked nonterminal deferred transfer, its live terminal row or unavailable_managed_turns entry may expose available_actions.close after all durable Turn, transfer, Store-route, message, and terminal-endpoint identities match an exact current ledger, one unique immutable receipt behind a newer ledger owner, or a verified absent ledger. The same close remains available for its exact closed user-abandonment-in-progress recovery. Process visibility is not required because this action sends no terminal input. After explicit user confirmation, that exact {turn_id} close abandons only AKK management and releases the management conflict. After the abandonment intent, AKK does not prepare or retry another callback. A callback attempt already in flight or accepted by the host may still arrive. This does not stop Codex. Refresh list afterward; a still-running human task may then expose Watch. Never infer this close from source history, an ambiguous transfer, an unreadable ledger, or a different Turn.",
       "Manual approval binds the exact prompt the user reviewed. After explicit confirmation, call only the currently advertised approve action; AKK keeps the prompt authority private and recaptures the exact terminal, process, request, and prompt before sending a decision key. A prompt without complete exact evidence is not approvable.",
       "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action. When a Codex managed prompt has no usable AKK Turn owner, list may expose one manual terminal-scoped approve action after exact observation. It does not mutate the Turn or Session binding, has no durable dispatch receipt, and is never eligible for automatic approval. If its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
@@ -365,10 +354,6 @@ export function listActionContracts(): JsonRecord {
           "expected_transition_id"
         ],
         requires_explicit_user_confirmation: true,
-        sends_terminal_input: false,
-        stops_coding_agent: false,
-        explicit_user_abandon_scope:
-          "Only the exact current blocked Turn's listed close action, or that same Turn's exact closed abandonment-in-progress recovery, may release one linked nonterminal deferred transfer. Authority requires an exact current ledger, one unique immutable receipt behind a newer owner, or a verified absent ledger; unreadable or ambiguous evidence is status-only. It records user_abandoned_management and releases AKK terminal management. After the abandonment intent, AKK does not prepare or retry another callback. A callback attempt already in flight or accepted by the host may still arrive. Codex may continue independently. Refresh list afterward before starting Watch or any other terminal action.",
         handoff_scope:
           "Use only the complete nested action from terminals[].handoff_decision.choices.take_over_current after explicit confirmation. AKK binds and revalidates the current handoff decision privately."
       }
@@ -896,73 +881,6 @@ export function readOnlyManagedTurn(managedTurn: JsonRecord): JsonRecord {
         : {}
     )
   };
-}
-
-export function exactDeferredUserAbandonManagedTurn(
-  managedTurn: JsonRecord
-): JsonRecord {
-  const availableActions = isRecord(managedTurn.available_actions)
-    ? managedTurn.available_actions
-    : {};
-  const close = isRecord(availableActions.close)
-    ? availableActions.close
-    : undefined;
-  if (!close) {
-    return readOnlyManagedTurn(managedTurn);
-  }
-  return {
-    ...managedTurn,
-    available_actions: {
-      ...readOnlyListActions(availableActions),
-      close: {
-        ...close,
-        requires_explicit_user_confirmation: true,
-        scope: "exact_deferred_user_abandonment",
-        disposition: "user_abandoned_management",
-        terminal_input_sent: false,
-        coding_agent_stopped: false,
-        management_released: true,
-        use: DEFERRED_USER_ABANDON_CLOSE_USE
-      }
-    }
-  };
-}
-
-export function renderUnavailableManagedTurn(
-  managedTurn: JsonRecord,
-  facts: {
-    mutationsAllowed: boolean;
-    hasNonterminalDeferredTransfer: boolean;
-    exactDeferredUserAbandonTarget: boolean;
-  }
-): JsonRecord {
-  if (!facts.mutationsAllowed) {
-    return readOnlyManagedTurn(managedTurn);
-  }
-  if (facts.exactDeferredUserAbandonTarget) {
-    return exactDeferredUserAbandonManagedTurn(managedTurn);
-  }
-  if (facts.hasNonterminalDeferredTransfer) {
-    return readOnlyManagedTurn(managedTurn);
-  }
-  const availableActions = isRecord(managedTurn.available_actions)
-    ? managedTurn.available_actions
-    : {};
-  return {
-    ...managedTurn,
-    available_actions: safeUnavailableManagedTurnActions(availableActions)
-  };
-}
-
-export function exactDeferredUserAbandonCloseAction(
-  managedTurn: JsonRecord | undefined
-): JsonRecord | undefined {
-  const availableActions = managedTurn && isRecord(managedTurn.available_actions)
-    ? managedTurn.available_actions
-    : undefined;
-  return isRecord(availableActions?.close)
-    ? availableActions.close
-    : undefined;
 }
 
 export function withoutGenericHandoffSourceClose(

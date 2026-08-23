@@ -756,7 +756,7 @@ test("raw lock timeout retries outside the service without duplicating monitor s
   assert.ok(!trace.includes("log:terminal_bridge_monitor_binding_check_deferred"));
 });
 
-test("prepared recovery releases state, writer, and terminal locks in canonical order", async () => {
+test("prepared recovery releases state, writer, and terminal locks in legacy order", async () => {
   const trace: string[] = [];
   const owner = conversation({
     terminal_bridge_submission: {
@@ -794,7 +794,6 @@ test("prepared recovery releases state, writer, and terminal locks in canonical 
         trace.push("state.load");
         return owner;
       },
-      userAbandonmentStatus: () => undefined,
       loadLedger: () => {
         trace.push("ledger.load");
         return {
@@ -844,89 +843,15 @@ test("prepared recovery releases state, writer, and terminal locks in canonical 
   assert.deepEqual(trace, [
     "terminal.acquire",
     "writer.acquire",
+    "ledger.load",
     "state.acquire",
     "state.load",
-    "ledger.load",
     "submission.read",
     "submission.apply:submitted",
     "submission.read",
     "state.save",
     "state.release",
     "submission.read",
-    "writer.release",
-    "terminal.release"
-  ]);
-});
-
-test("prepared recovery fences a close intent after loading the old Turn", async () => {
-  const listed = conversation({
-    terminal_bridge_submission: {
-      message_id: "message-1",
-      status: "prepared",
-      prepared_at: "1970-01-01T00:00:00.000Z"
-    }
-  });
-  const closed = {
-    ...listed,
-    status: "closed" as const,
-    disposition: "user_abandoned_management"
-  };
-  const trace: string[] = [];
-  const result = await recoverPreparedMonitorSubmission({
-    conversation: listed,
-    statePath: "/store/state.json",
-    logPath: "/store/events.ndjson",
-    terminalControl: CONTROL,
-    currentMessageId: "message-1",
-    dispatcherPid: 7331,
-    ports: {
-      acquireTerminal: () => {
-        trace.push("terminal.acquire");
-        return () => trace.push("terminal.release");
-      },
-      withWriter: async (use) => {
-        trace.push("writer.acquire");
-        try { return await use(); } finally { trace.push("writer.release"); }
-      },
-      acquireState: () => {
-        trace.push("state.acquire");
-        return () => trace.push("state.release");
-      },
-      loadConversation: () => {
-        trace.push("state.load:closed");
-        return closed;
-      },
-      userAbandonmentStatus: () => {
-        trace.push("abandonment:user_abandoning");
-        return "user_abandoning";
-      },
-      loadLedger: () => {
-        trace.push("ledger.load");
-        return undefined;
-      },
-      saveLedger: () => trace.push("ledger.save"),
-      saveConversation: () => trace.push("state.save"),
-      submission: () => {
-        trace.push("submission.read");
-        return undefined;
-      },
-      applySubmission: () => {
-        throw new Error("abandonment must fence submission recovery");
-      },
-      requestFingerprint: () => undefined,
-      now: () => new Date(0),
-      appendEvent: () => trace.push("event"),
-      stallCollateral: () => trace.push("collateral")
-    }
-  });
-  assert.equal(result, closed);
-  assert.deepEqual(trace, [
-    "terminal.acquire",
-    "writer.acquire",
-    "state.acquire",
-    "state.load:closed",
-    "abandonment:user_abandoning",
-    "state.release",
     "writer.release",
     "terminal.release"
   ]);
@@ -983,7 +908,6 @@ test("prepared monitor recovery fences callback authority before a retryable sta
       withWriter: async <Value>(use: () => Promise<Value>) => use(),
       acquireState: () => () => undefined,
       loadConversation: () => durableConversation,
-      userAbandonmentStatus: () => undefined,
       loadLedger: () => ledger,
       saveLedger: (_control: TerminalControlRef, next: Record<string, unknown>) => {
         trace.push("ledger.save");
@@ -1107,7 +1031,6 @@ test("prepared monitor recovery rejects a callback route redirect before writes"
       withWriter: async (use) => use(),
       acquireState: () => () => undefined,
       loadConversation: () => owner,
-      userAbandonmentStatus: () => undefined,
       loadLedger: () => ({
         message_id: "message-1",
         status: "submitted",
@@ -1239,7 +1162,6 @@ test("restart repairs lagging accepted authority before acceptance or terminal I
             trace.push("state.load:repair");
             return durableConversation;
           },
-          userAbandonmentStatus: () => undefined,
           loadLedger: () => {
             trace.push("ledger.load");
             return ledger;
@@ -1339,7 +1261,6 @@ test("lagging accepted authority repair fails closed on a route conflict", async
         return () => trace.push("state.release");
       },
       loadConversation: () => owner,
-      userAbandonmentStatus: () => undefined,
       loadLedger: () => ({
         message_id: "message-1",
         status: "agent_accepted",
@@ -1360,77 +1281,6 @@ test("lagging accepted authority repair fails closed on a route conflict", async
     "terminal.acquire",
     "writer.acquire",
     "state.acquire",
-    "state.release",
-    "writer.release",
-    "terminal.release"
-  ]);
-});
-
-test("lagging accepted repair fences a close intent under its state lock", async () => {
-  const listed = conversation({
-    terminal_bridge_submission: {
-      message_id: "message-1",
-      status: "enter_dispatched"
-    }
-  });
-  const closed = {
-    ...listed,
-    status: "closed" as const,
-    disposition: "user_abandoned_management"
-  };
-  const trace: string[] = [];
-  const result = await repairLaggingAcceptedMonitorAuthority({
-    conversation: listed,
-    terminalControl: CONTROL,
-    currentMessageId: "message-1",
-    ports: {
-      acquireTerminal: () => {
-        trace.push("terminal.acquire");
-        return () => trace.push("terminal.release");
-      },
-      withWriter: async (use) => {
-        trace.push("writer.acquire");
-        try { return await use(); } finally { trace.push("writer.release"); }
-      },
-      acquireState: () => {
-        trace.push("state.acquire");
-        return () => trace.push("state.release");
-      },
-      loadConversation: () => {
-        trace.push("state.load:closed");
-        return closed;
-      },
-      userAbandonmentStatus: () => {
-        trace.push("abandonment:user_abandoning");
-        return "user_abandoning";
-      },
-      loadLedger: () => {
-        trace.push("ledger.load");
-        return undefined;
-      },
-      reconcileLedger: () => {
-        trace.push("ledger.reconcile");
-        return undefined;
-      },
-      submission: (candidate) => {
-        trace.push("submission.read");
-        const takeover = isRecord(candidate.native_session_takeover)
-          ? candidate.native_session_takeover
-          : undefined;
-        return isRecord(takeover?.terminal_bridge_submission)
-          ? takeover.terminal_bridge_submission
-          : undefined;
-      }
-    }
-  });
-  assert.equal(result, closed);
-  assert.deepEqual(trace, [
-    "submission.read",
-    "terminal.acquire",
-    "writer.acquire",
-    "state.acquire",
-    "state.load:closed",
-    "abandonment:user_abandoning",
     "state.release",
     "writer.release",
     "terminal.release"
@@ -1515,7 +1365,6 @@ test("restart repairs a state-first accepted authority on the first poll", async
           saveLedger: (_control, next) => { ledger = next; },
           submission: monitorPorts.authority.submission,
           loadConversation: () => owner,
-          userAbandonmentStatus: () => undefined,
           terminalControl: () => CONTROL,
           sameIncarnation: () => true,
           runtime: () => ({ pid: 4201, cwd: "/workspace" }),
@@ -1576,7 +1425,6 @@ test("fresh poll retry releases the terminal lock and performs no terminal I/O",
       saveLedger: () => trace.push("ledger.save"),
       submission: () => undefined,
       loadConversation: () => changed,
-      userAbandonmentStatus: () => undefined,
       terminalControl: () => CONTROL,
       sameIncarnation: () => true,
       runtime: () => ({ pid: 4242 }),
@@ -1588,87 +1436,6 @@ test("fresh poll retry releases the terminal lock and performs no terminal I/O",
 
   assert.deepEqual(result, { kind: "retry", conversation: changed });
   assert.deepEqual(trace, ["terminal.acquire", "terminal.release"]);
-});
-
-test("poll fences a close intent before ledger repair or terminal I/O", async () => {
-  const listed = conversation({
-    terminal_bridge_submission: {
-      message_id: "message-1",
-      status: "submitted",
-      submitted_at: "1970-01-01T00:00:01.000Z"
-    }
-  });
-  const closed = {
-    ...listed,
-    status: "closed" as const,
-    disposition: "user_abandoned_management"
-  };
-  const trace: string[] = [];
-  const result = await pollTerminalMonitor({
-    conversation: listed,
-    terminalControl: CONTROL,
-    currentMessageId: "message-1",
-    executor: listed.executor,
-    screenChangedSinceSend: false,
-    scrollbackLines: 120,
-    terminalBridge: {
-      monitorPoll: async () => {
-        trace.push("terminal.poll");
-        return { status: status() } as TerminalMonitorPoll;
-      }
-    } as never,
-    onFenced: (ledgerStatus) => trace.push(`present:${ledgerStatus}`),
-    ports: {
-      acquireTerminal: () => {
-        trace.push("terminal.acquire");
-        return () => trace.push("terminal.release");
-      },
-      reconcileLedger: () => {
-        trace.push("ledger.reconcile");
-        return undefined;
-      },
-      loadLedger: () => {
-        trace.push("ledger.load");
-        return undefined;
-      },
-      saveLedger: () => trace.push("ledger.save"),
-      submission: () => {
-        trace.push("submission.read");
-        return undefined;
-      },
-      loadConversation: () => {
-        trace.push("state.load:closed");
-        return closed;
-      },
-      userAbandonmentStatus: () => {
-        trace.push("abandonment:user_abandoning");
-        return "user_abandoning";
-      },
-      terminalControl: () => CONTROL,
-      sameIncarnation: () => true,
-      runtime: () => {
-        trace.push("runtime");
-        return { pid: 4242 };
-      },
-      durableRequest: () => {
-        trace.push("durable-request");
-        return { context: {} };
-      },
-      appendEvent: () => trace.push("event"),
-      now: () => new Date(0)
-    }
-  });
-  assert.deepEqual(result, {
-    kind: "fenced",
-    ledgerStatus: "user_abandoning"
-  });
-  assert.deepEqual(trace, [
-    "terminal.acquire",
-    "state.load:closed",
-    "abandonment:user_abandoning",
-    "present:user_abandoning",
-    "terminal.release"
-  ]);
 });
 
 test("poll repair synchronizes callback route authority from the durable Turn", async () => {
@@ -1711,7 +1478,6 @@ test("poll repair synchronizes callback route authority from the durable Turn", 
             : undefined;
         },
         loadConversation: () => changed,
-        userAbandonmentStatus: () => undefined,
         terminalControl: () => CONTROL,
         sameIncarnation: () => true,
         runtime: () => ({ pid: 4242 }),
@@ -1766,7 +1532,6 @@ test("poll repair rejects conflicting callback route authority", async () => {
           : undefined;
       },
       loadConversation: () => owner,
-      userAbandonmentStatus: () => undefined,
       terminalControl: () => CONTROL,
       sameIncarnation: () => true,
       runtime: () => ({ pid: 4242 }),
@@ -1803,7 +1568,6 @@ test("dispatch fencing is presented before the poll terminal lock releases", asy
       saveLedger: () => trace.push("ledger.save"),
       submission: () => undefined,
       loadConversation: () => owner,
-      userAbandonmentStatus: () => undefined,
       terminalControl: () => CONTROL,
       sameIncarnation: () => true,
       runtime: () => ({ pid: 4242 }),

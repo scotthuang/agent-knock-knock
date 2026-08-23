@@ -49,8 +49,7 @@ export interface TerminalMonitorReconciliationResult {
 export interface TerminalMonitorSupervisionCliDependencies {
   state: Pick<TerminalMonitorStateCliAdapter,
     "runService" | "deferralPorts" | "reconcileCollateral" | "statePaths" |
-      "reconcileState" | "recoverDeferredUserAbandonmentBeforeMutation" |
-      "eligibility" | "prepareLaunch">;
+      "reconcileState" | "eligibility" | "prepareLaunch">;
   callbacks: Pick<CallbackCliFacade, "runRetryMonitor">;
   authority: {
     migrateIdentity(input: {
@@ -235,28 +234,16 @@ class TerminalMonitorSupervisionCliApplication {
     request: TerminalMonitorReconciliationRequest
   ): Promise<TerminalMonitorReconciliationResult> {
     const storeDir = this.#dependencies.runtime.storeDir(options);
-    const listedConversations = this.#dependencies.io
+    const collateral = await this.#dependencies.state.reconcileCollateral(
+      storeDir,
+      request.conversationId
+    );
+    const conversations = this.#dependencies.io
       .listConversations(storeDir)
       .filter((conversation) =>
         request.conversationId === undefined ||
         conversation.conversation_id === request.conversationId
       );
-    const conversations: Conversation[] = [];
-    for (const listed of listedConversations) {
-      const paths = this.#dependencies.state.statePaths(listed, storeDir);
-      const startup = await this.#dependencies.state
-        .recoverDeferredUserAbandonmentBeforeMutation({
-          options,
-          storeDir,
-          conversation: listed,
-          statePath: paths.statePath
-        });
-      conversations.push(startup.conversation);
-    }
-    const collateral = await this.#dependencies.state.reconcileCollateral(
-      storeDir,
-      request.conversationId
-    );
     const accumulator: ReconciliationAccumulator = {
       ignored: 0,
       launched: 0,
@@ -946,19 +933,9 @@ class TerminalMonitorSupervisionCliApplication {
       50,
       Number(options.pollIntervalMs ?? DEFAULT_MONITOR_POLL_INTERVAL_MS)
     );
-    const startup = await this.#dependencies.state
-      .recoverDeferredUserAbandonmentBeforeMutation({
-        options,
-        storeDir: this.#dependencies.runtime.storeDir(options),
-        conversation: this.#dependencies.io.loadState(statePath),
-        statePath
-      });
-    if (startup.action === "released") {
-      return;
-    }
     const initialConversation = await this.#dependencies.authority
       .migrateIdentity({
-        conversation: startup.conversation,
+        conversation: this.#dependencies.io.loadState(statePath),
         statePath,
         logPath,
         options

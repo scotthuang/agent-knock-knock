@@ -171,10 +171,6 @@ function harness(options: HarnessOptions): {
         assert.equal(scope, SCOPE);
         trace.push("recovery:pending-anchor-version");
         return options.pendingAnchorVersion ?? 2;
-      },
-      completeUserAbandonment: async (scope) => {
-        assert.equal(scope, SCOPE);
-        trace.push("recovery:complete-user-abandonment");
       }
     },
     runtime: {
@@ -286,32 +282,6 @@ test("possible-input version-three pending recovery never retries or rolls back"
   assert.equal(recording.trace.some((entry) => entry.includes("abort")), false);
   assert.equal(recording.trace.filter((entry) =>
     entry === "recovery:acceptance-once").length, 1);
-});
-
-test("durable user abandonment outranks boundary and acceptance recovery", async () => {
-  const recording = harness({
-    matching: [transfer("user_abandoning", "enter_dispatched")]
-  });
-  await recording.service.recover();
-  assert.deepEqual(recording.trace, [
-    "scope:writer",
-    "transfer:all",
-    "transfer:matching",
-    "scope:transfer:user_abandoning",
-    "recovery:complete-user-abandonment"
-  ]);
-});
-
-test("completed user abandonment is excluded from recovery candidates", async () => {
-  const recording = harness({
-    matching: [transfer("user_abandoned", "enter_dispatched")]
-  });
-  await recording.service.recover();
-  assert.deepEqual(recording.trace, [
-    "scope:writer",
-    "transfer:all",
-    "transfer:matching"
-  ]);
 });
 
 test("uncertain exact submission-retry pending remains monitorable", async () => {

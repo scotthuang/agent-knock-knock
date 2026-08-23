@@ -87,11 +87,6 @@ interface FixtureHooks {
   readEvents?(logPath: string): Array<Record<string, unknown>>;
   isProcessAlive?(pid: number): boolean;
   reconcileState?: TerminalMonitorStateCliAdapter["reconcileState"];
-  recoverDeferredUserAbandonmentBeforeMutation?:
-    TerminalMonitorStateCliAdapter[
-      "recoverDeferredUserAbandonmentBeforeMutation"
-    ];
-  reconcileCollateral?: TerminalMonitorStateCliAdapter["reconcileCollateral"];
   prepareLaunch?: TerminalMonitorStateCliAdapter["prepareLaunch"];
   eligibility?: TerminalMonitorStateCliAdapter["eligibility"];
   runService?: TerminalMonitorStateCliAdapter["runService"];
@@ -132,24 +127,18 @@ function fixture(hooks: FixtureHooks = {}) {
       runtime: {},
       presentation: {}
     }),
-    reconcileCollateral: hooks.reconcileCollateral ?? (async () => ({
-        checked: 0,
-        repaired: 0,
-        skipped: 0,
-        errors: [],
-        items: []
-      })),
+    reconcileCollateral: async () => ({
+      checked: 0,
+      repaired: 0,
+      skipped: 0,
+      errors: [],
+      items: []
+    }),
     statePaths: () => ({
       statePath: "/store/turn-1/state.json",
       logPath: "/store/turn-1/events.ndjson"
     }),
     reconcileState: hooks.reconcileState ?? (async () => ({ kind: "ignored" })),
-    recoverDeferredUserAbandonmentBeforeMutation:
-      hooks.recoverDeferredUserAbandonmentBeforeMutation ??
-        (async (input) => ({
-          action: "continue",
-          conversation: input.conversation
-        })),
     eligibility: hooks.eligibility ?? (() => ({
       eligible: false,
       reason: "test_ineligible"
@@ -372,58 +361,6 @@ test("reconciliation honors current then legacy ownership and fresh launch facts
   assert.equal(failed.events.length, 0);
 });
 
-test("reconciliation settles every abandonment before collateral callbacks", async () => {
-  const trace: string[] = [];
-  const first = conversation();
-  first.conversation_id = "turn-first";
-  const second = conversation();
-  second.conversation_id = "turn-second";
-  const supervision = fixture({
-    listConversations: () => [first, second],
-    recoverDeferredUserAbandonmentBeforeMutation: async (input) => {
-      trace.push(`abandonment:${input.conversation.conversation_id}`);
-      return {
-        action: input.conversation === first ? "released" : "continue",
-        conversation: input.conversation
-      };
-    },
-    reconcileCollateral: async () => {
-      trace.push("collateral-callback-reconcile");
-      return {
-        checked: 0,
-        repaired: 0,
-        skipped: 0,
-        errors: [],
-        items: []
-      };
-    },
-    reconcileState: async (input) => {
-      trace.push(`state:${input.listed.conversation_id}`);
-      return {
-        kind: "handled",
-        counter: "skipped",
-        item: {
-          conversation_id: input.listed.conversation_id,
-          status: "released"
-        }
-      };
-    }
-  });
-
-  await supervision.facade.reconcileMonitors({}, {
-    includeCallbackRecovery: true,
-    reason: "startup_reconciliation"
-  });
-
-  assert.deepEqual(trace, [
-    "abandonment:turn-first",
-    "abandonment:turn-second",
-    "collateral-callback-reconcile",
-    "state:turn-first",
-    "state:turn-second"
-  ]);
-});
-
 test("monitor routing retains singleton lock and lazy configuration boundaries", async () => {
   let configurationReads = 0;
   let bridgeCreates = 0;
@@ -453,31 +390,6 @@ test("monitor routing retains singleton lock and lazy configuration boundaries",
   });
   assert.equal(configurationReads, 1);
   assert.deepEqual(ready.order, ["acquire", "migrate", "release"]);
-
-  const releasedTrace: string[] = [];
-  const released = fixture({
-    recoverDeferredUserAbandonmentBeforeMutation: async (input) => {
-      releasedTrace.push("abandonment");
-      return { action: "released", conversation: input.conversation };
-    },
-    migrateIdentity: async (input) => {
-      releasedTrace.push("migrate");
-      return input.conversation;
-    },
-    runService: async () => {
-      releasedTrace.push("monitor-service");
-    },
-    createBridge: () => {
-      releasedTrace.push("live-bridge");
-      return {} as TerminalAgentBridge;
-    }
-  });
-  await released.facade.runMonitor({
-    terminalBridge: true,
-    state: "/store/turn-1/state.json"
-  });
-  assert.deepEqual(releasedTrace, ["abandonment"]);
-  assert.deepEqual(released.order, ["acquire", "release"]);
 
   let timeoutReads = 0;
   let generationBridgeCreates = 0;

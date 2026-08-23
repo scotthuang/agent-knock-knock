@@ -508,7 +508,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_close",
     description:
-      "Close one managed Turn record without terminating the shared pane. Ordinary close uses turn_id. A fresh list may advertise that same exact {turn_id} action to abandon one blocked Turn and its linked deferred AKK management after explicit confirmation. After the abandonment intent, AKK does not prepare or retry another callback. A callback attempt already in flight or accepted by the host may still arrive. It sends no terminal input and does not interrupt or stop Codex. Orphan dispatch/lifecycle recovery may additionally use its exact expected_message_id or expected_transition_id. Human-context handoff uses the advertised turn_id plus reason=superseded_by_human_context_switch after explicit confirmation; AKK resolves the current handoff authority privately. Refresh list afterward; a still-running human task may then expose Watch.",
+      "Close one managed Turn record without terminating the shared pane. Ordinary close uses turn_id. Orphan dispatch/lifecycle recovery may additionally use its exact expected_message_id or expected_transition_id. Human-context handoff uses the advertised turn_id plus reason=superseded_by_human_context_switch after explicit confirmation; AKK resolves the current handoff authority privately. Refresh list afterward.",
     parameters: closeParameters,
     isErrorResult: isBlockedTerminalDispatchResult,
     buildArgs: (params, toolContext) => {
@@ -1251,19 +1251,6 @@ function formatCloseCommandResult(result) {
   }
   const conversation = result.conversation ?? {};
   const { sessionId, turnId } = publicTurnIdentity(result);
-  if (result.disposition === "user_abandoned_management") {
-    return [
-      "AKK released its management of the Turn.",
-      `session: ${sessionId}`,
-      `turn: ${turnId}`,
-      "disposition: user_abandoned_management",
-      "terminal input sent: no",
-      "coding agent stopped: no",
-      "After the abandonment intent, AKK does not prepare or retry another callback. A callback attempt already in flight or accepted by the host may still arrive.",
-      "Codex may continue the task independently.",
-      "Refresh AKK list. If the current human-started task is still active, use only its newly advertised Watch action."
-    ].join("\n");
-  }
   return [
     "AKK Turn record closed.",
     `session: ${sessionId}`,

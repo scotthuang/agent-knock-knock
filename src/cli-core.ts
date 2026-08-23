@@ -169,8 +169,6 @@ import {
 } from "./terminal-dispatch-recovery-cli-adapter.js";
 import * as deferredRecoveryAdapter from
   "./deferred-foreground-recovery-cli-adapter.js";
-import { bindDeferredForegroundApplicationScope } from
-  "./deferred-foreground-capability.js";
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import { openClawYieldNextAction } from
   "./terminal-dispatch-presenter.js";
@@ -1277,7 +1275,6 @@ const {
   assertVerifiedEmptyCodexTransportBoundary,
   deferredForegroundApplication,
   deferredForegroundRecoveryAdapterPorts,
-  exactTargetDeferredForegroundTransfer,
   exactSafeAbortedRecoveredSessionMatches,
   maybeAdoptObservedExternalThread,
   maybeDetachVerifiedEmptyCodexSource,
@@ -1378,7 +1375,6 @@ const terminalMaintenanceCliFacade = createTerminalMaintenanceCliFacade({
     observedHandoffAuthorityToken,
     observedHandoffTargetResolution,
     activeTurnHandoffDecisionToken,
-    exactTargetDeferredForegroundTransfer,
     hasUnresolvedNativeTransition:
       terminalListCliFacade.managedSessionHasUnresolvedNativeTransition,
     assertExclusive: nativeThreadLifecycleFacade.assertExclusive,
@@ -1400,8 +1396,6 @@ const terminalMaintenanceCliFacade = createTerminalMaintenanceCliFacade({
     ledgerResolve: mutationDispatchLedger.resolve,
     ledgerReconcileIncarnation: mutationDispatchLedger.reconcileIncarnation,
     ledgerReconcile: mutationDispatchLedger.reconcile,
-    deferredScope: bindDeferredForegroundApplicationScope,
-    deferredApplication: deferredForegroundApplication,
     terminalWriterLocks: terminalWriterMutationLocks,
     terminalWriterStateLocks: terminalWriterStateMutationLocks,
     isVerifiedDead: isVerifiedDeadTerminalAgentProcess,

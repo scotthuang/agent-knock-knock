@@ -116,10 +116,7 @@ function createHarness({
     prepared,
     order,
     events,
-    stored: () => stored,
-    replace: (conversationToStore: Conversation) => {
-      stored = conversationToStore;
-    }
+    stored: () => stored
   };
 }
 
@@ -238,44 +235,6 @@ test("changed claims append only a skipped-settlement event", async () => {
     (harness.stored().callback_delivery as Record<string, unknown>).status,
     "pending"
   );
-});
-
-test("late settlement cannot revive a management-superseded callback claim", async () => {
-  for (const lane of ["lifecycle", "notification"] as const) {
-    const harness = createHarness({ lane });
-    const field = lane === "notification"
-      ? "callback_notification_delivery"
-      : "callback_delivery";
-    const superseded = {
-      ...harness.stored(),
-      [field]: {
-        ...(harness.stored()[field] as Record<string, unknown>),
-        status: "superseded",
-        superseded_at: NOW.toISOString(),
-        superseded_reason: "superseded_by_user_management_abandonment"
-      }
-    };
-    harness.replace(superseded);
-    await withFixedClock(() => {
-      const settled = harness.service.settleDelivery(harness.prepared, {
-        delivered: true,
-        delivery: {
-          kind: "gateway_method",
-          injection: { status: "accepted" },
-          wake: { status: "ok" }
-        }
-      });
-      assert.strictEqual(settled, superseded);
-    });
-    assert.equal(
-      (harness.stored()[field] as Record<string, unknown>).status,
-      "superseded"
-    );
-    assert.equal(harness.order.includes("save"), false);
-    assert.equal(harness.order.includes("retry-monitor:start"), false);
-    assert.equal(harness.events.length, 1);
-    assert.match(String(harness.events[0]?.event), /settle_skipped$/u);
-  }
 });
 
 test("failed delivery launches retry before durable failure settlement", async () => {

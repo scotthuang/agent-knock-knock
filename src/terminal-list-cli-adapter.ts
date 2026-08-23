@@ -4,22 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import {
-  deferredForegroundActiveMessageId,
   listDeferredForegroundTransfers,
-  type DeferredForegroundTransfer,
   type DeferredForegroundTransferSourceRolloutAuthority,
   type DeferredForegroundTransferSourceTurnAuthority
 } from "./deferred-foreground-transfer.js";
-import {
-  deferredForegroundUserAbandonmentLedgerPlan,
-  exactCurrentDeferredForegroundLedgerOwner,
-  exactDeferredForegroundLedgerOwner,
-  exactDeferredForegroundUserAbandonmentLedger,
-  exactDeferredForegroundUserAbandonmentReceipt
-} from
-  "./deferred-foreground-user-abandonment-ledger.js";
-import { exactDeferredForegroundUserAbandonmentTurnReceipt } from
-  "./deferred-foreground-user-abandonment-turn.js";
 import { isFinalDeferredForegroundTransferStatus } from
   "./deferred-foreground-transfer-policy.js";
 import {
@@ -64,7 +52,6 @@ import {
   ensureStoreWritable,
   inspectStoreCompatibility,
   listConversations,
-  pathsForConversationDir,
   STORE_SESSION_AUTHORITY_PROTOCOL
 } from "./store.js";
 import {
@@ -91,8 +78,6 @@ import {
   decideLocalTerminalDispatchOwnership,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
-  isDeferredUserAbandonProjectionEligible,
-  isDeferredUserAbandonTurnManagementReleasable,
   managedTurnNeedsAttention as terminalManagedTurnNeedsAttention,
   nonOwnerTerminalActions,
   projectBlockingTurn,
@@ -139,16 +124,12 @@ import {
 } from "./terminal-scoped-approval-authority.js";
 import {
   sameCanonicalStatePath,
-  terminalDispatchReceiptHistory,
-  type TerminalDispatchLedgerDocument,
-  type TerminalDispatchReceipt
+  type TerminalDispatchLedgerDocument
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatch from "./terminal-dispatch-policy.js";
 import {
   actionsForManagedSessionBinding,
   currentTerminalActions,
-  exactDeferredUserAbandonCloseAction,
-  exactDeferredUserAbandonManagedTurn,
   listActionContracts,
   readOnlyListActions,
   readOnlyManagedTurn,
@@ -156,7 +137,7 @@ import {
   renderCurrentManagedTurn,
   renderHistoricalManagedTurn,
   renderManagedTurnListEntry,
-  renderUnavailableManagedTurn,
+  safeUnavailableManagedTurnActions,
   sendActionForManagedSession,
   withoutGenericHandoffSourceClose,
   type AvailableListActionFacts
@@ -1654,279 +1635,6 @@ type TerminalFirstListContext = {
   ) => boolean;
 };
 
-type DeferredUserAbandonLedgerObservation =
-  | {
-      state: "present";
-      ledger: TerminalDispatchLedgerDocument;
-      owner?: Conversation;
-      receipts: TerminalDispatchReceipt[];
-    }
-  | { state: "absent" }
-  | { state: "unreadable" };
-
-function exactClosedUserAbandonmentInProgress(
-  conversation: Conversation,
-  transfer: DeferredForegroundTransfer
-): boolean {
-  return transfer.status === "user_abandoning" &&
-    exactDeferredForegroundUserAbandonmentTurnReceipt(
-      conversation,
-      transfer
-    );
-}
-
-function exactCurrentDeferredUserAbandonTurn(input: {
-  storeDir: string;
-  mutationsAllowed: boolean;
-  terminalControl: TerminalControlRef;
-  allRelated: Conversation[];
-  nonterminalDeferredTransfers: DeferredForegroundTransfer[];
-  ledgerObservation: DeferredUserAbandonLedgerObservation;
-}): Conversation | undefined {
-  const terminalTransfers = input.nonterminalDeferredTransfers.filter(
-    (transfer) =>
-      terminalControlEvidenceMatches(
-        transfer.terminal_endpoint,
-        input.terminalControl,
-        { requireCurrentRoute: true, requireProcessAnchor: false }
-      )
-  );
-  if (terminalTransfers.length !== 1) {
-    return undefined;
-  }
-  const transfer = terminalTransfers[0]!;
-  const turnId = stringValue(transfer.turn_id);
-  if (!turnId) {
-    return undefined;
-  }
-  const ownerMatches = input.allRelated.filter((conversation) =>
-    turnIdForConversation(conversation) === turnId
-  );
-  if (ownerMatches.length !== 1) {
-    return undefined;
-  }
-  const owner = ownerMatches[0]!;
-  const sessionId = sessionIdForConversation(owner);
-  const transferSessionIds = new Set([
-    transfer.source_session_id,
-    transfer.target_session_id
-  ]);
-  const globalSessionTransferConflict =
-    input.nonterminalDeferredTransfers.some((candidate) =>
-      candidate.transfer_id !== transfer.transfer_id &&
-      (
-        transferSessionIds.has(candidate.source_session_id) ||
-        transferSessionIds.has(candidate.target_session_id)
-      )
-    );
-  const targetIsSourceHistory = input.nonterminalDeferredTransfers.some(
-    (candidate) => candidate.source_turn_history?.some(
-      (sourceTurn) => sourceTurn.turn_id === turnId
-    )
-  );
-  const takeover = isRecord(owner.native_session_takeover)
-    ? owner.native_session_takeover
-    : undefined;
-  const ownerControl = terminalListRuntime().terminalControlFromTakeover(
-    takeover
-  );
-  const transferId = stringValue(takeover?.deferred_foreground_transfer_id);
-  if (
-    !takeover ||
-    !ownerControl ||
-    !transferId
-  ) {
-    return undefined;
-  }
-  const ownerStatePath = stringValue(owner.state_path);
-  const transferStatePath = stringValue(transfer.state_path);
-  const activeMessageId = deferredForegroundActiveMessageId(transfer);
-  if (!ownerStatePath || !transferStatePath) {
-    return undefined;
-  }
-  let ownerPaths: ReturnType<typeof pathsForConversationDir>;
-  try {
-    ownerPaths = pathsForConversationDir(path.dirname(ownerStatePath));
-  } catch {
-    return undefined;
-  }
-  if (
-    path.resolve(ownerPaths.storeDir) !== path.resolve(input.storeDir) ||
-    path.resolve(ownerPaths.statePath) !== path.resolve(ownerStatePath)
-  ) {
-    return undefined;
-  }
-  const exactLedger = (record: TerminalDispatchLedgerDocument) =>
-    exactDeferredForegroundUserAbandonmentLedger(record, {
-      transfer,
-      terminalControl: input.terminalControl,
-      storeDir: input.storeDir,
-      statePath: ownerPaths.statePath,
-      logPath: ownerPaths.logPath
-    });
-  const ledgerAuthority = (() => {
-    if (input.ledgerObservation.state !== "present") {
-      return input.ledgerObservation.state;
-    }
-    const { ledger, owner: ledgerOwner, receipts } =
-      input.ledgerObservation;
-    if (exactLedger(ledger)) {
-      return exactDeferredForegroundLedgerOwner(
-        ledger,
-        ledgerOwner,
-        { terminalControl: input.terminalControl, storeDir: input.storeDir }
-      )
-        ? "exact" as const
-        : "mismatch" as const;
-    }
-    const matches = receipts.filter((record) =>
-      exactDeferredForegroundUserAbandonmentReceipt(record, {
-        transfer,
-        terminalControl: input.terminalControl,
-        storeDir: input.storeDir,
-        statePath: ownerPaths.statePath,
-        logPath: ownerPaths.logPath
-      })
-    );
-    if (
-      matches.length !== 1 ||
-      !exactCurrentDeferredForegroundLedgerOwner(ledger, ledgerOwner, {
-        transfer,
-        terminalControl: input.terminalControl,
-        storeDir: input.storeDir,
-        statePath: ownerPaths.statePath,
-        logPath: ownerPaths.logPath
-      })
-    ) {
-      return "mismatch" as const;
-    }
-    return "superseded" as const;
-  })();
-  const frozenLedgerPlanMatches = (() => {
-    if (transfer.status !== "user_abandoning") {
-      return true;
-    }
-    const requestedAt = transfer.user_abandonment_requested_at;
-    const fingerprint = transfer.user_abandonment_ledger_fingerprint;
-    if (
-      !requestedAt ||
-      !fingerprint ||
-      input.ledgerObservation.state === "unreadable"
-    ) {
-      return false;
-    }
-    try {
-      const plan = deferredForegroundUserAbandonmentLedgerPlan({
-        current: input.ledgerObservation.state === "present"
-          ? input.ledgerObservation.ledger
-          : undefined,
-        currentOwner: input.ledgerObservation.state === "present"
-          ? input.ledgerObservation.owner
-          : undefined,
-        transfer,
-        terminalControl: input.terminalControl,
-        storeDir: input.storeDir,
-        statePath: ownerPaths.statePath,
-        logPath: ownerPaths.logPath,
-        resolvedAt: requestedAt
-      });
-      return plan.fingerprint === fingerprint;
-    } catch {
-      return false;
-    }
-  })();
-  if (!isDeferredUserAbandonProjectionEligible({
-    mutationsAllowed: input.mutationsAllowed,
-    matchingTransferCount: terminalTransfers.length,
-    matchingTurnCount: ownerMatches.length,
-    globalSessionTransferConflict,
-    turnManagementReleasable:
-      isDeferredUserAbandonTurnManagementReleasable(owner.status),
-    closedAbandonmentInProgress:
-      exactClosedUserAbandonmentInProgress(owner, transfer),
-    targetIsSourceHistory,
-    takeoverTransferMatches: transfer.transfer_id === transferId,
-    transferTurnMatches: transfer.turn_id === turnId,
-    transferTargetSessionMatches: transfer.target_session_id === sessionId,
-    persistedTargetIdentityMatches:
-      transfer.terminal_id === stringValue(takeover.native_session_id) &&
-      transfer.workspace === owner.workspace &&
-      transfer.workspace === stringValue(takeover.source_cwd) &&
-      transfer.process_pid === Number(takeover.terminal_agent_pid) &&
-      transfer.process_uuid ===
-        stringValue(takeover.terminal_agent_process_uuid) &&
-      transfer.process_birth ===
-        stringValue(takeover.terminal_agent_process_birth) &&
-      terminalControlEvidenceMatches(
-        transfer.terminal_endpoint,
-        ownerControl
-      ),
-    transferStatePathMatches: Boolean(
-      ownerStatePath &&
-      transferStatePath &&
-      path.resolve(owner.workspace) === path.resolve(transfer.workspace) &&
-      sameCanonicalStatePath(ownerStatePath, transferStatePath)
-    ),
-    takeoverMessageMatches: Boolean(
-      activeMessageId &&
-      stringValue(takeover.terminal_bridge_message_id) === activeMessageId
-    ),
-    terminalRouteMatches:
-      terminalControlEvidenceMatches(
-        takeover.terminal_endpoint ?? ownerControl,
-        input.terminalControl,
-        { requireCurrentRoute: true, requireProcessAnchor: false }
-      ),
-    frozenLedgerPlanMatches,
-    ledgerAuthority
-  })) {
-    return undefined;
-  }
-  return owner;
-}
-
-function deferredReleaseRelatedConversations(
-  conversations: Conversation[],
-  terminalControl: TerminalControlRef
-): Conversation[] {
-  return conversations.filter((conversation) => {
-    const takeover = isRecord(conversation.native_session_takeover)
-      ? conversation.native_session_takeover
-      : undefined;
-    const control = terminalControlForManagedConversation(conversation);
-    return Boolean(
-      control && terminalControlEvidenceMatches(
-        takeover?.terminal_endpoint ?? control,
-        terminalControl,
-        { requireCurrentRoute: true, requireProcessAnchor: false }
-      )
-    );
-  });
-}
-
-function observeDeferredUserAbandonLedger(
-  terminalControl: TerminalControlRef
-): DeferredUserAbandonLedgerObservation {
-  try {
-    const ledger = terminalListRuntime().loadTerminalBridgeDispatchLedger(
-      terminalControl
-    );
-    if (!ledger) {
-      return { state: "absent" };
-    }
-    return {
-      state: "present",
-      ledger,
-      owner: terminalListRuntime().loadTerminalDispatchLedgerOwner(ledger),
-      receipts: terminalDispatchReceiptHistory(ledger)
-    };
-  } catch {
-    // Only a verified missing ledger is safe for metadata-only abandonment.
-    // Read or owner-parse failures remain status-only.
-    return { state: "unreadable" };
-  }
-}
-
 function observeTerminalListBindingAuthority(
   terminal: Record<string, any>,
   context: TerminalFirstListContext
@@ -2164,23 +1872,6 @@ function observeTerminalListBindingAuthority(
   const handoffSourceBlockingTurns = terminalBlockingTurns.filter((turn) =>
     externalHandoffSourceSessionIds.has(sessionIdForConversation(turn))
   );
-  const deferredUserAbandonLedger = mutationsAllowed && terminalControl
-    ? observeDeferredUserAbandonLedger(terminalControl)
-    : { state: "unreadable" as const };
-  const deferredUserAbandonTurn =
-    mutationsAllowed && terminalControl
-      ? exactCurrentDeferredUserAbandonTurn({
-          storeDir,
-          mutationsAllowed,
-          terminalControl,
-          allRelated: deferredReleaseRelatedConversations(
-            context.allConversations,
-            terminalControl
-          ),
-          nonterminalDeferredTransfers,
-          ledgerObservation: deferredUserAbandonLedger
-        })
-      : undefined;
   const nativeIdentityObservation = isRecord(
     terminal.native_agent_identity_observation
   )
@@ -2236,7 +1927,6 @@ function observeTerminalListBindingAuthority(
     blockingHandoffTurns,
     terminalBlockingTurns,
     handoffSourceBlockingTurns,
-    deferredUserAbandonTurn,
     nativeIdentityObservation,
     codexProcessUuid,
     codexProcessBirth,
@@ -2821,7 +2511,6 @@ function renderTerminalFirstListEntry(
     handoffDecision,
     blockingHandoffTurnIds,
     terminalRecoveryBlockingTurns,
-    deferredUserAbandonTurn,
     terminalScopedCodexApprovalAction,
     rolloutBackedCodexSession
   } = observation;
@@ -2856,29 +2545,14 @@ function renderTerminalFirstListEntry(
         sessionAwareRawActions
       )
     : undefined;
-  const deferredUserAbandonTurnId = deferredUserAbandonTurn
-    ? turnIdForConversation(deferredUserAbandonTurn)
-    : undefined;
-  const projectManagedTurnForTransfer = (
-    turn: Record<string, any>,
-    conversation: Conversation
-  ): Record<string, any> => {
-    if (!mutationsAllowed) {
-      return readOnlyManagedTurn(turn);
-    }
-    if (turnIdForConversation(conversation) === deferredUserAbandonTurnId) {
-      return exactDeferredUserAbandonManagedTurn(turn);
-    }
-    return conversationHasNonterminalDeferredTransfer(conversation)
-      ? readOnlyManagedTurn(turn)
-      : turn;
-  };
-  const currentTurnProjection = currentTurnValue &&
-      ownership.state === "current"
-    ? projectManagedTurnForTransfer(
-        currentTurnValue,
-        ownership.conversation
-      )
+  const currentTurnProjection = currentTurnValue && (
+    !mutationsAllowed ||
+    (
+      ownership.state === "current" &&
+      conversationHasNonterminalDeferredTransfer(ownership.conversation)
+    )
+  )
+    ? readOnlyManagedTurn(currentTurnValue)
     : currentTurnValue;
   const currentTurn = currentTurnProjection
     ? withoutGenericHandoffSourceClose(
@@ -2903,8 +2577,12 @@ function renderTerminalFirstListEntry(
   const recentTurnValue = recentConversation
     ? historicalManagedTurnForTerminal(recentConversation)
     : undefined;
-  const recentTurnProjection = recentTurnValue && recentConversation
-    ? projectManagedTurnForTransfer(recentTurnValue, recentConversation)
+  const recentTurnProjection = recentTurnValue && (
+    !mutationsAllowed ||
+    Boolean(recentConversation &&
+      conversationHasNonterminalDeferredTransfer(recentConversation))
+  )
+    ? readOnlyManagedTurn(recentTurnValue)
     : recentTurnValue;
   const recentTurn = recentTurnProjection
     ? withoutGenericHandoffSourceClose(
@@ -2915,7 +2593,10 @@ function renderTerminalFirstListEntry(
   const history = historyConversations.map((conversation) => {
     const turn = historicalManagedTurnForTerminal(conversation);
     return withoutGenericHandoffSourceClose(
-      projectManagedTurnForTransfer(turn, conversation),
+      mutationsAllowed &&
+        !conversationHasNonterminalDeferredTransfer(conversation)
+        ? turn
+        : readOnlyManagedTurn(turn),
       blockingHandoffTurnIds
     );
   });
@@ -2987,7 +2668,7 @@ function renderTerminalFirstListEntry(
             }
           }
         : undefined;
-  const selectedAvailableActions = selectTerminalAvailableActions({
+  const availableActions = selectTerminalAvailableActions({
     ownership: ownership.state,
     currentActions: ownership.state === "current"
       ? currentTerminalActions(currentTurn)
@@ -3000,24 +2681,6 @@ function renderTerminalFirstListEntry(
     terminalScopedApprovalAction: terminalScopedCodexApprovalAction,
     isAction: isRecord
   });
-  const deferredUserAbandonManagedTurn = deferredUserAbandonTurn
-    ? exactDeferredUserAbandonManagedTurn(
-        currentManagedTurnForTerminal(
-          deferredUserAbandonTurn,
-          terminal,
-          sessionAwareRawActions
-        )
-      )
-    : undefined;
-  const deferredUserAbandonClose = exactDeferredUserAbandonCloseAction(
-    deferredUserAbandonManagedTurn
-  );
-  const availableActions = deferredUserAbandonClose
-    ? {
-        ...selectedAvailableActions,
-        close: deferredUserAbandonClose
-      }
-    : selectedAvailableActions;
   // An explicit undefined rollout prevents a lingering resolver rollout from
   // being presented as the authoritative status-card thread.
   const authoritativeIdentity = authoritativeTerminalIdentity(
@@ -3132,22 +2795,6 @@ function terminalFirstListProjection({
       transferId && nonterminalDeferredTransferIds.has(transferId)
     );
   };
-  const directNonterminalDeferredTransfer = (
-    conversation: Conversation
-  ): DeferredForegroundTransfer | undefined => {
-    const takeover = isRecord(conversation.native_session_takeover)
-      ? conversation.native_session_takeover
-      : undefined;
-    const transferId = stringValue(takeover?.deferred_foreground_transfer_id);
-    if (!transferId) {
-      return undefined;
-    }
-    const matches = nonterminalDeferredTransfers.filter((transfer) =>
-      transfer.transfer_id === transferId &&
-      transfer.turn_id === turnIdForConversation(conversation)
-    );
-    return matches.length === 1 ? matches[0] : undefined;
-  };
   const discoveredTerminalControls = terminals.flatMap((terminal) => {
     const control = isRecord(terminal.terminal_control)
       ? terminal.terminal_control as unknown as TerminalControlRef
@@ -3179,25 +2826,7 @@ function terminalFirstListProjection({
     )
   );
 
-  const displayedTurnIds = new Set(displayedConversations.map(
-    (conversation) => turnIdForConversation(conversation)
-  ));
-  const closedAbandonmentRecoveryTurns = allConversations.filter(
-    (conversation) => {
-      if (displayedTurnIds.has(turnIdForConversation(conversation))) {
-        return false;
-      }
-      const transfer = directNonterminalDeferredTransfer(conversation);
-      return Boolean(
-        transfer &&
-        exactClosedUserAbandonmentInProgress(conversation, transfer)
-      );
-    }
-  );
-  const unavailableManagedTurns = [
-    ...displayedConversations,
-    ...closedAbandonmentRecoveryTurns
-  ]
+  const unavailableManagedTurns = displayedConversations
     .filter((conversation) => {
       const managedControl = terminalControlForManagedConversation(conversation);
       if (discoveredTerminalControls.some((control) =>
@@ -3205,25 +2834,7 @@ function terminalFirstListProjection({
       )) {
         return false;
       }
-      const directTransfer = directNonterminalDeferredTransfer(conversation);
-      const takeover = isRecord(conversation.native_session_takeover)
-        ? conversation.native_session_takeover
-        : undefined;
-      if (
-        directTransfer &&
-        managedControl &&
-        discoveredTerminalControls.some((control) =>
-          terminalControlEvidenceMatches(
-            takeover?.terminal_endpoint ?? managedControl,
-            control,
-            { requireCurrentRoute: true, requireProcessAnchor: false }
-          )
-        )
-      ) {
-        return false;
-      }
       return (
-        closedAbandonmentRecoveryTurns.includes(conversation) ||
         includeAll ||
         managedOnly ||
         statusFilter !== undefined ||
@@ -3240,40 +2851,20 @@ function terminalFirstListProjection({
           conversation
         }
       );
-      const managedControl = terminalControlForManagedConversation(
-        conversation
-      );
-      const related = managedControl
-        ? deferredReleaseRelatedConversations(
-            allConversations,
-            managedControl
-          )
-        : [];
-      const exactDeferredUserAbandonTarget = mutationsAllowed && managedControl
-        ? exactCurrentDeferredUserAbandonTurn({
-            storeDir,
-            mutationsAllowed,
-            terminalControl: managedControl,
-            allRelated: related,
-            nonterminalDeferredTransfers,
-            ledgerObservation: observeDeferredUserAbandonLedger(managedControl)
-          })
-        : undefined;
-      const projectedManagedTurn = renderUnavailableManagedTurn(
-        managedTurn,
-        {
-          mutationsAllowed,
-          hasNonterminalDeferredTransfer:
-            conversationHasNonterminalDeferredTransfer(conversation),
-          exactDeferredUserAbandonTarget: Boolean(
-            exactDeferredUserAbandonTarget &&
-            turnIdForConversation(exactDeferredUserAbandonTarget) ===
-              turnIdForConversation(conversation)
-          )
-        }
-      );
       return {
-        ...projectedManagedTurn,
+        ...managedTurn,
+        available_actions: mutationsAllowed &&
+            !conversationHasNonterminalDeferredTransfer(conversation)
+          ? safeUnavailableManagedTurnActions(
+              isRecord(managedTurn.available_actions)
+                ? managedTurn.available_actions
+                : {}
+            )
+          : readOnlyListActions(
+              isRecord(managedTurn.available_actions)
+                ? managedTurn.available_actions
+                : {}
+            ),
         terminal_availability: {
           available: false,
           reason: managedOnly

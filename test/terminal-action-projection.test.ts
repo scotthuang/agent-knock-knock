@@ -6,12 +6,9 @@ import {
   decideTerminalWatchExternalTaskAuthority,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
-  isDeferredUserAbandonProjectionEligible,
-  isDeferredUserAbandonTurnManagementReleasable,
   managedTurnNeedsAttention,
   selectTerminalAvailableActions,
   type TerminalActionSet,
-  type DeferredUserAbandonProjectionFacts,
   type TerminalDispatchOwnership,
   type TerminalSendAuthorityFacts
 } from "../src/terminal-action-projection.js";
@@ -76,97 +73,6 @@ const rollout = {
   inode: "101",
   path: "/repo/source.jsonl"
 };
-
-test("deferred user-abandon close projects only exact durable authority", () => {
-  const exact: DeferredUserAbandonProjectionFacts = {
-    mutationsAllowed: true,
-    matchingTransferCount: 1,
-    matchingTurnCount: 1,
-    globalSessionTransferConflict: false,
-    turnManagementReleasable: true,
-    closedAbandonmentInProgress: false,
-    targetIsSourceHistory: false,
-    takeoverTransferMatches: true,
-    transferTurnMatches: true,
-    transferTargetSessionMatches: true,
-    persistedTargetIdentityMatches: true,
-    transferStatePathMatches: true,
-    takeoverMessageMatches: true,
-    terminalRouteMatches: true,
-    frozenLedgerPlanMatches: true,
-    ledgerAuthority: "exact"
-  };
-
-  assert.equal(isDeferredUserAbandonProjectionEligible(exact), true);
-  assert.equal(isDeferredUserAbandonProjectionEligible({
-    ...exact,
-    ledgerAuthority: "superseded"
-  }), true);
-  assert.equal(isDeferredUserAbandonProjectionEligible({
-    ...exact,
-    ledgerAuthority: "absent"
-  }), true);
-  assert.equal(isDeferredUserAbandonProjectionEligible({
-    ...exact,
-    turnManagementReleasable: false,
-    closedAbandonmentInProgress: true
-  }), true);
-
-  const unsafe: DeferredUserAbandonProjectionFacts[] = [
-    { ...exact, mutationsAllowed: false },
-    { ...exact, matchingTransferCount: 2 },
-    { ...exact, matchingTurnCount: 0 },
-    { ...exact, globalSessionTransferConflict: true },
-    {
-      ...exact,
-      turnManagementReleasable: false,
-      closedAbandonmentInProgress: false
-    },
-    { ...exact, targetIsSourceHistory: true },
-    { ...exact, takeoverTransferMatches: false },
-    { ...exact, transferTurnMatches: false },
-    { ...exact, transferTargetSessionMatches: false },
-    { ...exact, persistedTargetIdentityMatches: false },
-    { ...exact, transferStatePathMatches: false },
-    { ...exact, takeoverMessageMatches: false },
-    { ...exact, terminalRouteMatches: false },
-    { ...exact, frozenLedgerPlanMatches: false },
-    { ...exact, ledgerAuthority: "mismatch" },
-    { ...exact, ledgerAuthority: "unreadable" }
-  ];
-  for (const facts of unsafe) {
-    assert.equal(isDeferredUserAbandonProjectionEligible(facts), false);
-  }
-});
-
-test("deferred user-abandon release covers every legal non-closed Turn phase", () => {
-  for (const status of [
-    "created",
-    "running",
-    "waiting_for_agent",
-    "waiting_for_openclaw",
-    "stalled",
-    "callback_pending",
-    "callback_failed",
-    "cancelling",
-    "idle",
-    "failed",
-    "cancelled"
-  ]) {
-    assert.equal(
-      isDeferredUserAbandonTurnManagementReleasable(status),
-      true,
-      status
-    );
-  }
-  for (const status of ["closed", "unknown", undefined, null, 42]) {
-    assert.equal(
-      isDeferredUserAbandonTurnManagementReleasable(status),
-      false,
-      String(status)
-    );
-  }
-});
 
 function session(
   overrides: Partial<ManagedSessionState> = {}
@@ -465,23 +371,6 @@ test("Terminal Watch external-task authority fails closed for every managed owne
       conversation: blockingTurn
     });
   }
-});
-
-test("final user-abandoned management releases the raw Watch authority chain", () => {
-  const staleManagedTurn = { id: "turn-user-abandoned" };
-  assert.deepEqual(decideTerminalWatchExternalTaskAuthority({
-    blockingTurn: staleManagedTurn,
-    dispatchOwnership: { state: "none" }
-  }), {
-    state: "managed_turn",
-    conversation: staleManagedTurn
-  });
-  assert.deepEqual(decideTerminalWatchExternalTaskAuthority({
-    blockingTurn: undefined,
-    dispatchOwnership: { state: "none" }
-  }), {
-    state: "external_task"
-  });
 });
 
 test("Session authority conflict wins without consulting dispatch mismatch", () => {
