@@ -8,6 +8,12 @@ import {
   type DeliverOpenClawCallbackInput
 } from "../src/openclaw-callback-transport.js";
 import {
+  createCallbackEnvelope,
+  createLegacyOpenClawCallbackRoute,
+  type CallbackAttemptOutcome,
+  type CallbackTransportDeliverInput
+} from "../src/callback-transport.js";
+import {
   createConversation,
   createMessage,
   type AgentMessage,
@@ -39,6 +45,98 @@ interface TransportHarness {
   ): DeliverOpenClawCallbackInput;
 }
 
+function genericInput(
+  harness: TransportHarness,
+  overrides: Partial<CallbackTransportDeliverInput> = {}
+): CallbackTransportDeliverInput {
+  const route = createLegacyOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:gateway",
+    gatewayMethod: "agent.callback",
+    openclawBin: "/callback/bin/openclaw",
+    gatewayUrl: "ws://127.0.0.1:18789"
+  });
+  return {
+    route,
+    envelope: createCallbackEnvelope({
+      route,
+      deliveryId: "callback-delivery-transport",
+      idempotencyKey: "callback-idempotency-transport",
+      source: {
+        kind: "managed_turn",
+        session_id: "session-transport",
+        turn_id: "turn-transport",
+        conversation_id: "turn-transport"
+      },
+      event: {
+        id: harness.message.id,
+        type: harness.message.type,
+        body: harness.message.body,
+        requires_response: harness.message.requires_response
+      }
+    }),
+    attempt: { number: 1, id: "attempt-transport" },
+    context: {
+      statePath: "/store/turn/state.json",
+      logPath: "/store/turn/events.ndjson",
+      conversation: harness.conversation,
+      message: harness.message,
+      legacyOptions: {
+        gatewayMethod: "agent.callback",
+        gatewaySession: "agent:main:gateway",
+        openclawSession: "agent:main:gateway",
+        openclawBin: "/callback/bin/openclaw",
+        gatewayUrl: "ws://127.0.0.1:18789",
+        token: "callback-token"
+      }
+    },
+    ...overrides
+  };
+}
+
+function terminalWatchGenericInput(
+  overrides: Partial<CallbackTransportDeliverInput> = {}
+): CallbackTransportDeliverInput {
+  const controllerSessionId = "agent:main:terminal-watch";
+  const openclawBin = "/callback/bin/openclaw-terminal-watch";
+  const route = {
+    ...createLegacyOpenClawCallbackRoute({
+      controllerSessionId,
+      gatewayMethod: "chat.send",
+      openclawBin
+    }),
+    capabilities: { wake: true, respond: false }
+  };
+  return {
+    route,
+    envelope: createCallbackEnvelope({
+      route,
+      deliveryId: "terminal-watch-notification-transport",
+      idempotencyKey:
+        "agent-knock-knock:terminal-watch:watch-transport:notification-1",
+      source: {
+        kind: "terminal_watch",
+        watch_id: "terminal-watch-transport",
+        terminal_id: "terminal:v2:transport"
+      },
+      event: {
+        id: "terminal-watch-notification-transport",
+        type: "completed",
+        body: "bounded Terminal Watch completion",
+        requires_response: true
+      }
+    }),
+    attempt: { number: 2, id: "attempt-terminal-watch-2" },
+    context: {
+      legacyOptions: {
+        gatewayMethod: "chat.send",
+        gatewaySession: controllerSessionId,
+        openclawBin
+      }
+    },
+    ...overrides
+  };
+}
+
 function processResult(
   stdout: unknown,
   overrides: Partial<CallbackSpawnResult> = {}
@@ -52,7 +150,7 @@ function processResult(
 }
 
 function createHarness(
-  processResults: CallbackSpawnResult[]
+  processResults: Array<CallbackSpawnResult | Error>
 ): TransportHarness {
   const conversation = createConversation({
     userRequest: "transport extraction",
@@ -104,6 +202,7 @@ function createHarness(
       trace.push(`spawn:${args[2]}`);
       const result = queue.shift();
       assert.ok(result, `missing process result for ${args[2]}`);
+      if (result instanceof Error) throw result;
       return result;
     }
   });
@@ -130,6 +229,7 @@ function createHarness(
         logPath: "/store/turn/events.ndjson",
         conversation,
         message,
+        attempt: { number: 1, id: "attempt-a" },
         ...callbacks
       };
     }
@@ -589,5 +689,479 @@ test("unconfirmed injection rejects a failed wake instead of claiming acceptance
   assert.deepEqual(
     harness.observations.map((observation) => observation.event),
     ["callback_gateway_method_delivery", "callback_chat_send_delivery"]
+  );
+});
+
+test("generic callback transport preserves OpenClaw acceptance checkpoints", () => {
+  const harness = createHarness([
+    processResult(gatewayPlan()),
+    processResult({ runId: "run-1", status: "started" }),
+    processResult({
+      runId: "run-1",
+      status: "ok",
+      stopReason: "completed",
+      timeoutPhase: "none",
+      providerStarted: true
+    })
+  ]);
+  const checkpoints: CallbackAttemptOutcome[] = [];
+  const result = harness.transport.deliver(genericInput(harness, {
+    reportCheckpoint(outcome) {
+      checkpoints.push(outcome);
+    }
+  }));
+
+  assert.equal(result.disposition, "accepted");
+  assert.equal(
+    result.disposition === "accepted" ? result.acceptance_id : undefined,
+    "injection-1"
+  );
+  assert.equal(
+    result.disposition === "accepted"
+      ? (result.evidence?.legacy_delivery as { kind?: unknown } | undefined)
+          ?.kind
+      : undefined,
+    "gateway_method+chat_send"
+  );
+  assert.ok(checkpoints.length >= 2);
+  assert.ok(checkpoints.every((checkpoint) =>
+    checkpoint.disposition === "accepted"
+  ));
+  assert.deepEqual(
+    harness.spawnCalls.map((call) => call.args[2]),
+    ["agent.callback", "chat.send", "agent.wait"]
+  );
+});
+
+test("Terminal Watch generic delivery uses the shared OpenClaw transport", () => {
+  const input = terminalWatchGenericInput();
+  const harness = createHarness([
+    processResult({
+      runId: input.envelope.idempotency_key,
+      status: "started"
+    })
+  ]);
+  const checkpoints: CallbackAttemptOutcome[] = [];
+  const request = {
+    ...input,
+    reportCheckpoint(outcome: CallbackAttemptOutcome) {
+      checkpoints.push(outcome);
+      throw new Error("simulate a failed first durable observation");
+    }
+  };
+
+  const result = harness.transport.deliver(request);
+
+  assert.deepEqual(result, {
+    disposition: "accepted",
+    accepted_at: "2026-08-14T08:00:00.000Z",
+    acceptance_id: input.envelope.idempotency_key,
+    evidence: { status: "started" }
+  });
+  assert.deepEqual(checkpoints, [result]);
+  assert.equal(harness.spawnCalls.length, 1);
+  const call = harness.spawnCalls[0];
+  assert.equal(call.command, "/callback/bin/openclaw-terminal-watch");
+  assert.deepEqual(call.args.slice(0, 3), [
+    "gateway",
+    "call",
+    "chat.send"
+  ]);
+  assert.deepEqual(JSON.parse(String(call.args[4])), {
+    sessionKey: input.route.controller_session_id,
+    message: input.envelope.event.body,
+    idempotencyKey: input.envelope.idempotency_key,
+    deliver: true
+  });
+});
+
+test("Terminal Watch generic delivery reports thrown and malformed attempts as uncertain", () => {
+  const cases = [
+    {
+      result: new Error("spawn observation failed"),
+      errorCode: "openclaw_callback_acceptance_uncertain",
+      evidence: { error_message: "spawn observation failed" }
+    },
+    {
+      result: processResult("not-json"),
+      errorCode: "openclaw_chat_send_ack_uncertain",
+      evidence: undefined
+    }
+  ];
+  for (const fixture of cases) {
+    const harness = createHarness([fixture.result]);
+    assert.deepEqual(
+      harness.transport.deliver(terminalWatchGenericInput()),
+      {
+        disposition: "uncertain",
+        error_code: fixture.errorCode,
+        observed_at: "2026-08-14T08:00:00.000Z",
+        ...(fixture.evidence ? { evidence: fixture.evidence } : {})
+      }
+    );
+    assert.equal(harness.spawnCalls.length, 1);
+  }
+});
+
+test("Terminal Watch generic process failures preserve safe retry boundaries", () => {
+  const cases: Array<{
+    name: string;
+    result: CallbackSpawnResult | Error;
+    disposition: "permanent_failure" | "retryable_failure" | "uncertain";
+    errorCode: string;
+  }> = [
+    {
+      name: "spawn timeout",
+      result: Object.assign(new Error("spawnSync openclaw failed"), {
+        code: "ETIMEDOUT"
+      }),
+      disposition: "uncertain",
+      errorCode: "openclaw_callback_acceptance_uncertain"
+    },
+    {
+      name: "missing executable",
+      result: Object.assign(new Error("spawnSync openclaw failed"), {
+        code: "ENOENT"
+      }),
+      disposition: "permanent_failure",
+      errorCode: "openclaw_callback_configuration_error"
+    },
+    {
+      name: "connection refused before request dispatch",
+      result: processResult("", {
+        status: 1,
+        stderr: "connect ECONNREFUSED 127.0.0.1:18789"
+      }),
+      disposition: "retryable_failure",
+      errorCode: "openclaw_callback_delivery_failed"
+    },
+    {
+      name: "unknown nonzero result after invocation",
+      result: processResult("", {
+        status: 7,
+        stderr: "gateway process exited after dispatch"
+      }),
+      disposition: "uncertain",
+      errorCode: "openclaw_callback_acceptance_uncertain"
+    }
+  ];
+
+  for (const fixture of cases) {
+    const harness = createHarness([fixture.result]);
+    const outcome = harness.transport.deliver(terminalWatchGenericInput());
+    assert.equal(outcome.disposition, fixture.disposition, fixture.name);
+    assert.equal(outcome.error_code, fixture.errorCode, fixture.name);
+    assert.equal(harness.spawnCalls.length, 1, fixture.name);
+  }
+});
+
+test("Terminal Watch matching terminal acknowledgements settle the idempotency key", () => {
+  for (const status of ["error", "timeout"] as const) {
+    const input = terminalWatchGenericInput();
+    const harness = createHarness([
+      processResult({
+        runId: input.envelope.idempotency_key,
+        status
+      }, { status: status === "error" ? 1 : 0 })
+    ]);
+    const checkpoints: CallbackAttemptOutcome[] = [];
+    const outcome = harness.transport.deliver({
+      ...input,
+      reportCheckpoint(checkpoint) {
+        checkpoints.push(checkpoint);
+      }
+    });
+
+    assert.deepEqual(outcome, {
+      disposition: "accepted",
+      accepted_at: "2026-08-14T08:00:00.000Z",
+      acceptance_id: input.envelope.idempotency_key,
+      evidence: { status }
+    });
+    assert.deepEqual(checkpoints, [outcome]);
+    assert.equal(harness.spawnCalls.length, 1);
+  }
+});
+
+test("Terminal Watch generic delivery rejects trusted profile drift before I/O", () => {
+  for (const drift of [
+    "profile",
+    "controller",
+    "method",
+    "trusted_options"
+  ] as const) {
+    const harness = createHarness([]);
+    const input = terminalWatchGenericInput();
+    const route = drift === "controller"
+      ? { ...input.route, controller_session_id: "agent:other:session" }
+      : drift === "profile"
+        ? {
+            ...input.route,
+            profile_revision: `sha256:${"f".repeat(64)}`
+          }
+        : drift === "method"
+          ? {
+              ...createLegacyOpenClawCallbackRoute({
+                controllerSessionId: input.route.controller_session_id,
+                gatewayMethod: "agent.callback",
+                openclawBin: "/callback/bin/openclaw-terminal-watch"
+              }),
+              capabilities: input.route.capabilities
+            }
+          : input.route;
+    const context = drift === "trusted_options" || drift === "method"
+      ? {
+          ...input.context,
+          legacyOptions: {
+            ...input.context?.legacyOptions,
+            ...(drift === "method"
+              ? { gatewayMethod: "agent.callback" }
+              : { openclawBin: "/callback/bin/redirected-openclaw" })
+          }
+        }
+      : input.context;
+    const result = harness.transport.deliver({
+      ...input,
+      route,
+      envelope: {
+        ...input.envelope,
+        route: {
+          ...input.envelope.route,
+          profile_revision: route.profile_revision,
+          controller_session_id: route.controller_session_id
+        }
+      },
+      context
+    });
+
+    assert.deepEqual(result, {
+      disposition: "permanent_failure",
+      error_code: drift === "controller"
+        ? "openclaw_controller_session_changed"
+        : "openclaw_callback_profile_changed"
+    });
+    assert.equal(harness.spawnCalls.length, 0);
+  }
+});
+
+test("generic callback transport rejects route/profile drift before delivery", () => {
+  const harness = createHarness([]);
+  const input = genericInput(harness);
+  const result = harness.transport.deliver({
+    ...input,
+    route: {
+      ...input.route,
+      profile_revision: `sha256:${"f".repeat(64)}`
+    }
+  });
+
+  assert.deepEqual(result, {
+    disposition: "permanent_failure",
+    error_code: "callback_envelope_route_mismatch"
+  });
+  assert.equal(harness.spawnCalls.length, 0);
+});
+
+test("generic OpenClaw transport cannot redirect its controller session", () => {
+  const harness = createHarness([]);
+  const input = genericInput(harness);
+  const redirectedRoute = {
+    ...input.route,
+    controller_session_id: "agent:other:session"
+  };
+  const result = harness.transport.deliver({
+    ...input,
+    route: redirectedRoute,
+    envelope: {
+      ...input.envelope,
+      route: {
+        ...input.envelope.route,
+        controller_session_id: redirectedRoute.controller_session_id
+      }
+    }
+  });
+
+  assert.deepEqual(result, {
+    disposition: "permanent_failure",
+    error_code: "openclaw_controller_session_changed"
+  });
+  assert.equal(harness.spawnCalls.length, 0);
+});
+
+test("generic callback transport treats an unparseable response as uncertain", () => {
+  const harness = createHarness([processResult("not-json")]);
+  const result = harness.transport.deliver(genericInput(harness));
+
+  assert.equal(result.disposition, "uncertain");
+  assert.equal(
+    result.disposition === "uncertain" ? result.error_code : undefined,
+    "openclaw_callback_acceptance_uncertain"
+  );
+  assert.match(
+    result.disposition === "uncertain"
+      ? String(result.evidence?.error_message)
+      : "",
+    /malformed JSON/u
+  );
+});
+
+test("generic managed delivery never retries an opaque post-invocation throw", () => {
+  const harness = createHarness([
+    new Error("host transport disconnected after dispatch")
+  ]);
+  const checkpoints: CallbackAttemptOutcome[] = [];
+  const result = harness.transport.deliver(genericInput(harness, {
+    reportCheckpoint(outcome) {
+      checkpoints.push(outcome);
+    }
+  }));
+
+  assert.deepEqual(result, {
+    disposition: "uncertain",
+    error_code: "openclaw_callback_acceptance_uncertain",
+    observed_at: "2026-08-14T08:00:00.000Z",
+    evidence: {
+      error_message: "host transport disconnected after dispatch"
+    }
+  });
+  assert.deepEqual(checkpoints, []);
+  assert.deepEqual(
+    harness.spawnCalls.map((call) => call.args[2]),
+    ["agent.callback"]
+  );
+});
+
+test("legacy gateway ok without enqueued stays uncertain after wake refusal", () => {
+  const harness = createHarness([
+    processResult(gatewayPlan({
+      enqueued: undefined,
+      injection_id: undefined
+    })),
+    processResult("", {
+      status: 7,
+      stderr: "connect ECONNREFUSED 127.0.0.1:18789"
+    })
+  ]);
+
+  const result = harness.transport.deliver(genericInput(harness));
+
+  assert.deepEqual(result, {
+    disposition: "uncertain",
+    error_code: "openclaw_callback_acceptance_uncertain",
+    observed_at: "2026-08-14T08:00:02.000Z",
+    evidence: {
+      error_message: "connect ECONNREFUSED 127.0.0.1:18789"
+    }
+  });
+  assert.deepEqual(
+    harness.spawnCalls.map((call) => call.args[2]),
+    ["agent.callback", "chat.send"]
+  );
+});
+
+test("explicit enqueued false keeps pre-acceptance wake refusal retryable", () => {
+  const harness = createHarness([
+    processResult(gatewayPlan({
+      enqueued: false,
+      injection_id: undefined
+    })),
+    processResult("", {
+      status: 7,
+      stderr: "connect ECONNREFUSED 127.0.0.1:18789"
+    })
+  ]);
+
+  const result = harness.transport.deliver(genericInput(harness));
+
+  assert.deepEqual(result, {
+    disposition: "retryable_failure",
+    error_code: "openclaw_callback_delivery_failed",
+    evidence: {
+      error_message: "connect ECONNREFUSED 127.0.0.1:18789"
+    }
+  });
+  assert.deepEqual(
+    harness.spawnCalls.map((call) => call.args[2]),
+    ["agent.callback", "chat.send"]
+  );
+});
+
+test("generic callback transport keeps an accepted injection when wake fails", () => {
+  const harness = createHarness([
+    processResult(gatewayPlan()),
+    processResult("", { status: 7, stderr: "wake failed" })
+  ]);
+  const checkpoints: CallbackAttemptOutcome[] = [];
+  const result = harness.transport.deliver(genericInput(harness, {
+    reportCheckpoint(outcome) {
+      checkpoints.push(outcome);
+    }
+  }));
+
+  assert.equal(result.disposition, "accepted");
+  assert.ok(checkpoints.some((checkpoint) =>
+    checkpoint.disposition === "accepted"
+  ));
+  assert.equal(harness.spawnCalls.length, 2);
+});
+
+test("chat.send plan cannot redirect before any accepted side effect", () => {
+  const harness = createHarness([
+    processResult(gatewayPlan({
+      enqueued: false,
+      injection_id: undefined,
+      chat_send: {
+        sessionKey: "agent:other:session",
+        message: "wake the wrong agent",
+        idempotencyKey: "run-redirected-chat",
+        deliver: true
+      }
+    }))
+  ]);
+
+  const result = harness.transport.deliver(genericInput(harness));
+
+  assert.deepEqual(result, {
+    disposition: "permanent_failure",
+    error_code: "openclaw_callback_target_mismatch",
+    evidence: {
+      error_message:
+        "gateway callback delivery target does not match the immutable callback route"
+    }
+  });
+  assert.deepEqual(
+    harness.spawnCalls.map((call) => call.args[2]),
+    ["agent.callback"]
+  );
+});
+
+test("sessions.send redirect after possible injection is uncertain and not woken", () => {
+  const harness = createHarness([
+    processResult(gatewayPlan({
+      delivery_mode: "sessions.send",
+      chat_send: undefined,
+      session_send: {
+        key: "agent:other:session",
+        message: "wake the wrong agent",
+        idempotencyKey: "run-redirected-session"
+      }
+    }))
+  ]);
+
+  const result = harness.transport.deliver(genericInput(harness));
+
+  assert.deepEqual(result, {
+    disposition: "uncertain",
+    error_code:
+      "openclaw_callback_target_mismatch_after_possible_acceptance",
+    observed_at: "2026-08-14T08:00:00.000Z",
+    evidence: {
+      error_message:
+        "gateway callback delivery target does not match the immutable callback route"
+    }
+  });
+  assert.deepEqual(
+    harness.spawnCalls.map((call) => call.args[2]),
+    ["agent.callback"]
   );
 });

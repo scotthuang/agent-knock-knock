@@ -311,15 +311,30 @@ same dispatch but may not send it again.
 
 ### Callback/outbox
 
-1. Prepare one immutable callback message and deterministic id.
-2. Persist pending outbox state and an attempt lease before transport.
-3. Deliver through the current OpenClaw Gateway adapter.
-4. Persist transport progress/acceptance.
-5. Settle delivered final state, or persist retryable failure and next attempt.
-6. Reconciliation resumes only the same message/attempt authority.
+1. Resolve one trusted, versioned, secretless callback route; a present invalid
+   route fails closed and never falls back to legacy host fields.
+2. Prepare one immutable callback envelope and deterministic delivery/idempotency
+   identity.
+3. Persist the envelope, route snapshot, pending outbox state, and attempt lease
+   before transport.
+4. Resolve the route to a concrete adapter at the composition root. The current
+   adapter preserves the OpenClaw Gateway behavior; core services do not select
+   or construct it.
+5. Persist an explicit accepted, retryable-failure, permanent-failure, or
+   uncertain attempt outcome. Only retryable failure schedules another attempt;
+   accepted checkpoints survive a later wake/observation failure.
+6. Reconciliation resumes only the same persisted route, envelope,
+   message, and attempt authority. Current CLI options or Conversation fields
+   cannot redirect an existing outbox.
 
 Callback transport state does not own or rewrite the semantic Turn phase.
 Cross-Session callback delivery remains strictly isolated.
+
+The first host-neutral slice retains the existing OpenClaw fields and Turn
+status names as a read/write compatibility projection. OpenClaw's trusted
+plugin still supplies the controller session identity; model-facing tools never
+accept a callback destination or profile. A standalone supervisor and new host
+adapters remain separate follow-on work.
 
 ### Monitor step
 

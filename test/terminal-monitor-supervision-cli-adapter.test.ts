@@ -422,6 +422,43 @@ test("monitor routing retains singleton lock and lazy configuration boundaries",
     statePath: "/store/turn-1/state.json",
     initialDelayMs: 17
   }]);
+  await callback.facade.runMonitor({
+    callbackRetry: true,
+    state: "/store/turn-1/state.json",
+    callbackRetryDelayMs: 19,
+    callbackOutboxLane: "notification"
+  });
+  assert.deepEqual(callback.callbacks[1], {
+    statePath: "/store/turn-1/state.json",
+    initialDelayMs: 19,
+    callbackOutboxLane: "notification"
+  });
+
+  const notificationMonitor = callback.facade.startCallbackRetryMonitor({
+    statePath: "/store/turn-1/state.json",
+    delayMs: 23,
+    callbackOutboxLane: "notification"
+  });
+  assert.equal(notificationMonitor.pid, 80);
+  assert.deepEqual(callback.spawned[0]?.args, [
+    "/dist/cli.js",
+    "monitor",
+    "--callback-retry",
+    "--state",
+    "/store/turn-1/state.json",
+    "--callback-retry-delay-ms",
+    "23",
+    "--callback-outbox-lane",
+    "notification"
+  ]);
+  await assert.rejects(
+    callback.facade.runMonitor({
+      callbackRetry: true,
+      state: "/store/turn-1/state.json",
+      callbackOutboxLane: "unknown"
+    }),
+    /--callback-outbox-lane must be lifecycle or notification/u
+  );
 
   const locked = fixture({
     acquire: () => {

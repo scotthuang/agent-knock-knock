@@ -5,6 +5,16 @@ import type {
   DeliverCallbackInput
 } from "./callback-outbox-policy.js";
 import {
+  callbackEnvelopeMatchesRoute,
+  createLegacyOpenClawCallbackRoute,
+  parseCallbackRoute,
+  type CallbackAttemptOutcome,
+  type CallbackEnvelopeV1,
+  type CallbackRouteV1,
+  type CallbackTransport,
+  type CallbackTransportDeliverInput
+} from "./callback-transport.js";
+import {
   sessionIdForConversation,
   turnIdForConversation,
   type AgentMessage,
@@ -20,6 +30,7 @@ const CALLBACK_AGENT_WAIT_TIMEOUT_MS = 20_000;
 const CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS = 25_000;
 const CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS = 30_000;
 const CALLBACK_PROCESS_MAX_BUFFER = 1024 * 1024 * 10;
+const DEFAULT_OPENCLAW_GATEWAY_URL = "ws://127.0.0.1:18789";
 
 export type CallbackWakeAcknowledgementStatus =
   | "started"
@@ -97,7 +108,9 @@ export interface DeliverChatSendInput {
   params: Record<string, unknown>;
 }
 
-export interface OpenClawCallbackTransport {
+export interface OpenClawCallbackTransport extends CallbackTransport {
+  readonly kind: "openclaw_gateway_v1";
+  deliver(input: CallbackTransportDeliverInput): CallbackAttemptOutcome;
   deliverCallback(input: DeliverOpenClawCallbackInput): CallbackDeliveryOutcome;
   deliverGatewayMethod(input: DeliverGatewayMethodInput): CallbackProcessDelivery;
   deliverChatSend(input: DeliverChatSendInput): CallbackProcessDelivery;
@@ -106,6 +119,376 @@ export interface OpenClawCallbackTransport {
 export interface CallbackWakeAcknowledgement {
   runId: string;
   status: CallbackWakeAcknowledgementStatus;
+}
+
+class OpenClawCallbackPlanError extends Error {
+  readonly disposition: "permanent_failure" | "uncertain";
+  readonly errorCode: string;
+
+  constructor(input: {
+    message: string;
+    disposition: "permanent_failure" | "uncertain";
+    errorCode: string;
+  }) {
+    super(input.message);
+    this.name = "OpenClawCallbackPlanError";
+    this.disposition = input.disposition;
+    this.errorCode = input.errorCode;
+  }
+}
+
+function permanentFailure(errorCode: string): CallbackAttemptOutcome {
+  return {
+    disposition: "permanent_failure",
+    error_code: errorCode
+  };
+}
+
+function sameOpenClawProfile(
+  actual: CallbackRouteV1,
+  expected: CallbackRouteV1
+): boolean {
+  return actual.transport === expected.transport &&
+    actual.profile_id === expected.profile_id &&
+    actual.profile_revision === expected.profile_revision &&
+    actual.controller_session_id === expected.controller_session_id;
+}
+
+function acceptedOutcome(
+  envelope: CallbackEnvelopeV1,
+  outcome: CallbackDeliveryOutcome,
+  observedAt: Date
+): CallbackAttemptOutcome {
+  const injectionId = stringValue(outcome.injection.injection_id);
+  const acceptedAt = stringValue(outcome.wake.accepted_at) ??
+    stringValue(outcome.injection.accepted_at) ??
+    observedAt.toISOString();
+  return {
+    disposition: "accepted",
+    accepted_at: acceptedAt,
+    // Injection acceptance is the first authoritative side effect and remains
+    // stable across later wake/run observations for the same delivery.
+    acceptance_id: injectionId ?? envelope.delivery_id,
+    evidence: {
+      transport: "openclaw_gateway_v1",
+      delivery_kind: outcome.kind,
+      injection_status: stringValue(outcome.injection.status) ?? "unknown",
+      wake_status: stringValue(outcome.wake.status) ?? "unknown",
+      // Opaque adapter evidence retained only so the compatibility projection
+      // can keep writing the pre-existing OpenClaw receipt shape. Generic core
+      // policy never reads this transport-private payload.
+      legacy_delivery: outcome
+    }
+  };
+}
+
+function callbackFailureOutcome(
+  error: unknown,
+  observedAt: Date,
+  fallbackDisposition: "retryable_failure" | "uncertain" =
+    "retryable_failure"
+): CallbackAttemptOutcome {
+  const errorMessage = (error instanceof Error ? error.message : String(error))
+    .slice(0, 4_000);
+  if (error instanceof OpenClawCallbackPlanError) {
+    return error.disposition === "uncertain"
+      ? {
+          disposition: "uncertain",
+          error_code: error.errorCode,
+          observed_at: observedAt.toISOString(),
+          evidence: { error_message: errorMessage }
+        }
+      : {
+          disposition: "permanent_failure",
+          error_code: error.errorCode,
+          evidence: { error_message: errorMessage }
+        };
+  }
+  const systemErrorCode = error instanceof Error
+    ? stringValue((error as NodeJS.ErrnoException).code)
+    : isRecord(error)
+      ? stringValue(error.code)
+      : undefined;
+  const message = `${systemErrorCode ?? ""} ${errorMessage}`.toLowerCase();
+  const evidence = { error_message: errorMessage };
+  if (
+    message.includes("eacces") ||
+    message.includes("eperm") ||
+    message.includes("enoent") ||
+    message.includes("enotdir") ||
+    message.includes("permission denied") ||
+    message.includes("operation not permitted") ||
+    message.includes("command not found") ||
+    message.includes("not found") ||
+    message.includes("unsupported") ||
+    message.includes("invalid url") ||
+    message.includes("unknown option")
+  ) {
+    return {
+      disposition: "permanent_failure",
+      error_code: "openclaw_callback_configuration_error",
+      evidence
+    };
+  }
+  if (
+    message.includes("etimedout") ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("econnreset") ||
+    message.includes("epipe") ||
+    message.includes("socket hang up") ||
+    message.includes("connection closed") ||
+    message.includes("malformed json") ||
+    message.includes("did not confirm") ||
+    message.includes("enqueue unconfirmed") ||
+    message.includes("acknowledgement")
+  ) {
+    return {
+      disposition: "uncertain",
+      error_code: "openclaw_callback_acceptance_uncertain",
+      observed_at: observedAt.toISOString(),
+      evidence
+    };
+  }
+  if (
+    message.includes("econnrefused") ||
+    message.includes("enetunreach") ||
+    message.includes("ehostunreach") ||
+    message.includes("enotfound") ||
+    message.includes("connection refused") ||
+    message.includes("network is unreachable") ||
+    message.includes("no route to host") ||
+    message.includes("failed to connect")
+  ) {
+    return {
+      disposition: "retryable_failure",
+      error_code: "openclaw_callback_delivery_failed",
+      evidence
+    };
+  }
+  if (fallbackDisposition === "uncertain") {
+    return {
+      disposition: "uncertain",
+      error_code: "openclaw_callback_acceptance_uncertain",
+      observed_at: observedAt.toISOString(),
+      evidence
+    };
+  }
+  return {
+    disposition: "retryable_failure",
+    error_code: "openclaw_callback_delivery_failed",
+    evidence
+  };
+}
+
+function deliverGenericOpenClawCallback(input: {
+  request: CallbackTransportDeliverInput;
+  now(): Date;
+  deliverCallback(input: DeliverOpenClawCallbackInput): CallbackDeliveryOutcome;
+  deliverChatSend(input: DeliverChatSendInput): CallbackProcessDelivery;
+}): CallbackAttemptOutcome {
+  const { request } = input;
+  const route = parseCallbackRoute(request.route);
+  if (route.transport !== "openclaw_gateway_v1") {
+    return permanentFailure("unsupported_callback_transport");
+  }
+  if (!callbackEnvelopeMatchesRoute(request.envelope, route)) {
+    return permanentFailure("callback_envelope_route_mismatch");
+  }
+  if (request.envelope.source.kind === "terminal_watch") {
+    return deliverGenericTerminalWatchCallback({
+      request,
+      route,
+      now: input.now,
+      deliverChatSend: input.deliverChatSend
+    });
+  }
+  if (request.envelope.source.kind !== "managed_turn") {
+    return permanentFailure("unsupported_callback_envelope_source");
+  }
+  const conversation = isRecord(request.context?.conversation)
+    ? request.context.conversation as unknown as Conversation
+    : undefined;
+  const message = isRecord(request.context?.message)
+    ? request.context.message as unknown as AgentMessage
+    : undefined;
+  const legacyOptions = isRecord(request.context?.legacyOptions)
+    ? request.context.legacyOptions
+    : undefined;
+  const statePath = stringValue(request.context?.statePath);
+  const logPath = stringValue(request.context?.logPath);
+  if (!conversation || !message || !legacyOptions || !statePath || !logPath) {
+    return permanentFailure("openclaw_callback_context_missing");
+  }
+  if (message.id !== request.envelope.event.id) {
+    return permanentFailure("callback_envelope_message_mismatch");
+  }
+  const gatewayMethod = stringValue(legacyOptions.gatewayMethod);
+  if (!gatewayMethod) {
+    return permanentFailure("openclaw_gateway_method_missing");
+  }
+  const controllerSessionId = stringValue(legacyOptions.gatewaySession) ??
+    stringValue(legacyOptions.openclawSession);
+  if (!controllerSessionId) {
+    return permanentFailure("openclaw_controller_session_missing");
+  }
+  if (route.controller_session_id !== controllerSessionId) {
+    return permanentFailure("openclaw_controller_session_changed");
+  }
+  const expectedRoute = createLegacyOpenClawCallbackRoute({
+    controllerSessionId,
+    gatewayMethod,
+    openclawBin: legacyOptions.openclawBin,
+    gatewayUrl: legacyOptions.gatewayUrl
+  });
+  if (!sameOpenClawProfile(route, expectedRoute)) {
+    return permanentFailure("openclaw_callback_profile_changed");
+  }
+  const options: CallbackDeliveryOptions = {
+    callbackRoute: route,
+    gatewayMethod,
+    gatewaySession: route.controller_session_id,
+    openclawSession: route.controller_session_id,
+    openclawBin: stringValue(legacyOptions.openclawBin),
+    gatewayUrl: openClawGatewayUrlForInvocation(legacyOptions.gatewayUrl),
+    token: stringValue(legacyOptions.token)
+  };
+  let acceptedCheckpoint: CallbackAttemptOutcome | undefined;
+  try {
+    const legacyOutcome = input.deliverCallback({
+      options,
+      statePath,
+      logPath,
+      conversation,
+      message,
+      attempt: request.attempt,
+      onAccepted(outcome) {
+        acceptedCheckpoint = acceptedOutcome(
+          request.envelope,
+          outcome,
+          input.now()
+        );
+        request.reportCheckpoint?.(acceptedCheckpoint);
+      }
+    });
+    return acceptedOutcome(request.envelope, legacyOutcome, input.now());
+  } catch (error) {
+    if (acceptedCheckpoint) return acceptedCheckpoint;
+    // deliverCallback is an opaque host invocation boundary. Without an
+    // accepted checkpoint, a generic throw still cannot prove that the host
+    // did not accept the idempotency key before the observation was lost.
+    return callbackFailureOutcome(error, input.now(), "uncertain");
+  }
+}
+
+function deliverGenericTerminalWatchCallback(input: {
+  request: CallbackTransportDeliverInput;
+  route: CallbackRouteV1;
+  now(): Date;
+  deliverChatSend(input: DeliverChatSendInput): CallbackProcessDelivery;
+}): CallbackAttemptOutcome {
+  const { request, route } = input;
+  const legacyOptions = isRecord(request.context?.legacyOptions)
+    ? request.context.legacyOptions
+    : undefined;
+  if (!legacyOptions) {
+    return permanentFailure("openclaw_callback_context_missing");
+  }
+  const gatewayMethod = stringValue(legacyOptions.gatewayMethod);
+  if (!gatewayMethod) {
+    return permanentFailure("openclaw_gateway_method_missing");
+  }
+  if (gatewayMethod !== "chat.send") {
+    return permanentFailure("openclaw_callback_profile_changed");
+  }
+  const controllerSessionId = stringValue(legacyOptions.gatewaySession) ??
+    stringValue(legacyOptions.openclawSession);
+  if (!controllerSessionId) {
+    return permanentFailure("openclaw_controller_session_missing");
+  }
+  if (route.controller_session_id !== controllerSessionId) {
+    return permanentFailure("openclaw_controller_session_changed");
+  }
+  const expectedRoute = createLegacyOpenClawCallbackRoute({
+    controllerSessionId,
+    gatewayMethod,
+    openclawBin: legacyOptions.openclawBin,
+    gatewayUrl: legacyOptions.gatewayUrl
+  });
+  if (!sameOpenClawProfile(route, expectedRoute)) {
+    return permanentFailure("openclaw_callback_profile_changed");
+  }
+
+  let delivery: CallbackProcessDelivery;
+  try {
+    delivery = input.deliverChatSend({
+      openclawBin: stringValue(legacyOptions.openclawBin),
+      gatewayUrl: openClawGatewayUrlForInvocation(legacyOptions.gatewayUrl),
+      token: stringValue(legacyOptions.token),
+      params: {
+        sessionKey: route.controller_session_id,
+        message: request.envelope.event.body,
+        idempotencyKey: request.envelope.idempotency_key,
+        deliver: true
+      }
+    });
+  } catch (error) {
+    // deliverChatSend is one opaque invocation boundary. Once entered, an
+    // unexpected throw cannot prove that chat.send did not reach the Gateway.
+    return callbackFailureOutcome(error, input.now(), "uncertain");
+  }
+
+  let acknowledgement: CallbackWakeAcknowledgement;
+  if (delivery.status !== 0) {
+    try {
+      // A matching acknowledgement is stronger evidence than the CLI exit
+      // code: the Gateway established this exact idempotency key.
+      acknowledgement = parseChatSendAcknowledgement(
+        delivery.stdout,
+        request.envelope.idempotency_key
+      );
+    } catch {
+      const detail = cleanProcessText(delivery.stderr) ??
+        cleanProcessText(delivery.stdout) ??
+        `chat.send failed with status ${delivery.status}`;
+      return callbackFailureOutcome(
+        new Error(detail),
+        input.now(),
+        "uncertain"
+      );
+    }
+  } else {
+    try {
+      acknowledgement = parseChatSendAcknowledgement(
+        delivery.stdout,
+        request.envelope.idempotency_key
+      );
+    } catch {
+      return {
+        disposition: "uncertain",
+        error_code: "openclaw_chat_send_ack_uncertain",
+        observed_at: input.now().toISOString()
+      };
+    }
+  }
+  const outcome: CallbackAttemptOutcome = {
+    disposition: "accepted",
+    accepted_at: input.now().toISOString(),
+    acceptance_id: acknowledgement.runId,
+    evidence: { status: acknowledgement.status }
+  };
+  try {
+    request.reportCheckpoint?.(outcome);
+  } catch {
+    // The authoritative chat.send acknowledgement still wins. Returning the
+    // accepted outcome gives the caller one final chance to durably settle it.
+  }
+  return outcome;
+}
+
+function openClawGatewayUrlForInvocation(value: unknown): string | undefined {
+  const gatewayUrl = stringValue(value);
+  return gatewayUrl === DEFAULT_OPENCLAW_GATEWAY_URL ? undefined : gatewayUrl;
 }
 
 interface DeliverAgentWaitInput {
@@ -240,6 +623,47 @@ function parseGatewayCallbackDeliveryPlan(
     }
   }
   return { chatSendParams, sessionSendParams };
+}
+
+function assertGatewayCallbackPlanTarget(input: {
+  chatSendParams?: Record<string, unknown>;
+  sessionSendParams?: Record<string, unknown>;
+  expectedControllerSessionId: string;
+  sideEffectPossible: boolean;
+}): void {
+  const actualControllerSessionId = input.chatSendParams
+    ? stringValue(input.chatSendParams.sessionKey)
+    : input.sessionSendParams
+      ? stringValue(input.sessionSendParams.key)
+      : undefined;
+  if (
+    actualControllerSessionId === undefined ||
+    actualControllerSessionId === input.expectedControllerSessionId
+  ) {
+    return;
+  }
+  throw new OpenClawCallbackPlanError({
+    message:
+      "gateway callback delivery target does not match the immutable callback route",
+    disposition: input.sideEffectPossible ? "uncertain" : "permanent_failure",
+    errorCode: input.sideEffectPossible
+      ? "openclaw_callback_target_mismatch_after_possible_acceptance"
+      : "openclaw_callback_target_mismatch"
+  });
+}
+
+function callbackPlanValidationError(
+  error: unknown,
+  sideEffectPossible: boolean
+): OpenClawCallbackPlanError {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new OpenClawCallbackPlanError({
+    message: detail,
+    disposition: sideEffectPossible ? "uncertain" : "permanent_failure",
+    errorCode: sideEffectPossible
+      ? "openclaw_callback_plan_invalid_after_possible_acceptance"
+      : "openclaw_callback_plan_invalid"
+  });
 }
 
 export function parseChatSendAcknowledgement(
@@ -586,15 +1010,19 @@ export function createOpenClawCallbackTransport(
       );
     }
 
+    const expectedControllerSessionId =
+      stringValue(options.gatewaySession) ??
+      stringValue(options.openclawSession) ??
+      stringValue(conversation.openclaw_session);
+    if (!expectedControllerSessionId) {
+      throw new Error("callback delivery requires a controller session");
+    }
     const delivery = deliverGatewayMethod({
       method: options.gatewayMethod,
       openclawBin: options.openclawBin,
       gatewayUrl: options.gatewayUrl,
       token: options.token,
-      sessionKey:
-        options.gatewaySession ??
-        options.openclawSession ??
-        conversation.openclaw_session,
+      sessionKey: expectedControllerSessionId,
       statePath,
       logPath,
       conversation,
@@ -618,8 +1046,6 @@ export function createOpenClawCallbackTransport(
     }
 
     const gatewayPayload = parseRequiredGatewayDeliveryPayload(delivery.stdout);
-    const { chatSendParams, sessionSendParams } =
-      parseGatewayCallbackDeliveryPlan(gatewayPayload);
     const explicitlyEnqueued =
       typeof gatewayPayload.enqueued === "boolean"
         ? gatewayPayload.enqueued
@@ -627,6 +1053,25 @@ export function createOpenClawCallbackTransport(
     const gatewayHandledWithoutInjection =
       gatewayPayload.auto_approved === true ||
       gatewayPayload.approval_already_handled === true;
+    const sideEffectPossible = explicitlyEnqueued !== false ||
+      gatewayHandledWithoutInjection ||
+      stringValue(gatewayPayload.injection_id) !== undefined;
+    let chatSendParams: Record<string, unknown> | undefined;
+    let sessionSendParams: Record<string, unknown> | undefined;
+    try {
+      ({ chatSendParams, sessionSendParams } =
+        parseGatewayCallbackDeliveryPlan(gatewayPayload));
+      assertGatewayCallbackPlanTarget({
+        chatSendParams,
+        sessionSendParams,
+        expectedControllerSessionId,
+        sideEffectPossible
+      });
+    } catch (error) {
+      throw error instanceof OpenClawCallbackPlanError
+        ? error
+        : callbackPlanValidationError(error, sideEffectPossible);
+    }
     const injectionObservedAt = ports.now().toISOString();
     let injection: Record<string, unknown> = {
       status:
@@ -729,15 +1174,15 @@ export function createOpenClawCallbackTransport(
       params: wakePlan.params
     });
     if (wakeDelivery.status !== 0) {
+      const wakeError =
+        wakeDelivery.stderr ||
+        wakeDelivery.stdout ||
+        `callback wake delivery failed with status ${wakeDelivery.status}`;
       const wake = {
         status: "failed",
         mode: wakePlan.mode,
         failed_at: ports.now().toISOString(),
-        error: cleanProcessText(
-          wakeDelivery.stderr ||
-            wakeDelivery.stdout ||
-            `wake delivery failed with status ${wakeDelivery.status}`
-        )
+        error: cleanProcessText(wakeError)
       };
       const outcome = { kind: wakePlan.kind, injection, wake };
       if (injection.status === "accepted") {
@@ -759,11 +1204,17 @@ export function createOpenClawCallbackTransport(
       if (injection.status === "accepted") {
         return outcome;
       }
-      throw new Error(
-        wakeDelivery.stderr ||
-          wakeDelivery.stdout ||
-          `callback wake delivery failed with status ${wakeDelivery.status}`
-      );
+      if (injection.status === "unconfirmed") {
+        // Older Gateway callback methods can return a wake plan without the
+        // `enqueued` field. Once that opaque method has returned `ok`, a later
+        // wake failure cannot prove the injection did not already happen.
+        throw new OpenClawCallbackPlanError({
+          message: wakeError,
+          disposition: "uncertain",
+          errorCode: "openclaw_callback_acceptance_uncertain"
+        });
+      }
+      throw new Error(wakeError);
     }
 
     let wakeAck: CallbackWakeAcknowledgement;
@@ -854,6 +1305,13 @@ export function createOpenClawCallbackTransport(
   }
 
   return {
+    kind: "openclaw_gateway_v1",
+    deliver: (input) => deliverGenericOpenClawCallback({
+      request: input,
+      now: ports.now,
+      deliverCallback,
+      deliverChatSend
+    }),
     deliverCallback,
     deliverGatewayMethod,
     deliverChatSend

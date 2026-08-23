@@ -64,6 +64,7 @@ export interface ConstructTerminalOrdinaryDispatchLedgerOptions {
   statePath: string;
   eventLogPath: string;
   callbackExpected: boolean;
+  callbackRouteFingerprint?: string | null;
   postCallbackFields?: TerminalOrdinaryDispatchPostCallbackFields;
   previousGenerationId?: string;
 }
@@ -79,6 +80,9 @@ export const constructTerminalOrdinaryDispatchLedger = (
   state_path: options.statePath,
   event_log_path: options.eventLogPath,
   callback_expected: options.callbackExpected,
+  ...(options.callbackRouteFingerprint !== undefined
+    ? { callback_route_fingerprint: options.callbackRouteFingerprint }
+    : {}),
   ...(options.postCallbackFields ?? {}),
   previous_generation_id: options.previousGenerationId
 });
@@ -246,6 +250,7 @@ const RECEIPT_IMMUTABLE_FIELDS = [
   "request_hash",
   "executor_kind",
   "openclaw_session",
+  "callback_route_fingerprint",
   "state_path",
   "event_log_path",
   "deferred_foreground_transfer_id"

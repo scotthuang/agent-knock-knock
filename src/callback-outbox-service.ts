@@ -11,6 +11,7 @@ import {
   isWaitingForAgentStatus,
   normalizeLegacyCallbackStatus,
   parseMessageJson,
+  sessionIdForConversation,
   turnIdForConversation,
   type AgentMessage,
   type Actor,
@@ -29,16 +30,45 @@ import type {
 } from "./callback-outbox-policy.js";
 import {
   beginCallbackRetryPolicy,
-  reduceCallbackRetryPolicy
+  reduceCallbackRetryPolicy,
+  supersedeCallbackNotificationDelivery
 } from "./callback-outbox-policy.js";
-import { createCallbackOutboxSettlement } from "./callback-outbox-settlement.js";
+import {
+  callbackOutboxEvent,
+  callbackOutboxField,
+  createCallbackOutboxSettlement,
+  type CallbackOutboxLane
+} from "./callback-outbox-settlement.js";
 import type { TranscriptEvent } from "./transcript.js";
 import { canonicalJson } from "./canonical-json.js";
+import { callbackRouteFingerprint } from
+  "./callback-route-authority.js";
+import {
+  createCallbackEnvelope,
+  parseCallbackAttemptOutcome,
+  resolveCallbackRoute as resolveHostCallbackRoute,
+  type CallbackEnvelopeV1,
+  type CallbackRouteCandidate,
+  type CallbackRouteV1
+} from "./callback-transport.js";
 import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
 type CallbackSettlement = ReturnType<typeof createCallbackOutboxSettlement>;
+
+function supersedeNotificationForLifecycleMessage(
+  conversation: Conversation,
+  message: AgentMessage,
+  now: Date
+): Conversation {
+  return message.type === "done" || message.type === "error"
+    ? supersedeCallbackNotificationDelivery(conversation, {
+        at: now.toISOString(),
+        reason: `superseded_by_${message.type}_callback`
+      })
+    : conversation;
+}
 
 export interface CallbackPreparationOptions
   extends CallbackDeliveryOptions {
@@ -55,6 +85,8 @@ export interface CallbackPreparationOptions
   recoverMissingOutbox?: boolean;
   recoverTerminalCompletion?: boolean;
   retryPending?: boolean;
+  /** Internal durable lane; ordinary callbacks use the lifecycle lane. */
+  callbackOutboxLane?: CallbackOutboxLane;
 }
 
 export interface PrepareCallbackOutboxInput {
@@ -78,6 +110,9 @@ export interface PreparedCallbackDelivery extends PreparedCallbackBase {
   logPath: string;
   deliveryAttempt: number;
   deliveryAttemptId: string;
+  callbackOutboxLane: CallbackOutboxLane;
+  callbackRoute?: CallbackRouteV1;
+  callbackEnvelope?: CallbackEnvelopeV1;
 }
 
 export type PreparedCallback =
@@ -107,11 +142,13 @@ export interface CallbackDeliveryReconciliationInput {
   statePath: string;
   logPath: string;
   delayMs?: unknown;
+  callbackOutboxLane?: CallbackOutboxLane;
 }
 
 export interface CallbackRetryMonitorInput {
   statePath: string;
   initialDelayMs?: unknown;
+  callbackOutboxLane?: CallbackOutboxLane;
 }
 
 export interface RetryCallbackInput {
@@ -150,6 +187,14 @@ export interface ApprovalNotificationPreparationInput {
   recoverMissingOutbox?: boolean;
 }
 
+export interface StallNotificationPreparationInput {
+  options: CallbackPreparationOptions;
+  statePath: string;
+  logPath: string;
+  conversation: Conversation;
+  message: AgentMessage;
+}
+
 export interface CallbackOutboxServicePorts {
   state: {
     load(statePath: string): Conversation;
@@ -183,6 +228,7 @@ export interface CallbackOutboxServicePorts {
     startMonitor(input: {
       statePath: string;
       delayMs: number;
+      callbackOutboxLane?: CallbackOutboxLane;
     }): { pid?: number | null };
     isProcessAlive(pid: number): boolean;
     attemptLeaseMs: number;
@@ -215,20 +261,209 @@ export interface CallbackGatewayRouteCandidate {
 export function resolveCallbackGatewayRoute(
   ...candidates: CallbackGatewayRouteCandidate[]
 ) {
+  let gatewayUrl: string | undefined;
   for (const candidate of candidates) {
+    gatewayUrl ??= stringValue(candidate.gatewayUrl);
     const token = stringValue(candidate.token);
     if (!token || token === "<token>") {
       continue;
     }
     return {
-      gatewayUrl: stringValue(candidate.gatewayUrl),
+      gatewayUrl: stringValue(candidate.gatewayUrl) ?? gatewayUrl,
       token
     };
   }
   return {
-    gatewayUrl: undefined,
+    gatewayUrl,
     token: undefined
   };
+}
+
+function resolveManagedCallbackRoute(input: {
+  options: CallbackPreparationOptions;
+  conversation: Conversation;
+  inheritedDelivery?: Record<string, unknown>;
+}): CallbackRouteV1 | undefined {
+  if (input.inheritedDelivery) {
+    return resolveHostCallbackRoute(
+      callbackRouteFieldCandidate(
+        input.inheritedDelivery,
+        "callback_route"
+      ),
+      legacyCallbackRouteCandidate({
+        gatewayMethod: input.inheritedDelivery.gateway_method,
+        gatewaySession: input.inheritedDelivery.gateway_session ??
+          input.conversation.gateway_session ??
+          input.conversation.openclaw_session,
+        openclawBin: input.inheritedDelivery.openclaw_bin ??
+          input.conversation.openclaw_bin,
+        gatewayUrl: input.inheritedDelivery.gateway_url ??
+          input.conversation.gateway_url
+      })
+    );
+  }
+  return resolveHostCallbackRoute(
+    callbackRouteFieldCandidate(input.options, "callbackRoute"),
+    callbackRouteFieldCandidate(input.conversation, "callback_route"),
+    legacyCallbackRouteCandidate({
+      gatewayMethod: input.options.gatewayMethod ??
+        input.conversation.gateway_method,
+      gatewaySession: input.options.gatewaySession ??
+        input.options.openclawSession ?? input.conversation.gateway_session ??
+        input.conversation.openclaw_session,
+      openclawBin: input.options.openclawBin ?? input.conversation.openclaw_bin,
+      gatewayUrl: input.options.gatewayUrl ?? input.conversation.gateway_url
+    }),
+    legacyCallbackRouteCandidate({
+      gatewayMethod: input.conversation.gateway_method,
+      gatewaySession: input.conversation.gateway_session ??
+        input.conversation.openclaw_session,
+      openclawBin: input.conversation.openclaw_bin,
+      gatewayUrl: input.conversation.gateway_url
+    })
+  );
+}
+
+function callbackRouteFieldCandidate(
+  container: object,
+  field: string
+): CallbackRouteCandidate {
+  return Object.hasOwn(container, field)
+    ? { callbackRoute: (container as Record<string, unknown>)[field] }
+    : {};
+}
+
+function resolvedDeliveryOptions(input: {
+  options: CallbackPreparationOptions;
+  conversation: Conversation;
+  inheritedDelivery?: Record<string, unknown>;
+  callbackRoute?: CallbackRouteV1;
+}): CallbackPreparationOptions {
+  if (!input.inheritedDelivery) {
+    return {
+      ...input.options,
+      ...(input.callbackRoute ? { callbackRoute: input.callbackRoute } : {}),
+      gatewayMethod: input.options.gatewayMethod ??
+        input.conversation.gateway_method,
+      gatewaySession: input.options.gatewaySession ??
+        input.options.openclawSession ?? input.conversation.gateway_session ??
+        input.conversation.openclaw_session,
+      openclawSession: input.options.openclawSession ??
+        input.conversation.openclaw_session,
+      openclawBin: input.options.openclawBin ?? input.conversation.openclaw_bin,
+      gatewayUrl: input.options.gatewayUrl ?? input.conversation.gateway_url
+    };
+  }
+  const { callbackRoute: _ignoredCurrentRoute, ...currentOptions } =
+    input.options;
+  return {
+    ...currentOptions,
+    ...(input.callbackRoute ? { callbackRoute: input.callbackRoute } : {}),
+    gatewayMethod: stringValue(input.inheritedDelivery.gateway_method),
+    gatewaySession: stringValue(input.inheritedDelivery.gateway_session) ??
+      input.conversation.gateway_session ??
+      input.conversation.openclaw_session,
+    openclawSession: input.conversation.openclaw_session,
+    openclawBin: stringValue(input.inheritedDelivery.openclaw_bin) ??
+      input.conversation.openclaw_bin,
+    gatewayUrl: stringValue(input.inheritedDelivery.gateway_url) ??
+      input.conversation.gateway_url
+  };
+}
+
+function legacyCallbackRouteCandidate(input: {
+  gatewayMethod?: unknown;
+  gatewaySession?: unknown;
+  openclawBin?: unknown;
+  gatewayUrl?: unknown;
+}): CallbackRouteCandidate {
+  return stringValue(input.gatewayMethod)
+    ? {
+        legacyOpenClaw: {
+          controllerSessionId: input.gatewaySession,
+          gatewayMethod: input.gatewayMethod,
+          openclawBin: input.openclawBin,
+          gatewayUrl: input.gatewayUrl
+        }
+      }
+    : {};
+}
+
+function createManagedCallbackEnvelope(
+  route: CallbackRouteV1,
+  conversation: Conversation,
+  message: AgentMessage
+): CallbackEnvelopeV1 {
+  return createCallbackEnvelope({
+    route,
+    source: {
+      kind: "managed_turn",
+      session_id: sessionIdForConversation(conversation),
+      turn_id: turnIdForConversation(conversation),
+      conversation_id: conversation.conversation_id
+    },
+    event: {
+      id: message.id,
+      type: message.type,
+      body: message.body,
+      requires_response: message.requires_response,
+      metadata: message.metadata
+    }
+  });
+}
+
+function assertImmutableCallbackTransport(
+  inheritedDelivery: Record<string, unknown> | undefined,
+  route: CallbackRouteV1 | undefined,
+  envelope: CallbackEnvelopeV1 | undefined,
+  messageId: string
+): void {
+  if (!inheritedDelivery) return;
+  if (
+    inheritedDelivery.callback_route !== undefined &&
+    canonicalJson(inheritedDelivery.callback_route) !== canonicalJson(route)
+  ) {
+    throw new Error(
+      `callback message ${messageId} conflicts with its persisted immutable route`
+    );
+  }
+  if (
+    inheritedDelivery.callback_envelope !== undefined &&
+    canonicalJson(inheritedDelivery.callback_envelope) !== canonicalJson(envelope)
+  ) {
+    throw new Error(
+      `callback message ${messageId} conflicts with its persisted immutable envelope`
+    );
+  }
+}
+
+function assertDispatchCallbackRouteAuthority(
+  conversation: Conversation,
+  route: CallbackRouteV1 | undefined
+): void {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const submission = isRecord(takeover?.terminal_bridge_submission)
+    ? takeover.terminal_bridge_submission
+    : undefined;
+  if (
+    !submission ||
+    !Object.hasOwn(submission, "callback_route_fingerprint")
+  ) {
+    // Records from before the route-fingerprint field remain readable.
+    return;
+  }
+  const authority = submission.callback_route_fingerprint;
+  const matches = authority === null
+    ? route === undefined
+    : stringValue(authority) !== undefined && route !== undefined &&
+      callbackRouteFingerprint(route) === authority;
+  if (!matches) {
+    throw new Error(
+      "callback route conflicts with immutable terminal dispatch authority"
+    );
+  }
 }
 
 export function createCallbackOutboxService(
@@ -242,9 +477,10 @@ export function createCallbackOutboxService(
       append: ports.state.append
     },
     retryMonitor: {
-      start: ({ statePath }) => ports.retry.startMonitor({
+      start: ({ statePath, callbackOutboxLane }) => ports.retry.startMonitor({
         statePath,
-        delayMs: ports.retry.delaysMs[0]
+        delayMs: ports.retry.delaysMs[0],
+        callbackOutboxLane
       })
     },
     clock: { now: ports.runtime.now, nowMs: ports.runtime.nowMs },
@@ -262,6 +498,8 @@ export function createCallbackOutboxService(
     const conversation = normalizeLegacyCallbackStatus(
       loadedConversation as Conversation
     );
+    const callbackOutboxLane = options.callbackOutboxLane ?? "lifecycle";
+    const callbackOutbox = callbackOutboxField(callbackOutboxLane);
     const storeDir = ports.state.storeDirForStatePath(options.statePath);
     ports.authority.assertNoDeferredTransfer({
       storeDir,
@@ -269,10 +507,6 @@ export function createCallbackOutboxService(
       action: "prepare callback for"
     });
     const executor = executorForConversation(conversation);
-    const persistedGatewayRoute = resolveCallbackGatewayRoute({
-      gatewayUrl: options.gatewayUrl,
-      token: options.token
-    });
     const message = options.retryPending === true ||
         options.preserveMessageId === true
       ? parseMessageJson(messageInput)
@@ -289,8 +523,8 @@ export function createCallbackOutboxService(
     }
 
     const existingEvents = ports.state.readEvents(logPath);
-    const callbackDelivery = isRecord(conversation.callback_delivery)
-      ? conversation.callback_delivery
+    const callbackDelivery = isRecord(conversation[callbackOutbox])
+      ? conversation[callbackOutbox]
       : undefined;
     const persistedDeliveryMessage = isRecord(callbackDelivery?.message)
       ? callbackDelivery.message
@@ -306,6 +540,31 @@ export function createCallbackOutboxService(
     const inheritedDelivery = sameDeliveryMessage
       ? callbackDelivery
       : undefined;
+    const callbackRoute = resolveManagedCallbackRoute({
+      options,
+      conversation,
+      inheritedDelivery
+    });
+    assertDispatchCallbackRouteAuthority(conversation, callbackRoute);
+    const deliveryOptions = resolvedDeliveryOptions({
+      options,
+      conversation,
+      inheritedDelivery,
+      callbackRoute
+    });
+    const persistedGatewayRoute = resolveCallbackGatewayRoute({
+      gatewayUrl: deliveryOptions.gatewayUrl,
+      token: deliveryOptions.token
+    });
+    const callbackEnvelope = callbackRoute
+      ? createManagedCallbackEnvelope(callbackRoute, conversation, message)
+      : undefined;
+    assertImmutableCallbackTransport(
+      inheritedDelivery,
+      callbackRoute,
+      callbackEnvelope,
+      message.id
+    );
     const retryingPending = options.retryPending === true &&
       sameDeliveryMessage &&
       callbackRetryDisposition(ports, inheritedDelivery).state === "retryable";
@@ -388,7 +647,16 @@ export function createCallbackOutboxService(
       const deliveryAttemptId = randomUUID();
       let nextConversation: Conversation = retryingPending
         ? conversation
-        : applyMessageToConversation(conversation, message);
+        : callbackOutboxLane === "notification"
+          ? conversation
+          : applyMessageToConversation(
+              supersedeNotificationForLifecycleMessage(
+                conversation,
+                message,
+                ports.runtime.now()
+              ),
+              message
+            );
       if (closeTerminalBridgeOnDone) {
         const closedAt = ports.runtime.now().toISOString();
         nextConversation = {
@@ -418,7 +686,8 @@ export function createCallbackOutboxService(
         deliveryAttempt <= ports.retry.delaysMs.length
         ? ports.retry.startMonitor({
             statePath: options.statePath,
-            delayMs: retryDelayMs
+            delayMs: retryDelayMs,
+            callbackOutboxLane
           })
         : undefined;
       if (
@@ -432,7 +701,7 @@ export function createCallbackOutboxService(
         const now = ports.runtime.now().toISOString();
         nextConversation = {
           ...nextConversation,
-          callback_delivery: {
+          [callbackOutbox]: {
             status: "pending",
             message,
             attempts: deliveryAttempt,
@@ -444,17 +713,20 @@ export function createCallbackOutboxService(
             created_at: stringValue(inheritedDelivery?.created_at) ?? now,
             last_attempt_at: now,
             updated_at: now,
-            gateway_method: options.gatewayMethod,
-            gateway_session: options.gatewaySession ??
-              options.openclawSession ?? conversation.openclaw_session,
+            gateway_method: deliveryOptions.gatewayMethod,
+            gateway_session: deliveryOptions.gatewaySession ??
+              deliveryOptions.openclawSession ?? conversation.openclaw_session,
             gateway_url: persistedGatewayRoute.gatewayUrl,
-            openclaw_bin: options.openclawBin ?? conversation.openclaw_bin,
+            openclaw_bin: deliveryOptions.openclawBin ??
+              conversation.openclaw_bin,
             close_terminal_bridge_on_done: closeTerminalBridgeOnDone,
             track_delivery: true,
             final_status: finalStatus,
             preserve_conversation_status: true,
             kind: stringValue(options.callbackDeliveryKind) ??
               stringValue(inheritedDelivery?.kind),
+            ...(callbackRoute ? { callback_route: callbackRoute } : {}),
+            ...(callbackEnvelope ? { callback_envelope: callbackEnvelope } : {}),
             ...(callbackWatchdog
               ? {
                   retry_monitor_pid: callbackWatchdog.pid ?? null,
@@ -468,9 +740,10 @@ export function createCallbackOutboxService(
         ports.state.append(logPath, {
           ts: now,
           conversation_id: conversation.conversation_id,
-          event: retryingPending
-            ? "callback_delivery_retry_started"
-            : "callback_delivery_pending",
+          event: callbackOutboxEvent(
+            callbackOutboxLane,
+            retryingPending ? "retry_started" : "pending"
+          ),
           message_id: message.id,
           attempt: deliveryAttempt
         });
@@ -478,11 +751,13 @@ export function createCallbackOutboxService(
           ports.state.append(logPath, {
             ts: ports.runtime.now().toISOString(),
             conversation_id: conversation.conversation_id,
-            event: "callback_retry_monitor_launched",
+            event: callbackOutboxLane === "notification"
+              ? "callback_notification_retry_monitor_launched"
+              : "callback_retry_monitor_launched",
             message_id: message.id,
             pid: callbackWatchdog.pid ?? null,
-            next_attempt_at: isRecord(nextConversation.callback_delivery)
-              ? nextConversation.callback_delivery.next_attempt_at
+            next_attempt_at: isRecord(nextConversation[callbackOutbox])
+              ? nextConversation[callbackOutbox].next_attempt_at
               : undefined
           });
         }
@@ -516,13 +791,16 @@ export function createCallbackOutboxService(
 
       return {
         outcome: "deliver",
-        options,
+        options: deliveryOptions,
         statePath: options.statePath,
         logPath,
         conversation: nextConversation,
         message,
         deliveryAttempt,
-        deliveryAttemptId
+        deliveryAttemptId,
+        callbackOutboxLane,
+        ...(callbackRoute ? { callbackRoute } : {}),
+        callbackEnvelope
       };
     }
 
@@ -543,13 +821,20 @@ export function createCallbackOutboxService(
       ports.state.storeDirForStatePath(prepared.statePath)
     );
     let acceptedDelivery: CallbackDeliveryOutcome | undefined;
+    let delivery: CallbackDeliveryOutcome;
     try {
-      const delivery = ports.delivery.deliver({
+      delivery = ports.delivery.deliver({
         options: prepared.options,
         statePath: prepared.statePath,
         logPath: prepared.logPath,
         conversation: prepared.conversation,
         message: prepared.message,
+        attempt: {
+          number: prepared.deliveryAttempt,
+          id: prepared.deliveryAttemptId
+        },
+        route: prepared.callbackRoute,
+        envelope: prepared.callbackEnvelope,
         onProgress: (progress) => {
           settlement.persistDeliveryProgress(prepared, progress);
         },
@@ -557,16 +842,6 @@ export function createCallbackOutboxService(
           acceptedDelivery = accepted;
         }
       });
-      return {
-        delivered: true,
-        duplicate: false,
-        conversation: settlement.settleDelivery(prepared, {
-          delivered: true,
-          delivery
-        }),
-        message: prepared.message,
-        delivery: delivery.kind
-      };
     } catch (error) {
       if (acceptedDelivery) {
         const acceptedAfterError: CallbackDeliveryOutcome = {
@@ -593,8 +868,9 @@ export function createCallbackOutboxService(
         delivered: false,
         error
       });
-      const settledDelivery = isRecord(settled.callback_delivery)
-        ? settled.callback_delivery
+      const settledOutbox = callbackOutboxField(prepared.callbackOutboxLane);
+      const settledDelivery = isRecord(settled[settledOutbox])
+        ? settled[settledOutbox]
         : undefined;
       if (settledDelivery?.status === "delivered") {
         return {
@@ -607,6 +883,48 @@ export function createCallbackOutboxService(
       }
       throw error;
     }
+
+    const attemptOutcome = delivery.attempt_outcome === undefined
+      ? undefined
+      : parseCallbackAttemptOutcome(delivery.attempt_outcome);
+    if (attemptOutcome && attemptOutcome.disposition !== "accepted") {
+      const error = new Error(
+        stringValue(attemptOutcome.evidence?.error_message) ??
+          `callback transport ${attemptOutcome.disposition}: ` +
+            attemptOutcome.error_code
+      );
+      const settled = settlement.settleDelivery(prepared, {
+        delivered: false,
+        delivery,
+        outcome: attemptOutcome,
+        error
+      });
+      const settledOutbox = callbackOutboxField(prepared.callbackOutboxLane);
+      const settledDelivery = isRecord(settled[settledOutbox])
+        ? settled[settledOutbox]
+        : undefined;
+      if (settledDelivery?.status === "delivered") {
+        return {
+          delivered: true,
+          duplicate: false,
+          conversation: settled,
+          message: prepared.message,
+          delivery: delivery.kind
+        };
+      }
+      throw error;
+    }
+    return {
+      delivered: true,
+      duplicate: false,
+      conversation: settlement.settleDelivery(prepared, {
+        delivered: true,
+        delivery,
+        outcome: attemptOutcome
+      }),
+      message: prepared.message,
+      delivery: delivery.kind
+    };
   }
 
   return {
@@ -623,6 +941,8 @@ export function createCallbackOutboxService(
     prepareApprovalNotification: (
       input: ApprovalNotificationPreparationInput
     ) => prepareApprovalNotification(prepare, input),
+    prepareStallNotification: (input: StallNotificationPreparationInput) =>
+      prepareStallNotification(prepare, input),
     prepareTerminalCompletion: (input: TerminalCompletionPreparationInput) =>
       prepareTerminalCompletion(ports, prepare, input)
   };
@@ -632,6 +952,10 @@ function prepareApprovalNotification(
   prepare: (input: PrepareCallbackOutboxInput) => PreparedCallback,
   input: ApprovalNotificationPreparationInput
 ) {
+  const callbackRoute = resolveManagedCallbackRoute({
+    options: input.options,
+    conversation: input.conversation
+  });
   const identity = terminalApprovalCallbackIdentity(input.conversation);
   const callbackMessage = createMessage({
     conversation: input.conversation,
@@ -644,7 +968,7 @@ function prepareApprovalNotification(
     metadata: input.metadata,
     now: identity.now
   });
-  if (!input.conversation.gateway_method) {
+  if (!callbackRoute) {
     return {
       callbackMessage,
       delivered: false as const
@@ -655,6 +979,7 @@ function prepareApprovalNotification(
     prepared: prepare({
       options: {
         ...input.options,
+        ...(callbackRoute ? { callbackRoute } : {}),
         statePath: input.statePath,
         log: input.logPath,
         messageJson: JSON.stringify(callbackMessage),
@@ -662,13 +987,50 @@ function prepareApprovalNotification(
         gatewaySession: input.conversation.gateway_session,
         openclawSession: input.conversation.openclaw_session,
         openclawBin: input.conversation.openclaw_bin,
-        gatewayUrl: stringValue(input.conversation.gateway_token)
-          ? input.conversation.gateway_url
-          : undefined,
+        gatewayUrl: input.conversation.gateway_url,
         token: stringValue(input.conversation.gateway_token),
         preserveMessageId: true,
         callbackDeliveryKind: "approval_notification",
         recoverMissingOutbox: input.recoverMissingOutbox === true,
+        conversationOverride: input.conversation
+      },
+      logPath: input.logPath
+    })
+  };
+}
+
+function prepareStallNotification(
+  prepare: (input: PrepareCallbackOutboxInput) => PreparedCallback,
+  input: StallNotificationPreparationInput
+) {
+  const callbackRoute = resolveManagedCallbackRoute({
+    options: input.options,
+    conversation: input.conversation
+  });
+  if (!callbackRoute) {
+    return {
+      callbackMessage: input.message,
+      delivered: false as const
+    };
+  }
+  return {
+    callbackMessage: input.message,
+    prepared: prepare({
+      options: {
+        ...input.options,
+        callbackRoute,
+        callbackOutboxLane: "notification",
+        statePath: input.statePath,
+        log: input.logPath,
+        messageJson: JSON.stringify(input.message),
+        gatewayMethod: input.conversation.gateway_method,
+        gatewaySession: input.conversation.gateway_session,
+        openclawSession: input.conversation.openclaw_session,
+        openclawBin: input.conversation.openclaw_bin,
+        gatewayUrl: input.conversation.gateway_url,
+        token: stringValue(input.conversation.gateway_token),
+        preserveMessageId: true,
+        callbackDeliveryKind: "stall_notification",
         conversationOverride: input.conversation
       },
       logPath: input.logPath
@@ -820,9 +1182,14 @@ function prepareTerminalCompletion(
       }),
       id: callbackMessageId
     };
+    const callbackRoute = resolveManagedCallbackRoute({
+      options: input.options,
+      conversation: claim.conversation
+    });
     const prepared = prepare({
       options: {
         ...input.options,
+        ...(callbackRoute ? { callbackRoute } : {}),
         statePath: input.statePath,
         log: input.logPath,
         closeTerminalBridgeOnDone: false,
@@ -835,11 +1202,9 @@ function prepareTerminalCompletion(
         gatewaySession: claim.conversation.gateway_session,
         openclawSession: claim.conversation.openclaw_session,
         openclawBin: claim.conversation.openclaw_bin,
-        gatewayUrl: stringValue(claim.conversation.gateway_token)
-          ? claim.conversation.gateway_url
-          : undefined,
+        gatewayUrl: claim.conversation.gateway_url,
         token: stringValue(claim.conversation.gateway_token),
-        recordOnly: !stringValue(claim.conversation.gateway_method)
+        recordOnly: !callbackRoute
       },
       logPath: input.logPath
     });
@@ -985,8 +1350,10 @@ function retryCallback(
   settlement: CallbackSettlement,
   { options, conversation, statePath, logPath }: RetryCallbackInput
 ): RetryCallbackOutcome {
-  const callbackDelivery = isRecord(conversation.callback_delivery)
-    ? conversation.callback_delivery
+  const callbackOutboxLane = options.callbackOutboxLane ?? "lifecycle";
+  const callbackOutbox = callbackOutboxField(callbackOutboxLane);
+  const callbackDelivery = isRecord(conversation[callbackOutbox])
+    ? conversation[callbackOutbox]
     : undefined;
   const legacyStatusError = stringValue(
     conversation.legacy_callback_status_error
@@ -1005,7 +1372,8 @@ function retryCallback(
       expectedMessageId: isRecord(callbackDelivery?.message)
         ? stringValue(callbackDelivery.message.id)
         : undefined,
-      reason: "manual_retry_observed_accepted_transport"
+      reason: "manual_retry_observed_accepted_transport",
+      callbackOutboxLane
     });
     if (!recovered) {
       throw new Error(
@@ -1042,10 +1410,16 @@ function retryCallback(
       token: conversation.gateway_token
     }
   );
+  const callbackRoute = resolveManagedCallbackRoute({
+    options,
+    conversation,
+    inheritedDelivery: callbackDelivery
+  });
   return {
     kind: "retried",
     result: ports.delivery.runTransaction({
       ...options,
+      ...(callbackRoute ? { callbackRoute } : {}),
       statePath,
       messageJson: JSON.stringify(callbackDelivery.message),
       gatewayMethod: stringValue(callbackDelivery.gateway_method) ??
@@ -1059,6 +1433,7 @@ function retryCallback(
       token: gatewayRoute.token,
       closeTerminalBridgeOnDone:
         callbackDelivery.close_terminal_bridge_on_done === true,
+      callbackOutboxLane,
       retryPending: true
     })
   };
@@ -1117,6 +1492,20 @@ function rejectManualRetryDisposition(
       `delivery retries are exhausted after attempt ${disposition.attempt}`
     );
   }
+  if (disposition.state === "uncertain") {
+    throw new Error(
+      `cannot retry callback for ${conversation.conversation_id}; callback ` +
+      `attempt ${disposition.attempt} has an uncertain transport outcome ` +
+      `(${disposition.reason}) and must not be blindly repeated`
+    );
+  }
+  if (disposition.state === "permanent_failure") {
+    throw new Error(
+      `cannot retry callback for ${conversation.conversation_id}; callback ` +
+      `attempt ${disposition.attempt} failed permanently ` +
+      `(${disposition.reason})`
+    );
+  }
   if (disposition.state !== "retryable") {
     throw new Error(
       `cannot retry callback for ${conversation.conversation_id}; ` +
@@ -1128,7 +1517,12 @@ function rejectManualRetryDisposition(
 function reconcileCallbackDelivery(
   ports: CallbackOutboxServicePorts,
   settlement: CallbackSettlement,
-  { statePath, logPath, delayMs }: CallbackDeliveryReconciliationInput
+  {
+    statePath,
+    logPath,
+    delayMs,
+    callbackOutboxLane = "lifecycle"
+  }: CallbackDeliveryReconciliationInput
 ) {
   return ports.state.withTransaction(statePath, () => {
     const conversation = ports.state.load(statePath);
@@ -1144,8 +1538,9 @@ function reconcileCallbackDelivery(
         diagnostic: legacyStatusError
       };
     }
-    const callbackDelivery = isRecord(conversation.callback_delivery)
-      ? conversation.callback_delivery
+    const callbackOutbox = callbackOutboxField(callbackOutboxLane);
+    const callbackDelivery = isRecord(conversation[callbackOutbox])
+      ? conversation[callbackOutbox]
       : undefined;
     if (
       !["pending", "failed"].includes(
@@ -1173,7 +1568,10 @@ function reconcileCallbackDelivery(
         handled: true as const,
         conversationId,
         status: "skipped",
-        reason: "callback_delivery_metadata_missing"
+        reason: callbackOutboxEvent(
+          callbackOutboxLane,
+          "metadata_missing"
+        )
       };
     }
     const disposition = callbackRetryDisposition(ports, callbackDelivery);
@@ -1183,15 +1581,19 @@ function reconcileCallbackDelivery(
         statePath,
         logPath,
         expectedMessageId: stringValue(callbackDelivery.message.id),
-        reason: "startup_reconciliation_observed_accepted_transport"
+        reason: "startup_reconciliation_observed_accepted_transport",
+        callbackOutboxLane
       });
       return {
         handled: true as const,
         conversationId,
         status: settled ? "recovered" : "skipped",
         reason: settled
-          ? "callback_delivery_accepted_recovered"
-          : "callback_delivery_changed_before_recovery"
+          ? callbackOutboxEvent(callbackOutboxLane, "accepted_recovered")
+          : callbackOutboxEvent(
+              callbackOutboxLane,
+              "changed_before_recovery"
+            )
       };
     }
     if (disposition.state === "in_flight") {
@@ -1199,7 +1601,7 @@ function reconcileCallbackDelivery(
         handled: true as const,
         conversationId,
         status: "already_running",
-        reason: "callback_delivery_attempt_in_flight",
+        reason: callbackOutboxEvent(callbackOutboxLane, "attempt_in_flight"),
         attempt: disposition.attempt,
         attemptPid: disposition.attempt_pid,
         leaseExpiresAt: disposition.lease_expires_at,
@@ -1211,7 +1613,7 @@ function reconcileCallbackDelivery(
         handled: true as const,
         conversationId,
         status: "skipped",
-        reason: "callback_delivery_retries_exhausted"
+        reason: callbackOutboxEvent(callbackOutboxLane, "retries_exhausted")
       };
     }
     if (disposition.state !== "retryable") {
@@ -1228,14 +1630,18 @@ function reconcileCallbackDelivery(
       configuredDelayMs >= 0
       ? configuredDelayMs
       : ports.retry.delaysMs[Math.max(0, attempts - 1)];
-    const retryMonitor = ports.retry.startMonitor({ statePath, delayMs: retryDelayMs });
+    const retryMonitor = ports.retry.startMonitor({
+      statePath,
+      delayMs: retryDelayMs,
+      callbackOutboxLane
+    });
     const launchedAt = ports.runtime.now().toISOString();
     const nextAttemptAt = new Date(
       ports.runtime.nowMs() + retryDelayMs
     ).toISOString();
     ports.state.save(statePath, {
       ...conversation,
-      callback_delivery: {
+      [callbackOutbox]: {
         ...callbackDelivery,
         retry_monitor_pid: retryMonitor.pid ?? null,
         next_attempt_at: nextAttemptAt,
@@ -1245,7 +1651,9 @@ function reconcileCallbackDelivery(
     ports.state.append(logPath, {
       ts: launchedAt,
       conversation_id: conversationId,
-      event: "callback_retry_monitor_launched",
+      event: callbackOutboxLane === "notification"
+        ? "callback_notification_retry_monitor_launched"
+        : "callback_retry_monitor_launched",
       message_id: callbackDelivery.message.id,
       pid: retryMonitor.pid ?? null,
       next_attempt_at: nextAttemptAt,
@@ -1255,7 +1663,7 @@ function reconcileCallbackDelivery(
       handled: true as const,
       conversationId,
       status: "launched",
-      reason: "callback_delivery_reconciliation",
+      reason: callbackOutboxEvent(callbackOutboxLane, "reconciliation"),
       monitorPid: retryMonitor.pid
     };
   });
@@ -1264,7 +1672,11 @@ function reconcileCallbackDelivery(
 function runCallbackRetryMonitor(
   ports: CallbackOutboxServicePorts,
   settlement: CallbackSettlement,
-  { statePath, initialDelayMs }: CallbackRetryMonitorInput
+  {
+    statePath,
+    initialDelayMs,
+    callbackOutboxLane = "lifecycle"
+  }: CallbackRetryMonitorInput
 ): void {
   const configuredDelayMs = Number(initialDelayMs);
   ports.runtime.sleepSync(Math.max(
@@ -1275,7 +1687,11 @@ function runCallbackRetryMonitor(
   ));
 
   while (true) {
-    const observed = observeCallbackRetryMonitor(ports, statePath);
+    const observed = observeCallbackRetryMonitor(
+      ports,
+      statePath,
+      callbackOutboxLane
+    );
     if (observed.kind === "stop") {
       return;
     }
@@ -1284,7 +1700,8 @@ function runCallbackRetryMonitor(
         ports,
         settlement,
         statePath,
-        observed.messageId
+        observed.messageId,
+        callbackOutboxLane
       );
       return;
     }
@@ -1294,20 +1711,29 @@ function runCallbackRetryMonitor(
     }
     try {
       ports.delivery.runTransaction(
-        retryMonitorDeliveryOptions(statePath, observed)
+        retryMonitorDeliveryOptions(
+          statePath,
+          observed,
+          callbackOutboxLane
+        )
       );
       return;
     } catch {
       // The failed attempt is persisted before the next bounded retry.
     }
 
-    const latest = observeCallbackRetryMonitor(ports, statePath);
+    const latest = observeCallbackRetryMonitor(
+      ports,
+      statePath,
+      callbackOutboxLane
+    );
     if (latest.kind === "accepted") {
       settleRetryMonitorAcceptance(
         ports,
         settlement,
         statePath,
-        latest.messageId
+        latest.messageId,
+        callbackOutboxLane
       );
       return;
     }
@@ -1326,14 +1752,16 @@ function runCallbackRetryMonitor(
 
 function observeCallbackRetryMonitor(
   ports: CallbackOutboxServicePorts,
-  statePath: string
+  statePath: string,
+  callbackOutboxLane: CallbackOutboxLane
 ): CallbackRetryMonitorObservation {
   const conversation = ports.state.load(statePath);
   if (stringValue(conversation.legacy_callback_status_error)) {
     return { kind: "stop" };
   }
-  const delivery = isRecord(conversation.callback_delivery)
-    ? conversation.callback_delivery
+  const callbackOutbox = callbackOutboxField(callbackOutboxLane);
+  const delivery = isRecord(conversation[callbackOutbox])
+    ? conversation[callbackOutbox]
     : undefined;
   if (
     !delivery ||
@@ -1365,7 +1793,8 @@ function observeCallbackRetryMonitor(
 
 function retryMonitorDeliveryOptions(
   statePath: string,
-  observed: Extract<CallbackRetryMonitorObservation, { kind: "retryable" }>
+  observed: Extract<CallbackRetryMonitorObservation, { kind: "retryable" }>,
+  callbackOutboxLane: CallbackOutboxLane
 ): CallbackPreparationOptions {
   const { conversation, delivery } = observed;
   const gatewayRoute = resolveCallbackGatewayRoute(
@@ -1378,8 +1807,14 @@ function retryMonitorDeliveryOptions(
       token: conversation.gateway_token
     }
   );
+  const callbackRoute = resolveManagedCallbackRoute({
+    options: { statePath },
+    conversation,
+    inheritedDelivery: delivery
+  });
   return {
     statePath,
+    ...(callbackRoute ? { callbackRoute } : {}),
     messageJson: JSON.stringify(delivery.message),
     gatewayMethod: stringValue(delivery.gateway_method) ??
       conversation.gateway_method,
@@ -1391,6 +1826,7 @@ function retryMonitorDeliveryOptions(
     token: gatewayRoute.token,
     closeTerminalBridgeOnDone:
       delivery.close_terminal_bridge_on_done === true,
+    callbackOutboxLane,
     retryPending: true,
     disableCallbackRetry: true
   };
@@ -1400,13 +1836,15 @@ function settleRetryMonitorAcceptance(
   ports: CallbackOutboxServicePorts,
   settlement: CallbackSettlement,
   statePath: string,
-  expectedMessageId: string | undefined
+  expectedMessageId: string | undefined,
+  callbackOutboxLane: CallbackOutboxLane
 ): void {
   settlement.settleAccepted({
     statePath,
     logPath: ports.state.logPathForStatePath(statePath),
     expectedMessageId,
-    reason: "retry_monitor_observed_accepted_transport"
+    reason: "retry_monitor_observed_accepted_transport",
+    callbackOutboxLane
   });
 }
 
@@ -1439,6 +1877,18 @@ function rejectNonRetryableDelivery(
   if (disposition.state === "exhausted") {
     throw new Error(
       `callback retries are exhausted after attempt ${disposition.attempt}`
+    );
+  }
+  if (disposition.state === "uncertain") {
+    throw new Error(
+      `callback attempt ${disposition.attempt} has an uncertain transport ` +
+      `outcome (${disposition.reason}) and must not be blindly repeated`
+    );
+  }
+  if (disposition.state === "permanent_failure") {
+    throw new Error(
+      `callback attempt ${disposition.attempt} failed permanently ` +
+      `(${disposition.reason})`
     );
   }
   throw new Error(

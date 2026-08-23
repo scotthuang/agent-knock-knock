@@ -1,8 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  createTerminalWatchCallbackCliAdapter
+  createTerminalWatchCallbackCliAdapter,
+  resolveTerminalWatchOpenClawCallback,
+  type TerminalWatchTransportDeliveryInput
 } from "../src/terminal-watch-callback-cli-adapter.js";
+import { createCallbackEnvelope } from "../src/callback-transport.js";
+
+function transportDelivery(): TerminalWatchTransportDeliveryInput {
+  const callback = resolveTerminalWatchOpenClawCallback({
+    openclaw_session: "agent:main:transport",
+    openclaw_bin: "/opt/openclaw-transport"
+  });
+  return {
+    route: callback.route,
+    context: callback.context,
+    envelope: createCallbackEnvelope({
+      route: callback.route,
+      deliveryId: "terminal-watch-notification-transport",
+      idempotencyKey:
+        "agent-knock-knock:terminal-watch:watch-transport:notification-1",
+      source: {
+        kind: "terminal_watch",
+        watch_id: "terminal-watch-transport",
+        terminal_id: "terminal:v2:transport"
+      },
+      event: {
+        id: "terminal-watch-notification-transport",
+        type: "completed",
+        body: "bounded host-neutral callback body",
+        requires_response: true
+      }
+    }),
+    attempt: { number: 2, id: "attempt-transport-2" }
+  };
+}
 
 test("Terminal Watch callback uses one deterministic chat.send delivery", () => {
   const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
@@ -139,4 +171,77 @@ test("Terminal Watch callback rejects malformed or mismatched acknowledgements",
     }),
     /was not accepted: error/u
   );
+});
+
+test("Terminal Watch transport delivers a host-neutral envelope through its trusted profile context", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const adapter = createTerminalWatchCallbackCliAdapter({
+    now: () => new Date("2026-08-23T01:02:03.000Z"),
+    spawnSync(command, args) {
+      calls.push({ command, args });
+      const params = JSON.parse(String(args[4]));
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          runId: params.idempotencyKey,
+          status: "started"
+        }),
+        stderr: ""
+      };
+    }
+  });
+
+  const input = transportDelivery();
+  assert.equal(input.route.transport, "openclaw_gateway_v1");
+  assert.equal(input.route.profile_id, "legacy-openclaw-cli");
+  assert.deepEqual(input.route.capabilities, { wake: true, respond: false });
+  assert.doesNotMatch(JSON.stringify(input.route), /openclaw-transport/u);
+  const outcome = adapter.deliverTransport?.(input);
+  assert.deepEqual(outcome, {
+    disposition: "accepted",
+    accepted_at: "2026-08-23T01:02:03.000Z",
+    acceptance_id: input.envelope.idempotency_key,
+    evidence: { status: "started" }
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "/opt/openclaw-transport");
+  const params = JSON.parse(String(calls[0].args[4]));
+  assert.equal(params.sessionKey, input.route.controller_session_id);
+  assert.equal(params.message, input.envelope.event.body);
+  assert.equal(params.idempotencyKey, input.envelope.idempotency_key);
+});
+
+test("Terminal Watch transport treats an invalid acknowledgement as uncertain", () => {
+  const adapter = createTerminalWatchCallbackCliAdapter({
+    now: () => new Date("2026-08-23T01:02:03.000Z"),
+    spawnSync: () => ({ status: 0, stdout: "not-json", stderr: "" })
+  });
+  assert.deepEqual(adapter.deliverTransport?.(transportDelivery()), {
+    disposition: "uncertain",
+    error_code: "openclaw_chat_send_ack_uncertain",
+    observed_at: "2026-08-23T01:02:03.000Z"
+  });
+});
+
+test("Terminal Watch transport rejects route drift before invoking OpenClaw", () => {
+  let calls = 0;
+  const adapter = createTerminalWatchCallbackCliAdapter({
+    spawnSync: () => {
+      calls += 1;
+      return { status: 0, stdout: "{}", stderr: "" };
+    }
+  });
+  const input = transportDelivery();
+  const drifted = {
+    ...input,
+    route: {
+      ...input.route,
+      controller_session_id: "agent:other:session"
+    }
+  };
+  assert.deepEqual(adapter.deliverTransport?.(drifted), {
+    disposition: "permanent_failure",
+    error_code: "callback_envelope_route_mismatch"
+  });
+  assert.equal(calls, 0);
 });

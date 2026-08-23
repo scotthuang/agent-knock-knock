@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
+import { callbackExpectedForConversationWithLegacyFallback } from
+  "./callback-route-authority.js";
 import type { ExecutorKind } from "./executors.js";
 import {
   executorForConversation,
@@ -800,9 +802,11 @@ export class TerminalDispatchExecutionService {
         nonBlankString(ledger?.conversation_id) ??
         replayOwner.conversation_id,
       receiptMessageId: nonBlankString(ledger?.message_id) ?? input.messageId,
-      callbackExpected: !replay.invalid && Boolean(
-        replayOwner.gateway_method ?? ledger?.callback_expected
-      )
+      callbackExpected: !replay.invalid &&
+        callbackExpectedForConversationWithLegacyFallback(
+          replayOwner,
+          ledger?.callback_expected
+        )
     };
   }
 

@@ -4,6 +4,11 @@ import path from "node:path";
 
 import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
+import {
+  callbackExpectedForConversation,
+  callbackRouteFingerprintLedgerFields
+} from
+  "./callback-route-authority.js";
 import type { DeferredForegroundApplicationScope } from
   "./deferred-foreground-boundary.js";
 import type { DeferredForegroundTransfer } from
@@ -1301,6 +1306,11 @@ export async function recoverAcceptedDeferredForegroundDispatch(
     recovered,
     acceptedAt
   );
+  const callbackRouteLedgerFields = callbackRouteFingerprintLedgerFields({
+    receipt: terminalBridgeSubmission(acceptedConversation),
+    ledger,
+    context: "deferred foreground acceptance"
+  });
   let acceptedStatePersisted = false;
   // Turn acceptance is stronger than every Session/ledger write that follows.
   saveState(authority.statePath, acceptedConversation);
@@ -1312,6 +1322,7 @@ export async function recoverAcceptedDeferredForegroundDispatch(
     recovered,
     acceptedAt,
     acceptedConversation,
+    callbackRouteLedgerFields,
     acceptedStatePersisted
   });
 }
@@ -1435,6 +1446,9 @@ interface RecoveredCommitFacts {
   recovered: RecoveredAcceptance;
   acceptedAt: string;
   acceptedConversation: Conversation;
+  callbackRouteLedgerFields: {
+    callback_route_fingerprint?: string | null;
+  };
   acceptedStatePersisted: boolean;
 }
 
@@ -1497,7 +1511,10 @@ function saveRecoveredAcceptanceLedger(
     dispatcher_pid: null,
     state_path: facts.authority.statePath,
     event_log_path: facts.authority.logPath,
-    callback_expected: Boolean(facts.acceptedConversation.gateway_method),
+    callback_expected: callbackExpectedForConversation(
+      facts.acceptedConversation
+    ),
+    ...facts.callbackRouteLedgerFields,
     reason: "recovered exact deferred foreground request acceptance"
   });
 }
@@ -1588,6 +1605,7 @@ function saveAcceptedBookkeepingFailure(
       acceptance_evidence: facts.recovered.evidence,
       dispatcher_pid: null,
       callback_expected: false,
+      ...facts.callbackRouteLedgerFields,
       reason
     });
   } catch {
@@ -1650,6 +1668,11 @@ export async function persistCommittedDeferredForegroundTurnAcceptance(
     { identity, evidence: acceptance },
     current.agent_accepted_at as string
   );
+  const callbackRouteLedgerFields = callbackRouteFingerprintLedgerFields({
+    receipt: terminalBridgeSubmission(acceptedConversation),
+    ledger,
+    context: "committed deferred foreground acceptance"
+  });
   saveState(authority.statePath, acceptedConversation);
   saveCommittedAcceptanceLedger(ports, {
     terminal,
@@ -1657,7 +1680,8 @@ export async function persistCommittedDeferredForegroundTurnAcceptance(
     authority,
     ledger,
     acceptance,
-    acceptedConversation
+    acceptedConversation,
+    callbackRouteLedgerFields
   });
   return { conversation: acceptedConversation, identity };
 }
@@ -1779,10 +1803,13 @@ function saveCommittedAcceptanceLedger(
     ledger: Record<string, any>;
     acceptance: TerminalSubmissionAcceptanceEvidence;
     acceptedConversation: Conversation;
+    callbackRouteLedgerFields: {
+      callback_route_fingerprint?: string | null;
+    };
   }
 ): void {
   const { terminal, transfer, authority, ledger, acceptance,
-    acceptedConversation } = facts;
+    acceptedConversation, callbackRouteLedgerFields } = facts;
   ports.ledger.save(terminal.terminalControl, {
     ...ledger,
     ...ports.ledger.bindingFields(acceptedConversation),
@@ -1802,7 +1829,8 @@ function saveCommittedAcceptanceLedger(
     dispatcher_pid: null,
     state_path: authority.statePath,
     event_log_path: authority.logPath,
-    callback_expected: Boolean(acceptedConversation.gateway_method),
+    callback_expected: callbackExpectedForConversation(acceptedConversation),
+    ...callbackRouteLedgerFields,
     reason: "recovered committed deferred foreground request acceptance"
   });
 }

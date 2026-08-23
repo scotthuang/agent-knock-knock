@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { callbackRouteFingerprintForConversation } from
+  "../src/callback-route-authority.js";
 import type { DeferredForegroundTransfer } from
   "../src/deferred-foreground-transfer.js";
 import type { Conversation } from "../src/protocol.js";
@@ -99,6 +101,7 @@ function assertControlledDecoderError(value: unknown, message: string) {
 }
 
 interface FixtureOptions {
+  conversation?: Record<string, unknown>;
   takeover?: Record<string, unknown>;
   status?: Conversation["status"];
   statePath?: string;
@@ -208,6 +211,7 @@ function fixture(options: FixtureOptions = {}) {
       : { store_dir: options.conversationStoreDir ?? "/store" }),
     terminal_binding_id: "binding-1",
     terminal_binding_generation: 3,
+    ...options.conversation,
     native_session_takeover: takeover
   } as unknown as Conversation;
   const rawLedger = options.ledger === null
@@ -514,6 +518,225 @@ test("startup monitor launch eligibility requests exact stages and omits absent 
   );
   assert.equal("reason" in actual.result, false);
   assert.equal(Object.values(actual.result).some((value) => value === undefined), false);
+});
+
+test("startup monitor rejects receipt and ledger route authority mismatch", () => {
+  const routeA = `sha256:${"a".repeat(64)}`;
+  const routeB = `sha256:${"b".repeat(64)}`;
+  const cases = [
+    {
+      ledger: dispatchLedger({ callback_route_fingerprint: routeA }),
+      submission: {
+        message_id: "message-1",
+        status: "enter_dispatched",
+        callback_route_fingerprint: routeB
+      }
+    },
+    {
+      ledger: dispatchLedger({ callback_route_fingerprint: routeA }),
+      submission: { message_id: "message-1", status: "enter_dispatched" }
+    },
+    {
+      ledger: dispatchLedger(),
+      submission: {
+        message_id: "message-1",
+        status: "enter_dispatched",
+        callback_route_fingerprint: null
+      }
+    }
+  ];
+  for (const entry of cases) {
+    const candidate = fixture(entry);
+    const actual = decide(candidate, ["control", "dispatch", "store"]);
+    assert.deepEqual(actual.result, {
+      eligible: false,
+      reason: "terminal_dispatch_callback_route_authority_mismatch"
+    });
+    assert.equal(candidate.reads.runtime, 0);
+  }
+
+  const matching = fixture({
+    ledger: dispatchLedger({ callback_route_fingerprint: routeA }),
+    submission: {
+      message_id: "message-1",
+      status: "enter_dispatched",
+      callback_route_fingerprint: routeA
+    }
+  });
+  assert.equal(decide(matching, [
+    "control", "dispatch", "store", "runtime", "store"
+  ]).result.eligible, true);
+});
+
+test("startup monitor admits only exact callback authority crash windows", () => {
+  const callbackFields = {
+    gateway_method: "agent-knock-knock.callback",
+    gateway_session: "agent:controller:restart"
+  };
+  const routeAuthority = callbackRouteFingerprintForConversation(callbackFields)!;
+  const positive = [
+    {
+      name: "routed prepared state after ledger-first submitted write",
+      conversation: callbackFields,
+      submission: { message_id: "message-1", status: "prepared" },
+      ledger: dispatchLedger({
+        status: "submitted",
+        callback_route_fingerprint: routeAuthority
+      })
+    },
+    {
+      name: "no-route prepared state after ledger-first accepted write",
+      submission: { message_id: "message-1", status: "prepared" },
+      ledger: dispatchLedger({
+        status: "agent_accepted",
+        callback_route_fingerprint: null
+      })
+    },
+    {
+      name: "routed enter-dispatched state after ledger-first legacy upgrade",
+      conversation: callbackFields,
+      submission: { message_id: "message-1", status: "enter_dispatched" },
+      ledger: dispatchLedger({
+        status: "agent_accepted",
+        callback_route_fingerprint: routeAuthority
+      })
+    },
+    {
+      name: "no-route enter-dispatched state after ledger-first legacy upgrade",
+      submission: { message_id: "message-1", status: "enter_dispatched" },
+      ledger: dispatchLedger({
+        status: "agent_accepted",
+        callback_route_fingerprint: null
+      })
+    },
+    {
+      name: "routed accepted state after state-first acceptance write",
+      conversation: callbackFields,
+      submission: {
+        message_id: "message-1",
+        status: "agent_accepted",
+        callback_route_fingerprint: routeAuthority
+      },
+      ledger: dispatchLedger({ status: "enter_dispatched" })
+    },
+    {
+      name: "no-route accepted state after state-first acceptance write",
+      submission: {
+        message_id: "message-1",
+        status: "agent_accepted",
+        callback_route_fingerprint: null
+      },
+      ledger: dispatchLedger({ status: "enter_dispatched" })
+    },
+    {
+      name: "routed accepted state after state-first accepted-ledger upgrade",
+      conversation: callbackFields,
+      submission: {
+        message_id: "message-1",
+        status: "agent_accepted",
+        callback_route_fingerprint: routeAuthority
+      },
+      ledger: dispatchLedger({ status: "agent_accepted" })
+    },
+    {
+      name: "no-route accepted state after state-first accepted-ledger upgrade",
+      submission: {
+        message_id: "message-1",
+        status: "agent_accepted",
+        callback_route_fingerprint: null
+      },
+      ledger: dispatchLedger({ status: "agent_accepted" })
+    }
+  ];
+  for (const entry of positive) {
+    const candidate = fixture(entry);
+    const actual = decide(candidate, [
+      "control", "dispatch", "store", "runtime", "store"
+    ]);
+    assert.equal(actual.result.eligible, true, entry.name);
+  }
+
+  const negative = [
+    {
+      name: "prepared ledger authority redirects from the current route",
+      conversation: callbackFields,
+      submission: { message_id: "message-1", status: "prepared" },
+      ledger: dispatchLedger({
+        status: "submitted",
+        callback_route_fingerprint: `sha256:${"b".repeat(64)}`
+      })
+    },
+    {
+      name: "prepared exception excludes enter-dispatched ledger",
+      submission: { message_id: "message-1", status: "prepared" },
+      ledger: dispatchLedger({
+        status: "enter_dispatched",
+        callback_route_fingerprint: null
+      })
+    },
+    {
+      name: "prepared exception excludes a different receipt message",
+      submission: { message_id: "message-2", status: "prepared" },
+      ledger: dispatchLedger({
+        status: "submitted",
+        callback_route_fingerprint: null
+      })
+    },
+    {
+      name: "lagging accepted ledger redirects from the current route",
+      conversation: callbackFields,
+      submission: { message_id: "message-1", status: "enter_dispatched" },
+      ledger: dispatchLedger({
+        status: "agent_accepted",
+        callback_route_fingerprint: `sha256:${"b".repeat(64)}`
+      })
+    },
+    {
+      name: "accepted state authority redirects from the current route",
+      conversation: callbackFields,
+      submission: {
+        message_id: "message-1",
+        status: "agent_accepted",
+        callback_route_fingerprint: `sha256:${"b".repeat(64)}`
+      },
+      ledger: dispatchLedger({ status: "enter_dispatched" })
+    },
+    {
+      name: "accepted exception excludes submitted ledger",
+      submission: {
+        message_id: "message-1",
+        status: "agent_accepted",
+        callback_route_fingerprint: null
+      },
+      ledger: dispatchLedger({ status: "submitted" })
+    },
+    {
+      name: "lagging accepted exception excludes submitted state",
+      submission: { message_id: "message-1", status: "submitted" },
+      ledger: dispatchLedger({
+        status: "agent_accepted",
+        callback_route_fingerprint: null
+      })
+    },
+    {
+      name: "accepted exception excludes malformed declared authority",
+      submission: {
+        message_id: "message-1",
+        status: "agent_accepted",
+        callback_route_fingerprint: "invalid"
+      },
+      ledger: dispatchLedger({ status: "enter_dispatched" })
+    }
+  ];
+  for (const entry of negative) {
+    const candidate = fixture(entry);
+    const actual = decide(candidate, ["control", "dispatch", "store"]);
+    assert.deepEqual(actual.result, {
+      eligible: false,
+      reason: "terminal_dispatch_callback_route_authority_mismatch"
+    }, entry.name);
+    assert.equal(candidate.reads.runtime, 0, entry.name);
+  }
 });
 
 test("startup monitor reads dispatch state path only after prior identity predicates", () => {

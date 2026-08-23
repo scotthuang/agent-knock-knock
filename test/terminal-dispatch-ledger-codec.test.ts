@@ -771,6 +771,7 @@ test("merge rejects every changed immutable field with exact text", () => {
     "request_hash",
     "executor_kind",
     "openclaw_session",
+    "callback_route_fingerprint",
     "state_path",
     "event_log_path",
     "deferred_foreground_transfer_id"
@@ -1035,6 +1036,45 @@ test("ordinary dispatch writes preserve every phase key and JSON byte", () => {
       current.name
     );
   }
+});
+
+test("ordinary ledger records route digest and explicit no-route authority", () => {
+  const base = {
+    bindingFields: { executor_kind: "codex" },
+    identityFields: {
+      status: "prepared" as const,
+      generation_id: "message-route",
+      conversation_id: "turn-route",
+      session_id: "session-route",
+      turn_id: "turn-route",
+      message_id: "message-route",
+      message_type: "task" as const,
+      request_hash: "request-route",
+      prepared_at: "2026-08-14T00:00:01.000Z"
+    },
+    dispatcherPid: 99,
+    statePath: "/store/conversations/turn-route/state.json",
+    eventLogPath: "/store/conversations/turn-route/events.ndjson",
+    callbackExpected: true
+  };
+  const fingerprint = `sha256:${"a".repeat(64)}`;
+  assert.equal(
+    constructTerminalOrdinaryDispatchLedger({
+      ...base,
+      callbackRouteFingerprint: fingerprint
+    }).callback_route_fingerprint,
+    fingerprint
+  );
+  const noRoute = constructTerminalOrdinaryDispatchLedger({
+    ...base,
+    callbackExpected: false,
+    callbackRouteFingerprint: null
+  });
+  assert.equal(
+    Object.hasOwn(noRoute, "callback_route_fingerprint"),
+    true
+  );
+  assert.equal(noRoute.callback_route_fingerprint, null);
 });
 
 test("construct emits v1 field presence and insertion order exactly", () => {

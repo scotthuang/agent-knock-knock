@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import { callbackRouteFingerprintForConversation } from
+  "../src/callback-route-authority.js";
 import { createConversation } from "../src/protocol.js";
 import {
   createTerminalDispatchRecoveryCliAdapter
@@ -20,15 +22,17 @@ import {
   type TerminalDispatchLedgerDocument
 } from "../src/terminal-dispatch-ledger-codec.js";
 import {
-  terminalBridgeRequestFingerprint
+  terminalBridgeRequestFingerprint,
+  terminalBridgeSubmission
 } from "../src/terminal-dispatch-receipt.js";
+import { fingerprint } from "../src/terminal-submission-facts.js";
 import {
   createTerminalEndpointRef,
   terminalControlEvidence,
   terminalEndpointFromControlRef,
   type TerminalControlRef
 } from "../src/terminal-control-ref.js";
-import { ensureStoreWritable } from "../src/store.js";
+import { ensureStoreWritable, loadState } from "../src/store.js";
 
 const NOW = new Date("2026-08-15T04:05:06.000Z");
 const PRIOR_AT = "2026-08-15T04:00:00.000Z";
@@ -318,6 +322,14 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
   const currentMessageId = "message-current";
   const requestText = "restore the prior durable generation";
   const requestHash = terminalBridgeRequestFingerprint(requestText);
+  const callbackAuthority = {
+    gateway_method: "agent-knock-knock.callback",
+    gateway_session: "agent:controller:prior"
+  };
+  const callbackRouteFingerprint = callbackRouteFingerprintForConversation(
+    callbackAuthority
+  );
+  assert.ok(callbackRouteFingerprint);
   const submission = {
     status: "submitted",
     session_id: "session-1",
@@ -331,7 +343,8 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
     prepared_at: PRIOR_AT,
     submitted_at: PRIOR_AT,
     dispatcher_pid: 4102,
-    last_proven_stage: "enter_dispatched"
+    last_proven_stage: "enter_dispatched",
+    callback_route_fingerprint: callbackRouteFingerprint
   };
   writeConversation(statePath, {
     ...createConversation({
@@ -347,6 +360,7 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
     terminal_binding_id: "binding-1",
     terminal_binding_generation: 2,
     native_thread_id: "11111111-1111-4111-8111-111111111111",
+    ...callbackAuthority,
     native_session_takeover: {
       terminal_bridge: true,
       terminal_bridge_message_id: priorMessageId,
@@ -382,7 +396,8 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
       dispatcher_pid: 999_999,
       state_path: statePath,
       event_log_path: logPath,
-      callback_expected: false,
+      callback_expected: true,
+      callback_route_fingerprint: `sha256:${"b".repeat(64)}`,
       previous_generation_id: priorMessageId
     };
     repository.save(CONTROL, preparedLedger);
@@ -409,6 +424,10 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
     const restored = facade.reconcilePrepared(CONTROL, previousLedger);
     assert.equal(restored?.generation_id, priorMessageId);
     assert.equal(restored?.previous_generation_id, undefined);
+    assert.equal(
+      restored?.callback_route_fingerprint,
+      callbackRouteFingerprint
+    );
 
     const expectedIncoming: TerminalDispatchLedgerDocument = {
       binding_id: "binding-1",
@@ -428,7 +447,8 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
       dispatcher_pid: null,
       state_path: statePath,
       event_log_path: logPath,
-      callback_expected: false,
+      callback_expected: true,
+      callback_route_fingerprint: callbackRouteFingerprint,
       reason:
         "restored the prior durable generation after a pre-submit dispatcher exit"
     };
@@ -457,6 +477,339 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
       Object.keys(expected));
     assert.equal(raw.includes('"previous_generation_id"'), false);
   });
+});
+
+test("lagging active ledgers preserve hash, null, and legacy route authority", async (t) => {
+  const cases = ["hash", "null", "absent"] as const;
+  for (const routeCase of cases) {
+    const root = fs.mkdtempSync(path.join(
+      os.tmpdir(),
+      `akk-lagging-route-${routeCase}-`
+    ));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const { storeDir, statePath, logPath } = conversationPaths(root);
+    const requestText = "recover the strongest active receipt";
+    const requestHash = terminalBridgeRequestFingerprint(requestText);
+    const callbackFields = routeCase === "hash"
+      ? {
+          gateway_method: "agent-knock-knock.callback",
+          gateway_session: "agent:controller:lagging"
+        }
+      : {};
+    const callbackAuthority = routeCase === "hash"
+      ? callbackRouteFingerprintForConversation(callbackFields)!
+      : null;
+    const submission = {
+      status: "submitted",
+      session_id: "session-1",
+      turn_id: "turn-1",
+      message_id: "message-1",
+      message_type: "task",
+      binding_id: "binding-1",
+      binding_generation: 1,
+      request_hash: requestHash,
+      prepared_at: PRIOR_AT,
+      text_injected_at: PRIOR_AT,
+      enter_dispatched_at: PRIOR_AT,
+      submitted_at: PRIOR_AT,
+      ...(routeCase === "absent"
+        ? {}
+        : { callback_route_fingerprint: callbackAuthority })
+    };
+    const owner = {
+      ...createConversation({
+        userRequest: requestText,
+        sessionId: "session-1",
+        turnId: "turn-1",
+        executorKind: "codex",
+        now: NOW
+      }),
+      status: "waiting_for_agent" as const,
+      store_dir: storeDir,
+      conversation_dir: path.dirname(statePath),
+      state_path: statePath,
+      event_log_path: logPath,
+      terminal_binding_id: "binding-1",
+      terminal_binding_generation: 1,
+      ...callbackFields,
+      native_session_takeover: {
+        terminal_bridge: true,
+        terminal_bridge_message_id: "message-1",
+        terminal_bridge_request_text: requestText,
+        terminal_bridge_submission: submission,
+        terminal_bridge_submission_receipts: [submission]
+      }
+    };
+    writeConversation(statePath, owner);
+    let ledger: TerminalDispatchLedgerDocument = {
+      status: "text_injected",
+      generation_id: "message-1",
+      conversation_id: "turn-1",
+      session_id: "session-1",
+      turn_id: "turn-1",
+      message_id: "message-1",
+      message_type: "task",
+      request_hash: requestHash,
+      prepared_at: PRIOR_AT,
+      text_injected_at: PRIOR_AT,
+      dispatcher_pid: 999_999,
+      state_path: statePath,
+      event_log_path: logPath,
+      store_dir: storeDir,
+      binding_id: "binding-1",
+      binding_generation: 1,
+      executor_kind: "codex"
+    };
+    const repository = {
+      save(_control: TerminalControlRef, next: TerminalDispatchLedgerDocument) {
+        ledger = next;
+      },
+      load() { return ledger; }
+    } as unknown as TerminalDispatchRepositoryCliAdapter;
+    const facade = createTerminalDispatchRecoveryCliAdapter({
+      repository,
+      authority: {
+        terminalControl: () => CONTROL,
+        assertNoDeferredTransfer: () => undefined,
+        assertTurnBindingCurrent: () => undefined,
+        storeDirForConversation: () => storeDir
+      },
+      observation: {
+        process: async () => ({ status: "unverifiable", reason: "unused" }),
+        completion: async () => ({ status: "unverifiable", reason: "unused" })
+      },
+      completion: { prepare: () => { throw new Error("unused"); } },
+      runtime: { isProcessAlive: () => false }
+    });
+    const recovered = facade.reconcilePrepared(CONTROL, ledger);
+    assert.equal(recovered?.status, "submitted");
+    assert.equal(
+      Object.hasOwn(recovered ?? {}, "callback_route_fingerprint"),
+      routeCase !== "absent"
+    );
+    assert.equal(
+      recovered?.callback_route_fingerprint,
+      routeCase === "absent" ? undefined : callbackAuthority
+    );
+  }
+});
+
+test("lagging active recovery rejects callback route conflicts before writes", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-lagging-conflict-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { storeDir, statePath, logPath } = conversationPaths(root);
+  const requestText = "reject a lagging callback redirect";
+  const requestHash = terminalBridgeRequestFingerprint(requestText);
+  const submission = {
+    status: "submitted",
+    session_id: "session-1",
+    turn_id: "turn-1",
+    message_id: "message-1",
+    binding_id: "binding-1",
+    binding_generation: 1,
+    request_hash: requestHash,
+    prepared_at: PRIOR_AT,
+    submitted_at: PRIOR_AT,
+    callback_route_fingerprint: `sha256:${"a".repeat(64)}`
+  };
+  writeConversation(statePath, {
+    ...createConversation({
+      userRequest: requestText,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      executorKind: "codex",
+      now: NOW
+    }),
+    status: "waiting_for_agent",
+    state_path: statePath,
+    event_log_path: logPath,
+    terminal_binding_id: "binding-1",
+    terminal_binding_generation: 1,
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_bridge_message_id: "message-1",
+      terminal_bridge_request_text: requestText,
+      terminal_bridge_submission: submission,
+      terminal_bridge_submission_receipts: [submission]
+    }
+  });
+  let writes = 0;
+  const ledger: TerminalDispatchLedgerDocument = {
+    status: "text_injected",
+    conversation_id: "turn-1",
+    message_id: "message-1",
+    request_hash: requestHash,
+    state_path: statePath,
+    store_dir: storeDir,
+    binding_id: "binding-1",
+    binding_generation: 1,
+    executor_kind: "codex",
+    callback_route_fingerprint: `sha256:${"b".repeat(64)}`
+  };
+  const facade = createTerminalDispatchRecoveryCliAdapter({
+    repository: {
+      save() { writes += 1; },
+      load() { return ledger; }
+    } as unknown as TerminalDispatchRepositoryCliAdapter,
+    authority: {
+      terminalControl: () => CONTROL,
+      assertNoDeferredTransfer: () => undefined,
+      assertTurnBindingCurrent: () => undefined,
+      storeDirForConversation: () => storeDir
+    },
+    observation: {
+      process: async () => ({ status: "unverifiable", reason: "unused" }),
+      completion: async () => ({ status: "unverifiable", reason: "unused" })
+    },
+    completion: { prepare: () => { throw new Error("unused"); } },
+    runtime: { isProcessAlive: () => false }
+  });
+  assert.throws(
+    () => facade.reconcilePrepared(CONTROL, ledger),
+    /callback route conflicts with its dispatch ledger/u
+  );
+  assert.equal(writes, 0);
+  assert.equal(terminalBridgeSubmission(loadState(statePath))?.status, "submitted");
+});
+
+test("lagging accepted-ledger route upgrade recovers a state-first crash", (t) => {
+  for (const routed of [true, false]) {
+    const root = fs.mkdtempSync(path.join(
+      os.tmpdir(),
+      `akk-lagging-accepted-${routed ? "route" : "null"}-`
+    ));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const { storeDir, statePath, logPath } = conversationPaths(root);
+    const requestText = "recover accepted native evidence";
+    const requestHash = terminalBridgeRequestFingerprint(requestText);
+    const nativeThreadId = "11111111-1111-4111-8111-111111111111";
+    const callbackFields = routed
+      ? {
+          gateway_method: "agent-knock-knock.callback",
+          gateway_session: "agent:controller:accepted"
+        }
+      : {};
+    const expectedAuthority = callbackRouteFingerprintForConversation(
+      callbackFields
+    ) ?? null;
+    const submission = {
+      status: "enter_dispatched",
+      session_id: "session-1",
+      turn_id: "turn-1",
+      message_id: "message-1",
+      message_type: "task",
+      binding_id: "binding-1",
+      binding_generation: 1,
+      native_thread_id: nativeThreadId,
+      request_hash: requestHash,
+      prepared_at: PRIOR_AT,
+      text_injected_at: PRIOR_AT,
+      enter_dispatched_at: PRIOR_AT
+    };
+    const owner = {
+      ...createConversation({
+        userRequest: requestText,
+        sessionId: "session-1",
+        turnId: "turn-1",
+        executorKind: "codex",
+        now: NOW
+      }),
+      status: "waiting_for_agent" as const,
+      store_dir: storeDir,
+      conversation_dir: path.dirname(statePath),
+      state_path: statePath,
+      event_log_path: logPath,
+      terminal_binding_id: "binding-1",
+      terminal_binding_generation: 1,
+      native_thread_id: nativeThreadId,
+      ...callbackFields,
+      native_session_takeover: {
+        terminal_bridge: true,
+        terminal_bridge_message_id: "message-1",
+        terminal_bridge_request_text: requestText,
+        terminal_bridge_submission: submission,
+        terminal_bridge_submission_receipts: [submission]
+      }
+    };
+    writeConversation(statePath, owner);
+    const evidenceBase = {
+      source: "codex_rollout" as const,
+      kind: "native_user_turn" as const,
+      nativeThreadId,
+      requestHash,
+      acceptanceId: "acceptance-1",
+      acceptedAt: PRIOR_AT,
+      anchorFingerprint: "d".repeat(64)
+    };
+    const evidence = {
+      ...evidenceBase,
+      evidenceFingerprint: fingerprint(evidenceBase)
+    };
+    let ledger: TerminalDispatchLedgerDocument = {
+      status: "agent_accepted",
+      conversation_id: "turn-1",
+      message_id: "message-1",
+      request_hash: requestHash,
+      state_path: statePath,
+      store_dir: storeDir,
+      binding_id: "binding-1",
+      binding_generation: 1,
+      native_thread_id: nativeThreadId,
+      executor_kind: "codex",
+      prepared_at: PRIOR_AT,
+      text_injected_at: PRIOR_AT,
+      enter_dispatched_at: PRIOR_AT,
+      agent_accepted_at: PRIOR_AT,
+      acceptance_evidence: evidence
+    };
+    let failFirstLedgerWrite = true;
+    const repository = {
+      save(_control: TerminalControlRef, next: TerminalDispatchLedgerDocument) {
+        if (failFirstLedgerWrite) {
+          failFirstLedgerWrite = false;
+          throw new Error("simulated callback authority ledger crash");
+        }
+        ledger = next;
+      },
+      load() { return ledger; }
+    } as unknown as TerminalDispatchRepositoryCliAdapter;
+    const facade = createTerminalDispatchRecoveryCliAdapter({
+      repository,
+      authority: {
+        terminalControl: () => CONTROL,
+        assertNoDeferredTransfer: () => undefined,
+        assertTurnBindingCurrent: () => undefined,
+        storeDirForConversation: () => storeDir
+      },
+      observation: {
+        process: async () => ({ status: "unverifiable", reason: "unused" }),
+        completion: async () => ({ status: "unverifiable", reason: "unused" })
+      },
+      completion: { prepare: () => { throw new Error("unused"); } },
+      runtime: { isProcessAlive: () => false }
+    });
+    assert.throws(
+      () => facade.reconcilePrepared(CONTROL, ledger),
+      /simulated callback authority ledger crash/u
+    );
+    assert.equal(
+      terminalBridgeSubmission(loadState(statePath))
+        ?.callback_route_fingerprint,
+      expectedAuthority
+    );
+    assert.equal(
+      Object.hasOwn(ledger, "callback_route_fingerprint"),
+      false
+    );
+
+    const recovered = facade.reconcilePrepared(CONTROL, ledger);
+    assert.equal(recovered?.callback_route_fingerprint, expectedAuthority);
+    assert.equal(
+      terminalBridgeSubmission(loadState(statePath))
+        ?.callback_route_fingerprint,
+      expectedAuthority
+    );
+  }
 });
 
 test("verified-dead recovery short-circuits state, ledger, receipts, and acceptance", async (t) => {

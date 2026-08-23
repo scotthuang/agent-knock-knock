@@ -8,6 +8,10 @@ import {
 } from "node:crypto";
 import path from "node:path";
 import {
+  callbackExpectedForConversation,
+  callbackExpectedForConversationWithLegacyFallback
+} from "./callback-route-authority.js";
+import {
   captureClaudeTranscriptAnchor,
   defaultClaudeHome,
   type ClaudeTranscriptAnchor
@@ -1294,6 +1298,10 @@ function replayExactActiveTerminalSubmission({
         }
       });
   const acceptanceInvalid = replayReceipt.submission_outcome === "uncertain";
+  const callbackExpected = callbackExpectedForConversationWithLegacyFallback(
+    owner,
+    ledger.callback_expected
+  );
   printJson({
     session_id: sessionIdForConversation(owner),
     turn_id: turnIdForConversation(owner),
@@ -1303,9 +1311,7 @@ function replayExactActiveTerminalSubmission({
     status: replayReceipt.status,
     submission_outcome: replayReceipt.submission_outcome,
     background: true,
-    callback_expected: !acceptanceInvalid && Boolean(
-      owner.gateway_method ?? ledger.callback_expected
-    ),
+    callback_expected: !acceptanceInvalid && callbackExpected,
     terminal_control: terminalControl,
     executor,
     replayed: replayReceipt.replayed,
@@ -1324,7 +1330,7 @@ function replayExactActiveTerminalSubmission({
           sessionId: sessionIdForConversation(owner),
           turnId: turnIdForConversation(owner),
           source: "terminal_control",
-          callbackExpected: Boolean(owner.gateway_method ?? ledger.callback_expected)
+          callbackExpected
         })
       : {
           action: "inspect",
@@ -1690,7 +1696,7 @@ function replayExactStoredTerminalSubmission({
         }
       });
   const acceptanceInvalid = replayReceipt.submission_outcome === "uncertain";
-  const callbackExpected = Boolean(owner.gateway_method);
+  const callbackExpected = callbackExpectedForConversation(owner);
   printJson({
     session_id: sessionIdForConversation(owner),
     turn_id: turnIdForConversation(owner),

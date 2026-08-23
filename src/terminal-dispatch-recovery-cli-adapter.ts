@@ -2,6 +2,12 @@ import path from "node:path";
 
 import { canonicalJson } from "./canonical-json.js";
 import {
+  callbackExpectedForConversation,
+  callbackRouteFingerprintLedgerFields,
+  callbackRouteFingerprintFromRecord
+} from
+  "./callback-route-authority.js";
+import {
   deterministicTerminalCallbackMessageId,
   type PreparedCallback
 } from "./callback-outbox-service.js";
@@ -687,11 +693,31 @@ class TerminalDispatchRecoveryCliApplication {
     if (decision.action === "reconcile_lagging") {
       return this.#reconcileLagging(terminalControl, ledger);
     }
+    const currentGenerationRouteFields =
+      decision.action === "save_ledger" && owner.status === "loaded" &&
+      owner.storedMessageId === ledger.message_id &&
+      [
+        "submitted",
+        "text_injected",
+        "enter_dispatched",
+        "agent_accepted"
+      ].includes(decision.mutation.status)
+        ? callbackRouteFingerprintLedgerFields({
+            receipt: owner.submission.callbackRouteFingerprint === undefined
+              ? {}
+              : {
+                  callback_route_fingerprint:
+                    owner.submission.callbackRouteFingerprint
+                },
+            ledger,
+            context: "prepared terminal dispatch recovery"
+          })
+        : {};
     this.#dependencies.repository.save(
       terminalControl,
       decision.action === "replace_ledger"
         ? decision.mutation
-        : { ...ledger, ...decision.mutation }
+        : { ...ledger, ...decision.mutation, ...currentGenerationRouteFields }
     );
     return this.#dependencies.repository.load(terminalControl);
   }
@@ -734,7 +760,7 @@ class TerminalDispatchRecoveryCliApplication {
       statePath,
       eventLogPath: nonBlankString(ledger.event_log_path) ??
         logPathForStatePath(statePath),
-      callbackExpected: Boolean(conversation.gateway_method)
+      callbackExpected: callbackExpectedForConversation(conversation)
     };
   }
 
@@ -745,7 +771,27 @@ class TerminalDispatchRecoveryCliApplication {
     const projection = this.#laggingProjection(terminalControl, ledger);
     if (!projection || !ledger) return ledger;
     const decision = decideLaggingDispatchRecovery(projection.input);
-    if (decision.action === "keep") return ledger;
+    if (decision.action === "keep") {
+      const receipt = terminalBridgeSubmission(projection.conversation);
+      if (
+        !Object.hasOwn(ledger, "callback_route_fingerprint") &&
+        receipt &&
+        Object.hasOwn(receipt, "callback_route_fingerprint")
+      ) {
+        const callbackRouteLedgerFields = callbackRouteFingerprintLedgerFields({
+          receipt,
+          ledger,
+          context: "settled lagging terminal acceptance recovery"
+        });
+        const nextLedger = {
+          ...ledger,
+          ...callbackRouteLedgerFields
+        };
+        this.#dependencies.repository.save(terminalControl, nextLedger);
+        return this.#dependencies.repository.load(terminalControl) ?? nextLedger;
+      }
+      return ledger;
+    }
     if (decision.action === "save_turn_accepted") {
       const accepted = this.#applySubmissionMutation({
         conversation: projection.conversation,
@@ -761,7 +807,29 @@ class TerminalDispatchRecoveryCliApplication {
         agentAcceptedAt: decision.acceptedAt,
         acceptanceEvidence: decision.acceptanceEvidence
       });
+      const callbackRouteLedgerFields = callbackRouteFingerprintLedgerFields({
+        receipt: terminalBridgeSubmission(accepted),
+        ledger,
+        context: "lagging terminal acceptance recovery"
+      });
+      // The accepted Turn is the stronger durable truth. Persist it first so
+      // an interrupted legacy authority upgrade is recovered by the ordinary
+      // accepted-state ledger reconciliation on the next monitor poll.
       saveState(projection.statePath, accepted);
+      if (
+        Object.hasOwn(
+          callbackRouteLedgerFields,
+          "callback_route_fingerprint"
+        ) &&
+        !Object.hasOwn(ledger, "callback_route_fingerprint")
+      ) {
+        const nextLedger = {
+          ...ledger,
+          ...callbackRouteLedgerFields
+        };
+        this.#dependencies.repository.save(terminalControl, nextLedger);
+        return this.#dependencies.repository.load(terminalControl) ?? nextLedger;
+      }
       return ledger;
     }
     if (decision.action === "save_turn_uncertain_and_ledger") {
@@ -793,9 +861,15 @@ class TerminalDispatchRecoveryCliApplication {
       });
       return this.#dependencies.repository.load(terminalControl);
     }
+    const callbackRouteLedgerFields = callbackRouteFingerprintLedgerFields({
+      receipt: terminalBridgeSubmission(projection.conversation),
+      ledger,
+      context: "lagging terminal dispatch recovery"
+    });
     this.#dependencies.repository.save(terminalControl, {
       ...ledger,
-      ...decision.mutation
+      ...decision.mutation,
+      ...callbackRouteLedgerFields
     });
     return this.#dependencies.repository.load(terminalControl);
   }
@@ -1001,7 +1075,7 @@ class TerminalDispatchRecoveryCliApplication {
     const initial = loadState(request.statePath);
     const claim = completionClaim(initial);
     if (
-      nonBlankString(initial.gateway_method) ||
+      callbackExpectedForConversation(initial) ||
       !claim ||
       !["idle", "failed"].includes(String(initial.status))
     ) return localNotApplicable();
@@ -1069,7 +1143,7 @@ class TerminalDispatchRecoveryCliApplication {
       ? "done"
       : outcome === "failure" ? "error" : undefined;
     if (
-      nonBlankString(conversation.gateway_method) ||
+      callbackExpectedForConversation(conversation) ||
       conversation.callback_delivery !== undefined ||
       !claim ||
       !control ||
@@ -1678,6 +1752,8 @@ function submissionFacts(value: unknown): TerminalSubmissionRecoveryFacts {
     uncertainAt: nonBlankString(submission?.uncertain_at),
     abortedAt: nonBlankString(submission?.aborted_at),
     lastProvenStage: nonBlankString(submission?.last_proven_stage),
+    callbackRouteFingerprint:
+      callbackRouteFingerprintFromRecord(submission),
     acceptanceEvidence: submission?.acceptance_evidence as
       TerminalSubmissionAcceptanceEvidence | undefined
   };
@@ -1964,7 +2040,8 @@ function ledgerDispatchRecordMatches(
       nonBlankString(record.executor_kind) === executorForConversation(input.conversation).kind &&
       (nonBlankString(record.openclaw_session) ?? undefined) ===
         (nonBlankString(input.conversation.openclaw_session) ?? undefined) &&
-      Boolean(record.callback_expected) === Boolean(input.conversation.gateway_method) &&
+      Boolean(record.callback_expected) ===
+        callbackExpectedForConversation(input.conversation) &&
       (nonBlankString(record.message_type) ?? undefined) ===
         (nonBlankString(expected.submission?.message_type) ?? undefined) &&
       (nonBlankString(record.message_body_hash) ?? undefined) ===

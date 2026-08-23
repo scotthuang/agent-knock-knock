@@ -1,13 +1,34 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
   createTerminalAcceptanceCliFacade,
+  type TerminalAcceptanceBridge,
   type TerminalAcceptanceCliDependencies
 } from "../src/terminal-acceptance-cli-adapter.js";
+import { callbackRouteFingerprintForConversation } from
+  "../src/callback-route-authority.js";
+import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 import { terminalBindingFrom, type ManagedSessionState } from
   "../src/managed-session.js";
+import {
+  CALLBACK_ROUTE_SCHEMA,
+  CALLBACK_ROUTE_VERSION,
+  type CallbackRouteV1
+} from "../src/callback-transport.js";
+import { createConversation, resolveExecutor } from "../src/protocol.js";
+import type { TerminalControlRef } from
+  "../src/terminal-agent-adapter.js";
+import type { TerminalDispatchLedgerDocument } from
+  "../src/terminal-dispatch-ledger-codec.js";
+import {
+  terminalBridgeRequestFingerprint,
+  terminalBridgeSubmission
+} from "../src/terminal-dispatch-receipt.js";
+import { ensureStoreWritable, loadState } from "../src/store.js";
 
 function compiledSource(): string {
   return fs.readFileSync(
@@ -243,6 +264,300 @@ test("managed Turn creation preserves storage and binding JSON keys", () => {
   assert.equal(created.message.id, "msg-1");
   assert.equal(created.message.session_id, "session-1");
   assert.equal(created.message.turn_id, created.conversation.turn_id);
+});
+
+test("managed Turn creation writes and inherits a generic callback route", () => {
+  const control = {
+    kind: "tmux" as const,
+    target: "akk:0.0",
+    session: "akk",
+    window: 0,
+    pane: 0,
+    panePid: 42,
+    currentPath: "/workspace/project",
+    capabilities: []
+  };
+  const facade = createTerminalAcceptanceCliFacade(
+    {} as unknown as TerminalAcceptanceCliDependencies
+  );
+  const created = facade.createManagedTurn({
+    options: {
+      storeDir: "/tmp/akk-acceptance-route",
+      messageId: "msg-route-1",
+      gatewayMethod: "agent-knock-knock.callback",
+      gatewaySession: "agent:controller:one",
+      openclawSession: "agent:controller:one",
+      openclawBin: "/opt/openclaw"
+    },
+    conversationId: "terminal:tmux:akk:0.0:42",
+    agent: "codex",
+    pid: 42,
+    messageBody: "implement it",
+    terminalControl: control
+  });
+
+  assert.deepEqual(created.conversation.callback_route, {
+    schema: CALLBACK_ROUTE_SCHEMA,
+    version: CALLBACK_ROUTE_VERSION,
+    transport: "openclaw_gateway_v1",
+    profile_id: "legacy-openclaw-cli",
+    profile_revision: created.conversation.callback_route?.profile_revision,
+    controller_session_id: "agent:controller:one",
+    capabilities: { wake: true, respond: true }
+  });
+  assert.equal(created.conversation.gateway_method, "agent-knock-knock.callback");
+  assert.equal(created.conversation.gateway_session, "agent:controller:one");
+
+  const inherited = facade.createManagedTurn({
+    options: {
+      storeDir: "/tmp/akk-acceptance-route",
+      messageId: "msg-route-2"
+    },
+    conversationId: "terminal:tmux:akk:0.0:42",
+    agent: "codex",
+    pid: 42,
+    messageBody: "continue",
+    terminalControl: control,
+    previousTurn: created.conversation
+  });
+  assert.deepEqual(
+    inherited.conversation.callback_route,
+    created.conversation.callback_route
+  );
+  assert.equal(inherited.conversation.gateway_method, "agent-knock-knock.callback");
+  assert.equal(inherited.conversation.gateway_session, "agent:controller:one");
+});
+
+test("trusted managed Turn options give an explicit generic route precedence", () => {
+  const control = {
+    kind: "tmux" as const,
+    target: "akk:0.0",
+    session: "akk",
+    window: 0,
+    pane: 0,
+    panePid: 42,
+    currentPath: "/workspace/project",
+    capabilities: []
+  };
+  const callbackRoute: CallbackRouteV1 = {
+    schema: CALLBACK_ROUTE_SCHEMA,
+    version: CALLBACK_ROUTE_VERSION,
+    transport: "local_ipc_v1",
+    profile_id: "trusted-local-controller",
+    profile_revision: "revision-1",
+    controller_session_id: "controller-local-one",
+    capabilities: { wake: true, respond: true }
+  };
+  const facade = createTerminalAcceptanceCliFacade(
+    {} as unknown as TerminalAcceptanceCliDependencies
+  );
+  const create = (route: CallbackRouteV1) => facade.createManagedTurn({
+    options: {
+      storeDir: "/tmp/akk-acceptance-generic-route",
+      messageId: "msg-generic-route",
+      callbackRoute: route,
+      gatewayMethod: "legacy.callback",
+      gatewaySession: "agent:legacy:controller"
+    },
+    conversationId: "terminal:tmux:akk:0.0:42",
+    agent: "codex",
+    pid: 42,
+    messageBody: "implement it",
+    terminalControl: control
+  });
+
+  assert.deepEqual(create(callbackRoute).conversation.callback_route, callbackRoute);
+  assert.throws(
+    () => create({ ...callbackRoute, version: 99 } as unknown as CallbackRouteV1),
+    /unsupported callback_route version 99/u
+  );
+});
+
+test("legacy in-flight acceptance synchronizes callback route authority", async (t) => {
+  const control: TerminalControlRef = {
+    kind: "tmux",
+    target: "akk:0.0",
+    session: "akk",
+    window: 0,
+    pane: 0,
+    panePid: 42,
+    currentPath: "/workspace/project",
+    capabilities: []
+  };
+  const requestText = "accept the exact legacy in-flight request";
+  const requestHash = terminalBridgeRequestFingerprint(requestText) as string;
+  const bridge = {
+    proveExactDraftStillPresent: async () => false,
+    resolveStoredTerminal: async () => {
+      throw new Error("deferred resolution is not expected");
+    }
+  } as TerminalAcceptanceBridge;
+
+  async function runCase(input: {
+    name: string;
+    routed: boolean;
+    ledgerAuthority?: string | null;
+    rejects?: boolean;
+  }): Promise<void> {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `akk-${input.name}-`));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const storeDir = path.join(root, "store");
+    ensureStoreWritable(storeDir);
+    const conversationDir = path.join(storeDir, "conversations", "turn-1");
+    const statePath = path.join(conversationDir, "state.json");
+    const logPath = path.join(conversationDir, "events.ndjson");
+    fs.mkdirSync(conversationDir, { recursive: true });
+    const legacySubmission = {
+      status: "enter_dispatched",
+      message_id: "message-1",
+      prepared_at: "2026-08-15T00:00:00.000Z",
+      text_injected_at: "2026-08-15T00:00:01.000Z",
+      enter_dispatched_at: "2026-08-15T00:00:02.000Z",
+      last_proven_stage: "enter_dispatched"
+    };
+    const conversation = {
+      ...createConversation({
+        userRequest: requestText,
+        sessionId: "session-1",
+        turnId: "turn-1",
+        executorKind: "claude",
+        now: new Date("2026-08-15T00:00:00.000Z")
+      }),
+      status: "waiting_for_agent" as const,
+      store_dir: storeDir,
+      conversation_dir: conversationDir,
+      state_path: statePath,
+      event_log_path: logPath,
+      ...(input.routed
+        ? {
+            gateway_method: "agent-knock-knock.callback",
+            gateway_session: "agent:controller:one"
+          }
+        : {}),
+      native_session_takeover: {
+        terminal_bridge: true,
+        terminal_bridge_message_id: "message-1",
+        terminal_bridge_request_text: requestText,
+        terminal_bridge_request_hash: requestHash,
+        terminal_agent_expected_session_id: "session-1",
+        terminal_bridge_submission: legacySubmission,
+        terminal_bridge_submission_receipts: [legacySubmission]
+      }
+    };
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify(conversation, null, 2)}\n`,
+      { mode: 0o600 }
+    );
+    const ledger: TerminalDispatchLedgerDocument = {
+      status: "enter_dispatched",
+      message_id: "message-1",
+      ...(input.ledgerAuthority !== undefined
+        ? { callback_route_fingerprint: input.ledgerAuthority }
+        : {})
+    };
+    let savedLedger: TerminalDispatchLedgerDocument | undefined;
+    const facade = createTerminalAcceptanceCliFacade({
+      native: {
+        codexProvider: () => ({}),
+        codexProcessIncarnation: () => {
+          throw new Error("Codex identity is not expected");
+        },
+        assertExclusive: async () => undefined
+      },
+      terminal: {
+        runtime: () => ({
+          loadClaudeAgentRows: () => [],
+          createBridge: () => bridge
+        }),
+        durableRequest: () => {
+          throw new Error("synthetic acceptance must not inspect transcripts");
+        },
+        runtimeIdentity: () => ({})
+      },
+      authority: {
+        assertTurnCurrent: () => undefined,
+        terminalControl: () => control,
+        isDiscoverableTurn: () => true,
+        workspaceMatches: () => true
+      },
+      repository: {
+        acquireStateLock: () => () => undefined,
+        acquireTerminalLock: () => () => undefined,
+        loadLedger: () => ledger,
+        saveLedger: (_terminalControl, next) => {
+          savedLedger = next;
+        },
+        reconcileLedger: (_terminalControl, current) => current,
+        bindingFields: () => ({})
+      },
+      deferred: {
+        recover: async () => {
+          throw new Error("deferred recovery is not expected");
+        },
+        loadAuthority: () => {
+          throw new Error("deferred authority is not expected");
+        },
+        assertLedgerAuthority: () => {
+          throw new Error("deferred authority is not expected");
+        },
+        loadTransfer: () => {
+          throw new Error("deferred transfer is not expected");
+        }
+      }
+    } as unknown as TerminalAcceptanceCliDependencies);
+    const reconcile = () => facade.reconcileMonitor({
+      options: {},
+      conversation,
+      statePath,
+      logPath,
+      terminalControl: control,
+      executor: resolveExecutor({ kind: "claude" }),
+      terminalBridge: bridge
+    });
+    await runCliCommandExecution(input.name, {}, {
+      env: {
+        ...process.env,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+        AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
+      },
+      now: () => new Date("2026-08-15T00:00:03.000Z"),
+      pid: process.pid,
+      runtimeLog: () => undefined
+    }, async () => {
+      if (input.rejects) {
+        await assert.rejects(
+          reconcile,
+          /callback route conflicts with its dispatch ledger/u
+        );
+        assert.equal(
+          terminalBridgeSubmission(loadState(statePath))?.status,
+          "enter_dispatched"
+        );
+        assert.equal(savedLedger, undefined);
+        return;
+      }
+      const result = await reconcile();
+      assert.equal(result.outcome, "accepted");
+      const authority = callbackRouteFingerprintForConversation(conversation) ??
+        null;
+      assert.equal(
+        terminalBridgeSubmission(loadState(statePath))
+          ?.callback_route_fingerprint,
+        authority
+      );
+      assert.equal(savedLedger?.callback_route_fingerprint, authority);
+    });
+  }
+
+  await runCase({ name: "legacy-acceptance-routed", routed: true });
+  await runCase({ name: "legacy-acceptance-no-route", routed: false });
+  await runCase({
+    name: "legacy-acceptance-route-mismatch",
+    routed: true,
+    ledgerAuthority: `sha256:${"f".repeat(64)}`,
+    rejects: true
+  });
 });
 
 test("service declarations remain data-only and the facade exposes no raw any", () => {

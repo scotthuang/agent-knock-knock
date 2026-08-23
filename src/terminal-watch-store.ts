@@ -2,6 +2,14 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  callbackEnvelopeMatchesRoute,
+  createCallbackEnvelope,
+  parseCallbackRoute,
+  type CallbackEnvelopeV1,
+  type CallbackRouteV1
+} from "./callback-transport.js";
+import { canonicalJson } from "./canonical-json.js";
+import {
   assertRealDirectory,
   atomicSaveJsonFile,
   isNodeError,
@@ -124,6 +132,8 @@ export interface TerminalWatchNotification {
   kind: TerminalWatchNotificationKind;
   evidence_fingerprint: string;
   reason_code?: string;
+  callback_route?: CallbackRouteV1;
+  callback_envelope?: CallbackEnvelopeV1;
   status: TerminalWatchNotificationStatus;
   attempts: number;
   created_at: string;
@@ -170,6 +180,94 @@ export interface TerminalWatch {
   last_activity_at: string;
   settlement?: TerminalWatchSettlement;
   notification_outbox: TerminalWatchNotification[];
+}
+
+export type TerminalWatchCallbackEvent =
+  | "approval_required"
+  | TerminalWatchTerminalStatus;
+
+export interface TerminalWatchCallbackMessageInput {
+  watchId: string;
+  event: TerminalWatchCallbackEvent;
+  agent: ExecutorKind;
+  terminalId: string;
+  detail?: string;
+  completionText?: string;
+}
+
+export function terminalWatchCallbackEnvelope(
+  watch: TerminalWatch,
+  notification: TerminalWatchNotification,
+  route: CallbackRouteV1
+): CallbackEnvelopeV1 {
+  const event: TerminalWatchCallbackEvent = notification.kind === "approval"
+    ? "approval_required"
+    : notification.kind;
+  const reasonCode = notification.kind === "approval"
+    ? notification.reason_code
+    : notification.reason_code ?? watch.settlement?.reason_code;
+  return createCallbackEnvelope({
+    route,
+    deliveryId: notification.notification_id,
+    idempotencyKey: notification.idempotency_key,
+    source: {
+      kind: "terminal_watch",
+      watch_id: watch.watch_id,
+      terminal_id: watch.terminal.terminal_id
+    },
+    event: {
+      id: notification.notification_id,
+      type: event,
+      body: terminalWatchCallbackMessage({
+        watchId: watch.watch_id,
+        event,
+        agent: watch.agent,
+        terminalId: watch.terminal.terminal_id,
+        detail: reasonCode,
+        completionText: notification.kind === "completed" ||
+            notification.kind === "failed"
+          ? watch.settlement?.completion_text
+          : undefined
+      }),
+      requires_response: true,
+      metadata: {
+        agent: watch.agent,
+        ...(reasonCode
+          ? { reason_code: reasonCode }
+          : {}),
+        ...((notification.kind === "completed" ||
+              notification.kind === "failed") &&
+            watch.settlement?.completion_text
+          ? { completion_text: watch.settlement.completion_text }
+          : {})
+      }
+    }
+  });
+}
+
+export function terminalWatchCallbackMessage(
+  input: TerminalWatchCallbackMessageInput
+): string {
+  const eventInstruction = input.event === "approval_required"
+    ? "Tell the user that the observed TUI task is waiting for approval and ask the human to inspect and decide in the named live TUI. Do not call any AKK approval tool or action, do not send approval keys, and do not use autoApprove."
+    : input.event === "completed"
+      ? "Tell the user that the human-started TUI task completed and summarize only the bounded completion text below."
+      : "Tell the user that Terminal Watch stopped without a verified successful completion and explain the exact reason below.";
+  return [
+    "Continue this controller conversation from the Agent Knock Knock Terminal Watch event below.",
+    "This is an observation of a task started by the human directly in Codex or Claude Code. It is not an AKK Turn and AKK did not send terminal input.",
+    eventInstruction,
+    "Do not poll files, processes, terminal panes, stdout, or stderr. Use only this structured event.",
+    "",
+    `[AKK Terminal Watch: ${input.event}]`,
+    `Watch: ${input.watchId}`,
+    `Terminal: ${input.terminalId}`,
+    `Agent: ${input.agent}`,
+    ...(input.detail ? [`Detail: ${input.detail}`] : []),
+    ...(input.completionText
+      ? ["", "Bounded completion text:", input.completionText]
+      : [])
+  ].join("\n");
 }
 
 export interface TerminalWatchSaveOptions {
@@ -452,6 +550,8 @@ const NOTIFICATION_FIELDS = {
   kind: oneOfGuard(TERMINAL_WATCH_NOTIFICATION_KINDS),
   evidence_fingerprint: assertSha256,
   reason_code: optionalGuard(assertReasonCode),
+  callback_route: IGNORE_VALUE,
+  callback_envelope: IGNORE_VALUE,
   status: oneOfGuard(TERMINAL_WATCH_NOTIFICATION_STATUSES),
   attempts: NON_NEGATIVE_INTEGER,
   created_at: assertTimestamp,
@@ -859,7 +959,7 @@ function assertNotificationOutbox(watch: TerminalWatch): void {
   const seenEvidence = new Set<string>();
   let previousCreatedAt = Date.parse(watch.created_at);
   for (const notification of watch.notification_outbox) {
-    assertNotification(notification, String(watch.watch_id));
+    assertNotification(notification, watch);
     if (seenIds.has(notification.notification_id)) {
       throw new Error("terminal Watch notification ids must be unique");
     }
@@ -900,24 +1000,119 @@ function assertNotificationOutbox(watch: TerminalWatch): void {
   }
 }
 
-function assertNotification(value: unknown, watchId: string): void {
+function assertNotification(value: unknown, watch: TerminalWatch): void {
   assertStrictRecord(value, "terminal Watch notification", NOTIFICATION_FIELDS);
   const notification = value as unknown as TerminalWatchNotification;
   const expectedId = terminalWatchNotificationId(
-    watchId,
+    watch.watch_id,
     notification.kind,
     notification.evidence_fingerprint
   );
   if (
     notification.notification_id !== expectedId ||
     notification.idempotency_key !==
-      terminalWatchNotificationIdempotencyKey(watchId, expectedId)
+      terminalWatchNotificationIdempotencyKey(watch.watch_id, expectedId)
   ) {
     throw new Error("terminal Watch notification identity is not deterministic");
   }
   const [minimumAttempts, receiptFields] =
     NOTIFICATION_SHAPES[notification.status];
   assertNotificationShape(value, minimumAttempts, receiptFields);
+  terminalWatchNotificationCallbackSnapshot(watch, notification);
+}
+
+export interface TerminalWatchNotificationCallbackSnapshot {
+  route: CallbackRouteV1;
+  envelope: CallbackEnvelopeV1;
+}
+
+/**
+ * Parse one optional v1 callback snapshot. Legacy notifications may omit both
+ * fields; a partial or malformed snapshot is never treated as legacy.
+ */
+export function terminalWatchNotificationCallbackSnapshot(
+  watch: TerminalWatch,
+  notification: TerminalWatchNotification
+): TerminalWatchNotificationCallbackSnapshot | undefined {
+  const hasRoute = Object.hasOwn(notification, "callback_route");
+  const hasEnvelope = Object.hasOwn(notification, "callback_envelope");
+  if (hasRoute !== hasEnvelope) {
+    throw new Error(
+      "terminal Watch notification callback snapshot must contain both route and envelope"
+    );
+  }
+  if (!hasRoute) return undefined;
+
+  const route = parseCallbackRoute(notification.callback_route);
+  const rawEnvelope = notification.callback_envelope;
+  if (!isRecord(rawEnvelope)) {
+    throw new Error("terminal Watch notification callback_envelope must be an object");
+  }
+  const normalizedEnvelope = createCallbackEnvelope({
+    route,
+    deliveryId: typeof rawEnvelope.delivery_id === "string"
+      ? rawEnvelope.delivery_id
+      : undefined,
+    idempotencyKey: typeof rawEnvelope.idempotency_key === "string"
+      ? rawEnvelope.idempotency_key
+      : undefined,
+    source: rawEnvelope.source as CallbackEnvelopeV1["source"],
+    event: rawEnvelope.event as CallbackEnvelopeV1["event"]
+  });
+  const envelope = strictJsonClone(
+    normalizedEnvelope,
+    "terminal Watch notification callback_envelope"
+  );
+  if (
+    canonicalJson(envelope) !== canonicalJson(rawEnvelope) ||
+    !callbackEnvelopeMatchesRoute(envelope, route)
+  ) {
+    throw new Error(
+      "terminal Watch notification callback_envelope is malformed or does not match callback_route"
+    );
+  }
+  const expectedEvent = notification.kind === "approval"
+    ? "approval_required"
+    : notification.kind;
+  const expectedEnvelope = terminalWatchCallbackEnvelope(
+    watch,
+    notification,
+    route
+  );
+  if (
+    envelope.delivery_id !== notification.notification_id ||
+    envelope.idempotency_key !== notification.idempotency_key ||
+    envelope.source.kind !== "terminal_watch" ||
+    envelope.source.watch_id !== watch.watch_id ||
+    envelope.source.terminal_id !== watch.terminal.terminal_id ||
+    route.controller_session_id !== watch.openclaw_session ||
+    envelope.event.id !== notification.notification_id ||
+    envelope.event.type !== expectedEvent ||
+    envelope.event.requires_response !== true ||
+    canonicalJson(envelope) !== canonicalJson(expectedEnvelope)
+  ) {
+    throw new Error(
+      "terminal Watch notification callback snapshot does not match its immutable identity"
+    );
+  }
+  return { route, envelope };
+}
+
+function strictJsonClone<Value>(value: Value, label: string): Value {
+  let encoded: string | undefined;
+  try {
+    encoded = JSON.stringify(value);
+  } catch {
+    throw new Error(`${label} must contain only JSON values`);
+  }
+  if (encoded === undefined) {
+    throw new Error(`${label} must contain only JSON values`);
+  }
+  const cloned = JSON.parse(encoded) as Value;
+  if (canonicalJson(cloned) !== canonicalJson(value)) {
+    throw new Error(`${label} must contain only exact JSON values`);
+  }
+  return cloned;
 }
 
 function assertNotificationShape(
@@ -1030,6 +1225,26 @@ function assertNotificationAdvance(
       "created_at"
     ] as const) {
       if (before[key] !== after[key]) {
+        throw new Error(`terminal Watch notification cannot change immutable ${key}`);
+      }
+    }
+    for (const key of ["callback_route", "callback_envelope"] as const) {
+      const existed = Object.hasOwn(before, key);
+      const exists = Object.hasOwn(after, key);
+      if (!existed && exists) {
+        const reclaimed = before.status === "delivering" &&
+          after.status === "delivering" &&
+          after.attempt_id !== before.attempt_id;
+        const claimed = (before.status === "pending" ||
+            before.status === "failed") &&
+          after.status === "delivering";
+        if (!claimed && !reclaimed) {
+          throw new Error(
+            "terminal Watch notification callback snapshot may be backfilled only while claiming delivery"
+          );
+        }
+      }
+      if (existed && (!exists || canonicalJson(before[key]) !== canonicalJson(after[key]))) {
         throw new Error(`terminal Watch notification cannot change immutable ${key}`);
       }
     }

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   createCallbackOutboxService,
+  resolveCallbackGatewayRoute,
   type CallbackOutboxServicePorts
 } from "../src/callback-outbox-service.js";
 import {
@@ -10,6 +11,14 @@ import {
   type Conversation
 } from "../src/protocol.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import { callbackRouteFingerprint } from
+  "../src/callback-route-authority.js";
+import {
+  CALLBACK_ENVELOPE_SCHEMA,
+  CALLBACK_ROUTE_SCHEMA,
+  createLegacyOpenClawCallbackRoute,
+  type CallbackRouteV1
+} from "../src/callback-transport.js";
 
 const NOW = new Date("2026-08-14T12:00:00.000Z");
 const STATE_PATH = "/store/turn-a/state.json";
@@ -23,6 +32,31 @@ const TERMINAL_CONTROL: TerminalControlRef = {
   panePid: 5102,
   capabilities: ["screen_completion", "durable_completion"]
 };
+const GENERIC_ROUTE: CallbackRouteV1 = {
+  schema: CALLBACK_ROUTE_SCHEMA,
+  version: 1,
+  transport: "local_ipc_v1",
+  profile_id: "desktop-controller",
+  profile_revision: "revision-a",
+  controller_session_id: "controller-a",
+  capabilities: { wake: true, respond: true }
+};
+
+test("callback route keeps its gateway URL independent of token rotation", () => {
+  assert.deepEqual(resolveCallbackGatewayRoute({
+    gatewayUrl: "ws://127.0.0.1:18789"
+  }), {
+    gatewayUrl: "ws://127.0.0.1:18789",
+    token: undefined
+  });
+  assert.deepEqual(resolveCallbackGatewayRoute(
+    { gatewayUrl: "ws://persisted.example" },
+    { token: "rotated-private-token" }
+  ), {
+    gatewayUrl: "ws://persisted.example",
+    token: "rotated-private-token"
+  });
+});
 
 function createHarness(events: Array<Record<string, unknown>> = []) {
   const conversation = {
@@ -37,6 +71,7 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
   };
   let stored: Conversation = conversation;
   const order: string[] = [];
+  const retryMonitors: Array<Record<string, unknown>> = [];
   let dispositionCalls = 0;
   const ports: CallbackOutboxServicePorts = {
     state: {
@@ -92,8 +127,9 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
         dispositionCalls += 1;
         return false;
       },
-      startMonitor() {
+      startMonitor(input) {
         order.push("start:retry-monitor");
+        retryMonitors.push({ ...input });
         return { pid: 4102 };
       },
       attemptLeaseMs: 120_000,
@@ -127,6 +163,7 @@ function createHarness(events: Array<Record<string, unknown>> = []) {
     ports,
     service: createCallbackOutboxService(ports),
     stored: () => stored,
+    retryMonitors,
     dispositionCalls: () => dispositionCalls
   };
 }
@@ -481,4 +518,561 @@ test("approval without a gateway keeps the stable message out of the outbox", ()
   assert.equal(result.callbackMessage.id, "approval-message-a");
   assert.deepEqual(harness.order, []);
   assert.strictEqual(harness.stored(), harness.conversation);
+});
+
+test("stall notification preparation uses an independent advisory outbox", () => {
+  const harness = createHarness();
+  Object.assign(harness.conversation as Conversation, {
+    status: "stalled",
+    callback_route: GENERIC_ROUTE,
+    callback_delivery: {
+      status: "pending",
+      message: callbackMessage(harness.conversation),
+      attempts: 1
+    }
+  });
+  const lifecycleDelivery = (harness.conversation as Conversation)
+    .callback_delivery;
+  const message = createMessage({
+    conversation: harness.conversation,
+    id: "stall-message-a",
+    from: "codex",
+    to: "openclaw",
+    type: "error",
+    requiresResponse: false,
+    body: "The managed terminal task stalled.",
+    now: NOW
+  });
+
+  const result = harness.service.prepareStallNotification({
+    options: { statePath: STATE_PATH },
+    statePath: STATE_PATH,
+    logPath: LOG_PATH,
+    conversation: {
+      ...harness.conversation,
+      stalled_notification_message_id: message.id
+    },
+    message
+  });
+
+  assert.ok(result.prepared);
+  assert.equal(result.prepared.outcome, "deliver");
+  if (result.prepared.outcome !== "deliver") return;
+  assert.equal(result.prepared.callbackOutboxLane, "notification");
+  assert.equal(result.prepared.conversation.status, "stalled");
+  assert.strictEqual(
+    result.prepared.conversation.callback_delivery,
+    lifecycleDelivery
+  );
+  assert.equal(
+    result.prepared.conversation.stalled_notification_sent_at,
+    undefined
+  );
+  const advisory = result.prepared.conversation
+    .callback_notification_delivery as Record<string, unknown>;
+  assert.equal(advisory.status, "pending");
+  assert.equal(advisory.kind, "stall_notification");
+  assert.deepEqual(advisory.message, message);
+  assert.deepEqual(advisory.callback_route, GENERIC_ROUTE);
+  assert.deepEqual(harness.order, [
+    "derive:store-dir",
+    "assert:no-deferred",
+    "read-events",
+    "assert:binding",
+    "start:retry-monitor",
+    "append:message",
+    "append:callback_notification_delivery_pending",
+    "append:callback_notification_retry_monitor_launched",
+    "save",
+    "log:callback_received"
+  ]);
+});
+
+test("accepted stall notification settles sent evidence without changing Turn phase", () => {
+  const harness = createHarness();
+  Object.assign(harness.conversation as Conversation, {
+    status: "stalled",
+    callback_route: GENERIC_ROUTE
+  });
+  const message = createMessage({
+    conversation: harness.conversation,
+    id: "stall-message-accepted",
+    from: "codex",
+    to: "openclaw",
+    type: "error",
+    requiresResponse: false,
+    body: "The managed terminal task stalled.",
+    now: NOW
+  });
+  const preparation = harness.service.prepareStallNotification({
+    options: { statePath: STATE_PATH },
+    statePath: STATE_PATH,
+    logPath: LOG_PATH,
+    conversation: {
+      ...harness.conversation,
+      stalled_notification_message_id: message.id
+    },
+    message
+  });
+  assert.ok(preparation.prepared);
+  if (!preparation.prepared || preparation.prepared.outcome !== "deliver") {
+    return;
+  }
+  harness.ports.delivery.deliver = () => ({
+    kind: "local_ipc_v1",
+    injection: { status: "accepted", accepted_at: NOW.toISOString() },
+    wake: { status: "accepted", accepted_at: NOW.toISOString() },
+    attempt_outcome: {
+      disposition: "accepted",
+      accepted_at: NOW.toISOString(),
+      acceptance_id: "acceptance-stall-a"
+    }
+  });
+
+  const result = harness.service.runPrepared(preparation.prepared);
+
+  assert.equal(result.delivered, true);
+  assert.equal(result.conversation.status, "stalled");
+  assert.equal(
+    result.conversation.stalled_notification_sent_at,
+    NOW.toISOString()
+  );
+  assert.equal(
+    result.conversation.stalled_notification_message_id,
+    message.id
+  );
+  assert.equal(
+    (result.conversation.callback_notification_delivery as
+      Record<string, unknown>).status,
+    "delivered"
+  );
+});
+
+test("startup reconciliation restarts only the notification lane", () => {
+  const harness = createHarness();
+  const message = createMessage({
+    conversation: harness.conversation,
+    id: "stall-message-reconcile",
+    from: "codex",
+    to: "openclaw",
+    type: "error",
+    requiresResponse: false,
+    body: "The managed terminal task stalled.",
+    now: NOW
+  });
+  const lifecycleDelivery = {
+    status: "delivered",
+    attempts: 1,
+    message: callbackMessage(harness.conversation)
+  };
+  Object.assign(harness.conversation as Conversation, {
+    status: "stalled",
+    callback_route: GENERIC_ROUTE,
+    callback_delivery: lifecycleDelivery,
+    callback_notification_delivery: {
+      status: "failed",
+      attempts: 1,
+      message,
+      attempt_outcome: {
+        disposition: "retryable_failure",
+        error_code: "temporarily_unavailable"
+      }
+    }
+  });
+
+  const result = harness.service.reconcileDelivery({
+    statePath: STATE_PATH,
+    logPath: LOG_PATH,
+    delayMs: 7_000,
+    callbackOutboxLane: "notification"
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.status, "launched");
+  assert.equal(result.reason,
+    "callback_notification_delivery_reconciliation");
+  assert.deepEqual(harness.retryMonitors, [{
+    statePath: STATE_PATH,
+    delayMs: 7_000,
+    callbackOutboxLane: "notification"
+  }]);
+  assert.strictEqual(harness.stored().callback_delivery, lifecycleDelivery);
+  const advisory = harness.stored().callback_notification_delivery as
+    Record<string, unknown>;
+  assert.equal(advisory.retry_monitor_pid, 4102);
+  assert.equal(advisory.next_attempt_at, "2026-08-14T12:00:07.000Z");
+});
+
+test("notification retry reuses its durable payload and settles acceptance", () => {
+  const harness = createHarness();
+  Object.assign(harness.conversation as Conversation, {
+    status: "stalled",
+    callback_route: GENERIC_ROUTE,
+    callback_delivery: {
+      status: "delivered",
+      attempts: 1,
+      message: callbackMessage(harness.conversation)
+    }
+  });
+  const message = createMessage({
+    conversation: harness.conversation,
+    id: "stall-message-retry",
+    from: "codex",
+    to: "openclaw",
+    type: "error",
+    requiresResponse: false,
+    body: "The managed terminal task stalled.",
+    now: NOW
+  });
+  const preparation = harness.service.prepareStallNotification({
+    options: { statePath: STATE_PATH },
+    statePath: STATE_PATH,
+    logPath: LOG_PATH,
+    conversation: {
+      ...harness.conversation,
+      stalled_notification_message_id: message.id
+    },
+    message
+  });
+  assert.ok(preparation.prepared);
+  if (!preparation.prepared || preparation.prepared.outcome !== "deliver") {
+    return;
+  }
+  harness.ports.delivery.deliver = () => ({
+    kind: "local_ipc_v1",
+    injection: { status: "failed" },
+    wake: { status: "not_attempted" },
+    attempt_outcome: {
+      disposition: "retryable_failure",
+      error_code: "temporarily_unavailable"
+    }
+  });
+  assert.throws(
+    () => harness.service.runPrepared(preparation.prepared),
+    /temporarily_unavailable/u
+  );
+  assert.equal(
+    (harness.stored().callback_notification_delivery as
+      Record<string, unknown>).status,
+    "failed"
+  );
+  assert.equal(harness.stored().stalled_notification_sent_at, undefined);
+
+  let retriedMessageId: string | undefined;
+  harness.ports.delivery.deliver = (input) => {
+    retriedMessageId = input.message.id;
+    assert.equal(input.attempt.number, 2);
+    return {
+      kind: "local_ipc_v1",
+      injection: { status: "accepted", accepted_at: NOW.toISOString() },
+      wake: { status: "accepted", accepted_at: NOW.toISOString() },
+      attempt_outcome: {
+        disposition: "accepted",
+        accepted_at: NOW.toISOString(),
+        acceptance_id: "notification-retry-accepted"
+      }
+    };
+  };
+  harness.ports.delivery.runTransaction = (options) => {
+    const prepared = harness.service.prepare({ options, logPath: LOG_PATH });
+    return harness.service.runPrepared(prepared);
+  };
+
+  harness.service.runRetryMonitor({
+    statePath: STATE_PATH,
+    initialDelayMs: 0,
+    callbackOutboxLane: "notification"
+  });
+
+  assert.equal(retriedMessageId, message.id);
+  assert.equal(harness.stored().status, "stalled");
+  assert.equal(
+    (harness.stored().callback_notification_delivery as
+      Record<string, unknown>).status,
+    "delivered"
+  );
+  assert.equal(
+    harness.stored().stalled_notification_sent_at,
+    NOW.toISOString()
+  );
+  assert.equal(
+    (harness.stored().callback_delivery as Record<string, unknown>).status,
+    "delivered"
+  );
+});
+
+test("generic callback-only preparation persists an immutable route and envelope", () => {
+  const harness = createHarness();
+  const message = callbackMessage(harness.conversation);
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(message),
+      preserveMessageId: true,
+      callbackRoute: GENERIC_ROUTE
+    },
+    logPath: LOG_PATH
+  });
+
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  assert.deepEqual(prepared.callbackRoute, GENERIC_ROUTE);
+  const delivery = harness.stored().callback_delivery as Record<string, unknown>;
+  assert.deepEqual(delivery.callback_route, GENERIC_ROUTE);
+  const envelope = delivery.callback_envelope as Record<string, unknown>;
+  assert.equal(envelope.schema, CALLBACK_ENVELOPE_SCHEMA);
+  assert.deepEqual(envelope.route, {
+    transport: GENERIC_ROUTE.transport,
+    profile_id: GENERIC_ROUTE.profile_id,
+    profile_revision: GENERIC_ROUTE.profile_revision,
+    controller_session_id: GENERIC_ROUTE.controller_session_id
+  });
+  assert.deepEqual(envelope.source, {
+    kind: "managed_turn",
+    session_id: "session-a",
+    turn_id: "turn-a",
+    conversation_id: "turn-a"
+  });
+  assert.equal(JSON.stringify(delivery).includes("token"), false);
+});
+
+test("fresh raw callback backfills trusted legacy options from its immutable Turn", () => {
+  const harness = createHarness();
+  const legacy = {
+    gateway_method: "agent-knock-knock.callback",
+    gateway_session: "agent:main:controller",
+    openclaw_session: "agent:main:controller",
+    openclaw_bin: "/trusted/bin/openclaw",
+    gateway_url: "ws://127.0.0.1:18789"
+  };
+  Object.assign(harness.conversation as Conversation, {
+    ...legacy,
+    callback_route: createLegacyOpenClawCallbackRoute({
+      controllerSessionId: legacy.gateway_session,
+      gatewayMethod: legacy.gateway_method,
+      openclawBin: legacy.openclaw_bin,
+      gatewayUrl: legacy.gateway_url
+    })
+  });
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true
+    },
+    logPath: LOG_PATH
+  });
+
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  assert.equal(prepared.options.gatewayMethod, legacy.gateway_method);
+  assert.equal(prepared.options.gatewaySession, legacy.gateway_session);
+  assert.equal(prepared.options.openclawSession, legacy.openclaw_session);
+  assert.equal(prepared.options.openclawBin, legacy.openclaw_bin);
+  assert.equal(prepared.options.gatewayUrl, legacy.gateway_url);
+  assert.deepEqual(
+    prepared.options.callbackRoute,
+    (harness.conversation as Conversation).callback_route
+  );
+});
+
+test("legacy raw callback route uses the same Turn fallbacks as delivery options", () => {
+  for (const supplied of [
+    { gatewayMethod: "agent-knock-knock.callback" },
+    {
+      gatewayMethod: "agent-knock-knock.callback",
+      gatewaySession: "agent:main:controller",
+      openclawBin: "/trusted/bin/openclaw"
+    }
+  ]) {
+    const harness = createHarness();
+    const legacy = {
+      gateway_method: "agent-knock-knock.callback",
+      gateway_session: "agent:main:controller",
+      openclaw_session: "agent:main:legacy-fallback",
+      openclaw_bin: "/trusted/bin/openclaw",
+      gateway_url: "ws://configured.example:18789"
+    };
+    Object.assign(harness.conversation as Conversation, legacy);
+    assert.equal(
+      Object.hasOwn(harness.conversation as Conversation, "callback_route"),
+      false
+    );
+    const prepared = harness.service.prepare({
+      options: {
+        statePath: STATE_PATH,
+        messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+        preserveMessageId: true,
+        ...supplied
+      },
+      logPath: LOG_PATH
+    });
+
+    assert.equal(prepared.outcome, "deliver");
+    if (prepared.outcome !== "deliver") continue;
+    const expectedRoute = createLegacyOpenClawCallbackRoute({
+      controllerSessionId: legacy.gateway_session,
+      gatewayMethod: legacy.gateway_method,
+      openclawBin: legacy.openclaw_bin,
+      gatewayUrl: legacy.gateway_url
+    });
+    assert.deepEqual(prepared.callbackRoute, expectedRoute);
+    assert.deepEqual(prepared.options.callbackRoute, expectedRoute);
+    assert.equal(prepared.options.gatewaySession, legacy.gateway_session);
+    assert.equal(prepared.options.gatewayUrl, legacy.gateway_url);
+  }
+});
+
+test("first outbox prepare rejects dispatch route drift before persistence", () => {
+  const changedRoute: CallbackRouteV1 = {
+    ...GENERIC_ROUTE,
+    profile_revision: "revision-b",
+    controller_session_id: "controller-b"
+  };
+  for (const currentRoute of [changedRoute, GENERIC_ROUTE] as const) {
+    const harness = createHarness();
+    (harness.conversation as Conversation).callback_route = currentRoute;
+    (harness.conversation as Conversation).native_session_takeover = {
+      terminal_bridge_submission: {
+        callback_route_fingerprint: currentRoute === GENERIC_ROUTE
+          ? null
+          : callbackRouteFingerprint(GENERIC_ROUTE)
+      }
+    };
+
+    assert.throws(() => harness.service.prepare({
+      options: {
+        statePath: STATE_PATH,
+        messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+        preserveMessageId: true
+      },
+      logPath: LOG_PATH
+    }), /conflicts with immutable terminal dispatch authority/u);
+    assert.equal(harness.order.includes("save"), false);
+    assert.equal(harness.order.includes("append:message"), false);
+    assert.equal(harness.order.includes("start:retry-monitor"), false);
+  }
+});
+
+test("matching and legacy-missing dispatch route authority remain compatible", () => {
+  for (const authority of [
+    callbackRouteFingerprint(GENERIC_ROUTE),
+    undefined
+  ]) {
+    const harness = createHarness();
+    (harness.conversation as Conversation).callback_route = GENERIC_ROUTE;
+    (harness.conversation as Conversation).native_session_takeover = {
+      terminal_bridge_submission: {
+        ...(authority !== undefined
+          ? { callback_route_fingerprint: authority }
+          : {})
+      }
+    };
+
+    const prepared = harness.service.prepare({
+      options: {
+        statePath: STATE_PATH,
+        messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+        preserveMessageId: true
+      },
+      logPath: LOG_PATH
+    });
+    assert.equal(prepared.outcome, "deliver");
+  }
+});
+
+test("malformed generic route never falls back to legacy OpenClaw fields", () => {
+  const harness = createHarness();
+  Object.assign(harness.conversation as Conversation, {
+    callback_route: { ...GENERIC_ROUTE, version: 99 },
+    gateway_method: "agent-knock-knock.callback"
+  });
+  assert.throws(() => harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true
+    },
+    logPath: LOG_PATH
+  }), /unsupported callback_route version 99/u);
+});
+
+test("persisted generic and legacy routes beat changed current routing", () => {
+  const changedOptionsRoute: CallbackRouteV1 = {
+    ...GENERIC_ROUTE,
+    profile_revision: "changed-options",
+    controller_session_id: "changed-options-controller"
+  };
+  const changedConversationRoute: CallbackRouteV1 = {
+    ...GENERIC_ROUTE,
+    profile_revision: "changed-conversation",
+    controller_session_id: "changed-conversation-controller"
+  };
+
+  const generic = createHarness();
+  const genericMessage = callbackMessage(generic.conversation);
+  (generic.conversation as Conversation).callback_route =
+    changedConversationRoute;
+  (generic.conversation as Conversation).callback_delivery = {
+    status: "failed",
+    message: genericMessage,
+    attempts: 1,
+    callback_route: GENERIC_ROUTE
+  };
+  const genericPrepared = generic.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(genericMessage),
+      preserveMessageId: true,
+      retryPending: true,
+      callbackRoute: changedOptionsRoute
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(genericPrepared.outcome, "deliver");
+  if (genericPrepared.outcome !== "deliver") return;
+  assert.deepEqual(genericPrepared.callbackRoute, GENERIC_ROUTE);
+  assert.deepEqual(genericPrepared.options.callbackRoute, GENERIC_ROUTE);
+
+  const legacy = createHarness();
+  const legacyMessage = callbackMessage(legacy.conversation);
+  (legacy.conversation as Conversation).callback_route =
+    changedConversationRoute;
+  (legacy.conversation as Conversation).callback_delivery = {
+    status: "failed",
+    message: legacyMessage,
+    attempts: 1,
+    gateway_method: "persisted.callback",
+    gateway_session: "persisted-controller",
+    openclaw_bin: "/persisted/openclaw",
+    gateway_url: "ws://persisted.invalid"
+  };
+  const legacyPrepared = legacy.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(legacyMessage),
+      preserveMessageId: true,
+      retryPending: true,
+      callbackRoute: changedOptionsRoute,
+      gatewayMethod: "changed.callback",
+      gatewaySession: "changed-controller",
+      openclawBin: "/changed/openclaw",
+      gatewayUrl: "ws://changed.invalid"
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(legacyPrepared.outcome, "deliver");
+  if (legacyPrepared.outcome !== "deliver") return;
+  assert.deepEqual(legacyPrepared.callbackRoute,
+    createLegacyOpenClawCallbackRoute({
+      controllerSessionId: "persisted-controller",
+      gatewayMethod: "persisted.callback",
+      openclawBin: "/persisted/openclaw",
+      gatewayUrl: "ws://persisted.invalid"
+    })
+  );
+  assert.equal(legacyPrepared.options.gatewayMethod, "persisted.callback");
+  assert.equal(legacyPrepared.options.gatewaySession, "persisted-controller");
+  assert.equal(legacyPrepared.options.openclawBin, "/persisted/openclaw");
+  assert.equal(legacyPrepared.options.gatewayUrl, "ws://persisted.invalid");
 });

@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { createConversation, type Conversation } from "../src/protocol.js";
+import { callbackRouteFingerprintForConversation } from
+  "../src/callback-route-authority.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
 import {
@@ -138,6 +140,7 @@ test("prepared receipt preserves exact Object.keys and durable state bytes", () 
     request_hash: sha256(REQUEST_TEXT),
     executor_kind: "codex",
     openclaw_session: "agent:main:main",
+    callback_route_fingerprint: null,
     store_dir: STORE_DIR,
     native_thread_id: "thread-a",
     terminal_target: TERMINAL_CONTROL.target,
@@ -211,5 +214,39 @@ test("receipt history is append-only and immutable within one generation", () =>
       terminalControl: TERMINAL_CONTROL
     }),
     /changed immutable binding_id/u
+  );
+});
+
+test("dispatch receipt binds a canonical callback route fingerprint", () => {
+  const routedConversation: Conversation = {
+    ...conversation(),
+    gateway_method: "agent.callback",
+    gateway_session: "agent:controller:one"
+  };
+  const prepared = preparedReceipt(routedConversation);
+  const expected = callbackRouteFingerprintForConversation(routedConversation);
+  assert.ok(expected);
+  assert.equal(
+    terminalBridgeSubmission(prepared)?.callback_route_fingerprint,
+    expected
+  );
+
+  assert.throws(
+    () => applyTerminalBridgeSubmission({
+      conversation: {
+        ...prepared,
+        gateway_session: "agent:controller:redirected"
+      },
+      messageId: "message-a",
+      requestText: REQUEST_TEXT,
+      status: "text_injected",
+      preparedAt: STARTED_AT,
+      textInjectedAt: "2026-08-14T12:00:01.000Z"
+    }, {
+      dispatcherPid: 4102,
+      storeDir: STORE_DIR,
+      terminalControl: TERMINAL_CONTROL
+    }),
+    /changed immutable callback_route_fingerprint/u
   );
 });

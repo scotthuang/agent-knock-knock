@@ -4,13 +4,23 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type {
+  CallbackAttemptOutcome,
+  CallbackEnvelopeV1,
+  CallbackRouteV1,
+  CallbackTransportAttemptV1
+} from "../src/callback-transport.js";
 import {
   createTerminalWatchStore,
   pathsForTerminalWatch,
+  terminalWatchNotificationCallbackSnapshot,
   terminalWatchRevision,
   type TerminalWatch,
   type TerminalWatchTerminalIdentity
 } from "../src/terminal-watch-store.js";
+import {
+  resolveTerminalWatchOpenClawCallback
+} from "../src/terminal-watch-callback-cli-adapter.js";
 import type { CodexHumanStartedActiveTaskAnchor } from
   "../src/terminal-submission-acceptance.js";
 import {
@@ -18,6 +28,7 @@ import {
   createTerminalWatchService,
   terminalWatchObservationFence,
   type CreateTerminalWatchInput,
+  type TerminalWatchCallbackResolution,
   type TerminalWatchObservation,
   type TerminalWatchService
 } from "../src/terminal-watch-service.js";
@@ -106,8 +117,21 @@ interface Harness {
     kind: string;
     watchId: string;
     settlementText?: string;
+    route: CallbackRouteV1;
+    envelope: CallbackEnvelopeV1;
+    attempt: CallbackTransportAttemptV1;
   }>;
-  deliveryOutcomes: Array<"success" | "failure" | (() => Promise<void>)>;
+  deliveryOutcomes: Array<
+    | "success"
+    | "failure"
+    | "permanent"
+    | "uncertain"
+    | "throw"
+    | "malformed"
+    | ((
+        reportCheckpoint?: (outcome: CallbackAttemptOutcome) => void
+      ) => Promise<void>)
+  >;
   observeCalls(): number;
 }
 
@@ -115,6 +139,8 @@ function harness(
   t: test.TestContext,
   policy: {
     notificationMaxRetryDelayMs?: number;
+    resolveCallback?: (watch: TerminalWatch) =>
+      TerminalWatchCallbackResolution;
   } = {}
 ): Harness {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-watch-service-"));
@@ -144,19 +170,60 @@ function harness(
             observed_at: new Date(nowMs).toISOString()
           };
     },
-    deliver: async ({ watch, notification }) => {
+    resolveCallback:
+      policy.resolveCallback ?? resolveTerminalWatchOpenClawCallback,
+    deliver: async ({
+      route,
+      envelope,
+      attempt,
+      reportCheckpoint
+    }): Promise<CallbackAttemptOutcome> => {
+      assert.equal(envelope.source.kind, "terminal_watch");
+      const eventKind = envelope.event.type === "approval_required"
+        ? "approval"
+        : envelope.event.type;
       deliveries.push({
-        id: notification.notification_id,
-        key: notification.idempotency_key,
-        kind: notification.kind,
-        watchId: watch.watch_id,
-        settlementText: watch.settlement?.completion_text
+        id: envelope.delivery_id,
+        key: envelope.idempotency_key,
+        kind: eventKind,
+        watchId: envelope.source.watch_id,
+        settlementText: boundedCompletionText(envelope.event.body),
+        route,
+        envelope,
+        attempt
       });
       const outcome = deliveryOutcomes.shift();
-      if (typeof outcome === "function") await outcome();
-      if (outcome === "failure") {
-        throw new Error("sensitive transport failure detail");
+      if (typeof outcome === "function") await outcome(reportCheckpoint);
+      if (outcome === "throw") {
+        throw new Error("transport crashed after invocation");
       }
+      if (outcome === "malformed") {
+        return undefined as unknown as CallbackAttemptOutcome;
+      }
+      if (outcome === "failure") {
+        return {
+          disposition: "retryable_failure",
+          error_code: "transport_failed"
+        };
+      }
+      if (outcome === "permanent") {
+        return {
+          disposition: "permanent_failure",
+          error_code: "profile_removed"
+        };
+      }
+      if (outcome === "uncertain") {
+        return {
+          disposition: "uncertain",
+          error_code: "acknowledgement_malformed",
+          observed_at: new Date(nowMs).toISOString()
+        };
+      }
+      return {
+        disposition: "accepted",
+        accepted_at: new Date(nowMs).toISOString(),
+        acceptance_id: envelope.delivery_id
+      };
     },
     notificationLeaseMs: 1_000,
     notificationRetryDelayMs: 500,
@@ -181,6 +248,10 @@ function harness(
     deliveryOutcomes,
     observeCalls: () => observeCalls
   };
+}
+
+function boundedCompletionText(body: string): string | undefined {
+  return body.split("\nBounded completion text:\n")[1];
 }
 
 function observed(
@@ -249,6 +320,40 @@ test("approval remains active and enqueues once per exact fingerprint", async (t
 
   assert.equal((await state.service.reconcileAll()).callbacks_delivered, 1);
   assert.equal(state.deliveries.length, 1);
+  assert.equal(
+    state.deliveries[0].route.transport,
+    "openclaw_gateway_v1"
+  );
+  assert.equal(
+    state.deliveries[0].route.controller_session_id,
+    created.openclaw_session
+  );
+  assert.equal(
+    state.deliveries[0].route.profile_id,
+    "legacy-openclaw-cli"
+  );
+  assert.match(
+    state.deliveries[0].route.profile_revision,
+    /^sha256:[0-9a-f]{64}$/u
+  );
+  assert.deepEqual(state.deliveries[0].route.capabilities, {
+    wake: true,
+    respond: false
+  });
+  assert.equal(state.deliveries[0].envelope.source.kind, "terminal_watch");
+  assert.equal(state.deliveries[0].envelope.event.type, "approval_required");
+  assert.equal(
+    state.deliveries[0].envelope.idempotency_key,
+    approval.notification_outbox[0].idempotency_key
+  );
+  assert.match(
+    state.deliveries[0].envelope.event.body,
+    /Do not call any AKK approval tool or action/u
+  );
+  assert.deepEqual(state.deliveries[0].attempt, {
+    number: 1,
+    id: "nonce-1"
+  });
   assert.equal((await state.service.reconcileAll()).callbacks_delivered, 0);
 });
 
@@ -359,14 +464,13 @@ test("terminal settlement supersedes every undelivered approval before callback 
   assert.equal((await state.service.reconcileAll()).callbacks_delivered, 0);
 });
 
-test("a claimed approval serializes terminal settlement callback delivery", async (t) => {
+test("claimed approval without reason survives later settlement and serializes delivery", async (t) => {
   const state = harness(t);
   const created = state.service.create(exactInput());
   state.advance(1_000);
   const approvalAt = "2026-08-21T00:00:01.000Z";
   state.observations.push((watch) => observed(watch, "approval", approvalAt, {
-    evidence_fingerprint: APPROVAL_FINGERPRINT,
-    reason_code: "approval_required"
+    evidence_fingerprint: APPROVAL_FINGERPRINT
   }));
   await state.service.reconcile(created.watch_id);
   let releaseDelivery = () => {};
@@ -532,6 +636,90 @@ test("expired delivery claim retries with one deterministic notification identit
   await staleWorker;
 });
 
+test("legacy pending notification atomically backfills its snapshot before transport", async (t) => {
+  const state = harness(t);
+  const created = state.service.create(exactInput({
+    approval_fingerprint: APPROVAL_FINGERPRINT,
+    approval_reason_code: "approval_required"
+  }));
+  const legacy = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(Object.hasOwn(legacy, "callback_route"), false);
+  assert.equal(Object.hasOwn(legacy, "callback_envelope"), false);
+
+  let releaseDelivery = () => {};
+  let deliveryStarted = () => {};
+  const started = new Promise<void>((resolve) => {
+    deliveryStarted = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    releaseDelivery = resolve;
+  });
+  state.deliveryOutcomes.push(async () => {
+    deliveryStarted();
+    await blocked;
+  });
+
+  const draining = state.service.reconcileAll();
+  await started;
+  const claimed = state.service.get(created.watch_id);
+  const notification = claimed.notification_outbox[0];
+  assert.equal(notification.status, "delivering");
+  assert.ok(terminalWatchNotificationCallbackSnapshot(claimed, notification));
+  assert.deepEqual(notification.callback_route, state.deliveries[0].route);
+  assert.deepEqual(notification.callback_envelope, state.deliveries[0].envelope);
+
+  releaseDelivery();
+  await draining;
+});
+
+test("retry after restart ignores resolver route and profile drift and reuses body", async (t) => {
+  let resolverCalls = 0;
+  let profileRevision = "profile-before-restart";
+  const state = harness(t, {
+    resolveCallback(watch) {
+      resolverCalls += 1;
+      const callback = resolveTerminalWatchOpenClawCallback(watch);
+      return {
+        ...callback,
+        route: {
+          ...callback.route,
+          profile_revision: profileRevision
+        }
+      };
+    }
+  });
+  const created = state.service.create(exactInput({
+    approval_fingerprint: APPROVAL_FINGERPRINT,
+    approval_reason_code: "approval_required"
+  }));
+  state.deliveryOutcomes.push("failure");
+  await state.service.reconcileAll();
+
+  const failedWatch = state.service.get(created.watch_id);
+  const failed = failedWatch.notification_outbox[0];
+  const snapshot = terminalWatchNotificationCallbackSnapshot(
+    failedWatch,
+    failed
+  );
+  assert.ok(snapshot);
+  assert.equal(snapshot.route.profile_revision, "profile-before-restart");
+  assert.equal(resolverCalls, 1);
+
+  profileRevision = "profile-after-restart";
+  state.advance(500);
+  state.deliveryOutcomes.push("success");
+  const retried = await state.restart().reconcileAll();
+  assert.equal(retried.callbacks_delivered, 1);
+  assert.equal(resolverCalls, 1, "a durable snapshot must bypass the resolver");
+  assert.equal(state.deliveries.length, 2);
+  assert.deepEqual(state.deliveries[1].route, snapshot.route);
+  assert.deepEqual(state.deliveries[1].envelope, snapshot.envelope);
+  assert.equal(
+    state.deliveries[1].envelope.event.body,
+    state.deliveries[0].envelope.event.body
+  );
+});
+
 test("failed callback persists retry and reuses the same idempotency key", async (t) => {
   const state = harness(t);
   const created = state.service.create(exactInput({
@@ -556,6 +744,234 @@ test("failed callback persists retry and reuses the same idempotency key", async
   assert.equal(state.deliveries.length, 2);
   assert.equal(state.deliveries[0].key, state.deliveries[1].key);
   assert.equal(state.service.get(created.watch_id).notification_outbox[0].attempts, 2);
+});
+
+test("permanent and uncertain callback outcomes fail closed without redelivery", async (t) => {
+  for (const [outcome, prefix] of [
+    ["permanent", "callback_permanent_"],
+    ["uncertain", "callback_uncertain_"]
+  ] as const) {
+    const state = harness(t);
+    const created = state.service.create(exactInput({
+      watch_id: `terminal-watch-${outcome}`,
+      approval_fingerprint: APPROVAL_FINGERPRINT,
+      approval_reason_code: "approval_required"
+    }));
+    state.deliveryOutcomes.push(outcome);
+
+    const first = await state.service.reconcileAll();
+    assert.equal(first.callbacks_delivered, 0);
+    assert.equal(first.errors, 1);
+    const failed = state.service.get(created.watch_id).notification_outbox[0];
+    assert.equal(failed.status, "failed");
+    assert.match(failed.last_error_code ?? "", new RegExp(`^${prefix}`, "u"));
+
+    state.advance(5_000);
+    assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 0);
+    assert.equal(state.deliveries.length, 1);
+    assert.equal(
+      state.service.get(created.watch_id).notification_outbox[0].attempts,
+      1
+    );
+  }
+});
+
+test("nonretryable approval failure does not starve a distinct later approval", async (t) => {
+  for (const [outcome, prefix, nextFingerprint] of [
+    ["permanent", "callback_permanent_", "e".repeat(64)],
+    ["uncertain", "callback_uncertain_", "f".repeat(64)]
+  ] as const) {
+    const state = harness(t);
+    const created = state.service.create(exactInput({
+      watch_id: `terminal-watch-nonretryable-head-${outcome}`,
+      approval_fingerprint: APPROVAL_FINGERPRINT,
+      approval_reason_code: "approval_required"
+    }));
+    state.deliveryOutcomes.push(outcome);
+    await state.service.reconcileAll();
+
+    const failed = state.service.get(created.watch_id).notification_outbox[0];
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.attempts, 1);
+    assert.match(failed.last_error_code ?? "", new RegExp(`^${prefix}`, "u"));
+
+    state.advance(1_000);
+    const approvalAt = "2026-08-21T00:00:01.000Z";
+    state.observations.push((watch) => observed(watch, "approval", approvalAt, {
+      evidence_fingerprint: nextFingerprint,
+      reason_code: "approval_required_again"
+    }));
+    const queued = await state.service.reconcile(created.watch_id);
+    assert.deepEqual(
+      queued.notification_outbox.map(({ status, evidence_fingerprint }) => ({
+        status,
+        evidence_fingerprint
+      })),
+      [
+        { status: "failed", evidence_fingerprint: APPROVAL_FINGERPRINT },
+        { status: "pending", evidence_fingerprint: nextFingerprint }
+      ]
+    );
+
+    state.deliveryOutcomes.push("success");
+    const resumed = await state.restart().reconcileAll();
+    assert.equal(resumed.callbacks_delivered, 1);
+    const settled = state.service.get(created.watch_id).notification_outbox;
+    assert.deepEqual(settled[0], failed, "old failure evidence must be retained");
+    assert.equal(settled[1].status, "delivered");
+    assert.equal(settled[1].attempts, 1);
+    assert.deepEqual(
+      state.deliveries.map(({ id }) => id),
+      [failed.notification_id, settled[1].notification_id]
+    );
+
+    state.advance(5_000);
+    await state.restart().reconcileAll();
+    assert.equal(state.deliveries.length, 2, "the old failure must not retry");
+    assert.deepEqual(
+      state.service.get(created.watch_id).notification_outbox[0],
+      failed
+    );
+  }
+});
+
+test("route resolution fails permanently before callback transport", async (t) => {
+  const state = harness(t, {
+    resolveCallback() {
+      throw new Error("route profile no longer exists");
+    }
+  });
+  const created = state.service.create(exactInput({
+    approval_fingerprint: APPROVAL_FINGERPRINT,
+    approval_reason_code: "approval_required"
+  }));
+
+  const first = await state.service.reconcileAll();
+  assert.equal(first.callbacks_delivered, 0);
+  assert.equal(first.errors, 1);
+  const failed = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(failed.status, "failed");
+  assert.equal(
+    failed.last_error_code,
+    "callback_permanent_callback_route_resolution_failed"
+  );
+  assert.equal(state.deliveries.length, 0);
+
+  state.advance(5_000);
+  assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 0);
+  assert.equal(state.deliveries.length, 0);
+  assert.equal(
+    state.service.get(created.watch_id).notification_outbox[0].attempts,
+    1
+  );
+});
+
+test("callback request construction fails permanently before transport", async (t) => {
+  const state = harness(t, {
+    resolveCallback(watch) {
+      const callback = resolveTerminalWatchOpenClawCallback(watch);
+      return {
+        ...callback,
+        route: {
+          ...callback.route,
+          version: 99
+        } as unknown as CallbackRouteV1
+      };
+    }
+  });
+  const created = state.service.create(exactInput({
+    approval_fingerprint: APPROVAL_FINGERPRINT,
+    approval_reason_code: "approval_required"
+  }));
+
+  const first = await state.service.reconcileAll();
+  assert.equal(first.callbacks_delivered, 0);
+  assert.equal(first.errors, 1);
+  const failed = state.service.get(created.watch_id).notification_outbox[0];
+  assert.equal(failed.status, "failed");
+  assert.equal(
+    failed.last_error_code,
+    "callback_permanent_callback_request_construction_failed"
+  );
+  assert.equal(state.deliveries.length, 0);
+
+  state.advance(5_000);
+  assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 0);
+  assert.equal(state.deliveries.length, 0);
+  assert.equal(
+    state.service.get(created.watch_id).notification_outbox[0].attempts,
+    1
+  );
+});
+
+test("transport throws and malformed outcomes are uncertain without retry", async (t) => {
+  for (const transportOutcome of ["throw", "malformed"] as const) {
+    const state = harness(t);
+    const created = state.service.create(exactInput({
+      watch_id: `terminal-watch-${transportOutcome}`,
+      approval_fingerprint: APPROVAL_FINGERPRINT,
+      approval_reason_code: "approval_required"
+    }));
+    state.deliveryOutcomes.push(transportOutcome);
+
+    const first = await state.service.reconcileAll();
+    assert.equal(first.callbacks_delivered, 0);
+    assert.equal(first.errors, 1);
+    const failed = state.service.get(created.watch_id).notification_outbox[0];
+    assert.equal(failed.status, "failed");
+    assert.match(failed.last_error_code ?? "", /^callback_uncertain_/u);
+
+    state.advance(5_000);
+    assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 0);
+    assert.equal(state.deliveries.length, 1);
+    assert.equal(
+      state.service.get(created.watch_id).notification_outbox[0].attempts,
+      1
+    );
+  }
+});
+
+test("accepted checkpoint durably settles before transport returns", async (t) => {
+  const state = harness(t);
+  const created = state.service.create(exactInput({
+    approval_fingerprint: APPROVAL_FINGERPRINT,
+    approval_reason_code: "approval_required"
+  }));
+  let reportObserved = () => {};
+  const reported = new Promise<void>((resolve) => {
+    reportObserved = resolve;
+  });
+  let releaseTransport = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    releaseTransport = resolve;
+  });
+  state.deliveryOutcomes.push(async (reportCheckpoint) => {
+    assert.ok(reportCheckpoint);
+    reportCheckpoint({
+      disposition: "accepted",
+      accepted_at: START,
+      acceptance_id: "transport-acceptance-1"
+    });
+    reportObserved();
+    await blocked;
+    throw new Error("transport crashed after accepted checkpoint");
+  });
+
+  const draining = state.service.reconcileAll();
+  await reported;
+  const checkpointed = state.service.get(created.watch_id)
+    .notification_outbox[0];
+  assert.equal(checkpointed.status, "delivered");
+  assert.equal(checkpointed.attempts, 1);
+  assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 0);
+
+  releaseTransport();
+  assert.equal((await draining).callbacks_delivered, 1);
+  assert.equal(state.deliveries.length, 1);
+  assert.equal(
+    state.service.get(created.watch_id).notification_outbox[0].status,
+    "delivered"
+  );
 });
 
 test("callback retries back off with a cap and remain recoverable", async (t) => {

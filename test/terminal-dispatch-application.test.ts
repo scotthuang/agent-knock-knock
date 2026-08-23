@@ -7,6 +7,8 @@ import {
   type AgentMessage,
   type Conversation
 } from "../src/protocol.js";
+import { callbackRouteFingerprintForConversation } from
+  "../src/callback-route-authority.js";
 import { messageEvent } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 import { TerminalInputNotStartedError } from
@@ -266,6 +268,9 @@ async function advanceThroughEnter(
 function expectedFinalLedger(
   evidence: TerminalSubmissionAcceptanceEvidence
 ): TerminalDispatchLedgerDocument {
+  const callbackRouteFingerprint =
+    callbackRouteFingerprintForConversation(originalConversation());
+  assert.ok(callbackRouteFingerprint);
   return {
     binding_id: "binding-a",
     binding_generation: 7,
@@ -291,6 +296,7 @@ function expectedFinalLedger(
     state_path: STATE_PATH,
     event_log_path: EVENT_LOG_PATH,
     callback_expected: true,
+    callback_route_fingerprint: callbackRouteFingerprint,
     previous_generation_id: "message-previous"
   };
 }
@@ -343,6 +349,11 @@ test("dispatch application preserves ledger/state/stage/final order and bytes", 
   assert.equal(
     `${JSON.stringify(finalReceipt, null, 2)}\n`,
     `${JSON.stringify(expectedReceipt, null, 2)}\n`
+  );
+  assert.equal(
+    finalReceipt?.callback_route_fingerprint,
+    finalLedger?.callback_route_fingerprint,
+    "state receipt and terminal ledger must bind the same route"
   );
 });
 
@@ -528,11 +539,12 @@ test("generic uncertainty preserves ledger/state/event order and error key bytes
     "event:terminal_message_submit_uncertain"
   ]);
   const ledger = harness.ledgers.at(-1);
-  assert.deepEqual(Object.keys(ledger ?? {}).slice(-6), [
+  assert.deepEqual(Object.keys(ledger ?? {}).slice(-7), [
     "dispatcher_pid",
     "state_path",
     "event_log_path",
     "callback_expected",
+    "callback_route_fingerprint",
     "error",
     "previous_generation_id"
   ]);

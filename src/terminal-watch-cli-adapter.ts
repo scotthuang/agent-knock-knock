@@ -27,6 +27,8 @@ import {
 } from "./terminal-control-ref.js";
 import {
   createTerminalWatchCallbackCliAdapter,
+  resolveTerminalWatchOpenClawCallback,
+  resolveTerminalWatchOpenClawCallbackContext,
   type TerminalWatchCallbackCliAdapter,
   type TerminalWatchCallbackEvent
 } from "./terminal-watch-callback-cli-adapter.js";
@@ -41,7 +43,6 @@ import {
   terminalWatchIdentityFingerprint,
   type TerminalWatch,
   type TerminalWatchAnchor,
-  type TerminalWatchNotification,
   type TerminalWatchObservationCheckpoint,
   type TerminalWatchTerminalIdentity
 } from "./terminal-watch-store.js";
@@ -145,21 +146,49 @@ export function createTerminalWatchCliAdapter(
       now: dependencies.now,
       randomUUID: dependencies.randomUUID,
       observe: (watch) => observeTerminalWatch(watch, options, dependencies),
-      deliver: async ({ watch, notification }) => {
+      resolveCallback: resolveTerminalWatchOpenClawCallback,
+      resolveCallbackContext: resolveTerminalWatchOpenClawCallbackContext,
+      deliver: (input) => {
+        if (callback.deliverTransport) {
+          return callback.deliverTransport(input);
+        }
+        const metadata = isRecord(input.envelope.event.metadata)
+          ? input.envelope.event.metadata
+          : {};
+        const agent = metadata.agent;
+        if (agent !== "codex" && agent !== "claude") {
+          return {
+            disposition: "permanent_failure",
+            error_code: "terminal_watch_callback_agent_invalid"
+          };
+        }
         callback.deliver({
-          watchId: watch.watch_id,
-          idempotencyKey: notification.idempotency_key,
-          event: callbackEvent(notification),
-          agent: watch.agent,
-          terminalId: watch.terminal.terminal_id,
-          openclawSession: watch.openclaw_session,
-          openclawBin: watch.openclaw_bin,
-          detail: notification.reason_code ?? watch.settlement?.reason_code,
-          completionText:
-            notification.kind === "completed" || notification.kind === "failed"
-              ? watch.settlement?.completion_text
-              : undefined
+          watchId: input.envelope.source.kind === "terminal_watch"
+            ? input.envelope.source.watch_id
+            : "",
+          idempotencyKey: input.envelope.idempotency_key,
+          event: input.envelope.event.type as TerminalWatchCallbackEvent,
+          agent,
+          terminalId: input.envelope.source.kind === "terminal_watch"
+            ? input.envelope.source.terminal_id
+            : "",
+          openclawSession: input.route.controller_session_id,
+          openclawBin: typeof input.context?.legacyOptions?.openclawBin ===
+              "string"
+            ? input.context.legacyOptions.openclawBin
+            : undefined,
+          detail: typeof metadata.reason_code === "string"
+            ? metadata.reason_code
+            : undefined,
+          completionText: typeof metadata.completion_text === "string"
+            ? metadata.completion_text
+            : undefined
         });
+        return {
+          disposition: "accepted",
+          accepted_at: dependencies.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
       }
     });
   }
@@ -741,14 +770,6 @@ function publicTerminalWatch(watch: TerminalWatch): Record<string, unknown> {
         : {})
     }
   };
-}
-
-function callbackEvent(
-  notification: TerminalWatchNotification
-): TerminalWatchCallbackEvent {
-  return notification.kind === "approval"
-    ? "approval_required"
-    : notification.kind;
 }
 
 function approvalFingerprint(

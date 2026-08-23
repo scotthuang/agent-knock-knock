@@ -44,6 +44,28 @@ An ordinary send never targets a completed or historical `turn_id`. If the curre
 
 If no eligible terminal exists, AKK stops and returns an actionable setup message. It does not launch an invisible replacement agent.
 
+### Trusted controller callback boundary
+
+Callback routing is an administrator/trusted-host concern, never a model
+argument. The OpenClaw plugin captures its own authenticated controller
+session identity and gives AKK a versioned, secretless `callback_route`; the
+durable outbox freezes that route together with a canonical callback envelope
+before delivery. A transport returns one explicit outcome: accepted,
+retryable failure, permanent failure, or uncertain. Permanent and uncertain
+outcomes are not blindly retried, while an accepted checkpoint remains
+authoritative if a later wake or observation step fails.
+
+The phase-one implementation still ships only the OpenClaw transport and keeps
+the existing OpenClaw Store fields readable and dual-written for compatibility.
+The core outbox, managed-Turn monitor, stall notification, and Terminal Watch
+use the host-neutral route/envelope/outcome boundary; OpenClaw-specific
+`sessionKey`, Gateway calls, executable paths, and credentials remain inside
+the trusted OpenClaw adapter. No route, profile, controller-session identity,
+token, or transport evidence is exposed through the v18 model-facing contract.
+This boundary alone does not provide a standalone supervisor or enable another
+controller host; those require their own trusted session-context adapter and
+runtime integration.
+
 ## Human-Started Terminal Watch
 
 Terminal Watch is the observation-only path for a task already started by the human in the visible Codex or Claude Code TUI:

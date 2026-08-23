@@ -40,6 +40,7 @@ export interface TerminalSubmissionRecoveryFacts {
   abortedAt?: string;
   lastProvenStage?: string;
   acceptanceEvidence?: TerminalSubmissionAcceptanceEvidence;
+  callbackRouteFingerprint?: string | null;
 }
 
 export interface TerminalDispatchLedgerMutation extends Record<string, unknown> {
@@ -64,6 +65,7 @@ export interface TerminalDispatchLedgerMutation extends Record<string, unknown> 
   state_path?: string;
   event_log_path?: string;
   callback_expected?: boolean;
+  callback_route_fingerprint?: string | null;
   reason: string;
   binding?: TerminalBindingLedgerFacts;
 }
@@ -177,6 +179,7 @@ function recoverCurrentPreparedGeneration(
         : submission.status === "submitted"
           ? { submitted_at: at }
           : {}),
+      ...submissionCallbackRouteFields(submission),
       reason: "recovered from the durable conversation submission receipt"
     }
   };
@@ -216,6 +219,7 @@ function recoverPreviousPreparedGeneration(
         state_path: owner.statePath,
         event_log_path: input.ledger.eventLogPath ?? owner.eventLogPath,
         callback_expected: owner.callbackExpected,
+        ...submissionCallbackRouteFields(submission),
         reason:
           "restored the prior durable generation after a pre-submit dispatcher exit"
       }
@@ -302,6 +306,7 @@ function acceptedLedgerMutation(
     agent_accepted_at: input.submission.agentAcceptedAt ?? input.now,
     acceptance_evidence: input.stateAcceptance,
     dispatcher_pid: null,
+    ...submissionCallbackRouteFields(input.submission),
     reason: "recovered the strongest durable native acceptance receipt"
   };
 }
@@ -362,10 +367,19 @@ function strongerStateDecision(
       uncertain_at: input.submission.uncertainAt,
       aborted_at: input.submission.abortedAt,
       last_proven_stage: input.submission.lastProvenStage,
+      ...submissionCallbackRouteFields(input.submission),
       ...(terminal ? { dispatcher_pid: null } : {}),
       reason: "recovered the strongest durable conversation proof level"
     }
   };
+}
+
+function submissionCallbackRouteFields(
+  submission: TerminalSubmissionRecoveryFacts
+): { callback_route_fingerprint?: string | null } {
+  return submission.callbackRouteFingerprint === undefined
+    ? {}
+    : { callback_route_fingerprint: submission.callbackRouteFingerprint };
 }
 
 function terminalSubmissionProofRank(

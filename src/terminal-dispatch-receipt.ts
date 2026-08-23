@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 import { canonicalJson } from "./canonical-json.js";
+import { callbackRouteFingerprintForConversation } from
+  "./callback-route-authority.js";
 import {
   executorForConversation,
   sessionIdForConversation,
@@ -204,6 +206,8 @@ export function applyTerminalBridgeSubmission(
       )
     : undefined;
   const requestHash = terminalBridgeRequestFingerprint(requestText);
+  const callbackRouteFingerprint =
+    callbackRouteFingerprintForConversation(conversation);
   const control = context.terminalControl;
   const candidateImmutableReceiptFields: UnknownRecord = {
     session_id: sessionIdForConversation(conversation),
@@ -220,6 +224,7 @@ export function applyTerminalBridgeSubmission(
     request_hash: requestHash,
     executor_kind: executorForConversation(conversation).kind,
     openclaw_session: conversation.openclaw_session,
+    callback_route_fingerprint: callbackRouteFingerprint ?? null,
     store_dir: context.storeDir,
     native_thread_id:
       nonBlankString(conversation.native_thread_id) ??
