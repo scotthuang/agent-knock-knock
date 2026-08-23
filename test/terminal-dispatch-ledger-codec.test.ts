@@ -1151,6 +1151,47 @@ test("construct emits v2 endpoint then append-only receipt history", () => {
   assert.deepEqual(history[1].terminal_endpoint, incomingEndpoint);
 });
 
+test("construct resolves only the top-level owner without rewriting receipt history", () => {
+  const historical = receipt("uncertain", {
+    uncertain_at: "2026-08-24T00:00:01.000Z",
+    reason: "original uncertain outcome",
+    error: { length: 17, preview: "original uncertain" }
+  });
+  const historyBytes = JSON.stringify([historical]);
+  const previous = {
+    ...historical,
+    text_injected_at: "2026-08-24T00:00:00.500Z",
+    version: 2,
+    terminal_key: canonicalKey,
+    terminal_submission_receipts: [historical]
+  };
+  const built = constructTerminalDispatchLedgerDocument({
+    previousLedger: previous,
+    incomingLedger: {
+      ...previous,
+      status: "resolved",
+      resolved_at: "2026-08-24T00:00:02.000Z",
+      reason: "conversation explicitly closed by request"
+    },
+    version: 2,
+    terminalKey: canonicalKey,
+    terminalControl: control(),
+    terminalEndpoint: endpoint()
+  });
+
+  assert.equal(built.status, "resolved");
+  assert.equal(
+    built.text_injected_at,
+    "2026-08-24T00:00:00.500Z"
+  );
+  assert.equal(built.resolved_at, "2026-08-24T00:00:02.000Z");
+  assert.equal(built.reason, "conversation explicitly closed by request");
+  assert.equal(
+    JSON.stringify(built.terminal_submission_receipts),
+    historyBytes
+  );
+});
+
 test("construct preserves existing key positions while replacing values", () => {
   const built = constructTerminalDispatchLedgerDocument({
     previousLedger: undefined,

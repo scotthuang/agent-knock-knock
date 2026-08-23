@@ -197,6 +197,11 @@ test("recovery routes durable statuses through the exact ordered effects", async
       expected: ["scope:writer", "transfer:all", "transfer:matching"]
     },
     {
+      name: "user abandoned is already final",
+      options: { matching: [transfer("user_abandoned")] },
+      expected: ["scope:writer", "transfer:all", "transfer:matching"]
+    },
+    {
       name: "finalize aborted before selecting",
       options: { matching: [transfer("aborted")] },
       expected: [

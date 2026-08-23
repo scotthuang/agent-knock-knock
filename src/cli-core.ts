@@ -642,8 +642,12 @@ const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
   },
   store: {
     terminalControlFromTakeover, storeDir: storeDirFromOptions,
+    storeDirForStatePath: (statePath) => pathsForConversationDir(
+      path.dirname(statePath)
+    ).storeDir,
     storeDirForConversation: (conversation) =>
       terminalAcceptanceCliFacade.storeDirForConversation(conversation),
+    withWriter: withStoreWriterLease,
     turnsForSession: (storeDir, sessionId) =>
       terminalAcceptanceCliFacade.turnsForSession(storeDir, sessionId),
     turnMatchesTerminal: (conversation, terminal, currentIdentity) =>
@@ -1060,6 +1064,7 @@ const terminalStatusCliFacade = createTerminalStatusCliFacade({
     reconcileMonitors: (options, request) =>
       terminalMonitorSupervisionCliFacade.reconcileMonitors(options, request),
     workspaceMatches: matchesConfiguredWorkspace,
+    withStoreWriter: withStoreWriterLease,
     acquireStateLock: (statePath) => acquireFileLock(`${statePath}.lock`),
     terminalBridgeEnabled
   },

@@ -2,6 +2,8 @@ import {
   isDeferredForegroundSubmissionRetryPending,
   type DeferredForegroundTransfer
 } from "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import type { Conversation } from "./protocol.js";
 import type {
   DeferredForegroundApplicationScope,
@@ -113,7 +115,8 @@ export class DeferredForegroundRecoveryService {
     }
     const matching = this.#ports.repository.matching(writerScope);
     const candidates = matching.filter((transfer) =>
-      !["resolved", "aborted", "abort_resolved"].includes(transfer.status)
+      transfer.status !== "aborted" &&
+      !isFinalDeferredForegroundTransferStatus(transfer.status)
     );
     if (candidates.length === 0) return;
     if (candidates.length !== 1) {

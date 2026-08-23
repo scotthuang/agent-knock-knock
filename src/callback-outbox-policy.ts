@@ -66,6 +66,47 @@ export function supersedeCallbackNotificationDelivery(
   };
 }
 
+/**
+ * Explicit Close releases AKK's management of the Turn. Fence both durable
+ * callback lanes unless the host has already accepted the transport. A
+ * transport-start marker is retained as audit evidence, but never authorizes a
+ * retry after Close.
+ */
+export function supersedeUnacceptedCallbackDeliveries(
+  conversation: Conversation,
+  input: { at: string; reason: string }
+): Conversation {
+  let next = conversation;
+  for (const field of [
+    "callback_delivery",
+    "callback_notification_delivery"
+  ] as const) {
+    const delivery = recordValue(next[field]);
+    if (
+      !delivery ||
+      !["pending", "failed"].includes(String(delivery.status ?? "")) ||
+      callbackDeliveryHasAcceptedTransport(delivery)
+    ) {
+      continue;
+    }
+    next = {
+      ...next,
+      [field]: {
+        ...delivery,
+        status: "superseded",
+        superseded_at: input.at,
+        superseded_reason: input.reason,
+        attempt_pid: undefined,
+        attempt_lease_expires_at: undefined,
+        retry_monitor_pid: undefined,
+        next_attempt_at: undefined,
+        updated_at: input.at
+      }
+    };
+  }
+  return next;
+}
+
 export function classifyCallbackProcessFailure(
   result: CallbackProcessFailureObservation
 ): string | undefined {
@@ -244,6 +285,34 @@ export function beginCallbackRetryPolicy(
   }
   if (callbackDeliveryHasAcceptedTransport(delivery)) {
     return decided({ state: "accepted", attempt });
+  }
+  const hasTransportStart = Object.hasOwn(
+    delivery,
+    "transport_started_at"
+  );
+  const transportStartedAt = stringValue(delivery.transport_started_at);
+  if (
+    hasTransportStart &&
+    (!transportStartedAt || !Number.isFinite(Date.parse(transportStartedAt)))
+  ) {
+    return decided({
+      state: "unavailable",
+      attempt,
+      reason: "callback outbox has invalid transport-start evidence"
+    });
+  }
+  if (
+    transportStartedAt &&
+    !(
+      attemptOutcome.kind === "present" &&
+      attemptOutcome.outcome.disposition === "retryable_failure"
+    )
+  ) {
+    return decided({
+      state: "uncertain",
+      attempt,
+      reason: "callback transport started without a durable final outcome"
+    });
   }
   if (!Number.isSafeInteger(attemptValue) || attemptValue < 1) {
     return decided({

@@ -16,11 +16,19 @@ import {
 } from "../src/deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from
   "../src/deferred-foreground-transfer-policy.js";
+import { cleanupDeferredForegroundUserClose } from
+  "../src/deferred-foreground-user-close.js";
 import {
   managedSessionBindingToken,
   terminalBindingFrom,
+  type ManagedSessionState,
   type ManagedTerminalBinding
 } from "../src/managed-session.js";
+import { createConversation, type Conversation } from "../src/protocol.js";
+import {
+  loadManagedSession,
+  saveManagedSession
+} from "../src/session-store.js";
 import type { TerminalControlRef } from "../src/terminal-control-ref.js";
 
 const SOURCE_UUID = "00000000-0000-4000-8000-000000000401";
@@ -41,6 +49,7 @@ test("deferred foreground final status policy is exhaustive and fail closed", ()
   for (const [status, final] of [
     ["resolved", true],
     ["abort_resolved", true],
+    ["user_abandoned", true],
     ["prepared", false],
     ["source_reserved", false],
     ["target_prepared", false],
@@ -378,6 +387,96 @@ function assertValid(value: DeferredForegroundTransfer): void {
       allowMissingRevision: true
     })
   );
+}
+
+function userCloseManagedSession(input: {
+  sessionId: string;
+  binding: ManagedTerminalBinding;
+  createdBy: "attach" | "new_thread";
+  previousSessionId?: string;
+}): ManagedSessionState {
+  return {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: input.sessionId,
+    agent: "codex",
+    workspace: "/workspace/project",
+    status: "transitioning",
+    binding: input.binding,
+    lineage: input.createdBy === "attach"
+      ? { created_by: "attach" }
+      : {
+          created_by: "new_thread",
+          previous_session_id: input.previousSessionId,
+          transition_id: "deferred-transfer-test"
+        },
+    created_at: T0,
+    updated_at: T2,
+    last_transition_id: "deferred-transfer-test"
+  };
+}
+
+function userCloseFixture(options: { createTargetSession?: boolean } = {}): {
+  sandbox: string;
+  storeDir: string;
+  conversation: Conversation;
+  transfer: DeferredForegroundTransfer;
+} {
+  const sandbox = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-deferred-user-close-"
+  ));
+  const storeDir = path.join(sandbox, "store");
+  const created = saveDeferredForegroundTransfer(storeDir, prepared(), {
+    expectedRevision: null
+  });
+  const reserved = saveDeferredForegroundTransfer(storeDir, {
+    ...sourceReserved(created),
+    revision: created.revision
+  }, { expectedRevision: created.revision! });
+  const targetFixture = targetPrepared(reserved);
+  const transfer = saveDeferredForegroundTransfer(storeDir, {
+    ...targetFixture.transfer,
+    revision: reserved.revision
+  }, { expectedRevision: reserved.revision! });
+
+  const preparedSource = saveManagedSession(
+    storeDir,
+    userCloseManagedSession({
+    sessionId: transfer.source_session_id,
+    binding: transfer.source_before_binding,
+    createdBy: "attach"
+    }),
+    { expectedRevision: null }
+  );
+  saveManagedSession(storeDir, {
+    ...preparedSource,
+    updated_at: T2
+  }, { expectedRevision: preparedSource.revision! });
+  if (options.createTargetSession !== false) {
+    saveManagedSession(storeDir, userCloseManagedSession({
+      sessionId: transfer.target_session_id,
+      binding: transfer.target_before_binding!,
+      createdBy: "new_thread",
+      previousSessionId: transfer.source_session_id
+    }), { expectedRevision: null });
+  }
+
+  const conversation: Conversation = {
+    ...createConversation({
+      userRequest: "ordinary task",
+      sessionId: transfer.target_session_id,
+      turnId: transfer.turn_id!,
+      workspace: transfer.workspace,
+      executorKind: "codex",
+      now: new Date(T2)
+    }),
+    state_path: transfer.state_path,
+    native_session_takeover: {
+      deferred_foreground_transfer_id: transfer.transfer_id
+    }
+  };
+  return { sandbox, storeDir, conversation, transfer };
 }
 
 test("staged schema validation preserves source-before-target getter order", () => {
@@ -727,6 +826,362 @@ test("candidate source history authority is immutable across CAS advances", () =
     assert.deepEqual(loaded.source_turn_history, created.source_turn_history);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("explicit user abandonment is a final CAS that freezes its origin", () => {
+  const uncertain = {
+    ...targetPrepared().transfer,
+    status: "uncertain" as const,
+    input_stage: "text_injected" as const,
+    dispatch_started_at: T3,
+    text_injected_at: T4,
+    uncertain_at: T7,
+    error: "submission outcome is uncertain",
+    do_not_retry: true
+  };
+  assertValid(uncertain);
+  assertValid({
+    ...uncertain,
+    status: "user_abandoned",
+    origin_status: "uncertain",
+    user_abandoned_at: T8
+  });
+
+  const sandbox = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-deferred-user-abandoned-"
+  ));
+  const storeDir = path.join(sandbox, "store");
+  try {
+    const created = saveDeferredForegroundTransfer(storeDir, prepared(), {
+      expectedRevision: null
+    });
+    const reserved = saveDeferredForegroundTransfer(storeDir, {
+      ...sourceReserved(created),
+      revision: created.revision
+    }, { expectedRevision: created.revision! });
+    const target = saveDeferredForegroundTransfer(storeDir, {
+      ...targetPrepared(reserved).transfer,
+      revision: reserved.revision
+    }, { expectedRevision: reserved.revision! });
+
+    assert.throws(
+      () => assertDeferredForegroundTransfer({
+        ...target,
+        status: "user_abandoned"
+      }),
+      /requires its origin status and timestamp/u
+    );
+    assert.throws(
+      () => saveDeferredForegroundTransfer(storeDir, {
+        ...target,
+        status: "user_abandoned",
+        origin_status: "source_reserved",
+        user_abandoned_at: T3
+      }, { expectedRevision: target.revision! }),
+      /cannot carry target evidence|must freeze its origin status/u
+    );
+
+    const final = saveDeferredForegroundTransfer(storeDir, {
+      ...target,
+      status: "user_abandoned",
+      origin_status: "target_prepared",
+      user_abandoned_at: T3
+    }, { expectedRevision: target.revision! });
+    assert.equal(final.status, "user_abandoned");
+    assert.equal(final.origin_status, "target_prepared");
+    assert.equal(final.user_abandoned_at, T3);
+    assert.equal(isFinalDeferredForegroundTransferStatus(final.status), true);
+    assert.throws(
+      () => saveDeferredForegroundTransfer(storeDir, {
+        ...final
+      }, { expectedRevision: final.revision! }),
+      /cannot move from user_abandoned to user_abandoned/u
+    );
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("user Close finalizes the exact transfer before detaching its Sessions", () => {
+  const value = userCloseFixture();
+  try {
+    const result = cleanupDeferredForegroundUserClose({
+      storeDir: value.storeDir,
+      conversation: value.conversation,
+      at: T3
+    });
+    assert.equal(result.transfer_finalized, true);
+    assert.deepEqual(result.detached_session_ids, [
+      value.transfer.source_session_id,
+      value.transfer.target_session_id
+    ]);
+    assert.deepEqual(result.warnings, []);
+
+    const transfer = loadDeferredForegroundTransfer(
+      value.storeDir,
+      value.transfer.transfer_id
+    );
+    assert.equal(transfer.status, "user_abandoned");
+    assert.equal(
+      transfer.origin_status,
+      "target_prepared"
+    );
+    assert.equal(transfer.user_abandoned_at, T3);
+    assert.equal(
+      loadManagedSession(value.storeDir, transfer.source_session_id).status,
+      "detached"
+    );
+    assert.equal(
+      loadManagedSession(value.storeDir, transfer.target_session_id).status,
+      "detached"
+    );
+
+    const repeated = cleanupDeferredForegroundUserClose({
+      storeDir: value.storeDir,
+      conversation: value.conversation,
+      at: T4
+    });
+    assert.equal(repeated.transfer_finalized, true);
+    assert.deepEqual(repeated.detached_session_ids, []);
+    assert.deepEqual(repeated.warnings, []);
+    assert.equal(
+      loadDeferredForegroundTransfer(value.storeDir, transfer.transfer_id)
+        .user_abandoned_at,
+      T3
+    );
+  } finally {
+    fs.rmSync(value.sandbox, { recursive: true, force: true });
+  }
+});
+
+test("user Close resumes Session cleanup after a crash following final CAS", () => {
+  const value = userCloseFixture();
+  try {
+    saveDeferredForegroundTransfer(value.storeDir, {
+      ...value.transfer,
+      status: "user_abandoned",
+      origin_status: "target_prepared",
+      user_abandoned_at: T3
+    }, { expectedRevision: value.transfer.revision! });
+
+    const resumed = cleanupDeferredForegroundUserClose({
+      storeDir: value.storeDir,
+      conversation: value.conversation,
+      at: T4
+    });
+    assert.equal(resumed.transfer_finalized, true);
+    assert.deepEqual(resumed.detached_session_ids, [
+      value.transfer.source_session_id,
+      value.transfer.target_session_id
+    ]);
+    assert.deepEqual(resumed.warnings, []);
+    assert.equal(
+      loadDeferredForegroundTransfer(
+        value.storeDir,
+        value.transfer.transfer_id
+      ).user_abandoned_at,
+      T3
+    );
+  } finally {
+    fs.rmSync(value.sandbox, { recursive: true, force: true });
+  }
+});
+
+test("user Close treats missing and drifted Session cleanup as warnings", () => {
+  const drifted = userCloseFixture();
+  try {
+    const target = loadManagedSession(
+      drifted.storeDir,
+      drifted.transfer.target_session_id
+    );
+    saveManagedSession(drifted.storeDir, {
+      ...target,
+      last_transition_id: "newer-session-owner",
+      updated_at: T3
+    }, { expectedRevision: target.revision! });
+
+    const result = cleanupDeferredForegroundUserClose({
+      storeDir: drifted.storeDir,
+      conversation: drifted.conversation,
+      at: T4
+    });
+    assert.equal(result.transfer_finalized, true);
+    assert.deepEqual(result.detached_session_ids, [
+      drifted.transfer.source_session_id
+    ]);
+    assert.match(result.warnings.join("\n"), /session_drift/u);
+    assert.equal(
+      loadDeferredForegroundTransfer(
+        drifted.storeDir,
+        drifted.transfer.transfer_id
+      ).status,
+      "user_abandoned"
+    );
+    assert.equal(
+      loadManagedSession(
+        drifted.storeDir,
+        drifted.transfer.target_session_id
+      ).status,
+      "transitioning"
+    );
+  } finally {
+    fs.rmSync(drifted.sandbox, { recursive: true, force: true });
+  }
+
+  const missing = userCloseFixture({ createTargetSession: false });
+  try {
+    const result = cleanupDeferredForegroundUserClose({
+      storeDir: missing.storeDir,
+      conversation: missing.conversation,
+      at: T3
+    });
+    assert.equal(result.transfer_finalized, true);
+    assert.deepEqual(result.detached_session_ids, [
+      missing.transfer.source_session_id
+    ]);
+    assert.match(result.warnings.join("\n"), /session_missing/u);
+  } finally {
+    fs.rmSync(missing.sandbox, { recursive: true, force: true });
+  }
+
+  const newerOwner = userCloseFixture();
+  try {
+    const target = loadManagedSession(
+      newerOwner.storeDir,
+      newerOwner.transfer.target_session_id
+    );
+    saveManagedSession(newerOwner.storeDir, {
+      ...target,
+      status: "bound",
+      updated_at: T3
+    }, { expectedRevision: target.revision! });
+    const result = cleanupDeferredForegroundUserClose({
+      storeDir: newerOwner.storeDir,
+      conversation: newerOwner.conversation,
+      at: T4
+    });
+    assert.equal(result.transfer_finalized, true);
+    assert.deepEqual(result.detached_session_ids, [
+      newerOwner.transfer.source_session_id
+    ]);
+    assert.match(
+      result.warnings.join("\n"),
+      /possible newer owner/u
+    );
+    assert.equal(
+      loadManagedSession(
+        newerOwner.storeDir,
+        newerOwner.transfer.target_session_id
+      ).status,
+      "bound"
+    );
+  } finally {
+    fs.rmSync(newerOwner.sandbox, { recursive: true, force: true });
+  }
+
+  const reusedTransition = userCloseFixture();
+  try {
+    const target = loadManagedSession(
+      reusedTransition.storeDir,
+      reusedTransition.transfer.target_session_id
+    );
+    saveManagedSession(reusedTransition.storeDir, {
+      ...target,
+      binding: {
+        ...target.binding!,
+        binding_id: `${target.binding!.binding_id}-newer`,
+        generation: target.binding!.generation + 1
+      },
+      updated_at: T3
+    }, { expectedRevision: target.revision! });
+    const result = cleanupDeferredForegroundUserClose({
+      storeDir: reusedTransition.storeDir,
+      conversation: reusedTransition.conversation,
+      at: T4
+    });
+    assert.equal(result.transfer_finalized, true);
+    assert.deepEqual(result.detached_session_ids, [
+      reusedTransition.transfer.source_session_id
+    ]);
+    assert.match(result.warnings.join("\n"), /no longer matches/u);
+    assert.equal(
+      loadManagedSession(
+        reusedTransition.storeDir,
+        reusedTransition.transfer.target_session_id
+      ).status,
+      "transitioning"
+    );
+  } finally {
+    fs.rmSync(reusedTransition.sandbox, { recursive: true, force: true });
+  }
+});
+
+test("user Close returns target drift and transfer write failures", () => {
+  const value = userCloseFixture();
+  try {
+    const drifted = cleanupDeferredForegroundUserClose({
+      storeDir: value.storeDir,
+      conversation: {
+        ...value.conversation,
+        state_path: "/tmp/different-turn/state.json"
+      },
+      at: T3
+    });
+    assert.equal(drifted.transfer_finalized, false);
+    assert.match(drifted.warnings.join("\n"), /linked_transfer_drift/u);
+    assert.equal(
+      loadDeferredForegroundTransfer(
+        value.storeDir,
+        value.transfer.transfer_id
+      ).status,
+      "target_prepared"
+    );
+
+    const failed = cleanupDeferredForegroundUserClose({
+      storeDir: value.storeDir,
+      conversation: value.conversation,
+      at: "not-a-timestamp"
+    });
+    assert.equal(failed.transfer_finalized, false);
+    assert.match(failed.warnings.join("\n"), /linked_transfer_conflict/u);
+    assert.equal(
+      loadManagedSession(
+        value.storeDir,
+        value.transfer.source_session_id
+      ).status,
+      "transitioning"
+    );
+    assert.equal(
+      loadManagedSession(
+        value.storeDir,
+        value.transfer.target_session_id
+      ).status,
+      "transitioning"
+    );
+  } finally {
+    fs.rmSync(value.sandbox, { recursive: true, force: true });
+  }
+});
+
+test("user Close returns a warning for an absent linked transfer", () => {
+  const value = userCloseFixture();
+  try {
+    const result = cleanupDeferredForegroundUserClose({
+      storeDir: value.storeDir,
+      conversation: {
+        ...value.conversation,
+        native_session_takeover: {
+          deferred_foreground_transfer_id: "missing-transfer"
+        }
+      },
+      at: T3
+    });
+    assert.equal(result.transfer_finalized, false);
+    assert.match(result.warnings.join("\n"), /linked_transfer_missing/u);
+  } finally {
+    fs.rmSync(value.sandbox, { recursive: true, force: true });
   }
 });
 

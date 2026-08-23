@@ -470,10 +470,34 @@ export function saveState(statePath: string, conversation: Conversation): void {
   });
 }
 
+/**
+ * Persist the user-facing half of an explicit management-only Close even when
+ * this Turn is frozen in deferred source history. All ordinary state/path
+ * checks remain in force; only this exact closed disposition bypasses the
+ * source-history mutation fence.
+ */
+export function saveExplicitUserCloseState(
+  statePath: string,
+  conversation: Conversation
+): void {
+  assertExplicitUserCloseState(conversation);
+  assertConversationStateIdentity(conversation);
+  const paths = assertCanonicalConversationDataPath(statePath, "state.json");
+  assertConversationStateIdentity(
+    conversation,
+    path.basename(paths.conversationDir)
+  );
+  assertConversationStorageMetadata(statePath, conversation);
+  withStoreWriterLease(paths.storeDir, () => {
+    saveStateWithWriterLease(statePath, conversation);
+  });
+}
+
 function saveStateWithWriterLease(
   statePath: string,
   conversation: Conversation
 ): void {
+  assertExplicitUserCloseNotReopened(statePath, conversation);
   secureConversationStorageMetadata(statePath, conversation);
   prepareDataDirectory(statePath);
   const serialized = `${JSON.stringify(conversation, null, 2)}\n`;
@@ -516,6 +540,34 @@ function saveStateWithWriterLease(
       }
     }
   });
+}
+
+/** Once the user has explicitly released AKK management, stale writers may
+ * still settle audit-only fields but may never reopen the Turn. */
+function assertExplicitUserCloseNotReopened(
+  statePath: string,
+  next: Conversation
+): void {
+  if (!fs.existsSync(statePath)) return;
+  let current: Conversation;
+  try {
+    current = loadState(statePath);
+  } catch {
+    // Preserve the existing Store behavior for malformed files; ordinary
+    // validation and write-path guards decide whether they are replaceable.
+    return;
+  }
+  if (current.disposition !== "user_abandoned_management") return;
+  if (
+    current.status !== "closed" ||
+    next.status !== "closed" ||
+    next.disposition !== "user_abandoned_management" ||
+    next.callback_expected !== false
+  ) {
+    throw new Error(
+      `explicitly closed Turn ${current.conversation_id} cannot be reopened`
+    );
+  }
 }
 
 export function loadState(statePath: string): Conversation {
@@ -646,6 +698,59 @@ export function appendEvent(logPath: string, event: EventRecord): void {
   });
 }
 
+/** Append only the exact audit event paired with saveExplicitUserCloseState. */
+export function appendExplicitUserCloseEvent(
+  logPath: string,
+  event: EventRecord
+): void {
+  assertExplicitUserCloseEvent(event);
+  const paths = assertCanonicalConversationDataPath(logPath, "events.ndjson");
+  if (event.conversation_id !== path.basename(paths.conversationDir)) {
+    throw new Error(
+      "explicit user Close event must match its conversation directory"
+    );
+  }
+  withStoreWriterLease(paths.storeDir, () => {
+    appendEventWithWriterLease(logPath, event);
+  });
+}
+
+function assertExplicitUserCloseState(conversation: Conversation): void {
+  if (
+    conversation.status !== "closed" ||
+    typeof conversation.closed_at !== "string" ||
+    !Number.isFinite(Date.parse(conversation.closed_at)) ||
+    typeof conversation.close_reason !== "string" ||
+    conversation.close_reason.trim().length === 0 ||
+    conversation.disposition !== "user_abandoned_management" ||
+    conversation.callback_expected !== false
+  ) {
+    throw new Error(
+      "explicit user Close state must be closed management-only authority"
+    );
+  }
+}
+
+function assertExplicitUserCloseEvent(event: EventRecord): void {
+  if (
+    event.event !== "conversation_closed" ||
+    typeof event.conversation_id !== "string" ||
+    event.conversation_id.trim().length === 0 ||
+    event.status !== "closed" ||
+    typeof event.ts !== "string" ||
+    !Number.isFinite(Date.parse(event.ts)) ||
+    typeof event.reason !== "string" ||
+    event.reason.trim().length === 0 ||
+    event.disposition !== "user_abandoned_management" ||
+    event.terminal_input_sent !== false ||
+    event.coding_agent_stopped !== false
+  ) {
+    throw new Error(
+      "explicit user Close event must record management-only closure"
+    );
+  }
+}
+
 /**
  * Protocol 5 makes a candidate-rollout deferred transfer's historical source
  * Turns read-only until the transfer reaches a terminal receipt.  Keeping the
@@ -706,7 +811,8 @@ function assertConversationNotReservedByDeferredSourceHistory(
         "resolved",
         "uncertain",
         "aborted",
-        "abort_resolved"
+        "abort_resolved",
+        "user_abandoned"
       ].includes(String(value.status)) ||
       (
         Number(value.version) === 2 &&

@@ -137,7 +137,9 @@ export interface TerminalIdentityRuntimePorts {
 export interface TerminalIdentityStorePorts {
   terminalControlFromTakeover(value: unknown): TerminalControlRef | undefined;
   storeDir(options: TerminalIdentityCliOptions): string;
+  storeDirForStatePath(statePath: string): string;
   storeDirForConversation(conversation: Conversation): string | undefined;
+  withWriter<Result>(storeDir: string, operation: () => Result): Result;
   turnsForSession(storeDir: string, sessionId: string): Conversation[];
   turnMatchesTerminal(conversation: Conversation,
     terminal: TerminalIdentityTerminal,
@@ -468,35 +470,40 @@ function persistLegacyTerminalAgentIdentity(
   nativeSessionId: string,
   matchedProcess: ActiveTerminalProcess
 ): { conversation: Conversation; migrated: boolean } {
-  const releaseLock = ports.store.acquireStateLock(input.statePath);
-  try {
-    const current = ports.store.loadTurn(input.statePath);
-    const currentTakeover = isRecord(current.native_session_takeover)
-      ? current.native_session_takeover
-      : undefined;
-    const currentControl = ports.store.terminalControlFromTakeover(currentTakeover);
-    if (!currentTakeover || !currentControl || hasRuntimePid(
-      terminalRuntimeIdentityForConversation(ports, current, currentControl)
-    ) || currentTakeover.native_session_id !== nativeSessionId ||
-      !terminalControlsShareIncarnation(currentControl, terminalControl)) {
-      return { conversation: current, migrated: false };
+  const storeDir = ports.store.storeDirForStatePath(input.statePath);
+  return ports.store.withWriter(storeDir, () => {
+    const releaseLock = ports.store.acquireStateLock(input.statePath);
+    try {
+      const current = ports.store.loadTurn(input.statePath);
+      const currentTakeover = isRecord(current.native_session_takeover)
+        ? current.native_session_takeover
+        : undefined;
+      const currentControl = ports.store.terminalControlFromTakeover(
+        currentTakeover
+      );
+      if (!currentTakeover || !currentControl || hasRuntimePid(
+        terminalRuntimeIdentityForConversation(ports, current, currentControl)
+      ) || currentTakeover.native_session_id !== nativeSessionId ||
+        !terminalControlsShareIncarnation(currentControl, terminalControl)) {
+        return { conversation: current, migrated: false };
+      }
+      const migratedAt = ports.environment.now().toISOString();
+      const conversation: Conversation = {
+        ...current,
+        native_session_takeover: {
+          ...currentTakeover,
+          terminal_agent_pid: matchedProcess.pid,
+          terminal_agent_session_id: matchedProcess.sessionId,
+          terminal_agent_identity_migrated_at: migratedAt
+        },
+        updated_at: migratedAt
+      };
+      ports.store.saveTurn(input.statePath, conversation);
+      return { conversation, migrated: true };
+    } finally {
+      releaseLock();
     }
-    const migratedAt = ports.environment.now().toISOString();
-    const conversation: Conversation = {
-      ...current,
-      native_session_takeover: {
-        ...currentTakeover,
-        terminal_agent_pid: matchedProcess.pid,
-        terminal_agent_session_id: matchedProcess.sessionId,
-        terminal_agent_identity_migrated_at: migratedAt
-      },
-      updated_at: migratedAt
-    };
-    ports.store.saveTurn(input.statePath, conversation);
-    return { conversation, migrated: true };
-  } finally {
-    releaseLock();
-  }
+  });
 }
 
 function reportLegacyTerminalAgentIdentityMigration(

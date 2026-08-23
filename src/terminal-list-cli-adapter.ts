@@ -133,6 +133,8 @@ import {
   listActionContracts,
   readOnlyListActions,
   readOnlyManagedTurn,
+  userReleaseListActions,
+  userReleasableManagedTurn,
   renderAvailableListActions,
   renderCurrentManagedTurn,
   renderHistoricalManagedTurn,
@@ -2336,17 +2338,9 @@ function observeTerminalHandoffAuthority(
   const blockingHandoffTurnIds = new Set(
     handoffSourceBlockingTurns.map((turn) => turn.conversation_id)
   );
-  // An active source Turn may be superseded only through the snapshot-bound
-  // handoff decision above. Never expose the generic Store-only close action
-  // for that Turn, because doing so would bypass expected_handoff_token after
-  // the live native thread or Turn generation changed. `blocking_turns` is
-  // reserved for other same-incarnation blockers such as legacy collateral
-  // stalls; clear those first, refresh, and only then decide the handoff.
-  const terminalRecoveryBlockingTurns = terminalBlockingTurns.filter(
-    (turn) =>
-      !blockingHandoffTurnIds.has(turn.conversation_id) &&
-      !conversationHasNonterminalDeferredTransfer(turn)
-  );
+  // A blocking managed Turn always remains explicitly closable. Close releases
+  // AKK management only; it does not send input or stop the coding agent.
+  const terminalRecoveryBlockingTurns = terminalBlockingTurns;
   return {
     ...observation,
     reconcileBindingAction,
@@ -2545,15 +2539,14 @@ function renderTerminalFirstListEntry(
         sessionAwareRawActions
       )
     : undefined;
-  const currentTurnProjection = currentTurnValue && (
-    !mutationsAllowed ||
-    (
-      ownership.state === "current" &&
-      conversationHasNonterminalDeferredTransfer(ownership.conversation)
-    )
-  )
-    ? readOnlyManagedTurn(currentTurnValue)
-    : currentTurnValue;
+  const currentTurnProjection = currentTurnValue
+    ? !mutationsAllowed
+      ? readOnlyManagedTurn(currentTurnValue)
+      : ownership.state === "current" &&
+          conversationHasNonterminalDeferredTransfer(ownership.conversation)
+        ? userReleasableManagedTurn(currentTurnValue)
+        : currentTurnValue
+    : undefined;
   const currentTurn = currentTurnProjection
     ? withoutGenericHandoffSourceClose(
         currentTurnProjection,
@@ -2577,13 +2570,14 @@ function renderTerminalFirstListEntry(
   const recentTurnValue = recentConversation
     ? historicalManagedTurnForTerminal(recentConversation)
     : undefined;
-  const recentTurnProjection = recentTurnValue && (
-    !mutationsAllowed ||
-    Boolean(recentConversation &&
-      conversationHasNonterminalDeferredTransfer(recentConversation))
-  )
-    ? readOnlyManagedTurn(recentTurnValue)
-    : recentTurnValue;
+  const recentTurnProjection = recentTurnValue
+    ? !mutationsAllowed
+      ? readOnlyManagedTurn(recentTurnValue)
+      : recentConversation &&
+          conversationHasNonterminalDeferredTransfer(recentConversation)
+        ? userReleasableManagedTurn(recentTurnValue)
+        : recentTurnValue
+    : undefined;
   const recentTurn = recentTurnProjection
     ? withoutGenericHandoffSourceClose(
         recentTurnProjection,
@@ -2593,10 +2587,11 @@ function renderTerminalFirstListEntry(
   const history = historyConversations.map((conversation) => {
     const turn = historicalManagedTurnForTerminal(conversation);
     return withoutGenericHandoffSourceClose(
-      mutationsAllowed &&
-        !conversationHasNonterminalDeferredTransfer(conversation)
-        ? turn
-        : readOnlyManagedTurn(turn),
+      !mutationsAllowed
+        ? readOnlyManagedTurn(turn)
+        : conversationHasNonterminalDeferredTransfer(conversation)
+          ? userReleasableManagedTurn(turn)
+          : turn,
       blockingHandoffTurnIds
     );
   });
@@ -2853,18 +2848,24 @@ function terminalFirstListProjection({
       );
       return {
         ...managedTurn,
-        available_actions: mutationsAllowed &&
-            !conversationHasNonterminalDeferredTransfer(conversation)
-          ? safeUnavailableManagedTurnActions(
+        available_actions: !mutationsAllowed
+          ? readOnlyListActions(
               isRecord(managedTurn.available_actions)
                 ? managedTurn.available_actions
                 : {}
             )
-          : readOnlyListActions(
-              isRecord(managedTurn.available_actions)
-                ? managedTurn.available_actions
-                : {}
-            ),
+          : conversationHasNonterminalDeferredTransfer(conversation)
+            ? userReleaseListActions(
+                isRecord(managedTurn.available_actions)
+                  ? managedTurn.available_actions
+                  : {},
+                turnIdForConversation(conversation)
+              )
+            : safeUnavailableManagedTurnActions(
+                isRecord(managedTurn.available_actions)
+                  ? managedTurn.available_actions
+                  : {}
+              ),
         terminal_availability: {
           available: false,
           reason: managedOnly

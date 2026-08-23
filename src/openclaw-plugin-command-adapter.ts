@@ -508,32 +508,13 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_close",
     description:
-      "Close one managed Turn record without terminating the shared pane. Ordinary close uses turn_id. Orphan dispatch/lifecycle recovery may additionally use its exact expected_message_id or expected_transition_id. Human-context handoff uses the advertised turn_id plus reason=superseded_by_human_context_switch after explicit confirmation; AKK resolves the current handoff authority privately. Refresh list afterward.",
+      "Honor an explicit user request to close one managed turn_id and release AKK management. Raw orphan recovery may instead use conversation_id with expected_message_id or expected_transition_id. Close never sends terminal input, stops the coding agent, or closes the shared pane. Deferred transfer, Session, ledger, and callback cleanup is best-effort and cannot veto closing the Turn; warnings identify metadata AKK preserved. Refresh list afterward and use Watch if the coding agent is still working.",
     parameters: closeParameters,
     isErrorResult: isBlockedTerminalDispatchResult,
-    buildArgs: (params, toolContext) => {
+    buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const args = ["close"];
       assertExclusiveRecoveryFence(params);
-      const handoffReason = stringValue(params.reason) ===
-        "superseded_by_human_context_switch";
-      const handoffAction = handoffReason
-        ? consumeDisplayedPrivateAction(api, {
-            sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
-            sessionId: requiredOpenClawSessionId(toolContext?.sessionId),
-            kind: OPENCLAW_HANDOFF_AUTHORITY_KIND,
-            target: {
-              type: "turn_id",
-              id: requiredString(params.turn_id, "turn_id")
-            },
-            tool: "agent_knock_knock_close",
-            matches: (argumentsValue) =>
-              stringValue(argumentsValue.turn_id) ===
-                stringValue(params.turn_id) &&
-              stringValue(argumentsValue.reason) ===
-                "superseded_by_human_context_switch"
-          })
-        : undefined;
       pushTurnTarget(args, params);
       pushOptional(args, "--reason", stringValue(params.reason));
       pushOptional(
@@ -545,16 +526,6 @@ export function registerOpenClawCommands(
         args,
         "--expected-transition-id",
         stringValue(params.expected_transition_id)
-      );
-      pushOptional(
-        args,
-        "--expected-handoff-token",
-        handoffAction
-          ? requiredString(
-              handoffAction.expected_handoff_token,
-              "current internal handoff authority"
-            )
-          : undefined
       );
       pushOptional(
         args,
@@ -1255,7 +1226,13 @@ function formatCloseCommandResult(result) {
     "AKK Turn record closed.",
     `session: ${sessionId}`,
     `turn: ${turnId}`,
-    `status: ${conversation.status ?? "unknown"}`
+    `status: ${conversation.status ?? "unknown"}`,
+    "AKK management was released; the coding agent and terminal pane were not stopped.",
+    ...(Array.isArray(result.warnings) && result.warnings.length > 0
+      ? [`cleanup warnings: ${result.warnings.map((warning) =>
+          sanitizeAkkModelFacingDiagnosticText(String(warning))).join("; ")}`]
+      : []),
+    "Refresh the AKK list; if the coding agent is still working, Watch can attach to it again."
   ].join("\n");
 }
 
@@ -2514,15 +2491,12 @@ function assertExclusiveRecoveryFence(params) {
       "close accepts only one of expected_message_id or expected_transition_id"
     );
   }
-  const handoffReason = stringValue(params.reason) ===
-    "superseded_by_human_context_switch";
-  if (handoffReason && (
-    !stringValue(params.turn_id) ||
-    stringValue(params.conversation_id) ||
-    closeFenceCount > 0
-  )) {
+  if (
+    stringValue(params.reason) === "superseded_by_human_context_switch" &&
+    (!stringValue(params.turn_id) || stringValue(params.conversation_id))
+  ) {
     throw new Error(
-      "human-context handoff requires only the exact managed turn_id and supersede reason"
+      "human-context handoff Close requires the exact managed turn_id"
     );
   }
 }

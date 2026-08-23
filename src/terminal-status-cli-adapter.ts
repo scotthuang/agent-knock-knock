@@ -162,6 +162,7 @@ export interface TerminalStatusReconciliationPorts {
     }
   ): Promise<TerminalStatusMonitorReconciliation>;
   workspaceMatches(configured: unknown, observed: unknown): boolean;
+  withStoreWriter<Result>(storeDir: string, operation: () => Result): Result;
   acquireStateLock(statePath: string): () => void;
   terminalBridgeEnabled(conversation: Conversation): boolean;
 }
@@ -942,39 +943,41 @@ function closeExpiredIdleConversation(
 ): IdleCloseResult {
   const statePath = listedConversation.state_path ??
     statePathForConversationId(listedConversation.conversation_id, storeDir);
-  let releaseStateLock: (() => void) | undefined;
-  try {
-    releaseStateLock = dependencies.reconciliation.acquireStateLock(statePath);
-  } catch (error) {
-    if (isRecord(error) && error.code === "LOCK_TIMEOUT") {
-      return "skipped";
+  return dependencies.reconciliation.withStoreWriter(storeDir, () => {
+    let releaseStateLock: (() => void) | undefined;
+    try {
+      releaseStateLock = dependencies.reconciliation.acquireStateLock(statePath);
+    } catch (error) {
+      if (isRecord(error) && error.code === "LOCK_TIMEOUT") {
+        return "skipped";
+      }
+      throw error;
     }
-    throw error;
-  }
-  try {
-    const conversation = loadState(statePath);
-    if (conversation.status !== "idle" || !conversation.idle_since) {
-      return "unchanged";
+    try {
+      const conversation = loadState(statePath);
+      if (conversation.status !== "idle" || !conversation.idle_since) {
+        return "unchanged";
+      }
+      const idleSinceMs = Date.parse(conversation.idle_since);
+      if (!Number.isFinite(idleSinceMs)) {
+        return "unchanged";
+      }
+      const terminalBridge =
+        dependencies.reconciliation.terminalBridgeEnabled(conversation) &&
+        isRecord(conversation.native_session_takeover) &&
+        typeof conversation.native_session_takeover
+          .terminal_bridge_message_id === "string";
+      if (now.getTime() - idleSinceMs < timeoutMinutes * 60 * 1000) {
+        return "unchanged";
+      }
+      persistIdleConversationClose(
+        dependencies, statePath, conversation, now, timeoutMinutes,
+        terminalBridge);
+      return "closed";
+    } finally {
+      releaseStateLock();
     }
-    const idleSinceMs = Date.parse(conversation.idle_since);
-    if (!Number.isFinite(idleSinceMs)) {
-      return "unchanged";
-    }
-    const terminalBridge =
-      dependencies.reconciliation.terminalBridgeEnabled(conversation) &&
-      isRecord(conversation.native_session_takeover) &&
-      typeof conversation.native_session_takeover
-        .terminal_bridge_message_id === "string";
-    if (now.getTime() - idleSinceMs < timeoutMinutes * 60 * 1000) {
-      return "unchanged";
-    }
-    persistIdleConversationClose(
-      dependencies, statePath, conversation, now, timeoutMinutes,
-      terminalBridge);
-    return "closed";
-  } finally {
-    releaseStateLock();
-  }
+  });
 }
 
 function persistIdleConversationClose(

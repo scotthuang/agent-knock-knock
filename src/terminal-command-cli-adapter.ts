@@ -2157,6 +2157,10 @@ function terminalSubmissionRetryAccepted(input: {
   attempt?: TerminalSubmissionRetryRecord;
   terminalInputSent: boolean;
 }): { conversation: Conversation; attempt?: TerminalSubmissionRetryRecord } {
+  const currentConversation = assertTerminalSubmissionRetryTurnOpen({
+    statePath: input.statePath,
+    exactTurnId: turnIdForConversation(input.conversation)
+  });
   const messageId = required(
     stringValue(input.submission.message_id),
     "terminal submission retry message id is unavailable"
@@ -2166,7 +2170,7 @@ function terminalSubmissionRetryAccepted(input: {
     "terminal submission retry prepared timestamp is unavailable"
   );
   const acceptedConversation = withTerminalBridgeSubmission({
-    conversation: terminalSubmissionRetryUnstalled(input.conversation),
+    conversation: terminalSubmissionRetryUnstalled(currentConversation),
     messageId,
     messageType: terminalSubmissionRetryMessageType(input.submission),
     requestText: input.requestText,
@@ -2181,7 +2185,7 @@ function terminalSubmissionRetryAccepted(input: {
   saveState(input.statePath, acceptedConversation);
   let acceptedAttempt = input.attempt;
   if (acceptedAttempt && acceptedAttempt.state !== "agent_accepted") {
-    acceptedAttempt = saveTerminalSubmissionRetry(input.statePath, {
+    acceptedAttempt = saveTerminalSubmissionRetryForOpenTurn(input.statePath, {
       ...acceptedAttempt,
       state: "agent_accepted",
       agent_accepted_at: input.at,
@@ -2222,6 +2226,10 @@ function terminalSubmissionRetryTerminalOutcome(input: {
   attempt: TerminalSubmissionRetryRecord;
   outcome: "not_accepted" | "uncertain";
 }): Conversation {
+  const currentConversation = assertTerminalSubmissionRetryTurnOpen({
+    statePath: input.statePath,
+    exactTurnId: turnIdForConversation(input.conversation)
+  });
   const messageId = required(
     stringValue(input.submission.message_id),
     "terminal submission retry message id is unavailable"
@@ -2231,7 +2239,7 @@ function terminalSubmissionRetryTerminalOutcome(input: {
     "terminal submission retry prepared timestamp is unavailable"
   );
   const stalled: Conversation = {
-    ...input.conversation,
+    ...currentConversation,
     status: "stalled",
     stalled_at: input.at,
     stalled_reason: input.reason,
@@ -2296,6 +2304,21 @@ function finalizeDeferredTerminalSubmissionRetryAccepted(input: {
   attempt?: TerminalSubmissionRetryRecord;
 }): { conversation: Conversation; attempt?: TerminalSubmissionRetryRecord } {
   const conversation = loadState(input.statePath);
+  if (conversation.status === "closed") {
+    throw new Error(
+      `cannot finalize submission retry for closed Turn ` +
+      `${turnIdForConversation(conversation)}; no retry state was changed`
+    );
+  }
+  if (
+    input.attempt &&
+    turnIdForConversation(conversation) !== input.attempt.turn_id
+  ) {
+    throw new Error(
+      "Turn identity changed during submission retry finalization; no retry " +
+      "state was changed"
+    );
+  }
   const submission = required(
     terminalBridgeSubmission(conversation),
     "deferred submission retry acceptance lost its Turn receipt"
@@ -2316,7 +2339,7 @@ function finalizeDeferredTerminalSubmissionRetryAccepted(input: {
   if (attempt && attempt.state !== "agent_accepted") {
     const acceptedAt = stringValue(submission.agent_accepted_at) ??
       stringValue(ledger.agent_accepted_at) ?? cliNow().toISOString();
-    attempt = saveTerminalSubmissionRetry(input.statePath, {
+    attempt = saveTerminalSubmissionRetryForOpenTurn(input.statePath, {
       ...attempt,
       state: "agent_accepted",
       agent_accepted_at: acceptedAt,
@@ -2344,6 +2367,10 @@ function reconcileTerminalSubmissionRetryPending(input: {
   resources: CanonicalMutationResources;
   deferred?: TerminalSubmissionRetryDeferredContext;
 }): Conversation {
+  const currentConversation = assertTerminalSubmissionRetryTurnOpen({
+    statePath: input.statePath,
+    exactTurnId: turnIdForConversation(input.conversation)
+  });
   const { attempt, submission, ledger } = input;
   const projection = projectTerminalSubmissionRetryPending({
     attempt,
@@ -2369,7 +2396,7 @@ function reconcileTerminalSubmissionRetryPending(input: {
   }
   const enteredConversation = withTerminalBridgeSubmission({
     conversation: withTerminalSubmissionRetryMonitorEpoch(
-      terminalSubmissionRetryUnstalled(input.conversation),
+      terminalSubmissionRetryUnstalled(currentConversation),
       enterDispatchedAt
     ),
     messageId,
@@ -2749,6 +2776,50 @@ interface TerminalSubmissionRetryLockedAuthority {
   lifecycleSettled: boolean;
 }
 
+function loadExactTerminalSubmissionRetryTurn(input: {
+  statePath: string;
+  exactTurnId: string;
+}): Conversation {
+  const conversation = loadState(input.statePath);
+  if (turnIdForConversation(conversation) !== input.exactTurnId) {
+    throw new Error(
+      "Turn identity changed during submission retry; no terminal input was " +
+      "sent and no retry state was changed"
+    );
+  }
+  return conversation;
+}
+
+function assertTerminalSubmissionRetryTurnOpen(input: {
+  statePath: string;
+  exactTurnId: string;
+}): Conversation {
+  const conversation = loadExactTerminalSubmissionRetryTurn(input);
+  if (conversation.status === "closed") {
+    throw new Error(
+      `cannot retry submission for closed Turn ${input.exactTurnId}; no ` +
+      "terminal input was sent and no retry state was changed"
+    );
+  }
+  return conversation;
+}
+
+function saveTerminalSubmissionRetryForOpenTurn(
+  statePath: string,
+  candidate: TerminalSubmissionRetryRecord,
+  expectedRevision: number | null
+): TerminalSubmissionRetryRecord {
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath,
+    exactTurnId: candidate.turn_id
+  });
+  return saveTerminalSubmissionRetry(
+    statePath,
+    candidate,
+    expectedRevision
+  );
+}
+
 function loadTerminalSubmissionRetryLockedAuthority(input: {
   invocation: TerminalSubmissionRetryInvocation;
   scopes: CanonicalStateMutationScopes;
@@ -2765,7 +2836,10 @@ function loadTerminalSubmissionRetryLockedAuthority(input: {
     statePath,
     logPath
   });
-  let conversation = loadState(statePath);
+  let conversation = assertTerminalSubmissionRetryTurnOpen({
+    statePath,
+    exactTurnId
+  });
   const takeover = isRecord(conversation.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
@@ -3116,6 +3190,10 @@ function prepareTerminalSubmissionRetryDeferredContext(input: {
   deferred?: TerminalSubmissionRetryDeferredContext;
   ledger: TerminalDispatchLedgerDocument;
 } {
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath: input.invocation.statePath,
+    exactTurnId: input.invocation.exactTurnId
+  });
   const { deferredTransferId, attempt, submission } = input.authority;
   if (!deferredTransferId) return { ledger: input.authority.ledger };
   const scope = bindDeferredForegroundApplicationScope(
@@ -3273,6 +3351,10 @@ async function recoverPartialTerminalSubmissionRetryAcceptance(
   context: TerminalSubmissionRetryFlowContext,
   state: TerminalSubmissionRetryFlowState
 ): Promise<boolean> {
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath: context.invocation.statePath,
+    exactTurnId: context.invocation.exactTurnId
+  });
   const partialAcceptance =
     state.submission.status === "agent_accepted" ||
     state.ledger.status === "agent_accepted" ||
@@ -3297,6 +3379,10 @@ async function recoverPartialTerminalSubmissionRetryAcceptance(
           boundary: context.deferred.boundary
         }
       );
+    assertTerminalSubmissionRetryTurnOpen({
+      statePath,
+      exactTurnId: context.invocation.exactTurnId
+    });
     if (!recovered) {
       printTerminalSubmissionRetryOutcome({
         conversation: state.conversation,
@@ -3336,6 +3422,10 @@ async function recoverPartialTerminalSubmissionRetryAcceptance(
     executor: "codex",
     conversation: state.conversation,
     terminalControl
+  });
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath,
+    exactTurnId: context.invocation.exactTurnId
   });
   if (!durableEvidence) {
     printTerminalSubmissionRetryOutcome({
@@ -3425,6 +3515,10 @@ async function recoverTerminalSubmissionRetryAcceptance(
         }
       )
     : false;
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath,
+    exactTurnId: context.invocation.exactTurnId
+  });
   if (deferredAccepted) {
     const finalized = finalizeDeferredTerminalSubmissionRetryAccepted({
       statePath,
@@ -3457,6 +3551,10 @@ async function recoverTerminalSubmissionRetryAcceptance(
         conversation: state.conversation,
         terminalControl
       });
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath,
+    exactTurnId: context.invocation.exactTurnId
+  });
   if (!acceptedEvidence) return false;
   const repaired = terminalSubmissionRetryAccepted({
     conversation: state.conversation,
@@ -3497,6 +3595,10 @@ function finishPendingTerminalSubmissionRetry(
   alreadyReconciled: boolean
 ): boolean {
   if (state.attempt?.state !== "enter_dispatched") return false;
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath: context.invocation.statePath,
+    exactTurnId: context.invocation.exactTurnId
+  });
   if (!alreadyReconciled) {
     state.conversation = reconcileTerminalSubmissionRetryPending({
       conversation: state.conversation,
@@ -3599,6 +3701,10 @@ async function runTerminalSubmissionRetryDecision(
       terminalControl
     ) }
   );
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath,
+    exactTurnId: context.invocation.exactTurnId
+  });
   const decision = decideTerminalSubmissionRetry({
     agent: "codex",
     exactTurnTarget: true,
@@ -3696,6 +3802,22 @@ async function runTerminalSubmissionRetryLocked(input: {
   scopes: CanonicalStateMutationScopes;
   resources: CanonicalStateMutationResources;
 }): Promise<void> {
+  const freshConversation = loadExactTerminalSubmissionRetryTurn({
+    statePath: input.invocation.statePath,
+    exactTurnId: input.invocation.exactTurnId
+  });
+  if (freshConversation.status === "closed") {
+    printTerminalSubmissionRetryOutcome({
+      conversation: freshConversation,
+      terminalControl: input.invocation.terminalControl,
+      outcome: "refused",
+      terminalInputSent: false,
+      reason:
+        "The Turn was explicitly closed; no terminal input was sent and no " +
+        "retry state was changed."
+    });
+    return;
+  }
   const authority = loadTerminalSubmissionRetryLockedAuthority(input);
   if (authority.lifecycleSettled) {
     printTerminalSubmissionRetryOutcome({
@@ -3832,6 +3954,10 @@ async function runTerminalSubmissionExactDraftEnter(input: {
 }): Promise<void> {
   let attempt = input.attempt;
   const reserveEnter = (): void => {
+    assertTerminalSubmissionRetryTurnOpen({
+      statePath: input.statePath,
+      exactTurnId: turnIdForConversation(input.conversation)
+    });
     const at = cliNow().toISOString();
     const persistAttemptLedger = (): void => {
       mutationDispatchLedger.save(input.scopes, input.resources, {
@@ -3859,7 +3985,7 @@ async function runTerminalSubmissionExactDraftEnter(input: {
       });
     };
     if (!attempt) {
-      attempt = saveTerminalSubmissionRetry(input.statePath, {
+      attempt = saveTerminalSubmissionRetryForOpenTurn(input.statePath, {
         ...terminalSubmissionRetryBaseRecord({
           mode: "exact_draft_enter",
           state: "enter_reserved",
@@ -3902,7 +4028,7 @@ async function runTerminalSubmissionExactDraftEnter(input: {
       attempt.mode === "replacement_send" &&
       attempt.state === "replacement_text_reserved"
     ) {
-      attempt = saveTerminalSubmissionRetry(input.statePath, {
+      attempt = saveTerminalSubmissionRetryForOpenTurn(input.statePath, {
         ...attempt,
         state: "replacement_text_injected",
         replacement_text_injected_at: at,
@@ -3917,7 +4043,7 @@ async function runTerminalSubmissionExactDraftEnter(input: {
       );
     }
     const enterReservedAt = cliNow().toISOString();
-    attempt = saveTerminalSubmissionRetry(input.statePath, {
+    attempt = saveTerminalSubmissionRetryForOpenTurn(input.statePath, {
       ...attempt,
       state: "enter_reserved",
       enter_reserved_at: enterReservedAt,
@@ -3937,13 +4063,17 @@ async function runTerminalSubmissionExactDraftEnter(input: {
       beforeEnterReservation: reserveEnter
     }
   );
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath: input.statePath,
+    exactTurnId: turnIdForConversation(input.conversation)
+  });
   if (!attempt || attempt.state !== "enter_reserved") {
     throw new Error(
       "terminal bridge dispatched Enter without a durable retry reservation"
     );
   }
   const enterAt = cliNow().toISOString();
-  attempt = saveTerminalSubmissionRetry(input.statePath, {
+  attempt = saveTerminalSubmissionRetryForOpenTurn(input.statePath, {
     ...attempt,
     state: "enter_dispatched",
     enter_dispatched_at: enterAt,
@@ -4023,6 +4153,10 @@ async function runTerminalSubmissionExactDraftEnter(input: {
           boundary: input.deferred.boundary
         }
     );
+    assertTerminalSubmissionRetryTurnOpen({
+      statePath: input.statePath,
+      exactTurnId: turnIdForConversation(input.conversation)
+    });
     if (recovered) {
       const finalized = finalizeDeferredTerminalSubmissionRetryAccepted({
         statePath: input.statePath,
@@ -4083,6 +4217,10 @@ async function runTerminalSubmissionExactDraftEnter(input: {
         DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS)
     )),
     scrollbackLines: Number(input.options.scrollbackLines ?? 240)
+  });
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath: input.statePath,
+    exactTurnId: turnIdForConversation(input.conversation)
   });
   if (acceptance.outcome === "agent_accepted") {
     const repaired = terminalSubmissionRetryAccepted({
@@ -4219,10 +4357,14 @@ async function runTerminalSubmissionReplacement(input: {
       "replacement send lost its positive empty-composer proof; no terminal input was sent"
     );
   }
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath: input.statePath,
+    exactTurnId: turnIdForConversation(input.conversation)
+  });
   let attempt = input.attempt;
   if (!attempt) {
     const at = cliNow().toISOString();
-    attempt = saveTerminalSubmissionRetry(input.statePath,
+    attempt = saveTerminalSubmissionRetryForOpenTurn(input.statePath,
       terminalSubmissionRetryBaseRecord({
         mode: "replacement_send",
         state: "replacement_reserved",
@@ -4282,7 +4424,7 @@ async function runTerminalSubmissionReplacement(input: {
     fields: Partial<TerminalSubmissionRetryRecord>
   ): void => {
     const current = currentAttempt();
-    attempt = saveTerminalSubmissionRetry(input.statePath, {
+    attempt = saveTerminalSubmissionRetryForOpenTurn(input.statePath, {
       ...current,
       ...fields,
       state,
@@ -4320,6 +4462,10 @@ async function runTerminalSubmissionReplacement(input: {
         preliminaryComposerDigest: input.observation.digest
       },
       beforeText: () => {
+        assertTerminalSubmissionRetryTurnOpen({
+          statePath: input.statePath,
+          exactTurnId: turnIdForConversation(input.conversation)
+        });
         const at = cliNow().toISOString();
         saveAttempt("replacement_text_reserved", at, {
           replacement_text_reserved_at: at
@@ -4342,6 +4488,10 @@ async function runTerminalSubmissionReplacement(input: {
         persistRetryLedger();
       },
       beforeEnter: () => {
+        assertTerminalSubmissionRetryTurnOpen({
+          statePath: input.statePath,
+          exactTurnId: turnIdForConversation(input.conversation)
+        });
         const at = cliNow().toISOString();
         saveAttempt("enter_reserved", at, { enter_reserved_at: at });
         if (input.deferred) {
@@ -4362,6 +4512,10 @@ async function runTerminalSubmissionReplacement(input: {
         persistRetryLedger();
       },
       onTransportStage: ({ stage }) => {
+        assertTerminalSubmissionRetryTurnOpen({
+          statePath: input.statePath,
+          exactTurnId: turnIdForConversation(input.conversation)
+        });
         const at = cliNow().toISOString();
         if (stage === "text_injected") {
           saveAttempt("replacement_text_injected", at, {
@@ -4437,6 +4591,10 @@ async function runTerminalSubmissionReplacement(input: {
       }
     }
   );
+  assertTerminalSubmissionRetryTurnOpen({
+    statePath: input.statePath,
+    exactTurnId: turnIdForConversation(input.conversation)
+  });
   if (
     currentAttempt().state !== "enter_dispatched" ||
     !enteredConversation || !enteredLedger
@@ -4461,6 +4619,10 @@ async function runTerminalSubmissionReplacement(input: {
           boundary: input.deferred.boundary
         }
     );
+    assertTerminalSubmissionRetryTurnOpen({
+      statePath: input.statePath,
+      exactTurnId: turnIdForConversation(input.conversation)
+    });
     if (recovered) {
       const finalized = finalizeDeferredTerminalSubmissionRetryAccepted({
         statePath: input.statePath,
@@ -4506,6 +4668,10 @@ async function runTerminalSubmissionReplacement(input: {
           DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS)
       )),
       scrollbackLines: Number(input.options.scrollbackLines ?? 240)
+    });
+    assertTerminalSubmissionRetryTurnOpen({
+      statePath: input.statePath,
+      exactTurnId: turnIdForConversation(input.conversation)
     });
     if (acceptance.outcome === "agent_accepted") {
       const repaired = terminalSubmissionRetryAccepted({

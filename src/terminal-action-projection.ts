@@ -675,8 +675,7 @@ export function projectHandoffDecision(facts: {
           tool: "agent_knock_knock_close",
           arguments: {
             turn_id: facts.actionTurnId ?? facts.sourceTurnId,
-            reason: "superseded_by_human_context_switch",
-            expected_handoff_token: facts.handoffDecisionToken
+            reason: "superseded_by_human_context_switch"
           },
           requires_explicit_user_confirmation: true
         },

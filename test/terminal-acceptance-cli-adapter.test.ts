@@ -28,7 +28,12 @@ import {
   terminalBridgeRequestFingerprint,
   terminalBridgeSubmission
 } from "../src/terminal-dispatch-receipt.js";
-import { ensureStoreWritable, loadState } from "../src/store.js";
+import {
+  ensureStoreWritable,
+  loadState,
+  pathsForConversation,
+  saveState
+} from "../src/store.js";
 
 function compiledSource(): string {
   return fs.readFileSync(
@@ -121,6 +126,9 @@ test("acceptance adapter exposes one factory and keeps exact lock/write order", 
     "#markUncertainLocked(",
     "\n    #persistUncertainLedger("
   ), [
+    "loadState(",
+    "isExplicitUserAbandonedManagementTurn(current)",
+    "terminalBridgeSubmission(current)",
     "applyTerminalBridgeSubmission({",
     "#persistUncertainLedger(",
     "saveState(",
@@ -371,6 +379,175 @@ test("trusted managed Turn options give an explicit generic route precedence", (
     () => create({ ...callbackRoute, version: 99 } as unknown as CallbackRouteV1),
     /unsupported callback_route version 99/u
   );
+});
+
+test("user-abandoned deferred acceptance is neutral without terminal I/O", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-accepted-close-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const conversationDir = path.join(storeDir, "conversations", "turn-closed");
+  const statePath = path.join(conversationDir, "state.json");
+  const logPath = path.join(conversationDir, "events.ndjson");
+  const conversation = {
+    ...createConversation({
+      userRequest: "closed by user",
+      sessionId: "session-closed",
+      turnId: "turn-closed",
+      executorKind: "codex",
+      now: new Date("2026-08-15T00:00:00.000Z")
+    }),
+    status: "closed" as const,
+    native_session_takeover: {
+      deferred_foreground_transfer_id: "transfer-user-abandoned"
+    }
+  };
+  let terminalReads = 0;
+  const facade = createTerminalAcceptanceCliFacade({
+    deferred: {
+      loadTransfer: () => ({ status: "user_abandoned" })
+    }
+  } as unknown as TerminalAcceptanceCliDependencies);
+  const result = await facade.reconcileMonitor({
+    options: {},
+    conversation,
+    statePath,
+    logPath,
+    terminalControl: {
+      kind: "tmux",
+      target: "closed:0.0",
+      session: "closed",
+      window: 0,
+      pane: 0,
+      panePid: 42,
+      capabilities: []
+    },
+    executor: resolveExecutor({ kind: "codex" }),
+    terminalBridge: {
+      async resolveStoredTerminal() {
+        terminalReads += 1;
+        throw new Error("user-abandoned acceptance must not read terminal");
+      }
+    } as unknown as TerminalAcceptanceBridge
+  });
+  assert.equal(result.outcome, "not_accepted");
+  assert.equal("conversation" in result && result.conversation, conversation);
+  assert.equal(terminalReads, 0);
+});
+
+test("acceptance uncertainty cannot revive an explicit Close that wins the Store lock", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-acceptance-close-race-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const paths = pathsForConversation("turn-close-race", storeDir);
+  const submission = {
+    message_id: "message-close-race",
+    status: "enter_dispatched",
+    prepared_at: "2026-08-24T00:00:00.000Z",
+    text_injected_at: "2026-08-24T00:00:01.000Z",
+    enter_dispatched_at: "2026-08-24T00:00:02.000Z",
+    last_proven_stage: "enter_dispatched"
+  };
+  const stale = {
+    ...createConversation({
+      userRequest: "finish the task",
+      sessionId: "session-close-race",
+      turnId: "turn-close-race",
+      executorKind: "codex",
+      now: new Date("2026-08-24T00:00:00.000Z")
+    }),
+    status: "waiting_for_agent" as const,
+    store_dir: path.resolve(storeDir),
+    conversation_dir: path.resolve(paths.conversationDir),
+    state_path: path.resolve(paths.statePath),
+    event_log_path: path.resolve(paths.logPath),
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_bridge_message_id: "message-close-race",
+      terminal_bridge_request_text: "finish the task",
+      terminal_bridge_submission: submission,
+      terminal_bridge_submission_receipts: [submission]
+    }
+  };
+  const closed = {
+    ...stale,
+    status: "closed" as const,
+    disposition: "user_abandoned_management",
+    callback_expected: false,
+    closed_at: "2026-08-24T00:00:03.000Z",
+    close_reason: "closed by request",
+    updated_at: "2026-08-24T00:00:03.000Z"
+  };
+  saveState(paths.statePath, closed);
+  const before = fs.readFileSync(paths.statePath);
+  let stateLocks = 0;
+  let ledgerReads = 0;
+  let ledgerWrites = 0;
+  let terminalAuthorityReads = 0;
+  const facade = createTerminalAcceptanceCliFacade({
+    repository: {
+      acquireStateLock: () => {
+        stateLocks += 1;
+        return () => undefined;
+      },
+      loadLedger: () => {
+        ledgerReads += 1;
+        return undefined;
+      },
+      saveLedger: () => { ledgerWrites += 1; }
+    },
+    authority: {
+      terminalControl: () => {
+        terminalAuthorityReads += 1;
+        return undefined;
+      }
+    }
+  } as unknown as TerminalAcceptanceCliDependencies);
+
+  const raced = facade.markUncertain({
+    conversation: stale,
+    statePath: paths.statePath,
+    logPath: paths.logPath,
+    terminalControl: {
+      kind: "tmux",
+      target: "close-race:0.0",
+      session: "close-race",
+      window: 0,
+      pane: 0,
+      panePid: 4242,
+      capabilities: []
+    },
+    reason: "stale acceptance observation"
+  });
+
+  assert.deepEqual(raced, loadState(paths.statePath));
+  assert.equal(raced.status, "closed");
+  assert.equal(raced.disposition, "user_abandoned_management");
+  assert.equal(stateLocks, 1);
+  assert.equal(ledgerReads, 0);
+  assert.equal(ledgerWrites, 0);
+  assert.equal(terminalAuthorityReads, 0);
+  assert.deepEqual(fs.readFileSync(paths.statePath), before);
+  assert.equal(fs.existsSync(paths.logPath), false);
+
+  const outer = facade.markUncertain({
+    conversation: raced,
+    statePath: paths.statePath,
+    logPath: paths.logPath,
+    terminalControl: {
+      kind: "tmux",
+      target: "close-race:0.0",
+      session: "close-race",
+      window: 0,
+      pane: 0,
+      panePid: 4242,
+      capabilities: []
+    },
+    reason: "already closed"
+  });
+  assert.strictEqual(outer, raced);
+  assert.equal(stateLocks, 1);
 });
 
 test("legacy in-flight acceptance synchronizes callback route authority", async (t) => {

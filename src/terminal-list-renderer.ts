@@ -88,7 +88,7 @@ export function listActionContracts(): JsonRecord {
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations use terminal_id and, for resume, one complete native_thread_id; AKK resolves and revalidates current lifecycle authority internally. They never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id. AKK resolves current lifecycle authority internally, and AKK status does not execute a native slash command.",
       "Terminal Watch observes one exact human-started active task without sending terminal input or creating an AKK Session or Turn. Start it only from terminals[].available_actions.watch, pass that action's exact terminal_id, and use watch_id for later status or unwatch operations. AKK refreshes and revalidates current observation authority internally.",
-      "A verified, idle human native-thread switch may expose a terminal-scoped send; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound operation only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source or any otherwise eligible quiescent rollout-backed source with a complete nonempty pinned open-rollout inventory may also expose this exact action. One materialized rollout does not prove the current Codex TUI foreground thread, and a /clear resume hint is diagnostic only. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. An explicitly closed uncertain Turn may authorize only a future candidate send when its exact resolved close ledger, append-only uncertain receipt, frozen predecessor history, and complete current rollout inventory prove that the old bound rollout is absent and every candidate is unclaimed; close never forges the lost callback, and uncertain submissions cannot be renewed. Other binding conflicts remain fail-closed and may expose only exact low-level reconcile_binding recovery.",
+      "A verified, idle human native-thread switch may expose a terminal-scoped send; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound operation only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source or any otherwise eligible quiescent rollout-backed source with a complete nonempty pinned open-rollout inventory may also expose this exact action. One materialized rollout does not prove the current Codex TUI foreground thread, and a /clear resume hint is diagnostic only. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. Explicit Close always honors the user's decision to release AKK management of the selected Turn; it sends no terminal input, never stops the coding agent or pane, and reports best-effort cleanup warnings without vetoing the Close. Refresh list afterward and use Watch when the coding agent is still working. Other input-producing binding actions remain fail-closed.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "Structured follow-current actions use only the exact terminal_id prefilled by that terminal row. Human slash commands may use an explicitly named discovery selector. AKK resolves and revalidates current action authority internally; never infer or guess a target.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
@@ -149,7 +149,7 @@ export function listActionContracts(): JsonRecord {
       },
       blocking_turns: {
         meaning:
-          "terminal-incarnation-wide collateral unresolved managed Turns that suppress send, lifecycle, and native-inspection actions; an active human-handoff source Turn is never listed here and remains governed only by handoff_decision",
+          "terminal-incarnation-wide unresolved managed Turns that suppress send, lifecycle, and native-inspection actions; each exact Turn remains explicitly closable even during a deferred transfer or human handoff",
         authoritative_action_path:
           "terminals[].blocking_turns[].recovery_action",
         requires_explicit_user_confirmation: true,
@@ -186,7 +186,7 @@ export function listActionContracts(): JsonRecord {
         status_card_only_deferred_scope:
           "A zero-Turn Codex status-card binding has no rollout; only its listed follow-current send creates an isolated provisional Session and binds it after exact request acceptance. Until promotion commits, strict managed controls, native lifecycle, native_inspect, and callback authority remain unavailable; an uncertain dispatch, acceptance, or post-submit binding must not be retried automatically.",
         candidate_rollout_deferred_scope:
-          "A quiescent rollout-backed Codex source uses a listed follow-current send whenever AKK can pin a complete nonempty candidate inventory. Inventory status resolved means only that one rollout is materialized; it does not prove the current TUI foreground thread. Released predecessor Turn history stays read-only while a separate provisional Session sends once and waits for one unique post-anchor request acceptance. A /clear resume hint is diagnostic only and is not routing authority. Same-UUID and different-UUID results keep separate Session lineages; zero, multiple, drifted, or uncertain acceptance is never retried blindly. Explicit close can abandon an uncertain receipt for future-send liveness only while the exact resolved close ledger, append-only receipt, frozen history, absent old rollout, and unclaimed candidate set remain authoritative; it never synthesizes callback delivery.",
+          "A quiescent rollout-backed Codex source uses a listed follow-current send whenever AKK can pin a complete nonempty candidate inventory. Inventory status resolved means only that one rollout is materialized; it does not prove the current TUI foreground thread. Released predecessor Turn history stays read-only while a separate provisional Session sends once and waits for one unique post-anchor request acceptance. A /clear resume hint is diagnostic only and is not routing authority. Same-UUID and different-UUID results keep separate Session lineages; zero, multiple, drifted, or uncertain acceptance is never retried blindly. Explicit Close is the user-owned escape hatch: it closes the AKK Turn first, then best-effort releases only linked AKK metadata without terminal input or coding-agent interruption.",
         ordinary_use:
           "Create a new managed Turn through the exact action listed for the pane. An explicit session_id never follows the pane and is unavailable for rollout-backed Codex Sessions; their listed follow-current action binds only the unique exact rollout that accepts the submitted request. A user-explicit or uniquely delegated raw send receives the same fresh under-lock candidate authority when it resolves to an already managed rollout-backed Codex source. A live terminal selector can also attach an unmanaged pane, adopt one verified human-selected native context, detach a verified-empty Codex source, or replace an eligible status-card/candidate-rollout source."
       },
@@ -354,8 +354,13 @@ export function listActionContracts(): JsonRecord {
           "expected_transition_id"
         ],
         requires_explicit_user_confirmation: true,
+        user_priority: true,
+        sends_terminal_input: false,
+        stops_coding_agent: false,
+        cleanup_policy:
+          "Close the selected AKK Turn first. Linked transfer, Session, ledger, and callback cleanup is best-effort; missing, stale, malformed, or newer metadata is preserved and reported as a warning rather than blocking Close.",
         handoff_scope:
-          "Use only the complete nested action from terminals[].handoff_decision.choices.take_over_current after explicit confirmation. AKK binds and revalidates the current handoff decision privately."
+          "After explicit confirmation, a handoff Close follows the same user-priority management-release path and does not depend on a private live-terminal fence."
       }
     }
   };
@@ -757,7 +762,7 @@ export function exactTerminalWatchAction(
 
 const CURRENT_TURN_ACTIONS = [
   "status", "respond", "approve", "cancel", "renew", "retry_callback",
-  "retry_submission"
+  "retry_submission", "close"
 ] as const;
 
 export function currentTerminalActions(currentTurn: JsonRecord | undefined): JsonRecord {
@@ -872,6 +877,28 @@ export function readOnlyListActions(actionsValue: JsonRecord): JsonRecord {
     : {};
 }
 
+/**
+ * A deferred transfer may suppress every mutation except the user's explicit
+ * request to release AKK management. Close never sends terminal input or stops
+ * the coding agent, so it remains available while transfer cleanup is pending.
+ */
+export function userReleaseListActions(
+  actionsValue: JsonRecord,
+  turnId?: string
+): JsonRecord {
+  const actions = readOnlyListActions(actionsValue);
+  if (isRecord(actionsValue.close)) {
+    actions.close = actionsValue.close;
+  } else if (turnId) {
+    actions.close = {
+      tool: "agent_knock_knock_close",
+      arguments: { turn_id: turnId },
+      requires_explicit_user_confirmation: true
+    };
+  }
+  return actions;
+}
+
 export function readOnlyManagedTurn(managedTurn: JsonRecord): JsonRecord {
   return {
     ...managedTurn,
@@ -883,22 +910,28 @@ export function readOnlyManagedTurn(managedTurn: JsonRecord): JsonRecord {
   };
 }
 
-export function withoutGenericHandoffSourceClose(
-  managedTurn: JsonRecord,
-  blockingHandoffTurnIds: ReadonlySet<string>
-): JsonRecord {
-  const conversationId = stringValue(managedTurn.conversation_id);
-  if (!conversationId || !blockingHandoffTurnIds.has(conversationId)) {
-    return managedTurn;
-  }
-  const availableActions = isRecord(managedTurn.available_actions)
-    ? managedTurn.available_actions
-    : {};
-  const { close: _genericClose, ...safeActions } = availableActions;
+export function userReleasableManagedTurn(managedTurn: JsonRecord): JsonRecord {
+  const turnId = stringValue(
+    managedTurn.turn_id ?? managedTurn.conversation_id ?? managedTurn.id
+  );
   return {
     ...managedTurn,
-    available_actions: safeActions
+    available_actions: userReleaseListActions(
+      isRecord(managedTurn.available_actions)
+        ? managedTurn.available_actions
+        : {},
+      turnId
+    )
   };
+}
+
+export function withoutGenericHandoffSourceClose(
+  managedTurn: JsonRecord,
+  _blockingHandoffTurnIds: ReadonlySet<string>
+): JsonRecord {
+  // Explicit Close releases only AKK metadata. A live handoff no longer
+  // revokes the user's ability to abandon the selected managed Turn.
+  return managedTurn;
 }
 
 export function retargetConversationAction(

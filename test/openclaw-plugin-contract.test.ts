@@ -1183,8 +1183,7 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     "--expected-approval-fingerprint",
     "--expected-binding-token",
     "--expected-terminal-token",
-    "--candidate-token",
-    "--expected-handoff-token"
+    "--candidate-token"
   ]) {
     assert.match(
       commandSource,
@@ -2636,7 +2635,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         `    approve: { tool: "agent_knock_knock_approve", arguments: { conversation_id: terminalId, expected_approval_fingerprint: approvalFingerprint, expected_terminal_token: terminalToken } },`,
         `    reconcile_binding: { tool: "agent_knock_knock_reconcile_binding", arguments: { terminal_id: terminalId, conflicting_session_id: "session-conflict", expected_session_revision: 7, expected_binding_token: "conflict-binding-current", expected_terminal_token: terminalToken } }`,
         `  },`,
-        `  handoff_decision: { kind: "active_turn_requires_decision", choices: { take_over_current: { action: { tool: "agent_knock_knock_close", arguments: { turn_id: "turn-active", reason: "superseded_by_human_context_switch", expected_handoff_token: "handoff-current" }, requires_explicit_user_confirmation: true } } } },`,
+        `  handoff_decision: { kind: "active_turn_requires_decision", choices: { take_over_current: { action: { tool: "agent_knock_knock_close", arguments: { turn_id: "turn-active", reason: "superseded_by_human_context_switch" }, requires_explicit_user_confirmation: true } } } },`,
         `  audit_history: {`,
         `    reconcile: { tool: "agent_knock_knock_reconcile_binding", arguments: { terminal_id: terminalId, conflicting_session_id: "session-conflict", expected_session_revision: 6, expected_binding_token: "stale-conflict-binding", expected_terminal_token: "stale-terminal-token" } },`,
         `    handoff: { tool: "agent_knock_knock_close", arguments: { turn_id: "turn-active", reason: "superseded_by_human_context_switch", expected_handoff_token: "stale-handoff" } }`,
@@ -2796,7 +2795,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       false
     );
     assert.match(closeTool?.description ?? "", /expected_transition_id/u);
-    assert.match(closeTool?.description ?? "", /handoff authority privately/u);
+    assert.match(closeTool?.description ?? "", /cannot veto closing the Turn/u);
     const approveTool = tools.get("agent_knock_knock_approve");
     assert.ok(approveTool);
     assert.deepEqual(approveTool.parameters?.anyOf, [
@@ -2837,20 +2836,17 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       }),
       /only one of expected_message_id or expected_transition_id/u
     );
-    await assert.rejects(
-      () => closeTool!.execute!("ambiguous-handoff-fence", {
-        turn_id: "turn-active",
-        reason: "superseded_by_human_context_switch",
-        expected_message_id: "message-current"
-      }),
-      /requires only the exact managed turn_id and supersede reason/u
-    );
+    await closeTool!.execute!("managed-handoff-ignores-private-fence", {
+      turn_id: "turn-active-with-recovery-id",
+      reason: "superseded_by_human_context_switch",
+      expected_message_id: "message-current"
+    });
     await assert.rejects(
       () => closeTool!.execute!("raw-handoff-target", {
         conversation_id: "terminal:v2:tmux:codex:work:0.0:1234",
         reason: "superseded_by_human_context_switch"
       }),
-      /requires only the exact managed turn_id and supersede reason/u
+      /requires the exact managed turn_id/u
     );
 
     for (const name of [
@@ -2955,13 +2951,10 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         sessionKey: "agent:test:controls",
         sessionId: "openclaw-conversation-b"
       } as never);
-    await assert.rejects(
-      () => foreignClose!.execute!("cross-session-handoff", {
-        turn_id: "turn-active",
-        reason: "superseded_by_human_context_switch"
-      }),
-      /in this OpenClaw session/u
-    );
+    await foreignClose!.execute!("cross-session-handoff", {
+      turn_id: "turn-active-foreign",
+      reason: "superseded_by_human_context_switch"
+    });
     await statusTool.execute?.("watch-status", {
       watch_id: "terminal-watch-status"
     });
@@ -3125,11 +3118,11 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     assert.deepEqual(handoffClose, [
       "close",
       "--turn",
-      "turn-active",
+      "turn-active-with-recovery-id",
       "--reason",
       "superseded_by_human_context_switch",
-      "--expected-handoff-token",
-      "handoff-current"
+      "--expected-message-id",
+      "message-current"
     ]);
     const recoveryClose = calls.find((args) =>
       args[0] === "close" && args.includes("transition-current")

@@ -1,16 +1,38 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import type {
   CallbackExecutionResult,
   PreparedCallback
 } from "../src/callback-outbox-service.js";
-import type { Conversation } from "../src/protocol.js";
+import {
+  pathsForDeferredForegroundTransfer,
+  saveDeferredForegroundTransfer,
+  type DeferredForegroundTransfer
+} from "../src/deferred-foreground-transfer.js";
+import {
+  managedSessionBindingToken,
+  terminalBindingFrom
+} from "../src/managed-session.js";
+import { createConversation, type Conversation } from "../src/protocol.js";
+import {
+  ensureStoreWritable,
+  loadState,
+  pathsForConversation,
+  saveState
+} from "../src/store.js";
+import {
+  createTerminalMonitorStateCliAdapter,
+  type TerminalMonitorStateCliDependencies
+} from "../src/terminal-monitor-state-cli-adapter.js";
 import type { MonitorVerifiedDeadResult } from
   "../src/terminal-monitor-application-service.js";
 import type { TerminalMonitorEligibility } from
   "../src/terminal-monitor-reconciliation-eligibility.js";
+import type { TerminalControlRef } from "../src/terminal-control-ref.js";
 import {
   reconcileTerminalMonitorStateCandidate,
   type TerminalMonitorCallbackRecovery,
@@ -34,6 +56,191 @@ const CONTROL = {
   currentPath: "/workspace",
   capabilities: []
 };
+
+const DEFERRED_CONTROL: TerminalControlRef = {
+  kind: "herdr",
+  target: "workspace-1:pane-1",
+  session: "workspace-1",
+  socketPath: "/tmp/akk-monitor-close-herdr.sock",
+  sessionDir: "/tmp/akk-monitor-close-herdr",
+  workspaceId: "workspace-1",
+  tabId: "tab-1",
+  paneId: "pane-1",
+  terminalId: "terminal-1",
+  panePid: 4242,
+  currentCommand: "codex",
+  currentPath: "/workspace",
+  capabilities: ["screen_status", "send_keys"]
+};
+
+interface DeferredCloseFenceCounters {
+  terminalLockAcquires: number;
+  terminalResolutions: number;
+  handoffRecoveries: number;
+}
+
+function persistedMonitorConversation(input: {
+  storeDir: string;
+  status: "waiting_for_agent" | "closed";
+  disposition?: "user_abandoned_management";
+  transferId: string;
+  includeTerminalAuthority: boolean;
+}): { conversation: Conversation; paths: TerminalMonitorStatePaths } {
+  const paths = pathsForConversation("turn-monitor-close", input.storeDir);
+  const base = createConversation({
+    userRequest: "continue monitoring",
+    sessionId: "session-monitor-close",
+    turnId: "turn-monitor-close",
+    executorKind: "codex",
+    workspace: "/workspace",
+    now: new Date("2026-08-24T00:00:00.000Z")
+  });
+  const terminalAuthority = input.includeTerminalAuthority
+    ? {
+        terminal_agent_pid: 4242,
+        terminal_control: DEFERRED_CONTROL
+      }
+    : {};
+  const conversation: Conversation = {
+    ...base,
+    status: input.status,
+    ...(input.disposition ? { disposition: input.disposition } : {}),
+    ...(input.status === "closed"
+      ? {
+          closed_at: "2026-08-24T00:00:01.000Z",
+          close_reason: "closed by request"
+        }
+      : {}),
+    store_dir: path.resolve(input.storeDir),
+    conversation_dir: path.resolve(path.dirname(paths.statePath)),
+    state_path: path.resolve(paths.statePath),
+    event_log_path: path.resolve(paths.logPath),
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_bridge_message_id: "message-monitor-close",
+      deferred_foreground_transfer_id: input.transferId,
+      ...terminalAuthority
+    }
+  };
+  saveState(paths.statePath, conversation);
+  return { conversation: loadState(paths.statePath), paths };
+}
+
+function preparedDeferredTransfer(
+  storeDir: string,
+  transferId: string
+): DeferredForegroundTransfer {
+  const sourceBinding = terminalBindingFrom({
+    terminalId: "terminal:v2:herdr:codex:workspace-1:pane-1:4242",
+    terminalControl: DEFERRED_CONTROL,
+    pid: 4242,
+    nativeThreadId: "00000000-0000-4000-8000-000000000424",
+    processUuid: "codex-pid:4242:birth:monitor-close",
+    processBirth: "monitor-close",
+    evidence: "codex_status_card+process_birth",
+    generation: 1,
+    now: new Date("2026-08-24T00:00:00.000Z")
+  });
+  return saveDeferredForegroundTransfer(storeDir, {
+    schema: "agent-knock-knock/deferred-foreground-transfer",
+    version: 1,
+    transfer_id: transferId,
+    status: "prepared",
+    input_stage: "none",
+    terminal_id: sourceBinding.terminal_id,
+    terminal_endpoint: sourceBinding.terminal_endpoint!,
+    process_pid: 4242,
+    process_uuid: "codex-pid:4242:birth:monitor-close",
+    process_birth: "monitor-close",
+    workspace: "/workspace",
+    source_session_id: "session-source-monitor-close",
+    source_expected_revision: 1,
+    source_binding_token: managedSessionBindingToken({
+      session_id: "session-source-monitor-close",
+      status: "bound",
+      binding: sourceBinding
+    }),
+    source_before_binding: sourceBinding,
+    target_session_id: "session-monitor-close",
+    target_expected_revision: null,
+    previous_dispatch_status: "none",
+    previous_dispatch_fingerprint: "a".repeat(64),
+    request_hash: "b".repeat(64),
+    dispatcher_pid: 7331,
+    prepared_at: "2026-08-24T00:00:00.000Z"
+  }, { expectedRevision: null });
+}
+
+function deferredCloseFenceFacade(input: {
+  storeDir: string;
+  counters: DeferredCloseFenceCounters;
+  beforeTerminalLock?: () => void;
+}) {
+  return createTerminalMonitorStateCliAdapter({
+    dispatch: {
+      repository: {
+        acquire: () => {
+          input.counters.terminalLockAcquires += 1;
+          input.beforeTerminalLock?.();
+          return () => {};
+        }
+      },
+      recovery: {
+        settleLocalCompletion: () => ({ handled: false }),
+        stallAccepted: async (request: { conversation: Conversation }) => ({
+          stalled: false,
+          conversation: request.conversation
+        })
+      }
+    },
+    acceptance: {
+      storeDirForConversation: () => input.storeDir,
+      recoverVirgin: async (request: { conversation: Conversation }) => {
+        const takeover = {
+          ...(request.conversation.native_session_takeover as
+            Record<string, unknown>)
+        };
+        delete takeover.deferred_foreground_transfer_id;
+        return {
+          outcome: "not_accepted",
+          conversation: {
+            ...request.conversation,
+            native_session_takeover: takeover
+          }
+        };
+      }
+    },
+    authority: {
+      identity: {
+        migrateLegacyTerminalAgentIdentity: async (request: {
+          conversation: Conversation;
+        }) => request.conversation
+      },
+      handoff: {
+        recoverDeferredCodexForegroundTransferBeforeMutation: async () => {
+          input.counters.handoffRecoveries += 1;
+        }
+      },
+      assertBindingCurrent: () => {},
+      terminalControlForConversation: () => undefined,
+      createBridge: () => ({
+        resolveStoredTerminal: async () => {
+          input.counters.terminalResolutions += 1;
+          throw new Error("closed deferred recovery must not read terminal");
+        }
+      })
+    },
+    callbacks: {},
+    runtime: {
+      isProcessAlive: () => true,
+      storeDir: () => input.storeDir,
+      print: () => {},
+      bindingSuperseded: () => undefined,
+      approvalTtlMs: 60_000,
+      callbackRetryLimit: 3
+    }
+  } as unknown as TerminalMonitorStateCliDependencies);
+}
 
 function compiledMonitorStateSource(startToken: string, endToken: string): string {
   const source = fs.readFileSync(
@@ -276,6 +483,33 @@ test("monitor state reconciliation preserves exact order and resource identity",
   });
 });
 
+test("explicit user Close short-circuits every monitor recovery port", async () => {
+  const trace: string[] = [];
+  const fixture = portsFixture(trace);
+  const listed: Conversation = {
+    ...fixture.listed,
+    status: "closed",
+    disposition: "user_abandoned_management",
+    callback_expected: false,
+    closed_at: "2026-08-20T00:00:01.000Z",
+    close_reason: "closed by request",
+    updated_at: "2026-08-20T00:00:01.000Z"
+  };
+
+  const result = await reconcile(listed, fixture.ports);
+
+  assert.deepEqual(trace, []);
+  assert.deepEqual(result, {
+    kind: "handled",
+    counter: "skipped",
+    item: {
+      conversation_id: "turn-1",
+      status: "skipped",
+      reason: "explicit_user_close_released_management"
+    }
+  });
+});
+
 test("startup retry recovery preserves terminal outcomes and finalizes accepted crash lags", () => {
   const recovery = compiledMonitorStateSource(
     "async #recoverSubmissionRetry(",
@@ -306,6 +540,116 @@ test("startup retry recovery preserves terminal outcomes and finalizes accepted 
     "input.saveLedger",
     'terminal_input_sent: false'
   ]);
+});
+
+test("monitor launch preparation acquires Store writer before Turn state", () => {
+  const preparation = compiledMonitorStateSource(
+    "    prepareLaunch(input) {",
+    "    #persistMonitorLockVersion("
+  );
+  assertSourceOrder(preparation, [
+    "withStoreWriterLease(storeDir",
+    "#stateFileLock.acquire(`${input.statePath}.lock`)",
+    "#persistMonitorLockVersion("
+  ]);
+});
+
+test("explicit user-abandoned Close fences deferred recovery before terminal authority", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-close-fence-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const transferId = "deferred-transfer-monitor-close-outer";
+  const fixture = persistedMonitorConversation({
+    storeDir,
+    status: "closed",
+    disposition: "user_abandoned_management",
+    transferId,
+    includeTerminalAuthority: false
+  });
+  const before = fs.readFileSync(fixture.paths.statePath);
+  const counters: DeferredCloseFenceCounters = {
+    terminalLockAcquires: 0,
+    terminalResolutions: 0,
+    handoffRecoveries: 0
+  };
+  const facade = deferredCloseFenceFacade({ storeDir, counters });
+
+  const result = await facade.reconcileState({
+    options: {},
+    storeDir,
+    listed: fixture.conversation,
+    paths: fixture.paths,
+    includeCallbackRecovery: false
+  });
+
+  assert.equal(result.kind, "handled");
+  assert.deepEqual(counters, {
+    terminalLockAcquires: 0,
+    terminalResolutions: 0,
+    handoffRecoveries: 0
+  });
+  assert.deepEqual(fs.readFileSync(fixture.paths.statePath), before);
+});
+
+test("Close winning the canonical deferred-recovery lock race prevents terminal I/O", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-close-race-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const transferId = "deferred-transfer-monitor-close-race";
+  const fixture = persistedMonitorConversation({
+    storeDir,
+    status: "waiting_for_agent",
+    transferId,
+    includeTerminalAuthority: true
+  });
+  preparedDeferredTransfer(storeDir, transferId);
+  const transferPath = pathsForDeferredForegroundTransfer(
+    transferId,
+    storeDir
+  ).statePath;
+  const transferBefore = fs.readFileSync(transferPath);
+  const counters: DeferredCloseFenceCounters = {
+    terminalLockAcquires: 0,
+    terminalResolutions: 0,
+    handoffRecoveries: 0
+  };
+  let closedBytes: Buffer | undefined;
+  const facade = deferredCloseFenceFacade({
+    storeDir,
+    counters,
+    beforeTerminalLock: () => {
+      const current = loadState(fixture.paths.statePath);
+      saveState(fixture.paths.statePath, {
+        ...current,
+        status: "closed",
+        disposition: "user_abandoned_management",
+        closed_at: "2026-08-24T00:00:01.000Z",
+        close_reason: "closed by request",
+        updated_at: "2026-08-24T00:00:01.000Z"
+      });
+      closedBytes = fs.readFileSync(fixture.paths.statePath);
+    }
+  });
+
+  const result = await facade.reconcileState({
+    options: {},
+    storeDir,
+    listed: fixture.conversation,
+    paths: fixture.paths,
+    includeCallbackRecovery: false
+  });
+
+  assert.equal(result.kind, "handled");
+  assert.deepEqual(counters, {
+    terminalLockAcquires: 1,
+    terminalResolutions: 0,
+    handoffRecoveries: 0
+  });
+  assert.ok(closedBytes);
+  assert.deepEqual(fs.readFileSync(fixture.paths.statePath), closedBytes);
+  assert.deepEqual(fs.readFileSync(transferPath), transferBefore);
 });
 
 test("local completion short-circuits lazily with the legacy getter order", async () => {

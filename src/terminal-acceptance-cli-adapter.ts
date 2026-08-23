@@ -15,6 +15,7 @@ import {
   createConversation,
   createMessage,
   executorForConversation,
+  isExplicitUserAbandonedManagementTurn,
   isSessionSendBlockingStatus,
   resolveExecutor,
   sessionIdForConversation,
@@ -867,6 +868,12 @@ class TerminalAcceptanceCliApplication {
     if (!transferId) return undefined;
     const storeDir = pathsForConversationDir(path.dirname(input.statePath)).storeDir;
     let transfer = this.#dependencies.deferred.loadTransfer(storeDir, transferId);
+    if (transfer.status === "user_abandoned") {
+      return {
+        outcome: "not_accepted",
+        conversation: input.conversation
+      };
+    }
     const pid = safeInteger(
       takeoverFor(input.conversation)?.terminal_agent_pid
     );
@@ -1120,6 +1127,9 @@ class TerminalAcceptanceCliApplication {
     terminalControl: TerminalControlRef;
     reason: string;
   }): Conversation {
+    if (isExplicitUserAbandonedManagementTurn(input.conversation)) {
+      return input.conversation;
+    }
     const messageId = nonBlankString(
       terminalBridgeSubmission(input.conversation)?.message_id
     );
@@ -1148,6 +1158,9 @@ class TerminalAcceptanceCliApplication {
     uncertainAt: string
   ): Conversation {
     const current = loadState(input.statePath);
+    if (isExplicitUserAbandonedManagementTurn(current)) {
+      return current;
+    }
     const submission = terminalBridgeSubmission(current);
     if (
       !messageId ||
