@@ -359,6 +359,45 @@ test("Codex prompt evidence binds complete two-choice, three-choice, edit, and p
   }
 });
 
+test("Codex 0.149.1 patch approval binds Description and Destination details", () => {
+  const prompt = (description: string, destination: string) => [
+    "  Would you like to make the following edits?",
+    "",
+    `  Description: ${description}`,
+    `  Destination: ${destination}`,
+    "",
+    "› 1. Yes, proceed (y)",
+    "  2. Yes, and don't ask again for these files (a)",
+    "  3. No, and tell Codex what to do differently (esc)",
+    "",
+    "  Press enter to confirm or esc to cancel"
+  ].join("\n");
+  const canonical = prompt(
+    "The model wants to apply changes",
+    "/tmp/project/README.md"
+  );
+  const unavailable = prompt("Apply proposed file edits", "unavailable");
+
+  const first = detectCodexApprovalPrompt(canonical);
+  const second = detectCodexApprovalPrompt(unavailable);
+  assert.equal(first.approvable, true);
+  assert.equal(second.approvable, true);
+  if (!first.approvable || !second.approvable) {
+    assert.fail("expected complete Codex 0.149.1 patch approval prompts");
+  }
+  assert.equal(first.key, "y");
+  assert.equal(first.promptKind, "file_edit");
+  assert.deepEqual(
+    first.promptEvidence,
+    terminalApprovalPromptEvidence("codex-approval-prompt-v1", canonical)
+  );
+  assert.notEqual(
+    second.promptEvidence.sha256,
+    first.promptEvidence.sha256,
+    "Destination remains part of the reviewed approval authority"
+  );
+});
+
 test("Codex approval parser fails closed for incomplete or ambiguous prompt regions", () => {
   const marker = "Would you like to run the following command?";
   const command = "  $ npm test";
@@ -832,15 +871,23 @@ test("adapter capabilities advertise semantic terminal behavior explicitly", () 
 });
 
 test("verified Codex lifecycle profiles use closed status-clear-status steps", () => {
-  for (const version of ["0.146.0", "0.146.1", "0.147.0", "0.148.0"]) {
+  for (const version of [
+    "0.146.0",
+    "0.146.1",
+    "0.147.0",
+    "0.148.0",
+    "0.149.1"
+  ]) {
     const profile = probeCodexThreadLifecycle(version);
     assert.equal(profile.status, "supported");
     assert.equal(profile.behaviorProfile, `codex-tui-${version}`);
   }
 
-  const capabilities = probeCodexThreadLifecycle("0.148.0");
+  const capabilities = probeCodexThreadLifecycle("0.149.1");
   assert.equal(probeCodexThreadLifecycle("0.146.2").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle("0.148.1").status, "unsupported");
+  assert.equal(probeCodexThreadLifecycle("0.149.0").status, "unsupported");
+  assert.equal(probeCodexThreadLifecycle("0.149.2").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle(undefined).status, "unknown");
 
   const fresh = planCodexThreadLifecycle(
@@ -890,7 +937,13 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
 });
 
 test("verified Codex native inspection profiles expose one closed read-only status plan", () => {
-  for (const version of ["0.146.0", "0.146.1", "0.147.0", "0.148.0"]) {
+  for (const version of [
+    "0.146.0",
+    "0.146.1",
+    "0.147.0",
+    "0.148.0",
+    "0.149.1"
+  ]) {
     const capabilities = probeCodexNativeInspection(version);
     assert.equal(capabilities.status, "supported");
     assert.equal(capabilities.statusInspection, true);
@@ -922,7 +975,7 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     statusInspection: false,
     reason: "the running Codex version could not be verified"
   });
-  const unsupported = probeCodexNativeInspection("0.148.1");
+  const unsupported = probeCodexNativeInspection("0.149.2");
   assert.equal(unsupported.status, "unsupported");
   assert.equal(unsupported.statusInspection, false);
   assert.throws(
@@ -979,6 +1032,67 @@ test("Codex 0.148.0 native inspection parses the current status card", () => {
     { name: "Limits", value: "data not available yet" }
   ]);
   assert.doesNotMatch(observed.result?.excerpt ?? "", /owner@example\.com/u);
+});
+
+test("Codex 0.149.1 native inspection parses a real expanded status card", () => {
+  const nativeThreadId = "01a031e1-dbd9-7570-b579-d30f806c2a5c";
+  const screen = [
+    "/status",
+    "",
+    "╭─────────────────────────────────────────────────────────────────────────────────────────╮",
+    "│  >_ OpenAI Codex (v0.149.1)                                                             │",
+    "│                                                                                         │",
+    "│ Visit https://chatgpt.com/codex/settings/usage for up-to-date                           │",
+    "│ information on rate limits and credits                                                  │",
+    "│                                                                                         │",
+    "│  Model:                       gpt-5.6-terra (reasoning medium, summaries auto)          │",
+    "│  Directory:                   ~                                                         │",
+    "│  Permissions:                 Read Only (never)                                         │",
+    "│  Agents.md:                   <none>                                                    │",
+    "│  Account:                     <redacted-account>                                        │",
+    "│  Collaboration mode:          Default                                                   │",
+    `│  Session:                     ${nativeThreadId}                      │`,
+    "│                                                                                         │",
+    "│  Weekly limit:                <redacted>                                                │",
+    "│  GPT-5.3-Codex-Spark limit:                                                             │",
+    "│  5h limit:                    <redacted>                                                │",
+    "│  Weekly limit:                <redacted>                                                │",
+    "╰─────────────────────────────────────────────────────────────────────────────────────────╯",
+    "",
+    "› Ask Codex to do anything",
+    "",
+    "  gpt-5.6-terra medium · ~"
+  ].join("\n");
+
+  const observed = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "0.149.1"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.nativeThreadId, nativeThreadId);
+  assert.equal(observed.observedAgentVersion, "0.149.1");
+  assert.deepEqual(observed.result?.fields, [
+    {
+      name: "Model",
+      value: "gpt-5.6-terra (reasoning medium, summaries auto)"
+    },
+    { name: "Directory", value: "~" },
+    { name: "Permissions", value: "Read Only (never)" },
+    { name: "Agents.md", value: "<none>" },
+    { name: "Account", value: "[REDACTED]" },
+    { name: "Collaboration mode", value: "Default" },
+    { name: "Session", value: nativeThreadId },
+    { name: "Weekly limit", value: "<redacted>" },
+    { name: "GPT-5.3-Codex-Spark limit", value: "" },
+    { name: "5h limit", value: "<redacted>" },
+    { name: "Weekly limit", value: "<redacted>" }
+  ]);
+  assert.doesNotMatch(
+    observed.result?.excerpt ?? "",
+    /<redacted-account>/u
+  );
 });
 
 test("Codex native inspection observer requires the newest fresh exact status card", () => {

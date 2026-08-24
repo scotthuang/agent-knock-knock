@@ -495,7 +495,7 @@ async function createCodexRolloutListFixture(
         cwd: workspace,
         originator: "codex-tui",
         source: "cli",
-        cli_version: "0.148.0"
+        cli_version: "0.149.1"
       }
     },
     {
@@ -607,7 +607,7 @@ async function createCodexRolloutListFixture(
       createTerminalProcessSource: () => ({
         listProcessSnapshots: async () => []
       }),
-      agentVersionForRunningProcess: () => "0.148.0",
+      agentVersionForRunningProcess: () => "0.149.1",
       codexLatentClearResumeObservation: () => undefined,
       codexManagedIdentityResolutionContext: () => ({
         companions: { primary: undefined, additional: [] }

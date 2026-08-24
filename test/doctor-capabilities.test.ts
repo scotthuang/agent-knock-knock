@@ -32,14 +32,15 @@ test("doctor accepts a tmux installation with either supported coding agent", ()
 
 test("doctor recognizes exact native profiles without gating ordinary readiness", () => {
   assert.equal(
-    doctorCodingAgentNativeProfile("codex", "0.148.0"),
-    "codex-tui-0.148.0"
+    doctorCodingAgentNativeProfile("codex", "0.149.1"),
+    "codex-tui-0.149.1"
   );
   assert.equal(
     doctorCodingAgentNativeProfile("claude", "2.1.237"),
     "claude-code-2.1.237-native-status"
   );
-  assert.equal(doctorCodingAgentNativeProfile("codex", "0.148.1"), undefined);
+  assert.equal(doctorCodingAgentNativeProfile("codex", "0.149.0"), undefined);
+  assert.equal(doctorCodingAgentNativeProfile("codex", "0.149.2"), undefined);
   assert.equal(doctorCodingAgentNativeProfile("claude", "2.1.238"), undefined);
 
   const result = evaluateDoctorCapabilities([
