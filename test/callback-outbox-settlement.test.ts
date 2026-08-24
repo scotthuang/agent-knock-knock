@@ -143,10 +143,20 @@ async function withFixedClock(operation: () => void): Promise<void> {
 
 test("callback progress preserves lock, save, then event order", async () => {
   const harness = createHarness();
+  const pending = harness.stored()
+    .callback_delivery as Record<string, unknown>;
+  pending.kind = "approval_notification";
   await withFixedClock(() => {
     harness.service.persistDeliveryProgress(harness.prepared, {
-      stage: "injection_accepted",
-      injection: { status: "accepted" }
+      stage: "transport_checkpoint",
+      kind: "gateway_method",
+      injection: { status: "accepted" },
+      attempt_outcome: {
+        disposition: "accepted",
+        accepted_at: NOW.toISOString(),
+        acceptance_id: "gateway-acceptance-a",
+        evidence: { delivery_kind: "gateway_method" }
+      }
     });
   });
 
@@ -160,10 +170,15 @@ test("callback progress preserves lock, save, then event order", async () => {
     "lock:exit",
     "writer:exit"
   ]);
-  assert.equal(
-    (harness.stored().callback_delivery as Record<string, unknown>)
-      .attempt_lease_expires_at,
+  const delivery = harness.stored()
+    .callback_delivery as Record<string, unknown>;
+  assert.equal(delivery.attempt_lease_expires_at,
     "2026-08-14T12:02:00.000Z"
+  );
+  assert.equal(delivery.kind, "approval_notification");
+  assert.deepEqual(
+    (delivery.attempt_outcome as { evidence?: unknown }).evidence,
+    { delivery_kind: "gateway_method" }
   );
 });
 

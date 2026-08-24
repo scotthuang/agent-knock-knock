@@ -130,6 +130,7 @@ export function createCallbackOutboxSettlement({
       }
       const now = clock.now().toISOString();
       const { stage, ...fields } = progress;
+      const semanticKind = stringValue(currentDelivery.kind);
       const lane = preparedCallbackOutboxLane(prepared);
       const outboxField = callbackOutboxField(lane);
       state.save(prepared.statePath, {
@@ -137,6 +138,7 @@ export function createCallbackOutboxSettlement({
         [outboxField]: {
           ...currentDelivery,
           ...fields,
+          ...(semanticKind ? { kind: semanticKind } : {}),
           updated_at: now,
           attempt_lease_expires_at: new Date(
             clock.nowMs() + attemptLeaseMs

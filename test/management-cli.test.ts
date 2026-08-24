@@ -199,7 +199,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /explicitly closed uncertain Turn[\s\S]*exact resolved close ledger[\s\S]*append-only uncertain receipt[\s\S]*close never forges the lost callback[\s\S]*cannot be renewed/u
+      /Explicit Close always honors the user's decision[\s\S]*sends no terminal input[\s\S]*never stops the coding agent or pane[\s\S]*best-effort cleanup warnings without vetoing the Close[\s\S]*Refresh list afterward and use Watch/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -273,7 +273,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.candidate_rollout_deferred_scope,
-      /complete nonempty candidate inventory[\s\S]*one rollout is materialized[\s\S]*does not prove the current TUI foreground thread[\s\S]*predecessor Turn history stays read-only[\s\S]*unique post-anchor request acceptance[\s\S]*\/clear resume hint is diagnostic only[\s\S]*not routing authority[\s\S]*Same-UUID and different-UUID results keep separate Session lineages[\s\S]*never retried blindly[\s\S]*Explicit close[\s\S]*append-only receipt[\s\S]*absent old rollout[\s\S]*never synthesizes callback delivery/u
+      /complete nonempty candidate inventory[\s\S]*one rollout is materialized[\s\S]*does not prove the current TUI foreground thread[\s\S]*predecessor Turn history stays read-only[\s\S]*unique post-anchor request acceptance[\s\S]*\/clear resume hint is diagnostic only[\s\S]*not routing authority[\s\S]*Same-UUID and different-UUID results keep separate Session lineages[\s\S]*never retried blindly[\s\S]*Explicit Close is the user-owned escape hatch[\s\S]*closes the AKK Turn first[\s\S]*best-effort releases only linked AKK metadata[\s\S]*without terminal input or coding-agent interruption/u
     );
     assert.match(
       listed.action_contracts.actions.send.ordinary_use,
@@ -294,7 +294,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       listed.action_contracts.field_semantics.blocking_turns,
       {
         meaning:
-          "terminal-incarnation-wide collateral unresolved managed Turns that suppress send, lifecycle, and native-inspection actions; an active human-handoff source Turn is never listed here and remains governed only by handoff_decision",
+          "terminal-incarnation-wide unresolved managed Turns that suppress send, lifecycle, and native-inspection actions; each exact Turn remains explicitly closable even during a deferred transfer or human handoff",
         authoritative_action_path:
           "terminals[].blocking_turns[].recovery_action",
         requires_explicit_user_confirmation: true,
@@ -461,6 +461,21 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         "expected_message_id",
         "expected_transition_id"
       ]
+    );
+    assert.equal(
+      listed.action_contracts.actions.close.requires_explicit_user_confirmation,
+      true
+    );
+    assert.equal(listed.action_contracts.actions.close.user_priority, true);
+    assert.equal(listed.action_contracts.actions.close.sends_terminal_input, false);
+    assert.equal(listed.action_contracts.actions.close.stops_coding_agent, false);
+    assert.match(
+      listed.action_contracts.actions.close.cleanup_policy,
+      /Close the selected AKK Turn first[\s\S]*best-effort[\s\S]*preserved and reported as a warning rather than blocking Close/u
+    );
+    assert.match(
+      listed.action_contracts.actions.close.handoff_scope,
+      /same user-priority management-release path[\s\S]*does not depend on a private live-terminal fence/u
     );
     const approvalActions = terminal.available_actions;
     assert.deepEqual(
