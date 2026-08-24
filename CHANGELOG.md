@@ -1,10 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.12.14 - 2026-08-24
 
 ### Added
 
 - Add an exact Codex `0.149.1` native lifecycle and `/status` inspection profile, retaining fail-closed handling for adjacent and future unverified versions.
+- Add a versioned, host-neutral callback route and transport boundary with durable routing and idempotency authority while retaining OpenClaw as the concrete host adapter.
+
+### Fixed
+
+- Distinguish the exact Codex root user row from same-turn synthetic user-role context, preserving Terminal Watch until a later native task actually supersedes it.
+- Safely recover eligible uncertain Send submissions through exact one-shot retry and reconciliation without replaying accepted input or replacing the original request.
+- Make explicit Close honor the user's management-release decision first, with best-effort linked cleanup, warning-only cleanup conflicts, no terminal or coding-agent interruption, and immediate eligibility for a fresh Watch.
+
+### Security
+
+- Freeze callback routing and idempotency authority durably, fail closed on route drift or ambiguous recovery, and keep model-facing callback and retry contracts free of opaque authority material.
+- Require exact adjacent native-event evidence and a privacy-safe content hash when identifying Codex root user rows; missing, duplicate, orphaned, or mismatched evidence fails closed.
 
 ## 0.12.13 - 2026-08-22
 
