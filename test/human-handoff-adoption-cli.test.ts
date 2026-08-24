@@ -74,6 +74,17 @@ const NATIVE_B = "22222222-2222-4222-8222-222222222222";
 const NATIVE_C = "33333333-3333-4333-8333-333333333333";
 const CLAUDE_COMPOSER_DIVIDER =
   "────────────────────────────────────────────────";
+const CODEX_TEST_COMPOSER_FOOTER = "gpt-5.6-sol high · /repo";
+
+function codexComposerScreen(text = ""): string {
+  const [first = "", ...continuation] = text.split("\n");
+  return [
+    "Ready",
+    `› ${first}`,
+    ...continuation.map((row) => `  ${row}`),
+    CODEX_TEST_COMPOSER_FOOTER
+  ].join("\n");
+}
 
 function claudeComposerScreen(text = ""): string {
   const rows = text.split("\n");
@@ -858,20 +869,15 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     const listed = await fixture.listTerminal();
     assert.equal(listed.handoff_state, "external_handoff_blocked");
     assert.equal(listed.available_actions?.send, undefined);
+    assert.equal(listed.blocking_turns?.length, 1);
     assert.equal(
-      listed.blocking_turns,
-      undefined,
-      "an active handoff source must never expose an unfenced generic close"
+      listed.blocking_turns?.[0]?.recovery_action?.arguments?.turn_id,
+      oldTurn.conversation_id
     );
     assert.match(
       String(listed.handoff_blocked_reason ?? ""),
-      /snapshot-bound handoff_decision/u
+      /exact listed Close/u
     );
-    const expectedHandoffToken = String(
-      listed.handoff_decision?.choices?.take_over_current?.action?.arguments
-        ?.expected_handoff_token ?? ""
-    );
-    assert.ok(expectedHandoffToken);
     assert.deepEqual(listed.handoff_decision, {
       kind: "active_turn_requires_decision",
       source_session_id: source.session_id,
@@ -883,8 +889,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
             tool: "agent_knock_knock_close",
             arguments: {
               turn_id: oldTurn.conversation_id,
-              reason: "superseded_by_human_context_switch",
-              expected_handoff_token: expectedHandoffToken
+              reason: "superseded_by_human_context_switch"
             },
             requires_explicit_user_confirmation: true
           },
@@ -899,19 +904,20 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     });
     const closeAction = listed.handoff_decision.choices
       .take_over_current.action;
-    assert.deepEqual(
-      serializedCloseActionsForTurn(listed, oldTurn.conversation_id),
-      [closeAction],
-      "the complete serialized terminal row must expose only the token-fenced handoff close"
+    const listedCloseActions = serializedCloseActionsForTurn(
+      listed,
+      oldTurn.conversation_id
     );
-    assert.equal(
-      closeAction.arguments.expected_handoff_token,
-      expectedHandoffToken
-    );
+    assert.ok(listedCloseActions.length >= 2);
+    assert.ok(listedCloseActions.some((action) =>
+      action.arguments?.reason === "superseded_by_human_context_switch"
+    ));
+    assert.ok(listedCloseActions.every((action) =>
+      action.arguments?.expected_handoff_token === undefined
+    ));
     const closed = await fixture.closeTurn(
       closeAction.arguments.turn_id,
-      closeAction.arguments.reason,
-      closeAction.arguments.expected_handoff_token
+      closeAction.arguments.reason
     );
     assert.equal(closed.status, 0, fixture.debug(closed));
     const oldTurnAfterClose = listConversations(fixture.storeDir).find(
@@ -924,7 +930,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     );
     assert.equal(
       oldTurnAfterClose?.disposition,
-      "superseded_by_human_context_switch"
+      "user_abandoned_management"
     );
     assert.equal(
       fixture.keyDispatches().flat().some((key) =>
@@ -939,7 +945,6 @@ test("an active source Turn exposes an exact supersede decision before handoff",
       refreshed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
     assert.ok(freshToken);
-    assert.notEqual(freshToken, expectedHandoffToken);
 
     const sent = await fixture.sendToTerminal(
       "Continue only after the human explicitly superseded the old Turn.",
@@ -964,7 +969,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
   }
 });
 
-test("a generic close cached before a human thread switch cannot bypass the fresh handoff decision", async () => {
+test("a generic close cached before a human thread switch still releases AKK management", async () => {
   const fixture = createHandoffFixture({ agent: "claude" });
   try {
     const source = fixture.persistSession({
@@ -997,69 +1002,34 @@ test("a generic close cached before a human thread switch cannot bypass the fres
       source.session_id,
       fixture.storeDir
     );
-    const turnPaths = pathsForConversation(
-      oldTurn.conversation_id,
-      fixture.storeDir
-    );
-    const ledgerDir = path.join(
-      fixture.root,
-      "runtime",
-      "terminal-dispatch"
-    );
     const sourceBytes = snapshotDirectoryBytes(sourcePaths.directory);
-    const turnBytes = snapshotDirectoryBytes(turnPaths.conversationDir);
-    const ledgerBytes = snapshotDirectoryBytes(ledgerDir);
 
-    const rejected = await fixture.closeTurn(
+    const closed = await fixture.closeTurn(
       cachedClose.arguments.turn_id,
       cachedClose.arguments.reason
     );
-    assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(
-      rejected.stderr,
-      /handoff|human context switch|expected-handoff-token|refresh/iu
-    );
+    assert.equal(closed.status, 0, fixture.debug(closed));
+    const output = JSON.parse(closed.stdout);
+    assert.equal(output.closed, true);
+    assert.equal(output.management_released, true);
+    assert.equal(output.terminal_input_sent, false);
+    assert.match(String(output.next_action ?? ""), /Watch/u);
     assert.deepEqual(
       snapshotDirectoryBytes(sourcePaths.directory),
       sourceBytes,
-      "a stale generic close must not mutate the source Session"
-    );
-    assert.deepEqual(
-      snapshotDirectoryBytes(turnPaths.conversationDir),
-      turnBytes,
-      "a stale generic close must not mutate the source Turn or event log"
-    );
-    assert.deepEqual(
-      snapshotDirectoryBytes(ledgerDir),
-      ledgerBytes,
-      "a stale generic close must not create or mutate a dispatch ledger"
+      "explicit Close must not mutate the source Session"
     );
     assert.deepEqual(fixture.literalInputs(), []);
     assert.equal(fixture.enterCount(), 0);
     assert.equal(fixture.transitionCount(), 0);
 
-    const fresh = await fixture.listTerminal();
-    const handoffClose = fresh.handoff_decision?.choices
-      ?.take_over_current?.action;
-    assert.equal(handoffClose?.tool, "agent_knock_knock_close");
-    assert.equal(
-      handoffClose?.arguments?.turn_id,
-      oldTurn.conversation_id
-    );
-    assert.ok(handoffClose?.arguments?.expected_handoff_token);
-    const closed = await fixture.closeTurn(
-      handoffClose.arguments.turn_id,
-      handoffClose.arguments.reason,
-      handoffClose.arguments.expected_handoff_token
-    );
-    assert.equal(closed.status, 0, fixture.debug(closed));
     const oldTurnAfter = listConversations(fixture.storeDir).find(
       (turn) => turn.conversation_id === oldTurn.conversation_id
     );
     assert.equal(oldTurnAfter?.status, "closed");
     assert.equal(
       oldTurnAfter?.disposition,
-      "superseded_by_human_context_switch"
+      "user_abandoned_management"
     );
     assert.deepEqual(fixture.literalInputs(), []);
     assert.equal(fixture.enterCount(), 0);
@@ -1115,7 +1085,7 @@ test("a cached generic close remains available as Store-only recovery after its 
 });
 
 for (const agent of ["codex", "claude"] as const) {
-  test(`${agent} managed close retires an accepted Turn after its exact bound agent process is verified dead`, async () => {
+  test(`${agent} explicit Close releases an accepted Turn after its agent process exits`, async () => {
     const fixture = createHandoffFixture({
       agent,
       ...(agent === "codex"
@@ -1198,19 +1168,18 @@ for (const agent of ["codex", "claude"] as const) {
       assert.equal(closed.status, 0, fixture.debug(closed));
       const closedOutput = JSON.parse(closed.stdout);
       assert.equal(closedOutput.closed, true);
+      assert.equal(closedOutput.management_released, true);
+      assert.equal(closedOutput.terminal_input_sent, false);
       assert.equal(closedOutput.terminal_dispatch_resolved, true);
+      assert.match(String(closedOutput.next_action ?? ""), /Watch/u);
 
       const turnAfter = listConversations(fixture.storeDir).find(
         (candidate) => candidate.conversation_id === turnId
       );
       assert.equal(turnAfter?.status, "closed");
-      const processDisposition = (
-        turnAfter as Record<string, any> | undefined
-      )?.terminal_agent_process_disposition;
-      assert.equal(processDisposition?.status, "verified_dead");
       assert.equal(
-        processDisposition?.proof?.kind,
-        "exact_pid_absent_from_complete_process_inventory"
+        (turnAfter as Record<string, any> | undefined)?.disposition,
+        "user_abandoned_management"
       );
       assert.deepEqual(
         snapshotDirectoryBytes(managedSessionPaths.directory),
@@ -1232,26 +1201,19 @@ for (const agent of ["codex", "claude"] as const) {
         String(turnAfter?.event_log_path),
         "utf8"
       );
-      const agentPid = agent === "codex" ? 81_001 : 82_001;
-      assert.match(eventEvidence, /terminal_agent_process_verified_dead/u);
-      assert.match(eventEvidence, new RegExp(String(agentPid), "u"));
-      assert.match(
+      assert.match(eventEvidence, /conversation_closed/u);
+      assert.doesNotMatch(
         eventEvidence,
-        agent === "codex"
-          ? new RegExp(`codex-pid:${agentPid}:birth:`, "u")
-          : new RegExp(
-              `claude-pid:${agentPid}:started:1786339200000`,
-              "u"
-            )
+        /terminal_agent_process_verified_dead/u,
+        "explicit Close does not need process-death proof"
       );
-      assert.match(eventEvidence, new RegExp(`human-${agent}:0\\.0`, "u"));
     } finally {
       fixture.cleanup();
     }
   });
 }
 
-test("a managed close fails closed when exact process death cannot be verified", async () => {
+test("an explicit Close is not vetoed when process death cannot be verified", async () => {
   const fixture = createHandoffFixture({ agent: "claude" });
   try {
     const source = fixture.persistSession({
@@ -1272,34 +1234,32 @@ test("a managed close fails closed when exact process death cannot be verified",
       source.session_id,
       fixture.storeDir
     );
-    const turnPaths = pathsForConversation(
-      turn.conversation_id,
-      fixture.storeDir
-    );
     const sourceBytes = snapshotDirectoryBytes(sourcePaths.directory);
-    const turnBytes = snapshotDirectoryBytes(turnPaths.conversationDir);
     fixture.setProcessProbeFailure(
       new Error("synthetic process inventory probe failed")
     );
 
-    const rejected = await fixture.closeTurn(
+    const closed = await fixture.closeTurn(
       cachedClose.arguments.turn_id,
       cachedClose.arguments.reason
     );
-    assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(
-      rejected.stderr,
-      /process inventory probe failed|cannot verify|unverifiable/iu
+    assert.equal(closed.status, 0, fixture.debug(closed));
+    const output = JSON.parse(closed.stdout);
+    assert.equal(output.closed, true);
+    assert.equal(output.management_released, true);
+    assert.equal(output.terminal_input_sent, false);
+    const turnAfter = listConversations(fixture.storeDir).find(
+      (candidate) => candidate.conversation_id === turn.conversation_id
+    );
+    assert.equal(turnAfter?.status, "closed");
+    assert.equal(
+      (turnAfter as Record<string, any> | undefined)?.disposition,
+      "user_abandoned_management"
     );
     assert.deepEqual(
       snapshotDirectoryBytes(sourcePaths.directory),
       sourceBytes,
-      "an unverifiable process probe must not mutate the Session"
-    );
-    assert.deepEqual(
-      snapshotDirectoryBytes(turnPaths.conversationDir),
-      turnBytes,
-      "an unverifiable process probe must not mutate the Turn or event log"
+      "explicit Close must not mutate the Session"
     );
     assert.deepEqual(fixture.literalInputs(), []);
     assert.equal(fixture.enterCount(), 0);
@@ -1600,6 +1560,7 @@ test("reconciliation stalls a verified-dead accepted Turn once and keeps it clos
     assert.equal(JSON.parse(closed.stdout).terminal_dispatch_resolved, true);
     const closedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(closedState.status, "closed");
+    assert.equal(closedState.disposition, "user_abandoned_management");
     assert.equal(
       closedState.terminal_agent_process_disposition?.status,
       "verified_dead"
@@ -1746,7 +1707,7 @@ test("verified-dead reconciliation resumes after events-before-state crash witho
   }
 });
 
-test("verified-dead close resumes after state-before-ledger crash without a fresh process probe", async () => {
+test("explicit Close ignores the obsolete verified-dead crash seam and commits Store state", async () => {
   const fixture = createHandoffFixture({
     agent: "codex",
     codexInitialNativeThreadId: NATIVE_A
@@ -1779,67 +1740,49 @@ test("verified-dead close resumes after state-before-ledger crash without a fres
     const keyDispatchesBeforeClose = fixture.keyDispatches();
     fixture.setAgentProcessAbsent();
 
-    const crashed = await fixture.closeTurn(
+    const closed = await fixture.closeTurn(
       turnId,
       "operator closes the verified-dead process",
       undefined,
       { AKK_TEST_EXIT_AFTER_VERIFIED_DEAD_CLOSE_STATE: "1" }
     );
-    assert.equal(crashed.status, 86, fixture.debug(crashed));
-    const closedBeforeRecovery = JSON.parse(
+    assert.equal(closed.status, 0, fixture.debug(closed));
+    const output = JSON.parse(closed.stdout);
+    assert.equal(output.closed, true);
+    assert.equal(output.management_released, true);
+    assert.equal(output.terminal_input_sent, false);
+    assert.equal(output.terminal_dispatch_resolved, true);
+    const closedState = JSON.parse(
       fs.readFileSync(paths.statePath, "utf8")
     );
-    assert.equal(closedBeforeRecovery.status, "closed");
+    assert.equal(closedState.status, "closed");
     assert.equal(
-      closedBeforeRecovery.terminal_agent_process_disposition?.status,
-      "verified_dead"
+      closedState.disposition,
+      "user_abandoned_management"
     );
-    assert.equal(fixture.dispatchLedgerForTurn(turnId)?.status, "agent_accepted");
-    const eventsBeforeRecovery = fs.readFileSync(paths.logPath, "utf8")
+    assert.equal(
+      closedState.terminal_agent_process_disposition,
+      undefined,
+      "explicit Close does not need process-death proof"
+    );
+    assert.equal(fixture.dispatchLedgerForTurn(turnId)?.status, "resolved");
+    const events = fs.readFileSync(paths.logPath, "utf8")
       .trim()
       .split(/\r?\n/u)
       .filter(Boolean)
       .map((line) => JSON.parse(line));
     assert.equal(
-      eventsBeforeRecovery.filter((event) =>
+      events.filter((event) =>
         event.event === "terminal_agent_process_verified_dead"
-      ).length,
-      1
-    );
-    assert.equal(
-      eventsBeforeRecovery.filter((event) =>
-        event.event === "conversation_closed"
       ).length,
       0
     );
-
-    fixture.setProcessProbeFailure(
-      new Error("process inventory unavailable during close recovery")
+    assert.equal(
+      events.filter((event) =>
+        event.event === "conversation_closed"
+      ).length,
+      1
     );
-    const recovered = await fixture.closeTurn(
-      turnId,
-      "operator closes the verified-dead process"
-    );
-    assert.equal(recovered.status, 0, fixture.debug(recovered));
-    const recoveredOutput = JSON.parse(recovered.stdout);
-    assert.equal(recoveredOutput.closed, true);
-    assert.equal(recoveredOutput.recovered, true);
-    assert.equal(recoveredOutput.terminal_dispatch_resolved, true);
-    assert.equal(fixture.dispatchLedgerForTurn(turnId)?.status, "resolved");
-    const eventsAfterRecovery = fs.readFileSync(paths.logPath, "utf8")
-      .trim()
-      .split(/\r?\n/u)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    const deathEvents = eventsAfterRecovery.filter((event) =>
-      event.event === "terminal_agent_process_verified_dead"
-    );
-    const closeEvents = eventsAfterRecovery.filter((event) =>
-      event.event === "conversation_closed"
-    );
-    assert.equal(deathEvents.length, 1);
-    assert.equal(closeEvents.length, 1);
-    assert.equal(deathEvents[0].evidence_id, closeEvents[0].evidence_id);
     assert.deepEqual(fixture.literalInputs(), literalInputsBeforeClose);
     assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeClose);
   } finally {
@@ -2056,7 +1999,7 @@ test("partial Codex rollout stalls with unverifiable completion evidence", async
   }
 });
 
-test("a dead process does not bypass a nonterminal deferred foreground transfer", async () => {
+test("explicit Close is not vetoed by a nonterminal deferred foreground transfer", async () => {
   const fixture = createHandoffFixture({
     agent: "codex",
     codexInitialNativeThreadId: NATIVE_A
@@ -2135,28 +2078,28 @@ test("a dead process does not bypass a nonterminal deferred foreground transfer"
     assert.equal(fixture.enterCount(), 0);
 
     fixture.setAgentProcessAbsent();
-    const before = snapshotDirectoryBytes(
-      pathsForConversation(
-        sourceTurn.conversation_id,
-        fixture.storeDir
-      ).conversationDir
-    );
     const literalInputsBeforeClose = fixture.literalInputs();
     const keyDispatchesBeforeClose = fixture.keyDispatches();
     const close = await fixture.closeTurn(
       sourceTurn.conversation_id,
-      "explicit close must still respect deferred authority"
+      "explicit close releases AKK management despite deferred authority"
     );
-    assert.equal(close.status, 1, fixture.debug(close));
-    assert.match(close.stderr, /deferred foreground transfer/iu);
-    assert.deepEqual(
-      snapshotDirectoryBytes(
-        pathsForConversation(
-          sourceTurn.conversation_id,
-          fixture.storeDir
-        ).conversationDir
-      ),
-      before
+    assert.equal(close.status, 0, fixture.debug(close));
+    const output = JSON.parse(close.stdout);
+    assert.equal(output.closed, true);
+    assert.equal(output.management_released, true);
+    const turnAfter = listConversations(fixture.storeDir).find(
+      (candidate) => candidate.conversation_id === sourceTurn.conversation_id
+    );
+    assert.equal(turnAfter?.status, "closed");
+    assert.equal(
+      (turnAfter as Record<string, any> | undefined)?.disposition,
+      "user_abandoned_management"
+    );
+    assert.equal(
+      listDeferredForegroundTransfers(fixture.storeDir)[0]?.status,
+      "prepared",
+      "an unlinked transfer is outside this Turn's best-effort cleanup scope"
     );
     assert.deepEqual(fixture.literalInputs(), literalInputsBeforeClose);
     assert.deepEqual(fixture.keyDispatches(), keyDispatchesBeforeClose);
@@ -2218,7 +2161,7 @@ test("a verified-dead agent does not terminate a waiting_for_openclaw callback T
   }
 });
 
-test("a cached generic close does not treat agent process identity drift as terminal unavailability", async () => {
+test("a cached generic Close is not vetoed by agent process identity drift", async () => {
   const fixture = createHandoffFixture({ agent: "claude" });
   try {
     const source = fixture.persistSession({
@@ -2235,23 +2178,23 @@ test("a cached generic close does not treat agent process identity drift as term
       ?.available_actions?.close;
     assert.equal(cachedClose?.tool, "agent_knock_knock_close");
 
-    const turnPaths = pathsForConversation(
-      turn.conversation_id,
-      fixture.storeDir
-    );
-    const turnBytes = snapshotDirectoryBytes(turnPaths.conversationDir);
     fixture.setAgentProcessIntegrityDrift();
 
-    const rejected = await fixture.closeTurn(
+    const closed = await fixture.closeTurn(
       cachedClose.arguments.turn_id,
       cachedClose.arguments.reason
     );
-    assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(rejected.stderr, /no longer active|identity|process/iu);
-    assert.deepEqual(
-      snapshotDirectoryBytes(turnPaths.conversationDir),
-      turnBytes,
-      "process identity drift must reject before Turn or event-log mutation"
+    assert.equal(closed.status, 0, fixture.debug(closed));
+    const output = JSON.parse(closed.stdout);
+    assert.equal(output.closed, true);
+    assert.equal(output.management_released, true);
+    const turnAfter = listConversations(fixture.storeDir).find(
+      (candidate) => candidate.conversation_id === turn.conversation_id
+    );
+    assert.equal(turnAfter?.status, "closed");
+    assert.equal(
+      (turnAfter as Record<string, any> | undefined)?.disposition,
+      "user_abandoned_management"
     );
     assert.deepEqual(fixture.literalInputs(), []);
     assert.equal(fixture.enterCount(), 0);
@@ -2265,7 +2208,7 @@ for (const decisionDrift of [
   "live thread B to C",
   "live thread B back to A"
 ] as const) {
-  test(`a take-over decision rejects stale ${decisionDrift} evidence without mutation`, async () => {
+  test(`explicit Close survives stale ${decisionDrift} handoff evidence`, async () => {
     const fixture = createHandoffFixture({ agent: "claude" });
     try {
       const source = fixture.persistSession({
@@ -2279,10 +2222,7 @@ for (const decisionDrift of [
       const action = listed.handoff_decision?.choices
         ?.take_over_current?.action;
       assert.equal(action?.tool, "agent_knock_knock_close");
-      const expectedHandoffToken = String(
-        action?.arguments?.expected_handoff_token ?? ""
-      );
-      assert.ok(expectedHandoffToken);
+      assert.equal(action?.arguments?.expected_handoff_token, undefined);
 
       if (decisionDrift === "source Turn revision") {
         const oldTurnState = listConversations(fixture.storeDir).find(
@@ -2307,37 +2247,31 @@ for (const decisionDrift of [
       const sessionsBeforeClose = JSON.stringify(
         listManagedSessions(fixture.storeDir)
       );
-      const turnsBeforeClose = JSON.stringify(
-        listConversations(fixture.storeDir)
-      );
       const sourceStatePath = pathsForManagedSession(
         source.session_id,
         fixture.storeDir
       ).statePath;
-      const turnStatePath = pathsForConversation(
-        oldTurn.conversation_id,
-        fixture.storeDir
-      ).statePath;
       const sourceBytesBeforeClose = fs.readFileSync(sourceStatePath);
-      const turnBytesBeforeClose = fs.readFileSync(turnStatePath);
 
-      const rejected = await fixture.closeTurn(
+      const closed = await fixture.closeTurn(
         action.arguments.turn_id,
-        action.arguments.reason,
-        expectedHandoffToken
+        action.arguments.reason
       );
-      assert.equal(rejected.status, 1, fixture.debug(rejected));
-      assert.match(rejected.stderr, /changed|stale|refresh|handoff/iu);
+      assert.equal(closed.status, 0, fixture.debug(closed));
+      assert.equal(JSON.parse(closed.stdout).management_released, true);
       assert.equal(
         JSON.stringify(listManagedSessions(fixture.storeDir)),
         sessionsBeforeClose
       );
-      assert.equal(
-        JSON.stringify(listConversations(fixture.storeDir)),
-        turnsBeforeClose
-      );
       assert.deepEqual(fs.readFileSync(sourceStatePath), sourceBytesBeforeClose);
-      assert.deepEqual(fs.readFileSync(turnStatePath), turnBytesBeforeClose);
+      const turnAfter = listConversations(fixture.storeDir).find(
+        (candidate) => candidate.conversation_id === oldTurn.conversation_id
+      );
+      assert.equal(turnAfter?.status, "closed");
+      assert.equal(
+        (turnAfter as Record<string, any> | undefined)?.disposition,
+        "user_abandoned_management"
+      );
       assert.deepEqual(fixture.literalInputs(), []);
       assert.equal(fixture.enterCount(), 0);
       assert.equal(fixture.transitionCount(), 0);
@@ -2347,7 +2281,7 @@ for (const decisionDrift of [
   });
 }
 
-test("a take-over decision rejects B becoming active elsewhere without touching A", async () => {
+test("explicit Close survives B becoming active elsewhere without touching A", async () => {
   const fixture = createHandoffFixture({ agent: "claude" });
   try {
     const source = fixture.persistSession({
@@ -2360,32 +2294,30 @@ test("a take-over decision rejects B becoming active elsewhere without touching 
     const listed = await fixture.listTerminal();
     const action = listed.handoff_decision?.choices
       ?.take_over_current?.action;
-    const expectedHandoffToken = String(
-      action?.arguments?.expected_handoff_token ?? ""
-    );
-    assert.ok(expectedHandoffToken);
+    assert.equal(action?.arguments?.expected_handoff_token, undefined);
 
     fixture.addActiveOwnerForCurrentThread();
     const sourceStatePath = pathsForManagedSession(
       source.session_id,
       fixture.storeDir
     ).statePath;
-    const turnStatePath = pathsForConversation(
-      oldTurn.conversation_id,
-      fixture.storeDir
-    ).statePath;
     const sourceBytes = fs.readFileSync(sourceStatePath);
-    const turnBytes = fs.readFileSync(turnStatePath);
 
-    const rejected = await fixture.closeTurn(
+    const closed = await fixture.closeTurn(
       action.arguments.turn_id,
-      action.arguments.reason,
-      expectedHandoffToken
+      action.arguments.reason
     );
-    assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(rejected.stderr, /active in another|already active|ownership/iu);
+    assert.equal(closed.status, 0, fixture.debug(closed));
+    assert.equal(JSON.parse(closed.stdout).management_released, true);
     assert.deepEqual(fs.readFileSync(sourceStatePath), sourceBytes);
-    assert.deepEqual(fs.readFileSync(turnStatePath), turnBytes);
+    const turnAfter = listConversations(fixture.storeDir).find(
+      (candidate) => candidate.conversation_id === oldTurn.conversation_id
+    );
+    assert.equal(turnAfter?.status, "closed");
+    assert.equal(
+      (turnAfter as Record<string, any> | undefined)?.disposition,
+      "user_abandoned_management"
+    );
     assert.deepEqual(fixture.literalInputs(), []);
     assert.equal(fixture.enterCount(), 0);
     assert.equal(fixture.transitionCount(), 0);
@@ -2398,7 +2330,7 @@ for (const callbackStatus of [
   "callback_pending",
   "callback_failed"
 ] as const) {
-  test(`a ${callbackStatus} Turn with an exact resolved ledger can be superseded without input`, async () => {
+  test(`explicit Close supersedes a ${callbackStatus} callback lane without input`, async () => {
     const fixture = createHandoffFixture({ agent: "claude" });
     try {
       const source = fixture.persistSession({
@@ -2421,18 +2353,19 @@ for (const callbackStatus of [
       const listed = await fixture.listTerminal();
       const action = listed.handoff_decision?.choices
         ?.take_over_current?.action;
-      const expectedHandoffToken = String(
-        action?.arguments?.expected_handoff_token ?? ""
+      assert.equal(
+        action?.arguments?.expected_handoff_token,
+        undefined,
+        JSON.stringify(listed, null, 2)
       );
-      assert.ok(expectedHandoffToken, JSON.stringify(listed, null, 2));
       const closed = await fixture.closeTurn(
         action.arguments.turn_id,
-        action.arguments.reason,
-        expectedHandoffToken
+        action.arguments.reason
       );
       assert.equal(closed.status, 0, fixture.debug(closed));
       const output = JSON.parse(closed.stdout);
       assert.equal(output.closed, true);
+      assert.equal(output.management_released, true);
       assert.equal(output.terminal_dispatch_resolved, true);
       const oldTurnAfter = listConversations(fixture.storeDir).find((turn) =>
         turn.conversation_id === oldTurn.conversation_id
@@ -2440,12 +2373,14 @@ for (const callbackStatus of [
       assert.equal(oldTurnAfter?.status, "closed");
       assert.equal(
         oldTurnAfter?.disposition,
-        "superseded_by_human_context_switch"
+        "user_abandoned_management"
       );
       assert.equal(
         oldTurnAfter?.close_reason,
         "superseded_by_human_context_switch"
       );
+      assert.equal(oldTurnAfter?.callback_expected, false);
+      assert.equal(oldTurnAfter?.callback_delivery?.status, "superseded");
       assert.deepEqual(fixture.literalInputs(), []);
       assert.equal(fixture.enterCount(), 0);
       assert.equal(fixture.transitionCount(), 0);
@@ -2478,14 +2413,13 @@ test("a target native thread already bound in Store remains a blocked handoff", 
     assert.equal(listed.available_actions?.send, undefined);
     assert.equal(listed.handoff_decision, undefined);
     assert.equal(
-      listed.blocking_turns,
-      undefined,
-      "an ineligible target must not make the active source generically closable"
+      listed.blocking_turns?.[0]?.recovery_action?.arguments?.turn_id,
+      sourceTurn.conversation_id
     );
-    assert.deepEqual(
-      serializedCloseActionsForTurn(listed, sourceTurn.conversation_id),
-      [],
-      "the complete serialized terminal row must not expose a close for an ineligible handoff source"
+    assert.ok(
+      serializedCloseActionsForTurn(listed, sourceTurn.conversation_id)
+        .length >= 1,
+      "blocked input must not hide the user's exact Close action"
     );
     const rejected = await fixture.sendToTerminal(
       "Never adopt a target with a competing bound claim."
@@ -2533,14 +2467,13 @@ test("ambiguous source claims block automatic handoff before terminal input", as
     assert.equal(listed.available_actions?.send, undefined);
     assert.equal(listed.handoff_decision, undefined);
     assert.equal(
-      listed.blocking_turns,
-      undefined,
-      "ambiguous handoff sources must not leak a generic close action"
+      listed.blocking_turns?.[0]?.recovery_action?.arguments?.turn_id,
+      sourceTurn.conversation_id
     );
-    assert.deepEqual(
-      serializedCloseActionsForTurn(listed, sourceTurn.conversation_id),
-      [],
-      "the complete serialized terminal row must not expose a close for an ambiguous handoff source"
+    assert.ok(
+      serializedCloseActionsForTurn(listed, sourceTurn.conversation_id)
+        .length >= 1,
+      "ambiguous input authority must not hide the user's exact Close action"
     );
 
     const rejected = await fixture.sendToTerminal(
@@ -3133,7 +3066,9 @@ function createHandoffFixture({
   });
   const terminalId =
     `terminal:v2:tmux:${agent}:${target}:${agentPid}`;
-  const prompt = agent === "codex" ? "Ready\n› " : claudeComposerScreen();
+  const prompt = agent === "codex"
+    ? codexComposerScreen()
+    : claudeComposerScreen();
   let resolverNativeThreadId = codexInitialNativeThreadId ?? (
     agent === "codex" && codexTargetMode === "status_card_only"
       ? NATIVE_A
@@ -3193,7 +3128,7 @@ function createHandoffFixture({
         mutable.setScreen(
           target,
           agent === "codex"
-            ? `${prompt}${operation.text}`
+            ? codexComposerScreen(operation.text)
             : claudeComposerScreen(operation.text)
         );
         if (

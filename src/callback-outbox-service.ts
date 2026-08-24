@@ -972,7 +972,6 @@ function beginPreparedCallbackTransport(
       const delivery = isRecord(current[field]) ? current[field] : undefined;
       const message = isRecord(delivery?.message) ? delivery.message : undefined;
       if (
-        current.status === "closed" ||
         delivery?.status !== "pending" ||
         message?.id !== prepared.message.id ||
         Number(delivery.attempts) !== prepared.deliveryAttempt ||

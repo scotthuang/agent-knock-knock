@@ -239,7 +239,7 @@ test("managed terminal send cannot overwrite a concurrent terminal cancellation"
   }
 });
 
-test("managed terminal close locks terminal before state and prevents queued sends or approvals", async () => {
+test("managed Close uses the Store writer rather than the terminal lock and prevents queued sends or approvals", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-close-terminal-race-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -254,6 +254,7 @@ test("managed terminal close locks terminal before state and prevents queued sen
     ".akk-cli-test-runtime",
     "terminal-locks"
   );
+  const writerLockPath = path.join(storeDir, ".akk-writer.lock");
   const racedMessage = "This message must never be sent after close";
   const codexIdentityArgs = codexNativeIdentityArgs({
     pid: 33389,
@@ -329,22 +330,31 @@ test("managed terminal close locks terminal before state and prevents queued sen
       "closed during terminal mutation race"
     ], testEnv);
     await waitForCondition(() => {
-      if (!fs.existsSync(terminalLockDir)) {
+      if (!fs.existsSync(writerLockPath)) {
         return false;
       }
-      const terminalLocks = fs.readdirSync(terminalLockDir)
-        .filter((name) =>
-          name.startsWith("terminal-bridge-send-") &&
-          name.endsWith(".lock")
-        );
-      return terminalLocks.some((name) => {
-        const owner = JSON.parse(
-          fs.readFileSync(path.join(terminalLockDir, name), "utf8")
-        );
-        return owner.pid === closing?.child.pid;
-      });
-    }, "close to acquire the terminal lock before waiting for state");
+      const owner = JSON.parse(fs.readFileSync(writerLockPath, "utf8"));
+      return owner.pid === closing?.child.pid;
+    }, "Close to acquire the Store writer before waiting for state");
     assert.equal(closing.child.exitCode, null);
+    const closeOwnedTerminalLocks = fs.existsSync(terminalLockDir)
+      ? fs.readdirSync(terminalLockDir)
+          .filter((name) =>
+            name.startsWith("terminal-bridge-send-") &&
+            name.endsWith(".lock")
+          )
+          .filter((name) => {
+            const owner = JSON.parse(
+              fs.readFileSync(path.join(terminalLockDir, name), "utf8")
+            );
+            return owner.pid === closing?.child.pid;
+          })
+      : [];
+    assert.deepEqual(
+      closeOwnedTerminalLocks,
+      [],
+      "management-only Close must not acquire the terminal input lock"
+    );
 
     sending = spawnAgentCliCaptured([
       "respond",
@@ -364,7 +374,8 @@ test("managed terminal close locks terminal before state and prevents queued sen
     sendingStopped = true;
 
     const concurrentState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    concurrentState.close_race_marker = "state written while close held the terminal lock";
+    concurrentState.close_race_marker =
+      "state written while Close held the Store writer";
     concurrentState.updated_at = new Date().toISOString();
     fs.writeFileSync(statePath, `${JSON.stringify(concurrentState, null, 2)}\n`);
     fs.unlinkSync(stateLockPath);
@@ -374,10 +385,12 @@ test("managed terminal close locks terminal before state and prevents queued sen
     assert.equal(closeResult.status, 0, closeResult.stderr || closeResult.stdout);
     const closeParsed = JSON.parse(closeResult.stdout);
     assert.equal(closeParsed.closed, true);
+    assert.equal(closeParsed.management_released, true);
+    assert.equal(closeParsed.terminal_input_sent, false);
     assert.equal(closeParsed.conversation.status, "closed");
     assert.equal(
       closeParsed.conversation.close_race_marker,
-      "state written while close held the terminal lock",
+      "state written while Close held the Store writer",
       "close must reload state after acquiring the state lock"
     );
 
@@ -392,7 +405,7 @@ test("managed terminal close locks terminal before state and prevents queued sen
     assert.equal(finalState.close_reason, "closed during terminal mutation race");
     assert.equal(
       finalState.close_race_marker,
-      "state written while close held the terminal lock"
+      "state written while Close held the Store writer"
     );
     const sendKeyCalls = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys");

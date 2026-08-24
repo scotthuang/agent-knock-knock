@@ -623,13 +623,13 @@ function handoffBlockedReason(facts: {
   automatedInputComposerReady: boolean;
 }): string | undefined {
   if (facts.recoveryBlockingTurnCount > 0) {
-    return "the terminal has unresolved managed Turn state; use only a listed blocking_turns recovery action";
+    return "the terminal has unresolved managed Turn state; input-producing actions remain blocked, but an exact listed Close can always release AKK management";
   }
   if (facts.hasHandoffDecision) {
-    return "the source Session has one active Turn; use only the snapshot-bound handoff_decision after explicit confirmation";
+    return "the source Session has one active Turn; input-producing handoff remains snapshot-bound, but an exact listed Close can always release AKK management";
   }
   if (facts.sourceBlockingTurnCount > 0) {
-    return "the conflicting source Session has unresolved Turn state but no snapshot-bound handoff decision is currently safe; inspect the conflict and refresh";
+    return "the conflicting source Session has unresolved Turn state; automatic input remains unsafe, but an exact listed Close can always release AKK management";
   }
   return facts.automatedInputComposerReady
     ? undefined

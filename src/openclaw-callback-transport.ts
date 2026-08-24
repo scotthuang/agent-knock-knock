@@ -350,7 +350,10 @@ function deliverGenericOpenClawCallback(input: {
     gatewaySession: route.controller_session_id,
     openclawSession: route.controller_session_id,
     openclawBin: stringValue(legacyOptions.openclawBin),
-    gatewayUrl: openClawGatewayUrlForInvocation(legacyOptions.gatewayUrl),
+    gatewayUrl: openClawGatewayUrlForInvocation(
+      legacyOptions.gatewayUrl,
+      legacyOptions.token
+    ),
     token: stringValue(legacyOptions.token)
   };
   let acceptedCheckpoint: CallbackAttemptOutcome | undefined;
@@ -423,7 +426,10 @@ function deliverGenericTerminalWatchCallback(input: {
   try {
     delivery = input.deliverChatSend({
       openclawBin: stringValue(legacyOptions.openclawBin),
-      gatewayUrl: openClawGatewayUrlForInvocation(legacyOptions.gatewayUrl),
+      gatewayUrl: openClawGatewayUrlForInvocation(
+        legacyOptions.gatewayUrl,
+        legacyOptions.token
+      ),
       token: stringValue(legacyOptions.token),
       params: {
         sessionKey: route.controller_session_id,
@@ -486,9 +492,16 @@ function deliverGenericTerminalWatchCallback(input: {
   return outcome;
 }
 
-function openClawGatewayUrlForInvocation(value: unknown): string | undefined {
+function openClawGatewayUrlForInvocation(
+  value: unknown,
+  tokenValue: unknown
+): string | undefined {
   const gatewayUrl = stringValue(value);
-  return gatewayUrl === DEFAULT_OPENCLAW_GATEWAY_URL ? undefined : gatewayUrl;
+  const token = stringValue(tokenValue);
+  return !token || token === "<token>" ||
+      gatewayUrl === DEFAULT_OPENCLAW_GATEWAY_URL
+    ? undefined
+    : gatewayUrl;
 }
 
 interface DeliverAgentWaitInput {

@@ -464,7 +464,7 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("closing a Turn does not abandon its failed callback outbox", async () => {
+test("closing a Turn supersedes its failed callback outbox", async () => {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-callback-retry-"));
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-retry-"));
   const allowDeliveryPath = path.join(fakeBinDir, "allow-delivery");
@@ -489,7 +489,7 @@ if (fs.existsSync(params.statePath + ".lock")) {
   process.exit(97);
 }
 if (!fs.existsSync(${JSON.stringify(allowDeliveryPath)})) {
-  console.error("gateway temporarily unavailable");
+  console.error("connect ECONNREFUSED 127.0.0.1:29872");
   process.exit(1);
 }
 console.log(JSON.stringify({ ok: true }));
@@ -541,7 +541,7 @@ console.log(JSON.stringify({ ok: true }));
       OPENCLAW_GATEWAY_TOKEN: ""
     });
     assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, /gateway temporarily unavailable/);
+    assert.match(failed.stderr, /ECONNREFUSED/);
 
     const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
     assert.equal(failedState.status, "idle");
@@ -549,17 +549,12 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(failedState.closed_at, undefined);
     assert.equal(failedState.callback_delivery.status, "failed");
     assert.equal(failedState.callback_delivery.attempts, 1);
-    assert.equal(failedState.callback_delivery.gateway_url, undefined);
+    assert.equal(
+      failedState.callback_delivery.gateway_url,
+      configuredGatewayUrl
+    );
     const persistedMessageId = failedState.callback_delivery.message.id;
     assert.match(persistedMessageId, /^msg-/);
-    saveState(created.paths.statePath, {
-      ...failedState,
-      callback_delivery: {
-        ...failedState.callback_delivery,
-        gateway_url: configuredGatewayUrl
-      }
-    });
-
     const closed = await runCli([
       "close",
       "--state",
@@ -570,14 +565,17 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(closed.conversation.status, "closed");
     assert.equal(
       closed.conversation.callback_delivery.status,
-      "failed"
+      "superseded"
     );
-    const closedAt = closed.conversation.closed_at;
-    const closeReason = closed.conversation.close_reason;
-    const turnUpdatedAt = closed.conversation.updated_at;
+    assert.equal(closed.conversation.callback_expected, false);
+    assert.equal(
+      closed.conversation.callback_delivery.superseded_reason,
+      "superseded_by_conversation_close"
+    );
+    const closedStateBytes = fs.readFileSync(created.paths.statePath, "utf8");
 
     fs.writeFileSync(allowDeliveryPath, "yes", "utf8");
-    const retried = await runCli([
+    const retried = await runImportedCli([
       "retry-callback",
       "--state",
       created.paths.statePath
@@ -585,14 +583,15 @@ console.log(JSON.stringify({ ok: true }));
       AKK_GATEWAY_TOKEN: "",
       OPENCLAW_GATEWAY_TOKEN: ""
     });
-    assert.equal(retried.delivered, true);
-    assert.equal(retried.conversation.status, "closed");
-    assert.equal(retried.conversation.closed_at, closedAt);
-    assert.equal(retried.conversation.close_reason, closeReason);
-    assert.equal(retried.conversation.updated_at, turnUpdatedAt);
-    assert.equal(retried.conversation.callback_delivery.status, "delivered");
-    assert.equal(retried.conversation.callback_delivery.attempts, 2);
-    assert.equal(retried.message.id, persistedMessageId);
+    assert.notEqual(retried.status, 0);
+    assert.match(
+      retried.stderr,
+      /no pending or failed callback outbox is available/iu
+    );
+    assert.equal(
+      fs.readFileSync(created.paths.statePath, "utf8"),
+      closedStateBytes
+    );
 
     const events = fs.readFileSync(created.paths.logPath, "utf8")
       .trim()
@@ -602,10 +601,10 @@ console.log(JSON.stringify({ ok: true }));
       event.event === "message" && (event.message?.id ?? event.id) === persistedMessageId
     ).length, 1);
     assert.equal(events.some((event) => event.event === "callback_delivery_failed"), true);
-    assert.equal(events.some((event) => event.event === "callback_delivery_retry_started"), true);
-    assert.equal(events.some((event) => event.event === "callback_delivery_succeeded"), true);
+    assert.equal(events.some((event) => event.event === "callback_delivery_retry_started"), false);
+    assert.equal(events.some((event) => event.event === "callback_delivery_succeeded"), false);
     const calls = readJsonLines(callsPath);
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
     assert.equal(calls.every((args) => !args.includes("--url")), true);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
@@ -613,7 +612,7 @@ console.log(JSON.stringify({ ok: true }));
   }
 });
 
-test("closing during callback delivery preserves a later failure and retry", async () => {
+test("closing during callback delivery supersedes the in-flight outbox", async () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-callback-close-pending-")
   );
@@ -667,7 +666,7 @@ process.exit(1);
       "closed while callback attempt was in flight"
     ]);
     assert.equal(closed.conversation.status, "closed");
-    assert.equal(closed.conversation.callback_delivery.status, "pending");
+    assert.equal(closed.conversation.callback_delivery.status, "superseded");
     const closedAt = closed.conversation.closed_at;
     const closeReason = closed.conversation.close_reason;
     const turnUpdatedAt = closed.conversation.updated_at;
@@ -683,20 +682,23 @@ process.exit(1);
     assert.equal(failed.closed_at, closedAt);
     assert.equal(failed.close_reason, closeReason);
     assert.equal(failed.updated_at, turnUpdatedAt);
-    assert.equal(failed.callback_delivery.status, "failed");
+    assert.equal(failed.callback_delivery.status, "superseded");
 
     fs.writeFileSync(allowSuccessPath, "yes", "utf8");
-    const retried = await runCli([
+    const retried = await runImportedCli([
       "retry-callback",
       "--state",
       created.paths.statePath
     ]);
-    assert.equal(retried.delivered, true);
-    assert.equal(retried.conversation.status, "closed");
-    assert.equal(retried.conversation.closed_at, closedAt);
-    assert.equal(retried.conversation.close_reason, closeReason);
-    assert.equal(retried.conversation.updated_at, turnUpdatedAt);
-    assert.equal(retried.conversation.callback_delivery.status, "delivered");
+    assert.notEqual(retried.status, 0);
+    assert.match(
+      retried.stderr,
+      /no pending or failed callback outbox is available/iu
+    );
+    const events = readJsonLines(created.paths.logPath);
+    assert.equal(events.some((event) =>
+      event.event === "callback_delivery_settle_skipped"
+    ), true);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
@@ -786,7 +788,7 @@ test("an immutable callback retry survives a later Session binding generation", 
       `#!/usr/bin/env node
 const fs = require("node:fs");
 if (!fs.existsSync(${JSON.stringify(allowDeliveryPath)})) {
-  console.error("binding callback gateway unavailable");
+  console.error("connect ECONNREFUSED 127.0.0.1:18789");
   process.exit(1);
 }
 console.log(JSON.stringify({ ok: true }));
@@ -870,7 +872,7 @@ console.log(JSON.stringify({ ok: true }));
       created.paths.statePath,
       fakeOpenClaw
     );
-    assert.match(initial.stderr, /binding callback gateway unavailable/u);
+    assert.match(initial.stderr, /ECONNREFUSED/u);
     const claimed = JSON.parse(
       fs.readFileSync(created.paths.statePath, "utf8")
     );
@@ -948,7 +950,7 @@ if (args[args.indexOf("--url") + 1] !== ${JSON.stringify(gatewayUrl)}) {
   process.exit(97);
 }
 if (!fs.existsSync(${JSON.stringify(allowDeliveryPath)})) {
-  console.error("gateway temporarily unavailable");
+  console.error("connect ECONNREFUSED 127.0.0.1:29874");
   process.exit(1);
 }
 console.log(JSON.stringify({ ok: true }));
@@ -993,7 +995,7 @@ console.log(JSON.stringify({ ok: true }));
       OPENCLAW_GATEWAY_TOKEN: ""
     });
     assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, /gateway temporarily unavailable/);
+    assert.match(failed.stderr, /ECONNREFUSED/);
     const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
     assert.equal(failedState.callback_delivery.gateway_url, gatewayUrl);
     assert.equal(failedState.callback_delivery.gateway_token, undefined);
@@ -1174,7 +1176,7 @@ if (args.includes("--url")) {
   process.exit(96);
 }
 if (calls.length === 0) {
-  console.error("temporary gateway failure");
+  console.error("connect ECONNREFUSED 127.0.0.1:29873");
   process.exit(1);
 }
 console.log(JSON.stringify({ ok: true }));
@@ -1210,14 +1212,10 @@ console.log(JSON.stringify({ ok: true }));
     assert.notEqual(failed.status, 0);
 
     const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
-    assert.equal(failedState.callback_delivery.gateway_url, undefined);
-    saveState(created.paths.statePath, {
-      ...failedState,
-      callback_delivery: {
-        ...failedState.callback_delivery,
-        gateway_url: configuredGatewayUrl
-      }
-    });
+    assert.equal(
+      failedState.callback_delivery.gateway_url,
+      configuredGatewayUrl
+    );
 
     const closed = await waitForCallbackDeliveryState(
       created.paths.statePath,
@@ -1227,7 +1225,7 @@ console.log(JSON.stringify({ ok: true }));
     assert.equal(closed.status, "closed");
     assert.equal(closed.callback_delivery.status, "delivered");
     assert.equal(closed.callback_delivery.attempts, 2);
-    assert.equal(closed.callback_delivery.gateway_url, undefined);
+    assert.equal(closed.callback_delivery.gateway_url, configuredGatewayUrl);
     const calls = readJsonLines(callsPath);
     assert.equal(calls.length, 2);
     assert.equal(calls.every((args) => !args.includes("--url")), true);

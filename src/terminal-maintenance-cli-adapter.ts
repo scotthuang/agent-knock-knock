@@ -1078,6 +1078,8 @@ async function runClose(options: TerminalMaintenanceCliOptions): Promise<void> {
         terminal_input_sent: false,
         coding_agent_stopped: false,
         tmux_pane_closed: false,
+        next_action:
+          "refresh list; if the coding agent is still working, use the fresh Watch action",
         deferred_transfer: transferCleanup,
         terminal_dispatch_resolved: dispatchLedgerResolved,
         ...(

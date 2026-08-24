@@ -212,6 +212,7 @@ export type CallbackRetryPolicyState =
       effective_lease_expires_at_ms?: number;
       persisted_lease_expires_at?: string;
       next_attempt_at?: string;
+      transport_started_without_outcome?: true;
     }
   | {
       phase: "observe_clock";
@@ -220,6 +221,7 @@ export type CallbackRetryPolicyState =
       effective_lease_expires_at_ms: number;
       persisted_lease_expires_at?: string;
       next_attempt_at?: string;
+      transport_started_without_outcome?: true;
     };
 
 export type CallbackRetryObservation =
@@ -301,19 +303,13 @@ export function beginCallbackRetryPolicy(
       reason: "callback outbox has invalid transport-start evidence"
     });
   }
-  if (
+  const transportStartedWithoutOutcome = Boolean(
     transportStartedAt &&
     !(
       attemptOutcome.kind === "present" &&
       attemptOutcome.outcome.disposition === "retryable_failure"
     )
-  ) {
-    return decided({
-      state: "uncertain",
-      attempt,
-      reason: "callback transport started without a durable final outcome"
-    });
-  }
+  );
   if (!Number.isSafeInteger(attemptValue) || attemptValue < 1) {
     return decided({
       state: "unavailable",
@@ -325,7 +321,9 @@ export function beginCallbackRetryPolicy(
     return decided({ state: "exhausted", attempt });
   }
   if (delivery.status === "failed") {
-    return decided({ state: "retryable", attempt });
+    return transportStartedWithoutOutcome
+      ? uncertainTransportStart(attempt)
+      : decided({ state: "retryable", attempt });
   }
 
   const attemptPidValue = Number(delivery.attempt_pid);
@@ -333,7 +331,9 @@ export function beginCallbackRetryPolicy(
     ? attemptPidValue
     : undefined;
   if (attemptPid === undefined) {
-    return decided({ state: "retryable", attempt });
+    return transportStartedWithoutOutcome
+      ? uncertainTransportStart(attempt)
+      : decided({ state: "retryable", attempt });
   }
 
   const persistedLeaseExpiresAt = stringValue(
@@ -350,7 +350,10 @@ export function beginCallbackRetryPolicy(
         ? undefined
         : legacyLastAttemptAtMs + limits.attemptLeaseMs),
     persisted_lease_expires_at: persistedLeaseExpiresAt,
-    next_attempt_at: stringValue(delivery.next_attempt_at)
+    next_attempt_at: stringValue(delivery.next_attempt_at),
+    ...(transportStartedWithoutOutcome
+      ? { transport_started_without_outcome: true as const }
+      : {})
   };
 }
 
@@ -371,7 +374,9 @@ export function reduceCallbackRetryPolicy(
       throw new Error("callback retry policy requires a process observation");
     }
     if (!observation.alive || state.effective_lease_expires_at_ms === undefined) {
-      return decided({ state: "retryable", attempt: state.attempt });
+      return state.transport_started_without_outcome
+        ? uncertainTransportStart(state.attempt)
+        : decided({ state: "retryable", attempt: state.attempt });
     }
     return {
       phase: "observe_clock",
@@ -379,7 +384,10 @@ export function reduceCallbackRetryPolicy(
       attempt_pid: state.attempt_pid,
       effective_lease_expires_at_ms: state.effective_lease_expires_at_ms,
       persisted_lease_expires_at: state.persisted_lease_expires_at,
-      next_attempt_at: state.next_attempt_at
+      next_attempt_at: state.next_attempt_at,
+      ...(state.transport_started_without_outcome
+        ? { transport_started_without_outcome: true as const }
+        : {})
     };
   }
   if (observation.kind !== "clock") {
@@ -395,7 +403,17 @@ export function reduceCallbackRetryPolicy(
       next_attempt_at: state.next_attempt_at
     });
   }
-  return decided({ state: "retryable", attempt: state.attempt });
+  return state.transport_started_without_outcome
+    ? uncertainTransportStart(state.attempt)
+    : decided({ state: "retryable", attempt: state.attempt });
+}
+
+function uncertainTransportStart(attempt: number): CallbackRetryPolicyState {
+  return decided({
+    state: "uncertain",
+    attempt,
+    reason: "callback transport started without a durable final outcome"
+  });
 }
 
 export function callbackDeliveryHasAcceptedTransport(
