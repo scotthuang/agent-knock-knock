@@ -2907,3 +2907,26 @@ CAS, service restart/dedupe/timeout/claim-crash/retry behavior, callback
 projection, list/action v18, slash/tool routing, and documentation. Per the
 repository test policy, integration/full/release tests remain reserved for the
 immediate pre-publication gate of an actual npm or ClawHub release.
+
+## Issue #212 addendum — Host-owned lifecycle adapter
+
+AKK does not run a standalone supervisor. Exactly one external Host owns the
+in-process AKK lifecycle and calls `start()` and `stop()` with its own plugin or
+adapter lifetime. The Host injects an ordered list of reconciliation phases;
+the host-neutral lifecycle service owns only startup execution, periodic
+single-flight scheduling, per-phase error isolation, and stop/drain behavior.
+It owns no Store, callback transport, process identity, Host configuration,
+daemon entrypoint, or cross-Host lease.
+
+OpenClaw is the first adapter. Its compatibility module continues to own the
+existing reconciliation argv, Store-dir lookup, log messages, unref timer
+policy, registration service id, and managed-monitor-before-Watch ordering. The
+legacy module and service names remain unchanged to avoid an unnecessary
+OpenClaw compatibility change; they do not represent an independently running
+Supervisor product. Callback route and delivery ports were already
+host-neutral, so this extraction does not change the Store or callback protocol.
+
+Future Hosts such as Hermes compose their own adapter around the same lifecycle
+and callback ports. AKK deliberately does not add multi-Host ownership,
+Host-switch recovery, PID/heartbeat fencing, or no-Host continuity because
+those are outside the supported product behavior.
