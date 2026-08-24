@@ -321,7 +321,7 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
   fs.writeFileSync(executable, [
     "#!/bin/sh",
     `printf '%s\\n' \"$@\" > \"${argsPath}\"`,
-    "printf '%s\\n' 'n/Users/test/.codex/packages/standalone/releases/0.148.0-aarch64-apple-darwin/bin/codex'",
+    "printf '%s\\n' 'n/Users/test/.codex/packages/standalone/releases/0.149.1-aarch64-apple-darwin/bin/codex'",
     "printf '%s\\n' 'n/Users/test/.local/share/claude/versions/2.1.237'"
   ].join("\n"));
   fs.chmodSync(executable, 0o700);
@@ -329,7 +329,7 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
     env: { PATH: directory, HOME: directory },
     runtimeLog: () => undefined
   }, async () => {
-    assert.equal(runtime().agentVersionForRunningProcess("codex", 77), "0.148.0");
+    assert.equal(runtime().agentVersionForRunningProcess("codex", 77), "0.149.1");
     assert.deepEqual(fs.readFileSync(argsPath, "utf8").trim().split("\n"),
       ["-a", "-p", "77", "-d", "txt", "-Fn"]);
     assert.equal(runtime().agentVersionForRunningProcess("claude", 78), "2.1.237");

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add an exact Codex `0.149.1` native lifecycle and `/status` inspection profile, retaining fail-closed handling for adjacent and future unverified versions.
+
 ## 0.12.13 - 2026-08-22
 
 ### Added

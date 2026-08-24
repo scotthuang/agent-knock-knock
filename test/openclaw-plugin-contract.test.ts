@@ -606,7 +606,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "1181b45dc0aa39a873b108b04d5ebac3eea21301d28a4f0422222f0a3b29c64f"
+    "de1f2eb6aef8caefac403a5b5aa6f960d5c83f3699f3365c10571cf577144968"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -4341,9 +4341,9 @@ test("/akk doctor leaves the Gateway event loop free for its health check", asyn
       checks: [{
         command: "codex",
         available: true,
-        version: "0.148.0",
+        version: "0.149.1",
         native_profile_supported: true,
-        native_profile: "codex-tui-0.148.0"
+        native_profile: "codex-tui-0.149.1"
       }, {
         command: "claude",
         available: true,
