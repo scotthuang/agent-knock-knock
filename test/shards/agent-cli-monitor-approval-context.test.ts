@@ -191,7 +191,7 @@ test("terminal bridge monitor callbacks when the completed prompt has scrolled o
   }
 });
 
-test("terminal approval notification releases the state lock during callback delivery and preserves concurrent close", async () => {
+test("terminal approval notification releases the state lock and late settlement preserves explicit Close", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-approval-callback-close-race-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -329,14 +329,30 @@ test("terminal approval notification releases the state lock during callback del
     assert.equal(closed.status, 0, closed.stderr || closed.stdout);
     const closedParsed = JSON.parse(closed.stdout);
     assert.equal(closedParsed.conversation.status, "closed");
+    assert.equal(closedParsed.management_released, true);
+    assert.equal(closedParsed.terminal_input_sent, false);
     assert.equal(
       monitoring.child.exitCode,
       null,
       "the callback should remain blocked while close completes independently"
     );
-    const closedWhilePending = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    assert.equal(closedWhilePending.status, "closed");
-    assert.equal(closedWhilePending.callback_delivery.status, "pending");
+    const closedWhileTransportInFlight = JSON.parse(
+      fs.readFileSync(statePath, "utf8")
+    );
+    assert.equal(closedWhileTransportInFlight.status, "closed");
+    assert.equal(
+      closedWhileTransportInFlight.callback_delivery.status,
+      "superseded"
+    );
+    assert.equal(
+      typeof closedWhileTransportInFlight.callback_delivery
+        .transport_started_at,
+      "string"
+    );
+    assert.equal(
+      closedWhileTransportInFlight.callback_delivery.attempt_pid,
+      undefined
+    );
 
     fs.writeFileSync(`${openclawGatePath}.release`, "");
     const monitored = await monitoring.result;
@@ -344,18 +360,22 @@ test("terminal approval notification releases the state lock during callback del
     const monitoredParsed = JSON.parse(monitored.stdout);
     assert.equal(monitoredParsed.delivered, true);
     assert.equal(monitoredParsed.conversation.status, "closed");
-    assert.equal(monitoredParsed.conversation.callback_delivery.status, "delivered");
+    assert.equal(
+      monitoredParsed.conversation.callback_delivery.status,
+      "superseded"
+    );
 
     const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(finalState.status, "closed");
-    assert.equal(finalState.callback_delivery.status, "delivered");
+    assert.equal(finalState.callback_delivery.status, "superseded");
     assert.equal(finalState.closed_at, closedParsed.conversation.closed_at);
     assert.equal(finalState.updated_at, closedParsed.conversation.updated_at);
     assert.equal(finalState.close_reason, "closed while approval callback was in flight");
     const events = fs.readFileSync(logPath, "utf8");
     assert.match(events, /terminal_bridge_approval_notification_recorded/u);
     assert.match(events, /callback_gateway_method_delivery/u);
-    assert.match(events, /"state_preserved":true/u);
+    assert.match(events, /callback_delivery_settle_skipped/u);
+    assert.doesNotMatch(events, /callback_delivery_succeeded/u);
     assert.match(events, /conversation_closed/u);
   } finally {
     fs.writeFileSync(`${openclawGatePath}.release`, "");

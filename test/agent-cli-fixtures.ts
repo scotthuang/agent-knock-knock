@@ -520,7 +520,13 @@ function directFakeTerminalCommand(
         if (
           commandEnvironment.AKK_TEST_TMUX_COMPOSER_FROM_LITERAL === "1"
         ) {
-          writeScreen(`› ${operation.text}`);
+          const [first = "", ...continuation] = operation.text.split("\n");
+          writeScreen([
+            "Ready",
+            `› ${first}`,
+            ...continuation.map((row) => `  ${row}`),
+            "gpt-5.6-sol high · /repo"
+          ].join("\n"));
         }
         const afterPaste =
           commandEnvironment.AKK_TEST_TMUX_COMPOSER_AFTER_PASTE;
@@ -1154,9 +1160,16 @@ if (args[0] === "send-keys" && args.includes("-l")) {
     fs.writeFileSync(rolloutPath + ".pending-input", args[args.length - 1]);
   }
   if (process.env.AKK_TEST_TMUX_COMPOSER_FROM_LITERAL === "1") {
+    const text = String(args[args.length - 1] || "");
+    const [first = "", ...continuation] = text.split("\\n");
     fs.writeFileSync(
       ${JSON.stringify(screenPath ?? "")},
-      "› " + args[args.length - 1]
+      [
+        "Ready",
+        "› " + first,
+        ...continuation.map((row) => "  " + row),
+        "gpt-5.6-sol high · /repo"
+      ].join("\\n")
     );
   }
   const gatePath = process.env.AKK_TEST_TMUX_SEND_GATE_PATH;

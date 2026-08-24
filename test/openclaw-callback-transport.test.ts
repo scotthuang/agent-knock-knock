@@ -345,6 +345,100 @@ test("placeholder tokens preserve the execution environment by reference", () =>
   ]);
 });
 
+test("managed generic callbacks keep a tokenless custom URL on the config route", () => {
+  const harness = createHarness([
+    processResult(gatewayPlan()),
+    processResult({ runId: "run-1", status: "started" }),
+    processResult({
+      runId: "run-1",
+      status: "ok",
+      stopReason: "completed"
+    })
+  ]);
+  const base = genericInput(harness);
+  const gatewayUrl = "ws://configured-gateway.test";
+  const route = createLegacyOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:gateway",
+    gatewayMethod: "agent.callback",
+    openclawBin: "/callback/bin/openclaw",
+    gatewayUrl
+  });
+  const outcome = harness.transport.deliver({
+    ...base,
+    route,
+    envelope: createCallbackEnvelope({
+      route,
+      deliveryId: base.envelope.delivery_id,
+      idempotencyKey: base.envelope.idempotency_key,
+      source: base.envelope.source,
+      event: base.envelope.event
+    }),
+    context: {
+      ...base.context,
+      legacyOptions: {
+        gatewayMethod: "agent.callback",
+        gatewaySession: "agent:main:gateway",
+        openclawSession: "agent:main:gateway",
+        openclawBin: "/callback/bin/openclaw",
+        gatewayUrl
+      }
+    }
+  });
+
+  assert.equal(outcome.disposition, "accepted");
+  assert.equal(
+    harness.spawnCalls.every((call) => !call.args.includes("--url")),
+    true
+  );
+  assert.equal(
+    harness.spawnCalls.every((call) => call.options.env === harness.environment),
+    true
+  );
+});
+
+test("Terminal Watch keeps a tokenless custom URL on the config route", () => {
+  const idempotencyKey =
+    "agent-knock-knock:terminal-watch:watch-transport:notification-1";
+  const harness = createHarness([
+    processResult({ runId: idempotencyKey, status: "started" })
+  ]);
+  const base = terminalWatchGenericInput();
+  const gatewayUrl = "ws://configured-terminal-watch.test";
+  const route = {
+    ...createLegacyOpenClawCallbackRoute({
+      controllerSessionId: "agent:main:terminal-watch",
+      gatewayMethod: "chat.send",
+      openclawBin: "/callback/bin/openclaw-terminal-watch",
+      gatewayUrl
+    }),
+    capabilities: { wake: true, respond: false }
+  };
+  const outcome = harness.transport.deliver({
+    ...base,
+    route,
+    envelope: createCallbackEnvelope({
+      route,
+      deliveryId: base.envelope.delivery_id,
+      idempotencyKey,
+      source: base.envelope.source,
+      event: base.envelope.event
+    }),
+    context: {
+      legacyOptions: {
+        gatewayMethod: "chat.send",
+        gatewaySession: "agent:main:terminal-watch",
+        openclawBin: "/callback/bin/openclaw-terminal-watch",
+        gatewayUrl
+      }
+    }
+  });
+
+  assert.equal(outcome.disposition, "accepted");
+  assert.equal(harness.spawnCalls.length, 1);
+  assert.equal(harness.spawnCalls[0].args.includes("--url"), false);
+  assert.equal(harness.spawnCalls[0].options.env, harness.environment);
+});
+
 test("chat wake keeps accepted, progress, record, and agent wait order", () => {
   const harness = createHarness([
     processResult(gatewayPlan()),

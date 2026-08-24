@@ -487,14 +487,72 @@ test("explicit Close supersedes both unaccepted callback lanes", () => {
   }
 });
 
-test("transport-started callback without a final outcome is never retried", () => {
-  assert.deepEqual(disposition(beginCallbackRetryPolicy({
+test("transport-started callback reports a live attempt but never becomes retryable", () => {
+  const live = beginCallbackRetryPolicy({
+    status: "pending",
+    attempts: 1,
+    attempt_pid: 4102,
+    attempt_lease_expires_at: "2026-08-14T12:02:00.000Z",
+    message: MESSAGE,
+    transport_started_at: NOW_ISO
+  }, LIMITS);
+  assert.equal(live.phase, "observe_process");
+  if (live.phase !== "observe_process") return;
+  const clock = reduceCallbackRetryPolicy(live, {
+    kind: "process_alive",
+    alive: true
+  });
+  assert.equal(clock.phase, "observe_clock");
+  if (clock.phase !== "observe_clock") return;
+  assert.deepEqual(disposition(reduceCallbackRetryPolicy(clock, {
+    kind: "clock",
+    now_ms: Date.parse("2026-08-14T12:01:00.000Z")
+  })), {
+    state: "in_flight",
+    attempt: 1,
+    attempt_pid: 4102,
+    lease_expires_at: "2026-08-14T12:02:00.000Z",
+    next_attempt_at: undefined
+  });
+
+  const expiredLive = beginCallbackRetryPolicy({
+    status: "pending",
+    attempts: 1,
+    attempt_pid: 4102,
+    attempt_lease_expires_at: "2026-08-14T12:02:00.000Z",
+    message: MESSAGE,
+    transport_started_at: NOW_ISO
+  }, LIMITS);
+  assert.equal(expiredLive.phase, "observe_process");
+  if (expiredLive.phase !== "observe_process") return;
+  const expiredClock = reduceCallbackRetryPolicy(expiredLive, {
+    kind: "process_alive",
+    alive: true
+  });
+  assert.equal(expiredClock.phase, "observe_clock");
+  if (expiredClock.phase !== "observe_clock") return;
+  assert.deepEqual(disposition(reduceCallbackRetryPolicy(expiredClock, {
+    kind: "clock",
+    now_ms: Date.parse("2026-08-14T12:03:00.000Z")
+  })), {
+    state: "uncertain",
+    attempt: 1,
+    reason: "callback transport started without a durable final outcome"
+  });
+
+  const orphaned = beginCallbackRetryPolicy({
     status: "pending",
     attempts: 1,
     attempt_pid: 999999,
     message: MESSAGE,
     transport_started_at: NOW_ISO
-  }, LIMITS)), {
+  }, LIMITS);
+  assert.equal(orphaned.phase, "observe_process");
+  if (orphaned.phase !== "observe_process") return;
+  assert.deepEqual(disposition(reduceCallbackRetryPolicy(orphaned, {
+    kind: "process_alive",
+    alive: false
+  })), {
     state: "uncertain",
     attempt: 1,
     reason: "callback transport started without a durable final outcome"

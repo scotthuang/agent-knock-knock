@@ -91,6 +91,17 @@ const SECOND_EXTERNAL_THREAD_ID = "33333333-3333-4333-8333-333333333333";
 const FIRST_NATIVE_TURN_ID = "44444444-4444-4444-8444-444444444444";
 const FIXTURE_TMUX_PANE_ID = "%42";
 const SIMULATED_DEAD_CLI_PID = 2_147_483_647;
+const CODEX_TEST_COMPOSER_FOOTER = "gpt-5.6-sol high · /repo";
+
+function codexTestComposerScreen(text = ""): string {
+  const [first = "", ...continuation] = text.split("\n");
+  return [
+    "Ready",
+    `› ${first}`,
+    ...continuation.map((row) => `  ${row}`),
+    CODEX_TEST_COMPOSER_FOOTER
+  ].join("\n");
+}
 
 interface CodexNoRolloutShardExpansion {
   canonical_source: string;
@@ -8728,7 +8739,7 @@ function runInProcessTmux(
     const pendingInputPath = path.join(fixture.tempDir, "pending-input.txt");
     fs.writeFileSync(pendingInputPath, text);
     if (text !== "/status") {
-      fs.writeFileSync(fixture.screenPath, `Ready\n› ${text}`);
+      fs.writeFileSync(fixture.screenPath, codexTestComposerScreen(text));
     }
     if (
       text !== "/status" &&
@@ -8955,9 +8966,16 @@ if (args[0] === "list-panes") {
         );
       }
     } else {
+      const text = String(args.at(-1) ?? "");
+      const [first = "", ...continuation] = text.split("\\n");
       fs.writeFileSync(
         ${JSON.stringify(options.screenPath)},
-        "Ready\\n› " + String(args.at(-1) ?? "")
+        [
+          "Ready",
+          "› " + first,
+          ...continuation.map((row) => "  " + row),
+          ${JSON.stringify(CODEX_TEST_COMPOSER_FOOTER)}
+        ].join("\\n")
       );
     }
   }

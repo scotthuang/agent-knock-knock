@@ -379,7 +379,7 @@
       "id": "monitor-approval-boundary",
       "path": "test/shards/agent-cli-monitor-approval-context.test.ts",
       "tier": "integration",
-      "needle": "terminal approval notification releases the state lock during callback delivery and preserves concurrent close"
+      "needle": "terminal approval notification releases the state lock and late settlement preserves explicit Close"
     },
     {
       "id": "monitor-decision-unit",

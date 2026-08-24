@@ -368,7 +368,22 @@ test("Close committed after callback preparation prevents transport start", () =
   });
   assert.equal(prepared.outcome, "deliver");
   if (prepared.outcome !== "deliver") return;
-  harness.replaceStored({ ...harness.stored(), status: "closed" });
+  const current = harness.stored();
+  const delivery = current.callback_delivery as Record<string, unknown>;
+  harness.replaceStored({
+    ...current,
+    status: "closed",
+    closed_at: NOW.toISOString(),
+    close_reason: "closed by request",
+    disposition: "user_abandoned_management",
+    callback_expected: false,
+    callback_delivery: {
+      ...delivery,
+      status: "superseded",
+      superseded_at: NOW.toISOString(),
+      superseded_reason: "superseded_by_conversation_close"
+    }
+  });
   let deliveries = 0;
   harness.ports.delivery.deliver = () => {
     deliveries += 1;
@@ -395,6 +410,42 @@ test("Close committed after callback preparation prevents transport start", () =
     "writer:release",
     "load"
   ]);
+});
+
+test("completion-close preparation still starts its own callback transport", () => {
+  const harness = createHarness();
+  const prepared = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.conversation)),
+      preserveMessageId: true,
+      gatewayMethod: "agent-knock-knock.callback",
+      closeTerminalBridgeOnDone: true
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(prepared.outcome, "deliver");
+  if (prepared.outcome !== "deliver") return;
+  assert.equal(harness.stored().status, "closed");
+  let deliveries = 0;
+  harness.ports.delivery.deliver = () => {
+    deliveries += 1;
+    return {
+      kind: "test",
+      injection: { status: "accepted" },
+      wake: { status: "accepted" }
+    };
+  };
+
+  const result = harness.service.runPrepared(prepared);
+
+  assert.equal(result.delivered, true);
+  assert.equal(deliveries, 1);
+  assert.equal(result.conversation.status, "closed");
+  assert.equal(
+    (result.conversation.callback_delivery as Record<string, unknown>).status,
+    "delivered"
+  );
 });
 
 test("Close after callback transport start is not revived by settlement", () => {
