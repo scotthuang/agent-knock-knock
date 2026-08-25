@@ -118,7 +118,7 @@ test("number, short id, and opaque handle resolve only inside one exact snapshot
         selectionNumber: 2,
         now
       }),
-      /another terminal or OpenClaw session/u
+      /another terminal or controller session/u
     );
     assert.throws(
       () => resolveNativeThreadResumeSelection({
@@ -129,7 +129,7 @@ test("number, short id, and opaque handle resolve only inside one exact snapshot
         selectionHandle: selectedRow.selection_handle,
         now
       }),
-      /another terminal or OpenClaw session/u
+      /another terminal or controller session/u
     );
     assert.throws(
       () => resolveNativeThreadResumeSelection({

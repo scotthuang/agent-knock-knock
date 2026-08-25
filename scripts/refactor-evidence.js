@@ -70,6 +70,8 @@ const PUBLIC_COMMANDS = Object.freeze([
   "transcript",
   "install-openclaw",
   "doctor",
+  "host-profile",
+  "host-bridge",
   "callback",
   "retry-callback",
   "monitor"
@@ -121,6 +123,20 @@ const OPENCLAW_AUTHORITY_ROLES = Object.freeze({
 const OPENCLAW_AUTHORITY_PATHS = Object.freeze(
   Object.values(OPENCLAW_AUTHORITY_ROLES).sort()
 );
+const HOST_BRIDGE_PROFILE_SCHEMA = "agent-knock-knock/host-profile";
+const HOST_BRIDGE_PROFILE_SCHEMA_ID =
+  "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/" +
+  "schemas/host-profile-v1.schema.json";
+const HOST_BRIDGE_AUTHORITY_PATHS = Object.freeze([
+  "schemas/host-profile-v1.schema.json",
+  "src/command-json-callback-transport.ts",
+  "src/host-bridge-mcp.ts",
+  "src/host-bridge-tools.ts",
+  "src/host-bridge.ts",
+  "src/host-profile-callback-transport.ts",
+  "src/host-profile-runtime.ts",
+  "src/host-profile.ts"
+]);
 const MIGRATION_IDS = Object.freeze([
   "callback-outbox",
   "cli-runtime",
@@ -1120,6 +1136,7 @@ function validatePublicContracts(value, {
 }) {
   const contracts = assertExactKeys(value, [
     "cli_json",
+    "host_bridge",
     "list_action",
     "openclaw_tools",
     "store_protocols"
@@ -1166,6 +1183,59 @@ function validatePublicContracts(value, {
     "src/cli-core.ts",
     /export async function executeCliCommand\s*\(/u,
     "executeCliCommand facade export"
+  );
+
+  const hostBridge = assertExactKeys(contracts.host_bridge, [
+    "authority_paths",
+    "callback_driver",
+    "schema",
+    "tool_count",
+    "transport",
+    "version",
+    "witnesses"
+  ], "Host Bridge contract");
+  if (hostBridge.schema !== HOST_BRIDGE_PROFILE_SCHEMA ||
+      hostBridge.version !== 1 ||
+      hostBridge.transport !== "mcp_stdio" ||
+      hostBridge.callback_driver !== "command_json_v1" ||
+      hostBridge.tool_count !== OPENCLAW_TOOLS.length) {
+    fail("Host Bridge profile, transport, callback, or tool contract changed");
+  }
+  assertExactArray(
+    hostBridge.authority_paths,
+    HOST_BRIDGE_AUTHORITY_PATHS,
+    "Host Bridge authority_paths"
+  );
+  validateAuthorityPaths(
+    hostBridge.authority_paths,
+    "Host Bridge authority_paths",
+    repoRoot
+  );
+  validateWitnessReferences(
+    hostBridge.witnesses,
+    "Host Bridge witnesses",
+    witnesses,
+    usedWitnesses
+  );
+  const hostProfileSchema = readJson(
+    repoRoot,
+    "schemas/host-profile-v1.schema.json"
+  );
+  if (hostProfileSchema.$id !== HOST_BRIDGE_PROFILE_SCHEMA_ID ||
+      hostProfileSchema.properties?.$schema?.const !==
+        HOST_BRIDGE_PROFILE_SCHEMA_ID ||
+      hostProfileSchema.properties?.schema?.const !==
+        HOST_BRIDGE_PROFILE_SCHEMA ||
+      hostProfileSchema.properties?.version?.const !== 1 ||
+      hostProfileSchema.$defs?.callback?.properties?.driver?.const !==
+        "command_json_v1") {
+    fail("Host Bridge JSON Schema no longer matches the v1 public contract");
+  }
+  assertSourcePattern(
+    repoRoot,
+    "src/host-bridge.ts",
+    /new StdioServerTransport\(\s*input,\s*output\s*\)/u,
+    "Host Bridge MCP stdio transport"
   );
 
   const actions = assertExactKeys(contracts.list_action, [
@@ -1373,6 +1443,7 @@ export function validatePublicContractManifest({ manifest, repoRoot, tiers }) {
     contractCount: Object.keys(root.contracts).length,
     witnessCount: witnesses.size,
     migrationCount: root.migration_witnesses.length,
+    hostBridgeToolCount: root.contracts.host_bridge.tool_count,
     openclawToolCount: root.contracts.openclaw_tools.tools.length,
     storeProtocolCount: root.contracts.store_protocols.protocol_witnesses.length
   };

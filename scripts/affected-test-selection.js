@@ -23,6 +23,7 @@ export const targetedIntegrationByPath = Object.freeze({
 export const testSupportImpactByPath = Object.freeze({
   "test/agent-cli-fixtures.ts": [
     "test/claude-native-inspection-cli.test.ts",
+    "test/host-bridge-stdio.test.ts",
     "test/shards/agent-cli-claude-callback.test.ts",
     "test/shards/agent-cli-composer-replay.test.ts",
     "test/shards/agent-cli-control-locks.test.ts",

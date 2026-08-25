@@ -1,7 +1,7 @@
 {
   "name": "@scotthuang/agent-knock-knock",
   "version": "0.12.15",
-  "description": "Control local Codex and Claude Code from OpenClaw through shared tmux or Herdr terminals, with seamless human-agent handoff.",
+  "description": "Control local Codex and Claude Code from OpenClaw or compatible controller Hosts through shared terminals.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/scotthuang/agent-knock-knock#readme",
@@ -15,6 +15,7 @@
   "keywords": [
     "openclaw",
     "openclaw-plugin",
+    "mcp-server",
     "agent-orchestration",
     "codex",
     "claude-code",
@@ -55,11 +56,14 @@
   },
   "files": [
     "dist/src",
+    "schemas",
+    "examples/host-profiles",
     "templates",
     "docs/assets/agent-knock-knock-cover.jpg",
     "docs/assets/agent-knock-knock-icon.png",
     "docs/quickstart-herdr.md",
     "docs/quickstart-tmux.md",
+    "docs/host-bridge-profiles.md",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE",
@@ -106,5 +110,8 @@
     "clawhub": "0.23.1",
     "openclaw": "2026.6.5",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0"
   }
 }

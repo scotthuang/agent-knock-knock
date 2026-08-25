@@ -58,7 +58,7 @@ export function openClawYieldNextAction({
   return {
     action: "yield" as const,
     reason:
-      "The requested agent work was handed off asynchronously. End this OpenClaw turn now instead of waiting, polling, or treating the send as a synchronous agent result.",
+      "The requested agent work was handed off asynchronously. End this controller turn now instead of waiting, polling, or treating the send as a synchronous agent result.",
     source,
     conversation_id: conversationId,
     session_id: sessionId,

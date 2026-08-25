@@ -63,9 +63,24 @@ export const defaultOpenClawRelayPath = fileURLToPath(
   new URL("./cli.js", import.meta.url)
 );
 const relayPathByApi = new WeakMap<object, string>();
+const relayEnvironmentByApi = new WeakMap<object, NodeJS.ProcessEnv>();
+const hostBridgePresentationApis = new WeakSet<object>();
 
 export function bindOpenClawRelayPath(api: object, relayPath: string): void {
   relayPathByApi.set(api, relayPath);
+}
+
+/** Bind a private child-process environment for a Host adapter instance. */
+export function bindOpenClawRelayEnvironment(
+  api: object,
+  environment: NodeJS.ProcessEnv
+): void {
+  relayEnvironmentByApi.set(api, { ...environment });
+}
+
+/** Keep one shared tool implementation while selecting Host-neutral output. */
+export function bindHostBridgeToolPresentation(api: object): void {
+  hostBridgePresentationApis.add(api);
 }
 
 export function registerOpenClawCommands(
@@ -480,7 +495,7 @@ export function registerOpenClawCommands(
 
   registerCliTool(api, {
     name: "agent_knock_knock_retry_callback",
-    description: "Retry a persisted AKK callback for an exact turn that failed before reaching OpenClaw. The original callback message id and turn identity are reused for idempotent delivery.",
+    description: "Retry a persisted AKK callback for an exact turn that failed before reaching the controller Host. The original callback message id and turn identity are reused for idempotent delivery.",
     parameters: retryCallbackParameters,
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -543,7 +558,7 @@ function resumeSelectionScope(
 ): string {
   const key = requiredString(
     sessionKey,
-    "OpenClaw session identity is required for snapshot-bound Resume"
+    "Controller session identity is required for snapshot-bound Resume"
   );
   const incarnation = stringValue(sessionId) ?? null;
   return `openclaw:${createHash("sha256")
@@ -558,7 +573,7 @@ function resumeSnapshotCacheKey(
 ): string {
   const key = requiredString(
     sessionKey,
-    "OpenClaw session identity is required for snapshot-bound Resume"
+    "Controller session identity is required for snapshot-bound Resume"
   );
   return JSON.stringify([key, stringValue(sessionId) ?? null, terminalId]);
 }
@@ -746,7 +761,7 @@ async function handleAkkLifecycleCommand(
   ) {
     requiredString(
       ctx.sessionId,
-      "OpenClaw conversation incarnation is required for number or short-id Resume; run /akk threads again in the current conversation or use the complete UUID"
+      "Controller conversation incarnation is required for number or short-id Resume; run /akk threads again in the current conversation or use the complete UUID"
     );
     const mutationArgs = buildAkkCommandCliArgs(parsed, config, {
       sessionKey: ctx.sessionKey,
@@ -937,7 +952,7 @@ function formatDelegateCommandResult(result) {
     `session: ${sessionId}`,
     `turn: ${turnId}`,
     `status: ${result.conversation_status ?? result.status ?? "unknown"}`,
-    "The result will return to this OpenClaw session through the callback."
+    "The result will return to this controller session through the callback."
   ].join("\n");
 }
 
@@ -1739,7 +1754,7 @@ function consumeDisplayedPrivateAction(
   });
   if (!offered || !isRecord(offered.args)) {
     throw new Error(
-      `${input.tool} requires a current action shown by AKK list in this OpenClaw session; refresh list, review it, and explicitly confirm again`
+      `${input.tool} requires a current action shown by AKK list in this controller session; refresh list, review it, and explicitly confirm again`
     );
   }
   const current = privateActionArguments(api, input);
@@ -1826,7 +1841,7 @@ function buildPrivateApprovalArgs(
       : undefined);
   if (!isExactApprovalFingerprint(offeredFingerprint)) {
     throw new Error(
-      "approve requires a current approval request shown by agent_knock_knock_status in this OpenClaw conversation; refresh status, ask the user to review it, and explicitly confirm again"
+      "approve requires a current approval request shown by agent_knock_knock_status in this controller conversation; refresh status, ask the user to review it, and explicitly confirm again"
     );
   }
   const action = terminalId
@@ -2217,7 +2232,9 @@ async function runDelegate(api, params, toolContext) {
     replayed: parsed.replayed === true,
     background: parsed.background === true,
     pid: parsed.pid ?? parsedTerminalControl?.panePid ?? null,
-    callback_method: CALLBACK_METHOD,
+    callback_method: hostBridgePresentationApis.has(api)
+      ? "command_json_v1"
+      : CALLBACK_METHOD,
     ...(submissionUnfenced
       ? {
           submission_outcome: "submitted",
@@ -2278,14 +2295,14 @@ async function runDelegate(api, params, toolContext) {
           openclaw_next_action: {
             action: "yield",
             reason:
-              "The coding agent is working in the shared terminal. End this OpenClaw turn now and wait for an Agent Knock Knock callback.",
+              "The coding agent is working in the shared terminal. End this controller turn now and wait for an Agent Knock Knock callback.",
             do_not:
               "Do not poll terminal internals while waiting. Further communication must use Agent Knock Knock tools so the same shared terminal remains authoritative.",
             expected_callback:
-              "The callback will be injected and scheduled into this OpenClaw session by the agent-knock-knock.callback Gateway method."
+              "The callback will be injected into this controller session by its configured callback transport."
           },
           note:
-            "The task was sent to the shared terminal. OpenClaw should yield now and wait for the scheduled callback turn."
+            "The task was sent to the shared terminal. The controller Host should yield now and wait for the callback turn."
         })
   };
 }
@@ -2392,7 +2409,8 @@ export function runCli(
   const spawned = spawnSync(process.execPath, [binPath, ...cliArgs], {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 10,
-    cwd
+    cwd,
+    env: relayEnvironmentForApi(api)
   });
 
   if (spawned.error) {
@@ -2427,6 +2445,7 @@ export function runCliAsync(
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...cliArgs], {
       cwd,
+      env: relayEnvironmentForApi(api),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true
     });
@@ -2513,6 +2532,10 @@ function relayPathForApi(api): string {
   return relayPathByApi.get(api) ?? defaultOpenClawRelayPath;
 }
 
+function relayEnvironmentForApi(api): NodeJS.ProcessEnv {
+  return relayEnvironmentByApi.get(api) ?? process.env;
+}
+
 function pushTurnTarget(args, params) {
   if (Object.hasOwn(params, "turn_id") && Object.hasOwn(params, "conversation_id")) {
     throw new Error("turn-target tools accept only one of turn_id or conversation_id");
@@ -2590,14 +2613,14 @@ function requiredString(value, name) {
 function requiredOpenClawSessionKey(value: unknown): string {
   return requiredString(
     value,
-    "OpenClaw session identity for this confirmed action"
+    "Controller session identity for this confirmed action"
   );
 }
 
 function requiredOpenClawSessionId(value: unknown): string {
   return requiredString(
     value,
-    "OpenClaw conversation incarnation for this confirmed action"
+    "Controller conversation incarnation for this confirmed action"
   );
 }
 

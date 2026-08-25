@@ -35,6 +35,8 @@
         "transcript",
         "install-openclaw",
         "doctor",
+        "host-profile",
+        "host-bridge",
         "callback",
         "retry-callback",
         "monitor"
@@ -49,6 +51,31 @@
         "cli-output-boundary",
         "management-list-in-process",
         "store-protocol-cli-boundary"
+      ]
+    },
+    "host_bridge": {
+      "schema": "agent-knock-knock/host-profile",
+      "version": 1,
+      "transport": "mcp_stdio",
+      "callback_driver": "command_json_v1",
+      "tool_count": 16,
+      "authority_paths": [
+        "schemas/host-profile-v1.schema.json",
+        "src/command-json-callback-transport.ts",
+        "src/host-bridge-mcp.ts",
+        "src/host-bridge-tools.ts",
+        "src/host-bridge.ts",
+        "src/host-profile-callback-transport.ts",
+        "src/host-profile-runtime.ts",
+        "src/host-profile.ts"
+      ],
+      "witnesses": [
+        "command-json-callback-unit",
+        "host-bridge-conformance-unit",
+        "host-bridge-mcp-unit",
+        "host-bridge-stdio-unit",
+        "host-bridge-tools-unit",
+        "host-profile-unit"
       ]
     },
     "list_action": {
@@ -244,6 +271,12 @@
       "needle": "virgin raw Codex attach atomically refines the Session and Turn binding after send"
     },
     {
+      "id": "command-json-callback-unit",
+      "path": "test/command-json-callback-transport.test.ts",
+      "tier": "fast",
+      "needle": "command_json_v1 delivers without a shell using only allowlisted context and environment"
+    },
+    {
       "id": "control-lock-boundary",
       "path": "test/shards/agent-cli-control-locks.test.ts",
       "tier": "integration",
@@ -302,6 +335,36 @@
       "path": "test/human-handoff-adoption-cli.test.ts",
       "tier": "integration",
       "needle": "a terminal-scoped Codex send adopts an exact unknown human-switched thread"
+    },
+    {
+      "id": "host-bridge-conformance-unit",
+      "path": "test/host-bridge-stdio.test.ts",
+      "tier": "fast",
+      "needle": "fixture Host settles a command_json_v1 callback through a real MCP tool"
+    },
+    {
+      "id": "host-bridge-mcp-unit",
+      "path": "test/host-bridge-mcp.test.ts",
+      "tier": "fast",
+      "needle": "MCP server initializes and advertises all exact host bridge tools"
+    },
+    {
+      "id": "host-bridge-stdio-unit",
+      "path": "test/host-bridge-stdio.test.ts",
+      "tier": "fast",
+      "needle": "real Host Bridge stdio advertises 16 tools and exits on Host EOF"
+    },
+    {
+      "id": "host-bridge-tools-unit",
+      "path": "test/host-bridge-tools.test.ts",
+      "tier": "fast",
+      "needle": "host bridge captures the existing semantic tool contract once"
+    },
+    {
+      "id": "host-profile-unit",
+      "path": "test/host-profile.test.ts",
+      "tier": "fast",
+      "needle": "published HostProfile v1 JSON Schema enforces its closed structural contract"
     },
     {
       "id": "install-openclaw-in-process",

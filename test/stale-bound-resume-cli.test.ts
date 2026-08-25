@@ -241,7 +241,7 @@ test("resume lists a conclusively dead bound Session read-only, then CAS-detache
       ...commonArgs
     ], environment);
     assert.equal(wrongScope.status, 1);
-    assert.match(wrongScope.stderr, /another terminal or OpenClaw session/u);
+    assert.match(wrongScope.stderr, /another terminal or controller session/u);
 
     const expiredSnapshot = JSON.parse(originalSnapshot);
     const expiredAt = Date.now();

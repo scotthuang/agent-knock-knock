@@ -658,7 +658,15 @@ test("public facade declarations are typed and retain only five port groups", ()
   assert.doesNotMatch(compositionSource, /createOpenClawCallbackTransport/u);
   assert.match(
     compositionSource,
-    /delivery:\s*managedOpenClawCallbackDelivery/u
+    /delivery:\s*managedCallbackDelivery/u
+  );
+  assert.match(
+    compositionSource,
+    /createHostProfileCallbackTransport/u
+  );
+  assert.match(
+    compositionSource,
+    /legacyTransport:\s*managedOpenClawCallbackDelivery\.transport/u
   );
   assert.match(
     openClawCompositionSource,

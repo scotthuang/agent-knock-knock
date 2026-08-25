@@ -938,9 +938,19 @@ export function runAgentCliAsync(
   });
 }
 
-export function spawnAgentCliCaptured(args: string[], env: NodeJS.ProcessEnv = {}) {
+export interface SpawnAgentCliCapturedOptions {
+  readonly cwd?: string;
+  readonly entrypoint?: string;
+}
+
+export function spawnAgentCliCaptured(
+  args: string[],
+  env: NodeJS.ProcessEnv = {},
+  options: SpawnAgentCliCapturedOptions = {}
+) {
   args = managedStateMachineSendArgs(args);
-  const child = spawn(process.execPath, [binPath, ...args], {
+  const child = spawn(process.execPath, [options.entrypoint ?? binPath, ...args], {
+    cwd: options.cwd,
     env: agentCliTestEnv(args, env)
   });
   let stdout = "";

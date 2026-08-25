@@ -106,9 +106,10 @@ test("final refactor evidence reproduces startup counts and historical selection
   );
 
   assert.deepEqual(evidence.publicContracts, {
-    contractCount: 4,
-    witnessCount: 66,
+    contractCount: 5,
+    witnessCount: 72,
     migrationCount: 11,
+    hostBridgeToolCount: 16,
     openclawToolCount: 16,
     storeProtocolCount: 5
   });
@@ -1103,6 +1104,22 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
   assert.throws(
     () => validate(terminalWatchSchemaDrift),
     /Terminal Watch schema contract changed/u
+  );
+
+  const hostBridgeDrift = loadJson("config/public-contract-witnesses.json");
+  hostBridgeDrift.contracts.host_bridge.callback_driver = "shell_v1";
+  assert.throws(
+    () => validate(hostBridgeDrift),
+    /Host Bridge profile, transport, callback, or tool contract changed/u
+  );
+
+  const missingHostBridgeAuthority =
+    loadJson("config/public-contract-witnesses.json");
+  missingHostBridgeAuthority.contracts.host_bridge.authority_paths =
+    missingHostBridgeAuthority.contracts.host_bridge.authority_paths.slice(1);
+  assert.throws(
+    () => validate(missingHostBridgeAuthority),
+    /Host Bridge authority_paths must equal/u
   );
 
   const duplicateTool = loadJson("config/public-contract-witnesses.json");

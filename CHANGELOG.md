@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add a Host-owned foreground MCP/stdio Bridge that exposes the existing 16 semantic AKK tools without introducing a second state or tool model.
+- Add strict Host Profile v1 configuration with trusted environment session binding, a shell-free `command_json_v1` callback driver, compatibility/doctor commands, a published JSON Schema, and a starter user Profile.
+
+### Changed
+
+- Reuse the shared Host lifecycle and existing durable callback route, outbox, retry, and settlement core for configuration-only Hosts while preserving the native OpenClaw adapter unchanged.
+
+### Security
+
+- Keep Profile selection, controller identity, executable, arguments, credentials, and acknowledgement rules outside model-facing tool inputs; exact route fingerprints and delivery/message acknowledgements fail closed on drift.
+
 ## 0.12.15 - 2026-08-25
 
 ### Added

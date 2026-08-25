@@ -769,7 +769,7 @@ if (args.includes("cwd")) {
     assert.notEqual(wrongOpenClawOwner.status, 0);
     assert.match(
       wrongOpenClawOwner.stderr,
-      /belongs to a different OpenClaw session/u
+      /belongs to a different controller session/u
     );
     assert.equal(fs.readFileSync(secondStatePath, "utf8"), stateBeforeWrongOpenClawOwner);
     assert.equal(
