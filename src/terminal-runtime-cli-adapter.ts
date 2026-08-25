@@ -263,10 +263,14 @@ function processSource({ options, dependencies }: Pick<
   if (injected) {
     return injected;
   }
-  if (options.processesJson) {
+  const isStatic = Boolean(options.terminalsJson || options.terminalScreensJson ||
+    options.processesJson);
+  if (isStatic) {
     return new StaticTerminalProcessSource(
-      parseJsonOption(options.processesJson, "--processes-json") as
-        readonly TerminalProcessSnapshot[]
+      options.processesJson
+        ? parseJsonOption(options.processesJson, "--processes-json") as
+          readonly TerminalProcessSnapshot[]
+        : []
     );
   }
   return new SystemTerminalProcessSource();
@@ -603,6 +607,16 @@ function runningAgentVersion(
     input.options.agentVersionsJson, "--agent-versions-json") : undefined;
   if (isRecord(fixture)) {
     return nonBlankString(fixture[String(pid)]) ?? nonBlankString(fixture[agent]);
+  }
+  if (
+    input.options.agentVersionsJson !== undefined ||
+    input.options.processesJson !== undefined ||
+    input.options.terminalsJson !== undefined ||
+    input.options.terminalScreensJson !== undefined
+  ) {
+    // Keep executable version lookup inside the same explicitly static
+    // observation boundary instead of inspecting an unrelated host PID.
+    return undefined;
   }
   const lsof = resolveOptionalExecutable("lsof");
   if (!lsof) {

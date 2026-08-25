@@ -1022,7 +1022,7 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
   }
 });
 
-test("multiple idle turns stay terminal history while the pane advertises a fenced follow-current send", async () => {
+test("multiple idle turns stay terminal history while user-priority Send keeps its managed fast path", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-terminal-history-")
   );
@@ -1177,6 +1177,15 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
       "string"
     );
     assert.equal(
+      typeof terminal.available_actions.send.arguments
+        .expected_managed_terminal_token,
+      "string"
+    );
+    assert.equal(
+      terminal.available_actions.send.scope,
+      "terminal_user_explicit"
+    );
+    assert.equal(
       terminal.available_actions.send.arguments.session_id,
       undefined
     );
@@ -1216,9 +1225,18 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
       undefined,
       JSON.stringify(restarted.terminals[0], null, 2)
     );
-    assert.deepEqual(
-      restarted.terminals[0].available_actions.send.arguments,
-      { selector: restarted.terminals[0].id }
+    assert.equal(
+      restarted.terminals[0].available_actions.send.arguments.selector,
+      restarted.terminals[0].id
+    );
+    assert.equal(
+      typeof restarted.terminals[0].available_actions.send.arguments
+        .expected_terminal_token,
+      "string"
+    );
+    assert.equal(
+      restarted.terminals[0].available_actions.send.scope,
+      "terminal_user_explicit"
     );
 
     const listedAll = await runCliWithCodexInventory([
@@ -1267,6 +1285,11 @@ test("multiple idle turns stay terminal history while the pane advertises a fenc
       typeof followCurrentAction.arguments.expected_terminal_token,
       "string"
     );
+    assert.equal(
+      typeof followCurrentAction.arguments.expected_managed_terminal_token,
+      "string"
+    );
+    assert.equal(followCurrentAction.scope, "terminal_user_explicit");
     const sent = await runCliWithCodexInventory([
       "send",
       "--conversation",

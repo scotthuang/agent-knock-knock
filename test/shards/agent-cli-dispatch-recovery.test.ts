@@ -1098,7 +1098,7 @@ test("an uncertain dispatch does not collateral-stall a delivered idle Turn", as
   }
 });
 
-test("monitor supervision repairs only an exact legacy idle collateral stall and list actions match runtime blockers", async () => {
+test("monitor supervision repairs only an exact legacy idle collateral stall while physical Send remains visible", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-collateral-stall-repair-")
   );
@@ -1385,7 +1385,19 @@ test("monitor supervision repairs only an exact legacy idle collateral stall and
     ], testEnv);
     assert.equal(before.status, 0, before.stderr || before.stdout);
     const beforeTerminal = JSON.parse(before.stdout).terminals[0];
-    assert.equal(beforeTerminal.available_actions.send, undefined);
+    assert.equal(
+      beforeTerminal.available_actions.send?.scope,
+      "terminal_user_explicit"
+    );
+    assert.equal(
+      beforeTerminal.available_actions.send?.arguments?.selector,
+      beforeTerminal.id
+    );
+    assert.equal(
+      typeof beforeTerminal.available_actions.send?.arguments
+        ?.expected_terminal_token,
+      "string"
+    );
     assert.deepEqual(beforeTerminal.blocking_turns, [{
       session_id: firstState.session_id,
       turn_id: firstState.turn_id,

@@ -79,6 +79,7 @@ import {
 import {
   codexNativeAcceptanceEnv,
   codexNoRolloutBackgroundSendArgs,
+  codexNoRolloutManagedStateMachineArgs,
   codexNoRolloutStoreArgs
 } from "./support/codex-no-rollout-cli-harness.js";
 
@@ -895,7 +896,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
   }
 });
 
-test("a provisional attach orphan exposes one fenced reconcile action and detaches without terminal input", async () => {
+test("a provisional attach orphan keeps fenced reconciliation alongside user-priority Send", async () => {
   const fixture = createNoRolloutFixture();
   try {
     const orphan = persistConflictSession(fixture, {
@@ -906,8 +907,10 @@ test("a provisional attach orphan exposes one fenced reconcile action and detach
     assert.equal(terminal.management_conflict.kind, "provisional_orphan");
     assert.deepEqual(Object.keys(terminal.available_actions), [
       "status",
-      "reconcile_binding"
+      "reconcile_binding",
+      "send"
     ]);
+    assertTerminalUserExplicitSendAction(terminal);
     const action = terminal.available_actions.reconcile_binding;
     assert.equal(action.requires_user_intent, true);
     assert.deepEqual(action.arguments, {
@@ -1178,7 +1181,7 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
   }
 });
 
-test("verified-empty handoff stays fail-closed for a real draft, resolver failure, stale token, and active Turn", async () => {
+test("verified-empty physical Send ignores resolver and Turn state but rejects a real draft or stale token", async () => {
   for (const blocker of ["draft", "resolver", "stale_token", "active_turn"] as const) {
     const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
     try {
@@ -1205,8 +1208,23 @@ test("verified-empty handoff stays fail-closed for a real draft, resolver failur
           "unavailable"
         );
       }
-      if (blocker === "draft" || blocker === "resolver" || blocker === "active_turn") {
+      if (blocker === "draft") {
         assert.equal(terminal.available_actions.send, undefined, blocker);
+        assert.equal(
+          loadManagedSession(fixture.storeDir, source.session_id).status,
+          "bound",
+          blocker
+        );
+        assert.equal(
+          readTmuxCalls(fixture.tmuxCallsPath)
+            .some((call) => call.args[0] === "send-keys"),
+          false,
+          blocker
+        );
+        continue;
+      }
+      if (blocker === "resolver" || blocker === "active_turn") {
+        assertTerminalUserExplicitSendAction(terminal);
         assert.equal(
           loadManagedSession(fixture.storeDir, source.session_id).status,
           "bound",
@@ -1364,7 +1382,7 @@ test("Herdr uses the same verified-empty Codex handoff fence and virgin post-sub
   }
 });
 
-test("ambiguous and unverifiable binding claims never advertise reconciliation", async () => {
+test("ambiguous and unverifiable binding claims hide reconciliation but not user-priority Send", async () => {
   for (const kind of ["ambiguous", "unverifiable"] as const) {
     const fixture = createNoRolloutFixture();
     try {
@@ -1388,7 +1406,11 @@ test("ambiguous and unverifiable binding claims never advertise reconciliation",
         kind === "ambiguous" ? "ambiguous_bound_claims" : "unverifiable",
         kind
       );
-      assert.deepEqual(Object.keys(terminal.available_actions), ["status"]);
+      assert.deepEqual(
+        Object.keys(terminal.available_actions),
+        ["status", "send"]
+      );
+      assertTerminalUserExplicitSendAction(terminal);
     } finally {
       fixture.cleanup();
     }
@@ -1430,7 +1452,7 @@ test("a fresh /status card that supersedes the open rollout is projected as an a
   }
 });
 
-test("blocking Turns, unresolved transitions, and dispatch ledgers suppress binding reconciliation", async () => {
+test("managed blockers suppress reconciliation but not user-priority physical Send", async () => {
   for (const blocker of ["turn", "transition", "ledger"] as const) {
     const fixture = createNoRolloutFixture();
     try {
@@ -1454,7 +1476,7 @@ test("blocking Turns, unresolved transitions, and dispatch ledgers suppress bind
       const blocked = await listFixtureTerminal(fixture);
       assert.equal(blocked.management_state, "conflict", blocker);
       assert.equal(blocked.available_actions.reconcile_binding, undefined, blocker);
-      assert.equal(blocked.available_actions.send, undefined, blocker);
+      assertTerminalUserExplicitSendAction(blocked);
       assert.equal(blocked.available_actions.new_thread, undefined, blocker);
       assert.equal(
         blocked.available_actions.list_resumable_threads,
@@ -1816,9 +1838,14 @@ for (const crashCase of [
         assert.deepEqual(listConversations(fixture.storeDir), []);
 
         const refreshedAction = await deferredForegroundSendAction(fixture);
-        assert.notEqual(
+        assert.equal(
           refreshedAction.arguments.expected_terminal_token,
-          action.arguments.expected_terminal_token
+          action.arguments.expected_terminal_token,
+          "Store recovery must not stale unchanged physical authority"
+        );
+        assert.notEqual(
+          refreshedAction.arguments.expected_managed_terminal_token,
+          action.arguments.expected_managed_terminal_token
         );
         const retried = await runCli(
           deferredForegroundSendArgs(fixture, refreshedAction, message),
@@ -3667,7 +3694,11 @@ test("abandoned deferred history blocks replay but not an explicit terminal send
     const callsBeforeExplicitSend = taskInputCalls(fixture).length;
     fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
     const sent = await runCli(
-      deferredForegroundSendArgs(fixture, explicitSend, explicitMessage),
+      userExplicitDeferredForegroundSendArgs(
+        fixture,
+        explicitSend,
+        explicitMessage
+      ),
       codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
@@ -3747,7 +3778,7 @@ test("pre-text terminal identity drift immediately aborts a target-prepared tran
   }
 });
 
-test("deferred terminal tokens fail closed while an unmanaged no-token send still works", async () => {
+test("managed deferred tokens fail closed while exact no-token managed routing still works", async () => {
   const fixture = createNoRolloutFixture({
     codexVersion: "0.147.0",
     rolloutInitiallyAbsent: true
@@ -3762,7 +3793,7 @@ test("deferred terminal tokens fail closed while an unmanaged no-token send stil
           ...action,
           arguments: {
             ...action.arguments,
-            expected_terminal_token: "arbitrary-terminal-token"
+            expected_managed_terminal_token: "arbitrary-terminal-token"
           }
         },
         "An arbitrary token must send no input."
@@ -3795,7 +3826,7 @@ test("deferred terminal tokens fail closed while an unmanaged no-token send stil
   }
 
   const unmanaged = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
-  const message = "A normal unmanaged selector still needs no handoff token.";
+  const message = "An exact managed-only selector still needs no handoff token.";
   try {
     const sent = await runCli([
       "send",
@@ -5751,7 +5782,7 @@ test("abandoned predecessor candidate token fails closed when exact authority dr
   }
 });
 
-test("abandoned predecessor does not advertise a candidate already claimed by a detached Session", async () => {
+test("a detached candidate claim cannot hide user-priority physical Send", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   const message = "Keep detached candidate ownership fail closed.";
   try {
@@ -5778,7 +5809,7 @@ test("abandoned predecessor does not advertise a candidate already claimed by a 
       "session-detached-current-candidate"
     );
     const listed = await listFixtureTerminal(fixture);
-    assert.equal(listed.available_actions.send, undefined);
+    assertTerminalUserExplicitSendAction(listed);
     assert.deepEqual(taskInputCalls(fixture, message), []);
   } finally {
     fixture.cleanup();
@@ -5943,7 +5974,7 @@ test("known detached companion roots use the terminal-scoped human-priority rout
   }
 });
 
-test("a non-companion bound candidate claim suppresses present multi-root send and rejects a cached token before input", async () => {
+test("a non-companion bound candidate claim cannot hide or stale user-priority physical Send", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   const message = "Do not cross a competing bound candidate claim.";
   try {
@@ -5972,21 +6003,30 @@ test("a non-companion bound candidate claim suppresses present multi-root send a
     }, { expectedRevision: detachedClaim.revision as number });
 
     const listed = await listFixtureTerminal(fixture);
-    assert.equal(listed.available_actions.send, undefined);
+    const currentAction = assertTerminalUserExplicitSendAction(listed);
+    assert.equal(
+      currentAction.arguments.expected_terminal_token,
+      cachedAction.arguments.expected_terminal_token,
+      "managed claim changes must not stale unchanged physical authority"
+    );
     assert.deepEqual(taskInputCalls(fixture), []);
     assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
     assert.deepEqual(listConversations(fixture.storeDir), []);
 
-    const rejected = await runCli(
-      deferredForegroundSendArgs(fixture, cachedAction, message),
+    const sent = await runCli(
+      userExplicitDeferredForegroundSendArgs(
+        fixture,
+        cachedAction,
+        message
+      ),
       codexNativeAcceptanceEnv(fixture.environment)
     );
-    assert.equal(rejected.status, 1, rejected.stdout);
-    assert.match(
-      rejected.stderr,
-      /multiple bound managed Session claims|candidate.*claimed|authority|refresh/iu
-    );
-    assert.deepEqual(taskInputCalls(fixture), []);
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, sent.stdout);
+    assert.equal(output.delivered_unmanaged, true, sent.stdout);
+    assert.equal(output.management_mode, "unmanaged_fallback", sent.stdout);
+    assertSingleTaskInput(fixture, message);
     assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
     assert.deepEqual(listConversations(fixture.storeDir), []);
   } finally {
@@ -5994,7 +6034,7 @@ test("a non-companion bound candidate claim suppresses present multi-root send a
   }
 });
 
-test("a stalled Turn suppresses one-root candidate send while released history does not", async () => {
+test("a stalled Turn remains visible but cannot suppress user-priority physical Send", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   try {
     enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
@@ -6005,7 +6045,7 @@ test("a stalled Turn suppresses one-root candidate send while released history d
     persistReleasedCandidateSourceTurns(fixture, source);
     persistBlockingTurn(fixture, source, "stalled");
     const terminal = await listFixtureTerminal(fixture);
-    assert.equal(terminal.available_actions.send, undefined);
+    assertTerminalUserExplicitSendAction(terminal);
     assert.ok(
       terminal.blocking_turns?.some((turn: Record<string, any>) =>
         turn.status === "stalled"
@@ -7112,18 +7152,54 @@ async function deferredForegroundSendAction(
   fixture: NoRolloutFixture
 ): Promise<Record<string, any>> {
   const terminal = await listFixtureTerminal(fixture);
-  const action = terminal.available_actions.send;
+  return assertTerminalUserExplicitSendAction(terminal);
+}
+
+function assertTerminalUserExplicitSendAction(
+  terminal: Record<string, any>
+): Record<string, any> {
+  const action = terminal.available_actions?.send;
   assert.ok(action, JSON.stringify(terminal, null, 2));
-  assert.equal(action.arguments.selector, fixture.terminalId);
+  assert.equal(action.scope, "terminal_user_explicit");
+  assert.equal(action.arguments.selector, terminal.id);
   assert.equal("session_id" in action.arguments, false);
-  assert.equal(
-    typeof action.arguments.expected_terminal_token,
-    "string"
-  );
+  assert.equal(typeof action.arguments.expected_terminal_token, "string");
   return action;
 }
 
 function deferredForegroundSendArgs(
+  fixture: NoRolloutFixture,
+  action: Record<string, any>,
+  message: string
+): string[] {
+  const expectedManagedTerminalToken = String(
+    action.arguments.expected_managed_terminal_token ?? ""
+  );
+  assert.ok(
+    expectedManagedTerminalToken,
+    `managed deferred fixture is missing its managed token: ${JSON.stringify(action)}`
+  );
+  return [
+    "send",
+    "--conversation",
+    String(action.arguments.selector),
+    "--managed-only",
+    "--expected-terminal-token",
+    expectedManagedTerminalToken,
+    "--message",
+    message,
+    "--background",
+    "--store-dir",
+    fixture.storeDir,
+    "--codex-home",
+    fs.realpathSync(fixture.codexHome),
+    "--openclaw-bin",
+    "/usr/bin/true",
+    "--disable-terminal-bridge-monitor"
+  ];
+}
+
+function userExplicitDeferredForegroundSendArgs(
   fixture: NoRolloutFixture,
   action: Record<string, any>,
   message: string
@@ -8141,6 +8217,7 @@ async function runCli(
   env: NodeJS.ProcessEnv,
   onExit?: (status: number) => never
 ): Promise<CliTestResult> {
+  args = codexNoRolloutManagedStateMachineArgs(args);
   const parsed = parseCliCommand(args);
   const storeDir = String(parsed.options.storeDir ?? "");
   const fixture = inProcessFixtures.get(storeDir);
@@ -8224,7 +8301,10 @@ async function runCliCrashCheckpoint(
 
 /** Deliberate crash/exit and detached child-lifecycle process goldens. */
 function runCliSubprocess(args: string[], env: NodeJS.ProcessEnv) {
-  return spawnSync(process.execPath, [binPath, ...args], {
+  return spawnSync(process.execPath, [
+    binPath,
+    ...codexNoRolloutManagedStateMachineArgs(args)
+  ], {
     encoding: "utf8",
     env,
     timeout: 60_000
