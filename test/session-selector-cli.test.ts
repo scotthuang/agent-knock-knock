@@ -380,7 +380,7 @@ test("legacy unsupported executors do not break live terminal short refs", async
     workspace,
     terminalTarget,
     codexPid,
-    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
+    screen: "› \u001b[2mReady for the next task\u001b[22m\n\ngpt-5.6-sol high · /repo"
   });
   const legacyPaths = pathsForConversation("task-legacy-cursor", storeDir);
   const idleLegacyPaths = pathsForConversation(
@@ -496,6 +496,14 @@ test("legacy unsupported executors do not break live terminal short refs", async
     assert.deepEqual(listed.unavailable_managed_turns, []);
     assert.equal(listed.terminals.length, 1);
     assert.match(listed.terminals[0].short_ref, /^@[0-9a-f]{10}$/u);
+    const sendAction = listed.terminals[0].available_actions.send;
+    assert.equal(sendAction.scope, "terminal_user_explicit");
+    assert.equal(sendAction.arguments.selector, listed.terminals[0].id);
+    assert.equal(
+      typeof sendAction.arguments.expected_terminal_token,
+      "string"
+    );
+    assert.equal(sendAction.arguments.session_id, undefined);
 
     const sent = await runCliWithCodexInventory([
       "send",
@@ -539,7 +547,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
     workspace,
     terminalTarget,
     codexPid,
-    screen: "› Ready for the next task\n\ngpt-5.6-sol high · /repo"
+    screen: "› \u001b[2mReady for the next task\u001b[22m\n\ngpt-5.6-sol high · /repo"
   });
   const legacyPaths = pathsForConversation(
     "task-active-legacy-cursor",
@@ -607,10 +615,14 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
       session_count: 0,
       history: []
     });
-    assert.deepEqual(
-      listed.terminals[0].available_actions.send.arguments,
-      { selector: listed.terminals[0].id }
+    const sendAction = listed.terminals[0].available_actions.send;
+    assert.equal(sendAction.scope, "terminal_user_explicit");
+    assert.equal(sendAction.arguments.selector, listed.terminals[0].id);
+    assert.equal(
+      typeof sendAction.arguments.expected_terminal_token,
+      "string"
     );
+    assert.equal(sendAction.arguments.session_id, undefined);
     assert.deepEqual(listed.unavailable_managed_turns, []);
 
     const sent = await runCliWithCodexInventory([

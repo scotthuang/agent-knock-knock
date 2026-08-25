@@ -13,6 +13,8 @@
 - Retire an exact same-incarnation ordinary dispatch ledger whose owner Turn is gone after physical fallback, so a refreshed List can advertise Watch again; unresolved native lifecycle ledgers remain preserved.
 - Reject ordinary native slash-command text before selector discovery, avoiding terminal or host-process scans for an invalid Send or Respond.
 - Make OpenClaw doctor skill verification compatible with multi-agent installations that require an explicit `main` owner.
+- Scope durable omitted-target delegate bindings to the active runtime directory, preventing in-process hosts with scoped `AKK_RUNTIME_DIR` values from sharing message-ID state.
+- Bind explicit physical Send authority to the exact operating-system process incarnation and reject stale supplied authority before managed preparation or terminal input.
 
 ### Changed
 

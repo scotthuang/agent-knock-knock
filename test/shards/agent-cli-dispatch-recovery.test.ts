@@ -60,7 +60,7 @@ import {
   readJsonLines
 } from "../agent-cli-fixtures.js";
 
-test("safe-aborted delegate retries refuse a changed Session binding", async () => {
+test("safe-aborted strict managed retry rejects binding drift while user-priority delegate falls back once", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-delegate-safe-abort-binding-")
   );
@@ -72,6 +72,8 @@ test("safe-aborted delegate retries refuse a changed Session binding", async () 
   const tmuxSession = `akk-delegate-safe-abort-${process.pid}`;
   const terminalTarget = `${tmuxSession}:0.1`;
   const codexPid = 33430;
+  const rawConversationId =
+    `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`;
   const stableMessageId = `msg-openclaw-${"6".repeat(64)}`;
   const request = "Retry only inside the original Session binding";
   const nativeProcessUuid = "codex-delegate-safe-abort-process";
@@ -118,7 +120,28 @@ test("safe-aborted delegate retries refuse a changed Session binding", async () 
       screenPath,
       `${tmuxSession}\t0\t1\t${codexPid}\tnode\t${workspace}\n`
     );
-    const args = [
+    const managedAbortArgs = [
+      "send",
+      "--conversation",
+      rawConversationId,
+      "--message",
+      request,
+      "--message-id",
+      stableMessageId,
+      "--managed-only",
+      "--background",
+      "--workspace",
+      workspace,
+      "--store-dir",
+      storeDir,
+      "--openclaw-session",
+      "agent:test:delegate-safe-abort",
+      "--openclaw-bin",
+      "/usr/bin/true",
+      ...nativeIdentityArgs,
+      "--disable-terminal-bridge-monitor"
+    ];
+    const delegateArgs = [
       "delegate",
       "--request",
       request,
@@ -138,7 +161,7 @@ test("safe-aborted delegate retries refuse a changed Session binding", async () 
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
-    const aborted = await runAgentCliInProcess(args, {
+    const aborted = await runAgentCliInProcess(managedAbortArgs, {
       ...testEnv,
       AKK_TEST_TERMINAL_SETUP_FAILURE: "1"
     });
@@ -182,9 +205,14 @@ test("safe-aborted delegate retries refuse a changed Session binding", async () 
     );
     assert.ok(listedTerminal, listed.stdout);
     assert.equal(
-      listedTerminal.available_actions.send,
-      undefined,
-      "a changed binding cannot advertise fresh follow-current authority"
+      listedTerminal.available_actions.send?.scope,
+      "terminal_user_explicit",
+      "managed binding drift cannot hide the user's physical Send authority"
+    );
+    assert.equal(
+      typeof listedTerminal.available_actions.send?.arguments
+        ?.expected_terminal_token,
+      "string"
     );
 
     const directRetry = await runAgentCliInProcess([
@@ -195,6 +223,7 @@ test("safe-aborted delegate retries refuse a changed Session binding", async () 
       request,
       "--message-id",
       stableMessageId,
+      "--managed-only",
       "--background",
       "--store-dir",
       storeDir,
@@ -207,18 +236,46 @@ test("safe-aborted delegate retries refuse a changed Session binding", async () 
       /rollout-backed managed Session.*strict session_id send[\s\S]*refresh AKK list/iu
     );
 
-    const delegateRetry = await runAgentCliInProcess(args, testEnv);
-    assert.notEqual(delegateRetry.status, 0);
-    assert.match(
-      delegateRetry.stderr,
-      /Session binding is no longer current|idempotency key/iu
+    const delegateRetry = await runAgentCliInProcess(delegateArgs, testEnv);
+    assert.equal(
+      delegateRetry.status,
+      0,
+      delegateRetry.stderr || delegateRetry.stdout
+    );
+    const delegateOutput = JSON.parse(delegateRetry.stdout);
+    assert.equal(delegateOutput.delivered, true);
+    assert.equal(delegateOutput.delivered_unmanaged, true);
+    assert.equal(delegateOutput.management_mode, "unmanaged_fallback");
+    assert.equal(delegateOutput.scope, "terminal_user_explicit");
+    assert.equal(delegateOutput.message_id, stableMessageId);
+    const replayedDelegate = await runAgentCliInProcess(
+      delegateArgs,
+      testEnv
     );
     assert.equal(
-      readJsonLines(tmuxCallsPath).filter((call) =>
-        call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
-      ).length,
+      replayedDelegate.status,
       0,
-      "a stable retry must not cross a New/Resume binding generation"
+      replayedDelegate.stderr || replayedDelegate.stdout
+    );
+    const replayedOutput = JSON.parse(replayedDelegate.stdout);
+    assert.equal(replayedOutput.replayed, true);
+    assert.equal(replayedOutput.delivered_unmanaged, true);
+    assert.equal(replayedOutput.management_mode, "unmanaged_fallback");
+    assert.equal(replayedOutput.scope, "terminal_user_explicit");
+    assert.equal(replayedOutput.message_id, stableMessageId);
+    const inputCalls = readJsonLines(tmuxCallsPath).filter((call) =>
+      call.args[0] === "send-keys"
+    );
+    assert.equal(
+      inputCalls.filter((call) =>
+        call.args.includes("-l") && call.args.at(-1) === request
+      ).length,
+      1
+    );
+    assert.equal(
+      inputCalls.filter((call) => call.args.at(-1) === "C-m").length,
+      1,
+      "strict managed authority must stay fenced while explicit delegate input is delivered exactly once"
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

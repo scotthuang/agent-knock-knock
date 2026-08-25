@@ -251,6 +251,8 @@ export interface TerminalCommandCliOptions {
   expectedCallbackTurnId?: string;
   expectedManagedTerminalToken?: string;
   expectedTerminalToken?: string;
+  /** Internal copy of the user-priority token while managed fast path runs. */
+  expectedUserExplicitTerminalToken?: string;
   logDir?: string;
   message?: string;
   messageId?: string;
@@ -542,6 +544,11 @@ interface TerminalCommandCliRawPorts {
     storeDir: string;
   }): ManagedSessionState | undefined;
   positiveMinutes(value: unknown, optionName: string): number;
+  processIncarnationForPid(pid: number): {
+    processUuid: string;
+    processBirth: string;
+    evidence: "process_birth";
+  };
   prepareDeferredCodexForegroundBinding(request: {
     options: TerminalCommandCliOptions;
     scope: DeferredForegroundApplicationScope;
@@ -814,6 +821,7 @@ const parseJsonOption = rawPort("parseJsonOption");
 const persistManagedSessionNativeIdentity =
   rawPort("persistManagedSessionNativeIdentity");
 const positiveMinutes = rawPort("positiveMinutes");
+const processIncarnationForPid = rawPort("processIncarnationForPid");
 const prepareDeferredCodexForegroundBinding =
   rawPort("prepareDeferredCodexForegroundBinding");
 const quarantineManagedSessionBinding = rawPort("quarantineManagedSessionBinding");
@@ -4923,12 +4931,15 @@ function assertRawTerminalCandidateAuthority({
 function explicitTerminalSendToken(
   terminal: TerminalCommandTarget
 ): string {
+  const processIncarnation = processIncarnationForPid(terminal.pid);
   return unmanagedTerminalBindingToken({
     terminalId: terminal.conversationId,
     terminalControl: terminal.terminalControl,
     agent: terminal.agent,
     pid: terminal.pid,
-    workspace: terminal.terminalControl.currentPath ?? ""
+    workspace: terminal.terminalControl.currentPath ?? "",
+    processUuid: processIncarnation.processUuid,
+    processBirth: processIncarnation.processBirth
   });
 }
 
@@ -4946,6 +4957,41 @@ function hasFreshExplicitTerminalSendToken(
 ): boolean {
   const supplied = stringValue(options.expectedTerminalToken);
   return Boolean(supplied && supplied === explicitTerminalSendToken(terminal));
+}
+
+function assertFreshUserExplicitTerminalSendToken(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget
+): void {
+  const expected = stringValue(options.expectedUserExplicitTerminalToken);
+  if (expected && expected !== explicitTerminalSendToken(terminal)) {
+    throw new Error(
+      "the explicit terminal send token is stale; refresh AKK list"
+    );
+  }
+}
+
+async function assertFreshUserExplicitTerminalSendTargetWhileLocked(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget
+): Promise<void> {
+  if (!stringValue(options.expectedUserExplicitTerminalToken)) return;
+  const resolved = await createTerminalAgentBridge(options)
+    .resolveConversationId(terminal.conversationId);
+  if (
+    !resolved ||
+    resolved.agent !== terminal.agent ||
+    resolved.pid !== terminal.pid ||
+    !terminalControlsShareIncarnation(
+      resolved.terminalControl,
+      terminal.terminalControl
+    )
+  ) {
+    throw new Error(
+      "the explicitly selected terminal is no longer the same live process"
+    );
+  }
+  assertFreshUserExplicitTerminalSendToken(options, resolved);
 }
 
 function releaseTerminalDispatchForExplicitSend(input: {
@@ -5847,7 +5893,24 @@ async function runRawTerminalSend(
   messageBody: string,
   terminalConversation: TerminalCommandTarget
 ): Promise<void> {
-  if (!hasFreshExplicitTerminalSendToken(options, terminalConversation)) {
+  const suppliedExpectedTerminalToken = stringValue(
+    options.expectedTerminalToken
+  );
+  const userExplicitAuthorityRequested = Boolean(
+    suppliedExpectedTerminalToken && options.managedOnly !== true
+  );
+  const freshExplicitAuthority = userExplicitAuthorityRequested
+    ? hasFreshExplicitTerminalSendToken(options, terminalConversation)
+    : false;
+  if (
+    userExplicitAuthorityRequested &&
+    !freshExplicitAuthority
+  ) {
+    throw new Error(
+      "the explicit terminal send token is stale; refresh AKK list"
+    );
+  }
+  if (!freshExplicitAuthority) {
     await runManagedRawTerminalSend(
       options,
       messageBody,
@@ -5873,6 +5936,7 @@ async function runRawTerminalSend(
   const managedResult = await runManagedRawTerminalSend(
     {
       ...explicitOptions,
+      expectedUserExplicitTerminalToken: suppliedExpectedTerminalToken,
       expectedTerminalToken: stringValue(
         explicitOptions.expectedManagedTerminalToken
       ),
@@ -5966,6 +6030,10 @@ async function runManagedRawTerminalSendAttempt(
     terminalConversation.terminalControl,
     deferZeroInputFailurePresentation ? { timeoutMs: 0 } : undefined
   ), async (scopes, resources) => {
+    await assertFreshUserExplicitTerminalSendTargetWhileLocked(
+      options,
+      terminalConversation
+    );
     await mutationDispatchLedger.beforeMutation(
       scopes, resources, options, terminalConversation
     );
@@ -6296,8 +6364,12 @@ async function runManagedRawTerminalSendAttempt(
         recordMessageAfterSend: true,
         recordRawAttachmentAfterSend: reusableTurn === undefined,
         deferZeroInputFailurePresentation,
-        onTerminalPreflightVerified: pendingRawAttachSessionCreate
-            ? async (route) => {
+        onTerminalPreflightVerified: async (route) => {
+              assertFreshUserExplicitTerminalSendToken(options, {
+                ...terminalConversation,
+                terminalControl: route.terminalControl
+              });
+              if (!pendingRawAttachSessionCreate) return;
               const exactRoute = withExactTerminalDispatchRoute(route, {
                 terminalControl: terminalConversation.terminalControl,
                 terminalKey: terminalBridgeRuntimeKey(
@@ -6371,8 +6443,7 @@ async function runManagedRawTerminalSendAttempt(
                   expectedRevision: current.revision as number
                 });
               };
-            }
-          : undefined,
+            },
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
         observedHandoff:

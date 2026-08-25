@@ -5,6 +5,7 @@ import {
   parseProcessElapsedSeconds,
   StaticTerminalProcessSource,
   SystemTerminalProcessSource,
+  terminalProcessIncarnationForPid,
   type ProcessCommandResult,
   type TerminalProcessSource
 } from "../src/terminal-process-source.js";
@@ -20,6 +21,23 @@ test("ps elapsed values parse for selector recency", () => {
   assert.equal(parseProcessElapsedSeconds("2-01:02:03"), 176523);
   assert.equal(parseProcessElapsedSeconds("not-a-duration"), undefined);
   assert.equal(parseProcessElapsedSeconds("00:99"), undefined);
+});
+
+test("physical process incarnation distinguishes PID reuse by process birth", () => {
+  const before = terminalProcessIncarnationForPid(
+    4242,
+    () => "Mon Aug 24 10:00:00 2026"
+  );
+  const after = terminalProcessIncarnationForPid(
+    4242,
+    () => "Mon Aug 24 10:01:00 2026"
+  );
+  assert.equal(before.processBirth, "Mon Aug 24 10:00:00 2026");
+  assert.notEqual(before.processUuid, after.processUuid);
+  assert.throws(
+    () => terminalProcessIncarnationForPid(4242, () => ""),
+    /cannot verify process incarnation/u
+  );
 });
 
 test("only the system process source advertises complete inventory authority", () => {

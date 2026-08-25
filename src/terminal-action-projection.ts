@@ -65,6 +65,8 @@ export interface TerminalUserExplicitSendFacts {
   readonly terminalControl?: TerminalControlRef;
   readonly agent?: ExecutorKind;
   readonly pid?: number;
+  readonly processUuid?: string;
+  readonly processBirth?: string;
   readonly approvalScanned: boolean;
   readonly approvalBlocked: boolean;
   readonly exactEmptyComposer: boolean;
@@ -89,6 +91,8 @@ export function decideTerminalUserExplicitSendAuthority(
   const terminalId = nonBlank(facts.terminalId);
   const control = facts.terminalControl;
   const workspace = control?.currentPath ?? "";
+  const processUuid = nonBlank(facts.processUuid);
+  const processBirth = nonBlank(facts.processBirth);
   if (
     !facts.exactTerminalRow ||
     !terminalId ||
@@ -102,7 +106,9 @@ export function decideTerminalUserExplicitSendAuthority(
     !facts.exactEmptyComposer ||
     !facts.agent ||
     !Number.isSafeInteger(facts.pid) ||
-    Number(facts.pid) <= 1
+    Number(facts.pid) <= 1 ||
+    !processUuid ||
+    !processBirth
   ) {
     return { eligible: false };
   }
@@ -121,7 +127,9 @@ export function decideTerminalUserExplicitSendAuthority(
       terminalControl: control,
       agent: facts.agent,
       pid: Number(facts.pid),
-      workspace
+      workspace,
+      processUuid,
+      processBirth
     })
   };
 }

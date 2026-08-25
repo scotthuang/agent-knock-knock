@@ -84,7 +84,7 @@ export interface TerminalDelegateSendBindingRepository {
 }
 
 interface TerminalDelegateSendBindingRepositoryOptions {
-  runtimeDir: string;
+  runtimeDir: string | (() => string);
   now?: () => Date;
   ensureDirectory?: (directoryPath: string) => void;
   acquireLock?: (lockPath: string) => () => void;
@@ -370,11 +370,6 @@ function finalBindingPathDefinitelyAbsent(
 export function createTerminalDelegateSendBindingRepository(
   options: TerminalDelegateSendBindingRepositoryOptions
 ): TerminalDelegateSendBindingRepository {
-  const runtimeDir = path.resolve(options.runtimeDir);
-  const bindingsDir = path.join(
-    runtimeDir,
-    TERMINAL_DELEGATE_SEND_BINDINGS_DIRECTORY
-  );
   const now = options.now ?? (() => new Date());
   const ensureDirectory = options.ensureDirectory ?? ensureDir;
   const saveJson = options.saveJson ?? atomicSaveJsonFile;
@@ -388,9 +383,26 @@ export function createTerminalDelegateSendBindingRepository(
     fileLock.acquire(lockPath));
   const heldMessages = new Set<string>();
 
-  function pathFor(
+  function resolveRuntimeDir(): string {
+    return path.resolve(
+      typeof options.runtimeDir === "function"
+        ? options.runtimeDir()
+        : options.runtimeDir
+    );
+  }
+
+  function heldMessageKey(runtimeDir: string, messageId: string): string {
+    return JSON.stringify([runtimeDir, digest(messageId)]);
+  }
+
+  function pathForRuntime(
+    runtimeDir: string,
     input: Pick<TerminalDelegateSendRequestBoundary, "messageId">
   ): string {
+    const bindingsDir = path.join(
+      runtimeDir,
+      TERMINAL_DELEGATE_SEND_BINDINGS_DIRECTORY
+    );
     const messageId = requiredString(input.messageId, "messageId");
     const messageDigest = digest(messageId);
     return path.join(
@@ -400,9 +412,16 @@ export function createTerminalDelegateSendBindingRepository(
     );
   }
 
+  function pathFor(
+    input: Pick<TerminalDelegateSendRequestBoundary, "messageId">
+  ): string {
+    return pathForRuntime(resolveRuntimeDir(), input);
+  }
+
   function acquire(messageId: string): () => void {
-    const filePath = pathFor({ messageId });
-    const messageKey = digest(messageId);
+    const runtimeDir = resolveRuntimeDir();
+    const filePath = pathForRuntime(runtimeDir, { messageId });
+    const messageKey = heldMessageKey(runtimeDir, messageId);
     if (heldMessages.has(messageKey)) {
       throw new TerminalDelegateSendBindingUncertainError(
         "terminal delegate send binding lock is already held by this repository"
@@ -440,7 +459,14 @@ export function createTerminalDelegateSendBindingRepository(
     input: TerminalDelegateSendRequestBoundary
   ): TerminalDelegateSendBinding | undefined {
     const boundary = canonicalRequestBoundary(input);
-    const filePath = pathFor(boundary);
+    return loadFromRuntime(resolveRuntimeDir(), boundary);
+  }
+
+  function loadFromRuntime(
+    runtimeDir: string,
+    boundary: TerminalDelegateSendRequestBoundary
+  ): TerminalDelegateSendBinding | undefined {
+    const filePath = pathForRuntime(runtimeDir, boundary);
     try {
       const binding = bindingFromRecord(parseRecord(
         readJsonFileNoFollow(filePath, "terminal delegate send binding")
@@ -473,8 +499,11 @@ export function createTerminalDelegateSendBindingRepository(
     }
   }
 
-  function save(binding: TerminalDelegateSendBinding): void {
-    saveJson(pathFor(binding), recordFromBinding(binding), {
+  function saveAtRuntime(
+    runtimeDir: string,
+    binding: TerminalDelegateSendBinding
+  ): void {
+    saveJson(pathForRuntime(runtimeDir, binding), recordFromBinding(binding), {
       rootLabel: "terminal delegate send binding root",
       directoryLabel: "terminal delegate send binding shard directory",
       fileLabel: "terminal delegate send binding",
@@ -490,13 +519,14 @@ export function createTerminalDelegateSendBindingRepository(
   ): TerminalDelegateSendBindResult {
     const boundary = canonicalRequestBoundary(input);
     const target = canonicalTargetBoundary(targetInput);
-    if (!heldMessages.has(digest(boundary.messageId))) {
+    const runtimeDir = resolveRuntimeDir();
+    if (!heldMessages.has(heldMessageKey(runtimeDir, boundary.messageId))) {
       throw new TerminalDelegateSendBindingUncertainError(
         "terminal delegate send binding requires its global message lock"
       );
     }
     try {
-      const existing = load(boundary);
+      const existing = loadFromRuntime(runtimeDir, boundary);
       if (existing) {
         assertTargetMatches(existing, target);
         return { outcome: "replay", binding: existing };
@@ -506,7 +536,7 @@ export function createTerminalDelegateSendBindingRepository(
         ...target,
         reservedAt: nowTimestamp(now)
       };
-      save(binding);
+      saveAtRuntime(runtimeDir, binding);
       return { outcome: "reserved", binding };
     } catch (error) {
       if (

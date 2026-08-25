@@ -152,6 +152,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       "send",
       "--conversation",
       rawConversationId,
+      "--managed-only",
       "--message",
       "Legacy managed terminal binding",
       "--background",
@@ -241,10 +242,15 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       terminal.managed.recent_turn.conversation_id,
       modernState.conversation_id
     );
+    const sendAction = terminal.available_actions.send;
+    assert.equal(sendAction.scope, "terminal_user_explicit");
+    assert.equal(sendAction.arguments.selector, rawConversationId);
+    assert.equal(typeof sendAction.arguments.expected_terminal_token, "string");
     assert.equal(
-      terminal.available_actions.send.arguments.session_id,
-      modernState.conversation_id
+      typeof sendAction.arguments.expected_managed_terminal_token,
+      "string"
     );
+    assert.equal(sendAction.arguments.session_id, undefined);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -431,6 +437,7 @@ if (args.includes("cwd")) {
       "send",
       "--conversation",
       rawTerminalId,
+      "--managed-only",
       "--message",
       "First session turn",
       ...commonArgs
@@ -538,6 +545,7 @@ if (args.includes("cwd")) {
       "send",
       "--session",
       firstParsed.session_id,
+      "--managed-only",
       "--type",
       "answer",
       "--message",
@@ -567,8 +575,14 @@ if (args.includes("cwd")) {
     );
     const secondTerminal = JSON.parse(listedForSecond.stdout).terminals[0];
     const secondAction = secondTerminal.available_actions.send;
+    assert.equal(secondAction.scope, "terminal_user_explicit");
+    assert.equal(secondAction.arguments.selector, secondTerminal.id);
     assert.equal(
       typeof secondAction.arguments.expected_terminal_token,
+      "string"
+    );
+    assert.equal(
+      typeof secondAction.arguments.expected_managed_terminal_token,
       "string"
     );
     const sendsBeforeStaleProcessBirth = readJsonLines(tmuxCallsPath).filter(

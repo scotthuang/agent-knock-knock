@@ -41,6 +41,7 @@ export const testSupportImpactByPath = Object.freeze({
   "test/in-process-cli-fixtures.ts": [
     "test/agent-cli-fixtures.ts",
     "test/callback-cli.test.ts",
+    "test/cli-core.test.ts",
     "test/cli-ux.test.ts",
     "test/codex-sticky-rollout-fixture.ts",
     "test/delegate-cli.test.ts",

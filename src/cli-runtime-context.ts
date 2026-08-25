@@ -39,6 +39,8 @@ export interface CliCommandDependencies<Options extends CliDependencyOptions = C
     options: Options
   ) => string | undefined;
   codexProcessBirthForPid?: (pid: number) => string;
+  /** Adapter-neutral process birth used to fence physical terminal actions. */
+  processBirthForPid?: (pid: number) => string;
   stdout?: (text: string) => void;
   cwd?: string | (() => string);
   env?: NodeJS.ProcessEnv;

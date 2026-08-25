@@ -1264,6 +1264,24 @@ test("default delegate retries route to the original active receipt before idle 
     const firstParsed = JSON.parse(first.stdout);
     assert.equal(firstParsed.delivered, true);
     assert.equal(firstParsed.message.id, stableMessageId);
+    const delegateBindingDigest = createHash("sha256")
+      .update(stableMessageId)
+      .digest("hex");
+    const delegateBindingPath = path.join(
+      tempDir,
+      ".akk-cli-test-runtime",
+      "terminal-delegate-send-bindings",
+      delegateBindingDigest.slice(0, 2),
+      `terminal-delegate-send-binding-${delegateBindingDigest}.json`
+    );
+    const delegateBinding = JSON.parse(
+      fs.readFileSync(delegateBindingPath, "utf8")
+    );
+    assert.equal(
+      delegateBinding.terminal_id,
+      `terminal:v2:tmux:codex:${terminalTarget}:${codexPid}`
+    );
+    assert.equal(typeof delegateBinding.physical_token, "string");
     assert.equal(
       readJsonLines(tmuxCallsPath).filter((call) =>
         call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
@@ -1276,16 +1294,22 @@ test("default delegate retries route to the original active receipt before idle 
     assert.equal(replay.status, 0, replay.stderr || replay.stdout);
     const replayParsed = JSON.parse(replay.stdout);
     assert.equal(replayParsed.replayed, true);
-    assert.equal(replayParsed.delivered, true);
-    assert.equal(replayParsed.session_id, firstParsed.session_id);
-    assert.equal(replayParsed.turn_id, firstParsed.turn_id);
-    assert.equal(replayParsed.message.id, stableMessageId);
+    assert.equal(replayParsed.delivered, false);
+    assert.equal(replayParsed.status, "submission_pending_acceptance");
+    assert.equal(replayParsed.submission_outcome, "pending_acceptance");
+    assert.equal(replayParsed.delivery_receipt, "enter_dispatched");
+    assert.equal(replayParsed.do_not_retry, true);
+    assert.equal(replayParsed.management_mode, "managed");
+    assert.equal(replayParsed.scope, "terminal_user_explicit");
+    assert.equal(replayParsed.message_id, stableMessageId);
+    assert.equal(replayParsed.session_id, undefined);
+    assert.equal(replayParsed.turn_id, undefined);
     assert.equal(
       readJsonLines(tmuxCallsPath).filter((call) =>
         call.args[0] === "send-keys" && call.args.at(-1) === "C-m"
       ).length,
       1,
-      "delegate replay must bypass idle selection and send no second Enter"
+      "physical delegate replay must bypass idle selection and send no second Enter"
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
