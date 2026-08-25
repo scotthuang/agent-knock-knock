@@ -130,6 +130,7 @@ const HOST_BRIDGE_PROFILE_SCHEMA_ID =
 const HOST_BRIDGE_AUTHORITY_PATHS = Object.freeze([
   "schemas/host-profile-v1.schema.json",
   "src/command-json-callback-transport.ts",
+  "src/host-adapter.ts",
   "src/host-bridge-mcp.ts",
   "src/host-bridge-tools.ts",
   "src/host-bridge.ts",

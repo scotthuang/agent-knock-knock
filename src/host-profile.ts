@@ -40,6 +40,10 @@ export type HostProfileAcknowledgementDispositionV1 =
   | "permanent_failure"
   | "uncertain";
 
+export type HostProfileControllerScopeV1 =
+  | "startup_v1"
+  | "route_bound_v1";
+
 export interface HostProfileCompatibilityV1 {
   readonly host: string;
   readonly range: string;
@@ -48,6 +52,11 @@ export interface HostProfileCompatibilityV1 {
 export interface HostProfileEnvironmentControllerContextV1 {
   readonly driver: "environment_v1";
   readonly sessionIdVariable: string;
+  /**
+   * Omitted is the original v1 behavior and is equivalent to startup_v1.
+   * Keeping it omitted in the parsed model preserves existing fingerprints.
+   */
+  readonly scope?: HostProfileControllerScopeV1;
 }
 
 export interface HostProfileCallbackEnvironmentV1 {
@@ -613,7 +622,7 @@ function parseControllerContext(
   const context = profileObject(value, "host profile controllerContext");
   assertOnlyKeys(
     context,
-    ["driver", "sessionIdVariable"],
+    ["driver", "sessionIdVariable", "scope"],
     "host profile controllerContext"
   );
   if (
@@ -631,10 +640,32 @@ function parseControllerContext(
     128
   );
   assertSafeEnvironmentVariable(sessionIdVariable, "controller session");
+  const scope = Object.hasOwn(context, "scope")
+    ? parseControllerScope(context.scope)
+    : undefined;
   return Object.freeze({
     driver: "environment_v1" as const,
-    sessionIdVariable
+    sessionIdVariable,
+    ...(scope === undefined ? {} : { scope })
   });
+}
+
+/** Normalize the optional scope without changing legacy Profile fingerprints. */
+export function hostProfileControllerScope(
+  profile: HostProfileV1
+): HostProfileControllerScopeV1 {
+  return profile.controllerContext.scope ?? "startup_v1";
+}
+
+function parseControllerScope(
+  value: unknown
+): HostProfileControllerScopeV1 {
+  if (value !== "startup_v1" && value !== "route_bound_v1") {
+    throw new Error(
+      "host profile controllerContext.scope must be startup_v1 or route_bound_v1"
+    );
+  }
+  return value;
 }
 
 function parseCommandJsonCallback(

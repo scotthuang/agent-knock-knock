@@ -1,0 +1,74 @@
+{
+  "name": "@scotthuang/agent-knock-knock-deepseek-harness",
+  "version": "0.1.0-rc.1",
+  "description": "Native Agent Knock Knock connector for DeepSeek Harness",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.js.map",
+    "lib/**/*.d.ts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scotthuang/agent-knock-knock.git",
+    "directory": "connectors/deepseek-harness"
+  },
+  "bugs": {
+    "url": "https://github.com/scotthuang/agent-knock-knock/issues"
+  },
+  "homepage": "https://github.com/scotthuang/agent-knock-knock/tree/main/connectors/deepseek-harness#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "clean": "node -e \"fs.rmSync('lib', { recursive: true, force: true }); fs.rmSync('.test-dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test:fast": "npm run build && tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
+    "prepack": "npm run build",
+    "pack:check": "npm pack --dry-run",
+    "release:check": "node scripts/release-check.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-commands": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.1",
+    "@scotthuang/agent-knock-knock": "file:../..",
+    "ajv": "8.20.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-commands": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@types/node": "22.20.0",
+    "typescript": "6.0.3"
+  }
+}

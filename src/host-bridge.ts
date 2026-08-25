@@ -80,6 +80,12 @@ export async function runHostBridge(
     environment,
     cwd
   });
+  if (runtime.controllerScope === "route_bound_v1") {
+    throw new Error(
+      "Host Profile controllerContext.scope route_bound_v1 is not supported " +
+      "by the standalone Host Bridge; use the Host-native connector"
+    );
+  }
   assertHostProfileCallbackExecutableReady(
     runtime.selected.profile.callback.executable,
     runtime.selected.profile.callback.environment.allow

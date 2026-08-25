@@ -58,6 +58,8 @@ The second command proves that AKK can find the one send-ready pane, revalidate 
 
 **Connect another controller Host without an AKK fork.** A compatible Host can launch `agent-knock-knock host-bridge` as a foreground MCP/stdio child, bind its trusted current session through `environment_v1`, and inject callbacks through `command_json_v1`. The Bridge exposes the same 16 semantic tools and reuses the same Session, Turn, Watch, Store, callback, and terminal core as OpenClaw. See [Host Bridge and Host Profiles](docs/host-bridge-profiles.md) for the configuration-only prerequisites, starter Profile, validation commands, and thin-connector fallback.
 
+**Use AKK natively from DeepSeek Harness.** DeepSeek Harness Web `0.1.1-rc.2` can install the first-party connector bundle with `dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next`. After one restart, every conversation receives `/akk` and the same 16 semantic tools without `/akk-bind`, copied session IDs, an AKK fork, or a standalone supervisor. The connector derives callback authority from the exact command/tool Agent and returns completion to that same live conversation. See [the connector package](connectors/deepseek-harness/README.md) for its prerelease compatibility and recovery boundaries.
+
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 
 ## How It Works

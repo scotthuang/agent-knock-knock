@@ -56,8 +56,11 @@ export function createHostProfileCallbackTransport(
         runtime.callbackRoute.transport !== input.route.transport ||
         runtime.callbackRoute.profile_id !== input.route.profile_id ||
         runtime.callbackRoute.profile_revision !== input.route.profile_revision ||
-        runtime.callbackRoute.controller_session_id !==
-          input.route.controller_session_id
+        (
+          runtime.controllerScope === "startup_v1" &&
+          runtime.callbackRoute.controller_session_id !==
+            input.route.controller_session_id
+        )
       ) {
         return permanentFailure("host_profile_callback_route_mismatch");
       }
@@ -66,7 +69,10 @@ export function createHostProfileCallbackTransport(
       try {
         transport = createCommandJsonCallbackTransport({
           profile: runtime.selected.profile,
-          controllerSessionId: runtime.controllerSessionId,
+          controllerSessionId:
+            runtime.controllerScope === "route_bound_v1"
+              ? input.route.controller_session_id
+              : runtime.controllerSessionId,
           environment: options.environment,
           now: options.now
         });

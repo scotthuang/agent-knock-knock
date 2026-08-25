@@ -104,6 +104,8 @@ test("host-profile example, list, and validate execute with scoped cwd", async (
   assert.equal(body.revision, "2026.08.25-1");
   assert.equal(body.compatibility_checked, true);
   assert.equal(body.controller_context_driver, "environment_v1");
+  assert.equal(body.controller_context_scope, "startup_v1");
+  assert.equal(body.standalone_bridge_compatible, true);
   assert.equal(body.callback_driver, "command_json_v1");
   assert.match(body.fingerprint, /^sha256:[a-f0-9]{64}$/u);
 });
@@ -134,6 +136,8 @@ test("doctor checks Profile compatibility, trusted context, and callback executa
   assert.equal(valid.exitCode, 0);
   assert.equal(validBody.ok, true);
   assert.equal(validBody.mode, "host_bridge");
+  assert.equal(validBody.controller_context_scope, "startup_v1");
+  assert.equal(validBody.standalone_bridge_compatible, true);
   assert.deepEqual(
     validBody.checks.map((check: { name: string; status: string }) => [
       check.name,
@@ -167,6 +171,50 @@ test("doctor checks Profile compatibility, trusted context, and callback executa
   );
 });
 
+test("validate and doctor identify route-bound Profiles as connector-only", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-route-bound-doctor-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const profilePath = path.join(root, "route-bound.json");
+  writeProfile(profilePath, "route_bound_v1");
+
+  const validated = await executeCliCommand("host-profile", {
+    action: "validate",
+    profile: path.basename(profilePath),
+    host: "my-agent",
+    hostVersion: "1.9.2"
+  }, quietDependencies(root));
+  const validatedBody = JSON.parse(validated.stdout);
+  assert.equal(validated.exitCode, 0);
+  assert.equal(validatedBody.controller_context_scope, "route_bound_v1");
+  assert.equal(validatedBody.standalone_bridge_compatible, false);
+
+  const diagnosed = await executeCliCommand("doctor", {
+    hostProfile: path.basename(profilePath),
+    host: "my-agent",
+    hostVersion: "1.9.2"
+  }, {
+    ...quietDependencies(root),
+    env: { MY_AGENT_SESSION_ID: "private-controller-session" }
+  });
+  const diagnosedBody = JSON.parse(diagnosed.stdout);
+  assert.equal(diagnosed.exitCode, 1);
+  assert.equal(diagnosedBody.controller_context_scope, "route_bound_v1");
+  assert.equal(diagnosedBody.standalone_bridge_compatible, false);
+  assert.deepEqual(
+    diagnosedBody.checks.find((check: { name: string }) =>
+      check.name === "standalone_bridge_scope"
+    ),
+    {
+      name: "standalone_bridge_scope",
+      status: "error",
+      scope: "route_bound_v1",
+      detail:
+        "route_bound_v1 is for a Host-native connector and is not supported " +
+        "by the standalone Host Bridge"
+    }
+  );
+});
+
 function quietDependencies(cwd: string) {
   return {
     cwd,
@@ -174,7 +222,10 @@ function quietDependencies(cwd: string) {
   };
 }
 
-function writeProfile(filePath: string): void {
+function writeProfile(
+  filePath: string,
+  controllerScope?: "startup_v1" | "route_bound_v1"
+): void {
   fs.writeFileSync(filePath, `${JSON.stringify({
     $schema: HOST_PROFILE_JSON_SCHEMA,
     schema: HOST_PROFILE_SCHEMA,
@@ -187,7 +238,8 @@ function writeProfile(filePath: string): void {
     },
     controllerContext: {
       driver: "environment_v1",
-      sessionIdVariable: "MY_AGENT_SESSION_ID"
+      sessionIdVariable: "MY_AGENT_SESSION_ID",
+      ...(controllerScope === undefined ? {} : { scope: controllerScope })
     },
     callback: {
       driver: "command_json_v1",

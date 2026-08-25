@@ -235,6 +235,30 @@ test(
   }
 );
 
+test("standalone Host Bridge rejects a route-bound Host Profile", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-route-bound-bridge-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const profilePath = path.join(root, "route-bound.json");
+  writeProfile(profilePath, undefined, "route_bound_v1");
+
+  const spawned = spawnAgentCliCaptured([
+    "host-bridge",
+    "--profile",
+    profilePath,
+    "--host",
+    "my-agent",
+    "--host-version",
+    "1.8.7"
+  ], childEnvironment(root), {
+    cwd: root,
+    entrypoint: path.resolve("dist/src/cli.js")
+  });
+  const result = await spawned.result;
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /route_bound_v1 is not supported/u);
+  assert.match(result.stderr, /Host-native connector/u);
+});
+
 interface JsonRpcResponse extends Record<string, unknown> {
   readonly id?: unknown;
   readonly result?: Record<string, any>;
@@ -321,7 +345,11 @@ async function within<Value>(
   }
 }
 
-function writeProfile(filePath: string, callbackScript?: string): void {
+function writeProfile(
+  filePath: string,
+  callbackScript?: string,
+  controllerScope?: "startup_v1" | "route_bound_v1"
+): void {
   fs.writeFileSync(filePath, `${JSON.stringify({
     $schema: HOST_PROFILE_JSON_SCHEMA,
     schema: HOST_PROFILE_SCHEMA,
@@ -334,7 +362,8 @@ function writeProfile(filePath: string, callbackScript?: string): void {
     },
     controllerContext: {
       driver: "environment_v1",
-      sessionIdVariable: "MY_AGENT_SESSION_ID"
+      sessionIdVariable: "MY_AGENT_SESSION_ID",
+      ...(controllerScope === undefined ? {} : { scope: controllerScope })
     },
     callback: {
       driver: "command_json_v1",

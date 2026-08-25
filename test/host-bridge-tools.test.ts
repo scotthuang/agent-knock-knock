@@ -32,7 +32,12 @@ const expectedToolNames = [
 test("host bridge captures the existing semantic tool contract once", () => {
   const registry = createRegistry("session-key", "session-incarnation");
   const listed = registry.list();
+  const command = registry.command();
 
+  assert.equal(command.name, "akk");
+  assert.equal(command.acceptsArgs, true);
+  assert.ok(command.description.length > 0);
+  assert.equal(registry.command(), command);
   assert.deepEqual(listed.map((tool) => tool.name), expectedToolNames);
   assert.equal(new Set(listed.map((tool) => tool.name)).size, 16);
   assert.equal(registry.list(), listed);
@@ -41,6 +46,16 @@ test("host bridge captures the existing semantic tool contract once", () => {
     assert.ok(tool.description.length > 0);
     assert.equal(tool.inputSchema.type, "object");
   }
+});
+
+test("host bridge executes the captured akk slash command", async () => {
+  const result = await createRegistry(
+    "command-session",
+    "command-incarnation"
+  ).command().execute("help");
+
+  assert.equal(result.isError, undefined);
+  assert.match(result.text, /\/akk/u);
 });
 
 test("host bridge tools execute with the trusted stable controller context", async () => {
@@ -138,6 +153,32 @@ test("host bridge rejects unknown tool names", async () => {
     registry.execute("agent_knock_knock_missing", "call-1", {}),
     /unknown host bridge tool agent_knock_knock_missing/u
   );
+});
+
+test("host bridge relay leaves the embedding Host event loop responsive", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-host-async-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.mjs");
+  fs.writeFileSync(
+    relayPath,
+    "setTimeout(() => process.stdout.write(JSON.stringify({ terminals: [] })), 80);\n",
+    "utf8"
+  );
+  const registry = createRegistry("async-session", "async-owner", relayPath);
+  let eventLoopAdvanced = false;
+  const resultPromise = registry.execute(
+    "agent_knock_knock_list",
+    "async-call",
+    {}
+  );
+  await new Promise<void>((resolve) => setImmediate(() => {
+    eventLoopAdvanced = true;
+    resolve();
+  }));
+
+  assert.equal(eventLoopAdvanced, true);
+  const result = await resultPromise;
+  assert.deepEqual(result.details, { terminals: [] });
 });
 
 function createRegistry(

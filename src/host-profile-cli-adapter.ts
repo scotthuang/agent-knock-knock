@@ -3,6 +3,7 @@ import fs from "node:fs";
 import {
   assertHostProfileCompatibility,
   assertHostProfileCallbackExecutableReady,
+  hostProfileControllerScope,
   resolveHostProfileControllerContext
 } from "./host-profile.js";
 import {
@@ -63,6 +64,7 @@ export function runHostProfileCommand(
   if (compatibility) {
     assertHostProfileCompatibility(selected.profile, compatibility);
   }
+  const controllerScope = hostProfileControllerScope(selected.profile);
   writeCliJson({
     ok: true,
     schema: selected.profile.schema,
@@ -75,6 +77,8 @@ export function runHostProfileCommand(
     compatibility: selected.profile.compatibility,
     compatibility_checked: compatibility !== undefined,
     controller_context_driver: selected.profile.controllerContext.driver,
+    controller_context_scope: controllerScope,
+    standalone_bridge_compatible: controllerScope === "startup_v1",
     callback_driver: selected.profile.callback.driver
   });
 }
@@ -96,6 +100,18 @@ export function runHostProfileDoctor(options: HostProfileCliOptions): void {
     });
     finishDoctor(checks);
     return;
+  }
+
+  const controllerScope = hostProfileControllerScope(selected.profile);
+  if (controllerScope === "route_bound_v1") {
+    checks.push({
+      name: "standalone_bridge_scope",
+      status: "error",
+      scope: controllerScope,
+      detail:
+        "route_bound_v1 is for a Host-native connector and is not supported " +
+        "by the standalone Host Bridge"
+    });
   }
 
   try {
@@ -154,7 +170,9 @@ export function runHostProfileDoctor(options: HostProfileCliOptions): void {
   finishDoctor(checks, {
     profile_id: selected.profile.id,
     profile_revision: selected.profile.revision,
-    profile_fingerprint: selected.fingerprint
+    profile_fingerprint: selected.fingerprint,
+    controller_context_scope: controllerScope,
+    standalone_bridge_compatible: controllerScope === "startup_v1"
   });
 }
 

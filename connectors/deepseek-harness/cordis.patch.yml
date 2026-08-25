@@ -1,0 +1,4 @@
+# Optional Web Profile bundle: mount the AKK native connector on the Host plane.
+- insert:
+    - id: agent-knock-knock-deepseek-harness
+      name: '@scotthuang/agent-knock-knock-deepseek-harness'

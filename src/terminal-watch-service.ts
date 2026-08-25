@@ -52,6 +52,11 @@ export interface CreateTerminalWatchInput {
   agent: ExecutorKind;
   terminal: TerminalWatchTerminalIdentity;
   anchor: TerminalWatchAnchor;
+  /**
+   * Immutable Host callback authority captured when the Watch is created.
+   * Legacy OpenClaw Watches omit this and retain their existing lazy resolver.
+   */
+  callback_route?: CallbackRouteV1;
   openclaw_session: string;
   openclaw_bin: string;
   timeout_ms: number;
@@ -201,6 +206,9 @@ export function createTerminalWatchService(
       anchor: input.anchor,
       observation_checkpoint:
         initialTerminalWatchObservationCheckpoint(input.anchor),
+      ...(input.callback_route === undefined
+        ? {}
+        : { callback_route: parseCallbackRoute(input.callback_route) }),
       openclaw_session: input.openclaw_session,
       openclaw_bin: input.openclaw_bin,
       created_at: createdAt,
@@ -509,7 +517,9 @@ function createTerminalWatchNotificationDelivery(input: {
       if (!terminalWatchNotificationCallbackSnapshot(current, selected)) {
         let callback: TerminalWatchCallbackResolution | undefined;
         try {
-          callback = dependencies.resolveCallback(current);
+          callback = current.callback_route
+            ? { route: current.callback_route }
+            : dependencies.resolveCallback(current);
         } catch {
           snapshotErrorCode = "callback_route_resolution_failed";
         }

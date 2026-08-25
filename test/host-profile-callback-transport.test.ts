@@ -41,7 +41,10 @@ interface CallbackFixture {
   readonly relayEnvironment: NodeJS.ProcessEnv;
 }
 
-function createCallbackFixture(t: TestContext): CallbackFixture {
+function createCallbackFixture(
+  t: TestContext,
+  controllerScope?: "startup_v1" | "route_bound_v1"
+): CallbackFixture {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-profile-callback-"));
   const executable = path.join(root, "callback-driver");
   const profilePath = path.join(root, "host-profile.json");
@@ -80,7 +83,8 @@ function createCallbackFixture(t: TestContext): CallbackFixture {
     },
     controllerContext: {
       driver: "environment_v1",
-      sessionIdVariable: SESSION_VARIABLE
+      sessionIdVariable: SESSION_VARIABLE,
+      ...(controllerScope === undefined ? {} : { scope: controllerScope })
     },
     callback: {
       driver: "command_json_v1",
@@ -201,6 +205,26 @@ test("command_json_v1 executes the exact selected Profile and accepts its acknow
     disposition: "accepted",
     accepted_at: NOW.toISOString(),
     acceptance_id: `${CALLBACK_TOKEN}:${SESSION_ID}:body-232`,
+    evidence: {
+      transport: "command_json_v1",
+      process_status: 0
+    }
+  });
+});
+
+test("route_bound_v1 executes against the persisted route controller session", (t) => {
+  const fixture = createCallbackFixture(t, "route_bound_v1");
+  const routeSessionId = "controller-session-from-persisted-route";
+  const route = {
+    ...fixture.runtime.callbackRoute,
+    controller_session_id: routeSessionId
+  };
+  const router = callbackRouter(fixture, () => fixture.relayEnvironment);
+
+  assert.deepEqual(router.deliver(deliveryInput(route)), {
+    disposition: "accepted",
+    accepted_at: NOW.toISOString(),
+    acceptance_id: `${CALLBACK_TOKEN}:${routeSessionId}:body-232`,
     evidence: {
       transport: "command_json_v1",
       process_status: 0
