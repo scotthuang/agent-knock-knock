@@ -6,6 +6,7 @@ import {
   createLegacyOpenClawCallbackRoute,
   type CallbackAttemptOutcome,
   type CallbackRouteV1,
+  type CallbackTransport,
   type CallbackTransportContextV1,
   type CallbackTransportDeliverInput
 } from "./callback-transport.js";
@@ -78,16 +79,18 @@ export function createTerminalWatchCallbackCliAdapter(
     environment?: () => NodeJS.ProcessEnv;
     now?: () => Date;
     spawnSync?: CallbackSpawnSync;
+    transport?: CallbackTransport;
   } = {}
 ): TerminalWatchCallbackCliAdapter {
   const now = options.now ?? (() => new Date());
-  const transport = createOpenClawCallbackTransport({
+  const openClawTransport = createOpenClawCallbackTransport({
     now,
     environment: options.environment ?? (() => process.env),
     redactConversation: () => ({}),
     recordCallbackProcessDelivery: () => {},
     ...(options.spawnSync ? { spawnSync: options.spawnSync } : {})
   });
+  const deliveryTransport = options.transport ?? openClawTransport;
 
   return Object.freeze({
     deliver(input) {
@@ -105,7 +108,7 @@ export function createTerminalWatchCallbackCliAdapter(
       }
     },
     deliverTransport(input): CallbackAttemptOutcome {
-      return transport.deliver(input);
+      return deliveryTransport.deliver(input);
     }
   });
 
@@ -115,7 +118,7 @@ export function createTerminalWatchCallbackCliAdapter(
     message: string;
     idempotencyKey: string;
   }): OpenClawCallbackAttempt {
-    const delivery = transport.deliverChatSend({
+    const delivery = openClawTransport.deliverChatSend({
       openclawBin: input.openclawBin,
       params: {
         sessionKey: input.sessionKey,

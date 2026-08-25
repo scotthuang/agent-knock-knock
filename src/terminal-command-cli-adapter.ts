@@ -1240,7 +1240,7 @@ function replayExactActiveTerminalSubmission({
   })) {
     throw new Error(
       `terminal idempotency key ${messageId} does not match its original ` +
-      "Store, Session, Turn, OpenClaw session, message, or terminal binding; " +
+      "Store, Session, Turn, controller session, message, or terminal binding; " +
       "no terminal input was sent"
     );
   }
@@ -1576,7 +1576,7 @@ function validateStoredTerminalSubmissionMatch({
   ) {
     throw new Error(
       `terminal idempotency key ${messageId} does not match its original ` +
-      "Store, Session, Turn, OpenClaw session, or terminal binding; no terminal input was sent"
+      "Store, Session, Turn, controller session, or terminal binding; no terminal input was sent"
     );
   }
 
@@ -6758,7 +6758,7 @@ async function runTurnResponse({ options, messageBody }) {
   ) {
     throw new Error(
       `turn ${turnIdForConversation(initialConversation)} belongs to a ` +
-      "different OpenClaw session; no terminal input was sent"
+      "different controller session; no terminal input was sent"
     );
   }
   const nativeTakeover = isRecord(initialConversation.native_session_takeover)
@@ -6835,7 +6835,7 @@ async function runTurnResponse({ options, messageBody }) {
         ) {
           throw new Error(
             `turn ${turnIdForConversation(lockedConversation)} belongs to a ` +
-            "different OpenClaw session; no terminal input was sent"
+            "different controller session; no terminal input was sent"
           );
         }
         lockedConversation = refineTerminalTurnEndpoint({

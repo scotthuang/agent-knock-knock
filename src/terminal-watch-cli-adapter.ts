@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import {
+  parseCallbackRoute,
+  type CallbackRouteV1
+} from "./callback-transport.js";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
   captureClaudeHumanStartedActiveTaskAnchor,
@@ -54,6 +58,7 @@ import {
 const DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES = 720;
 
 export interface TerminalWatchCliOptions {
+  callbackRoute?: CallbackRouteV1;
   claudeHome?: string;
   hardTimeoutMinutes?: number | string;
   openclawBin?: string;
@@ -137,6 +142,9 @@ export function createTerminalWatchCliAdapter(
   function serviceFor(
     options: TerminalWatchCliOptions
   ): TerminalWatchService {
+    const explicitRoute = Object.hasOwn(options, "callbackRoute")
+      ? parseCallbackRoute(options.callbackRoute)
+      : undefined;
     const repository = createTerminalWatchStore(
       dependencies.storeDirFromOptions(options),
       { acquire: dependencies.acquireFileLock }
@@ -146,8 +154,12 @@ export function createTerminalWatchCliAdapter(
       now: dependencies.now,
       randomUUID: dependencies.randomUUID,
       observe: (watch) => observeTerminalWatch(watch, options, dependencies),
-      resolveCallback: resolveTerminalWatchOpenClawCallback,
-      resolveCallbackContext: resolveTerminalWatchOpenClawCallbackContext,
+      resolveCallback: explicitRoute
+        ? () => ({ route: explicitRoute })
+        : resolveTerminalWatchOpenClawCallback,
+      resolveCallbackContext: explicitRoute
+        ? () => undefined
+        : resolveTerminalWatchOpenClawCallbackContext,
       deliver: (input) => {
         if (callback.deliverTransport) {
           return callback.deliverTransport(input);
@@ -195,10 +207,11 @@ export function createTerminalWatchCliAdapter(
 
   async function runWatch(options: TerminalWatchCliOptions): Promise<void> {
     const terminalId = requiredString(options.terminal, "--terminal");
-    const openclawSession = requiredString(
-      options.openclawSession,
-      "--openclaw-session"
-    );
+    const callbackRoute = Object.hasOwn(options, "callbackRoute")
+      ? parseCallbackRoute(options.callbackRoute)
+      : undefined;
+    const openclawSession = callbackRoute?.controller_session_id ??
+      requiredString(options.openclawSession, "--openclaw-session");
     const storeDir = dependencies.storeDirFromOptions(options);
     const initiallyObserved = await exactTerminalForWatch(
       terminalId,

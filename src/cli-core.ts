@@ -150,8 +150,18 @@ import { terminalSubmissionPayload } from
 import { createCallbackCliFacade } from "./callback-cli-adapter.js";
 import { createOpenClawManagedCallbackCliAdapter } from
   "./openclaw-managed-callback-cli-adapter.js";
+import { createHostProfileCallbackTransport } from
+  "./host-profile-callback-transport.js";
+import { applyTrustedHostProfileCliOptions } from
+  "./host-profile-runtime.js";
+import {
+  runHostProfileCommand,
+  runHostProfileDoctor
+} from "./host-profile-cli-adapter.js";
 import { createTerminalMaintenanceCliFacade } from
   "./terminal-maintenance-cli-adapter.js";
+import { createTerminalWatchCallbackCliAdapter } from
+  "./terminal-watch-callback-cli-adapter.js";
 import {
   terminalMonitorActivityPersistIntervalMs as terminalBridgeActivityPersistIntervalMs,
   terminalMonitorApprovalCandidate as terminalBridgeApprovalCandidate,
@@ -464,6 +474,33 @@ export interface ParsedCliCommand {
 
 export function parseCliCommand(argv: readonly string[]): ParsedCliCommand {
   const [command, ...rawArgs] = argv;
+  if (command === "host-profile") {
+    const [action, ...actionArgs] = rawArgs;
+    if (action === undefined || action.startsWith("--")) {
+      throw new Error("host-profile requires example, list, or validate");
+    }
+    const positionalProfile = action === "validate" &&
+        actionArgs[0] !== undefined &&
+        !actionArgs[0].startsWith("--")
+      ? actionArgs[0]
+      : undefined;
+    const options: CliCommandOptions = parseArgs(
+      positionalProfile ? actionArgs.slice(1) : actionArgs
+    );
+    if (positionalProfile && options.profile !== undefined) {
+      throw new Error(
+        "host-profile validate accepts the Profile only once"
+      );
+    }
+    return {
+      command,
+      options: {
+        ...options,
+        action,
+        ...(positionalProfile ? { profile: positionalProfile } : {})
+      }
+    };
+  }
   return {
     command,
     options: parseArgs(rawArgs)
@@ -479,11 +516,32 @@ export async function executeCliCommand(
     commandName,
     options,
     dependencies,
-    () => dispatchCliCommand(commandName, options)
+    () => dispatchCliCommand(
+      commandName,
+      applyTrustedHostProfileCliOptions(
+        commandName,
+        options,
+        cliEnv(),
+        cliCwd()
+      )
+    )
   );
 }
 
 async function dispatchCliCommand(commandName, options) {
+  if (commandName === "host-profile") {
+    runHostProfileCommand(options);
+    return;
+  }
+  if (commandName === "host-bridge") {
+    const { runHostBridgeCli } = await import("./host-bridge.js");
+    await runHostBridgeCli(options);
+    return;
+  }
+  if (commandName === "doctor" && options.hostProfile !== undefined) {
+    runHostProfileDoctor({ ...options, profile: options.hostProfile });
+    return;
+  }
   if (
     ((commandName === "send" && !stringValue(options.turn)) ||
       commandName === "respond") &&
@@ -765,6 +823,15 @@ const managedOpenClawCallbackDelivery =
     textSummary,
     log: runtimeLog
   });
+const hostProfileCallbackTransport = createHostProfileCallbackTransport({
+  legacyTransport: managedOpenClawCallbackDelivery.transport,
+  environment: cliEnv,
+  now: cliNow
+});
+const managedCallbackDelivery = Object.freeze({
+  ...managedOpenClawCallbackDelivery,
+  transport: hostProfileCallbackTransport
+});
 
 const callbackCliFacade = createCallbackCliFacade({
   state: { acquireFileLock, loadConversation: loadConversationFromOptions,
@@ -784,7 +851,7 @@ const callbackCliFacade = createCallbackCliFacade({
     isProcessAlive,
     attemptLeaseMs: CALLBACK_ATTEMPT_LEASE_MS,
     delaysMs: CALLBACK_RETRY_DELAYS_MS },
-  delivery: managedOpenClawCallbackDelivery,
+  delivery: managedCallbackDelivery,
   runtime: { textSummary }
 });
 const terminalDispatchRecovery = createTerminalDispatchRecoveryCliAdapter({
@@ -1282,6 +1349,11 @@ const terminalWatchCliFacade = createTerminalWatchCliAdapter({
       storeDir,
       terminalControl
     ),
+  callback: createTerminalWatchCallbackCliAdapter({
+    environment: cliEnv,
+    now: cliNow,
+    transport: hostProfileCallbackTransport
+  }),
   printJson
 });
 
@@ -1733,6 +1805,11 @@ function usage() {
   agent-knock-knock close [--turn <turn-id|selector>] [--conversation <selector>] [--reason <text>] [--expected-message-id <message-id> | --expected-transition-id <transition-id> | --expected-handoff-token <token>]
   agent-knock-knock install-openclaw [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
   agent-knock-knock doctor [--openclaw-bin <path>] [--tmux-bin <path>] [--herdr-bin <path>]
+  agent-knock-knock host-profile example
+  agent-knock-knock host-profile list
+  agent-knock-knock host-profile validate <profile.json|built-in-id> [--host <id> --host-version <version>]
+  agent-knock-knock doctor --host-profile <profile.json|built-in-id> --host <id> --host-version <version>
+  agent-knock-knock host-bridge --profile <profile.json|built-in-id> --host <id> --host-version <version> [--store-dir <dir>]
   agent-knock-knock callback --state <file> --message-json <json> [--record-only]
   agent-knock-knock transcript --log <file> [--include-raw]
   agent-knock-knock transcript --conversation <dir> [--include-raw]

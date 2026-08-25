@@ -269,7 +269,7 @@ export function resolveNativeThreadResumeSelection({
     snapshot.selection_scope !== selectionScope
   ) {
     throw new Error(
-      "resume selection belongs to another terminal or OpenClaw session; run /akk threads again"
+      "resume selection belongs to another terminal or controller session; run /akk threads again"
     );
   }
   const handleNumber = handleMatch ? Number(handleMatch[2]) : undefined;

@@ -4,7 +4,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-339933)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/scotthuang/agent-knock-knock/blob/main/LICENSE)
 
-Most agent orchestrators bring Codex or Claude Code into their own interface. AKK does the reverse: it brings OpenClaw into the live tmux or Herdr terminal where you already work. Human and agent share the same native session, so either can take over at any time without leaving the other on a forked context.
+Most agent orchestrators bring Codex or Claude Code into their own interface. AKK does the reverse: it brings a controller Host into the live tmux or Herdr terminal where you already work. OpenClaw has the bundled native integration; compatible third-party Hosts can use the foreground MCP/stdio Host Bridge and a declarative Profile without forking AKK. Human and agent share the same native session, so either can take over at any time without leaving the other on a forked context.
 
 **Stay in the terminal. Stay in control. No hooks. No agent-side plugins. No YOLO.**
 
@@ -55,6 +55,8 @@ The second command proves that AKK can find the one send-ready pane, revalidate 
 **Delegate from anywhere.** Use any configured OpenClaw channel to hand work to a local coding agent while you are away from your computer. AKK reports when the agent needs attention or finishes, and you can continue from chat or the shared terminal.
 
 **Orchestrate specialist agents.** OpenClaw can coordinate handoffs: Claude Code can plan, Codex can implement, and Claude Code can review. At any point, you can take over the live terminal, keep working yourself, then hand the same native session back to OpenClaw with its context intact.
+
+**Connect another controller Host without an AKK fork.** A compatible Host can launch `agent-knock-knock host-bridge` as a foreground MCP/stdio child, bind its trusted current session through `environment_v1`, and inject callbacks through `command_json_v1`. The Bridge exposes the same 16 semantic tools and reuses the same Session, Turn, Watch, Store, callback, and terminal core as OpenClaw. See [Host Bridge and Host Profiles](docs/host-bridge-profiles.md) for the configuration-only prerequisites, starter Profile, validation commands, and thin-connector fallback.
 
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 

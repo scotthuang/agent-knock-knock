@@ -8,6 +8,8 @@ import { createTerminalWatchCliAdapter } from
 import type { TerminalWatchCallbackInput } from
   "../src/terminal-watch-callback-cli-adapter.js";
 import type { Conversation } from "../src/protocol.js";
+import type { CallbackTransportDeliverInput } from
+  "../src/callback-transport.js";
 
 const THREAD_ID = "019f0000-0000-7000-8000-000000000206";
 const TASK_ID = "019f0000-0000-7000-8000-000000000207";
@@ -95,6 +97,78 @@ test("Terminal Watch CLI observes one exact human-started Codex task and deliver
     facade.listPublicWatches(fixture.storeDir, { includeAll: true }).length,
     1
   );
+});
+
+test("Terminal Watch snapshots and delivers the trusted generic Host route", async (t) => {
+  const fixture = createFixture(t);
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  let terminals = [fixture.terminal];
+  const callbackRoute = {
+    schema: "agent-knock-knock/callback-route" as const,
+    version: 1 as const,
+    transport: "command_json_v1",
+    profile_id: "fixture-host",
+    profile_revision: "1",
+    controller_session_id: "host-session-1",
+    capabilities: { wake: true, respond: true }
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation(terminals, terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000216",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver() {
+        throw new Error("legacy OpenClaw callback must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    callbackRoute
+  });
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    `${JSON.stringify({
+      timestamp: "2026-08-21T01:00:01.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: TASK_ID,
+        last_agent_message: "generic Host completion"
+      }
+    })}\n`
+  );
+  terminals = [];
+  fixture.advance();
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+
+  assert.equal(deliveries.length, 1);
+  assert.deepEqual(deliveries[0].route, callbackRoute);
+  assert.equal(
+    deliveries[0].envelope.route.controller_session_id,
+    "host-session-1"
+  );
+  assert.equal(deliveries[0].envelope.source.kind, "terminal_watch");
 });
 
 test("Terminal Watch accepts a paired human prompt beside a same-turn synthetic Codex context row", async (t) => {

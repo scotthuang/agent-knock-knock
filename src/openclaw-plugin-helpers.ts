@@ -1254,7 +1254,7 @@ function requiredSelectionScope(value: unknown): string {
   const scope = nonEmptyString(value);
   if (!scope) {
     throw new Error(
-      "snapshot-bound resume requires the current OpenClaw session scope; run /akk threads again"
+      "snapshot-bound resume requires the current controller session scope; run /akk threads again"
     );
   }
   return scope;

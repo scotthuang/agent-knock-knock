@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/schemas/host-profile-v1.schema.json",
+  "title": "Agent Knock Knock Host Profile v1",
+  "description": "Declarative configuration for a Host-owned AKK Bridge. Runtime validation is performed by the strict AKK parser.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "id",
+    "revision",
+    "compatibility",
+    "controllerContext",
+    "callback"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/schemas/host-profile-v1.schema.json"
+    },
+    "schema": {
+      "const": "agent-knock-knock/host-profile"
+    },
+    "version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+    },
+    "revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    },
+    "controllerContext": {
+      "$ref": "#/$defs/controllerContext"
+    },
+    "callback": {
+      "$ref": "#/$defs/callback"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+    },
+    "environmentVariable": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?!DYLD_)(?!AKK_HOST_PROFILE_)[A-Z_][A-Z0-9_]*$",
+      "not": {
+        "enum": [
+          "BASH_ENV",
+          "ENV",
+          "LD_LIBRARY_PATH",
+          "LD_PRELOAD",
+          "NODE_OPTIONS",
+          "NODE_PATH",
+          "SHELLOPTS",
+          "AKK_HOST_PROFILE_SELECTION",
+          "AKK_HOST_PROFILE_SOURCE",
+          "AKK_HOST_PROFILE_FINGERPRINT",
+          "AKK_HOST_PROFILE_HOST",
+          "AKK_HOST_PROFILE_HOST_VERSION"
+        ]
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "range"],
+      "properties": {
+        "host": {
+          "$ref": "#/$defs/identifier"
+        },
+        "range": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?:(?:>=|>|<=|<|=)?(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?)(?: (?:(?:>=|>|<=|<|=)?(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?)){0,3}$",
+          "description": "One to four space-separated explicit SemVer comparators, for example >=1.8.0 <2.0.0."
+        }
+      }
+    },
+    "controllerContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["driver", "sessionIdVariable"],
+      "properties": {
+        "driver": {
+          "const": "environment_v1"
+        },
+        "sessionIdVariable": {
+          "$ref": "#/$defs/environmentVariable"
+        }
+      }
+    },
+    "callbackEnvironment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow"],
+      "properties": {
+        "allow": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/environmentVariable"
+          }
+        }
+      }
+    },
+    "jsonPointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonPointer"],
+      "properties": {
+        "jsonPointer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^/(?!.*\\s$)(?:~[01]|[^~/\\x00-\\x1F\\x7F])*(?:/(?:~[01]|[^~/\\x00-\\x1F\\x7F])*){0,15}$"
+        }
+      }
+    },
+    "disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonPointer", "mapping"],
+      "properties": {
+        "jsonPointer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^/(?!.*\\s$)(?:~[01]|[^~/\\x00-\\x1F\\x7F])*(?:/(?:~[01]|[^~/\\x00-\\x1F\\x7F])*){0,15}$"
+        },
+        "mapping": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 16,
+          "$comment": "AKK runtime validation additionally requires at least one property value to be accepted.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+          },
+          "additionalProperties": {
+            "enum": [
+              "accepted",
+              "retryable_failure",
+              "permanent_failure",
+              "uncertain"
+            ]
+          }
+        }
+      }
+    },
+    "acknowledgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "disposition",
+        "acceptanceId",
+        "acknowledgedDeliveryId",
+        "acknowledgedMessageId"
+      ],
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/disposition"
+        },
+        "acceptanceId": {
+          "$ref": "#/$defs/jsonPointer"
+        },
+        "acknowledgedDeliveryId": {
+          "$ref": "#/$defs/jsonPointer"
+        },
+        "acknowledgedMessageId": {
+          "$ref": "#/$defs/jsonPointer"
+        }
+      }
+    },
+    "callback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "driver",
+        "executable",
+        "arguments",
+        "stdin",
+        "environment",
+        "timeoutMs",
+        "maxOutputBytes",
+        "acknowledgement"
+      ],
+      "properties": {
+        "driver": {
+          "const": "command_json_v1"
+        },
+        "executable": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^/(?!/)(?!.*//)(?!.*(?:/\\.\\.?)(?:/|$))(?!.*\\$\\{)(?!.*\\s$)(?!.*\\/(?:[Bb][Aa][Ss][Hh]|[Cc][Mm][Dd](?:\\.[Ee][Xx][Ee])?|[Cc][Ss][Hh]|[Dd][Aa][Ss][Hh]|[Ee][Nn][Vv]|[Ff][Ii][Ss][Hh]|[Kk][Ss][Hh]|[Pp][Oo][Ww][Ee][Rr][Ss][Hh][Ee][Ll][Ll](?:\\.[Ee][Xx][Ee])?|[Pp][Ww][Ss][Hh]|[Ss][Hh]|[Tt][Cc][Ss][Hh]|[Zz][Ss][Hh])$)[^\\x00-\\x1F\\x7F]*[^/\\s]$"
+        },
+        "arguments": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^(?:(?!&&)[^$\\x00\\r\\n;`<>|]|\\$\\{(?:controller\\.session_id|envelope\\.(?:delivery_id|idempotency_key|message_id))\\})*$"
+          },
+          "allOf": [
+            {
+              "contains": {
+                "pattern": "\\$\\{controller\\.session_id\\}"
+              }
+            },
+            {
+              "contains": {
+                "pattern": "\\$\\{envelope\\.delivery_id\\}"
+              }
+            },
+            {
+              "contains": {
+                "pattern": "\\$\\{envelope\\.message_id\\}"
+              }
+            }
+          ]
+        },
+        "stdin": {
+          "const": "${envelope.body}"
+        },
+        "environment": {
+          "$ref": "#/$defs/callbackEnvironment"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "maxOutputBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "acknowledgement": {
+          "$ref": "#/$defs/acknowledgement"
+        }
+      }
+    }
+  }
+}

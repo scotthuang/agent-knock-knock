@@ -1,0 +1,62 @@
+{
+  "$schema": "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/schemas/host-profile-v1.schema.json",
+  "schema": "agent-knock-knock/host-profile",
+  "version": 1,
+  "id": "my-agent-command",
+  "revision": "2026.08.25-1",
+  "compatibility": {
+    "host": "my-agent",
+    "range": ">=1.8.0 <2.0.0"
+  },
+  "controllerContext": {
+    "driver": "environment_v1",
+    "sessionIdVariable": "MY_AGENT_SESSION_ID"
+  },
+  "callback": {
+    "driver": "command_json_v1",
+    "executable": "/usr/local/bin/my-agent",
+    "arguments": [
+      "session",
+      "inject",
+      "--session",
+      "${controller.session_id}",
+      "--delivery-id",
+      "${envelope.delivery_id}",
+      "--message-id",
+      "${envelope.message_id}",
+      "--idempotency-key",
+      "${envelope.idempotency_key}",
+      "--message-stdin",
+      "--json"
+    ],
+    "stdin": "${envelope.body}",
+    "environment": {
+      "allow": [
+        "MY_AGENT_TOKEN",
+        "PATH"
+      ]
+    },
+    "timeoutMs": 8000,
+    "maxOutputBytes": 65536,
+    "acknowledgement": {
+      "disposition": {
+        "jsonPointer": "/result/status",
+        "mapping": {
+          "accepted": "accepted",
+          "retry": "retryable_failure",
+          "rejected": "permanent_failure",
+          "unknown": "uncertain"
+        }
+      },
+      "acceptanceId": {
+        "jsonPointer": "/result/acceptance_id"
+      },
+      "acknowledgedDeliveryId": {
+        "jsonPointer": "/request/delivery_id"
+      },
+      "acknowledgedMessageId": {
+        "jsonPointer": "/request/message_id"
+      }
+    }
+  }
+}

@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 1740,
-    "production_physical_loc": 115030,
+    "cli_core_max_physical_loc": 1817,
+    "production_physical_loc": 117885,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -107,6 +107,13 @@
         "test/shards/agent-cli-control-locks.test.ts",
         "test/shards/agent-cli-dispatch-recovery.test.ts",
         "test/shards/agent-cli-monitor-recovery.test.ts"
+      ]
+    },
+    "host-bridge": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/cli-ux.test.ts",
+        "test/openclaw-plugin-contract.test.ts"
       ]
     },
     "host-lifecycle": {
@@ -595,6 +602,10 @@
       "owner": "terminal-agent-core"
     },
     {
+      "path": "src/command-json-callback-transport.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/conversation-trace.ts",
       "owner": "conversation-trace"
     },
@@ -663,8 +674,36 @@
       "owner": "terminal-control"
     },
     {
+      "path": "src/host-bridge-mcp.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/host-bridge-tools.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/host-bridge.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/host-lifecycle-service.ts",
       "owner": "host-lifecycle"
+    },
+    {
+      "path": "src/host-profile-callback-transport.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/host-profile-cli-adapter.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/host-profile-runtime.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/host-profile.ts",
+      "owner": "host-bridge"
     },
     {
       "path": "src/install-doctor-command-adapter.ts",
