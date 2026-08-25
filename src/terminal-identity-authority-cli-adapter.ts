@@ -1134,6 +1134,18 @@ async function assertCodexComposerReadyForAutomatedInput(
   const resolvedTerminal = await provider.resolve(
     provider.endpoint(input.terminalControl)
   );
+  const resolvedControl = provider.toControlRef(
+    resolvedTerminal,
+    input.terminalControl.capabilities
+  );
+  if (!terminalControlsShareIncarnation(
+    input.terminalControl,
+    resolvedControl
+  )) {
+    throw new Error(
+      "terminal process changed before the Codex composer safety check"
+    );
+  }
   const styledScreen = await provider.capture(
     resolvedTerminal,
     { scrollbackLines: 40, preserveEscapes: true }

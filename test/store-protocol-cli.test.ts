@@ -11,12 +11,21 @@ import {
 } from "../src/protocol.js";
 import {
   appendEvent,
+  ensureStoreWritable,
   messageEvent,
   pathsForConversation,
   saveState,
   STORE_WRITER_PROTOCOL,
   storeManifestPath
 } from "../src/store.js";
+import { InlineCodexLocalSessionAdapter } from
+  "../src/codex-local-session-provider.js";
+import {
+  MutableRecordingTerminalProvider,
+  MutableTerminalProcessSource,
+  runInProcessCli,
+  terminalCliDependencies
+} from "./in-process-cli-fixtures.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -107,17 +116,23 @@ test("list --reconcile remains readable and skips writes for a newer writer prot
       ["status"]
     );
     const mutationSelector = spawnCli([
-      "send",
-      "--conversation",
+      "respond",
+      "--turn",
       listedTurn.short_ref,
       "--message",
       "must remain read-only",
       "--managed-only",
       "--store-dir",
-      storeDir
+      storeDir,
+      "--processes-json",
+      "[]",
+      "--terminals-json",
+      "[]",
+      "--terminal-screens-json",
+      "{}"
     ], { runtimeDir });
     assert.notEqual(mutationSelector.status, 0);
-    assert.match(mutationSelector.stderr, /not actionable for send/iu);
+    assert.match(mutationSelector.stderr, /not actionable for respond/iu);
     assert.deepEqual({
       manifest: fileSnapshot(manifestPath),
       ...conversationFileSnapshots(fixture.paths),
@@ -130,7 +145,7 @@ test("list --reconcile remains readable and skips writes for a newer writer prot
   }
 });
 
-test("send fails closed on writer protocol mismatch before invoking tmux", () => {
+test("managed respond fails closed on writer protocol mismatch before invoking tmux", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-protocol-send-"));
   const storeDir = path.join(tempDir, "store");
   const runtimeDir = path.join(tempDir, "runtime-must-not-exist");
@@ -156,12 +171,11 @@ test("send fails closed on writer protocol mismatch before invoking tmux", () =>
     fs.chmodSync(fakeTmuxPath, 0o755);
 
     const result = spawnCli([
-      "send",
-      "--conversation",
-      "terminal:v2:tmux:codex:protocol-test:0.0:4242",
+      "respond",
+      "--turn",
+      fixture.conversation.turn_id,
       "--message",
       "this must not reach tmux",
-      "--background",
       "--store-dir",
       storeDir
     ], {
@@ -184,6 +198,300 @@ test("send fails closed on writer protocol mismatch before invoking tmux", () =>
     assert.equal(fs.existsSync(runtimeDir), false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("explicit physical send bypasses a newer writer protocol without mutating Store", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-store-protocol-physical-send-")
+  );
+  const storeDir = path.join(tempDir, "store");
+  const runtimeDir = path.join(tempDir, "runtime");
+  const workspace = path.join(tempDir, "workspace");
+  const terminalTarget = "protocol-test:0.0";
+  const terminalId =
+    `terminal:v2:tmux:codex:${terminalTarget}:4242`;
+  const message = "deliver despite the incompatible AKK Store";
+
+  try {
+    const fixture = storeConversationFixture(storeDir);
+    const manifestPath = storeManifestPath(storeDir);
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest.writer_protocol = STORE_WRITER_PROTOCOL + 1;
+    fs.writeFileSync(
+      manifestPath,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8"
+    );
+    const before = {
+      manifest: fileSnapshot(manifestPath),
+      ...conversationFileSnapshots(fixture.paths)
+    };
+
+    fs.mkdirSync(workspace, { recursive: true });
+    let pendingText = "";
+    const terminalProvider = new MutableRecordingTerminalProvider({
+      panes: [{
+        kind: "tmux",
+        target: terminalTarget,
+        session: "protocol-test",
+        window: 0,
+        pane: 0,
+        panePid: 9001,
+        currentCommand: "codex",
+        currentPath: workspace
+      }],
+      screens: { [terminalTarget]: "Ready\n› " },
+      hooks: {
+        sendText(operation, provider) {
+          pendingText = operation.text;
+          provider.setScreen(
+            terminalTarget,
+            `Ready\n› ${operation.text}\n\ngpt-5.6-sol high · /repo`
+          );
+        },
+        sendKeys(operation, provider) {
+          if (operation.keys.includes("C-m")) {
+            pendingText = "";
+            provider.setScreen(terminalTarget, "Working\n");
+          }
+        }
+      }
+    });
+    const processSource = new MutableTerminalProcessSource([{
+      pid: 4242,
+      ppid: 9001,
+      elapsed: "00:20",
+      command: "codex",
+      cwd: workspace
+    }]);
+    const dependencies = terminalCliDependencies({
+      terminalProvider,
+      processSource,
+      env: {
+        ...process.env,
+        AKK_LOG_LEVEL: "silent",
+        AKK_RUNTIME_DIR: runtimeDir,
+        TMUX: ""
+      },
+      overrides: {
+        agentVersionForRunningProcess: () => "0.149.1",
+        codexProcessBirthForPid: () => "fixture-process-birth"
+      }
+    });
+    const listed = await runInProcessCli([
+      "list",
+      "--store-dir",
+      storeDir
+    ], dependencies);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const terminal = JSON.parse(listed.stdout).terminals.find(
+      (entry: Record<string, unknown>) => entry.id === terminalId
+    );
+    assert.ok(terminal, listed.stdout);
+    assert.equal(
+      terminal.available_actions.send.scope,
+      "terminal_user_explicit"
+    );
+    const expectedTerminalToken =
+      terminal.available_actions.send.arguments.expected_terminal_token;
+    assert.equal(typeof expectedTerminalToken, "string");
+    terminalProvider.clearOperations();
+
+    const result = await runInProcessCli([
+      "send",
+      "--conversation",
+      terminalId,
+      "--expected-terminal-token",
+      expectedTerminalToken,
+      "--message",
+      message,
+      "--message-id",
+      "store-protocol-explicit-send",
+      "--background",
+      "--store-dir",
+      storeDir,
+      "--disable-terminal-bridge-monitor"
+    ], dependencies);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.delivered, true);
+    assert.equal(output.delivered_unmanaged, true);
+    assert.equal(output.management_mode, "unmanaged_fallback");
+    assert.equal(output.scope, "terminal_user_explicit");
+    assert.equal(pendingText, "");
+    assert.deepEqual(terminalProvider.literalInputs(), [message]);
+    assert.deepEqual(terminalProvider.keyDispatches(), [["C-m"]]);
+    assert.deepEqual({
+      manifest: fileSnapshot(manifestPath),
+      ...conversationFileSnapshots(fixture.paths)
+    }, before);
+    assert.equal(fs.existsSync(path.join(storeDir, ".akk-writer.lock")), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("managed-first physical Send revalidates process birth under its terminal lock", async (t) => {
+  for (const driftAfterLock of [false, true]) {
+    await t.test(
+      driftAfterLock ? "same PID replacement" : "unchanged incarnation",
+      async () => {
+        const tempDir = fs.mkdtempSync(path.join(
+          os.tmpdir(),
+          driftAfterLock
+            ? "akk-managed-physical-stale-birth-"
+            : "akk-managed-physical-live-birth-"
+        ));
+        const storeDir = path.join(tempDir, "store");
+        const runtimeDir = path.join(tempDir, "runtime");
+        const workspace = path.join(tempDir, "workspace");
+        const terminalTarget = "managed-physical:0.0";
+        const terminalId =
+          `terminal:v2:tmux:codex:${terminalTarget}:4242`;
+        const originalBirth = "fixture-process-birth-original";
+        const replacementBirth = "fixture-process-birth-replacement";
+        let sending = false;
+        let sendBirthProbes = 0;
+        let pendingText = "";
+        try {
+          fs.mkdirSync(workspace, { recursive: true });
+          ensureStoreWritable(storeDir);
+          const manifestPath = storeManifestPath(storeDir);
+          const storeBefore = {
+            manifest: fileSnapshot(manifestPath),
+            entries: fs.readdirSync(storeDir).sort()
+          };
+          const terminalProvider = new MutableRecordingTerminalProvider({
+            panes: [{
+              kind: "tmux",
+              target: terminalTarget,
+              session: "managed-physical",
+              window: 0,
+              pane: 0,
+              panePid: 9001,
+              currentCommand: "codex",
+              currentPath: workspace
+            }],
+            screens: { [terminalTarget]: "Ready\n› " },
+            hooks: {
+              sendText(operation, provider) {
+                pendingText = operation.text;
+                provider.setScreen(
+                  terminalTarget,
+                  `Ready\n› ${operation.text}\n\ngpt-5.6-sol high · /repo`
+                );
+              },
+              sendKeys(operation, provider) {
+                if (operation.keys.includes("C-m")) {
+                  pendingText = "";
+                  provider.setScreen(terminalTarget, "Working\n");
+                }
+              }
+            }
+          });
+          const processSnapshot = {
+            pid: 4242,
+            ppid: 9001,
+            elapsed: "00:20",
+            command: "codex",
+            cwd: workspace
+          };
+          const dependencies = terminalCliDependencies({
+            terminalProvider,
+            processSource: new MutableTerminalProcessSource([processSnapshot]),
+            env: {
+              ...process.env,
+              AKK_LOG_LEVEL: "silent",
+              AKK_RUNTIME_DIR: runtimeDir,
+              AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+              AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted",
+              TMUX: ""
+            },
+            overrides: {
+              agentVersionForRunningProcess: () => "0.149.1",
+              codexLocalSessionAdapter: new InlineCodexLocalSessionAdapter({
+                processes: [processSnapshot]
+              }),
+              codexProcessBirthForPid: () => originalBirth,
+              processBirthForPid: () => {
+                if (!sending) return originalBirth;
+                sendBirthProbes += 1;
+                // Send probes selector refresh, the outer physical gate, its
+                // durable intent, then the locked fresh target. The fifth is
+                // the post-prepare/pre-dispatch callback fence.
+                return driftAfterLock && sendBirthProbes >= 5
+                  ? replacementBirth
+                  : originalBirth;
+              }
+            }
+          });
+          const listed = await runInProcessCli([
+            "list",
+            "--store-dir",
+            storeDir
+          ], dependencies);
+          assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+          const terminal = JSON.parse(listed.stdout).terminals.find(
+            (entry: Record<string, unknown>) => entry.id === terminalId
+          );
+          assert.ok(terminal, listed.stdout);
+          const token =
+            terminal.available_actions.send.arguments.expected_terminal_token;
+          terminalProvider.clearOperations();
+          sending = true;
+          const result = await runInProcessCli([
+            "send",
+            "--conversation",
+            terminalId,
+            "--expected-terminal-token",
+            token,
+            "--message",
+            "managed physical incarnation witness",
+            "--message-id",
+            driftAfterLock ? "managed-physical-stale" : "managed-physical-live",
+            "--background",
+            "--store-dir",
+            storeDir,
+            "--disable-terminal-bridge-monitor"
+          ], dependencies);
+          assert.ok(sendBirthProbes >= 5, `birth probes: ${sendBirthProbes}`);
+          if (!driftAfterLock) {
+            assert.equal(result.status, 0, result.stderr || result.stdout);
+            const managedOutput = JSON.parse(result.stdout);
+            assert.notEqual(
+              managedOutput.delivered_unmanaged,
+              true,
+              result.stdout
+            );
+            assert.equal(typeof managedOutput.session_id, "string");
+            assert.equal(typeof managedOutput.turn_id, "string");
+            assert.equal(
+              fs.existsSync(managedOutput.conversation.state_path),
+              true,
+              "the unchanged-incarnation baseline must commit a managed Turn"
+            );
+            assert.equal(pendingText, "");
+            assert.deepEqual(terminalProvider.literalInputs(), [
+              "managed physical incarnation witness"
+            ]);
+            assert.deepEqual(terminalProvider.keyDispatches(), [["C-m"]]);
+            return;
+          }
+          assert.equal(result.status, 1, result.stdout);
+          assert.match(result.stderr, /explicit terminal send token is stale/u);
+          assert.deepEqual(terminalProvider.literalInputs(), []);
+          assert.deepEqual(terminalProvider.keyDispatches(), []);
+          assert.deepEqual({
+            manifest: fileSnapshot(manifestPath),
+            entries: fs.readdirSync(storeDir).sort()
+          }, storeBefore);
+        } finally {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+      }
+    );
   }
 });
 

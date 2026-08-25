@@ -645,3 +645,44 @@ test("repository acquires canonical and legacy locks lexically and releases idem
     assert.deepEqual(fs.readdirSync(path.dirname(paths[0])), []);
   });
 });
+
+test("repository preserves a second-lock timeout when first-lock cleanup fails", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-dispatch-lock-timeout-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const timeout = Object.assign(new Error("second alias lock is busy"), {
+    code: "LOCK_TIMEOUT"
+  });
+  let acquisitions = 0;
+  let cleanupAttempts = 0;
+
+  await runCliCommandExecution("repository-test", {}, {
+    env: { ...process.env, AKK_RUNTIME_DIR: path.join(root, "runtime") },
+    now: () => NOW,
+    pid: process.pid,
+    runtimeLog: () => undefined
+  }, async () => {
+    const repository = createTerminalDispatchRepositoryCliAdapter({
+      fileLock: {
+        acquire: () => {
+          acquisitions += 1;
+          if (acquisitions === 2) throw timeout;
+          return () => {
+            cleanupAttempts += 1;
+            throw new Error("first alias cleanup failed");
+          };
+        },
+        stale: () => false,
+        owner: () => ({})
+      }
+    });
+    const control = tmuxControl();
+    associateCanonicalEndpoint(control);
+
+    assert.throws(
+      () => repository.acquire("/unused/store", control, { timeoutMs: 0 }),
+      (error) => error === timeout
+    );
+    assert.equal(acquisitions, 2);
+    assert.equal(cleanupAttempts, 1);
+  });
+});

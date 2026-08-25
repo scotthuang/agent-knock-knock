@@ -110,6 +110,17 @@ function claudeHerdrClearedComposerScreen(): string {
   ].join("\n");
 }
 
+function assertTerminalUserExplicitSendAction(
+  terminal: Record<string, any>
+): Record<string, any> {
+  const action = terminal.available_actions?.send;
+  assert.ok(action, JSON.stringify(terminal, null, 2));
+  assert.equal(action.scope, "terminal_user_explicit");
+  assert.equal(action.arguments?.selector, terminal.id);
+  assert.equal(typeof action.arguments?.expected_terminal_token, "string");
+  return action;
+}
+
 test("a terminal-scoped Codex send adopts an exact unknown human-switched thread", async () => {
   const fixture = createHandoffFixture({
     agent: "codex",
@@ -271,6 +282,7 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
   const shellPid = 83_000;
   const agentPid = shellPid + 1;
   const claudeStartedAt = 1_786_339_200_000;
+  const processBirth = "Mon Aug 10 12:00:00 2026";
   const version = "2.1.226";
   const executable = `/Users/test/.local/share/claude/versions/${version}`;
   const request = "Continue in the human-selected Herdr Claude context.";
@@ -287,6 +299,7 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
   let screen = claudeHerdrClearedComposerScreen();
   let pendingText = "";
   let revision = 0;
+  const processBirthProbePids: number[] = [];
 
   fs.mkdirSync(workspace, { recursive: true });
   fs.mkdirSync(claudeHome, { recursive: true });
@@ -445,6 +458,10 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
       status: "idle"
     }],
     agentVersionForRunningProcess: () => version,
+    processBirthForPid: (pid: number) => {
+      processBirthProbePids.push(pid);
+      return pid === agentPid ? processBirth : "";
+    },
     pid: agentPid + 500_000,
     runtimeLog() {}
   };
@@ -605,6 +622,11 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
       ),
       false,
       "handoff must preserve human input instead of clearing the composer"
+    );
+    assert.deepEqual(
+      [...new Set(processBirthProbePids)],
+      [agentPid],
+      "physical authority must probe the foreground Claude process incarnation"
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -801,7 +823,7 @@ test("a handoff send token rejects an alias or omitted selector before mutation"
 });
 
 for (const drift of ["source revision", "target snapshot"] as const) {
-  test(`a listed handoff token rejects ${drift} drift without partial mutation`, async () => {
+  test(`physical Send authority survives managed ${drift} drift`, async () => {
     const fixture = createHandoffFixture({ agent: "claude" });
     try {
       const source = fixture.persistSession({
@@ -831,25 +853,27 @@ for (const drift of ["source revision", "target snapshot"] as const) {
           Date.parse(selected.updated_at) + 1_000
         ).toISOString()
       }, { expectedRevision: selected.revision as number });
-      const sessionsBeforeSend = JSON.stringify(
-        listManagedSessions(fixture.storeDir)
+      const relisted = await fixture.listTerminal();
+      assert.equal(
+        assertTerminalUserExplicitSendAction(relisted).arguments
+          .expected_terminal_token,
+        expectedTerminalToken,
+        "managed revision drift must not stale unchanged physical authority"
       );
 
-      const rejected = await fixture.sendToTerminal(
-        `Do not cross the drifted ${drift} snapshot.`,
+      const request = `Continue despite managed ${drift} drift.`;
+      const sent = await fixture.sendToTerminal(
+        request,
         {},
         expectedTerminalToken
       );
-      assert.equal(rejected.status, 1, fixture.debug(rejected));
-      assert.match(rejected.stderr, /changed|refresh|revision|snapshot/iu);
+      assert.equal(sent.status, 0, fixture.debug(sent));
+      assert.equal(JSON.parse(sent.stdout).delivered, true, fixture.debug(sent));
       assert.equal(
-        JSON.stringify(listManagedSessions(fixture.storeDir)),
-        sessionsBeforeSend
+        fixture.literalInputs().filter((input) => input === request).length,
+        1
       );
-      assert.equal(listConversations(fixture.storeDir).length, 0);
-      assert.equal(fixture.transitionCount(), 0);
-      assert.deepEqual(fixture.literalInputs(), []);
-      assert.equal(fixture.enterCount(), 0);
+      assert.equal(fixture.enterCount(), 1);
     } finally {
       fixture.cleanup();
     }
@@ -868,7 +892,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     const oldTurn = fixture.persistBlockingTurn(source);
     const listed = await fixture.listTerminal();
     assert.equal(listed.handoff_state, "external_handoff_blocked");
-    assert.equal(listed.available_actions?.send, undefined);
+    assertTerminalUserExplicitSendAction(listed);
     assert.equal(listed.blocking_turns?.length, 1);
     assert.equal(
       listed.blocking_turns?.[0]?.recovery_action?.arguments?.turn_id,
@@ -2410,7 +2434,7 @@ test("a target native thread already bound in Store remains a blocked handoff", 
 
     const listed = await fixture.listTerminal();
     assert.equal(listed.handoff_state, "external_handoff_blocked");
-    assert.equal(listed.available_actions?.send, undefined);
+    assertTerminalUserExplicitSendAction(listed);
     assert.equal(listed.handoff_decision, undefined);
     assert.equal(
       listed.blocking_turns?.[0]?.recovery_action?.arguments?.turn_id,
@@ -2464,7 +2488,7 @@ test("ambiguous source claims block automatic handoff before terminal input", as
     const before = JSON.stringify(listManagedSessions(fixture.storeDir));
     const listed = await fixture.listTerminal();
     assert.equal(listed.handoff_state, "external_handoff_blocked");
-    assert.equal(listed.available_actions?.send, undefined);
+    assertTerminalUserExplicitSendAction(listed);
     assert.equal(listed.handoff_decision, undefined);
     assert.equal(
       listed.blocking_turns?.[0]?.recovery_action?.arguments?.turn_id,
@@ -2495,7 +2519,7 @@ test("ambiguous source claims block automatic handoff before terminal input", as
   }
 });
 
-test("a human-selected native thread active in another process blocks adoption atomically", async () => {
+test("a competing native owner cannot veto physical user Send", async () => {
   const fixture = createHandoffFixture({ agent: "codex" });
   try {
     fixture.persistSession({
@@ -2511,21 +2535,30 @@ test("a human-selected native thread active in another process blocks adoption a
     );
     assert.ok(expectedTerminalToken);
     fixture.addActiveOwnerForCurrentThread();
-    const before = JSON.stringify(listManagedSessions(fixture.storeDir));
+    const relisted = await fixture.listTerminal();
+    assert.equal(
+      assertTerminalUserExplicitSendAction(relisted).arguments
+        .expected_terminal_token,
+      expectedTerminalToken
+    );
 
-    const rejected = await fixture.sendToTerminal(
-      "Do not steal B from its other live process.",
+    const request = "Send to this exact pane despite a competing native owner.";
+    const sent = await fixture.sendToTerminal(
+      request,
       {},
       expectedTerminalToken
     );
-    assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(
-      rejected.stderr,
-      /active in another codex process|already active|expected terminal token no longer authorizes|refresh AKK list/iu
-    );
-    assert.equal(JSON.stringify(listManagedSessions(fixture.storeDir)), before);
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, fixture.debug(sent));
+    assert.equal(output.delivered_unmanaged, true, fixture.debug(sent));
+    assert.equal(output.management_mode, "unmanaged_fallback");
     assert.equal(fixture.transitionCount(), 0);
-    assert.deepEqual(fixture.literalInputs(), []);
+    assert.equal(
+      fixture.literalInputs().filter((input) => input === request).length,
+      1
+    );
+    assert.equal(fixture.enterCount(), 1);
   } finally {
     fixture.cleanup();
   }
@@ -2584,13 +2617,13 @@ test("the bridge recaptures an exact draft after beforeEnter returns", async () 
   );
 });
 
-test("Codex drift from B to C at the post-adoption pre-text fence starts no task input", async () => {
+test("Codex pre-text managed identity drift falls back to the same physical pane", async () => {
   const fixture = createHandoffFixture({
     agent: "codex",
     codexTargetMode: "status_card_only",
     codexTaskDrift: "before_task_text"
   });
-  const request = "This task must never cross the B to C handoff race.";
+  const request = "Continue on this exact pane across managed B to C drift.";
   try {
     fixture.persistSession({
       sessionId: "session-codex-pre-text-drift-source",
@@ -2604,23 +2637,23 @@ test("Codex drift from B to C at the post-adoption pre-text fence starts no task
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
     assert.ok(expectedTerminalToken);
-    const rejected = await fixture.sendToTerminal(
+    const sent = await fixture.sendToTerminal(
       request,
       {},
       expectedTerminalToken
     );
-    assert.equal(rejected.status, 1, fixture.debug(rejected));
-    assert.match(
-      rejected.stderr,
-      /thread changed|identity changed|expected terminal token no longer authorizes|refresh (?:AKK )?list/iu
-    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, fixture.debug(sent));
+    assert.equal(output.delivered_unmanaged, true, fixture.debug(sent));
+    assert.equal(output.management_mode, "unmanaged_fallback");
     assert.equal(fixture.driftTriggered(), true);
     assert.equal(
       fixture.literalInputs().filter((input) => input === request).length,
-      0
+      1
     );
-    assert.equal(fixture.enterCount(), 0);
-    assert.equal(fixture.postDriftEnterCount(), 0);
+    assert.equal(fixture.enterCount(), 1);
+    assert.equal(fixture.postDriftEnterCount(), 1);
     assert.equal(
       fixture.literalInputs().some((input) =>
         input === "/clear" || input.startsWith("/resume")
@@ -2694,14 +2727,9 @@ for (const crashHook of [
         generation: 1
       });
 
-      const listed = await fixture.listTerminal();
-      const expectedTerminalToken = String(
-        listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
-      );
-      assert.ok(expectedTerminalToken);
       const crashed = await fixture.sendToTerminal(request, {
         [crashHook]: "1"
-      }, expectedTerminalToken, messageId);
+      }, undefined, messageId);
       assert.equal(
         crashed.status,
         86,
@@ -2713,28 +2741,10 @@ for (const crashHook of [
       assert.equal(fixture.transitionCount(), 0);
       assert.equal(listDeferredForegroundTransfers(fixture.storeDir).length, 1);
 
-      const staleRecovery = await fixture.sendToTerminal(
-        request,
-        {},
-        expectedTerminalToken,
-        messageId
-      );
-      assert.equal(staleRecovery.status, 1, fixture.debug(staleRecovery));
-      assert.match(
-        staleRecovery.stderr,
-        /fresh exact terminal token|expected terminal token no longer authorizes|refresh AKK list/iu
-      );
-      assert.deepEqual(fixture.literalInputs(), []);
-      const refreshed = await fixture.listTerminal();
-      const refreshedTerminalToken = String(
-        refreshed.available_actions?.send?.arguments?.expected_terminal_token ??
-          ""
-      );
-      assert.ok(refreshedTerminalToken);
       const recovered = await fixture.sendToTerminal(
         request,
         {},
-        refreshedTerminalToken,
+        undefined,
         messageId
       );
       assert.equal(recovered.status, 0, fixture.debug(recovered));
@@ -3314,6 +3324,7 @@ function createHandoffFixture({
           : [])
       ] : [],
       agentVersionForRunningProcess: () => version,
+      processBirthForPid: () => processBirth,
       codexProcessBirthForPid: () => processBirth,
       // Imported executions share this Node process, but crash recovery must
       // observe the previous command owner as dead just as a real CLI restart

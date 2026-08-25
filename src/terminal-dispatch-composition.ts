@@ -82,6 +82,11 @@ export interface TerminalControlSendRequest {
   message: AgentMessage;
   recordMessageAfterSend?: boolean;
   recordRawAttachmentAfterSend?: boolean;
+  /**
+   * Let a caller with independent physical-terminal authority handle a proven
+   * zero-input abort instead of presenting the managed-path failure.
+   */
+  deferZeroInputFailurePresentation?: boolean;
   onTerminalPreflightVerified?:
     (route: BoundTerminalDispatchRoute) =>
       Promise<((route: BoundTerminalDispatchRoute) => void) | void> |

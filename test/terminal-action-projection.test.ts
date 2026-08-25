@@ -6,6 +6,7 @@ import {
   decideTerminalWatchExternalTaskAuthority,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
+  decideTerminalUserExplicitSendAuthority,
   managedTurnNeedsAttention,
   projectHandoffDecision,
   selectTerminalAvailableActions,
@@ -344,6 +345,111 @@ test("available actions preserve legacy insertion order and approval-last rule",
   };
   assert.equal(JSON.stringify(actual), JSON.stringify(legacy));
   assert.deepEqual(Object.keys(actual), Object.keys(legacy));
+});
+
+test("terminal-user-explicit Send depends only on fresh physical prompt authority", () => {
+  const terminalControl: TerminalControlRef = {
+    ...control,
+    target: "user-send:0.0",
+    session: "user-send"
+  };
+  const endpointKey = "socket:/private/tmp/tmux-501/user-send";
+  createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: "pane-id:%91"
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(
+        endpointKey,
+        terminalControl.target,
+        terminalControl.socketPath
+      ),
+      label: terminalControl.target,
+      currentCommand: terminalControl.currentCommand,
+      currentPath: terminalControl.currentPath
+    },
+    processAnchorPid: terminalControl.panePid,
+    capabilities: terminalControl.capabilities,
+    providerRef: terminalControl
+  });
+  const terminalId =
+    "terminal:v2:tmux:codex:user-send:0.0:4100";
+  const common = {
+    exactTerminalRow: true,
+    terminalId,
+    processState: "active",
+    terminalControl,
+    agent: "codex" as const,
+    pid: 4_100,
+    processUuid: "process-pid:4100:birth:fixture-birth",
+    processBirth: "fixture-birth",
+    approvalScanned: true,
+    approvalBlocked: false,
+    exactEmptyComposer: true
+  };
+  const expectedToken = unmanagedTerminalBindingToken({
+    terminalId,
+    terminalControl,
+    agent: "codex",
+    pid: 4_100,
+    workspace: terminalControl.currentPath ?? "",
+    processUuid: "process-pid:4100:birth:fixture-birth",
+    processBirth: "fixture-birth"
+  });
+  assert.deepEqual(
+    decideTerminalUserExplicitSendAuthority(common),
+    {
+      eligible: true,
+      terminalId,
+      expectedTerminalToken: expectedToken
+    }
+  );
+  for (const unavailable of [
+    { exactTerminalRow: false },
+    { processState: "exited" },
+    { approvalScanned: false },
+    { approvalBlocked: true },
+    { exactEmptyComposer: false },
+    { processBirth: undefined },
+    {
+      terminalControl: {
+        ...terminalControl,
+        capabilities: ["screen_status" as const]
+      }
+    }
+  ]) {
+    assert.deepEqual(
+      decideTerminalUserExplicitSendAuthority({
+        ...common,
+        ...unavailable
+      }),
+      { eligible: false }
+    );
+  }
+});
+
+test("terminal-user-explicit Send overrides every AKK ownership projection", () => {
+  const action = (id: string) => ({ id });
+  const userSend = action("terminal-user-explicit");
+  for (const ownership of ["none", "current", "conflict"] as const) {
+    const projected = selectTerminalAvailableActions({
+      ownership,
+      currentActions: { status: action("current-status") },
+      sessionAwareRawActions: {
+        status: action("session-status"),
+        send: action("session-send")
+      },
+      nonOwnerRawActions: {
+        status: action("raw-status"),
+        send: action("raw-send")
+      },
+      authoritativeSendAction: action("managed-authority-send"),
+      terminalUserExplicitSendAction: userSend
+    });
+    assert.equal(projected.send, userSend, ownership);
+  }
 });
 
 test("Terminal Watch external-task authority fails closed for every managed ownership path", () => {

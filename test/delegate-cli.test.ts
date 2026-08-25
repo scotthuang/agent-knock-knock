@@ -11,6 +11,12 @@ import {
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-delegate-cli-runtime-")
 );
+const CLAUDE_EXACT_IDLE_COMPOSER = [
+  "────────────────────────────────────────────────",
+  "❯ ",
+  "────────────────────────────────────────────────",
+  "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+].join("\n");
 process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
 });
@@ -293,7 +299,7 @@ test("delegate without an agent gives setup guidance when no idle pane exists", 
     ]);
 
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /No idle Codex or Claude Code pane is available/);
+    assert.match(result.stderr, /No send-ready Codex or Claude Code pane is available/);
     assert.match(result.stderr, /Start codex or claude inside tmux/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -355,7 +361,7 @@ test("bare delegate without --workspace fails closed across idle pane workspaces
     assert.equal(result.status, 1, result.stdout);
     assert.match(
       result.stderr,
-      /Multiple idle coding-agent panes are available across workspaces/u
+      /Multiple send-ready coding-agent panes are available across workspaces/u
     );
     assert.match(result.stderr, /codex-first-workspace:0\.0/u);
     assert.match(result.stderr, /codex-second-workspace:0\.0/u);
@@ -423,7 +429,7 @@ test("delegate fails closed when multiple idle matching tmux panes exist", async
     ]);
 
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /Multiple idle Codex panes match/);
+    assert.match(result.stderr, /Multiple send-ready Codex panes match/);
     assert.match(result.stderr, /\/akk codex: <task>/);
     assert.match(result.stderr, /\/akk @short-ref: <message>/);
   } finally {
@@ -558,12 +564,12 @@ test("delegate without an agent fails closed across mixed idle panes", async () 
       "--terminal-screens-json",
       JSON.stringify({
         "codex-mixed-work:0.0": "› ",
-        "claude-work:0.0": "❯ "
+        "claude-work:0.0": CLAUDE_EXACT_IDLE_COMPOSER
       })
     ]);
 
     assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /Multiple idle coding-agent panes match/);
+    assert.match(result.stderr, /Multiple send-ready coding-agent panes match/);
     assert.match(result.stderr, /\(codex, codex-mixed-work:0\.0\)/);
     assert.match(result.stderr, /\(claude, claude-work:0\.0\)/);
     assert.match(result.stderr, /\/akk claude: <task>/);
@@ -683,6 +689,7 @@ function runCli(command: string, args: string[]) {
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
       AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
     },
+    processBirthForPid: (pid) => `fixture-process-birth-${pid}`,
     codexProcessBirthForPid: (pid) => `fixture-process-birth-${pid}`,
     now: clock.now,
     monotonicNowMs: clock.nowMs,

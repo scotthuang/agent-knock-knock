@@ -65,6 +65,7 @@ function exactCodexNativeIdentityArgs(options: {
   pid: number;
   sessionId: string;
   processUuid: string;
+  processBirth?: string;
   rolloutPath: string;
 }): string[] {
   const rolloutPath = fs.realpathSync(options.rolloutPath);
@@ -75,7 +76,7 @@ function exactCodexNativeIdentityArgs(options: {
       [options.pid]: {
         sessionId: options.sessionId,
         processUuid: options.processUuid,
-        processBirth: options.processUuid,
+        processBirth: options.processBirth ?? options.processUuid,
         rollout: {
           fd: "12r",
           device: String(stat.dev),
@@ -117,11 +118,20 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
     tempDir,
     "codex-legacy-binding-rollout.jsonl"
   );
+  const processBirth = "Thu Aug  6 10:00:00 2026";
+  const physicalProcessDependencies = {
+    processBirthForPid: () => processBirth
+  };
+  const idleComposerScreen = [
+    "Ready",
+    "› ",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, idleComposerScreen);
     fs.writeFileSync(legacyRolloutPath, `${JSON.stringify({
       timestamp: "2026-08-13T00:00:00.000Z",
       type: "session_meta",
@@ -137,6 +147,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       pid: 33389,
       sessionId,
       processUuid: "codex-legacy-binding-process",
+      processBirth,
       rolloutPath: legacyRolloutPath
     });
     writeFakeTmux(
@@ -152,6 +163,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       "send",
       "--conversation",
       rawConversationId,
+      "--managed-only",
       "--message",
       "Legacy managed terminal binding",
       "--background",
@@ -161,7 +173,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       "/usr/bin/true",
       ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
-    ], testEnv);
+    ], testEnv, physicalProcessDependencies);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const parsed = JSON.parse(sent.stdout);
     const statePath = parsed.conversation.state_path;
@@ -229,9 +241,9 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ [terminalTarget]: "› \n" }),
+      JSON.stringify({ [terminalTarget]: idleComposerScreen }),
       ...nativeIdentityArgs
-    ], testEnv);
+    ], testEnv, physicalProcessDependencies);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const listedParsed = JSON.parse(listed.stdout);
     assert.equal(listedParsed.terminals.length, 1);
@@ -241,10 +253,18 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       terminal.managed.recent_turn.conversation_id,
       modernState.conversation_id
     );
+    const sendAction = terminal.available_actions.send;
+    assert.equal(sendAction.scope, "terminal_user_explicit");
+    assert.equal(sendAction.arguments.selector, rawConversationId);
     assert.equal(
-      terminal.available_actions.send.arguments.session_id,
-      modernState.conversation_id
+      typeof sendAction.arguments.expected_terminal_token,
+      "string"
     );
+    assert.equal(
+      typeof sendAction.arguments.expected_managed_terminal_token,
+      "undefined"
+    );
+    assert.equal(sendAction.arguments.session_id, undefined);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -431,6 +451,7 @@ if (args.includes("cwd")) {
       "send",
       "--conversation",
       rawTerminalId,
+      "--managed-only",
       "--message",
       "First session turn",
       ...commonArgs
@@ -538,6 +559,7 @@ if (args.includes("cwd")) {
       "send",
       "--session",
       firstParsed.session_id,
+      "--managed-only",
       "--type",
       "answer",
       "--message",
@@ -567,8 +589,14 @@ if (args.includes("cwd")) {
     );
     const secondTerminal = JSON.parse(listedForSecond.stdout).terminals[0];
     const secondAction = secondTerminal.available_actions.send;
+    assert.equal(secondAction.scope, "terminal_user_explicit");
+    assert.equal(secondAction.arguments.selector, secondTerminal.id);
     assert.equal(
       typeof secondAction.arguments.expected_terminal_token,
+      "string"
+    );
+    assert.equal(
+      typeof secondAction.arguments.expected_managed_terminal_token,
       "string"
     );
     const sendsBeforeStaleProcessBirth = readJsonLines(tmuxCallsPath).filter(
@@ -592,7 +620,7 @@ if (args.includes("cwd")) {
     assert.notEqual(staleProcessBirth.status, 0);
     assert.match(
       staleProcessBirth.stderr,
-      /expected terminal token no longer authorizes/u
+      /explicit terminal send token is stale; refresh AKK list/u
     );
     assert.equal(
       readJsonLines(tmuxCallsPath).filter(

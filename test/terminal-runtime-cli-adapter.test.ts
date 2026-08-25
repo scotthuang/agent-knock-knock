@@ -97,6 +97,15 @@ test("injected and static terminal observations preserve precedence and truthine
   );
   assert.equal(fixture.createProcessSource().completeInventoryAuthority, undefined);
   assert.deepEqual(await fixture.createProcessSource().listProcessSnapshots(), []);
+  const terminalOnlyFixture = runtime({ terminalsJson: "[]" });
+  assert.equal(
+    terminalOnlyFixture.createProcessSource().completeInventoryAuthority,
+    undefined
+  );
+  assert.deepEqual(
+    await terminalOnlyFixture.createProcessSource().listProcessSnapshots(),
+    []
+  );
 
   const production = runtime({ processesJson: "" });
   assert.deepEqual(
@@ -385,6 +394,47 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
     },
     terminal_endpoint: {}
   }), undefined);
+});
+
+test("static terminal observations never inspect host executable versions", async (t) => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-runtime-static-version-")
+  );
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const executable = path.join(directory, "lsof");
+  const callsPath = path.join(directory, "calls.txt");
+  fs.writeFileSync(executable, [
+    "#!/bin/sh",
+    `printf '%s\\n' \"$@\" >> \"${callsPath}\"`,
+    "printf '%s\\n' 'n/Users/test/.codex/packages/standalone/releases/0.149.1-aarch64-apple-darwin/bin/codex'"
+  ].join("\n"));
+  fs.chmodSync(executable, 0o700);
+
+  await runCliCommandExecution("runtime-static-version-test", {}, {
+    env: { PATH: directory, HOME: directory },
+    runtimeLog: () => undefined
+  }, async () => {
+    for (const options of [
+      { agentVersionsJson: "[]" },
+      { processesJson: "[]" },
+      { terminalsJson: "[]" },
+      { terminalScreensJson: "{}" }
+    ]) {
+      assert.equal(
+        runtime(options).agentVersionForRunningProcess("codex", 77),
+        undefined
+      );
+    }
+    assert.equal(
+      runtime({
+        processesJson: "[]",
+        agentVersionsJson: JSON.stringify({ codex: "0.149.1" })
+      }).agentVersionForRunningProcess("codex", 77),
+      "0.149.1"
+    );
+  });
+
+  assert.equal(fs.existsSync(callsPath), false);
 });
 
 function agentSessionProvider(

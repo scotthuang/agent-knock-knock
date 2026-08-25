@@ -41,6 +41,7 @@ export const testSupportImpactByPath = Object.freeze({
   "test/in-process-cli-fixtures.ts": [
     "test/agent-cli-fixtures.ts",
     "test/callback-cli.test.ts",
+    "test/cli-core.test.ts",
     "test/cli-ux.test.ts",
     "test/codex-sticky-rollout-fixture.ts",
     "test/delegate-cli.test.ts",
@@ -53,6 +54,7 @@ export const testSupportImpactByPath = Object.freeze({
     "test/session-selector-cli.test.ts",
     "test/shards/agent-cli-composer-replay.test.ts",
     "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/store-protocol-cli.test.ts",
     "test/turn-session-binding-cli.test.ts"
   ]
 });

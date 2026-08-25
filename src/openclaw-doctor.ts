@@ -171,7 +171,7 @@ export function runOpenClawChainDiagnostics(
       : {})
   });
 
-  const skillResult = run(["skills", "info", PLUGIN_ID, "--json"]);
+  const skillResult = runOpenClawSkillInfo(run);
   const skill = recordValue(skillResult.json);
   const skillOk = skillResult.ok &&
     skill?.name === PLUGIN_ID &&
@@ -189,7 +189,7 @@ export function runOpenClawChainDiagnostics(
     ...(!skillOk
       ? {
           remediation: [
-            "openclaw skills info agent-knock-knock --json",
+            "openclaw skills info agent-knock-knock --agent main --json",
             "openclaw plugins update agent-knock-knock"
           ]
         }
@@ -224,6 +224,22 @@ export function runOpenClawChainDiagnostics(
     gateway_ready: gatewayOk,
     checks
   };
+}
+
+function runOpenClawSkillInfo(
+  run: (args: string[]) => CommandResult
+): CommandResult {
+  const direct = run(["skills", "info", PLUGIN_ID, "--json"]);
+  if (direct.ok) return direct;
+  const scoped = run([
+    "skills",
+    "info",
+    PLUGIN_ID,
+    "--agent",
+    "main",
+    "--json"
+  ]);
+  return scoped.ok ? scoped : direct;
 }
 
 function runOpenClawJson(

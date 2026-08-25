@@ -16,6 +16,7 @@ import {
 } from "./durable-json-file.js";
 import {
   createFileLockCliAdapter,
+  type FileLockCliAdapter,
   type FileLockAcquisitionOptions
 } from "./file-lock-cli-adapter.js";
 import { defaultStoreDir, ensureDir } from "./store.js";
@@ -273,9 +274,11 @@ function decodeLocatedTerminalDispatchLedger(
  * ordinary terminal dispatch ledgers. Product recovery policy stays outside
  * this adapter.
  */
-export function createTerminalDispatchRepositoryCliAdapter():
+export function createTerminalDispatchRepositoryCliAdapter(
+  dependencies: Readonly<{ fileLock?: FileLockCliAdapter }> = {}
+):
   TerminalDispatchRepositoryCliAdapter {
-  const fileLock = createFileLockCliAdapter({
+  const fileLock = dependencies.fileLock ?? createFileLockCliAdapter({
     now: cliNow,
     nowMs: cliNowMs,
     pid: cliPid,
@@ -335,7 +338,13 @@ export function createTerminalDispatchRepositoryCliAdapter():
       }
     } catch (error) {
       for (const release of releases.reverse()) {
-        release();
+        try {
+          release();
+        } catch {
+          // Preserve the acquisition failure. In particular, a LOCK_TIMEOUT
+          // must never be downgraded into the user-priority no-lock path by a
+          // secondary cleanup failure.
+        }
       }
       throw error;
     }

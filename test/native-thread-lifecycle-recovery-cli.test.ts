@@ -71,6 +71,7 @@ test("black-box Codex recovery clears a dispatching composer and rolls exact-bef
       "send",
       "--session",
       fixture.terminalId,
+      "--managed-only",
       "--message",
       "This task must remain fenced.",
       "--background",

@@ -260,11 +260,35 @@ export function agentCliTestEnv(
   };
 }
 
+function managedStateMachineSendArgs(args: string[]): string[] {
+  // Legacy integration scenarios below exercise managed attachment,
+  // recovery, and lock ordering. Keep exact no-token raw sends on that
+  // explicitly requested path; user-priority witnesses carry the physical
+  // token advertised by list and are intentionally left unchanged.
+  if (
+    args[0] !== "send" ||
+    args.includes("--managed-only") ||
+    args.includes("--expected-terminal-token")
+  ) {
+    return args;
+  }
+  const exactTerminalTarget = ["--session", "--conversation"]
+    .map((option) => args.indexOf(option))
+    .some((index) => index >= 0 && args[index + 1]?.startsWith("terminal:v"));
+  return exactTerminalTarget ? [...args, "--managed-only"] : args;
+}
+
 export function runAgentCliInProcess(
   args: string[],
-  env: NodeJS.ProcessEnv = {}
+  env: NodeJS.ProcessEnv = {},
+  dependencyOverrides: CliCommandDependencies = {}
 ) {
-  return runAgentCliInProcessWithTiming(args, env);
+  return runAgentCliInProcessWithTiming(
+    args,
+    env,
+    undefined,
+    dependencyOverrides
+  );
 }
 
 export interface AgentCliVirtualSleepRequest {
@@ -642,6 +666,7 @@ function runAgentCliInProcessWithTiming(
   virtualClock?: AgentCliVirtualClock,
   dependencyOverrides: CliCommandDependencies = {}
 ) {
+  args = managedStateMachineSendArgs(args);
   const commandEnvironment = agentCliTestEnv(args, env);
   const usesStaticTerminalAdapters = [
     "--processes-json",
@@ -870,6 +895,7 @@ export function runAgentCliAsync(
   env: NodeJS.ProcessEnv = {},
   timeoutMs = 30_000
 ) {
+  args = managedStateMachineSendArgs(args);
   return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...args], {
       env: agentCliTestEnv(args, env)
@@ -913,6 +939,7 @@ export function runAgentCliAsync(
 }
 
 export function spawnAgentCliCaptured(args: string[], env: NodeJS.ProcessEnv = {}) {
+  args = managedStateMachineSendArgs(args);
   const child = spawn(process.execPath, [binPath, ...args], {
     env: agentCliTestEnv(args, env)
   });
@@ -940,6 +967,7 @@ export function spawnAgentCliCaptured(args: string[], env: NodeJS.ProcessEnv = {
 }
 
 export function spawnAgentCliProcess(args: string[], env: NodeJS.ProcessEnv = {}) {
+  args = managedStateMachineSendArgs(args);
   const child = spawn(process.execPath, [binPath, ...args], {
     env: agentCliTestEnv(args, env)
   });

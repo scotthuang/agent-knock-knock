@@ -420,6 +420,7 @@
             "test/codex-store-adapter.test.ts",
             "test/management-cli.test.ts",
             "test/turn-session-binding-cli.test.ts",
+            "test/store-protocol-cli.test.ts",
             "test/native-lifecycle-command-guard-cli.test.ts"
           ]
         }

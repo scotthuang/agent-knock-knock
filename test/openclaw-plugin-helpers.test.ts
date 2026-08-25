@@ -635,6 +635,32 @@ test("/akk accepts selector-first sends without treating a Turn as the target", 
     }
   );
   assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand("codex: review the diff"),
+      {},
+      {
+        sessionKey: "agent:test:selector-send",
+        messageId: "openclaw-command-fixed"
+      }
+    ),
+    [
+      "send",
+      "--session",
+      "codex",
+      "--message",
+      "review the diff",
+      "--background",
+      "--message-id",
+      "openclaw-command-fixed",
+      "--openclaw-session",
+      "agent:test:selector-send",
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:test:selector-send"
+    ]
+  );
+  assert.deepEqual(
     parseAkkCommand("codex: review the diff"),
     {
       action: "send",

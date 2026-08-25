@@ -925,6 +925,7 @@ export function buildAkkCommandCliArgs(
     sessionKey?: unknown;
     expectedBindingToken?: unknown;
     candidateToken?: unknown;
+    messageId?: unknown;
     selectionScope?: unknown;
     selectionSnapshotId?: unknown;
   } = {}
@@ -1095,6 +1096,7 @@ export function buildAkkCommandCliArgs(
         ["--idle-timeout-minutes", idleTimeoutMinutes],
         ["--agent-timeout-minutes", finiteNumberString(config.agentTimeoutMinutes)],
         ["--agent-hard-timeout-minutes", finiteNumberString(config.agentHardTimeoutMinutes)],
+        ["--message-id", nonEmptyString(context.messageId)],
         ["--openclaw-session", openclawSession],
         ["--gateway-method", AKK_CALLBACK_METHOD],
         ["--gateway-session", openclawSession],

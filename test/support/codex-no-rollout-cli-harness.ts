@@ -26,6 +26,22 @@ export function codexNoRolloutBackgroundSendArgs(
   ];
 }
 
+export function codexNoRolloutManagedStateMachineArgs(
+  args: readonly string[]
+): string[] {
+  if (
+    args[0] !== "send" ||
+    args.includes("--managed-only") ||
+    args.includes("--expected-terminal-token")
+  ) {
+    return [...args];
+  }
+  const exactTerminalTarget = ["--session", "--conversation"]
+    .map((option) => args.indexOf(option))
+    .some((index) => index >= 0 && args[index + 1]?.startsWith("terminal:v"));
+  return exactTerminalTarget ? [...args, "--managed-only"] : [...args];
+}
+
 export function codexNativeAcceptanceEnv(
   environment: NodeJS.ProcessEnv
 ): NodeJS.ProcessEnv {

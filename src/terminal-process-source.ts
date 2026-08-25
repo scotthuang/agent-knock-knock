@@ -12,6 +12,54 @@ export interface ProcessCommandResult {
   error?: Error;
 }
 
+export interface TerminalProcessIncarnation {
+  processUuid: string;
+  processBirth: string;
+  evidence: "process_birth";
+}
+
+/**
+ * Exact operating-system process incarnation for a selected agent PID.
+ *
+ * This deliberately does not depend on a Codex/Claude identity resolver. The
+ * same probe is used when List advertises physical authority and when Send
+ * revalidates that authority under the terminal lock.
+ */
+export function terminalProcessIncarnationForPid(
+  pid: number,
+  injectedProcessBirthForPid?: (pid: number) => string
+): TerminalProcessIncarnation {
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    throw new Error(`cannot verify process incarnation for invalid pid ${pid}`);
+  }
+  let processBirth: string;
+  if (injectedProcessBirthForPid) {
+    processBirth = String(injectedProcessBirthForPid(pid) ?? "").trim();
+  } else {
+    const result = runProcessCommand("ps", [
+      "-o",
+      "lstart=",
+      "-p",
+      String(pid)
+    ]);
+    processBirth = String(result.stdout ?? "").trim();
+    if (result.status !== 0 || result.error || !processBirth) {
+      throw new Error(
+        String(result.stderr ?? "").trim() || result.error?.message ||
+          `cannot verify process incarnation for pid ${pid}`
+      );
+    }
+  }
+  if (!processBirth) {
+    throw new Error(`cannot verify process incarnation for pid ${pid}`);
+  }
+  return {
+    processUuid: `process-pid:${pid}:birth:${processBirth}`,
+    processBirth,
+    evidence: "process_birth"
+  };
+}
+
 export interface TerminalProcessSource {
   /**
    * True only when an empty result comes from one complete, integrity-checked

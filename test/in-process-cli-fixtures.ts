@@ -40,7 +40,9 @@ export async function runInProcessCli(
   argv: readonly string[],
   dependencies: CliCommandDependencies = {}
 ): Promise<InProcessCliResult> {
-  const { command, options } = parseCliCommand(argv);
+  const { command, options } = parseCliCommand(
+    managedStateMachineSendArgs(argv)
+  );
   try {
     const result = await executeCliCommand(command, options, {
       ...dependencies,
@@ -71,6 +73,27 @@ export async function runInProcessCli(
       error: normalized
     };
   }
+}
+
+/**
+ * Existing integration fixtures that address a raw terminal directly exercise
+ * the managed attachment/recovery state machine. Opt those exact no-token
+ * sends into `--managed-only`; user-priority integration witnesses pass the
+ * freshly advertised physical token and therefore remain on the production
+ * default path.
+ */
+function managedStateMachineSendArgs(argv: readonly string[]): readonly string[] {
+  if (
+    argv[0] !== "send" ||
+    argv.includes("--managed-only") ||
+    argv.includes("--expected-terminal-token")
+  ) {
+    return argv;
+  }
+  const exactTerminalTarget = ["--session", "--conversation"]
+    .map((option) => argv.indexOf(option))
+    .some((index) => index >= 0 && argv[index + 1]?.startsWith("terminal:v"));
+  return exactTerminalTarget ? [...argv, "--managed-only"] : argv;
 }
 
 export type RecordedTerminalOperation =

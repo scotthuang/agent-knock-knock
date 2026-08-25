@@ -6,12 +6,15 @@ import {
   createHash,
   randomUUID
 } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import {
   callbackExpectedForConversation,
   callbackExpectedForConversationWithLegacyFallback,
   callbackRouteFingerprintForConversation
 } from "./callback-route-authority.js";
+import { supersedeUnacceptedCallbackDeliveries } from
+  "./callback-outbox-policy.js";
 import {
   captureClaudeTranscriptAnchor,
   defaultClaudeHome,
@@ -41,6 +44,7 @@ import {
   createMessage,
   effectiveTurnStatus,
   executorForConversation,
+  isSessionSendBlockingStatus,
   isTerminalDispatchOwnerReleasedStatus,
   sessionIdForConversation,
   turnIdForConversation,
@@ -54,12 +58,16 @@ import {
 } from "./transcript.js";
 import {
   appendEvent,
+  appendExplicitUserCloseEvent,
+  defaultStoreDir,
   ensureDir,
   ensureStoreWritable,
   listConversations,
   loadState,
   messageEvent,
+  pathsForConversation,
   pathsForConversationDir,
+  saveExplicitUserCloseState,
   saveState,
   withStoreWriterLeaseAsync
 } from "./store.js";
@@ -67,10 +75,13 @@ import type { EventRecord } from "./store.js";
 import {
   createManagedSessionId,
   managedSessionBindingToken,
+  managedSessionRevision,
+  unmanagedTerminalBindingToken,
   type ManagedSessionState,
   type NativeThreadTransition
 } from "./managed-session.js";
 import {
+  listManagedSessions,
   loadManagedSession,
   saveManagedSession,
   tryLoadManagedSession
@@ -85,6 +96,7 @@ import {
   terminalControlEvidenceMatches
 } from "./terminal-control-ref.js";
 import {
+  isExactClaudeNativeInspectionIdleComposer,
   TerminalEnterDispatchNotAttemptedError,
   TerminalInputNotStartedError,
   type TerminalApprovalAuthorizationContext,
@@ -114,6 +126,7 @@ import {
   codexCompanionsPresentInOpenRootInventory,
   isCompleteNativeRollout,
   nativeIdentityMatchesCodexPreMaterialization,
+  terminalControlAliasMatches,
   terminalControlsShareIncarnation,
   type CodexAllowedCompanionSet,
   type CodexPreMaterializationIdentity
@@ -175,12 +188,21 @@ import {
 import * as deferredRecoveryAdapter from "./deferred-foreground-recovery-cli-adapter.js";
 import type { DeferredForegroundRecoveryAdapterPorts } from
   "./deferred-foreground-recovery-cli-adapter.js";
+import { cleanupDeferredForegroundUserClose } from
+  "./deferred-foreground-user-close.js";
 import {
   deferredForegroundBoundaryProjection
 } from "./deferred-foreground-preparation-cli-adapter.js";
 import {
   terminalSubmissionPayload
 } from "./terminal-dispatch-execution.js";
+import {
+  createTerminalUserSendIntentRepository,
+  TerminalUserSendIntentBoundaryConflictError,
+  TerminalUserSendIntentUncertainError,
+  type TerminalUserSendDeliveryMode,
+  type TerminalUserSendIntentBoundary
+} from "./terminal-user-send-intent.js";
 import type {
   NativeAgentSessionIdentityObservation,
   NativeIdentityResolutionRequest,
@@ -227,7 +249,10 @@ export interface TerminalCommandCliOptions {
   expectedCallbackOpenclawSession?: string;
   expectedCallbackSessionId?: string;
   expectedCallbackTurnId?: string;
+  expectedManagedTerminalToken?: string;
   expectedTerminalToken?: string;
+  /** Internal copy of the user-priority token while managed fast path runs. */
+  expectedUserExplicitTerminalToken?: string;
   logDir?: string;
   message?: string;
   messageId?: string;
@@ -519,6 +544,11 @@ interface TerminalCommandCliRawPorts {
     storeDir: string;
   }): ManagedSessionState | undefined;
   positiveMinutes(value: unknown, optionName: string): number;
+  processIncarnationForPid(pid: number): {
+    processUuid: string;
+    processBirth: string;
+    evidence: "process_birth";
+  };
   prepareDeferredCodexForegroundBinding(request: {
     options: TerminalCommandCliOptions;
     scope: DeferredForegroundApplicationScope;
@@ -564,6 +594,14 @@ interface TerminalCommandCliRawPorts {
       options: TerminalCommandCliOptions;
     }
   ): Promise<NativeAgentSessionIdentity | undefined>;
+  resolveTerminalBridgeDispatchLedger(
+    terminalControl: TerminalControlRef,
+    request: {
+      conversation: Readonly<{ conversation_id: string }>;
+      expectedMessageId?: string;
+      reason: string;
+    }
+  ): boolean;
   resolveTerminalDispatchLedgerPaneIncarnation(
     terminalControl: TerminalControlRef,
     ledger?: TerminalDispatchRecord
@@ -643,7 +681,8 @@ interface TerminalCommandCliRawPorts {
   ): TerminalRuntimeIdentity;
   terminalWriterMutationLocks(
     storeDir: string,
-    terminalControl: TerminalControlRef
+    terminalControl: TerminalControlRef,
+    options?: FileLockAcquisitionOptions
   ): CanonicalMutationLockPorts;
   textSummary(
     text: unknown,
@@ -668,7 +707,8 @@ interface TerminalCommandCliRawPorts {
     operation: (
       scopes: CanonicalStateMutationScopes,
       resources: CanonicalStateMutationResources
-    ) => Promise<Result>
+    ) => Promise<Result>,
+    options?: FileLockAcquisitionOptions
   ): Promise<Result>;
 }
 
@@ -781,6 +821,7 @@ const parseJsonOption = rawPort("parseJsonOption");
 const persistManagedSessionNativeIdentity =
   rawPort("persistManagedSessionNativeIdentity");
 const positiveMinutes = rawPort("positiveMinutes");
+const processIncarnationForPid = rawPort("processIncarnationForPid");
 const prepareDeferredCodexForegroundBinding =
   rawPort("prepareDeferredCodexForegroundBinding");
 const quarantineManagedSessionBinding = rawPort("quarantineManagedSessionBinding");
@@ -794,6 +835,8 @@ const refineTerminalTurnEndpoint = rawPort("refineTerminalTurnEndpoint");
 const required = rawPort("required");
 const resolveCurrentNativeAgentSessionIdentity =
   rawPort("resolveCurrentNativeAgentSessionIdentity");
+const resolveTerminalBridgeDispatchLedger =
+  rawPort("resolveTerminalBridgeDispatchLedger");
 const resolveTerminalDispatchLedgerPaneIncarnation =
   rawPort("resolveTerminalDispatchLedgerPaneIncarnation");
 const resolveTerminalConversationFromOptions =
@@ -4885,11 +4928,1089 @@ function assertRawTerminalCandidateAuthority({
   }
 }
 
+function explicitTerminalSendToken(
+  terminal: TerminalCommandTarget
+): string {
+  const processIncarnation = processIncarnationForPid(terminal.pid);
+  return unmanagedTerminalBindingToken({
+    terminalId: terminal.conversationId,
+    terminalControl: terminal.terminalControl,
+    agent: terminal.agent,
+    pid: terminal.pid,
+    workspace: terminal.terminalControl.currentPath ?? "",
+    processUuid: processIncarnation.processUuid,
+    processBirth: processIncarnation.processBirth
+  });
+}
+
+function explicitSendTurnReference(candidate: Conversation): string {
+  try {
+    return turnIdForConversation(candidate);
+  } catch {
+    return stringValue(candidate.conversation_id) ?? "unknown";
+  }
+}
+
+function hasFreshExplicitTerminalSendToken(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget
+): boolean {
+  const supplied = stringValue(options.expectedTerminalToken);
+  return Boolean(supplied && supplied === explicitTerminalSendToken(terminal));
+}
+
+function assertFreshUserExplicitTerminalSendToken(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget
+): void {
+  const expected = stringValue(options.expectedUserExplicitTerminalToken);
+  if (expected && expected !== explicitTerminalSendToken(terminal)) {
+    throw new Error(
+      "the explicit terminal send token is stale; refresh AKK list"
+    );
+  }
+}
+
+async function assertFreshUserExplicitTerminalSendTargetWhileLocked(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget
+): Promise<void> {
+  if (!stringValue(options.expectedUserExplicitTerminalToken)) return;
+  const resolved = await createTerminalAgentBridge(options)
+    .resolveConversationId(terminal.conversationId);
+  if (
+    !resolved ||
+    resolved.agent !== terminal.agent ||
+    resolved.pid !== terminal.pid ||
+    !terminalControlsShareIncarnation(
+      resolved.terminalControl,
+      terminal.terminalControl
+    )
+  ) {
+    throw new Error(
+      "the explicitly selected terminal is no longer the same live process"
+    );
+  }
+  assertFreshUserExplicitTerminalSendToken(options, resolved);
+}
+
+function releaseTerminalDispatchForExplicitSend(input: {
+  terminal: TerminalCommandTarget;
+  conversations: readonly Conversation[];
+}): {
+  checked: boolean;
+  lifecycleLedger?: TerminalDispatchLedgerDocument;
+  warnings: string[];
+} {
+  let ledger: TerminalDispatchLedgerDocument | undefined;
+  try {
+    ledger = loadTerminalBridgeDispatchLedger(
+      input.terminal.terminalControl
+    );
+  } catch (error) {
+    return {
+      checked: false,
+      warnings: [
+        `terminal dispatch ownership could not be checked before Session ` +
+        `release: ${error instanceof Error ? error.message : String(error)}`
+      ]
+    };
+  }
+  if (!ledger || ledger.status === "resolved") {
+    return { checked: true, warnings: [] };
+  }
+  if (terminalDispatchLedgerLooksLifecycle(ledger)) {
+    return { checked: true, lifecycleLedger: ledger, warnings: [] };
+  }
+  if (!terminalDispatchRecordMatchesControl(
+    ledger,
+    input.terminal.terminalControl
+  )) {
+    return { checked: true, warnings: [] };
+  }
+  const conversationId = stringValue(ledger.conversation_id);
+  const expectedMessageId = stringValue(ledger.message_id);
+  if (!conversationId || !expectedMessageId) {
+    return {
+      checked: true,
+      warnings: [
+        "orphaned terminal dispatch was kept because its exact conversation " +
+        "or message generation could not be verified"
+      ]
+    };
+  }
+  if (input.conversations.some((conversation) =>
+    conversation.conversation_id === conversationId
+  )) {
+    return { checked: true, warnings: [] };
+  }
+  try {
+    if (loadTerminalDispatchLedgerOwner(ledger)) {
+      return { checked: true, warnings: [] };
+    }
+  } catch (error) {
+    return {
+      checked: true,
+      warnings: [
+        `orphaned terminal dispatch owner could not be checked: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      ]
+    };
+  }
+  try {
+    const resolved = resolveTerminalBridgeDispatchLedger(
+      input.terminal.terminalControl,
+      {
+        conversation: { conversation_id: conversationId },
+        expectedMessageId,
+        reason: "orphaned management superseded by explicit user Send"
+      }
+    );
+    return resolved
+      ? { checked: true, warnings: [] }
+      : {
+          checked: true,
+          warnings: [
+            "orphaned terminal dispatch changed before explicit Send cleanup"
+          ]
+        };
+  } catch (error) {
+    return {
+      checked: true,
+      warnings: [
+        `orphaned terminal dispatch could not be released: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      ]
+    };
+  }
+}
+
+async function bestEffortReleaseTerminalManagementForExplicitSend(input: {
+  storeDir: string;
+  terminal: TerminalCommandTarget;
+}): Promise<string[]> {
+  try {
+    return await withStoreWriterLeaseAsync(
+      input.storeDir,
+      async () => releaseTerminalManagementForExplicitSendUnderWriter(input),
+      { timeoutMs: 0 }
+    );
+  } catch (error) {
+    return [
+      `AKK management writer was unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    ];
+  }
+}
+
+function releaseTerminalManagementForExplicitSendUnderWriter(input: {
+  storeDir: string;
+  terminal: TerminalCommandTarget;
+}): string[] {
+  const warnings: string[] = [];
+  let conversations: Conversation[];
+  try {
+    conversations = listConversations(input.storeDir);
+  } catch (error) {
+    return [
+      `managed Turn inventory could not be read: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    ];
+  }
+  for (const candidate of conversations) {
+    const reference = explicitSendTurnReference(candidate);
+    try {
+      if (!isSessionSendBlockingStatus(candidate.status)) continue;
+      const takeover = isRecord(candidate.native_session_takeover)
+        ? candidate.native_session_takeover
+        : undefined;
+      const control = terminalControlFromTakeover(takeover);
+      if (
+        !control ||
+        !terminalControlsShareIncarnation(
+          control,
+          input.terminal.terminalControl
+        )
+      ) {
+        continue;
+      }
+      const paths = pathsForConversation(
+        candidate.conversation_id,
+        input.storeDir
+      );
+      const releaseStateLock = acquireFileLock(
+        `${paths.statePath}.lock`,
+        { timeoutMs: 0 }
+      );
+      try {
+        const current = loadState(paths.statePath);
+        if (!isSessionSendBlockingStatus(current.status)) continue;
+        const currentTakeover = isRecord(current.native_session_takeover)
+          ? current.native_session_takeover
+          : undefined;
+        const currentControl = terminalControlFromTakeover(currentTakeover);
+        if (
+          !currentControl ||
+          !terminalControlsShareIncarnation(
+            currentControl,
+            input.terminal.terminalControl
+          )
+        ) {
+          continue;
+        }
+        const now = cliNow().toISOString();
+        const closed: Conversation = {
+          ...supersedeUnacceptedCallbackDeliveries(current, {
+            at: now,
+            reason: "superseded_by_user_explicit_send"
+          }),
+          status: "closed",
+          closed_at: now,
+          close_reason: "superseded by explicit user Send",
+          disposition: "user_abandoned_management",
+          callback_expected: false,
+          updated_at: now
+        };
+        delete closed.idle_since;
+        saveExplicitUserCloseState(paths.statePath, closed);
+        try {
+          const transferCleanup = cleanupDeferredForegroundUserClose({
+            storeDir: input.storeDir,
+            conversation: closed,
+            at: now
+          });
+          warnings.push(...transferCleanup.warnings.map((warning) =>
+            `Turn ${explicitSendTurnReference(current)} deferred cleanup: ${warning}`
+          ));
+        } catch (error) {
+          warnings.push(
+            `Turn ${explicitSendTurnReference(current)} deferred cleanup failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+        try {
+          const expectedMessageId = stringValue(
+            currentTakeover?.terminal_bridge_message_id
+          );
+          const dispatchResolved = resolveTerminalBridgeDispatchLedger(
+            currentControl,
+            {
+              conversation: closed,
+              expectedMessageId,
+              reason: "management superseded by explicit user Send"
+            }
+          );
+          if (expectedMessageId && !dispatchResolved) {
+            warnings.push(
+              `Turn ${explicitSendTurnReference(current)} dispatch cleanup ` +
+              "did not match its expected ledger"
+            );
+          }
+        } catch (error) {
+          warnings.push(
+            `Turn ${explicitSendTurnReference(current)} dispatch cleanup failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+        try {
+          appendExplicitUserCloseEvent(paths.logPath, {
+            ts: now,
+            conversation_id: current.conversation_id,
+            event: "conversation_closed",
+            status: "closed",
+            reason: closed.close_reason as string,
+            disposition: "user_abandoned_management",
+            terminal_input_sent: false,
+            coding_agent_stopped: false,
+            tmux_pane_closed: false
+          });
+        } catch (error) {
+          warnings.push(
+            `Turn ${explicitSendTurnReference(current)} close event failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+      } finally {
+        releaseStateLock();
+      }
+    } catch (error) {
+      warnings.push(
+        `Turn ${reference} could not release AKK ` +
+        `management: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  let currentConversations: Conversation[];
+  try {
+    currentConversations = listConversations(input.storeDir);
+  } catch (error) {
+    warnings.push(
+      `managed Turn inventory could not be rechecked before Session release: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return warnings;
+  }
+  const blockingSessionIds = new Set(
+    currentConversations
+      .filter((turn) => isSessionSendBlockingStatus(turn.status))
+      .map((turn) => sessionIdForConversation(turn))
+  );
+  const dispatchRelease = releaseTerminalDispatchForExplicitSend({
+    terminal: input.terminal,
+    conversations: currentConversations
+  });
+  warnings.push(...dispatchRelease.warnings);
+  if (!dispatchRelease.checked) {
+    return warnings;
+  }
+  let sessions: ManagedSessionState[];
+  try {
+    sessions = listManagedSessions(input.storeDir);
+  } catch (error) {
+    warnings.push(
+      `managed Session inventory could not be read: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return warnings;
+  }
+  const lifecycleLedger = dispatchRelease.lifecycleLedger;
+  for (const session of sessions) {
+    try {
+      const binding = session.binding;
+      if (
+        !["bound", "quarantined", "transitioning"].includes(
+          session.status
+        ) ||
+        session.agent !== input.terminal.agent ||
+        !binding ||
+        binding.native_process.pid !== input.terminal.pid ||
+        !terminalControlAliasMatches(
+          binding.terminal_id,
+          binding.terminal_control,
+          input.terminal.conversationId,
+          input.terminal.terminalControl
+        ) ||
+        blockingSessionIds.has(session.session_id)
+      ) {
+        continue;
+      }
+      const lifecycleSourceSessionId = stringValue(
+        lifecycleLedger?.source_session_id
+      );
+      const lifecycleTargetSessionId = stringValue(
+        lifecycleLedger?.target_session_id
+      );
+      const lifecycleTransitionId = stringValue(
+        lifecycleLedger?.transition_id
+      );
+      const lifecycleNamesSession = Boolean(
+        lifecycleLedger &&
+        (
+          lifecycleSourceSessionId === session.session_id ||
+          lifecycleTargetSessionId === session.session_id
+        )
+      );
+      if (lifecycleNamesSession) {
+        const transitionRelationship = session.last_transition_id
+          ? lifecycleTransitionId === session.last_transition_id
+            ? `transition ${session.last_transition_id}`
+            : `a lifecycle transition that drifted from Session marker ` +
+              session.last_transition_id
+          : `lifecycle transition ${lifecycleTransitionId ?? "with unknown id"}`;
+        warnings.push(
+          `Session ${session.session_id} kept AKK management because ` +
+          `unresolved ${transitionRelationship} still names it; explicit ` +
+          "Send does not prove that transition's native outcome"
+        );
+        continue;
+      }
+      const detachedAt = cliNow().toISOString();
+      saveManagedSession(input.storeDir, {
+        ...session,
+        status: "detached",
+        detached_at: detachedAt,
+        quarantine_reason: undefined,
+        updated_at: detachedAt
+      }, { expectedRevision: managedSessionRevision(session) });
+    } catch (error) {
+      warnings.push(
+        `Session ${session.session_id} could not release AKK management: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+  return warnings;
+}
+
+function explicitTerminalSendIntentRuntimeDir(): string {
+  const configured = stringValue(cliEnv().AKK_RUNTIME_DIR);
+  return configured
+    ? path.resolve(required(expandHome(configured), "AKK runtime directory"))
+    : path.join(path.dirname(defaultStoreDir()), "runtime-v2");
+}
+
+function assertSafeUserExplicitTerminalSend(
+  status: TerminalBridgeStatus | undefined
+): void {
+  if (status?.reachable !== true) {
+    throw new Error("the explicitly selected terminal is unreachable");
+  }
+  const approval = isRecord(status.approval_state)
+    ? status.approval_state
+    : undefined;
+  if (approval?.scanned !== true) {
+    throw new Error(
+      "the explicitly selected terminal approval state could not be verified"
+    );
+  }
+  if (approval?.blocked === true) {
+    throw new Error(
+      stringValue(approval.reason) ??
+        "the explicitly selected terminal is waiting at an approval prompt"
+    );
+  }
+}
+
+function terminalUserSendIntentContext(
+  options: Record<string, any>,
+  messageBody: string,
+  terminal: TerminalCommandTarget
+): {
+  messageId: string;
+  payload: string;
+  boundary: TerminalUserSendIntentBoundary;
+  repository: ReturnType<typeof createTerminalUserSendIntentRepository>;
+} {
+  const messageId = required(
+    stringValue(options.messageId),
+    "explicit terminal Send message id is unavailable"
+  );
+  const payload = terminalSubmissionPayload(String(messageBody));
+  return {
+    messageId,
+    payload,
+    boundary: {
+      terminalRuntimeKey: terminalBridgeRuntimeKey(terminal.terminalControl),
+      physicalToken: explicitTerminalSendToken(terminal),
+      messageId,
+      requestHash: createHash("sha256").update(payload).digest("hex")
+    },
+    repository: createTerminalUserSendIntentRepository({
+      runtimeDir: explicitTerminalSendIntentRuntimeDir()
+    })
+  };
+}
+
+type TerminalUserSendIntentContext = ReturnType<
+  typeof terminalUserSendIntentContext
+>;
+
+interface TerminalUserSendIntentLease {
+  intent: TerminalUserSendIntentContext;
+  durable: boolean;
+  warnings: string[];
+}
+
+class TerminalUserSendReplayForbiddenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TerminalUserSendReplayForbiddenError";
+  }
+}
+
+type TerminalUserSendIntentReservation =
+  | { outcome: "proceed"; lease: TerminalUserSendIntentLease }
+  | { outcome: "replayed" };
+
+function userExplicitEmergencyTerminalLockPath(
+  terminal: TerminalCommandTarget
+): string {
+  const userScope = createHash("sha256")
+    .update(path.dirname(defaultStoreDir()))
+    .digest("hex")
+    .slice(0, 16);
+  const terminalKey = createHash("sha256")
+    .update(terminalBridgeRuntimeKey(terminal.terminalControl))
+    .digest("hex");
+  const directory = path.join(
+    os.tmpdir(),
+    `agent-knock-knock-user-send-${userScope}`
+  );
+  ensureDir(directory);
+  return path.join(directory, `terminal-${terminalKey}.lock`);
+}
+
+function acquireUserExplicitTerminalSendLock(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget,
+  warnings: string[]
+): () => void {
+  let release: (() => void) | undefined;
+  try {
+    release = acquireTerminalBridgeSendLock(
+      storeDirFromOptions(options),
+      terminal.terminalControl,
+      { timeoutMs: 30_000 }
+    );
+  } catch (error) {
+    if (isRecord(error) && error.code === "LOCK_TIMEOUT") throw error;
+    warnings.push(
+      `primary terminal serialization was unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    try {
+      release = acquireFileLock(
+        userExplicitEmergencyTerminalLockPath(terminal),
+        { timeoutMs: 30_000 }
+      );
+    } catch (fallbackError) {
+      if (
+        isRecord(fallbackError) &&
+        fallbackError.code === "LOCK_TIMEOUT"
+      ) {
+        throw fallbackError;
+      }
+      warnings.push(
+        `emergency terminal serialization was unavailable; proceeding ` +
+        `with exact pre-input revalidation: ${
+          fallbackError instanceof Error
+            ? fallbackError.message
+            : String(fallbackError)
+        }`
+      );
+      return () => {};
+    }
+  }
+  return () => {
+    try {
+      release?.();
+    } catch (error) {
+      const warning = `terminal serialization cleanup failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+      warnings.push(warning);
+      runtimeLog("warn", "terminal_user_explicit_send_lock_release_failed", {
+        terminal_id: terminal.conversationId,
+        warning
+      });
+    }
+  };
+}
+
+function printReplayedUserExplicitSend(
+  terminal: TerminalCommandTarget,
+  intent: TerminalUserSendIntentContext,
+  deliveryMode: TerminalUserSendDeliveryMode
+): void {
+  if (deliveryMode === "managed") {
+    printJson({
+      delivered: false,
+      replayed: true,
+      status: "submission_pending_acceptance",
+      submission_outcome: "pending_acceptance",
+      delivery_receipt: "enter_dispatched",
+      do_not_retry: true,
+      management_mode: "managed",
+      terminal_id: terminal.conversationId,
+      message_id: intent.messageId,
+      scope: "terminal_user_explicit"
+    });
+    return;
+  }
+  printJson({
+    delivered: true,
+    delivered_unmanaged: true,
+    callback_expected: false,
+    management_mode: "unmanaged_fallback",
+    replayed: true,
+    terminal_id: terminal.conversationId,
+    message_id: intent.messageId,
+    scope: "terminal_user_explicit"
+  });
+}
+
+function reserveUserExplicitSendIntent(
+  options: Record<string, any>,
+  messageBody: string,
+  terminal: TerminalCommandTarget
+): TerminalUserSendIntentReservation {
+  const intent = terminalUserSendIntentContext(
+    options,
+    messageBody,
+    terminal
+  );
+  const routingWarning = stringValue(options.terminalUserSendRoutingWarning);
+  const warnings: string[] = routingWarning ? [routingWarning] : [];
+  try {
+      const reservation = intent.repository.reserve(intent.boundary);
+      if (reservation.outcome === "replay") {
+        printReplayedUserExplicitSend(
+          terminal,
+          intent,
+          required(
+            reservation.intent.delivery_mode,
+            "completed explicit Send delivery mode is unavailable"
+          )
+        );
+        return { outcome: "replayed" };
+      }
+      if (reservation.outcome === "uncertain") {
+        throw new TerminalUserSendReplayForbiddenError(
+          `explicit terminal Send ${intent.messageId} already reached ` +
+          `${reservation.stage}; automatic replay is forbidden`
+        );
+      }
+      return {
+        outcome: "proceed",
+        lease: { intent, durable: true, warnings }
+      };
+  } catch (error) {
+      if (
+        error instanceof TerminalUserSendIntentBoundaryConflictError ||
+        error instanceof TerminalUserSendIntentUncertainError ||
+        error instanceof TerminalUserSendReplayForbiddenError
+      ) {
+        throw error;
+      }
+      // Runtime receipts strengthen same-id retry safety; their own damage is
+      // never authority to suppress a fresh physical user Send.
+      warnings.push(
+        `durable user-Send intent unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      return {
+        outcome: "proceed",
+        lease: { intent, durable: false, warnings }
+      };
+  }
+}
+
+function cancelProvenZeroInputUserExplicitSendIntent(
+  lease: TerminalUserSendIntentLease,
+  terminal: TerminalCommandTarget,
+  reason: unknown
+): void {
+  if (!lease.durable) return;
+  try {
+    lease.intent.repository.cancelProvenZeroInput(lease.intent.boundary);
+    lease.durable = false;
+  } catch (error) {
+    const warning =
+      `durable zero-input user-Send reservation cleanup failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    lease.warnings.push(warning);
+    runtimeLog("warn", "terminal_user_explicit_send_intent_cancel_failed", {
+      terminal_id: terminal.conversationId,
+      message_id: lease.intent.messageId,
+      zero_input_reason: reason instanceof Error
+        ? reason.message
+        : String(reason),
+      error: warning
+    });
+  }
+}
+
+function completeUserExplicitSendIntentWhileLocked(
+  lease: TerminalUserSendIntentLease,
+  deliveryMode: TerminalUserSendDeliveryMode
+): void {
+  if (!lease.durable) return;
+  try {
+    lease.intent.repository.complete(lease.intent.boundary, deliveryMode);
+  } catch (error) {
+    lease.durable = false;
+    lease.warnings.push(
+      `durable user-Send completion receipt failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+}
+
+function completeManagedUserExplicitSendIntent(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget,
+  lease: TerminalUserSendIntentLease
+): void {
+  let releaseTerminalLock: (() => void) | undefined;
+  if (lease.durable) {
+    try {
+      releaseTerminalLock = acquireTerminalBridgeSendLock(
+        storeDirFromOptions(options),
+        terminal.terminalControl,
+        { timeoutMs: 0 }
+      );
+      completeUserExplicitSendIntentWhileLocked(lease, "managed");
+    } catch (error) {
+      lease.durable = false;
+      lease.warnings.push(
+        `durable managed Send completion receipt failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+      try {
+        releaseTerminalLock?.();
+      } catch (error) {
+        lease.warnings.push(
+          `managed terminal serialization cleanup failed after Send: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
+  if (lease.warnings.length > 0) {
+    runtimeLog("warn", "terminal_user_explicit_send_intent_warning", {
+      terminal_id: terminal.conversationId,
+      message_id: lease.intent.messageId,
+      warnings: lease.warnings
+    });
+  }
+}
+
+async function runUserExplicitTerminalFallback(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget,
+  managedFailure: unknown,
+  intentLease: TerminalUserSendIntentLease
+): Promise<void> {
+  const storeDir = storeDirFromOptions(options);
+  let releaseTerminalLock: () => void;
+  let terminalLockReleased = false;
+  try {
+    releaseTerminalLock = acquireUserExplicitTerminalSendLock(
+      options,
+      terminal,
+      intentLease.warnings
+    );
+  } catch (error) {
+    // Both the failed managed path and this failed lock acquisition precede
+    // fallback input. Release the same-id receipt so the user can retry.
+    cancelProvenZeroInputUserExplicitSendIntent(
+      intentLease,
+      terminal,
+      error
+    );
+    runtimeLog("warn", "terminal_user_explicit_send_zero_input", {
+      terminal_id: terminal.conversationId,
+      message_id: intentLease.intent.messageId,
+      error: error instanceof Error ? error.message : String(error),
+      retry_safe: true,
+      intent_warnings: intentLease.warnings
+    });
+    throw error;
+  }
+  const releaseTerminalLockOnce = () => {
+    if (terminalLockReleased) return;
+    terminalLockReleased = true;
+    releaseTerminalLock();
+  };
+  try {
+    let bridge: TerminalAgentBridge;
+    let fresh: TerminalCommandTarget;
+    let runtime: TerminalRuntimeIdentity;
+    const { payload, messageId } = intentLease.intent;
+    const intentWarnings = intentLease.warnings;
+    try {
+      bridge = createTerminalAgentBridge(options);
+      const resolved = await bridge.resolveConversationId(
+        terminal.conversationId
+      );
+      if (
+        !resolved ||
+        resolved.agent !== terminal.agent ||
+        resolved.pid !== terminal.pid ||
+        !terminalControlsShareIncarnation(
+          resolved.terminalControl,
+          terminal.terminalControl
+        )
+      ) {
+        throw new Error(
+          "the explicitly selected terminal is no longer the same live process"
+        );
+      }
+      fresh = resolved;
+      if (!hasFreshExplicitTerminalSendToken(options, fresh)) {
+        throw new Error(
+          "the explicit terminal send token is stale; refresh AKK list"
+        );
+      }
+      runtime = terminalRuntimeForLiveIdentity({
+        terminal: fresh,
+        physicalOnly: true
+      });
+      const status = await bridge.status(
+        fresh.agent,
+        fresh.terminalControl,
+        { runtime, scrollbackLines: Number(options.scrollbackLines ?? 120) }
+      );
+      assertSafeUserExplicitTerminalSend(status);
+      if (fresh.agent === "codex") {
+        await assertCodexComposerReadyForAutomatedInput({
+          options,
+          terminalControl: fresh.terminalControl
+        });
+      }
+    } catch (error) {
+      cancelProvenZeroInputUserExplicitSendIntent(
+        intentLease,
+        terminal,
+        error
+      );
+      runtimeLog("warn", "terminal_user_explicit_send_zero_input", {
+        terminal_id: terminal.conversationId,
+        message_id: messageId,
+        error: error instanceof Error ? error.message : String(error),
+        retry_safe: true,
+        intent_warnings: intentWarnings
+      });
+      throw error;
+    }
+    try {
+      await bridge.send(
+        fresh.agent,
+        fresh.terminalControl,
+        payload,
+        {
+          runtime,
+          requireExactComposerBeforeEnter: true,
+          beforeText: async ({ terminalControl }) => {
+            const currentStatus = await bridge.status(
+              fresh.agent,
+              terminalControl,
+              {
+                runtime,
+                scrollbackLines: Number(options.scrollbackLines ?? 120)
+              }
+            );
+            assertSafeUserExplicitTerminalSend(currentStatus);
+            if (fresh.agent === "codex") {
+              await assertCodexComposerReadyForAutomatedInput({
+                options,
+                terminalControl
+              });
+            } else if (!isExactClaudeNativeInspectionIdleComposer(
+              currentStatus.screen.excerpt ?? ""
+            )) {
+              throw new Error(
+                "the explicitly selected Claude composer is no longer empty"
+              );
+            }
+          }
+        }
+      );
+      completeUserExplicitSendIntentWhileLocked(intentLease, "unmanaged");
+      releaseTerminalLockOnce();
+    } catch (error) {
+      const zeroInput = error instanceof TerminalInputNotStartedError;
+      if (zeroInput) {
+        cancelProvenZeroInputUserExplicitSendIntent(
+          intentLease,
+          fresh,
+          error
+        );
+      }
+      runtimeLog(
+        zeroInput ? "warn" : "error",
+        zeroInput
+          ? "terminal_user_explicit_send_zero_input"
+          : "terminal_user_explicit_send_uncertain",
+        {
+        terminal_id: fresh.conversationId,
+        terminal_target: fresh.terminalControl.target,
+        message_id: messageId,
+        error: error instanceof Error ? error.message : String(error),
+        ...(zeroInput
+          ? { retry_safe: true }
+          : { do_not_retry: true }),
+        intent_warnings: intentWarnings
+        }
+      );
+      throw error;
+    }
+    let cleanupWarnings: string[];
+    try {
+      cleanupWarnings = await bestEffortReleaseTerminalManagementForExplicitSend({
+        storeDir,
+        terminal: fresh
+      });
+    } catch (error) {
+      cleanupWarnings = [
+        `AKK management release was unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      ];
+    }
+    const fallbackReason = managedFailure instanceof Error
+      ? managedFailure.message
+      : String(managedFailure);
+    runtimeLog("warn", "terminal_user_explicit_send_fallback", {
+      terminal_id: fresh.conversationId,
+      terminal_target: fresh.terminalControl.target,
+      message_id: messageId,
+      managed_failure: fallbackReason,
+      delivered_unmanaged: true
+    });
+    printJson({
+      delivered: true,
+      delivered_unmanaged: true,
+      cleanup_warnings: cleanupWarnings,
+      intent_warnings: intentWarnings,
+      callback_expected: false,
+      terminal_id: fresh.conversationId,
+      message_id: messageId,
+      scope: "terminal_user_explicit",
+      management_mode: "unmanaged_fallback",
+      previous_management_release_attempted: true,
+      warning: textSummary(
+        `AKK delivered the user's message after managed-state preparation ` +
+        `failed (${fallbackReason}). No callback Turn was claimed.`
+      ),
+      next_action:
+        "refresh AKK list; the live coding agent continues independently of AKK callback state"
+    });
+  } finally {
+    releaseTerminalLockOnce();
+  }
+}
+
 async function runRawTerminalSend(
   options: Record<string, any>,
   messageBody: string,
   terminalConversation: TerminalCommandTarget
 ): Promise<void> {
+  const suppliedExpectedTerminalToken = stringValue(
+    options.expectedTerminalToken
+  );
+  const userExplicitAuthorityRequested = Boolean(
+    suppliedExpectedTerminalToken && options.managedOnly !== true
+  );
+  const freshExplicitAuthority = userExplicitAuthorityRequested
+    ? hasFreshExplicitTerminalSendToken(options, terminalConversation)
+    : false;
+  if (
+    userExplicitAuthorityRequested &&
+    !freshExplicitAuthority
+  ) {
+    throw new Error(
+      "the explicit terminal send token is stale; refresh AKK list"
+    );
+  }
+  if (!freshExplicitAuthority) {
+    await runManagedRawTerminalSend(
+      options,
+      messageBody,
+      terminalConversation
+    );
+    return;
+  }
+  assertExpectedHandoffTokenUsesExactTerminalSelector({
+    options,
+    terminal: terminalConversation
+  });
+  const explicitOptions: Record<string, any> = {
+    ...options,
+    messageId: stringValue(options.messageId) ?? `user-send-${randomUUID()}`
+  };
+  const reservation = reserveUserExplicitSendIntent(
+    explicitOptions,
+    messageBody,
+    terminalConversation
+  );
+  if (reservation.outcome === "replayed") return;
+  const intentLease = reservation.lease;
+  const managedResult = await runManagedRawTerminalSend(
+    {
+      ...explicitOptions,
+      expectedUserExplicitTerminalToken: suppliedExpectedTerminalToken,
+      expectedTerminalToken: stringValue(
+        explicitOptions.expectedManagedTerminalToken
+      ),
+      expectedManagedTerminalToken: undefined
+    },
+    messageBody,
+    terminalConversation,
+    true
+  );
+  if (managedResult.outcome !== "zero_input") {
+    if (
+      managedResult.outcome === "replayed" ||
+      managedResult.enterDispatched
+    ) {
+      completeManagedUserExplicitSendIntent(
+        explicitOptions,
+        terminalConversation,
+        intentLease
+      );
+    }
+    return;
+  }
+  return runUserExplicitTerminalFallback(
+    explicitOptions,
+    terminalConversation,
+    managedResult.failure,
+    intentLease
+  );
+}
+
+async function runManagedRawTerminalSend(
+  options: Record<string, any>,
+  messageBody: string,
+  terminalConversation: TerminalCommandTarget,
+  deferZeroInputFailurePresentation = false
+): Promise<TerminalControlSendResult> {
+  const attempt = {
+    terminalControlSendInvoked: false,
+    result: undefined as TerminalControlSendResult | undefined
+  };
+  try {
+    return await runManagedRawTerminalSendAttempt(
+      options,
+      messageBody,
+      terminalConversation,
+      deferZeroInputFailurePresentation,
+      attempt
+    );
+  } catch (error) {
+    if (!deferZeroInputFailurePresentation) throw error;
+    if (attempt.result) return attempt.result;
+    if (!attempt.terminalControlSendInvoked) {
+      return { outcome: "zero_input", failure: error };
+    }
+    throw new Error(
+      "managed terminal Send may already have started input; refusing an " +
+      `automatic unmanaged fallback: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { cause: error }
+    );
+  }
+}
+
+async function runManagedRawTerminalSendAttempt(
+  options: Record<string, any>,
+  messageBody: string,
+  terminalConversation: TerminalCommandTarget,
+  deferZeroInputFailurePresentation: boolean,
+  attempt: {
+    terminalControlSendInvoked: boolean;
+    result?: TerminalControlSendResult;
+  }
+): Promise<TerminalControlSendResult> {
   // A token copied from list is authority for exactly the advertised full
   // terminal selector. Reject aliases and implicit/no-selector resolution
   // before taking locks or touching Store state.
@@ -4903,9 +6024,16 @@ async function runRawTerminalSend(
     );
   }
   const rawStoreDir = storeDirFromOptions(options);
+  let controlSendResult: TerminalControlSendResult | undefined;
   await withCanonicalMutationLocks(terminalWriterMutationLocks(
-    rawStoreDir, terminalConversation.terminalControl
+    rawStoreDir,
+    terminalConversation.terminalControl,
+    deferZeroInputFailurePresentation ? { timeoutMs: 0 } : undefined
   ), async (scopes, resources) => {
+    await assertFreshUserExplicitTerminalSendTargetWhileLocked(
+      options,
+      terminalConversation
+    );
     await mutationDispatchLedger.beforeMutation(
       scopes, resources, options, terminalConversation
     );
@@ -4920,6 +6048,8 @@ async function runRawTerminalSend(
       expectedStoreDir: rawStoreDir,
       expectedMessageType: "task"
     })) {
+      controlSendResult = { outcome: "replayed" };
+      attempt.result = controlSendResult;
       return;
     }
     terminalListCliFacade.assertTerminalIncarnationCanStartTurn(
@@ -5220,7 +6350,8 @@ async function runRawTerminalSend(
       managed.statePath,
       managed.logPath,
       async (dispatchScopes, dispatchResources) => {
-      await runTerminalControlSend({
+      attempt.terminalControlSendInvoked = true;
+      controlSendResult = await runTerminalControlSend({
         transaction: {
           scopes: dispatchScopes,
           resources: dispatchResources
@@ -5232,8 +6363,13 @@ async function runRawTerminalSend(
         message: managed.message,
         recordMessageAfterSend: true,
         recordRawAttachmentAfterSend: reusableTurn === undefined,
-        onTerminalPreflightVerified: pendingRawAttachSessionCreate
-            ? async (route) => {
+        deferZeroInputFailurePresentation,
+        onTerminalPreflightVerified: async (route) => {
+              assertFreshUserExplicitTerminalSendToken(options, {
+                ...terminalConversation,
+                terminalControl: route.terminalControl
+              });
+              if (!pendingRawAttachSessionCreate) return;
               const exactRoute = withExactTerminalDispatchRoute(route, {
                 terminalControl: terminalConversation.terminalControl,
                 terminalKey: terminalBridgeRuntimeKey(
@@ -5307,8 +6443,7 @@ async function runRawTerminalSend(
                   expectedRevision: current.revision as number
                 });
               };
-            }
-          : undefined,
+            },
         allowedPreMaterializationIdentity,
         allowedAdditionalIdentities,
         observedHandoff:
@@ -5319,12 +6454,18 @@ async function runRawTerminalSend(
               }
             : undefined,
         verifiedEmptyCodexHandoff: verifiedEmptyHandoff?.boundary,
-        deferredCodexForegroundBinding
+          deferredCodexForegroundBinding
       });
-      }
+      attempt.result = controlSendResult;
+      },
+      deferZeroInputFailurePresentation ? { timeoutMs: 0 } : undefined
     );
   });
-  return;
+  if (!controlSendResult) {
+    throw new Error("managed terminal Send completed without an outcome");
+  }
+  attempt.result = controlSendResult;
+  return controlSendResult;
 }
 
 async function runManagedSessionSend(
@@ -7864,7 +9005,8 @@ function presentTerminalDispatchTransportFailure({
   application,
   progress,
   deferredForegroundScope,
-  bridgeMonitor
+  bridgeMonitor,
+  deferZeroInputFailurePresentation
 }: {
   error: unknown;
   request: TerminalControlSendRequest;
@@ -7873,7 +9015,8 @@ function presentTerminalDispatchTransportFailure({
   progress: TerminalDispatchProgress;
   deferredForegroundScope?: DeferredForegroundApplicationScope;
   bridgeMonitor?: TerminalMonitorProcess;
-}): void {
+  deferZeroInputFailurePresentation: boolean;
+}): "zero_input" | "input_started" {
   const {
     options,
     executor,
@@ -7890,12 +9033,32 @@ function presentTerminalDispatchTransportFailure({
     !progress.textInjectedAt &&
     error instanceof TerminalInputNotStartedError
   ) {
-    renderTerminalZeroInputAbort(application.recordZeroInputAbort({
-      failureKind: "transport",
-      error,
-      abortedAt: cliNow().toISOString()
-    }), presentationContext, presentationPorts, bridgeMonitor?.pid);
-    return;
+    let aborted: ReturnType<typeof application.recordZeroInputAbort> |
+      undefined;
+    try {
+      aborted = application.recordZeroInputAbort({
+        failureKind: "transport",
+        error,
+        abortedAt: cliNow().toISOString()
+      });
+    } catch (persistenceError) {
+      if (!deferZeroInputFailurePresentation) throw persistenceError;
+      runtimeLog("warn", "terminal_user_explicit_zero_input_abort_unavailable", {
+        terminal_target: prepared.terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError)
+      });
+    }
+    if (!deferZeroInputFailurePresentation && aborted) {
+      renderTerminalZeroInputAbort(
+        aborted,
+        presentationContext,
+        presentationPorts,
+        bridgeMonitor?.pid
+      );
+    }
+    return "zero_input";
   }
   const uncertainAt = cliNow().toISOString();
   const errorMessage = error instanceof Error ? error.message : String(error);
@@ -7956,10 +9119,16 @@ function presentTerminalDispatchTransportFailure({
     enterDispatched: progress.enterDispatchedAt !== undefined,
     monitorPid: bridgeMonitor?.pid
   }, presentationContext, presentationPorts);
+  return "input_started";
 }
 
 type TerminalDispatchTransportResult =
-  | { outcome: "handled" }
+  | {
+      outcome: "handled";
+      terminalInput: "zero_input" | "input_started";
+      enterDispatched: boolean;
+      failure?: unknown;
+    }
   | {
       outcome: "completed";
       conversation: Conversation;
@@ -7973,7 +9142,8 @@ async function runTerminalDispatchTransport({
   application,
   progress,
   recordPostTransportBookkeepingFailure,
-  deferredForegroundScope
+  deferredForegroundScope,
+  deferZeroInputFailurePresentation
 }: {
   request: TerminalControlSendRequest;
   prepared: PreparedTerminalControlSend;
@@ -7981,6 +9151,7 @@ async function runTerminalDispatchTransport({
   progress: TerminalDispatchProgress;
   recordPostTransportBookkeepingFailure(phase: string, error: unknown): void;
   deferredForegroundScope?: DeferredForegroundApplicationScope;
+  deferZeroInputFailurePresentation: boolean;
 }): Promise<TerminalDispatchTransportResult> {
   const { executor } = request;
   const {
@@ -8031,7 +9202,11 @@ async function runTerminalDispatchTransport({
         presentationPorts,
         bridgeMonitor?.pid
       );
-      return { outcome: "handled" };
+      return {
+        outcome: "handled",
+        terminalInput: "input_started",
+        enterDispatched: true
+      };
     }
     const acceptance = submissionOwner.deferredCandidateBindingPending
       ? { outcome: "pending_acceptance" } as const
@@ -8059,64 +9234,93 @@ async function runTerminalDispatchTransport({
       bridgeMonitor
     };
   } catch (error) {
-    presentTerminalDispatchTransportFailure({
+    const terminalInput = presentTerminalDispatchTransportFailure({
       error,
       request,
       prepared,
       application,
       progress,
       deferredForegroundScope,
-      bridgeMonitor
+      bridgeMonitor,
+      deferZeroInputFailurePresentation
     });
-    return { outcome: "handled" };
+    return {
+      outcome: "handled",
+      terminalInput,
+      enterDispatched: progress.enterDispatchedAt !== undefined,
+      failure: error
+    };
   }
 }
 
+type TerminalControlSendResult =
+  | { outcome: "replayed" }
+  | { outcome: "zero_input"; failure: unknown }
+  | { outcome: "input_started"; enterDispatched: boolean };
+
 async function runTerminalControlSend(
   request: TerminalControlSendRequest
-): Promise<void> {
+): Promise<TerminalControlSendResult> {
   const {
     transaction,
     recordMessageAfterSend = false,
     onTerminalPreflightVerified,
-    deferredCodexForegroundBinding
+    deferredCodexForegroundBinding,
+    deferZeroInputFailurePresentation = false
   } = request;
-  const prepared = await prepareTerminalControlSend(request);
+  let prepared: Awaited<ReturnType<typeof prepareTerminalControlSend>>;
+  try {
+    prepared = await prepareTerminalControlSend(request);
+  } catch (error) {
+    if (deferZeroInputFailurePresentation) {
+      return { outcome: "zero_input", failure: error };
+    }
+    throw error;
+  }
   if (!prepared) {
-    return;
+    return { outcome: "replayed" };
   }
   const { route, presentationContext, presentationPorts } = prepared;
-  const deferredForegroundScope = deferredCodexForegroundBinding
-    ? bindDeferredForegroundApplicationScope(
-        transaction.scopes,
-        transaction.resources
-      )
-    : undefined;
+  let deferredForegroundScope: DeferredForegroundApplicationScope | undefined;
   // A newly discovered raw terminal may not have an authoritative Session
   // yet. Commit that Session only after every pre-input terminal and native
   // acceptance check has passed, but before the Turn or dispatch ledger can
   // become durable. This prevents a failed virgin attach from leaving a
   // zero-identity `bound` Session that fences every later control action.
-  if (deferredCodexForegroundBinding) {
-    deferredForegroundScope?.assertBoundary(
-      deferredForegroundBoundaryProjection(deferredCodexForegroundBinding)
+  let dispatch: TerminalDispatchRuntime;
+  try {
+    deferredForegroundScope = deferredCodexForegroundBinding
+      ? bindDeferredForegroundApplicationScope(
+          transaction.scopes,
+          transaction.resources
+        )
+      : undefined;
+    if (deferredCodexForegroundBinding) {
+      deferredForegroundScope?.assertBoundary(
+        deferredForegroundBoundaryProjection(deferredCodexForegroundBinding)
+      );
+    }
+    const preTransportRollback =
+      await onTerminalPreflightVerified?.(route);
+    const rollback = terminalDispatchRollbackRepositories({
+      request,
+      prepared,
+      deferredForegroundScope,
+      preTransportRollback: typeof preTransportRollback === "function"
+        ? preTransportRollback
+        : undefined
+    });
+    dispatch = createTerminalDispatchRuntime(
+      request,
+      prepared,
+      rollback
     );
+  } catch (error) {
+    if (deferZeroInputFailurePresentation) {
+      return { outcome: "zero_input", failure: error };
+    }
+    throw error;
   }
-  const preTransportRollback =
-    await onTerminalPreflightVerified?.(route);
-  const rollback = terminalDispatchRollbackRepositories({
-    request,
-    prepared,
-    deferredForegroundScope,
-    preTransportRollback: typeof preTransportRollback === "function"
-      ? preTransportRollback
-      : undefined
-  });
-  const dispatch = createTerminalDispatchRuntime(
-    request,
-    prepared,
-    rollback
-  );
   const {
     application,
     progress,
@@ -8135,14 +9339,34 @@ async function runTerminalControlSend(
         : undefined
     );
   } catch (error) {
-    renderTerminalZeroInputAbort(application.recordZeroInputAbort({
-      failureKind: "setup",
-      error,
-      abortedAt: cliNow().toISOString(),
-      injectStatePersistenceFailure:
-        cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
-    }), presentationContext, presentationPorts, undefined);
-    return;
+    let aborted: ReturnType<typeof application.recordZeroInputAbort> |
+      undefined;
+    try {
+      aborted = application.recordZeroInputAbort({
+        failureKind: "setup",
+        error,
+        abortedAt: cliNow().toISOString(),
+        injectStatePersistenceFailure:
+          cliEnv().AKK_TEST_ABORTED_STATE_PERSISTENCE_FAILURE === "1"
+      });
+    } catch (persistenceError) {
+      if (!deferZeroInputFailurePresentation) throw persistenceError;
+      runtimeLog("warn", "terminal_user_explicit_zero_input_abort_unavailable", {
+        terminal_target: route.terminalControl.target,
+        error: persistenceError instanceof Error
+          ? persistenceError.message
+          : String(persistenceError)
+      });
+    }
+    if (!deferZeroInputFailurePresentation && aborted) {
+      renderTerminalZeroInputAbort(
+        aborted,
+        presentationContext,
+        presentationPorts,
+        undefined
+      );
+    }
+    return { outcome: "zero_input", failure: error };
   }
 
   const transport = await runTerminalDispatchTransport({
@@ -8151,10 +9375,16 @@ async function runTerminalControlSend(
     application,
     progress,
     recordPostTransportBookkeepingFailure,
-    deferredForegroundScope
+    deferredForegroundScope,
+    deferZeroInputFailurePresentation
   });
   if (transport.outcome === "handled") {
-    return;
+    return transport.terminalInput === "zero_input"
+      ? { outcome: "zero_input", failure: transport.failure }
+      : {
+          outcome: "input_started",
+          enterDispatched: transport.enterDispatched
+        };
   }
   const deliveredConversation = transport.conversation;
   const acceptanceResult = transport.acceptance;
@@ -8174,6 +9404,7 @@ async function runTerminalControlSend(
     monitorPid: bridgeMonitor?.pid,
     bookkeepingWarning: progress.bookkeepingWarning
   }, presentationContext, presentationPorts);
+  return { outcome: "input_started", enterDispatched: true };
 }
 
 export function createTerminalCommandCliFacade(

@@ -79,6 +79,7 @@ import {
 import {
   codexNativeAcceptanceEnv,
   codexNoRolloutBackgroundSendArgs,
+  codexNoRolloutManagedStateMachineArgs,
   codexNoRolloutStoreArgs
 } from "./support/codex-no-rollout-cli-harness.js";
 
@@ -895,7 +896,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
   }
 });
 
-test("a provisional attach orphan exposes one fenced reconcile action and detaches without terminal input", async () => {
+test("a provisional attach orphan keeps fenced reconciliation alongside user-priority Send", async () => {
   const fixture = createNoRolloutFixture();
   try {
     const orphan = persistConflictSession(fixture, {
@@ -906,8 +907,10 @@ test("a provisional attach orphan exposes one fenced reconcile action and detach
     assert.equal(terminal.management_conflict.kind, "provisional_orphan");
     assert.deepEqual(Object.keys(terminal.available_actions), [
       "status",
-      "reconcile_binding"
+      "reconcile_binding",
+      "send"
     ]);
+    assertTerminalUserExplicitSendAction(terminal);
     const action = terminal.available_actions.reconcile_binding;
     assert.equal(action.requires_user_intent, true);
     assert.deepEqual(action.arguments, {
@@ -1178,7 +1181,7 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
   }
 });
 
-test("verified-empty handoff stays fail-closed for a real draft, resolver failure, stale token, and active Turn", async () => {
+test("verified-empty physical Send ignores resolver and Turn state but rejects a real draft or stale token", async () => {
   for (const blocker of ["draft", "resolver", "stale_token", "active_turn"] as const) {
     const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
     try {
@@ -1205,8 +1208,23 @@ test("verified-empty handoff stays fail-closed for a real draft, resolver failur
           "unavailable"
         );
       }
-      if (blocker === "draft" || blocker === "resolver" || blocker === "active_turn") {
+      if (blocker === "draft") {
         assert.equal(terminal.available_actions.send, undefined, blocker);
+        assert.equal(
+          loadManagedSession(fixture.storeDir, source.session_id).status,
+          "bound",
+          blocker
+        );
+        assert.equal(
+          readTmuxCalls(fixture.tmuxCallsPath)
+            .some((call) => call.args[0] === "send-keys"),
+          false,
+          blocker
+        );
+        continue;
+      }
+      if (blocker === "resolver" || blocker === "active_turn") {
+        assertTerminalUserExplicitSendAction(terminal);
         assert.equal(
           loadManagedSession(fixture.storeDir, source.session_id).status,
           "bound",
@@ -1223,17 +1241,19 @@ test("verified-empty handoff stays fail-closed for a real draft, resolver failur
 
       const action = terminal.available_actions.send;
       assert.ok(action, JSON.stringify(terminal));
-      const current = loadManagedSession(fixture.storeDir, source.session_id);
-      saveManagedSession(fixture.storeDir, {
-        ...current,
-        updated_at: "2026-08-11T03:10:00.000Z"
-      }, { expectedRevision: current.revision as number });
+      const stalePhysicalToken = createHash("sha256")
+        .update("stale verified-empty physical terminal authority")
+        .digest("hex");
+      assert.notEqual(
+        stalePhysicalToken,
+        action.arguments.expected_terminal_token
+      );
       const rejected = await runCli([
         "send",
         "--conversation",
         fixture.terminalId,
         "--expected-terminal-token",
-        String(action.arguments.expected_terminal_token),
+        stalePhysicalToken,
         "--message",
         "A stale list token must not detach the source.",
         ...codexNoRolloutBackgroundSendArgs(fixture)
@@ -1364,7 +1384,7 @@ test("Herdr uses the same verified-empty Codex handoff fence and virgin post-sub
   }
 });
 
-test("ambiguous and unverifiable binding claims never advertise reconciliation", async () => {
+test("ambiguous and unverifiable binding claims hide reconciliation but not user-priority Send", async () => {
   for (const kind of ["ambiguous", "unverifiable"] as const) {
     const fixture = createNoRolloutFixture();
     try {
@@ -1388,7 +1408,11 @@ test("ambiguous and unverifiable binding claims never advertise reconciliation",
         kind === "ambiguous" ? "ambiguous_bound_claims" : "unverifiable",
         kind
       );
-      assert.deepEqual(Object.keys(terminal.available_actions), ["status"]);
+      assert.deepEqual(
+        Object.keys(terminal.available_actions),
+        ["status", "send"]
+      );
+      assertTerminalUserExplicitSendAction(terminal);
     } finally {
       fixture.cleanup();
     }
@@ -1430,7 +1454,7 @@ test("a fresh /status card that supersedes the open rollout is projected as an a
   }
 });
 
-test("blocking Turns, unresolved transitions, and dispatch ledgers suppress binding reconciliation", async () => {
+test("managed blockers suppress reconciliation but not user-priority physical Send", async () => {
   for (const blocker of ["turn", "transition", "ledger"] as const) {
     const fixture = createNoRolloutFixture();
     try {
@@ -1454,7 +1478,7 @@ test("blocking Turns, unresolved transitions, and dispatch ledgers suppress bind
       const blocked = await listFixtureTerminal(fixture);
       assert.equal(blocked.management_state, "conflict", blocker);
       assert.equal(blocked.available_actions.reconcile_binding, undefined, blocker);
-      assert.equal(blocked.available_actions.send, undefined, blocker);
+      assertTerminalUserExplicitSendAction(blocked);
       assert.equal(blocked.available_actions.new_thread, undefined, blocker);
       assert.equal(
         blocked.available_actions.list_resumable_threads,
@@ -1816,9 +1840,14 @@ for (const crashCase of [
         assert.deepEqual(listConversations(fixture.storeDir), []);
 
         const refreshedAction = await deferredForegroundSendAction(fixture);
-        assert.notEqual(
+        assert.equal(
           refreshedAction.arguments.expected_terminal_token,
-          action.arguments.expected_terminal_token
+          action.arguments.expected_terminal_token,
+          "Store recovery must not stale unchanged physical authority"
+        );
+        assert.notEqual(
+          refreshedAction.arguments.expected_managed_terminal_token,
+          action.arguments.expected_managed_terminal_token
         );
         const retried = await runCli(
           deferredForegroundSendArgs(fixture, refreshedAction, message),
@@ -3565,7 +3594,7 @@ test("an accepted deferred Turn recovers before Session commit without replay", 
   }
 });
 
-test("deferred send without exact request acceptance stays uncertain and blocks replay", async () => {
+test("abandoned deferred history blocks replay but not an explicit terminal send", async () => {
   const fixture = createNoRolloutFixture({
     codexVersion: "0.147.0",
     rolloutInitiallyAbsent: true
@@ -3601,6 +3630,88 @@ test("deferred send without exact request acceptance stays uncertain and blocks 
     assert.equal(transfer.status, "uncertain");
     assert.equal(transfer.do_not_retry, true);
     assertSingleTaskInput(fixture, message);
+
+    const closed = await runCli([
+      "close",
+      "--turn",
+      String(output.turn_id),
+      ...codexNoRolloutStoreArgs(fixture)
+    ], fixture.environment);
+    assert.equal(closed.status, 0, closed.stderr || closed.stdout);
+    transfer = soleDeferredForegroundTransfer(fixture);
+    assert.equal(transfer.status, "user_abandoned");
+
+    const detachedSource = loadManagedSession(
+      fixture.storeDir,
+      transfer.source_session_id
+    );
+    assert.equal(detachedSource.status, "detached");
+    assert.equal(detachedSource.last_transition_id, transfer.transfer_id);
+    assert.ok(detachedSource.binding);
+    assert.ok(detachedSource.detached_at);
+    const rolloutStat = fs.statSync(fixture.rolloutPath);
+    const reattachedAt = new Date(
+      Date.parse(detachedSource.detached_at) + 1_000
+    );
+    const reattached = saveManagedSession(fixture.storeDir, {
+      ...detachedSource,
+      status: "bound",
+      binding: terminalBindingFrom({
+        terminalId: fixture.terminalId,
+        terminalControl: fixture.terminalControl,
+        pid: fixture.codexPid,
+        nativeThreadId: NATIVE_THREAD_ID,
+        processUuid: processUuid(fixture.codexPid, LIVE_PROCESS_BIRTH),
+        processBirth: LIVE_PROCESS_BIRTH,
+        rollout: {
+          fd: "24",
+          device: String(rolloutStat.dev),
+          inode: String(rolloutStat.ino),
+          path: fs.realpathSync(fixture.rolloutPath)
+        },
+        evidence: "codex_open_root_rollout",
+        generation: detachedSource.binding.generation + 1,
+        now: reattachedAt
+      }),
+      detached_at: undefined,
+      updated_at: reattachedAt.toISOString()
+    }, { expectedRevision: detachedSource.revision as number });
+    assert.equal(reattached.last_transition_id, transfer.transfer_id);
+
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
+    const relisted = await listFixtureTerminal(fixture);
+    const explicitSend = relisted.available_actions.send;
+    assert.ok(explicitSend, JSON.stringify(relisted, null, 2));
+    assert.equal(explicitSend.scope, "terminal_user_explicit");
+    assert.equal(explicitSend.arguments.selector, fixture.terminalId);
+    assert.equal("session_id" in explicitSend.arguments, false);
+    assert.equal(
+      typeof explicitSend.arguments.expected_terminal_token,
+      "string"
+    );
+
+    const explicitMessage =
+      "Continue after the abandoned deferred transfer was reattached.";
+    const callsBeforeExplicitSend = taskInputCalls(fixture).length;
+    fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+    const sent = await runCli(
+      userExplicitDeferredForegroundSendArgs(
+        fixture,
+        explicitSend,
+        explicitMessage
+      ),
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    assert.deepEqual(
+      taskInputCalls(fixture).slice(callsBeforeExplicitSend)
+        .map((call) => call.args),
+      [
+        ["send-keys", "-t", fixture.inputTarget, "-l", explicitMessage],
+        ["send-keys", "-t", fixture.inputTarget, "C-m"]
+      ]
+    );
   } finally {
     fixture.cleanup();
   }
@@ -3669,7 +3780,7 @@ test("pre-text terminal identity drift immediately aborts a target-prepared tran
   }
 });
 
-test("deferred terminal tokens fail closed while an unmanaged no-token send still works", async () => {
+test("managed deferred tokens fail closed while exact no-token managed routing still works", async () => {
   const fixture = createNoRolloutFixture({
     codexVersion: "0.147.0",
     rolloutInitiallyAbsent: true
@@ -3684,7 +3795,7 @@ test("deferred terminal tokens fail closed while an unmanaged no-token send stil
           ...action,
           arguments: {
             ...action.arguments,
-            expected_terminal_token: "arbitrary-terminal-token"
+            expected_managed_terminal_token: "arbitrary-terminal-token"
           }
         },
         "An arbitrary token must send no input."
@@ -3717,7 +3828,7 @@ test("deferred terminal tokens fail closed while an unmanaged no-token send stil
   }
 
   const unmanaged = createNoRolloutFixture({ rolloutInitiallyAbsent: true });
-  const message = "A normal unmanaged selector still needs no handoff token.";
+  const message = "An exact managed-only selector still needs no handoff token.";
   try {
     const sent = await runCli([
       "send",
@@ -4890,7 +5001,19 @@ async function assertSafeAbortedRolloutDelegateRetry(
     );
     const bindingBefore = source.binding;
     assert.ok(bindingBefore);
-    const aborted = await runCli(delegateArgs, {
+    const action = await deferredForegroundSendAction(fixture);
+    const firstSendArgs = [
+      ...deferredForegroundSendArgs(fixture, action, message),
+      "--message-id",
+      messageId,
+      "--openclaw-session",
+      gatewaySession,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      gatewaySession
+    ];
+    const aborted = await runCli(firstSendArgs, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
       ...abortCase.failureEnv
@@ -4997,7 +5120,10 @@ async function assertSafeAbortedRolloutDelegateRetry(
     );
 
     fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
-    const retried = await runCli(delegateArgs, codexNativeAcceptanceEnv(fixture.environment));
+    const retried = await runCli(
+      delegateArgs,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const output = JSON.parse(retried.stdout);
     assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);
@@ -5240,31 +5366,50 @@ async function assertSafeAbortedStatusCardDelegateRetry(
       0
     );
 
-    const retried = await runCli(delegateArgs, codexNativeAcceptanceEnv(fixture.environment));
+    const retried = await runCli(
+      delegateArgs,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const output = JSON.parse(retried.stdout);
     assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);
     assert.equal(output.message.id, messageId);
     assert.notEqual(output.turn_id, abortedTurnId);
-    assert.equal(output.session_id, source.session_id);
+    assert.notEqual(output.session_id, source.session_id);
+    assert.notEqual(output.session_id, abortTransfer.target_session_id);
     assert.equal(output.conversation.native_thread_id, NATIVE_THREAD_ID);
     assert.equal(
       output.conversation.gateway_method,
       "agent-knock-knock.callback"
     );
     assert.equal(output.conversation.gateway_session, gatewaySession);
-    assert.deepEqual(
-      listDeferredForegroundTransfers(fixture.storeDir),
-      [abortTransfer],
-      "the retry must preserve the completed abort and reuse its restored source"
+    const transfers = listDeferredForegroundTransfers(fixture.storeDir);
+    assert.equal(transfers.length, 2, JSON.stringify(transfers, null, 2));
+    const preservedAbort = transfers.find((candidate) =>
+      candidate.transfer_id === abortTransfer.transfer_id
     );
-    const refinedSource = loadManagedSession(
+    assert.deepEqual(preservedAbort, abortTransfer);
+    const transfer = transfers.find((candidate) =>
+      candidate.turn_id === output.turn_id
+    );
+    assert.ok(transfer, JSON.stringify(transfers, null, 2));
+    assert.equal(transfer.status, "resolved");
+    assert.equal(transfer.source_kind, "status_card_only");
+    assert.equal(transfer.source_session_id, source.session_id);
+    assert.equal(transfer.target_session_id, output.session_id);
+    assert.equal(transfer.target_native_thread_id, NATIVE_THREAD_ID);
+    assert.notEqual(transfer.target_session_id, abortTransfer.target_session_id);
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "detached"
+    );
+    const acceptedTarget = loadManagedSession(
       fixture.storeDir,
-      source.session_id
+      String(output.session_id)
     );
-    assert.equal(refinedSource.status, "bound");
-    assert.equal(refinedSource.binding?.native_thread_id, NATIVE_THREAD_ID);
-    assert.ok(refinedSource.binding?.native_process.rollout);
+    assert.equal(acceptedTarget.status, "bound");
+    assert.equal(acceptedTarget.binding?.native_thread_id, NATIVE_THREAD_ID);
+    assert.ok(acceptedTarget.binding?.native_process.rollout);
     assert.equal(
       loadManagedSession(
         fixture.storeDir,
@@ -5273,18 +5418,41 @@ async function assertSafeAbortedStatusCardDelegateRetry(
       "detached"
     );
 
+    const replayed = await runCli(
+      delegateArgs,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(replayed.status, 0, replayed.stderr || replayed.stdout);
+    const replayedOutput = JSON.parse(replayed.stdout);
+    assert.equal(replayedOutput.replayed, true, replayed.stdout);
+    assert.equal(replayedOutput.delivered, false, replayed.stdout);
+    assert.equal(replayedOutput.status, "submission_pending_acceptance");
+    assert.equal(replayedOutput.submission_outcome, "pending_acceptance");
+    assert.equal(replayedOutput.delivery_receipt, "enter_dispatched");
+    assert.equal(replayedOutput.do_not_retry, true);
+    assert.equal(replayedOutput.management_mode, "managed");
+    assert.equal(replayedOutput.scope, "terminal_user_explicit");
+    assert.equal(replayedOutput.message_id, messageId);
+    assert.equal(replayedOutput.session_id, undefined);
+    assert.equal(replayedOutput.turn_id, undefined);
+    assert.deepEqual(
+      listDeferredForegroundTransfers(fixture.storeDir),
+      transfers,
+      "delegate intent replay must not create another managed transfer"
+    );
+
     const finalTaskCalls = taskInputCalls(fixture, message);
     assert.equal(
       finalTaskCalls.filter((call) => call.args.at(-1) === "C-m").length,
-      2,
-      "status-card retry performs one /status Enter and one task Enter"
+      1,
+      "the accepted provisional retry dispatches the task Enter exactly once"
     );
     assert.equal(
       readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
         call.args.includes("-l") && call.args.at(-1) === "/status"
       ).length,
-      1,
-      "the restored status-card source is revalidated exactly once"
+      0,
+      "durable status-card authority does not require a native /status probe"
     );
     assert.equal(
       finalTaskCalls.filter((call) =>
@@ -5673,7 +5841,7 @@ test("abandoned predecessor candidate token fails closed when exact authority dr
   }
 });
 
-test("abandoned predecessor does not advertise a candidate already claimed by a detached Session", async () => {
+test("a detached candidate claim cannot hide user-priority physical Send", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   const message = "Keep detached candidate ownership fail closed.";
   try {
@@ -5700,7 +5868,7 @@ test("abandoned predecessor does not advertise a candidate already claimed by a 
       "session-detached-current-candidate"
     );
     const listed = await listFixtureTerminal(fixture);
-    assert.equal(listed.available_actions.send, undefined);
+    assertTerminalUserExplicitSendAction(listed);
     assert.deepEqual(taskInputCalls(fixture, message), []);
   } finally {
     fixture.cleanup();
@@ -5865,7 +6033,7 @@ test("known detached companion roots use the terminal-scoped human-priority rout
   }
 });
 
-test("a non-companion bound candidate claim suppresses present multi-root send and rejects a cached token before input", async () => {
+test("a non-companion bound candidate claim cannot hide or stale user-priority physical Send", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   const message = "Do not cross a competing bound candidate claim.";
   try {
@@ -5894,21 +6062,30 @@ test("a non-companion bound candidate claim suppresses present multi-root send a
     }, { expectedRevision: detachedClaim.revision as number });
 
     const listed = await listFixtureTerminal(fixture);
-    assert.equal(listed.available_actions.send, undefined);
+    const currentAction = assertTerminalUserExplicitSendAction(listed);
+    assert.equal(
+      currentAction.arguments.expected_terminal_token,
+      cachedAction.arguments.expected_terminal_token,
+      "managed claim changes must not stale unchanged physical authority"
+    );
     assert.deepEqual(taskInputCalls(fixture), []);
     assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
     assert.deepEqual(listConversations(fixture.storeDir), []);
 
-    const rejected = await runCli(
-      deferredForegroundSendArgs(fixture, cachedAction, message),
+    const sent = await runCli(
+      userExplicitDeferredForegroundSendArgs(
+        fixture,
+        cachedAction,
+        message
+      ),
       codexNativeAcceptanceEnv(fixture.environment)
     );
-    assert.equal(rejected.status, 1, rejected.stdout);
-    assert.match(
-      rejected.stderr,
-      /multiple bound managed Session claims|candidate.*claimed|authority|refresh/iu
-    );
-    assert.deepEqual(taskInputCalls(fixture), []);
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, sent.stdout);
+    assert.equal(output.delivered_unmanaged, true, sent.stdout);
+    assert.equal(output.management_mode, "unmanaged_fallback", sent.stdout);
+    assertSingleTaskInput(fixture, message);
     assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
     assert.deepEqual(listConversations(fixture.storeDir), []);
   } finally {
@@ -5916,7 +6093,7 @@ test("a non-companion bound candidate claim suppresses present multi-root send a
   }
 });
 
-test("a stalled Turn suppresses one-root candidate send while released history does not", async () => {
+test("a stalled Turn remains visible but cannot suppress user-priority physical Send", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   try {
     enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
@@ -5927,7 +6104,7 @@ test("a stalled Turn suppresses one-root candidate send while released history d
     persistReleasedCandidateSourceTurns(fixture, source);
     persistBlockingTurn(fixture, source, "stalled");
     const terminal = await listFixtureTerminal(fixture);
-    assert.equal(terminal.available_actions.send, undefined);
+    assertTerminalUserExplicitSendAction(terminal);
     assert.ok(
       terminal.blocking_turns?.some((turn: Record<string, any>) =>
         turn.status === "stalled"
@@ -7034,18 +7211,54 @@ async function deferredForegroundSendAction(
   fixture: NoRolloutFixture
 ): Promise<Record<string, any>> {
   const terminal = await listFixtureTerminal(fixture);
-  const action = terminal.available_actions.send;
+  return assertTerminalUserExplicitSendAction(terminal);
+}
+
+function assertTerminalUserExplicitSendAction(
+  terminal: Record<string, any>
+): Record<string, any> {
+  const action = terminal.available_actions?.send;
   assert.ok(action, JSON.stringify(terminal, null, 2));
-  assert.equal(action.arguments.selector, fixture.terminalId);
+  assert.equal(action.scope, "terminal_user_explicit");
+  assert.equal(action.arguments.selector, terminal.id);
   assert.equal("session_id" in action.arguments, false);
-  assert.equal(
-    typeof action.arguments.expected_terminal_token,
-    "string"
-  );
+  assert.equal(typeof action.arguments.expected_terminal_token, "string");
   return action;
 }
 
 function deferredForegroundSendArgs(
+  fixture: NoRolloutFixture,
+  action: Record<string, any>,
+  message: string
+): string[] {
+  const expectedManagedTerminalToken = String(
+    action.arguments.expected_managed_terminal_token ?? ""
+  );
+  assert.ok(
+    expectedManagedTerminalToken,
+    `managed deferred fixture is missing its managed token: ${JSON.stringify(action)}`
+  );
+  return [
+    "send",
+    "--conversation",
+    String(action.arguments.selector),
+    "--managed-only",
+    "--expected-terminal-token",
+    expectedManagedTerminalToken,
+    "--message",
+    message,
+    "--background",
+    "--store-dir",
+    fixture.storeDir,
+    "--codex-home",
+    fs.realpathSync(fixture.codexHome),
+    "--openclaw-bin",
+    "/usr/bin/true",
+    "--disable-terminal-bridge-monitor"
+  ];
+}
+
+function userExplicitDeferredForegroundSendArgs(
   fixture: NoRolloutFixture,
   action: Record<string, any>,
   message: string
@@ -8063,6 +8276,7 @@ async function runCli(
   env: NodeJS.ProcessEnv,
   onExit?: (status: number) => never
 ): Promise<CliTestResult> {
+  args = codexNoRolloutManagedStateMachineArgs(args);
   const parsed = parseCliCommand(args);
   const storeDir = String(parsed.options.storeDir ?? "");
   const fixture = inProcessFixtures.get(storeDir);
@@ -8146,7 +8360,10 @@ async function runCliCrashCheckpoint(
 
 /** Deliberate crash/exit and detached child-lifecycle process goldens. */
 function runCliSubprocess(args: string[], env: NodeJS.ProcessEnv) {
-  return spawnSync(process.execPath, [binPath, ...args], {
+  return spawnSync(process.execPath, [
+    binPath,
+    ...codexNoRolloutManagedStateMachineArgs(args)
+  ], {
     encoding: "utf8",
     env,
     timeout: 60_000

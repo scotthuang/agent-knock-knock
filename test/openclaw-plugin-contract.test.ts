@@ -606,7 +606,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "de1f2eb6aef8caefac403a5b5aa6f960d5c83f3699f3365c10571cf577144968"
+    "ab251ec2d86bd96d570578fd9b61c2ce2d310788cb194cb0dff01d3908911521"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -626,6 +626,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.match(listTool.description ?? "", /semantic IDs/u);
   assert.match(listTool.description ?? "", /session_exact.*session_id/u);
   assert.match(listTool.description ?? "", /terminal_follow_current.*terminal_id/u);
+  assert.match(
+    listTool.description ?? "",
+    /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+  );
   assert.match(listTool.description ?? "", /managed controls use turn_id/u);
   assert.match(listTool.description ?? "", /freshness authority private/u);
   assert.doesNotMatch(listTool.description ?? "", /follow_up/u);
@@ -2068,6 +2072,17 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.match(sendTool?.description ?? "", /terminal_id/u);
     assert.match(sendTool?.description ?? "", /exact \{turn_id\} form/u);
     assert.match(sendTool?.description ?? "", /freshness authority privately/u);
+    assert.match(
+      sendTool?.description ?? "",
+      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+    );
+    const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
+    assert.match(
+      isRecord(terminalIdSchema)
+        ? String(terminalIdSchema.description ?? "")
+        : "",
+      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*managed fast path[\s\S]*unmanaged delivery[\s\S]*no callback[\s\S]*use Watch/u
+    );
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {
         request: "Do not route this as an ordinary send",
@@ -3412,6 +3427,157 @@ process.stdout.write(JSON.stringify(result));
     });
     assert.match(closeResult?.text ?? "", /AKK Turn record closed\./u);
     assert.doesNotMatch(closeResult?.text ?? "", /AKK session closed/u);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", async () => {
+  const tempDir = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-plugin-user-priority-send-"
+  ));
+  const fakeCli = path.join(tempDir, "user-priority-send.cjs");
+  let command:
+    | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
+    | undefined;
+  let sendTool: ToolDefinition | undefined;
+  try {
+    const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";
+    const fallbackResult = {
+      delivered: true,
+      delivered_unmanaged: true,
+      callback_expected: false,
+      terminal_id: terminalId,
+      message_id: "message-user-priority-send",
+      scope: "terminal_user_explicit",
+      management_mode: "unmanaged_fallback"
+    };
+    const managedReplayResult = {
+      delivered: false,
+      replayed: true,
+      status: "submission_pending_acceptance",
+      submission_outcome: "pending_acceptance",
+      delivery_receipt: "enter_dispatched",
+      do_not_retry: true,
+      terminal_id: terminalId,
+      message_id: "message-managed-replay",
+      scope: "terminal_user_explicit",
+      management_mode: "managed"
+    };
+    fs.writeFileSync(
+      fakeCli,
+      [
+        "const args = process.argv.slice(2);",
+        `const terminalId = ${JSON.stringify(terminalId)};`,
+        `const fallback = ${JSON.stringify(fallbackResult)};`,
+        `const managedReplay = ${JSON.stringify(managedReplayResult)};`,
+        `const result = args[0] === "list" ? { terminals: [{`,
+        `  id: terminalId, available_actions: { send: {`,
+        `    tool: "agent_knock_knock_send", arguments: {`,
+        `      selector: terminalId, expected_terminal_token: "private-physical-token"`,
+        `    }`,
+        `  } }`,
+        `}] } : args.includes("pending-managed") ? managedReplay : fallback;`,
+        "process.stdout.write(JSON.stringify(result));"
+      ].join("\n"),
+      "utf8"
+    );
+    (
+      createOpenClawPluginForTest(fakeCli) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: {},
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand(value: typeof command) {
+        command = value;
+      },
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        const definition = typeof tool === "function"
+          ? tool({
+              sessionKey: "agent:test:user-priority-send",
+              sessionId: "openclaw-user-priority-send"
+            } as never)
+          : tool;
+        if (options?.name === "agent_knock_knock_send") {
+          sendTool = definition;
+        }
+      }
+    });
+
+    const result = await command?.handler?.({
+      args: "only: Continue despite broken AKK state",
+      sessionKey: "agent:test:user-priority-send"
+    });
+    const text = String(result?.text ?? "");
+    assert.match(text, /delivered the user's request directly/u);
+    assert.match(text, /^delivery: unmanaged fallback$/mu);
+    assert.match(text, /^callback: none; no AKK Turn was created/mu);
+    assert.match(text, /refresh AKK list and use Watch/u);
+    assert.doesNotMatch(text, /AKK turn sent|session: unknown|turn: unknown/iu);
+    assert.notEqual(result?.isError, true);
+
+    const bareResult = await command?.handler?.({
+      args: "Continue despite broken AKK state",
+      sessionKey: "agent:test:user-priority-send"
+    });
+    const bareText = String(bareResult?.text ?? "");
+    assert.notEqual(bareResult?.isError, true);
+    assert.match(bareText, /delivered the user's request directly/u);
+    assert.match(bareText, /^callback: none; no AKK Turn was created/mu);
+    assert.match(bareText, /refresh AKK list and use Watch/u);
+    assert.doesNotMatch(bareText, /session: unknown|turn: unknown/iu);
+
+    const toolResult = await sendTool?.execute?.("tool-user-priority-send", {
+      terminal_id: terminalId,
+      request: "Continue despite broken AKK state"
+    });
+    assert.notEqual(toolResult?.isError, true);
+    assert.equal(toolResult?.details?.delivered, true);
+    assert.equal(toolResult?.details?.delivered_unmanaged, true);
+    assert.equal(toolResult?.details?.scope, "terminal_user_explicit");
+    assert.equal(
+      JSON.stringify(toolResult?.details).includes("private-physical-token"),
+      false
+    );
+
+    const delegatedToolResult = await sendTool?.execute?.(
+      "tool-user-priority-delegate",
+      { request: "Continue through the unique physical terminal" }
+    );
+    assert.notEqual(delegatedToolResult?.isError, true);
+    assert.equal(delegatedToolResult?.details?.delivered, true);
+    assert.equal(
+      delegatedToolResult?.details?.management_mode,
+      "unmanaged_fallback"
+    );
+    assert.equal(delegatedToolResult?.details?.scope, "terminal_user_explicit");
+
+    const pendingCommand = await command?.handler?.({
+      args: "only: pending-managed",
+      sessionKey: "agent:test:user-priority-send"
+    });
+    assert.equal(pendingCommand?.isError, true);
+    assert.match(
+      String(pendingCommand?.text ?? ""),
+      /already dispatched this managed terminal Send/u
+    );
+    assert.match(String(pendingCommand?.text ?? ""), /do not resend/u);
+
+    const pendingTool = await sendTool?.execute?.("tool-managed-replay", {
+      terminal_id: terminalId,
+      request: "pending-managed"
+    });
+    assert.equal(pendingTool?.isError, true);
+    assert.equal(pendingTool?.details?.delivered, false);
+    assert.equal(pendingTool?.details?.delivery_receipt, "enter_dispatched");
+    assert.equal(pendingTool?.details?.do_not_retry, true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
