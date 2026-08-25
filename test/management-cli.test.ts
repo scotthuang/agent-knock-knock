@@ -747,9 +747,17 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
     assert.equal(idleEntry.process_state, "active");
     assert.equal(idleEntry.activity_state, "idle");
     assert.match(idleEntry.activity_reason, /input prompt/u);
-    assert.deepEqual(
-      idleEntry.available_actions.send.arguments,
-      { selector: idleEntry.id }
+    assert.equal(
+      idleEntry.available_actions.send.arguments.selector,
+      idleEntry.id
+    );
+    assert.equal(
+      typeof idleEntry.available_actions.send.arguments.expected_terminal_token,
+      "string"
+    );
+    assert.equal(
+      idleEntry.available_actions.send.scope,
+      "terminal_user_explicit"
     );
     assert.equal(idleEntry.available_actions.cancel, undefined);
 
@@ -955,9 +963,12 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     );
     assert.equal(
       typeof claude.available_actions.send.arguments.expected_terminal_token,
-      "undefined"
+      "string"
     );
-    assert.equal(claude.available_actions.send.scope, undefined);
+    assert.equal(
+      claude.available_actions.send.scope,
+      "terminal_user_explicit"
+    );
     assert.equal(claude.available_actions.cancel, undefined);
     assert.equal(claude.terminal_control.capabilities.includes("durable_completion"), true);
     assert.equal(claude.terminal_control.capabilities.includes("screen_completion"), false);
@@ -967,7 +978,10 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
 });
 
 async function runCli(args: string[]) {
-  const result = await runInProcessCli(args, { env: { ...process.env } });
+  const result = await runInProcessCli(args, {
+    env: { ...process.env },
+    processBirthForPid: (pid) => `management-fixture-process-birth:${pid}`
+  });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
 }

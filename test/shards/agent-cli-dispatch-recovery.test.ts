@@ -159,7 +159,8 @@ test("safe-aborted strict managed retry rejects binding drift while user-priorit
       "--disable-terminal-bridge-monitor"
     ];
     const testEnv = {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_TEST_TMUX_COMPOSER_FROM_LITERAL: "1"
     };
     const aborted = await runAgentCliInProcess(managedAbortArgs, {
       ...testEnv,
@@ -235,6 +236,12 @@ test("safe-aborted strict managed retry rejects binding drift while user-priorit
       directRetry.stderr,
       /rollout-backed managed Session.*strict session_id send[\s\S]*refresh AKK list/iu
     );
+    const sessionIdsBeforeDelegate = listManagedSessions(storeDir)
+      .map((session) => session.session_id)
+      .sort();
+    const turnIdsBeforeDelegate = listConversations(storeDir)
+      .map((turn) => turn.conversation_id)
+      .sort();
 
     const delegateRetry = await runAgentCliInProcess(delegateArgs, testEnv);
     assert.equal(
@@ -248,6 +255,9 @@ test("safe-aborted strict managed retry rejects binding drift while user-priorit
     assert.equal(delegateOutput.management_mode, "unmanaged_fallback");
     assert.equal(delegateOutput.scope, "terminal_user_explicit");
     assert.equal(delegateOutput.message_id, stableMessageId);
+    assert.equal(delegateOutput.callback_expected, false);
+    assert.equal(delegateOutput.session_id, undefined);
+    assert.equal(delegateOutput.turn_id, undefined);
     const replayedDelegate = await runAgentCliInProcess(
       delegateArgs,
       testEnv
@@ -259,10 +269,28 @@ test("safe-aborted strict managed retry rejects binding drift while user-priorit
     );
     const replayedOutput = JSON.parse(replayedDelegate.stdout);
     assert.equal(replayedOutput.replayed, true);
+    assert.equal(replayedOutput.delivered, true);
     assert.equal(replayedOutput.delivered_unmanaged, true);
     assert.equal(replayedOutput.management_mode, "unmanaged_fallback");
     assert.equal(replayedOutput.scope, "terminal_user_explicit");
     assert.equal(replayedOutput.message_id, stableMessageId);
+    assert.equal(replayedOutput.callback_expected, false);
+    assert.equal(replayedOutput.session_id, undefined);
+    assert.equal(replayedOutput.turn_id, undefined);
+    assert.deepEqual(
+      listManagedSessions(storeDir)
+        .map((session) => session.session_id)
+        .sort(),
+      sessionIdsBeforeDelegate,
+      "binding drift must fall back before claiming a fresh callback Session"
+    );
+    assert.deepEqual(
+      listConversations(storeDir)
+        .map((turn) => turn.conversation_id)
+        .sort(),
+      turnIdsBeforeDelegate,
+      "physical fallback and replay must not claim a fresh callback Turn"
+    );
     const inputCalls = readJsonLines(tmuxCallsPath).filter((call) =>
       call.args[0] === "send-keys"
     );

@@ -5375,31 +5375,70 @@ async function assertSafeAbortedStatusCardDelegateRetry(
     assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);
     assert.equal(output.message.id, messageId);
     assert.notEqual(output.turn_id, abortedTurnId);
-    assert.equal(output.session_id, source.session_id);
+    assert.notEqual(output.session_id, source.session_id);
+    assert.notEqual(output.session_id, abortTransfer.target_session_id);
     assert.equal(output.conversation.native_thread_id, NATIVE_THREAD_ID);
     assert.equal(
       output.conversation.gateway_method,
       "agent-knock-knock.callback"
     );
     assert.equal(output.conversation.gateway_session, gatewaySession);
-    assert.deepEqual(
-      listDeferredForegroundTransfers(fixture.storeDir),
-      [abortTransfer],
-      "the retry must preserve the completed abort and reuse its restored source"
+    const transfers = listDeferredForegroundTransfers(fixture.storeDir);
+    assert.equal(transfers.length, 2, JSON.stringify(transfers, null, 2));
+    const preservedAbort = transfers.find((candidate) =>
+      candidate.transfer_id === abortTransfer.transfer_id
     );
-    const refinedSource = loadManagedSession(
+    assert.deepEqual(preservedAbort, abortTransfer);
+    const transfer = transfers.find((candidate) =>
+      candidate.turn_id === output.turn_id
+    );
+    assert.ok(transfer, JSON.stringify(transfers, null, 2));
+    assert.equal(transfer.status, "resolved");
+    assert.equal(transfer.source_kind, "status_card_only");
+    assert.equal(transfer.source_session_id, source.session_id);
+    assert.equal(transfer.target_session_id, output.session_id);
+    assert.equal(transfer.target_native_thread_id, NATIVE_THREAD_ID);
+    assert.notEqual(transfer.target_session_id, abortTransfer.target_session_id);
+    assert.equal(
+      loadManagedSession(fixture.storeDir, source.session_id).status,
+      "detached"
+    );
+    const acceptedTarget = loadManagedSession(
       fixture.storeDir,
-      source.session_id
+      String(output.session_id)
     );
-    assert.equal(refinedSource.status, "bound");
-    assert.equal(refinedSource.binding?.native_thread_id, NATIVE_THREAD_ID);
-    assert.ok(refinedSource.binding?.native_process.rollout);
+    assert.equal(acceptedTarget.status, "bound");
+    assert.equal(acceptedTarget.binding?.native_thread_id, NATIVE_THREAD_ID);
+    assert.ok(acceptedTarget.binding?.native_process.rollout);
     assert.equal(
       loadManagedSession(
         fixture.storeDir,
         abortTransfer.target_session_id
       ).status,
       "detached"
+    );
+
+    const replayed = await runCli(
+      delegateArgs,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(replayed.status, 0, replayed.stderr || replayed.stdout);
+    const replayedOutput = JSON.parse(replayed.stdout);
+    assert.equal(replayedOutput.replayed, true, replayed.stdout);
+    assert.equal(replayedOutput.delivered, false, replayed.stdout);
+    assert.equal(replayedOutput.status, "submission_pending_acceptance");
+    assert.equal(replayedOutput.submission_outcome, "pending_acceptance");
+    assert.equal(replayedOutput.delivery_receipt, "enter_dispatched");
+    assert.equal(replayedOutput.do_not_retry, true);
+    assert.equal(replayedOutput.management_mode, "managed");
+    assert.equal(replayedOutput.scope, "terminal_user_explicit");
+    assert.equal(replayedOutput.message_id, messageId);
+    assert.equal(replayedOutput.session_id, undefined);
+    assert.equal(replayedOutput.turn_id, undefined);
+    assert.deepEqual(
+      listDeferredForegroundTransfers(fixture.storeDir),
+      transfers,
+      "delegate intent replay must not create another managed transfer"
     );
 
     const finalTaskCalls = taskInputCalls(fixture, message);

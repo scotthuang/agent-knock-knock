@@ -161,6 +161,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
       "send",
       "--session",
       terminalId,
+      "--managed-only",
       "--message",
       "This must never reach tmux.",
       "--background",
