@@ -9,6 +9,9 @@
 ### Fixed
 
 - Prevent stale, stalled, deferred, corrupt, or missing Store, Session, Turn, transfer, activity, and dispatch-ledger state from vetoing an explicit user Send. When a zero-wait managed attempt proves that no input was submitted, fall back once to exact physical delivery and leave subsequent observation to Terminal Watch.
+- Detach an exact same-incarnation bound Session left behind by failed managed preparation after physical fallback when no live blocking Turn remains, so a later Terminal Watch can attach normally.
+- Retire an exact same-incarnation ordinary dispatch ledger whose owner Turn is gone after physical fallback, so a refreshed List can advertise Watch again; unresolved native lifecycle ledgers remain preserved.
+- Reject ordinary native slash-command text before selector discovery, avoiding terminal or host-process scans for an invalid Send or Respond.
 - Make OpenClaw doctor skill verification compatible with multi-agent installations that require an explicit `main` owner.
 
 ### Changed
@@ -19,6 +22,7 @@
 
 - Continue to require exact live terminal and process identity, approval eligibility, an empty composer, and unambiguous input evidence before physical Send. Possible prior input, true concurrency, or same-message ambiguity remains fail-closed and never triggers duplicate delivery.
 - Keep fallback delivery free of synthetic Turns or callbacks, and treat post-delivery bookkeeping or cleanup failures as warnings without automatically replaying user input.
+- Preserve a Session still named by an unresolved native lifecycle ledger instead of fabricating a transition outcome; the physical Send remains delivered and cleanup reports the retained recovery boundary.
 
 ## 0.12.14 - 2026-08-24
 

@@ -4002,6 +4002,20 @@ async function resolveConversationSelectorOption(commandName, options): Promise<
       : options.turn ?? options.conversation ?? options.conversationId
   )?.trim();
   if (
+    sendOperation &&
+    options.managedOnly === true &&
+    supplied?.startsWith("terminal:v") &&
+    !stringValue(options.expectedTerminalToken)
+  ) {
+    // `--managed-only` is an explicit diagnostic/test request for the legacy
+    // managed state machine. Keep an exact physical id on that path without
+    // upgrading it to the default user-priority Send authority. Ordinary user
+    // Send never sets this option and continues to discover and bind fresh
+    // physical authority below.
+    options.session = supplied;
+    return;
+  }
+  if (
     supplied &&
     !isSessionSelectorSyntax(supplied) &&
     !(

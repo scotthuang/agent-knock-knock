@@ -145,6 +145,8 @@ import {
   type BoundTerminalDispatchRoute,
   type TerminalDispatchCapabilityRepositories
 } from "./terminal-dispatch-capability.js";
+import { terminalSubmissionPayload } from
+  "./terminal-dispatch-execution.js";
 import { createCallbackCliFacade } from "./callback-cli-adapter.js";
 import { createOpenClawManagedCallbackCliAdapter } from
   "./openclaw-managed-callback-cli-adapter.js";
@@ -479,6 +481,16 @@ export async function executeCliCommand(
 }
 
 async function dispatchCliCommand(commandName, options) {
+  if (
+    ((commandName === "send" && !stringValue(options.turn)) ||
+      commandName === "respond") &&
+    typeof (options.message ?? options.request) === "string"
+  ) {
+    // This pure syntax fence must run before selector discovery. Native
+    // lifecycle commands never need terminal, process, or Store observation.
+    // runSend retains the same check at the execution boundary.
+    terminalSubmissionPayload(options.message ?? options.request);
+  }
   if (!(commandName === "send" && options.turn)) {
     await terminalListCliFacade.resolveConversationSelectorOption(commandName, options);
   }

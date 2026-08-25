@@ -53,6 +53,7 @@ export const testSupportImpactByPath = Object.freeze({
     "test/session-selector-cli.test.ts",
     "test/shards/agent-cli-composer-replay.test.ts",
     "test/shards/agent-cli-session-acceptance.test.ts",
+    "test/store-protocol-cli.test.ts",
     "test/turn-session-binding-cli.test.ts"
   ]
 });

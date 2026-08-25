@@ -75,11 +75,13 @@ import type { EventRecord } from "./store.js";
 import {
   createManagedSessionId,
   managedSessionBindingToken,
+  managedSessionRevision,
   unmanagedTerminalBindingToken,
   type ManagedSessionState,
   type NativeThreadTransition
 } from "./managed-session.js";
 import {
+  listManagedSessions,
   loadManagedSession,
   saveManagedSession,
   tryLoadManagedSession
@@ -124,6 +126,7 @@ import {
   codexCompanionsPresentInOpenRootInventory,
   isCompleteNativeRollout,
   nativeIdentityMatchesCodexPreMaterialization,
+  terminalControlAliasMatches,
   terminalControlsShareIncarnation,
   type CodexAllowedCompanionSet,
   type CodexPreMaterializationIdentity
@@ -587,7 +590,7 @@ interface TerminalCommandCliRawPorts {
   resolveTerminalBridgeDispatchLedger(
     terminalControl: TerminalControlRef,
     request: {
-      conversation: Conversation;
+      conversation: Readonly<{ conversation_id: string }>;
       expectedMessageId?: string;
       reason: string;
     }
@@ -4945,6 +4948,99 @@ function hasFreshExplicitTerminalSendToken(
   return Boolean(supplied && supplied === explicitTerminalSendToken(terminal));
 }
 
+function releaseTerminalDispatchForExplicitSend(input: {
+  terminal: TerminalCommandTarget;
+  conversations: readonly Conversation[];
+}): {
+  checked: boolean;
+  lifecycleLedger?: TerminalDispatchLedgerDocument;
+  warnings: string[];
+} {
+  let ledger: TerminalDispatchLedgerDocument | undefined;
+  try {
+    ledger = loadTerminalBridgeDispatchLedger(
+      input.terminal.terminalControl
+    );
+  } catch (error) {
+    return {
+      checked: false,
+      warnings: [
+        `terminal dispatch ownership could not be checked before Session ` +
+        `release: ${error instanceof Error ? error.message : String(error)}`
+      ]
+    };
+  }
+  if (!ledger || ledger.status === "resolved") {
+    return { checked: true, warnings: [] };
+  }
+  if (terminalDispatchLedgerLooksLifecycle(ledger)) {
+    return { checked: true, lifecycleLedger: ledger, warnings: [] };
+  }
+  if (!terminalDispatchRecordMatchesControl(
+    ledger,
+    input.terminal.terminalControl
+  )) {
+    return { checked: true, warnings: [] };
+  }
+  const conversationId = stringValue(ledger.conversation_id);
+  const expectedMessageId = stringValue(ledger.message_id);
+  if (!conversationId || !expectedMessageId) {
+    return {
+      checked: true,
+      warnings: [
+        "orphaned terminal dispatch was kept because its exact conversation " +
+        "or message generation could not be verified"
+      ]
+    };
+  }
+  if (input.conversations.some((conversation) =>
+    conversation.conversation_id === conversationId
+  )) {
+    return { checked: true, warnings: [] };
+  }
+  try {
+    if (loadTerminalDispatchLedgerOwner(ledger)) {
+      return { checked: true, warnings: [] };
+    }
+  } catch (error) {
+    return {
+      checked: true,
+      warnings: [
+        `orphaned terminal dispatch owner could not be checked: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      ]
+    };
+  }
+  try {
+    const resolved = resolveTerminalBridgeDispatchLedger(
+      input.terminal.terminalControl,
+      {
+        conversation: { conversation_id: conversationId },
+        expectedMessageId,
+        reason: "orphaned management superseded by explicit user Send"
+      }
+    );
+    return resolved
+      ? { checked: true, warnings: [] }
+      : {
+          checked: true,
+          warnings: [
+            "orphaned terminal dispatch changed before explicit Send cleanup"
+          ]
+        };
+  } catch (error) {
+    return {
+      checked: true,
+      warnings: [
+        `orphaned terminal dispatch could not be released: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      ]
+    };
+  }
+}
+
 async function bestEffortReleaseTerminalManagementForExplicitSend(input: {
   storeDir: string;
   terminal: TerminalCommandTarget;
@@ -5102,6 +5198,108 @@ function releaseTerminalManagementForExplicitSendUnderWriter(input: {
       warnings.push(
         `Turn ${reference} could not release AKK ` +
         `management: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  let currentConversations: Conversation[];
+  try {
+    currentConversations = listConversations(input.storeDir);
+  } catch (error) {
+    warnings.push(
+      `managed Turn inventory could not be rechecked before Session release: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return warnings;
+  }
+  const blockingSessionIds = new Set(
+    currentConversations
+      .filter((turn) => isSessionSendBlockingStatus(turn.status))
+      .map((turn) => sessionIdForConversation(turn))
+  );
+  const dispatchRelease = releaseTerminalDispatchForExplicitSend({
+    terminal: input.terminal,
+    conversations: currentConversations
+  });
+  warnings.push(...dispatchRelease.warnings);
+  if (!dispatchRelease.checked) {
+    return warnings;
+  }
+  let sessions: ManagedSessionState[];
+  try {
+    sessions = listManagedSessions(input.storeDir);
+  } catch (error) {
+    warnings.push(
+      `managed Session inventory could not be read: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return warnings;
+  }
+  const lifecycleLedger = dispatchRelease.lifecycleLedger;
+  for (const session of sessions) {
+    try {
+      const binding = session.binding;
+      if (
+        !["bound", "quarantined", "transitioning"].includes(
+          session.status
+        ) ||
+        session.agent !== input.terminal.agent ||
+        !binding ||
+        binding.native_process.pid !== input.terminal.pid ||
+        !terminalControlAliasMatches(
+          binding.terminal_id,
+          binding.terminal_control,
+          input.terminal.conversationId,
+          input.terminal.terminalControl
+        ) ||
+        blockingSessionIds.has(session.session_id)
+      ) {
+        continue;
+      }
+      const lifecycleSourceSessionId = stringValue(
+        lifecycleLedger?.source_session_id
+      );
+      const lifecycleTargetSessionId = stringValue(
+        lifecycleLedger?.target_session_id
+      );
+      const lifecycleTransitionId = stringValue(
+        lifecycleLedger?.transition_id
+      );
+      const lifecycleNamesSession = Boolean(
+        lifecycleLedger &&
+        (
+          lifecycleSourceSessionId === session.session_id ||
+          lifecycleTargetSessionId === session.session_id
+        )
+      );
+      if (lifecycleNamesSession) {
+        const transitionRelationship = session.last_transition_id
+          ? lifecycleTransitionId === session.last_transition_id
+            ? `transition ${session.last_transition_id}`
+            : `a lifecycle transition that drifted from Session marker ` +
+              session.last_transition_id
+          : `lifecycle transition ${lifecycleTransitionId ?? "with unknown id"}`;
+        warnings.push(
+          `Session ${session.session_id} kept AKK management because ` +
+          `unresolved ${transitionRelationship} still names it; explicit ` +
+          "Send does not prove that transition's native outcome"
+        );
+        continue;
+      }
+      const detachedAt = cliNow().toISOString();
+      saveManagedSession(input.storeDir, {
+        ...session,
+        status: "detached",
+        detached_at: detachedAt,
+        quarantine_reason: undefined,
+        updated_at: detachedAt
+      }, { expectedRevision: managedSessionRevision(session) });
+    } catch (error) {
+      warnings.push(
+        `Session ${session.session_id} could not release AKK management: ${
+          error instanceof Error ? error.message : String(error)
+        }`
       );
     }
   }

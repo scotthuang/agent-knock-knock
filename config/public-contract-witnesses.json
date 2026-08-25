@@ -511,7 +511,7 @@
       "id": "store-protocol-cli-boundary",
       "path": "test/store-protocol-cli.test.ts",
       "tier": "integration",
-      "needle": "send fails closed on writer protocol mismatch before invoking tmux"
+      "needle": "managed respond fails closed on writer protocol mismatch before invoking tmux"
     },
     {
       "id": "terminal-acceptance-unit",

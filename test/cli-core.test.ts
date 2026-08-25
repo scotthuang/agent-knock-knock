@@ -95,6 +95,61 @@ test("CLI command execution uses scoped terminal and process dependencies", asyn
   }
 });
 
+test("native slash messages fail before terminal selector discovery", async () => {
+  let terminalScans = 0;
+  let processScans = 0;
+  class RecordingTerminalProvider extends StaticTerminalControlProvider {
+    override async listTerminals() {
+      terminalScans += 1;
+      return super.listTerminals();
+    }
+  }
+  const dependencies = {
+    terminalControlProviderRegistry: createTerminalControlProviderRegistry([
+      new RecordingTerminalProvider()
+    ]),
+    terminalProcessSource: {
+      async listProcessSnapshots() {
+        processScans += 1;
+        return [];
+      }
+    } satisfies TerminalProcessSource,
+    runtimeLog: () => undefined
+  };
+
+  for (const scenario of [
+    {
+      command: "send",
+      options: {
+        conversation: "terminal:v2:tmux:codex:missing:0.0:4242",
+        message: "/clear"
+      },
+      nativeCommand: "/clear"
+    },
+    {
+      command: "send",
+      options: { turn: "   ", message: "/clear" },
+      nativeCommand: "/clear"
+    },
+    {
+      command: "respond",
+      options: { turn: "only", message: "/status" },
+      nativeCommand: "/status"
+    }
+  ]) {
+    await assert.rejects(
+      executeCliCommand(scenario.command, scenario.options, dependencies),
+      new RegExp(
+        `ordinary send/respond cannot invoke native slash command \\${scenario.nativeCommand}`,
+        "u"
+      )
+    );
+  }
+
+  assert.equal(terminalScans, 0);
+  assert.equal(processScans, 0);
+});
+
 test("cli-core AST remains a stable facade without owned state machines", () => {
   const root = path.resolve(import.meta.dirname, "../..");
   const sourcePath = path.join(root, "src/cli-core.ts");
