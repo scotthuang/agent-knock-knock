@@ -59,6 +59,8 @@ const DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES = 720;
 
 export interface TerminalWatchCliOptions {
   callbackRoute?: CallbackRouteV1;
+  /** Private Host-adapter authority describing how a route template is bound. */
+  callbackRouteControllerScope?: "startup_v1" | "route_bound_v1";
   claudeHome?: string;
   hardTimeoutMinutes?: number | string;
   openclawBin?: string;
@@ -155,7 +157,11 @@ export function createTerminalWatchCliAdapter(
       randomUUID: dependencies.randomUUID,
       observe: (watch) => observeTerminalWatch(watch, options, dependencies),
       resolveCallback: explicitRoute
-        ? () => ({ route: explicitRoute })
+        ? (watch) => ({
+            route: options.callbackRouteControllerScope === "route_bound_v1"
+              ? routeBoundWatchCallbackRoute(explicitRoute, watch)
+              : explicitRoute
+          })
         : resolveTerminalWatchOpenClawCallback,
       resolveCallbackContext: explicitRoute
         ? () => undefined
@@ -287,6 +293,9 @@ export function createTerminalWatchCliAdapter(
           expectedBindingToken
         ),
         anchor,
+        ...(callbackRoute === undefined
+          ? {}
+          : { callback_route: callbackRoute }),
         openclaw_session: openclawSession,
         openclaw_bin: stringValue(options.openclawBin) ?? "openclaw",
         timeout_ms: positiveMinutes(
@@ -362,6 +371,21 @@ export function createTerminalWatchCliAdapter(
     runReconcileWatches,
     listPublicWatches,
     scanPublicWatchesForExactObservation
+  });
+}
+
+/**
+ * A shared native-Host lifecycle owns no single controller session. Bind its
+ * trusted Profile template to the exact session captured when this Watch was
+ * created; the callback router will still verify Profile identity/revision.
+ */
+function routeBoundWatchCallbackRoute(
+  template: CallbackRouteV1,
+  watch: Pick<TerminalWatch, "openclaw_session">
+): CallbackRouteV1 {
+  return Object.freeze({
+    ...template,
+    controller_session_id: watch.openclaw_session
   });
 }
 

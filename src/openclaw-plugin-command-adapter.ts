@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { executorDefinitionForKind } from "./executors.js";
@@ -65,6 +66,10 @@ export const defaultOpenClawRelayPath = fileURLToPath(
 const relayPathByApi = new WeakMap<object, string>();
 const relayEnvironmentByApi = new WeakMap<object, NodeJS.ProcessEnv>();
 const hostBridgePresentationApis = new WeakSet<object>();
+const hostBridgeAsyncRelayApis = new WeakSet<object>();
+const hostBridgeInvocationStorage = new AsyncLocalStorage<{
+  readonly signal?: AbortSignal;
+}>();
 
 export function bindOpenClawRelayPath(api: object, relayPath: string): void {
   relayPathByApi.set(api, relayPath);
@@ -75,12 +80,36 @@ export function bindOpenClawRelayEnvironment(
   api: object,
   environment: NodeJS.ProcessEnv
 ): void {
-  relayEnvironmentByApi.set(api, { ...environment });
+  relayEnvironmentByApi.set(
+    api,
+    Object.freeze({ ...environment }) as NodeJS.ProcessEnv
+  );
 }
 
 /** Keep one shared tool implementation while selecting Host-neutral output. */
 export function bindHostBridgeToolPresentation(api: object): void {
   hostBridgePresentationApis.add(api);
+}
+
+/**
+ * Keep an embedding Host's event loop responsive while AKK CLI work runs.
+ *
+ * OpenClaw deliberately retains its established synchronous relay behavior;
+ * only public Host adapters opt into the asynchronous child-process runner.
+ */
+export function bindHostBridgeAsyncRelay(api: object): void {
+  hostBridgeAsyncRelayApis.add(api);
+}
+
+/** Scope one Host invocation's cancellation without sharing mutable state. */
+export function withHostBridgeInvocationSignal<T>(
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>
+): Promise<T> {
+  if (signal?.aborted) {
+    return Promise.reject(hostBridgeAbortError());
+  }
+  return hostBridgeInvocationStorage.run({ signal }, async () => operation());
 }
 
 export function registerOpenClawCommands(
@@ -208,14 +237,14 @@ export function registerOpenClawCommands(
       "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal. Pass only terminal_id and inspection=status; AKK refreshes binding authority privately. Arbitrary slash commands remain unavailable. This creates no AKK Session, Turn, receipt, monitor, or callback.",
     parameters: nativeInspectParameters,
     normalizeTurnIdentity: false,
-    buildArgs: (params) => {
+    buildArgs: async (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const inspection = requiredString(params.inspection, "inspection");
       if (inspection !== "status") {
         throw new Error("inspection must be status");
       }
       const terminalId = requiredString(params.terminal_id, "terminal_id");
-      const action = privateTerminalActionArguments(
+      const action = await privateTerminalActionArguments(
         api,
         terminalId,
         "agent_knock_knock_native_inspect"
@@ -245,10 +274,10 @@ export function registerOpenClawCommands(
     parameters: newThreadParameters,
     normalizeTurnIdentity: false,
     isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
-    buildArgs: (params) => {
+    buildArgs: async (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const terminalId = requiredString(params.terminal_id, "terminal_id");
-      const action = privateTerminalActionArguments(
+      const action = await privateTerminalActionArguments(
         api,
         terminalId,
         "agent_knock_knock_new_thread"
@@ -275,14 +304,14 @@ export function registerOpenClawCommands(
       "Detach one exact conflicting managed Session binding without adopting the live replacement thread. Pass only the advertised terminal_id and conflicting_session_id after explicit user confirmation; AKK refreshes all revision and binding authority privately. This sends no coding-agent input and creates no Turn.",
     parameters: reconcileBindingParameters,
     normalizeTurnIdentity: false,
-    buildArgs: (params, toolContext) => {
+    buildArgs: async (params, toolContext) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const terminalId = requiredString(params.terminal_id, "terminal_id");
       const conflictingSessionId = requiredString(
         params.conflicting_session_id,
         "conflicting_session_id"
       );
-      const action = consumeDisplayedPrivateAction(api, {
+      const action = await consumeDisplayedPrivateAction(api, {
         sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
         sessionId: requiredOpenClawSessionId(toolContext?.sessionId),
         kind: OPENCLAW_RECONCILE_BINDING_AUTHORITY_KIND,
@@ -335,14 +364,14 @@ export function registerOpenClawCommands(
     parameters: resumeThreadParameters,
     normalizeTurnIdentity: false,
     isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
-    buildArgs: (params) => {
+    buildArgs: async (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const terminalId = requiredString(params.terminal_id, "terminal_id");
       const nativeThreadId = requiredString(
         params.native_thread_id,
         "native_thread_id"
       );
-      const discovery = privateThreadDiscovery(api, terminalId);
+      const discovery = await privateThreadDiscovery(api, terminalId);
       const candidate = Array.isArray(discovery.threads)
         ? discovery.threads.find((thread) =>
             isRecord(thread) &&
@@ -387,7 +416,7 @@ export function registerOpenClawCommands(
       parameters: statusParameters,
       async execute(_toolCallId, params) {
         try {
-          const result = runCli(
+          const result = await runHostAwareCli(
             api,
             buildStatusCliArgs(api, isRecord(params) ? params : {})
           );
@@ -662,7 +691,7 @@ async function handleAkkCommand(
       );
     }
     const args = parsed.action === "approve"
-      ? buildPrivateApprovalArgs(api, { turn_id: parsed.turnId }, {
+      ? await buildPrivateApprovalArgs(api, { turn_id: parsed.turnId }, {
           sessionKey: requiredOpenClawSessionKey(ctx.sessionKey),
           sessionId: requiredOpenClawSessionId(ctx.sessionId)
         })
@@ -679,7 +708,7 @@ async function handleAkkCommand(
     // check. Keep the Gateway event loop free while that child CLI runs.
     const result = parsed.action === "doctor"
       ? await runCliAsync(api, args, { allowNonzeroJson: true })
-      : runCli(api, args);
+      : await runHostAwareCli(api, args);
     switch (parsed.action) {
       case "doctor":
         return {
@@ -716,6 +745,9 @@ async function handleAkkCommand(
         };
     }
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
     const message = modelFacingErrorMessage(error);
     return {
       text: `AKK command failed: ${message}`,
@@ -774,7 +806,7 @@ async function handleAkkLifecycleCommand(
     if (!mutationArgs) {
       throw new Error("could not build snapshot-bound resume command");
     }
-    const transitionResult = runCli(api, mutationArgs);
+    const transitionResult = await runHostAwareCli(api, mutationArgs);
     if (isAkkThreadTransitionSuccess(transitionResult)) {
       displayedResumeSnapshots.delete(snapshotCacheKey);
     }
@@ -794,7 +826,7 @@ async function handleAkkLifecycleCommand(
   if (!discoveryArgs) {
     throw new Error("could not build native-thread discovery command");
   }
-  const discovery = runCli(api, discoveryArgs);
+  const discovery = await runHostAwareCli(api, discoveryArgs);
   if (
     parsed.action === "list-resumable-threads" ||
     (
@@ -890,7 +922,7 @@ async function handleAkkLifecycleCommand(
   if (!mutationArgs) {
     throw new Error("could not build native-thread lifecycle command");
   }
-  const transitionResult = runCli(api, mutationArgs);
+  const transitionResult = await runHostAwareCli(api, mutationArgs);
   if (isAkkThreadTransitionSuccess(transitionResult)) {
     displayedResumeSnapshots.delete(snapshotCacheKey);
   }
@@ -1396,7 +1428,7 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
       );
     }
     const turnId = authoritativeManagedId(params.turn_id, "turn_id");
-    privateActionArguments(api, {
+    await privateActionArguments(api, {
       tool: "agent_knock_knock_send",
       matches: (argumentsValue) =>
         Object.keys(argumentsValue).length === 1 &&
@@ -1405,7 +1437,7 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
     const args = ["send", "--turn", turnId];
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
-    return runCli(api, args);
+    return runHostAwareCli(api, args);
   }
   const requestedType = Object.hasOwn(params, "type")
     ? stringValue(params.type)
@@ -1434,7 +1466,7 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
   }
 
   const terminalAction = terminalId
-    ? privateActionArguments(api, {
+    ? await privateActionArguments(api, {
         tool: "agent_knock_knock_send",
         terminalId,
         matches: (argumentsValue) =>
@@ -1495,7 +1527,7 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
   pushOptional(args, "--gateway-method", CALLBACK_METHOD);
   pushOptional(args, "--gateway-session", openclawSession);
   pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
-  return runCli(api, args);
+  return runHostAwareCli(api, args);
 }
 
 function toolResult(
@@ -1525,7 +1557,7 @@ function toolResult(
   };
 }
 
-function privateList(api): Record<string, unknown> {
+async function privateList(api): Promise<Record<string, unknown>> {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const args = ["list", "--reconcile"];
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
@@ -1534,13 +1566,13 @@ function privateList(api): Record<string, unknown> {
     "--idle-timeout-minutes",
     numberString(config.idleTimeoutMinutes)
   );
-  return runCli(api, args);
+  return runHostAwareCli(api, args);
 }
 
-function privateThreadDiscovery(
+async function privateThreadDiscovery(
   api,
   terminalId: string
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const args = [
     "list-resumable-threads",
@@ -1549,14 +1581,14 @@ function privateThreadDiscovery(
   ];
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(args, "--codex-home", stringValue(config.codexHome));
-  return runCli(api, args);
+  return runHostAwareCli(api, args);
 }
 
-function privateTerminalActionArguments(
+async function privateTerminalActionArguments(
   api,
   terminalId: string,
   tool: string
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   return privateActionArguments(api, {
     tool,
     terminalId,
@@ -1565,15 +1597,15 @@ function privateTerminalActionArguments(
   });
 }
 
-function privateActionArguments(
+async function privateActionArguments(
   api,
   input: {
     tool: string;
     terminalId?: string;
     matches: (argumentsValue: Record<string, unknown>) => boolean;
   }
-): Record<string, unknown> {
-  const result = privateList(api);
+): Promise<Record<string, unknown>> {
+  const result = await privateList(api);
   const terminals = input.terminalId
     ? terminalRows(result).filter((terminal) =>
         stringValue(terminal.id) === input.terminalId
@@ -1734,7 +1766,7 @@ function privateAuthorityOfferKey(
   return { sessionKey, sessionId, kind, target };
 }
 
-function consumeDisplayedPrivateAction(
+async function consumeDisplayedPrivateAction(
   api: object,
   input: {
     sessionKey: string;
@@ -1745,7 +1777,7 @@ function consumeDisplayedPrivateAction(
     terminalId?: string;
     matches: (argumentsValue: Record<string, unknown>) => boolean;
   }
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const offered = consumeOpenClawPrivateAuthorityOffer(api, {
     sessionKey: input.sessionKey,
     sessionId: input.sessionId,
@@ -1757,7 +1789,7 @@ function consumeDisplayedPrivateAction(
       `${input.tool} requires a current action shown by AKK list in this controller session; refresh list, review it, and explicitly confirm again`
     );
   }
-  const current = privateActionArguments(api, input);
+  const current = await privateActionArguments(api, input);
   if (JSON.stringify(current) !== JSON.stringify(offered.args)) {
     throw new Error(
       `${input.tool} authority changed after it was shown; refresh AKK list, review the current action, and explicitly confirm again`
@@ -1818,11 +1850,11 @@ function currentApprovalFingerprint(result: unknown): string {
   return unique[0]!;
 }
 
-function buildPrivateApprovalArgs(
+async function buildPrivateApprovalArgs(
   api,
   params: Record<string, unknown>,
   { sessionKey, sessionId }: { sessionKey: string; sessionId: string }
-): string[] {
+): Promise<string[]> {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const turnId = stringValue(params.turn_id);
   const terminalId = stringValue(params.terminal_id);
@@ -1845,7 +1877,7 @@ function buildPrivateApprovalArgs(
     );
   }
   const action = terminalId
-    ? privateActionArguments(api, {
+    ? await privateActionArguments(api, {
         tool: "agent_knock_knock_approve",
         terminalId,
         matches: (argumentsValue) => stringValue(
@@ -1866,7 +1898,9 @@ function buildPrivateApprovalArgs(
   } else {
     args.push("--turn", requiredString(turnId, "turn_id"));
   }
-  const currentFingerprint = currentApprovalFingerprint(runCli(api, statusArgs));
+  const currentFingerprint = currentApprovalFingerprint(
+    await runHostAwareCli(api, statusArgs)
+  );
   if (currentFingerprint !== offeredFingerprint) {
     throw new Error(
       "the approval request changed after it was shown; refresh AKK status, ask the user to review the current request, and explicitly confirm again"
@@ -1991,6 +2025,9 @@ function isLegacyAuthorityInstructionPath(path: readonly string[]): boolean {
 }
 
 function modelFacingToolError(error: unknown): Error {
+  if (error instanceof Error && error.name === "AbortError") {
+    return error;
+  }
   return new Error(modelFacingErrorMessage(error));
 }
 
@@ -2352,9 +2389,9 @@ function registerCliTool(
       parameters,
       async execute(toolCallId, params) {
         try {
-          const result = runCli(
+          const result = await runHostAwareCli(
             api,
-            buildArgs(
+            await buildArgs(
               isRecord(params) ? params : {},
               toolContext,
               toolCallId
@@ -2441,6 +2478,11 @@ export function runCliAsync(
 ): Promise<Record<string, unknown>> {
   const binPath = relayPathForApi(api);
   const maxBuffer = 10 * 1024 * 1024;
+  const signal = hostBridgeInvocationStorage.getStore()?.signal;
+
+  if (signal?.aborted) {
+    return Promise.reject(hostBridgeAbortError());
+  }
 
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...cliArgs], {
@@ -2456,6 +2498,15 @@ export function runCliAsync(
     let stderr = "";
     let overflow = false;
     let timedOut = false;
+    let aborted = false;
+    const onAbort = (): void => {
+      aborted = true;
+      child.kill("SIGKILL");
+    };
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+    };
     const append = (current: string, chunk: string): string => {
       const next = current + chunk;
       if (Buffer.byteLength(next, "utf8") > maxBuffer) {
@@ -2476,9 +2527,17 @@ export function runCliAsync(
       child.kill("SIGKILL");
     }, timeoutMs);
     timeout.unref();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+    }
 
     child.once("error", (error) => {
-      clearTimeout(timeout);
+      cleanup();
+      if (aborted) {
+        reject(hostBridgeAbortError());
+        return;
+      }
       reject(
         new Error(
           `agent-knock-knock ${cliArgs[0]} failed to start: ${error.message}`
@@ -2486,7 +2545,11 @@ export function runCliAsync(
       );
     });
     child.once("close", (status) => {
-      clearTimeout(timeout);
+      cleanup();
+      if (aborted) {
+        reject(hostBridgeAbortError());
+        return;
+      }
       if (timedOut) {
         reject(
           new Error(`agent-knock-knock ${cliArgs[0]} timed out`)
@@ -2526,6 +2589,26 @@ export function runCliAsync(
       }
     });
   });
+}
+
+function hostBridgeAbortError(): Error {
+  const error = new Error("agent-knock-knock Host invocation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+async function runHostAwareCli(
+  api,
+  cliArgs,
+  options: {
+    cwd?: string;
+    allowNonzeroJson?: boolean;
+  } = {}
+): Promise<Record<string, unknown>> {
+  if (hostBridgeAsyncRelayApis.has(api)) {
+    return runCliAsync(api, cliArgs, options);
+  }
+  return runCli(api, cliArgs, options);
 }
 
 function relayPathForApi(api): string {

@@ -1,4 +1,5 @@
 import {
+  bindHostBridgeAsyncRelay,
   bindHostBridgeToolPresentation,
   bindOpenClawRelayEnvironment,
   bindOpenClawRelayPath,
@@ -30,6 +31,18 @@ export interface HostBridgeToolResult {
   readonly [key: string]: unknown;
 }
 
+export interface HostBridgeCommandResult {
+  readonly text: string;
+  readonly isError?: boolean;
+}
+
+export interface HostBridgeCommandDescriptor {
+  readonly name: string;
+  readonly description: string;
+  readonly acceptsArgs: boolean;
+  execute(args: string): Promise<HostBridgeCommandResult>;
+}
+
 export interface HostBridgeToolDescriptor {
   readonly name: string;
   readonly description: string;
@@ -50,6 +63,10 @@ export interface HostBridgeToolRegistry {
   ): Promise<HostBridgeToolResult>;
 }
 
+export interface HostBridgeCommandToolRegistry extends HostBridgeToolRegistry {
+  command(): HostBridgeCommandDescriptor;
+}
+
 export interface CreateHostBridgeToolsOptions {
   readonly relayPath: string;
   readonly relayEnvironment: NodeJS.ProcessEnv;
@@ -65,6 +82,14 @@ interface CapturedToolDefinition {
   execute?(toolCallId: string, args: unknown): Promise<unknown> | unknown;
 }
 
+interface CapturedCommandDefinition {
+  readonly name?: unknown;
+  readonly description?: unknown;
+  readonly acceptsArgs?: unknown;
+  handler?(context: HostBridgeToolContext & { readonly args: string }):
+    Promise<unknown> | unknown;
+}
+
 type CapturedToolFactory = (
   context: HostBridgeToolContext
 ) => CapturedToolDefinition;
@@ -78,9 +103,10 @@ type CapturedToolFactory = (
  */
 export function createHostBridgeToolRegistry(
   options: CreateHostBridgeToolsOptions
-): HostBridgeToolRegistry {
+): HostBridgeCommandToolRegistry {
   const descriptors: HostBridgeToolDescriptor[] = [];
   const descriptorsByName = new Map<string, HostBridgeToolDescriptor>();
+  let commandDescriptor: HostBridgeCommandDescriptor | undefined;
   const trustedContext = Object.freeze({
     sessionKey: requiredString(options.context.sessionKey, "context.sessionKey"),
     sessionId: requiredString(options.context.sessionId, "context.sessionId")
@@ -89,7 +115,40 @@ export function createHostBridgeToolRegistry(
   const api = {
     pluginConfig: options.pluginConfig,
     logger: options.logger,
-    registerCommand() {},
+    registerCommand(command: CapturedCommandDefinition): void {
+      if (commandDescriptor) {
+        throw new Error("host bridge registered more than one command");
+      }
+      const name = requiredString(command.name, "command name");
+      if (name !== "akk") {
+        throw new Error(`host bridge expected command akk, received ${name}`);
+      }
+      if (typeof command.description !== "string") {
+        throw new Error(`host bridge command ${name} has no description`);
+      }
+      if (typeof command.handler !== "function") {
+        throw new Error(`host bridge command ${name} has no handler`);
+      }
+      const handler = command.handler.bind(command);
+      commandDescriptor = Object.freeze({
+        name,
+        description: command.description,
+        acceptsArgs: command.acceptsArgs === true,
+        async execute(args: string): Promise<HostBridgeCommandResult> {
+          const result = await handler({
+            ...trustedContext,
+            args: typeof args === "string" ? args : ""
+          });
+          if (!isRecord(result) || typeof result.text !== "string") {
+            throw new Error(`host bridge command ${name} returned an invalid result`);
+          }
+          return {
+            text: result.text,
+            ...(result.isError === true ? { isError: true } : {})
+          };
+        }
+      });
+    },
     registerTool(
       tool: CapturedToolDefinition | CapturedToolFactory,
       registration?: { readonly name?: unknown }
@@ -141,7 +200,12 @@ export function createHostBridgeToolRegistry(
   bindOpenClawRelayPath(api, requiredString(options.relayPath, "relayPath"));
   bindOpenClawRelayEnvironment(api, options.relayEnvironment);
   bindHostBridgeToolPresentation(api);
+  bindHostBridgeAsyncRelay(api);
   registerOpenClawCommands(api, new Map());
+
+  if (!commandDescriptor) {
+    throw new Error("host bridge did not capture the akk command");
+  }
 
   if (descriptors.length !== 16) {
     throw new Error(
@@ -150,7 +214,9 @@ export function createHostBridgeToolRegistry(
   }
 
   const listed = Object.freeze([...descriptors]);
+  const capturedCommand = commandDescriptor;
   return Object.freeze({
+    command: () => capturedCommand,
     list: () => listed,
     get: (name: string) => descriptorsByName.get(name),
     execute: async (

@@ -106,6 +106,7 @@ test("an explicit file selection becomes one canonical, trusted startup runtime"
   assert.equal(runtime.selected.selection, fs.realpathSync(fixture.profilePath));
   assert.equal(runtime.host, HOST_ID);
   assert.equal(runtime.hostVersion, HOST_VERSION);
+  assert.equal(runtime.controllerScope, "startup_v1");
   assert.equal(runtime.controllerSessionId, SESSION_ID);
   assert.deepEqual(runtime.callbackRoute, {
     schema: "agent-knock-knock/callback-route",

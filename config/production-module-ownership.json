@@ -3,7 +3,7 @@
   "version": 1,
   "architecture": {
     "cli_core_max_physical_loc": 1817,
-    "production_physical_loc": 117885,
+    "production_physical_loc": 118407,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -672,6 +672,10 @@
     {
       "path": "src/herdr-terminal-control-provider.ts",
       "owner": "terminal-control"
+    },
+    {
+      "path": "src/host-adapter.ts",
+      "owner": "host-bridge"
     },
     {
       "path": "src/host-bridge-mcp.ts",

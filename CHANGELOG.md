@@ -6,14 +6,18 @@
 
 - Add a Host-owned foreground MCP/stdio Bridge that exposes the existing 16 semantic AKK tools without introducing a second state or tool model.
 - Add strict Host Profile v1 configuration with trusted environment session binding, a shell-free `command_json_v1` callback driver, compatibility/doctor commands, a published JSON Schema, and a starter user Profile.
+- Add the public `./host-adapter` facade used by native controller integrations, with exact per-controller command/tool authority and one shared Host-owned lifecycle.
+- Add a first-party DeepSeek Harness Web connector package that derives the controller route from the exact invoking Agent, registers `/akk` plus all 16 semantic tools, and returns callbacks through idle `followup` or running `inject` without a user-visible bind step.
 
 ### Changed
 
 - Reuse the shared Host lifecycle and existing durable callback route, outbox, retry, and settlement core for configuration-only Hosts while preserving the native OpenClaw adapter unchanged.
+- Persist complete route-bound Terminal Watch callback authority and keep callbacks pinned to the initiating Host/Agent incarnation instead of redirecting them after replacement or restart.
 
 ### Security
 
 - Keep Profile selection, controller identity, executable, arguments, credentials, and acknowledgement rules outside model-facing tool inputs; exact route fingerprints and delivery/message acknowledgements fail closed on drift.
+- Keep DeepSeek session routing outside slash/tool arguments, authenticate its private callback socket, and reject disposed or replaced Agent objects rather than trusting a reused session-id string.
 
 ## 0.12.15 - 2026-08-25
 

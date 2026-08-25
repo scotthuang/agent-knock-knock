@@ -1,10 +1,12 @@
 import {
   assertHostProfileCompatibility,
   createHostProfileRegistry,
+  hostProfileControllerScope,
   hostProfileFingerprint,
   HOST_PROFILE_PRIVATE_ENVIRONMENT_VARIABLES,
   loadHostProfileV1,
   resolveHostProfileControllerContext,
+  type HostProfileControllerScopeV1,
   type HostProfileRegistry,
   type HostProfileV1
 } from "./host-profile.js";
@@ -36,6 +38,7 @@ export interface SelectedHostProfileV1 {
 
 export interface TrustedHostProfileRuntimeV1 {
   readonly selected: SelectedHostProfileV1;
+  readonly controllerScope: HostProfileControllerScopeV1;
   readonly controllerSessionId: string;
   readonly host: string;
   readonly hostVersion: string;
@@ -106,6 +109,7 @@ export function createTrustedHostProfileRuntime(
   );
   return Object.freeze({
     selected,
+    controllerScope: hostProfileControllerScope(selected.profile),
     controllerSessionId: context.controllerSessionId,
     host,
     hostVersion,
@@ -118,8 +122,9 @@ export function createTrustedHostProfileRuntime(
 
 /**
  * Build the private child-process environment used by the Bridge. The exact
- * Profile fingerprint and controller identity are captured once; model-facing
- * tool arguments have no route/profile fields and cannot override them.
+ * Profile fingerprint and route-creation controller identity are captured
+ * once; model-facing tool arguments have no route/profile fields and cannot
+ * override them. A route-bound callback later uses only that persisted route.
  */
 export function hostProfileRelayEnvironment(
   runtime: TrustedHostProfileRuntimeV1,
@@ -198,6 +203,7 @@ export function applyTrustedHostProfileCliOptions(
   return {
     ...options,
     callbackRoute: runtime.callbackRoute,
+    callbackRouteControllerScope: runtime.controllerScope,
     openclawSession: runtime.controllerSessionId,
     gatewaySession: runtime.controllerSessionId,
     openclawBin: "agent-knock-knock-host-bridge"

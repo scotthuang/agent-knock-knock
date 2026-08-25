@@ -62,6 +62,7 @@
       "authority_paths": [
         "schemas/host-profile-v1.schema.json",
         "src/command-json-callback-transport.ts",
+        "src/host-adapter.ts",
         "src/host-bridge-mcp.ts",
         "src/host-bridge-tools.ts",
         "src/host-bridge.ts",
@@ -71,6 +72,7 @@
       ],
       "witnesses": [
         "command-json-callback-unit",
+        "host-adapter-unit",
         "host-bridge-conformance-unit",
         "host-bridge-mcp-unit",
         "host-bridge-stdio-unit",
@@ -335,6 +337,12 @@
       "path": "test/human-handoff-adoption-cli.test.ts",
       "tier": "integration",
       "needle": "a terminal-scoped Codex send adopts an exact unknown human-switched thread"
+    },
+    {
+      "id": "host-adapter-unit",
+      "path": "test/host-adapter.test.ts",
+      "tier": "fast",
+      "needle": "public Host adapter registers metadata once and isolates exact owners"
     },
     {
       "id": "host-bridge-conformance-unit",

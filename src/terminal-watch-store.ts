@@ -171,6 +171,8 @@ export interface TerminalWatch {
   terminal: TerminalWatchTerminalIdentity;
   anchor: TerminalWatchAnchor;
   observation_checkpoint: TerminalWatchObservationCheckpoint;
+  /** Immutable callback authority captured by a native Host at Watch creation. */
+  callback_route?: CallbackRouteV1;
   openclaw_session: string;
   openclaw_bin: string;
   created_at: string;
@@ -484,6 +486,7 @@ const WATCH_FIELDS = {
   terminal: assertTerminalIdentity,
   anchor: IGNORE_VALUE,
   observation_checkpoint: IGNORE_VALUE,
+  callback_route: optionalGuard(IGNORE_VALUE),
   openclaw_session: assertNonEmptyString,
   openclaw_bin: assertNonEmptyString,
   created_at: assertTimestamp,
@@ -603,6 +606,14 @@ export function assertTerminalWatch(
     watch.observation_checkpoint,
     watch.anchor
   );
+  if (watch.callback_route !== undefined) {
+    const route = parseCallbackRoute(watch.callback_route);
+    if (route.controller_session_id !== watch.openclaw_session) {
+      throw new Error(
+        "terminal Watch callback route does not match its controller session"
+      );
+    }
+  }
   const minimumCheckpointOffset = watch.anchor.schema ===
       "agent-knock-knock/claude-human-started-active-task-anchor"
       ? watch.anchor.turn_start_offset_bytes
@@ -1079,6 +1090,9 @@ export function terminalWatchNotificationCallbackSnapshot(
     notification,
     route
   );
+  const watchRoute = watch.callback_route === undefined
+    ? undefined
+    : parseCallbackRoute(watch.callback_route);
   if (
     envelope.delivery_id !== notification.notification_id ||
     envelope.idempotency_key !== notification.idempotency_key ||
@@ -1086,6 +1100,10 @@ export function terminalWatchNotificationCallbackSnapshot(
     envelope.source.watch_id !== watch.watch_id ||
     envelope.source.terminal_id !== watch.terminal.terminal_id ||
     route.controller_session_id !== watch.openclaw_session ||
+    (
+      watchRoute !== undefined &&
+      canonicalJson(route) !== canonicalJson(watchRoute)
+    ) ||
     envelope.event.id !== notification.notification_id ||
     envelope.event.type !== expectedEvent ||
     envelope.event.requires_response !== true ||
@@ -1151,6 +1169,7 @@ function assertTerminalWatchAdvance(
     ["agent", current.agent, candidate.agent],
     ["terminal", current.terminal, candidate.terminal],
     ["anchor", current.anchor, candidate.anchor],
+    ["callback_route", current.callback_route, candidate.callback_route],
     ["openclaw_session", current.openclaw_session, candidate.openclaw_session],
     ["openclaw_bin", current.openclaw_bin, candidate.openclaw_bin],
     ["created_at", current.created_at, candidate.created_at],

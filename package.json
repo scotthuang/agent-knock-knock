@@ -54,6 +54,22 @@
   "bin": {
     "agent-knock-knock": "dist/src/cli.js"
   },
+  "exports": {
+    "./host-adapter": {
+      "types": "./dist/src/host-adapter.d.ts",
+      "import": "./dist/src/host-adapter.js"
+    },
+    "./schemas/*": "./schemas/*",
+    "./examples/host-profiles/*": "./examples/host-profiles/*",
+    "./templates/*": "./templates/*",
+    "./docs/*": "./docs/*",
+    "./openclaw.plugin.json": "./openclaw.plugin.json",
+    "./README.md": "./README.md",
+    "./LICENSE": "./LICENSE",
+    "./CHANGELOG.md": "./CHANGELOG.md",
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist/src",
     "schemas",
@@ -90,6 +106,11 @@
     "clawhub:validate": "npm run build && clawhub --workdir . package validate . --out .clawhub-validation --runtime --allow-execute --no-mock-sdk",
     "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --topics tmux,codex,claude-code,agent-orchestration,terminal-handoff --dry-run",
     "compat:openclaw": "npm run build && node scripts/verify-openclaw-compatibility.js",
+    "deepseek:build": "npm --prefix connectors/deepseek-harness run build",
+    "deepseek:typecheck": "npm --prefix connectors/deepseek-harness run typecheck",
+    "deepseek:test:fast": "npm --prefix connectors/deepseek-harness run test:fast",
+    "deepseek:pack:check": "npm --prefix connectors/deepseek-harness run pack:check",
+    "deepseek:release:check": "npm --prefix connectors/deepseek-harness run release:check",
     "smoke:lifecycle": "npm run build && node scripts/smoke-lifecycle-tmux.js",
     "smoke:lifecycle:attest": "npm run build && node scripts/verify-lifecycle-smoke-evidence.js",
     "transcript": "node dist/src/cli.js transcript"

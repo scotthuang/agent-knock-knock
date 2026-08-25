@@ -19,6 +19,7 @@ import {
   assertHostProfileCallbackExecutableReady,
   createHostProfileRegistry,
   hostProfileFingerprint,
+  hostProfileControllerScope,
   hostProfileSupportsHostVersion,
   loadHostProfileV1,
   parseHostProfileV1,
@@ -105,6 +106,8 @@ test("HostProfile v1 parses into a normalized deeply immutable model", () => {
   assert.equal(profile.$schema, HOST_PROFILE_JSON_SCHEMA);
   assert.equal(profile.schema, HOST_PROFILE_SCHEMA);
   assert.equal(profile.version, 1);
+  assert.equal(Object.hasOwn(profile.controllerContext, "scope"), false);
+  assert.equal(hostProfileControllerScope(profile), "startup_v1");
   assert.deepEqual(profile.callback.environment.allow, ["MY_AGENT_TOKEN"]);
   assert.deepEqual(profile.callback.acknowledgement.disposition.mapping, {
     accepted: "accepted",
@@ -130,6 +133,26 @@ test("HostProfile v1 parses into a normalized deeply immutable model", () => {
   assert.equal(
     hostProfileFingerprint(parseHostProfileV1(profileFixture())),
     hostProfileFingerprint(profile)
+  );
+});
+
+test("controller scope is optional, explicit, and closed to the v1 enum", () => {
+  const routeBound = parseHostProfileV1(changed((candidate) => {
+    Object.assign(candidate.controllerContext, { scope: "route_bound_v1" });
+  }));
+  assert.equal(routeBound.controllerContext.scope, "route_bound_v1");
+  assert.equal(hostProfileControllerScope(routeBound), "route_bound_v1");
+
+  const startup = parseHostProfileV1(changed((candidate) => {
+    Object.assign(candidate.controllerContext, { scope: "startup_v1" });
+  }));
+  assert.equal(hostProfileControllerScope(startup), "startup_v1");
+
+  assert.throws(
+    () => parseHostProfileV1(changed((candidate) => {
+      Object.assign(candidate.controllerContext, { scope: "runtime_v1" });
+    })),
+    /scope must be startup_v1 or route_bound_v1/u
   );
 });
 
@@ -671,10 +694,17 @@ test("published HostProfile v1 JSON Schema enforces its closed structural contra
   >(schema as unknown as JsonSchemaType);
   const valid = validate(profileFixture());
   assert.equal(valid.valid, true, valid.errorMessage);
+  const routeBound = changed((profile) => {
+    Object.assign(profile.controllerContext, { scope: "route_bound_v1" });
+  });
+  assert.equal(validate(routeBound).valid, true);
 
   for (const candidate of [
     changed((profile) => {
       profile.compatibility.range = "^1.8.0";
+    }),
+    changed((profile) => {
+      Object.assign(profile.controllerContext, { scope: "runtime_v1" });
     }),
     changed((profile) => {
       profile.controllerContext.sessionIdVariable =

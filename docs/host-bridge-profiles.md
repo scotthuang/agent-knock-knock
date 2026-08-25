@@ -152,7 +152,7 @@ Top-level fields have these meanings:
 | `schema`, `version` | Exact protocol identity: `agent-knock-knock/host-profile`, version `1`. |
 | `id`, `revision` | Stable Profile identity and administrator-controlled revision. |
 | `compatibility` | Exact Host ID plus one to four explicit SemVer comparators, such as `>=1.8.0 <2.0.0`. |
-| `controllerContext` | Trusted controller-session resolver; v1 supports only `environment_v1`. |
+| `controllerContext` | Trusted controller-session resolver and binding scope; v1 supports only `environment_v1`. |
 | `callback` | Callback delivery configuration; v1 supports only `command_json_v1`. |
 
 The command-line Host ID must exactly equal `compatibility.host`, and its
@@ -166,7 +166,8 @@ revision when appropriate and restart the Bridge deliberately.
 ```json
 {
   "driver": "environment_v1",
-  "sessionIdVariable": "MY_AGENT_SESSION_ID"
+  "sessionIdVariable": "MY_AGENT_SESSION_ID",
+  "scope": "startup_v1"
 }
 ```
 
@@ -178,6 +179,30 @@ is captured into AKK's private callback route; the model cannot provide or
 override it. Names beginning `AKK_HOST_PROFILE_` are reserved for the private
 Bridge relay and cannot be used as session or callback allowlist variables.
 
+`scope` is optional. When omitted, its effective value is `startup_v1`, which
+preserves the original Host Profile v1 document and fingerprint behavior.
+`startup_v1` binds every callback to the one trusted controller session
+captured when the Host Bridge starts; callback delivery requires the persisted
+route to match that session exactly.
+
+`route_bound_v1` is an extension point for a Host-native thin connector that
+serves multiple Host sessions in one process. Profile identity, revision,
+transport, and fingerprint remain trusted and exact, but
+`${controller.session_id}` is populated from the immutable controller session
+already persisted in each callback route. It is never taken from a callback
+tool argument. The generic MCP/stdio `host-bridge` command deliberately rejects
+this scope because that standalone Bridge owns exactly one startup session.
+Use `host-profile validate` to inspect `standalone_bridge_compatible`;
+`doctor --host-profile` reports an explicit `standalone_bridge_scope` error for
+a route-bound Profile.
+
+Long-lived work such as Terminal Watch captures the complete route (Profile
+identity, revision, transport, and controller session) when the user creates
+the Watch. A later shared lifecycle pass may deliver that route, but must not
+rebuild it from the lifecycle process's current Profile. After a native Host
+restart, a new Profile revision therefore fails closed instead of adopting an
+old Watch or routing it to a replacement Agent.
+
 ### `command_json_v1`
 
 `command_json_v1` starts `callback.executable` directly with an argv array and
@@ -188,7 +213,7 @@ The argv templates support only these placeholders:
 
 | Placeholder | Value | Allowed destination |
 | --- | --- | --- |
-| `${controller.session_id}` | Trusted session resolved by `environment_v1` | argv |
+| `${controller.session_id}` | Startup-trusted session, or the persisted route session for `route_bound_v1` | argv |
 | `${envelope.delivery_id}` | Exact callback delivery ID | argv |
 | `${envelope.message_id}` | Exact callback event/message ID | argv |
 | `${envelope.idempotency_key}` | Stable logical-delivery deduplication key | argv |
@@ -264,9 +289,10 @@ selection all belong to the administrator/Host boundary. None is accepted from
 the 16 model-facing semantic tool calls. MCP inputs are validated against the
 existing closed tool schemas before the shared tool implementation runs.
 
-The Bridge privately passes a fingerprinted Profile selection and route to its
-AKK CLI and monitor children. The Store receives only the immutable callback
-route/envelope data required by the existing callback contract; it does not
+The Bridge or Host-native connector privately passes a fingerprinted Profile
+selection and route to its AKK CLI and monitor children. The Store receives
+only the immutable callback route/envelope data required by the existing
+callback contract; it does not
 persist arbitrary callback commands or credential values. Callback stdout is
 interpreted only through the configured bounded pointers and is not treated as
 new executable configuration.

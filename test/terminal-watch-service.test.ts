@@ -672,6 +672,47 @@ test("legacy pending notification atomically backfills its snapshot before trans
   await draining;
 });
 
+test("native Host Watch keeps its creation route across restart before first delivery", async (t) => {
+  let resolverCalls = 0;
+  const state = harness(t, {
+    resolveCallback(watch) {
+      resolverCalls += 1;
+      return {
+        ...resolveTerminalWatchOpenClawCallback(watch),
+        route: {
+          ...resolveTerminalWatchOpenClawCallback(watch).route,
+          profile_id: "replacement-host",
+          profile_revision: "replacement-instance"
+        }
+      };
+    }
+  });
+  const creationRoute: CallbackRouteV1 = {
+    schema: "agent-knock-knock/callback-route",
+    version: 1,
+    transport: "command_json_v1",
+    profile_id: "deepseek-harness-native",
+    profile_revision: "initiating-host-instance",
+    controller_session_id: "openclaw-service-session",
+    capabilities: { wake: true, respond: true }
+  };
+  const created = state.service.create(exactInput({
+    callback_route: creationRoute,
+    approval_fingerprint: APPROVAL_FINGERPRINT,
+    approval_reason_code: "approval_required"
+  }));
+
+  assert.deepEqual(created.callback_route, creationRoute);
+  state.deliveryOutcomes.push("success");
+  assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 1);
+  assert.equal(resolverCalls, 0);
+  assert.deepEqual(state.deliveries[0]?.route, creationRoute);
+  assert.deepEqual(
+    state.service.get(created.watch_id).notification_outbox[0]?.callback_route,
+    creationRoute
+  );
+});
+
 test("retry after restart ignores resolver route and profile drift and reuses body", async (t) => {
   let resolverCalls = 0;
   let profileRevision = "profile-before-restart";
