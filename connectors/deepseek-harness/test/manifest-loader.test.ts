@@ -36,7 +36,7 @@ test("declares a standalone bundle and exact DSH compatibility", () => {
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-agent"], "0.1.1-rc.2");
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-commands"], "0.1.1-rc.2");
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-tools"], "0.1.1-rc.2");
-  assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "file:../..");
+  assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.12.16");
 
   const patch = fs.readFileSync(path.join(packageDirectory, "cordis.patch.yml"), "utf8");
   assert.match(patch, /@scotthuang\/agent-knock-knock-deepseek-harness/u);

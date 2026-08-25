@@ -59,7 +59,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.1",
-    "@scotthuang/agent-knock-knock": "file:../..",
+    "@scotthuang/agent-knock-knock": "0.12.16",
     "ajv": "8.20.0"
   },
   "devDependencies": {
