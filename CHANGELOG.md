@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.12.15 - 2026-08-25
+
+### Added
+
+- Add the `terminal_user_explicit` physical Send authority domain, global message intent, and immutable omitted-target binding so an explicit user Send remains actionable independently of AKK management state.
+
+### Fixed
+
+- Prevent stale, stalled, deferred, corrupt, or missing Store, Session, Turn, transfer, activity, and dispatch-ledger state from vetoing an explicit user Send. When a zero-wait managed attempt proves that no input was submitted, fall back once to exact physical delivery and leave subsequent observation to Terminal Watch.
+- Make OpenClaw doctor skill verification compatible with multi-agent installations that require an explicit `main` owner.
+
+### Changed
+
+- Advance the action contract to 19 and expose Send readiness from physical terminal evidence while retaining the existing Store format and writer protocol.
+
+### Security
+
+- Continue to require exact live terminal and process identity, approval eligibility, an empty composer, and unambiguous input evidence before physical Send. Possible prior input, true concurrency, or same-message ambiguity remains fail-closed and never triggers duplicate delivery.
+- Keep fallback delivery free of synthetic Turns or callbacks, and treat post-delivery bookkeeping or cleanup failures as warnings without automatically replaying user input.
+
 ## 0.12.14 - 2026-08-24
 
 ### Added
