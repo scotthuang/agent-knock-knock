@@ -30,9 +30,8 @@ dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
 
 For development in this repository, build the AKK root package and this child
 package, then add the child directory with the DeepSeek Harness plugin command.
-The package currently uses `file:../..` for its AKK dependency on purpose;
-`release:check` blocks publication until that development dependency is
-replaced with an exact published AKK version.
+The published connector depends on the exact AKK runtime version `0.12.16` so
+the Host Adapter API it was tested against cannot drift unexpectedly.
 
 The optional bundle patch mounts only the Host plugin:
 
