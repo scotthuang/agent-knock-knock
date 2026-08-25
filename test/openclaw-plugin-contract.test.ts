@@ -1262,7 +1262,11 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   );
   assert.match(
     hostLifecycleSource,
-    /const sweep = runSweep\("periodic"\)\.finally[\s\S]*?inFlight = sweep[\s\S]*?const sweep = runSweep\("startup"\)\.finally[\s\S]*?inFlight = sweep[\s\S]*?async stop\(\)[\s\S]*?cancelScheduled\?\.\(\)[\s\S]*?await stopDrain/u
+    /const beginSweep = [\s\S]*?const execution = new Promise<void>[\s\S]*?const sweep = execution\.finally[\s\S]*?inFlight = sweep;[\s\S]*?void runSweep\(reason\)\.then\(settle, reject\)/u
+  );
+  assert.match(
+    hostLifecycleSource,
+    /beginSweep\("periodic", scheduleNext\)[\s\S]*?beginSweep\("startup", scheduleNext\)[\s\S]*?async stop\(\)[\s\S]*?cancelScheduled\?\.\(\)[\s\S]*?await stopDrain/u
   );
   assert.match(
     terminalListSource,
@@ -2851,7 +2855,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       () => approveTool.execute!("approval-without-offer", {
         turn_id: "turn-no-offer"
       }),
-      /requires a current approval request shown by agent_knock_knock_status in this OpenClaw conversation/u
+      /requires a current approval request shown by agent_knock_knock_status in this controller conversation/u
     );
     assert.equal(
       fs.existsSync(callsPath),
@@ -2961,7 +2965,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       () => foreignApprove!.execute!("cross-session-approval", {
         turn_id: "turn-approve"
       }),
-      /in this OpenClaw conversation/u
+      /in this controller conversation/u
     );
     const foreignReconcile = toolFactories
       .get("agent_knock_knock_reconcile_binding")
@@ -2974,7 +2978,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         terminal_id: "terminal:v2:tmux:codex:work:0.0:1234",
         conflicting_session_id: "session-conflict"
       }),
-      /in this OpenClaw session/u
+      /in this controller session/u
     );
     const foreignClose = toolFactories
       .get("agent_knock_knock_close")
