@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.12.16 - 2026-08-26
+
 ### Added
 
 - Add a Host-owned foreground MCP/stdio Bridge that exposes the existing 16 semantic AKK tools without introducing a second state or tool model.
