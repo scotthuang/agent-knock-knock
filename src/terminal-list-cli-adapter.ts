@@ -4096,13 +4096,13 @@ async function resolveConversationSelectorOption(commandName, options): Promise<
         "the selected terminal no longer advertises user-priority Send"
       );
     }
-    // Human selectors are discovery conveniences. Record the freshly resolved
-    // full terminal id as the trusted internal selector before the physical
-    // token reaches execution.
-    terminalListRuntime().rememberOriginalExpectedTerminalSelector(
-      options,
-      physical.terminalId
-    );
+    // Preserve a token-bearing caller's original selector for the exact fence.
+    if (!stringValue(options.expectedTerminalToken)) {
+      terminalListRuntime().rememberOriginalExpectedTerminalSelector(
+        options,
+        physical.terminalId
+      );
+    }
     options.expectedTerminalToken = physical.expectedTerminalToken;
     options.expectedManagedTerminalToken =
       physical.expectedManagedTerminalToken;

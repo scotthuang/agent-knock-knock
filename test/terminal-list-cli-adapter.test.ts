@@ -1384,6 +1384,46 @@ test("exact no-token Send discovery binds fresh physical user authority", async 
   assert.equal(options.conversation, fixture.terminalId);
   assert.equal(typeof options.expectedTerminalToken, "string");
   assert.equal(options.managedOnly, undefined);
+  assert.deepEqual(fixture.rememberedExpectedTerminalSelectors, [
+    fixture.terminalId
+  ]);
+});
+
+test("token-bearing Send discovery preserves the caller selector for the exact fence", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-token-selector-fence-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true
+  );
+
+  for (const callerSelector of ["codex", undefined] as const) {
+    fixture.rememberedExpectedTerminalSelectors.length = 0;
+    const options: Record<string, unknown> = {
+      ...(callerSelector ? { conversation: callerSelector } : {}),
+      storeDir: fixture.storeDir,
+      expectedTerminalToken: "caller-copied-token"
+    };
+
+    await fixture.facade.resolveConversationSelectorOption("send", options);
+
+    assert.equal(options.session, fixture.terminalId);
+    assert.equal(options.conversation, fixture.terminalId);
+    assert.notEqual(options.expectedTerminalToken, "caller-copied-token");
+    assert.deepEqual(
+      fixture.rememberedExpectedTerminalSelectors,
+      [callerSelector],
+      "unique discovery must not replace token-bearing caller authority"
+    );
+  }
 });
 
 test("corrupt Store metadata cannot hide exact terminal user Send", async (t) => {
@@ -1789,6 +1829,7 @@ async function createCodexRolloutListFixture(
   const unusedGate = deferredGate();
   unusedGate.release();
   const base = facadeDependencies("A", [], unusedGate, unusedGate);
+  const rememberedExpectedTerminalSelectors: Array<string | undefined> = [];
   const dependencies: TerminalListCliDependencies = {
     ...base,
     discovery: {
@@ -1880,7 +1921,13 @@ async function createCodexRolloutListFixture(
         status: "blocked",
         reason: "unused"
       })
-    } as TerminalListAuthorityPorts
+    } as TerminalListAuthorityPorts,
+    policy: {
+      ...base.policy,
+      rememberOriginalExpectedTerminalSelector: (_options, selector) => {
+        rememberedExpectedTerminalSelectors.push(selector);
+      }
+    }
   };
   const facade = terminalListCliAdapter.createTerminalListCliFacade(dependencies);
   const storeDir = path.join(workspace, "store");
@@ -1898,6 +1945,7 @@ async function createCodexRolloutListFixture(
     processUuid,
     processBirth,
     rolloutPath,
-    nativeTurnId
+    nativeTurnId,
+    rememberedExpectedTerminalSelectors
   };
 }

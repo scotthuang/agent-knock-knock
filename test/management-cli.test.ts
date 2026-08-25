@@ -753,11 +753,11 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
     );
     assert.equal(
       typeof idleEntry.available_actions.send.arguments.expected_terminal_token,
-      "string"
+      "undefined"
     );
     assert.equal(
       idleEntry.available_actions.send.scope,
-      "terminal_user_explicit"
+      undefined
     );
     assert.equal(idleEntry.available_actions.cancel, undefined);
 
@@ -963,12 +963,9 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     );
     assert.equal(
       typeof claude.available_actions.send.arguments.expected_terminal_token,
-      "string"
+      "undefined"
     );
-    assert.equal(
-      claude.available_actions.send.scope,
-      "terminal_user_explicit"
-    );
+    assert.equal(claude.available_actions.send.scope, undefined);
     assert.equal(claude.available_actions.cancel, undefined);
     assert.equal(claude.terminal_control.capabilities.includes("durable_completion"), true);
     assert.equal(claude.terminal_control.capabilities.includes("screen_completion"), false);

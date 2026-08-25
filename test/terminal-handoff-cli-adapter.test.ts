@@ -206,6 +206,20 @@ test("handoff facade exposes one factory and isolates async capability recording
       terminal: terminalB
     })
   );
+  for (const callerSelector of ["codex", undefined] as const) {
+    const mismatchedOptions = { expectedTerminalToken: "fresh-token" };
+    facadeA.rememberOriginalExpectedTerminalSelector(
+      mismatchedOptions,
+      callerSelector
+    );
+    assert.throws(
+      () => facadeA.assertExpectedHandoffTokenUsesExactTerminalSelector({
+        options: mismatchedOptions,
+        terminal: terminalA
+      }),
+      /exact full terminal/u
+    );
+  }
 });
 
 test("safe retry keeps getter and thrown-error priority before repository access", () => {

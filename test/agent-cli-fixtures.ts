@@ -280,9 +280,15 @@ function managedStateMachineSendArgs(args: string[]): string[] {
 
 export function runAgentCliInProcess(
   args: string[],
-  env: NodeJS.ProcessEnv = {}
+  env: NodeJS.ProcessEnv = {},
+  dependencyOverrides: CliCommandDependencies = {}
 ) {
-  return runAgentCliInProcessWithTiming(args, env);
+  return runAgentCliInProcessWithTiming(
+    args,
+    env,
+    undefined,
+    dependencyOverrides
+  );
 }
 
 export interface AgentCliVirtualSleepRequest {

@@ -5444,15 +5444,15 @@ async function assertSafeAbortedStatusCardDelegateRetry(
     const finalTaskCalls = taskInputCalls(fixture, message);
     assert.equal(
       finalTaskCalls.filter((call) => call.args.at(-1) === "C-m").length,
-      2,
-      "status-card retry performs one /status Enter and one task Enter"
+      1,
+      "the accepted provisional retry dispatches the task Enter exactly once"
     );
     assert.equal(
       readTmuxCalls(fixture.tmuxCallsPath).filter((call) =>
         call.args.includes("-l") && call.args.at(-1) === "/status"
       ).length,
-      1,
-      "the restored status-card source is revalidated exactly once"
+      0,
+      "durable status-card authority does not require a native /status probe"
     );
     assert.equal(
       finalTaskCalls.filter((call) =>
