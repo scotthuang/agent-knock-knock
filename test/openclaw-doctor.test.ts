@@ -67,6 +67,30 @@ test("OpenClaw diagnostics ignore the removed default-agent setting", () => {
   }
 });
 
+test("OpenClaw diagnostics use main as skill owner when multiple agents have no default", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-doctor-multi-agent-"));
+  const fakeOpenClaw = path.join(tempDir, "openclaw");
+
+  try {
+    writeFakeOpenClaw(fakeOpenClaw);
+
+    const result = runOpenClawChainDiagnostics({
+      openclawBin: fakeOpenClaw,
+      env: {
+        AKK_FAKE_SCENARIO: "multi_agent"
+      }
+    });
+
+    assert.equal(result.ready, true, JSON.stringify(result, null, 2));
+    assert.equal(
+      result.checks.find((check) => check.name === "skill")?.ok,
+      true
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("OpenClaw diagnostics keep package and Gateway readiness independent", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-doctor-health-"));
   const fakeOpenClaw = path.join(tempDir, "openclaw");
@@ -194,6 +218,12 @@ if (args[0] === "plugins" && args[1] === "inspect") {
   });
 }
 if (args[0] === "skills" && args[1] === "info") {
+  if (scenario === "multi_agent" && !args.includes("--agent")) {
+    emit({
+      ok: false,
+      error: { message: "Multiple agents require an explicit owner." }
+    }, 1);
+  }
   emit({
     name: "agent-knock-knock",
     eligible: scenario !== "broken",
