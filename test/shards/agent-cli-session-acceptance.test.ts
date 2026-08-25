@@ -119,6 +119,9 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
     "codex-legacy-binding-rollout.jsonl"
   );
   const processBirth = "Thu Aug  6 10:00:00 2026";
+  const physicalProcessDependencies = {
+    processBirthForPid: () => processBirth
+  };
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -165,7 +168,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       "/usr/bin/true",
       ...nativeIdentityArgs,
       "--disable-terminal-bridge-monitor"
-    ], testEnv);
+    ], testEnv, physicalProcessDependencies);
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const parsed = JSON.parse(sent.stdout);
     const statePath = parsed.conversation.state_path;
@@ -235,7 +238,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       "--terminal-screens-json",
       JSON.stringify({ [terminalTarget]: "› \n" }),
       ...nativeIdentityArgs
-    ], testEnv);
+    ], testEnv, physicalProcessDependencies);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const listedParsed = JSON.parse(listed.stdout);
     assert.equal(listedParsed.terminals.length, 1);
@@ -248,7 +251,10 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
     const sendAction = terminal.available_actions.send;
     assert.equal(sendAction.scope, "terminal_user_explicit");
     assert.equal(sendAction.arguments.selector, rawConversationId);
-    assert.equal(typeof sendAction.arguments.expected_terminal_token, "string");
+    assert.equal(
+      typeof sendAction.arguments.expected_terminal_token,
+      "string"
+    );
     assert.equal(
       typeof sendAction.arguments.expected_managed_terminal_token,
       "string"
