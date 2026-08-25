@@ -179,7 +179,10 @@ import * as deferredRecoveryAdapter from
 import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import { openClawYieldNextAction } from
   "./terminal-dispatch-presenter.js";
-import { isProcessAlive } from "./terminal-process-source.js";
+import {
+  isProcessAlive,
+  terminalProcessIncarnationForPid
+} from "./terminal-process-source.js";
 import {
   assertConfiguredWorkspace,
   canonicalWorkspace,
@@ -224,7 +227,7 @@ const terminalDispatchRepository =
   createTerminalDispatchRepositoryCliAdapter();
 const terminalDelegateSendBindingRepository =
   createTerminalDelegateSendBindingRepository({
-    runtimeDir: terminalDispatchRepository.runtimeDir(),
+    runtimeDir: terminalDispatchRepository.runtimeDir,
     acquireLock: (lockPath) => acquireFileLock(lockPath, { timeoutMs: 30_000 })
   });
 const acquireTerminalBridgeSendLock = terminalDispatchRepository.acquire;
@@ -1193,6 +1196,12 @@ const terminalListCliFacade = createTerminalListCliFacade({
     codexLatentClearResumeObservation,
     codexManagedIdentityResolutionContext,
     codexProcessIncarnationForPid,
+    processIncarnationForPid: (pid) =>
+      terminalProcessIncarnationForPid(
+        pid,
+        cliDependencies().processBirthForPid ??
+          cliDependencies().codexProcessBirthForPid
+      ),
     createRuntimeTerminalAgentRegistry,
     createTerminalAgentBridge,
     createTerminalControlProvider,
@@ -1633,6 +1642,12 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     parseJsonOption,
     persistManagedSessionNativeIdentity,
     positiveMinutes,
+    processIncarnationForPid: (pid) =>
+      terminalProcessIncarnationForPid(
+        pid,
+        cliDependencies().processBirthForPid ??
+          cliDependencies().codexProcessBirthForPid
+      ),
     prepareDeferredCodexForegroundBinding,
     quarantineManagedSessionBinding,
     reattachManagedSessionForNativeIdentity,

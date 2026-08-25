@@ -328,6 +328,11 @@ export interface TerminalListDiscoveryPorts {
     processBirth: string;
     evidence: "codex_process_birth";
   };
+  processIncarnationForPid(pid: number): {
+    processUuid: string;
+    processBirth: string;
+    evidence: "process_birth";
+  };
   inspectCodexOpenRootRolloutInventory(request: {
     options: TerminalListCliOptions;
     pid: number;
@@ -1273,6 +1278,20 @@ async function terminalControlledListEntry(
     terminalState: effectiveTerminalState,
     options
   });
+  let physicalProcessIncarnation:
+    | ReturnType<TerminalListDiscoveryPorts["processIncarnationForPid"]>
+    | undefined;
+  try {
+    physicalProcessIncarnation =
+      terminalListRuntime().processIncarnationForPid(session.pid);
+  } catch (error) {
+    runtimeLog("warn", "terminal_physical_process_incarnation_unavailable", {
+      agent: session.agent,
+      terminal_target: terminalControl.target,
+      pid: session.pid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
   const entry = {
     id: bridge.terminalConversationId(session),
     short_ref: sessionShortRef(bridge.terminalConversationId(session)),
@@ -1379,6 +1398,8 @@ async function terminalControlledListEntry(
       terminalControl,
       agent: session.agent,
       pid: session.pid,
+      processUuid: physicalProcessIncarnation?.processUuid,
+      processBirth: physicalProcessIncarnation?.processBirth,
       approvalScanned: effectiveTerminalState.approval_state.scanned === true,
       approvalBlocked: effectiveTerminalState.approval_state.blocked === true,
       exactEmptyComposer: automatedInputComposerReady

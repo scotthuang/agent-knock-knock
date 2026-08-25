@@ -295,7 +295,7 @@
       "id": "dispatch-recovery-boundary",
       "path": "test/shards/agent-cli-dispatch-recovery.test.ts",
       "tier": "integration",
-      "needle": "safe-aborted delegate retries refuse a changed Session binding"
+      "needle": "safe-aborted strict managed retry rejects binding drift while user-priority delegate falls back once"
     },
     {
       "id": "handoff-boundary",

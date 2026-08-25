@@ -186,6 +186,53 @@ test("bind requires the global message lock", (t) => {
   assert.equal(fs.existsSync(repository.pathFor(boundary)), false);
 });
 
+test("dynamic runtime resolution scopes storage and lock ownership", (t) => {
+  const { root, runtimeDir, boundary, target } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const otherRuntimeDir = path.join(root, "other-runtime");
+  let selectedRuntimeDir = runtimeDir;
+  const repository = createTerminalDelegateSendBindingRepository({
+    runtimeDir: () => selectedRuntimeDir,
+    now: () => new Date("2026-08-25T03:04:05.000Z")
+  });
+  const firstPath = repository.pathFor(boundary);
+  const releaseFirst = repository.acquire(boundary.messageId);
+  let releaseOther: (() => void) | undefined;
+  const otherTarget: TerminalDelegateSendTargetBoundary = {
+    ...target,
+    terminalId: "terminal:v2:tmux:codex:other:0.0:4200",
+    terminalRuntimeKey: "tmux:socket:other:%84",
+    physicalToken: hash("physical terminal B")
+  };
+
+  try {
+    selectedRuntimeDir = otherRuntimeDir;
+    const otherPath = repository.pathFor(boundary);
+    assert.notEqual(otherPath, firstPath);
+    assert.equal(otherPath.startsWith(`${otherRuntimeDir}${path.sep}`), true);
+    assert.throws(
+      () => repository.bind(boundary, otherTarget),
+      (error: unknown) =>
+        error instanceof TerminalDelegateSendBindingUncertainError &&
+        /requires its global message lock/u.test(error.message)
+    );
+
+    releaseOther = repository.acquire(boundary.messageId);
+    assert.equal(repository.bind(boundary, otherTarget).outcome, "reserved");
+
+    selectedRuntimeDir = runtimeDir;
+    assert.equal(repository.bind(boundary, target).outcome, "reserved");
+  } finally {
+    releaseOther?.();
+    releaseFirst();
+  }
+
+  selectedRuntimeDir = runtimeDir;
+  assert.equal(repository.load(boundary)?.terminalId, target.terminalId);
+  selectedRuntimeDir = otherRuntimeDir;
+  assert.equal(repository.load(boundary)?.terminalId, otherTarget.terminalId);
+});
+
 test("malformed or symlinked same-id bindings fail closed", (t) => {
   const malformed = fixture();
   const symlinked = fixture();

@@ -1241,17 +1241,19 @@ test("verified-empty physical Send ignores resolver and Turn state but rejects a
 
       const action = terminal.available_actions.send;
       assert.ok(action, JSON.stringify(terminal));
-      const current = loadManagedSession(fixture.storeDir, source.session_id);
-      saveManagedSession(fixture.storeDir, {
-        ...current,
-        updated_at: "2026-08-11T03:10:00.000Z"
-      }, { expectedRevision: current.revision as number });
+      const stalePhysicalToken = createHash("sha256")
+        .update("stale verified-empty physical terminal authority")
+        .digest("hex");
+      assert.notEqual(
+        stalePhysicalToken,
+        action.arguments.expected_terminal_token
+      );
       const rejected = await runCli([
         "send",
         "--conversation",
         fixture.terminalId,
         "--expected-terminal-token",
-        String(action.arguments.expected_terminal_token),
+        stalePhysicalToken,
         "--message",
         "A stale list token must not detach the source.",
         ...codexNoRolloutBackgroundSendArgs(fixture)
@@ -4999,7 +5001,19 @@ async function assertSafeAbortedRolloutDelegateRetry(
     );
     const bindingBefore = source.binding;
     assert.ok(bindingBefore);
-    const aborted = await runCli(delegateArgs, {
+    const action = await deferredForegroundSendAction(fixture);
+    const firstSendArgs = [
+      ...deferredForegroundSendArgs(fixture, action, message),
+      "--message-id",
+      messageId,
+      "--openclaw-session",
+      gatewaySession,
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      gatewaySession
+    ];
+    const aborted = await runCli(firstSendArgs, {
       ...fixture.environment,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "0",
       ...abortCase.failureEnv
@@ -5106,7 +5120,10 @@ async function assertSafeAbortedRolloutDelegateRetry(
     );
 
     fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
-    const retried = await runCli(delegateArgs, codexNativeAcceptanceEnv(fixture.environment));
+    const retried = await runCli(
+      delegateArgs,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const output = JSON.parse(retried.stdout);
     assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);
@@ -5349,7 +5366,10 @@ async function assertSafeAbortedStatusCardDelegateRetry(
       0
     );
 
-    const retried = await runCli(delegateArgs, codexNativeAcceptanceEnv(fixture.environment));
+    const retried = await runCli(
+      delegateArgs,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const output = JSON.parse(retried.stdout);
     assert.equal(output.delivery_receipt, "agent_accepted", retried.stdout);

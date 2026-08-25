@@ -383,6 +383,8 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
     terminalControl,
     agent: "codex" as const,
     pid: 4_100,
+    processUuid: "process-pid:4100:birth:fixture-birth",
+    processBirth: "fixture-birth",
     approvalScanned: true,
     approvalBlocked: false,
     exactEmptyComposer: true
@@ -392,7 +394,9 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
     terminalControl,
     agent: "codex",
     pid: 4_100,
-    workspace: terminalControl.currentPath ?? ""
+    workspace: terminalControl.currentPath ?? "",
+    processUuid: "process-pid:4100:birth:fixture-birth",
+    processBirth: "fixture-birth"
   });
   assert.deepEqual(
     decideTerminalUserExplicitSendAuthority(common),
@@ -408,6 +412,7 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
     { approvalScanned: false },
     { approvalBlocked: true },
     { exactEmptyComposer: false },
+    { processBirth: undefined },
     {
       terminalControl: {
         ...terminalControl,

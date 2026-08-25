@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +22,10 @@ import {
   StaticTerminalControlProvider
 } from "../src/terminal-control-provider.js";
 import type { TerminalProcessSource } from "../src/terminal-process-source.js";
+import {
+  runInProcessCli,
+  VirtualClock
+} from "./in-process-cli-fixtures.js";
 
 test("CLI command execution returns output and exit status without process globals", async () => {
   const originalExitCode = process.exitCode;
@@ -148,6 +153,144 @@ test("native slash messages fail before terminal selector discovery", async () =
 
   assert.equal(terminalScans, 0);
   assert.equal(processScans, 0);
+});
+
+test("in-process delegates isolate durable bindings by scoped runtime env", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-cli-core-delegate-runtime-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const messageId = `msg-openclaw-${createHash("sha256")
+    .update(root)
+    .digest("hex")}`;
+
+  async function runScopedDelegate(options: {
+    label: string;
+    request: string;
+    pid: number;
+    panePid: number;
+  }) {
+    const workspace = path.join(root, options.label, "workspace");
+    const storeDir = path.join(root, options.label, "conversations");
+    const runtimeDir = path.join(root, options.label, "runtime");
+    const terminalTarget = `${options.label}:0.0`;
+    const nativeSessionId =
+      `00000000-0000-4000-8000-${String(options.pid).padStart(12, "0")}`;
+    const rolloutPath = path.join(
+      workspace,
+      ".codex",
+      "sessions",
+      `${nativeSessionId}.jsonl`
+    );
+    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+    fs.writeFileSync(rolloutPath, `${JSON.stringify({
+      timestamp: "2026-08-25T00:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: nativeSessionId,
+        cwd: workspace,
+        originator: "codex-tui",
+        source: "cli",
+        cli_version: "0.149.1"
+      }
+    })}\n`, { mode: 0o600 });
+    const rolloutStat = fs.statSync(rolloutPath);
+    const clock = new VirtualClock();
+    const result = await runInProcessCli([
+      "delegate",
+      "--agent",
+      "codex",
+      "--request",
+      options.request,
+      "--message-id",
+      messageId,
+      "--workspace",
+      workspace,
+      "--store-dir",
+      storeDir,
+      "--background",
+      "--disable-terminal-bridge-monitor",
+      "--processes-json",
+      JSON.stringify([{
+        pid: options.pid,
+        ppid: options.panePid,
+        elapsed: "00:20",
+        command: "codex",
+        cwd: workspace
+      }]),
+      "--terminals-json",
+      JSON.stringify([{
+        kind: "tmux",
+        target: terminalTarget,
+        session: options.label,
+        window: 0,
+        pane: 0,
+        panePid: options.panePid,
+        currentCommand: "node",
+        currentPath: workspace
+      }]),
+      "--terminal-screens-json",
+      JSON.stringify({ [terminalTarget]: "› " }),
+      "--codex-active-session-identities-json",
+      JSON.stringify({
+        [options.pid]: {
+          sessionId: nativeSessionId,
+          processUuid: `fixture-process-${options.pid}`,
+          processBirth: `fixture-process-${options.pid}`,
+          rollout: {
+            fd: "17",
+            device: String(rolloutStat.dev),
+            inode: String(rolloutStat.ino),
+            path: rolloutPath
+          },
+          evidence: "static_exact_fixture"
+        }
+      })
+    ], {
+      env: {
+        ...process.env,
+        AKK_RUNTIME_DIR: runtimeDir,
+        AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
+        AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
+      },
+      codexProcessBirthForPid: () => `fixture-process-${options.pid}`,
+      now: clock.now,
+      monotonicNowMs: clock.nowMs,
+      sleep: clock.sleep,
+      sleepSync: clock.sleepSync,
+      runtimeLog() {}
+    });
+    return { result, runtimeDir };
+  }
+
+  const first = await runScopedDelegate({
+    label: "first",
+    request: "First scoped delegate request",
+    pid: 6511,
+    panePid: 9511
+  });
+  assert.equal(first.result.status, 0, first.result.stderr || first.result.stdout);
+  const second = await runScopedDelegate({
+    label: "second",
+    request: "Different request reusing the caller id in another runtime",
+    pid: 6512,
+    panePid: 9512
+  });
+  assert.equal(
+    second.result.status,
+    0,
+    second.result.stderr || second.result.stdout
+  );
+  for (const runtimeDir of [first.runtimeDir, second.runtimeDir]) {
+    assert.equal(
+      fs.existsSync(path.join(
+        runtimeDir,
+        "terminal-delegate-send-bindings"
+      )),
+      true
+    );
+  }
 });
 
 test("cli-core AST remains a stable facade without owned state machines", () => {

@@ -384,6 +384,10 @@ test("list token falls back to one unmanaged send and replays by message id", as
     true
   );
   const { terminalControl, workspace, storeDir } = listFixture;
+  const advertisedProcessBirth = listFixture.processBirth;
+  let liveProcessBirth = advertisedProcessBirth;
+  let replaceProcessAfterNextTerminalLock = false;
+  let processIncarnationProbeUnavailable = false;
   ensureStoreWritable(storeDir);
   const runtimeDir = path.join(root, "runtime");
   const stalledAt = "2026-08-25T01:00:00.000Z";
@@ -682,6 +686,10 @@ test("list token falls back to one unmanaged send and replays by message id", as
       if (terminalLockMode === "storage_error") {
         throw new Error("test-only terminal lock runtime is read-only");
       }
+      if (replaceProcessAfterNextTerminalLock) {
+        replaceProcessAfterNextTerminalLock = false;
+        liveProcessBirth = "replacement-process-birth-same-pid";
+      }
       return terminalLockMode === "release_error"
         ? () => { throw new Error("test-only terminal lock unlink failed"); }
         : () => {};
@@ -694,6 +702,16 @@ test("list token falls back to one unmanaged send and replays by message id", as
     },
     createTerminalAgentBridge() {
       return bridge as unknown as TerminalAgentBridge;
+    },
+    processIncarnationForPid(pid: number) {
+      if (processIncarnationProbeUnavailable) {
+        throw new Error("test-only process birth probe unavailable");
+      }
+      return {
+        processUuid: `process-pid:${pid}:birth:${liveProcessBirth}`,
+        processBirth: liveProcessBirth,
+        evidence: "process_birth" as const
+      };
     },
     terminalRuntimeForLiveIdentity() {
       return {};
@@ -786,6 +804,28 @@ test("list token falls back to one unmanaged send and replays by message id", as
     runtimeLog: () => {}
   };
 
+  processIncarnationProbeUnavailable = true;
+  const managedOnlyOptions = {
+    ...options,
+    managedOnly: true,
+    expectedTerminalToken: "managed-token-fixture"
+  };
+  await assert.rejects(
+    runCliCommandExecution(
+      "send",
+      managedOnlyOptions,
+      dependencies,
+      () => facade.runSend(managedOnlyOptions)
+    ),
+    /managed preparation blocked by the stalled AKK Turn/u
+  );
+  processIncarnationProbeUnavailable = false;
+  assert.deepEqual(
+    transportCalls,
+    [],
+    "managed-only Send must not depend on the physical process-birth probe"
+  );
+
   await assert.rejects(
     runCliCommandExecution(
       "send",
@@ -817,6 +857,28 @@ test("list token falls back to one unmanaged send and replays by message id", as
   );
   fallbackPreflightAvailable = true;
 
+  replaceProcessAfterNextTerminalLock = true;
+  const staleIncarnationOptions = {
+    ...options,
+    message: "Do not send this to a replacement process with the same PID.",
+    messageId: "message-user-send-stale-process-incarnation"
+  };
+  await assert.rejects(
+    runCliCommandExecution(
+      "send",
+      staleIncarnationOptions,
+      dependencies,
+      () => facade.runSend(staleIncarnationOptions)
+    ),
+    /explicit terminal send token is stale/u
+  );
+  assert.deepEqual(
+    transportCalls,
+    [],
+    "same PID with a changed process birth must inject zero terminal input"
+  );
+  liveProcessBirth = advertisedProcessBirth;
+
   const first = await runCliCommandExecution(
     "send",
     options,
@@ -832,7 +894,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.deepEqual(transportCalls, [
     ["text", message],
     ["enter", "C-m"]
-  ]);
+  ], "unchanged process birth must retain physical Send authority");
   const released = loadState(stalledPaths.statePath);
   assert.equal(released.status, "closed");
   assert.equal(released.disposition, "user_abandoned_management");
@@ -967,21 +1029,31 @@ test("list token falls back to one unmanaged send and replays by message id", as
   );
   assert.equal(
     managedPreparationAttempts,
-    3,
+    5,
     "a completed fallback intent must replay before managed preparation"
   );
   assert.deepEqual(
     managedLockOptions,
-    [{ timeoutMs: 0 }, { timeoutMs: 0 }, { timeoutMs: 0 }],
-    "user-priority Send must never wait for management locks"
+    [
+      undefined,
+      { timeoutMs: 0 },
+      { timeoutMs: 0 },
+      { timeoutMs: 0 },
+      { timeoutMs: 0 }
+    ],
+    "managed-only keeps its legacy lock policy while user-priority Send never waits"
   );
 
   const intentRoot = path.join(runtimeDir, "terminal-user-send-intents");
   const intentFiles = fs.readdirSync(intentRoot)
     .filter((file) => file.endsWith(".json"))
     .map((file) => path.join(intentRoot, file));
-  assert.equal(intentFiles.length, 1);
-  fs.writeFileSync(intentFiles[0] as string, "{damaged-same-id-receipt\n");
+  assert.equal(intentFiles.length, 2);
+  const completedIntentFile = intentFiles.find((file) =>
+    JSON.parse(fs.readFileSync(file, "utf8")).message_id === messageId
+  );
+  assert.ok(completedIntentFile);
+  fs.writeFileSync(completedIntentFile, "{damaged-same-id-receipt\n");
   await assert.rejects(
     runCliCommandExecution(
       "send",
@@ -996,7 +1068,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
     [["text", message], ["enter", "C-m"]],
     "an unverifiable existing same-id receipt must never duplicate input"
   );
-  assert.equal(managedPreparationAttempts, 3);
+  assert.equal(managedPreparationAttempts, 5);
 
   const managedReplayMessage = "Managed Enter was already dispatched.";
   const managedReplayMessageId = "message-user-send-managed-replay";
@@ -1031,7 +1103,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
   );
   assert.equal(managedReplayOutput.delivery_receipt, "enter_dispatched");
   assert.equal(managedReplayOutput.do_not_retry, true);
-  assert.equal(managedPreparationAttempts, 3);
+  assert.equal(managedPreparationAttempts, 5);
 
   terminalLockMode = "release_error";
   const releaseFailureMessage = "Send even if physical lock cleanup fails.";
@@ -1735,6 +1807,11 @@ async function createCodexRolloutListFixture(
         processUuid,
         processBirth,
         evidence: "codex_process_birth"
+      }),
+      processIncarnationForPid: (pid: number) => ({
+        processUuid: `process-pid:${pid}:birth:${processBirth}`,
+        processBirth,
+        evidence: "process_birth"
       }),
       inspectCodexOpenRootRolloutInventory: async () => ({ roots: [] }),
       nativeInspectionComposerEmpty: () => true,
