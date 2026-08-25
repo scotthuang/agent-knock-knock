@@ -219,6 +219,44 @@ test("start cannot create a second schedule chain while stop drains", async () =
   await service.stop();
 });
 
+test("synchronous reentrant stop drains the registered startup sweep", async () => {
+  const timer = controlledSchedule();
+  const laterPhase = deferred();
+  let stopDrain: Promise<void> | undefined;
+  let stopped = false;
+  let service!: ReturnType<typeof createHostLifecycleService>;
+  service = createHostLifecycleService({
+    schedule: timer.schedule,
+    phases: [
+      {
+        name: "request_stop",
+        run() {
+          stopDrain = service.stop().then(() => {
+            stopped = true;
+          });
+        }
+      },
+      {
+        name: "later_phase",
+        async run() {
+          await laterPhase.promise;
+        }
+      }
+    ],
+    onPhaseError() {}
+  });
+
+  service.start();
+  await flushMicrotasks();
+  assert.ok(stopDrain, "the first phase must request Host shutdown");
+  assert.equal(stopped, false, "stop waits for every phase in the startup sweep");
+
+  laterPhase.resolve();
+  await stopDrain;
+  assert.equal(stopped, true);
+  assert.equal(timer.pendingCount(), 0, "reentrant stop prevents scheduling");
+});
+
 test("phase error reporting cannot suppress the following phase", async () => {
   const timer = controlledSchedule();
   let followingPhaseRan = false;

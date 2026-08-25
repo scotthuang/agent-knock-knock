@@ -88,19 +88,36 @@ export function createHostLifecycleService(
     }
   };
 
+  const beginSweep = (
+    reason: HostLifecycleSweepReason,
+    after: () => void
+  ): void => {
+    let settle!: () => void;
+    let reject!: (error: unknown) => void;
+    const execution = new Promise<void>((resolve, rejectPromise) => {
+      settle = resolve;
+      reject = rejectPromise;
+    });
+    const sweep = execution.finally(() => {
+      if (inFlight === sweep) {
+        inFlight = undefined;
+      }
+      after();
+    });
+    // Register before invoking phase code. A phase may synchronously request
+    // Host shutdown; stop() must observe and drain the complete sweep while
+    // phase startup retains its pre-extraction synchronous ordering.
+    inFlight = sweep;
+    void runSweep(reason).then(settle, reject);
+  };
+
   const scheduleNext = (): void => {
     if (state !== "running") {
       return;
     }
     cancelScheduled = scheduleAfter(() => {
       cancelScheduled = undefined;
-      const sweep = runSweep("periodic").finally(() => {
-        if (inFlight === sweep) {
-          inFlight = undefined;
-        }
-        scheduleNext();
-      });
-      inFlight = sweep;
+      beginSweep("periodic", scheduleNext);
     }, intervalMs);
   };
 
@@ -110,13 +127,7 @@ export function createHostLifecycleService(
         return;
       }
       state = "running";
-      const sweep = runSweep("startup").finally(() => {
-        if (inFlight === sweep) {
-          inFlight = undefined;
-        }
-        scheduleNext();
-      });
-      inFlight = sweep;
+      beginSweep("startup", scheduleNext);
     },
 
     async stop(): Promise<void> {
