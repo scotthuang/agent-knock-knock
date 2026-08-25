@@ -262,7 +262,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
     );
     assert.equal(
       typeof sendAction.arguments.expected_managed_terminal_token,
-      "string"
+      "undefined"
     );
     assert.equal(sendAction.arguments.session_id, undefined);
   } finally {
