@@ -65,6 +65,7 @@ function exactCodexNativeIdentityArgs(options: {
   pid: number;
   sessionId: string;
   processUuid: string;
+  processBirth?: string;
   rolloutPath: string;
 }): string[] {
   const rolloutPath = fs.realpathSync(options.rolloutPath);
@@ -75,7 +76,7 @@ function exactCodexNativeIdentityArgs(options: {
       [options.pid]: {
         sessionId: options.sessionId,
         processUuid: options.processUuid,
-        processBirth: options.processUuid,
+        processBirth: options.processBirth ?? options.processUuid,
         rollout: {
           fd: "12r",
           device: String(stat.dev),
@@ -117,6 +118,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
     tempDir,
     "codex-legacy-binding-rollout.jsonl"
   );
+  const processBirth = "Thu Aug  6 10:00:00 2026";
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -137,6 +139,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       pid: 33389,
       sessionId,
       processUuid: "codex-legacy-binding-process",
+      processBirth,
       rolloutPath: legacyRolloutPath
     });
     writeFakeTmux(
@@ -606,7 +609,7 @@ if (args.includes("cwd")) {
     assert.notEqual(staleProcessBirth.status, 0);
     assert.match(
       staleProcessBirth.stderr,
-      /expected terminal token no longer authorizes/u
+      /explicit terminal send token is stale; refresh AKK list/u
     );
     assert.equal(
       readJsonLines(tmuxCallsPath).filter(

@@ -3313,6 +3313,7 @@ function createHandoffFixture({
           : [])
       ] : [],
       agentVersionForRunningProcess: () => version,
+      processBirthForPid: () => processBirth,
       codexProcessBirthForPid: () => processBirth,
       // Imported executions share this Node process, but crash recovery must
       // observe the previous command owner as dead just as a real CLI restart
