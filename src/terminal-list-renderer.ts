@@ -80,11 +80,12 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 18,
+    version: 19,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Either nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
+      "A terminal_user_explicit send is the user's physical-terminal authority. A new user Send is gated only by one exact live physical prompt, no active approval prompt, and an exactly empty composer; AKK Turn, Session, deferred-transfer, transition, ledger, and Store health are not eligibility vetoes. AKK tries the managed fast path first. If AKK internal state prevents that path, it delivers the request once as unmanaged work, then best-effort releases the conflicting AKK management. When runtime durability is available, an omitted target binds its message_id to the first selected physical terminal and an existing or possibly existing same-ID record rejects automatic replay. If no record exists and durability is unavailable, user priority wins: AKK proceeds with a warning, and callers must not automatically retry that degraded result. The fallback creates no callback Turn and sends no callback; refresh list afterward and use Watch to observe the still-running task.",
       "The session_exact scope uses session_id only when it is prefilled by the listed send action. A rollout-backed managed Codex pane instead uses the terminal_follow_current scope with its exact terminal_id because even one materialized rollout does not prove the current TUI foreground thread. AKK derives and revalidates current terminal authority internally. A turn id is never an ordinary send target.",
-      "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, is only a discovery choice. If that terminal already has one rollout-backed managed Codex source, AKK captures fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. Unmanaged first attach retains its existing behavior.",
+      "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, is only a discovery choice. If that terminal already has one rollout-backed managed Codex source, the managed fast path captures fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. If that managed path proves zero input and fails, the separate terminal_user_explicit path may deliver once as unmanaged work.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations use terminal_id and, for resume, one complete native_thread_id; AKK resolves and revalidates current lifecycle authority internally. They never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id. AKK resolves current lifecycle authority internally, and AKK status does not execute a native slash command.",
       "Terminal Watch observes one exact human-started active task without sending terminal input or creating an AKK Session or Turn. Start it only from terminals[].available_actions.watch, pass that action's exact terminal_id, and use watch_id for later status or unwatch operations. AKK refreshes and revalidates current observation authority internally.",
@@ -97,7 +98,7 @@ export function listActionContracts(): JsonRecord {
       "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action. When a Codex managed prompt has no usable AKK Turn owner, list may expose one manual terminal-scoped approve action after exact observation. It does not mutate the Turn or Session binding, has no durable dispatch receipt, and is never eligible for automatic approval. If its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly.",
       "Start with the action's prefilled arguments, supply every missing_required field, and consult the top-level action's optional fields only when needed.",
       "Authoritative full IDs are prefilled; short_ref is for display and human input.",
-      "Availability is a snapshot. AKK revalidates process, provider-owned terminal identity, workspace, activity, approval, and recovery state before side effects."
+      "Availability is a snapshot. terminal_user_explicit revalidates the exact live process and provider-owned terminal identity, approval observation, and empty composer; activity and AKK recovery state never veto it. Other actions revalidate their action-specific workspace, activity, management, and recovery authority before side effects."
     ],
     field_semantics: {
       process_state: {
@@ -135,7 +136,7 @@ export function listActionContracts(): JsonRecord {
       },
       handoff_state: {
         meaning:
-          "why a conflict-scoped follow-current send is available or blocked",
+          "why a managed conflict-scoped follow-current send is available or blocked; it does not veto terminal_user_explicit physical Send",
         verified_empty_native_session_adoptable:
           "the exact current terminal snapshot permits the listed conflict send; availability is revalidated before terminal input"
       },
@@ -149,7 +150,7 @@ export function listActionContracts(): JsonRecord {
       },
       blocking_turns: {
         meaning:
-          "terminal-incarnation-wide unresolved managed Turns that suppress send, lifecycle, and native-inspection actions; each exact Turn remains explicitly closable even during a deferred transfer or human handoff",
+          "terminal-incarnation-wide unresolved managed Turns that suppress managed send, lifecycle, and native-inspection actions but never terminal_user_explicit physical Send; each exact Turn remains explicitly closable even during a deferred transfer or human handoff",
         authoritative_action_path:
           "terminals[].blocking_turns[].recovery_action",
         requires_explicit_user_confirmation: true,
@@ -172,7 +173,7 @@ export function listActionContracts(): JsonRecord {
           }
         },
         initial_attach_scope:
-          "A structured call uses the terminal_id prefilled by an unmanaged raw-terminal row's available send action, or omits the target only when exactly one eligible raw pane exists. Human slash commands may preserve a discovery selector explicitly named by the user. For an already managed rollout-backed Codex pane, an explicit or unique raw delegation internally captures fresh v3 candidate authority under lock; it never becomes a strict Session continuation.",
+          "A terminal_user_explicit structured call uses the terminal_id prefilled by an exact live terminal row's available send action, or omits the target only when exactly one send-ready pane exists. Human slash commands may preserve a discovery selector explicitly named by the user. This user-priority scope depends only on the exact live physical prompt, no active approval prompt, and an exactly empty composer. AKK first attempts the managed fast path; if AKK internal state blocks it, AKK delivers once as unmanaged work with no callback Turn or callback, then best-effort releases that management. Refresh list afterward and use Watch to observe the task.",
         required: ["request"],
         optional: [
           "session_id",
@@ -188,7 +189,7 @@ export function listActionContracts(): JsonRecord {
         candidate_rollout_deferred_scope:
           "A quiescent rollout-backed Codex source uses a listed follow-current send whenever AKK can pin a complete nonempty candidate inventory. Inventory status resolved means only that one rollout is materialized; it does not prove the current TUI foreground thread. Released predecessor Turn history stays read-only while a separate provisional Session sends once and waits for one unique post-anchor request acceptance. A /clear resume hint is diagnostic only and is not routing authority. Same-UUID and different-UUID results keep separate Session lineages; zero, multiple, drifted, or uncertain acceptance is never retried blindly. Explicit Close is the user-owned escape hatch: it closes the AKK Turn first, then best-effort releases only linked AKK metadata without terminal input or coding-agent interruption.",
         ordinary_use:
-          "Create a new managed Turn through the exact action listed for the pane. An explicit session_id never follows the pane and is unavailable for rollout-backed Codex Sessions; their listed follow-current action binds only the unique exact rollout that accepts the submitted request. A user-explicit or uniquely delegated raw send receives the same fresh under-lock candidate authority when it resolves to an already managed rollout-backed Codex source. A live terminal selector can also attach an unmanaged pane, adopt one verified human-selected native context, detach a verified-empty Codex source, or replace an eligible status-card/candidate-rollout source."
+          "Create a new managed Turn through the exact action listed for the pane when the managed fast path succeeds. An explicit session_id never follows the pane and is unavailable for rollout-backed Codex Sessions; their listed follow-current action binds only the unique exact rollout that accepts the submitted request. The managed path can attach an unmanaged pane, adopt one verified human-selected native context, detach a verified-empty Codex source, or replace an eligible status-card/candidate-rollout source. A terminal_user_explicit action gives the user's selected exact live physical prompt priority over broken AKK internal state: it may deliver once as unmanaged work with no callback Turn or callback, then best-effort release that management. Refresh list and use Watch for that still-running task."
       },
       retry_submission: {
         tool: "agent_knock_knock_send",

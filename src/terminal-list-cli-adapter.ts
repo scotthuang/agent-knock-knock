@@ -52,6 +52,8 @@ import {
   ensureStoreWritable,
   inspectStoreCompatibility,
   listConversations,
+  storeManifestPath,
+  type StoreCompatibility,
   STORE_SESSION_AUTHORITY_PROTOCOL
 } from "./store.js";
 import {
@@ -78,6 +80,7 @@ import {
   decideLocalTerminalDispatchOwnership,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
+  decideTerminalUserExplicitSendAuthority,
   managedTurnNeedsAttention as terminalManagedTurnNeedsAttention,
   nonOwnerTerminalActions,
   projectBlockingTurn,
@@ -581,13 +584,27 @@ function projectSelectorCandidate(
 
 async function runList(options: TerminalListCliOptions) {
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(cliCwd()));
-  const store = inspectStoreCompatibility(storeDir);
-  const reconciliation = options.reconcile === true
-    ? await reconcileStoreForList(storeDir, options)
-    : {
-        status: "disabled",
-        reason: "standalone list is read-only unless --reconcile is supplied"
+  const store = inspectStoreCompatibilityForTerminalList(storeDir);
+  let reconciliation: Record<string, unknown>;
+  if (options.reconcile === true) {
+    try {
+      reconciliation = await reconcileStoreForList(storeDir, options);
+    } catch (error) {
+      reconciliation = {
+        status: "failed",
+        reason: error instanceof Error ? error.message : String(error)
       };
+      runtimeLog("warn", "terminal_list_reconciliation_failed", {
+        store_dir: storeDir,
+        error: reconciliation.reason
+      });
+    }
+  } else {
+    reconciliation = {
+      status: "disabled",
+      reason: "standalone list is read-only unless --reconcile is supplied"
+    };
+  }
   const agentFilter = options.agent ? resolveExecutor({ kind: options.agent }).kind : undefined;
   const statusFilter = options.status;
   const terminalScan = await buildTerminalListGroup({ options, agentFilter, statusFilter });
@@ -625,6 +642,69 @@ async function runList(options: TerminalListCliOptions) {
   });
 }
 
+function inspectStoreCompatibilityForTerminalList(
+  storeDir: string
+): StoreCompatibility {
+  try {
+    return inspectStoreCompatibility(storeDir);
+  } catch (error) {
+    return {
+      status: "incompatible",
+      store_dir: storeDir,
+      manifest_path: storeManifestPath(storeDir),
+      readable: false,
+      writable: false,
+      reason: `AKK Store metadata is unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    };
+  }
+}
+
+function physicalOnlyTerminalProjection(
+  terminals: TerminalListScanEntry[],
+  reason: string
+): ReturnType<typeof terminalFirstListProjection> {
+  return {
+    terminals: terminals.map((terminal) => {
+      const {
+        _automated_input_composer_ready: _composer,
+        _codex_open_root_rollout_inventory: _inventory,
+        _codex_latent_clear_resume: _resume,
+        _terminal_user_explicit_send_action: terminalUserExplicitSendAction,
+        _terminal_status_snapshot: _status,
+        ...publicTerminal
+      } = terminal;
+      const actions = isRecord(publicTerminal.available_actions)
+        ? publicTerminal.available_actions
+        : {};
+      const send = isRecord(terminalUserExplicitSendAction)
+        ? terminalUserExplicitSendAction
+        : undefined;
+      const status = isRecord(actions.status) ? actions.status : undefined;
+      return {
+        ...publicTerminal,
+        management_state: "unavailable",
+        management_unavailable: { reason },
+        managed: {
+          session_id: null,
+          session_short_ref: null,
+          current_turn: null,
+          recent_turn: null,
+          turn_count: 0,
+          hidden_turn_count: 0,
+          session_count: 0
+        },
+        available_actions: {
+          ...(status ? { status } : {}),
+          ...(send ? { send } : {})
+        }
+      };
+    }),
+    unavailableManagedTurns: []
+  };
+}
+
 function projectTerminalListScan(input: {
   options: TerminalListCliOptions;
   storeDir: string;
@@ -644,11 +724,30 @@ function projectTerminalListScan(input: {
     tolerateInvalidWatchRecords
   } = input;
   const includeAll = Boolean(options.all);
-  const allManagedConversations = listConversations(storeDir)
-    .filter(terminalListRuntime().isDiscoverableTmuxConversation);
-  const managedSessions = store.readable
-    ? listManagedSessions(storeDir)
-    : [];
+  const managementErrors: string[] = [];
+  let allManagedConversations: Conversation[] = [];
+  try {
+    allManagedConversations = listConversations(storeDir)
+      .filter(terminalListRuntime().isDiscoverableTmuxConversation);
+  } catch (error) {
+    managementErrors.push(
+      `managed Turn inventory is unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+  let managedSessions: ManagedSessionState[] = [];
+  if (store.readable) {
+    try {
+      managedSessions = listManagedSessions(storeDir);
+    } catch (error) {
+      managementErrors.push(
+        `managed Session inventory is unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
   const displayedConversations = allManagedConversations
     .filter((conversation) =>
       includeAll || terminalListRuntime().isActiveStatus(conversation.status)
@@ -677,30 +776,62 @@ function projectTerminalListScan(input: {
       entry.workspace ?? entry.cwd
     )
   );
-  const projection = terminalFirstListProjection({
-    storeDir,
-    terminals: physicalTerminals,
-    managedSessions,
-    sessionAuthorityRequired:
-      Number(store.writer_protocol) >= STORE_SESSION_AUTHORITY_PROTOCOL,
-    allConversations: workspaceConversations,
-    displayedConversations,
-    includeAll,
-    managedOnly: options.managedOnly === true,
-    statusFilter,
-    mutationsAllowed: store.writable === true
-  });
+  let projection: ReturnType<typeof terminalFirstListProjection>;
+  if (managementErrors.length === 0) {
+    try {
+      projection = terminalFirstListProjection({
+        storeDir,
+        terminals: physicalTerminals,
+        managedSessions,
+        sessionAuthorityRequired:
+          Number(store.writer_protocol) >= STORE_SESSION_AUTHORITY_PROTOCOL,
+        allConversations: workspaceConversations,
+        displayedConversations,
+        includeAll,
+        managedOnly: options.managedOnly === true,
+        statusFilter,
+        mutationsAllowed: store.writable === true
+      });
+    } catch (error) {
+      managementErrors.push(
+        `managed terminal projection is unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      projection = physicalOnlyTerminalProjection(
+        physicalTerminals,
+        managementErrors.join("; ")
+      );
+    }
+  } else {
+    projection = physicalOnlyTerminalProjection(
+      physicalTerminals,
+      managementErrors.join("; ")
+    );
+  }
   const exactWatchScan = terminalListRuntime()
     .scanTerminalWatchesForExactObservation;
-  const watchObservation = tolerateInvalidWatchRecords && exactWatchScan
-    ? exactWatchScan(storeDir, { includeAll })
-    : {
-        watches: terminalListRuntime().listTerminalWatches?.(
-          storeDir,
-          { includeAll }
-        ) ?? [],
-        activeOverlayTrusted: true
-      };
+  let watchObservation: {
+    watches: JsonObject[];
+    activeOverlayTrusted: boolean;
+  };
+  try {
+    watchObservation = tolerateInvalidWatchRecords && exactWatchScan
+      ? exactWatchScan(storeDir, { includeAll })
+      : {
+          watches: terminalListRuntime().listTerminalWatches?.(
+            storeDir,
+            { includeAll }
+          ) ?? [],
+          activeOverlayTrusted: true
+        };
+  } catch (error) {
+    runtimeLog("warn", "terminal_watch_inventory_unavailable", {
+      store_dir: storeDir,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    watchObservation = { watches: [], activeOverlayTrusted: false };
+  }
   const observedTerminalWatches = watchObservation.watches;
   const terminalWatches = options.managedOnly
     ? []
@@ -739,7 +870,7 @@ async function observeExactTerminal(request: {
   const storeDir = expandHome(
     options.storeDir ?? options.logDir ?? defaultStoreDir(cliCwd())
   );
-  const store = inspectStoreCompatibility(storeDir);
+  const store = inspectStoreCompatibilityForTerminalList(storeDir);
   const scan = await buildTerminalListGroup({ options, terminalId });
   const matches = scan.terminalControlled.filter(
     (terminal) => stringValue(terminal.id) === terminalId
@@ -1124,16 +1255,22 @@ async function terminalControlledListEntry(
   const codexLifecycleIncarnationAvailable =
     session.agent !== "codex" ||
     Boolean(nativeProcessUuid && nativeProcessBirth);
-  const terminalHasBlockingTurn = terminalIncarnationBlockingTurns(
-    terminalListRuntime().storeDirFromOptions(options),
-    terminalControl
-  ).length > 0;
+  let terminalHasBlockingTurn = true;
+  try {
+    terminalHasBlockingTurn = terminalIncarnationBlockingTurns(
+      terminalListRuntime().storeDirFromOptions(options),
+      terminalControl
+    ).length > 0;
+  } catch (error) {
+    runtimeLog("warn", "terminal_managed_turn_inventory_unavailable", {
+      terminal_target: terminalControl.target,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
   const automatedInputComposerReady = await observeAutomatedInputComposerReady({
     session,
     terminalControl,
     terminalState: effectiveTerminalState,
-    nativeIdentityObservation,
-    codexOpenRootRolloutInventory,
     options
   });
   const entry = {
@@ -1233,11 +1370,39 @@ async function terminalControlledListEntry(
       terminalHasBlockingTurn
     })
   };
-  const availableActions = renderAvailableListActions(entry);
+  const renderedActions = renderAvailableListActions(entry);
+  const terminalUserExplicitSendAuthority =
+    decideTerminalUserExplicitSendAuthority({
+      exactTerminalRow: true,
+      terminalId: entry.id,
+      processState: entry.process_state,
+      terminalControl,
+      agent: session.agent,
+      pid: session.pid,
+      approvalScanned: effectiveTerminalState.approval_state.scanned === true,
+      approvalBlocked: effectiveTerminalState.approval_state.blocked === true,
+      exactEmptyComposer: automatedInputComposerReady
+    });
+  const terminalUserExplicitSendAction =
+    terminalUserExplicitSendAuthority.eligible
+      ? {
+          tool: "agent_knock_knock_send",
+          arguments: {
+            selector: terminalUserExplicitSendAuthority.terminalId,
+            expected_terminal_token:
+              terminalUserExplicitSendAuthority.expectedTerminalToken
+          },
+          missing_required: ["request"],
+          scope: "terminal_user_explicit"
+        }
+      : undefined;
   const { commands: _commands, ...publicEntry } = entry;
   return {
     ...publicEntry,
-    available_actions: availableActions
+    ...(terminalUserExplicitSendAction
+      ? { _terminal_user_explicit_send_action: terminalUserExplicitSendAction }
+      : {}),
+    available_actions: renderedActions
   };
 }
 
@@ -1458,8 +1623,16 @@ async function observeTerminalNativeListIdentity(
   options: TerminalListCliOptions,
   bridge: TerminalAgentBridge
 ): Promise<TerminalNativeListIdentityObservation> {
-  const orphanedDispatch =
-    terminalListRuntime().orphanedTerminalDispatchForRecovery(terminalControl);
+  let orphanedDispatch: TerminalDispatchLedgerDocument | undefined;
+  try {
+    orphanedDispatch =
+      terminalListRuntime().orphanedTerminalDispatchForRecovery(terminalControl);
+  } catch (error) {
+    runtimeLog("warn", "terminal_orphaned_dispatch_observation_unavailable", {
+      terminal_target: terminalControl.target,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
   let codexIdentityContext:
     | ReturnType<TerminalListDiscoveryPorts["codexManagedIdentityResolutionContext"]>
     | undefined;
@@ -1486,16 +1659,24 @@ async function observeTerminalNativeListIdentity(
       });
     }
   }
-  const nativeIdentityObservation =
-    await terminalListRuntime().observeCurrentNativeAgentSessionIdentity({
-      options,
-      agent: session.agent,
-      pid: session.pid,
-      cwd: session.cwd ?? terminalControl.currentPath,
-      preferredSessionId: codexIdentityContext?.preferredSessionId,
-      allowedCompanionIdentity: codexIdentityContext?.companions.primary,
-      allowedAdditionalIdentities: codexIdentityContext?.companions.additional
-    });
+  let nativeIdentityObservation: TerminalNativeIdentityObservation;
+  try {
+    nativeIdentityObservation =
+      await terminalListRuntime().observeCurrentNativeAgentSessionIdentity({
+        options,
+        agent: session.agent,
+        pid: session.pid,
+        cwd: session.cwd ?? terminalControl.currentPath,
+        preferredSessionId: codexIdentityContext?.preferredSessionId,
+        allowedCompanionIdentity: codexIdentityContext?.companions.primary,
+        allowedAdditionalIdentities: codexIdentityContext?.companions.additional
+      });
+  } catch (error) {
+    nativeIdentityObservation = {
+      status: "unavailable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
   const nativeAgentIdentity = nativeIdentityObservation.status === "resolved"
     ? nativeIdentityObservation.identity
     : undefined;
@@ -1569,15 +1750,11 @@ async function observeAutomatedInputComposerReady({
   session,
   terminalControl,
   terminalState,
-  nativeIdentityObservation,
-  codexOpenRootRolloutInventory,
   options
 }: {
   session: ActiveTerminalProcess;
   terminalControl: TerminalControlRef;
   terminalState: Awaited<ReturnType<typeof listStateForTerminal>>;
-  nativeIdentityObservation: TerminalNativeIdentityObservation;
-  codexOpenRootRolloutInventory?: CodexOpenRootRolloutInventory;
   options: TerminalListCliOptions;
 }): Promise<boolean> {
   let ready = terminalListRuntime().nativeInspectionComposerEmpty(
@@ -1586,16 +1763,6 @@ async function observeAutomatedInputComposerReady({
   );
   if (
     session.agent !== "codex" ||
-    (
-      terminalState.activity_state !== "idle" &&
-      (
-        terminalState.activity_state !== "unknown" ||
-        (
-          nativeIdentityObservation.status !== "verified_absent" &&
-          codexOpenRootRolloutInventory === undefined
-        )
-      )
-    ) ||
     terminalState.approval_state.blocked === true ||
     !terminalControl.capabilities.includes("send_keys") ||
     !terminalControl.capabilities.includes("screen_status")
@@ -1653,6 +1820,7 @@ function observeTerminalListBindingAuthority(
     _automated_input_composer_ready: automatedInputComposerReady,
     _codex_open_root_rollout_inventory: codexOpenRootRolloutInventoryValue,
     _codex_latent_clear_resume: codexLatentClearResumeValue,
+    _terminal_user_explicit_send_action: terminalUserExplicitSendAction,
     _terminal_status_snapshot: _terminalStatusSnapshot,
     ...publicTerminal
   } = terminal;
@@ -1902,6 +2070,7 @@ function observeTerminalListBindingAuthority(
     automatedInputComposerReady,
     codexOpenRootRolloutInventory,
     codexLatentClearResumeValue,
+    terminalUserExplicitSendAction,
     publicTerminal,
     terminalControl,
     terminalHasNonterminalDeferredTransfer,
@@ -2485,7 +2654,9 @@ function renderTerminalFirstListEntry(
   } = context;
   const {
     automatedInputComposerReady,
+    terminalUserExplicitSendAction,
     publicTerminal,
+    terminalControl,
     allRelated,
     displayedRelated,
     relatedSessions,
@@ -2661,8 +2832,23 @@ function renderTerminalFirstListEntry(
                 : {}),
               expected_terminal_token: sendAuthority.token
             }
-          }
+        }
         : undefined;
+  const managedFastPathToken = "token" in sendAuthority
+    ? sendAuthority.token
+    : undefined;
+  const prioritizedTerminalUserExplicitSendAction =
+    terminalUserExplicitSendAction && managedFastPathToken
+      ? {
+          ...terminalUserExplicitSendAction,
+          arguments: {
+            ...(isRecord(terminalUserExplicitSendAction.arguments)
+              ? terminalUserExplicitSendAction.arguments
+              : {}),
+            expected_managed_terminal_token: managedFastPathToken
+          }
+        }
+      : terminalUserExplicitSendAction;
   const availableActions = selectTerminalAvailableActions({
     ownership: ownership.state,
     currentActions: ownership.state === "current"
@@ -2672,6 +2858,8 @@ function renderTerminalFirstListEntry(
       sessionAwareRawActions as TerminalActionSet<Record<string, any>>,
     nonOwnerRawActions,
     authoritativeSendAction,
+    terminalUserExplicitSendAction:
+      prioritizedTerminalUserExplicitSendAction,
     reconcileBindingAction,
     terminalScopedApprovalAction: terminalScopedCodexApprovalAction,
     isAction: isRecord
@@ -3813,11 +4001,49 @@ async function resolveConversationSelectorOption(commandName, options): Promise<
       ? options.session ?? options.conversation ?? options.conversationId
       : options.turn ?? options.conversation ?? options.conversationId
   )?.trim();
-  if (supplied && !isSessionSelectorSyntax(supplied)) {
+  if (
+    supplied &&
+    !isSessionSelectorSyntax(supplied) &&
+    !(
+      sendOperation &&
+      supplied.startsWith("terminal:v") &&
+      !stringValue(options.expectedTerminalToken)
+    )
+  ) {
     // Full authoritative IDs keep their existing command-specific validation
     // path. This avoids a discovery scan before option validation and preserves
     // precise downstream errors for closed or currently non-actionable state.
     if (sendOperation) {
+      if (
+        supplied.startsWith("terminal:v") &&
+        stringValue(options.expectedTerminalToken)
+      ) {
+        try {
+          const observed = await observeExactTerminal({
+            options,
+            terminalId: supplied
+          });
+          const actions = observed.state === "available" &&
+              isRecord(observed.terminal.available_actions)
+            ? observed.terminal.available_actions
+            : {};
+          const send = isRecord(actions.send) ? actions.send : {};
+          const argumentsValue = isRecord(send.arguments)
+            ? send.arguments
+            : {};
+          options.expectedManagedTerminalToken =
+            stringValue(argumentsValue.expected_terminal_token) ===
+                stringValue(options.expectedTerminalToken)
+              ? stringValue(
+                  argumentsValue.expected_managed_terminal_token
+                )
+              : undefined;
+        } catch {
+          // Managed fast-path discovery is optional. The physical Send token
+          // is still revalidated by execution and may fall back without Store.
+          options.expectedManagedTerminalToken = undefined;
+        }
+      }
       options.session = supplied;
     } else {
       options.turn = supplied;
@@ -3829,11 +4055,28 @@ async function resolveConversationSelectorOption(commandName, options): Promise<
     operation: commandName
   });
   if (sendOperation) {
-    options.session = resolution.id;
+    const physical = resolution.candidate.userExplicitTerminalSend;
+    if (!physical) {
+      throw new Error(
+        "the selected terminal no longer advertises user-priority Send"
+      );
+    }
+    // Human selectors are discovery conveniences. Record the freshly resolved
+    // full terminal id as the trusted internal selector before the physical
+    // token reaches execution.
+    terminalListRuntime().rememberOriginalExpectedTerminalSelector(
+      options,
+      physical.terminalId
+    );
+    options.expectedTerminalToken = physical.expectedTerminalToken;
+    options.expectedManagedTerminalToken =
+      physical.expectedManagedTerminalToken;
+    options.session = physical.terminalId;
+    options.conversation = physical.terminalId;
   } else {
     options.turn = resolution.id;
+    options.conversation = resolution.id;
   }
-  options.conversation = resolution.id;
   delete options.conversationId;
 }
 
@@ -3844,10 +4087,84 @@ function isSessionSelectorSyntax(value: string): boolean {
   );
 }
 
+interface UserExplicitSendSelectorCandidate extends SessionSelectorCandidate {
+  userExplicitTerminalSend?: {
+    terminalId: string;
+    expectedTerminalToken: string;
+    expectedManagedTerminalToken?: string;
+  };
+}
+
 async function sessionSelectorCandidates(
   commandName,
   options
-): Promise<SessionSelectorCandidate[]> {
+): Promise<UserExplicitSendSelectorCandidate[]> {
+  const terminalScan = await buildTerminalListGroup({
+    options: {
+      ...options,
+      noApprovalScan: commandName === "send"
+        ? false
+        : ["approve", "cancel"].includes(commandName)
+          ? options.noApprovalScan
+          : true
+    },
+    agentFilter: undefined,
+    statusFilter: undefined
+  });
+  const observedAtMs = cliNowMs();
+  if (commandName === "send") {
+    return terminalScan.terminalControlled
+      .filter((entry) => terminalListRuntime().matchesConfiguredWorkspace(
+        options.workspace,
+        entry.workspace ?? entry.cwd
+      ))
+      .flatMap((entry) => {
+        const action = isRecord(entry._terminal_user_explicit_send_action)
+          ? entry._terminal_user_explicit_send_action
+          : undefined;
+        const argumentsValue = isRecord(action?.arguments)
+          ? action.arguments
+          : undefined;
+        const terminalId = stringValue(entry.id);
+        const expectedTerminalToken = stringValue(
+          argumentsValue?.expected_terminal_token
+        );
+        if (
+          action?.scope !== "terminal_user_explicit" ||
+          !terminalId ||
+          stringValue(
+            argumentsValue?.selector ?? argumentsValue?.terminal_id
+          ) !== terminalId ||
+          !expectedTerminalToken
+        ) {
+          return [];
+        }
+        const candidate = projectSelectorCandidate({
+          ...entry,
+          available_actions: { send: action }
+        }, commandName, observedAtMs, {
+          defaultActionable: true,
+          // Physical Send authority is independent of Store writability.
+          mutationsAllowed: true
+        });
+        return [{
+          ...candidate,
+          userExplicitTerminalSend: {
+            terminalId,
+            expectedTerminalToken,
+            ...(stringValue(
+              argumentsValue?.expected_managed_terminal_token
+            ) === undefined
+              ? {}
+              : {
+                  expectedManagedTerminalToken: stringValue(
+                    argumentsValue?.expected_managed_terminal_token
+                  )
+                })
+          }
+        }];
+      });
+  }
   const storeDir = terminalListRuntime().storeDirFromOptions(options);
   const mutationsAllowed = inspectStoreCompatibility(storeDir).writable === true;
   const selectorStore = inspectStoreCompatibility(storeDir);
@@ -3868,16 +4185,6 @@ async function sessionSelectorCandidates(
         }
       )
   );
-  const terminalScan = await buildTerminalListGroup({
-    options: {
-      ...options,
-      noApprovalScan: ["send", "approve", "cancel"].includes(commandName)
-        ? options.noApprovalScan
-        : true
-    },
-    agentFilter: undefined,
-    statusFilter: undefined
-  });
   const terminalProjection = terminalFirstListProjection({
     storeDir,
     terminals: terminalScan.terminalControlled.filter((entry) =>
@@ -3900,99 +4207,6 @@ async function sessionSelectorCandidates(
     statusFilter: undefined,
     mutationsAllowed
   });
-  const observedAtMs = cliNowMs();
-  if (commandName === "send") {
-    const sessionEntries = terminalProjection.terminals.flatMap((entry) => {
-      const managedState = isRecord(entry.managed) ? entry.managed : undefined;
-      const recentTurn = isRecord(managedState?.recent_turn)
-        ? managedState.recent_turn
-        : undefined;
-      const currentTurn = isRecord(managedState?.current_turn)
-        ? managedState.current_turn
-        : undefined;
-      const sessionId = stringValue(managedState?.session_id);
-      const actions = isRecord(entry.available_actions)
-        ? entry.available_actions
-        : undefined;
-      const sendAction = isRecord(actions?.send)
-        ? actions.send
-        : undefined;
-      const sendArguments = isRecord(sendAction?.arguments)
-        ? sendAction.arguments
-        : undefined;
-      if (
-        !sessionId ||
-        !sendAction ||
-        stringValue(sendArguments?.session_id) !== sessionId
-      ) {
-        return [];
-      }
-      const commonEntry = {
-        agent: entry.agent,
-        status: "idle",
-        workspace: entry.workspace ?? entry.cwd,
-        updated_at:
-          recentTurn?.updated_at ??
-          currentTurn?.updated_at,
-        available_actions: {
-          send: sendAction
-        }
-      };
-      return [
-        {
-          ...commonEntry,
-          id: sessionId,
-          short_ref: sessionShortRef(sessionId),
-          source: "managed_session"
-        },
-        {
-          ...commonEntry,
-          id: String(entry.id),
-          short_ref: stringValue(entry.short_ref) ??
-            sessionShortRef(String(entry.id)),
-          source: "managed_session_terminal_alias"
-        }
-      ];
-    });
-    const rawTerminalEntries = terminalProjection.terminals.filter((entry) => {
-      const managedState = isRecord(entry.managed) ? entry.managed : undefined;
-      const actions = isRecord(entry.available_actions)
-        ? entry.available_actions
-        : undefined;
-      const sendAction = isRecord(actions?.send) ? actions.send : undefined;
-      const sendArguments = isRecord(sendAction?.arguments)
-        ? sendAction.arguments
-        : undefined;
-      return (
-        !stringValue(managedState?.session_id) ||
-        !stringValue(sendArguments?.session_id)
-      );
-    });
-    return [
-      ...managed.map((entry) =>
-        projectSelectorCandidate(entry, commandName, observedAtMs, {
-          defaultActionable: false,
-          mutationsAllowed
-        })
-      ),
-      ...sessionEntries.map((entry) =>
-        projectSelectorCandidate(entry, commandName, observedAtMs, {
-          // A managed terminal's full id/@short-ref is an explicit alias for
-          // its Session send target. It must not duplicate the Session in
-          // omitted, only, latest, or agent-name selection.
-          defaultActionable:
-            entry.source !== "managed_session_terminal_alias",
-          mutationsAllowed
-        })
-      ),
-      ...rawTerminalEntries.map((entry) =>
-        projectSelectorCandidate(entry, commandName, observedAtMs, {
-          defaultActionable: true,
-          mutationsAllowed
-        })
-      )
-    ];
-  }
   return [
     ...managed.map((entry) =>
       projectSelectorCandidate(entry, commandName, observedAtMs, {

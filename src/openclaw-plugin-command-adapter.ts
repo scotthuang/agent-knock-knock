@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { executorDefinitionForKind } from "./executors.js";
 import {
@@ -84,7 +84,7 @@ export function registerOpenClawCommands(
       default: "AKK is handling the request..."
     },
     agentPromptGuidance: [
-      "Use /akk <task> when exactly one eligible idle coding-agent terminal pane should receive new work. Structured tools use only semantic identifiers returned by AKK: session_id for an exact managed context, terminal_id for the currently verified pane, turn_id for one managed Turn, watch_id for one Terminal Watch, and native_thread_id for one resumable native thread. AKK keeps all opaque freshness authority private and revalidates it under its locks. Use /akk watch only from a currently advertised watch action to observe one human-started active task; it sends no input and creates no Session or Turn. New/clear/resume, approval, reconciliation, handoff, and recovery still require the documented user intent or explicit confirmation. AKK never starts a coding-agent process."
+      "Use /akk <task> when exactly one send-ready coding-agent terminal pane should receive new work. Send-ready means an exact live process and terminal, a verified non-blocked approval state, and an exactly empty composer; parsed activity and broken AKK management state do not veto the user's Send. Structured tools use only semantic identifiers returned by AKK: session_id for an exact managed context, terminal_id for the currently verified pane, turn_id for one managed Turn, watch_id for one Terminal Watch, and native_thread_id for one resumable native thread. AKK keeps all opaque freshness authority private and revalidates it under its locks. Use /akk watch only from a currently advertised watch action to observe one human-started active task; it sends no input and creates no Session or Turn. New/clear/resume, approval, reconciliation, handoff, and recovery still require the documented user intent or explicit confirmation. AKK never starts a coding-agent process."
     ],
     handler: async (ctx) => handleAkkCommand(
       api,
@@ -95,7 +95,7 @@ export function registerOpenClawCommands(
 
   registerCliTool(api, {
     name: "agent_knock_knock_list",
-    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources, plus durable terminal_watches[] records. Use only advertised actions and their semantic IDs. AKK keeps opaque freshness authority private and revalidates terminal, binding, candidate, approval, and handoff state before every side effect. A session_exact send uses session_id; terminal_follow_current and Watch use terminal_id; managed controls use turn_id; lifecycle resume additionally uses the complete native_thread_id. Recovery actions remain explicit-confirmation operations. AKK never starts a coding-agent process.",
+    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources, plus durable terminal_watches[] records. Use only advertised actions and their semantic IDs. A terminal_user_explicit send is user-priority authority for one exact live physical prompt with no active approval and an empty composer; broken AKK Turn, Session, transfer, ledger, or Store state does not veto a new user Send. AKK tries the managed fast path first, then delivers once as unmanaged work with no callback before best-effort management release. Existing or possibly existing same-message idempotency evidence rejects replay. If fresh durability is unavailable, AKK proceeds with a warning and the result must not be automatically retried. Refresh list afterward and use Watch. A session_exact send uses session_id; terminal_follow_current and terminal_user_explicit Send use terminal_id; Watch uses terminal_id; managed controls use turn_id; lifecycle resume additionally uses the complete native_thread_id. AKK keeps opaque freshness authority private and never starts a coding-agent process.",
     parameters: listParameters,
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -397,7 +397,7 @@ export function registerOpenClawCommands(
       label: "AKK Send",
       name: "agent_knock_knock_send",
       description:
-        "Start a new AKK Turn, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. Retry submission is the mutually exclusive exact {turn_id} form: the caller cannot supply or change request text, terminal, Session, timeout, or callback route data. AKK may press Enter once for the proven exact original draft, or retransmit the immutable original request once only when durable evidence proves Enter was never attempted and the live composer is positively empty. AKK derives all freshness authority privately, revalidates the exact durable Turn/pane/process/context under lock, and otherwise fails closed. A Turn id is never an ordinary-send destination. This is asynchronous: after acceptance, yield and wait for the callback or an explicit status request.",
+        "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit is gated only by one exact live physical prompt, no active approval prompt, and an empty composer. AKK tries its managed fast path first; if broken internal AKK state prevents it, AKK delivers once as unmanaged work with no callback Turn or callback before best-effort management release. Refresh list afterward and use Watch. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. AKK derives all freshness authority privately. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
       parameters: sendParameters,
       async execute(toolCallId, params) {
         try {
@@ -616,10 +616,17 @@ async function handleAkkCommand(
     }
     if (parsed.action === "delegate") {
       const result = await runDelegate(api, {
-        request: parsed.request
+        request: parsed.request,
+        messageId: `openclaw-command-${randomUUID()}`
       }, {
         sessionKey: ctx.sessionKey
       });
+      if (result.scope === "terminal_user_explicit") {
+        return {
+          text: formatSendCommandResult(result),
+          isError: sendCommandResultIsError(result)
+        };
+      }
       return {
         text: formatDelegateCommandResult(result),
         isError: result.status !== "async_pending"
@@ -645,7 +652,10 @@ async function handleAkkCommand(
           sessionId: requiredOpenClawSessionId(ctx.sessionId)
         })
       : buildAkkCommandCliArgs(parsed, config, {
-          sessionKey: ctx.sessionKey
+          sessionKey: ctx.sessionKey,
+          messageId: parsed.action === "send"
+            ? `openclaw-command-${randomUUID()}`
+            : undefined
         });
     if (!args) {
       return { text: akkUsageText(), isError: true };
@@ -672,9 +682,7 @@ async function handleAkkCommand(
       case "send":
         return {
           text: formatSendCommandResult(result),
-          isError: terminalSubmissionReported(result)
-            ? !isAkkNativeSubmissionAccepted(result)
-            : result.status === "delivered_unfenced"
+          isError: sendCommandResultIsError(result)
         };
       case "respond":
         return formatAkkRespondCommandResult(result);
@@ -699,6 +707,15 @@ async function handleAkkCommand(
       isError: true
     };
   }
+}
+
+function sendCommandResultIsError(result) {
+  return result.delivered === true &&
+    result.scope === "terminal_user_explicit"
+    ? false
+    : terminalSubmissionReported(result)
+      ? !isAkkNativeSubmissionAccepted(result)
+      : result.status === "delivered_unfenced";
 }
 
 async function handleAkkLifecycleCommand(
@@ -1078,6 +1095,39 @@ function formatRetryCallbackCommandResult(result) {
 }
 
 function formatSendCommandResult(result) {
+  if (
+    result.scope === "terminal_user_explicit"
+  ) {
+    const unmanaged = result.delivered_unmanaged === true;
+    const replayed = result.replayed === true;
+    if (result.delivered !== true) {
+      return [
+        "AKK already dispatched this managed terminal Send; native acceptance is still pending.",
+        `terminal: ${result.terminal_id ?? "unknown"}`,
+        `message: ${result.message_id ?? "unknown"}`,
+        "delivery: Enter dispatched; do not resend this message id.",
+        "next: inspect AKK status or the terminal; wait for the existing managed Turn."
+      ].join("\n");
+    }
+    return [
+      unmanaged
+        ? replayed
+          ? "AKK confirmed this direct terminal Send was already delivered."
+          : "AKK delivered the user's request directly to the coding agent."
+        : replayed
+          ? "AKK confirmed this managed terminal Send was already delivered."
+          : "AKK delivered the user's terminal Send through managed routing.",
+      `terminal: ${result.terminal_id ?? "unknown"}`,
+      `message: ${result.message_id ?? "unknown"}`,
+      `delivery: ${unmanaged ? "unmanaged fallback" : "managed"}`,
+      ...(unmanaged
+        ? ["callback: none; no AKK Turn was created for this delivery."]
+        : []),
+      unmanaged
+        ? "next: refresh AKK list and use Watch to observe the still-running coding-agent task."
+        : "next: refresh AKK list; do not resend this message id."
+    ].join("\n");
+  }
   const conversation = result.conversation ?? {};
   const conversationId = conversation.conversation_id ?? result.conversation_id ?? "unknown";
   const sessionId = conversation.session_id ?? result.session_id ?? conversationId;
@@ -1383,7 +1433,6 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
         "current internal terminal send authority"
       )
     : undefined;
-
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const openclawSession =
     stringValue(toolContext?.sessionKey) ??
@@ -1947,6 +1996,12 @@ function isSubmissionError(result: unknown): boolean {
   if (!isRecord(result)) {
     return false;
   }
+  if (
+    result.delivered === true &&
+    result.scope === "terminal_user_explicit"
+  ) {
+    return false;
+  }
   if (terminalSubmissionReported(result)) {
     return !isAkkNativeSubmissionAccepted(result);
   }
@@ -2076,6 +2131,12 @@ async function runDelegate(api, params, toolContext) {
   const parsed = withTurnIdentity(await runCliAsync(api, args));
   if (!isRecord(parsed)) {
     throw new Error("agent-knock-knock delegate returned a non-object result");
+  }
+  if (parsed.scope === "terminal_user_explicit") {
+    // A uniquely delegated user-priority Send may deliberately complete
+    // without creating a managed Turn. Preserve that terminal receipt for the
+    // shared Send formatter instead of inventing Session/Turn identity.
+    return parsed;
   }
   const conversationId = stringValue(parsed.conversation_id) ??
     (isRecord(parsed.conversation)

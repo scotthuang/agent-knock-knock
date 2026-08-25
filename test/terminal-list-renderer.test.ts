@@ -104,9 +104,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v18 exposes semantic arguments only", () => {
+test("the public action contract v19 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 18);
+  assert.equal(contracts.version, 19);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -149,6 +149,14 @@ test("the public action contract v18 exposes semantic arguments only", () => {
     assert.equal(encoded.includes(forbidden), false, forbidden);
   }
   const actions = contracts.actions as Record<string, any>;
+  assert.match(
+    (contracts.instructions as string[]).join("\n"),
+    /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*best-effort releases[\s\S]*no callback[\s\S]*use Watch/u
+  );
+  assert.match(
+    actions.send.initial_attach_scope,
+    /terminal_user_explicit[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback/u
+  );
   assert.deepEqual(actions.retry_submission, {
     tool: "agent_knock_knock_send",
     target_argument: "turn_id",

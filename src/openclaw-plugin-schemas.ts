@@ -42,7 +42,7 @@ export const sendParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal-scoped send action. AKK derives and revalidates current terminal authority internally. Human discovery selectors remain slash-command inputs and are not structured-tool authority. Omit both target fields only when AKK should attach the unique eligible idle pane."
+        "Exact full terminal_id from the current terminal-scoped send action. For terminal_user_explicit, it identifies one exact live physical prompt with no active approval and an empty composer. AKK tries the managed fast path first; when internal AKK state is broken, it performs one unmanaged delivery with no callback and only then attempts best-effort management release. Refresh list afterward and use Watch. Human discovery selectors are not structured-tool authority. Omit both target fields only when AKK should select the unique send-ready pane."
     },
     request: {
       type: "string",

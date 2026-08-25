@@ -187,6 +187,15 @@ test("cli-core AST remains a stable facade without owned state machines", () => 
       `${symbol} must remain in its canonical policy owner`
     );
   }
+  const preflightStart = source.indexOf("function preflightStoreWriter");
+  const preflightEnd = source.indexOf("function terminalRuntime", preflightStart);
+  const preflight = source.slice(preflightStart, preflightEnd);
+  assert.ok(
+    preflight.indexOf('commandName === "delegate"') >= 0 &&
+      preflight.indexOf('commandName === "delegate"') <
+        preflight.indexOf("assertStoreWriterCompatible"),
+    "user-priority delegate must bypass the global Store writer preflight"
+  );
 
   for (const symbol of [
     "assertSafeTerminalSend",

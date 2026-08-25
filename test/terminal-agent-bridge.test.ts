@@ -2051,7 +2051,7 @@ test("Codex multiline send fails closed on identity drift without cleanup or Ent
     terminalProvider: provider,
     async verifyIdentity() {
       checks += 1;
-      if (checks > 1) {
+      if (checks > 2) {
         throw new Error("Codex process identity drifted after multiline paste");
       }
     }
@@ -3745,7 +3745,7 @@ test("send leaves injected text untouched and never submits after identity failu
     terminalProvider: provider,
     async verifyIdentity() {
       checks += 1;
-      if (checks === 2) {
+      if (checks === 3) {
         throw new Error("agent exited after text injection");
       }
     }
@@ -3786,6 +3786,7 @@ test("send resolves a stable endpoint again for text and Enter routes", async ()
   );
   const provider = new SequencedResolutionProvider([
     textEndpoint,
+    textEndpoint,
     enterEndpoint
   ]);
   const bridge = createBridge(adapter, provider);
@@ -3802,7 +3803,7 @@ test("send resolves a stable endpoint again for text and Enter routes", async ()
   });
 
   assert.equal(result.stage, "enter_dispatched");
-  assert.equal(provider.resolveCount, 2);
+  assert.equal(provider.resolveCount, 3);
   assert.deepEqual(stages, ["text_injected", "enter_dispatched"]);
   assert.deepEqual(provider.operations, [
     {
@@ -3871,6 +3872,7 @@ test("send preserves not-started and post-injection uncertainty across endpoint 
     await t.test(`${drift.label} drift after text never presses Enter`, async () => {
       const provider = new SequencedResolutionProvider([
         freshTextEndpoint,
+        freshTextEndpoint,
         drift.endpoint
       ]);
       const bridge = createBridge(adapter, provider);
@@ -3896,7 +3898,7 @@ test("send preserves not-started and post-injection uncertainty across endpoint 
           return true;
         }
       );
-      assert.equal(provider.resolveCount, 2);
+      assert.equal(provider.resolveCount, 3);
       assert.deepEqual(stages, ["text_injected"]);
       assert.deepEqual(provider.operations, [{
         kind: "text",
@@ -3904,6 +3906,39 @@ test("send preserves not-started and post-injection uncertainty across endpoint 
         text: "do work",
         socketPath: PANE.socketPath
       }]);
+    });
+
+    await t.test(`${drift.label} drift after beforeText sends no input`, async () => {
+      const provider = new SequencedResolutionProvider([
+        freshTextEndpoint,
+        drift.endpoint
+      ]);
+      const bridge = createBridge(adapter, provider);
+      const control = provider.toControlRef(
+        initialEndpoint,
+        terminalControl(adapter).capabilities
+      );
+      let beforeTextCalled = false;
+
+      await assert.rejects(
+        bridge.send("claude", control, "do work", {
+          beforeText() {
+            beforeTextCalled = true;
+          }
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof TerminalInputNotStartedError);
+          assert.equal(error.code, "AKK_TERMINAL_INPUT_NOT_STARTED");
+          assert.match(
+            error.message,
+            /stable resource or process anchor changed/u
+          );
+          return true;
+        }
+      );
+      assert.equal(beforeTextCalled, true);
+      assert.equal(provider.resolveCount, 2);
+      assert.deepEqual(provider.operations, []);
     });
   }
 });

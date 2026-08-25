@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 1681,
-    "production_physical_loc": 111949,
+    "cli_core_max_physical_loc": 1713,
+    "production_physical_loc": 114467,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -849,6 +849,10 @@
       "owner": "terminal-delegate-adapter"
     },
     {
+      "path": "src/terminal-delegate-send-binding.ts",
+      "owner": "terminal-delegate-adapter"
+    },
+    {
       "path": "src/terminal-dispatch-abort.ts",
       "owner": "terminal-dispatch-abort"
     },
@@ -1015,6 +1019,10 @@
     {
       "path": "src/terminal-turn-binding-authority-cli-adapter.ts",
       "owner": "terminal-identity-authority"
+    },
+    {
+      "path": "src/terminal-user-send-intent.ts",
+      "owner": "terminal-dispatch-core"
     },
     {
       "path": "src/terminal-watch-callback-cli-adapter.ts",

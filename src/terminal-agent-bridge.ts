@@ -918,6 +918,27 @@ export class TerminalAgentBridge {
       }
     }
     try {
+      const reverifiedForText = await this.verifyTerminalIdentity(
+        adapter.agent,
+        verifiedForText,
+        options.runtime
+      );
+      if (!sameTerminalControlIdentity(verifiedForText, reverifiedForText)) {
+        throw new Error(
+          "terminal identity changed after the final pre-text check"
+        );
+      }
+      verifiedForText = reverifiedForText;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (exactEmptyRetryAuthority) {
+        throw new TerminalEnterDispatchReservedError(message, {
+          cause: error
+        });
+      }
+      throw new TerminalInputNotStartedError(message, { cause: error });
+    }
+    try {
       await this.terminalProvider.sendText(
         this.terminalProvider.endpoint(verifiedForText),
         normalized

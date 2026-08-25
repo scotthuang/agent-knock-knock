@@ -3565,7 +3565,7 @@ test("an accepted deferred Turn recovers before Session commit without replay", 
   }
 });
 
-test("deferred send without exact request acceptance stays uncertain and blocks replay", async () => {
+test("abandoned deferred history blocks replay but not an explicit terminal send", async () => {
   const fixture = createNoRolloutFixture({
     codexVersion: "0.147.0",
     rolloutInitiallyAbsent: true
@@ -3601,6 +3601,84 @@ test("deferred send without exact request acceptance stays uncertain and blocks 
     assert.equal(transfer.status, "uncertain");
     assert.equal(transfer.do_not_retry, true);
     assertSingleTaskInput(fixture, message);
+
+    const closed = await runCli([
+      "close",
+      "--turn",
+      String(output.turn_id),
+      ...codexNoRolloutStoreArgs(fixture)
+    ], fixture.environment);
+    assert.equal(closed.status, 0, closed.stderr || closed.stdout);
+    transfer = soleDeferredForegroundTransfer(fixture);
+    assert.equal(transfer.status, "user_abandoned");
+
+    const detachedSource = loadManagedSession(
+      fixture.storeDir,
+      transfer.source_session_id
+    );
+    assert.equal(detachedSource.status, "detached");
+    assert.equal(detachedSource.last_transition_id, transfer.transfer_id);
+    assert.ok(detachedSource.binding);
+    assert.ok(detachedSource.detached_at);
+    const rolloutStat = fs.statSync(fixture.rolloutPath);
+    const reattachedAt = new Date(
+      Date.parse(detachedSource.detached_at) + 1_000
+    );
+    const reattached = saveManagedSession(fixture.storeDir, {
+      ...detachedSource,
+      status: "bound",
+      binding: terminalBindingFrom({
+        terminalId: fixture.terminalId,
+        terminalControl: fixture.terminalControl,
+        pid: fixture.codexPid,
+        nativeThreadId: NATIVE_THREAD_ID,
+        processUuid: processUuid(fixture.codexPid, LIVE_PROCESS_BIRTH),
+        processBirth: LIVE_PROCESS_BIRTH,
+        rollout: {
+          fd: "24",
+          device: String(rolloutStat.dev),
+          inode: String(rolloutStat.ino),
+          path: fs.realpathSync(fixture.rolloutPath)
+        },
+        evidence: "codex_open_root_rollout",
+        generation: detachedSource.binding.generation + 1,
+        now: reattachedAt
+      }),
+      detached_at: undefined,
+      updated_at: reattachedAt.toISOString()
+    }, { expectedRevision: detachedSource.revision as number });
+    assert.equal(reattached.last_transition_id, transfer.transfer_id);
+
+    enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+    fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
+    const relisted = await listFixtureTerminal(fixture);
+    const explicitSend = relisted.available_actions.send;
+    assert.ok(explicitSend, JSON.stringify(relisted, null, 2));
+    assert.equal(explicitSend.scope, "terminal_user_explicit");
+    assert.equal(explicitSend.arguments.selector, fixture.terminalId);
+    assert.equal("session_id" in explicitSend.arguments, false);
+    assert.equal(
+      typeof explicitSend.arguments.expected_terminal_token,
+      "string"
+    );
+
+    const explicitMessage =
+      "Continue after the abandoned deferred transfer was reattached.";
+    const callsBeforeExplicitSend = taskInputCalls(fixture).length;
+    fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+    const sent = await runCli(
+      deferredForegroundSendArgs(fixture, explicitSend, explicitMessage),
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    assert.deepEqual(
+      taskInputCalls(fixture).slice(callsBeforeExplicitSend)
+        .map((call) => call.args),
+      [
+        ["send-keys", "-t", fixture.inputTarget, "-l", explicitMessage],
+        ["send-keys", "-t", fixture.inputTarget, "C-m"]
+      ]
+    );
   } finally {
     fixture.cleanup();
   }
