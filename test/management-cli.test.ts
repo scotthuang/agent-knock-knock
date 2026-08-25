@@ -160,10 +160,14 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 18);
+    assert.equal(listed.action_contracts.version, 19);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*internal state prevents[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -294,7 +298,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       listed.action_contracts.field_semantics.blocking_turns,
       {
         meaning:
-          "terminal-incarnation-wide unresolved managed Turns that suppress send, lifecycle, and native-inspection actions; each exact Turn remains explicitly closable even during a deferred transfer or human handoff",
+          "terminal-incarnation-wide unresolved managed Turns that suppress managed send, lifecycle, and native-inspection actions but never terminal_user_explicit physical Send; each exact Turn remains explicitly closable even during a deferred transfer or human handoff",
         authoritative_action_path:
           "terminals[].blocking_turns[].recovery_action",
         requires_explicit_user_confirmation: true,
@@ -364,7 +368,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.initial_attach_scope,
-      /terminal_id prefilled by an unmanaged raw-terminal row[\s\S]*selector explicitly named by the user/u
+      /terminal_user_explicit[\s\S]*terminal_id prefilled by an exact live terminal row[\s\S]*selector explicitly named by the user/u
     );
     assert.deepEqual(
       listed.action_contracts.actions.send.required,
@@ -639,7 +643,7 @@ test("list exposes terminal-controlled Codex working activity state", async () =
   const workingScreen = [
     "• Working (8s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
     "",
-    "› Continue implementation"
+    "›"
   ].join("\n");
 
   try {
@@ -680,7 +684,10 @@ test("list exposes terminal-controlled Codex working activity state", async () =
     assert.equal(listed.terminals[0].approval_state.blocked, false);
     assert.equal(listed.terminals[0].approval_state.approvable, false);
     assert.equal("commands" in listed.terminals[0], false);
-    assert.equal(listed.terminals[0].available_actions.send, undefined);
+    assert.equal(
+      listed.terminals[0].available_actions.send.scope,
+      "terminal_user_explicit"
+    );
     assert.deepEqual(
       listed.terminals[0].available_actions.cancel.arguments,
       { conversation_id: listed.terminals[0].id }
@@ -918,10 +925,15 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     assert.equal(codex.source, "terminal");
     assert.equal(codex.process_state, "active");
     assert.equal("commands" in codex, false);
-    assert.deepEqual(
-      codex.available_actions.send.arguments,
-      { selector: codex.id }
+    assert.equal(
+      codex.available_actions.send.arguments.selector,
+      codex.id
     );
+    assert.equal(
+      typeof codex.available_actions.send.arguments.expected_terminal_token,
+      "string"
+    );
+    assert.equal(codex.available_actions.send.scope, "terminal_user_explicit");
     assert.deepEqual(
       codex.available_actions.send.missing_required,
       ["request"]
@@ -937,10 +949,15 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     assert.equal(claude.source, "terminal");
     assert.equal(claude.process_state, "active");
     assert.equal("commands" in claude, false);
-    assert.deepEqual(
-      claude.available_actions.send.arguments,
-      { selector: claude.id }
+    assert.equal(
+      claude.available_actions.send.arguments.selector,
+      claude.id
     );
+    assert.equal(
+      typeof claude.available_actions.send.arguments.expected_terminal_token,
+      "undefined"
+    );
+    assert.equal(claude.available_actions.send.scope, undefined);
     assert.equal(claude.available_actions.cancel, undefined);
     assert.equal(claude.terminal_control.capabilities.includes("durable_completion"), true);
     assert.equal(claude.terminal_control.capabilities.includes("screen_completion"), false);

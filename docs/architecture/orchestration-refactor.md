@@ -2782,7 +2782,7 @@ retaining this commit as the historical comparison point.
 Issue #206 adds Terminal Watch as a new aggregate beside, not inside, the
 managed Session/Turn architecture. The v16 action-contract and 14-tool sections
 above remain immutable historical snapshots; the current public delta is list
-action-contract v18 and 16 registered OpenClaw tools.
+action-contract v19 and 16 registered OpenClaw tools.
 
 ### Aggregate and persistence boundary
 

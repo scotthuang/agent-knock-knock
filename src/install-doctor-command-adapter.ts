@@ -44,7 +44,7 @@ export function runInstallOpenClaw(options: InstallDoctorCommandOptions): void {
   }
   if (options.defaultAgent !== undefined) {
     throw new Error(
-      "--default-agent was removed; AKK now selects the only eligible idle terminal pane"
+      "--default-agent was removed; AKK now selects the only send-ready terminal pane"
     );
   }
   if (options.mode !== undefined) {

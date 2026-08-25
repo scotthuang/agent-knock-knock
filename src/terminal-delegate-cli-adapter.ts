@@ -1,14 +1,11 @@
 // CLI composition for delegate discovery and exact idempotent replay routing.
 import { createHash } from "node:crypto";
-import path from "node:path";
 
 import {
   executorDefinitionForKind,
   type ExecutorKind,
   resolveExecutor
 } from "./executors.js";
-import type { ManagedSessionState } from "./managed-session.js";
-import { executorForConversation, type Conversation } from "./protocol.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import type {
   TerminalCommandCliFacade,
@@ -18,14 +15,18 @@ import type {
   TerminalListCliFacade,
   TerminalListCliOptions
 } from "./terminal-list-cli-adapter.js";
-import { isCompleteNativeRollout, terminalControlsShareIncarnation } from
-  "./terminal-authority-policy.js";
-import { terminalBridgeRequestFingerprint, terminalBridgeSubmissionReceipts }
-  from "./terminal-dispatch-receipt.js";
 import { terminalSubmissionPayload } from "./terminal-dispatch-execution.js";
-import { terminalControlFromTakeover } from "./terminal-runtime-cli-adapter.js";
-import type { TranscriptEvent } from "./transcript.js";
-import { isRecord, nonBlankString as stringValue, type UnknownRecord } from
+import {
+  TerminalDelegateSendBindingUncertainError,
+  type TerminalDelegateSendBinding,
+  type TerminalDelegateSendBindingRepository,
+  type TerminalDelegateSendRequestBoundary
+} from "./terminal-delegate-send-binding.js";
+/*
+ * This adapter deliberately has no Store/Turn/Session port. Omitted-target
+ * Send resolves only current physical terminal authority.
+ */
+import { isRecord, nonBlankString as stringValue } from
   "./value-guards.js";
 
 export interface TerminalDelegateCliOptions
@@ -40,33 +41,16 @@ type DelegateTerminalCandidate = Awaited<ReturnType<
 interface DelegateRuntimePorts {
   canonicalWorkspace(value: unknown): string;
   required<Value>(value: Value | undefined, message: string): Value;
-  storeDir(options: TerminalDelegateCliOptions): string;
-}
-
-interface DelegateRepositoryPorts {
-  listConversations(storeDir: string): Conversation[];
-  readEvents(logPath: string): TranscriptEvent[];
-  storeDirForConversation(conversation: Conversation): string | undefined;
-}
-
-interface DelegateAuthorityPorts {
-  assertSafeAbortedTerminalRetryBinding(request: {
-    owner: Conversation;
-    receipt: UnknownRecord;
-    storeDir: string;
-    terminalControl: TerminalControlRef;
-    messageId: string;
-  }): ManagedSessionState | undefined;
+  terminalRuntimeKey(terminalControl: TerminalControlRef): string;
 }
 
 export interface TerminalDelegateCliDependencies {
   runtime: DelegateRuntimePorts;
-  repository: DelegateRepositoryPorts;
-  authority: DelegateAuthorityPorts;
   terminalList: Pick<
     TerminalListCliFacade,
-    "buildTerminalListGroup" | "terminalDispatchOwnership"
+    "buildTerminalListGroup" | "observeExactTerminal"
   >;
+  sendBinding: TerminalDelegateSendBindingRepository;
   terminalCommand: Pick<TerminalCommandCliFacade, "runSend">;
 }
 
@@ -74,224 +58,50 @@ export interface TerminalDelegateCliFacade {
   runDelegate(options: TerminalDelegateCliOptions): Promise<void>;
 }
 
-type StableDelegateTerminalRoute =
-  | { kind: "terminal"; conversationId: string; workspace: string }
-  | { kind: "session"; sessionId: string; workspace: string };
-
-interface RoutedDelegateReceipt {
-  owner: Conversation;
-  receipt: UnknownRecord;
-  conversationId: string;
-  workspace: string;
-  terminalControl: TerminalControlRef;
-}
-
-interface StableRouteRequest {
+interface DelegateRouteRequest {
   options: TerminalDelegateCliOptions;
   request: string;
   workspace?: string;
   requestedAgent?: ExecutorKind;
 }
 
-function delegateEventMessage(
-  dependencies: TerminalDelegateCliDependencies,
-  owner: Conversation,
-  messageId: string
-): UnknownRecord | undefined {
-  const eventLogPath = stringValue(owner.event_log_path);
-  if (!eventLogPath) {
-    return undefined;
-  }
-  let matches: UnknownRecord[];
-  try {
-    matches = dependencies.repository.readEvents(eventLogPath)
-      .filter((event) =>
-        isRecord(event.message) && event.message.id === messageId
-      )
-      .map((event) => event.message as UnknownRecord);
-  } catch {
-    matches = [];
-  }
-  if (matches.length > 1) {
-    throw new Error(`terminal idempotency key ${messageId} has duplicate durable messages`);
-  }
-  return matches[0];
+interface DelegateUserExplicitSendCandidate {
+  terminal: DelegateTerminalCandidate;
+  expectedTerminalToken: string;
+  expectedManagedTerminalToken?: string;
+  routingWarning?: string;
 }
 
-function routedDelegateReceipt(
-  dependencies: TerminalDelegateCliDependencies,
-  boundary: StableRouteRequest & {
-    storeDir: string;
-    requestHash?: string;
-    bodyHash: string;
-    requestedOpenClawSession?: string;
-    messageId: string;
-  },
-  owner: Conversation,
-  receipt: UnknownRecord
-): RoutedDelegateReceipt {
-  const ownerStoreDir = dependencies.repository.storeDirForConversation(owner);
-  const takeover = isRecord(owner.native_session_takeover)
-    ? owner.native_session_takeover
-    : undefined;
-  const terminalControl = terminalControlFromTakeover(takeover);
-  const conversationId = stringValue(takeover?.native_session_id);
-  const eventMessage = delegateEventMessage(dependencies, owner, boundary.messageId);
-  const messageType = stringValue(receipt.message_type) ??
-    (isRecord(eventMessage) ? stringValue(eventMessage.type) : undefined);
-  const storedBodyHash = stringValue(receipt.message_body_hash) ??
-    (isRecord(eventMessage) && typeof eventMessage.body === "string"
-      ? createHash("sha256").update(eventMessage.body).digest("hex")
-      : undefined);
-  const ownerWorkspace = dependencies.runtime.canonicalWorkspace(owner.workspace);
-  if (
-    !ownerStoreDir ||
-    path.resolve(ownerStoreDir) !== boundary.storeDir ||
-    (stringValue(receipt.store_dir) !== undefined &&
-      path.resolve(String(receipt.store_dir)) !== boundary.storeDir) ||
-    !terminalControl ||
-    !conversationId ||
-    stringValue(receipt.request_hash) !== boundary.requestHash ||
-    messageType !== "task" ||
-    storedBodyHash !== boundary.bodyHash ||
-    (boundary.requestedOpenClawSession &&
-      (stringValue(receipt.openclaw_session) ?? owner.openclaw_session) !==
-        boundary.requestedOpenClawSession) ||
-    (boundary.requestedAgent &&
-      executorForConversation(owner).kind !== boundary.requestedAgent) ||
-    (boundary.workspace && ownerWorkspace !== boundary.workspace)
-  ) {
-    throw new Error(
-      `terminal idempotency key ${boundary.messageId} does not match its ` +
-      "original delegate request boundary; no terminal input was sent"
-    );
-  }
-  return { owner, receipt, conversationId, workspace: ownerWorkspace,
-    terminalControl };
-}
-
-function selectedStableDelegateRoute(
-  dependencies: TerminalDelegateCliDependencies,
-  routed: RoutedDelegateReceipt[],
-  storeDir: string,
-  messageId: string
-): StableDelegateTerminalRoute | undefined {
-  const authoritative = routed.filter(({ receipt }) =>
-    !(receipt.status === "aborted" && receipt.safe_to_retry === true)
-  );
-  if (authoritative.length > 1) {
-    throw new Error(
-      `terminal idempotency key ${messageId} has multiple durable delegate receipts`);
-  }
-  const firstRoute = routed[0];
-  if (
-    !firstRoute ||
-    routed.some((entry) =>
-      entry.conversationId !== firstRoute.conversationId ||
-      !terminalControlsShareIncarnation(
-        entry.terminalControl,
-        firstRoute.terminalControl
-      )
-    )
-  ) {
-    throw new Error(
-      `terminal idempotency key ${messageId} has conflicting terminal routes`);
-  }
-  const selected = authoritative[0] ?? routed.at(-1);
-  if (!selected) {
-    return undefined;
-  }
-  if (
-    selected.receipt.status === "aborted" &&
-    selected.receipt.safe_to_retry === true
-  ) {
-    const ownerControl = terminalControlFromTakeover(
-      isRecord(selected.owner.native_session_takeover)
-        ? selected.owner.native_session_takeover
-        : undefined
-    );
-    if (!ownerControl) {
-      throw new Error(
-        `terminal idempotency key ${messageId} has no durable terminal route`);
-    }
-    const retrySession =
-      dependencies.authority.assertSafeAbortedTerminalRetryBinding({
-        owner: selected.owner,
-        receipt: selected.receipt,
-        storeDir,
-        terminalControl: ownerControl,
-        messageId
-      });
-    if (!retrySession) {
-      throw new Error(
-        `terminal idempotency key ${messageId} has no restored retry Session`);
-    }
-    if (
-      retrySession.agent === "codex" &&
-      isCompleteNativeRollout(retrySession.binding?.native_process.rollout)
-    ) {
-      // An unchanged safe-aborted binding still does not prove the Codex TUI
-      // foreground. Keep the terminal route so runSend captures fresh
-      // candidate authority and uses the v3 transfer instead of strict Session.
-      return { kind: "terminal", conversationId: selected.conversationId,
-        workspace: selected.workspace };
-    }
-    return { kind: "session", sessionId: retrySession.session_id,
-      workspace: selected.workspace };
-  }
-  return { kind: "terminal", conversationId: selected.conversationId,
-    workspace: selected.workspace };
-}
-
-function stableDelegateTerminalRoute(
-  dependencies: TerminalDelegateCliDependencies,
-  boundary: StableRouteRequest
-): StableDelegateTerminalRoute | undefined {
-  const messageId = stringValue(boundary.options.messageId);
-  if (!messageId) {
-    return undefined;
-  }
-  const storeDir = path.resolve(dependencies.runtime.storeDir(boundary.options));
-  const requestHash = terminalBridgeRequestFingerprint(
-    terminalSubmissionPayload(boundary.request)
-  );
-  const bodyHash = createHash("sha256").update(boundary.request).digest("hex");
-  const requestedOpenClawSession =
-    stringValue(boundary.options.openclawSession);
-  const matches = dependencies.repository.listConversations(storeDir)
-    .flatMap((owner) => terminalBridgeSubmissionReceipts(owner)
-      .filter((receipt) => stringValue(receipt.message_id) === messageId)
-      .map((receipt) => ({ owner, receipt })));
-  if (matches.length === 0) {
-    return undefined;
-  }
-  const routed = matches.map(({ owner, receipt }) => routedDelegateReceipt(
-    dependencies, { ...boundary, storeDir, requestHash, bodyHash,
-      requestedOpenClawSession, messageId }, owner, receipt));
-  return selectedStableDelegateRoute(dependencies, routed, storeDir, messageId);
+interface DelegatePhysicalSendRoute {
+  terminalId: string;
+  workspace: string;
+  terminalRuntimeKey: string;
+  expectedTerminalToken: string;
+  expectedManagedTerminalToken?: string;
+  routingWarning?: string;
 }
 
 function assertSingleDelegateCandidate(
-  candidates: DelegateTerminalCandidate[],
+  candidates: DelegateUserExplicitSendCandidate[],
   scopedCount: number,
   workspace: string | undefined,
   requestedAgent: ExecutorKind | undefined
-): DelegateTerminalCandidate {
+): DelegateUserExplicitSendCandidate {
   if (candidates.length === 0) {
     const observed = scopedCount > 0
-      ? ` Found ${scopedCount} matching pane(s), but none is idle.`
+      ? ` Found ${scopedCount} matching pane(s), but none has an exact safe empty composer.`
       : "";
     const requestedExecutor = requestedAgent
       ? executorDefinitionForKind(requestedAgent)
       : undefined;
     const workspaceDetail = workspace ? ` in ${workspace}` : "";
     throw new Error(
-      `No idle ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available${workspaceDetail}.${observed} ` +
-      `Start ${requestedAgent ?? "codex or claude"} inside tmux or Herdr${workspaceDetail}, wait until it is idle, then retry.`
+      `No send-ready ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available${workspaceDetail}.${observed} ` +
+      `Start ${requestedAgent ?? "codex or claude"} inside tmux or Herdr${workspaceDetail}, wait for an exact empty composer with no approval prompt, then retry.`
     );
   }
   if (candidates.length > 1) {
-    const rendered = candidates.map((candidate) => {
+    const rendered = candidates.map(({ terminal: candidate }) => {
       const identity =
         `${candidate.agent}, ${candidate.terminal_control?.target ?? candidate.id}`;
       return workspace
@@ -305,11 +115,325 @@ function assertSingleDelegateCandidate(
       ? `match ${workspace}`
       : "are available across workspaces";
     throw new Error(
-      `Multiple idle ${scope} panes ${ambiguity}: ${rendered}. ` +
+      `Multiple send-ready ${scope} panes ${ambiguity}: ${rendered}. ` +
       "Use /akk codex: <task>, /akk claude: <task>, or /akk @short-ref: <message> to choose one explicitly."
     );
   }
   return candidates[0];
+}
+
+function delegateUserExplicitSendCandidate(
+  terminal: DelegateTerminalCandidate
+): DelegateUserExplicitSendCandidate | undefined {
+  const action = isRecord(terminal._terminal_user_explicit_send_action)
+    ? terminal._terminal_user_explicit_send_action
+    : isRecord(terminal.available_actions) &&
+        isRecord(terminal.available_actions.send)
+      ? terminal.available_actions.send
+      : undefined;
+  const argumentsValue = isRecord(action?.arguments)
+    ? action.arguments
+    : undefined;
+  const terminalId = stringValue(terminal.id);
+  const expectedTerminalToken = stringValue(
+    argumentsValue?.expected_terminal_token
+  );
+  if (
+    action?.scope !== "terminal_user_explicit" ||
+    !terminalId ||
+    stringValue(
+      argumentsValue?.selector ?? argumentsValue?.terminal_id
+    ) !== terminalId ||
+    !expectedTerminalToken
+  ) {
+    return undefined;
+  }
+  return {
+    terminal,
+    expectedTerminalToken,
+    expectedManagedTerminalToken: stringValue(
+      argumentsValue?.expected_managed_terminal_token
+    )
+  };
+}
+
+function samePhysicalDelegateAuthority(
+  candidate: DelegateUserExplicitSendCandidate,
+  terminalId: string,
+  expectedTerminalToken: string
+): boolean {
+  return stringValue(candidate.terminal.id) === terminalId &&
+    candidate.expectedTerminalToken === expectedTerminalToken;
+}
+
+async function discoverDelegatePhysicalRoute(
+  dependencies: TerminalDelegateCliDependencies,
+  input: {
+    options: TerminalDelegateCliOptions;
+    workspace?: string;
+    requestedAgent?: ExecutorKind;
+  }
+): Promise<DelegatePhysicalSendRoute> {
+  const { options, workspace, requestedAgent } = input;
+  const scan = await dependencies.terminalList.buildTerminalListGroup({
+    options: { ...options, workspace, noApprovalScan: false },
+    agentFilter: requestedAgent,
+    statusFilter: undefined
+  });
+  if (scan.summary.error) {
+    throw new Error(`terminal discovery failed: ${scan.summary.error}`);
+  }
+  const scopedCandidates = workspace === undefined
+    ? scan.terminalControlled
+    : scan.terminalControlled.filter((candidate) => {
+        try {
+          return dependencies.runtime.canonicalWorkspace(candidate.workspace) ===
+            workspace;
+        } catch {
+          return false;
+        }
+      });
+  const eligible = scopedCandidates.flatMap((candidate) => {
+    const authority = delegateUserExplicitSendCandidate(candidate);
+    return authority ? [authority] : [];
+  });
+  const selected = assertSingleDelegateCandidate(
+    eligible,
+    scopedCandidates.length,
+    workspace,
+    requestedAgent
+  );
+  const selectedTerminalId = dependencies.runtime.required(
+    stringValue(selected.terminal.id),
+    "selected terminal id is unavailable"
+  );
+  const terminalControl = isRecord(selected.terminal.terminal_control)
+    ? selected.terminal.terminal_control as unknown as TerminalControlRef
+    : undefined;
+  if (!terminalControl) {
+    throw new Error("selected terminal physical control is unavailable");
+  }
+  let expectedManagedTerminalToken =
+    selected.expectedManagedTerminalToken;
+  try {
+    const observed = await dependencies.terminalList.observeExactTerminal({
+      options: { ...options, workspace, noApprovalScan: false },
+      terminalId: selectedTerminalId
+    });
+    const projectedAuthority = observed.state === "available"
+      ? delegateUserExplicitSendCandidate(observed.terminal)
+      : undefined;
+    if (
+      projectedAuthority &&
+      samePhysicalDelegateAuthority(
+        projectedAuthority,
+        selectedTerminalId,
+        selected.expectedTerminalToken
+      )
+    ) {
+      expectedManagedTerminalToken =
+        projectedAuthority.expectedManagedTerminalToken;
+    }
+  } catch {
+    // Managed fast-path discovery is optional. The raw physical action was
+    // already observed from this exact scan and execution revalidates it.
+  }
+  return {
+    terminalId: selectedTerminalId,
+    workspace: dependencies.runtime.canonicalWorkspace(
+      selected.terminal.workspace
+    ),
+    terminalRuntimeKey: dependencies.runtime.terminalRuntimeKey(
+      terminalControl
+    ),
+    expectedTerminalToken: selected.expectedTerminalToken,
+    ...(expectedManagedTerminalToken
+      ? { expectedManagedTerminalToken }
+      : {})
+  };
+}
+
+function delegateSendRequestBoundary(
+  input: DelegateRouteRequest & { messageId: string }
+): TerminalDelegateSendRequestBoundary {
+  return {
+    messageId: input.messageId,
+    requestHash: createHash("sha256")
+      .update(terminalSubmissionPayload(input.request))
+      .digest("hex"),
+    ...(input.workspace === undefined
+      ? {}
+      : { requestedWorkspace: input.workspace }),
+    ...(input.requestedAgent === undefined
+      ? {}
+      : { requestedAgent: input.requestedAgent }),
+    ...(stringValue(input.options.openclawSession) === undefined
+      ? {}
+      : { openclawSession: stringValue(input.options.openclawSession) })
+  };
+}
+
+async function routeForDelegateBinding(
+  dependencies: TerminalDelegateCliDependencies,
+  options: TerminalDelegateCliOptions,
+  binding: TerminalDelegateSendBinding
+): Promise<DelegatePhysicalSendRoute> {
+  let expectedManagedTerminalToken: string | undefined;
+  try {
+    const observed = await dependencies.terminalList.observeExactTerminal({
+      options: {
+        ...options,
+        workspace: binding.workspace,
+        noApprovalScan: false
+      },
+      terminalId: binding.terminalId
+    });
+    const projectedAuthority = observed.state === "available"
+      ? delegateUserExplicitSendCandidate(observed.terminal)
+      : undefined;
+    if (
+      projectedAuthority &&
+      samePhysicalDelegateAuthority(
+        projectedAuthority,
+        binding.terminalId,
+        binding.physicalToken
+      )
+    ) {
+      expectedManagedTerminalToken =
+        projectedAuthority.expectedManagedTerminalToken;
+    }
+  } catch {
+    // The immutable physical binding remains authoritative. runSend performs
+    // the fresh process, approval, and empty-composer checks before any input.
+  }
+  return {
+    terminalId: binding.terminalId,
+    workspace: binding.workspace,
+    terminalRuntimeKey: binding.terminalRuntimeKey,
+    expectedTerminalToken: binding.physicalToken,
+    ...(expectedManagedTerminalToken
+      ? { expectedManagedTerminalToken }
+      : {})
+  };
+}
+
+async function resolveDelegateSendRoute(
+  dependencies: TerminalDelegateCliDependencies,
+  input: DelegateRouteRequest
+): Promise<DelegatePhysicalSendRoute> {
+  const messageId = stringValue(input.options.messageId);
+  if (!messageId) {
+    return discoverDelegatePhysicalRoute(dependencies, input);
+  }
+  const boundary = delegateSendRequestBoundary({
+    ...input,
+    messageId
+  });
+  let releaseBindingLock: (() => void) | undefined;
+  let discoveredRoute: DelegatePhysicalSendRoute | undefined;
+  let resolvedRoute: DelegatePhysicalSendRoute | undefined;
+  try {
+    const existingBinding = dependencies.sendBinding.load(boundary);
+    if (existingBinding) {
+      return routeForDelegateBinding(
+        dependencies,
+        input.options,
+        existingBinding
+      );
+    }
+    releaseBindingLock = dependencies.sendBinding.acquire(messageId);
+    let concurrentBinding = dependencies.sendBinding.load(boundary);
+    if (!concurrentBinding) {
+      discoveredRoute = await discoverDelegatePhysicalRoute(
+        dependencies,
+        input
+      );
+      concurrentBinding = dependencies.sendBinding.bind(boundary, {
+        terminalId: discoveredRoute.terminalId,
+        workspace: discoveredRoute.workspace,
+        terminalRuntimeKey: discoveredRoute.terminalRuntimeKey,
+        physicalToken: discoveredRoute.expectedTerminalToken
+      }).binding;
+    }
+    const binding = dependencies.runtime.required(
+      concurrentBinding,
+      "terminal delegate send binding is unavailable"
+    );
+    if (
+      discoveredRoute &&
+      discoveredRoute.terminalId === binding.terminalId &&
+      discoveredRoute.expectedTerminalToken === binding.physicalToken
+    ) {
+      resolvedRoute = discoveredRoute;
+    } else {
+      resolvedRoute = await routeForDelegateBinding(
+        dependencies,
+        input.options,
+        binding
+      );
+    }
+  } catch (error) {
+    if (
+      !(error instanceof TerminalDelegateSendBindingUncertainError) ||
+      error.possibleExistingBinding
+    ) {
+      throw error;
+    }
+    const route = discoveredRoute ?? await discoverDelegatePhysicalRoute(
+      dependencies,
+      input
+    );
+    resolvedRoute = {
+      ...route,
+      routingWarning:
+        `durable omitted-target routing was unavailable: ${error.message}`
+    };
+  } finally {
+    try {
+      releaseBindingLock?.();
+    } catch (error) {
+      if (resolvedRoute) {
+        const warning = `durable omitted-target routing lock cleanup failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        resolvedRoute = {
+          ...resolvedRoute,
+          routingWarning: resolvedRoute.routingWarning
+            ? `${resolvedRoute.routingWarning}; ${warning}`
+            : warning
+        };
+      }
+      // A failed unlock cannot veto a route already selected before input.
+    }
+  }
+  return dependencies.runtime.required(
+    resolvedRoute,
+    "terminal delegate physical Send route is unavailable"
+  );
+}
+
+async function sendDelegatePhysicalRoute(
+  dependencies: TerminalDelegateCliDependencies,
+  options: TerminalDelegateCliOptions,
+  request: string,
+  route: DelegatePhysicalSendRoute
+): Promise<void> {
+  await dependencies.terminalCommand.runSend({
+    ...options,
+    conversation: route.terminalId,
+    message: request,
+    workspace: route.workspace,
+    background: true,
+    expectedTerminalToken: route.expectedTerminalToken,
+    ...(route.routingWarning
+      ? { terminalUserSendRoutingWarning: route.routingWarning }
+      : {}),
+    ...(route.expectedManagedTerminalToken
+      ? {
+          expectedManagedTerminalToken: route.expectedManagedTerminalToken
+        }
+      : {})
+  });
 }
 
 function createRunDelegate(dependencies: TerminalDelegateCliDependencies) {
@@ -324,76 +448,18 @@ function createRunDelegate(dependencies: TerminalDelegateCliDependencies) {
     const requestedAgent = options.agent === undefined
       ? undefined
       : resolveExecutor({ kind: options.agent }).kind;
-    const stableRoute = stableDelegateTerminalRoute(dependencies, {
+    const resolved = await resolveDelegateSendRoute(dependencies, {
       options,
       request,
       workspace,
       requestedAgent
     });
-    if (stableRoute) {
-      await dependencies.terminalCommand.runSend(stableRoute.kind === "session"
-        ? {
-            ...options,
-            session: stableRoute.sessionId,
-            conversation: undefined,
-            message: request,
-            workspace: stableRoute.workspace,
-            background: true
-          }
-        : {
-            ...options,
-            conversation: stableRoute.conversationId,
-            session: undefined,
-            message: request,
-            workspace: stableRoute.workspace,
-            background: true
-          });
-      return;
-    }
-    const scan = await dependencies.terminalList.buildTerminalListGroup({
-      options: { ...options, workspace, noApprovalScan: false },
-      agentFilter: requestedAgent,
-      statusFilter: undefined
-    });
-    if (scan.summary.error) {
-      throw new Error(`terminal discovery failed: ${scan.summary.error}`);
-    }
-    const scopedCandidates = workspace === undefined
-      ? scan.terminalControlled
-      : scan.terminalControlled.filter((candidate) => {
-          try {
-            return dependencies.runtime.canonicalWorkspace(candidate.workspace) ===
-              workspace;
-          } catch {
-            return false;
-          }
-        });
-    const eligible = scopedCandidates.filter((candidate) => {
-      if (candidate.activity_state !== "idle") {
-        return false;
-      }
-      const terminalControl = isRecord(candidate.terminal_control)
-        ? candidate.terminal_control as unknown as TerminalControlRef
-        : undefined;
-      return !terminalControl ||
-        dependencies.terminalList.terminalDispatchOwnership(terminalControl)
-          .state === "none";
-    });
-    const selected = assertSingleDelegateCandidate(
-      eligible,
-      scopedCandidates.length,
-      workspace,
-      requestedAgent
+    await sendDelegatePhysicalRoute(
+      dependencies,
+      options,
+      request,
+      resolved
     );
-    const selectedWorkspace =
-      dependencies.runtime.canonicalWorkspace(selected.workspace);
-    await dependencies.terminalCommand.runSend({
-      ...options,
-      conversation: selected.id,
-      message: request,
-      workspace: selectedWorkspace,
-      background: true
-    });
   };
 }
 

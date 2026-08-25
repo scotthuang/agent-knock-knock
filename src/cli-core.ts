@@ -12,7 +12,10 @@ import {
 } from "./value-guards.js";
 import { loadDeferredForegroundTransfer } from
   "./deferred-foreground-transfer.js";
-import { createFileLockCliAdapter } from "./file-lock-cli-adapter.js";
+import {
+  createFileLockCliAdapter,
+  type FileLockAcquisitionOptions
+} from "./file-lock-cli-adapter.js";
 import {
   budgetAction,
   createMessage,
@@ -104,6 +107,8 @@ import { createTerminalHandoffCliFacade } from
   "./terminal-handoff-cli-adapter.js";
 import { createTerminalDelegateCliFacade } from
   "./terminal-delegate-cli-adapter.js";
+import { createTerminalDelegateSendBindingRepository } from
+  "./terminal-delegate-send-binding.js";
 import {
   createNativeThreadLifecycleCliAdapter
 } from "./native-thread-lifecycle-cli-adapter.js";
@@ -215,6 +220,11 @@ const cliFileLock = createFileLockCliAdapter({
 const acquireFileLock = cliFileLock.acquire;
 const terminalDispatchRepository =
   createTerminalDispatchRepositoryCliAdapter();
+const terminalDelegateSendBindingRepository =
+  createTerminalDelegateSendBindingRepository({
+    runtimeDir: terminalDispatchRepository.runtimeDir(),
+    acquireLock: (lockPath) => acquireFileLock(lockPath, { timeoutMs: 30_000 })
+  });
 const acquireTerminalBridgeSendLock = terminalDispatchRepository.acquire;
 const terminalBridgeRuntimeKey = terminalDispatchRepository.runtimeKey;
 const loadTerminalBridgeDispatchLedger = terminalDispatchRepository.load;
@@ -266,15 +276,26 @@ const mutationManagedSessions = Object.freeze({
   load: gateRepository(["storeWriter"], "storeWriter", loadManagedSession),
   save: gateRepository(["storeWriter"], "storeWriter", saveManagedSession)
 });
-function terminalWriterMutationLocks(storeDir: string, terminalControl: TerminalControlRef) {
+function terminalWriterMutationLocks(
+  storeDir: string,
+  terminalControl: TerminalControlRef,
+  options: { timeoutMs?: number; retryMs?: number } = {}
+) {
   const canonicalStoreDir = path.resolve(storeDir);
   return {
     resources: {
       terminal: canonicalMutationResource(terminalBridgeRuntimeKey(terminalControl), terminalControl),
       storeWriter: canonicalMutationResource(canonicalStoreDir, canonicalStoreDir)
     },
-    acquireTerminal: () => acquireTerminalBridgeSendLock(canonicalStoreDir, terminalControl, { timeoutMs: 30000 }),
-    withStoreWriter: <Result>(operation: () => Promise<Result>) => withStoreWriterLeaseAsync(canonicalStoreDir, operation)
+    acquireTerminal: () => acquireTerminalBridgeSendLock(
+      canonicalStoreDir,
+      terminalControl,
+      { timeoutMs: options.timeoutMs ?? 30_000, retryMs: options.retryMs }
+    ),
+    withStoreWriter: <Result>(operation: () => Promise<Result>) =>
+      withStoreWriterLeaseAsync(canonicalStoreDir, operation, {
+        timeoutMs: options.timeoutMs
+      })
   };
 }
 function terminalWriterStateMutationLocks(storeDir: string, terminalControl: TerminalControlRef, statePath: string, logPath: string) {
@@ -300,7 +321,8 @@ function withTerminalDispatchStateScope<Result>(
   operation: (
     scopes: CanonicalStateMutationScopes,
     resources: CanonicalStateMutationResources
-  ) => Promise<Result>
+  ) => Promise<Result>,
+  options: FileLockAcquisitionOptions = {}
 ): Promise<Result> {
   const stateResource = terminalDispatchStateMutationResource(
     scopes, resources, statePath, logPath
@@ -311,7 +333,8 @@ function withTerminalDispatchStateScope<Result>(
     {
       resource: stateResource,
       acquire: () => acquireFileLock(
-        terminalDispatchStateLockPath(stateResource)
+        terminalDispatchStateLockPath(stateResource),
+        options
       )
     },
     operation
@@ -522,6 +545,19 @@ async function dispatchCliCommand(commandName, options) {
 
 function preflightStoreWriter(commandName, options): void {
   if (!STORE_MUTATION_COMMANDS.has(String(commandName ?? ""))) {
+    return;
+  }
+  const terminalSendSelector = stringValue(
+    options.session ?? options.conversation ?? options.conversationId
+  );
+  if (
+    commandName === "delegate" ||
+    (commandName === "send" &&
+    terminalSendSelector?.startsWith("terminal:v") &&
+    stringValue(options.expectedTerminalToken))
+  ) {
+    // User-priority Send owns a Store-independent physical fallback; its managed
+    // path checks Store state, but damaged Store state cannot veto terminal input.
     return;
   }
   const statePath = stringValue(options.state);
@@ -1593,6 +1629,7 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     refineTerminalTurnEndpoint,
     required,
     resolveCurrentNativeAgentSessionIdentity,
+    resolveTerminalBridgeDispatchLedger,
     resolveTerminalConversationFromOptions,
     resolveTerminalDispatchLedgerPaneIncarnation,
     soleBoundManagedSessionClaimForTerminal,
@@ -1631,18 +1668,13 @@ const terminalDelegateCliFacade = createTerminalDelegateCliFacade({
   runtime: {
     canonicalWorkspace,
     required,
-    storeDir: storeDirFromOptions
+    terminalRuntimeKey: terminalDispatchRepository.runtimeKey
   },
-  repository: {
-    listConversations,
-    readEvents: readNdjsonLog,
-    storeDirForConversation: managedSessionStoreDirForConversation
-  },
-  authority: { assertSafeAbortedTerminalRetryBinding },
   terminalList: {
     buildTerminalListGroup: terminalListCliFacade.buildTerminalListGroup,
-    terminalDispatchOwnership: terminalListCliFacade.terminalDispatchOwnership
+    observeExactTerminal: terminalListCliFacade.observeExactTerminal
   },
+  sendBinding: terminalDelegateSendBindingRepository,
   terminalCommand: { runSend: terminalCommandCliFacade.runSend }
 });
 

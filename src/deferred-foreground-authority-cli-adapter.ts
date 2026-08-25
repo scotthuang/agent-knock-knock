@@ -12,6 +12,10 @@ import type {
   DeferredForegroundTransferSourceRolloutAuthority,
   DeferredForegroundTransferSourceTurnAuthority
 } from "./deferred-foreground-transfer.js";
+import { loadDeferredForegroundTransfer } from
+  "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
 import {
   isExactNativeThreadId,
   managedSessionBindingToken,
@@ -940,6 +944,17 @@ function candidateSourceTransitionHistoryIsTerminal(
     return true;
   }
   try {
+    if (session.last_transition_id.startsWith("deferred-transfer-")) {
+      const transfer = loadDeferredForegroundTransfer(
+        storeDir,
+        session.last_transition_id
+      );
+      return isFinalDeferredForegroundTransferStatus(transfer.status) &&
+        (
+          transfer.source_session_id === session.session_id ||
+          transfer.target_session_id === session.session_id
+        );
+    }
     const transition = loadNativeThreadTransition(
       storeDir,
       session.last_transition_id

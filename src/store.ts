@@ -360,7 +360,8 @@ export function withStoreWriterLease<T>(
 /** Hold the store writer lease until an asynchronous side effect and commit finish. */
 export async function withStoreWriterLeaseAsync<T>(
   storeDir: string,
-  action: (lease: StoreWriterLease) => Promise<T>
+  action: (lease: StoreWriterLease) => Promise<T>,
+  options: { timeoutMs?: number } = {}
 ): Promise<T> {
   const resolvedStoreDir = path.resolve(storeDir);
   const current = activeStoreWriterLease.getStore();
@@ -376,7 +377,7 @@ export async function withStoreWriterLeaseAsync<T>(
   acquireConversationLock(
     lockPath,
     token,
-    Date.now() + STORE_LOCK_TIMEOUT_MS
+    Date.now() + (options.timeoutMs ?? STORE_LOCK_TIMEOUT_MS)
   );
   let lease: ActiveStoreWriterLease | undefined;
   try {
