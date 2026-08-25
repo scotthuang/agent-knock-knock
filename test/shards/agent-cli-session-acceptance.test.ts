@@ -122,11 +122,16 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
   const physicalProcessDependencies = {
     processBirthForPid: () => processBirth
   };
+  const idleComposerScreen = [
+    "Ready",
+    "› ",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, idleComposerScreen);
     fs.writeFileSync(legacyRolloutPath, `${JSON.stringify({
       timestamp: "2026-08-13T00:00:00.000Z",
       type: "session_meta",
@@ -236,7 +241,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
         currentPath: workspace
       })]),
       "--terminal-screens-json",
-      JSON.stringify({ [terminalTarget]: "› \n" }),
+      JSON.stringify({ [terminalTarget]: idleComposerScreen }),
       ...nativeIdentityArgs
     ], testEnv, physicalProcessDependencies);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);

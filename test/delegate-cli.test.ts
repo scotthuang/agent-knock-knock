@@ -11,6 +11,12 @@ import {
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-delegate-cli-runtime-")
 );
+const CLAUDE_EXACT_IDLE_COMPOSER = [
+  "────────────────────────────────────────────────",
+  "❯ ",
+  "────────────────────────────────────────────────",
+  "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+].join("\n");
 process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
 });
@@ -558,7 +564,7 @@ test("delegate without an agent fails closed across mixed idle panes", async () 
       "--terminal-screens-json",
       JSON.stringify({
         "codex-mixed-work:0.0": "› ",
-        "claude-work:0.0": "❯ "
+        "claude-work:0.0": CLAUDE_EXACT_IDLE_COMPOSER
       })
     ]);
 
@@ -683,6 +689,7 @@ function runCli(command: string, args: string[]) {
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
       AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
     },
+    processBirthForPid: (pid) => `fixture-process-birth-${pid}`,
     codexProcessBirthForPid: (pid) => `fixture-process-birth-${pid}`,
     now: clock.now,
     monotonicNowMs: clock.nowMs,

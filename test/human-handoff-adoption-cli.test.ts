@@ -282,6 +282,7 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
   const shellPid = 83_000;
   const agentPid = shellPid + 1;
   const claudeStartedAt = 1_786_339_200_000;
+  const processBirth = "Mon Aug 10 12:00:00 2026";
   const version = "2.1.226";
   const executable = `/Users/test/.local/share/claude/versions/${version}`;
   const request = "Continue in the human-selected Herdr Claude context.";
@@ -298,6 +299,7 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
   let screen = claudeHerdrClearedComposerScreen();
   let pendingText = "";
   let revision = 0;
+  const processBirthProbePids: number[] = [];
 
   fs.mkdirSync(workspace, { recursive: true });
   fs.mkdirSync(claudeHome, { recursive: true });
@@ -456,6 +458,10 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
       status: "idle"
     }],
     agentVersionForRunningProcess: () => version,
+    processBirthForPid: (pid: number) => {
+      processBirthProbePids.push(pid);
+      return pid === agentPid ? processBirth : "";
+    },
     pid: agentPid + 500_000,
     runtimeLog() {}
   };
@@ -616,6 +622,11 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
       ),
       false,
       "handoff must preserve human input instead of clearing the composer"
+    );
+    assert.deepEqual(
+      [...new Set(processBirthProbePids)],
+      [agentPid],
+      "physical authority must probe the foreground Claude process incarnation"
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
