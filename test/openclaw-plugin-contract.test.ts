@@ -1167,6 +1167,10 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     path.join(packageRoot, "src", "openclaw-plugin-supervisor.ts"),
     "utf8"
   );
+  const hostLifecycleSource = fs.readFileSync(
+    path.join(packageRoot, "src", "host-lifecycle-service.ts"),
+    "utf8"
+  );
   const terminalListSource = fs.readFileSync(
     path.join(packageRoot, "src", "terminal-list-cli-adapter.ts"),
     "utf8"
@@ -1238,15 +1242,27 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   );
   assert.match(
     supervisorSource,
-    /const args = \["reconcile-monitors", "--reason", reason\][\s\S]*?--terminal-monitors-only[\s\S]*?catch \(error\)[\s\S]*?logger\.warn/u
+    /const args = \["reconcile-monitors", "--reason", reason\][\s\S]*?--terminal-monitors-only[\s\S]*?const args = \["reconcile-watches"\]/u
   );
   assert.match(
     supervisorSource,
-    /const args = \["reconcile-watches"\][\s\S]*?monitor supervision deferred after error[\s\S]*?watchReconciliationArgs\(\)[\s\S]*?Terminal Watch supervision deferred after error/u
+    /managedReason[\s\S]*?startup_reconciliation[\s\S]*?monitor_supervision[\s\S]*?watchReason[\s\S]*?startup_reconciliation[\s\S]*?watch_supervision/u
   );
   assert.match(
     supervisorSource,
-    /const reconcileStartup = async[\s\S]*?runCliAsync\([\s\S]*?reconciliationArgs\("startup_reconciliation"\)[\s\S]*?runCliAsync\([\s\S]*?watchReconciliationArgs\(\)[\s\S]*?inFlight = reconcileStartup\(\)/u
+    /monitor reconciliation skipped after startup error[\s\S]*?monitor supervision deferred after error[\s\S]*?Terminal Watch reconciliation skipped after startup error[\s\S]*?Terminal Watch supervision deferred after error/u
+  );
+  assert.match(
+    supervisorSource,
+    /createHostLifecycleService\(\{[\s\S]*?name: MANAGED_MONITOR_PHASE[\s\S]*?reconciliationArgs\(reconciliationReason\)[\s\S]*?name: TERMINAL_WATCH_PHASE[\s\S]*?watchReconciliationArgs\(\)/u
+  );
+  assert.match(
+    hostLifecycleSource,
+    /for \(const phase of options\.phases\)[\s\S]*?await phase\.run\(\{ reason \}\)[\s\S]*?options\.onPhaseError/u
+  );
+  assert.match(
+    hostLifecycleSource,
+    /const sweep = runSweep\("periodic"\)\.finally[\s\S]*?inFlight = sweep[\s\S]*?const sweep = runSweep\("startup"\)\.finally[\s\S]*?inFlight = sweep[\s\S]*?async stop\(\)[\s\S]*?cancelScheduled\?\.\(\)[\s\S]*?await stopDrain/u
   );
   assert.match(
     terminalListSource,

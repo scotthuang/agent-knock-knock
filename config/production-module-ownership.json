@@ -3,7 +3,7 @@
   "version": 1,
   "architecture": {
     "cli_core_max_physical_loc": 1740,
-    "production_physical_loc": 114900,
+    "production_physical_loc": 115030,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -107,6 +107,12 @@
         "test/shards/agent-cli-control-locks.test.ts",
         "test/shards/agent-cli-dispatch-recovery.test.ts",
         "test/shards/agent-cli-monitor-recovery.test.ts"
+      ]
+    },
+    "host-lifecycle": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/openclaw-plugin-contract.test.ts"
       ]
     },
     "install-doctor": {
@@ -657,6 +663,10 @@
       "owner": "terminal-control"
     },
     {
+      "path": "src/host-lifecycle-service.ts",
+      "owner": "host-lifecycle"
+    },
+    {
       "path": "src/install-doctor-command-adapter.ts",
       "owner": "install-doctor"
     },
@@ -766,7 +776,7 @@
     },
     {
       "path": "src/openclaw-plugin-supervisor.ts",
-      "owner": "terminal-monitor-supervision"
+      "owner": "host-lifecycle"
     },
     {
       "path": "src/openclaw-plugin.ts",

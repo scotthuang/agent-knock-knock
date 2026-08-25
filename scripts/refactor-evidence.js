@@ -1057,6 +1057,13 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
   assertDirectNamedImport(
     repoRoot,
     roles.monitor_supervisor,
+    "./host-lifecycle-service.js",
+    ["createHostLifecycleService", "HOST_LIFECYCLE_INTERVAL_MS"],
+    "OpenClaw monitor-supervisor role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.monitor_supervisor,
     "./openclaw-plugin-command-adapter.js",
     ["pushOptional", "runCliAsync"],
     "OpenClaw monitor-supervisor role"
