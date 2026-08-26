@@ -3094,7 +3094,8 @@ function createHandoffFixture({
     `│ OpenAI Codex (v${version})                 │\n` +
     `│ Session: ${nativeThreadId} │\n` +
     `│ Probe: ${marker}                              │\n` +
-    "╰────────────────────────────────────────────╯\n› ";
+    "╰────────────────────────────────────────────╯\n" +
+    codexComposerScreen();
   const initialScreen = agent === "codex" &&
       codexTargetMode === "status_card_only"
     ? codexStatusScreen(NATIVE_B, "initial")
@@ -3157,6 +3158,11 @@ function createHandoffFixture({
         }
       },
       sendKeys(operation, mutable) {
+        if (operation.keys.includes("C-u")) {
+          pendingText = "";
+          mutable.setScreen(target, codexComposerScreen());
+          return;
+        }
         if (operation.keys.includes("C-m")) {
           const submittedText = pendingText;
           if (

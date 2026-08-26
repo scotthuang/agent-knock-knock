@@ -28,6 +28,11 @@ import {
 } from "./in-process-cli-fixtures.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+const CODEX_TEST_COMPOSER_FOOTER = "gpt-5.6-sol high · /repo";
+
+function codexComposerScreen(text = ""): string {
+  return ["Ready", `› ${text}`, CODEX_TEST_COMPOSER_FOOTER].join("\n");
+}
 
 test("standalone list and status leave persisted conversation files and runtime untouched", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-protocol-read-"));
@@ -241,13 +246,13 @@ test("explicit physical send bypasses a newer writer protocol without mutating S
         currentCommand: "codex",
         currentPath: workspace
       }],
-      screens: { [terminalTarget]: "Ready\n› " },
+      screens: { [terminalTarget]: codexComposerScreen() },
       hooks: {
         sendText(operation, provider) {
           pendingText = operation.text;
           provider.setScreen(
             terminalTarget,
-            `Ready\n› ${operation.text}\n\ngpt-5.6-sol high · /repo`
+            codexComposerScreen(operation.text)
           );
         },
         sendKeys(operation, provider) {
@@ -374,13 +379,13 @@ test("managed-first physical Send revalidates process birth under its terminal l
               currentCommand: "codex",
               currentPath: workspace
             }],
-            screens: { [terminalTarget]: "Ready\n› " },
+            screens: { [terminalTarget]: codexComposerScreen() },
             hooks: {
               sendText(operation, provider) {
                 pendingText = operation.text;
                 provider.setScreen(
                   terminalTarget,
-                  `Ready\n› ${operation.text}\n\ngpt-5.6-sol high · /repo`
+                  codexComposerScreen(operation.text)
                 );
               },
               sendKeys(operation, provider) {

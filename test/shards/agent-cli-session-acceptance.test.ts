@@ -29,6 +29,7 @@ import {
   cwd,
   sessionId,
   rolloutPath,
+  codexEmptyComposerScreen,
   startManagedClaudeTerminalTask,
   claudeTerminalStaticArgs,
   claudeAgentRow,
@@ -370,7 +371,7 @@ test("follow-current sends create distinct successor turns and respond stays on 
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.mkdirSync(codexSessionsDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
     fs.writeFileSync(originalRolloutPath, `${JSON.stringify({
       timestamp: "2026-08-13T01:00:00.000Z",
       type: "session_meta",
@@ -550,7 +551,7 @@ if (args.includes("cwd")) {
       JSON.parse(firstClosed.stdout).terminal_dispatch_resolved,
       true
     );
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
 
     const keysBeforeWrongType = readJsonLines(tmuxCallsPath).filter(
       (call) => call.args[0] === "send-keys"
@@ -742,7 +743,7 @@ if (args.includes("cwd")) {
       secondStatePath,
       `${JSON.stringify(waitingForOpenClaw, null, 2)}\n`
     );
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
     const stateBeforeWrongOpenClawOwner = fs.readFileSync(
       secondStatePath,
       "utf8"
@@ -891,7 +892,7 @@ if (args.includes("cwd")) {
       secondStatePath,
       `${JSON.stringify(waitingForAnotherAnswer, null, 2)}\n`
     );
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
     const secondRespondMessageId = `msg-openclaw-${"f".repeat(64)}`;
     const secondResponse = await runAgentCliInProcessSequential([
       "respond",
@@ -1195,7 +1196,7 @@ test("monitor keeps a durable late native ACK when later bookkeeping fails", asy
       try {
         fs.mkdirSync(fakeBinDir, { recursive: true });
         fs.mkdirSync(workspace, { recursive: true });
-        fs.writeFileSync(screenPath, "› \n");
+        fs.writeFileSync(screenPath, codexEmptyComposerScreen);
         writeFakeTmux(
           fakeBinDir,
           tmuxCallsPath,

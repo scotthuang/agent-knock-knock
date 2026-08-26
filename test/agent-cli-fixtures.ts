@@ -48,6 +48,8 @@ process.on("exit", () => {
 });
 export const sessionId = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 export const rolloutPath = "/tmp/codex-rollout.jsonl";
+export const codexEmptyComposerScreen =
+  "Ready\n› \ngpt-5.6-sol high · /repo";
 
 export interface ManagedClaudeTerminalTask {
   conversation: any;

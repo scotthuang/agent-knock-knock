@@ -30,6 +30,7 @@ import {
   cwd,
   sessionId,
   rolloutPath,
+  codexEmptyComposerScreen,
   startManagedClaudeTerminalTask,
   claudeTerminalStaticArgs,
   claudeAgentRow,
@@ -85,7 +86,7 @@ test("safe-aborted strict managed retry rejects binding drift while user-priorit
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
     fs.writeFileSync(exactRolloutPath, `${JSON.stringify({
       timestamp: "2026-08-13T00:00:00.000Z",
       type: "session_meta",

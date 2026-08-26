@@ -34,6 +34,7 @@ import {
   cwd,
   sessionId,
   rolloutPath,
+  codexEmptyComposerScreen,
   startManagedClaudeTerminalTask,
   claudeTerminalStaticArgs,
   claudeAgentRow,
@@ -93,7 +94,7 @@ test("CLI reports a multilingual multiline draft left in Codex after one Enter",
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
     fs.writeFileSync(
       rolloutPath,
       `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`,
@@ -1203,7 +1204,7 @@ test("default delegate retries route to the original active receipt before idle 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
     fs.writeFileSync(
       rolloutPath,
       `${JSON.stringify({
@@ -1257,7 +1258,8 @@ test("default delegate retries route to the original active receipt before idle 
       "--disable-terminal-bridge-monitor"
     ];
     const testEnv = {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_TEST_TMUX_COMPOSER_FROM_LITERAL: "1"
     };
     const first = await runAgentCliInProcess(args, testEnv);
     assert.equal(first.status, 0, first.stderr || first.stdout);

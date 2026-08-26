@@ -19,6 +19,8 @@ import { ensureStoreWritable, listConversations } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
+const CODEX_EMPTY_COMPOSER_SCREEN =
+  "Ready\n› \ngpt-5.6-sol high · /repo";
 
 test("verified lifecycle target conflict preserves source and later rolls forward without duplicate command, Session, or Turn", () => {
   const tempDir = fs.mkdtempSync(
@@ -53,7 +55,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
     fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(screenPath, "Ready\n› ");
+    fs.writeFileSync(screenPath, CODEX_EMPTY_COMPOSER_SCREEN);
     fs.writeFileSync(rolloutPath, `${JSON.stringify({
       timestamp: "2026-08-06T00:00:00.000Z",
       type: "session_meta",
@@ -313,7 +315,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
       true
     );
     fs.writeFileSync(statusCountPath, "0");
-    fs.writeFileSync(screenPath, "Ready\n› ");
+    fs.writeFileSync(screenPath, CODEX_EMPTY_COMPOSER_SCREEN);
 
     const conflicted = runCli([
       "new-thread",
@@ -553,8 +555,11 @@ if (args[0] === "send-keys" && args.includes("C-m")) {
     const id = next === 1
       ? ${JSON.stringify(options.oldNativeThreadId)}
       : ${JSON.stringify(options.newNativeThreadId)};
-    fs.writeFileSync(${JSON.stringify(options.screenPath)},
-      "/status\\nprobe-" + next + "\\nSession: " + id + "\\n› ");
+    fs.writeFileSync(
+      ${JSON.stringify(options.screenPath)},
+      "/status\\nprobe-" + next + "\\nSession: " + id + "\\n" +
+      ${JSON.stringify(CODEX_EMPTY_COMPOSER_SCREEN)}
+    );
   }
   process.exit(0);
 }
@@ -681,7 +686,8 @@ function tmux(args) {
           : ${JSON.stringify(options.newNativeThreadId)};
         fs.writeFileSync(
           ${JSON.stringify(options.screenPath)},
-          "/status\\nprobe-" + next + "\\nSession: " + id + "\\n› "
+          "/status\\nprobe-" + next + "\\nSession: " + id + "\\n" +
+          ${JSON.stringify(CODEX_EMPTY_COMPOSER_SCREEN)}
         );
       }
     }
