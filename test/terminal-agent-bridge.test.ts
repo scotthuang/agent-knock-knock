@@ -1104,55 +1104,94 @@ test("Codex composer observation returns every closed state without draft text",
   });
 });
 
-test("explicit Codex Send injects, submits, or replaces by composer state", async (t) => {
-  const request = "the user's newest explicit request";
+test("explicit Codex Send replaces even when the Composer is off-screen", async (t) => {
+  const request = Array.from(
+    { length: 19 },
+    (_, index) => `line ${index + 1}: the user's newest explicit request`
+  ).join("\n");
+  const workingLine =
+    "• Working (8s · esc to interrupt) · 1 background terminal running";
   const cases = [
     {
       name: "empty composer",
-      screen: codexPaddedStyledIdleScreen(80),
-      disposition: "injected_empty_composer",
-      mutations: ["text", "keys:C-m"]
+      screen: codexPaddedStyledIdleScreen(91)
     },
     {
-      name: "same draft",
-      screen: `› ${request}\ngpt-5.6-sol high · /repo`,
-      disposition: "submitted_existing_draft",
-      mutations: ["keys:C-m"]
+      name: "same visible draft",
+      screen: `› ${request}\ngpt-5.6-sol high · /repo`
     },
     {
-      name: "different draft",
-      screen: "› an older unrelated draft\ngpt-5.6-sol high · /repo",
-      disposition: "replaced_existing_draft",
-      mutations: ["keys:C-u", "text", "keys:C-m"]
+      name: "different visible draft",
+      screen: "› an older unrelated draft\ngpt-5.6-sol high · /repo"
+    },
+    {
+      name: "off-screen composer",
+      screen: Array.from(
+        { length: 30 },
+        (_, index) => `Assistant output fills viewport row ${index + 1}`
+      ).join("\n")
+    },
+    {
+      name: "working with a background terminal",
+      screen: [
+        workingLine,
+        "Assistant output fills the visible viewport; composer is below it."
+      ].join("\n")
     }
   ] as const;
 
   for (const testCase of cases) {
     await t.test(testCase.name, async () => {
       let nowMs = 0;
-      class ExplicitSendProvider extends RecordingTerminalProvider {
+      let injectedAt: number | undefined;
+      let mutationStarted = false;
+      const narrowPane: TerminalPane = {
+        ...PANE,
+        columns: 91,
+        rows: 30
+      };
+      class BlindReplacementProvider extends RecordingTerminalProvider {
+        override async capture(
+          terminal: TerminalEndpointRef | string,
+          options: {
+            scrollbackLines?: number;
+            socketPath?: string;
+            preserveEscapes?: boolean;
+          } = {}
+        ): Promise<string> {
+          if (mutationStarted) {
+            throw new Error("post-mutation Composer capture is forbidden");
+          }
+          return super.capture(terminal, options);
+        }
+
         override async sendText(
-          target: TerminalEndpointRef | string,
+          terminal: TerminalEndpointRef | string,
           text: string,
           options: { socketPath?: string } = {}
         ): Promise<void> {
-          await super.sendText(target, text, options);
-          this.setScreen(target, `› ${text}\ngpt-5.6-sol high · /repo`);
+          assert.equal(mutationStarted, true);
+          injectedAt = nowMs;
+          await super.sendText(terminal, text, options);
         }
 
         override async sendKeys(
-          target: TerminalEndpointRef | string,
+          terminal: TerminalEndpointRef | string,
           keys: readonly string[],
           options: { socketPath?: string } = {}
         ): Promise<void> {
-          await super.sendKeys(target, keys, options);
           if (keys.includes("C-u")) {
-            this.setScreen(target, codexPaddedStyledIdleScreen(80));
+            mutationStarted = true;
           }
+          if (keys.includes("C-m")) {
+            assert.notEqual(injectedAt, undefined);
+            assert.ok(nowMs - Number(injectedAt) >= 121);
+          }
+          await super.sendKeys(terminal, keys, options);
         }
       }
-      const provider = new ExplicitSendProvider([PANE], {
-        [PANE.target]: testCase.screen
+      const provider = new BlindReplacementProvider([narrowPane], {
+        [narrowPane.target]: testCase.screen
       });
       const bridge = new TerminalAgentBridge({
         registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
@@ -1162,24 +1201,25 @@ test("explicit Codex Send injects, submits, or replaces by composer state", asyn
           nowMs += milliseconds;
         }
       });
-      const reservations: string[] = [];
+      const reservations: Array<{ target: string; text: string }> = [];
       const result = await bridge.sendUserExplicitCodex(
         terminalControl(codexTerminalAgentAdapter),
         request,
         {
-          beforeMutationReservation: ({ composerState }) => {
-            reservations.push(composerState);
+          beforeMutationReservation: ({ terminalControl, text }) => {
+            reservations.push({ target: terminalControl.target, text });
           }
         }
       );
-      assert.equal(result.disposition, testCase.disposition);
-      assert.deepEqual(reservations, [
-        testCase.name === "empty composer"
-          ? "exact_empty"
-          : testCase.name === "same draft"
-            ? "exact_draft"
-            : "different_draft"
-      ]);
+      assert.deepEqual(reservations, [{ target: PANE.target, text: request }]);
+      assert.deepEqual(result, {
+        stage: "enter_dispatched",
+        terminalControl: result.terminalControl,
+        disposition: "replaced_current_composer",
+        clearCount: 1,
+        textInjectionCount: 1,
+        enterCount: 1
+      });
       assert.deepEqual(
         provider.operations.flatMap((operation) =>
           operation.kind === "capture"
@@ -1188,125 +1228,68 @@ test("explicit Codex Send injects, submits, or replaces by composer state", asyn
               ? ["text"]
               : [`keys:${operation.keys.join(",")}`]
         ),
-        testCase.mutations
+        ["keys:C-u", "text", "keys:C-m"]
+      );
+      assert.equal(
+        provider.operations.filter((operation) => operation.kind === "capture")
+          .length,
+        2,
+        "only the two pre-mutation approval/identity scans are allowed"
       );
     });
   }
 });
 
-test("explicit Codex Send preserves user priority on a working mutable composer", async (t) => {
-  const request = "the user's newest explicit request";
-  const workingLine =
-    "• Working (8s · esc to interrupt) · 1 background terminal running";
-  const workingScreen = (composer: string) => [
-    workingLine,
-    composer,
-    "gpt-5.6-sol high · /repo"
-  ].join("\n");
-  const cases = [
-    {
-      name: "empty composer",
-      screen: `${workingLine}\n${codexPaddedStyledIdleScreen(80)}`,
-      disposition: "injected_empty_composer",
-      mutations: ["text", "keys:C-m"]
-    },
-    {
-      name: "same draft",
-      screen: workingScreen(`› ${request}`),
-      disposition: "submitted_existing_draft",
-      mutations: ["keys:C-m"]
-    },
-    {
-      name: "different draft",
-      screen: workingScreen("› an older unrelated draft"),
-      disposition: "replaced_existing_draft",
-      mutations: ["keys:C-u", "text", "keys:C-m"]
-    }
-  ] as const;
-
-  for (const testCase of cases) {
-    await t.test(testCase.name, async () => {
-      let nowMs = 0;
-      class WorkingExplicitSendProvider extends RecordingTerminalProvider {
-        override async sendText(
-          target: TerminalEndpointRef | string,
-          text: string,
-          options: { socketPath?: string } = {}
-        ): Promise<void> {
-          await super.sendText(target, text, options);
-          this.setScreen(target, workingScreen(`› ${text}`));
-        }
-
-        override async sendKeys(
-          target: TerminalEndpointRef | string,
-          keys: readonly string[],
-          options: { socketPath?: string } = {}
-        ): Promise<void> {
-          await super.sendKeys(target, keys, options);
-          if (keys.includes("C-u")) {
-            this.setScreen(
-              target,
-              `${workingLine}\n${codexPaddedStyledIdleScreen(80)}`
-            );
-          }
-        }
+test("explicit Codex Send keeps approval as a zero-input boundary", async (t) => {
+  await t.test("an existing approval blocks Send", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: strictCodexCommandApprovalScreen()
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
       }
-      const provider = new WorkingExplicitSendProvider([PANE], {
-        [PANE.target]: testCase.screen
-      });
-      const bridge = new TerminalAgentBridge({
-        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
-        terminalProvider: provider,
-        nowMs: () => nowMs,
-        async sleep(milliseconds) {
-          nowMs += milliseconds;
-        }
-      });
-      const result = await bridge.sendUserExplicitCodex(
-        terminalControl(codexTerminalAgentAdapter),
-        request,
-        { beforeMutationReservation() {} }
-      );
-      assert.equal(result.disposition, testCase.disposition);
-      assert.deepEqual(
-        provider.operations.flatMap((operation) =>
-          operation.kind === "capture"
-            ? []
-            : operation.kind === "text"
-              ? ["text"]
-              : [`keys:${operation.keys.join(",")}`]
-        ),
-        testCase.mutations
-      );
     });
-  }
-});
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        "new explicit request",
+        { beforeMutationReservation() {} }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
 
-test("explicit Codex Send still rejects approval while working is allowed", async () => {
-  let nowMs = 0;
-  const provider = new RecordingTerminalProvider([PANE], {
-    [PANE.target]: strictCodexCommandApprovalScreen()
+  await t.test("an approval appearing during reservation blocks Send", async () => {
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: "Assistant output with the Composer off-screen"
+    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        "new explicit request",
+        {
+          beforeMutationReservation() {
+            provider.setScreen(PANE.target, strictCodexCommandApprovalScreen());
+          }
+        }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
   });
-  const bridge = new TerminalAgentBridge({
-    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
-    terminalProvider: provider,
-    nowMs: () => nowMs,
-    async sleep(milliseconds) {
-      nowMs += milliseconds;
-    }
-  });
-  await assert.rejects(
-    bridge.sendUserExplicitCodex(
-      terminalControl(codexTerminalAgentAdapter),
-      "new explicit request",
-      { beforeMutationReservation() {} }
-    ),
-    TerminalInputNotStartedError
-  );
-  assert.equal(
-    provider.operations.some((operation) => operation.kind !== "capture"),
-    false
-  );
 });
 
 test("managed user Send recaptures exact empty immediately before text", async (t) => {
@@ -1353,6 +1336,126 @@ test("managed user Send recaptures exact empty immediately before text", async (
             : [`keys:${operation.keys.join(",")}`]
       ),
       ["text", "keys:C-m"]
+    );
+  });
+
+  await t.test("user-explicit managed Codex ignores post-text Composer visibility", async () => {
+    let nowMs = 0;
+    let textInjected = false;
+    let injectedAt = 0;
+    class ManagedExplicitProvider extends RecordingTerminalProvider {
+      override async capture(
+        terminal: TerminalEndpointRef | string,
+        options: {
+          scrollbackLines?: number;
+          socketPath?: string;
+          preserveEscapes?: boolean;
+        } = {}
+      ): Promise<string> {
+        if (textInjected) {
+          throw new Error("post-text Composer capture must not run");
+        }
+        return super.capture(terminal, options);
+      }
+
+      override async sendText(
+        terminal: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        textInjected = true;
+        injectedAt = nowMs;
+        await super.sendText(terminal, text, options);
+      }
+
+      override async sendKeys(
+        terminal: TerminalEndpointRef | string,
+        keys: readonly string[],
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        if (keys.includes("C-m")) {
+          assert.ok(nowMs - injectedAt >= 121);
+        }
+        await super.sendKeys(terminal, keys, options);
+      }
+    }
+    const provider = new ManagedExplicitProvider([PANE], {
+      [PANE.target]: codexPaddedStyledIdleScreen(80)
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      request,
+      {
+        requireExactEmptyComposerBeforeText: true,
+        requireExactComposerBeforeEnter: true,
+        userExplicitEnterAfterTextWithoutComposerVeto: true
+      }
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["text", "keys:C-m"]
+    );
+  });
+
+  await t.test("post-text bookkeeping failure cannot strand an explicit draft", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: codexPaddedStyledIdleScreen(80)
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.send(
+        "codex",
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        {
+          requireExactEmptyComposerBeforeText: true,
+          requireExactComposerBeforeEnter: true,
+          userExplicitEnterAfterTextWithoutComposerVeto: true,
+          onTransportStage({ stage }) {
+            if (stage === "text_injected") {
+              throw new Error("durable text receipt is unavailable");
+            }
+          },
+          beforeEnter() {
+            throw new Error("managed pre-Enter bookkeeping is unavailable");
+          }
+        }
+      ),
+      TerminalEnterDispatchReservedError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["text", "keys:C-m"],
+      "the user request must still receive Enter exactly once"
     );
   });
 
@@ -1456,85 +1559,21 @@ test("managed user Send recaptures exact empty immediately before text", async (
   });
 });
 
-test("explicit Codex Send keeps every pre-mutation callback failure retry-safe", async (t) => {
-  const request = "new explicit request";
-  const cases = [
-    {
-      name: "empty composer",
-      screen: codexPaddedStyledIdleScreen(80)
-    },
-    {
-      name: "same draft",
-      screen: `› ${request}\ngpt-5.6-sol high · /repo`
-    },
-    {
-      name: "different draft",
-      screen: "› older draft\ngpt-5.6-sol high · /repo"
-    }
-  ];
-
-  for (const testCase of cases) {
-    await t.test(testCase.name, async () => {
-      let nowMs = 0;
-      const provider = new RecordingTerminalProvider([PANE], {
-        [PANE.target]: testCase.screen
-      });
-      const bridge = new TerminalAgentBridge({
-        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
-        terminalProvider: provider,
-        nowMs: () => nowMs,
-        async sleep(milliseconds) {
-          nowMs += milliseconds;
-        }
-      });
-      await assert.rejects(
-        bridge.sendUserExplicitCodex(
-          terminalControl(codexTerminalAgentAdapter),
-          request,
-          {
-            beforeMutationReservation() {
-              throw new Error("fresh physical authority was lost");
-            }
-          }
-        ),
-        TerminalInputNotStartedError
-      );
-      assert.equal(
-        provider.operations.some((operation) => operation.kind !== "capture"),
-        false
-      );
+test("explicit Codex Send reserves before its first physical mutation", async (t) => {
+  await t.test("reservation failure is retry-safe and sends zero input", async () => {
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: "Assistant output with the Composer off-screen"
     });
-  }
-});
-
-test("explicit Codex Send distinguishes proven zero text from uncertain injected text", async (t) => {
-  const request = "new explicit request";
-
-  await t.test("typed text-not-sent proof remains retry-safe", async () => {
-    let nowMs = 0;
-    class ProvenNoTextProvider extends RecordingTerminalProvider {
-      override async sendText(): Promise<void> {
-        throw new TerminalControlInputNotSentError(
-          "test provider proved text was not delivered"
-        );
-      }
-    }
-    const provider = new ProvenNoTextProvider([PANE], {
-      [PANE.target]: codexPaddedStyledIdleScreen(80)
-    });
-    const bridge = new TerminalAgentBridge({
-      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
-      terminalProvider: provider,
-      nowMs: () => nowMs,
-      async sleep(milliseconds) {
-        nowMs += milliseconds;
-      }
-    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
     await assert.rejects(
       bridge.sendUserExplicitCodex(
         terminalControl(codexTerminalAgentAdapter),
-        request,
-        { beforeMutationReservation() {} }
+        "new explicit request",
+        {
+          beforeMutationReservation() {
+            throw new Error("fresh physical authority was lost");
+          }
+        }
       ),
       TerminalInputNotStartedError
     );
@@ -1544,53 +1583,9 @@ test("explicit Codex Send distinguishes proven zero text from uncertain injected
     );
   });
 
-  for (const testCase of [
-    {
-      name: "typed exact-draft Enter-not-sent proof remains retry-safe",
-      screen: `› ${request}\ngpt-5.6-sol high · /repo`
-    },
-    {
-      name: "typed different-draft clear-not-sent proof remains retry-safe",
-      screen: "› older draft\ngpt-5.6-sol high · /repo"
-    }
-  ]) {
-    await t.test(testCase.name, async () => {
-      let nowMs = 0;
-      class ProvenNoKeyProvider extends RecordingTerminalProvider {
-        override async sendKeys(): Promise<void> {
-          throw new TerminalControlInputNotSentError(
-            "test provider proved the first key was not delivered"
-          );
-        }
-      }
-      const provider = new ProvenNoKeyProvider([PANE], {
-        [PANE.target]: testCase.screen
-      });
-      const bridge = new TerminalAgentBridge({
-        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
-        terminalProvider: provider,
-        nowMs: () => nowMs,
-        async sleep(milliseconds) {
-          nowMs += milliseconds;
-        }
-      });
-      await assert.rejects(
-        bridge.sendUserExplicitCodex(
-          terminalControl(codexTerminalAgentAdapter),
-          request,
-          { beforeMutationReservation() {} }
-        ),
-        TerminalInputNotStartedError
-      );
-      assert.equal(
-        provider.operations.some((operation) => operation.kind !== "capture"),
-        false
-      );
-    });
-  }
-
-  await t.test("successful text call followed by an inexact draft is uncertain", async () => {
+  await t.test("Composer drift during reservation is replaced, not vetoed", async () => {
     let nowMs = 0;
+    const request = "new explicit request";
     const provider = new RecordingTerminalProvider([PANE], {
       [PANE.target]: codexPaddedStyledIdleScreen(80)
     });
@@ -1602,6 +1597,111 @@ test("explicit Codex Send distinguishes proven zero text from uncertain injected
         nowMs += milliseconds;
       }
     });
+    const result = await bridge.sendUserExplicitCodex(
+      terminalControl(codexTerminalAgentAdapter),
+      request,
+      {
+        beforeMutationReservation() {
+          provider.setScreen(
+            PANE.target,
+            "› human changed the draft\ngpt-5.6-sol high · /repo"
+          );
+        }
+      }
+    );
+    assert.equal(result.disposition, "replaced_current_composer");
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["keys:C-u", "text", "keys:C-m"]
+    );
+  });
+});
+
+test("explicit Codex Send classifies transport failures around its one-shot sequence", async (t) => {
+  const request = "new explicit request";
+
+  await t.test("proven C-u not-sent remains retry-safe", async () => {
+    let clearAttempts = 0;
+    class ProvenNoClearProvider extends RecordingTerminalProvider {
+      override async sendKeys(
+        _terminal: TerminalEndpointRef | string,
+        keys: readonly string[]
+      ): Promise<void> {
+        assert.deepEqual(keys, ["C-u"]);
+        clearAttempts += 1;
+        throw new TerminalControlInputNotSentError(
+          "test provider proved C-u was not delivered"
+        );
+      }
+    }
+    const provider = new ProvenNoClearProvider([PANE], {
+      [PANE.target]: "Composer may be off-screen"
+    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(clearAttempts, 1);
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  await t.test("unknown C-u outcome is uncertain and stops", async () => {
+    let clearAttempts = 0;
+    class UnknownClearProvider extends RecordingTerminalProvider {
+      override async sendKeys(
+        _terminal: TerminalEndpointRef | string,
+        keys: readonly string[]
+      ): Promise<void> {
+        assert.deepEqual(keys, ["C-u"]);
+        clearAttempts += 1;
+        throw new Error("C-u delivery outcome is unknown");
+      }
+    }
+    const provider = new UnknownClearProvider([PANE], {
+      [PANE.target]: "Composer may be off-screen"
+    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalEnterDispatchReservedError
+    );
+    assert.equal(clearAttempts, 1);
+    assert.equal(
+      provider.operations.some((operation) => operation.kind === "text"),
+      false
+    );
+  });
+
+  await t.test("text-not-sent after C-u is uncertain", async () => {
+    class ProvenNoTextProvider extends RecordingTerminalProvider {
+      override async sendText(): Promise<void> {
+        throw new TerminalControlInputNotSentError(
+          "test provider proved text was not delivered"
+        );
+      }
+    }
+    const provider = new ProvenNoTextProvider([PANE], {
+      [PANE.target]: "Composer may be off-screen"
+    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
     await assert.rejects(
       bridge.sendUserExplicitCodex(
         terminalControl(codexTerminalAgentAdapter),
@@ -1618,231 +1718,14 @@ test("explicit Codex Send distinguishes proven zero text from uncertain injected
             ? ["text"]
             : [`keys:${operation.keys.join(",")}`]
       ),
-      ["text"]
+      ["keys:C-u"]
     );
   });
-});
 
-test("explicit Codex Send treats every attempted Enter as uncertain on transport failure", async (t) => {
-  const request = "new explicit request";
-  const cases = [
-    {
-      name: "empty composer",
-      screen: codexPaddedStyledIdleScreen(80),
-      mutations: ["text", "keys:C-m"]
-    },
-    {
-      name: "same draft",
-      screen: `› ${request}\ngpt-5.6-sol high · /repo`,
-      mutations: ["keys:C-m"]
-    },
-    {
-      name: "different draft",
-      screen: "› older draft\ngpt-5.6-sol high · /repo",
-      mutations: ["keys:C-u", "text", "keys:C-m"]
-    }
-  ];
-
-  for (const testCase of cases) {
-    await t.test(testCase.name, async () => {
-      let nowMs = 0;
-      class FailedEnterProvider extends RecordingTerminalProvider {
-        override async sendText(
-          target: TerminalEndpointRef | string,
-          text: string,
-          options: { socketPath?: string } = {}
-        ): Promise<void> {
-          await super.sendText(target, text, options);
-          this.setScreen(target, `› ${text}\ngpt-5.6-sol high · /repo`);
-        }
-
-        override async sendKeys(
-          target: TerminalEndpointRef | string,
-          keys: readonly string[],
-          options: { socketPath?: string } = {}
-        ): Promise<void> {
-          await super.sendKeys(target, keys, options);
-          if (keys.includes("C-u")) {
-            this.setScreen(target, codexPaddedStyledIdleScreen(80));
-          }
-          if (keys.includes("C-m")) {
-            throw new Error("Enter delivery outcome is unknown");
-          }
-        }
-      }
-      const provider = new FailedEnterProvider([PANE], {
-        [PANE.target]: testCase.screen
-      });
-      const bridge = new TerminalAgentBridge({
-        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
-        terminalProvider: provider,
-        nowMs: () => nowMs,
-        async sleep(milliseconds) {
-          nowMs += milliseconds;
-        }
-      });
-      await assert.rejects(
-        bridge.sendUserExplicitCodex(
-          terminalControl(codexTerminalAgentAdapter),
-          request,
-          { beforeMutationReservation() {} }
-        ),
-        TerminalEnterDispatchReservedError
-      );
-      assert.deepEqual(
-        provider.operations.flatMap((operation) =>
-          operation.kind === "capture"
-            ? []
-            : operation.kind === "text"
-              ? ["text"]
-              : [`keys:${operation.keys.join(",")}`]
-        ),
-        testCase.mutations
-      );
-    });
-  }
-});
-
-test("explicit Codex Send submits fresh large-paste placeholders and replaces opaque old drafts", async (t) => {
-  const request = "x".repeat(1_001);
-  const cases = [
-    {
-      name: "empty composer",
-      screen: codexPaddedStyledIdleScreen(80),
-      disposition: "injected_empty_composer",
-      mutations: ["text", "keys:C-m"]
-    },
-    {
-      name: "different visible draft",
-      screen: "› older draft\ngpt-5.6-sol high · /repo",
-      disposition: "replaced_existing_draft",
-      mutations: ["keys:C-u", "text", "keys:C-m"]
-    },
-    {
-      name: "same-length opaque existing draft",
-      screen: "› [Pasted Content 1001 chars]\ngpt-5.6-sol high · /repo",
-      disposition: "replaced_existing_draft",
-      mutations: ["keys:C-u", "text", "keys:C-m"]
-    }
-  ] as const;
-
-  for (const testCase of cases) {
-    await t.test(testCase.name, async () => {
-      let nowMs = 0;
-      class LargePasteProvider extends RecordingTerminalProvider {
-        override async sendText(
-          target: TerminalEndpointRef | string,
-          text: string,
-          options: { socketPath?: string } = {}
-        ): Promise<void> {
-          await super.sendText(target, text, options);
-          this.setScreen(
-            target,
-            `› [Pasted Content ${Array.from(text).length} chars]\n` +
-              "gpt-5.6-sol high · /repo"
-          );
-        }
-
-        override async sendKeys(
-          target: TerminalEndpointRef | string,
-          keys: readonly string[],
-          options: { socketPath?: string } = {}
-        ): Promise<void> {
-          await super.sendKeys(target, keys, options);
-          if (keys.includes("C-u")) {
-            this.setScreen(target, codexPaddedStyledIdleScreen(80));
-          }
-        }
-      }
-      const provider = new LargePasteProvider([PANE], {
-        [PANE.target]: testCase.screen
-      });
-      const bridge = new TerminalAgentBridge({
-        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
-        terminalProvider: provider,
-        nowMs: () => nowMs,
-        async sleep(milliseconds) {
-          nowMs += milliseconds;
-        }
-      });
-      const result = await bridge.sendUserExplicitCodex(
-        terminalControl(codexTerminalAgentAdapter),
-        request,
-        { beforeMutationReservation() {} }
-      );
-      assert.equal(result.disposition, testCase.disposition);
-      assert.deepEqual(
-        provider.operations.flatMap((operation) =>
-          operation.kind === "capture"
-            ? []
-            : operation.kind === "text"
-              ? ["text"]
-              : [`keys:${operation.keys.join(",")}`]
-        ),
-        testCase.mutations
-      );
-    });
-  }
-});
-
-test("explicit Codex replacement revalidates before clear and proves clear before text", async (t) => {
-  const request = "new explicit request";
-  await t.test("empty and same drafts that drift before mutation stay retry-safe", async (nested) => {
-    const cases = [
-      {
-        name: "empty composer",
-        screen: codexPaddedStyledIdleScreen(80)
-      },
-      {
-        name: "same draft",
-        screen: `› ${request}\ngpt-5.6-sol high · /repo`
-      }
-    ];
-    for (const testCase of cases) {
-      await nested.test(testCase.name, async () => {
-        let nowMs = 0;
-        const provider = new RecordingTerminalProvider([PANE], {
-          [PANE.target]: testCase.screen
-        });
-        const bridge = new TerminalAgentBridge({
-          registry: createTerminalAgentAdapterRegistry([
-            codexTerminalAgentAdapter
-          ]),
-          terminalProvider: provider,
-          nowMs: () => nowMs,
-          async sleep(milliseconds) {
-            nowMs += milliseconds;
-          }
-        });
-        await assert.rejects(
-          bridge.sendUserExplicitCodex(
-            terminalControl(codexTerminalAgentAdapter),
-            request,
-            {
-              beforeMutationReservation() {
-                provider.setScreen(
-                  PANE.target,
-                  "› human changed the draft\ngpt-5.6-sol high · /repo"
-                );
-              }
-            }
-          ),
-          TerminalInputNotStartedError
-        );
-        assert.equal(
-          provider.operations.some((operation) =>
-            operation.kind !== "capture"
-          ),
-          false
-        );
-      });
-    }
-  });
-
-  await t.test("draft drift before clear sends no input", async () => {
+  await t.test("post-clear hook failure cannot strand the user's draft", async () => {
     let nowMs = 0;
     const provider = new RecordingTerminalProvider([PANE], {
-      [PANE.target]: "› old draft\ngpt-5.6-sol high · /repo"
+      [PANE.target]: "Composer may be off-screen"
     });
     const bridge = new TerminalAgentBridge({
       registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
@@ -1857,26 +1740,45 @@ test("explicit Codex replacement revalidates before clear and proves clear befor
         terminalControl(codexTerminalAgentAdapter),
         request,
         {
-          beforeMutationReservation() {
-            provider.setScreen(
-              PANE.target,
-              "› human changed the draft\ngpt-5.6-sol high · /repo"
-            );
+          beforeMutationReservation() {},
+          onComposerClearDispatched() {
+            throw new Error("internal clear receipt is unavailable");
           }
         }
       ),
-      TerminalInputNotStartedError
+      TerminalEnterDispatchReservedError
     );
-    assert.equal(
-      provider.operations.some((operation) => operation.kind !== "capture"),
-      false
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["keys:C-u", "text", "keys:C-m"],
+      "internal acknowledgement failure must not veto physical Enter"
     );
   });
 
-  await t.test("failed clear is uncertain and never injects the new request", async () => {
+  await t.test("Enter failure is uncertain and attempted exactly once", async () => {
     let nowMs = 0;
-    const provider = new RecordingTerminalProvider([PANE], {
-      [PANE.target]: "› old draft\ngpt-5.6-sol high · /repo"
+    let enterAttempts = 0;
+    class UnknownEnterProvider extends RecordingTerminalProvider {
+      override async sendKeys(
+        terminal: TerminalEndpointRef | string,
+        keys: readonly string[],
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendKeys(terminal, keys, options);
+        if (keys.includes("C-m")) {
+          enterAttempts += 1;
+          throw new Error("Enter delivery outcome is unknown");
+        }
+      }
+    }
+    const provider = new UnknownEnterProvider([PANE], {
+      [PANE.target]: "Composer may be off-screen"
     });
     const bridge = new TerminalAgentBridge({
       registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
@@ -1894,18 +1796,58 @@ test("explicit Codex replacement revalidates before clear and proves clear befor
       ),
       TerminalEnterDispatchReservedError
     );
-    assert.equal(
-      provider.operations.filter((operation) =>
-        operation.kind === "keys" && operation.keys.includes("C-u")
-      ).length,
-      1
-    );
-    assert.equal(
-      provider.operations.some((operation) =>
-        operation.kind === "text" ||
-        (operation.kind === "keys" && operation.keys.includes("C-m"))
+    assert.equal(enterAttempts, 1);
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
       ),
-      false
+      ["keys:C-u", "text", "keys:C-m"]
+    );
+  });
+
+  await t.test("identity drift after text prevents Enter without retry", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: "Composer may be off-screen"
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      },
+      async verifyIdentity({ terminalControl }) {
+        if (provider.operations.some((operation) => operation.kind === "text")) {
+          throw new Error("terminal process changed after text");
+        }
+        return { terminalControl };
+      }
+    });
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        {
+          runtime: { pid: 110 },
+          beforeMutationReservation() {}
+        }
+      ),
+      TerminalEnterDispatchReservedError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["keys:C-u", "text"]
     );
   });
 });

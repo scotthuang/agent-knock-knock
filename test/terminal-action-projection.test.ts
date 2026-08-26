@@ -406,12 +406,32 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
       expectedTerminalToken: expectedToken
     }
   );
+  assert.deepEqual(
+    decideTerminalUserExplicitSendAuthority({
+      ...common,
+      userExplicitComposerReady: false
+    }),
+    {
+      eligible: true,
+      terminalId,
+      expectedTerminalToken: expectedToken
+    },
+    "Codex user-explicit Send must not depend on visible composer proof"
+  );
+  assert.deepEqual(
+    decideTerminalUserExplicitSendAuthority({
+      ...common,
+      agent: "claude",
+      userExplicitComposerReady: false
+    }),
+    { eligible: false },
+    "Claude user-explicit Send remains exact-composer gated"
+  );
   for (const unavailable of [
     { exactTerminalRow: false },
     { processState: "exited" },
     { approvalScanned: false },
     { approvalBlocked: true },
-    { userExplicitComposerReady: false },
     { processBirth: undefined },
     {
       terminalControl: {

@@ -623,7 +623,7 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
     "const zeroInput = error instanceof TerminalInputNotStartedError",
     "cancelProvenZeroInputUserExplicitSendIntent(",
     'composer_disposition: composerDisposition',
-    'composerDisposition === "replaced_existing_draft"'
+    "composer_cleared_before_send: true"
   ]);
   assert.doesNotMatch(
     fallback.match(/const zeroInput[\s\S]*?if \(zeroInput\)/u)?.[0] ?? "",

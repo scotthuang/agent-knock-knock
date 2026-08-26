@@ -5782,10 +5782,8 @@ async function runUserExplicitTerminalFallback(
       });
       throw error;
     }
-    let composerDisposition:
-      | "injected_empty_composer"
-      | "submitted_existing_draft"
-      | "replaced_existing_draft" = "injected_empty_composer";
+    let composerDisposition: "replaced_current_composer" =
+      "replaced_current_composer";
     try {
       const revalidatePhysicalMutation = async (
         terminalControl: TerminalControlRef
@@ -5910,8 +5908,11 @@ async function runUserExplicitTerminalFallback(
       scope: "terminal_user_explicit",
       management_mode: "unmanaged_fallback",
       composer_disposition: composerDisposition,
-      replaced_existing_draft:
-        composerDisposition === "replaced_existing_draft",
+      composer_cleared_before_send: true,
+      // Deprecated compatibility alias. The v22 policy always dispatches
+      // C-u, so older readers may conservatively treat the prior draft as
+      // replaced without controlling the new behavior.
+      replaced_existing_draft: true,
       previous_management_release_attempted: true,
       warning: textSummary(
         `AKK delivered the user's message after managed-state preparation ` +
@@ -8975,10 +8976,16 @@ function terminalDispatchTransportLifecycle({
     recordStage: (stage, at, afterDurable) =>
       application.recordTransportStage(stage, at, afterDurable)
   });
-  return stringValue(options.expectedUserExplicitTerminalToken)
+  const userExplicitTerminalSend = Boolean(
+    stringValue(options.expectedUserExplicitTerminalToken)
+  );
+  return userExplicitTerminalSend
     ? {
         ...lifecycle,
-        requireExactEmptyComposerBeforeText: true
+        requireExactEmptyComposerBeforeText: true,
+        ...(request.executor.kind === "codex"
+          ? { userExplicitEnterAfterTextWithoutComposerVeto: true }
+          : {})
       }
     : lifecycle;
 }
