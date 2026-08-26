@@ -199,7 +199,7 @@ function buildDoctorReport(options: InstallDoctorCommandOptions) {
     notes: [
       `Node.js ${MINIMUM_NODE_VERSION}+ and OpenClaw are required.`,
       "AKK supports Codex and Claude Code through shared tmux or local Herdr terminals.",
-      "Coding-agent checks report exact native lifecycle/status profiles separately; an unprofiled executable can remain available for ordinary terminal work while native actions fail closed.",
+      "Coding-agent checks report exact native lifecycle/status profiles separately; an unprofiled executable keeps native actions available through optimistic runtime validation and emits a compatibility warning.",
       "Doctor does not require a live coding-agent pane; delegation discovers and verifies one at send time.",
       "Claude terminal completion is hook-free and fails closed unless the local transcript schema is verified.",
       "Herdr support is exact-version gated to 0.8.0/protocol 19 and uses local Unix sockets."

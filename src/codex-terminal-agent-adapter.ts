@@ -4,7 +4,9 @@ import {
   type CodexProcessKind,
   type ForkContextPackage
 } from "./codex-session-provider.js";
-import { codexLifecycleBehaviorProfile } from "./codex-lifecycle-compatibility.js";
+import {
+  codexRuntimeCompatibilityProfile
+} from "./codex-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
 import type {
   TerminalAgentAdapter,
@@ -128,16 +130,23 @@ export function probeCodexNativeInspection(
       reason: "the running Codex version could not be verified"
     };
   }
-  const behaviorProfile = codexLifecycleBehaviorProfile(agentVersion);
-  const supported = behaviorProfile !== undefined;
+  const runtimeProfile = codexRuntimeCompatibilityProfile(agentVersion);
+  if (!runtimeProfile) {
+    return {
+      status: "unsupported",
+      agentVersion,
+      statusInspection: false,
+      reason: "the running Codex version is not a complete x.y.z version"
+    };
+  }
   return {
-    status: supported ? "supported" : "unsupported",
+    status: "supported",
     agentVersion,
-    behaviorProfile,
-    statusInspection: supported,
-    reason: supported
+    ...runtimeProfile,
+    statusInspection: true,
+    reason: runtimeProfile.versionCompatibility === "verified"
       ? "Codex /status native inspection is supported by the verified version"
-      : "this exact Codex version has no AKK native inspection behavior profile"
+      : "Codex /status native inspection will use the generic runtime profile for this unverified version"
   };
 }
 
@@ -145,7 +154,7 @@ export function planCodexNativeInspection(
   operation: TerminalNativeInspectionOperation,
   capabilities: TerminalNativeInspectionCapabilities
 ): TerminalNativeInspectionPlan {
-  const behaviorProfile = codexLifecycleBehaviorProfile(
+  const runtimeProfile = codexRuntimeCompatibilityProfile(
     capabilities.agentVersion
   );
   if (
@@ -153,14 +162,15 @@ export function planCodexNativeInspection(
     capabilities.status !== "supported" ||
     !capabilities.statusInspection ||
     !capabilities.agentVersion ||
-    !behaviorProfile ||
-    capabilities.behaviorProfile !== behaviorProfile
+    !runtimeProfile ||
+    capabilities.behaviorProfile !== runtimeProfile.behaviorProfile ||
+    capabilities.versionCompatibility !== runtimeProfile.versionCompatibility
   ) {
     throw new Error(capabilities.reason);
   }
   return {
     operation,
-    behaviorProfile,
+    behaviorProfile: runtimeProfile.behaviorProfile,
     command: "/status",
     effect: "read_only",
     requiresIdle: true,
@@ -260,11 +270,11 @@ export function observeCodexNativeInspection(
     }
   }
 
-  if (!codexLifecycleBehaviorProfile(observedAgentVersion)) {
+  if (!codexRuntimeCompatibilityProfile(observedAgentVersion)) {
     return {
       ...observed,
       status: "mismatch",
-      reason: `Codex /status reported unsupported version ${observedAgentVersion}`
+      reason: `Codex /status reported invalid version ${observedAgentVersion}`
     };
   }
   if (
@@ -311,18 +321,27 @@ export function probeCodexThreadLifecycle(
       reason: "the running Codex version could not be verified"
     };
   }
-  const behaviorProfile = codexLifecycleBehaviorProfile(agentVersion);
-  const supported = behaviorProfile !== undefined;
+  const runtimeProfile = codexRuntimeCompatibilityProfile(agentVersion);
+  if (!runtimeProfile) {
+    return {
+      status: "unsupported",
+      agentVersion,
+      newThread: false,
+      resumeExact: false,
+      candidateDiscovery: false,
+      reason: "the running Codex version is not a complete x.y.z version"
+    };
+  }
   return {
-    status: supported ? "supported" : "unsupported",
+    status: "supported",
     agentVersion,
-    behaviorProfile,
-    newThread: supported,
-    resumeExact: supported,
-    candidateDiscovery: supported,
-    reason: supported
+    ...runtimeProfile,
+    newThread: true,
+    resumeExact: true,
+    candidateDiscovery: true,
+    reason: runtimeProfile.versionCompatibility === "verified"
       ? "Codex /clear, /status identity proof, and exact inline /resume are supported by the verified version"
-      : "this exact Codex version has no AKK native-thread lifecycle behavior profile"
+      : "Codex lifecycle control will use the generic runtime profile for this unverified version"
   };
 }
 
@@ -330,14 +349,15 @@ export function planCodexThreadLifecycle(
   operation: TerminalThreadLifecycleOperation,
   capabilities: TerminalThreadLifecycleCapabilities
 ): TerminalThreadLifecyclePlan {
-  const behaviorProfile = codexLifecycleBehaviorProfile(
+  const runtimeProfile = codexRuntimeCompatibilityProfile(
     capabilities.agentVersion
   );
   if (
     capabilities.status !== "supported" ||
     !capabilities.agentVersion ||
-    !behaviorProfile ||
-    capabilities.behaviorProfile !== behaviorProfile
+    !runtimeProfile ||
+    capabilities.behaviorProfile !== runtimeProfile.behaviorProfile ||
+    capabilities.versionCompatibility !== runtimeProfile.versionCompatibility
   ) {
     throw new Error(capabilities.reason);
   }
@@ -347,7 +367,7 @@ export function planCodexThreadLifecycle(
     }
     return {
       operation,
-      behaviorProfile,
+      behaviorProfile: runtimeProfile.behaviorProfile,
       steps: [
         {
           kind: "identity_probe_before",
@@ -381,7 +401,7 @@ export function planCodexThreadLifecycle(
   }
   return {
     operation,
-    behaviorProfile,
+    behaviorProfile: runtimeProfile.behaviorProfile,
     steps: [
       {
         kind: "transition",

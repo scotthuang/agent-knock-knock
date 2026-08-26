@@ -1003,12 +1003,21 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       )).status,
       "changed"
     );
+    const unverifiedVersionCandidate = (
+      await adapter.listThreadLifecycleCandidates({
+        ...request,
+        agentVersion: "0.150.0"
+      })
+    )[0];
+    assert.equal(unverifiedVersionCandidate.agentVersion, "0.150.0");
+    assert.equal(unverifiedVersionCandidate.sourceAgentVersion, "0.146.1");
+    assert.equal(unverifiedVersionCandidate.candidateToken.version, 2);
     await assert.rejects(
       adapter.listThreadLifecycleCandidates({
         ...request,
-        agentVersion: "0.146.2"
+        agentVersion: "0.150"
       }),
-      /supported exact versions: 0\.146\.0, 0\.146\.1, 0\.147\.0, 0\.148\.0, 0\.149\.1/u
+      /complete x\.y\.z agent version/u
     );
 
     row.cli_version = "0.140.0";
@@ -1042,6 +1051,13 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       }, request)).status,
       "changed"
     );
+    assert.equal(
+      (await adapter.revalidateThreadLifecycleCandidate({
+        ...historicalCandidate.candidateToken,
+        sourceAgentVersion: "0.139"
+      }, request)).status,
+      "unsafe"
+    );
     const {
       sourceAgentVersion: _sourceAgentVersion,
       ...historicalTokenBase
@@ -1052,6 +1068,13 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
         version: 1
       }, request)).status,
       "changed"
+    );
+
+    row.cli_version = "0.140";
+    writeRollout("0.140");
+    assert.deepEqual(
+      await adapter.listThreadLifecycleCandidates(request),
+      []
     );
 
     row.cli_version = "0.146.0";

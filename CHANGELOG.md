@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Treat Codex and Claude Code version profiles as regression-test evidence rather than runtime allowlists. A complete but unverified `x.y.z` version keeps every otherwise eligible Watch, native status, new-thread, candidate-list, and exact-resume action available through a generic compatibility profile, with explicit warnings in List, action, doctor, and command results.
+- Advance the model-facing action contract to 21 so Hosts preserve compatibility warnings while continuing to pass only semantic action arguments.
+
+### Security
+
+- Preserve exact terminal/process, native-thread, workspace, artifact, approval, composer, candidate, and postcondition checks for unverified versions. Real UI or schema drift fails at runtime, and any result after possibly sending input remains uncertain and must not be retried automatically.
+
 ## 0.12.17 - 2026-08-26
 
 ### Fixed

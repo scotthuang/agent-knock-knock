@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
-  claudeLifecycleBehaviorProfile,
   claudeLifecycleCompatibilityProfile,
-  claudeNativeInspectionBehaviorProfile,
+  claudeRuntimeCompatibilityWarning,
+  claudeRuntimeLifecycleCompatibilityProfile,
   profiledClaudeNativeStatusPanelFields
 } from "./claude-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
@@ -251,23 +251,27 @@ export function createClaudeTerminalAgentAdapter(
 export function probeClaudeNativeInspection(
   agentVersion: string | undefined
 ): TerminalNativeInspectionCapabilities {
-  if (!agentVersion) {
+  const profile = claudeRuntimeLifecycleCompatibilityProfile(agentVersion);
+  if (!profile) {
     return {
       status: "unknown",
       statusInspection: false,
       reason: "the running Claude Code version could not be verified"
     };
   }
-  const behaviorProfile = claudeNativeInspectionBehaviorProfile(agentVersion);
-  const supported = behaviorProfile !== undefined;
+  const verified = claudeLifecycleCompatibilityProfile(agentVersion) !==
+    undefined;
+  const compatibilityWarning = claudeRuntimeCompatibilityWarning(agentVersion);
   return {
-    status: supported ? "supported" : "unsupported",
+    status: "supported",
     agentVersion,
-    behaviorProfile,
-    statusInspection: supported,
-    reason: supported
+    behaviorProfile: profile.nativeInspectionBehaviorProfile,
+    versionCompatibility: verified ? "verified" : "unverified",
+    ...(compatibilityWarning ? { compatibilityWarning } : {}),
+    statusInspection: true,
+    reason: verified
       ? "Claude Code /status native inspection is supported by the verified version"
-      : "this exact Claude Code version has no AKK native inspection behavior profile"
+      : "Claude Code /status native inspection will use the unverified compatibility profile"
   };
 }
 
@@ -275,7 +279,7 @@ export function planClaudeNativeInspection(
   operation: TerminalNativeInspectionOperation,
   capabilities: TerminalNativeInspectionCapabilities
 ): TerminalNativeInspectionPlan {
-  const profile = claudeLifecycleCompatibilityProfile(
+  const profile = claudeRuntimeLifecycleCompatibilityProfile(
     capabilities.agentVersion
   );
   if (
@@ -382,7 +386,7 @@ export function observeClaudeNativeInspection(
       };
     }
   }
-  if (!claudeNativeInspectionBehaviorProfile(parsed.agentVersion)) {
+  if (!claudeRuntimeLifecycleCompatibilityProfile(parsed.agentVersion)) {
     return {
       status: "mismatch",
       nativeThreadId: parsed.nativeThreadId,
@@ -390,7 +394,7 @@ export function observeClaudeNativeInspection(
       evidenceFingerprint,
       screenFingerprint,
       evidenceInventory: inventory.entries,
-      reason: `Claude /status reported unsupported version ${parsed.agentVersion}`
+      reason: `Claude /status reported invalid version ${parsed.agentVersion}`
     };
   }
   if (
@@ -474,7 +478,8 @@ export function observeClaudeNativeInspection(
 export function probeClaudeThreadLifecycle(
   agentVersion: string | undefined
 ): TerminalThreadLifecycleCapabilities {
-  if (!agentVersion) {
+  const profile = claudeRuntimeLifecycleCompatibilityProfile(agentVersion);
+  if (!profile) {
     return {
       status: "unknown",
       newThread: false,
@@ -482,18 +487,21 @@ export function probeClaudeThreadLifecycle(
       reason: "the running Claude Code version could not be verified"
     };
   }
-  const behaviorProfile = claudeLifecycleBehaviorProfile(agentVersion);
-  const supported = behaviorProfile !== undefined;
+  const verified = claudeLifecycleCompatibilityProfile(agentVersion) !==
+    undefined;
+  const compatibilityWarning = claudeRuntimeCompatibilityWarning(agentVersion);
   return {
-    status: supported ? "supported" : "unsupported",
+    status: "supported",
     agentVersion,
-    behaviorProfile,
-    newThread: supported,
-    resumeExact: supported,
-    candidateDiscovery: supported,
-    reason: supported
+    behaviorProfile: profile.lifecycleBehaviorProfile,
+    versionCompatibility: verified ? "verified" : "unverified",
+    ...(compatibilityWarning ? { compatibilityWarning } : {}),
+    newThread: true,
+    resumeExact: true,
+    candidateDiscovery: true,
+    reason: verified
       ? "Claude Code /clear and exact /resume are supported by the verified version"
-      : "this exact Claude Code version has no AKK native-thread lifecycle behavior profile"
+      : "Claude Code /clear and exact /resume will use the unverified compatibility profile"
   };
 }
 
@@ -501,9 +509,9 @@ export function planClaudeThreadLifecycle(
   operation: TerminalThreadLifecycleOperation,
   capabilities: TerminalThreadLifecycleCapabilities
 ): TerminalThreadLifecyclePlan {
-  const behaviorProfile = claudeLifecycleBehaviorProfile(
+  const behaviorProfile = claudeRuntimeLifecycleCompatibilityProfile(
     capabilities.agentVersion
-  );
+  )?.lifecycleBehaviorProfile;
   if (
     capabilities.status !== "supported" ||
     !behaviorProfile ||
@@ -798,28 +806,28 @@ function parseCurrentClaudeStatusPanel(
         "the Claude Status panel lacks exact Version, Session ID, cwd, or Model fields"
     };
   }
-  const exactProfileFields = new Set(
-    claudeLifecycleCompatibilityProfile(agentVersion)
+  const runtimeProfileFields = new Set(
+    claudeRuntimeLifecycleCompatibilityProfile(agentVersion)
       ?.nativeStatusPanelFields ?? []
   );
-  const exactRequiredValues =
-    claudeLifecycleCompatibilityProfile(agentVersion)
+  const runtimeRequiredValues =
+    claudeRuntimeLifecycleCompatibilityProfile(agentVersion)
       ?.nativeStatusPanelRequiredValues ?? {};
   if (
-    exactProfileFields.size > 0 &&
-    [...rawFields.keys()].some((name) => !exactProfileFields.has(name))
+    runtimeProfileFields.size > 0 &&
+    [...rawFields.keys()].some((name) => !runtimeProfileFields.has(name))
   ) {
     return {
       status: "ambiguous",
-      reason: "the Claude Status panel fields do not match its exact version profile"
+      reason: "the Claude Status panel fields do not match its runtime compatibility profile"
     };
   }
-  if (Object.entries(exactRequiredValues).some(
+  if (Object.entries(runtimeRequiredValues).some(
     ([name, value]) => rawFields.get(name) !== value
   )) {
     return {
       status: "ambiguous",
-      reason: "the Claude Status panel lacks an exact field value required by its version profile"
+      reason: "the Claude Status panel lacks a field value required by its runtime compatibility profile"
     };
   }
   const fields = [...rawFields.entries()].map(([name, rawValue]) => ({

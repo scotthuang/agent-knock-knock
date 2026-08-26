@@ -776,19 +776,27 @@ test("Claude lifecycle candidates are root-interactive and carry a revalidated f
     }).status,
     "changed"
   );
-  for (const agentVersion of ["2.1.219", "2.1.238"]) {
+  for (const agentVersion of ["2.1.219", "2.1.238", "3.0.0"]) {
+    const unverifiedCandidates = listClaudeHistoricalSessions({
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion
+    });
+    assert.equal(unverifiedCandidates.length, 1);
+  }
+  for (const agentVersion of ["2.1", "v2.1.238", "02.1.238"]) {
     assert.throws(
       () => listClaudeHistoricalSessions({
         cwd: fixture.workspace,
         claudeHome: fixture.claudeHome,
         agentVersion
       }),
-      /supported exact versions: 2\.1\.218, 2\.1\.226, 2\.1\.237/u
+      /complete x\.y\.z Claude Code version/u
     );
   }
 });
 
-test("Claude resume compatibility is one-way across 2.1.218, 2.1.226, and 2.1.237", (t) => {
+test("Claude resume candidates use complete versions and structural identity instead of an exact allowlist", (t) => {
   const fixture = createFixture(t);
   fixture.write(turnRecords({
     request: "Historical 2.1.218 request",
@@ -828,7 +836,7 @@ test("Claude resume compatibility is one-way across 2.1.218, 2.1.226, and 2.1.23
       claudeHome: fixture.claudeHome,
       agentVersion: CURRENT_VERSION
     }).status,
-    "unsafe"
+    "changed"
   );
   assert.equal(
     listClaudeThreadLifecycleCandidates({
@@ -879,13 +887,13 @@ test("Claude resume compatibility is one-way across 2.1.218, 2.1.226, and 2.1.23
     }).status,
     "valid"
   );
-  assert.deepEqual(
+  assert.equal(
     listClaudeThreadLifecycleCandidates({
       cwd: previous.workspace,
       claudeHome: previous.claudeHome,
       agentVersion: VERSION
-    }),
-    []
+    }).length,
+    1
   );
 
   const newer = createFixture(t, 226);
@@ -895,21 +903,46 @@ test("Claude resume compatibility is one-way across 2.1.218, 2.1.226, and 2.1.23
     sessionId: newer.sessionId,
     version: CURRENT_VERSION
   }));
-  assert.deepEqual(
+  assert.equal(
     listClaudeThreadLifecycleCandidates({
       cwd: newer.workspace,
       claudeHome: newer.claudeHome,
       agentVersion: PREVIOUS_VERSION
-    }),
-    []
+    }).length,
+    1
   );
-  assert.deepEqual(
+  assert.equal(
     listClaudeThreadLifecycleCandidates({
       cwd: newer.workspace,
       claudeHome: newer.claudeHome,
       agentVersion: VERSION
-    }),
-    []
+    }).length,
+    1
+  );
+
+  const unverified = createFixture(t, 239);
+  unverified.write(turnRecords({
+    request: "Unverified future source request",
+    assistantText: "Unverified future source answer",
+    sessionId: unverified.sessionId,
+    version: "2.1.238"
+  }));
+  const unverifiedCandidate = listClaudeThreadLifecycleCandidates({
+    cwd: unverified.workspace,
+    claudeHome: unverified.claudeHome,
+    agentVersion: "2.1.239"
+  })[0];
+  assert.equal(unverifiedCandidate.sourceAgentVersion, "2.1.238");
+  assert.equal(
+    revalidateClaudeThreadLifecycleCandidate(
+      unverifiedCandidate.candidateToken,
+      {
+        cwd: unverified.workspace,
+        claudeHome: unverified.claudeHome,
+        agentVersion: "2.1.239"
+      }
+    ).status,
+    "valid"
   );
 });
 

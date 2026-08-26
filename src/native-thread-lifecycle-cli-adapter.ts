@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { createClaudeThreadLifecycleCandidateProvider } from
   "./claude-local-transcript-provider.js";
-import { codexLifecycleBehaviorProfile } from
+import { codexRuntimeLifecycleBehaviorProfile } from
   "./codex-lifecycle-compatibility.js";
 import { expandHome } from "./cli-command-runtime.js";
 import type { ExecutorKind } from "./executors.js";
@@ -555,6 +555,12 @@ class NativeThreadLifecycleCliApplication {
           ? { candidate_token: candidate.candidate_token }
           : {})
       },
+      ...(input.snapshot.capabilities.compatibilityWarning
+        ? {
+            compatibility_warning:
+              input.snapshot.capabilities.compatibilityWarning
+          }
+        : {}),
       requires_user_intent: true
     });
     const previousRow = input.previous
@@ -569,6 +575,12 @@ class NativeThreadLifecycleCliApplication {
         input.snapshot.session?.binding?.native_thread_id ?? null,
       expected_binding_token: input.snapshot.bindingToken,
       capability: input.snapshot.capabilities,
+      ...(input.snapshot.capabilities.compatibilityWarning
+        ? {
+            compatibility_warning:
+              input.snapshot.capabilities.compatibilityWarning
+          }
+        : {}),
       selection_snapshot: {
         schema: input.resumeSnapshot.schema,
         version: input.resumeSnapshot.version,
@@ -1170,6 +1182,12 @@ class NativeThreadLifecycleCliApplication {
       agent: context.terminal.agent,
       agent_version: context.snapshot.version,
       behavior_profile: context.plan.behaviorProfile,
+      ...(context.snapshot.capabilities.compatibilityWarning
+        ? {
+            compatibility_warning:
+              context.snapshot.capabilities.compatibilityWarning
+          }
+        : {}),
       native_thread_id: observed.observation.nativeThreadId,
       native_status: observed.observation.result,
       terminal_submission: {
@@ -1257,7 +1275,9 @@ function codexLatentClearResumeObservation(input: {
   screen?: string;
   agentVersion?: string;
 }): { sourceNativeThreadId: string; fingerprint: string } | undefined {
-  const behaviorProfile = codexLifecycleBehaviorProfile(input.agentVersion);
+  const behaviorProfile = codexRuntimeLifecycleBehaviorProfile(
+    input.agentVersion
+  );
   if (!behaviorProfile) return undefined;
   const clean = (line: string): string => line.replace(
     /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu, ""

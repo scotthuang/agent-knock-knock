@@ -9,6 +9,10 @@ import {
   captureClaudeHumanStartedActiveTaskAnchor,
   observeClaudeHumanStartedActiveTask
 } from "./claude-local-transcript-provider.js";
+import { claudeRuntimeCompatibilityWarning } from
+  "./claude-lifecycle-compatibility.js";
+import { codexRuntimeCompatibilityProfile } from
+  "./codex-lifecycle-compatibility.js";
 import type { ExecutorKind } from "./executors.js";
 import {
   turnIdForConversation,
@@ -286,6 +290,7 @@ export function createTerminalWatchCliAdapter(
           "the exact terminal has no unique supported human-started active task"
         );
       }
+      assertWatchAnchorVersion(anchor, rawTerminal);
       watch = watchService.create({
         agent,
         terminal: terminalWatchIdentity(
@@ -372,6 +377,26 @@ export function createTerminalWatchCliAdapter(
     listPublicWatches,
     scanPublicWatchesForExactObservation
   });
+}
+
+function assertWatchAnchorVersion(
+  anchor: TerminalWatchAnchor,
+  terminal: Record<string, unknown>
+): void {
+  const runningVersion = requiredString(
+    terminal.agent_version,
+    "running coding-agent version"
+  );
+  const artifactVersion = anchor.schema ===
+      "agent-knock-knock/codex-human-started-active-task-anchor"
+    ? anchor.codex_version
+    : anchor.claude_version;
+  if (artifactVersion !== runningVersion) {
+    throw new Error(
+      `the active task artifact reports ${artifactVersion}, not the running ` +
+      `coding-agent version ${runningVersion}; no Terminal Watch was created`
+    );
+  }
 }
 
 /**
@@ -750,6 +775,16 @@ function publicTerminalWatch(watch: TerminalWatch): Record<string, unknown> {
   const pending = watch.notification_outbox.filter(({ status }) =>
     status === "pending" || status === "delivering" || status === "failed"
   ).length;
+  const compatibilityWarning = watch.agent === "codex" &&
+      watch.anchor.schema ===
+        "agent-knock-knock/codex-human-started-active-task-anchor"
+    ? codexRuntimeCompatibilityProfile(watch.anchor.codex_version)
+      ?.compatibilityWarning
+    : watch.agent === "claude" &&
+        watch.anchor.schema ===
+          "agent-knock-knock/claude-human-started-active-task-anchor"
+      ? claudeRuntimeCompatibilityWarning(watch.anchor.claude_version)
+      : undefined;
   return {
     watch_id: watch.watch_id,
     source: "human_started_terminal_watch",
@@ -767,6 +802,9 @@ function publicTerminalWatch(watch: TerminalWatch): Record<string, unknown> {
     deadline_at: watch.deadline_at,
     updated_at: watch.updated_at,
     last_activity_at: watch.last_activity_at,
+    ...(compatibilityWarning
+      ? { compatibility_warning: compatibilityWarning }
+      : {}),
     callback: {
       pending,
       delivered: watch.notification_outbox.filter(

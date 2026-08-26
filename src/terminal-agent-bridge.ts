@@ -77,6 +77,10 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
   "codex-tui-0.149.1": [
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
+  ],
+  "codex-tui-generic-v1": [
+    "  /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
   ]
 };
 // Codex's verified `/status` profiles are exercised against its canonical
@@ -91,7 +95,8 @@ const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
   "codex-tui-0.146.1": 80,
   "codex-tui-0.147.0": 80,
   "codex-tui-0.148.0": 80,
-  "codex-tui-0.149.1": 80
+  "codex-tui-0.149.1": 80,
+  "codex-tui-generic-v1": 80
 };
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
   Record<string, readonly string[]>
@@ -113,6 +118,12 @@ const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "/statusline Set up Claude Code's status line UI",
     "/ide Manage IDE integrations and show status",
     "/usage Show session cost, plan usage, and activity stats"
+  ],
+  "claude-code-unverified-native-status-v1": [
+    "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
+    "/statusline Set up Claude Code's status line UI",
+    "/ide Manage IDE integrations and show status",
+    "/usage Show session cost, plan usage, and activity stats"
   ]
 };
 const CLAUDE_NATIVE_STATUS_SETTLE_BY_PROFILE: Readonly<
@@ -127,6 +138,10 @@ const CLAUDE_NATIVE_STATUS_SETTLE_BY_PROFILE: Readonly<
     maximumSettleMs: 5_000
   },
   "claude-code-2.1.237-native-status": {
+    minimumStableMs: 80,
+    maximumSettleMs: 5_000
+  },
+  "claude-code-unverified-native-status-v1": {
     minimumStableMs: 80,
     maximumSettleMs: 5_000
   }
@@ -3738,7 +3753,7 @@ function assertClosedStatusInspectionPlan(
     plan.expectedResult.kind !== "native_status" ||
     !exactPresentation
   ) {
-    throw new Error("refusing a non-closed or unverified native inspection plan");
+    throw new Error("refusing a non-closed native inspection plan");
   }
 }
 
@@ -3751,7 +3766,7 @@ function assertClosedNativeInspectionDismissal(
     JSON.stringify(plan.expectedResult.dismissal.keys) !==
       JSON.stringify(["Escape"])
   ) {
-    throw new Error("native inspection has no closed verified modal dismissal plan");
+    throw new Error("native inspection has no closed modal dismissal plan");
   }
 }
 

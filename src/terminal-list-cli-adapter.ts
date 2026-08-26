@@ -1242,6 +1242,12 @@ async function terminalControlledListEntry(
       statusInspection: false,
       reason: "native inspection is unavailable"
     };
+  const compatibilityWarnings = [...new Set([
+    lifecycleCapability.compatibilityWarning,
+    nativeInspectionCapability.compatibilityWarning
+  ].filter((warning): warning is string =>
+    typeof warning === "string" && warning.trim().length > 0
+  ))];
   const codexLatentClearResumeObservationValue = session.agent === "codex"
     ? terminalListRuntime().codexLatentClearResumeObservation({
         screen: effectiveTerminalState.screen_excerpt,
@@ -1327,6 +1333,9 @@ async function terminalControlledListEntry(
     agent_version: agentVersion,
     native_thread_lifecycle: lifecycleCapability,
     native_inspection: nativeInspectionCapability,
+    ...(compatibilityWarnings.length > 0
+      ? { compatibility_warnings: compatibilityWarnings }
+      : {}),
     lifecycle_binding_token: lifecycleBindingToken,
     confidence: session.confidence,
     reason: session.reason,

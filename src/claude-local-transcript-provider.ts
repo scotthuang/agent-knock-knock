@@ -4,10 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
-  claudeLifecycleBehaviorProfile,
   claudeLifecycleSourceVersionSupported,
+  claudeRuntimeLifecycleCompatibilityProfile,
   DEFAULT_CLAUDE_LIFECYCLE_VERSION,
-  supportedClaudeLifecycleVersions
 } from "./claude-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
 import { isRecord } from "./value-guards.js";
@@ -254,10 +253,9 @@ export function listClaudeHistoricalSessions(options: {
   const cwd = path.resolve(options.cwd);
   const claudeHome = path.resolve(options.claudeHome ?? defaultClaudeHome());
   const agentVersion = options.agentVersion ?? DEFAULT_CLAUDE_LIFECYCLE_VERSION;
-  if (!claudeLifecycleBehaviorProfile(agentVersion)) {
+  if (!claudeRuntimeLifecycleCompatibilityProfile(agentVersion)) {
     throw new Error(
-      "Claude lifecycle candidates require one of the supported exact versions: " +
-      supportedClaudeLifecycleVersions().join(", ")
+      "Claude lifecycle candidates require a complete x.y.z Claude Code version"
     );
   }
   const projectsRoot = projectsRootPath(claudeHome);
@@ -360,7 +358,7 @@ export function revalidateClaudeThreadLifecycleCandidate(
       !path.isAbsolute(token.cwd) ||
       path.resolve(token.cwd) !== path.resolve(options.cwd) ||
       !CLAUDE_SESSION_ID_PATTERN.test(token.nativeThreadId) ||
-      !claudeLifecycleBehaviorProfile(options.agentVersion)
+      !claudeRuntimeLifecycleCompatibilityProfile(options.agentVersion)
     ) {
       return {
         status: "unsafe",
@@ -435,7 +433,7 @@ function inspectClaudeHistoricalSession({
   if (
     !isRealDirectory(projectsRoot) ||
     !CLAUDE_SESSION_ID_PATTERN.test(sessionId) ||
-    !claudeLifecycleBehaviorProfile(agentVersion)
+    !claudeRuntimeLifecycleCompatibilityProfile(agentVersion)
   ) {
     return undefined;
   }

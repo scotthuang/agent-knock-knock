@@ -47,7 +47,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v20 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v21 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -272,12 +272,12 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(readme, /v20 `action_contracts`/u);
+  assert.match(readme, /v21 `action_contracts`/u);
   assert.match(
     readme,
     /`terminal_user_explicit`[\s\S]*exact live physical prompt[\s\S]*(?:same|identical)[^\n.]*draft[\s\S]*(?:different|replace)[^\n.]*draft[\s\S]*best-effort[\s\S]*unmanaged[\s\S]*no callback[\s\S]*Watch/u
   );
-  assert.match(skill, /v20 `action_contracts`/u);
+  assert.match(skill, /v21 `action_contracts`/u);
   assert.match(readme, /current writer protocol is 5/u);
   assert.match(
     readme,

@@ -16,6 +16,12 @@ import {
   probeCodexNativeInspection,
   probeCodexThreadLifecycle
 } from "../src/codex-terminal-agent-adapter.js";
+import {
+  CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE,
+  codexLifecycleBehaviorProfile,
+  codexRuntimeCompatibilityProfile,
+  isValidCodexAgentVersion
+} from "../src/codex-lifecycle-compatibility.js";
 import { claudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
 import { terminalAgentAdapterFor } from "../src/terminal-agent-registry.js";
 import {
@@ -881,14 +887,34 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
     const profile = probeCodexThreadLifecycle(version);
     assert.equal(profile.status, "supported");
     assert.equal(profile.behaviorProfile, `codex-tui-${version}`);
+    assert.equal(profile.versionCompatibility, "verified");
+    assert.equal(profile.compatibilityWarning, undefined);
   }
 
   const capabilities = probeCodexThreadLifecycle("0.149.1");
-  assert.equal(probeCodexThreadLifecycle("0.146.2").status, "unsupported");
-  assert.equal(probeCodexThreadLifecycle("0.148.1").status, "unsupported");
-  assert.equal(probeCodexThreadLifecycle("0.149.0").status, "unsupported");
-  assert.equal(probeCodexThreadLifecycle("0.149.2").status, "unsupported");
+  const unverified = probeCodexThreadLifecycle("0.150.0");
+  assert.equal(unverified.status, "supported");
+  assert.equal(unverified.behaviorProfile, CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE);
+  assert.equal(unverified.versionCompatibility, "unverified");
+  assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
+  assert.equal(unverified.newThread, true);
+  assert.equal(unverified.resumeExact, true);
+  assert.equal(unverified.candidateDiscovery, true);
+  assert.equal(
+    planCodexThreadLifecycle({ kind: "new_thread" }, unverified).behaviorProfile,
+    CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE
+  );
+  assert.equal(probeCodexThreadLifecycle("0.150").status, "unsupported");
+  assert.equal(probeCodexThreadLifecycle("0.150.0-01").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle(undefined).status, "unknown");
+
+  assert.equal(codexLifecycleBehaviorProfile("0.150.0"), undefined);
+  assert.equal(
+    codexRuntimeCompatibilityProfile("0.150.0")?.behaviorProfile,
+    CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE
+  );
+  assert.equal(isValidCodexAgentVersion("0.150.0-next.1+build.7"), false);
+  assert.equal(isValidCodexAgentVersion("9007199254740992.0.0"), true);
 
   const fresh = planCodexThreadLifecycle(
     { kind: "new_thread" },
@@ -948,6 +974,7 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     assert.equal(capabilities.status, "supported");
     assert.equal(capabilities.statusInspection, true);
     assert.equal(capabilities.behaviorProfile, `codex-tui-${version}`);
+    assert.equal(capabilities.versionCompatibility, "verified");
     assert.deepEqual(
       planCodexNativeInspection({ kind: "status" }, capabilities),
       {
@@ -975,12 +1002,22 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     statusInspection: false,
     reason: "the running Codex version could not be verified"
   });
-  const unsupported = probeCodexNativeInspection("0.149.2");
-  assert.equal(unsupported.status, "unsupported");
-  assert.equal(unsupported.statusInspection, false);
+  const unverified = probeCodexNativeInspection("0.150.0");
+  assert.equal(unverified.status, "supported");
+  assert.equal(unverified.statusInspection, true);
+  assert.equal(unverified.behaviorProfile, CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE);
+  assert.equal(unverified.versionCompatibility, "unverified");
+  assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
+  assert.equal(
+    planCodexNativeInspection({ kind: "status" }, unverified).behaviorProfile,
+    CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE
+  );
+  const invalid = probeCodexNativeInspection("0.150");
+  assert.equal(invalid.status, "unsupported");
+  assert.equal(invalid.statusInspection, false);
   assert.throws(
-    () => planCodexNativeInspection({ kind: "status" }, unsupported),
-    /no AKK native inspection behavior profile/u
+    () => planCodexNativeInspection({ kind: "status" }, invalid),
+    /complete x\.y\.z version/u
   );
   assert.equal(
     claudeTerminalAgentAdapter.probeNativeInspection?.("2.1.226").status,
@@ -1270,7 +1307,7 @@ test("Codex native inspection rejects malformed and over-bounded evidence invent
   assert.match(overBounded.reason ?? "", /bounded distinct-card count/u);
 });
 
-test("Codex native status parsing fails closed on ambiguous, malformed, and unsupported cards", () => {
+test("Codex native status parsing accepts unverified semver and fails closed on malformed cards", () => {
   const nativeThreadId = "22222222-2222-4222-8222-222222222222";
   const card = (body: readonly string[], version = "0.146.1") => [
     "/status",
@@ -1301,6 +1338,20 @@ test("Codex native status parsing fails closed on ambiguous, malformed, and unsu
     observeCodexNativeInspection({
       operation: { kind: "status" },
       screen: card([`│ Session: ${nativeThreadId} │`], "0.148.1")
+    }).status,
+    "observed"
+  );
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: card([`│ Session: ${nativeThreadId} │`], "0.150.0")
+    }).status,
+    "observed"
+  );
+  assert.equal(
+    observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: card([`│ Session: ${nativeThreadId} │`], "0.150.0-01")
     }).status,
     "mismatch"
   );

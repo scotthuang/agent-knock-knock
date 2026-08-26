@@ -250,8 +250,12 @@ export interface TerminalAgentAdapterCapabilities {
 export interface TerminalThreadLifecycleCapabilities {
   status: "supported" | "unsupported" | "unknown";
   agentVersion?: string;
-  /** Exact, version-scoped behavior profile selected by the adapter. */
+  /** Adapter behavior profile selected for the observed version. */
   behaviorProfile?: string;
+  /** Whether this exact version has been regression-tested by AKK. */
+  versionCompatibility?: "verified" | "unverified";
+  /** Diagnostic only: an unverified version never vetoes an otherwise valid action. */
+  compatibilityWarning?: string;
   newThread: boolean;
   resumeExact: boolean;
   /** Candidate discovery is exposed only when identity metadata can be revalidated. */
@@ -340,8 +344,12 @@ export type TerminalNativeInspectionOperation = { kind: "status" };
 export interface TerminalNativeInspectionCapabilities {
   status: "supported" | "unsupported" | "unknown";
   agentVersion?: string;
-  /** Exact, version-scoped behavior profile selected by the adapter. */
+  /** Adapter behavior profile selected for the observed version. */
   behaviorProfile?: string;
+  /** Whether this exact version has been regression-tested by AKK. */
+  versionCompatibility?: "verified" | "unverified";
+  /** Diagnostic only: an unverified version never vetoes an otherwise valid action. */
+  compatibilityWarning?: string;
   statusInspection: boolean;
   reason: string;
 }

@@ -205,22 +205,33 @@ for (const claudeVersion of ["2.1.218", "2.1.226"] as const) {
       assert.match(rejected.stderr, expectedError, label);
     }
 
-    const unsupportedArgs = commonArgs.map((argument) =>
+    const unverifiedArgs = commonArgs.map((argument) =>
       argument === JSON.stringify({ [claudePid]: claudeVersion })
         ? JSON.stringify({ [claudePid]: "2.1.227" })
         : argument
     );
     fs.writeFileSync(screenPath, initialScreen);
-    const unsupported = await runAgentCliInProcess(
-      ["list", "--all", ...unsupportedArgs],
+    const unverified = await runAgentCliInProcess(
+      ["list", "--all", ...unverifiedArgs],
       environment
     );
-    assert.equal(unsupported.status, 0, unsupported.stderr || unsupported.stdout);
-    const unsupportedRow = JSON.parse(unsupported.stdout).terminals.find(
+    assert.equal(unverified.status, 0, unverified.stderr || unverified.stdout);
+    const unverifiedRow = JSON.parse(unverified.stdout).terminals.find(
       (entry: Record<string, unknown>) => entry.id === terminalId
     );
-    assert.equal(unsupportedRow.native_inspection.status, "unsupported");
-    assert.equal(unsupportedRow.available_actions.native_inspect, undefined);
+    assert.equal(unverifiedRow.native_inspection.status, "supported");
+    assert.equal(
+      unverifiedRow.native_inspection.versionCompatibility,
+      "unverified"
+    );
+    assert.match(
+      unverifiedRow.native_inspection.compatibilityWarning,
+      /not been regression-tested/u
+    );
+    assert.match(
+      unverifiedRow.available_actions.native_inspect.compatibility_warning,
+      /not been regression-tested/u
+    );
 
     const ambiguousIdentity = await runAgentCliInProcess(
       nativeInspectArgs(expectedBindingToken),

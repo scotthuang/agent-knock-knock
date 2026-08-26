@@ -990,6 +990,9 @@ test("/akk list renders watchable terminals and durable watch rows", () => {
       agent: "codex",
       process_state: "active",
       activity_state: "working",
+      compatibility_warnings: [
+        "Codex 0.150.0 has not been regression-tested by AKK"
+      ],
       terminal_control: { target: "work:0.0" },
       available_actions: {
         watch: {
@@ -1004,6 +1007,8 @@ test("/akk list renders watchable terminals and durable watch rows", () => {
       agent: "codex",
       status: "watching",
       terminal_id: exactTerminalId,
+      compatibility_warning:
+        "Codex 0.150.0 has not been regression-tested by AKK",
       available_actions: {
         status: { arguments: { watch_id: "terminal-watch-durable-1" } },
         unwatch: { arguments: { watch_id: "terminal-watch-durable-1" } }
@@ -1028,6 +1033,10 @@ test("/akk list renders watchable terminals and durable watch rows", () => {
   assert.match(text, /terminal watches:/u);
   assert.match(text, /terminal-watch-durable-1 \| codex \| watching/u);
   assert.match(text, /actions: status, unwatch/u);
+  assert.equal(
+    text.match(/compatibility warning: Codex 0\.150\.0 has not been regression-tested by AKK/gu)?.length,
+    2
+  );
 });
 
 test("Terminal Watch command summaries preserve external-work attribution", () => {
@@ -1035,9 +1044,12 @@ test("Terminal Watch command summaries preserve external-work attribution", () =
     watch_id: "terminal-watch-durable-1",
     terminal_id: exactTerminalId,
     agent: "claude",
-    status: "watching"
+    status: "watching",
+    compatibility_warning:
+      "Claude Code 2.1.238 has not been regression-tested by AKK"
   });
   assert.match(started, /Terminal Watch started/u);
+  assert.match(started, /compatibility warning: Claude Code 2\.1\.238/u);
   assert.match(started, /did not send or adopt this task/u);
 
   const status = formatAkkWatchStatusCommandResult({
@@ -1045,10 +1057,13 @@ test("Terminal Watch command summaries preserve external-work attribution", () =
       watch_id: "terminal-watch-durable-1",
       terminal_id: exactTerminalId,
       agent: "claude",
-      status: "awaiting_approval"
+      status: "awaiting_approval",
+      compatibility_warning:
+        "Claude Code 2.1.238 has not been regression-tested by AKK"
     }
   });
   assert.match(status, /Terminal Watch status/u);
+  assert.match(status, /compatibility warning: Claude Code 2\.1\.238/u);
   assert.match(status, /observed external work/u);
 
   const stopped = formatAkkUnwatchCommandResult({
@@ -1227,6 +1242,10 @@ test("/akk threads renders exact candidates without exposing the CAS token", () 
     terminal_id: exactTerminalId,
     current_session_id: "session-current",
     current_native_thread_id: currentNativeThreadId,
+    capability: {
+      compatibilityWarning:
+        "Codex 0.150.0 has not been regression-tested by AKK"
+    },
     expected_binding_token: "binding-token-private-to-handler",
     selection_snapshot: {
       snapshot_id: "rs_abcdefghijklmnopqrstuv",
@@ -1282,6 +1301,7 @@ test("/akk threads renders exact candidates without exposing the CAS token", () 
     )
   );
   assert.match(text, /does not create an AKK Turn/u);
+  assert.match(text, /compatibility warning: Codex 0\.150\.0/u);
   assert.doesNotMatch(text, /binding-token-private-to-handler/u);
   assert.doesNotMatch(text, /candidate-token-private-to-handler/u);
 });
@@ -1295,6 +1315,8 @@ test("/akk thread transition output distinguishes Session switching from Turn cr
     session_id: "session-after",
     previous_native_thread_id: currentNativeThreadId,
     native_thread_id: resumableNativeThreadId,
+    compatibility_warning:
+      "Codex 0.150.0 has not been regression-tested by AKK",
     binding_generation: 2,
     turn_created: false
   });
@@ -1303,6 +1325,7 @@ test("/akk thread transition output distinguishes Session switching from Turn cr
   assert.match(text, /^session: session-after$/mu);
   assert.doesNotMatch(text, /binding generation/iu);
   assert.match(text, /No AKK Turn was created/u);
+  assert.match(text, /compatibility warning: Codex 0\.150\.0/u);
 });
 
 test("relative plugin storeDir resolves against the Gateway cwd", () => {
