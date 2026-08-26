@@ -5379,6 +5379,11 @@ function assertSafeUserExplicitTerminalSend(
         "the explicitly selected terminal is waiting at an approval prompt"
     );
   }
+  if (status.activity_state === "awaiting_approval") {
+    throw new Error(
+      "the explicitly selected terminal is waiting at an approval prompt"
+    );
+  }
 }
 
 function terminalUserSendIntentContext(
@@ -5552,49 +5557,52 @@ function reserveUserExplicitSendIntent(
   );
   const routingWarning = stringValue(options.terminalUserSendRoutingWarning);
   const warnings: string[] = routingWarning ? [routingWarning] : [];
+  let reservation: ReturnType<typeof intent.repository.reserve>;
   try {
-      const reservation = intent.repository.reserve(intent.boundary);
-      if (reservation.outcome === "replay") {
-        printReplayedUserExplicitSend(
-          terminal,
-          intent,
-          required(
-            reservation.intent.delivery_mode,
-            "completed explicit Send delivery mode is unavailable"
-          )
-        );
-        return { outcome: "replayed" };
-      }
-      if (reservation.outcome === "uncertain") {
-        throw new TerminalUserSendReplayForbiddenError(
-          `explicit terminal Send ${intent.messageId} already reached ` +
-          `${reservation.stage}; automatic replay is forbidden`
-        );
-      }
-      return {
-        outcome: "proceed",
-        lease: { intent, durable: true, warnings }
-      };
+    reservation = intent.repository.reserve(intent.boundary);
   } catch (error) {
-      if (
-        error instanceof TerminalUserSendIntentBoundaryConflictError ||
-        error instanceof TerminalUserSendIntentUncertainError ||
-        error instanceof TerminalUserSendReplayForbiddenError
-      ) {
-        throw error;
-      }
-      // Runtime receipts strengthen same-id retry safety; their own damage is
-      // never authority to suppress a fresh physical user Send.
-      warnings.push(
-        `durable user-Send intent unavailable: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-      return {
-        outcome: "proceed",
-        lease: { intent, durable: false, warnings }
-      };
+    if (
+      error instanceof TerminalUserSendIntentBoundaryConflictError ||
+      error instanceof TerminalUserSendIntentUncertainError
+    ) {
+      throw error;
+    }
+    // Runtime receipts strengthen same-id retry safety; their own damage is
+    // never authority to suppress a fresh physical user Send.
+    warnings.push(
+      `durable user-Send intent unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return {
+      outcome: "proceed",
+      lease: { intent, durable: false, warnings }
+    };
   }
+  // Presentation is outside the durability catch. A completed same-ID intent
+  // remains a replay even when stdout fails (for example EPIPE); it must never
+  // degrade into a fresh physical Send.
+  if (reservation.outcome === "replay") {
+    printReplayedUserExplicitSend(
+      terminal,
+      intent,
+      required(
+        reservation.intent.delivery_mode,
+        "completed explicit Send delivery mode is unavailable"
+      )
+    );
+    return { outcome: "replayed" };
+  }
+  if (reservation.outcome === "uncertain") {
+    throw new TerminalUserSendReplayForbiddenError(
+      `explicit terminal Send ${intent.messageId} already reached ` +
+      `${reservation.stage}; automatic replay is forbidden`
+    );
+  }
+  return {
+    outcome: "proceed",
+    lease: { intent, durable: true, warnings }
+  };
 }
 
 function cancelProvenZeroInputUserExplicitSendIntent(
@@ -5759,12 +5767,6 @@ async function runUserExplicitTerminalFallback(
         { runtime, scrollbackLines: Number(options.scrollbackLines ?? 120) }
       );
       assertSafeUserExplicitTerminalSend(status);
-      if (fresh.agent === "codex") {
-        await assertCodexComposerReadyForAutomatedInput({
-          options,
-          terminalControl: fresh.terminalControl
-        });
-      }
     } catch (error) {
       cancelProvenZeroInputUserExplicitSendIntent(
         intentLease,
@@ -5780,42 +5782,73 @@ async function runUserExplicitTerminalFallback(
       });
       throw error;
     }
+    let composerDisposition:
+      | "injected_empty_composer"
+      | "submitted_existing_draft"
+      | "replaced_existing_draft" = "injected_empty_composer";
     try {
-      await bridge.send(
-        fresh.agent,
-        fresh.terminalControl,
-        payload,
-        {
-          runtime,
-          requireExactComposerBeforeEnter: true,
-          beforeText: async ({ terminalControl }) => {
-            const currentStatus = await bridge.status(
-              fresh.agent,
-              terminalControl,
-              {
-                runtime,
-                scrollbackLines: Number(options.scrollbackLines ?? 120)
-              }
-            );
-            assertSafeUserExplicitTerminalSend(currentStatus);
-            if (fresh.agent === "codex") {
-              await assertCodexComposerReadyForAutomatedInput({
-                options,
-                terminalControl
+      const revalidatePhysicalMutation = async (
+        terminalControl: TerminalControlRef
+      ) => {
+        const currentStatus = await bridge.status(
+          fresh.agent,
+          terminalControl,
+          {
+            runtime,
+            scrollbackLines: Number(options.scrollbackLines ?? 120)
+          }
+        );
+        assertSafeUserExplicitTerminalSend(currentStatus);
+        if (
+          fresh.agent !== "codex" &&
+          !isExactClaudeNativeInspectionIdleComposer(
+            currentStatus.screen.excerpt ?? ""
+          )
+        ) {
+          throw new Error(
+            "the explicitly selected Claude composer is no longer empty"
+          );
+        }
+      };
+      if (fresh.agent === "codex") {
+        const result = await bridge.sendUserExplicitCodex(
+          fresh.terminalControl,
+          payload,
+          {
+            runtime,
+            beforeMutationReservation: ({ terminalControl }) =>
+              revalidatePhysicalMutation(terminalControl),
+            onComposerClearDispatched: () => {
+              runtimeLog("info", "terminal_user_explicit_composer_cleared", {
+                terminal_id: fresh.conversationId,
+                terminal_target: fresh.terminalControl.target,
+                message_id: messageId
               });
-            } else if (!isExactClaudeNativeInspectionIdleComposer(
-              currentStatus.screen.excerpt ?? ""
-            )) {
-              throw new Error(
-                "the explicitly selected Claude composer is no longer empty"
-              );
             }
           }
-        }
-      );
+        );
+        composerDisposition = result.disposition;
+      } else {
+        await bridge.send(
+          fresh.agent,
+          fresh.terminalControl,
+          payload,
+          {
+            runtime,
+            requireExactComposerBeforeEnter: true,
+            requireExactEmptyComposerBeforeText: true,
+            allowWorkingComposerForUserExplicit: true,
+            beforeText: ({ terminalControl }) =>
+              revalidatePhysicalMutation(terminalControl)
+          }
+        );
+      }
       completeUserExplicitSendIntentWhileLocked(intentLease, "unmanaged");
       releaseTerminalLockOnce();
     } catch (error) {
+      // The user-explicit bridge normalizes only failures before its first
+      // physical mutation to this type. A draft-clear, text-delivery, or Enter
+      // attempt is uncertain and must retain the same-id intent.
       const zeroInput = error instanceof TerminalInputNotStartedError;
       if (zeroInput) {
         cancelProvenZeroInputUserExplicitSendIntent(
@@ -5863,6 +5896,7 @@ async function runUserExplicitTerminalFallback(
       terminal_target: fresh.terminalControl.target,
       message_id: messageId,
       managed_failure: fallbackReason,
+      composer_disposition: composerDisposition,
       delivered_unmanaged: true
     });
     printJson({
@@ -5875,6 +5909,9 @@ async function runUserExplicitTerminalFallback(
       message_id: messageId,
       scope: "terminal_user_explicit",
       management_mode: "unmanaged_fallback",
+      composer_disposition: composerDisposition,
+      replaced_existing_draft:
+        composerDisposition === "replaced_existing_draft",
       previous_management_release_attempted: true,
       warning: textSummary(
         `AKK delivered the user's message after managed-state preparation ` +
@@ -8041,6 +8078,8 @@ async function prepareTerminalControlSend(
   const terminalBridge = createTerminalAgentBridge(options);
   const execution = terminalDispatchExecution(options, terminalBridge);
   const bridgeStartedAt = cliNow().toISOString();
+  const submissionPreparedAt = deferredCodexForegroundBinding?.preparedAt ??
+    bridgeStartedAt;
   const agentTimeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
   const agentHardTimeoutMinutes = positiveMinutes(
     options.agentHardTimeoutMinutes ?? DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
@@ -8189,8 +8228,28 @@ async function prepareTerminalControlSend(
     } else {
       assertSafeTerminalSend(executor.kind, status);
     }
-    if (executor.kind === "codex" && needsPostSendNativeBinding) {
-      if (pendingManagedNativeBinding || allowedPreMaterializationIdentity) {
+    const userExplicitManagedCodexAttempt = Boolean(
+      stringValue(options.expectedUserExplicitTerminalToken)
+    );
+    if (
+      executor.kind === "claude" &&
+      userExplicitManagedCodexAttempt &&
+      !isExactClaudeNativeInspectionIdleComposer(
+        status.screen.excerpt ?? ""
+      )
+    ) {
+      throw new Error(
+        "Claude composer is not exactly empty for managed user Send"
+      );
+    }
+    if (
+      executor.kind === "codex" &&
+      (needsPostSendNativeBinding || userExplicitManagedCodexAttempt)
+    ) {
+      if (
+        needsPostSendNativeBinding &&
+        (pendingManagedNativeBinding || allowedPreMaterializationIdentity)
+      ) {
         const expectedForegroundId = stringValue(
           sendTakeover?.terminal_agent_expected_session_id
         );
@@ -8259,7 +8318,7 @@ async function prepareTerminalControlSend(
   }
   return {
     route, bridge, terminalControl, lockedStoreDir, statePath, logPath,
-    terminalBridge, execution, bridgeStartedAt,
+    terminalBridge, execution, bridgeStartedAt, submissionPreparedAt,
     agentTimeoutMinutes, agentHardTimeoutMinutes,
     terminalPayload, terminalRequestHash,
     presentationContext, presentationPorts, previousDispatchLedger,
@@ -8692,6 +8751,7 @@ function createTerminalDispatchRuntime(
     statePath,
     logPath,
     bridgeStartedAt,
+    submissionPreparedAt,
     agentTimeoutMinutes,
     agentHardTimeoutMinutes,
     terminalPayload,
@@ -8719,15 +8779,21 @@ function createTerminalDispatchRuntime(
         claudeHome
       })
     : nextConversation;
-  const preparedConversation = withTerminalBridgeSubmission({
+  const preparedSubmissionConversation = withTerminalBridgeSubmission({
     conversation: bridgeConversation,
     messageId: message.id,
     messageType: terminalMessage.type,
     messageBody: String(message.body),
     requestText: terminalPayload,
     status: "prepared",
-    preparedAt: bridgeStartedAt
+    preparedAt: submissionPreparedAt
   });
+  // A deferred generation's receipt authority begins when its transfer is
+  // prepared. Keep the newer bridge lifecycle timestamp at the Turn level so
+  // creating the provisional Turn never moves its visible update time back.
+  const preparedConversation = submissionPreparedAt === bridgeStartedAt
+    ? preparedSubmissionConversation
+    : { ...preparedSubmissionConversation, updated_at: bridgeStartedAt };
   const previousGenerationId = stringValue(previousDispatchLedger?.generation_id) ??
     stringValue(previousDispatchLedger?.message_id);
   const progress: TerminalDispatchProgress = {
@@ -8797,7 +8863,7 @@ function createTerminalDispatchRuntime(
     ),
     requestText: terminalPayload,
     requestHash: terminalRequestHash,
-    preparedAt: bridgeStartedAt,
+    preparedAt: submissionPreparedAt,
     statePath,
     eventLogPath: logPath,
     previousGenerationId,
@@ -8835,7 +8901,7 @@ function terminalDispatchTransportLifecycle({
     verifiedEmptyCodexHandoff,
     deferredCodexForegroundBinding
   } = request;
-  return prepared.execution.transportLifecycle({
+  const lifecycle = prepared.execution.transportLifecycle({
     ...(observedHandoff
       ? {
           observedHandoff: {
@@ -8909,6 +8975,12 @@ function terminalDispatchTransportLifecycle({
     recordStage: (stage, at, afterDurable) =>
       application.recordTransportStage(stage, at, afterDurable)
   });
+  return stringValue(options.expectedUserExplicitTerminalToken)
+    ? {
+        ...lifecycle,
+        requireExactEmptyComposerBeforeText: true
+      }
+    : lifecycle;
 }
 
 async function terminalDispatchAcceptance({

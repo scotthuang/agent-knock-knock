@@ -160,7 +160,7 @@ The fast tier owns the deterministic Terminal Watch contract:
 | `test/terminal-watch-service.test.ts` | Restart/list recovery, timeout and terminal settlement, approval dedupe without automatic approval, exact observation fences, callback claim-crash recovery, retry, and deterministic idempotency |
 | `test/terminal-submission-acceptance.test.ts`, `test/claude-local-transcript-provider.test.ts` | Exact Codex rollout and Claude current-turn transcript anchors; process, native identity, file, boundary, version, truncation, successor, and ambiguity drift fail closed |
 | `test/terminal-watch-cli-adapter.test.ts`, `test/terminal-watch-callback-cli-adapter.test.ts` | Human-started active-task capture, `watch_id` projection, no terminal input or Session/Turn ownership, privacy-safe callback transport, and restart-safe delivery metadata |
-| `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Fresh `available_actions.watch`, Watch status/unwatch routing and formatting, action-contract v19 semantic-ID-only projection, user-priority terminal Send, and the documented TUI → fresh list → Watch workflow |
+| `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Fresh `available_actions.watch`, Watch status/unwatch routing and formatting, action-contract v20 semantic-ID-only projection, Codex three-state user-priority Send with Claude empty-only isolation, and the documented TUI → fresh list → Watch workflow |
 
 The current public surface has 16 OpenClaw tools. Terminal Watch adds the
 `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`
@@ -170,12 +170,16 @@ boundaries, so either side can make progress when the other fails. The
 process-level plugin contract remains in the integration tier and is exercised
 only as part of an authorized pre-publication full/release gate.
 
-The v19 fast contract also proves that structured model actions expose semantic
+The v20 fast contract also proves that structured model actions expose semantic
 IDs only: Watch uses `terminal_id`; send uses mutually exclusive `session_id` or
 `terminal_id`; native inspection, new, resume, and reconcile use their documented
 terminal/session/thread IDs; and approve or handoff retains explicit-confirmation
 behavior without projecting opaque tokens, fingerprints, revisions, binding
-IDs/generations, or handoff-only live-native-UUID fences. The semantic
+IDs/generations, composer digests, draft text, or handoff-only live-native-UUID
+fences. Codex `terminal_user_explicit` proves empty injection, identical-draft
+Enter-only submission, and different-draft clear/replace/Enter; Claude user-explicit
+Send, managed Send, native inspection, and lifecycle input remain exact-empty-only.
+The semantic
 `native_thread_id` remains public for resume. The plugin/CLI still derives and
 revalidates those private fences under lock. This is an action-contract change
 only; Store format remains 1 and writer protocol remains 5.
@@ -278,7 +282,7 @@ static-terminal, and synthetic-acceptance behavior. The six record-only
 
 | Former executable cases | Imported service invariant | Retained real boundary |
 | --- | --- | --- |
-| Ten management list/status invocations | Exact JSON projection, trace redaction, static terminal observation, and action-contract v19 | Standalone executable list/status in `store-protocol-cli`, copied-distribution CLI output/exit |
+| Ten management list/status invocations | Exact JSON projection, trace redaction, static terminal observation, and action-contract v20 | Standalone executable list/status in `store-protocol-cli`, copied-distribution CLI output/exit |
 | Thirty-four selector, status, send, respond, and approve invocations | Deterministic ambiguity failures, canonical ownership, cross-Store fencing, semantic-ID routing, and private fence derivation | Codex binding and terminal-send executable suites with real terminal observation/input |
 | Six record-only callback binding invocations | Protocol-3 Session presence, generation, process evidence, route-rename, and protocol-2 compatibility | Callback executable argv/exit, Gateway, retry, and concurrency suites |
 

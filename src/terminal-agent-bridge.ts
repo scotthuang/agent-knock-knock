@@ -359,6 +359,14 @@ export interface TerminalSendOptions {
   /** Require Codex's exact stable composer proof even for a single-line send. */
   requireExactComposerBeforeEnter?: boolean;
   /**
+   * User-explicit managed-path guard. Recapture an exactly empty composer
+   * immediately before the first text-delivery call so a stale list/preflight
+   * observation can fall back without appending to a human draft.
+   */
+  requireExactEmptyComposerBeforeText?: boolean;
+  /** User-explicit physical Send may steer a mutable working composer. */
+  allowWorkingComposerForUserExplicit?: boolean;
+  /**
    * Retry-only authority from a preliminary exact-empty observation. After
    * `beforeText` reserves the attempt, the bridge independently recaptures the
    * same empty composer and then immediately makes its sole text-delivery call.
@@ -429,6 +437,79 @@ export interface TerminalCodexDraftSubmissionResult {
   stage: "enter_dispatched";
   terminalControl: TerminalControlRef;
   enterCount: 1;
+}
+
+export type TerminalCodexUserExplicitSendDisposition =
+  | "injected_empty_composer"
+  | "submitted_existing_draft"
+  | "replaced_existing_draft";
+
+export interface TerminalCodexUserExplicitSendReservationContext
+  extends TerminalCodexDraftSubmissionContext {
+  composerState: "exact_empty" | "exact_draft" | "different_draft";
+}
+
+export interface TerminalCodexUserExplicitSendOptions {
+  runtime?: TerminalRuntimeIdentity;
+  /** Revalidate caller authority before the first physical mutation. */
+  beforeMutationReservation: (
+    context: TerminalCodexUserExplicitSendReservationContext
+  ) => void | Promise<void>;
+  /** Called after the replace path has attempted its sole clear-line key. */
+  onComposerClearDispatched?: (
+    context: TerminalCodexUserExplicitSendReservationContext
+  ) => void | Promise<void>;
+  onTransportStage?: TerminalSendOptions["onTransportStage"];
+}
+
+export interface TerminalCodexUserExplicitSendResult {
+  stage: "enter_dispatched";
+  terminalControl: TerminalControlRef;
+  disposition: TerminalCodexUserExplicitSendDisposition;
+  clearCount: 0 | 1;
+  textInjectionCount: 0 | 1;
+  enterCount: 1;
+}
+
+function terminalSendComposerRequirements(
+  agent: ExecutorKind,
+  multiline: boolean,
+  options: TerminalSendOptions
+): {
+  exactEmptyRetryAuthority?: {
+    preliminaryComposerDigest: string;
+  };
+  requireExactEmptyComposerBeforeText: boolean;
+  requireExactComposer: boolean;
+} {
+  const exactEmptyRetryAuthority =
+    options.requireExactEmptyComposerAfterBeforeText;
+  const requireExactEmptyComposerBeforeText =
+    options.requireExactEmptyComposerBeforeText === true;
+  const requireExactComposer =
+    (agent === "codex" && multiline) ||
+    options.requireExactComposerBeforeEnter === true ||
+    requireExactEmptyComposerBeforeText ||
+    exactEmptyRetryAuthority !== undefined;
+  if (
+    exactEmptyRetryAuthority !== undefined &&
+    (
+      agent !== "codex" ||
+      options.beforeText === undefined ||
+      !/^[0-9a-f]{64}$/u.test(
+        exactEmptyRetryAuthority.preliminaryComposerDigest
+      )
+    )
+  ) {
+    throw new TerminalInputNotStartedError(
+      "exact-empty replacement requires Codex, a reservation hook, and a preliminary composer digest"
+    );
+  }
+  return {
+    exactEmptyRetryAuthority,
+    requireExactEmptyComposerBeforeText,
+    requireExactComposer
+  };
 }
 
 type TerminalCodexCapturedComposerState = TerminalCodexObservedComposerState;
@@ -795,26 +876,11 @@ export class TerminalAgentBridge {
   ): Promise<TerminalSendResult> {
     const adapter = this.registry.require(agent);
     const multiline = /[\r\n]/u.test(text.trimEnd());
-    const exactEmptyRetryAuthority =
-      options.requireExactEmptyComposerAfterBeforeText;
-    const requireExactComposer =
-      (adapter.agent === "codex" && multiline) ||
-      options.requireExactComposerBeforeEnter === true ||
-      exactEmptyRetryAuthority !== undefined;
-    if (
-      exactEmptyRetryAuthority !== undefined &&
-      (
-        adapter.agent !== "codex" ||
-        options.beforeText === undefined ||
-        !/^[0-9a-f]{64}$/u.test(
-          exactEmptyRetryAuthority.preliminaryComposerDigest
-        )
-      )
-    ) {
-      throw new TerminalInputNotStartedError(
-        "exact-empty replacement requires Codex, a reservation hook, and a preliminary composer digest"
-      );
-    }
+    const {
+      exactEmptyRetryAuthority,
+      requireExactEmptyComposerBeforeText,
+      requireExactComposer
+    } = terminalSendComposerRequirements(adapter.agent, multiline, options);
     try {
       assertTerminalMutationCapabilities({
         provider: this.terminalProvider,
@@ -862,6 +928,7 @@ export class TerminalAgentBridge {
         `${adapter.displayName} terminal input capability changed before injection`
       );
     }
+    let composerVerifiedImmediatelyBeforeText = false;
     if (exactEmptyRetryAuthority) {
       try {
         // Invoking this retry-only hook consumes the durable attempt. The
@@ -916,27 +983,46 @@ export class TerminalAgentBridge {
           { cause: error }
         );
       }
+      if (requireExactEmptyComposerBeforeText) {
+        try {
+          verifiedForText = await this.verifyExactEmptyComposerBeforeText(
+            adapter,
+            verifiedForText,
+            normalized,
+            options.runtime,
+            options.allowWorkingComposerForUserExplicit === true
+          );
+          composerVerifiedImmediatelyBeforeText = true;
+        } catch (error) {
+          throw new TerminalInputNotStartedError(
+            error instanceof Error ? error.message : String(error),
+            { cause: error }
+          );
+        }
+      }
     }
-    try {
-      const reverifiedForText = await this.verifyTerminalIdentity(
-        adapter.agent,
-        verifiedForText,
-        options.runtime
-      );
-      if (!sameTerminalControlIdentity(verifiedForText, reverifiedForText)) {
-        throw new Error(
-          "terminal identity changed after the final pre-text check"
+    if (!composerVerifiedImmediatelyBeforeText) {
+      try {
+        const reverifiedForText = await this.verifyTerminalIdentity(
+          adapter.agent,
+          verifiedForText,
+          options.runtime
         );
+        if (!sameTerminalControlIdentity(verifiedForText, reverifiedForText)) {
+          throw new Error(
+            "terminal identity changed after the final pre-text check"
+          );
+        }
+        verifiedForText = reverifiedForText;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (exactEmptyRetryAuthority) {
+          throw new TerminalEnterDispatchReservedError(message, {
+            cause: error
+          });
+        }
+        throw new TerminalInputNotStartedError(message, { cause: error });
       }
-      verifiedForText = reverifiedForText;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (exactEmptyRetryAuthority) {
-        throw new TerminalEnterDispatchReservedError(message, {
-          cause: error
-        });
-      }
-      throw new TerminalInputNotStartedError(message, { cause: error });
     }
     try {
       await this.terminalProvider.sendText(
@@ -976,7 +1062,9 @@ export class TerminalAgentBridge {
           options.runtime,
           {
             allowOpaqueLargePastePlaceholder:
-              exactEmptyRetryAuthority === undefined
+              exactEmptyRetryAuthority === undefined,
+            allowWorkingComposer:
+              options.allowWorkingComposerForUserExplicit === true
           }
         );
       } else if (requireExactComposer) {
@@ -984,7 +1072,8 @@ export class TerminalAgentBridge {
           adapter,
           terminalControl,
           normalized,
-          options.runtime
+          options.runtime,
+          options.allowWorkingComposerForUserExplicit === true
         );
       } else {
         verifiedForEnter = await this.verifyTerminalIdentity(
@@ -1011,14 +1100,17 @@ export class TerminalAgentBridge {
             options.runtime,
             {
               allowOpaqueLargePastePlaceholder:
-                exactEmptyRetryAuthority === undefined
+                exactEmptyRetryAuthority === undefined,
+              allowWorkingComposer:
+                options.allowWorkingComposerForUserExplicit === true
             }
           )
           : await this.verifyExactComposerBeforeEnter(
             adapter,
             terminalControl,
             normalized,
-            options.runtime
+            options.runtime,
+            options.allowWorkingComposerForUserExplicit === true
           );
       } else if (options.beforeEnter) {
         verifiedForEnter = await this.verifyTerminalIdentity(
@@ -1109,6 +1201,361 @@ export class TerminalAgentBridge {
       options.runtime,
       { minimumStableMs: CODEX_MULTILINE_SETTLE_POLL_MS }
     );
+  }
+
+  /**
+   * Honor one explicit user Send against the current Codex composer.
+   * Empty composers receive the request, exact drafts receive Enter only, and
+   * every other stable draft is cleared and replaced by the requested text.
+   * This primitive is intentionally not used by autonomous managed sends.
+   */
+  async sendUserExplicitCodex(
+    terminalControl: TerminalControlRef,
+    text: string,
+    options: TerminalCodexUserExplicitSendOptions
+  ): Promise<TerminalCodexUserExplicitSendResult> {
+    const adapter = this.registry.require("codex");
+    const normalized = text.trimEnd();
+    const multiline = /[\r\n]/u.test(normalized);
+    if (!normalized) {
+      throw new TerminalInputNotStartedError("terminal message is empty");
+    }
+    try {
+      assertTerminalMutationCapabilities({
+        provider: this.terminalProvider,
+        terminal: this.terminalProvider.endpoint(terminalControl),
+        semantic: ["send_keys", "screen_status"],
+        transport: [
+          "stable_resource_resolution",
+          "screen_capture",
+          "key_delivery"
+        ]
+      });
+    } catch (error) {
+      throw new TerminalInputNotStartedError(
+        error instanceof Error ? error.message : String(error),
+        { cause: error }
+      );
+    }
+    const observation = await this.settleCodexComposerObservation(
+      adapter,
+      terminalControl,
+      normalized,
+      options.runtime,
+      {
+        // The same-draft branch may press Enter without any preceding text
+        // delivery of its own, so its initial stable proof must itself cross
+        // Codex's paste/newline suppression window.
+        minimumStableMs: CODEX_PASTE_ENTER_SETTLE_MS,
+        classifyOpaqueLargePasteAsDifferent: true,
+        allowWorkingComposer: true
+      }
+    );
+    if (
+      observation.state !== "exact_empty" &&
+      observation.state !== "exact_draft" &&
+      observation.state !== "different_draft"
+    ) {
+      const reason = "reason" in observation
+        ? observation.reason
+        : `Codex composer is ${observation.state}`;
+      throw new TerminalInputNotStartedError(
+        `the explicit user Send has no stable mutable Codex composer: ${reason}`
+      );
+    }
+    const reservationContext: TerminalCodexUserExplicitSendReservationContext = {
+      terminalControl: observation.terminalControl,
+      text: normalized,
+      composerDigest: observation.digest,
+      composerState: observation.state
+    };
+
+    const notStarted = (error: unknown, prefix?: string) =>
+      error instanceof TerminalInputNotStartedError
+        ? error
+        : new TerminalInputNotStartedError(
+          `${prefix ? `${prefix}: ` : ""}${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          { cause: error }
+        );
+    const uncertain = (message: string, error: unknown) =>
+      error instanceof TerminalEnterDispatchReservedError
+        ? error
+        : new TerminalEnterDispatchReservedError(message, { cause: error });
+
+    const revalidateBeforeFirstMutation = async (
+      expectedState: "exact_empty" | "exact_draft" | "different_draft"
+    ): Promise<TerminalControlRef> => {
+      try {
+        await options.beforeMutationReservation(reservationContext);
+        const finalComposer = await this.captureCodexComposerSnapshot(
+          adapter,
+          observation.terminalControl,
+          normalized,
+          options.runtime,
+          {
+            classifyOpaqueLargePasteAsDifferent: true,
+            allowWorkingComposer: true
+          }
+        );
+        if (
+          finalComposer.state !== expectedState ||
+          finalComposer.digest !== observation.digest ||
+          !sameTerminalControlIdentity(
+            observation.terminalControl,
+            finalComposer.terminalControl
+          )
+        ) {
+          const reason = "reason" in finalComposer
+            ? finalComposer.reason
+            : `Codex composer is ${finalComposer.state}`;
+          throw new Error(
+            `the Codex composer changed before explicit user Send: ${reason}`
+          );
+        }
+        return finalComposer.terminalControl;
+      } catch (error) {
+        throw notStarted(error);
+      }
+    };
+
+    const dispatchEnter = async (
+      control: TerminalControlRef,
+      outcomeLabel: string,
+      mutationAlreadyStarted: boolean
+    ): Promise<TerminalControlRef> => {
+      let endpoint: TerminalEndpointRef;
+      try {
+        endpoint = this.terminalProvider.endpoint(control);
+      } catch (error) {
+        if (!mutationAlreadyStarted) throw notStarted(error);
+        throw uncertain(
+          `${outcomeLabel} Enter endpoint is unresolved after terminal input; do not retry automatically`,
+          error
+        );
+      }
+      try {
+        await this.terminalProvider.sendKeys(endpoint, ["C-m"]);
+      } catch (error) {
+        if (
+          !mutationAlreadyStarted &&
+          error instanceof TerminalControlInputNotSentError
+        ) {
+          throw notStarted(error);
+        }
+        throw uncertain(
+          `${outcomeLabel} Enter outcome is uncertain; do not retry automatically`,
+          error
+        );
+      }
+      try {
+        await options.onTransportStage?.({
+          stage: "enter_dispatched",
+          agent: adapter.agent,
+          terminalControl: control,
+          multiline
+        });
+        return control;
+      } catch (error) {
+        throw uncertain(
+          `${outcomeLabel} Enter was dispatched but its durable acknowledgement failed; do not retry automatically`,
+          error
+        );
+      }
+    };
+
+    const injectAndSubmit = async (
+      control: TerminalControlRef,
+      mutationAlreadyStarted: boolean
+    ): Promise<TerminalControlRef> => {
+      let endpoint: TerminalEndpointRef;
+      try {
+        endpoint = this.terminalProvider.endpoint(control);
+      } catch (error) {
+        if (!mutationAlreadyStarted) throw notStarted(error);
+        throw uncertain(
+          "explicit Codex replacement endpoint is unresolved after clearing the prior draft; do not retry automatically",
+          error
+        );
+      }
+      try {
+        await this.terminalProvider.sendText(endpoint, normalized);
+      } catch (error) {
+        if (
+          !mutationAlreadyStarted &&
+          error instanceof TerminalControlInputNotSentError
+        ) {
+          throw notStarted(error);
+        }
+        throw uncertain(
+          mutationAlreadyStarted
+            ? "explicit Codex replacement text outcome is uncertain after clearing the prior draft; do not retry automatically"
+            : "explicit Codex text outcome is uncertain; do not retry automatically",
+          error
+        );
+      }
+
+      let exactDraftControl: TerminalControlRef;
+      try {
+        await options.onTransportStage?.({
+          stage: "text_injected",
+          agent: adapter.agent,
+          terminalControl: control,
+          multiline
+        });
+        // This text was injected from an exact-empty composer under the same
+        // terminal lock. Codex may render a large paste only as its exact
+        // character-count placeholder, which is sufficient for this freshly
+        // injected request but never for classifying a pre-existing draft.
+        exactDraftControl = await this.settleCodexMultilineComposer(
+          adapter,
+          control,
+          normalized,
+          options.runtime,
+          {
+            allowOpaqueLargePastePlaceholder: true,
+            allowWorkingComposer: true
+          }
+        );
+      } catch (error) {
+        throw uncertain(
+          "explicit Codex text was injected but its Enter outcome is unresolved; do not retry automatically",
+          error
+        );
+      }
+      return dispatchEnter(
+        exactDraftControl,
+        "explicit Codex Send",
+        true
+      );
+    };
+
+    if (observation.state === "exact_draft") {
+      const verifiedForEnter = await revalidateBeforeFirstMutation(
+        "exact_draft"
+      );
+      const entered = await dispatchEnter(
+        verifiedForEnter,
+        "explicit Codex existing-draft submission",
+        false
+      );
+      return {
+        stage: "enter_dispatched",
+        terminalControl: entered,
+        disposition: "submitted_existing_draft",
+        clearCount: 0,
+        textInjectionCount: 0,
+        enterCount: 1
+      };
+    }
+    if (observation.state === "exact_empty") {
+      try {
+        assertTerminalMutationCapabilities({
+          provider: this.terminalProvider,
+          terminal: this.terminalProvider.endpoint(
+            observation.terminalControl
+          ),
+          semantic: ["send_keys", "screen_status"],
+          transport: [
+            "stable_resource_resolution",
+            "screen_capture",
+            "text_delivery",
+            "key_delivery"
+          ]
+        });
+      } catch (error) {
+        throw notStarted(error);
+      }
+      const verifiedForText = await revalidateBeforeFirstMutation(
+        "exact_empty"
+      );
+      const entered = await injectAndSubmit(verifiedForText, false);
+      return {
+        stage: "enter_dispatched",
+        terminalControl: entered,
+        disposition: "injected_empty_composer",
+        clearCount: 0,
+        textInjectionCount: 1,
+        enterCount: 1
+      };
+    }
+
+    try {
+      assertTerminalMutationCapabilities({
+        provider: this.terminalProvider,
+        terminal: this.terminalProvider.endpoint(observation.terminalControl),
+        semantic: ["send_keys", "screen_status"],
+        transport: [
+          "stable_resource_resolution",
+          "screen_capture",
+          "text_delivery",
+          "key_delivery"
+        ]
+      });
+    } catch (error) {
+      throw notStarted(error);
+    }
+    const verifiedForClear = await revalidateBeforeFirstMutation(
+      "different_draft"
+    );
+    let clearEndpoint: TerminalEndpointRef;
+    try {
+      clearEndpoint = this.terminalProvider.endpoint(verifiedForClear);
+    } catch (error) {
+      throw notStarted(error);
+    }
+    try {
+      await this.terminalProvider.sendKeys(clearEndpoint, ["C-u"]);
+    } catch (error) {
+      if (error instanceof TerminalControlInputNotSentError) {
+        throw notStarted(error);
+      }
+      throw uncertain(
+        "explicit Codex draft-clear outcome is uncertain; do not retry automatically",
+        error
+      );
+    }
+
+    let emptyControl: TerminalControlRef;
+    try {
+      await options.onComposerClearDispatched?.(reservationContext);
+      const empty = await this.settleCodexComposerObservation(
+        adapter,
+        verifiedForClear,
+        normalized,
+        options.runtime,
+        {
+          minimumStableMs: CODEX_MULTILINE_SETTLE_POLL_MS,
+          requiredState: "exact_empty",
+          classifyOpaqueLargePasteAsDifferent: true,
+          allowWorkingComposer: true
+        }
+      );
+      if (empty.state !== "exact_empty") {
+        const reason = "reason" in empty
+          ? empty.reason
+          : `Codex composer is ${empty.state}`;
+        throw new Error(
+          `Codex composer did not become empty after explicit replacement clear: ${reason}`
+        );
+      }
+      emptyControl = empty.terminalControl;
+    } catch (error) {
+      throw uncertain(
+        "explicit Codex composer was cleared but replacement did not start; do not retry automatically",
+        error
+      );
+    }
+    const entered = await injectAndSubmit(emptyControl, true);
+    return {
+      stage: "enter_dispatched",
+      terminalControl: entered,
+      disposition: "replaced_existing_draft",
+      clearCount: 1,
+      textInjectionCount: 1,
+      enterCount: 1
+    };
   }
 
   /**
@@ -1237,7 +1684,8 @@ export class TerminalAgentBridge {
     adapter: TerminalAgentAdapter,
     terminalControl: TerminalControlRef,
     expectedText: string,
-    runtime?: TerminalRuntimeIdentity
+    runtime?: TerminalRuntimeIdentity,
+    allowWorkingComposer = false
   ): Promise<TerminalControlRef> {
     const captured = await this.captureInspection(adapter, terminalControl, {
       runtime,
@@ -1250,7 +1698,13 @@ export class TerminalAgentBridge {
     );
     if (
       captured.inspection.approval.blocked ||
-      !["idle", "unknown"].includes(captured.inspection.activity.state) ||
+      !(
+        ["idle", "unknown"].includes(captured.inspection.activity.state) ||
+        (
+          allowWorkingComposer &&
+          captured.inspection.activity.state === "working"
+        )
+      ) ||
       !exactComposer
     ) {
       throw new Error(
@@ -1273,6 +1727,62 @@ export class TerminalAgentBridge {
       );
     }
     return verifiedImmediatelyBeforeEnter;
+  }
+
+  private async verifyExactEmptyComposerBeforeText(
+    adapter: TerminalAgentAdapter,
+    terminalControl: TerminalControlRef,
+    expectedText: string,
+    runtime?: TerminalRuntimeIdentity,
+    allowWorkingComposer = false
+  ): Promise<TerminalControlRef> {
+    if (adapter.agent === "codex") {
+      const snapshot = await this.captureCodexComposerSnapshot(
+        adapter,
+        terminalControl,
+        expectedText,
+        runtime
+      );
+      if (snapshot.state !== "exact_empty") {
+        const reason = "reason" in snapshot
+          ? snapshot.reason
+          : `Codex composer is ${snapshot.state}`;
+        throw new Error(
+          `Codex composer was not exactly empty immediately before text: ${reason}`
+        );
+      }
+      return snapshot.terminalControl;
+    }
+    const captured = await this.captureInspection(adapter, terminalControl, {
+      runtime,
+      scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+    });
+    if (
+      captured.inspection.approval.blocked ||
+      !(
+        ["idle", "unknown"].includes(captured.inspection.activity.state) ||
+        (
+          allowWorkingComposer &&
+          captured.inspection.activity.state === "working"
+        )
+      ) ||
+      !exactTerminalComposerCapture(adapter.agent, captured.screen, "")
+    ) {
+      throw new Error(
+        `${adapter.displayName} composer was not exactly empty immediately before text`
+      );
+    }
+    const verified = await this.verifyTerminalIdentity(
+      adapter.agent,
+      captured.terminalControl,
+      runtime
+    );
+    if (!sameTerminalControlIdentity(captured.terminalControl, verified)) {
+      throw new Error(
+        "terminal control identity changed after the final empty composer capture"
+      );
+    }
+    return verified;
   }
 
   /**
@@ -2080,7 +2590,10 @@ export class TerminalAgentBridge {
     terminalControl: TerminalControlRef,
     expectedText: string,
     runtime?: TerminalRuntimeIdentity,
-    options: { allowOpaqueLargePastePlaceholder?: boolean } = {}
+    options: {
+      allowOpaqueLargePastePlaceholder?: boolean;
+      allowWorkingComposer?: boolean;
+    } = {}
   ): Promise<TerminalControlRef> {
     const observation = await this.settleCodexComposerObservation(
       adapter,
@@ -2091,7 +2604,8 @@ export class TerminalAgentBridge {
         minimumStableMs: CODEX_PASTE_ENTER_SETTLE_MS,
         requiredState: "exact_draft",
         allowOpaqueLargePastePlaceholder:
-          options.allowOpaqueLargePastePlaceholder === true
+          options.allowOpaqueLargePastePlaceholder === true,
+        allowWorkingComposer: options.allowWorkingComposer === true
       }
     );
     if (observation.state === "exact_draft") {
@@ -2122,6 +2636,8 @@ export class TerminalAgentBridge {
       minimumStableMs: number;
       requiredState?: TerminalCodexCapturedComposerState;
       allowOpaqueLargePastePlaceholder?: boolean;
+      classifyOpaqueLargePasteAsDifferent?: boolean;
+      allowWorkingComposer?: boolean;
     }
   ): Promise<TerminalCodexComposerObservation> {
     const startedAt = this.nowMs();
@@ -2143,7 +2659,10 @@ export class TerminalAgentBridge {
         runtime,
         {
           allowOpaqueLargePastePlaceholder:
-            options.allowOpaqueLargePastePlaceholder === true
+            options.allowOpaqueLargePastePlaceholder === true,
+          classifyOpaqueLargePasteAsDifferent:
+            options.classifyOpaqueLargePasteAsDifferent === true,
+          allowWorkingComposer: options.allowWorkingComposer === true
         }
       );
       if (
@@ -2203,7 +2722,10 @@ export class TerminalAgentBridge {
           runtime,
           {
             allowOpaqueLargePastePlaceholder:
-              options.allowOpaqueLargePastePlaceholder === true
+              options.allowOpaqueLargePastePlaceholder === true,
+            classifyOpaqueLargePasteAsDifferent:
+              options.classifyOpaqueLargePasteAsDifferent === true,
+            allowWorkingComposer: options.allowWorkingComposer === true
           }
         );
         if (
@@ -2292,7 +2814,11 @@ export class TerminalAgentBridge {
     terminalControl: TerminalControlRef,
     expectedText: string,
     runtime?: TerminalRuntimeIdentity,
-    options: { allowOpaqueLargePastePlaceholder?: boolean } = {}
+    options: {
+      allowOpaqueLargePastePlaceholder?: boolean;
+      classifyOpaqueLargePasteAsDifferent?: boolean;
+      allowWorkingComposer?: boolean;
+    } = {}
   ): Promise<TerminalCodexComposerSnapshot> {
     let verifiedBefore: TerminalControlRef;
     try {
@@ -2366,7 +2892,10 @@ export class TerminalAgentBridge {
         digest: screenDigest
       };
     }
-    if (inspection.activity.state === "working") {
+    if (
+      inspection.activity.state === "working" &&
+      options.allowWorkingComposer !== true
+    ) {
       return {
         state: "working",
         terminalControl: verifiedAfter,
@@ -2377,7 +2906,8 @@ export class TerminalAgentBridge {
     const composer = currentCodexComposerCapture(
       styledScreen,
       expectedText,
-      options.allowOpaqueLargePastePlaceholder === true
+      options.allowOpaqueLargePastePlaceholder === true,
+      options.classifyOpaqueLargePasteAsDifferent === true
     );
     if (!composer) {
       return {
@@ -3569,6 +4099,26 @@ export function exactCodexReadyStyledComposerCapture(
 }
 
 /**
+ * Closed list-time proof that the bottom Codex composer is either exactly
+ * empty or contains one stable replaceable draft. The draft text is never
+ * returned; the request-aware classification is repeated under the Send lock.
+ */
+export function codexUserExplicitComposerCapture(
+  screen: string
+): { state: "exact_empty" | "stable_nonempty"; digest: string } | undefined {
+  // NUL cannot be represented by the terminal composer, so every visible
+  // nonempty value classifies as replaceable without exposing its contents.
+  const composer = currentCodexComposerCapture(screen, "\0", false, true);
+  if (!composer) return undefined;
+  return {
+    state: composer.state === "exact_empty"
+      ? "exact_empty"
+      : "stable_nonempty",
+    digest: composer.digest
+  };
+}
+
+/**
  * Infer a viewport only from fixed-width visible-buffer rows. Trimmed captures
  * deliberately return undefined: a short content row is not proof of a short
  * terminal. This keeps the fallback provider-neutral and fail-closed only on
@@ -3688,7 +4238,8 @@ function codexBlockingModalVisible(screen: string): boolean {
 function currentCodexComposerCapture(
   styledScreen: string,
   expectedText: string,
-  allowOpaqueLargePastePlaceholder = false
+  allowOpaqueLargePastePlaceholder = false,
+  classifyOpaqueLargePasteAsDifferent = false
 ): {
   state: "exact_draft" | "exact_empty" | "different_draft";
   digest: string;
@@ -3750,7 +4301,9 @@ function currentCodexComposerCapture(
   const opaqueLargePastePlaceholder =
     /^\[Pasted Content \d+ chars\]$/u.test(comparable);
   if (opaqueLargePastePlaceholder && !allowOpaqueLargePastePlaceholder) {
-    return undefined;
+    return classifyOpaqueLargePasteAsDifferent
+      ? { state: "different_draft", digest }
+      : undefined;
   }
   const exactVisibleDraft = terminalComposerRowsMatchExpected(
     bodyRows,

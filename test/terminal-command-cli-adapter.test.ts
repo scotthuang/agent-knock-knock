@@ -558,6 +558,118 @@ test("exact Turn retry wires durable authority before composer input", () => {
   ]);
 });
 
+test("deferred dispatch keeps one prepared authority and a separate bridge clock", () => {
+  const preparation = compiledFunctionSource(
+    "prepareTerminalControlSend",
+    "resolveTerminalDispatchSubmissionOwner"
+  );
+  assertOrdered(preparation, [
+    "const bridgeStartedAt = cliNow().toISOString()",
+    "const submissionPreparedAt = deferredCodexForegroundBinding?.preparedAt",
+    "bridgeStartedAt",
+    "bridgeStartedAt, submissionPreparedAt"
+  ]);
+
+  const runtime = compiledFunctionSource(
+    "createTerminalDispatchRuntime",
+    "terminalDispatchTransportLifecycle"
+  );
+  assertOrdered(runtime, [
+    "bridgeStartedAt",
+    "submissionPreparedAt",
+    "withTerminalBridgeState",
+    "startedAt: bridgeStartedAt",
+    "withTerminalBridgeSubmission",
+    "preparedAt: submissionPreparedAt",
+    "updated_at: bridgeStartedAt",
+    "new dispatchApplication.TerminalDispatchApplication",
+    "preparedAt: submissionPreparedAt"
+  ]);
+  assert.equal(
+    runtime.match(/preparedAt: submissionPreparedAt/gu)?.length,
+    2,
+    "the Turn receipt and dispatch ledger application must share transfer authority"
+  );
+  assert.doesNotMatch(
+    runtime,
+    /preparedAt: bridgeStartedAt/u,
+    "the monitor clock must never become deferred generation authority"
+  );
+});
+
+test("user-explicit fallback cancels only bridge-proven pre-mutation failure", () => {
+  const liveSafety = compiledFunctionSource(
+    "assertSafeUserExplicitTerminalSend",
+    "terminalUserSendIntentContext"
+  );
+  assertOrdered(liveSafety, [
+    "status?.reachable !== true",
+    "approval?.scanned !== true",
+    "approval?.blocked === true",
+    'status.activity_state === "awaiting_approval"',
+    "waiting at an approval prompt"
+  ]);
+
+  const fallback = compiledFunctionSource(
+    "runUserExplicitTerminalFallback",
+    "runRawTerminalSend"
+  );
+  assertOrdered(fallback, [
+    "bridge.sendUserExplicitCodex(",
+    "beforeMutationReservation:",
+    "composerDisposition = result.disposition",
+    "requireExactEmptyComposerBeforeText: true",
+    "allowWorkingComposerForUserExplicit: true",
+    "const zeroInput = error instanceof TerminalInputNotStartedError",
+    "cancelProvenZeroInputUserExplicitSendIntent(",
+    'composer_disposition: composerDisposition',
+    'composerDisposition === "replaced_existing_draft"'
+  ]);
+  assert.doesNotMatch(
+    fallback.match(/const zeroInput[\s\S]*?if \(zeroInput\)/u)?.[0] ?? "",
+    /TerminalEnterDispatchNotAttemptedError/u,
+    "text, clear, and Enter-stage uncertainty must retain the same-id intent"
+  );
+
+  const managedPreflight = compiledFunctionSource(
+    "prepareTerminalControlSend",
+    "resolveTerminalDispatchSubmissionOwner"
+  );
+  assertOrdered(managedPreflight, [
+    "options.expectedUserExplicitTerminalToken",
+    "needsPostSendNativeBinding || userExplicitManagedCodexAttempt",
+    "assertCodexComposerReadyForAutomatedInput({"
+  ]);
+  const managedTransport = compiledFunctionSource(
+    "terminalDispatchTransportLifecycle",
+    "terminalDispatchAcceptance"
+  );
+  assertOrdered(managedTransport, [
+    "options.expectedUserExplicitTerminalToken",
+    "requireExactEmptyComposerBeforeText: true"
+  ]);
+});
+
+test("same-ID replay presentation cannot degrade into a fresh Send", () => {
+  const reservation = compiledFunctionSource(
+    "reserveUserExplicitSendIntent",
+    "cancelProvenZeroInputUserExplicitSendIntent"
+  );
+  assertOrdered(reservation, [
+    "try {",
+    "intent.repository.reserve(intent.boundary)",
+    "catch (error) {",
+    "Presentation is outside the durability catch",
+    'reservation.outcome === "replay"',
+    "printReplayedUserExplicitSend("
+  ]);
+  const durabilityCatch = reservation.slice(
+    reservation.indexOf("catch (error) {"),
+    reservation.indexOf("Presentation is outside the durability catch")
+  );
+  assert.doesNotMatch(durabilityCatch, /printReplayedUserExplicitSend/u);
+});
+
 test("callback auto approval rejects a different Turn before migration or terminal I/O", async () => {
   const events: string[] = [];
   const statePath = "/private/store/conversations/turn-b/state.json";

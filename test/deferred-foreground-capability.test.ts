@@ -52,6 +52,7 @@ function boundary(
       canonicalEndpoint: true
     },
     transferId: "transfer-1",
+    preparedAt: "2026-08-15T00:00:00.000Z",
     targetSessionId: "target-1",
     sourceSessionId: "source-1",
     sourceBoundRevision: 1,

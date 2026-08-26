@@ -32,6 +32,8 @@ export interface DeferredForegroundTerminalFacts {
 export interface DeferredForegroundBindingBoundary {
   terminal: DeferredForegroundTerminalFacts;
   transferId: string;
+  /** Immutable prepared timestamp shared by the transfer and its submission. */
+  preparedAt: string;
   targetSessionId: string;
   sourceSessionId: string;
   sourceBoundRevision: number;

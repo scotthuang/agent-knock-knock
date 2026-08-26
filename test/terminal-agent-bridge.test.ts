@@ -34,6 +34,7 @@ import {
 import {
   terminalRefFromPane,
   StaticTerminalControlProvider,
+  TerminalControlInputNotSentError,
   type TerminalControlProvider,
   type TerminalPane
 } from "../src/terminal-control-provider.js";
@@ -1100,6 +1101,812 @@ test("Codex composer observation returns every closed state without draft text",
       terminalControl(codexTerminalAgentAdapter),
       expected
     )).state, "unavailable");
+  });
+});
+
+test("explicit Codex Send injects, submits, or replaces by composer state", async (t) => {
+  const request = "the user's newest explicit request";
+  const cases = [
+    {
+      name: "empty composer",
+      screen: codexPaddedStyledIdleScreen(80),
+      disposition: "injected_empty_composer",
+      mutations: ["text", "keys:C-m"]
+    },
+    {
+      name: "same draft",
+      screen: `› ${request}\ngpt-5.6-sol high · /repo`,
+      disposition: "submitted_existing_draft",
+      mutations: ["keys:C-m"]
+    },
+    {
+      name: "different draft",
+      screen: "› an older unrelated draft\ngpt-5.6-sol high · /repo",
+      disposition: "replaced_existing_draft",
+      mutations: ["keys:C-u", "text", "keys:C-m"]
+    }
+  ] as const;
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      class ExplicitSendProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(target, `› ${text}\ngpt-5.6-sol high · /repo`);
+        }
+
+        override async sendKeys(
+          target: TerminalEndpointRef | string,
+          keys: readonly string[],
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendKeys(target, keys, options);
+          if (keys.includes("C-u")) {
+            this.setScreen(target, codexPaddedStyledIdleScreen(80));
+          }
+        }
+      }
+      const provider = new ExplicitSendProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      const reservations: string[] = [];
+      const result = await bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        {
+          beforeMutationReservation: ({ composerState }) => {
+            reservations.push(composerState);
+          }
+        }
+      );
+      assert.equal(result.disposition, testCase.disposition);
+      assert.deepEqual(reservations, [
+        testCase.name === "empty composer"
+          ? "exact_empty"
+          : testCase.name === "same draft"
+            ? "exact_draft"
+            : "different_draft"
+      ]);
+      assert.deepEqual(
+        provider.operations.flatMap((operation) =>
+          operation.kind === "capture"
+            ? []
+            : operation.kind === "text"
+              ? ["text"]
+              : [`keys:${operation.keys.join(",")}`]
+        ),
+        testCase.mutations
+      );
+    });
+  }
+});
+
+test("explicit Codex Send preserves user priority on a working mutable composer", async (t) => {
+  const request = "the user's newest explicit request";
+  const workingLine =
+    "• Working (8s · esc to interrupt) · 1 background terminal running";
+  const workingScreen = (composer: string) => [
+    workingLine,
+    composer,
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+  const cases = [
+    {
+      name: "empty composer",
+      screen: `${workingLine}\n${codexPaddedStyledIdleScreen(80)}`,
+      disposition: "injected_empty_composer",
+      mutations: ["text", "keys:C-m"]
+    },
+    {
+      name: "same draft",
+      screen: workingScreen(`› ${request}`),
+      disposition: "submitted_existing_draft",
+      mutations: ["keys:C-m"]
+    },
+    {
+      name: "different draft",
+      screen: workingScreen("› an older unrelated draft"),
+      disposition: "replaced_existing_draft",
+      mutations: ["keys:C-u", "text", "keys:C-m"]
+    }
+  ] as const;
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      class WorkingExplicitSendProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(target, workingScreen(`› ${text}`));
+        }
+
+        override async sendKeys(
+          target: TerminalEndpointRef | string,
+          keys: readonly string[],
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendKeys(target, keys, options);
+          if (keys.includes("C-u")) {
+            this.setScreen(
+              target,
+              `${workingLine}\n${codexPaddedStyledIdleScreen(80)}`
+            );
+          }
+        }
+      }
+      const provider = new WorkingExplicitSendProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      const result = await bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        { beforeMutationReservation() {} }
+      );
+      assert.equal(result.disposition, testCase.disposition);
+      assert.deepEqual(
+        provider.operations.flatMap((operation) =>
+          operation.kind === "capture"
+            ? []
+            : operation.kind === "text"
+              ? ["text"]
+              : [`keys:${operation.keys.join(",")}`]
+        ),
+        testCase.mutations
+      );
+    });
+  }
+});
+
+test("explicit Codex Send still rejects approval while working is allowed", async () => {
+  let nowMs = 0;
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: strictCodexCommandApprovalScreen()
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+  await assert.rejects(
+    bridge.sendUserExplicitCodex(
+      terminalControl(codexTerminalAgentAdapter),
+      "new explicit request",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind !== "capture"),
+    false
+  );
+});
+
+test("managed user Send recaptures exact empty immediately before text", async (t) => {
+  const request = "the user's newest managed request";
+
+  await t.test("exact-empty Codex proceeds once", async () => {
+    let nowMs = 0;
+    class ManagedGuardProvider extends RecordingTerminalProvider {
+      override async sendText(
+        target: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendText(target, text, options);
+        this.setScreen(target, `› ${text}\ngpt-5.6-sol high · /repo`);
+      }
+    }
+    const provider = new ManagedGuardProvider([PANE], {
+      [PANE.target]: codexPaddedStyledIdleScreen(80)
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await bridge.send(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      request,
+      {
+        requireExactEmptyComposerBeforeText: true,
+        requireExactComposerBeforeEnter: true
+      }
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["text", "keys:C-m"]
+    );
+  });
+
+  await t.test("Codex draft drift before text proves zero input", async () => {
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: codexPaddedStyledIdleScreen(80)
+    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
+    await assert.rejects(
+      bridge.send(
+        "codex",
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        {
+          requireExactEmptyComposerBeforeText: true,
+          requireExactComposerBeforeEnter: true,
+          beforeText() {
+            provider.setScreen(
+              PANE.target,
+              "› a human draft arrived after preflight\n" +
+                "gpt-5.6-sol high · /repo"
+            );
+          }
+        }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  await t.test("Claude draft drift before text proves zero input", async () => {
+    const divider = "────────────────────────────────────────────────";
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: [divider, "❯ ", divider].join("\n")
+    });
+    const adapter = createTestClaudeAdapter();
+    const bridge = createBridge(adapter, provider);
+    await assert.rejects(
+      bridge.send("claude", terminalControl(adapter), request, {
+        runtime: MANAGED_CLAUDE_RUNTIME,
+        requireExactEmptyComposerBeforeText: true,
+        requireExactComposerBeforeEnter: true,
+        beforeText() {
+          provider.setScreen(
+            PANE.target,
+            [divider, "❯ a human draft arrived after preflight", divider]
+              .join("\n")
+          );
+        }
+      }),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  await t.test("working Claude exact-empty fallback may steer once", async () => {
+    const divider = "────────────────────────────────────────────────";
+    const working = (composer: string) => [
+      "working: background terminal remains active",
+      divider,
+      composer,
+      divider
+    ].join("\n");
+    class WorkingClaudeProvider extends RecordingTerminalProvider {
+      override async sendText(
+        target: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendText(target, text, options);
+        this.setScreen(target, working(`❯ ${text}`));
+      }
+    }
+    const provider = new WorkingClaudeProvider([PANE], {
+      [PANE.target]: working("❯ ")
+    });
+    const adapter = createTestClaudeAdapter();
+    const bridge = createBridge(adapter, provider);
+    await bridge.send("claude", terminalControl(adapter), request, {
+      runtime: MANAGED_CLAUDE_RUNTIME,
+      requireExactEmptyComposerBeforeText: true,
+      requireExactComposerBeforeEnter: true,
+      allowWorkingComposerForUserExplicit: true
+    });
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["text", "keys:C-m"]
+    );
+  });
+});
+
+test("explicit Codex Send keeps every pre-mutation callback failure retry-safe", async (t) => {
+  const request = "new explicit request";
+  const cases = [
+    {
+      name: "empty composer",
+      screen: codexPaddedStyledIdleScreen(80)
+    },
+    {
+      name: "same draft",
+      screen: `› ${request}\ngpt-5.6-sol high · /repo`
+    },
+    {
+      name: "different draft",
+      screen: "› older draft\ngpt-5.6-sol high · /repo"
+    }
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      const provider = new RecordingTerminalProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      await assert.rejects(
+        bridge.sendUserExplicitCodex(
+          terminalControl(codexTerminalAgentAdapter),
+          request,
+          {
+            beforeMutationReservation() {
+              throw new Error("fresh physical authority was lost");
+            }
+          }
+        ),
+        TerminalInputNotStartedError
+      );
+      assert.equal(
+        provider.operations.some((operation) => operation.kind !== "capture"),
+        false
+      );
+    });
+  }
+});
+
+test("explicit Codex Send distinguishes proven zero text from uncertain injected text", async (t) => {
+  const request = "new explicit request";
+
+  await t.test("typed text-not-sent proof remains retry-safe", async () => {
+    let nowMs = 0;
+    class ProvenNoTextProvider extends RecordingTerminalProvider {
+      override async sendText(): Promise<void> {
+        throw new TerminalControlInputNotSentError(
+          "test provider proved text was not delivered"
+        );
+      }
+    }
+    const provider = new ProvenNoTextProvider([PANE], {
+      [PANE.target]: codexPaddedStyledIdleScreen(80)
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  for (const testCase of [
+    {
+      name: "typed exact-draft Enter-not-sent proof remains retry-safe",
+      screen: `› ${request}\ngpt-5.6-sol high · /repo`
+    },
+    {
+      name: "typed different-draft clear-not-sent proof remains retry-safe",
+      screen: "› older draft\ngpt-5.6-sol high · /repo"
+    }
+  ]) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      class ProvenNoKeyProvider extends RecordingTerminalProvider {
+        override async sendKeys(): Promise<void> {
+          throw new TerminalControlInputNotSentError(
+            "test provider proved the first key was not delivered"
+          );
+        }
+      }
+      const provider = new ProvenNoKeyProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      await assert.rejects(
+        bridge.sendUserExplicitCodex(
+          terminalControl(codexTerminalAgentAdapter),
+          request,
+          { beforeMutationReservation() {} }
+        ),
+        TerminalInputNotStartedError
+      );
+      assert.equal(
+        provider.operations.some((operation) => operation.kind !== "capture"),
+        false
+      );
+    });
+  }
+
+  await t.test("successful text call followed by an inexact draft is uncertain", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: codexPaddedStyledIdleScreen(80)
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalEnterDispatchReservedError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["text"]
+    );
+  });
+});
+
+test("explicit Codex Send treats every attempted Enter as uncertain on transport failure", async (t) => {
+  const request = "new explicit request";
+  const cases = [
+    {
+      name: "empty composer",
+      screen: codexPaddedStyledIdleScreen(80),
+      mutations: ["text", "keys:C-m"]
+    },
+    {
+      name: "same draft",
+      screen: `› ${request}\ngpt-5.6-sol high · /repo`,
+      mutations: ["keys:C-m"]
+    },
+    {
+      name: "different draft",
+      screen: "› older draft\ngpt-5.6-sol high · /repo",
+      mutations: ["keys:C-u", "text", "keys:C-m"]
+    }
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      class FailedEnterProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(target, `› ${text}\ngpt-5.6-sol high · /repo`);
+        }
+
+        override async sendKeys(
+          target: TerminalEndpointRef | string,
+          keys: readonly string[],
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendKeys(target, keys, options);
+          if (keys.includes("C-u")) {
+            this.setScreen(target, codexPaddedStyledIdleScreen(80));
+          }
+          if (keys.includes("C-m")) {
+            throw new Error("Enter delivery outcome is unknown");
+          }
+        }
+      }
+      const provider = new FailedEnterProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      await assert.rejects(
+        bridge.sendUserExplicitCodex(
+          terminalControl(codexTerminalAgentAdapter),
+          request,
+          { beforeMutationReservation() {} }
+        ),
+        TerminalEnterDispatchReservedError
+      );
+      assert.deepEqual(
+        provider.operations.flatMap((operation) =>
+          operation.kind === "capture"
+            ? []
+            : operation.kind === "text"
+              ? ["text"]
+              : [`keys:${operation.keys.join(",")}`]
+        ),
+        testCase.mutations
+      );
+    });
+  }
+});
+
+test("explicit Codex Send submits fresh large-paste placeholders and replaces opaque old drafts", async (t) => {
+  const request = "x".repeat(1_001);
+  const cases = [
+    {
+      name: "empty composer",
+      screen: codexPaddedStyledIdleScreen(80),
+      disposition: "injected_empty_composer",
+      mutations: ["text", "keys:C-m"]
+    },
+    {
+      name: "different visible draft",
+      screen: "› older draft\ngpt-5.6-sol high · /repo",
+      disposition: "replaced_existing_draft",
+      mutations: ["keys:C-u", "text", "keys:C-m"]
+    },
+    {
+      name: "same-length opaque existing draft",
+      screen: "› [Pasted Content 1001 chars]\ngpt-5.6-sol high · /repo",
+      disposition: "replaced_existing_draft",
+      mutations: ["keys:C-u", "text", "keys:C-m"]
+    }
+  ] as const;
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      class LargePasteProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(
+            target,
+            `› [Pasted Content ${Array.from(text).length} chars]\n` +
+              "gpt-5.6-sol high · /repo"
+          );
+        }
+
+        override async sendKeys(
+          target: TerminalEndpointRef | string,
+          keys: readonly string[],
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendKeys(target, keys, options);
+          if (keys.includes("C-u")) {
+            this.setScreen(target, codexPaddedStyledIdleScreen(80));
+          }
+        }
+      }
+      const provider = new LargePasteProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      const result = await bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        { beforeMutationReservation() {} }
+      );
+      assert.equal(result.disposition, testCase.disposition);
+      assert.deepEqual(
+        provider.operations.flatMap((operation) =>
+          operation.kind === "capture"
+            ? []
+            : operation.kind === "text"
+              ? ["text"]
+              : [`keys:${operation.keys.join(",")}`]
+        ),
+        testCase.mutations
+      );
+    });
+  }
+});
+
+test("explicit Codex replacement revalidates before clear and proves clear before text", async (t) => {
+  const request = "new explicit request";
+  await t.test("empty and same drafts that drift before mutation stay retry-safe", async (nested) => {
+    const cases = [
+      {
+        name: "empty composer",
+        screen: codexPaddedStyledIdleScreen(80)
+      },
+      {
+        name: "same draft",
+        screen: `› ${request}\ngpt-5.6-sol high · /repo`
+      }
+    ];
+    for (const testCase of cases) {
+      await nested.test(testCase.name, async () => {
+        let nowMs = 0;
+        const provider = new RecordingTerminalProvider([PANE], {
+          [PANE.target]: testCase.screen
+        });
+        const bridge = new TerminalAgentBridge({
+          registry: createTerminalAgentAdapterRegistry([
+            codexTerminalAgentAdapter
+          ]),
+          terminalProvider: provider,
+          nowMs: () => nowMs,
+          async sleep(milliseconds) {
+            nowMs += milliseconds;
+          }
+        });
+        await assert.rejects(
+          bridge.sendUserExplicitCodex(
+            terminalControl(codexTerminalAgentAdapter),
+            request,
+            {
+              beforeMutationReservation() {
+                provider.setScreen(
+                  PANE.target,
+                  "› human changed the draft\ngpt-5.6-sol high · /repo"
+                );
+              }
+            }
+          ),
+          TerminalInputNotStartedError
+        );
+        assert.equal(
+          provider.operations.some((operation) =>
+            operation.kind !== "capture"
+          ),
+          false
+        );
+      });
+    }
+  });
+
+  await t.test("draft drift before clear sends no input", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: "› old draft\ngpt-5.6-sol high · /repo"
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        {
+          beforeMutationReservation() {
+            provider.setScreen(
+              PANE.target,
+              "› human changed the draft\ngpt-5.6-sol high · /repo"
+            );
+          }
+        }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  await t.test("failed clear is uncertain and never injects the new request", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: "› old draft\ngpt-5.6-sol high · /repo"
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalEnterDispatchReservedError
+    );
+    assert.equal(
+      provider.operations.filter((operation) =>
+        operation.kind === "keys" && operation.keys.includes("C-u")
+      ).length,
+      1
+    );
+    assert.equal(
+      provider.operations.some((operation) =>
+        operation.kind === "text" ||
+        (operation.kind === "keys" && operation.keys.includes("C-m"))
+      ),
+      false
+    );
   });
 });
 

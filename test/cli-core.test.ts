@@ -231,7 +231,9 @@ test("in-process delegates isolate durable bindings by scoped runtime env", asyn
         currentPath: workspace
       }]),
       "--terminal-screens-json",
-      JSON.stringify({ [terminalTarget]: "› " }),
+      JSON.stringify({
+        [terminalTarget]: "Ready\n› \ngpt-5.6-sol high · /repo"
+      }),
       "--codex-active-session-identities-json",
       JSON.stringify({
         [options.pid]: {

@@ -387,7 +387,7 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
     processBirth: "fixture-birth",
     approvalScanned: true,
     approvalBlocked: false,
-    exactEmptyComposer: true
+    userExplicitComposerReady: true
   };
   const expectedToken = unmanagedTerminalBindingToken({
     terminalId,
@@ -411,7 +411,7 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
     { processState: "exited" },
     { approvalScanned: false },
     { approvalBlocked: true },
-    { exactEmptyComposer: false },
+    { userExplicitComposerReady: false },
     { processBirth: undefined },
     {
       terminalControl: {

@@ -104,9 +104,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v19 exposes semantic arguments only", () => {
+test("the public action contract v20 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 19);
+  assert.equal(contracts.version, 20);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -151,11 +151,19 @@ test("the public action contract v19 exposes semantic arguments only", () => {
   const actions = contracts.actions as Record<string, any>;
   assert.match(
     (contracts.instructions as string[]).join("\n"),
-    /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*best-effort releases[\s\S]*no callback[\s\S]*use Watch/u
+    /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*same existing draft receives Enter only[\s\S]*different existing draft is cleared and replaced[\s\S]*best-effort releases[\s\S]*no callback[\s\S]*use Watch/u
+  );
+  assert.match(
+    (contracts.instructions as string[]).join("\n"),
+    /parsed working activity does not veto/u
   );
   assert.match(
     actions.send.initial_attach_scope,
-    /terminal_user_explicit[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback/u
+    /terminal_user_explicit[\s\S]*identical existing draft with Enter only[\s\S]*clears and replaces a different existing draft[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback/u
+  );
+  assert.equal(
+    actions.send.codex_terminal_user_explicit_composer_policy,
+    "submit_if_exact_replace_if_different"
   );
   assert.deepEqual(actions.retry_submission, {
     tool: "agent_knock_knock_send",

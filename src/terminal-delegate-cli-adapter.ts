@@ -89,7 +89,7 @@ function assertSingleDelegateCandidate(
 ): DelegateUserExplicitSendCandidate {
   if (candidates.length === 0) {
     const observed = scopedCount > 0
-      ? ` Found ${scopedCount} matching pane(s), but none has an exact safe empty composer.`
+      ? ` Found ${scopedCount} matching pane(s), but none has a safe mutable composer.`
       : "";
     const requestedExecutor = requestedAgent
       ? executorDefinitionForKind(requestedAgent)
@@ -97,7 +97,7 @@ function assertSingleDelegateCandidate(
     const workspaceDetail = workspace ? ` in ${workspace}` : "";
     throw new Error(
       `No send-ready ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available${workspaceDetail}.${observed} ` +
-      `Start ${requestedAgent ?? "codex or claude"} inside tmux or Herdr${workspaceDetail}, wait for an exact empty composer with no approval prompt, then retry.`
+      `Start ${requestedAgent ?? "codex or claude"} inside tmux or Herdr${workspaceDetail}, wait for a stable Codex composer or an exact empty Claude composer with no approval prompt, then retry.`
     );
   }
   if (candidates.length > 1) {

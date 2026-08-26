@@ -42,7 +42,7 @@ export const sendParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal-scoped send action. For terminal_user_explicit, it identifies one exact live physical prompt with no active approval and an empty composer. AKK tries the managed fast path first; when internal AKK state is broken, it performs one unmanaged delivery with no callback and only then attempts best-effort management release. Refresh list afterward and use Watch. Human discovery selectors are not structured-tool authority. Omit both target fields only when AKK should select the unique send-ready pane."
+        "Exact full terminal_id from the current terminal-scoped send action. Codex terminal_user_explicit identifies one exact live physical prompt with no active approval and a stable mutable composer: AKK injects into empty, submits an identical draft with Enter only, or clears and replaces a different draft with this request. Claude Code terminal_user_explicit remains exact-empty-only. Broken AKK state cannot veto the user; unmanaged delivery has no callback and is followed by best-effort management release. Refresh list afterward and use Watch. Human discovery selectors are not structured-tool authority. Omit both target fields only when AKK should select the unique send-ready pane."
     },
     request: {
       type: "string",

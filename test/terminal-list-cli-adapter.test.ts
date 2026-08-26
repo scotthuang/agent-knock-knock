@@ -650,6 +650,36 @@ test("list token falls back to one unmanaged send and replays by message id", as
         terminalControl: control,
         multiline
       };
+    },
+    async sendUserExplicitCodex(control, text, options) {
+      await options.beforeMutationReservation({
+        terminalControl: control,
+        text,
+        composerDigest: "0".repeat(64),
+        composerState: "exact_empty"
+      });
+      transportCalls.push(["text", text]);
+      await options.onTransportStage?.({
+        stage: "text_injected",
+        agent: "codex",
+        terminalControl: control,
+        multiline: false
+      });
+      transportCalls.push(["enter", "C-m"]);
+      await options.onTransportStage?.({
+        stage: "enter_dispatched",
+        agent: "codex",
+        terminalControl: control,
+        multiline: false
+      });
+      return {
+        stage: "enter_dispatched" as const,
+        terminalControl: control,
+        disposition: "injected_empty_composer" as const,
+        clearCount: 0 as const,
+        textInjectionCount: 1 as const,
+        enterCount: 1 as const
+      };
     }
   } satisfies Partial<TerminalAgentBridge>;
 
@@ -890,6 +920,8 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.equal(firstOutput.delivered_unmanaged, true);
   assert.notEqual(firstOutput.replayed, true);
   assert.equal(firstOutput.management_mode, "unmanaged_fallback");
+  assert.equal(firstOutput.composer_disposition, "injected_empty_composer");
+  assert.equal(firstOutput.replaced_existing_draft, false);
   assert.equal(firstOutput.message_id, messageId);
   assert.deepEqual(transportCalls, [
     ["text", message],
@@ -1314,6 +1346,41 @@ test("healthy managed terminal keeps physical Send separate from its fast path",
   assert.equal(selectorOptions.expectedManagedTerminalToken, undefined);
 });
 
+test("stable nonempty Codex composer advertises only user-explicit replacement Send", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-nonempty-user-send-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    true,
+    "› an older unrelated draft\ngpt-5.6-sol high · /repo"
+  );
+  const observed = await fixture.facade.observeExactTerminal({
+    options: { storeDir: fixture.storeDir },
+    terminalId: fixture.terminalId
+  });
+  assert.equal(observed.state, "available");
+  if (observed.state !== "available") return;
+  const actions = observed.terminal.available_actions as Record<string, any>;
+  assert.equal(actions.send?.scope, "terminal_user_explicit");
+  assert.equal(
+    actions.send?.composer_policy,
+    "submit_if_exact_replace_if_different"
+  );
+  assert.equal(actions.native_inspect, undefined);
+  assert.equal(
+    Object.hasOwn(observed.terminal, "_user_explicit_composer_ready"),
+    false
+  );
+});
+
 test("corrupt managed inventory cannot hide exact terminal user Send", async (t) => {
   const root = fs.mkdtempSync(path.join(
     os.tmpdir(),
@@ -1640,7 +1707,8 @@ async function createCodexRolloutListFixture(
   rootUserRowOrder: "human-only" | "synthetic-first" | "human-first" =
     "human-only",
   canonicalTerminal = false,
-  nativeIdentityHasRollout = true
+  nativeIdentityHasRollout = true,
+  composerScreen = "› "
 ) {
   const nativeThreadId = "019f0000-0000-7000-8000-000000000777";
   const nativeTurnId = "019f0000-0000-7000-8000-000000000778";
@@ -1804,7 +1872,7 @@ async function createCodexRolloutListFixture(
     endpoint: (value: unknown) =>
       terminalEndpointFromControlRef(value as TerminalControlRef),
     resolve: async (value: unknown) => value,
-    capture: async () => "› "
+    capture: async () => composerScreen
   };
   const bridge = {
     registry,
@@ -1823,7 +1891,7 @@ async function createCodexRolloutListFixture(
       },
       activity_state: "idle",
       activity_reason: "idle-looking fixture screen",
-      screen: { excerpt: "› " }
+      screen: { excerpt: composerScreen }
     })
   };
   const unusedGate = deferredGate();

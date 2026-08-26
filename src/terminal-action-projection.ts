@@ -69,7 +69,7 @@ export interface TerminalUserExplicitSendFacts {
   readonly processBirth?: string;
   readonly approvalScanned: boolean;
   readonly approvalBlocked: boolean;
-  readonly exactEmptyComposer: boolean;
+  readonly userExplicitComposerReady: boolean;
 }
 
 export type TerminalUserExplicitSendAuthority =
@@ -103,7 +103,7 @@ export function decideTerminalUserExplicitSendAuthority(
     !control.capabilities.includes("screen_status") ||
     !facts.approvalScanned ||
     facts.approvalBlocked ||
-    !facts.exactEmptyComposer ||
+    !facts.userExplicitComposerReady ||
     !facts.agent ||
     !Number.isSafeInteger(facts.pid) ||
     Number(facts.pid) <= 1 ||

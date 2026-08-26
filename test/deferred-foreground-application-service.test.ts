@@ -23,6 +23,7 @@ const BOUNDARY = {
     canonicalEndpoint: true
   },
   transferId: "transfer-1",
+  preparedAt: "2026-08-15T00:00:00.000Z",
   targetSessionId: "target-1",
   sourceSessionId: "source-1",
   sourceBoundRevision: 3,
@@ -66,7 +67,7 @@ function transfer(
     previous_dispatch_fingerprint: BOUNDARY.previousDispatchSnapshot.fingerprint,
     request_hash: "c".repeat(64),
     dispatcher_pid: 99,
-    prepared_at: "2026-08-15T00:00:00.000Z",
+    prepared_at: BOUNDARY.preparedAt,
     ...(inputStage === "none"
       ? {}
       : { dispatch_started_at: "2026-08-15T00:00:01.000Z" })
@@ -83,7 +84,7 @@ function harness(initial: DeferredForegroundTransfer): {
   let current = initial;
   const scope = {
     assertBoundary: (boundary: DeferredForegroundBindingBoundary) => {
-      assert.equal(boundary, BOUNDARY);
+      assert.equal(boundary.terminal, BOUNDARY.terminal);
       trace.push("capability:boundary");
     },
     terminalMatches: () => {
@@ -189,4 +190,21 @@ test("possible-input abort rejects before rollback, Session, or transfer writes"
       event.startsWith("transfer:save") || event === "runtime:log"),
     false
   );
+});
+
+test("prepared authority drift fails before clocks, logs, or transfer writes", () => {
+  const recording = harness(transfer("dispatch_started", "text_injected"));
+  assert.throws(() => recording.application.markUncertain({
+    scope: recording.scope,
+    boundary: {
+      ...BOUNDARY,
+      preparedAt: "2026-08-15T00:00:00.001Z"
+    },
+    reason: "must not cross generations"
+  }), /deferred foreground transfer transfer-1 authority changed/u);
+  assert.deepEqual(recording.trace, [
+    "transfer:load",
+    "capability:boundary"
+  ]);
+  assert.equal(recording.current().revision, 7);
 });

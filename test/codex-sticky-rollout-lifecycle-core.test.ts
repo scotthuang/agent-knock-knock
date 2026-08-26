@@ -171,6 +171,7 @@ test("B send rejects drafts and wrong status, then materializes only B", async (
     assert.equal(fs.existsSync(fixture.rolloutPaths.b), false);
     assert.deepEqual(fixture.literalInputs().slice(-1), ["/status"]);
 
+    fixture.setScreen("Ready\n› ");
     const message = "Report the logical Codex thread after sticky rollout.";
     const sent = await fixture.send(target.session_id, message);
     assert.equal(sent.status, 0, sent.stderr);
@@ -548,6 +549,7 @@ async function createActiveC(fixture: StickyRolloutFixture) {
   const newC = await fixture.newThread();
   assert.equal(newC.status, 0, newC.stderr);
   const c = boundSession(fixture);
+  fixture.setScreen("Ready\n› ");
   const sent = await fixture.send(c.session_id, "Materialize C.");
   assert.equal(sent.status, 0, sent.stderr);
   return { c, cTurn: JSON.parse(sent.stdout) };

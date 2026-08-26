@@ -42,6 +42,8 @@ export interface VerifiedEmptyCodexHandoffBoundary {
 export interface DeferredCodexForegroundBindingBoundary {
   terminal: TerminalDispatchTerminal;
   transferId: string;
+  /** Immutable prepared timestamp shared by the transfer and its submission. */
+  preparedAt: string;
   targetSessionId: string;
   sourceSessionId: string;
   sourceBoundRevision: number;

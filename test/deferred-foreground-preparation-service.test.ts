@@ -70,6 +70,7 @@ const REQUEST_KEYS = [
   "terminal"
 ];
 const BOUNDARY_KEYS = [
+  "preparedAt",
   "previousDispatchSnapshot",
   "processBirth",
   "processUuid",
@@ -236,16 +237,18 @@ test("preparation projects data-only terminal facts and revalidates before CAS p
     "authority:fresh-token",
     "identity:target",
     "identity:transfer",
+    "clock:now",
     "authority:revalidate",
     "authority:exclusive",
     "transfer:list",
     "identity:request-hash",
     "runtime:pid",
-    "clock:now",
     "transfer:save"
   ]);
   assert.equal(recording.saved.length, 1);
   assert.equal(recording.saved[0].revision, undefined);
+  assert.equal(boundary.preparedAt, NOW);
+  assert.equal(recording.saved[0].prepared_at, boundary.preparedAt);
 
   const concrete = deferredForegroundConcreteBoundary(
     boundary,
