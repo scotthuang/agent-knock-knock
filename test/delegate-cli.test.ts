@@ -4,9 +4,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  MutableRecordingTerminalProvider,
   runInProcessCli,
   VirtualClock
 } from "./in-process-cli-fixtures.js";
+import {
+  createTerminalControlProviderRegistry,
+  type TerminalPane
+} from "../src/terminal-control-provider.js";
 
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-delegate-cli-runtime-")
@@ -17,6 +22,8 @@ const CLAUDE_EXACT_IDLE_COMPOSER = [
   "────────────────────────────────────────────────",
   "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
 ].join("\n");
+const CODEX_EXACT_IDLE_COMPOSER =
+  "Ready\n› \ngpt-5.6-sol high · /repo";
 process.on("exit", () => {
   fs.rmSync(testRuntimeDir, { recursive: true, force: true });
 });
@@ -80,7 +87,7 @@ test("delegate routes asynchronously to the only idle matching tmux pane", async
       ]),
       "--terminal-screens-json",
       JSON.stringify({
-        "codex-work:0.0": "› ",
+        "codex-work:0.0": CODEX_EXACT_IDLE_COMPOSER,
         "codex-other:0.0": "› "
       }),
       "--codex-active-session-identities-json",
@@ -149,7 +156,7 @@ test("a recreated pane keeps the prior receipt immutable while accepting a new d
       currentPath: workspace
     })]),
     "--terminal-screens-json",
-    JSON.stringify({ [terminalTarget]: "› " }),
+    JSON.stringify({ [terminalTarget]: CODEX_EXACT_IDLE_COMPOSER }),
     "--codex-active-session-identities-json",
     JSON.stringify({
       [options.codexPid]: codexNativeIdentityFixture({
@@ -217,7 +224,7 @@ test("delegate without an agent selects the only idle supported pane", async () 
       })]),
       "--terminal-screens-json",
       JSON.stringify({
-        "codex-work:0.0": "› "
+        "codex-work:0.0": CODEX_EXACT_IDLE_COMPOSER
       })
     ]);
 
@@ -258,7 +265,7 @@ test("delegate without --workspace routes to the only idle pane in its own cwd",
           currentPath: paneWorkspace
         })],
         screens: {
-          "codex-any-workspace:0.0": "› "
+          "codex-any-workspace:0.0": CODEX_EXACT_IDLE_COMPOSER
         }
       })
     ]);
@@ -478,8 +485,8 @@ test("an exact short selector can send across cwd without --workspace", async ()
         })
       ],
       screens: {
-        "codex-first-selector:0.0": "› ",
-        "codex-selected:0.0": "› "
+        "codex-first-selector:0.0": CODEX_EXACT_IDLE_COMPOSER,
+        "codex-selected:0.0": CODEX_EXACT_IDLE_COMPOSER
       }
     });
     const listed = await runCli("list", [
@@ -681,6 +688,30 @@ function runDelegate(args: string[]) {
 
 function runCli(command: string, args: string[]) {
   const clock = new VirtualClock();
+  const panes = jsonOption<TerminalPane[]>(args, "--terminals-json") ?? [];
+  const screens = jsonOption<Record<string, string>>(
+    args,
+    "--terminal-screens-json"
+  ) ?? {};
+  const provider = new MutableRecordingTerminalProvider({
+    panes,
+    screens,
+    hooks: {
+      sendText(operation, terminal) {
+        terminal.setScreen(
+          operation.target,
+          codexComposerScreen(operation.text)
+        );
+      },
+      sendKeys(operation, terminal) {
+        if (operation.keys.includes("C-u")) {
+          terminal.setScreen(operation.target, CODEX_EXACT_IDLE_COMPOSER);
+        } else if (operation.keys.includes("C-m")) {
+          terminal.setScreen(operation.target, "Working\n");
+        }
+      }
+    }
+  });
   return runInProcessCli([command, ...args], {
     cwd: process.cwd(),
     env: {
@@ -695,8 +726,27 @@ function runCli(command: string, args: string[]) {
     monotonicNowMs: clock.nowMs,
     sleep: clock.sleep,
     sleepSync: clock.sleepSync,
+    terminalControlProviderRegistry:
+      createTerminalControlProviderRegistry([provider]),
     runtimeLog() {}
   });
+}
+
+function jsonOption<T>(args: string[], option: string): T | undefined {
+  const index = args.indexOf(option);
+  return index >= 0 && args[index + 1]
+    ? JSON.parse(args[index + 1]) as T
+    : undefined;
+}
+
+function codexComposerScreen(text: string): string {
+  const [first = "", ...continuation] = text.split("\n");
+  return [
+    "Ready",
+    `› ${first}`,
+    ...continuation.map((row) => `  ${row}`),
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
 }
 
 function terminalFixtureArgs(options: {

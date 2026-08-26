@@ -202,7 +202,8 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
     );
     const testEnv = {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      AKK_TEST_TMUX_COMPOSER_FROM_LITERAL: "1"
+      AKK_TEST_TMUX_COMPOSER_FROM_LITERAL: "1",
+      AKK_TEST_TMUX_COMPOSER_AFTER_ENTER: codexEmptyComposerScreen
     };
     const first = await runAgentCliInProcess([
       "send",

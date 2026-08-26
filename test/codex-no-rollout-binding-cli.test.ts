@@ -1093,7 +1093,7 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
     );
 
     const terminal = await listFixtureTerminal(fixture);
-    assert.equal(terminal.activity_state, "unknown");
+    assert.equal(terminal.activity_state, "idle");
     assert.equal(
       terminal.native_agent_identity_observation.status,
       "verified_absent"
@@ -1347,7 +1347,7 @@ test("Herdr uses the same verified-empty Codex handoff fence and virgin post-sub
     );
     const terminal = await listFixtureTerminal(fixture);
     assert.equal(terminal.terminal_control.kind, "herdr");
-    assert.equal(terminal.activity_state, "unknown");
+    assert.equal(terminal.activity_state, "idle");
     assert.equal(
       terminal.handoff_state,
       "verified_empty_native_session_adoptable"
