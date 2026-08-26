@@ -103,8 +103,8 @@ export function decideTerminalUserExplicitSendAuthority(
     !control.capabilities.includes("screen_status") ||
     !facts.approvalScanned ||
     facts.approvalBlocked ||
-    !facts.userExplicitComposerReady ||
     !facts.agent ||
+    (facts.agent !== "codex" && !facts.userExplicitComposerReady) ||
     !Number.isSafeInteger(facts.pid) ||
     Number(facts.pid) <= 1 ||
     !processUuid ||

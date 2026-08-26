@@ -160,14 +160,14 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 21);
+    assert.equal(listed.action_contracts.version, 22);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*same existing draft receives Enter only[\s\S]*different existing draft is cleared and replaced[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*no Composer observation may veto Enter[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -372,12 +372,12 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.initial_attach_scope,
-      /terminal_user_explicit[\s\S]*terminal_id prefilled by an exact live terminal row[\s\S]*selector explicitly named by the user[\s\S]*identical existing draft with Enter only[\s\S]*clears and replaces a different existing draft/u
+      /terminal_user_explicit[\s\S]*terminal_id prefilled by an exact live terminal row[\s\S]*selector explicitly named by the user[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto/u
     );
     assert.equal(
       listed.action_contracts.actions.send
         .codex_terminal_user_explicit_composer_policy,
-      "submit_if_exact_replace_if_different"
+      "replace_current_composer_and_submit"
     );
     assert.deepEqual(
       listed.action_contracts.actions.send.required,
@@ -770,7 +770,7 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
     );
     assert.equal(
       idleEntry.available_actions.send.composer_policy,
-      "submit_if_exact_replace_if_different"
+      "replace_current_composer_and_submit"
     );
     assert.equal(idleEntry.available_actions.cancel, undefined);
 

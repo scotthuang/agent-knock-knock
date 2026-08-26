@@ -1216,7 +1216,7 @@ test("verified-empty physical Send advertises replacement over a real draft and 
         const action = assertTerminalUserExplicitSendAction(terminal);
         assert.equal(
           action.composer_policy,
-          "submit_if_exact_replace_if_different",
+          "replace_current_composer_and_submit",
           blocker
         );
         assert.equal(

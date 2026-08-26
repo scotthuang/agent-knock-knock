@@ -654,9 +654,12 @@ test("list token falls back to one unmanaged send and replays by message id", as
     async sendUserExplicitCodex(control, text, options) {
       await options.beforeMutationReservation({
         terminalControl: control,
-        text,
-        composerDigest: "0".repeat(64),
-        composerState: "exact_empty"
+        text
+      });
+      transportCalls.push(["clear", "C-u"]);
+      await options.onComposerClearDispatched?.({
+        terminalControl: control,
+        text
       });
       transportCalls.push(["text", text]);
       await options.onTransportStage?.({
@@ -675,8 +678,8 @@ test("list token falls back to one unmanaged send and replays by message id", as
       return {
         stage: "enter_dispatched" as const,
         terminalControl: control,
-        disposition: "injected_empty_composer" as const,
-        clearCount: 0 as const,
+        disposition: "replaced_current_composer" as const,
+        clearCount: 1 as const,
         textInjectionCount: 1 as const,
         enterCount: 1 as const
       };
@@ -920,10 +923,12 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.equal(firstOutput.delivered_unmanaged, true);
   assert.notEqual(firstOutput.replayed, true);
   assert.equal(firstOutput.management_mode, "unmanaged_fallback");
-  assert.equal(firstOutput.composer_disposition, "injected_empty_composer");
-  assert.equal(firstOutput.replaced_existing_draft, false);
+  assert.equal(firstOutput.composer_disposition, "replaced_current_composer");
+  assert.equal(firstOutput.composer_cleared_before_send, true);
+  assert.equal(firstOutput.replaced_existing_draft, true);
   assert.equal(firstOutput.message_id, messageId);
   assert.deepEqual(transportCalls, [
+    ["clear", "C-u"],
     ["text", message],
     ["enter", "C-m"]
   ], "unchanged process birth must retain physical Send authority");
@@ -1056,7 +1061,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.equal(replayOutput.message_id, messageId);
   assert.deepEqual(
     transportCalls,
-    [["text", message], ["enter", "C-m"]],
+    [["clear", "C-u"], ["text", message], ["enter", "C-m"]],
     "a replayed explicit Send must not inject terminal input again"
   );
   assert.equal(
@@ -1097,7 +1102,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
   );
   assert.deepEqual(
     transportCalls,
-    [["text", message], ["enter", "C-m"]],
+    [["clear", "C-u"], ["text", message], ["enter", "C-m"]],
     "an unverifiable existing same-id receipt must never duplicate input"
   );
   assert.equal(managedPreparationAttempts, 5);
@@ -1177,10 +1182,13 @@ test("list token falls back to one unmanaged send and replays by message id", as
     /primary terminal serialization was unavailable.*read-only/u
   );
   assert.deepEqual(transportCalls, [
+    ["clear", "C-u"],
     ["text", message],
     ["enter", "C-m"],
+    ["clear", "C-u"],
     ["text", releaseFailureMessage],
     ["enter", "C-m"],
+    ["clear", "C-u"],
     ["text", storageFailureMessage],
     ["enter", "C-m"]
   ]);
@@ -1213,7 +1221,8 @@ test("list token falls back to one unmanaged send and replays by message id", as
     JSON.stringify(intentStorageFailureOutput.intent_warnings),
     /durable user-Send intent unavailable/u
   );
-  assert.deepEqual(transportCalls.slice(-2), [
+  assert.deepEqual(transportCalls.slice(-3), [
+    ["clear", "C-u"],
     ["text", intentStorageFailureMessage],
     ["enter", "C-m"]
   ]);
@@ -1246,6 +1255,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.deepEqual(
     transportCalls.slice(transportCountBeforeOrphanedSend),
     [
+      ["clear", "C-u"],
       ["text", orphanedOptions.message],
       ["enter", "C-m"]
     ],
@@ -1372,13 +1382,65 @@ test("stable nonempty Codex composer advertises only user-explicit replacement S
   assert.equal(actions.send?.scope, "terminal_user_explicit");
   assert.equal(
     actions.send?.composer_policy,
-    "submit_if_exact_replace_if_different"
+    "replace_current_composer_and_submit"
   );
   assert.equal(actions.native_inspect, undefined);
   assert.equal(
     Object.hasOwn(observed.terminal, "_user_explicit_composer_ready"),
     false
   );
+});
+
+test("off-screen Codex composer still advertises user-explicit Send", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-offscreen-user-send-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    true,
+    "Assistant output fills the visible viewport; the composer is below it."
+  );
+  const observed = await fixture.facade.observeExactTerminal({
+    options: { storeDir: fixture.storeDir },
+    terminalId: fixture.terminalId
+  });
+  assert.equal(observed.state, "available");
+  if (observed.state !== "available") return;
+  const actions = observed.terminal.available_actions as Record<string, any>;
+  assert.equal(actions.send?.scope, "terminal_user_explicit");
+  assert.equal(actions.send?.arguments?.selector, fixture.terminalId);
+  assert.equal(
+    typeof actions.send?.arguments?.expected_terminal_token,
+    "string"
+  );
+
+  const exactOptions: Record<string, unknown> = {
+    conversation: fixture.terminalId,
+    storeDir: fixture.storeDir
+  };
+  await fixture.facade.resolveConversationSelectorOption(
+    "send",
+    exactOptions
+  );
+  assert.equal(exactOptions.session, fixture.terminalId);
+  assert.equal(typeof exactOptions.expectedTerminalToken, "string");
+
+  const uniqueOptions: Record<string, unknown> = {
+    storeDir: fixture.storeDir
+  };
+  await fixture.facade.resolveConversationSelectorOption(
+    "send",
+    uniqueOptions
+  );
+  assert.equal(uniqueOptions.session, fixture.terminalId);
+  assert.equal(typeof uniqueOptions.expectedTerminalToken, "string");
 });
 
 test("corrupt managed inventory cannot hide exact terminal user Send", async (t) => {

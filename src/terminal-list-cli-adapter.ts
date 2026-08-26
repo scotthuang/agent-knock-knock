@@ -63,7 +63,6 @@ import {
   type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
 import {
-  codexUserExplicitComposerCapture,
   exactCodexReadyStyledComposerCapture,
   TerminalAgentBridge,
   type ResolvedTerminalConversation,
@@ -1418,6 +1417,10 @@ async function terminalControlledListEntry(
       processBirth: physicalProcessIncarnation?.processBirth,
       approvalScanned: effectiveTerminalState.approval_state.scanned === true,
       approvalBlocked: effectiveTerminalState.approval_state.blocked === true,
+      // Codex user-explicit Send treats this observation as advisory: an
+      // off-screen or truncated composer must not hide the physical action.
+      // Claude Code still consumes the exact-composer result in the shared
+      // authority decision below.
       userExplicitComposerReady
     });
   const terminalUserExplicitSendAction =
@@ -1434,7 +1437,7 @@ async function terminalControlledListEntry(
           ...(session.agent === "codex"
             ? {
                 composer_policy:
-                  "submit_if_exact_replace_if_different"
+                  "replace_current_composer_and_submit"
               }
             : {})
         }
@@ -1807,8 +1810,12 @@ async function observeAutomatedInputComposerReady({
     session.agent,
     terminalState.screen_excerpt
   );
-  let userExplicitReady =
-    ready && terminalState.activity_state !== "awaiting_approval";
+  const userExplicitPromptSafe =
+    terminalState.activity_state !== "awaiting_approval" &&
+    terminalState.approval_state.blocked !== true;
+  let userExplicitReady = session.agent === "codex"
+    ? userExplicitPromptSafe
+    : ready && userExplicitPromptSafe;
   if (
     session.agent !== "codex" ||
     terminalState.approval_state.blocked === true ||
@@ -1830,17 +1837,14 @@ async function observeAutomatedInputComposerReady({
       { scrollbackLines: 40, preserveEscapes: true }
     );
     ready = exactCodexReadyStyledComposerCapture(styledScreen) !== undefined;
-    userExplicitReady =
-      terminalState.activity_state !== "awaiting_approval" &&
-      (
-        ready ||
-        codexUserExplicitComposerCapture(styledScreen) !== undefined
-      );
+    // Styled Composer evidence remains mandatory for managed/native input,
+    // but is advisory for a user's physical Codex Send.
+    userExplicitReady = userExplicitPromptSafe;
   } catch {
-    // Advertising an input action is optional. The action itself repeats the
-    // same styled composer proof under the terminal lock before any input.
+    // A failed styled capture suppresses managed/native input only. The
+    // separately scanned approval state still authorizes physical Codex Send.
     ready = false;
-    userExplicitReady = false;
+    userExplicitReady = userExplicitPromptSafe;
   }
   return {
     automatedInputComposerReady: ready,

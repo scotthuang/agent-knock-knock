@@ -610,7 +610,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "423e0a01be600e6fc6aafcb4243b9f1bdb483a75e1b65fc025d2b8f0971ca0d2"
+    "375b2634d7d34573ad0a974ec198056f8657d6ff9cc9a5556f7c4a1d9e6234f4"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -632,7 +632,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.match(listTool.description ?? "", /terminal_follow_current.*terminal_id/u);
   assert.match(
     listTool.description ?? "",
-    /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*replace_current_composer_and_submit[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
   );
   assert.match(listTool.description ?? "", /managed controls use turn_id/u);
   assert.match(
@@ -725,7 +725,7 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
           send: {
             tool: "agent_knock_knock_send",
             scope: "terminal_user_explicit",
-            composer_policy: "submit_if_exact_replace_if_different",
+            composer_policy: "replace_current_composer_and_submit",
             arguments: {
               selector: terminalId,
               expected_terminal_token: "private-terminal-token",
@@ -980,7 +980,7 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
     assert.equal(sendAction.scope, "terminal_user_explicit");
     assert.equal(
       sendAction.composer_policy,
-      "submit_if_exact_replace_if_different"
+      "replace_current_composer_and_submit"
     );
     assert.equal(
       Object.hasOwn(terminal, "_user_explicit_composer_ready"),
@@ -2105,14 +2105,14 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.match(
       sendTool?.description ?? "",
-      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*parsed working activity does not veto[\s\S]*Codex injects[\s\S]*clears and replaces[\s\S]*Claude Code remains exact-empty-only[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*parsed working activity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
     );
     const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
     assert.match(
       isRecord(terminalIdSchema)
         ? String(terminalIdSchema.description ?? "")
         : "",
-      /Codex terminal_user_explicit[\s\S]*no active approval[\s\S]*injects into empty[\s\S]*identical draft with Enter only[\s\S]*clears and replaces a different draft[\s\S]*Claude Code terminal_user_explicit remains exact-empty-only[\s\S]*Broken AKK state cannot veto[\s\S]*unmanaged delivery has no callback[\s\S]*use Watch/u
+      /Codex terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, exactness[\s\S]*not eligibility vetoes[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code terminal_user_explicit remains exact-empty-only[\s\S]*Broken AKK state cannot veto[\s\S]*unmanaged delivery has no callback[\s\S]*use Watch/u
     );
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {

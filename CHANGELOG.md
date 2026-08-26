@@ -2,14 +2,19 @@
 
 ## Unreleased
 
+### Fixed
+
+- Make an explicit Codex Send independent of Composer visibility, stability, and exactness. Physical fallback now replaces the current Composer with one `C-u`, injects the new request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto. Claude Code remains exact-empty-only.
+
 ### Changed
 
 - Treat Codex and Claude Code version profiles as regression-test evidence rather than runtime allowlists. A complete but unverified `x.y.z` version keeps every otherwise eligible Watch, native status, new-thread, candidate-list, and exact-resume action available through a generic compatibility profile, with explicit warnings in List, action, doctor, and command results.
-- Advance the model-facing action contract to 21 so Hosts preserve compatibility warnings while continuing to pass only semantic action arguments.
+- Advance the model-facing action contract to 22 so Hosts preserve compatibility warnings and advertise Codex `replace_current_composer_and_submit` while continuing to pass only semantic action arguments.
 
 ### Security
 
 - Preserve exact terminal/process, native-thread, workspace, artifact, approval, composer, candidate, and postcondition checks for unverified versions. Real UI or schema drift fails at runtime, and any result after possibly sending input remains uncertain and must not be retried automatically.
+- Preserve the exact live terminal/process and scanned, non-blocked approval boundary for Codex user-explicit Send. Once its sole mutation sequence begins, an uncertain result must not be retried automatically.
 
 ## 0.12.17 - 2026-08-26
 
@@ -20,7 +25,7 @@
 
 ### Changed
 
-- Advance the model-facing action contract to 20 and advertise the Codex `terminal_user_explicit` composer policy as `submit_if_exact_replace_if_different`. Claude Code user-explicit Send, managed Send, native inspection, and native lifecycle input remain restricted to a verified empty composer.
+- Advance the model-facing action contract to 20 and add the first Codex nonempty-Composer user-explicit policy, later superseded by the v22 replace-current-Composer behavior. Claude Code user-explicit Send, native inspection, and native lifecycle input remain restricted to a verified empty Composer.
 
 ### Security
 
