@@ -30,6 +30,7 @@ import {
   cwd,
   sessionId,
   rolloutPath,
+  codexEmptyComposerScreen,
   startManagedClaudeTerminalTask,
   claudeTerminalStaticArgs,
   claudeAgentRow,
@@ -79,7 +80,7 @@ test("an active managed task blocks a follow-up before tmux input", async () => 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
     const listPanesOutput = `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`;
     writeFakeTmux(fakeBinDir, tmuxCallsPath, screenPath, listPanesOutput);
     const testEnv = {
@@ -192,7 +193,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
-    fs.writeFileSync(screenPath, "› \n");
+    fs.writeFileSync(screenPath, codexEmptyComposerScreen);
     writeFakeTmux(
       fakeBinDir,
       tmuxCallsPath,
@@ -200,7 +201,8 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       `${tmuxSession}\t0\t1\t33389\tnode\t${workspace}\n`
     );
     const testEnv = {
-      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      AKK_TEST_TMUX_COMPOSER_FROM_LITERAL: "1"
     };
     const first = await runAgentCliInProcess([
       "send",

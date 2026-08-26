@@ -631,7 +631,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
   );
   assert.match(listTool.description ?? "", /managed controls use turn_id/u);
-  assert.match(listTool.description ?? "", /freshness authority private/u);
+  assert.match(
+    listTool.description ?? "",
+    /opaque freshness authority stay private/u
+  );
   assert.doesNotMatch(listTool.description ?? "", /follow_up/u);
   assert.doesNotMatch(
     listTool.description ?? "",

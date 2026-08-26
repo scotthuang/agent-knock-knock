@@ -780,7 +780,10 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
   const fixture = createNoRolloutFixture({ persistedCandidate: true });
   const productionEnvironment = codexNativeAcceptanceEnv(fixture.environment);
   try {
-    fs.writeFileSync(fixture.screenPath, "Ready\n› existing operator draft");
+    fs.writeFileSync(
+      fixture.screenPath,
+      codexTestComposerScreen("existing operator draft")
+    );
     const rejected = await runCli([
       "send",
       "--conversation",
@@ -795,7 +798,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
       /terminal is unknown, not idle|composer contains non-placeholder input/u
     );
     assert.deepEqual(listManagedSessions(fixture.storeDir), []);
-    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
 
     const terminal = await listFixtureTerminal({
       ...fixture,
@@ -844,7 +847,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
   try {
     fs.writeFileSync(
       newFixture.screenPath,
-      "Ready\n› another existing operator draft"
+      codexTestComposerScreen("another existing operator draft")
     );
     const rejected = await runCli([
       "send",
@@ -867,7 +870,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
       /terminal is unknown, not idle|composer contains non-placeholder input/u
     );
     assert.deepEqual(listManagedSessions(newFixture.storeDir), []);
-    fs.writeFileSync(newFixture.screenPath, "Ready\n› ");
+    fs.writeFileSync(newFixture.screenPath, codexTestComposerScreen());
 
     const terminal = await listFixtureTerminal({
       ...newFixture,
@@ -1085,7 +1088,8 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
       fixture.screenPath,
       "Token usage: 1,234\n" +
       `To continue this session, run codex resume ${NATIVE_THREAD_ID}\n\n` +
-      "› \u001b[2mRun /review on my current changes\u001b[0m"
+      "› \u001b[2mRun /review on my current changes\u001b[0m\n" +
+      CODEX_TEST_COMPOSER_FOOTER
     );
 
     const terminal = await listFixtureTerminal(fixture);
@@ -1181,7 +1185,7 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
   }
 });
 
-test("verified-empty physical Send ignores resolver and Turn state but rejects a real draft or stale token", async () => {
+test("verified-empty physical Send advertises replacement over a real draft and ignores resolver or Turn state while rejecting a stale token", async () => {
   for (const blocker of ["draft", "resolver", "stale_token", "active_turn"] as const) {
     const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
     try {
@@ -1209,7 +1213,12 @@ test("verified-empty physical Send ignores resolver and Turn state but rejects a
         );
       }
       if (blocker === "draft") {
-        assert.equal(terminal.available_actions.send, undefined, blocker);
+        const action = assertTerminalUserExplicitSendAction(terminal);
+        assert.equal(
+          action.composer_policy,
+          "submit_if_exact_replace_if_different",
+          blocker
+        );
         assert.equal(
           loadManagedSession(fixture.storeDir, source.session_id).status,
           "bound",
@@ -1333,7 +1342,8 @@ test("Herdr uses the same verified-empty Codex handoff fence and virgin post-sub
     fs.writeFileSync(
       fixture.screenPath,
       `Ready\nTo continue this session, run codex resume ${NATIVE_THREAD_ID}\n\n` +
-      "› \u001b[2mRun /review on my current changes\u001b[0m"
+      "› \u001b[2mRun /review on my current changes\u001b[0m\n" +
+      CODEX_TEST_COMPOSER_FOOTER
     );
     const terminal = await listFixtureTerminal(fixture);
     assert.equal(terminal.terminal_control.kind, "herdr");
@@ -1430,7 +1440,8 @@ test("a fresh /status card that supersedes the open rollout is projected as an a
     });
     fs.writeFileSync(
       fixture.screenPath,
-      `/status\nSession: ${EXTERNAL_THREAD_ID}\n› `
+      `/status\nSession: ${EXTERNAL_THREAD_ID}\n` +
+      codexTestComposerScreen()
     );
     const terminal = await listFixtureTerminal(fixture);
     assert.equal(terminal.native_agent_session_id, NATIVE_THREAD_ID);
@@ -1890,7 +1901,7 @@ for (const crashCase of [
         ], fixture.environment);
         assert.equal(closed.status, 0, closed.stderr || closed.stdout);
         assert.equal(JSON.parse(closed.stdout).closed, true, closed.stdout);
-        fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+        fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
         // This legacy status-card fixture did not expose an lsof inventory
         // provider before its first accepted task materialized the rollout.
         // Subsequent rollout-backed v15 sends require that now-live exact root
@@ -2203,7 +2214,7 @@ for (const historyCase of [
           fs.realpathSync(fixture.codexHome)
         ], fixture.environment);
         assert.equal(closed.status, 0, closed.stderr || closed.stdout);
-        fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+        fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
         enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
 
         const thirdMessage =
@@ -2366,7 +2377,7 @@ test("a missing deferred Turn survives a second crash after its exact ledger abo
     ], fixture.environment);
     assert.equal(closed.status, 0, closed.stderr || closed.stdout);
     assert.equal(JSON.parse(closed.stdout).closed, true, closed.stdout);
-    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
     enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
 
     const thirdMessage = "Continue after the missing-Turn abort receipt.";
@@ -4713,12 +4724,14 @@ for (const hintCase of ["absent", "aged"] as const) {
             { length: 30 },
             (_, index) => `post-clear terminal output line ${index + 1}`
           ),
-          "› \u001b[2mAsk Codex anything\u001b[0m"
+          "› \u001b[2mAsk Codex anything\u001b[0m",
+          CODEX_TEST_COMPOSER_FOOTER
         ].join("\n"));
       } else {
         fs.writeFileSync(
           fixture.screenPath,
-          "Ready after /clear\n› \u001b[2mAsk Codex anything\u001b[0m"
+          "Ready after /clear\n› \u001b[2mAsk Codex anything\u001b[0m\n" +
+          CODEX_TEST_COMPOSER_FOOTER
         );
       }
 
@@ -5506,7 +5519,8 @@ test("a listed visible clear hint may disappear before token send while exact in
       wrappedResumeFirstLine,
       NATIVE_THREAD_ID.slice(9),
       "",
-      "› \u001b[2mAsk Codex anything\u001b[0m"
+      "› \u001b[2mAsk Codex anything\u001b[0m",
+      CODEX_TEST_COMPOSER_FOOTER
     ].join("\n"));
 
     const action = await deferredForegroundSendAction(fixture);
@@ -5523,7 +5537,8 @@ test("a listed visible clear hint may disappear before token send while exact in
     // every durable source fence remain unchanged between list and send.
     fs.writeFileSync(
       fixture.screenPath,
-      "Ready after scrollback advanced\n› \u001b[2mAsk Codex anything\u001b[0m"
+      "Ready after scrollback advanced\n› \u001b[2mAsk Codex anything\u001b[0m\n" +
+      CODEX_TEST_COMPOSER_FOOTER
     );
     fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
     const sent = await runCli(
@@ -5666,7 +5681,8 @@ test("explicit close of a v1 uncertain clear dispatch restores only future candi
       "Codex process has an unexpected open root rollout outside the preferred and exact companion identities";
     fs.writeFileSync(
       fixture.screenPath,
-      "Ready\n› \u001b[2mAsk Codex anything\u001b[0m"
+      "Ready\n› \u001b[2mAsk Codex anything\u001b[0m\n" +
+      CODEX_TEST_COMPOSER_FOOTER
     );
 
     const closed = await runCli([
@@ -5692,7 +5708,8 @@ test("explicit close of a v1 uncertain clear dispatch restores only future candi
     fs.writeFileSync(
       fixture.screenPath,
       "Ready\nCompleted outside AKK attribution\n" +
-      "› \u001b[2mAsk Codex anything\u001b[0m"
+      "› \u001b[2mAsk Codex anything\u001b[0m\n" +
+      CODEX_TEST_COMPOSER_FOOTER
     );
     // Codex eventually closes the predecessor FD while retaining only the
     // post-/clear rollout. That current root already contains the lost task,
@@ -5787,7 +5804,8 @@ test("abandoned predecessor candidate token fails closed when exact authority dr
       "Codex process has an unexpected open root rollout outside the preferred and exact companion identities";
     fs.writeFileSync(
       fixture.screenPath,
-      "Ready\n› \u001b[2mAsk Codex anything\u001b[0m"
+      "Ready\n› \u001b[2mAsk Codex anything\u001b[0m\n" +
+      CODEX_TEST_COMPOSER_FOOTER
     );
     const closed = await runCli([
       "close", "--turn", String(turnId), "--store-dir", fixture.storeDir,
@@ -5855,7 +5873,8 @@ test("a detached candidate claim cannot hide user-priority physical Send", async
     fixture.identityObservationError = "fixture unavailable foreground";
     fs.writeFileSync(
       fixture.screenPath,
-      "Ready\n› \u001b[2mAsk Codex anything\u001b[0m"
+      "Ready\n› \u001b[2mAsk Codex anything\u001b[0m\n" +
+      CODEX_TEST_COMPOSER_FOOTER
     );
     const closed = await runCli([
       "close", "--turn", turnId,
@@ -6399,7 +6418,7 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
       false
     );
 
-    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
     const inspected = await runCli(
       nativeInspectArguments(listed.lifecycle_binding_token),
       fixture.environment
@@ -6567,7 +6586,7 @@ test("Herdr zoomed focused effective area gates closed Codex status at the exact
       "the zoomed Herdr path must retain the Codex suppression boundary"
     );
 
-    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
     // Direct-attach simulation: Herdr still reports a visible 108-column
     // outer layout, but the exact PTY is only 77 columns. Layout geometry must
     // never upgrade or override that narrower authority.
@@ -6607,7 +6626,7 @@ test("Herdr zoomed focused effective area gates closed Codex status at the exact
       "the exact 80-column TTY must preserve the Codex suppression boundary"
     );
 
-    fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+    fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
     fixture.viewportFocusedPaneId = "w1:p2";
     fixture.viewportPaneFocused = false;
     ttyInspectionsBefore = fixture.ttyViewportInspectionPids.length;
@@ -6878,7 +6897,7 @@ function createNoRolloutFixture(
     rolloutInitiallyAbsent ? codexHome : sessionsDir,
     { recursive: true, mode: 0o700 }
   );
-  fs.writeFileSync(screenPath, "Ready\n› ");
+  fs.writeFileSync(screenPath, codexTestComposerScreen());
   fs.writeFileSync(processBirthPath, LIVE_PROCESS_BIRTH);
   if (!rolloutInitiallyAbsent) {
     fs.writeFileSync(rolloutPath, `${JSON.stringify({
@@ -7525,7 +7544,7 @@ async function seedResolvedHistoricalDispatchAndStatusCard(
   }, { expectedRevision: previousSession.revision as number });
   fs.rmSync(fixture.rolloutPath, { force: true });
   fs.rmSync(fixture.materializedPath, { force: true });
-  fs.writeFileSync(fixture.screenPath, "Ready\n› ");
+  fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
   return {
     source: persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH),
     historicalTurnId
@@ -8553,6 +8572,13 @@ function createFixtureHerdrProvider(
               ["send-keys", "-t", fixture.target, "-l", text],
               nowMs()
             )
+          : keys.includes("ctrl+u")
+            ? runInProcessTmux(
+                fixture,
+                env,
+                ["send-keys", "-t", fixture.target, "C-u"],
+                nowMs()
+              )
           : keys.includes("enter")
             ? runInProcessTmux(
                 fixture,
@@ -8768,7 +8794,10 @@ function createFixtureCodexAdapter(
             }
           })}\n`
         );
-        fs.writeFileSync(fixture.screenPath, "Recovered exact result\n› ");
+        fs.writeFileSync(
+          fixture.screenPath,
+          `Recovered exact result\n${codexTestComposerScreen()}`
+        );
         fixture.appendAcceptanceOnProbe = undefined;
       }
       const processBirth = fs.readFileSync(
@@ -8994,6 +9023,11 @@ function runInProcessTmux(
     }
     return successfulCommand();
   }
+  if (args[0] === "send-keys" && args.at(-1) === "C-u") {
+    fs.writeFileSync(path.join(fixture.tempDir, "pending-input.txt"), "");
+    fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
+    return successfulCommand();
+  }
   if (args[0] === "send-keys" && args.at(-1) === "C-m") {
     const pendingInputPath = path.join(fixture.tempDir, "pending-input.txt");
     const pendingInput = fs.existsSync(pendingInputPath)
@@ -9010,7 +9044,8 @@ function runInProcessTmux(
         `│ OpenAI Codex (v${fixture.codexVersion})                       │\n` +
         `│ Session: ${statusSession} │\n` +
         "│ Account: private@example.com                 │\n" +
-        `╰──────────────────────────────────────────────────╯\n› `
+        `╰──────────────────────────────────────────────────╯\n` +
+        codexTestComposerScreen()
       );
     } else if (pendingInput === "/clear") {
       const nextRolloutPath = path.join(
@@ -9033,7 +9068,8 @@ function runInProcessTmux(
       fs.writeFileSync(fixture.materializedPath, "ready");
       fs.writeFileSync(
         fixture.screenPath,
-        `New Codex thread ${EXTERNAL_THREAD_ID}\n› `
+        `New Codex thread ${EXTERNAL_THREAD_ID}\n` +
+        codexTestComposerScreen()
       );
     } else {
       if (env.AKK_TEST_PROCESS_BIRTH_AFTER_ENTER) {
@@ -9196,6 +9232,12 @@ if (args[0] === "list-panes") {
       );
     }
   }
+} else if (args[0] === "send-keys" && args.at(-1) === "C-u") {
+  fs.writeFileSync(${JSON.stringify(options.pendingInputPath)}, "");
+  fs.writeFileSync(
+    ${JSON.stringify(options.screenPath)},
+    ${JSON.stringify(codexTestComposerScreen())}
+  );
 } else if (args[0] === "send-keys" && args.at(-1) === "C-m") {
   const pendingInput = fs.existsSync(${JSON.stringify(options.pendingInputPath)})
     ? fs.readFileSync(${JSON.stringify(options.pendingInputPath)}, "utf8")
@@ -9211,7 +9253,8 @@ if (args[0] === "list-panes") {
       `│ Session: `
     )} + statusSession + ${JSON.stringify(
       ` │\n│ Account: private@example.com                 │\n` +
-      `╰──────────────────────────────────────────────────╯\n› `
+      `╰──────────────────────────────────────────────────╯\n` +
+      codexTestComposerScreen()
     )});
   } else {
     if (process.env.AKK_TEST_PROCESS_BIRTH_AFTER_ENTER) {
@@ -9523,7 +9566,10 @@ function appendFixtureCompletion(
       last_agent_message: text
     }
   })}\n`);
-  fs.writeFileSync(fixture.screenPath, `${text}\n› `);
+  fs.writeFileSync(
+    fixture.screenPath,
+    `${text}\n${codexTestComposerScreen()}`
+  );
 }
 
 async function waitForFixtureConversation(
