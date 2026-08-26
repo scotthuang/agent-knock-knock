@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +16,711 @@ const THREAD_ID = "019f0000-0000-7000-8000-000000000206";
 const TASK_ID = "019f0000-0000-7000-8000-000000000207";
 const TOKEN = "a".repeat(64);
 type RootUserRowOrder = "human-only" | "synthetic-first" | "human-first";
+
+test("user-explicit fallback attaches after terminal exit and recovers completion before its first sweep", async (t) => {
+  const fixture = createFixture(t);
+  const callbacks: TerminalWatchCallbackInput[] = [];
+  const printed: unknown[] = [];
+  let terminals = [fixture.terminal];
+  const callbackRoute = {
+    schema: "agent-knock-knock/callback-route" as const,
+    version: 1 as const,
+    transport: "openclaw_gateway_v1" as const,
+    profile_id: "openclaw",
+    profile_revision: "legacy-v1",
+    controller_session_id: "agent:main:user-explicit",
+    capabilities: { wake: true, respond: true }
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation(terminals, terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000299",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value),
+    callback: {
+      deliver(input) {
+        callbacks.push(input);
+        return { runId: input.idempotencyKey, status: "started" };
+      }
+    }
+  });
+  const request = "User-explicit fallback request";
+  const requestHash = createHash("sha256").update(request).digest("hex");
+  const options = { storeDir: fixture.storeDir, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(fixture.terminal.id),
+      agent: "codex",
+      pid: Number(fixture.terminal.pid),
+      terminalControl: fixture.terminal.terminal_control as never
+    },
+    requestHash,
+    messageId: "message-user-explicit-fallback-watch",
+    physicalToken: "d".repeat(64)
+  });
+  assert.ok(prepared);
+
+  const fallbackTurnId = "019f0000-0000-7000-8000-000000000299";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    [
+      {
+        timestamp: "2026-08-21T01:00:00.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: fallbackTurnId }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.201Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: request }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: fallbackTurnId
+          }
+        }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.202Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: request }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.300Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: fallbackTurnId,
+          last_agent_message: "Fallback Watch recovered exact completion"
+        }
+      }
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+
+  // The task may finish and the process may disappear in the narrow window
+  // between Enter and callback attachment. The pre-Send anchor remains exact.
+  terminals = [];
+  const receipt = await facade.attachUserExplicitFallbackWatch({
+    options,
+    prepared
+  });
+  assert.deepEqual(receipt, {
+    callback_expected: true,
+    callback_mode: "terminal_watch",
+    watch_id: prepared.watchId
+  });
+  const listed = facade.listPublicWatches(fixture.storeDir);
+  assert.equal(listed.length, 1);
+  assert.equal(
+    listed[0].source,
+    "terminal_user_explicit_fallback_watch"
+  );
+
+  fixture.advance();
+  await facade.runReconcileWatches(options);
+  assert.equal(callbacks.length, 1);
+  assert.equal(callbacks[0].event, "completed");
+  assert.equal(
+    callbacks[0].completionText,
+    "Fallback Watch recovered exact completion"
+  );
+  facade.runWatchStatus({ ...options, watch: prepared.watchId });
+  const settled = record(record(printed.at(-1)).watch);
+  assert.equal(settled.status, "completed");
+  assert.equal(
+    facade.userExplicitFallbackWatchReceipt({
+      options,
+      watchId: prepared.watchId
+    })?.watch_id,
+    prepared.watchId
+  );
+});
+
+test("Codex fallback Watches freeze acceptance before a repeated request", async (t) => {
+  const fixture = createFixture(t);
+  const terminal = withCodexCandidateInventory(fixture.terminal);
+  let terminals = [terminal];
+  const callbacks: TerminalWatchCallbackInput[] = [];
+  const callbackRoute = {
+    schema: "agent-knock-knock/callback-route" as const,
+    version: 1 as const,
+    transport: "openclaw_gateway_v1" as const,
+    profile_id: "openclaw",
+    profile_revision: "legacy-v1",
+    controller_session_id: "agent:main:candidate-fallback",
+    capabilities: { wake: true, respond: true }
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation(terminals, terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000298",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver(input) {
+        callbacks.push(input);
+        return { runId: input.idempotencyKey, status: "started" };
+      }
+    }
+  });
+  const request = "Bind this request across the exact Codex rollout set";
+  const requestHash = createHash("sha256").update(request).digest("hex");
+  const options = { storeDir: fixture.storeDir, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(terminal.id),
+      agent: "codex",
+      pid: Number(terminal.pid),
+      terminalControl: terminal.terminal_control as never
+    },
+    requestHash,
+    messageId: "message-candidate-fallback-watch",
+    physicalToken: "e".repeat(64)
+  });
+  assert.ok(prepared);
+  assert.equal(
+    prepared.anchor.schema,
+    "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+  );
+  if (
+    prepared.anchor.schema !==
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+  ) {
+    throw new Error("expected a Codex fallback Watch anchor");
+  }
+  assert.equal(prepared.anchor.acceptance_anchor.version, 3);
+
+  const turnId = "019f0000-0000-7000-8000-000000000298";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    [
+      {
+        timestamp: "2026-08-21T01:00:00.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.201Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: request }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId }
+        }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.202Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: request }
+      }
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+  const repeatedPrepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(terminal.id),
+      agent: "codex",
+      pid: Number(terminal.pid),
+      terminalControl: terminal.terminal_control as never
+    },
+    requestHash,
+    messageId: "message-repeated-candidate-fallback-watch",
+    physicalToken: "9".repeat(64)
+  });
+  assert.ok(repeatedPrepared);
+  assert.equal(callbacks.length, 0);
+  assert.equal(facade.listPublicWatches(fixture.storeDir)[0].status, "active");
+
+  const repeatedTurnId = "019f0000-0000-7000-8000-000000000289";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    [
+      {
+        timestamp: "2026-08-21T01:00:00.300Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: turnId,
+          last_agent_message: "Candidate-set fallback completion"
+        }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.400Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: repeatedTurnId }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.401Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: request }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: repeatedTurnId
+          }
+        }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.402Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: request }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.500Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: repeatedTurnId,
+          last_agent_message: "Repeated candidate fallback completion"
+        }
+      }
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+  await facade.attachUserExplicitFallbackWatch({
+    options,
+    prepared: repeatedPrepared
+  });
+  fixture.advance();
+  await facade.runReconcileWatches(options);
+  await facade.runReconcileWatches(options);
+
+  assert.equal(callbacks.length, 2);
+  assert.deepEqual(
+    callbacks.map(({ event, completionText, detail }) => ({
+      event,
+      completionText,
+      detail
+    })),
+    [
+      {
+        event: "completed",
+        completionText: "Candidate-set fallback completion",
+        detail: "anchored_task_completed"
+      },
+      {
+        event: "completed",
+        completionText: "Repeated candidate fallback completion",
+        detail: "anchored_task_completed"
+      }
+    ]
+  );
+});
+
+test("user-explicit fallback Watch binds the first Codex rollout after Send", async (t) => {
+  const fixture = createFixture(t);
+  const beforeTerminal: Record<string, any> = structuredClone(
+    fixture.terminal
+  );
+  delete beforeTerminal.native_agent_session_id;
+  delete beforeTerminal.native_agent_rollout;
+  beforeTerminal._codex_open_root_rollout_inventory =
+    codexInventoryForTerminal(beforeTerminal, []);
+  let terminal = beforeTerminal;
+  const callbacks: TerminalWatchCallbackInput[] = [];
+  const callbackRoute = {
+    schema: "agent-knock-knock/callback-route" as const,
+    version: 1 as const,
+    transport: "openclaw_gateway_v1" as const,
+    profile_id: "openclaw",
+    profile_revision: "legacy-v1",
+    controller_session_id: "agent:main:virgin-fallback",
+    capabilities: { wake: true, respond: true }
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000297",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver(input) {
+        callbacks.push(input);
+        return { runId: input.idempotencyKey, status: "started" };
+      }
+    }
+  });
+  const request = "Create and bind the first Codex rollout";
+  const options = { storeDir: fixture.storeDir, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(beforeTerminal.id),
+      agent: "codex",
+      pid: Number(beforeTerminal.pid),
+      terminalControl: beforeTerminal.terminal_control as never
+    },
+    requestHash: createHash("sha256").update(request).digest("hex"),
+    messageId: "message-virgin-fallback-watch",
+    physicalToken: "f".repeat(64)
+  });
+  assert.ok(prepared);
+  if (
+    prepared.anchor.schema !==
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+  ) {
+    throw new Error("expected a Codex fallback Watch anchor");
+  }
+  assert.equal(prepared.anchor.acceptance_anchor.version, 3);
+  if (prepared.anchor.acceptance_anchor.version !== 3) {
+    throw new Error("expected a candidate-set acceptance anchor");
+  }
+  assert.equal(prepared.anchor.acceptance_anchor.zero_file_baseline, true);
+
+  const nativeThreadId = "019f0000-0000-7000-8000-000000000297";
+  const turnId = "019f0000-0000-7000-8000-000000000296";
+  const rolloutPath = path.join(
+    path.dirname(fixture.rolloutPath),
+    "first-rollout.jsonl"
+  );
+  fs.writeFileSync(
+    rolloutPath,
+    [
+      {
+        timestamp: "2026-08-21T01:00:00.150Z",
+        type: "session_meta",
+        payload: {
+          id: nativeThreadId,
+          timestamp: "2026-08-21T01:00:00.150Z",
+          cwd: beforeTerminal.workspace,
+          originator: "codex-tui",
+          source: "cli",
+          cli_version: beforeTerminal.agent_version
+        }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.201Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: request }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId }
+        }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.202Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: request }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.300Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: turnId,
+          last_agent_message: "First-rollout fallback completion"
+        }
+      }
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n",
+    { mode: 0o600 }
+  );
+  const rolloutStat = fs.statSync(rolloutPath);
+  const processUuid = String(beforeTerminal.native_agent_process_uuid);
+  const processBirth = String(beforeTerminal.native_agent_process_birth);
+  const rollout = {
+    fd: "13r",
+    device: String(rolloutStat.dev),
+    inode: String(rolloutStat.ino),
+    path: rolloutPath
+  };
+  terminal = {
+    ...beforeTerminal,
+    native_agent_session_id: nativeThreadId,
+    native_agent_rollout: rollout,
+    _codex_open_root_rollout_inventory: codexInventoryForTerminal(
+      beforeTerminal,
+      [{
+        sessionId: nativeThreadId,
+        processUuid,
+        processBirth,
+        rollout,
+        evidence: "codex_open_root_rollout"
+      }]
+    )
+  };
+
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+  fixture.advance();
+  await facade.runReconcileWatches(options);
+  assert.equal(callbacks.length, 1);
+  assert.equal(callbacks[0].event, "completed");
+  assert.equal(
+    callbacks[0].completionText,
+    "First-rollout fallback completion"
+  );
+});
+
+test("Claude fallback Watches freeze acceptance before a repeated request and survive terminal exit", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-terminal-watch-claude-fallback-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const claudeHome = path.join(root, ".claude");
+  const workspace = path.join(root, "workspace");
+  const sessionId = "019f0000-0000-7000-8000-000000000295";
+  const projectsDirectory = path.join(
+    claudeHome,
+    "projects",
+    workspace.replace(/[^A-Za-z0-9]/gu, "-")
+  );
+  const transcriptPath = path.join(projectsDirectory, `${sessionId}.jsonl`);
+  const storeDir = path.join(root, "store");
+  fs.mkdirSync(projectsDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(workspace, { recursive: true });
+  const pid = 6295;
+  const startedAt = 1784870000000;
+  const agentRows = [{
+    pid,
+    cwd: workspace,
+    kind: "interactive" as const,
+    sessionId,
+    startedAt,
+    status: "idle" as const
+  }];
+  const terminal: Record<string, any> = {
+    id: "terminal:v2:claude:fallback-fixture",
+    source: "terminal",
+    agent: "claude",
+    pid,
+    workspace,
+    cwd: workspace,
+    native_agent_session_id: sessionId,
+    agent_version: "2.1.237",
+    lifecycle_binding_token: "c".repeat(64),
+    activity_state: "idle",
+    approval_state: { scanned: true, blocked: false, approvable: false },
+    terminal_control: {
+      kind: "tmux",
+      target: "claude-fallback:0.0",
+      session: "claude-fallback",
+      window: 0,
+      pane: 0,
+      panePid: 6290,
+      currentCommand: "claude",
+      currentPath: workspace,
+      capabilities: ["screen_status", "durable_completion"]
+    }
+  };
+  let terminals = [terminal];
+  let now = new Date("2026-08-21T01:00:00.100Z");
+  const callbacks: TerminalWatchCallbackInput[] = [];
+  const callbackRoute = {
+    schema: "agent-knock-knock/callback-route" as const,
+    version: 1 as const,
+    transport: "openclaw_gateway_v1" as const,
+    profile_id: "openclaw",
+    profile_revision: "legacy-v1",
+    controller_session_id: "agent:main:claude-fallback",
+    capabilities: { wake: true, respond: true }
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation(terminals, terminalId),
+    loadClaudeAgentRows: () => agentRows,
+    now: () => new Date(now),
+    randomUUID: () => "00000000-0000-4000-8000-000000000295",
+    storeDirFromOptions: () => storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver(input) {
+        callbacks.push(input);
+        return { runId: input.idempotencyKey, status: "started" };
+      }
+    }
+  });
+  const request = "Return this exact Claude fallback result";
+  const requestHash = createHash("sha256").update(request).digest("hex");
+  const options = { storeDir, claudeHome, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(terminal.id),
+      agent: "claude",
+      pid,
+      terminalControl: terminal.terminal_control as never
+    },
+    requestHash,
+    messageId: "message-claude-fallback-watch",
+    physicalToken: "b".repeat(64)
+  });
+  assert.ok(prepared);
+  assert.equal(
+    prepared.anchor.schema,
+    "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+  );
+
+  const promptUuid = "019f0000-0000-7000-8000-000000000294";
+  const thinkingUuid = "019f0000-0000-7000-8000-000000000293";
+  const textUuid = "019f0000-0000-7000-8000-000000000292";
+  const durationUuid = "019f0000-0000-7000-8000-000000000291";
+  const messageId = "019f0000-0000-7000-8000-000000000290";
+  const base = (
+    uuid: string,
+    parentUuid: string | null,
+    timestamp: string
+  ) => ({
+    uuid,
+    parentUuid,
+    isSidechain: false,
+    entrypoint: "cli",
+    timestamp,
+    sessionId,
+    version: terminal.agent_version,
+    cwd: workspace
+  });
+  fs.writeFileSync(
+    transcriptPath,
+    `${JSON.stringify({
+      ...base(promptUuid, null, "2026-08-21T01:00:00.200Z"),
+      type: "user",
+      promptId: "019f0000-0000-7000-8000-000000000289",
+      message: { role: "user", content: request }
+    })}\n`,
+    { mode: 0o600 }
+  );
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+  const repeatedPrepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(terminal.id),
+      agent: "claude",
+      pid,
+      terminalControl: terminal.terminal_control as never
+    },
+    requestHash,
+    messageId: "message-repeated-claude-fallback-watch",
+    physicalToken: "8".repeat(64)
+  });
+  assert.ok(repeatedPrepared);
+  assert.equal(callbacks.length, 0);
+
+  const repeatedPromptUuid = "019f0000-0000-7000-8000-000000000288";
+  const repeatedTextUuid = "019f0000-0000-7000-8000-000000000286";
+  const repeatedDurationUuid = "019f0000-0000-7000-8000-000000000285";
+  const repeatedMessageId = "019f0000-0000-7000-8000-000000000284";
+  fs.appendFileSync(
+    transcriptPath,
+    [
+      {
+        ...base(thinkingUuid, promptUuid, "2026-08-21T01:00:00.250Z"),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: messageId,
+          stop_reason: "end_turn",
+          content: [{ type: "thinking", thinking: "not returned" }]
+        }
+      },
+      {
+        ...base(textUuid, thinkingUuid, "2026-08-21T01:00:00.300Z"),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: messageId,
+          stop_reason: "end_turn",
+          content: [{
+            type: "text",
+            text: "Claude fallback completion"
+          }]
+        }
+      },
+      {
+        ...base(durationUuid, textUuid, "2026-08-21T01:00:00.400Z"),
+        type: "system",
+        subtype: "turn_duration",
+        durationMs: 200
+      },
+      {
+        ...base(
+          repeatedPromptUuid,
+          null,
+          "2026-08-21T01:00:00.500Z"
+        ),
+        type: "user",
+        promptId: "019f0000-0000-7000-8000-000000000287",
+        message: { role: "user", content: request }
+      },
+      {
+        ...base(
+          repeatedTextUuid,
+          repeatedPromptUuid,
+          "2026-08-21T01:00:00.600Z"
+        ),
+        type: "assistant",
+        message: {
+          role: "assistant",
+          id: repeatedMessageId,
+          stop_reason: "end_turn",
+          content: [{
+            type: "text",
+            text: "Repeated Claude fallback completion"
+          }]
+        }
+      },
+      {
+        ...base(
+          repeatedDurationUuid,
+          repeatedTextUuid,
+          "2026-08-21T01:00:00.700Z"
+        ),
+        type: "system",
+        subtype: "turn_duration",
+        durationMs: 100
+      }
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n",
+  );
+  await facade.attachUserExplicitFallbackWatch({
+    options,
+    prepared: repeatedPrepared
+  });
+  terminals = [];
+  now = new Date("2026-08-21T01:00:02.000Z");
+  await facade.runReconcileWatches(options);
+  await facade.runReconcileWatches(options);
+
+  assert.equal(callbacks.length, 2);
+  assert.deepEqual(
+    callbacks.map(({ completionText }) => completionText).sort(),
+    [
+      "Claude fallback completion",
+      "Repeated Claude fallback completion"
+    ]
+  );
+});
 
 test("Terminal Watch CLI observes one exact human-started Codex task and delivers its completion", async (t) => {
   const fixture = createFixture(t);
@@ -860,6 +1566,49 @@ function createFixture(
         }
       }
     }
+  };
+}
+
+function withCodexCandidateInventory(
+  terminal: Record<string, any>
+): Record<string, any> {
+  const processUuid = String(terminal.native_agent_process_uuid);
+  const processBirth = String(terminal.native_agent_process_birth);
+  const rollout = structuredClone(record(terminal.native_agent_rollout));
+  return {
+    ...terminal,
+    _codex_open_root_rollout_inventory: codexInventoryForTerminal(
+      terminal,
+      [{
+        sessionId: String(terminal.native_agent_session_id),
+        processUuid,
+        processBirth,
+        rollout,
+        evidence: "codex_open_root_rollout" as const
+      }]
+    )
+  };
+}
+
+function codexInventoryForTerminal(
+  terminal: Record<string, any>,
+  roots: Array<Record<string, unknown>>
+) {
+  const authority = {
+    schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
+    version: 1 as const,
+    pid: Number(terminal.pid),
+    processUuid: String(terminal.native_agent_process_uuid),
+    processBirth: String(terminal.native_agent_process_birth),
+    roots
+  };
+  return {
+    ...authority,
+    status: roots.length === 0 ? "verified_absent" as const :
+      "resolved" as const,
+    inventoryFingerprint: createHash("sha256")
+      .update(JSON.stringify(authority))
+      .digest("hex")
   };
 }
 

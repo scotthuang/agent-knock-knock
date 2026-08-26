@@ -1246,8 +1246,8 @@ function validatePublicContracts(value, {
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 22) {
-    fail("list action contract version must remain 22");
+  if (actions.version !== 23) {
+    fail("list action contract version must remain 23");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -1264,8 +1264,8 @@ function validatePublicContracts(value, {
   assertSourcePattern(
     repoRoot,
     "src/terminal-list-renderer.ts",
-    /version:\s*22\b/u,
-    "list action contract version 22"
+    /version:\s*23\b/u,
+    "list action contract version 23"
   );
 
   const openclaw = assertExactKeys(contracts.openclaw_tools, [
@@ -1310,17 +1310,17 @@ function validatePublicContracts(value, {
     "witnesses"
   ], "Store protocol contract");
   if (store.format_version !== 1 ||
-      store.current_writer_protocol !== 5 ||
+      store.current_writer_protocol !== 6 ||
       store.session_authority_protocol !== 3) {
     fail("Store format/writer/session-authority protocol contract changed");
   }
   if (store.terminal_watch_schema !== "agent-knock-knock/terminal-watch" ||
-      store.terminal_watch_version !== 1) {
+      store.terminal_watch_version !== 2) {
     fail("Terminal Watch schema contract changed");
   }
   assertExactArray(
     store.upgradeable_writer_protocols,
-    [1, 2, 3, 4],
+    [1, 2, 3, 4, 5],
     "Store upgradeable_writer_protocols"
   );
   validateAuthorityPaths(store.authority_paths, "Store authority_paths", repoRoot);
@@ -1331,14 +1331,14 @@ function validatePublicContracts(value, {
     usedWitnesses
   );
   if (!Array.isArray(store.protocol_witnesses) ||
-      store.protocol_witnesses.length !== 5) {
-    fail("Store protocol_witnesses must cover writer protocols 1 through 5");
+      store.protocol_witnesses.length !== 6) {
+    fail("Store protocol_witnesses must cover writer protocols 1 through 6");
   }
   for (const [index, valueEntry] of store.protocol_witnesses.entries()) {
     const entry = assertExactKeys(valueEntry, ["protocol", "witness"],
       `Store protocol witness ${index}`);
     if (entry.protocol !== index + 1) {
-      fail("Store protocol_witnesses must be ordered 1 through 5");
+      fail("Store protocol_witnesses must be ordered 1 through 6");
     }
     validateWitnessReferences(
       [entry.witness],
@@ -1350,14 +1350,14 @@ function validatePublicContracts(value, {
   const storeSource = readRepositoryFile(repoRoot, "src/store.ts");
   for (const [name, expected] of [
     ["STORE_FORMAT_VERSION", 1],
-    ["STORE_WRITER_PROTOCOL", 5],
+    ["STORE_WRITER_PROTOCOL", 6],
     ["STORE_SESSION_AUTHORITY_PROTOCOL", 3]
   ]) {
     if (!new RegExp(`export const ${name} = ${expected};`, "u").test(storeSource)) {
       fail(`${name}=${expected} is missing from src/store.ts`);
     }
   }
-  if (!/STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set\(\[1, 2, 3, 4\]\)/u
+  if (!/STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set\(\[1, 2, 3, 4, 5\]\)/u
     .test(storeSource)) {
     fail("Store upgradeable writer protocol set changed");
   }
@@ -1365,13 +1365,13 @@ function validatePublicContracts(value, {
     repoRoot,
     "src/terminal-watch-store.ts",
     /export const TERMINAL_WATCH_SCHEMA = "agent-knock-knock\/terminal-watch" as const;/u,
-    "Terminal Watch schema v1 name"
+    "Terminal Watch schema v2 name"
   );
   assertSourcePattern(
     repoRoot,
     "src/terminal-watch-store.ts",
-    /export const TERMINAL_WATCH_VERSION = 1 as const;/u,
-    "Terminal Watch schema v1 version"
+    /export const TERMINAL_WATCH_VERSION = 2 as const;/u,
+    "Terminal Watch schema v2 version"
   );
 }
 

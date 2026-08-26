@@ -50,7 +50,12 @@ import { summarizeConversation as summarizeTerminalConversation } from
   "../src/terminal-status-facts.js";
 import { createTerminalWatchCliAdapter } from
   "../src/terminal-watch-cli-adapter.js";
-import { terminalWatchesDir } from "../src/terminal-watch-store.js";
+import type { PreparedUserExplicitFallbackWatch } from
+  "../src/terminal-watch-cli-adapter.js";
+import {
+  terminalUserExplicitFallbackWatchId,
+  terminalWatchesDir
+} from "../src/terminal-watch-store.js";
 import type {
   TerminalListAuthorityPorts,
   TerminalListCliDependencies,
@@ -588,6 +593,13 @@ test("list token falls back to one unmanaged send and replays by message id", as
   } satisfies ResolvedTerminalConversation;
 
   const transportCalls: string[][] = [];
+  const fallbackOperations: string[] = [];
+  const callbackWatchReceipts = new Map<string, {
+    callback_expected: true;
+    callback_mode: "terminal_watch";
+    watch_id: string;
+  }>();
+  let failNextCallbackWatchAttach = false;
   let fallbackPreflightAvailable = false;
   let terminalLockAcquisitions = 0;
   let terminalLockMode: "normal" | "storage_error" | "release_error" =
@@ -657,11 +669,13 @@ test("list token falls back to one unmanaged send and replays by message id", as
         text
       });
       transportCalls.push(["clear", "C-u"]);
+      fallbackOperations.push("clear:C-u");
       await options.onComposerClearDispatched?.({
         terminalControl: control,
         text
       });
       transportCalls.push(["text", text]);
+      fallbackOperations.push("text");
       await options.onTransportStage?.({
         stage: "text_injected",
         agent: "codex",
@@ -669,6 +683,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
         multiline: false
       });
       transportCalls.push(["enter", "C-m"]);
+      fallbackOperations.push("enter:C-m");
       await options.onTransportStage?.({
         stage: "enter_dispatched",
         agent: "codex",
@@ -754,6 +769,36 @@ test("list token falls back to one unmanaged send and replays by message id", as
     },
     terminalBridgeRequestFingerprint() {
       return undefined;
+    },
+    async prepareUserExplicitFallbackWatch(input: {
+      messageId: string;
+      physicalToken: string;
+      requestHash: string;
+    }) {
+      fallbackOperations.push("watch:prepare");
+      return {
+        watchId: terminalUserExplicitFallbackWatchId(input)
+      } as unknown as PreparedUserExplicitFallbackWatch;
+    },
+    async attachUserExplicitFallbackWatch({ prepared }: {
+      prepared: PreparedUserExplicitFallbackWatch;
+    }) {
+      fallbackOperations.push("watch:attach");
+      if (failNextCallbackWatchAttach) {
+        failNextCallbackWatchAttach = false;
+        throw new Error("test-only callback Watch storage unavailable");
+      }
+      const receipt = {
+        callback_expected: true as const,
+        callback_mode: "terminal_watch" as const,
+        watch_id: prepared.watchId
+      };
+      callbackWatchReceipts.set(prepared.watchId, receipt);
+      return receipt;
+    },
+    userExplicitFallbackWatchReceipt({ watchId }: { watchId: string }) {
+      fallbackOperations.push("watch:receipt");
+      return callbackWatchReceipts.get(watchId);
     },
     loadTerminalBridgeDispatchLedger() {
       return dispatchLedger;
@@ -927,6 +972,16 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.equal(firstOutput.composer_cleared_before_send, true);
   assert.equal(firstOutput.replaced_existing_draft, true);
   assert.equal(firstOutput.message_id, messageId);
+  assert.equal(firstOutput.callback_expected, true);
+  assert.equal(firstOutput.callback_mode, "terminal_watch");
+  assert.equal(typeof firstOutput.watch_id, "string");
+  assert.deepEqual(fallbackOperations.slice(-5), [
+    "watch:prepare",
+    "clear:C-u",
+    "text",
+    "enter:C-m",
+    "watch:attach"
+  ]);
   assert.deepEqual(transportCalls, [
     ["clear", "C-u"],
     ["text", message],
@@ -1059,6 +1114,10 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.equal(replayOutput.delivered_unmanaged, true);
   assert.equal(replayOutput.replayed, true);
   assert.equal(replayOutput.message_id, messageId);
+  assert.equal(replayOutput.callback_expected, true);
+  assert.equal(replayOutput.callback_mode, "terminal_watch");
+  assert.equal(replayOutput.watch_id, firstOutput.watch_id);
+  assert.equal(fallbackOperations.at(-1), "watch:receipt");
   assert.deepEqual(
     transportCalls,
     [["clear", "C-u"], ["text", message], ["enter", "C-m"]],
@@ -1142,6 +1201,41 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.equal(managedReplayOutput.do_not_retry, true);
   assert.equal(managedPreparationAttempts, 5);
 
+  failNextCallbackWatchAttach = true;
+  const callbackFailureMessage =
+    "Send even if automatic callback Watch attachment fails.";
+  const callbackFailureOptions = {
+    ...options,
+    message: callbackFailureMessage,
+    messageId: "message-user-send-watch-attachment-failure"
+  };
+  const callbackFailure = await runCliCommandExecution(
+    "send",
+    callbackFailureOptions,
+    dependencies,
+    () => facade.runSend(callbackFailureOptions)
+  );
+  const callbackFailureOutput = JSON.parse(callbackFailure.stdout);
+  assert.equal(callbackFailureOutput.delivered, true);
+  assert.equal(callbackFailureOutput.callback_expected, false);
+  assert.match(
+    JSON.stringify(callbackFailureOutput.callback_warnings),
+    /callback Watch attachment failed.*storage unavailable/u
+  );
+  const callsAfterCallbackFailure = transportCalls.length;
+  const callbackFailureReplay = await runCliCommandExecution(
+    "send",
+    callbackFailureOptions,
+    dependencies,
+    () => facade.runSend(callbackFailureOptions)
+  );
+  assert.equal(JSON.parse(callbackFailureReplay.stdout).callback_expected, false);
+  assert.equal(
+    transportCalls.length,
+    callsAfterCallbackFailure,
+    "callback Watch failure must not permit same-ID physical replay"
+  );
+
   terminalLockMode = "release_error";
   const releaseFailureMessage = "Send even if physical lock cleanup fails.";
   const releaseFailureOptions = {
@@ -1184,6 +1278,9 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.deepEqual(transportCalls, [
     ["clear", "C-u"],
     ["text", message],
+    ["enter", "C-m"],
+    ["clear", "C-u"],
+    ["text", callbackFailureMessage],
     ["enter", "C-m"],
     ["clear", "C-u"],
     ["text", releaseFailureMessage],
@@ -1328,6 +1425,19 @@ test("healthy managed terminal keeps physical Send separate from its fast path",
   });
   assert.equal(observed.state, "available");
   if (observed.state !== "available") return;
+  assert.equal(
+    (observed.rawTerminal._codex_open_root_rollout_inventory as
+      Record<string, unknown>).status,
+    "verified_absent"
+  );
+  assert.equal(
+    Object.hasOwn(
+      observed.terminal,
+      "_codex_open_root_rollout_inventory"
+    ),
+    false,
+    "the zero-rollout boundary remains private"
+  );
   assert.equal(observed.terminal.management_state, "managed");
   assert.equal(
     Object.hasOwn(observed.terminal, "_terminal_user_explicit_send_action"),
@@ -1867,6 +1977,36 @@ async function createCodexRolloutListFixture(
   const stat = fs.statSync(rolloutPath);
   const processBirth = "fixture-process-birth";
   const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const rolloutIdentity = {
+    fd: "12r",
+    device: String(stat.dev),
+    inode: String(stat.ino),
+    path: rolloutPath
+  };
+  const inventoryAuthority = {
+    schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
+    version: 1 as const,
+    pid: 4242,
+    processUuid,
+    processBirth,
+    roots: nativeIdentityHasRollout
+      ? [{
+          sessionId: nativeThreadId,
+          processUuid,
+          processBirth,
+          rollout: rolloutIdentity,
+          evidence: "codex_open_root_rollout" as const
+        }]
+      : []
+  };
+  const codexOpenRootRolloutInventory = {
+    ...inventoryAuthority,
+    status: nativeIdentityHasRollout ? "resolved" as const :
+      "verified_absent" as const,
+    inventoryFingerprint: createHash("sha256")
+      .update(JSON.stringify(inventoryAuthority))
+      .digest("hex")
+  };
   const terminalControl = {
     kind: "tmux" as const,
     target: "durable:0.0",
@@ -1984,7 +2124,8 @@ async function createCodexRolloutListFixture(
         processBirth,
         evidence: "process_birth"
       }),
-      inspectCodexOpenRootRolloutInventory: async () => ({ roots: [] }),
+      inspectCodexOpenRootRolloutInventory: async () =>
+        codexOpenRootRolloutInventory,
       nativeInspectionComposerEmpty: () => true,
       observeCurrentNativeAgentSessionIdentity: async (
         request: { pid: number }
@@ -2000,12 +2141,7 @@ async function createCodexRolloutListFixture(
             processBirth,
             ...(nativeIdentityHasRollout
               ? {
-                  rollout: {
-                    fd: "12r",
-                    device: String(stat.dev),
-                    inode: String(stat.ino),
-                    path: rolloutPath
-                  }
+                  rollout: rolloutIdentity
                 }
               : {}),
             evidence: "codex_rollout_fd+process_birth"

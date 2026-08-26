@@ -1066,6 +1066,19 @@ test("Terminal Watch command summaries preserve external-work attribution", () =
   assert.match(status, /compatibility warning: Claude Code 2\.1\.238/u);
   assert.match(status, /observed external work/u);
 
+  const fallbackStatus = formatAkkWatchStatusCommandResult({
+    watch: {
+      watch_id: "terminal-watch-user-send-1",
+      source: "terminal_user_explicit_fallback_watch",
+      terminal_id: exactTerminalId,
+      agent: "codex",
+      status: "completed"
+    }
+  });
+  assert.match(fallbackStatus, /AKK sent this exact request/u);
+  assert.match(fallbackStatus, /no managed Turn was created/u);
+  assert.doesNotMatch(fallbackStatus, /AKK did not send/u);
+
   const stopped = formatAkkUnwatchCommandResult({
     terminal_watch: {
       watch_id: "terminal-watch-durable-1",

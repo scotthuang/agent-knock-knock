@@ -1736,9 +1736,10 @@ async function observeTerminalNativeListIdentity(
         pid: session.pid,
         cwd: session.cwd ?? terminalControl.currentPath
       });
-      if (inventory.roots.length > 0) {
-        codexOpenRootRolloutInventory = inventory;
-      }
+      // Keep a verified empty inventory in the private raw projection. It is
+      // the exact pre-materialization boundary needed to attach a fallback
+      // Watch when this physical Send creates the process's first rollout.
+      codexOpenRootRolloutInventory = inventory;
     } catch (error) {
       runtimeLog("warn", "terminal_codex_open_root_inventory_unavailable", {
         terminal_target: terminalControl.target,

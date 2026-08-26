@@ -610,7 +610,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "375b2634d7d34573ad0a974ec198056f8657d6ff9cc9a5556f7c4a1d9e6234f4"
+    "457517e368204c0ac2250fd6f6b21b3e94496a90cba51a60f6db8d1236c25e20"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -632,7 +632,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.match(listTool.description ?? "", /terminal_follow_current.*terminal_id/u);
   assert.match(
     listTool.description ?? "",
-    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*replace_current_composer_and_submit[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*replace_current_composer_and_submit[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*failure never changes a successful Send/u
   );
   assert.match(listTool.description ?? "", /managed controls use turn_id/u);
   assert.match(
@@ -2105,14 +2105,14 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.match(
       sendTool?.description ?? "",
-      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*parsed working activity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*parsed working activity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no managed callback Turn[\s\S]*Terminal Watch callback/u
     );
     const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
     assert.match(
       isRecord(terminalIdSchema)
         ? String(terminalIdSchema.description ?? "")
         : "",
-      /Codex terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, exactness[\s\S]*not eligibility vetoes[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code terminal_user_explicit remains exact-empty-only[\s\S]*Broken AKK state cannot veto[\s\S]*unmanaged delivery has no callback[\s\S]*use Watch/u
+      /Codex terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, exactness[\s\S]*not eligibility vetoes[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code terminal_user_explicit remains exact-empty-only[\s\S]*Broken AKK state cannot veto[\s\S]*no managed callback Turn[\s\S]*Terminal Watch callback/u
     );
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {
@@ -3478,7 +3478,9 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     const fallbackResult = {
       delivered: true,
       delivered_unmanaged: true,
-      callback_expected: false,
+      callback_expected: true,
+      callback_mode: "terminal_watch",
+      watch_id: "terminal-watch-user-send-fixture",
       terminal_id: terminalId,
       message_id: "message-user-priority-send",
       scope: "terminal_user_explicit",
@@ -3549,8 +3551,11 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     const text = String(result?.text ?? "");
     assert.match(text, /delivered the user's request directly/u);
     assert.match(text, /^delivery: unmanaged fallback$/mu);
-    assert.match(text, /^callback: none; no AKK Turn was created/mu);
-    assert.match(text, /refresh AKK list and use Watch/u);
+    assert.match(
+      text,
+      /^callback: Terminal Watch terminal-watch-user-send-fixture; no managed AKK Turn was created/mu
+    );
+    assert.match(text, /wait for the Terminal Watch callback/u);
     assert.doesNotMatch(text, /AKK turn sent|session: unknown|turn: unknown/iu);
     assert.notEqual(result?.isError, true);
 
@@ -3561,8 +3566,11 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     const bareText = String(bareResult?.text ?? "");
     assert.notEqual(bareResult?.isError, true);
     assert.match(bareText, /delivered the user's request directly/u);
-    assert.match(bareText, /^callback: none; no AKK Turn was created/mu);
-    assert.match(bareText, /refresh AKK list and use Watch/u);
+    assert.match(
+      bareText,
+      /^callback: Terminal Watch terminal-watch-user-send-fixture; no managed AKK Turn was created/mu
+    );
+    assert.match(bareText, /wait for the Terminal Watch callback/u);
     assert.doesNotMatch(bareText, /session: unknown|turn: unknown/iu);
 
     const toolResult = await sendTool?.execute?.("tool-user-priority-send", {

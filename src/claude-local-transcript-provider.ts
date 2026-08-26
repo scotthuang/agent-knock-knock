@@ -168,6 +168,28 @@ export type ClaudeDeadProcessCompletionObservation =
       reason: string;
     };
 
+export type ClaudeUserExplicitFallbackTranscriptObservation =
+  | {
+      status: "pending";
+      acceptance?: ClaudeTranscriptAcceptanceEvidence;
+      observedEndOffsetBytes?: number;
+    }
+  | {
+      status: "completed";
+      acceptance: ClaudeTranscriptAcceptanceEvidence;
+      completion: TerminalCompletionEvidence;
+      observedEndOffsetBytes: number;
+    }
+  | {
+      status: "unavailable";
+      reason: string;
+    };
+
+export interface ObserveClaudeUserExplicitFallbackTranscriptOptions
+  extends Omit<DetectClaudeTranscriptCompletionOptions, "agentRows"> {
+  acceptanceEvidence?: unknown;
+}
+
 export interface ClaudeHistoricalSessionSummary {
   id: string;
   cwd: string;
@@ -1832,6 +1854,128 @@ export function detectClaudeTranscriptAcceptance(
   return acceptanceEvidenceFromSnapshot(snapshot);
 }
 
+/**
+ * Observe one user-explicit fallback request without persisting its raw text.
+ * The immutable pre-send transcript byte anchor plus the SHA-256 request hash
+ * must identify exactly one post-anchor root prompt.
+ */
+export function detectClaudeTranscriptAcceptanceByHash(
+  request: TerminalDurableCompletionRequest,
+  options: DetectClaudeTranscriptCompletionOptions
+): ClaudeTranscriptAcceptanceEvidence | undefined {
+  const snapshot = readClaudeTranscriptTurnSnapshot(
+    request,
+    options,
+    undefined,
+    "live_monitor",
+    "hash_only"
+  );
+  return snapshot ? acceptanceEvidenceFromSnapshot(snapshot) : undefined;
+}
+
+export function detectClaudeTranscriptCompletionByHash(
+  request: TerminalDurableCompletionRequest,
+  options: DetectClaudeTranscriptCompletionOptions
+): TerminalCompletionEvidence | undefined {
+  const snapshot = readClaudeTranscriptTurnSnapshot(
+    request,
+    options,
+    "idle",
+    "live_monitor",
+    "hash_only"
+  );
+  return snapshot ? completionFromRecords(snapshot) : undefined;
+}
+
+/**
+ * Observe a fallback Watch from its immutable pre-send transcript anchor.
+ * Once acceptance has been persisted, the native prompt UUID becomes the
+ * sole prompt selector so a later identical request cannot redirect the
+ * Watch. This path intentionally requires only the durable transcript: a
+ * completed callback remains recoverable after the pane or agent row exits.
+ */
+export function observeClaudeUserExplicitFallbackTranscript(
+  request: TerminalDurableCompletionRequest,
+  options: ObserveClaudeUserExplicitFallbackTranscriptOptions
+): ClaudeUserExplicitFallbackTranscriptObservation {
+  try {
+    const sessionId = nonEmptyString(request.sessionId);
+    const requestHash = nonEmptyString(request.requestHash);
+    if (!sessionId || !requestHash) {
+      throw new Error("Claude fallback transcript request identity is unavailable");
+    }
+    const persistedAcceptance = options.acceptanceEvidence === undefined
+      ? undefined
+      : validateTerminalSubmissionAcceptanceEvidence(
+          options.acceptanceEvidence,
+          {
+            source: "claude_transcript",
+            nativeThreadId: sessionId,
+            requestHash
+          }
+        ) as ClaudeTranscriptAcceptanceEvidence;
+    const acceptedPromptUuid = persistedAcceptance
+      ? uuidValue(persistedAcceptance.acceptanceId)
+      : undefined;
+    if (persistedAcceptance && !acceptedPromptUuid) {
+      throw new Error(
+        "persisted Claude fallback acceptance has no exact prompt UUID"
+      );
+    }
+    const snapshot = readClaudeTranscriptTurnSnapshot(
+      request,
+      { ...options, agentRows: [] },
+      undefined,
+      "durable_fallback",
+      "hash_only",
+      acceptedPromptUuid
+    );
+    if (!snapshot) {
+      return { status: "pending" };
+    }
+    const observedAcceptance = acceptanceEvidenceFromSnapshot(snapshot);
+    if (!observedAcceptance) {
+      if (persistedAcceptance) {
+        throw new Error(
+          "the exact accepted Claude fallback prompt is absent from its transcript"
+        );
+      }
+      return {
+        status: "pending",
+        observedEndOffsetBytes: snapshot.observedEndOffsetBytes
+      };
+    }
+    if (persistedAcceptance) {
+      assertSameClaudeTranscriptAcceptance(
+        persistedAcceptance,
+        observedAcceptance,
+        snapshot
+      );
+    }
+    const completion = completionFromRecords(snapshot, {
+      requireVerifiableCompletionSignal: true
+    });
+    if (!completion) {
+      return {
+        status: "pending",
+        acceptance: persistedAcceptance ?? observedAcceptance,
+        observedEndOffsetBytes: snapshot.observedEndOffsetBytes
+      };
+    }
+    return {
+      status: "completed",
+      acceptance: persistedAcceptance ?? observedAcceptance,
+      completion,
+      observedEndOffsetBytes: snapshot.observedEndOffsetBytes
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 function acceptanceEvidenceFromSnapshot(
   snapshot: ClaudeTranscriptTurnSnapshot
 ): ClaudeTranscriptAcceptanceEvidence | undefined {
@@ -1929,10 +2073,15 @@ function readClaudeTranscriptTurnSnapshot(
   request: TerminalDurableCompletionRequest,
   options: DetectClaudeTranscriptCompletionOptions,
   requiredAgentStatus?: "idle",
-  readMode: "live_monitor" | "verified_dead_process" = "live_monitor"
+  readMode:
+    | "live_monitor"
+    | "verified_dead_process"
+    | "durable_fallback" = "live_monitor",
+  requestIdentity: "text_and_hash" | "hash_only" = "text_and_hash",
+  acceptedPromptUuid?: string
 ): ClaudeTranscriptTurnSnapshot | undefined {
   const unavailable = (reason: string): undefined => {
-    if (readMode === "verified_dead_process") {
+    if (readMode !== "live_monitor") {
       throw new Error(reason);
     }
     return undefined;
@@ -1953,9 +2102,14 @@ function readClaudeTranscriptTurnSnapshot(
     !sessionId ||
     !cwd ||
     !expectedRequestHash ||
-    !requestTextHash ||
-    !expectedPromptText ||
-    expectedRequestHash !== requestTextHash ||
+    (
+      requestIdentity === "text_and_hash" &&
+      (
+        !requestTextHash ||
+        !expectedPromptText ||
+        expectedRequestHash !== requestTextHash
+      )
+    ) ||
     startedAtMs === undefined ||
     capturedAtMs === undefined
   ) {
@@ -1976,21 +2130,23 @@ function readClaudeTranscriptTurnSnapshot(
   if (runtimePid === undefined || runtimePid !== anchor.pid) {
     throw new Error("Claude transcript anchor PID does not match the active terminal runtime");
   }
-  const agent = exactInteractiveAgent(options.agentRows, anchor.pid);
-  if (!agent) {
-    throw new Error("the exact Claude process is absent from the local agent registry");
-  }
-  if (
-    agent.startedAt !== anchor.agent_started_at_ms ||
-    agent.sessionId !== sessionId ||
-    normalizePath(agent.cwd) !== normalizePath(cwd)
-  ) {
-    throw new Error("the Claude process session identity changed after the managed send");
-  }
-  if (requiredAgentStatus && agent.status !== requiredAgentStatus) {
-    return unavailable(
-      `the exact Claude process is ${agent.status}, not ${requiredAgentStatus}`
-    );
+  if (readMode !== "durable_fallback") {
+    const agent = exactInteractiveAgent(options.agentRows, anchor.pid);
+    if (!agent) {
+      throw new Error("the exact Claude process is absent from the local agent registry");
+    }
+    if (
+      agent.startedAt !== anchor.agent_started_at_ms ||
+      agent.sessionId !== sessionId ||
+      normalizePath(agent.cwd) !== normalizePath(cwd)
+    ) {
+      throw new Error("the Claude process session identity changed after the managed send");
+    }
+    if (requiredAgentStatus && agent.status !== requiredAgentStatus) {
+      return unavailable(
+        `the exact Claude process is ${agent.status}, not ${requiredAgentStatus}`
+      );
+    }
   }
 
   const projectsRoot = projectsRootPath(
@@ -2027,7 +2183,7 @@ function readClaudeTranscriptTurnSnapshot(
       throw new Error("Claude transcript turn exceeded the bounded local read limit");
     }
     if (
-      readMode === "verified_dead_process" &&
+      readMode !== "live_monitor" &&
       !fileEndsWithNewline(opened.fd, opened.stat.size)
     ) {
       throw new Error(
@@ -2059,6 +2215,7 @@ function readClaudeTranscriptTurnSnapshot(
       cwd,
       expectedRequestHash,
       expectedPromptText,
+      ...(acceptedPromptUuid ? { expectedPromptUuid: acceptedPromptUuid } : {}),
       transcriptFileId: transcriptFileId(sessionId, fileIdentity),
       observedEndOffsetBytes: opened.stat.size
     };
@@ -2074,8 +2231,9 @@ function matchingManagedPrompt(
     const promptText = userPromptText(record);
     const exactPromptIdentity = snapshot.expectedPromptUuid
       ? uuidValue(record.uuid) === snapshot.expectedPromptUuid
-      : snapshot.expectedPromptText !== undefined &&
-        exactPromptText(promptText) === snapshot.expectedPromptText;
+      : snapshot.expectedPromptText !== undefined
+        ? exactPromptText(promptText) === snapshot.expectedPromptText
+        : exactRequestFingerprint(promptText) === snapshot.expectedRequestHash;
     return record.type === "user" &&
       isRecord(record.message) &&
       record.message.role === "user" &&
@@ -3294,7 +3452,7 @@ function exactRequestFingerprint(value: unknown): string | undefined {
   return text ? createHash("sha256").update(text).digest("hex") : undefined;
 }
 
-function claudeTranscriptAnchorFingerprint(
+export function claudeTranscriptAnchorFingerprint(
   anchor: ClaudeTranscriptAnchor
 ): string {
   return sha256Hex(JSON.stringify({

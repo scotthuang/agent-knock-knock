@@ -204,6 +204,13 @@ import {
   type TerminalUserSendIntentBoundary
 } from "./terminal-user-send-intent.js";
 import type {
+  PreparedUserExplicitFallbackWatch,
+  UserExplicitFallbackWatchReceipt
+} from "./terminal-watch-cli-adapter.js";
+import {
+  terminalUserExplicitFallbackWatchId
+} from "./terminal-watch-store.js";
+import type {
   NativeAgentSessionIdentityObservation,
   NativeIdentityResolutionRequest,
   TerminalDispatchExecutionService
@@ -710,6 +717,21 @@ interface TerminalCommandCliRawPorts {
     ) => Promise<Result>,
     options?: FileLockAcquisitionOptions
   ): Promise<Result>;
+  prepareUserExplicitFallbackWatch(input: {
+    options: TerminalCommandCliOptions;
+    terminal: TerminalCommandTarget;
+    requestHash: string;
+    messageId: string;
+    physicalToken: string;
+  }): Promise<PreparedUserExplicitFallbackWatch | undefined>;
+  attachUserExplicitFallbackWatch(input: {
+    options: TerminalCommandCliOptions;
+    prepared: PreparedUserExplicitFallbackWatch;
+  }): Promise<UserExplicitFallbackWatchReceipt>;
+  userExplicitFallbackWatchReceipt(input: {
+    options: TerminalCommandCliOptions;
+    watchId: string;
+  }): UserExplicitFallbackWatchReceipt | undefined;
 }
 
 export interface TerminalCommandCliDependencies {
@@ -821,9 +843,13 @@ const parseJsonOption = rawPort("parseJsonOption");
 const persistManagedSessionNativeIdentity =
   rawPort("persistManagedSessionNativeIdentity");
 const positiveMinutes = rawPort("positiveMinutes");
+const prepareUserExplicitFallbackWatch =
+  rawPort("prepareUserExplicitFallbackWatch");
 const processIncarnationForPid = rawPort("processIncarnationForPid");
 const prepareDeferredCodexForegroundBinding =
   rawPort("prepareDeferredCodexForegroundBinding");
+const attachUserExplicitFallbackWatch =
+  rawPort("attachUserExplicitFallbackWatch");
 const quarantineManagedSessionBinding = rawPort("quarantineManagedSessionBinding");
 const reattachManagedSessionForNativeIdentity =
   rawPort("reattachManagedSessionForNativeIdentity");
@@ -869,6 +895,8 @@ const verifyCodexPendingManagedSendStatus =
   rawPort("verifyCodexPendingManagedSendStatus");
 const withTerminalBridgeSubmission = rawPort("withTerminalBridgeSubmission");
 const withTerminalDispatchStateScope = rawPort("withTerminalDispatchStateScope");
+const userExplicitFallbackWatchReceipt =
+  rawPort("userExplicitFallbackWatchReceipt");
 
 const mutationDispatchLedger = new Proxy({}, {
   get: (_target, property) =>
@@ -5514,6 +5542,7 @@ function acquireUserExplicitTerminalSendLock(
 }
 
 function printReplayedUserExplicitSend(
+  options: TerminalCommandCliOptions,
   terminal: TerminalCommandTarget,
   intent: TerminalUserSendIntentContext,
   deliveryMode: TerminalUserSendDeliveryMode
@@ -5533,10 +5562,19 @@ function printReplayedUserExplicitSend(
     });
     return;
   }
+  const watchId = terminalUserExplicitFallbackWatchId({
+    messageId: intent.messageId,
+    physicalToken: intent.boundary.physicalToken,
+    requestHash: intent.boundary.requestHash
+  });
+  const callbackReceipt = userExplicitFallbackWatchReceipt({
+    options,
+    watchId
+  });
   printJson({
     delivered: true,
     delivered_unmanaged: true,
-    callback_expected: false,
+    ...(callbackReceipt ?? { callback_expected: false }),
     management_mode: "unmanaged_fallback",
     replayed: true,
     terminal_id: terminal.conversationId,
@@ -5584,6 +5622,7 @@ function reserveUserExplicitSendIntent(
   // degrade into a fresh physical Send.
   if (reservation.outcome === "replay") {
     printReplayedUserExplicitSend(
+      options,
       terminal,
       intent,
       required(
@@ -5782,6 +5821,31 @@ async function runUserExplicitTerminalFallback(
       });
       throw error;
     }
+    let preparedCallbackWatch: PreparedUserExplicitFallbackWatch | undefined;
+    const callbackWarnings: string[] = [];
+    try {
+      preparedCallbackWatch = await prepareUserExplicitFallbackWatch({
+        options,
+        terminal: fresh,
+        requestHash: intentLease.intent.boundary.requestHash,
+        messageId,
+        physicalToken: intentLease.intent.boundary.physicalToken
+      });
+    } catch (error) {
+      const warning = `automatic callback Watch preparation failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+      callbackWarnings.push(warning);
+      runtimeLog(
+        "warn",
+        "terminal_user_explicit_fallback_watch_prepare_failed",
+        {
+          terminal_id: fresh.conversationId,
+          message_id: messageId,
+          warning
+        }
+      );
+    }
     let composerDisposition: "replaced_current_composer" =
       "replaced_current_composer";
     try {
@@ -5873,6 +5937,31 @@ async function runUserExplicitTerminalFallback(
       );
       throw error;
     }
+    let callbackReceipt: UserExplicitFallbackWatchReceipt | undefined;
+    if (preparedCallbackWatch) {
+      try {
+        callbackReceipt = await attachUserExplicitFallbackWatch({
+          options,
+          prepared: preparedCallbackWatch
+        });
+      } catch (error) {
+        const warning = `automatic callback Watch attachment failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        callbackWarnings.push(warning);
+        runtimeLog(
+          "warn",
+          "terminal_user_explicit_fallback_watch_attach_failed",
+          {
+            terminal_id: fresh.conversationId,
+            message_id: messageId,
+            watch_id: preparedCallbackWatch.watchId,
+            warning,
+            delivered: true
+          }
+        );
+      }
+    }
     let cleanupWarnings: string[];
     try {
       cleanupWarnings = await bestEffortReleaseTerminalManagementForExplicitSend({
@@ -5902,7 +5991,8 @@ async function runUserExplicitTerminalFallback(
       delivered_unmanaged: true,
       cleanup_warnings: cleanupWarnings,
       intent_warnings: intentWarnings,
-      callback_expected: false,
+      callback_warnings: callbackWarnings,
+      ...(callbackReceipt ?? { callback_expected: false }),
       terminal_id: fresh.conversationId,
       message_id: messageId,
       scope: "terminal_user_explicit",
@@ -5916,10 +6006,16 @@ async function runUserExplicitTerminalFallback(
       previous_management_release_attempted: true,
       warning: textSummary(
         `AKK delivered the user's message after managed-state preparation ` +
-        `failed (${fallbackReason}). No callback Turn was claimed.`
+        `failed (${fallbackReason}). ` +
+        (callbackReceipt
+          ? `Terminal Watch ${callbackReceipt.watch_id} now provides the ` +
+            `completion callback; no managed Turn was claimed.`
+          : "No callback Watch could be attached.")
       ),
-      next_action:
-        "refresh AKK list; the live coding agent continues independently of AKK callback state"
+      next_action: callbackReceipt
+        ? `wait for Terminal Watch ${callbackReceipt.watch_id} callback; ` +
+          "watch-status remains available for recovery"
+        : "refresh AKK list; the live coding agent continues independently of AKK callback state"
     });
   } finally {
     releaseTerminalLockOnce();

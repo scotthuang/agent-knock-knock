@@ -9,13 +9,16 @@ import {
   captureClaudeHumanStartedActiveTaskAnchor,
   captureClaudeTranscriptAnchor,
   detectClaudeTranscriptAcceptance,
+  detectClaudeTranscriptAcceptanceByHash,
   detectClaudeTranscriptCompletion,
+  detectClaudeTranscriptCompletionByHash,
   detectClaudeTranscriptPendingApproval,
   initialClaudeHumanStartedActiveTaskCheckpoint,
   listClaudeHistoricalSessions,
   listClaudeThreadLifecycleCandidates,
   observeClaudeHumanStartedActiveTask,
   observeClaudeDeadProcessTranscriptCompletion,
+  observeClaudeUserExplicitFallbackTranscript,
   revalidateClaudeThreadLifecycleCandidate,
   validateClaudeHumanStartedActiveTaskAnchor,
   validateClaudeHumanStartedActiveTaskCheckpoint,
@@ -997,6 +1000,87 @@ test("Claude 2.1.237 transcript supports lifecycle, acceptance, completion, and 
   const approval = pending.detectPending(pendingAnchor, pendingRequest);
   assert.equal(approval?.claudeVersion, CURRENT_VERSION);
   assert.equal(approval?.toolName, "Bash");
+});
+
+test("fallback Watch identifies one anchored Claude request from its hash only", (t) => {
+  const fixture = createFixture(t, 240);
+  const request = "Complete this exact user-explicit fallback request";
+  const anchor = fixture.capture();
+  fixture.write(turnRecords({
+    request,
+    assistantText: "Hash-only fallback completion",
+    sessionId: fixture.sessionId,
+    version: CURRENT_VERSION,
+    ids: 6240
+  }));
+  const durableRequest = {
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    requestHash: fingerprint(request),
+    startedAt: anchor.captured_at,
+    context: {
+      claudeTranscriptAnchor: anchor,
+      pid: PID
+    }
+  };
+  const providerOptions = {
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  };
+
+  const acceptance = detectClaudeTranscriptAcceptanceByHash(
+    durableRequest,
+    providerOptions
+  );
+  assert.equal(acceptance?.requestHash, fingerprint(request));
+  assert.equal(acceptance?.metadata?.prompt_uuid, uuid(6240));
+  assert.equal(
+    detectClaudeTranscriptCompletionByHash(durableRequest, providerOptions)
+      ?.text,
+    "Hash-only fallback completion"
+  );
+  assert.equal(JSON.stringify(durableRequest).includes(request), false);
+  const firstDurableSweep = observeClaudeUserExplicitFallbackTranscript(
+    durableRequest,
+    { claudeHome: fixture.claudeHome }
+  );
+  assert.equal(firstDurableSweep.status, "completed");
+  if (firstDurableSweep.status === "completed") {
+    assert.equal(
+      firstDurableSweep.completion.text,
+      "Hash-only fallback completion"
+    );
+  }
+
+  fixture.append(turnRecords({
+    request,
+    assistantText: "Later identical completion must not redirect Watch",
+    sessionId: fixture.sessionId,
+    version: CURRENT_VERSION,
+    ids: 6250
+  }));
+  const durable = observeClaudeUserExplicitFallbackTranscript(
+    durableRequest,
+    {
+      claudeHome: fixture.claudeHome,
+      acceptanceEvidence: acceptance
+    }
+  );
+  assert.equal(durable.status, "completed");
+  if (durable.status === "completed") {
+    assert.equal(durable.completion.text, "Hash-only fallback completion");
+    assert.equal(durable.acceptance.acceptanceId, uuid(6240));
+  }
+
+  const wrongRequest = { ...durableRequest, requestHash: "f".repeat(64) };
+  assert.equal(
+    detectClaudeTranscriptAcceptanceByHash(wrongRequest, providerOptions),
+    undefined
+  );
+  assert.equal(
+    detectClaudeTranscriptCompletionByHash(wrongRequest, providerOptions),
+    undefined
+  );
 });
 
 test("Claude lifecycle candidate discovery excludes sidechains, teams, daemons, and loops", (t) => {

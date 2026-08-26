@@ -47,7 +47,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v22 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v23 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -272,7 +272,7 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(readme, /v22 `action_contracts`/u);
+  assert.match(readme, /v23 `action_contracts`/u);
   assert.match(
     readme,
     /`terminal_user_explicit`[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state/u
@@ -284,17 +284,17 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
   assert.match(readme, /Composer observation cannot veto Enter/u);
   assert.match(
     readme,
-    /unmanaged work[\s\S]*best-effort[\s\S]*no callback[\s\S]*Watch/u
+    /unmanaged work[\s\S]*best-effort attaches a Terminal Watch[\s\S]*completion callback[\s\S]*failure[^.]*never vetoes/u
   );
-  assert.match(skill, /v22 `action_contracts`/u);
-  assert.match(readme, /current writer protocol is 5/u);
+  assert.match(skill, /v23 `action_contracts`/u);
+  assert.match(readme, /current writer protocol is 6/u);
   assert.match(
     readme,
-    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 5/u
+    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 6/u
   );
   assert.match(
     readme,
-    /Protocols 3 and 4 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
+    /Protocols 3, 4, and 5 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
   );
   assert.match(
     readme,

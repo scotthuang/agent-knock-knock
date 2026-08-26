@@ -1714,12 +1714,16 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     parseJsonOption,
     persistManagedSessionNativeIdentity,
     positiveMinutes,
+    prepareUserExplicitFallbackWatch: (input) =>
+      terminalWatchCliFacade.prepareUserExplicitFallbackWatch(input),
     processIncarnationForPid: (pid) =>
       terminalProcessIncarnationForPid(
         pid,
         cliDependencies().processBirthForPid ??
           cliDependencies().codexProcessBirthForPid
       ),
+    attachUserExplicitFallbackWatch: (input) =>
+      terminalWatchCliFacade.attachUserExplicitFallbackWatch(input),
     prepareDeferredCodexForegroundBinding,
     quarantineManagedSessionBinding,
     reattachManagedSessionForNativeIdentity,
@@ -1757,6 +1761,8 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     terminalRuntimeIdentityForConversation,
     terminalWriterMutationLocks,
     textSummary,
+    userExplicitFallbackWatchReceipt: (input) =>
+      terminalWatchCliFacade.userExplicitFallbackWatchReceipt(input),
     verifyCodexPendingManagedSendStatus,
     withTerminalBridgeSubmission,
     withTerminalDispatchStateScope
