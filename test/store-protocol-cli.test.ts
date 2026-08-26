@@ -327,7 +327,7 @@ test("explicit physical send bypasses a newer writer protocol without mutating S
     assert.equal(output.scope, "terminal_user_explicit");
     assert.equal(pendingText, "");
     assert.deepEqual(terminalProvider.literalInputs(), [message]);
-    assert.deepEqual(terminalProvider.keyDispatches(), [["C-m"]]);
+    assert.deepEqual(terminalProvider.keyDispatches(), [["C-u"], ["C-m"]]);
     assert.deepEqual({
       manifest: fileSnapshot(manifestPath),
       ...conversationFileSnapshots(fixture.paths)

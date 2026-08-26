@@ -706,7 +706,7 @@ test("list exposes terminal-controlled Codex working activity state", async () =
   }
 });
 
-test("list recognizes the current Codex composer marker and keeps unknown screens fail closed", async () => {
+test("list recognizes the current Codex composer marker and keeps explicit Send on unknown non-approval screens", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-list-current-codex-composer-")
   );
@@ -796,7 +796,15 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
     assert.equal("commands" in unknownEntry, false);
     assert.deepEqual(
       Object.keys(unknownEntry.available_actions),
-      ["status"]
+      ["status", "send"]
+    );
+    assert.equal(
+      unknownEntry.available_actions.send.scope,
+      "terminal_user_explicit"
+    );
+    assert.equal(
+      unknownEntry.available_actions.send.composer_policy,
+      "replace_current_composer_and_submit"
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
