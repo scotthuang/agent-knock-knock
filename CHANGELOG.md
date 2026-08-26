@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Fixed
+
+- Keep an explicit user Send available for a verified mutable Codex prompt even when its composer already contains a stable draft. An empty composer receives the new request, an identical draft receives exactly one Enter without duplicate text injection, and a different draft is cleared once, replaced by the new request, and then submitted once.
+- Use one shared prepared timestamp for a deferred foreground transfer, its Turn submission receipt, and its dispatch ledger, preventing real-clock drift from producing a half-submit authority mismatch between otherwise identical evidence.
+
+### Changed
+
+- Advance the model-facing action contract to 20 and advertise the Codex `terminal_user_explicit` composer policy as `submit_if_exact_replace_if_different`. Claude Code user-explicit Send, managed Send, native inspection, and native lifecycle input remain restricted to a verified empty composer.
+
+### Security
+
+- Revalidate the exact Codex terminal/process identity, non-approval state, stable composer digest, and user request immediately around clear, text, and Enter boundaries. Live working activity remains diagnostic rather than a veto for this user-explicit path. A failure after the sole draft-clear key is uncertain and must not be retried automatically; draft text and opaque composer authority remain outside model-facing actions and durable receipts.
+
 ## 0.12.16 - 2026-08-26
 
 ### Added

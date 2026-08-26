@@ -87,6 +87,7 @@ export function deferredForegroundBoundaryProjection(
   const projected: DeferredForegroundBindingBoundary = {
     terminal: projectDeferredForegroundTerminalFacts(boundary.terminal),
     transferId: boundary.transferId,
+    preparedAt: boundary.preparedAt,
     targetSessionId: boundary.targetSessionId,
     sourceSessionId: boundary.sourceSessionId,
     sourceBoundRevision: boundary.sourceBoundRevision,
@@ -131,6 +132,7 @@ export function deferredForegroundConcreteBoundary(
   const concrete: DeferredCodexForegroundBindingBoundary = {
     terminal,
     transferId: boundary.transferId,
+    preparedAt: boundary.preparedAt,
     targetSessionId: boundary.targetSessionId,
     sourceSessionId: boundary.sourceSessionId,
     sourceBoundRevision: boundary.sourceBoundRevision,

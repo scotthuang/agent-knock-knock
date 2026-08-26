@@ -55,6 +55,8 @@ const CODEX_STATUS_COMPOSER = [
   "› /status",
   "  /status  show current session configuration and token usage"
 ].join("\n");
+const CODEX_EMPTY_COMPOSER =
+  "Ready\n› \ngpt-5.6-sol high · /repo";
 
 interface StickyRolloutFixtureOptions {
   exactStatusProbe?: boolean;
@@ -171,7 +173,7 @@ export class StickyRolloutFixture {
           ? { columns: 100, rows: 30 }
           : {})
       }],
-      screens: { [this.target]: "Ready\n› " },
+      screens: { [this.target]: CODEX_EMPTY_COMPOSER },
       hooks: {
         sendText: async ({ text }) => this.onSendText(text),
         sendKeys: async ({ keys }) => this.onSendKeys(keys)
@@ -259,7 +261,10 @@ export class StickyRolloutFixture {
   }
 
   setScreen(screen: string): void {
-    this.provider.setScreen(this.target, screen);
+    this.provider.setScreen(
+      this.target,
+      screen === "Ready\n› " ? CODEX_EMPTY_COMPOSER : screen
+    );
   }
 
   acceptNextTaskInActiveRollout(): void {
@@ -409,12 +414,12 @@ export class StickyRolloutFixture {
       this.activeThreadId = this.clearCount >= 2
         ? STICKY_THREAD_IDS.c
         : STICKY_THREAD_IDS.b;
-      this.setScreen("Cleared\n› ");
+      this.setScreen("Cleared\n› \ngpt-5.6-sol high · /repo");
       return;
     }
     if (text.startsWith("/resume ")) {
       this.activeThreadId = text.slice("/resume ".length).trim().toLowerCase();
-      this.setScreen("Resumed\n› ");
+      this.setScreen("Resumed\n› \ngpt-5.6-sol high · /repo");
       return;
     }
     if (this.activeThreadId === STICKY_THREAD_IDS.b &&

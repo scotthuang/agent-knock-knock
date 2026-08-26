@@ -2782,7 +2782,12 @@ retaining this commit as the historical comparison point.
 Issue #206 adds Terminal Watch as a new aggregate beside, not inside, the
 managed Session/Turn architecture. The v16 action-contract and 14-tool sections
 above remain immutable historical snapshots; the current public delta is list
-action-contract v19 and 16 registered OpenClaw tools.
+action-contract v20 and 16 registered OpenClaw tools. v20 keeps every structured
+Send semantic-ID-only while giving Codex `terminal_user_explicit` a closed
+composer policy: inject into empty, submit an identical draft with Enter only,
+or clear and replace a different stable draft before Enter. Claude Code
+user-explicit Send, managed Send, native inspection, and lifecycle input remain
+exact-empty-only; no draft text or composer digest crosses the model boundary.
 
 ### Aggregate and persistence boundary
 

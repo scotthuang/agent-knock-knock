@@ -63,6 +63,7 @@ import {
   type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
 import {
+  codexUserExplicitComposerCapture,
   exactCodexReadyStyledComposerCapture,
   TerminalAgentBridge,
   type ResolvedTerminalConversation,
@@ -674,6 +675,7 @@ function physicalOnlyTerminalProjection(
     terminals: terminals.map((terminal) => {
       const {
         _automated_input_composer_ready: _composer,
+        _user_explicit_composer_ready: _userComposer,
         _codex_open_root_rollout_inventory: _inventory,
         _codex_latent_clear_resume: _resume,
         _terminal_user_explicit_send_action: terminalUserExplicitSendAction,
@@ -1272,12 +1274,16 @@ async function terminalControlledListEntry(
       error: error instanceof Error ? error.message : String(error)
     });
   }
-  const automatedInputComposerReady = await observeAutomatedInputComposerReady({
+  const composerAuthority = await observeAutomatedInputComposerReady({
     session,
     terminalControl,
     terminalState: effectiveTerminalState,
     options
   });
+  const automatedInputComposerReady =
+    composerAuthority.automatedInputComposerReady;
+  const userExplicitComposerReady =
+    composerAuthority.userExplicitComposerReady;
   let physicalProcessIncarnation:
     | ReturnType<TerminalListDiscoveryPorts["processIncarnationForPid"]>
     | undefined;
@@ -1338,6 +1344,7 @@ async function terminalControlledListEntry(
     // this field after gating every automated-input action that can follow a
     // human native-thread switch.
     _automated_input_composer_ready: automatedInputComposerReady,
+    _user_explicit_composer_ready: userExplicitComposerReady,
     ...(codexLatentClearResumeObservationValue
       ? {
           _codex_latent_clear_resume: {
@@ -1402,7 +1409,7 @@ async function terminalControlledListEntry(
       processBirth: physicalProcessIncarnation?.processBirth,
       approvalScanned: effectiveTerminalState.approval_state.scanned === true,
       approvalBlocked: effectiveTerminalState.approval_state.blocked === true,
-      exactEmptyComposer: automatedInputComposerReady
+      userExplicitComposerReady
     });
   const terminalUserExplicitSendAction =
     terminalUserExplicitSendAuthority.eligible
@@ -1414,7 +1421,13 @@ async function terminalControlledListEntry(
               terminalUserExplicitSendAuthority.expectedTerminalToken
           },
           missing_required: ["request"],
-          scope: "terminal_user_explicit"
+          scope: "terminal_user_explicit",
+          ...(session.agent === "codex"
+            ? {
+                composer_policy:
+                  "submit_if_exact_replace_if_different"
+              }
+            : {})
         }
       : undefined;
   const { commands: _commands, ...publicEntry } = entry;
@@ -1777,18 +1790,26 @@ async function observeAutomatedInputComposerReady({
   terminalControl: TerminalControlRef;
   terminalState: Awaited<ReturnType<typeof listStateForTerminal>>;
   options: TerminalListCliOptions;
-}): Promise<boolean> {
+}): Promise<{
+  automatedInputComposerReady: boolean;
+  userExplicitComposerReady: boolean;
+}> {
   let ready = terminalListRuntime().nativeInspectionComposerEmpty(
     session.agent,
     terminalState.screen_excerpt
   );
+  let userExplicitReady =
+    ready && terminalState.activity_state !== "awaiting_approval";
   if (
     session.agent !== "codex" ||
     terminalState.approval_state.blocked === true ||
     !terminalControl.capabilities.includes("send_keys") ||
     !terminalControl.capabilities.includes("screen_status")
   ) {
-    return ready;
+    return {
+      automatedInputComposerReady: ready,
+      userExplicitComposerReady: userExplicitReady
+    };
   }
   try {
     const provider = terminalListRuntime().createTerminalControlProvider(options);
@@ -1800,12 +1821,22 @@ async function observeAutomatedInputComposerReady({
       { scrollbackLines: 40, preserveEscapes: true }
     );
     ready = exactCodexReadyStyledComposerCapture(styledScreen) !== undefined;
+    userExplicitReady =
+      terminalState.activity_state !== "awaiting_approval" &&
+      (
+        ready ||
+        codexUserExplicitComposerCapture(styledScreen) !== undefined
+      );
   } catch {
     // Advertising an input action is optional. The action itself repeats the
     // same styled composer proof under the terminal lock before any input.
     ready = false;
+    userExplicitReady = false;
   }
-  return ready;
+  return {
+    automatedInputComposerReady: ready,
+    userExplicitComposerReady: userExplicitReady
+  };
 }
 
 type TerminalFirstListContext = {
@@ -1839,6 +1870,7 @@ function observeTerminalListBindingAuthority(
   } = context;
   const {
     _automated_input_composer_ready: automatedInputComposerReady,
+    _user_explicit_composer_ready: _userExplicitComposerReady,
     _codex_open_root_rollout_inventory: codexOpenRootRolloutInventoryValue,
     _codex_latent_clear_resume: codexLatentClearResumeValue,
     _terminal_user_explicit_send_action: terminalUserExplicitSendAction,

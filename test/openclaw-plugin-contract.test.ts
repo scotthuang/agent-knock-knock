@@ -606,7 +606,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "ab251ec2d86bd96d570578fd9b61c2ce2d310788cb194cb0dff01d3908911521"
+    "423e0a01be600e6fc6aafcb4243b9f1bdb483a75e1b65fc025d2b8f0971ca0d2"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -704,6 +704,9 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
       },
       terminals: [{
         id: terminalId,
+        _user_explicit_composer_ready: true,
+        composer_digest: "private-composer-digest",
+        composer_draft: "private-composer-draft",
         handoff_decision: {
           live_native_thread_id: "private-handoff-live-native-id"
         },
@@ -714,6 +717,8 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
         available_actions: {
           send: {
             tool: "agent_knock_knock_send",
+            scope: "terminal_user_explicit",
+            composer_policy: "submit_if_exact_replace_if_different",
             arguments: {
               selector: terminalId,
               expected_terminal_token: "private-terminal-token",
@@ -958,12 +963,24 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
     const send = isRecord(actions.send) && isRecord(actions.send.arguments)
       ? actions.send.arguments
       : {};
+    const sendAction = isRecord(actions.send) ? actions.send : {};
     const approve = isRecord(actions.approve) &&
         isRecord(actions.approve.arguments)
       ? actions.approve.arguments
       : {};
     assert.equal(send.terminal_id, terminalId);
     assert.equal(Object.hasOwn(send, "selector"), false);
+    assert.equal(sendAction.scope, "terminal_user_explicit");
+    assert.equal(
+      sendAction.composer_policy,
+      "submit_if_exact_replace_if_different"
+    );
+    assert.equal(
+      Object.hasOwn(terminal, "_user_explicit_composer_ready"),
+      false
+    );
+    assert.equal(Object.hasOwn(terminal, "composer_digest"), false);
+    assert.equal(Object.hasOwn(terminal, "composer_draft"), false);
     assert.equal(approve.terminal_id, terminalId);
     assert.equal(Object.hasOwn(approve, "conversation_id"), false);
     const approveBeforeCall = isRecord(actions.approve) &&
@@ -2075,17 +2092,20 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.match(sendTool?.description ?? "", /session_id/u);
     assert.match(sendTool?.description ?? "", /terminal_id/u);
     assert.match(sendTool?.description ?? "", /exact \{turn_id\} form/u);
-    assert.match(sendTool?.description ?? "", /freshness authority privately/u);
     assert.match(
       sendTool?.description ?? "",
-      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+      /opaque freshness authority stay private/u
+    );
+    assert.match(
+      sendTool?.description ?? "",
+      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*parsed working activity does not veto[\s\S]*Codex injects[\s\S]*clears and replaces[\s\S]*Claude Code remains exact-empty-only[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
     );
     const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
     assert.match(
       isRecord(terminalIdSchema)
         ? String(terminalIdSchema.description ?? "")
         : "",
-      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*managed fast path[\s\S]*unmanaged delivery[\s\S]*no callback[\s\S]*use Watch/u
+      /Codex terminal_user_explicit[\s\S]*no active approval[\s\S]*injects into empty[\s\S]*identical draft with Enter only[\s\S]*clears and replaces a different draft[\s\S]*Claude Code terminal_user_explicit remains exact-empty-only[\s\S]*Broken AKK state cannot veto[\s\S]*unmanaged delivery has no callback[\s\S]*use Watch/u
     );
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {

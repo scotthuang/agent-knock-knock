@@ -120,6 +120,7 @@ export class DeferredForegroundApplicationService {
   ): void {
     scope.assertBoundary(boundary);
     const same = transfer.transfer_id === boundary.transferId &&
+      transfer.prepared_at === boundary.preparedAt &&
       transfer.source_session_id === boundary.sourceSessionId &&
       transfer.target_session_id === boundary.targetSessionId &&
       transfer.source_expected_revision === boundary.sourceBoundRevision &&

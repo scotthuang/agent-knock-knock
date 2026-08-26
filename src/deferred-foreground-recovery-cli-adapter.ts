@@ -237,6 +237,7 @@ export function deferredCodexBoundaryFromTransfer(ports: DeferredForegroundRecov
   return {
     terminal,
     transferId: transfer.transfer_id,
+    preparedAt: transfer.prepared_at,
     targetSessionId: transfer.target_session_id,
     sourceSessionId: transfer.source_session_id,
     sourceBoundRevision: transfer.source_expected_revision,

@@ -194,6 +194,7 @@ export type TerminalDispatchExecutionPreflight =
 
 export interface TerminalDispatchTransportLifecycle {
   requireExactComposerBeforeEnter: boolean;
+  requireExactEmptyComposerBeforeText?: boolean;
   beforeText?: () => Promise<void>;
   beforeEnter?: () => Promise<void>;
   onTransportStage(input: {

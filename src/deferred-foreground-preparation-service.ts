@@ -187,7 +187,7 @@ export async function prepareDeferredForegroundBinding(
     previous_dispatch_fingerprint: authority.dispatchSnapshot.fingerprint,
     request_hash: ports.identity.requestHash(request.requestText),
     dispatcher_pid: ports.runtime.pid(),
-    prepared_at: ports.runtime.now().toISOString()
+    prepared_at: boundary.preparedAt
   }, null);
   return boundary;
 }
@@ -229,13 +229,15 @@ function buildBoundary(
 ): DeferredForegroundBindingBoundary {
   const targetSessionId = ports.identity.targetSessionId();
   const transferId = ports.identity.transferId();
+  const preparedAt = ports.runtime.now().toISOString();
   const inventory = request.candidateInventory;
   const candidateAcceptanceAnchor = inventory?.roots.length
-    ? ports.identity.captureCandidateAnchor(inventory, ports.runtime.now())
+    ? ports.identity.captureCandidateAnchor(inventory, new Date(preparedAt))
     : undefined;
   return {
     terminal: request.terminal,
     transferId,
+    preparedAt,
     targetSessionId,
     sourceSessionId: source.session_id,
     sourceBoundRevision: managedSessionRevision(source),

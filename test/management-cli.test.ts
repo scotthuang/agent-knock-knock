@@ -160,14 +160,18 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 19);
+    assert.equal(listed.action_contracts.version, 20);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*internal state prevents[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+      /terminal_user_explicit[\s\S]*exact live physical prompt[\s\S]*same existing draft receives Enter only[\s\S]*different existing draft is cleared and replaced[\s\S]*unmanaged work[\s\S]*no callback[\s\S]*use Watch/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /parsed working activity does not veto/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -368,7 +372,12 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.actions.send.initial_attach_scope,
-      /terminal_user_explicit[\s\S]*terminal_id prefilled by an exact live terminal row[\s\S]*selector explicitly named by the user/u
+      /terminal_user_explicit[\s\S]*terminal_id prefilled by an exact live terminal row[\s\S]*selector explicitly named by the user[\s\S]*identical existing draft with Enter only[\s\S]*clears and replaces a different existing draft/u
+    );
+    assert.equal(
+      listed.action_contracts.actions.send
+        .codex_terminal_user_explicit_composer_policy,
+      "submit_if_exact_replace_if_different"
     );
     assert.deepEqual(
       listed.action_contracts.actions.send.required,
@@ -753,11 +762,15 @@ test("list recognizes the current Codex composer marker and keeps unknown screen
     );
     assert.equal(
       typeof idleEntry.available_actions.send.arguments.expected_terminal_token,
-      "undefined"
+      "string"
     );
     assert.equal(
       idleEntry.available_actions.send.scope,
-      undefined
+      "terminal_user_explicit"
+    );
+    assert.equal(
+      idleEntry.available_actions.send.composer_policy,
+      "submit_if_exact_replace_if_different"
     );
     assert.equal(idleEntry.available_actions.cancel, undefined);
 

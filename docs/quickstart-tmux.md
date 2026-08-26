@@ -34,7 +34,7 @@ tmux new-session -s akk-work -c "$(pwd -P)" codex
 
 Use `claude` instead of `codex` to share a Claude Code terminal. Wait until the coding agent is authenticated and showing its idle prompt. Detach from tmux with `Ctrl-b`, followed by `d`.
 
-AKK discovers supported Codex and Claude Code panes across workspaces. Before acting, it revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match; sending new work also requires a verified idle prompt.
+AKK discovers supported Codex and Claude Code panes across workspaces. Before acting, it revalidates the expected agent PID and tmux pane identity, then confirms that the process and pane working directories still match. Managed Send requires a verified idle prompt; an advertised user-explicit physical Send may steer a working pane when its approval and composer proofs remain valid.
 
 ## 3. Run doctor
 
@@ -58,7 +58,7 @@ Doctor verifies the installed plugin and skill, Gateway health, tmux, and at lea
 /akk inspect this repository and summarize it
 ```
 
-The bare task works when exactly one send-ready coding-agent pane exists across all workspaces. Send-ready means an exact live terminal/process, a verified non-blocked approval state, and an exactly empty composer; `activity_state` and broken AKK management state do not veto this user-explicit Send. If more than one pane is eligible, AKK stops instead of guessing: run `/akk list`, then use `/akk <selector>: <message>`, for example:
+The bare task works when exactly one send-ready coding-agent pane exists across all workspaces. Send-ready means an exact live terminal/process, a verified non-blocked approval state, and an agent-supported composer; parsed working activity does not veto this user-priority path. Claude Code still requires an exactly empty composer. Codex accepts an empty or stable nonempty composer: it injects into empty, submits an identical draft with Enter only, or clears and replaces a different draft before Enter. Broken AKK management state does not veto this user-explicit Send. If more than one pane is eligible, AKK stops instead of guessing: run `/akk list`, then use `/akk <selector>: <message>`, for example:
 
 ```text
 /akk @a1b2c3d4: inspect this repository and summarize it
@@ -68,7 +68,7 @@ Success returns a managed turn and, when the work finishes, its result. The same
 
 `/akk list` keeps that physical pane as the primary resource: it appears once in `terminals[]` with live `process_state` and `activity_state`. Its managed context follows terminal → native coding-agent session → AKK `session_id` → Turns. AKK places the active Turn under `managed.current_turn`, or the newest retained Turn under `managed.recent_turn`; retained Turns do not occupy or hide the pane.
 
-For another request, refresh `/akk list` and use only that terminal row's listed v19 `send` action. A `session_exact` action carries `session_id`; `terminal_follow_current` and user-priority `terminal_user_explicit` actions carry `terminal_id`. Add only the new request text. The two target fields are mutually exclusive, and a structured model call never carries a selector or opaque token. AKK derives and revalidates its freshness fences internally. Managed delivery creates a new `turn_id`. If broken AKK state prevents managed delivery before input, `terminal_user_explicit` sends once without a callback Turn, then releases stale management best-effort; refresh the list and use Watch. A completed Turn is history, not the destination of the next send. Human-friendly selectors such as `codex`, `only`, or `@a1b2c3d4` remain slash-command discovery conveniences; they are not structured action authority.
+For another request, refresh `/akk list` and use only that terminal row's listed v20 `send` action. A `session_exact` action carries `session_id`; `terminal_follow_current` and user-priority `terminal_user_explicit` actions carry `terminal_id`. Add only the new request text. The two target fields are mutually exclusive, and a structured model call never carries a selector, draft text, composer digest, or opaque token. AKK derives and revalidates its freshness fences internally. Managed delivery remains exact-empty-only and creates a new `turn_id`; native inspection and lifecycle input also remain exact-empty-only. If managed delivery cannot run before input, Codex `terminal_user_explicit` applies `submit_if_exact_replace_if_different`, while Claude user-explicit delivery still requires empty. The physical fallback runs once without a callback Turn, then releases stale management best-effort; a failure after Codex clears a different draft is uncertain and must not be retried automatically. Refresh the list and use Watch. A completed Turn is history, not the destination of the next send. Human-friendly selectors such as `codex`, `only`, or `@a1b2c3d4` remain slash-command discovery conveniences; they are not structured action authority.
 
 If the coding agent asks a question and the active Turn becomes `waiting_for_openclaw`, use the listed `respond` action with its prefilled `turn_id`, or the equivalent form:
 
