@@ -540,7 +540,16 @@ if (args[0] === "send-keys" && args.includes("-l")) {
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Cleared\\n› ");
   } else {
     fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
-    fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
+    const [first = "", ...continuation] = String(text).split("\\n");
+    fs.writeFileSync(
+      ${JSON.stringify(options.screenPath)},
+      [
+        "Ready",
+        "› " + first,
+        ...continuation.map((row) => "  " + row),
+        "gpt-5.6-sol high · /repo"
+      ].join("\\n")
+    );
   }
   process.exit(0);
 }
@@ -560,6 +569,8 @@ if (args[0] === "send-keys" && args.includes("C-m")) {
       "/status\\nprobe-" + next + "\\nSession: " + id + "\\n" +
       ${JSON.stringify(CODEX_EMPTY_COMPOSER_SCREEN)}
     );
+  } else if (screen.startsWith("Ready\\n› ")) {
+    fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
   }
   process.exit(0);
 }
@@ -671,7 +682,16 @@ function tmux(args) {
         fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Cleared\\n› ");
       } else {
         fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
-        fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
+        const [first = "", ...continuation] = String(text).split("\\n");
+        fs.writeFileSync(
+          ${JSON.stringify(options.screenPath)},
+          [
+            "Ready",
+            "› " + first,
+            ...continuation.map((row) => "  " + row),
+            "gpt-5.6-sol high · /repo"
+          ].join("\\n")
+        );
       }
     } else if (operationArgs.includes("C-m")) {
       const screen = fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8");
@@ -689,6 +709,8 @@ function tmux(args) {
           "/status\\nprobe-" + next + "\\nSession: " + id + "\\n" +
           ${JSON.stringify(CODEX_EMPTY_COMPOSER_SCREEN)}
         );
+      } else if (screen.startsWith("Ready\\n› ")) {
+        fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
       }
     }
   }

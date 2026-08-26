@@ -562,6 +562,17 @@ function directFakeTerminalCommand(
       },
       sendKeys(operation) {
         record(["send-keys", "-t", operation.target, ...operation.keys]);
+        if (operation.keys.includes("C-u")) {
+          const acceptanceRolloutPath =
+            commandEnvironment.AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH;
+          if (acceptanceRolloutPath) {
+            fs.rmSync(`${acceptanceRolloutPath}.pending-input`, {
+              force: true
+            });
+          }
+          writeScreen(codexEmptyComposerScreen);
+          return;
+        }
         if (operation.keys.at(-1) !== "C-m") {
           return;
         }
@@ -1226,6 +1237,20 @@ if (args[0] === "send-keys" && args.includes("-l")) {
 }
 if (args[0] === "paste-buffer" && process.env.AKK_TEST_TMUX_COMPOSER_AFTER_PASTE) {
   fs.writeFileSync(${JSON.stringify(screenPath ?? "")}, process.env.AKK_TEST_TMUX_COMPOSER_AFTER_PASTE);
+}
+if (
+  args[0] === "send-keys" &&
+  !args.includes("-l") &&
+  args.includes("C-u")
+) {
+  const rolloutPath = process.env.AKK_TEST_CODEX_ACCEPTANCE_ROLLOUT_PATH;
+  if (rolloutPath) {
+    fs.rmSync(rolloutPath + ".pending-input", { force: true });
+  }
+  const screenPath = ${JSON.stringify(screenPath ?? "")};
+  if (screenPath) {
+    fs.writeFileSync(screenPath, ${JSON.stringify(codexEmptyComposerScreen)});
+  }
 }
 if (
   args[0] === "send-keys" &&
