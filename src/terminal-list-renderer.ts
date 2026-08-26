@@ -80,9 +80,10 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 20,
+    version: 21,
     instructions: [
       "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Either nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
+      "A complete but unverified Codex or Claude Code x.y.z version adds compatibility_warnings and action compatibility_warning diagnostics but never vetoes an otherwise eligible action. Execute the advertised action through the generic runtime protocol; actual UI, artifact, identity, and postcondition evidence decides success. Never automatically retry a result that says terminal input may already have occurred.",
       "A terminal_user_explicit send is the user's physical-terminal authority. It is gated only by one exact live physical prompt, no active approval, and a supported composer state; parsed working activity does not veto it, and AKK Turn, Session, deferred-transfer, transition, ledger, and Store health are not eligibility vetoes. For Codex, an empty composer receives the request, the same existing draft receives Enter only, and a different existing draft is cleared and replaced by the new request before Enter. Claude Code remains exact-empty-only. AKK tries the managed fast path first and otherwise performs that physical operation as unmanaged work, then best-effort releases conflicting AKK management. When runtime durability is available, an omitted target binds its message_id to the first selected physical terminal and an existing or possibly existing same-ID record rejects automatic replay. If no record exists and durability is unavailable, user priority wins: AKK proceeds with a warning, and callers must not automatically retry that degraded result. The fallback creates no callback Turn and sends no callback; refresh list afterward and use Watch to observe the still-running task.",
       "The session_exact scope uses session_id only when it is prefilled by the listed send action. A rollout-backed managed Codex pane instead uses the terminal_follow_current scope with its exact terminal_id because even one materialized rollout does not prove the current TUI foreground thread. AKK derives and revalidates current terminal authority internally. A turn id is never an ordinary send target.",
       "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, is only a discovery choice. If that terminal already has one rollout-backed managed Codex source, the managed fast path captures fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. If that managed path proves zero input and fails, the separate terminal_user_explicit path may deliver once as unmanaged work.",
@@ -219,7 +220,7 @@ export function listActionContracts(): JsonRecord {
         sends_terminal_input: false,
         candidate_source: "terminals[].available_actions.watch",
         scope:
-          "Observe only the exact supported human-started task already active in this terminal. It never adopts the task as AKK work or blocks later human terminal use."
+          "Observe only the exact structurally validated human-started task already active in this terminal. A missing regression-tested version profile is warning-only. It never adopts the task as AKK work or blocks later human terminal use."
       },
       unwatch: {
         tool: "agent_knock_knock_unwatch",
@@ -503,7 +504,11 @@ function renderTerminalLifecycleActions(input: {
   if (input.terminalControlled && input.commands.list_resumable_threads === true) {
     actions.list_resumable_threads = {
       tool: "agent_knock_knock_list_resumable_threads",
-      arguments: { terminal_id: input.id }
+      arguments: { terminal_id: input.id },
+      ...actionCompatibilityWarning(
+        input.entry,
+        "native_thread_lifecycle"
+      )
     };
   }
   return {
@@ -530,6 +535,10 @@ function renderNewThreadAction(input: {
         terminal_id: input.id,
         expected_binding_token: input.lifecycleBindingToken
       },
+      ...actionCompatibilityWarning(
+        input.entry,
+        "native_thread_lifecycle"
+      ),
       requires_user_intent: true
     }
   };
@@ -553,9 +562,21 @@ function renderNativeInspectAction(input: {
         terminal_id: input.id,
         inspection: "status",
         expected_binding_token: input.lifecycleBindingToken
-      }
+      },
+      ...actionCompatibilityWarning(input.entry, "native_inspection")
     }
   };
+}
+
+function actionCompatibilityWarning(
+  entry: JsonRecord,
+  capabilityName: "native_thread_lifecycle" | "native_inspection"
+): JsonRecord {
+  const capability = isRecord(entry[capabilityName])
+    ? entry[capabilityName]
+    : undefined;
+  const warning = stringValue(capability?.compatibilityWarning);
+  return warning ? { compatibility_warning: warning } : {};
 }
 
 function terminalIdleLifecycleActionEligible(
@@ -726,6 +747,10 @@ function appendTerminalWatchAction(input: {
     arguments: {
       terminal_id: input.id
     },
+    ...actionCompatibilityWarning(
+      input.entry,
+      "native_thread_lifecycle"
+    ),
     requires_user_intent: true,
     use: TERMINAL_WATCH_ACTION_USE
   };

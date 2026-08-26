@@ -1,7 +1,7 @@
 {
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
-  "description": "Control local Codex and Claude Code through shared tmux or Herdr terminals, with exact-version native status inspection, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
+  "description": "Control local Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection, compatibility warnings for unverified versions, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
   "icon": "https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/agent-knock-knock-icon.png",
   "activation": {
     "onStartup": true,

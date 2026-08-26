@@ -1314,6 +1314,12 @@ async function reconcileLifecycleDispatchLedgerScoped(
   });
 }
 
+function compatibilityWarningField(
+  warning: string | undefined
+): { compatibility_warning?: string } {
+  return warning ? { compatibility_warning: warning } : {};
+}
+
 function nativeThreadTransitionSettlementPorts(
   bindings: NativeThreadTransitionBindings,
   assertTargetExclusive: NativeThreadTransitionCommandApplication["assertTargetExclusive"],
@@ -1326,6 +1332,7 @@ function nativeThreadTransitionSettlementPorts(
   targetSessionId,
   sourceBefore,
   beforeIdentity,
+  compatibilityWarning,
   verificationPorts
 }: {
   options: NativeThreadTransitionCliOptions;
@@ -1336,6 +1343,7 @@ function nativeThreadTransitionSettlementPorts(
   targetSessionId: string;
   sourceBefore?: ManagedSessionState;
   beforeIdentity: NativeAgentSessionIdentity;
+  compatibilityWarning?: string;
   verificationPorts: NativeThreadVerificationAdapterPorts;
   }
 ): NativeThreadTransitionSettlementPorts {
@@ -1479,6 +1487,7 @@ function nativeThreadTransitionSettlementPorts(
           binding_id: result.binding.binding_id,
           binding_generation: result.binding.generation,
           binding_token: managedSessionBindingToken(result.committedTarget),
+          ...compatibilityWarningField(compatibilityWarning),
           turn_created: false
         });
         return;
@@ -1488,6 +1497,7 @@ function nativeThreadTransitionSettlementPorts(
         transition_id: result.transitionId,
         operation: operation.kind,
         terminal_id: terminal.conversationId,
+        ...compatibilityWarningField(compatibilityWarning),
         do_not_retry: true,
         turn_created: false,
         reason: result.reason
@@ -1647,7 +1657,8 @@ async function runNativeThreadTransition(
             terminal_id: terminal.conversationId,
             session_id: snapshot.session?.session_id ?? null,
             native_thread_id: operation.nativeThreadId,
-            binding_token: snapshot.bindingToken
+            binding_token: snapshot.bindingToken,
+            ...compatibilityWarningField(snapshot.capabilities.compatibilityWarning)
           });
           return;
         }
@@ -1800,11 +1811,10 @@ async function runNativeThreadTransition(
           targetSession,
           targetSessionId,
           sourceBefore,
-          beforeIdentity,
+          beforeIdentity, compatibilityWarning: snapshot.capabilities.compatibilityWarning,
           verificationPorts
         }
       );
-
       let inputStarted = false;
       let sourceTransitioning: ManagedSessionState | undefined;
       try {

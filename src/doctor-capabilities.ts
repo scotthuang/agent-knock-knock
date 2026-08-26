@@ -1,6 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { claudeNativeInspectionBehaviorProfile } from "./claude-lifecycle-compatibility.js";
-import { codexLifecycleBehaviorProfile } from "./codex-lifecycle-compatibility.js";
+import {
+  claudeNativeInspectionBehaviorProfile,
+  claudeRuntimeCompatibilityWarning,
+  claudeRuntimeLifecycleCompatibilityProfile
+} from "./claude-lifecycle-compatibility.js";
+import {
+  codexLifecycleBehaviorProfile,
+  codexRuntimeCompatibilityProfile
+} from "./codex-lifecycle-compatibility.js";
 
 export type DoctorMode = "tmux";
 
@@ -27,6 +34,8 @@ export interface DoctorCommandCheck {
   version_supported?: boolean;
   native_profile_supported?: boolean;
   native_profile?: string;
+  native_actions_available?: boolean;
+  compatibility_warning?: string;
   status?: DoctorProbeStatus;
 }
 
@@ -113,9 +122,8 @@ export const DOCTOR_PROBE_COMMANDS = Object.freeze(
 
 /**
  * Return the exact native lifecycle/status profile verified for a coding-agent
- * version. This diagnostic never controls general doctor readiness: unknown
- * versions may still support ordinary terminal work while native lifecycle and
- * inspection remain fail closed.
+ * version. This diagnostic never controls action availability: unknown coding-
+ * agent versions use the optimistic runtime protocol with a warning.
  */
 export function doctorCodingAgentNativeProfile(
   command: "codex" | "claude",
@@ -333,6 +341,22 @@ function buildProbeResult({
     (command === "codex" || command === "claude") && status === "ok"
       ? doctorCodingAgentNativeProfile(command, version)
       : undefined;
+  const nativeRuntimeProfile = command === "codex" && status === "ok"
+    ? codexRuntimeCompatibilityProfile(version)
+    : command === "claude" && status === "ok"
+      ? claudeRuntimeLifecycleCompatibilityProfile(version)
+      : undefined;
+  const nativeCompatibilityWarning = command === "codex"
+    ? codexRuntimeCompatibilityProfile(version)?.compatibilityWarning
+    : command === "claude"
+      ? claudeRuntimeCompatibilityWarning(version)
+      : undefined;
+  const invalidAgentVersionWarning =
+    (command === "codex" || command === "claude") &&
+      status === "ok" && version && !nativeRuntimeProfile
+      ? `${command === "codex" ? "Codex" : "Claude Code"} ${version} is not ` +
+        "a complete x.y.z version; AKK cannot select a runtime compatibility profile"
+      : undefined;
   return {
     command,
     executable,
@@ -342,7 +366,14 @@ function buildProbeResult({
     ...(command === "codex" || command === "claude"
       ? {
           native_profile_supported: nativeProfile !== undefined,
-          ...(nativeProfile ? { native_profile: nativeProfile } : {})
+          native_actions_available: nativeRuntimeProfile !== undefined,
+          ...(nativeProfile ? { native_profile: nativeProfile } : {}),
+          ...(nativeCompatibilityWarning || invalidAgentVersionWarning
+            ? {
+                compatibility_warning:
+                  nativeCompatibilityWarning ?? invalidAgentVersionWarning
+              }
+            : {})
         }
       : {}),
     ...(command === "herdr"

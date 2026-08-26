@@ -78,6 +78,7 @@ const PUBLIC_COMMANDS = Object.freeze([
 ]);
 const PUBLIC_ACTIONS = Object.freeze([
   "send",
+  "retry_submission",
   "watch",
   "unwatch",
   "new_thread",
@@ -1245,8 +1246,8 @@ function validatePublicContracts(value, {
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 20) {
-    fail("list action contract version must remain 20");
+  if (actions.version !== 21) {
+    fail("list action contract version must remain 21");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -1263,8 +1264,8 @@ function validatePublicContracts(value, {
   assertSourcePattern(
     repoRoot,
     "src/terminal-list-renderer.ts",
-    /version:\s*20\b/u,
-    "list action contract version 20"
+    /version:\s*21\b/u,
+    "list action contract version 21"
   );
 
   const openclaw = assertExactKeys(contracts.openclaw_tools, [

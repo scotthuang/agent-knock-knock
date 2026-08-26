@@ -552,6 +552,7 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     const hasWatchAction = Object.hasOwn(availableActions, "watch");
     return [
       `- ${formatTerminalLine(terminal)}`,
+      ...compatibilityWarningLines(terminal),
       ...(hasLifecycleAction && terminalId
         ? [`  lifecycle terminal_id: ${terminalId}`]
         : []),
@@ -597,6 +598,7 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
 
   const watchLines = terminalWatches.slice(0, 20).flatMap((watch) => [
     `- ${formatTerminalWatchLine(watch)}`,
+    ...compatibilityWarningLines(watch),
     ...formatAvailableActions("  actions", watch)
   ]);
 
@@ -636,6 +638,7 @@ export function formatAkkWatchCommandResult(
     `terminal: ${nonEmptyString(watch.terminal_id) ?? "unknown"}`,
     `agent: ${nonEmptyString(watch.agent) ?? "unknown"}`,
     `status: ${nonEmptyString(watch.status) ?? "watching"}`,
+    ...compatibilityWarningLines(watch),
     "AKK did not send or adopt this task; it is observing work the human started in the terminal."
   ].join("\n");
 }
@@ -666,6 +669,7 @@ export function formatAkkWatchStatusCommandResult(
     `terminal: ${nonEmptyString(watch.terminal_id) ?? "unknown"}`,
     `agent: ${nonEmptyString(watch.agent) ?? "unknown"}`,
     `status: ${nonEmptyString(watch.status) ?? "unknown"}`,
+    ...compatibilityWarningLines(watch),
     ...(reason
       ? [`reason: ${reason}`]
       : []),
@@ -844,6 +848,7 @@ export function formatAkkThreadsCommandResult(
     ...(nonEmptyString(selectionSnapshot?.expires_at)
       ? [`selection expires: ${nonEmptyString(selectionSnapshot?.expires_at)}`]
       : []),
+    ...compatibilityWarningLines(result),
     ...(threadLines.length > 0
       ? ["threads:", ...threadLines]
       : ["threads: none"]),
@@ -883,6 +888,7 @@ export function formatAkkThreadTransitionCommandResult(
             )}`
           ]
         : []),
+      ...compatibilityWarningLines(result),
       "No AKK Turn was created.",
       "Next: do not retry automatically; refresh /akk list and use only its exact lifecycle recovery action."
     ].join("\n");
@@ -907,6 +913,7 @@ export function formatAkkThreadTransitionCommandResult(
         ]
       : []),
     `native thread: ${nonEmptyString(result.native_thread_id) ?? "unknown"}`,
+    ...compatibilityWarningLines(result),
     "No AKK Turn was created. The next ordinary send creates the first Turn in this native context."
   ].join("\n");
 }
@@ -1421,12 +1428,34 @@ function formatAvailableActions(
     "close",
     "list_resumable_threads",
     "new_thread",
-    "resume_thread"
+    "resume_thread",
+    "native_inspect"
   ]);
   const names = Object.keys(actions)
     .filter((name) => displayedActions.has(name))
     .sort();
   return names.length > 0 ? [`  ${label}: ${names.join(", ")}`] : [];
+}
+
+function compatibilityWarningLines(
+  resource: Record<string, unknown>
+): string[] {
+  const capability = recordValue(resource.capability);
+  const warnings = [
+    nonEmptyString(resource.compatibility_warning),
+    nonEmptyString(capability?.compatibilityWarning),
+    ...(Array.isArray(resource.compatibility_warnings)
+      ? resource.compatibility_warnings
+        .map(nonEmptyString)
+        .filter((value): value is string => Boolean(value))
+      : [])
+  ].filter((value): value is string => Boolean(value));
+  return [...new Set(warnings)].map((warning) =>
+    `compatibility warning: ${truncateText(
+      sanitizeAkkModelFacingDiagnosticText(warning),
+      300
+    )}`
+  );
 }
 
 function orphanedTerminalDispatchRecovery(

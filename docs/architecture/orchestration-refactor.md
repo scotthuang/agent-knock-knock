@@ -2782,7 +2782,7 @@ retaining this commit as the historical comparison point.
 Issue #206 adds Terminal Watch as a new aggregate beside, not inside, the
 managed Session/Turn architecture. The v16 action-contract and 14-tool sections
 above remain immutable historical snapshots; the current public delta is list
-action-contract v20 and 16 registered OpenClaw tools. v20 keeps every structured
+action-contract v21 and 16 registered OpenClaw tools. v21 keeps every structured
 Send semantic-ID-only while giving Codex `terminal_user_explicit` a closed
 composer policy: inject into empty, submit an identical draft with Enter only,
 or clear and replace a different stable draft before Enter. Claude Code
@@ -2799,8 +2799,10 @@ human activity, or create callback authority for a managed Turn.
 
 Each strict record contains `watch_id`, revision, agent, exact terminal endpoint,
 workspace and internally resolved binding token; one privacy-safe provider anchor
-owns the process incarnation, native thread/task and supported agent-version
-evidence. The record also retains the originating OpenClaw session/binary,
+owns the process incarnation, native thread/task and exact captured agent-version
+evidence. Regression-tested versions are diagnostics rather than a Watch
+allowlist; structurally compatible future versions remain observable with a
+warning. The record also retains the originating OpenClaw session/binary,
 creation/update/deadline timestamps, status, last activity, optional terminal
 settlement, and an append-only notification outbox whose approval entries carry
 their own evidence fingerprints.

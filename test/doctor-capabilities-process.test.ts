@@ -90,6 +90,51 @@ test("doctor probes both terminal transports and their supported coding agents",
   }
 });
 
+test("doctor keeps complete unverified coding-agent versions available with warnings", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-future-agents-"));
+  try {
+    const codex = probeDoctorCommand("codex", {
+      executables: {
+        codex: writeFakeExecutable(
+          tempDir,
+          "codex-future",
+          `process.stdout.write("codex-cli 0.150.0");`
+        )
+      }
+    });
+    const claude = probeDoctorCommand("claude", {
+      executables: {
+        claude: writeFakeExecutable(
+          tempDir,
+          "claude-future",
+          `process.stdout.write("Claude Code 2.1.238");`
+        )
+      }
+    });
+    const incomplete = probeDoctorCommand("codex", {
+      executables: {
+        codex: writeFakeExecutable(
+          tempDir,
+          "codex-incomplete",
+          `process.stdout.write("codex-cli 0.150");`
+        )
+      }
+    });
+
+    for (const probe of [codex, claude]) {
+      assert.equal(probe.status, "ok");
+      assert.equal(probe.native_profile_supported, false);
+      assert.equal(probe.native_actions_available, true);
+      assert.match(probe.compatibility_warning ?? "", /not been regression-tested/u);
+    }
+    assert.equal(incomplete.status, "ok");
+    assert.equal(incomplete.native_actions_available, false);
+    assert.match(incomplete.compatibility_warning ?? "", /complete x\.y\.z/u);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("Herdr probe marks only exact 0.8.0 as version supported", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-herdr-version-"));
   try {

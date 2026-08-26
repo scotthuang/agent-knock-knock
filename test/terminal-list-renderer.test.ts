@@ -104,9 +104,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v20 exposes semantic arguments only", () => {
+test("the public action contract v21 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 20);
+  assert.equal(contracts.version, 21);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -271,6 +271,62 @@ test("raw active terminals expose only an exact prefilled watch action", () => {
       false
     );
   }
+});
+
+test("unverified agent versions warn without hiding eligible native actions", () => {
+  const lifecycleWarning =
+    "Codex 0.150.0 has not been regression-tested by AKK";
+  const inspectionWarning =
+    "Codex 0.150.0 native status uses optimistic runtime validation";
+  const idle = renderAvailableListActions({
+    id: "terminal:v2:tmux:codex:future:0.0:1500",
+    source: "terminal",
+    agent: "codex",
+    activity_state: "idle",
+    lifecycle_binding_token: "future-binding-token",
+    approval_state: { blocked: false },
+    native_thread_lifecycle: {
+      status: "supported",
+      compatibilityWarning: lifecycleWarning
+    },
+    native_inspection: {
+      status: "supported",
+      compatibilityWarning: inspectionWarning
+    },
+    commands: {
+      new_thread: true,
+      list_resumable_threads: true,
+      native_inspect: true
+    }
+  }) as Record<string, any>;
+
+  assert.equal(idle.new_thread.compatibility_warning, lifecycleWarning);
+  assert.equal(
+    idle.list_resumable_threads.compatibility_warning,
+    lifecycleWarning
+  );
+  assert.equal(
+    idle.native_inspect.compatibility_warning,
+    inspectionWarning
+  );
+
+  const working = renderAvailableListActions({
+    id: "terminal:v2:tmux:codex:future:0.0:1500",
+    source: "terminal",
+    agent: "codex",
+    activity_state: "working",
+    lifecycle_binding_token: "future-binding-token",
+    approval_state: { blocked: false },
+    native_thread_lifecycle: {
+      status: "supported",
+      compatibilityWarning: lifecycleWarning
+    },
+    commands: { watch: true }
+  }) as Record<string, any>;
+  assert.equal(working.watch.compatibility_warning, lifecycleWarning);
+  assert.ok(exactTerminalWatchAction({
+    available_actions: working
+  }, "terminal:v2:tmux:codex:future:0.0:1500"));
 });
 
 test("submission retry is a confirmed exact-Turn form of the existing send tool", () => {

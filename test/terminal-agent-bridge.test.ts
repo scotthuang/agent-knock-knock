@@ -403,9 +403,9 @@ function claudeNativeStatusPanel(
     "",
     `  Version:             ${version}`,
     `  Session ID:          ${nativeThreadId}`,
-    ...(["2.1.226", "2.1.237"].includes(version)
-      ? ["  Session kind:        interactive"]
-      : []),
+    ...(version === "2.1.218"
+      ? []
+      : ["  Session kind:        interactive"]),
     "  cwd:                 /repo",
     "  Auth token:          ANTHROPIC_AUTH_TOKEN",
     "",
@@ -5020,7 +5020,7 @@ test("generic Codex native inspection shares the pre-text viewport gate", async 
     bridge.submitNativeInspection(
       "codex",
       terminalControl(codexTerminalAgentAdapter),
-      codexStatusInspectionPlan("0.148.0"),
+      codexStatusInspectionPlan("0.150.0"),
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -5409,8 +5409,8 @@ test("native status inspection can settle against an injected monotonic clock", 
   );
 });
 
-test("Claude 2.1.226 and 2.1.237 use their exact stable composer and modal dismissal", async () => {
-  for (const version of ["2.1.226", "2.1.237"]) {
+test("verified and unverified Claude versions use the closed stable composer and modal dismissal", async () => {
+  for (const version of ["2.1.226", "2.1.237", "2.1.238"]) {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
     const idleScreen = [
       "────────────────────────────────────────────────",
@@ -5524,7 +5524,7 @@ test("Claude 2.1.226 and 2.1.237 use their exact stable composer and modal dismi
   }
 });
 
-test("current Claude native status profiles accept their exact 80-column popup", async () => {
+test("verified and generic Claude native status profiles accept the closed 80-column popup", async () => {
   class NarrowClaudeProvider extends RecordingTerminalProvider {
     override async sendText(
       target: TerminalEndpointRef | string,
@@ -5535,7 +5535,7 @@ test("current Claude native status profiles accept their exact 80-column popup",
       this.setScreen(target, claudeNarrowNativeComposerScreen(text));
     }
   }
-  for (const version of ["2.1.226", "2.1.237"]) {
+  for (const version of ["2.1.226", "2.1.237", "2.1.238"]) {
     const adapter = createClaudeTerminalAgentAdapter();
     const provider = new NarrowClaudeProvider([PANE]);
     const bridge = new TerminalAgentBridge({

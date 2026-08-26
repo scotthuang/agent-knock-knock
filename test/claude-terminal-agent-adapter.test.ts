@@ -18,6 +18,10 @@ import {
   probeClaudeThreadLifecycle
 } from "../src/claude-terminal-agent-adapter.js";
 import { terminalControlCapabilitiesForAdapter } from "../src/terminal-agent-adapter.js";
+import {
+  CLAUDE_UNVERIFIED_LIFECYCLE_BEHAVIOR_PROFILE,
+  CLAUDE_UNVERIFIED_NATIVE_INSPECTION_BEHAVIOR_PROFILE
+} from "../src/claude-lifecycle-compatibility.js";
 
 test("classifies only direct interactive Claude CLI processes", () => {
   assert.deepEqual(
@@ -78,6 +82,8 @@ test("verified Claude versions expose distinct closed modal native status plans"
     const capability = probeClaudeNativeInspection(version);
     assert.equal(capability.status, "supported");
     assert.equal(capability.statusInspection, true);
+    assert.equal(capability.versionCompatibility, "verified");
+    assert.equal(capability.compatibilityWarning, undefined);
     assert.equal(
       capability.behaviorProfile,
       `claude-code-${version}-native-status`
@@ -112,15 +118,45 @@ test("verified Claude versions expose distinct closed modal native status plans"
     statusInspection: false,
     reason: "the running Claude Code version could not be verified"
   });
-  for (const version of ["2.1.217", "2.1.219", "2.1.227", "2.1.238"]) {
-    const unsupported = probeClaudeNativeInspection(version);
-    assert.equal(unsupported.status, "unsupported");
-    assert.equal(unsupported.statusInspection, false);
-    assert.throws(
-      () => planClaudeNativeInspection({ kind: "status" }, unsupported),
-      /no AKK native inspection behavior profile/u
+  for (const version of [
+    "2.1.217", "2.1.219", "2.1.227", "2.1.238", "3.0.0",
+    "9007199254740992.0.0"
+  ]) {
+    const unverified = probeClaudeNativeInspection(version);
+    assert.equal(unverified.status, "supported");
+    assert.equal(unverified.statusInspection, true);
+    assert.equal(unverified.versionCompatibility, "unverified");
+    assert.equal(
+      unverified.behaviorProfile,
+      CLAUDE_UNVERIFIED_NATIVE_INSPECTION_BEHAVIOR_PROFILE
+    );
+    assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
+    assert.deepEqual(
+      planClaudeNativeInspection({ kind: "status" }, unverified).composer,
+      {
+        kind: "exact",
+        minimumStableMs: 80,
+        maximumSettleMs: 5_000
+      }
     );
   }
+  for (const version of ["", "2.1", "v2.1.238", "02.1.238", "2.1.3-beta"]) {
+    assert.equal(probeClaudeNativeInspection(version).status, "unknown");
+  }
+});
+
+test("unverified Claude native inspection succeeds when the latest safe modal shape is unchanged", () => {
+  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+  const observed = observeClaudeNativeInspection({
+    operation: { kind: "status" },
+    screen: claudeStatusPanel(nativeThreadId, "2.1.238"),
+    preEnterEvidenceInventory: [],
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "2.1.238",
+    expectedCwd: "/repo"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.observedAgentVersion, "2.1.238");
 });
 
 test("Claude native inspection requires a fresh exact current Status panel", () => {
@@ -1092,16 +1128,32 @@ test("Claude terminal capabilities expose durable completion only with a configu
   );
 });
 
-test("verified Claude lifecycle plans are exact-version and UUID scoped", () => {
+test("Claude lifecycle plans keep exact profiles and optimistically support complete versions", () => {
   for (const version of ["2.1.218", "2.1.226", "2.1.237"]) {
     const profile = probeClaudeThreadLifecycle(version);
     assert.equal(profile.status, "supported");
     assert.equal(profile.behaviorProfile, `claude-code-${version}`);
+    assert.equal(profile.versionCompatibility, "verified");
+    assert.equal(profile.compatibilityWarning, undefined);
   }
   const capabilities = probeClaudeThreadLifecycle("2.1.237");
-  assert.equal(probeClaudeThreadLifecycle("2.1.219").status, "unsupported");
-  assert.equal(probeClaudeThreadLifecycle("2.1.238").status, "unsupported");
+  const unverified = probeClaudeThreadLifecycle("2.1.238");
+  assert.equal(unverified.status, "supported");
+  assert.equal(unverified.newThread, true);
+  assert.equal(unverified.resumeExact, true);
+  assert.equal(unverified.candidateDiscovery, true);
+  assert.equal(unverified.versionCompatibility, "unverified");
+  assert.equal(
+    unverified.behaviorProfile,
+    CLAUDE_UNVERIFIED_LIFECYCLE_BEHAVIOR_PROFILE
+  );
+  assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
+  assert.equal(
+    planClaudeThreadLifecycle({ kind: "new_thread" }, unverified).command,
+    "/clear"
+  );
   assert.equal(probeClaudeThreadLifecycle(undefined).status, "unknown");
+  assert.equal(probeClaudeThreadLifecycle("2.1").status, "unknown");
   assert.deepEqual(
     planClaudeThreadLifecycle({ kind: "new_thread" }, capabilities).steps,
     [{
@@ -1246,9 +1298,9 @@ function claudeStatusPanel(
     `  Version:             ${version}`,
     "  Session name:        /rename to add a name",
     `  Session ID:          ${nativeThreadId}`,
-    ...(version === "2.1.226" || version === "2.1.237"
-      ? ["  Session kind:        interactive"]
-      : []),
+    ...(version === "2.1.218"
+      ? []
+      : ["  Session kind:        interactive"]),
     "  cwd:                 /repo",
     "  Auth token:          ANTHROPIC_AUTH_TOKEN",
     "  Anthropic base URL:  https://api.example.com/anthropic",

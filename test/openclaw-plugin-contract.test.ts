@@ -182,6 +182,10 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     "terminal_id",
     "inspection"
   ]);
+  assert.match(
+    String(nativeInspectParameters.properties.inspection.description),
+    /regression-tested[\s\S]*another complete x\.y\.z version remains callable[\s\S]*compatibility warning/u
+  );
   assert.deepEqual(newThreadParameters.required, ["terminal_id"]);
   assert.deepEqual(reconcileBindingParameters.required, [
     "terminal_id",
@@ -612,7 +616,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.equal(contractedTools.length, 16);
   assert.match(
     manifest.description ?? "",
-    /exact-version native status inspection/u
+    /closed native status inspection/u
   );
   assert.deepEqual(
     sorted(registeredCommands),
@@ -4558,9 +4562,11 @@ test("/akk doctor leaves the Gateway event loop free for its health check", asyn
       }, {
         command: "claude",
         available: true,
-        version: "2.1.237",
-        native_profile_supported: true,
-        native_profile: "claude-code-2.1.237-native-status"
+        version: "2.1.238",
+        native_profile_supported: false,
+        native_actions_available: true,
+        compatibility_warning:
+          "Claude Code 2.1.238 has not been regression-tested by AKK"
       }],
       capabilities: {
         tmux: { checked: true, status: "ready" }
@@ -4633,7 +4639,7 @@ request.on("error", () => process.exit(4));
       );
       assert.match(
         result?.text ?? "",
-        /Claude Code: 2\.1\.237 \(native profile claude-code-2\.1\.237-native-status\)/u
+        /Claude Code: 2\.1\.238 \(native lifecycle\/status available with compatibility warning\)/u
       );
       assert.notEqual(result?.isError, true);
     } finally {

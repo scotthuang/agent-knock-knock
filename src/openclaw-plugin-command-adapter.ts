@@ -168,7 +168,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_watch",
     description:
-      "Start one durable Terminal Watch for the exact supported human-started task already active in a listed Codex or Claude Code terminal. Call only from that terminal row's current watch action and pass its exact terminal_id. AKK refreshes and revalidates current observation authority internally. This observes external work, creates no AKK Session or Turn, sends no terminal input, and never adopts or blocks the human's terminal task.",
+      "Start one durable Terminal Watch for the exact structurally validated human-started task already active in a listed Codex or Claude Code terminal. A valid unverified agent version remains callable with a compatibility warning. Call only from that terminal row's current watch action and pass its exact terminal_id. AKK refreshes and revalidates current observation authority internally. This observes external work, creates no AKK Session or Turn, sends no terminal input, and never adopts or blocks the human's terminal task.",
     parameters: watchParameters,
     normalizeTurnIdentity: false,
     buildArgs: (params, toolContext) => {
@@ -215,7 +215,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_list_resumable_threads",
     description:
-      "List verified native Codex or Claude Code threads for one exact terminal. Resume only a row with resumable=true by passing this terminal_id and that row's complete native_thread_id. AKK retains candidate and binding freshness evidence privately. Number and short-id fields are slash-command display aids, never tool arguments. This is read-only for Session/Turn state and creates no AKK Turn.",
+      "List structurally verified native Codex or Claude Code threads for one exact terminal. A valid unverified agent version remains callable with a compatibility warning. Resume only a row with resumable=true by passing this terminal_id and that row's complete native_thread_id. AKK retains candidate and binding freshness evidence privately. Number and short-id fields are slash-command display aids, never tool arguments. This is read-only for Session/Turn state and creates no AKK Turn.",
     parameters: listResumableThreadsParameters,
     normalizeTurnIdentity: false,
     buildArgs: (params) => {
@@ -234,7 +234,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_native_inspect",
     description:
-      "Execute one closed, exact-version native status inspection in an exact Codex or Claude Code terminal. Pass only terminal_id and inspection=status; AKK refreshes binding authority privately. Arbitrary slash commands remain unavailable. This creates no AKK Session, Turn, receipt, monitor, or callback.",
+      "Execute one closed native status inspection in an exact Codex or Claude Code terminal. Verified versions use their regression-tested profile; unverified complete x.y.z versions remain callable through the generic runtime protocol and return a compatibility warning. Pass only terminal_id and inspection=status; AKK refreshes binding authority privately. Arbitrary slash commands remain unavailable. This creates no AKK Session, Turn, receipt, monitor, or callback.",
     parameters: nativeInspectParameters,
     normalizeTurnIdentity: false,
     buildArgs: async (params) => {
@@ -270,7 +270,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_new_thread",
     description:
-      "Start and verify a clean native coding-agent thread in the exact terminal_id after explicit user intent. AKK refreshes lifecycle authority privately. Never send /clear as ordinary task text. This creates a new AKK Session but no Turn.",
+      "Start and verify a clean native coding-agent thread in the exact terminal_id after explicit user intent. A valid unverified agent version remains callable with a compatibility warning. AKK refreshes lifecycle authority privately. Never send /clear as ordinary task text. This creates a new AKK Session but no Turn.",
     parameters: newThreadParameters,
     normalizeTurnIdentity: false,
     isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
@@ -360,7 +360,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_resume_thread",
     description:
-      "Resume one exact verified historical native thread after explicit user intent. Pass only terminal_id and one complete native_thread_id from a resumable=true row; AKK refreshes binding and candidate evidence privately. This creates or reactivates an AKK Session but no Turn.",
+      "Resume one exact structurally verified historical native thread after explicit user intent. A valid unverified agent version remains callable with a compatibility warning. Pass only terminal_id and one complete native_thread_id from a resumable=true row; AKK refreshes binding and candidate evidence privately. This creates or reactivates an AKK Session but no Turn.",
     parameters: resumeThreadParameters,
     normalizeTurnIdentity: false,
     isErrorResult: (result) => !isAkkThreadTransitionSuccess(result),
@@ -1086,8 +1086,10 @@ function formatDoctorCommandResult(result) {
     const nativeProfile = check?.native_profile_supported === true &&
       typeof check.native_profile === "string"
       ? `native profile ${check.native_profile}`
-      : check?.available === true
-        ? "native lifecycle/status unverified"
+      : check?.native_actions_available === true
+        ? "native lifecycle/status available with compatibility warning"
+        : check?.available === true
+          ? "native lifecycle/status unavailable: unrecognized version format"
         : "unavailable";
     return `${label}: ${version} (${nativeProfile})`;
   });

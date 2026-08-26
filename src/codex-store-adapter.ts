@@ -10,8 +10,7 @@ import type {
   CodexOpenRootRolloutInventory
 } from "./agent-session-provider.js";
 import {
-  codexLifecycleBehaviorProfile,
-  supportedCodexLifecycleVersions
+  isValidCodexAgentVersion
 } from "./codex-lifecycle-compatibility.js";
 import { discoverCodexProcesses, type CodexProcessSnapshot, type CodexThreadRow } from "./codex-session-provider.js";
 import type { CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
@@ -166,7 +165,7 @@ export class CodexStoreAdapter implements
           token.version === 1
             ? "sourceAgentVersion" in token
             : (
-                !stringField(token.sourceAgentVersion) ||
+                !isValidCodexAgentVersion(token.sourceAgentVersion) ||
                 token.sourceAgentVersion === token.agentVersion
               )
         ) ||
@@ -1462,10 +1461,9 @@ export function buildThreadByIdSelect(
 function assertCodexLifecycleCandidateRequest(
   request: TerminalThreadLifecycleCandidateRequest
 ): void {
-  if (!codexLifecycleBehaviorProfile(request.agentVersion)) {
+  if (!isValidCodexAgentVersion(request.agentVersion)) {
     throw new Error(
-      "Codex lifecycle candidates require one of the supported exact versions: " +
-      supportedCodexLifecycleVersions().join(", ")
+      "Codex lifecycle candidate discovery requires a complete x.y.z agent version"
     );
   }
   if (!request.cwd || !path.isAbsolute(request.cwd)) {
@@ -1496,7 +1494,7 @@ function codexLifecycleCandidateFromRow({
     !path.isAbsolute(rowCwd) ||
     !path.isAbsolute(rolloutPath) ||
     rowSource !== "cli" ||
-    !rowVersion ||
+    !isValidCodexAgentVersion(rowVersion) ||
     !(
       row.archived === undefined ||
       row.archived === false ||

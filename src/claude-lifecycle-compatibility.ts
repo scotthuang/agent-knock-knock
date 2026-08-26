@@ -33,6 +33,14 @@ const CLAUDE_STATUS_PANEL_FIELDS_2_1_226 = Object.freeze([
   "Setting sources"
 ]);
 
+const CLAUDE_VERSION_PATTERN =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+
+export const CLAUDE_UNVERIFIED_LIFECYCLE_BEHAVIOR_PROFILE =
+  "claude-code-unverified-runtime-v1";
+export const CLAUDE_UNVERIFIED_NATIVE_INSPECTION_BEHAVIOR_PROFILE =
+  "claude-code-unverified-native-status-v1";
+
 const CLAUDE_LIFECYCLE_PROFILES: Readonly<
   Record<string, ClaudeLifecycleCompatibilityProfile>
 > = Object.freeze({
@@ -76,6 +84,29 @@ const CLAUDE_LIFECYCLE_PROFILES: Readonly<
   })
 });
 
+/**
+ * Best-effort runtime protocol for complete x.y.z Claude Code versions
+ * that AKK has not regression-tested yet. This deliberately reuses the newest
+ * verified, bounded Status modal shape; a real TUI change therefore fails at
+ * observation instead of being blocked solely by its version number.
+ */
+const CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE:
+  ClaudeLifecycleCompatibilityProfile = Object.freeze({
+    lifecycleBehaviorProfile:
+      CLAUDE_UNVERIFIED_LIFECYCLE_BEHAVIOR_PROFILE,
+    nativeInspectionBehaviorProfile:
+      CLAUDE_UNVERIFIED_NATIVE_INSPECTION_BEHAVIOR_PROFILE,
+    nativeInspectionComposerStableMs: 80,
+    nativeInspectionComposerSettleTimeoutMs: 5_000,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_226,
+    nativeStatusPanelRequiredValues: Object.freeze({
+      "Session kind": "interactive"
+    }),
+    // Runtime candidate compatibility is structural and semver-based below;
+    // this exact-version registry field remains only as historical evidence.
+    resumableSourceVersions: Object.freeze([])
+  });
+
 // Preserve the historical optional-call default. Production discovery always
 // supplies the exact running version, while callers that omitted it before the
 // multi-profile registry continue to inspect 2.1.218 fixtures deterministically.
@@ -87,6 +118,42 @@ export function claudeLifecycleCompatibilityProfile(
   return agentVersion
     ? CLAUDE_LIFECYCLE_PROFILES[agentVersion]
     : undefined;
+}
+
+export function isValidClaudeSemanticVersion(
+  agentVersion: string | undefined
+): agentVersion is string {
+  if (!agentVersion) {
+    return false;
+  }
+  return CLAUDE_VERSION_PATTERN.test(agentVersion);
+}
+
+/**
+ * Selects a runtime protocol without turning the exact tested-version registry
+ * into an allowlist. Missing or malformed versions remain unknown.
+ */
+export function claudeRuntimeLifecycleCompatibilityProfile(
+  agentVersion: string | undefined
+): ClaudeLifecycleCompatibilityProfile | undefined {
+  if (!isValidClaudeSemanticVersion(agentVersion)) {
+    return undefined;
+  }
+  return claudeLifecycleCompatibilityProfile(agentVersion) ??
+    CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE;
+}
+
+export function claudeRuntimeCompatibilityWarning(
+  agentVersion: string | undefined
+): string | undefined {
+  if (
+    !isValidClaudeSemanticVersion(agentVersion) ||
+    claudeLifecycleCompatibilityProfile(agentVersion)
+  ) {
+    return undefined;
+  }
+  return `Claude Code ${agentVersion} has not been regression-tested by AKK; ` +
+    "the command will use the generic compatibility profile and may fail if the UI changed";
 }
 
 export function claudeLifecycleBehaviorProfile(
@@ -111,16 +178,14 @@ export function claudeLifecycleSourceVersionSupported(
   runningAgentVersion: string | undefined,
   sourceAgentVersion: string | undefined
 ): boolean {
-  if (!sourceAgentVersion) {
-    return false;
-  }
-  return claudeLifecycleCompatibilityProfile(runningAgentVersion)
-    ?.resumableSourceVersions.includes(sourceAgentVersion) === true;
+  return isValidClaudeSemanticVersion(runningAgentVersion) &&
+    isValidClaudeSemanticVersion(sourceAgentVersion);
 }
 
 export function profiledClaudeNativeStatusPanelFields(): readonly string[] {
   return [...new Set(
     Object.values(CLAUDE_LIFECYCLE_PROFILES)
+      .concat(CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE)
       .flatMap((profile) => profile.nativeStatusPanelFields)
   )];
 }

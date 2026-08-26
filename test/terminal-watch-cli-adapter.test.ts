@@ -99,6 +99,34 @@ test("Terminal Watch CLI observes one exact human-started Codex task and deliver
   );
 });
 
+test("Terminal Watch accepts an unverified complete Codex version and returns its warning", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.150.0");
+  const printed: unknown[] = [];
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([fixture.terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000250",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value)
+  });
+
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:main"
+  });
+
+  const created = record(record(printed.at(-1)).watch);
+  assert.equal(created.status, "active");
+  assert.match(created.compatibility_warning, /Codex 0\.150\.0/u);
+  assert.match(created.compatibility_warning, /not been regression-tested/u);
+});
+
 test("Terminal Watch snapshots and delivers the trusted generic Host route", async (t) => {
   const fixture = createFixture(t);
   const deliveries: CallbackTransportDeliverInput[] = [];
@@ -543,6 +571,44 @@ test("Terminal Watch CLI rejects a malformed internally resolved binding token",
   );
 });
 
+test("Terminal Watch rejects running and artifact version drift before persistence", async (t) => {
+  const fixture = createFixture(t);
+  const driftedTerminal = {
+    ...fixture.terminal,
+    agent_version: "0.150.0",
+    native_thread_lifecycle: {
+      status: "supported",
+      behaviorProfile: "codex-tui-generic-v1",
+      versionCompatibility: "unverified"
+    }
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([driftedTerminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000251",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {}
+  });
+
+  await assert.rejects(
+    facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      openclawSession: "agent:main:main"
+    }),
+    /artifact reports 0\.148\.0.*running coding-agent version 0\.150\.0/u
+  );
+  assert.equal(
+    fs.existsSync(path.join(fixture.storeDir, "terminal-watches")),
+    false
+  );
+});
+
 test("Terminal Watch rechecks managed Turn authority while holding the terminal lock", async (t) => {
   const fixture = createFixture(t);
   const events: string[] = [];
@@ -655,7 +721,8 @@ function exactTerminalObservation(
 
 function createFixture(
   t: test.TestContext,
-  rootUserRowOrder: RootUserRowOrder = "human-only"
+  rootUserRowOrder: RootUserRowOrder = "human-only",
+  codexVersion = "0.148.0"
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-watch-cli-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -708,7 +775,7 @@ function createFixture(
           cwd: root,
           originator: "codex-tui",
           source: "cli",
-          cli_version: "0.148.0"
+          cli_version: codexVersion
         }
       },
       {
@@ -746,10 +813,21 @@ function createFixture(
         inode: String(stat.ino),
         path: rolloutPath
       },
-      agent_version: "0.148.0",
+      agent_version: codexVersion,
       native_thread_lifecycle: {
         status: "supported",
-        behaviorProfile: "codex-tui-0.148.0"
+        behaviorProfile: codexVersion === "0.148.0"
+          ? "codex-tui-0.148.0"
+          : "codex-tui-generic-v1",
+        versionCompatibility: codexVersion === "0.148.0"
+          ? "verified"
+          : "unverified",
+        ...(codexVersion === "0.148.0"
+          ? {}
+          : {
+              compatibilityWarning:
+                `Codex ${codexVersion} has not been regression-tested by AKK`
+            })
       },
       lifecycle_binding_token: TOKEN,
       activity_state: "working",
@@ -771,6 +849,12 @@ function createFixture(
           arguments: {
             terminal_id: "terminal:v2:watch-fixture"
           },
+          ...(codexVersion === "0.148.0"
+            ? {}
+            : {
+                compatibility_warning:
+                  `Codex ${codexVersion} has not been regression-tested by AKK`
+              }),
           requires_user_intent: true,
           use: "Monitor this human-started external task."
         }
