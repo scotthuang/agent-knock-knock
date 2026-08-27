@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.12.20 - 2026-08-28
+
+### Added
+
+- Add a durable `terminal_activity` / `best_effort` Watch fallback for an exact user-selected terminal when no unique provider task anchor is available. It arms on observed work or approval and reports stable idle only after two consecutive supervision sweeps.
+
+### Fixed
+
+- Keep an explicit read-only Watch available across managed ownership, missing action advertisement, lifecycle-binding gaps, agent/artifact version drift, an existing Watch, and malformed unrelated Watch records; these conditions now warn, reuse, or degrade instead of vetoing the user.
+- Recognize the Codex 0.149.1 `item_completed` `UserMessage` record as exact human-root evidence, including exact text and turn-identity validation.
+
+### Changed
+
+- Allow independent controller callback authorities to observe the same terminal while keeping same-target, same-controller Watch creation idempotent. Existing active Watches no longer hide the Watch action on terminal rows.
+- Expose immutable Watch warnings plus `watch_mode` and `confidence` in status and callbacks so exact task completion remains distinct from best-effort terminal activity becoming idle.
+
+### Security
+
+- Keep manual Watch observation-only: it acquires no terminal mutation authority, sends no input, changes no managed ownership, and never auto-approves. Creation still fails when the exact terminal is absent or unobservable, neither an exact anchor nor screen-status path exists, or durable Watch state cannot be written.
+
 ## 0.12.19 - 2026-08-27
 
 ### Added
