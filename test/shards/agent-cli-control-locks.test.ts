@@ -335,8 +335,18 @@ test("managed Close uses the Store writer rather than the terminal lock and prev
       if (!fs.existsSync(writerLockPath)) {
         return false;
       }
-      const owner = JSON.parse(fs.readFileSync(writerLockPath, "utf8"));
-      return owner.pid === closing?.child.pid;
+      try {
+        const owner = JSON.parse(fs.readFileSync(writerLockPath, "utf8"));
+        return owner.pid === closing?.child.pid;
+      } catch (error) {
+        if (
+          error instanceof SyntaxError ||
+          (error as NodeJS.ErrnoException).code === "ENOENT"
+        ) {
+          return false;
+        }
+        throw error;
+      }
     }, "Close to acquire the Store writer before waiting for state");
     assert.equal(closing.child.exitCode, null);
     const closeOwnedTerminalLocks = fs.existsSync(terminalLockDir)
