@@ -610,7 +610,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "457517e368204c0ac2250fd6f6b21b3e94496a90cba51a60f6db8d1236c25e20"
+    "ba4efbe203adbda51ea1ab7c69b06098b89f578dbf7fff1ac741d11beb15ea68"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -2791,7 +2791,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     );
     assert.match(
       watchTool.description ?? "",
-      /exact terminal_id.*revalidates current observation authority internally/u
+      /read-only[\s\S]*exact selected[\s\S]*best-effort terminal activity[\s\S]*sends no terminal input/u
     );
     const unwatchTool = tools.get("agent_knock_knock_unwatch");
     assert.ok(unwatchTool, "agent_knock_knock_unwatch must be registered");
