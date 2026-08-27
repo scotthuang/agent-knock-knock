@@ -15,6 +15,7 @@ import {
   TERMINAL_WATCH_VERSION,
   TerminalWatchConflictError,
   assertTerminalWatch,
+  createClaudeUserExplicitFallbackWatchAnchor,
   createTerminalWatchStore,
   initialTerminalWatchObservationCheckpoint,
   listTerminalWatches,
@@ -27,12 +28,16 @@ import {
   terminalWatchCallbackEnvelope,
   terminalWatchNotificationCallbackSnapshot,
   terminalWatchRevision,
+  type ClaudeUserExplicitFallbackWatchObservationCheckpoint,
   type TerminalWatch,
   type TerminalWatchNotification,
   type TerminalWatchTerminalIdentity
 } from "../src/terminal-watch-store.js";
-import type { ClaudeHumanStartedActiveTaskAnchor } from
-  "../src/claude-local-transcript-provider.js";
+import {
+  claudeTranscriptAnchorFingerprint,
+  type ClaudeHumanStartedActiveTaskAnchor,
+  type ClaudeTranscriptAnchor
+} from "../src/claude-local-transcript-provider.js";
 import type { CodexHumanStartedActiveTaskAnchor } from
   "../src/terminal-submission-acceptance.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
@@ -222,6 +227,16 @@ test("legacy v1 Watch records without a checkpoint remain readable and upgrade o
   fs.writeFileSync(statePath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
 
   const loaded = loadTerminalWatch(storeDir, watchId);
+  assert.equal(
+    loaded.anchor.schema,
+    "agent-knock-knock/codex-human-started-active-task-anchor"
+  );
+  if (
+    loaded.anchor.schema !==
+      "agent-knock-knock/codex-human-started-active-task-anchor"
+  ) {
+    throw new Error("expected Codex human-started Watch anchor");
+  }
   assert.deepEqual(loaded.observation_checkpoint, {
     safe_resume_offset_bytes: loaded.anchor.observed_end_offset_bytes
   });
@@ -633,3 +648,110 @@ test("Claude terminal Watch anchor and legacy checkpoint round-trip", (t) => {
     "agent-knock-knock/claude-human-started-active-task-checkpoint"
   );
 });
+
+test("Claude fallback Watch persists and freezes its accepted prompt identity", (t) => {
+  const transcriptAnchor: ClaudeTranscriptAnchor = {
+    schema_version: 1,
+    session_id: THREAD_ID,
+    cwd: "/workspace/project",
+    pid: 701,
+    agent_started_at_ms: 1_777_000_000_000,
+    captured_at: CREATED_AT,
+    relative_path: `project/${THREAD_ID}.jsonl`,
+    offset_bytes: 0,
+    file_existed: false
+  };
+  const anchor = createClaudeUserExplicitFallbackWatchAnchor({
+    transcriptAnchor,
+    requestHash: SHA_B,
+    claudeVersion: "2.1.237"
+  });
+  const candidate: TerminalWatch = {
+    ...watch("terminal-watch-claude-fallback-checkpoint"),
+    agent: "claude",
+    terminal: terminal("claude"),
+    anchor,
+    observation_checkpoint: initialTerminalWatchObservationCheckpoint(anchor)
+  };
+  const storeDir = tempStore(t);
+  const saved = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+
+  const acceptance = claudeAcceptanceEvidence(
+    transcriptAnchor,
+    PROMPT_ID,
+    120
+  );
+  const checkpoint: ClaudeUserExplicitFallbackWatchObservationCheckpoint = {
+    schema:
+      "agent-knock-knock/claude-user-explicit-fallback-watch-checkpoint",
+    version: 1,
+    safe_resume_offset_bytes: 120,
+    acceptance_evidence: acceptance,
+    accepted_prompt_uuid: PROMPT_ID
+  };
+  const accepted = saveTerminalWatch(storeDir, {
+    ...saved,
+    observation_checkpoint: checkpoint,
+    updated_at: "2026-08-21T00:00:01.000Z",
+    last_activity_at: "2026-08-21T00:00:01.000Z"
+  }, { expectedRevision: terminalWatchRevision(saved) });
+  assert.deepEqual(loadTerminalWatch(storeDir, accepted.watch_id), accepted);
+
+  const otherPrompt = "44444444-4444-4444-8444-444444444444";
+  const otherAcceptance = claudeAcceptanceEvidence(
+    transcriptAnchor,
+    otherPrompt,
+    140
+  );
+  assert.throws(
+    () => saveTerminalWatch(storeDir, {
+      ...accepted,
+      observation_checkpoint: {
+        ...checkpoint,
+        safe_resume_offset_bytes: 140,
+        acceptance_evidence: otherAcceptance,
+        accepted_prompt_uuid: otherPrompt
+      },
+      updated_at: "2026-08-21T00:00:02.000Z",
+      last_activity_at: "2026-08-21T00:00:02.000Z"
+    }, { expectedRevision: terminalWatchRevision(accepted) }),
+    /accepted identity cannot change/u
+  );
+  assert.throws(
+    () => assertTerminalWatch({
+      ...accepted,
+      observation_checkpoint: {
+        ...checkpoint,
+        accepted_prompt_uuid: undefined
+      }
+    }, accepted.watch_id),
+    /acceptance identity is incomplete/u
+  );
+});
+
+function claudeAcceptanceEvidence(
+  anchor: ClaudeTranscriptAnchor,
+  promptUuid: string,
+  observedEndOffsetBytes: number
+) {
+  const base = {
+    source: "claude_transcript" as const,
+    kind: "native_user_turn" as const,
+    nativeThreadId: anchor.session_id,
+    requestHash: SHA_B,
+    acceptanceId: promptUuid,
+    acceptedAt: "2026-08-21T00:00:00.500Z",
+    anchorFingerprint: claudeTranscriptAnchorFingerprint(anchor),
+    metadata: {
+      prompt_uuid: promptUuid,
+      claude_version: "2.1.237",
+      transcript_file_id: "1".repeat(24),
+      anchor_offset_bytes: anchor.offset_bytes,
+      observed_end_offset_bytes: observedEndOffsetBytes,
+      agent_started_at_ms: anchor.agent_started_at_ms
+    }
+  };
+  return { ...base, evidenceFingerprint: digest(base) };
+}

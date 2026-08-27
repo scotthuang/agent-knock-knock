@@ -2782,7 +2782,7 @@ retaining this commit as the historical comparison point.
 Issue #206 adds Terminal Watch as a new aggregate beside, not inside, the
 managed Session/Turn architecture. The v16 action-contract and 14-tool sections
 above remain immutable historical snapshots; the current public delta is list
-action-contract v22 and 16 registered OpenClaw tools. v22 keeps every structured
+action-contract v23 and 16 registered OpenClaw tools. v23 keeps every structured
 Send semantic-ID-only while making Codex `terminal_user_explicit` independent
 of Composer visibility, stability, and exactness. Its physical fallback clears
 the current Composer once, injects the new request, waits through the paste
@@ -2790,12 +2790,17 @@ window, and dispatches Enter exactly once without a post-text Composer veto.
 Claude Code user-explicit Send, native inspection, and lifecycle input remain
 exact-empty-only; the managed path may require exact empty before input, but a
 user-explicit Codex request cannot be vetoed by Composer observation after text
-injection. No draft text or Composer digest crosses the model boundary.
+injection. When managed delivery fails before input, the physical fallback
+captures a pre-Send provider boundary and best-effort attaches an exact
+request-bound Terminal Watch after Enter. The Watch supplies completion callback
+behavior without claiming a managed Turn, and its failure never revokes Send.
+No draft text or Composer digest crosses the model boundary.
 
 ### Aggregate and persistence boundary
 
-`TerminalWatch` schema v1 represents one task that a human started directly in
-a Codex or Claude Code TUI. It is not a Conversation, Session, Turn, dispatch
+`TerminalWatch` schema v2 represents either one task that a human started
+directly in a Codex or Claude Code TUI or one request AKK delivered through the
+user-explicit unmanaged fallback. It is not a Conversation, Session, Turn, dispatch
 receipt, monitor owner, or terminal-input authority. Creating or reconciling it
 does not send input, adopt or claim the work, reserve the terminal, block later
 human activity, or create callback authority for a managed Turn.
@@ -2813,8 +2818,8 @@ Status is one of `active`, `completed`,
 `failed`, `timed_out`, `invalidated`, or `cancelled`. The files live at
 `<store>/terminal-watches/<watch_id>.json`, with a `0700` directory, `0600`
 owner-private atomic JSON, strict path/symlink/shape validation, and revision
-CAS. The independent namespace is admitted by the Store root allowlist without
-changing Store format 1 or writer protocol 5.
+CAS. The independent namespace is admitted by the Store root allowlist while
+retaining Store format 1 and advancing the writer fence to protocol 6.
 
 Codex anchors retain the exact process identity, rollout device/inode/path, native
 task, request hash, version, task-start/user-message/observed-end byte offsets,
@@ -2824,7 +2829,9 @@ identity, root prompt, request hash, version, current-turn/observed-end byte
 offsets, capture time, and fingerprint. The compact terminal record separately
 binds endpoint/incarnation, workspace, and the internal creation-time binding
 token. The Store validates the provider-owned anchor directly, without a mirrored
-Watch-specific shape or any raw prompt or command text.
+Watch-specific shape or any raw prompt or command text. Legacy schema-v1 Watch
+records normalize to v2 on read; protocol 6 prevents an older writer from
+treating those v2 records as compatible.
 
 ### State, locking, and callback recovery
 
@@ -2902,8 +2909,8 @@ None of those opaque values—including live native UUIDs used only as a handoff
 fence—crosses the model-facing boundary. Human slash selectors remain a CLI
 discovery layer. Orphan close keeps `expected_message_id` and
 `expected_transition_id` because they are durable entity identities rather than
-authority tokens. This projection change does not alter Store format 1, writer
-protocol 5, or the private persisted authority evidence.
+authority tokens. This projection change retains Store format 1 and the private
+persisted authority evidence while advancing the writer fence to protocol 6.
 
 The existing non-overlapping OpenClaw supervisor now coordinates two independent
 steps at startup and every five seconds: managed-Turn monitor reconciliation and

@@ -17,6 +17,8 @@ import {
 } from "./durable-json-file.js";
 import type { ExecutorKind } from "./executors.js";
 import {
+  claudeTranscriptAnchorFingerprint,
+  type ClaudeTranscriptAnchor,
   initialClaudeHumanStartedActiveTaskCheckpoint,
   validateClaudeHumanStartedActiveTaskCheckpoint,
   validateClaudeHumanStartedActiveTaskAnchor,
@@ -27,6 +29,15 @@ import {
   validateCodexHumanStartedActiveTaskAnchor,
   type CodexHumanStartedActiveTaskAnchor
 } from "./terminal-submission-acceptance.js";
+import {
+  exactNativeThreadId,
+  normalizedRolloutIdentity,
+  validateCodexRolloutAcceptanceAnchor,
+  validateTerminalSubmissionAcceptanceEvidence,
+  type CodexRolloutAcceptanceAnchor,
+  type CodexRolloutIdentity,
+  type TerminalSubmissionAcceptanceEvidence
+} from "./terminal-submission-facts.js";
 import {
   assertStoreReadable,
   ensureDir,
@@ -41,7 +52,7 @@ import {
 import { isRecord } from "./value-guards.js";
 
 export const TERMINAL_WATCH_SCHEMA = "agent-knock-knock/terminal-watch" as const;
-export const TERMINAL_WATCH_VERSION = 1 as const;
+export const TERMINAL_WATCH_VERSION = 2 as const;
 export const TERMINAL_WATCHES_DIRECTORY =
   STORE_TERMINAL_WATCHES_DIRECTORY;
 
@@ -84,7 +95,97 @@ export interface TerminalWatchTerminalIdentity {
 
 export type TerminalWatchAnchor =
   | CodexHumanStartedActiveTaskAnchor
-  | ClaudeHumanStartedActiveTaskAnchor;
+  | ClaudeHumanStartedActiveTaskAnchor
+  | CodexUserExplicitFallbackWatchAnchor
+  | ClaudeUserExplicitFallbackWatchAnchor;
+
+export interface CodexUserExplicitFallbackWatchAnchor {
+  schema: "agent-knock-knock/codex-user-explicit-fallback-watch-anchor";
+  version: 1;
+  captured_at: string;
+  request_hash: string;
+  codex_version: string;
+  acceptance_anchor: CodexRolloutAcceptanceAnchor;
+  anchor_fingerprint: string;
+}
+
+export interface ClaudeUserExplicitFallbackWatchAnchor {
+  schema: "agent-knock-knock/claude-user-explicit-fallback-watch-anchor";
+  version: 1;
+  captured_at: string;
+  request_hash: string;
+  claude_version: string;
+  transcript_anchor: ClaudeTranscriptAnchor;
+  anchor_fingerprint: string;
+}
+
+export type UserExplicitFallbackWatchAnchor =
+  | CodexUserExplicitFallbackWatchAnchor
+  | ClaudeUserExplicitFallbackWatchAnchor;
+
+export function isUserExplicitFallbackWatch(
+  watch: Pick<TerminalWatch, "anchor">
+): boolean {
+  return watch.anchor.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor" ||
+    watch.anchor.schema ===
+      "agent-knock-knock/claude-user-explicit-fallback-watch-anchor";
+}
+
+export function terminalUserExplicitFallbackWatchId(input: {
+  messageId: string;
+  physicalToken: string;
+  requestHash: string;
+}): string {
+  const digest = createHash("sha256").update(canonicalJson({
+    schema: "agent-knock-knock/terminal-user-explicit-fallback-watch-id",
+    version: 1,
+    message_id: nonEmptyString(input.messageId, "message id"),
+    physical_token: nonEmptyString(input.physicalToken, "physical token"),
+    request_hash: sha256String(input.requestHash, "request hash")
+  })).digest("hex");
+  return `terminal-watch-user-send-${digest}`;
+}
+
+export function createCodexUserExplicitFallbackWatchAnchor(input: {
+  acceptanceAnchor: CodexRolloutAcceptanceAnchor;
+  requestHash: string;
+  codexVersion: string;
+}): CodexUserExplicitFallbackWatchAnchor {
+  const acceptanceAnchor = validateCodexRolloutAcceptanceAnchor(
+    input.acceptanceAnchor
+  );
+  const base = {
+    schema:
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor" as const,
+    version: 1 as const,
+    captured_at: acceptanceAnchor.captured_at,
+    request_hash: sha256String(input.requestHash, "request hash"),
+    codex_version: nonEmptyString(input.codexVersion, "Codex version"),
+    acceptance_anchor: acceptanceAnchor
+  };
+  return { ...base, anchor_fingerprint: fingerprintValue(base) };
+}
+
+export function createClaudeUserExplicitFallbackWatchAnchor(input: {
+  transcriptAnchor: ClaudeTranscriptAnchor;
+  requestHash: string;
+  claudeVersion: string;
+}): ClaudeUserExplicitFallbackWatchAnchor {
+  const transcriptAnchor = validatedClaudeTranscriptAnchor(
+    input.transcriptAnchor
+  );
+  const base = {
+    schema:
+      "agent-knock-knock/claude-user-explicit-fallback-watch-anchor" as const,
+    version: 1 as const,
+    captured_at: transcriptAnchor.captured_at,
+    request_hash: sha256String(input.requestHash, "request hash"),
+    claude_version: nonEmptyString(input.claudeVersion, "Claude version"),
+    transcript_anchor: transcriptAnchor
+  };
+  return { ...base, anchor_fingerprint: fingerprintValue(base) };
+}
 
 /**
  * Mutable, privacy-safe progress through the append-only provider artifact.
@@ -95,8 +196,35 @@ export interface CodexTerminalWatchObservationCheckpoint {
   safe_resume_offset_bytes: number;
 }
 
+export interface CodexUserExplicitFallbackWatchAcceptedIdentity {
+  native_thread_id: string;
+  process_uuid: string;
+  process_birth: string;
+  rollout: CodexRolloutIdentity;
+}
+
+export interface CodexUserExplicitFallbackWatchObservationCheckpoint {
+  schema:
+    "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint";
+  version: 1;
+  safe_resume_offset_bytes: number;
+  acceptance_evidence?: TerminalSubmissionAcceptanceEvidence;
+  accepted_identity?: CodexUserExplicitFallbackWatchAcceptedIdentity;
+}
+
+export interface ClaudeUserExplicitFallbackWatchObservationCheckpoint {
+  schema:
+    "agent-knock-knock/claude-user-explicit-fallback-watch-checkpoint";
+  version: 1;
+  safe_resume_offset_bytes: number;
+  acceptance_evidence?: TerminalSubmissionAcceptanceEvidence;
+  accepted_prompt_uuid?: string;
+}
+
 export type TerminalWatchObservationCheckpoint =
   | CodexTerminalWatchObservationCheckpoint
+  | CodexUserExplicitFallbackWatchObservationCheckpoint
+  | ClaudeUserExplicitFallbackWatchObservationCheckpoint
   | ClaudeHumanStartedActiveTaskCheckpoint;
 
 export function initialTerminalWatchObservationCheckpoint(
@@ -107,6 +235,28 @@ export function initialTerminalWatchObservationCheckpoint(
       "agent-knock-knock/claude-human-started-active-task-anchor"
   ) {
     return initialClaudeHumanStartedActiveTaskCheckpoint(anchor);
+  }
+  if (
+    anchor.schema ===
+      "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+  ) {
+    return {
+      schema:
+        "agent-knock-knock/claude-user-explicit-fallback-watch-checkpoint",
+      version: 1,
+      safe_resume_offset_bytes: anchor.transcript_anchor.offset_bytes
+    };
+  }
+  if (
+    anchor.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+  ) {
+    return {
+      schema:
+        "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint",
+      version: 1,
+      safe_resume_offset_bytes: anchor.acceptance_anchor.offset_bytes
+    };
   }
   return {
     safe_resume_offset_bytes:
@@ -193,6 +343,7 @@ export interface TerminalWatchCallbackMessageInput {
   event: TerminalWatchCallbackEvent;
   agent: ExecutorKind;
   terminalId: string;
+  origin?: "external_human" | "terminal_user_explicit_fallback";
   detail?: string;
   completionText?: string;
 }
@@ -225,6 +376,9 @@ export function terminalWatchCallbackEnvelope(
         event,
         agent: watch.agent,
         terminalId: watch.terminal.terminal_id,
+        origin: isUserExplicitFallbackWatch(watch)
+          ? "terminal_user_explicit_fallback"
+          : "external_human",
         detail: reasonCode,
         completionText: notification.kind === "completed" ||
             notification.kind === "failed"
@@ -250,14 +404,20 @@ export function terminalWatchCallbackEnvelope(
 export function terminalWatchCallbackMessage(
   input: TerminalWatchCallbackMessageInput
 ): string {
+  const userExplicitFallback =
+    input.origin === "terminal_user_explicit_fallback";
   const eventInstruction = input.event === "approval_required"
     ? "Tell the user that the observed TUI task is waiting for approval and ask the human to inspect and decide in the named live TUI. Do not call any AKK approval tool or action, do not send approval keys, and do not use autoApprove."
     : input.event === "completed"
-      ? "Tell the user that the human-started TUI task completed and summarize only the bounded completion text below."
+      ? userExplicitFallback
+        ? "Tell the user that the request delivered through AKK's user-explicit unmanaged fallback completed and summarize only the bounded completion text below."
+        : "Tell the user that the human-started TUI task completed and summarize only the bounded completion text below."
       : "Tell the user that Terminal Watch stopped without a verified successful completion and explain the exact reason below.";
   return [
     "Continue this controller conversation from the Agent Knock Knock Terminal Watch event below.",
-    "This is an observation of a task started by the human directly in Codex or Claude Code. It is not an AKK Turn and AKK did not send terminal input.",
+    userExplicitFallback
+      ? "AKK delivered this exact request through terminal_user_explicit unmanaged fallback and then attached Terminal Watch. It is not a managed AKK Turn."
+      : "This is an observation of a task started by the human directly in Codex or Claude Code. It is not an AKK Turn and AKK did not send terminal input.",
     eventInstruction,
     "Do not poll files, processes, terminal panes, stdout, or stderr. Use only this structured event.",
     "",
@@ -617,7 +777,13 @@ export function assertTerminalWatch(
   const minimumCheckpointOffset = watch.anchor.schema ===
       "agent-knock-knock/claude-human-started-active-task-anchor"
       ? watch.anchor.turn_start_offset_bytes
-      : watch.anchor.observed_end_offset_bytes;
+      : watch.anchor.schema ===
+          "agent-knock-knock/codex-human-started-active-task-anchor"
+        ? watch.anchor.observed_end_offset_bytes
+        : watch.anchor.schema ===
+            "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+          ? watch.anchor.transcript_anchor.offset_bytes
+          : watch.anchor.acceptance_anchor.offset_bytes;
   if (
     watch.observation_checkpoint.safe_resume_offset_bytes <
       minimumCheckpointOffset
@@ -636,7 +802,10 @@ export function assertTerminalWatch(
   const processStartedAt = watch.anchor.schema ===
       "agent-knock-knock/claude-human-started-active-task-anchor"
       ? watch.anchor.agent_started_at_ms
-      : undefined;
+      : watch.anchor.schema ===
+          "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+        ? watch.anchor.transcript_anchor.agent_started_at_ms
+        : undefined;
   if (
     Date.parse(watch.anchor.captured_at) > Date.parse(watch.created_at) ||
     (
@@ -834,11 +1003,16 @@ function normalizeLegacyTerminalWatch(value: unknown): unknown {
   if (
     !isRecord(value) ||
     value.schema !== TERMINAL_WATCH_SCHEMA ||
-    value.version !== TERMINAL_WATCH_VERSION ||
-    value.observation_checkpoint !== undefined ||
+    (value.version !== 1 && value.version !== TERMINAL_WATCH_VERSION) ||
     !isRecord(value.anchor)
   ) {
     return value;
+  }
+  const versionNormalized = value.version === TERMINAL_WATCH_VERSION
+    ? value
+    : { ...value, version: TERMINAL_WATCH_VERSION };
+  if (value.observation_checkpoint !== undefined) {
+    return versionNormalized;
   }
   const anchor = value.anchor;
   if (
@@ -847,7 +1021,7 @@ function normalizeLegacyTerminalWatch(value: unknown): unknown {
   ) {
     const validated = validateClaudeHumanStartedActiveTaskAnchor(anchor);
     return {
-      ...value,
+      ...versionNormalized,
       observation_checkpoint: initialTerminalWatchObservationCheckpoint(
         validated
       )
@@ -859,12 +1033,12 @@ function normalizeLegacyTerminalWatch(value: unknown): unknown {
   ) {
     const validated = validateCodexHumanStartedActiveTaskAnchor(anchor);
     return {
-      ...value,
+      ...versionNormalized,
       observation_checkpoint:
         initialTerminalWatchObservationCheckpoint(validated)
     };
   }
-  return value;
+  return versionNormalized;
 }
 
 function assertObservationCheckpoint(
@@ -878,9 +1052,160 @@ function assertObservationCheckpoint(
     validateClaudeHumanStartedActiveTaskCheckpoint(value, anchor);
     return;
   }
+  if (
+    anchor.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+  ) {
+    assertCodexUserExplicitFallbackWatchCheckpoint(value, anchor);
+    return;
+  }
+  if (
+    anchor.schema ===
+      "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+  ) {
+    assertClaudeUserExplicitFallbackWatchCheckpoint(value, anchor);
+    return;
+  }
   assertStrictRecord(value, "terminal Watch observation checkpoint", {
     safe_resume_offset_bytes: NON_NEGATIVE_INTEGER
   });
+}
+
+function assertCodexUserExplicitFallbackWatchCheckpoint(
+  value: unknown,
+  anchor: CodexUserExplicitFallbackWatchAnchor
+): asserts value is CodexUserExplicitFallbackWatchObservationCheckpoint {
+  assertStrictRecord(value, "Codex fallback Watch checkpoint", {
+    schema: literalGuard(
+      "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint"
+    ),
+    version: literalGuard(1),
+    safe_resume_offset_bytes: NON_NEGATIVE_INTEGER,
+    acceptance_evidence: optionalGuard(IGNORE_VALUE),
+    accepted_identity: optionalGuard(IGNORE_VALUE)
+  });
+  const acceptanceValue = value.acceptance_evidence;
+  const identityValue = value.accepted_identity;
+  if ((acceptanceValue === undefined) !== (identityValue === undefined)) {
+    throw new Error(
+      "Codex fallback Watch checkpoint acceptance identity is incomplete"
+    );
+  }
+  if (acceptanceValue === undefined || identityValue === undefined) {
+    return;
+  }
+  assertStrictRecord(
+    identityValue,
+    "Codex fallback Watch accepted identity",
+    {
+      native_thread_id: assertNonEmptyString,
+      process_uuid: assertNonEmptyString,
+      process_birth: assertNonEmptyString,
+      rollout: IGNORE_VALUE
+    }
+  );
+  const nativeThreadId = exactNativeThreadId(
+    identityValue.native_thread_id
+  );
+  if (!isRecord(identityValue.rollout)) {
+    throw new Error("Codex fallback Watch accepted rollout is invalid");
+  }
+  const rollout = normalizedRolloutIdentity(identityValue.rollout);
+  if (
+    identityValue.native_thread_id !== nativeThreadId ||
+    JSON.stringify(identityValue.rollout) !== JSON.stringify(rollout) ||
+    !path.isAbsolute(rollout.path) ||
+    identityValue.process_uuid !== anchor.acceptance_anchor.process_uuid ||
+    identityValue.process_birth !== anchor.acceptance_anchor.process_birth
+  ) {
+    throw new Error(
+      "Codex fallback Watch accepted identity does not match its anchor"
+    );
+  }
+  const acceptance = validateTerminalSubmissionAcceptanceEvidence(
+    acceptanceValue,
+    {
+      source: "codex_rollout",
+      nativeThreadId,
+      requestHash: anchor.request_hash
+    }
+  );
+  if (
+    acceptance.anchorFingerprint !==
+      anchor.acceptance_anchor.anchor_fingerprint
+  ) {
+    throw new Error(
+      "Codex fallback Watch acceptance evidence does not match its anchor"
+    );
+  }
+  const observedEndOffset = acceptance.metadata?.observed_end_offset_bytes;
+  if (
+    typeof observedEndOffset !== "number" ||
+    !Number.isSafeInteger(observedEndOffset) ||
+    observedEndOffset <= anchor.acceptance_anchor.offset_bytes ||
+    Number(value.safe_resume_offset_bytes) < observedEndOffset
+  ) {
+    throw new Error(
+      "Codex fallback Watch acceptance checkpoint offset is invalid"
+    );
+  }
+}
+
+function assertClaudeUserExplicitFallbackWatchCheckpoint(
+  value: unknown,
+  anchor: ClaudeUserExplicitFallbackWatchAnchor
+): asserts value is ClaudeUserExplicitFallbackWatchObservationCheckpoint {
+  assertStrictRecord(value, "Claude fallback Watch checkpoint", {
+    schema: literalGuard(
+      "agent-knock-knock/claude-user-explicit-fallback-watch-checkpoint"
+    ),
+    version: literalGuard(1),
+    safe_resume_offset_bytes: NON_NEGATIVE_INTEGER,
+    acceptance_evidence: optionalGuard(IGNORE_VALUE),
+    accepted_prompt_uuid: optionalGuard(IGNORE_VALUE)
+  });
+  const acceptanceValue = value.acceptance_evidence;
+  const promptUuidValue = value.accepted_prompt_uuid;
+  if ((acceptanceValue === undefined) !== (promptUuidValue === undefined)) {
+    throw new Error(
+      "Claude fallback Watch checkpoint acceptance identity is incomplete"
+    );
+  }
+  if (acceptanceValue === undefined || promptUuidValue === undefined) {
+    return;
+  }
+  const acceptedPromptUuid = exactUuid(
+    promptUuidValue,
+    "Claude fallback accepted prompt UUID"
+  );
+  const acceptance = validateTerminalSubmissionAcceptanceEvidence(
+    acceptanceValue,
+    {
+      source: "claude_transcript",
+      nativeThreadId: anchor.transcript_anchor.session_id,
+      requestHash: anchor.request_hash
+    }
+  );
+  const metadata = acceptance.metadata;
+  const observedEndOffset = metadata?.observed_end_offset_bytes;
+  if (
+    acceptance.acceptanceId !== acceptedPromptUuid ||
+    metadata?.prompt_uuid !== acceptedPromptUuid ||
+    metadata?.claude_version !== anchor.claude_version ||
+    metadata?.anchor_offset_bytes !== anchor.transcript_anchor.offset_bytes ||
+    metadata?.agent_started_at_ms !==
+      anchor.transcript_anchor.agent_started_at_ms ||
+    acceptance.anchorFingerprint !==
+      claudeTranscriptAnchorFingerprint(anchor.transcript_anchor) ||
+    typeof observedEndOffset !== "number" ||
+    !Number.isSafeInteger(observedEndOffset) ||
+    observedEndOffset <= anchor.transcript_anchor.offset_bytes ||
+    Number(value.safe_resume_offset_bytes) < observedEndOffset
+  ) {
+    throw new Error(
+      "Claude fallback Watch acceptance checkpoint does not match its anchor"
+    );
+  }
 }
 
 function assertTerminalIdentity(
@@ -932,6 +1257,69 @@ function assertTerminalWatchAnchor(
     if (anchor.cwd !== terminal.workspace) {
       throw new Error("Claude Watch workspace does not match its task anchor");
     }
+    return;
+  }
+  if (
+    value.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+  ) {
+    if (agent !== "codex") {
+      throw new Error("Codex fallback Watch anchor cannot belong to another agent");
+    }
+    assertStrictRecord(value, "Codex fallback Watch anchor", {
+      schema: literalGuard(
+        "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+      ),
+      version: literalGuard(1),
+      captured_at: assertTimestamp,
+      request_hash: assertSha256,
+      codex_version: assertNonEmptyString,
+      acceptance_anchor: IGNORE_VALUE,
+      anchor_fingerprint: assertSha256
+    });
+    const acceptance = validateCodexRolloutAcceptanceAnchor(
+      value.acceptance_anchor
+    );
+    if (acceptance.captured_at !== value.captured_at) {
+      throw new Error(
+        "Codex fallback Watch capture time does not match its acceptance anchor"
+      );
+    }
+    assertAnchorFingerprint(value, "Codex fallback Watch anchor");
+    return;
+  }
+  if (
+    value.schema ===
+      "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+  ) {
+    if (agent !== "claude") {
+      throw new Error(
+        "Claude fallback Watch anchor cannot belong to another agent"
+      );
+    }
+    assertStrictRecord(value, "Claude fallback Watch anchor", {
+      schema: literalGuard(
+        "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+      ),
+      version: literalGuard(1),
+      captured_at: assertTimestamp,
+      request_hash: assertSha256,
+      claude_version: assertNonEmptyString,
+      transcript_anchor: IGNORE_VALUE,
+      anchor_fingerprint: assertSha256
+    });
+    const transcript = validatedClaudeTranscriptAnchor(
+      value.transcript_anchor
+    );
+    if (
+      transcript.captured_at !== value.captured_at ||
+      transcript.cwd !== terminal.workspace
+    ) {
+      throw new Error(
+        "Claude fallback Watch transcript anchor does not match its Watch"
+      );
+    }
+    assertAnchorFingerprint(value, "Claude fallback Watch anchor");
     return;
   }
   throw new Error("terminal Watch anchor schema is unsupported");
@@ -1191,6 +1579,10 @@ function assertTerminalWatchAdvance(
   ) {
     throw new Error("terminal Watch observation checkpoint cannot move backwards");
   }
+  assertFallbackCheckpointAdvance(
+    current.observation_checkpoint,
+    candidate.observation_checkpoint
+  );
   if (
     current.status !== "active" &&
     candidate.status !== current.status
@@ -1223,6 +1615,46 @@ function assertTerminalWatchAdvance(
     );
   }
   assertNotificationAdvance(current.notification_outbox, candidate.notification_outbox);
+}
+
+function assertFallbackCheckpointAdvance(
+  current: TerminalWatchObservationCheckpoint,
+  candidate: TerminalWatchObservationCheckpoint
+): void {
+  if (!("schema" in current)) {
+    return;
+  }
+  const fallbackSchema = current.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint" ||
+    current.schema ===
+      "agent-knock-knock/claude-user-explicit-fallback-watch-checkpoint";
+  if (!fallbackSchema) return;
+  if (
+    !("schema" in candidate) ||
+    candidate.schema !== current.schema
+  ) {
+    throw new Error("fallback Watch checkpoint schema cannot change");
+  }
+  if (current.acceptance_evidence === undefined) {
+    return;
+  }
+  const currentIdentity = current.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint"
+    ? current.accepted_identity
+    : current.accepted_prompt_uuid;
+  const candidateIdentity = candidate.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint"
+    ? candidate.accepted_identity
+    : candidate.accepted_prompt_uuid;
+  if (
+    canonicalJson(candidate.acceptance_evidence) !==
+      canonicalJson(current.acceptance_evidence) ||
+    canonicalJson(candidateIdentity) !== canonicalJson(currentIdentity)
+  ) {
+    throw new Error(
+      "fallback Watch accepted identity cannot change"
+    );
+  }
 }
 
 function assertNotificationAdvance(
@@ -1484,10 +1916,74 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
   }
 }
 
+function nonEmptyString(value: unknown, label: string): string {
+  assertNonEmptyString(value, label);
+  return value;
+}
+
 function assertSha256(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) {
     throw new Error(`${label} must be a lowercase SHA-256 digest`);
   }
+}
+
+function sha256String(value: unknown, label: string): string {
+  assertSha256(value, label);
+  return value;
+}
+
+function exactUuid(value: unknown, label: string): string {
+  const text = nonEmptyString(value, label);
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
+      .test(text)
+  ) {
+    throw new Error(`${label} must be an exact lowercase UUID`);
+  }
+  return text;
+}
+
+function fingerprintValue(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function assertAnchorFingerprint(
+  value: Record<string, unknown>,
+  label: string
+): void {
+  const { anchor_fingerprint: actual, ...base } = value;
+  if (actual !== fingerprintValue(base)) {
+    throw new Error(`${label} fingerprint does not match`);
+  }
+}
+
+function validatedClaudeTranscriptAnchor(
+  value: unknown
+): ClaudeTranscriptAnchor {
+  assertStrictRecord(value, "Claude fallback transcript anchor", {
+    schema_version: literalGuard(1),
+    session_id: assertNonEmptyString,
+    cwd: ABSOLUTE_PATH,
+    pid: POSITIVE_INTEGER,
+    agent_started_at_ms: POSITIVE_INTEGER,
+    captured_at: assertTimestamp,
+    relative_path: assertNonEmptyString,
+    offset_bytes: NON_NEGATIVE_INTEGER,
+    file_existed: oneOfGuard([true, false]),
+    device: optionalGuard(assertNonEmptyString),
+    inode: optionalGuard(assertNonEmptyString)
+  });
+  const anchor = value as unknown as ClaudeTranscriptAnchor;
+  if (
+    anchor.file_existed !==
+      (anchor.device !== undefined && anchor.inode !== undefined) ||
+    (anchor.device === undefined) !== (anchor.inode === undefined)
+  ) {
+    throw new Error(
+      "Claude fallback transcript file identity does not match file_existed"
+    );
+  }
+  return anchor;
 }
 
 function assertTimestamp(value: unknown, label: string): asserts value is string {

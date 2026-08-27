@@ -139,7 +139,7 @@ export function registerOpenClawCommands(
 
   registerCliTool(api, {
     name: "agent_knock_knock_list",
-    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources, plus durable terminal_watches[] records. Use only advertised actions and their semantic IDs. A terminal_user_explicit send is user-priority authority for one exact live physical terminal/process with a scanned, non-blocked approval state; parsed working activity and Codex Composer visibility, stability, or exactness do not veto it. Codex uses replace_current_composer_and_submit: physical fallback sends C-u once, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto. Claude Code remains exact-empty-only; managed Send may require exact empty before input, and native inspection and native lifecycle input remain exact-empty-only. Broken AKK Turn, Session, transfer, ledger, or Store state does not veto a new user Send. AKK tries the managed fast path first, then delivers once as unmanaged work with no callback before best-effort management release. Existing or possibly existing same-message idempotency evidence rejects replay. If fresh durability is unavailable, AKK proceeds with a warning and the result must not be automatically retried. Once the Codex mutation sequence begins, an uncertain result must not be automatically retried. Refresh list afterward and use Watch. A session_exact send uses session_id; terminal_follow_current and terminal_user_explicit Send use terminal_id; Watch uses terminal_id; managed controls use turn_id; lifecycle resume additionally uses the complete native_thread_id. Draft text, composer digests, and opaque freshness authority stay private. AKK never starts a coding-agent process.",
+    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources, plus durable terminal_watches[] records. Use only advertised actions and their semantic IDs. A terminal_user_explicit send is user-priority authority for one exact live physical terminal/process with a scanned, non-blocked approval state; parsed working activity and Codex Composer visibility, stability, or exactness do not veto it. Codex uses replace_current_composer_and_submit: physical fallback sends C-u once, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto. Claude Code remains exact-empty-only; managed Send may require exact empty before input, and native inspection and native lifecycle input remain exact-empty-only. Broken AKK Turn, Session, transfer, ledger, or Store state does not veto a new user Send. AKK tries the managed fast path first, then delivers once as unmanaged work and best-effort attaches an exact Terminal Watch callback before releasing stale management. Watch attachment failure never changes a successful Send and is reported as a warning. Existing or possibly existing same-message idempotency evidence rejects replay. If fresh durability is unavailable, AKK proceeds with a warning and the result must not be automatically retried. Once the Codex mutation sequence begins, an uncertain result must not be automatically retried. A session_exact send uses session_id; terminal_follow_current and terminal_user_explicit Send use terminal_id; Watch uses terminal_id; managed controls use turn_id; lifecycle resume additionally uses the complete native_thread_id. Draft text, composer digests, and opaque freshness authority stay private. AKK never starts a coding-agent process.",
     parameters: listParameters,
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -412,7 +412,7 @@ export function registerOpenClawCommands(
       label: "AKK Status",
       name: "agent_knock_knock_status",
       description:
-        "Inspect one exact AKK-managed Turn by its authoritative turn_id, one durable Terminal Watch by its authoritative watch_id, or use only a raw terminal row's own prefilled compatibility selector. These targets are mutually exclusive. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. Watch status describes observed external work and never claims AKK sent or adopted the task. AKK never starts a coding agent.",
+        "Inspect one exact AKK-managed Turn by its authoritative turn_id, one durable Terminal Watch by its authoritative watch_id, or use only a raw terminal row's own prefilled compatibility selector. These targets are mutually exclusive. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. Manual Watch status describes external work AKK did not send; automatic terminal_user_explicit fallback Watch status describes the exact request AKK physically sent without claiming a managed Turn. AKK never starts a coding agent.",
       parameters: statusParameters,
       async execute(_toolCallId, params) {
         try {
@@ -441,7 +441,7 @@ export function registerOpenClawCommands(
       label: "AKK Send",
       name: "agent_knock_knock_send",
       description:
-        "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process and a scanned, non-blocked approval state; parsed working activity and Codex Composer visibility, stability, or exactness do not veto it. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. The managed fast path may require exact empty before input, but after user-explicit Codex text injection it follows the same no-Composer-veto Enter rule. If broken internal AKK state prevents managed delivery before input, AKK delivers once as unmanaged work with no callback Turn or callback before best-effort management release. Once the mutation sequence begins, an uncertain result must not be automatically retried. Refresh list afterward and use Watch. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
+        "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process and a scanned, non-blocked approval state; parsed working activity and Codex Composer visibility, stability, or exactness do not veto it. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. The managed fast path may require exact empty before input, but after user-explicit Codex text injection it follows the same no-Composer-veto Enter rule. If broken internal AKK state prevents managed delivery before input, AKK delivers once as unmanaged work with no managed callback Turn, then best-effort attaches an exact Terminal Watch callback and releases stale management. Watch attachment failure never changes a successful Send and is reported in the delivery result. Once the mutation sequence begins, an uncertain result must not be automatically retried. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
       parameters: sendParameters,
       async execute(toolCallId, params) {
         try {
@@ -1149,6 +1149,12 @@ function formatSendCommandResult(result) {
   ) {
     const unmanaged = result.delivered_unmanaged === true;
     const replayed = result.replayed === true;
+    const watchCallback = unmanaged &&
+      result.callback_expected === true &&
+      result.callback_mode === "terminal_watch" &&
+      typeof result.watch_id === "string"
+        ? result.watch_id
+        : undefined;
     if (result.delivered !== true) {
       return [
         "AKK already dispatched this managed terminal Send; native acceptance is still pending.",
@@ -1170,10 +1176,14 @@ function formatSendCommandResult(result) {
       `message: ${result.message_id ?? "unknown"}`,
       `delivery: ${unmanaged ? "unmanaged fallback" : "managed"}`,
       ...(unmanaged
-        ? ["callback: none; no AKK Turn was created for this delivery."]
+        ? [watchCallback
+            ? `callback: Terminal Watch ${watchCallback}; no managed AKK Turn was created.`
+            : "callback: unavailable; no managed AKK Turn was created."]
         : []),
       unmanaged
-        ? "next: refresh AKK list and use Watch to observe the still-running coding-agent task."
+        ? watchCallback
+          ? "next: wait for the Terminal Watch callback; watch-status is the recovery path."
+          : "next: refresh AKK list and use Watch to observe the still-running coding-agent task."
         : "next: refresh AKK list; do not resend this message id."
     ].join("\n");
   }

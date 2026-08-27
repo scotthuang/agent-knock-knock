@@ -659,6 +659,8 @@ export function formatAkkWatchStatusCommandResult(
   result: Record<string, unknown>
 ): string {
   const watch = terminalWatchRecord(result);
+  const userExplicitFallback = watch.source ===
+    "terminal_user_explicit_fallback_watch";
   const settlement = recordValue(watch.settlement) ?? {};
   const reason = nonEmptyString(settlement.reason_code) ??
     nonEmptyString(watch.reason);
@@ -676,7 +678,9 @@ export function formatAkkWatchStatusCommandResult(
     ...(completionText
       ? [`completion: ${truncateText(completionText, 500)}`]
       : []),
-    "This is observed external work; AKK did not send or adopt the task."
+    userExplicitFallback
+      ? "AKK sent this exact request through user-explicit unmanaged fallback and attached Watch for its callback; no managed Turn was created."
+      : "This is observed external work; AKK did not send or adopt the task."
   ].join("\n");
 }
 

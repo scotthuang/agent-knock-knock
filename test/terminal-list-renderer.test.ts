@@ -104,9 +104,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v22 exposes semantic arguments only", () => {
+test("the public action contract v23 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 22);
+  assert.equal(contracts.version, 23);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -151,7 +151,7 @@ test("the public action contract v22 exposes semantic arguments only", () => {
   const actions = contracts.actions as Record<string, any>;
   assert.match(
     (contracts.instructions as string[]).join("\n"),
-    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*no Composer observation may veto Enter[\s\S]*best-effort releases[\s\S]*no callback[\s\S]*use Watch/u
+    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*no Composer observation may veto Enter[\s\S]*Terminal Watch callback[\s\S]*no managed callback Turn[\s\S]*failure is reported/u
   );
   assert.match(
     (contracts.instructions as string[]).join("\n"),
@@ -159,7 +159,7 @@ test("the public action contract v22 exposes semantic arguments only", () => {
   );
   assert.match(
     actions.send.initial_attach_scope,
-    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no callback/u
+    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*Terminal Watch callback/u
   );
   assert.equal(
     actions.send.codex_terminal_user_explicit_composer_policy,

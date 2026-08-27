@@ -393,6 +393,7 @@ export function createTerminalWatchService(
       observedAt: observation.observed_at,
       reasonCode: observation.reason_code,
       updatedAt: now,
+      observationCheckpoint: checkpoint,
       lastActivityAt: activityAt,
       completionText: observation.kind === "completed" ||
           observation.kind === "failed"
@@ -417,6 +418,7 @@ export function createTerminalWatchService(
       observedAt: string;
       reasonCode?: string;
       updatedAt: string;
+      observationCheckpoint?: TerminalWatchObservationCheckpoint;
       lastActivityAt?: string;
       completionText?: string;
       completionId?: string;
@@ -434,6 +436,8 @@ export function createTerminalWatchService(
       ...current,
       status: input.kind,
       updated_at: input.updatedAt,
+      observation_checkpoint:
+        input.observationCheckpoint ?? current.observation_checkpoint,
       last_activity_at: input.lastActivityAt ?? current.last_activity_at,
       settlement: {
         kind: input.kind,

@@ -1024,7 +1024,7 @@ test("protocol 3 upgrades to the current writer fence by atomically publishing o
   }
 });
 
-test("non-empty protocol 4 upgrades to protocol 5 without rewriting Turn or Session state", () => {
+test("non-empty protocol 4 upgrades to the current protocol without rewriting Turn or Session state", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p4-"));
   const storeDir = path.join(sandbox, "store");
   const createdAt = "2026-08-12T01:00:00.000Z";
@@ -1052,11 +1052,33 @@ test("non-empty protocol 4 upgrades to protocol 5 without rewriting Turn or Sess
     assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
     const upgraded = ensureStoreWritable(storeDir);
 
-    assert.equal(upgraded.writer_protocol, 5);
+    assert.equal(upgraded.writer_protocol, STORE_WRITER_PROTOCOL);
     assert.equal(upgraded.created_at, createdAt);
     assert.notEqual(fs.statSync(manifestPath).ino, before.manifestInode);
     assert.deepEqual(fileSnapshot(turn.paths.statePath), before.turn);
     assert.deepEqual(fileSnapshot(sessionPath), before.session);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("protocol 5 upgrades to protocol 6 as the Terminal Watch v2 writer fence", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p5-"));
+  const storeDir = path.join(sandbox, "store");
+  const createdAt = "2026-08-27T01:00:00.000Z";
+  try {
+    const manifestPath = writeStoreManifest(storeDir, {
+      writerProtocol: 5,
+      createdAt
+    });
+    const previousInode = fs.statSync(manifestPath).ino;
+
+    assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
+    const upgraded = ensureStoreWritable(storeDir);
+
+    assert.equal(upgraded.writer_protocol, 6);
+    assert.equal(upgraded.created_at, createdAt);
+    assert.notEqual(fs.statSync(manifestPath).ino, previousInode);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

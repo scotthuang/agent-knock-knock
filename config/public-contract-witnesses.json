@@ -81,7 +81,7 @@
       ]
     },
     "list_action": {
-      "version": 22,
+      "version": 23,
       "actions": [
         "send",
         "retry_submission",
@@ -104,7 +104,7 @@
         "src/terminal-list-renderer.ts"
       ],
       "witnesses": [
-        "action-v22-unit",
+        "action-v23-unit",
         "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
@@ -145,15 +145,16 @@
     },
     "store_protocols": {
       "format_version": 1,
-      "current_writer_protocol": 5,
+      "current_writer_protocol": 6,
       "session_authority_protocol": 3,
       "terminal_watch_schema": "agent-knock-knock/terminal-watch",
-      "terminal_watch_version": 1,
+      "terminal_watch_version": 2,
       "upgradeable_writer_protocols": [
         1,
         2,
         3,
-        4
+        4,
+        5
       ],
       "authority_paths": [
         "src/session-store.ts",
@@ -180,6 +181,10 @@
         {
           "protocol": 5,
           "witness": "store-protocol-5-boundary"
+        },
+        {
+          "protocol": 6,
+          "witness": "store-protocol-6-boundary"
         }
       ],
       "witnesses": [
@@ -190,10 +195,10 @@
   },
   "witnesses": [
     {
-      "id": "action-v22-unit",
+      "id": "action-v23-unit",
       "path": "test/terminal-list-renderer.test.ts",
       "tier": "fast",
-      "needle": "the public action contract v22 exposes semantic arguments only"
+      "needle": "the public action contract v23 exposes semantic arguments only"
     },
     {
       "id": "callback-cli-boundary",
@@ -571,13 +576,19 @@
       "id": "store-protocol-4-boundary",
       "path": "test/store.test.ts",
       "tier": "integration",
-      "needle": "non-empty protocol 4 upgrades to protocol 5 without rewriting Turn or Session state"
+      "needle": "non-empty protocol 4 upgrades to the current protocol without rewriting Turn or Session state"
     },
     {
       "id": "store-protocol-5-boundary",
       "path": "test/store.test.ts",
       "tier": "integration",
       "needle": "protocol 5 fences candidate source history until transfer cleanup is terminal"
+    },
+    {
+      "id": "store-protocol-6-boundary",
+      "path": "test/store.test.ts",
+      "tier": "integration",
+      "needle": "protocol 5 upgrades to protocol 6 as the Terminal Watch v2 writer fence"
     },
     {
       "id": "store-protocol-cli-boundary",
@@ -818,13 +829,13 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The imported command service and pure renderer preserve action-contract v22 ordering, semantic model-facing arguments, version compatibility warnings without version-based action vetoes, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, working activity as non-vetoing diagnostic evidence, Claude exact-empty and managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v23 ordering, semantic model-facing arguments, version compatibility warnings without version-based action vetoes, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, best-effort exact fallback Watch callbacks that never revoke Send, working activity as non-vetoing diagnostic evidence, Claude exact-empty and managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
         "management-list-in-process",
         "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
-        "action-v22-unit"
+        "action-v23-unit"
       ],
       "retained_boundary_witnesses": [
         "codex-binding-boundary",
