@@ -10,6 +10,7 @@ import path from "node:path";
 import process from "node:process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runNpmWithRetries } from "./npm-command-retry.js";
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -146,7 +147,9 @@ function installHost(version, caseRoot) {
     "utf8"
   );
   const env = isolatedEnv({
-    npm_config_cache: path.join(caseRoot, "npm-cache"),
+    // The matrix is sequential, so one run-private cache avoids downloading
+    // the same large OpenClaw dependency tree independently for every target.
+    npm_config_cache: path.join(tempRoot, "npm-cache"),
     npm_config_update_notifier: "false"
   });
   runNpm([
@@ -159,7 +162,7 @@ function installHost(version, caseRoot) {
   ], {
     cwd: hostDir,
     env,
-    timeoutMs: 8 * 60 * 1000
+    timeoutMs: 20 * 60 * 1000
   });
 
   const openclawPackagePath = path.join(
@@ -1159,31 +1162,7 @@ function run(command, args, {
 }
 
 function runNpm(args, options) {
-  let lastResult;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    lastResult = run("npm", args, {
-      ...options,
-      allowNonzero: true
-    });
-    if (lastResult.status === 0) {
-      return lastResult;
-    }
-    const output = `${lastResult.stdout}\n${lastResult.stderr}`;
-    const retryable = /(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|429|502|503|504)/iu.test(
-      output
-    );
-    if (!retryable || attempt === 3) {
-      break;
-    }
-    process.stderr.write(
-      `npm network failure; retrying (${attempt}/3)...\n`
-    );
-  }
-  throw new Error([
-    `npm ${args.join(" ")} exited with ${lastResult?.status}`,
-    lastResult?.stdout,
-    lastResult?.stderr
-  ].filter(Boolean).join("\n").slice(-20_000));
+  return runNpmWithRetries({ args, options, run });
 }
 
 function isolatedEnv(extra = {}) {
