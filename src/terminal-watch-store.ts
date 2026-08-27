@@ -97,7 +97,82 @@ export type TerminalWatchAnchor =
   | CodexHumanStartedActiveTaskAnchor
   | ClaudeHumanStartedActiveTaskAnchor
   | CodexUserExplicitFallbackWatchAnchor
-  | ClaudeUserExplicitFallbackWatchAnchor;
+  | ClaudeUserExplicitFallbackWatchAnchor
+  | TerminalActivityWatchAnchor;
+
+export type TerminalActivityState =
+  | "awaiting_approval"
+  | "working"
+  | "idle"
+  | "unknown";
+
+/**
+ * Observation-only fallback for a user-selected live terminal. It deliberately
+ * carries no task ownership claim: when a provider artifact cannot name one
+ * exact task, the Watch follows only this terminal/process activity epoch.
+ */
+export interface TerminalActivityWatchAnchor {
+  schema: "agent-knock-knock/terminal-activity-watch-anchor";
+  version: 1;
+  captured_at: string;
+  terminal_id: string;
+  pid: number;
+  initial_activity_state: TerminalActivityState;
+  native_process_uuid?: string;
+  native_process_birth?: string;
+  agent_version?: string;
+  anchor_fingerprint: string;
+}
+
+export function isTerminalActivityWatch(
+  watch: Pick<TerminalWatch, "anchor">
+): watch is Pick<TerminalWatch, "anchor"> & {
+  anchor: TerminalActivityWatchAnchor;
+} {
+  return watch.anchor.schema ===
+    "agent-knock-knock/terminal-activity-watch-anchor";
+}
+
+export function createTerminalActivityWatchAnchor(input: {
+  capturedAt: Date;
+  terminalId: string;
+  pid: number;
+  initialActivityState: TerminalActivityState;
+  nativeProcessUuid?: string;
+  nativeProcessBirth?: string;
+  agentVersion?: string;
+}): TerminalActivityWatchAnchor {
+  const base = {
+    schema: "agent-knock-knock/terminal-activity-watch-anchor" as const,
+    version: 1 as const,
+    captured_at: input.capturedAt.toISOString(),
+    terminal_id: nonEmptyString(input.terminalId, "terminal id"),
+    pid: positiveIntegerValue(input.pid, "terminal PID"),
+    initial_activity_state: input.initialActivityState,
+    ...(input.nativeProcessUuid === undefined
+      ? {}
+      : {
+          native_process_uuid: nonEmptyString(
+            input.nativeProcessUuid,
+            "native process UUID"
+          )
+        }),
+    ...(input.nativeProcessBirth === undefined
+      ? {}
+      : {
+          native_process_birth: nonEmptyString(
+            input.nativeProcessBirth,
+            "native process birth"
+          )
+        }),
+    ...(input.agentVersion === undefined
+      ? {}
+      : {
+          agent_version: nonEmptyString(input.agentVersion, "agent version")
+        })
+  };
+  return { ...base, anchor_fingerprint: fingerprintValue(base) };
+}
 
 export interface CodexUserExplicitFallbackWatchAnchor {
   schema: "agent-knock-knock/codex-user-explicit-fallback-watch-anchor";
@@ -125,7 +200,9 @@ export type UserExplicitFallbackWatchAnchor =
 
 export function isUserExplicitFallbackWatch(
   watch: Pick<TerminalWatch, "anchor">
-): boolean {
+): watch is Pick<TerminalWatch, "anchor"> & {
+  anchor: UserExplicitFallbackWatchAnchor;
+} {
   return watch.anchor.schema ===
       "agent-knock-knock/codex-user-explicit-fallback-watch-anchor" ||
     watch.anchor.schema ===
@@ -221,15 +298,39 @@ export interface ClaudeUserExplicitFallbackWatchObservationCheckpoint {
   accepted_prompt_uuid?: string;
 }
 
+export interface TerminalActivityWatchObservationCheckpoint {
+  schema: "agent-knock-knock/terminal-activity-watch-checkpoint";
+  version: 1;
+  safe_resume_offset_bytes: 0;
+  has_seen_activity: boolean;
+  consecutive_idle_observations: number;
+  last_activity_state: TerminalActivityState;
+}
+
 export type TerminalWatchObservationCheckpoint =
   | CodexTerminalWatchObservationCheckpoint
   | CodexUserExplicitFallbackWatchObservationCheckpoint
   | ClaudeUserExplicitFallbackWatchObservationCheckpoint
-  | ClaudeHumanStartedActiveTaskCheckpoint;
+  | ClaudeHumanStartedActiveTaskCheckpoint
+  | TerminalActivityWatchObservationCheckpoint;
 
 export function initialTerminalWatchObservationCheckpoint(
   anchor: TerminalWatchAnchor
 ): TerminalWatchObservationCheckpoint {
+  if (
+    anchor.schema === "agent-knock-knock/terminal-activity-watch-anchor"
+  ) {
+    return {
+      schema: "agent-knock-knock/terminal-activity-watch-checkpoint",
+      version: 1,
+      safe_resume_offset_bytes: 0,
+      has_seen_activity:
+        anchor.initial_activity_state === "working" ||
+        anchor.initial_activity_state === "awaiting_approval",
+      consecutive_idle_observations: 0,
+      last_activity_state: anchor.initial_activity_state
+    };
+  }
   if (
     anchor.schema ===
       "agent-knock-knock/claude-human-started-active-task-anchor"
@@ -321,6 +422,8 @@ export interface TerminalWatch {
   terminal: TerminalWatchTerminalIdentity;
   anchor: TerminalWatchAnchor;
   observation_checkpoint: TerminalWatchObservationCheckpoint;
+  /** Immutable creation-time diagnostics; none of these veto observation. */
+  warnings?: string[];
   /** Immutable callback authority captured by a native Host at Watch creation. */
   callback_route?: CallbackRouteV1;
   openclaw_session: string;
@@ -343,7 +446,10 @@ export interface TerminalWatchCallbackMessageInput {
   event: TerminalWatchCallbackEvent;
   agent: ExecutorKind;
   terminalId: string;
-  origin?: "external_human" | "terminal_user_explicit_fallback";
+  origin?:
+    | "user_selected_terminal"
+    | "terminal_user_explicit_fallback"
+    | "terminal_activity_fallback";
   detail?: string;
   completionText?: string;
 }
@@ -378,7 +484,9 @@ export function terminalWatchCallbackEnvelope(
         terminalId: watch.terminal.terminal_id,
         origin: isUserExplicitFallbackWatch(watch)
           ? "terminal_user_explicit_fallback"
-          : "external_human",
+          : isTerminalActivityWatch(watch)
+            ? "terminal_activity_fallback"
+            : "user_selected_terminal",
         detail: reasonCode,
         completionText: notification.kind === "completed" ||
             notification.kind === "failed"
@@ -388,6 +496,17 @@ export function terminalWatchCallbackEnvelope(
       requires_response: true,
       metadata: {
         agent: watch.agent,
+        watch_origin: isUserExplicitFallbackWatch(watch)
+          ? "terminal_user_explicit_fallback"
+          : isTerminalActivityWatch(watch)
+            ? "terminal_activity_fallback"
+            : "user_selected_terminal",
+        watch_mode: isTerminalActivityWatch(watch)
+          ? "terminal_activity"
+          : "exact_task",
+        confidence: isTerminalActivityWatch(watch)
+          ? "best_effort"
+          : "exact",
         ...(reasonCode
           ? { reason_code: reasonCode }
           : {}),
@@ -406,18 +525,24 @@ export function terminalWatchCallbackMessage(
 ): string {
   const userExplicitFallback =
     input.origin === "terminal_user_explicit_fallback";
+  const terminalActivityFallback =
+    input.origin === "terminal_activity_fallback";
   const eventInstruction = input.event === "approval_required"
     ? "Tell the user that the observed TUI task is waiting for approval and ask the human to inspect and decide in the named live TUI. Do not call any AKK approval tool or action, do not send approval keys, and do not use autoApprove."
     : input.event === "completed"
       ? userExplicitFallback
         ? "Tell the user that the request delivered through AKK's user-explicit unmanaged fallback completed and summarize only the bounded completion text below."
-        : "Tell the user that the human-started TUI task completed and summarize only the bounded completion text below."
+        : terminalActivityFallback
+          ? "Tell the user that the selected terminal's observed activity became idle. Explain that this was a best-effort terminal-activity Watch, not an exact task completion proof."
+          : "Tell the user that the exact task anchor in the selected TUI completed and summarize only the bounded completion text below."
       : "Tell the user that Terminal Watch stopped without a verified successful completion and explain the exact reason below.";
   return [
     "Continue this controller conversation from the Agent Knock Knock Terminal Watch event below.",
     userExplicitFallback
       ? "AKK delivered this exact request through terminal_user_explicit unmanaged fallback and then attached Terminal Watch. It is not a managed AKK Turn."
-      : "This is an observation of a task started by the human directly in Codex or Claude Code. It is not an AKK Turn and AKK did not send terminal input.",
+      : terminalActivityFallback
+        ? "This is a read-only best-effort observation of the exact selected terminal/process activity epoch. It is not an AKK Turn and AKK did not send terminal input."
+        : "This is a read-only observation of an exact task anchor in the terminal selected by the user. Terminal Watch itself did not send, adopt, or mutate the task; the task may independently have an AKK-managed Turn.",
     eventInstruction,
     "Do not poll files, processes, terminal panes, stdout, or stderr. Use only this structured event.",
     "",
@@ -623,6 +748,17 @@ const NON_NEGATIVE_INTEGER: FieldGuard = (value, label) => {
 const ARRAY_VALUE: FieldGuard = (value, label) => {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
 };
+const WARNING_LIST: FieldGuard = (value, label) => {
+  if (
+    !Array.isArray(value) ||
+    value.some((warning) =>
+      typeof warning !== "string" || warning.trim().length === 0
+    ) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new Error(`${label} must contain unique non-empty strings`);
+  }
+};
 const ABSOLUTE_PATH: FieldGuard = (value, label) => {
   if (typeof value !== "string" || !path.isAbsolute(value)) {
     throw new Error(`${label} must be absolute`);
@@ -646,6 +782,7 @@ const WATCH_FIELDS = {
   terminal: assertTerminalIdentity,
   anchor: IGNORE_VALUE,
   observation_checkpoint: IGNORE_VALUE,
+  warnings: optionalGuard(WARNING_LIST),
   callback_route: optionalGuard(IGNORE_VALUE),
   openclaw_session: assertNonEmptyString,
   openclaw_bin: assertNonEmptyString,
@@ -762,10 +899,23 @@ export function assertTerminalWatch(
     watch.agent,
     watch.terminal
   );
-  assertObservationCheckpoint(
+  assertTerminalWatchObservationCheckpoint(
     watch.observation_checkpoint,
     watch.anchor
   );
+  const checkpoint = watch.observation_checkpoint;
+  if (
+    isTerminalActivityWatch(watch) &&
+    "schema" in checkpoint &&
+    checkpoint.schema ===
+      "agent-knock-knock/terminal-activity-watch-checkpoint" &&
+    watch.status === "active" &&
+    checkpoint.consecutive_idle_observations > 1
+  ) {
+    throw new Error(
+      "an active terminal activity Watch cannot already carry stable-idle settlement evidence"
+    );
+  }
   if (watch.callback_route !== undefined) {
     const route = parseCallbackRoute(watch.callback_route);
     if (route.controller_session_id !== watch.openclaw_session) {
@@ -775,6 +925,9 @@ export function assertTerminalWatch(
     }
   }
   const minimumCheckpointOffset = watch.anchor.schema ===
+      "agent-knock-knock/terminal-activity-watch-anchor"
+    ? 0
+    : watch.anchor.schema ===
       "agent-knock-knock/claude-human-started-active-task-anchor"
       ? watch.anchor.turn_start_offset_bytes
       : watch.anchor.schema ===
@@ -1041,10 +1194,52 @@ function normalizeLegacyTerminalWatch(value: unknown): unknown {
   return versionNormalized;
 }
 
-function assertObservationCheckpoint(
+export function assertTerminalWatchObservationCheckpoint(
   value: unknown,
   anchor: TerminalWatchAnchor
 ): asserts value is TerminalWatchObservationCheckpoint {
+  if (
+    anchor.schema === "agent-knock-knock/terminal-activity-watch-anchor"
+  ) {
+    assertStrictRecord(value, "terminal activity Watch checkpoint", {
+      schema: literalGuard(
+        "agent-knock-knock/terminal-activity-watch-checkpoint"
+      ),
+      version: literalGuard(1),
+      safe_resume_offset_bytes: literalGuard(0),
+      has_seen_activity: (candidate, label) => {
+        if (typeof candidate !== "boolean") {
+          throw new Error(`${label} must be boolean`);
+        }
+      },
+      consecutive_idle_observations: NON_NEGATIVE_INTEGER,
+      last_activity_state: oneOfGuard([
+        "awaiting_approval", "working", "idle", "unknown"
+      ])
+    });
+    const checkpoint = value as unknown as
+      TerminalActivityWatchObservationCheckpoint;
+    if (
+      checkpoint.consecutive_idle_observations > 0 &&
+      (
+        !checkpoint.has_seen_activity ||
+        checkpoint.last_activity_state !== "idle"
+      )
+    ) {
+      throw new Error(
+        "terminal activity Watch idle observations require prior activity and an idle state"
+      );
+    }
+    if (
+      checkpoint.last_activity_state !== "idle" &&
+      checkpoint.consecutive_idle_observations !== 0
+    ) {
+      throw new Error(
+        "terminal activity Watch non-idle checkpoint cannot retain idle observations"
+      );
+    }
+    return;
+  }
   if (
     anchor.schema ===
       "agent-knock-knock/claude-human-started-active-task-anchor"
@@ -1235,6 +1430,33 @@ function assertTerminalWatchAnchor(
 ): asserts value is TerminalWatchAnchor {
   if (!isRecord(value)) {
     throw new Error("terminal Watch anchor must be an object");
+  }
+  if (
+    value.schema === "agent-knock-knock/terminal-activity-watch-anchor"
+  ) {
+    assertStrictRecord(value, "terminal activity Watch anchor", {
+      schema: literalGuard(
+        "agent-knock-knock/terminal-activity-watch-anchor"
+      ),
+      version: literalGuard(1),
+      captured_at: assertTimestamp,
+      terminal_id: assertNonEmptyString,
+      pid: POSITIVE_INTEGER,
+      initial_activity_state: oneOfGuard([
+        "awaiting_approval", "working", "idle", "unknown"
+      ]),
+      native_process_uuid: optionalGuard(assertNonEmptyString),
+      native_process_birth: optionalGuard(assertNonEmptyString),
+      agent_version: optionalGuard(assertNonEmptyString),
+      anchor_fingerprint: assertSha256
+    });
+    if (value.terminal_id !== terminal.terminal_id) {
+      throw new Error(
+        "terminal activity Watch id does not match its terminal identity"
+      );
+    }
+    assertAnchorFingerprint(value, "terminal activity Watch anchor");
+    return;
   }
   if (
     value.schema ===
@@ -1557,6 +1779,7 @@ function assertTerminalWatchAdvance(
     ["agent", current.agent, candidate.agent],
     ["terminal", current.terminal, candidate.terminal],
     ["anchor", current.anchor, candidate.anchor],
+    ["warnings", current.warnings, candidate.warnings],
     ["callback_route", current.callback_route, candidate.callback_route],
     ["openclaw_session", current.openclaw_session, candidate.openclaw_session],
     ["openclaw_bin", current.openclaw_bin, candidate.openclaw_bin],
@@ -1622,6 +1845,31 @@ function assertFallbackCheckpointAdvance(
   candidate: TerminalWatchObservationCheckpoint
 ): void {
   if (!("schema" in current)) {
+    return;
+  }
+  if (
+    current.schema ===
+      "agent-knock-knock/terminal-activity-watch-checkpoint"
+  ) {
+    if (
+      !("schema" in candidate) ||
+      candidate.schema !== current.schema
+    ) {
+      throw new Error("terminal activity Watch checkpoint schema cannot change");
+    }
+    if (current.has_seen_activity && !candidate.has_seen_activity) {
+      throw new Error(
+        "terminal activity Watch cannot forget observed activity"
+      );
+    }
+    if (
+      candidate.consecutive_idle_observations >
+        current.consecutive_idle_observations + 1
+    ) {
+      throw new Error(
+        "terminal activity Watch idle observations cannot skip supervision sweeps"
+      );
+    }
     return;
   }
   const fallbackSchema = current.schema ===
@@ -1904,6 +2152,13 @@ function isPositiveSafeInteger(value: unknown): value is number {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function positiveIntegerValue(value: unknown, label: string): number {
+  if (!isPositiveSafeInteger(value)) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
+  return value;
 }
 
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {

@@ -91,21 +91,21 @@ Omitting the resume selection lists exact verified candidates. You may use the c
 
 AKK Turn status and the coding agent's native status are separate. `/akk status` and `agent_knock_knock_status` inspect AKK-managed state and a bounded current screen; they never type `/status`. For native status, start from `/akk list` and use only an advertised `agent_knock_knock_native_inspect({terminal_id,inspection:"status"})` action. AKK derives and revalidates the binding fence internally. Regression-tested profiles are Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1 and Claude Code 2.1.218/2.1.226/2.1.237. Other complete `x.y.z` versions remain callable through the generic runtime protocol and display a compatibility warning; a real UI/schema incompatibility fails at runtime and is never retried automatically. Claude's modal Status panel is parsed and dismissed before the action proves the original idle composer. The action creates no Session, Turn, receipt, monitor, or callback. `/usage`, `/cost`, `/stats`, `/usage-credits`, `/model`, `/compact`, and arbitrary slash commands remain unavailable. Bare Codex `/usage` is not read-only automation: it opens a menu whose later Enter can select an account-side usage-limit reset.
 
-## 5. Watch work you started in the TUI
+## 5. Watch an exact terminal without changing it
 
-You can start a task yourself by typing it directly in the Codex or Claude Code TUI, then let OpenClaw observe it without handing the task to AKK. While that exact task is actively working or awaiting approval, send a fresh:
+You can start a task yourself by typing it directly in the Codex or Claude Code TUI, then let OpenClaw observe that terminal without handing the task to AKK. You can also explicitly add a read-only Watch alongside an existing managed Turn; it does not replace or change that Turn. Send a fresh:
 
 ```text
 /akk list
 ```
 
-Proceed only if that terminal row advertises `available_actions.watch`. For either the structured tool or slash form, pass only that row's exact terminal ID. Watch resolves the current internal binding authority, then scans again while holding the terminal lock before creating the Watch:
+Copy the row's complete `terminal_id`. An advertised `available_actions.watch` is the recommended convenience, but its absence is not a veto when the user explicitly selected the exact terminal. For either the structured tool or slash form, pass only that ID:
 
 ```text
 /akk watch <exact-terminal-id>
 ```
 
-The manual Watch action is only for human-started external work. If the terminal already has an active AKK-managed Turn, list and status do not offer manual Watch and a direct Watch attempt is rejected; use that Turn's existing monitor, status, and callback path instead. A successful user-explicit unmanaged fallback may separately attach an automatic Watch for the exact request AKK sent.
+Watch is read-only and user-intent-first. Agent-version or artifact uncertainty, missing binding metadata, existing AKK-managed ownership, and missing action advertisement produce warnings rather than blocking creation. AKK fails only when the exact terminal is absent, its endpoint/process cannot be identified, neither an exact durable task anchor nor a read-only screen-status path exists, or its durable Store record cannot be created. Prefer an existing managed monitor when its exact Turn attribution is what you need, but Watch can coexist without adopting or mutating it. A successful user-explicit unmanaged fallback may separately attach an automatic exact-request Watch after AKK sends.
 
 The result contains a durable `watch_id`. Use that ID—not a `session_id`, `turn_id`, terminal selector, or short reference—to inspect or stop observation:
 
@@ -114,9 +114,9 @@ The result contains a durable `watch_id`. Use that ID—not a `session_id`, `tur
 /akk unwatch <watch-id>
 ```
 
-Terminal Watch schema v2 is independent of managed Sessions and Turns. The Watch itself sends no terminal input and does not adopt, claim, reserve, or block the task; `unwatch` only marks the Watch cancelled and does not interrupt the TUI. A manual-Watch approval event is notification-only: inspect and approve or deny it yourself in the live TUI. Automatic fallback Watch currently reports completion/failure/recovery outcomes only and never invokes an approval action or participates in `autoApprove`.
+Terminal Watch schema v2 is independent of managed Sessions and Turns. The Watch sends no terminal input and does not adopt, claim, reserve, block, interrupt, approve, or otherwise change the task; `unwatch` only marks the Watch cancelled. A manual-Watch approval event is notification-only: inspect and approve or deny it yourself in the live TUI. Automatic fallback Watch currently reports completion/failure/recovery outcomes only and never invokes an approval action or participates in `autoApprove`.
 
-The Watch remains pinned to the exact terminal endpoint, process incarnation, native task, and privacy-safe Codex rollout or Claude transcript boundary captured at creation. An exact durable completion already written to that anchor wins; otherwise a replaced process, switched native thread, moved/replaced/truncated evidence file, changed boundary, or ambiguous successor invalidates the Watch instead of following current work. Its schema-v2 record, outcome, and notification outbox are durable, so startup and periodic supervision can resume observation and retry an idempotent callback after AKK, OpenClaw, or the Gateway restarts.
+AKK prefers an exact provider task anchor. When it can bind the Codex rollout or Claude transcript task, status reports `watch_mode="exact_task"`, `confidence="exact"`; durable task completion wins, and later endpoint/process/thread/file/boundary drift invalidates that exact Watch instead of following a successor. If no unique usable task anchor can be built at creation, AKK records the diagnostics and falls back to `watch_mode="terminal_activity"`, `confidence="best_effort"`. That mode watches only the selected terminal/process epoch, first observes `working` or `awaiting_approval`, then requires stable `idle` across consecutive sweeps. Its callback means only “observed terminal activity became idle”—not that one exact task completed or succeeded—and includes no exact-task completion text. Starting from idle or unknown does not immediately complete. Both modes keep durable outcome and callback-outbox state so supervision can resume and retry idempotent delivery after AKK, OpenClaw, or Gateway restarts.
 
 ## Optional: Enable natural-language routing
 

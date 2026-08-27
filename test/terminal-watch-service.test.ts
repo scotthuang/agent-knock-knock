@@ -24,7 +24,6 @@ import {
 import type { CodexHumanStartedActiveTaskAnchor } from
   "../src/terminal-submission-acceptance.js";
 import {
-  ActiveTerminalWatchConflictError,
   createTerminalWatchService,
   terminalWatchObservationFence,
   type CreateTerminalWatchInput,
@@ -268,7 +267,7 @@ function observed(
   } as TerminalWatchObservation;
 }
 
-test("service create/list survives restart and rejects a duplicate active task", async (t) => {
+test("service create/list survives restart and permits independent read-only subscriptions", async (t) => {
   const state = harness(t);
   const created = state.service.create(exactInput());
   assert.equal(created.revision, 1);
@@ -290,9 +289,14 @@ test("service create/list survives restart and rejects a duplicate active task",
       error_code: undefined
     }]
   });
-  assert.throws(
-    () => restarted.create(exactInput({ watch_id: "terminal-watch-duplicate" })),
-    ActiveTerminalWatchConflictError
+  const duplicate = restarted.create(exactInput({
+    watch_id: "terminal-watch-independent-subscription",
+    openclaw_session: "another-controller-session"
+  }));
+  assert.equal(duplicate.revision, 1);
+  assert.deepEqual(
+    restarted.list().map(({ watch_id }) => watch_id).sort(),
+    [created.watch_id, duplicate.watch_id].sort()
   );
 });
 

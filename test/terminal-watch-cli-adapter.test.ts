@@ -11,6 +11,7 @@ import type { TerminalWatchCallbackInput } from
 import type { Conversation } from "../src/protocol.js";
 import type { CallbackTransportDeliverInput } from
   "../src/callback-transport.js";
+import { terminalWatchesDir } from "../src/terminal-watch-store.js";
 
 const THREAD_ID = "019f0000-0000-7000-8000-000000000206";
 const TASK_ID = "019f0000-0000-7000-8000-000000000207";
@@ -1196,12 +1197,17 @@ test("unwatch persists cancellation and leaves callback delivery to supervision"
   assert.equal(callbacks[0].event, "cancelled");
 });
 
-test("Terminal Watch CLI rejects stale binding authority before persistence", async (t) => {
+test("Terminal Watch uses one read-only terminal observation without mutation authority", async (t) => {
   const fixture = createFixture(t);
   let scans = 0;
+  let terminalLocks = 0;
+  const printed: unknown[] = [];
   const facade = createTerminalWatchCliAdapter({
     acquireFileLock: () => () => {},
-    acquireTerminalLock: () => () => {},
+    acquireTerminalLock: () => {
+      terminalLocks += 1;
+      return () => {};
+    },
     observeExactTerminal: async ({ terminalId }) => {
       scans += 1;
       return exactTerminalObservation([{
@@ -1216,28 +1222,78 @@ test("Terminal Watch CLI rejects stale binding authority before persistence", as
     storeDirFromOptions: () => fixture.storeDir,
     terminalDispatchOwnership: () => ({ state: "none" }),
     terminalIncarnationBlockingTurns: () => [],
-    printJson: () => {},
+    printJson: (value) => printed.push(value),
     callback: {
       deliver(input) {
         return { runId: input.idempotencyKey, status: "started" };
       }
     }
   });
-  await assert.rejects(
-    facade.runWatch({
-      terminal: fixture.terminal.id as string,
-      openclawSession: "agent:main:main"
-    }),
-    /binding changed/u
-  );
-  assert.equal(scans, 2);
-  assert.equal(fs.existsSync(path.join(fixture.storeDir, "terminal-watches")), false);
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:main"
+  });
+  assert.equal(scans, 1);
+  assert.equal(terminalLocks, 0);
+  assert.equal(record(record(printed.at(-1)).watch).status, "active");
 });
 
-test("Terminal Watch CLI rejects a malformed internally resolved binding token", async (t) => {
+test("Terminal Watch ignores an invalid sibling record during user-requested creation", async (t) => {
+  const fixture = createFixture(t);
+  const printed: unknown[] = [];
+  let nextWatchUuid = 211;
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([fixture.terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () =>
+      `00000000-0000-4000-8000-000000000${nextWatchUuid++}`,
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value)
+  });
+
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:main"
+  });
+  const firstWatchId = String(record(record(printed.at(-1)).watch).watch_id);
+  fs.writeFileSync(
+    path.join(
+      terminalWatchesDir(fixture.storeDir),
+      "terminal-watch-corrupt.json"
+    ),
+    "{not-valid-watch\n",
+    { mode: 0o600 }
+  );
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:another-controller"
+  });
+
+  const created = record(record(printed.at(-1)).watch);
+  assert.equal(created.status, "active");
+  assert.notEqual(created.watch_id, firstWatchId);
+  assert.match(
+    (created.warnings as string[]).join("\n"),
+    /terminal_watch_store_entries_skipped/u
+  );
+  const tolerant = facade.scanPublicWatchesForExactObservation(
+    fixture.storeDir
+  );
+  assert.equal(tolerant.watches.length, 2);
+  assert.equal(tolerant.activeOverlayTrusted, false);
+});
+
+test("Terminal Watch derives read-only identity when the lifecycle token is malformed", async (t) => {
   const fixture = createFixture(t);
   const abbreviatedToken = "a".repeat(6) + "…" + "b".repeat(6);
   let scans = 0;
+  const printed: unknown[] = [];
   const facade = createTerminalWatchCliAdapter({
     acquireFileLock: () => () => {},
     acquireTerminalLock: () => () => {},
@@ -1254,31 +1310,36 @@ test("Terminal Watch CLI rejects a malformed internally resolved binding token",
     storeDirFromOptions: () => fixture.storeDir,
     terminalDispatchOwnership: () => ({ state: "none" }),
     terminalIncarnationBlockingTurns: () => [],
-    printJson: () => {}
+    printJson: (value) => printed.push(value)
   });
 
-  await assert.rejects(
-    facade.runWatch({
-      terminal: fixture.terminal.id as string,
-      openclawSession: "agent:main:main"
-    }),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /current terminal binding token/u);
-      assert.match(error.message, /exactly 64 lowercase ASCII hexadecimal/u);
-      assert.equal(error.message.includes(abbreviatedToken), false);
-      return true;
-    }
-  );
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:main"
+  });
   assert.equal(scans, 1);
+  const created = record(record(printed.at(-1)).watch);
+  assert.equal(created.status, "active");
+  assert.match(
+    (created.warnings as string[]).join("\n"),
+    /lifecycle_binding_token_unavailable/u
+  );
+  fixture.advance();
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+  facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: String(created.watch_id)
+  });
   assert.equal(
-    fs.existsSync(path.join(fixture.storeDir, "terminal-watches")),
-    false
+    record(record(printed.at(-1)).watch).status,
+    "active",
+    "missing binding metadata must remain warning-only during reconciliation"
   );
 });
 
-test("Terminal Watch rejects running and artifact version drift before persistence", async (t) => {
+test("Terminal Watch keeps exact observation across running and artifact version drift", async (t) => {
   const fixture = createFixture(t);
+  const printed: unknown[] = [];
   const driftedTerminal = {
     ...fixture.terminal,
     agent_version: "0.150.0",
@@ -1299,27 +1360,28 @@ test("Terminal Watch rejects running and artifact version drift before persisten
     storeDirFromOptions: () => fixture.storeDir,
     terminalDispatchOwnership: () => ({ state: "none" }),
     terminalIncarnationBlockingTurns: () => [],
-    printJson: () => {}
+    printJson: (value) => printed.push(value)
   });
 
-  await assert.rejects(
-    facade.runWatch({
-      terminal: fixture.terminal.id as string,
-      openclawSession: "agent:main:main"
-    }),
-    /artifact reports 0\.148\.0.*running coding-agent version 0\.150\.0/u
-  );
-  assert.equal(
-    fs.existsSync(path.join(fixture.storeDir, "terminal-watches")),
-    false
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:main"
+  });
+  const created = record(record(printed.at(-1)).watch);
+  assert.equal(created.watch_mode, "exact_task");
+  assert.equal(created.confidence, "exact");
+  assert.match(
+    (created.warnings as string[]).join("\n"),
+    /artifact reports 0\.148\.0.*running coding-agent version 0\.150\.0.*advisory/u
   );
 });
 
-test("Terminal Watch rechecks managed Turn authority while holding the terminal lock", async (t) => {
+test("Terminal Watch remains available beside an active managed Turn", async (t) => {
   const fixture = createFixture(t);
   const events: string[] = [];
   let scans = 0;
   let ownershipReads = 0;
+  const printed: unknown[] = [];
   const facade = createTerminalWatchCliAdapter({
     acquireFileLock: () => () => {},
     acquireTerminalLock: () => {
@@ -1341,33 +1403,21 @@ test("Terminal Watch rechecks managed Turn authority while holding the terminal 
     },
     terminalIncarnationBlockingTurns: () => {
       events.push("managed-authority:checked");
-      return scans >= 2 ? [managedTurn()] : [];
+      return [managedTurn()];
     },
-    printJson: () => {}
+    printJson: (value) => printed.push(value)
   });
 
-  await assert.rejects(
-    facade.runWatch({
-      terminal: fixture.terminal.id as string,
-      openclawSession: "agent:main:main"
-    }),
-    /already belongs to AKK Turn turn-managed-206 \(running\).*managed Turn monitor\/callback.*AKK status/u
-  );
-  assert.deepEqual(events, [
-    "scan:1",
-    "terminal-lock:acquired",
-    "scan:2",
-    "managed-authority:checked",
-    "terminal-lock:released"
-  ]);
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:main"
+  });
+  assert.deepEqual(events, ["scan:1"]);
   assert.equal(ownershipReads, 0);
-  assert.equal(
-    fs.existsSync(path.join(fixture.storeDir, "terminal-watches")),
-    false
-  );
+  assert.equal(record(record(printed.at(-1)).watch).status, "active");
 });
 
-test("Terminal Watch rejects a stale or forged public Watch action", async (t) => {
+test("Terminal Watch treats the public action as discovery rather than authority", async (t) => {
   const fixture = createFixture(t);
   const projectedTerminal = structuredClone(fixture.terminal);
   record(record(projectedTerminal.available_actions).watch).arguments = {
@@ -1375,6 +1425,7 @@ test("Terminal Watch rejects a stale or forged public Watch action", async (t) =
     expected_binding_token: "b".repeat(64)
   };
   let released = false;
+  const printed: unknown[] = [];
   const facade = createTerminalWatchCliAdapter({
     acquireFileLock: () => () => {},
     acquireTerminalLock: () => () => {
@@ -1392,21 +1443,188 @@ test("Terminal Watch rejects a stale or forged public Watch action", async (t) =
     storeDirFromOptions: () => fixture.storeDir,
     terminalDispatchOwnership: () => ({ state: "none" }),
     terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value)
+  });
+
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:main"
+  });
+  assert.equal(released, false);
+  assert.equal(record(record(printed.at(-1)).watch).status, "active");
+});
+
+test("Terminal Watch falls back to a read-only activity epoch and settles after stable idle", async (t) => {
+  const fixture = createFixture(t);
+  const header = fs.readFileSync(fixture.rolloutPath, "utf8").split("\n")[0];
+  fs.writeFileSync(fixture.rolloutPath, `${header}\n`, { mode: 0o600 });
+  const activityTerminal = {
+    ...fixture.terminal,
+    activity_state: "working",
+    available_actions: {}
+  };
+  let terminals: Array<Record<string, any>> = [activityTerminal];
+  const printed: unknown[] = [];
+  const callbacks: TerminalWatchCallbackInput[] = [];
+  let nextWatchUuid = 252;
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation(terminals, terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () =>
+      `00000000-0000-4000-8000-000000000${nextWatchUuid++}`,
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({
+      state: "conflict",
+      conflict: { reason: "ignored" }
+    }),
+    terminalIncarnationBlockingTurns: () => [managedTurn()],
+    printJson: (value) => printed.push(value),
+    callback: {
+      deliver(input) {
+        callbacks.push(input);
+        return { runId: input.idempotencyKey, status: "started" };
+      }
+    }
+  });
+
+  const options = {
+    terminal: fixture.terminal.id as string,
+    openclawSession: "agent:main:main"
+  };
+  await facade.runWatch(options);
+  const first = record(record(printed.at(-1)).watch);
+  assert.equal(first.watch_mode, "terminal_activity");
+  assert.equal(first.confidence, "best_effort");
+  assert.match(
+    (first.warnings as string[]).join("\n"),
+    /exact_task_anchor_unavailable[\s\S]*terminal_activity_fallback/u
+  );
+
+  await facade.runWatch(options);
+  const repeated = record(record(printed.at(-1)).watch);
+  assert.equal(repeated.watch_id, first.watch_id);
+  assert.equal(facade.listPublicWatches(fixture.storeDir).length, 1);
+
+  await facade.runWatch({
+    ...options,
+    openclawSession: "agent:main:another-controller"
+  });
+  const independent = record(record(printed.at(-1)).watch);
+  assert.notEqual(independent.watch_id, first.watch_id);
+  assert.equal(
+    facade.listPublicWatches(fixture.storeDir).length,
+    2,
+    "a distinct callback authority may independently observe the same read-only target"
+  );
+
+  terminals = [{
+    ...activityTerminal,
+    native_agent_process_uuid: undefined,
+    native_agent_process_birth: undefined
+  }];
+  await facade.runWatch(options);
+  assert.equal(
+    record(record(printed.at(-1)).watch).watch_id,
+    first.watch_id,
+    "temporarily missing optional process identity must reuse the active Watch"
+  );
+  assert.equal(facade.listPublicWatches(fixture.storeDir).length, 2);
+  fixture.advance();
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+  facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: String(first.watch_id)
+  });
+  assert.equal(record(record(printed.at(-1)).watch).status, "active");
+  assert.equal(callbacks.length, 0);
+
+  terminals = [{ ...activityTerminal, activity_state: "idle" }];
+  fixture.advance();
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+  assert.equal(callbacks.length, 0, "one idle sample is not enough");
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+  assert.equal(
+    callbacks.length,
+    1,
+    JSON.stringify(printed.slice(-2), null, 2)
+  );
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+  assert.equal(callbacks.length, 2);
+  assert.ok(callbacks.every(({ origin }) =>
+    origin === "terminal_activity_fallback"
+  ));
+  assert.deepEqual(
+    callbacks.map(({ event, openclawSession }) => ({ event, openclawSession }))
+      .sort((left, right) =>
+        String(left.openclawSession).localeCompare(String(right.openclawSession))
+      ),
+    [
+      {
+        event: "completed",
+        openclawSession: "agent:main:another-controller"
+      },
+      { event: "completed", openclawSession: "agent:main:main" }
+    ]
+  );
+
+  facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: String(first.watch_id)
+  });
+  const settled = record(record(printed.at(-1)).watch);
+  assert.equal(settled.status, "completed");
+  assert.equal(
+    record(settled.settlement).reason_code,
+    "terminal_activity_became_stably_idle"
+  );
+
+  await facade.runWatch(options);
+  const armed = record(record(printed.at(-1)).watch);
+  assert.equal(armed.watch_mode, "terminal_activity");
+  assert.equal(armed.status, "active");
+  assert.match(
+    (armed.warnings as string[]).join("\n"),
+    /terminal_activity_armed_for_next_activity/u
+  );
+});
+
+test("Terminal Watch rejects only when neither durable task nor screen activity can be observed", async (t) => {
+  const fixture = createFixture(t);
+  const terminal = {
+    ...fixture.terminal,
+    native_agent_rollout: undefined,
+    terminal_control: {
+      ...record(fixture.terminal.terminal_control),
+      capabilities: []
+    },
+    available_actions: {}
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000253",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
     printJson: () => {}
   });
 
   await assert.rejects(
-    facade.runWatch({
+    () => facade.runWatch({
       terminal: fixture.terminal.id as string,
       openclawSession: "agent:main:main"
     }),
-    /current available_actions\.watch/u
+    /neither a durable task anchor nor a read-only screen-status observation path/u
   );
-  assert.equal(released, true);
-  assert.equal(
-    fs.existsSync(path.join(fixture.storeDir, "terminal-watches")),
-    false
-  );
+  assert.deepEqual(facade.listPublicWatches(fixture.storeDir), []);
 });
 
 function exactTerminalObservation(

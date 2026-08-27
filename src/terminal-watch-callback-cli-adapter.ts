@@ -17,6 +17,7 @@ import {
 import {
   terminalWatchCallbackMessage,
   type TerminalWatchCallbackEvent as TerminalWatchCallbackEventType,
+  type TerminalWatchCallbackMessageInput,
   type TerminalWatchCallbackResolution
 } from "./terminal-watch-service.js";
 import type { TerminalWatch } from "./terminal-watch-store.js";
@@ -31,6 +32,7 @@ export interface TerminalWatchCallbackInput {
   terminalId: string;
   openclawSession?: string;
   openclawBin?: string;
+  origin?: TerminalWatchCallbackMessageInput["origin"];
   detail?: string;
   completionText?: string;
 }

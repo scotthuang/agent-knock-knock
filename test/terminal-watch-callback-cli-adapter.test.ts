@@ -76,7 +76,7 @@ test("Terminal Watch callback uses one deterministic chat.send delivery", () => 
   const params = JSON.parse(String(calls[0]?.args[4]));
   assert.equal(params.sessionKey, "agent:main:main");
   assert.equal(params.deliver, true);
-  assert.match(params.message, /human directly in Codex or Claude Code/u);
+  assert.match(params.message, /exact task anchor in the terminal selected by the user/u);
   assert.match(params.message, /Implemented the requested change/u);
   assert.equal(calls[0]?.env.OPENCLAW_GATEWAY_TOKEN, "secret");
 });

@@ -7,7 +7,7 @@ Agent Knock Knock coordinates OpenClaw, a local coding agent, and a human throug
 - AKK owns terminal delivery, monitoring, lifecycle state, and callbacks.
 - A human can attach to the same tmux pane at any time, continue directly, and later hand control back to OpenClaw.
 - AKK sends input only after it verifies the selected agent, pane, process, pane/process working directory, approval state, and action-specific composer. Managed paths require idle; an advertised user-explicit physical Send may steer a working mutable composer.
-- AKK reports approval or completion only when the terminal adapter has reliable evidence. Uncertain states fail closed.
+- AKK labels the evidence behind every notification. Managed Turns and exact-task Watches report completion only from correlated evidence; a user-selected terminal-activity Watch may instead report a clearly marked best-effort stable-idle observation that is not exact task-completion proof.
 
 ## Identity Model
 
@@ -19,14 +19,14 @@ tmux terminal / verified process incarnation
 │  └─ AKK session (session_id)
 │     ├─ Turn (turn_id)
 │     └─ Turn (turn_id)
-└─ Terminal Watch schema v2 (watch_id + exact provider/task anchor)
+└─ Terminal Watch schema v2 (watch_id + exact task anchor or terminal-activity epoch)
 ```
 
 - The terminal is the physical pane and coding-agent process incarnation.
 - The native session is the continuing context owned by Codex or Claude Code.
 - The AKK `session_id` identifies a continuing context and is the strict `session_exact` send target. The physical `terminal_id` is the separate `terminal_follow_current` or user-priority `terminal_user_explicit` send target, exactly as advertised.
 - A `turn_id` identifies exactly one accepted dispatch through its final monitor and callback state.
-- A `watch_id` identifies an observation-only aggregate for either one task the human started directly in the TUI or one exact request already delivered through user-explicit unmanaged fallback. It is never a Session, Turn, dispatch receipt, or terminal owner.
+- A `watch_id` identifies an observation-only aggregate for a user-selected exact terminal. It prefers one provider-correlated task, may fall back to that terminal/process activity epoch, and may also identify one exact request already delivered through user-explicit unmanaged fallback. It is never a Session, Turn, dispatch receipt, terminal owner, or terminal-input authority.
 - A terminal binding generation identifies one verified terminal-to-native-thread attachment. Native lifecycle transitions advance it even though they create no Turn.
 
 Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v23 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `native_inspect({terminal_id,inspection})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, managed `approve({turn_id})` or terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Approval, handoff takeover, and reconciliation require explicit user confirmation. The trusted plugin/CLI privately derives and revalidates terminal, binding, candidate, prompt, composer, handoff, revision, and compare-and-swap fences; the model never transports them. Store format remains 1 and writer protocol remains 6.
@@ -68,21 +68,23 @@ This boundary alone does not provide a standalone supervisor or enable another
 controller host; those require their own trusted session-context adapter and
 runtime integration.
 
-## Human-Started Terminal Watch
+## User-Selected Terminal Watch
 
-Terminal Watch is the observation-only path for a task already started by the human in the visible Codex or Claude Code TUI:
+Terminal Watch is the read-only, user-intent-first path for observing an exact visible Codex or Claude Code terminal:
 
-1. The human starts the task directly in the TUI; AKK did not submit it.
-2. While the exact task is working or awaiting approval, obtain a fresh `/akk list` and use only that terminal row's advertised `available_actions.watch`. Pass its complete `terminal_id`; no binding token crosses the model-facing Watch boundary.
-3. `agent_knock_knock_watch`, or `/akk watch <exact-terminal-id>`, resolves current binding authority internally, rechecks it while holding the terminal lock, creates one durable schema-v2 `TerminalWatch`, and returns its `watch_id`.
-4. Status and cancellation target only that ID: `agent_knock_knock_status({watch_id})`, `/akk status <watch-id>`, `agent_knock_knock_unwatch({watch_id})`, or `/akk unwatch <watch-id>`.
-5. Startup and periodic supervision observe and settle the same Watch, then deliver its durable notification outbox to the originating OpenClaw session.
+1. The user selects one complete `terminal_id`. A fresh `/akk list` and its advertised `available_actions.watch` are the safest discovery path, but advertisement is not authorization and its absence does not veto an explicit Watch request.
+2. `agent_knock_knock_watch({terminal_id})`, or `/akk watch <exact-terminal-id>`, observes that exact endpoint/process and attempts to construct one privacy-safe exact task anchor. It does not acquire terminal-input or managed-owner authority.
+3. If a unique provider task anchor is available, AKK creates `watch_mode="exact_task"`, `confidence="exact"`; missing or mismatched version evidence remains a warning and does not weaken that otherwise exact anchor. If task artifacts, native identity, or task boundaries cannot establish an anchor, AKK records warnings and creates `watch_mode="terminal_activity"`, `confidence="best_effort"` instead.
+4. Status and cancellation target only the returned ID: `agent_knock_knock_status({watch_id})`, `/akk status <watch-id>`, `agent_knock_knock_unwatch({watch_id})`, or `/akk unwatch <watch-id>`.
+5. Startup and periodic supervision observe and settle the same Watch, then deliver its durable notification outbox to the originating controller session.
 
-The aggregate records a revision, exact terminal endpoint, workspace and internally resolved creation-time binding token; one privacy-safe provider anchor owns the process incarnation, native thread/task and exact captured agent-version evidence. It also records the OpenClaw route, timestamps/deadline, lifecycle status, last activity, optional settlement, and an append-only notification outbox whose approval entries carry their own fingerprints. It lives independently from Session/Turn state. Creating, observing, querying, or cancelling it never sends terminal input; adopts, claims, reserves, or blocks a task; creates a Session or Turn; or grants callback authority to a managed Turn.
+Creating a Watch hard-fails only when the exact terminal is absent, its endpoint/process cannot be identified, neither a durable exact-task anchor nor a read-only screen-status activity path exists, or AKK cannot create/write the durable Watch Store. A missing or mismatched coding-agent version, unusable rollout/transcript artifact when screen activity remains observable, existing managed Turn or other ownership record, missing binding metadata, and missing `available_actions.watch` are diagnostics, never Watch vetoes. If the same exact active Watch already exists, AKK may return it rather than treating the request as a conflict. Because Watch is read-only, it can coexist with a managed monitor without adopting, superseding, or changing its Session/Turn; the managed monitor remains preferable when the user wants exact Turn attribution.
 
-Codex anchors bind the exact process/thread, rollout file identity and the human task's request/turn byte boundaries. Claude anchors bind the exact process/session/workspace, transcript file identity, root prompt, and current-turn byte boundaries. Both carry their exact captured agent version; terminal endpoint and binding evidence stay in the compact terminal record. A version without a regression-tested AKK profile emits a compatibility warning but does not veto Watch. An exact durable completion already written to the anchored task wins; while it remains pending, a replacement, truncation, successor task, changed boundary or fingerprint, process/thread/endpoint drift, structurally incompatible artifact, missing evidence, or ambiguity produces `invalidated` rather than following whatever is currently visible.
+Every aggregate records a revision, exact terminal endpoint/process epoch, workspace, creation warnings, controller route, timestamps/deadline, lifecycle status, last activity, optional settlement, and an append-only notification outbox. An exact-task Watch additionally stores one privacy-safe provider anchor: Codex binds rollout identity and task request/turn byte boundaries; Claude binds transcript identity, root prompt, and current-turn byte boundaries. Exact durable completion already written to that anchor wins, while later replacement, truncation, successor task, changed boundary or fingerprint, or process/thread/endpoint drift invalidates that exact Watch instead of following a different task.
 
-An approval observation appends at most one notification per exact fingerprint and leaves the Watch active. It never sends approval keys and never enters automatic approval; a human must inspect and decide in the TUI. Completion, failure, timeout, invalidation, or explicit `unwatch` settles once and enqueues one terminal notification. Deterministic notification IDs and idempotency keys, append-only receipts, claim leases, and retry timestamps make callback recovery crash-safe: transport is at-least-once, while the idempotency key makes the logical notification effectively at-most-once.
+A terminal-activity Watch makes no task-identity claim. Its checkpoint must first observe activity (`working` or `awaiting_approval`) in the selected terminal/process epoch and then observe stable `idle` across consecutive reconciliation sweeps. That transition emits a completion-shaped callback with reason `terminal_activity_became_stably_idle`, but the callback and public status remain labeled `best_effort`: they prove only that observed terminal activity became idle, not that a particular task completed or succeeded. They carry no exact-task completion text. Starting from idle or unknown does not immediately settle; later activity must be seen first.
+
+An approval observation appends at most one notification per exact fingerprint and leaves either Watch mode active. It never sends approval keys and never enters automatic approval; a human must inspect and decide in the TUI. Exact-task completion/failure, best-effort stable idle, timeout, invalidation, or explicit `unwatch` settles once and enqueues one terminal notification. Deterministic notification IDs and idempotency keys, append-only receipts, claim leases, and retry timestamps make callback recovery crash-safe: transport is at-least-once, while the idempotency key makes the logical notification effectively at-most-once.
 
 The current OpenClaw surface has 16 registered tools and emits list action-contract v23. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls. The v23 Send shape remains `send({session_id|terminal_id,request})`; the Codex composer policy is advertised as `replace_current_composer_and_submit`, not as another model-supplied argument.
 

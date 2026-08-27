@@ -208,7 +208,7 @@ test("the public action contract v23 exposes semantic arguments only", () => {
   ]);
 });
 
-test("raw active terminals expose only an exact prefilled watch action", () => {
+test("raw terminals expose an exact read-only watch action without lifecycle vetoes", () => {
   const working = renderAvailableListActions({
     id: "terminal:v2:tmux:codex:work:0.0:1234",
     source: "terminal",
@@ -225,11 +225,11 @@ test("raw active terminals expose only an exact prefilled watch action", () => {
     },
     requires_user_intent: true,
     use:
-      "Monitor this human-started external task and notify OpenClaw when it " +
-      "needs attention or finishes, instead of polling. Do not use Terminal " +
-      "Watch for an AKK-managed Turn. Call agent_knock_knock_watch with this " +
-      "exact terminal_id; AKK refreshes and revalidates current observation " +
-      "authority internally."
+      "Observe this exact terminal without sending input. AKK uses an exact " +
+      "task anchor when available and otherwise falls back to best-effort " +
+      "terminal activity. Call agent_knock_knock_watch with this exact " +
+      "terminal_id; version, ownership, and artifact uncertainty are warnings " +
+      "rather than Watch vetoes."
   });
   assert.equal(exactTerminalWatchAction({
     available_actions: working
@@ -268,7 +268,7 @@ test("raw active terminals expose only an exact prefilled watch action", () => {
   ]) {
     assert.equal(
       Object.hasOwn(renderAvailableListActions(entry), "watch"),
-      false
+      true
     );
   }
 });

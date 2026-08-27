@@ -422,7 +422,7 @@ interface CodexActiveTaskUserRecord {
   offsetBytes: number;
   turnId: string;
   requestHash?: string;
-  pairingIssue?: "hash_mismatch" | "unsupported";
+  pairingIssue?: "hash_mismatch" | "turn_mismatch" | "unsupported";
 }
 
 type CodexActiveTaskReverseDecision =
@@ -698,6 +698,11 @@ function inspectCodexActiveTaskRecordInReverse(
       "Codex active-task root user row does not match its user_message event"
     );
   }
+  if (user.pairingIssue === "turn_mismatch") {
+    throw new Error(
+      "Codex active-task root user row does not match its adjacent UserMessage turn"
+    );
+  }
   if (user.requestHash === undefined) {
     throw new Error("Codex active-task root user row has unsupported prompt content");
   }
@@ -738,8 +743,10 @@ function pairedCodexActiveTaskUserRecord(
     ? payload.internal_chat_message_metadata_passthrough
     : undefined;
   const rawTurnId = optionalString(metadata?.turn_id);
-  // Codex writes the human root's user_message event immediately after its
-  // response row. Synthetic user-role context has no such adjacent proof.
+  // Codex writes one provider-owned user-message event immediately after the
+  // human root response row. Older rollouts use event_msg.user_message; newer
+  // Codex surfaces use event_msg.item_completed with item.type=UserMessage.
+  // Synthetic user-role context has no such adjacent proof.
   if (
     !payload ||
     !rawTurnId ||
@@ -750,14 +757,19 @@ function pairedCodexActiveTaskUserRecord(
   const text = exactCodexUserResponseText(payload.content);
   const requestHash = text === undefined ? undefined : fingerprintText(text);
   const userMessageHash = codexUserMessageHash(followingRecord?.value);
-  const pairingIssue = requestHash === undefined || userMessageHash === undefined
+  const adjacentTurnId = codexUserMessageTurnId(followingRecord?.value);
+  const rootTurnId = exactNativeThreadId(rawTurnId);
+  const pairingIssue = adjacentTurnId !== undefined &&
+      exactNativeThreadId(adjacentTurnId) !== rootTurnId
+    ? "turn_mismatch" as const
+    : requestHash === undefined || userMessageHash === undefined
     ? "unsupported" as const
     : requestHash !== userMessageHash
       ? "hash_mismatch" as const
       : undefined;
   return {
     offsetBytes: record.offsetBytes,
-    turnId: exactNativeThreadId(rawTurnId),
+    turnId: rootTurnId,
     ...(pairingIssue ? { pairingIssue } : { requestHash })
   };
 }
@@ -773,10 +785,36 @@ function codexUserMessageHash(
   value: Record<string, any> | undefined
 ): string | undefined {
   const payload = value && isRecord(value.payload) ? value.payload : undefined;
-  return value?.type === "event_msg" &&
+  if (
+    value?.type === "event_msg" &&
     payload?.type === "user_message" &&
     typeof payload.message === "string"
-    ? fingerprintText(payload.message)
+  ) {
+    return fingerprintText(payload.message);
+  }
+  const item = payload?.type === "item_completed" && isRecord(payload.item)
+    ? payload.item
+    : undefined;
+  const content = item?.type === "UserMessage" && Array.isArray(item.content)
+    ? item.content
+    : undefined;
+  if (!content || content.length !== 1) return undefined;
+  const text = content[0];
+  return isRecord(text) && text.type === "text" &&
+      typeof text.text === "string"
+    ? fingerprintText(text.text)
+    : undefined;
+}
+
+function codexUserMessageTurnId(
+  value: Record<string, any> | undefined
+): string | undefined {
+  const payload = value && isRecord(value.payload) ? value.payload : undefined;
+  return value?.type === "event_msg" &&
+      payload?.type === "item_completed" &&
+      isRecord(payload.item) &&
+      payload.item.type === "UserMessage"
+    ? optionalString(payload.turn_id)
     : undefined;
 }
 
@@ -784,7 +822,15 @@ function isCodexUserMessageRecord(
   value: Record<string, any> | undefined
 ): boolean {
   const payload = value && isRecord(value.payload) ? value.payload : undefined;
-  return value?.type === "event_msg" && payload?.type === "user_message";
+  return value?.type === "event_msg" &&
+    (
+      payload?.type === "user_message" ||
+      (
+        payload?.type === "item_completed" &&
+        isRecord(payload.item) &&
+        payload.item.type === "UserMessage"
+      )
+    );
 }
 
 function isLaterCodexHumanTaskStartedRecord(

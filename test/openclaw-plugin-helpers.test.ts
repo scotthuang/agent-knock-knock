@@ -1028,7 +1028,7 @@ test("/akk list renders watchable terminals and durable watch rows", () => {
   assert.match(text, /terminal actions: watch/u);
   assert.match(
     text,
-    /monitor this human-started task and receive attention\/completion callbacks without polling/u
+    /observe this exact terminal without input; exact task evidence is preferred and terminal-activity fallback is best-effort/u
   );
   assert.match(text, /terminal watches:/u);
   assert.match(text, /terminal-watch-durable-1 \| codex \| watching/u);
@@ -1050,7 +1050,24 @@ test("Terminal Watch command summaries preserve external-work attribution", () =
   });
   assert.match(started, /Terminal Watch started/u);
   assert.match(started, /compatibility warning: Claude Code 2\.1\.238/u);
-  assert.match(started, /did not send or adopt this task/u);
+  assert.match(started, /without sending input, adopting the task/u);
+
+  const activityStarted = formatAkkWatchCommandResult({
+    watch: {
+      watch_id: "terminal-watch-activity-1",
+      terminal_id: exactTerminalId,
+      agent: "codex",
+      status: "active",
+      watch_mode: "terminal_activity",
+      confidence: "best_effort",
+      warnings: ["exact task anchor unavailable"]
+    }
+  });
+  assert.match(activityStarted, /^mode: terminal_activity$/mu);
+  assert.match(activityStarted, /^confidence: best_effort$/mu);
+  assert.match(activityStarted, /^warning: exact task anchor unavailable$/mu);
+  assert.match(activityStarted, /Stable idle is best-effort/u);
+  assert.match(activityStarted, /not proof that one exact task completed/u);
 
   const status = formatAkkWatchStatusCommandResult({
     watch: {
@@ -1064,7 +1081,7 @@ test("Terminal Watch command summaries preserve external-work attribution", () =
   });
   assert.match(status, /Terminal Watch status/u);
   assert.match(status, /compatibility warning: Claude Code 2\.1\.238/u);
-  assert.match(status, /observed external work/u);
+  assert.match(status, /user-selected read-only exact-task observation/u);
 
   const fallbackStatus = formatAkkWatchStatusCommandResult({
     watch: {
@@ -1099,19 +1116,19 @@ test("status Watch guidance requires an explicit non-authoritative hint", () => 
       kind: "terminal_watch_discovery",
       terminal_id: exactTerminalId,
       command: `/akk watch ${exactTerminalId}`,
-      available_action_required: true,
+      available_action_required: false,
       instruction:
-        "Refresh agent_knock_knock_list and use only the current watch action."
+        "Refresh list to copy the exact terminal; the action is discovery help."
     }
   }), [
     `AKK Watch available: /akk watch ${exactTerminalId}`,
-    "next: Refresh agent_knock_knock_list and use only the current watch action."
+    "next: Refresh list to copy the exact terminal; the action is discovery help."
   ]);
   assert.deepEqual(formatAkkTerminalWatchHint({
     terminal_watch_hint: {
       kind: "terminal_watch_discovery",
       command: `/akk watch ${exactTerminalId}`,
-      available_action_required: false,
+      available_action_required: true,
       instruction: "Do not trust this malformed hint."
     },
     terminal_status: { activity_state: "working" }
