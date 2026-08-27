@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.19 - 2026-08-27
+
+### Added
+
+- Attach a durable Terminal Watch after a successful `terminal_user_explicit` unmanaged physical Send, restoring completion, failure, invalidation, and timeout callbacks without fabricating a managed Turn.
+
+### Changed
+
+- Advance the model-facing action contract to 23, Terminal Watch schema to v2, and Store writer protocol to 6 with compatible migration and normalization of existing records.
+
+### Security
+
+- Keep the user's explicit Send authoritative: Watch attachment and observation are best-effort, warning-only follow-up work and can never block, revoke, or automatically replay accepted terminal input.
+- Bind fallback callbacks to the exact Codex rollout or Claude transcript task accepted after the Send, including same-request races and completion before the first Watch sweep. Automatic fallback Watches do not emit approval callbacks; approval input remains manual.
+
 ## 0.12.18 - 2026-08-27
 
 ### Fixed
