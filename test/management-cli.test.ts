@@ -798,7 +798,7 @@ test("list recognizes the current Codex composer marker and keeps explicit Send 
     assert.equal("commands" in unknownEntry, false);
     assert.deepEqual(
       Object.keys(unknownEntry.available_actions),
-      ["status", "send"]
+      ["status", "watch", "send"]
     );
     assert.equal(
       unknownEntry.available_actions.send.scope,
@@ -876,7 +876,7 @@ test("list never advertises raw Claude approval or ambiguous cancellation", asyn
     assert.equal(entry.available_actions.cancel, undefined);
     assert.deepEqual(
       Object.keys(entry.available_actions),
-      ["status"]
+      ["status", "watch"]
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
