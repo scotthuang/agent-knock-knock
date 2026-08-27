@@ -247,8 +247,10 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.deepEqual(
       listed.action_contracts.field_semantics.available_actions,
       {
-        meaning: "currently_safe_actions",
-        authoritative_for_tool_calls: true
+        meaning: "currently_safe_mutation_actions_and_watch_discovery",
+        authoritative_for_tool_calls: true,
+        read_only_watch_exception:
+          "an explicit exact terminal_id remains callable when available_actions.watch is absent"
       }
     );
     assert.match(

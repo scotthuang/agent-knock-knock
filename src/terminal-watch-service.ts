@@ -12,6 +12,7 @@ import {
   TERMINAL_WATCH_SCHEMA,
   TERMINAL_WATCH_VERSION,
   assertTerminalWatch,
+  assertTerminalWatchObservationCheckpoint,
   initialTerminalWatchObservationCheckpoint,
   terminalWatchIdentityFingerprint,
   terminalWatchCallbackEnvelope,
@@ -52,6 +53,7 @@ export interface CreateTerminalWatchInput {
   agent: ExecutorKind;
   terminal: TerminalWatchTerminalIdentity;
   anchor: TerminalWatchAnchor;
+  warnings?: string[];
   /**
    * Immutable Host callback authority captured when the Watch is created.
    * Legacy OpenClaw Watches omit this and retain their existing lazy resolver.
@@ -155,19 +157,6 @@ export interface TerminalWatchService {
   reconcileAll(): Promise<TerminalWatchReconciliationSummary>;
 }
 
-export class ActiveTerminalWatchConflictError extends Error {
-  readonly code = "AKK_ACTIVE_TERMINAL_WATCH_CONFLICT";
-  readonly existingWatchId: string;
-
-  constructor(existingWatchId: string) {
-    super(
-      `exact terminal/native task already has active Watch ${existingWatchId}`
-    );
-    this.name = "ActiveTerminalWatchConflictError";
-    this.existingWatchId = existingWatchId;
-  }
-}
-
 /**
  * Create the durable Watch application service. Terminal observation and
  * callback transport are the only effects; the API intentionally has no port
@@ -206,6 +195,9 @@ export function createTerminalWatchService(
       anchor: input.anchor,
       observation_checkpoint:
         initialTerminalWatchObservationCheckpoint(input.anchor),
+      ...(input.warnings && input.warnings.length > 0
+        ? { warnings: [...new Set(input.warnings)] }
+        : {}),
       ...(input.callback_route === undefined
         ? {}
         : { callback_route: parseCallbackRoute(input.callback_route) }),
@@ -227,14 +219,6 @@ export function createTerminalWatchService(
     }
     assertTerminalWatch(candidate, watchId, { allowMissingRevision: true });
     return dependencies.repository.withWatchLock(watchId, () => {
-      const identity = terminalWatchIdentityFingerprint(candidate);
-      const existing = dependencies.repository.list().find((watch) =>
-        watch.status === "active" &&
-        terminalWatchIdentityFingerprint(watch) === identity
-      );
-      if (existing) {
-        throw new ActiveTerminalWatchConflictError(existing.watch_id);
-      }
       return dependencies.repository.save(candidate, { expectedRevision: null });
     });
   }
@@ -324,6 +308,8 @@ export function createTerminalWatchService(
     const checkpoint = nextObservationCheckpoint(current, observation);
     const checkpointAdvanced = checkpoint.safe_resume_offset_bytes >
       current.observation_checkpoint.safe_resume_offset_bytes;
+    const checkpointChanged = JSON.stringify(checkpoint) !==
+      JSON.stringify(current.observation_checkpoint);
     const activityAt = latestActivityAt(
       current.last_activity_at,
       checkpointAdvanced
@@ -331,7 +317,7 @@ export function createTerminalWatchService(
         : observation.last_activity_at
     );
     if (observation.kind === "unavailable") {
-      if (!checkpointAdvanced) return current;
+      if (!checkpointChanged) return current;
       return dependencies.repository.save({
         ...current,
         observation_checkpoint: checkpoint,
@@ -342,7 +328,7 @@ export function createTerminalWatchService(
     if (observation.kind === "pending") {
       if (
         activityAt === current.last_activity_at &&
-        !checkpointAdvanced
+        !checkpointChanged
       ) {
         return current;
       }
@@ -361,7 +347,7 @@ export function createTerminalWatchService(
       if (duplicate) {
         if (
           activityAt === current.last_activity_at &&
-          !checkpointAdvanced
+          !checkpointChanged
         ) {
           return current;
         }
@@ -1070,8 +1056,7 @@ function nextObservationCheckpoint(
   ) {
     throw new Error("terminal Watch observation checkpoint is invalid");
   }
-  const candidateWatch = { ...watch, observation_checkpoint: candidate };
-  assertTerminalWatch(candidateWatch, watch.watch_id);
+  assertTerminalWatchObservationCheckpoint(candidate, watch.anchor);
   return candidate;
 }
 

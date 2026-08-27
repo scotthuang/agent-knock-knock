@@ -104,6 +104,35 @@ test("captures and completes one exact human-started Codex task without persisti
   }
 });
 
+test("captures Codex item_completed UserMessage evidence used by 0.149.1 surfaces", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const nativeTurnId = turnId(902);
+  const fixture = codexFixture([
+    {
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: nativeTurnId }
+    },
+    userResponseRecord(REQUEST, nativeTurnId),
+    itemCompletedUserMessageRecord(REQUEST, nativeTurnId)
+  ]);
+  try {
+    const anchor = captureCodexHumanStartedActiveTaskAnchor({
+      currentIdentity: {
+        sessionId: SESSION_ID,
+        processUuid,
+        processBirth,
+        rollout: fixture.identity
+      }
+    });
+    assert.ok(anchor);
+    assert.equal(anchor.turn_id, nativeTurnId);
+    assert.equal(anchor.request_hash, REQUEST_HASH);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("pairs the human Codex root while ignoring same-turn synthetic context rows", () => {
   const processBirth = "Tue Aug  4 14:15:13 2026";
   const processUuid = `codex-pid:4242:birth:${processBirth}`;
@@ -1807,6 +1836,25 @@ function userMessageRecord(request: string): unknown {
     timestamp: "2026-08-07T01:00:01.011Z",
     type: "event_msg",
     payload: { type: "user_message", message: request }
+  };
+}
+
+function itemCompletedUserMessageRecord(
+  request: string,
+  nativeTurnId: string
+): unknown {
+  return {
+    timestamp: "2026-08-07T01:00:01.011Z",
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      turn_id: nativeTurnId,
+      item: {
+        type: "UserMessage",
+        id: `user-message-${nativeTurnId}`,
+        content: [{ type: "text", text: request }]
+      }
+    }
   };
 }
 

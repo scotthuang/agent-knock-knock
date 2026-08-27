@@ -16,6 +16,7 @@ import {
   TerminalWatchConflictError,
   assertTerminalWatch,
   createClaudeUserExplicitFallbackWatchAnchor,
+  createTerminalActivityWatchAnchor,
   createTerminalWatchStore,
   initialTerminalWatchObservationCheckpoint,
   listTerminalWatches,
@@ -181,6 +182,92 @@ test("terminal Watch Store persists private atomic records and lists them", (t) 
   assert.equal(fs.statSync(paths.root).mode & 0o777, 0o700);
   assert.equal(fs.statSync(paths.statePath).mode & 0o777, 0o600);
   assert.equal(saved.anchor.anchor_fingerprint, codexAnchor().anchor_fingerprint);
+});
+
+test("terminal-activity Watch round-trips its confidence checkpoint and immutable warnings", (t) => {
+  const storeDir = tempStore(t);
+  const anchor = createTerminalActivityWatchAnchor({
+    capturedAt: new Date(CREATED_AT),
+    terminalId: "terminal:v2:fixture",
+    pid: 700,
+    initialActivityState: "working",
+    nativeProcessUuid: "codex-process-uuid",
+    nativeProcessBirth: "codex-process-birth",
+    agentVersion: "0.149.1"
+  });
+  const candidate: TerminalWatch = {
+    ...watch("terminal-watch-activity-fallback"),
+    anchor,
+    observation_checkpoint: initialTerminalWatchObservationCheckpoint(anchor),
+    warnings: [
+      "exact_task_anchor_unavailable: rollout identity was incomplete",
+      "terminal_activity_fallback: stable idle is best-effort"
+    ]
+  };
+  const saved = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
+  assert.deepEqual(saved.observation_checkpoint, {
+    schema: "agent-knock-knock/terminal-activity-watch-checkpoint",
+    version: 1,
+    safe_resume_offset_bytes: 0,
+    has_seen_activity: true,
+    consecutive_idle_observations: 0,
+    last_activity_state: "working"
+  });
+
+  const advanced = saveTerminalWatch(storeDir, {
+    ...saved,
+    observation_checkpoint: {
+      schema: "agent-knock-knock/terminal-activity-watch-checkpoint",
+      version: 1,
+      safe_resume_offset_bytes: 0,
+      has_seen_activity: true,
+      consecutive_idle_observations: 1,
+      last_activity_state: "idle"
+    },
+    updated_at: "2026-08-21T00:00:01.000Z"
+  }, { expectedRevision: terminalWatchRevision(saved) });
+  assert.equal(advanced.revision, 2);
+
+  assert.throws(
+    () => saveTerminalWatch(storeDir, {
+      ...advanced,
+      warnings: ["changed warning"],
+      updated_at: "2026-08-21T00:00:02.000Z"
+    }, { expectedRevision: terminalWatchRevision(advanced) }),
+    /immutable warnings/u
+  );
+  assert.throws(
+    () => assertTerminalWatch({
+      ...advanced,
+      anchor: { ...anchor, anchor_fingerprint: SHA_A }
+    }, advanced.watch_id),
+    /anchor fingerprint does not match/u
+  );
+  assert.throws(
+    () => assertTerminalWatch({
+      ...advanced,
+      observation_checkpoint: {
+        ...advanced.observation_checkpoint,
+        has_seen_activity: false,
+        consecutive_idle_observations: 1,
+        last_activity_state: "idle"
+      }
+    }, advanced.watch_id),
+    /idle observations require prior activity/u
+  );
+  assert.throws(
+    () => assertTerminalWatch({
+      ...advanced,
+      observation_checkpoint: {
+        ...advanced.observation_checkpoint,
+        consecutive_idle_observations: 2
+      }
+    }, advanced.watch_id),
+    /cannot already carry stable-idle settlement evidence/u
+  );
 });
 
 test("legacy v1 Watch records without a checkpoint remain readable and upgrade on save", (t) => {

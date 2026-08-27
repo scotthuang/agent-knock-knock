@@ -128,13 +128,13 @@ export const watchParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current watch action. The task must already have been started by the human in this terminal. AKK resolves and revalidates current observation authority internally."
+        "Exact full terminal_id selected by the user, normally copied from the current terminal row. Watch is read-only: AKK prefers an exact task anchor and otherwise uses a warning-bearing best-effort terminal-activity fallback."
     },
     hardTimeoutMinutes: {
       type: "number",
       exclusiveMinimum: 0,
       description:
-        "Optional maximum lifetime for observing this external terminal task."
+        "Optional maximum lifetime for observing this exact terminal."
     }
   }
 };

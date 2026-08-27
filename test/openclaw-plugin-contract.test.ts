@@ -1294,7 +1294,11 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   );
   assert.match(
     terminalListSource,
-    /const activeWatchedTerminals = new Set\(\s*observedTerminalWatches[\s\S]*?withoutAvailableAction\(terminal, "watch"\)/u
+    /terminals: projection\.terminals,\s*terminalWatches,/u
+  );
+  assert.doesNotMatch(
+    terminalListSource,
+    /activeWatchedTerminals|withoutTerminalWatchAuthority/u
   );
   assert.match(
     entrySource,

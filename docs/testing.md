@@ -156,11 +156,11 @@ The fast tier owns the deterministic Terminal Watch contract:
 
 | Fast witness | Contract proved |
 | --- | --- |
-| `test/terminal-watch-store.test.ts` | Owner-private atomic schema-v2 records under `terminal-watches/`, legacy-v1 normalization, strict load/list validation, revision CAS, direct provider-anchor persistence and validation, and `writer -> per-watch` lock order |
-| `test/terminal-watch-service.test.ts` | Restart/list recovery, timeout and terminal settlement, approval dedupe without automatic approval, exact observation fences, callback claim-crash recovery, retry, and deterministic idempotency |
-| `test/terminal-submission-acceptance.test.ts`, `test/claude-local-transcript-provider.test.ts` | Exact Codex rollout and Claude current-turn transcript anchors; process, native identity, file, boundary, version, truncation, successor, and ambiguity drift fail closed |
-| `test/terminal-watch-cli-adapter.test.ts`, `test/terminal-watch-callback-cli-adapter.test.ts` | Human-started active-task capture, pre-Send fallback anchors, completion-before-first-sweep recovery, `watch_id` projection, no terminal input or Session/Turn ownership, privacy-safe callback transport, and restart-safe delivery metadata |
-| `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Fresh `available_actions.watch`, Watch status/unwatch routing and formatting, action-contract v23 semantic-ID-only projection, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, automatic fallback Watch callback semantics, Claude empty-only isolation, and the documented TUI → fresh list → Watch workflow |
+| `test/terminal-watch-store.test.ts` | Owner-private atomic schema-v2 records under `terminal-watches/`, legacy-v1 normalization, strict load/list validation, revision CAS, exact provider anchors plus terminal-activity anchors/checkpoints and immutable warnings, and `writer -> per-watch` lock order |
+| `test/terminal-watch-service.test.ts` | Restart/list recovery, timeout and terminal settlement, approval dedupe without automatic approval, exact observation fences, terminal-activity checkpoint persistence, callback claim-crash recovery, retry, and deterministic idempotency |
+| `test/terminal-submission-acceptance.test.ts`, `test/claude-local-transcript-provider.test.ts` | Preferred exact Codex rollout and Claude current-turn transcript anchors; drift invalidates an already exact-anchored Watch, while absence or structural incompatibility at manual-Watch creation can be downgraded to a warning and terminal-activity fallback |
+| `test/terminal-watch-cli-adapter.test.ts`, `test/terminal-watch-callback-cli-adapter.test.ts` | Exact-task capture when available; best-effort `terminal_activity` fallback after observed activity and consecutive stable-idle sweeps; `watch_mode`/`confidence`/warning projection; no terminal input or Session/Turn ownership; managed ownership, version/artifact uncertainty, binding metadata, and action advertisement as non-veto diagnostics; hard failure only for an absent/unobservable exact terminal or unwritable Store; privacy-safe callbacks that never present stable idle as exact task completion; pre-Send exact fallback anchors and restart-safe delivery metadata |
+| `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Broad read-only Watch discovery, direct user-explicit Watch by exact `terminal_id` even without advertisement, Watch status/unwatch routing and formatting, action-contract v23 semantic-ID-only projection, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, automatic fallback Watch callback semantics, Claude empty-only isolation, and the documented terminal selection → exact-task-or-activity Watch workflow |
 
 The current public surface has 16 OpenClaw tools. Terminal Watch adds the
 `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`
@@ -169,6 +169,13 @@ reconciliation in the same non-overlapping lifecycle but with independent error
 boundaries, so either side can make progress when the other fails. The
 process-level plugin contract remains in the integration tier and is exercised
 only as part of an authorized pre-publication full/release gate.
+
+The fallback completion-shaped event is deliberately a weaker contract. Tests
+must assert that it is emitted only after the selected terminal/process has
+shown activity and then stable idle across consecutive observations, carries
+`watch_mode="terminal_activity"` and `confidence="best_effort"`, and tells the
+controller that the signal is not exact task-completion proof. An initially
+idle or unknown terminal cannot settle until activity has first been observed.
 
 The v23 fast contract also proves that structured model actions expose semantic
 IDs only: Watch uses `terminal_id`; send uses mutually exclusive `session_id` or

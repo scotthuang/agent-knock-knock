@@ -848,21 +848,9 @@ function projectTerminalListScan(input: {
         watch.workspace
       ))
       .filter((watch) => !statusFilter || watch.status === statusFilter);
-  const activeWatchedTerminals = new Set(
-    observedTerminalWatches
-      .filter((watch) => watch.status === "active")
-      .map((watch) => stringValue(watch.terminal_id))
-      .filter((terminalId): terminalId is string => terminalId !== undefined)
-  );
-  const terminals = projection.terminals.map((terminal) =>
-    !watchObservation.activeOverlayTrusted ||
-      activeWatchedTerminals.has(stringValue(terminal.id) ?? "")
-      ? withoutTerminalWatchAuthority(terminal)
-      : terminal
-  );
   return {
     includeAll,
-    terminals,
+    terminals: projection.terminals,
     terminalWatches,
     unavailableManagedTurns: projection.unavailableManagedTurns
   };
@@ -913,24 +901,6 @@ async function observeExactTerminal(request: {
     terminal: projectedMatches[0],
     summary: scan.summary
   };
-}
-
-function withoutAvailableAction(
-  terminal: JsonObject,
-  action: string
-): JsonObject {
-  if (!isRecord(terminal.available_actions)) return terminal;
-  const actions = { ...terminal.available_actions };
-  delete actions[action];
-  return { ...terminal, available_actions: actions };
-}
-
-function withoutTerminalWatchAuthority(terminal: JsonObject): JsonObject {
-  const projected = withoutAvailableAction(terminal, "watch");
-  if (!Object.hasOwn(projected, "terminal_watch_hint")) return projected;
-  const safe = { ...projected };
-  delete safe.terminal_watch_hint;
-  return safe;
 }
 
 async function reconcileStoreForList(storeDir, options) {
@@ -1521,15 +1491,11 @@ function terminalListCommands(input: {
       !hasOrphanedDispatch &&
       !terminalHasBlockingTurn,
     watch:
-      lifecycleCapability.status === "supported" &&
-      (terminalState.activity_state === "working" ||
-        terminalState.activity_state === "awaiting_approval") &&
-      Boolean(nativeAgentIdentity?.sessionId) &&
-      (agent !== "codex" || Boolean(nativeAgentIdentity?.rollout)) &&
-      Boolean(nativeProcessUuid) &&
-      Boolean(nativeProcessBirth) &&
-      !hasOrphanedDispatch &&
-      !terminalHasBlockingTurn
+      terminalControl.capabilities.includes("screen_status") ||
+      Boolean(
+        nativeAgentIdentity?.sessionId &&
+        (agent !== "codex" || nativeAgentIdentity.rollout)
+      )
   };
 }
 

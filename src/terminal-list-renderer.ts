@@ -15,11 +15,11 @@ import {
 type JsonRecord = Record<string, unknown>;
 
 const TERMINAL_WATCH_ACTION_USE =
-  "Monitor this human-started external task and notify OpenClaw when it " +
-  "needs attention or finishes, instead of polling. Do not use Terminal " +
-  "Watch for an AKK-managed Turn. Call agent_knock_knock_watch with this " +
-  "exact terminal_id; AKK refreshes and revalidates current observation " +
-  "authority internally.";
+  "Observe this exact terminal without sending input. AKK uses an exact task " +
+  "anchor when available and otherwise falls back to best-effort terminal " +
+  "activity. Call agent_knock_knock_watch with this exact terminal_id; " +
+  "version, ownership, and artifact uncertainty are warnings rather than " +
+  "Watch vetoes.";
 
 export interface AvailableListActionFacts {
   terminalBridgeReady: boolean;
@@ -82,14 +82,14 @@ export function listActionContracts(): JsonRecord {
   return {
     version: 23,
     instructions: [
-      "Treat terminals[] as the primary resource and use only actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Either nested action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
+      "Treat terminals[] as the primary resource and use only mutation actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Read-only Watch is the separate user-intent exception: one complete exact terminal_id may be watched even when available_actions.watch is absent. Either nested mutation action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "A complete but unverified Codex or Claude Code x.y.z version adds compatibility_warnings and action compatibility_warning diagnostics but never vetoes an otherwise eligible action. Execute the advertised action through the generic runtime protocol; actual UI, artifact, identity, and postcondition evidence decides success. Never automatically retry a result that says terminal input may already have occurred.",
       "A terminal_user_explicit send is the user's physical-terminal authority. It is gated only by one exact live physical terminal/process and a scanned, non-blocked approval state; parsed working activity does not veto it; Codex Composer visibility, stability, or exactness do not veto it; and AKK Turn, Session, deferred-transfer, transition, ledger, and Store health are not eligibility vetoes. Codex physical fallback clears the current Composer once with C-u, injects the new request, waits through the paste window, and dispatches Enter exactly once. After text injection, no Composer observation may veto Enter. Claude Code remains exact-empty-only. AKK tries the managed fast path first; that path may require an exact empty Composer before input, but after it injects a user-explicit Codex request it follows the same no-Composer-veto Enter rule. Otherwise AKK performs the physical fallback as unmanaged work, best-effort attaches an exact Terminal Watch callback, then releases conflicting AKK management. When runtime durability is available, an omitted target binds its message_id to the first selected physical terminal and an existing or possibly existing same-ID record rejects automatic replay. If no record exists and durability is unavailable, user priority wins: AKK proceeds with a warning, and callers must not automatically retry that degraded result. The fallback creates no managed callback Turn; Watch attachment failure is reported without changing a successful Send. Once its sole mutation sequence begins, an uncertain result must not be retried automatically; watch-status remains the callback recovery path.",
       "The session_exact scope uses session_id only when it is prefilled by the listed send action. A rollout-backed managed Codex pane instead uses the terminal_follow_current scope with its exact terminal_id because even one materialized rollout does not prove the current TUI foreground thread. AKK derives and revalidates current terminal authority internally. A turn id is never an ordinary send target.",
       "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, is only a discovery choice. If that terminal already has one rollout-backed managed Codex source, the managed fast path captures fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. If that managed path proves zero input and fails, the separate terminal_user_explicit path may deliver once as unmanaged work.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations use terminal_id and, for resume, one complete native_thread_id; AKK resolves and revalidates current lifecycle authority internally. They never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id. AKK resolves current lifecycle authority internally, and AKK status does not execute a native slash command.",
-      "Terminal Watch observes one exact human-started active task without sending terminal input or creating an AKK Session or Turn. Start it only from terminals[].available_actions.watch, pass that action's exact terminal_id, and use watch_id for later status or unwatch operations. AKK refreshes and revalidates current observation authority internally.",
+      "Terminal Watch is a read-only user-directed observation of one exact live terminal. AKK prefers an exact durable task anchor and otherwise degrades to best-effort terminal-activity observation; version, artifact, managed ownership, and stale action-advertisement uncertainty produce warnings rather than vetoing Watch. It sends no terminal input and creates no AKK Session or Turn. Pass the exact terminal_id and use watch_id for later status or unwatch operations.",
       "A verified, idle human native-thread switch may expose a terminal-scoped send; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound operation only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source or any otherwise eligible quiescent rollout-backed source with a complete nonempty pinned open-rollout inventory may also expose this exact action. One materialized rollout does not prove the current Codex TUI foreground thread, and a /clear resume hint is diagnostic only. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. Explicit Close always honors the user's decision to release AKK management of the selected Turn; it sends no terminal input, never stops the coding agent or pane, and reports best-effort cleanup warnings without vetoing the Close. Refresh list afterward and use Watch when the coding agent is still working. Other input-producing binding actions remain fail-closed.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "Structured follow-current actions use only the exact terminal_id prefilled by that terminal row. Human slash commands may use an explicitly named discovery selector. AKK resolves and revalidates current action authority internally; never infer or guess a target.",
@@ -123,8 +123,10 @@ export function listActionContracts(): JsonRecord {
         history: "older turns, present only with --all"
       },
       available_actions: {
-        meaning: "currently_safe_actions",
-        authoritative_for_tool_calls: true
+        meaning: "currently_safe_mutation_actions_and_watch_discovery",
+        authoritative_for_tool_calls: true,
+        read_only_watch_exception:
+          "an explicit exact terminal_id remains callable when available_actions.watch is absent"
       },
       native_agent_identity_observation: {
         meaning:
@@ -220,7 +222,7 @@ export function listActionContracts(): JsonRecord {
         sends_terminal_input: false,
         candidate_source: "terminals[].available_actions.watch",
         scope:
-          "Observe only the exact structurally validated human-started task already active in this terminal. A missing regression-tested version profile is warning-only. It never adopts the task as AKK work or blocks later human terminal use."
+          "Observe the user's exact selected live terminal without input. AKK prefers an exact durable task anchor; if version, artifact, task, managed-ownership, or action-advertisement evidence cannot support that anchor, Watch remains available through a warning-bearing terminal_activity fallback. That fallback reports best_effort confidence and stable-idle activity, not proof that one exact task completed. Only an absent or unobservable exact terminal, or failure to persist the Watch, is a hard error. Watch never adopts the task as AKK work or blocks later terminal use."
       },
       unwatch: {
         tool: "agent_knock_knock_unwatch",
@@ -410,7 +412,6 @@ export function renderAvailableListActions(
     commands,
     entry,
     id,
-    lifecycleBindingToken,
     terminalControlled
   });
   Object.assign(actions, renderTerminalLifecycleActions({
@@ -729,16 +730,11 @@ function appendTerminalWatchAction(input: {
   commands: JsonRecord;
   entry: JsonRecord;
   id: string;
-  lifecycleBindingToken?: string;
   terminalControlled: boolean;
 }): void {
   if (
     !input.terminalControlled ||
-    input.commands.watch !== true ||
-    !["working", "awaiting_approval"].includes(
-      String(input.entry.activity_state ?? "")
-    ) ||
-    !input.lifecycleBindingToken
+    input.commands.watch !== true
   ) {
     return;
   }
@@ -761,11 +757,12 @@ export function terminalWatchDiscoveryHint(terminalId: string): JsonRecord {
     kind: "terminal_watch_discovery",
     terminal_id: terminalId,
     command: `/akk watch ${terminalId}`,
-    available_action_required: true,
+    available_action_required: false,
     instruction:
-      "Refresh agent_knock_knock_list and use only this terminal's current " +
-      "available_actions.watch. Terminal Watch is only for human-started " +
-      "external work, never an AKK-managed Turn."
+      "Refresh agent_knock_knock_list to confirm and copy this exact terminal. " +
+      "The advertised action is discovery help, not authorization: Watch is " +
+      "read-only, prefers an exact task anchor, and otherwise follows the " +
+      "selected terminal activity epoch with best-effort confidence."
   };
 }
 

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
 import {
+  callbackRouteFingerprint,
   callbackRouteForConversation
 } from "./callback-route-authority.js";
 import {
@@ -25,15 +26,10 @@ import type {
   TerminalCompletionEvidence,
   TerminalDurableCompletionRequest
 } from "./terminal-agent-adapter.js";
+import type { Conversation } from "./protocol.js";
 import {
-  turnIdForConversation,
-  type Conversation
-} from "./protocol.js";
-import {
-  decideTerminalWatchExternalTaskAuthority,
   type TerminalDispatchOwnership
 } from "./terminal-action-projection.js";
-import { exactTerminalWatchAction } from "./terminal-list-renderer.js";
 import {
   captureCodexCandidateSetRolloutAcceptanceAnchor,
   captureCodexRolloutAcceptanceAnchor,
@@ -69,16 +65,19 @@ import {
 import {
   createClaudeUserExplicitFallbackWatchAnchor,
   createCodexUserExplicitFallbackWatchAnchor,
+  createTerminalActivityWatchAnchor,
   createTerminalWatchStore,
+  isTerminalActivityWatch,
   isUserExplicitFallbackWatch,
   terminalUserExplicitFallbackWatchId,
-  terminalWatchIdentityFingerprint,
   type TerminalWatch,
   type TerminalWatchAnchor,
   type ClaudeUserExplicitFallbackWatchObservationCheckpoint,
   type CodexUserExplicitFallbackWatchObservationCheckpoint,
   type TerminalWatchObservationCheckpoint,
   type TerminalWatchTerminalIdentity,
+  type TerminalActivityState,
+  type TerminalActivityWatchObservationCheckpoint,
   type UserExplicitFallbackWatchAnchor
 } from "./terminal-watch-store.js";
 import {
@@ -269,6 +268,11 @@ export function createTerminalWatchCliAdapter(
           openclawBin: typeof input.context?.legacyOptions?.openclawBin ===
               "string"
             ? input.context.legacyOptions.openclawBin
+            : undefined,
+          origin: metadata.watch_origin === "user_selected_terminal" ||
+              metadata.watch_origin === "terminal_activity_fallback" ||
+              metadata.watch_origin === "terminal_user_explicit_fallback"
+            ? metadata.watch_origin
             : undefined,
           detail: typeof metadata.reason_code === "string"
             ? metadata.reason_code
@@ -504,100 +508,124 @@ export function createTerminalWatchCliAdapter(
       : undefined;
     const openclawSession = callbackRoute?.controller_session_id ??
       requiredString(options.openclawSession, "--openclaw-session");
-    const storeDir = dependencies.storeDirFromOptions(options);
-    const initiallyObserved = await exactTerminalForWatch(
+    const observed = await exactTerminalForWatch(
       terminalId,
       options,
       dependencies
     );
-    const initiallyObservedBindingToken = bindingTokenForWatch(
-      initiallyObserved.rawTerminal
-    );
-    const initialTerminalControl = terminalControlForWatch(
-      initiallyObserved.rawTerminal
-    );
-    const releaseTerminal = dependencies.acquireTerminalLock(
-      storeDir,
-      initialTerminalControl
-    );
-    let watch: TerminalWatch;
+    const rawTerminal = observed.rawTerminal;
+    const projectedTerminal = observed.terminal;
+    // Endpoint evidence is the only indispensable observation authority. A
+    // manual Watch is read-only and therefore does not acquire terminal input
+    // authority or depend on managed-Turn ownership.
+    const terminalControl = terminalControlForWatch(rawTerminal);
+    const agent = terminalAgent(rawTerminal);
+    const warnings: string[] = [];
+    let anchor: TerminalWatchAnchor | undefined;
     try {
-      const observed = await exactTerminalForWatch(
-        terminalId,
-        options,
-        dependencies
-      );
-      const rawTerminal = observed.rawTerminal;
-      const projectedTerminal = observed.terminal;
-      const expectedBindingToken = bindingTokenForWatch(rawTerminal);
-      const terminalControl = terminalControlForWatch(rawTerminal);
-      if (!sameTerminalControlEvidenceIncarnation(
-        initialTerminalControl,
-        terminalControl
-      ) || expectedBindingToken !== initiallyObservedBindingToken) {
-        throw new Error(
-          "terminal binding changed while AKK acquired authority; refresh " +
-          "AKK list and retry"
-        );
-      }
-      assertExternalTerminalWatchAuthority(
-        storeDir,
-        terminalControl,
-        dependencies
-      );
-      const watchService = serviceFor(options);
-      const existing = watchService.list().find((candidate) =>
-        candidate.status === "active" &&
-        candidate.terminal.terminal_id === terminalId
-      );
-      if (existing) {
-        throw new Error(
-          `terminal ${terminalId} is already monitored by Terminal Watch ` +
-          `${existing.watch_id}; use watch-status instead of creating another`
-        );
-      }
-      assertExactPublicWatchAction(
-        projectedTerminal,
-        terminalId
-      );
-      const agent = terminalAgent(rawTerminal);
-      const anchor = captureTerminalWatchAnchor(
+      anchor = captureTerminalWatchAnchor(
         agent,
         rawTerminal,
         options,
         dependencies
       );
-      if (!anchor) {
+    } catch (error) {
+      warnings.push(
+        `exact_task_anchor_unavailable: ${safeDiagnostic(error)}`
+      );
+    }
+    if (anchor) {
+      warnings.push(...watchAnchorVersionWarnings(anchor, rawTerminal));
+    } else {
+      if (!terminalControl.capabilities.includes("screen_status")) {
         throw new Error(
-          "the exact terminal has no unique supported human-started active task"
+          "the exact terminal has neither a durable task anchor nor a " +
+          "read-only screen-status observation path; no effective Watch " +
+          "can be created"
         );
       }
-      assertWatchAnchorVersion(anchor, rawTerminal);
-      watch = watchService.create({
-        agent,
-        terminal: terminalWatchIdentity(
-          rawTerminal,
-          expectedBindingToken
-        ),
-        anchor,
-        ...(callbackRoute === undefined
-          ? {}
-          : { callback_route: callbackRoute }),
-        openclaw_session: openclawSession,
-        openclaw_bin: stringValue(options.openclawBin) ?? "openclaw",
-        timeout_ms: positiveMinutes(
-          options.hardTimeoutMinutes,
-          DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES
-        ) * 60_000,
-        approval_fingerprint: approvalFingerprint(projectedTerminal),
-        approval_reason_code: approvalFingerprint(projectedTerminal)
-          ? "terminal_waiting_for_approval"
-          : undefined
+      if (warnings.length === 0) {
+        warnings.push(
+          "exact_task_anchor_unavailable: no unique supported task anchor was present"
+        );
+      }
+      const initialActivityState = terminalActivityState(projectedTerminal);
+      anchor = createTerminalActivityWatchAnchor({
+        capturedAt: dependencies.now(),
+        terminalId,
+        pid: positiveInteger(rawTerminal.pid, "terminal PID"),
+        initialActivityState,
+        nativeProcessUuid: stringValue(rawTerminal.native_agent_process_uuid),
+        nativeProcessBirth: stringValue(rawTerminal.native_agent_process_birth),
+        agentVersion: stringValue(rawTerminal.agent_version)
       });
-    } finally {
-      releaseTerminal();
+      warnings.push(
+        "terminal_activity_fallback: observing the exact terminal/process activity epoch instead of claiming exact task completion"
+      );
+      if (initialActivityState === "idle" || initialActivityState === "unknown") {
+        warnings.push(
+          "terminal_activity_armed_for_next_activity: no active epoch is visible yet; Watch will wait to observe working or approval activity before stable idle can settle"
+        );
+      }
     }
-    dependencies.printJson({ watch: publicTerminalWatch(watch) });
+    const binding = bestEffortBindingTokenForWatch(rawTerminal);
+    if (binding.warning) warnings.push(binding.warning);
+    const terminalIdentity = terminalWatchIdentity(rawTerminal, binding.token);
+    const repository = createTerminalWatchStore(
+      dependencies.storeDirFromOptions(options),
+      { acquire: dependencies.acquireFileLock }
+    );
+    let existingCandidates: TerminalWatch[] = [];
+    let discoveryWarnings: string[] = [];
+    try {
+      const scan = repository.scanForReconciliation();
+      existingCandidates = scan.watches;
+      if (scan.errors.length > 0) {
+        discoveryWarnings = [
+          `terminal_watch_store_entries_skipped: ignored ${scan.errors.length} ` +
+          "invalid sibling Watch record(s) during idempotent discovery"
+        ];
+      }
+    } catch (error) {
+      discoveryWarnings = [
+        `terminal_watch_store_discovery_unavailable: ${safeDiagnostic(error)}; ` +
+        "attempting the user-requested read-only Watch anyway"
+      ];
+    }
+    warnings.push(...discoveryWarnings);
+    const watchService = serviceFor(options);
+    const openclawBin = stringValue(options.openclawBin) ?? "openclaw";
+    const existing = existingCandidates.find((candidate) =>
+      sameManualWatchTarget(candidate, agent, terminalIdentity, anchor) &&
+      sameManualWatchCallbackAuthority(
+        candidate,
+        callbackRoute,
+        openclawSession,
+        openclawBin
+      )
+    );
+    const watch = existing ?? watchService.create({
+      agent,
+      terminal: terminalIdentity,
+      anchor,
+      warnings,
+      ...(callbackRoute === undefined
+        ? {}
+        : { callback_route: callbackRoute }),
+      openclaw_session: openclawSession,
+      openclaw_bin: openclawBin,
+      timeout_ms: positiveMinutes(
+        options.hardTimeoutMinutes,
+        DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES
+      ) * 60_000,
+      approval_fingerprint: approvalFingerprint(projectedTerminal),
+      approval_reason_code: approvalFingerprint(projectedTerminal)
+        ? "terminal_waiting_for_approval"
+        : undefined
+    });
+    dependencies.printJson({
+      watch: publicTerminalWatch(watch, existing ? discoveryWarnings : [])
+    });
   }
 
   async function runUnwatch(options: TerminalWatchCliOptions): Promise<void> {
@@ -648,7 +676,7 @@ export function createTerminalWatchCliAdapter(
   ): Array<Record<string, unknown>> {
     return watches
       .filter((watch) => options.includeAll || watch.status === "active")
-      .map(publicTerminalWatch);
+      .map((watch) => publicTerminalWatch(watch));
   }
 
   return Object.freeze({
@@ -664,14 +692,16 @@ export function createTerminalWatchCliAdapter(
   });
 }
 
-function assertWatchAnchorVersion(
+function watchAnchorVersionWarnings(
   anchor: TerminalWatchAnchor,
   terminal: Record<string, unknown>
-): void {
-  const runningVersion = requiredString(
-    terminal.agent_version,
-    "running coding-agent version"
-  );
+): string[] {
+  const runningVersion = stringValue(terminal.agent_version);
+  if (!runningVersion) {
+    return [
+      "running_agent_version_unavailable: exact task observation remains enabled"
+    ];
+  }
   const artifactVersion = anchor.schema ===
       "agent-knock-knock/codex-human-started-active-task-anchor"
     ? anchor.codex_version
@@ -679,15 +709,15 @@ function assertWatchAnchorVersion(
         "agent-knock-knock/claude-human-started-active-task-anchor"
       ? anchor.claude_version
       : undefined;
-  if (!artifactVersion) {
-    throw new Error("manual Terminal Watch requires a human-started task anchor");
-  }
+  if (!artifactVersion) return [];
   if (artifactVersion !== runningVersion) {
-    throw new Error(
+    return [
       `the active task artifact reports ${artifactVersion}, not the running ` +
-      `coding-agent version ${runningVersion}; no Terminal Watch was created`
-    );
+      `coding-agent version ${runningVersion}; Watch remains enabled because ` +
+      "version evidence is advisory"
+    ];
   }
+  return [];
 }
 
 /**
@@ -791,19 +821,128 @@ function bindingTokenForWatch(
   );
 }
 
-function assertExactPublicWatchAction(
-  terminal: Record<string, unknown>,
-  terminalId: string
-): void {
-  if (!exactTerminalWatchAction(
-    terminal,
-    terminalId
-  )) {
-    throw new Error(
-      "the exact terminal is not currently watchable; refresh AKK list and " +
-      "use only its current available_actions.watch"
-    );
+function bestEffortBindingTokenForWatch(
+  terminal: Record<string, unknown>
+): { token: string; warning?: string } {
+  try {
+    return { token: bindingTokenForWatch(terminal) };
+  } catch {
+    const terminalControl = terminalControlForWatch(terminal);
+    return {
+      token: sha256({
+        schema: "agent-knock-knock/terminal-watch-observation-binding",
+        version: 1,
+        terminal_id: requiredString(terminal.id, "terminal id"),
+        agent: terminalAgent(terminal),
+        pid: positiveInteger(terminal.pid, "terminal PID"),
+        endpoint: terminalControlEvidence(terminalControl),
+        process_uuid: stringValue(terminal.native_agent_process_uuid) ?? null,
+        process_birth: stringValue(terminal.native_agent_process_birth) ?? null
+      }),
+      warning:
+        "lifecycle_binding_token_unavailable: Watch used read-only terminal/process observation identity"
+    };
   }
+}
+
+function terminalActivityState(
+  terminal: Record<string, unknown>
+): TerminalActivityState {
+  const state = stringValue(terminal.activity_state);
+  return state === "awaiting_approval" || state === "working" ||
+      state === "idle"
+    ? state
+    : "unknown";
+}
+
+function sameManualWatchTarget(
+  watch: TerminalWatch,
+  agent: ExecutorKind,
+  terminal: TerminalWatchTerminalIdentity,
+  anchor: TerminalWatchAnchor
+): boolean {
+  return watch.status === "active" &&
+    watch.agent === agent &&
+    watch.terminal.terminal_id === terminal.terminal_id &&
+    watch.terminal.workspace === terminal.workspace &&
+    sameTerminalControlEvidenceIncarnation(
+      watch.terminal.terminal_endpoint,
+      terminal.terminal_endpoint
+    ) &&
+    sameManualWatchAnchorTarget(watch.anchor, anchor);
+}
+
+function sameManualWatchAnchorTarget(
+  left: TerminalWatchAnchor,
+  right: TerminalWatchAnchor
+): boolean {
+  if (left.schema !== right.schema) return false;
+  if (
+    left.schema ===
+      "agent-knock-knock/codex-human-started-active-task-anchor" &&
+    right.schema === left.schema
+  ) {
+    return left.turn_id === right.turn_id &&
+      left.process_uuid === right.process_uuid &&
+      left.process_birth === right.process_birth &&
+      left.rollout.device === right.rollout.device &&
+      left.rollout.inode === right.rollout.inode;
+  }
+  if (
+    left.schema ===
+      "agent-knock-knock/claude-human-started-active-task-anchor" &&
+    right.schema === left.schema
+  ) {
+    return left.prompt_uuid === right.prompt_uuid &&
+      left.pid === right.pid &&
+      left.agent_started_at_ms === right.agent_started_at_ms &&
+      left.device === right.device &&
+      left.inode === right.inode;
+  }
+  if (
+    left.schema === "agent-knock-knock/terminal-activity-watch-anchor" &&
+    right.schema === left.schema
+  ) {
+    return left.pid === right.pid &&
+      optionalIdentityCompatible(
+        left.native_process_uuid,
+        right.native_process_uuid
+      ) &&
+      optionalIdentityCompatible(
+        left.native_process_birth,
+        right.native_process_birth
+      );
+  }
+  return left.anchor_fingerprint === right.anchor_fingerprint;
+}
+
+function optionalIdentityCompatible(
+  left: string | undefined,
+  right: string | undefined
+): boolean {
+  return left === undefined || right === undefined || left === right;
+}
+
+function sameManualWatchCallbackAuthority(
+  watch: TerminalWatch,
+  callbackRoute: CallbackRouteV1 | undefined,
+  openclawSession: string,
+  openclawBin: string
+): boolean {
+  if (watch.openclaw_session !== openclawSession) return false;
+  if (callbackRoute === undefined) {
+    return watch.callback_route === undefined &&
+      watch.openclaw_bin === openclawBin;
+  }
+  return watch.callback_route !== undefined &&
+    callbackRouteFingerprint(watch.callback_route) ===
+      callbackRouteFingerprint(callbackRoute);
+}
+
+function safeDiagnostic(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/[\r\n\0]+/gu, " ").trim().slice(0, 500) ||
+    "unknown provider observation error";
 }
 
 function terminalControlForWatch(
@@ -813,40 +952,6 @@ function terminalControlForWatch(
     throw new Error("the exact terminal has no terminal control authority");
   }
   return terminal.terminal_control as unknown as TerminalControlRef;
-}
-
-function assertExternalTerminalWatchAuthority(
-  storeDir: string,
-  terminalControl: TerminalControlRef,
-  dependencies: TerminalWatchCliDependencies
-): void {
-  const blockingTurn = dependencies.terminalIncarnationBlockingTurns(
-    storeDir,
-    terminalControl
-  )[0];
-  const authority = decideTerminalWatchExternalTaskAuthority({
-    blockingTurn,
-    dispatchOwnership: blockingTurn
-      ? { state: "none" }
-      : dependencies.terminalDispatchOwnership(terminalControl)
-  });
-  if (authority.state === "external_task") {
-    return;
-  }
-  if (authority.state === "managed_turn") {
-    const turn = authority.conversation;
-    throw new Error(
-      `Terminal Watch is unavailable: this task already belongs to AKK Turn ` +
-      `${turnIdForConversation(turn)} (${turn.status}) and is covered by the ` +
-      "managed Turn monitor/callback path. Use AKK status for that Turn."
-    );
-  }
-  const reason = stringValue(authority.conflict.reason) ??
-    "terminal dispatch ownership is conflicted";
-  throw new Error(
-    `Terminal Watch is unavailable because AKK cannot prove this is external ` +
-    `work: ${reason}. Refresh AKK list and resolve the ownership conflict.`
-  );
 }
 
 function captureTerminalWatchAnchor(
@@ -892,10 +997,15 @@ async function observeTerminalWatch(
   const projectedTerminal = exactTerminal.state === "available"
     ? exactTerminal.terminal
     : undefined;
+  const activityTerminalIdentity = rawTerminal && isTerminalActivityWatch(watch)
+    ? terminalActivityWatchIdentityMatch(rawTerminal, watch)
+    : undefined;
   const terminalMatches = rawTerminal
     ? isUserExplicitFallbackWatch(watch)
       ? terminalMatchesUserExplicitFallbackWatch(rawTerminal, watch)
-      : terminalMatchesWatch(rawTerminal, watch)
+      : isTerminalActivityWatch(watch)
+        ? activityTerminalIdentity === "match"
+        : terminalMatchesWatch(rawTerminal, watch)
     : false;
   if (isUserExplicitFallbackWatch(watch)) {
     return observeUserExplicitFallbackTerminalWatch({
@@ -907,6 +1017,15 @@ async function observeTerminalWatch(
       observedAt,
       options,
       dependencies
+    });
+  }
+  if (isTerminalActivityWatch(watch)) {
+    return observeTerminalActivityWatch({
+      watch,
+      exactTerminal,
+      projectedTerminal,
+      terminalIdentityMatch: activityTerminalIdentity ?? "mismatch",
+      observedAt
     });
   }
   const observation =
@@ -1016,6 +1135,120 @@ async function observeTerminalWatch(
     observed_at: observedAt,
     safe_resume_offset_bytes: safeResumeOffsetBytes,
     observation_checkpoint: observationCheckpoint
+  };
+}
+
+function observeTerminalActivityWatch(input: {
+  watch: TerminalWatch;
+  exactTerminal: ExactTerminalWatchObservation;
+  projectedTerminal?: Record<string, unknown>;
+  terminalIdentityMatch: TerminalActivityWatchIdentityMatch;
+  observedAt: string;
+}): TerminalWatchObservation {
+  const {
+    watch,
+    exactTerminal,
+    projectedTerminal,
+    terminalIdentityMatch,
+    observedAt
+  } = input;
+  const fence = terminalWatchObservationFence(watch);
+  if (exactTerminal.state === "unavailable") {
+    return {
+      ...fence,
+      kind: "unavailable",
+      observed_at: observedAt,
+      reason_code: "terminal_observation_unavailable"
+    };
+  }
+  if (exactTerminal.state === "absent") {
+    return invalidatedObservation(
+      watch,
+      observedAt,
+      "terminal_process_unavailable"
+    );
+  }
+  if (terminalIdentityMatch === "unavailable") {
+    return {
+      ...fence,
+      kind: "unavailable",
+      observed_at: observedAt,
+      reason_code: "terminal_identity_observation_incomplete"
+    };
+  }
+  if (terminalIdentityMatch === "mismatch") {
+    return invalidatedObservation(
+      watch,
+      observedAt,
+      "terminal_identity_changed"
+    );
+  }
+  if (!projectedTerminal) {
+    return {
+      ...fence,
+      kind: "unavailable",
+      observed_at: observedAt,
+      reason_code: "terminal_activity_unavailable"
+    };
+  }
+  const state = terminalActivityState(projectedTerminal);
+  const current = terminalActivityObservationCheckpoint(watch);
+  const active = state === "working" || state === "awaiting_approval";
+  const hasSeenActivity = current.has_seen_activity || active;
+  const consecutiveIdle = state === "idle" && hasSeenActivity
+    ? current.last_activity_state === "idle"
+      ? current.consecutive_idle_observations + 1
+      : 1
+    : 0;
+  const checkpoint: TerminalActivityWatchObservationCheckpoint = {
+    ...current,
+    has_seen_activity: hasSeenActivity,
+    consecutive_idle_observations: consecutiveIdle,
+    last_activity_state: state
+  };
+  if (state === "unknown") {
+    return {
+      ...fence,
+      kind: "unavailable",
+      observed_at: observedAt,
+      observation_checkpoint: checkpoint,
+      reason_code: "terminal_activity_unknown"
+    };
+  }
+  if (state === "awaiting_approval") {
+    const approval = approvalFingerprint(projectedTerminal);
+    if (approval) {
+      return {
+        ...fence,
+        kind: "approval",
+        observed_at: observedAt,
+        last_activity_at: observedAt,
+        observation_checkpoint: checkpoint,
+        evidence_fingerprint: approval,
+        reason_code: "terminal_waiting_for_approval"
+      };
+    }
+  }
+  if (state === "idle" && hasSeenActivity && consecutiveIdle >= 2) {
+    return {
+      ...fence,
+      kind: "completed",
+      observed_at: observedAt,
+      observation_checkpoint: checkpoint,
+      evidence_fingerprint: sha256({
+        watch_id: watch.watch_id,
+        reason_code: "terminal_activity_became_stably_idle",
+        anchor_fingerprint: watch.anchor.anchor_fingerprint
+      }),
+      reason_code: "terminal_activity_became_stably_idle"
+    };
+  }
+  return {
+    ...fence,
+    kind: "pending",
+    observed_at: observedAt,
+    ...(active ? { last_activity_at: observedAt } : {}),
+    observation_checkpoint: checkpoint
   };
 }
 
@@ -1562,23 +1795,68 @@ function terminalMatchesWatch(
   watch: TerminalWatch
 ): boolean {
   try {
-    const agent = terminalAgent(terminal);
-    const current = terminalWatchIdentity(
-      terminal,
-      bindingTokenForWatch(terminal)
-    );
-    return agent === watch.agent &&
-      terminalWatchIdentityFingerprint({
-        agent,
-        terminal: current,
-        anchor: watch.anchor
-      }) === terminalWatchIdentityFingerprint(watch) &&
+    return terminalAgent(terminal) === watch.agent &&
+      requiredString(terminal.id, "terminal id") ===
+        watch.terminal.terminal_id &&
+      terminalWorkspace(terminal) === watch.terminal.workspace &&
+      isRecord(terminal.terminal_control) &&
       sameTerminalControlEvidenceIncarnation(
-        current.terminal_endpoint,
+        terminal.terminal_control as unknown as TerminalControlRef,
         watch.terminal.terminal_endpoint
       );
   } catch {
     return false;
+  }
+}
+
+type TerminalActivityWatchIdentityMatch =
+  | "match"
+  | "mismatch"
+  | "unavailable";
+
+function terminalActivityWatchIdentityMatch(
+  terminal: Record<string, unknown>,
+  watch: TerminalWatch
+): TerminalActivityWatchIdentityMatch {
+  try {
+    if (
+      !isTerminalActivityWatch(watch) ||
+      terminalAgent(terminal) !== watch.agent ||
+      requiredString(terminal.id, "terminal id") !==
+        watch.terminal.terminal_id ||
+      terminalWorkspace(terminal) !== watch.terminal.workspace ||
+      positiveInteger(terminal.pid, "terminal PID") !== watch.anchor.pid
+    ) {
+      return "mismatch";
+    }
+    if (!isRecord(terminal.terminal_control)) {
+      return "unavailable";
+    }
+    if (!sameTerminalControlEvidenceIncarnation(
+      terminal.terminal_control as unknown as TerminalControlRef,
+      watch.terminal.terminal_endpoint
+    )) {
+      return "mismatch";
+    }
+    const processUuid = stringValue(terminal.native_agent_process_uuid);
+    const processBirth = stringValue(terminal.native_agent_process_birth);
+    if (
+      (watch.anchor.native_process_uuid !== undefined && !processUuid) ||
+      (watch.anchor.native_process_birth !== undefined && !processBirth)
+    ) {
+      return "unavailable";
+    }
+    return (
+      watch.anchor.native_process_uuid !== undefined &&
+      processUuid !== watch.anchor.native_process_uuid
+    ) || (
+      watch.anchor.native_process_birth !== undefined &&
+      processBirth !== watch.anchor.native_process_birth
+    )
+      ? "mismatch"
+      : "match";
+  } catch {
+    return "unavailable";
   }
 }
 
@@ -1621,6 +1899,20 @@ function terminalMatchesUserExplicitFallbackWatch(
   } catch {
     return false;
   }
+}
+
+function terminalActivityObservationCheckpoint(
+  watch: TerminalWatch
+): TerminalActivityWatchObservationCheckpoint {
+  const checkpoint = watch.observation_checkpoint;
+  if (
+    !("schema" in checkpoint) ||
+    checkpoint.schema !==
+      "agent-knock-knock/terminal-activity-watch-checkpoint"
+  ) {
+    throw new Error("terminal activity Watch has no activity checkpoint");
+  }
+  return checkpoint;
 }
 
 function terminalWatchIdentity(
@@ -1691,30 +1983,35 @@ function codexIdentityForWatch(
   };
 }
 
-function publicTerminalWatch(watch: TerminalWatch): Record<string, unknown> {
+function publicTerminalWatch(
+  watch: TerminalWatch,
+  additionalWarnings: readonly string[] = []
+): Record<string, unknown> {
   const pending = watch.notification_outbox.filter(({ status }) =>
     status === "pending" || status === "delivering" || status === "failed"
   ).length;
-  const compatibilityWarning = watch.agent === "codex" &&
-      (watch.anchor.schema ===
-        "agent-knock-knock/codex-human-started-active-task-anchor" ||
-        watch.anchor.schema ===
-          "agent-knock-knock/codex-user-explicit-fallback-watch-anchor")
-    ? codexRuntimeCompatibilityProfile(watch.anchor.codex_version)
-      ?.compatibilityWarning
-    : watch.agent === "claude" &&
-        (watch.anchor.schema ===
-          "agent-knock-knock/claude-human-started-active-task-anchor" ||
-          watch.anchor.schema ===
-            "agent-knock-knock/claude-user-explicit-fallback-watch-anchor")
-      ? claudeRuntimeCompatibilityWarning(watch.anchor.claude_version)
-      : undefined;
+  const capturedAgentVersion = terminalWatchCapturedAgentVersion(watch);
+  const compatibilityWarning = capturedAgentVersion === undefined
+    ? undefined
+    : watch.agent === "codex"
+      ? codexRuntimeCompatibilityProfile(capturedAgentVersion)
+        ?.compatibilityWarning
+      : claudeRuntimeCompatibilityWarning(capturedAgentVersion);
   const userExplicitFallback = isUserExplicitFallbackWatch(watch);
+  const terminalActivityFallback = isTerminalActivityWatch(watch);
+  const warnings = [...new Set([
+    ...(watch.warnings ?? []),
+    ...additionalWarnings
+  ])];
   return {
     watch_id: watch.watch_id,
     source: userExplicitFallback
       ? "terminal_user_explicit_fallback_watch"
-      : "human_started_terminal_watch",
+      : terminalActivityFallback
+        ? "terminal_activity_watch"
+        : "user_selected_terminal_watch",
+    watch_mode: terminalActivityFallback ? "terminal_activity" : "exact_task",
+    confidence: terminalActivityFallback ? "best_effort" : "exact",
     agent: watch.agent,
     terminal_id: watch.terminal.terminal_id,
     native_thread_id: terminalWatchNativeThreadId(watch),
@@ -1727,6 +2024,9 @@ function publicTerminalWatch(watch: TerminalWatch): Record<string, unknown> {
     last_activity_at: watch.last_activity_at,
     ...(compatibilityWarning
       ? { compatibility_warning: compatibilityWarning }
+      : {}),
+    ...(warnings.length > 0
+      ? { warnings }
       : {}),
     callback: {
       pending,
@@ -1770,6 +2070,21 @@ function publicTerminalWatch(watch: TerminalWatch): Record<string, unknown> {
   };
 }
 
+function terminalWatchCapturedAgentVersion(
+  watch: TerminalWatch
+): string | undefined {
+  switch (watch.anchor.schema) {
+    case "agent-knock-knock/codex-human-started-active-task-anchor":
+    case "agent-knock-knock/codex-user-explicit-fallback-watch-anchor":
+      return watch.anchor.codex_version;
+    case "agent-knock-knock/claude-human-started-active-task-anchor":
+    case "agent-knock-knock/claude-user-explicit-fallback-watch-anchor":
+      return watch.anchor.claude_version;
+    case "agent-knock-knock/terminal-activity-watch-anchor":
+      return watch.anchor.agent_version;
+  }
+}
+
 function terminalWatchNativeThreadId(
   watch: TerminalWatch
 ): string | undefined {
@@ -1784,6 +2099,8 @@ function terminalWatchNativeThreadId(
         : undefined;
     case "agent-knock-knock/claude-user-explicit-fallback-watch-anchor":
       return watch.anchor.transcript_anchor.session_id;
+    case "agent-knock-knock/terminal-activity-watch-anchor":
+      return undefined;
   }
 }
 

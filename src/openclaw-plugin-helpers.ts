@@ -557,7 +557,7 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
         ? [`  lifecycle terminal_id: ${terminalId}`]
         : []),
       ...(hasWatchAction && terminalId
-        ? [`  AKK Watch available: /akk watch ${terminalId} — monitor this human-started task and receive attention/completion callbacks without polling.`]
+        ? [`  AKK Watch available: /akk watch ${terminalId} — observe this exact terminal without input; exact task evidence is preferred and terminal-activity fallback is best-effort.`]
         : []),
       ...(sessionId || sessionShortRef
         ? [`  AKK session: ${sessionShortRef ?? sessionId}`]
@@ -638,8 +638,15 @@ export function formatAkkWatchCommandResult(
     `terminal: ${nonEmptyString(watch.terminal_id) ?? "unknown"}`,
     `agent: ${nonEmptyString(watch.agent) ?? "unknown"}`,
     `status: ${nonEmptyString(watch.status) ?? "watching"}`,
+    `mode: ${nonEmptyString(watch.watch_mode) ?? "exact_task"}`,
+    `confidence: ${nonEmptyString(watch.confidence) ?? "exact"}`,
     ...compatibilityWarningLines(watch),
-    "AKK did not send or adopt this task; it is observing work the human started in the terminal."
+    ...(stringArrayValue(watch.warnings).map((warning) =>
+      `warning: ${warning}`
+    )),
+    watch.watch_mode === "terminal_activity"
+      ? "AKK is observing terminal activity only. Stable idle is best-effort and is not proof that one exact task completed."
+      : "This Watch is observing an exact task anchor without sending input, adopting the task, or changing any managed ownership."
   ].join("\n");
 }
 
@@ -671,7 +678,12 @@ export function formatAkkWatchStatusCommandResult(
     `terminal: ${nonEmptyString(watch.terminal_id) ?? "unknown"}`,
     `agent: ${nonEmptyString(watch.agent) ?? "unknown"}`,
     `status: ${nonEmptyString(watch.status) ?? "unknown"}`,
+    `mode: ${nonEmptyString(watch.watch_mode) ?? "exact_task"}`,
+    `confidence: ${nonEmptyString(watch.confidence) ?? "exact"}`,
     ...compatibilityWarningLines(watch),
+    ...(stringArrayValue(watch.warnings).map((warning) =>
+      `warning: ${warning}`
+    )),
     ...(reason
       ? [`reason: ${reason}`]
       : []),
@@ -680,7 +692,9 @@ export function formatAkkWatchStatusCommandResult(
       : []),
     userExplicitFallback
       ? "AKK sent this exact request through user-explicit unmanaged fallback and attached Watch for its callback; no managed Turn was created."
-      : "This is observed external work; AKK did not send or adopt the task."
+      : watch.watch_mode === "terminal_activity"
+        ? "This is a best-effort read-only terminal-activity Watch; stable idle is not exact task-completion proof."
+        : "This is a user-selected read-only exact-task observation; Watch itself did not send, adopt, or mutate the task."
   ].join("\n");
 }
 
@@ -690,7 +704,7 @@ export function formatAkkTerminalWatchHint(
   const hint = recordValue(result.terminal_watch_hint);
   if (
     hint?.kind !== "terminal_watch_discovery" ||
-    hint.available_action_required !== true
+    hint.available_action_required !== false
   ) {
     return [];
   }
@@ -1343,6 +1357,14 @@ function arrayValue(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> =>
         item !== null && typeof item === "object" && !Array.isArray(item)
+      )
+    : [];
+}
+
+function stringArrayValue(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string =>
+        typeof item === "string" && item.trim().length > 0
       )
     : [];
 }

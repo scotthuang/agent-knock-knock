@@ -295,7 +295,10 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
   for (const settled of ["completed", "aborted"] as const) {
     const listed = await listCodexRolloutState(root, settled);
     assert.equal(listed.activity_state, "idle", settled);
-    assert.equal(listed.available_actions.watch, undefined, settled);
+    assert.ok(
+      listed.available_actions.watch,
+      `${settled}: read-only Watch remains available and may arm a terminal-activity fallback`
+    );
     assert.ok(listed.available_actions.send, settled);
   }
 
@@ -305,17 +308,18 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
     String(unavailable.activity_reason),
     /durable Codex activity evidence is unavailable/iu
   );
-  for (const unsafeAction of ["send", "new_thread", "native_inspect", "watch"]) {
+  for (const unsafeAction of ["send", "new_thread", "native_inspect"]) {
     assert.equal(
       unavailable.available_actions[unsafeAction],
       undefined,
       unsafeAction
     );
   }
+  assert.ok(unavailable.available_actions.watch);
   const partial = await listCodexRolloutState(root, "partial");
   assert.equal(partial.activity_state, "unknown");
   assert.equal(partial.available_actions.send, undefined);
-  assert.equal(partial.available_actions.watch, undefined);
+  assert.ok(partial.available_actions.watch);
 
   const afterBrokenSibling = await listCodexRolloutState(
     root,
@@ -1791,12 +1795,10 @@ test("exact terminal observation keeps native facts when a Watch record is corru
     observation.terminal.native_agent_session_id,
     "019f0000-0000-7000-8000-000000000777"
   );
-  assert.equal(
+  assert.ok(
     (observation.terminal.available_actions as Record<string, unknown>).watch,
-    undefined,
-    "an untrusted active-Watch overlay must suppress Watch authority"
+    "a corrupt sibling or existing active Watch must not suppress the read-only Watch action"
   );
-  assert.equal(observation.terminal.terminal_watch_hint, undefined);
 
   fs.appendFileSync(
     fixture.rolloutPath,
