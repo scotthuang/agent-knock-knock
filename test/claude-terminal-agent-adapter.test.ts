@@ -10,6 +10,7 @@ import {
   detectClaudeApprovalPrompt,
   extractClaudeSessionId,
   inspectClaudeScreen,
+  isClaudeAgentIdleState,
   observeClaudeNativeInspection,
   observeClaudeThreadLifecycle,
   planClaudeNativeInspection,
@@ -58,9 +59,16 @@ test("classifies only direct interactive Claude CLI processes", () => {
     "claude --print=hello",
     "claude --background",
     "claude agents --json --all",
+    "claude attach abc123",
     "claude mcp serve",
     "claude --debug api doctor",
     "claude plugin list",
+    "claude import /tmp/session.json",
+    "claude logs abc123",
+    "claude respawn abc123",
+    "claude rm abc123",
+    "claude stop abc123",
+    "claude kill abc123",
     "claude ultrareview",
     "claude update",
     "claude upgrade",
@@ -78,7 +86,7 @@ test("classifies only direct interactive Claude CLI processes", () => {
 });
 
 test("verified Claude versions expose distinct closed modal native status plans", () => {
-  for (const version of ["2.1.218", "2.1.226", "2.1.237"]) {
+  for (const version of ["2.1.218", "2.1.226", "2.1.237", "2.1.251"]) {
     const capability = probeClaudeNativeInspection(version);
     assert.equal(capability.status, "supported");
     assert.equal(capability.statusInspection, true);
@@ -241,7 +249,7 @@ test("Claude native inspection requires a fresh exact current Status panel", () 
   }
 });
 
-for (const version of ["2.1.226", "2.1.237"] as const) {
+for (const version of ["2.1.226", "2.1.237", "2.1.251"] as const) {
   test(`Claude ${version} status inspection accepts only its exact Session-kind panel`, () => {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
     const screen = claudeStatusPanel(nativeThreadId, version);
@@ -261,6 +269,20 @@ for (const version of ["2.1.226", "2.1.237"] as const) {
       )?.value,
       "interactive"
     );
+    if (version === "2.1.251") {
+      assert.equal(
+        observed.result?.fields.find((field) =>
+          field.name === "Peer address"
+        )?.value,
+        "[REDACTED]"
+      );
+      assert.equal(
+        observed.result?.fields.find((field) =>
+          field.name === "Managed settings (remote)"
+        )?.value,
+        "connected"
+      );
+    }
 
     const oldProfileWithNewField = claudeStatusPanel(
       nativeThreadId,
@@ -569,6 +591,110 @@ test("approves the strict Claude 2.1.218 Bash dialog in an AKK-managed runtime",
     managedStatusInspection.screenExcerpt,
     /Bash request details omitted/u
   );
+});
+
+test("approves only the one-time Yes in the Claude 2.1.251 four-choice Bash dialog", () => {
+  const command = "touch /workspace/approval-fixture";
+  const screen = currentClaude251PermissionScreen(command, 1);
+  const approval = detectClaudeApprovalPrompt(screen);
+  assert.equal(approval.approvable, true);
+  if (!approval.approvable) {
+    assert.fail("expected the exact Claude 2.1.251 one-time choice");
+  }
+  assert.deepEqual(approval.action.keys, ["C-m"]);
+  assert.equal(
+    approval.promptEvidence?.profile,
+    "claude-bash-permission-prompt-v2"
+  );
+
+  for (const selectedChoice of [2, 3, 4] as const) {
+    const unsafe = detectClaudeApprovalPrompt(
+      currentClaude251PermissionScreen(command, selectedChoice)
+    );
+    assert.equal(unsafe.blocked, true);
+    assert.equal(unsafe.approvable, false);
+    assert.equal(unsafe.action, undefined);
+  }
+
+  const autoOnly = detectClaudeApprovalPrompt(
+    currentClaude251PermissionScreen(command, 1, false)
+  );
+  assert.equal(autoOnly.approvable, true);
+  if (!autoOnly.approvable) {
+    assert.fail("expected the exact auto-only Claude 2.1.251 one-time choice");
+  }
+  assert.equal(
+    autoOnly.promptEvidence?.profile,
+    "claude-bash-permission-prompt-v2"
+  );
+  const autoWithoutDescription = detectClaudeApprovalPrompt(
+    currentClaude251PermissionScreen(command, 1, false).replace(
+      " · auto mode handles these prompts for you",
+      ""
+    )
+  );
+  assert.equal(autoWithoutDescription.approvable, true);
+  if (!autoWithoutDescription.approvable) {
+    assert.fail("expected the exact auto-only choice without its optional description");
+  }
+  assert.equal(
+    autoWithoutDescription.promptEvidence?.profile,
+    "claude-bash-permission-prompt-v2"
+  );
+  for (const selectedChoice of [2, 3] as const) {
+    const unsafe = detectClaudeApprovalPrompt(
+      currentClaude251PermissionScreen(command, selectedChoice, false)
+    );
+    assert.equal(unsafe.approvable, false);
+    assert.equal(unsafe.action, undefined);
+  }
+});
+
+test("Claude 2.1.251 auto-mode tip does not replace exact transcript command correlation", () => {
+  const command = "touch /workspace/approval-fixture";
+  const commandSha256 = createHash("sha256").update(command).digest("hex");
+  const inspection = createClaudeTerminalAgentAdapter({
+    detectPendingApproval() {
+      return {
+        source: "claude_transcript",
+        kind: "run_command",
+        command,
+        cwd: "/workspace",
+        toolName: "Bash",
+        toolUseId: "toolu_claude_251",
+        promptUuid: "prompt-claude-251",
+        assistantUuid: "assistant-claude-251",
+        claudeVersion: "2.1.251",
+        transcriptFileId: "transcript-claude-251",
+        commandSha256,
+        evidenceFingerprint: "a".repeat(64),
+        observedEndOffsetBytes: 4096
+      };
+    }
+  }).inspectScreen({
+    screen: currentClaude251PermissionScreen(command, 1),
+    runtime: {
+      pid: 7200,
+      cwd: "/workspace",
+      conversationId: "conversation-claude-251",
+      messageId: "message-claude-251",
+      terminalTarget: "claude-work:0.0"
+    },
+    managedRequest: {
+      sessionId: "session-claude-251",
+      cwd: "/workspace",
+      requestText: "Create the exact test fixture",
+      requestHash: "request-hash",
+      startedAt: "2026-08-30T02:00:00.000Z",
+      context: { managed: true }
+    }
+  });
+  assert.equal(inspection.approval.approvable, true);
+  if (!inspection.approval.approvable) {
+    assert.fail("expected transcript-correlated Claude 2.1.251 approval");
+  }
+  assert.equal(inspection.approval.action.requestId, "toolu_claude_251");
+  assert.equal(inspection.approval.policyEvidence?.command, command);
 });
 
 test("hookless Claude policy evidence requires an exact screen and transcript intersection", () => {
@@ -1129,15 +1255,15 @@ test("Claude terminal capabilities expose durable completion only with a configu
 });
 
 test("Claude lifecycle plans keep exact profiles and optimistically support complete versions", () => {
-  for (const version of ["2.1.218", "2.1.226", "2.1.237"]) {
+  for (const version of ["2.1.218", "2.1.226", "2.1.237", "2.1.251"]) {
     const profile = probeClaudeThreadLifecycle(version);
     assert.equal(profile.status, "supported");
     assert.equal(profile.behaviorProfile, `claude-code-${version}`);
     assert.equal(profile.versionCompatibility, "verified");
     assert.equal(profile.compatibilityWarning, undefined);
   }
-  const capabilities = probeClaudeThreadLifecycle("2.1.237");
-  const unverified = probeClaudeThreadLifecycle("2.1.238");
+  const capabilities = probeClaudeThreadLifecycle("2.1.251");
+  const unverified = probeClaudeThreadLifecycle("2.1.252");
   assert.equal(unverified.status, "supported");
   assert.equal(unverified.newThread, true);
   assert.equal(unverified.resumeExact, true);
@@ -1220,6 +1346,35 @@ test("Claude lifecycle observer requires one idle exact-PID agents row", () => {
     }).status,
     "mismatch"
   );
+  assert.deepEqual(
+    observeClaudeThreadLifecycle({
+      ...baseRequest,
+      agentRows: [{
+        ...baseRequest.agentRows[0],
+        status: "waiting",
+        waitingFor: undefined
+      }]
+    }),
+    {
+      status: "verified",
+      nativeThreadId: after,
+      evidence: "claude_agents_exact_pid",
+      idle: true
+    }
+  );
+  for (const waitingFor of ["dialog open", "permission prompt", "background task"]) {
+    assert.equal(
+      observeClaudeThreadLifecycle({
+        ...baseRequest,
+        agentRows: [{
+          ...baseRequest.agentRows[0],
+          status: "waiting",
+          waitingFor
+        }]
+      }).status,
+      "mismatch"
+    );
+  }
   assert.equal(
     observeClaudeThreadLifecycle({
       ...baseRequest,
@@ -1265,6 +1420,28 @@ test("Claude lifecycle observer requires one idle exact-PID agents row", () => {
   );
 });
 
+test("Claude 2.1.251 input-ready waiting rows are idle only without a wait reason", () => {
+  assert.equal(isClaudeAgentIdleState({ status: "idle" }), true);
+  assert.equal(isClaudeAgentIdleState({ status: "waiting" }), true);
+  assert.equal(
+    isClaudeAgentIdleState({ status: "waiting", waitingFor: "   " }),
+    true
+  );
+  assert.equal(
+    isClaudeAgentIdleState({ status: "waiting", waitingFor: "dialog open" }),
+    false
+  );
+  assert.equal(
+    isClaudeAgentIdleState({ status: "waiting", waitingFor: "permission prompt" }),
+    false
+  );
+  assert.equal(
+    isClaudeAgentIdleState({ status: "waiting", waitingFor: "background task" }),
+    false
+  );
+  assert.equal(isClaudeAgentIdleState({ status: "working" }), false);
+});
+
 function currentClaudePermissionScreen(
   command: string,
   description?: string,
@@ -1287,6 +1464,35 @@ function currentClaudePermissionScreen(
   ].join("\n");
 }
 
+function currentClaude251PermissionScreen(
+  command: string,
+  selectedChoice: 1 | 2 | 3 | 4,
+  includePersistentChoice = true
+): string {
+  const choices = [
+    "1. Yes",
+    ...(includePersistentChoice
+      ? ["2. Yes, and always allow access to /workspace from this project"]
+      : []),
+    `${includePersistentChoice ? 3 : 2}. Yes, and switch to auto mode · auto mode handles these prompts for you`,
+    `${includePersistentChoice ? 4 : 3}. No`
+  ];
+  return [
+    "Bash command",
+    "Tip: auto mode handles these prompts for you — choose \"switch to auto mode\" below",
+    "",
+    `  ${command}`,
+    "  Create the compatibility fixture",
+    "",
+    "Do you want to proceed?",
+    ...choices.map((choice, index) =>
+      `${index + 1 === selectedChoice ? "❯" : " "} ${choice}`
+    ),
+    "",
+    "Esc to cancel · Tab to amend · ctrl+e to explain"
+  ].join("\n");
+}
+
 function claudeStatusPanel(
   nativeThreadId: string,
   version = "2.1.218"
@@ -1301,6 +1507,9 @@ function claudeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
+    ...(version === "2.1.251"
+      ? ["  Peer address:        unix:///private/tmp/claude.sock"]
+      : []),
     "  cwd:                 /repo",
     "  Auth token:          ANTHROPIC_AUTH_TOKEN",
     "  Anthropic base URL:  https://api.example.com/anthropic",
@@ -1308,6 +1517,9 @@ function claudeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         1 failed · /mcp",
     "  Setting sources:     User settings, Project local settings",
+    ...(version === "2.1.251"
+      ? ["  Managed settings (remote): connected"]
+      : []),
     "",
     "  Esc to cancel"
   ].join("\n");

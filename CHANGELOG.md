@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add an exact Claude Code `2.1.251` lifecycle, transcript, Bash approval, and `/status` inspection profile after real TUI validation.
+
+### Fixed
+
+- Treat Claude Code `2.1.251` `agents` rows reported as `waiting` without a wait reason as input-ready, while preserving non-empty permission/background wait reasons as blocked or active states.
+- Recognize the strict three- or four-choice Claude Bash approval variants that offer auto mode, approve only a highlighted one-time `Yes`, and exclude the auto-mode tip from exact transcript command correlation.
+- Exclude the new Claude Code management subcommands from interactive terminal discovery and accept the newly profiled Status fields without exposing the peer address.
+
 ## 0.12.21 - 2026-08-30
 
 ### Added

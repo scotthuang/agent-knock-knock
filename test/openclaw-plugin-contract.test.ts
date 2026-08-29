@@ -610,7 +610,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "3a0444b05136af31f61d8bc6f91d4f284056ea9e54badcaed7e11fb3b8d058f9"
+    "c1bfc989e6e078fdec81c101e14bd4199caba6cb9f17652be9c630131a448469"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -1491,7 +1491,7 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
     );
     assert.match(
       String(inspectionSchema.description ?? ""),
-      /Claude Code 2\.1\.218\/2\.1\.226\/2\.1\.237/u
+      /Claude Code 2\.1\.218\/2\.1\.226\/2\.1\.237\/2\.1\.251/u
     );
     assert.match(
       inspectTool.description ?? "",
@@ -4574,11 +4574,11 @@ test("/akk doctor leaves the Gateway event loop free for its health check", asyn
       }, {
         command: "claude",
         available: true,
-        version: "2.1.238",
+        version: "2.1.252",
         native_profile_supported: false,
         native_actions_available: true,
         compatibility_warning:
-          "Claude Code 2.1.238 has not been regression-tested by AKK"
+          "Claude Code 2.1.252 has not been regression-tested by AKK"
       }],
       capabilities: {
         tmux: { checked: true, status: "ready" }
@@ -4651,7 +4651,7 @@ request.on("error", () => process.exit(4));
       );
       assert.match(
         result?.text ?? "",
-        /Claude Code: 2\.1\.238 \(native lifecycle\/status available with compatibility warning\)/u
+        /Claude Code: 2\.1\.252 \(native lifecycle\/status available with compatibility warning\)/u
       );
       assert.notEqual(result?.isError, true);
     } finally {

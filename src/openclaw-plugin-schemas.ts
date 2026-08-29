@@ -184,7 +184,7 @@ export const nativeInspectParameters = {
       type: "string",
       enum: ["status"],
       description:
-        "Closed adapter-owned inspection kind. Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1 and Claude Code 2.1.218/2.1.226/2.1.237 are regression-tested; another complete x.y.z version remains callable through the generic runtime profile with a compatibility warning. This is never an arbitrary native command string."
+        "Closed adapter-owned inspection kind. Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1 and Claude Code 2.1.218/2.1.226/2.1.237/2.1.251 are regression-tested; another complete x.y.z version remains callable through the generic runtime profile with a compatibility warning. This is never an arbitrary native command string."
     }
   }
 };

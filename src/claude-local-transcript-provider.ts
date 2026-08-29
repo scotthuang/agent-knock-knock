@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
+import {
+  isClaudeAgentIdleState,
+  type ClaudeAgentRow
+} from "./claude-terminal-agent-adapter.js";
 import {
   claudeLifecycleSourceVersionSupported,
   claudeRuntimeLifecycleCompatibilityProfile,
@@ -692,7 +695,7 @@ export function captureClaudeTranscriptAnchor(
     agentStartedAtMs === undefined ||
     agent.sessionId !== sessionId ||
     normalizePath(agent.cwd) !== normalizePath(cwd) ||
-    agent.status !== "idle"
+    !isClaudeAgentIdleState(agent)
   ) {
     return undefined;
   }
@@ -1149,11 +1152,14 @@ function isClaudeRootHumanPrompt(record: TranscriptRecord): boolean {
 function isActiveClaudeAgentState(agent: ClaudeAgentRow): boolean {
   return agent.status === "working" ||
     agent.status === "busy" ||
-    (agent.status === "waiting" && agent.waitingFor === "dialog open");
+    (
+      agent.status === "waiting" &&
+      ["dialog open", "permission prompt"].includes(agent.waitingFor ?? "")
+    );
 }
 
 function isObservableClaudeAgentState(agent: ClaudeAgentRow): boolean {
-  return agent.status === "idle" || isActiveClaudeAgentState(agent);
+  return isClaudeAgentIdleState(agent) || isActiveClaudeAgentState(agent);
 }
 
 function assertObservableClaudeActiveTaskAgent(

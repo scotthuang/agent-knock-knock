@@ -302,6 +302,7 @@ export interface TerminalThreadLifecycleAgentRow {
   sessionId?: string;
   startedAt?: number;
   status?: string;
+  waitingFor?: string;
 }
 
 export interface TerminalThreadLifecycleObservationRequest {

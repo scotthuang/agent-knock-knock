@@ -331,7 +331,7 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
     "#!/bin/sh",
     `printf '%s\\n' \"$@\" > \"${argsPath}\"`,
     "printf '%s\\n' 'n/Users/test/.codex/packages/standalone/releases/0.150.1-aarch64-apple-darwin/bin/codex'",
-    "printf '%s\\n' 'n/Users/test/.local/share/claude/versions/2.1.237'"
+    "printf '%s\\n' 'n/Users/test/.local/share/claude/versions/2.1.251'"
   ].join("\n"));
   fs.chmodSync(executable, 0o700);
   await runCliCommandExecution("runtime-version-test", {}, {
@@ -341,7 +341,7 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
     assert.equal(runtime().agentVersionForRunningProcess("codex", 77), "0.150.1");
     assert.deepEqual(fs.readFileSync(argsPath, "utf8").trim().split("\n"),
       ["-a", "-p", "77", "-d", "txt", "-Fn"]);
-    assert.equal(runtime().agentVersionForRunningProcess("claude", 78), "2.1.237");
+    assert.equal(runtime().agentVersionForRunningProcess("claude", 78), "2.1.251");
   });
   assert.deepEqual(fs.readFileSync(argsPath, "utf8").trim().split("\n"),
     ["-a", "-p", "78", "-d", "txt", "-Fn"]);
