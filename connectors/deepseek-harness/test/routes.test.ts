@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 import { AgentRouteTable, type CallbackRequest } from "../src/routes.js";
 
@@ -18,7 +19,11 @@ test("routes idle callbacks to followup and running callbacks to inject", () => 
   const running = fakeAgent("session-running", "running");
   registry.set(idle.agent.id, idle.agent);
   registry.set(running.agent.id, running.agent);
-  const routes = new AgentRouteTable({ get: (id) => registry.get(id) }, "host");
+  const routes = new AgentRouteTable(
+    { get: (id) => registry.get(id) },
+    createUserMessage,
+    "host",
+  );
   const idleRoute = routes.bind(idle.agent);
   const runningRoute = routes.bind(running.agent);
 
@@ -47,7 +52,11 @@ test("routes idle callbacks to followup and running callbacks to inject", () => 
 test("deduplicates exact callbacks and rejects an idempotency collision", () => {
   const state = fakeAgent("session-one", "idle");
   const registry = new Map([[state.agent.id, state.agent]]);
-  const routes = new AgentRouteTable({ get: (id) => registry.get(id) }, "host");
+  const routes = new AgentRouteTable(
+    { get: (id) => registry.get(id) },
+    createUserMessage,
+    "host",
+  );
   const route = routes.bind(state.agent);
   const original = request(route.controllerId, "same");
   const first = routes.deliver(original);
@@ -67,7 +76,11 @@ test("deduplicates exact callbacks and rejects an idempotency collision", () => 
 test("does not let a replacement Agent inherit an old exact route", () => {
   const first = fakeAgent("same-session", "idle");
   const registry = new Map([[first.agent.id, first.agent]]);
-  const routes = new AgentRouteTable({ get: (id) => registry.get(id) }, "host");
+  const routes = new AgentRouteTable(
+    { get: (id) => registry.get(id) },
+    createUserMessage,
+    "host",
+  );
   const firstRoute = routes.bind(first.agent);
 
   const replacement = fakeAgent("same-session", "idle");
@@ -88,7 +101,11 @@ test("returns retry only when synchronous inbox admission throws", () => {
   const state = fakeAgent("session-error", "idle");
   state.failAdmission = true;
   const registry = new Map([[state.agent.id, state.agent]]);
-  const routes = new AgentRouteTable({ get: (id) => registry.get(id) }, "host");
+  const routes = new AgentRouteTable(
+    { get: (id) => registry.get(id) },
+    createUserMessage,
+    "host",
+  );
   const route = routes.bind(state.agent);
 
   const failed = routes.deliver(request(route.controllerId, "retry"));

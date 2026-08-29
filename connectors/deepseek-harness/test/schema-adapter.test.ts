@@ -12,7 +12,7 @@ import {
   compileAuthoritativeInputValidator,
 } from "../src/schema-adapter.js";
 
-test("all 16 real AKK schemas pass the official DSH rc.2 validator", async () => {
+test("all 16 real AKK schemas pass the shared supported DSH validator", async () => {
   const adapter = createHostAdapter({
     environmentForContext: () => ({}),
     lifecycleEnvironment: {},
@@ -21,7 +21,10 @@ test("all 16 real AKK schemas pass the official DSH rc.2 validator", async () =>
   try {
     assert.equal(adapter.tools.length, 16);
     for (const tool of adapter.tools) {
-      const discovery = adaptHostToolInputSchema(tool.inputSchema);
+      const discovery = adaptHostToolInputSchema(
+        tool.inputSchema,
+        assertSupportedJsonSchema,
+      );
       assert.doesNotThrow(() => assertSupportedJsonSchema(discovery), tool.name);
       assert.doesNotThrow(
         () => compileAuthoritativeInputValidator(tool.inputSchema),
@@ -44,7 +47,10 @@ test("discovery projection may omit unsupported conditions but execution does no
       tool.name === "agent_knock_knock_send"
     );
     assert.ok(send);
-    const discovery = adaptHostToolInputSchema(send.inputSchema);
+    const discovery = adaptHostToolInputSchema(
+      send.inputSchema,
+      assertSupportedJsonSchema,
+    );
     assertSupportedJsonSchema(discovery);
     const validateAuthoritative = compileAuthoritativeInputValidator(
       send.inputSchema,

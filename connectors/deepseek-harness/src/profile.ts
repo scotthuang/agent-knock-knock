@@ -16,7 +16,7 @@ import {
   CALLBACK_TOKEN_ENV,
   CONTROLLER_ID_ENV,
   DSH_HOST_ID,
-  DSH_HOST_VERSION,
+  type SupportedDeepSeekHarnessVersion,
 } from "./constants.js";
 
 const HOST_PROFILE_SCHEMA_URL =
@@ -42,6 +42,7 @@ export interface ConnectorProfileResources {
  * package artifact, so callback execution never depends on PATH or a shell.
  */
 export function createConnectorProfileResources(
+  hostVersion: SupportedDeepSeekHarnessVersion,
   baseEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): ConnectorProfileResources {
   if (process.platform === "win32") {
@@ -67,7 +68,7 @@ export function createConnectorProfileResources(
     revision,
     compatibility: {
       host: DSH_HOST_ID,
-      range: `=${DSH_HOST_VERSION}`,
+      range: `=${hostVersion}`,
     },
     controllerContext: {
       driver: "environment_v1",
@@ -134,7 +135,7 @@ export function createConnectorProfileResources(
     const runtime = createTrustedHostProfileRuntime({
       selection: profilePath,
       host: DSH_HOST_ID,
-      hostVersion: DSH_HOST_VERSION,
+      hostVersion,
       environment: base,
     });
     return hostProfileRelayEnvironment(runtime, base);

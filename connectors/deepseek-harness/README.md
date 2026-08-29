@@ -11,11 +11,15 @@ tests, lockfile, bundle manifest, and future release tag.
 
 ## Compatibility
 
-The first release intentionally supports exactly DeepSeek Harness
-`0.1.1-rc.2` on the resident Web Host and Node.js `>=22.19.0`. Activation locates
-the real `@deepseek-ai/dsh` launcher and requires that launcher plus its
-`dsh-agent`, `dsh-commands`, `dsh-llm`, and `dsh-tools` package set to be exact
-`0.1.1-rc.2`; an unsupported, missing, or split Host fails before mounting.
+This prerelease supports DeepSeek Harness `0.1.1-rc.2` and `0.1.2-alpha.1` on
+the resident Web Host and Node.js `>=22.19.0`. Activation locates the real
+`@deepseek-ai/dsh` launcher and requires that launcher plus its `dsh-agent`,
+`dsh-commands`, `dsh-llm`, and `dsh-tools` packages to form one coherent set at
+either reviewed version. An unsupported, missing, or split Host fails before
+mounting. The detected launcher version is also projected into the private AKK
+Host Profile instead of being replaced with a connector build-time version.
+Runtime message and schema helpers are imported from that verified Host package
+tree, so a source checkout's development dependencies cannot replace them.
 
 Headless/one-shot Harness processes, Host-exit callback continuity, and Windows
 named pipes are not supported in this release.
@@ -28,9 +32,13 @@ Once this connector has been published, add its bundle to the Web profile:
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
 ```
 
+Install through `dsh plugin` so the connector resolves the resident Host's
+launcher-owned peers. A standalone npm install is not a supported Host setup
+and may materialize a second, unrelated Harness package set.
+
 For development in this repository, build the AKK root package and this child
 package, then add the child directory with the DeepSeek Harness plugin command.
-The published connector depends on the exact AKK runtime version `0.12.16` so
+The published connector depends on the exact AKK runtime version `0.12.22` so
 the Host Adapter API it was tested against cannot drift unexpectedly.
 
 The optional bundle patch mounts only the Host plugin:
@@ -52,10 +60,11 @@ The optional bundle patch mounts only the Host plugin:
   not inherit its route.
 - One shared AKK lifecycle service runs per DSH Host. The root AKK Host Adapter
   retains one private tool/command authority registry per exact Agent object.
-- DSH receives a discovery schema projected into its enforced rc.2 subset.
-  Before a tool can reach the Host Adapter, the connector validates its input
-  against the complete original AKK JSON Schema, including conditional,
-  pattern, and numeric constraints that DSH discovery cannot represent.
+- DSH receives a discovery schema projected into the enforced subset shared by
+  the two supported Harness releases. Before a tool can reach the Host Adapter,
+  the connector validates its input against the complete original AKK JSON
+  Schema, including conditional, pattern, and numeric constraints that DSH
+  discovery cannot represent.
 - A private `0700` temporary directory contains the route-bound Host Profile
   and Unix socket. The callback helper is launched with `process.execPath`; its
   socket path and random token are inherited through an allowlisted environment
@@ -103,6 +112,12 @@ npm run pack:check
 
 No connector package is published by these commands.
 
+The `0.1.0-rc.2` compatibility work was additionally typechecked and
+runtime-smoked against the official DeepSeek Harness `0.1.2-alpha.1` source
+release. Its npm artifacts were not present on the public registry at that
+release point, so this package keeps the reproducible development lock on
+`0.1.1-rc.2` while its peer and runtime checks admit both reviewed versions.
+
 ## Release safety
 
 `npm run release:check` is check-only. The script rejects a dirty tree, a
@@ -112,7 +127,7 @@ runtime `file:`, `link:`, or `workspace:` dependency.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.1
+npm run release:check -- --publish --confirm-version 0.1.0-rc.2
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
