@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add an exact Codex `0.150.1` native lifecycle and `/status` inspection profile after verifying its Composer, rollout, slash-popup, status-card, clear, and exact-resume surfaces.
+
 ## 0.12.20 - 2026-08-28
 
 ### Added
