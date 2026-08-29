@@ -62,7 +62,7 @@ test("doctor probes both terminal transports and their supported coding agents",
     tmux: writeFakeExecutable(tempDir, "tmux", `process.stdout.write("tmux 3.5a");`),
     herdr: writeFakeExecutable(tempDir, "herdr", `process.stdout.write("herdr 0.8.0");`),
     codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("codex-cli 0.150.1");`),
-    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.237");`)
+    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.251");`)
   };
 
   try {
@@ -78,7 +78,7 @@ test("doctor probes both terminal transports and their supported coding agents",
     );
     assert.equal(
       probes.find((probe) => probe.command === "claude")?.native_profile,
-      "claude-code-2.1.237-native-status"
+      "claude-code-2.1.251-native-status"
     );
     assert.equal(
       probes.filter((probe) => ["codex", "claude"].includes(probe.command))
@@ -107,7 +107,7 @@ test("doctor keeps complete unverified coding-agent versions available with warn
         claude: writeFakeExecutable(
           tempDir,
           "claude-future",
-          `process.stdout.write("Claude Code 2.1.238");`
+          `process.stdout.write("Claude Code 2.1.252");`
         )
       }
     });

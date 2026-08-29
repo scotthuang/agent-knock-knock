@@ -406,12 +406,18 @@ function claudeNativeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
+    ...(version === "2.1.251"
+      ? ["  Peer address:        unix:///private/tmp/claude.sock"]
+      : []),
     "  cwd:                 /repo",
     "  Auth token:          ANTHROPIC_AUTH_TOKEN",
     "",
     "  Model:               claude-sonnet",
     "  MCP servers:         all connected",
     "  Setting sources:     User settings",
+    ...(version === "2.1.251"
+      ? ["  Managed settings (remote): connected"]
+      : []),
     "",
     "  Esc to cancel"
   ].join("\n");
@@ -5352,7 +5358,7 @@ test("native status inspection can settle against an injected monotonic clock", 
 });
 
 test("verified and unverified Claude versions use the closed stable composer and modal dismissal", async () => {
-  for (const version of ["2.1.226", "2.1.237", "2.1.238"]) {
+  for (const version of ["2.1.226", "2.1.237", "2.1.251", "2.1.252"]) {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
     const idleScreen = [
       "────────────────────────────────────────────────",
@@ -5477,7 +5483,7 @@ test("verified and generic Claude native status profiles accept the closed 80-co
       this.setScreen(target, claudeNarrowNativeComposerScreen(text));
     }
   }
-  for (const version of ["2.1.226", "2.1.237", "2.1.238"]) {
+  for (const version of ["2.1.226", "2.1.237", "2.1.251", "2.1.252"]) {
     const adapter = createClaudeTerminalAgentAdapter();
     const provider = new NarrowClaudeProvider([PANE]);
     const bridge = new TerminalAgentBridge({
@@ -5496,7 +5502,7 @@ test("verified and generic Claude native status profiles accept the closed 80-co
   }
 });
 
-test("Claude 2.1.237 native status rejects a non-prefix truncated popup", async () => {
+test("Claude 2.1.251 native status rejects a non-prefix truncated popup", async () => {
   const adapter = createClaudeTerminalAgentAdapter();
   class DriftedNarrowClaudeProvider extends RecordingTerminalProvider {
     private capturesAfterInjection = 0;
@@ -5534,7 +5540,7 @@ test("Claude 2.1.237 native status rejects a non-prefix truncated popup", async 
     bridge.submitNativeInspection(
       "claude",
       terminalControl(adapter),
-      claudeStatusInspectionPlan("2.1.237"),
+      claudeStatusInspectionPlan("2.1.251"),
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {

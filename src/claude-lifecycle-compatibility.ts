@@ -33,6 +33,23 @@ const CLAUDE_STATUS_PANEL_FIELDS_2_1_226 = Object.freeze([
   "Setting sources"
 ]);
 
+const CLAUDE_STATUS_PANEL_FIELDS_2_1_251 = Object.freeze([
+  "Version",
+  "Session name",
+  "Session ID",
+  "Session kind",
+  "Peer address",
+  "cwd",
+  "Auth token",
+  "Anthropic base URL",
+  "Model",
+  "MCP servers",
+  "Setting sources",
+  "Skipped sources",
+  "Claude Code on the web",
+  "Managed settings (remote)"
+]);
+
 const CLAUDE_VERSION_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 
@@ -81,6 +98,23 @@ const CLAUDE_LIFECYCLE_PROFILES: Readonly<
       "2.1.226",
       "2.1.237"
     ])
+  }),
+  "2.1.251": Object.freeze({
+    lifecycleBehaviorProfile: "claude-code-2.1.251",
+    nativeInspectionBehaviorProfile:
+      "claude-code-2.1.251-native-status",
+    nativeInspectionComposerStableMs: 80,
+    nativeInspectionComposerSettleTimeoutMs: 5_000,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_251,
+    nativeStatusPanelRequiredValues: Object.freeze({
+      "Session kind": "interactive"
+    }),
+    resumableSourceVersions: Object.freeze([
+      "2.1.218",
+      "2.1.226",
+      "2.1.237",
+      "2.1.251"
+    ])
   })
 });
 
@@ -98,7 +132,7 @@ const CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE:
       CLAUDE_UNVERIFIED_NATIVE_INSPECTION_BEHAVIOR_PROFILE,
     nativeInspectionComposerStableMs: 80,
     nativeInspectionComposerSettleTimeoutMs: 5_000,
-    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_226,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_251,
     nativeStatusPanelRequiredValues: Object.freeze({
       "Session kind": "interactive"
     }),

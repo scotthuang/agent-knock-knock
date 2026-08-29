@@ -31,7 +31,7 @@ const PID = 42421;
 const AGENT_STARTED_AT_MS = 1784870000000;
 const VERSION = "2.1.218";
 const PREVIOUS_VERSION = "2.1.226";
-const CURRENT_VERSION = "2.1.237";
+const CURRENT_VERSION = "2.1.251";
 const LEGACY_VERSION = "2.1.198";
 const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
@@ -639,7 +639,7 @@ test("human-started Claude observation returns exact failure and rejects later p
   superseded.agentRows[0] = {
     ...superseded.agentRows[0],
     status: "waiting",
-    waitingFor: "dialog open"
+    waitingFor: "permission prompt"
   };
   superseded.write([userRecord({
     uuid: uuid(6200),
@@ -949,7 +949,7 @@ test("Claude resume candidates use complete versions and structural identity ins
   );
 });
 
-test("Claude 2.1.237 transcript supports lifecycle, acceptance, completion, and approval evidence", (t) => {
+test("Claude 2.1.251 transcript supports lifecycle, acceptance, completion, and approval evidence", (t) => {
   const fixture = createFixture(t, 237);
   const request = "Verify the exact current Claude transcript profile";
   const anchor = fixture.capture();
@@ -1000,6 +1000,30 @@ test("Claude 2.1.237 transcript supports lifecycle, acceptance, completion, and 
   const approval = pending.detectPending(pendingAnchor, pendingRequest);
   assert.equal(approval?.claudeVersion, CURRENT_VERSION);
   assert.equal(approval?.toolName, "Bash");
+});
+
+test("Claude 2.1.251 input-ready waiting rows can anchor sends but permission waits cannot", (t) => {
+  const fixture = createFixture(t, 251);
+  fixture.agentRows[0] = {
+    ...fixture.agentRows[0],
+    status: "waiting",
+    waitingFor: undefined
+  };
+  assert.ok(fixture.capture());
+
+  fixture.agentRows[0] = {
+    ...fixture.agentRows[0],
+    status: "waiting",
+    waitingFor: "permission prompt"
+  };
+  assert.equal(captureClaudeTranscriptAnchor({
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    pid: PID,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows,
+    now: new Date(CAPTURED_AT)
+  }), undefined);
 });
 
 test("fallback Watch identifies one anchored Claude request from its hash only", (t) => {

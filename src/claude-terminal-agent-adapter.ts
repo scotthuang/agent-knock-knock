@@ -88,16 +88,23 @@ export interface ClaudePendingApprovalEvidence {
 
 const CLAUDE_SUBCOMMANDS = new Set([
   "agents",
+  "attach",
   "auth",
   "auto-mode",
   "doctor",
   "gateway",
+  "import",
   "install",
+  "kill",
+  "logs",
   "mcp",
   "plugin",
   "plugins",
   "project",
+  "respawn",
+  "rm",
   "setup-token",
+  "stop",
   "ultrareview",
   "update",
   "upgrade"
@@ -186,6 +193,7 @@ const PROFILED_CLAUDE_STATUS_PANEL_FIELDS = new Set(
 );
 const CLAUDE_STATUS_PANEL_SENSITIVE_FIELDS = new Set([
   "Session name",
+  "Peer address",
   "Auth token"
 ]);
 const NATIVE_INSPECTION_FINGERPRINT = /^sha256:[0-9a-f]{64}$/u;
@@ -637,12 +645,12 @@ export function observeClaudeThreadLifecycle(
     status: "observed",
     nativeThreadId,
     evidence: "claude_agents_exact_pid",
-    idle: row.status === "idle"
+    idle: isClaudeAgentIdleState(row)
   };
   if (request.phase === "before") {
     return observed;
   }
-  if (row.status !== "idle") {
+  if (!isClaudeAgentIdleState(row)) {
     return {
       ...observed,
       status: "mismatch",
@@ -682,6 +690,19 @@ export function observeClaudeThreadLifecycle(
         status: "mismatch",
         reason: `Claude resumed ${nativeThreadId}, not the requested native thread ${expected}`
       };
+}
+
+/**
+ * Claude Code 2.1.251 can report an input-ready interactive composer as
+ * `waiting` without a `waitingFor` reason. A non-empty wait reason remains a
+ * real blocked state and must never be promoted to idle.
+ */
+export function isClaudeAgentIdleState(row: ClaudeAgentRow): boolean {
+  const waitingFor = typeof row.waitingFor === "string"
+    ? row.waitingFor.trim()
+    : "";
+  return row.status === "idle" ||
+    (row.status === "waiting" && waitingFor.length === 0);
 }
 
 type ParsedClaudeStatusPanel =
@@ -1265,7 +1286,7 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
   const region = lines.slice(markerIndex);
   const lastChoiceLikeIndex = findLastIndex(
     region,
-    (line) => /^\s*(?:❯\s*)?[1-3]\.\s*.+?\s*$/u.test(line)
+    (line) => /^\s*(?:❯\s*)?[1-4]\.\s*.+?\s*$/u.test(line)
   );
   const newerStateIndex = findLastIndex(region, (line, index) =>
     index > lastChoiceLikeIndex &&
@@ -1304,7 +1325,7 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     ? headerIndexes[0]
     : -1;
   const choiceRows = region.flatMap((line, index) => {
-    const match = /^\s*(❯\s*)?([1-3])\.\s*(.+?)\s*$/u.exec(line);
+    const match = /^\s*(❯\s*)?([1-4])\.\s*(.+?)\s*$/u.exec(line);
     return match
       ? [{
           index,
@@ -1320,19 +1341,30 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
       isClaudePermissionFooterLine(line) ? index : -1
     )
     .filter((index) => index >= 0);
-  const orderedChoices = choiceRows.length === 3 &&
+  const orderedChoices = [3, 4].includes(choiceRows.length) &&
     choiceRows.every((choice, index) => choice.number === index + 1) &&
     choiceRows.every((choice, index) =>
       index === 0 || choice.index > choiceRows[index - 1].index
     );
-  const exactLabels = orderedChoices &&
+  const legacyLabels = orderedChoices && choiceRows.length === 3 &&
     isOneTimeYesChoice(choiceRows[0].label) &&
     isPersistentPermissionChoice(choiceRows[1].label) &&
     /^No(?:\b|,)/iu.test(choiceRows[2].label);
+  const autoOnlyLabels = orderedChoices && choiceRows.length === 3 &&
+    isOneTimeYesChoice(choiceRows[0].label) &&
+    isClaudeAutoModeChoice(choiceRows[1].label) &&
+    /^No(?:\b|,)/iu.test(choiceRows[2].label);
+  const currentLabels = orderedChoices && choiceRows.length === 4 &&
+    isOneTimeYesChoice(choiceRows[0].label) &&
+    isPersistentPermissionChoice(choiceRows[1].label) &&
+    isClaudeAutoModeChoice(choiceRows[2].label) &&
+    /^No(?:\b|,)/iu.test(choiceRows[3].label);
+  const exactLabels = legacyLabels || autoOnlyLabels || currentLabels;
   const exactChoiceSpacing = orderedChoices && [
     region.slice(1, choiceRows[0].index),
-    region.slice(choiceRows[0].index + 1, choiceRows[1].index),
-    region.slice(choiceRows[1].index + 1, choiceRows[2].index)
+    ...choiceRows.slice(1).map((choice, index) =>
+      region.slice(choiceRows[index].index + 1, choice.index)
+    )
   ].every((gap) => gap.every((line) => !line.trim()));
   const footerIndex = footerIndexes[0] ?? -1;
   const footerAfterChoices = footerIndexes.length === 1 &&
@@ -1373,8 +1405,9 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     return {
       blocked: true,
       approvable: false,
-      reason: isPersistentPermissionChoice(highlighted.label)
-        ? "the highlighted Claude Code choice would persist permission"
+      reason: isPersistentPermissionChoice(highlighted.label) ||
+          isClaudeAutoModeChoice(highlighted.label)
+        ? "the highlighted Claude Code choice would persist permission or change approval mode"
         : "the highlighted Claude Code choice is not the one-time Yes option",
       promptKind: "claude_permission"
     };
@@ -1390,7 +1423,9 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     requestDetail,
     toolName: "Bash",
     promptEvidence: terminalApprovalPromptEvidence(
-      "claude-bash-permission-prompt-v1",
+      autoOnlyLabels || currentLabels
+        ? "claude-bash-permission-prompt-v2"
+        : "claude-bash-permission-prompt-v1",
       lines.slice(absoluteHeaderIndex, promptRegionEnd + 1).join("\n")
     ),
     action: {
@@ -1430,7 +1465,7 @@ function claudePermissionVisibleCommandLine(screen: string): string | undefined 
   return lines
     .slice(searchStart + relativeHeaderIndex + 1, markerIndex)
     .map((line) => line.trim())
-    .find(Boolean);
+    .find((line) => Boolean(line) && !isClaudeAutoModeTipLine(line));
 }
 
 function omitClaudePermissionDetails(
@@ -1678,7 +1713,17 @@ function isOneTimeYesChoice(label: string): boolean {
 }
 
 function isPersistentPermissionChoice(label: string): boolean {
-  return /(?:don['’]t ask again|always allow|allow (?:this|the).*(?:session|project|directory)|yes,\s*and)/iu.test(label);
+  return /(?:don['’]t ask again|always allow|allow (?:this|the).*(?:session|project|directory))/iu.test(label);
+}
+
+function isClaudeAutoModeChoice(label: string): boolean {
+  return /^Yes,\s*and\s+switch\s+to\s+auto\s+mode(?:\s*·\s*auto\s+mode\s+handles\s+these\s+prompts\s+for\s+you)?$/iu
+    .test(label);
+}
+
+function isClaudeAutoModeTipLine(line: string): boolean {
+  return /^Tip:\s*auto mode handles these prompts for you\s*[—-]\s*choose ["“]switch to auto mode["”] below$/iu
+    .test(line);
 }
 
 function isClaudePermissionFooterLine(line: string): boolean {
