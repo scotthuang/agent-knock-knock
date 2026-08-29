@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
+
+export type CreateUserMessage =
+  typeof import("@deepseek-ai/dsh-llm")["createUserMessage"];
 
 export interface CallbackRequest {
   readonly controllerId: string;
@@ -54,6 +56,7 @@ export class AgentRouteTable {
 
   constructor(
     private readonly agents: LiveAgentLookup,
+    private readonly createUserMessage: CreateUserMessage,
     private readonly instanceNonce = randomBytes(12).toString("hex"),
   ) {}
 
@@ -110,7 +113,7 @@ export class AgentRouteTable {
       return rejected(base, "agent_route_not_live");
     }
 
-    const message = createUserMessage({
+    const message = this.createUserMessage({
       content: [{ type: "text", text: request.body }],
       source: {
         kind: "plugin",

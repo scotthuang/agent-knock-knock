@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Context } from "@deepseek-ai/cordis";
@@ -20,15 +21,21 @@ import {
 import {
   CONNECTOR_NAME,
   DSH_LAUNCHER_PACKAGE,
+  DSH_RUNTIME_ANCHOR_PACKAGE,
   SUPPORTED_DSH_RUNTIME_PACKAGES,
-  SUPPORTED_DSH_VERSION,
+  SUPPORTED_DSH_VERSIONS,
+  type SupportedDeepSeekHarnessVersion,
 } from "./constants.js";
 import { createCallbackIpcServer } from "./ipc.js";
 import { createConnectorProfileResources } from "./profile.js";
-import { AgentRouteTable } from "./routes.js";
+import {
+  AgentRouteTable,
+  type CreateUserMessage,
+} from "./routes.js";
 import {
   adaptHostToolInputSchema,
   compileAuthoritativeInputValidator,
+  type AssertSupportedJsonSchema,
 } from "./schema-adapter.js";
 
 export const name = CONNECTOR_NAME;
@@ -60,14 +67,15 @@ export async function apply(
 
 /** @internal Strict dependency seam used by the connector's native wiring tests. */
 export interface ConnectorDependencies {
-  readonly assertSupportedDeepSeekHarness: () => void;
+  readonly loadSupportedDeepSeekHarnessRuntime:
+    () => Promise<SupportedDeepSeekHarnessRuntime>;
   readonly createConnectorProfileResources: typeof createConnectorProfileResources;
   readonly createCallbackIpcServer: typeof createCallbackIpcServer;
   readonly createHostAdapter: typeof createHostAdapter;
 }
 
 const DEFAULT_DEPENDENCIES: ConnectorDependencies = Object.freeze({
-  assertSupportedDeepSeekHarness,
+  loadSupportedDeepSeekHarnessRuntime,
   createConnectorProfileResources,
   createCallbackIpcServer,
   createHostAdapter,
@@ -80,9 +88,11 @@ export async function applyWithDependencies(
   dependencies: Partial<ConnectorDependencies> = {},
 ): Promise<() => Promise<void>> {
   const resolved = { ...DEFAULT_DEPENDENCIES, ...dependencies };
-  resolved.assertSupportedDeepSeekHarness();
+  const harnessRuntime = await resolved.loadSupportedDeepSeekHarnessRuntime();
 
-  const resources = resolved.createConnectorProfileResources();
+  const resources = resolved.createConnectorProfileResources(
+    harnessRuntime.version,
+  );
   let routes: AgentRouteTable | undefined;
   let server: ReturnType<typeof createCallbackIpcServer> | undefined;
   let adapter: HostAdapter | undefined;
@@ -92,6 +102,7 @@ export async function applyWithDependencies(
   try {
     const builtRoutes = new AgentRouteTable(
       ctx.agents,
+      harnessRuntime.createUserMessage,
       resources.instanceNonce,
     );
     routes = builtRoutes;
@@ -138,6 +149,7 @@ export async function applyWithDependencies(
         builtAdapter,
         builtRoutes,
         tool,
+        harnessRuntime.assertSupportedJsonSchema,
       )));
     }
     if (builtAdapter.tools.length !== 16) {
@@ -192,8 +204,12 @@ function toolDefinition(
   adapter: HostAdapter,
   routes: AgentRouteTable,
   metadata: HostAdapterToolMetadata,
+  assertSupportedJsonSchema: AssertSupportedJsonSchema,
 ): ToolDefinition {
-  const parameters = adaptHostToolInputSchema(metadata.inputSchema);
+  const parameters = adaptHostToolInputSchema(
+    metadata.inputSchema,
+    assertSupportedJsonSchema,
+  );
   const validateAuthoritativeInput = compileAuthoritativeInputValidator(
     metadata.inputSchema,
   );
@@ -307,7 +323,16 @@ function requiredRecord(
 
 export interface DeepSeekHarnessManifestResolver {
   launcherManifest(): unknown;
+  runtimeAnchorManifest(): unknown;
   runtimePackageManifest(packageName: string): unknown;
+  runtimePackageEntry(packageName: string): string;
+}
+
+/** Host-owned DSH functions whose implementation must match the verified package set. */
+export interface SupportedDeepSeekHarnessRuntime {
+  readonly version: SupportedDeepSeekHarnessVersion;
+  readonly createUserMessage: CreateUserMessage;
+  readonly assertSupportedJsonSchema: AssertSupportedJsonSchema;
 }
 
 /** @internal Resolve compatibility evidence only from the real DSH launcher tree. */
@@ -334,17 +359,28 @@ export function createDeepSeekHarnessManifestResolver(
     );
   }
   const requireFromLauncher = createRequire(launcherManifestPath);
+  let runtimeAnchorManifestPath: string;
+  try {
+    runtimeAnchorManifestPath = fs.realpathSync(
+      requireFromLauncher.resolve(`${DSH_RUNTIME_ANCHOR_PACKAGE}/package.json`),
+    );
+  } catch {
+    throw new Error(
+      "agent-knock-knock-deepseek-harness could not identify the " +
+      `${DSH_RUNTIME_ANCHOR_PACKAGE} launcher runtime anchor`,
+    );
+  }
+  const requireFromRuntimeAnchor = createRequire(runtimeAnchorManifestPath);
 
   return Object.freeze({
     launcherManifest: () => readPackageManifest(launcherManifestPath),
+    runtimeAnchorManifest: () => readPackageManifest(runtimeAnchorManifestPath),
     runtimePackageManifest(packageName: string): unknown {
-      if (!(SUPPORTED_DSH_RUNTIME_PACKAGES as readonly string[]).includes(packageName)) {
-        throw new Error(`unsupported DeepSeek Harness runtime package ${packageName}`);
-      }
+      assertKnownRuntimePackageName(packageName);
       let manifestPath: string;
       try {
         manifestPath = fs.realpathSync(
-          requireFromLauncher.resolve(`${packageName}/package.json`),
+          requireFromRuntimeAnchor.resolve(`${packageName}/package.json`),
         );
       } catch {
         throw new Error(
@@ -353,6 +389,49 @@ export function createDeepSeekHarnessManifestResolver(
       }
       return readPackageManifest(manifestPath);
     },
+    runtimePackageEntry(packageName: string): string {
+      assertKnownRuntimePackageName(packageName);
+      try {
+        return fs.realpathSync(requireFromRuntimeAnchor.resolve(packageName));
+      } catch {
+        throw new Error(
+          `DeepSeek Harness launcher cannot load runtime package ${packageName}`,
+        );
+      }
+    },
+  });
+}
+
+/**
+ * Validate one launcher-owned package set, then import the exact Host modules
+ * that own the connector's two runtime helper functions.
+ */
+export async function loadSupportedDeepSeekHarnessRuntime(
+  resolver: DeepSeekHarnessManifestResolver =
+    createDeepSeekHarnessManifestResolver(),
+): Promise<SupportedDeepSeekHarnessRuntime> {
+  const version = assertSupportedDeepSeekHarness(resolver);
+  const [llmModule, toolsModule] = await Promise.all([
+    importRuntimePackage(resolver, "@deepseek-ai/dsh-llm"),
+    importRuntimePackage(resolver, "@deepseek-ai/dsh-tools"),
+  ]);
+  const createUserMessage = llmModule.createUserMessage;
+  if (typeof createUserMessage !== "function") {
+    throw new Error(
+      "DeepSeek Harness runtime package @deepseek-ai/dsh-llm does not export createUserMessage",
+    );
+  }
+  const assertSupportedJsonSchema = toolsModule.assertSupportedJsonSchema;
+  if (typeof assertSupportedJsonSchema !== "function") {
+    throw new Error(
+      "DeepSeek Harness runtime package @deepseek-ai/dsh-tools does not export assertSupportedJsonSchema",
+    );
+  }
+  return Object.freeze({
+    version,
+    createUserMessage: createUserMessage as CreateUserMessage,
+    assertSupportedJsonSchema:
+      assertSupportedJsonSchema as AssertSupportedJsonSchema,
   });
 }
 
@@ -360,10 +439,15 @@ export function createDeepSeekHarnessManifestResolver(
 export function assertSupportedDeepSeekHarness(
   resolver: DeepSeekHarnessManifestResolver =
     createDeepSeekHarnessManifestResolver(),
-): void {
-  assertExactDeepSeekHarnessPackage(
+): SupportedDeepSeekHarnessVersion {
+  const launcherVersion = assertSupportedDeepSeekHarnessPackage(
     resolver.launcherManifest(),
     DSH_LAUNCHER_PACKAGE,
+  );
+  assertMatchingDeepSeekHarnessPackage(
+    resolver.runtimeAnchorManifest(),
+    DSH_RUNTIME_ANCHOR_PACKAGE,
+    launcherVersion,
   );
   for (const packageName of SUPPORTED_DSH_RUNTIME_PACKAGES) {
     let manifest: unknown;
@@ -375,14 +459,47 @@ export function assertSupportedDeepSeekHarness(
         errorMessage(error),
       );
     }
-    assertExactDeepSeekHarnessPackage(manifest, packageName);
+    assertMatchingDeepSeekHarnessPackage(
+      manifest,
+      packageName,
+      launcherVersion,
+    );
+  }
+  return launcherVersion;
+}
+
+function assertSupportedDeepSeekHarnessPackage(
+  manifest: unknown,
+  expectedName: string,
+): SupportedDeepSeekHarnessVersion {
+  const version = deepSeekHarnessPackageVersion(manifest, expectedName);
+  if (!isSupportedDeepSeekHarnessVersion(version)) {
+    throw new Error(
+      "agent-knock-knock-deepseek-harness supports only DeepSeek Harness " +
+      `${SUPPORTED_DSH_VERSIONS.join(" or ")}; ${expectedName} is ${version}`,
+    );
+  }
+  return version;
+}
+
+function assertMatchingDeepSeekHarnessPackage(
+  manifest: unknown,
+  expectedName: string,
+  launcherVersion: SupportedDeepSeekHarnessVersion,
+): void {
+  const version = deepSeekHarnessPackageVersion(manifest, expectedName);
+  if (version !== launcherVersion) {
+    throw new Error(
+      "agent-knock-knock-deepseek-harness requires one coherent DeepSeek " +
+      `Harness ${launcherVersion} package set; ${expectedName} is ${version}`,
+    );
   }
 }
 
-function assertExactDeepSeekHarnessPackage(
+function deepSeekHarnessPackageVersion(
   manifest: unknown,
   expectedName: string,
-): void {
+): string {
   if (
     typeof manifest !== "object" ||
     manifest === null ||
@@ -399,12 +516,54 @@ function assertExactDeepSeekHarnessPackage(
       `found ${String(candidate.name)}`,
     );
   }
-  if (candidate.version !== SUPPORTED_DSH_VERSION) {
+  if (typeof candidate.version !== "string") {
     throw new Error(
-      "agent-knock-knock-deepseek-harness supports only DeepSeek Harness " +
-      `${SUPPORTED_DSH_VERSION}; ${expectedName} is ${String(candidate.version)}`,
+      `agent-knock-knock-deepseek-harness could not verify ${expectedName}: invalid package version`,
     );
   }
+  return candidate.version;
+}
+
+function isSupportedDeepSeekHarnessVersion(
+  version: string,
+): version is SupportedDeepSeekHarnessVersion {
+  return (SUPPORTED_DSH_VERSIONS as readonly string[]).includes(version);
+}
+
+function assertKnownRuntimePackageName(packageName: string): void {
+  if (!(SUPPORTED_DSH_RUNTIME_PACKAGES as readonly string[]).includes(packageName)) {
+    throw new Error(`unsupported DeepSeek Harness runtime package ${packageName}`);
+  }
+}
+
+async function importRuntimePackage(
+  resolver: DeepSeekHarnessManifestResolver,
+  packageName: string,
+): Promise<Readonly<Record<string, unknown>>> {
+  let entryPath: string;
+  try {
+    entryPath = resolver.runtimePackageEntry(packageName);
+  } catch (error) {
+    throw new Error(
+      `agent-knock-knock-deepseek-harness could not load ${packageName}: ` +
+      errorMessage(error),
+    );
+  }
+  let loaded: unknown;
+  try {
+    loaded = await import(pathToFileURL(entryPath).href);
+  } catch (error) {
+    throw new Error(
+      `agent-knock-knock-deepseek-harness could not import ${packageName}: ` +
+      errorMessage(error),
+    );
+  }
+  if (typeof loaded !== "object" || loaded === null || Array.isArray(loaded)) {
+    throw new Error(
+      `agent-knock-knock-deepseek-harness imported invalid ${packageName} runtime exports`,
+    );
+  }
+  return loaded as Readonly<Record<string, unknown>>;
 }
 
 function findOwningPackageManifest(

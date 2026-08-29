@@ -4,7 +4,12 @@ import test from "node:test";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Context } from "@deepseek-ai/cordis";
 import type { CommandDefinition } from "@deepseek-ai/dsh-commands";
-import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import {
+  assertSupportedJsonSchema,
+  type ToolDefinition,
+  type ToolRunContext,
+} from "@deepseek-ai/dsh-tools";
 import type {
   CreateHostAdapterOptions,
   HostAdapter,
@@ -31,6 +36,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   let registrationDisposals = 0;
   let drainControllerId: string | undefined;
   let drainStatus: string | undefined;
+  let profileHarnessVersion: string | undefined;
 
   const fakeContext = {
     agents: { get: (id: Agent["id"]) => live.get(id) },
@@ -60,8 +66,15 @@ test("mounts native command/tools and routes every call through the exact Agent"
   } as unknown as Context;
 
   const cleanup = await applyWithDependencies(fakeContext, {}, {
-    assertSupportedDeepSeekHarness() {},
-    createConnectorProfileResources() {
+    async loadSupportedDeepSeekHarnessRuntime() {
+      return {
+        version: "0.1.2-alpha.1",
+        createUserMessage,
+        assertSupportedJsonSchema,
+      };
+    },
+    createConnectorProfileResources(harnessVersion) {
+      profileHarnessVersion = harnessVersion;
       return {
         instanceNonce: "host-instance",
         directory: "/private/test",
@@ -108,6 +121,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   });
 
   assert.equal(serverStarts, 1);
+  assert.equal(profileHarnessVersion, "0.1.2-alpha.1");
   assert.equal(lifecycleStarts, 1);
   assert.equal(commands.length, 1);
   assert.equal(commands[0]?.name, "akk");
@@ -210,7 +224,13 @@ test("removes private resources when Host Adapter construction fails", async () 
 
   await assert.rejects(
     applyWithDependencies(fakeContext, {}, {
-      assertSupportedDeepSeekHarness() {},
+      async loadSupportedDeepSeekHarnessRuntime() {
+        return {
+          version: "0.1.2-alpha.1",
+          createUserMessage,
+          assertSupportedJsonSchema,
+        };
+      },
       createConnectorProfileResources() {
         return {
           instanceNonce: "failing-host",

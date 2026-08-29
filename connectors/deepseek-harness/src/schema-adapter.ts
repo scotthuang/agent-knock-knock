@@ -1,8 +1,8 @@
 import { Ajv, type ValidateFunction } from "ajv";
-import {
-  assertSupportedJsonSchema,
-  type JsonSchemaNode,
-} from "@deepseek-ai/dsh-tools";
+import type { JsonSchemaNode } from "@deepseek-ai/dsh-tools";
+
+export type AssertSupportedJsonSchema =
+  typeof import("@deepseek-ai/dsh-tools")["assertSupportedJsonSchema"];
 
 const SCHEMA_TYPES = new Set([
   "object",
@@ -21,7 +21,7 @@ const ajv = new Ajv({
 });
 
 /**
- * Project an AKK input schema into DSH 0.1.1-rc.2's enforced discovery subset.
+ * Project an AKK input schema into the supported DSH discovery subset.
  *
  * Unsupported conditional and scalar constraints are omitted only from the
  * model-facing discovery copy. Object shape, declared property types, enums,
@@ -31,6 +31,7 @@ const ajv = new Ajv({
  */
 export function adaptHostToolInputSchema(
   schema: Readonly<Record<string, unknown>>,
+  assertSupportedJsonSchema: AssertSupportedJsonSchema,
 ): Readonly<Record<string, unknown>> {
   const adapted = adaptNode(schema);
   if (adapted.type !== "object") {

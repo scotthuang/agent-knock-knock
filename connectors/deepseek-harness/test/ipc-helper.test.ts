@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 import {
   CALLBACK_SOCKET_ENV,
@@ -92,7 +93,7 @@ test("parses each required helper argument exactly once", () => {
 });
 
 async function callbackFixture() {
-  const resources = createConnectorProfileResources({});
+  const resources = createConnectorProfileResources("0.1.2-alpha.1", {});
   const followed: unknown[] = [];
   const agent = {
     id: "session-one",
@@ -100,7 +101,11 @@ async function callbackFixture() {
     followup: (message: unknown) => followed.push(message),
     inject: () => undefined,
   } as unknown as Agent;
-  const routes = new AgentRouteTable({ get: (id) => id === agent.id ? agent : undefined }, "host");
+  const routes = new AgentRouteTable(
+    { get: (id) => id === agent.id ? agent : undefined },
+    createUserMessage,
+    "host",
+  );
   const route = routes.bind(agent);
   const server = createCallbackIpcServer({
     socketPath: resources.socketPath,
