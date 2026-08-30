@@ -111,6 +111,10 @@
     "deepseek:test:fast": "npm --prefix connectors/deepseek-harness run test:fast",
     "deepseek:pack:check": "npm --prefix connectors/deepseek-harness run pack:check",
     "deepseek:release:check": "npm --prefix connectors/deepseek-harness run release:check",
+    "pi:build": "npm --prefix connectors/pi run build",
+    "pi:typecheck": "npm --prefix connectors/pi run typecheck",
+    "pi:test:fast": "npm --prefix connectors/pi run test:fast",
+    "pi:pack:check": "npm --prefix connectors/pi run pack:check",
     "smoke:lifecycle": "npm run build && node scripts/smoke-lifecycle-tmux.js",
     "smoke:lifecycle:attest": "npm run build && node scripts/verify-lifecycle-smoke-evidence.js",
     "transcript": "node dist/src/cli.js transcript"

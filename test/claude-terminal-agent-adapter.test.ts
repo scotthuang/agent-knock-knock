@@ -607,6 +607,25 @@ test("approves only the one-time Yes in the Claude 2.1.251 four-choice Bash dial
     "claude-bash-permission-prompt-v2"
   );
 
+  const wrappedPersistentChoice = detectClaudeApprovalPrompt(
+    screen.replace(
+      "2. Yes, and always allow access to /workspace from this project",
+      "2. Yes, and always allow access to\n      /workspace from this project"
+    )
+  );
+  assert.equal(
+    wrappedPersistentChoice.approvable,
+    true,
+    "a visually wrapped persistent option must not hide the highlighted one-time Yes"
+  );
+  const unexpectedWrappedChoice = detectClaudeApprovalPrompt(
+    screen.replace(
+      "2. Yes, and always allow access to /workspace from this project",
+      "2. Yes, and always allow access to\n      unrelated explanatory prose"
+    )
+  );
+  assert.equal(unexpectedWrappedChoice.approvable, false);
+
   for (const selectedChoice of [2, 3, 4] as const) {
     const unsafe = detectClaudeApprovalPrompt(
       currentClaude251PermissionScreen(command, selectedChoice)

@@ -1361,11 +1361,21 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     /^No(?:\b|,)/iu.test(choiceRows[3].label);
   const exactLabels = legacyLabels || autoOnlyLabels || currentLabels;
   const exactChoiceSpacing = orderedChoices && [
-    region.slice(1, choiceRows[0].index),
-    ...choiceRows.slice(1).map((choice, index) =>
-      region.slice(choiceRows[index].index + 1, choice.index)
+    {
+      previousChoice: undefined,
+      lines: region.slice(1, choiceRows[0].index)
+    },
+    ...choiceRows.slice(1).map((choice, index) => ({
+      previousChoice: choiceRows[index],
+      lines: region.slice(choiceRows[index].index + 1, choice.index)
+    }))
+  ].every(({ previousChoice, lines: gap }) => gap.every((line) =>
+    !line.trim() || Boolean(
+      previousChoice &&
+      isPersistentPermissionChoice(previousChoice.label) &&
+      isClaudePersistentPermissionContinuation(line)
     )
-  ].every((gap) => gap.every((line) => !line.trim()));
+  ));
   const footerIndex = footerIndexes[0] ?? -1;
   const footerAfterChoices = footerIndexes.length === 1 &&
     footerIndex > (choiceRows.at(-1)?.index ?? Number.MAX_SAFE_INTEGER);
@@ -1714,6 +1724,10 @@ function isOneTimeYesChoice(label: string): boolean {
 
 function isPersistentPermissionChoice(label: string): boolean {
   return /(?:don['’]t ask again|always allow|allow (?:this|the).*(?:session|project|directory))/iu.test(label);
+}
+
+function isClaudePersistentPermissionContinuation(line: string): boolean {
+  return /^\s{4,}(?:\/|~\/|\.\.?\/).+\s+from this project\s*$/iu.test(line);
 }
 
 function isClaudeAutoModeChoice(label: string): boolean {
