@@ -1,0 +1,73 @@
+{
+  "name": "@scotthuang/agent-knock-knock-pi",
+  "version": "0.1.0-poc.1",
+  "description": "Pi-as-orchestrator connector for Agent Knock Knock",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.js.map",
+    "lib/**/*.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "agent-knock-knock",
+    "codex",
+    "claude-code",
+    "orchestration"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scotthuang/agent-knock-knock.git",
+    "directory": "connectors/pi"
+  },
+  "bugs": {
+    "url": "https://github.com/scotthuang/agent-knock-knock/issues"
+  },
+  "homepage": "https://github.com/scotthuang/agent-knock-knock/tree/main/connectors/pi#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./lib/index.js"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "clean": "node -e \"fs.rmSync('lib', { recursive: true, force: true }); fs.rmSync('.test-dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test:fast": "npm run build && tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
+    "prepack": "npm run build",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "@scotthuang/agent-knock-knock": "0.12.23",
+    "ajv": "8.20.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@types/node": "22.20.0",
+    "typebox": "1.3.7",
+    "typescript": "6.0.3"
+  }
+}

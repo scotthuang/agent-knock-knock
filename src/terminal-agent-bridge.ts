@@ -4002,7 +4002,7 @@ function claudeNativeInspectionTrailingIsFooter(
   lines: readonly string[]
 ): boolean {
   return lines.length <= 2 && lines.every((line) =>
-    /^\s*(?:[⏵⏴]{1,2}|\?)\s*.*(?:shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
+    /^\s*(?:[⏵⏴⏸]{1,2}|\?)\s*.*(?:manual mode|shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
       .test(line)
   );
 }
@@ -4461,7 +4461,7 @@ function exactClaudeComposerCapture(
   if (
     trailing.length > 2 ||
     trailing.some((line) =>
-      !/^\s*(?:[⏵⏴]{1,2}|\?)\s*.*(?:shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
+      !/^\s*(?:[⏵⏴⏸]{1,2}|\?)\s*.*(?:manual mode|shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
         .test(line)
     )
   ) {

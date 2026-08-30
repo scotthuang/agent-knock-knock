@@ -1495,6 +1495,53 @@ test("managed user Send recaptures exact empty immediately before text", async (
     );
   });
 
+  await t.test("exact-empty Claude manual mode proceeds once", async () => {
+    const divider = "────────────────────────────────────────────────";
+    const idleFooter = "  ⏸ manual mode on · ? for shortcuts · ← for agents";
+    const injectedFooter = "  ⏸ manual mode on";
+    class ManualModeClaudeProvider extends RecordingTerminalProvider {
+      override async sendText(
+        target: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendText(target, text, options);
+        this.setScreen(
+          target,
+          [divider, `❯ ${text}`, divider, injectedFooter].join("\n")
+        );
+      }
+    }
+    const provider = new ManualModeClaudeProvider([PANE], {
+      [PANE.target]: [divider, "❯ ", divider, idleFooter].join("\n")
+    });
+    const adapter = createTestClaudeAdapter();
+    const bridge = createBridge(adapter, provider);
+
+    const result = await bridge.send(
+      "claude",
+      terminalControl(adapter),
+      request,
+      {
+        runtime: MANAGED_CLAUDE_RUNTIME,
+        requireExactEmptyComposerBeforeText: true,
+        requireExactComposerBeforeEnter: true
+      }
+    );
+
+    assert.equal(result.stage, "enter_dispatched");
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["text", "keys:C-m"]
+    );
+  });
+
   await t.test("Claude draft drift before text proves zero input", async () => {
     const divider = "────────────────────────────────────────────────";
     const provider = new RecordingTerminalProvider([PANE], {
@@ -2710,6 +2757,12 @@ test("Claude exact idle proof uses only the current Herdr composer frame", () =>
     true,
     "the compatibility export must preserve the same exact-frame proof"
   );
+  assert.equal(isExactClaudeIdleComposer([
+    divider,
+    `❯\u00a0`,
+    divider,
+    "  ⏸ manual mode on · ? for shortcuts · ← for agents"
+  ].join("\n")), true, "Claude 2.1.251 manual mode is an exact idle footer");
   assert.equal(isExactClaudeIdleComposer([
     "❯ /clear",
     divider,
