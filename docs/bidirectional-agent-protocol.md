@@ -1,11 +1,11 @@
 # Terminal Handoff Protocol
 
-Agent Knock Knock coordinates OpenClaw, a local coding agent, and a human through one visible tmux terminal.
+Agent Knock Knock coordinates a controller Host, a local coding agent, and a human through one visible tmux or Herdr terminal.
 
-- OpenClaw is the orchestrator, requirements owner, and final acceptance decision maker.
-- Codex or Claude Code performs the engineering work inside tmux.
+- OpenClaw, Pi, DeepSeek Harness, or another compatible Host is the orchestrator, requirements owner, and final acceptance decision maker.
+- Codex or Claude Code performs the engineering work inside tmux or Herdr.
 - AKK owns terminal delivery, monitoring, lifecycle state, and callbacks.
-- A human can attach to the same tmux pane at any time, continue directly, and later hand control back to OpenClaw.
+- A human can attach to the same terminal at any time, continue directly, and later hand control back to the Host.
 - AKK sends input only after it verifies the selected agent, pane, process, pane/process working directory, approval state, and action-specific composer. Managed paths require idle; an advertised user-explicit physical Send may steer a working mutable composer.
 - AKK labels the evidence behind every notification. Managed Turns and exact-task Watches report completion only from correlated evidence; a user-selected terminal-activity Watch may instead report a clearly marked best-effort stable-idle observation that is not exact task-completion proof.
 
@@ -14,7 +14,7 @@ Agent Knock Knock coordinates OpenClaw, a local coding agent, and a human throug
 AKK models shared work as:
 
 ```text
-tmux terminal / verified process incarnation
+tmux or Herdr terminal / verified process incarnation
 ├─ native Codex or Claude Code session
 │  └─ AKK session (session_id)
 │     ├─ Turn (turn_id)
@@ -33,16 +33,16 @@ Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` rem
 
 ## Turn Flow
 
-1. OpenClaw calls ordinary send using the exact current listed action and the user-facing request. `session_exact` carries `session_id`; `terminal_follow_current` and `terminal_user_explicit` carry `terminal_id`. Both target fields may be omitted only when AKK must prove one unique send-ready pane. Initial discovery may first resolve one eligible Codex or Claude Code terminal into an AKK session.
+1. The controller Host calls ordinary send using the exact current listed action and the user-facing request. `session_exact` carries `session_id`; `terminal_follow_current` and `terminal_user_explicit` carry `terminal_id`. Both target fields may be omitted only when AKK must prove one unique send-ready pane. Initial discovery may first resolve one eligible Codex or Claude Code terminal into an AKK session.
 2. AKK verifies that the session is bound to the expected native session, terminal, and idle coding-agent process.
 3. AKK creates a unique `turn_id`, writes the request to the verified idle pane, and starts a monitor bound to that Turn, pane, process, and message.
 4. The coding agent works in the same terminal that the human can inspect or take over.
-5. AKK sends a structured callback containing both `session_id` and `turn_id` to the originating OpenClaw session when it has reliable approval, completion, cancellation, stall, or failure evidence.
+5. AKK sends a structured callback containing both `session_id` and `turn_id` to the originating Host session when it has reliable approval, completion, cancellation, stall, or failure evidence.
 6. After completion, refresh the terminal list. Another ordinary send through that row's current exact action creates a new Turn without clearing the native coding-agent context.
 
 Steps 2–6 describe managed delivery, which may require an exact empty Composer before input. For an advertised `terminal_user_explicit` Send, AKK first attempts that managed path where it is eligible. If AKK's Store, Turn, Session, deferred-transfer, transition, ledger, or managed pre-input Composer authority prevents it before terminal input, the user's physical-terminal authority takes over. Codex physical fallback requires the exact live terminal/process plus a scanned, non-blocked approval state, but not Composer visibility, stability, or exactness. It sends `C-u` once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once. After text injection, neither the managed path nor fallback may use Composer observation to veto Enter. Claude Code remains exact-empty-only. Before mutation, AKK best-effort captures the exact provider byte boundary; after Enter succeeds, it best-effort persists a request-hash-bound Terminal Watch. The unmanaged path creates no managed callback Turn, but the Watch supplies a product-equivalent completion callback. Watch failure is reported without changing or retrying the successful Send. Once the sole Codex mutation sequence begins, an uncertain result must not be retried automatically; `watch-status` is the recovery path.
 
-An ordinary send never targets a completed or historical `turn_id`. If the current Turn is `waiting_for_openclaw` because the coding agent asked a question, OpenClaw uses `respond(turn_id, answer)`; that answer remains inside the same Turn.
+An ordinary send never targets a completed or historical `turn_id`. If the current Turn is in the compatibility state `waiting_for_openclaw` because the coding agent asked a question, the controller Host uses `respond(turn_id, answer)`; that answer remains inside the same Turn.
 
 If no eligible terminal exists, AKK stops and returns an actionable setup message. It does not launch an invisible replacement agent.
 
@@ -57,16 +57,17 @@ retryable failure, permanent failure, or uncertain. Permanent and uncertain
 outcomes are not blindly retried, while an accepted checkpoint remains
 authoritative if a later wake or observation step fails.
 
-The phase-one implementation still ships only the OpenClaw transport and keeps
-the existing OpenClaw Store fields readable and dual-written for compatibility.
 The core outbox, managed-Turn monitor, stall notification, and Terminal Watch
-use the host-neutral route/envelope/outcome boundary; OpenClaw-specific
-`sessionKey`, Gateway calls, executable paths, and credentials remain inside
-the trusted OpenClaw adapter. No route, profile, controller-session identity,
-token, composer digest, draft text, or transport evidence is exposed through the v23 model-facing contract.
-This boundary alone does not provide a standalone supervisor or enable another
-controller host; those require their own trusted session-context adapter and
-runtime integration.
+use the host-neutral route/envelope/outcome boundary. First-party adapters
+translate that boundary into the Host's own lifecycle: OpenClaw uses its
+Gateway session, while Pi and DeepSeek Harness use a local `command_json_v1`
+callback path. Existing OpenClaw Store fields remain readable and dual-written
+for compatibility; OpenClaw-specific `sessionKey`, Gateway calls, executable
+paths, and credentials stay inside the trusted OpenClaw adapter. No route,
+profile, controller-session identity, token, composer digest, draft text, or
+transport evidence is exposed through the v23 model-facing contract. A new
+controller Host still needs a trusted session-context adapter and runtime
+integration; the protocol boundary is not a standalone supervisor.
 
 ## User-Selected Terminal Watch
 
@@ -86,7 +87,7 @@ A terminal-activity Watch makes no task-identity claim. Its checkpoint must firs
 
 An approval observation appends at most one notification per exact fingerprint and leaves either Watch mode active. It never sends approval keys and never enters automatic approval; a human must inspect and decide in the TUI. Exact-task completion/failure, best-effort stable idle, timeout, invalidation, or explicit `unwatch` settles once and enqueues one terminal notification. Deterministic notification IDs and idempotency keys, append-only receipts, claim leases, and retry timestamps make callback recovery crash-safe: transport is at-least-once, while the idempotency key makes the logical notification effectively at-most-once.
 
-The current OpenClaw surface has 16 registered tools and emits list action-contract v23. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls. The v23 Send shape remains `send({session_id|terminal_id,request})`; the Codex composer policy is advertised as `replace_current_composer_and_submit`, not as another model-supplied argument.
+The current first-party Host surface has 16 registered tools and emits list action-contract v23. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls. The v23 Send shape remains `send({session_id|terminal_id,request})`; the Codex composer policy is advertised as `replace_current_composer_and_submit`, not as another model-supplied argument.
 
 ## Native Thread Transitions
 
@@ -119,8 +120,8 @@ Ordinary `send` and `respond` continue to reject every first-line native slash c
 
 | Type | Purpose |
 | --- | --- |
-| `task` | OpenClaw starts a new Turn with work for the coding agent. |
-| `answer` | OpenClaw answers a question inside a `waiting_for_openclaw` Turn. |
+| `task` | The controller Host starts a new Turn with work for the coding agent. |
+| `answer` | The controller Host answers a question inside a `waiting_for_openclaw` Turn. |
 | `progress` | AKK reports reliable non-final progress. |
 | `blocked` | AKK reports that the task needs attention. |
 | `done` | AKK reports that the current terminal turn completed. |
@@ -135,7 +136,7 @@ Each managed Turn is bound to a concrete identity, including:
 
 - coding agent (`codex` or `claude`)
 - canonical working directory captured for this pane and Turn
-- tmux socket and pane target
+- terminal provider endpoint and pane target
 - pane and agent process identity
 - native session evidence, AKK `session_id`, `turn_id`, and message identity
 - terminal binding ID and generation, including the transition that established it
@@ -145,7 +146,7 @@ AKK revalidates that identity before sending tasks, interrupt keys, or approval 
 
 Approval authorization is prompt-scoped. Managed approval carries only `turn_id`; terminal-scoped approval carries only `terminal_id`, and both require explicit user confirmation. An adapter isolates one complete bounded approval region and keeps its exact unredacted bytes and fingerprint local. The plugin/CLI retains the private confirmation offer, recaptures it under lock, and rejects before an approval key if any prompt, choice, command/secret, process, cwd, owner, or request evidence changed. Missing or ambiguous prompt evidence is never downgraded to whole-screen or parsed-display authority. No prompt fingerprint or terminal token crosses the model-facing boundary.
 
-The OpenClaw plugin supervises eligible terminal monitors and Terminal Watches
+The active Host runtime supervises eligible terminal monitors and Terminal Watches
 independently of interactive commands. At startup and in one non-overlapping
 five-second cycle, it runs managed-Turn monitor reconciliation and Terminal
 Watch reconciliation as separate coordination steps with separate error
@@ -161,16 +162,16 @@ event history for diagnosis.
 
 ## Human Handoff
 
-The tmux pane remains the source of visible truth:
+The tmux or Herdr pane remains the source of visible truth:
 
-- Attach to tmux to inspect or continue the work yourself.
+- Attach to the shared terminal to inspect or continue the work yourself.
 - Use AKK status for a bounded remote view.
 - Send the next request to `session_id` only when AKK verifies the pane is idle; this creates a new Turn.
 - Answer an in-flight agent question only through `respond(turn_id, answer)`.
 - Interrupt the current turn without closing the pane.
 - Renew monitoring only when the same live task remains in that pane.
 
-This makes handoff reversible: OpenClaw and the human operate the same coding-agent session instead of creating parallel, hidden conversations.
+This makes handoff reversible: the controller Host and the human operate the same coding-agent session instead of creating parallel, hidden conversations.
 
 If a human context switch conflicts with an active Turn, AKK presents a decision rather than redirecting automatically. After explicit takeover confirmation, the model calls `agent_knock_knock_close({turn_id,reason:"superseded_by_human_context_switch"})`; the plugin/CLI privately resolves and revalidates the exact advertised handoff decision, so no live native UUID or handoff token is transported. Low-level binding repair is similarly explicit: `reconcile_binding({terminal_id,conflicting_session_id})` carries no Session revision, binding ID/generation, or token. Reconciliation only detaches the proven stale binding; it neither adopts the live thread nor sends terminal input.
 
