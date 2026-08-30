@@ -58,19 +58,23 @@ The second command proves that AKK can find the one send-ready pane, revalidate 
 
 **Connect another controller Host without an AKK fork.** A compatible Host can launch `agent-knock-knock host-bridge` as a foreground MCP/stdio child, bind its trusted current session through `environment_v1`, and inject callbacks through `command_json_v1`. The Bridge exposes the same 16 semantic tools and reuses the same Session, Turn, Watch, Store, callback, and terminal core as OpenClaw. See [Host Bridge and Host Profiles](docs/host-bridge-profiles.md) for the configuration-only prerequisites, starter Profile, validation commands, and thin-connector fallback.
 
-**Use AKK natively from DeepSeek Harness.** DeepSeek Harness Web `0.1.1-rc.2` can install the first-party connector bundle with `dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next`. After one restart, every conversation receives `/akk` and the same 16 semantic tools without `/akk-bind`, copied session IDs, an AKK fork, or a standalone supervisor. The connector derives callback authority from the exact command/tool Agent and returns completion to that same live conversation. See [the connector package](connectors/deepseek-harness/README.md) for its prerelease compatibility and recovery boundaries.
+**Use AKK natively from DeepSeek Harness.** DeepSeek Harness Web `0.1.1-rc.2` and `0.1.2-alpha.1` can use the first-party connector bundle. Install a published prerelease with `dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next`, or load the connector from this checkout for local validation. After one restart, every conversation receives `/akk` and the same 16 semantic tools without `/akk-bind`, copied session IDs, an AKK fork, or a standalone supervisor. The connector derives callback authority from the exact command/tool Agent and returns completion to that same live conversation. See [the DeepSeek Harness connector guide](connectors/deepseek-harness/README.md) for the five-minute quick start, exact compatibility checks, manual-approval contract, recovery steps, and prerelease boundaries.
+
+**Use Pi as an AKK orchestrator.** Pi `0.84.4` can load the local Pi Extension POC and control existing Codex and Claude Code terminals through `/akk` and the same 16 semantic tools. The connector uses AKK's public HostAdapter, returns callbacks to the initiating Pi session through an authenticated local Unix socket and durable inbox, and presents approval or cancellation through Pi's native UI. It does not require a Pi fork, OpenClaw Gateway, `/akk-bind`, or a standalone supervisor. See [the Pi connector guide](connectors/pi/README.md) for the five-minute local install, complete tool workflow, callback recovery, approval behavior, and POC reliability boundary.
 
 ![Agent Knock Knock cover: OpenClaw knocking on coding agents' door](docs/assets/agent-knock-knock-cover.jpg)
 
 ## How It Works
 
-AKK connects OpenClaw to Codex or Claude Code already running inside a supported shared terminal:
+For a managed Send, AKK connects a controller Host—OpenClaw, DeepSeek Harness, Pi, or another compatible integration—to Codex or Claude Code already running inside a supported shared terminal:
 
-1. OpenClaw selects an AKK session and sends the next user-facing request.
+1. The controller Host selects an AKK session or terminal and sends the next user-facing request.
 2. AKK verifies the bound agent pane, creates a new Turn, and writes only that request into the terminal.
 3. AKK monitors the same pane for reliable approval, completion, cancellation, and failure evidence correlated to that Turn.
-4. AKK reports the result, `session_id`, and `turn_id` to the originating OpenClaw conversation.
+4. AKK reports the result, `session_id`, and `turn_id` through the initiating Host's trusted callback route.
 5. A human can attach to the same tmux or Herdr terminal at any time and continue directly.
+
+If an explicit user Send cannot enter that managed path before terminal input, AKK may deliver it once through the verified physical terminal without creating a managed Turn. It then best-effort attaches a request-bound Terminal Watch and returns a `watch_id`; that Watch supplies the callback and Status recovery path without pretending the physical Send became a managed Turn.
 
 AKK is local-first. It has no hosted control plane or telemetry and does not change the coding agent's configured permission mode.
 
