@@ -44,6 +44,69 @@ After doctor reports `AKK doctor: ready`, send a separate message:
 
 The second command proves that AKK can find the one send-ready pane, revalidate its process and pane identity, verify a scanned, non-blocked approval state, send the task, and return the result. Codex Composer visibility, stability, exactness, and parsed working activity do not veto this user-explicit Send: physical fallback sends `C-u` once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer check. Claude Code still requires an exact empty Composer. Broken AKK management state does not veto the user-explicit Send. Direct `/akk ...` commands need no OpenClaw tool-policy changes.
 
+## Quick Start with Pi
+
+Pi can act as the AKK orchestrator without OpenClaw. The current POC requires
+Pi `0.84.4` and Node.js `22.19.0` or newer. Install that Pi version and the AKK
+connector prerelease:
+
+```bash
+npm install -g @earendil-works/pi-coding-agent@0.84.4
+pi install npm:@scotthuang/agent-knock-knock-pi@next
+```
+
+Configure a Pi model through its normal `/login`, provider environment
+variable, or settings flow. Leave an authenticated Codex or Claude Code CLI
+running in tmux or Herdr under the same OS user, then start Pi:
+
+```bash
+pi
+```
+
+Pi should show `AKK ready`. In the Pi conversation, verify the connector and
+discover the live coding-agent terminals:
+
+```text
+/akk list
+```
+
+The connector registers `/akk` and all 16 semantic tools, returns callbacks to
+the initiating Pi session, and presents approval or cancellation through Pi's
+native UI. See [the Pi connector guide](connectors/pi/README.md) for the full
+five-minute flow, exact compatibility boundary, callback recovery, upgrades,
+and uninstall instructions.
+
+## Quick Start with DeepSeek Harness
+
+DeepSeek Harness Web can also host AKK without OpenClaw. The current connector
+prerelease supports Harness `0.1.1-rc.2` and `0.1.2-alpha.1`, requires Node.js
+`22.19.0` or newer, and uses `pnpm` for plugin installation. Add it to the Web
+profile:
+
+```bash
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
+```
+
+Stop an existing Web Host cleanly instead of starting a duplicate, then launch
+a fresh Host process so the connector mounts:
+
+```bash
+dsh web
+```
+
+With an authenticated Codex or Claude Code CLI already running in tmux or
+Herdr under the same OS user, open a Web conversation and enter:
+
+```text
+/akk list
+```
+
+Every conversation receives `/akk` and the same 16 semantic tools; managed
+callbacks return to the exact Harness Agent that initiated the task. See [the
+DeepSeek Harness connector guide](connectors/deepseek-harness/README.md) for
+prerequisites, compatibility checks, approval behavior, callback recovery,
+upgrades, and troubleshooting.
+
 ## See It in Action
 
 [![AKK orchestrating a Claude Code-to-Codex handoff through tmux](https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/akk-tmux-handoff-demo.gif)](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/assets/akk-tmux-handoff-demo.mp4)
