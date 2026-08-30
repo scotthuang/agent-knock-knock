@@ -138,6 +138,11 @@ export interface LegacyOpenClawCallbackRouteInput {
   gatewayUrl?: unknown;
 }
 
+export interface TerminalWatchOpenClawCallbackRouteInput {
+  controllerSessionId: unknown;
+  openclawBin?: unknown;
+}
+
 export interface CallbackRouteCandidate {
   callbackRoute?: unknown;
   legacyOpenClaw?: LegacyOpenClawCallbackRouteInput;
@@ -259,6 +264,25 @@ export function createLegacyOpenClawCallbackRoute(
     profile_revision: `sha256:${revision}`,
     controller_session_id: controllerSessionId,
     capabilities: { wake: true, respond: true }
+  };
+}
+
+/**
+ * Terminal Watch resumes the controller conversation directly through
+ * chat.send. Keep this authority separate from the managed-Turn Gateway
+ * method carried by a Send command so both creation and delivery hash the
+ * same immutable callback profile.
+ */
+export function createTerminalWatchOpenClawCallbackRoute(
+  input: TerminalWatchOpenClawCallbackRouteInput
+): CallbackRouteV1 {
+  return {
+    ...createLegacyOpenClawCallbackRoute({
+      controllerSessionId: input.controllerSessionId,
+      gatewayMethod: "chat.send",
+      openclawBin: input.openclawBin
+    }),
+    capabilities: { wake: true, respond: false }
   };
 }
 

@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   createCallbackEnvelope,
   createLegacyOpenClawCallbackRoute,
+  createTerminalWatchOpenClawCallbackRoute,
   type CallbackEnvelopeV1,
   type CallbackRouteV1
 } from "../src/callback-transport.js";
@@ -355,6 +356,209 @@ test("legacy v1 notifications may omit both callback snapshot fields", (t) => {
     undefined
   );
   assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
+});
+
+test("known fallback callback profile mismatch is repaired and made retryable with the same identity", (t) => {
+  const storeDir = tempStore(t);
+  const transcriptAnchor: ClaudeTranscriptAnchor = {
+    schema_version: 1,
+    session_id: THREAD_ID,
+    cwd: "/workspace/project",
+    pid: 701,
+    agent_started_at_ms: 1_777_000_000_000,
+    captured_at: CREATED_AT,
+    relative_path: `project/${THREAD_ID}.jsonl`,
+    offset_bytes: 0,
+    file_existed: false
+  };
+  const anchor = createClaudeUserExplicitFallbackWatchAnchor({
+    transcriptAnchor,
+    requestHash: SHA_B,
+    claudeVersion: "2.1.237"
+  });
+  const watchId = "terminal-watch-misrouted-fallback-callback";
+  const misrouted = createLegacyOpenClawCallbackRoute({
+    controllerSessionId: "openclaw-session-1",
+    gatewayMethod: "agent-knock-knock.callback",
+    openclawBin: "/usr/local/bin/openclaw"
+  });
+  const created = saveTerminalWatch(storeDir, {
+    ...watch(watchId),
+    agent: "claude",
+    terminal: terminal("claude"),
+    anchor,
+    observation_checkpoint: initialTerminalWatchObservationCheckpoint(anchor),
+    callback_route: misrouted
+  }, { expectedRevision: null });
+  const evidence = "c".repeat(64);
+  const notificationId = terminalWatchNotificationId(
+    watchId,
+    "completed",
+    evidence
+  );
+  const settledOwner: TerminalWatch = {
+    ...created,
+    updated_at: "2026-08-21T00:00:01.000Z",
+    status: "completed",
+    settlement: {
+      kind: "completed",
+      evidence_fingerprint: evidence,
+      observed_at: "2026-08-21T00:00:01.000Z",
+      reason_code: "fallback_task_completed",
+      completion_text: "historical completion"
+    },
+    notification_outbox: []
+  };
+  const failed: TerminalWatchNotification = {
+    notification_id: notificationId,
+    idempotency_key: terminalWatchNotificationIdempotencyKey(
+      watchId,
+      notificationId
+    ),
+    kind: "completed",
+    evidence_fingerprint: evidence,
+    reason_code: "fallback_task_completed",
+    callback_route: misrouted,
+    status: "failed",
+    attempts: 1,
+    created_at: "2026-08-21T00:00:01.000Z",
+    last_attempt_at: "2026-08-21T00:00:01.000Z",
+    failed_at: "2026-08-21T00:00:01.000Z",
+    next_attempt_at: "2026-08-21T00:00:01.000Z",
+    last_error_code:
+      "callback_permanent_openclaw_callback_profile_changed"
+  };
+  failed.callback_envelope = terminalWatchCallbackEnvelope(
+    settledOwner,
+    failed,
+    misrouted
+  );
+  const approval = approvalNotification(settledOwner, misrouted);
+  const supersededApproval: TerminalWatchNotification = {
+    ...approval,
+    status: "superseded",
+    attempts: 1,
+    superseded_at: "2026-08-21T00:00:01.000Z"
+  };
+  const legacy: TerminalWatch = {
+    ...settledOwner,
+    notification_outbox: [supersededApproval, failed]
+  };
+  assert.doesNotThrow(() => assertTerminalWatch(legacy, watchId));
+  const statePath = pathsForTerminalWatch(watchId, storeDir).statePath;
+
+  const snapshotless = structuredClone(legacy);
+  delete snapshotless.notification_outbox[1].callback_route;
+  delete snapshotless.notification_outbox[1].callback_envelope;
+  assert.doesNotThrow(() => assertTerminalWatch(snapshotless, watchId));
+  fs.writeFileSync(
+    statePath,
+    `${JSON.stringify(snapshotless)}\n`,
+    { mode: 0o600 }
+  );
+  const untouchedSnapshotless = loadTerminalWatch(storeDir, watchId);
+  assert.deepEqual(untouchedSnapshotless.callback_route, misrouted);
+  assert.equal(untouchedSnapshotless.warnings, undefined);
+  assert.equal(
+    untouchedSnapshotless.notification_outbox[1].last_error_code,
+    "callback_permanent_openclaw_callback_profile_changed"
+  );
+
+  const uncertain = structuredClone(legacy);
+  uncertain.notification_outbox[1].last_error_code =
+    "callback_uncertain_openclaw_callback_acceptance_uncertain";
+  fs.writeFileSync(statePath, `${JSON.stringify(uncertain)}\n`, { mode: 0o600 });
+  const untouchedUncertain = loadTerminalWatch(storeDir, watchId);
+  assert.deepEqual(untouchedUncertain.callback_route, misrouted);
+  assert.equal(untouchedUncertain.warnings, undefined);
+
+  fs.writeFileSync(statePath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+
+  const repaired = loadTerminalWatch(storeDir, watchId);
+  const expectedRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: repaired.openclaw_session,
+    openclawBin: repaired.openclaw_bin
+  });
+  assert.deepEqual(repaired.callback_route, expectedRoute);
+  assert.deepEqual(repaired.warnings, [
+    "legacy_openclaw_fallback_callback_route_repaired"
+  ]);
+  assert.equal(repaired.notification_outbox.length, 2);
+  assert.equal(repaired.notification_outbox[0].status, "superseded");
+  assert.deepEqual(
+    repaired.notification_outbox[0].callback_route,
+    expectedRoute
+  );
+  const notification = repaired.notification_outbox[1];
+  assert.equal(notification.notification_id, failed.notification_id);
+  assert.equal(notification.idempotency_key, failed.idempotency_key);
+  assert.equal(notification.status, "failed");
+  assert.equal(notification.attempts, 1);
+  assert.equal(notification.last_attempt_at, failed.last_attempt_at);
+  assert.equal(notification.failed_at, failed.failed_at);
+  assert.equal(notification.next_attempt_at, failed.next_attempt_at);
+  assert.equal(
+    notification.last_error_code,
+    "callback_route_repaired_after_openclaw_profile_mismatch"
+  );
+  assert.deepEqual(notification.callback_route, expectedRoute);
+  assert.equal(
+    notification.callback_envelope?.idempotency_key,
+    failed.idempotency_key
+  );
+
+  const persisted = saveTerminalWatch(storeDir, repaired, {
+    expectedRevision: terminalWatchRevision(repaired)
+  });
+  assert.equal(persisted.revision, 2);
+  assert.deepEqual(loadTerminalWatch(storeDir, watchId), persisted);
+});
+
+test("callback repair never redirects a delivered fallback notification", (t) => {
+  const storeDir = tempStore(t);
+  const transcriptAnchor: ClaudeTranscriptAnchor = {
+    schema_version: 1,
+    session_id: THREAD_ID,
+    cwd: "/workspace/project",
+    pid: 701,
+    agent_started_at_ms: 1_777_000_000_000,
+    captured_at: CREATED_AT,
+    relative_path: `project/${THREAD_ID}.jsonl`,
+    offset_bytes: 0,
+    file_existed: false
+  };
+  const anchor = createClaudeUserExplicitFallbackWatchAnchor({
+    transcriptAnchor,
+    requestHash: SHA_B,
+    claudeVersion: "2.1.237"
+  });
+  const candidate: TerminalWatch = {
+    ...watch("terminal-watch-delivered-fallback-callback"),
+    agent: "claude",
+    terminal: terminal("claude"),
+    anchor,
+    observation_checkpoint: initialTerminalWatchObservationCheckpoint(anchor)
+  };
+  const route = createLegacyOpenClawCallbackRoute({
+    controllerSessionId: candidate.openclaw_session,
+    gatewayMethod: "agent-knock-knock.callback",
+    openclawBin: candidate.openclaw_bin
+  });
+  candidate.callback_route = route;
+  const notification = approvalNotification(candidate, route);
+  candidate.notification_outbox = [{
+    ...notification,
+    status: "delivered",
+    attempts: 1,
+    last_attempt_at: CREATED_AT,
+    delivered_at: CREATED_AT
+  }];
+  const saved = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  const loaded = loadTerminalWatch(storeDir, saved.watch_id);
+  assert.deepEqual(loaded.callback_route, route);
+  assert.equal(loaded.warnings, undefined);
 });
 
 test("partial or malformed callback snapshots fail closed on v1 read", (t) => {

@@ -4,6 +4,8 @@ import path from "node:path";
 import {
   callbackEnvelopeMatchesRoute,
   createCallbackEnvelope,
+  createLegacyOpenClawCallbackRoute,
+  createTerminalWatchOpenClawCallbackRoute,
   parseCallbackRoute,
   type CallbackEnvelopeV1,
   type CallbackRouteV1
@@ -1147,9 +1149,105 @@ function decodeTerminalWatch(
   value: unknown,
   expectedWatchId: string
 ): TerminalWatch {
+  const sourceVersion = isRecord(value) ? value.version : undefined;
   const normalized = normalizeLegacyTerminalWatch(value);
   assertTerminalWatch(normalized, expectedWatchId);
-  return normalized;
+  const repaired = sourceVersion === TERMINAL_WATCH_VERSION
+    ? repairMisroutedUserExplicitFallbackCallback(normalized)
+    : normalized;
+  assertTerminalWatch(repaired, expectedWatchId);
+  return repaired;
+}
+
+const MISROUTED_FALLBACK_CALLBACK_ERROR =
+  "callback_permanent_openclaw_callback_profile_changed";
+const REPAIRED_FALLBACK_CALLBACK_ERROR =
+  "callback_route_repaired_after_openclaw_profile_mismatch";
+const REPAIRED_FALLBACK_CALLBACK_WARNING =
+  "legacy_openclaw_fallback_callback_route_repaired";
+
+/**
+ * v0.12.19-v0.12.22 accidentally snapshotted the managed Send Gateway
+ * method for user-explicit fallback Watches. That profile is rejected before
+ * callback I/O, so this exact shape is safe to redirect and retry with the
+ * original idempotency key. Every ambiguous or side-effect-capable state is
+ * left untouched.
+ */
+function repairMisroutedUserExplicitFallbackCallback(
+  watch: TerminalWatch
+): TerminalWatch {
+  if (!isUserExplicitFallbackWatch(watch) || !watch.callback_route) {
+    return watch;
+  }
+  const misrouted = createLegacyOpenClawCallbackRoute({
+    controllerSessionId: watch.openclaw_session,
+    gatewayMethod: "agent-knock-knock.callback",
+    openclawBin: watch.openclaw_bin
+  });
+  if (canonicalJson(watch.callback_route) !== canonicalJson(misrouted)) {
+    return watch;
+  }
+  for (const notification of watch.notification_outbox) {
+    const hasSnapshot = notification.callback_route !== undefined;
+    if (
+      notification.status === "delivered" ||
+      notification.status === "delivering" ||
+      (
+        notification.status === "failed" &&
+        (
+          !hasSnapshot ||
+          notification.last_error_code !== MISROUTED_FALLBACK_CALLBACK_ERROR
+        )
+      ) ||
+      (
+        notification.status === "pending" &&
+        hasSnapshot
+      )
+    ) {
+      return watch;
+    }
+    if (
+      notification.callback_route !== undefined &&
+      canonicalJson(notification.callback_route) !== canonicalJson(misrouted)
+    ) {
+      return watch;
+    }
+  }
+
+  const route = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: watch.openclaw_session,
+    openclawBin: watch.openclaw_bin
+  });
+  const repairedWatch: TerminalWatch = {
+    ...watch,
+    warnings: [...new Set([
+      ...(watch.warnings ?? []),
+      REPAIRED_FALLBACK_CALLBACK_WARNING
+    ])],
+    callback_route: route,
+    notification_outbox: []
+  };
+  repairedWatch.notification_outbox = watch.notification_outbox.map(
+    (notification) => {
+      const repaired = notification.status === "failed"
+        ? {
+            ...notification,
+            last_error_code: REPAIRED_FALLBACK_CALLBACK_ERROR
+          }
+        : { ...notification };
+      if (notification.callback_route === undefined) return repaired;
+      return {
+        ...repaired,
+        callback_route: route,
+        callback_envelope: terminalWatchCallbackEnvelope(
+          repairedWatch,
+          repaired,
+          route
+        )
+      };
+    }
+  );
+  return repairedWatch;
 }
 
 function normalizeLegacyTerminalWatch(value: unknown): unknown {
