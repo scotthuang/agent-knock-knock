@@ -1089,12 +1089,64 @@ test("Terminal Watch command summaries preserve external-work attribution", () =
       source: "terminal_user_explicit_fallback_watch",
       terminal_id: exactTerminalId,
       agent: "codex",
-      status: "completed"
+      status: "completed",
+      callback: {
+        pending: 0,
+        delivered: 1,
+        failed: 0,
+        superseded: 0
+      }
     }
   });
   assert.match(fallbackStatus, /AKK sent this exact request/u);
   assert.match(fallbackStatus, /no managed Turn was created/u);
+  assert.match(fallbackStatus, /^callback: delivered \(1\)$/mu);
   assert.doesNotMatch(fallbackStatus, /AKK did not send/u);
+
+  const failedCallbackStatus = formatAkkWatchStatusCommandResult({
+    watch: {
+      watch_id: "terminal-watch-user-send-failed",
+      source: "terminal_user_explicit_fallback_watch",
+      terminal_id: exactTerminalId,
+      agent: "codex",
+      status: "completed",
+      callback: {
+        pending: 1,
+        delivered: 0,
+        failed: 1,
+        superseded: 0,
+        last_error_code:
+          "callback_permanent_openclaw_callback_profile_changed"
+      }
+    }
+  });
+  assert.match(failedCallbackStatus, /^callback: failed \(1\)$/mu);
+  assert.match(
+    failedCallbackStatus,
+    /^callback error: callback_permanent_openclaw_callback_profile_changed$/mu
+  );
+  assert.match(
+    failedCallbackStatus,
+    /terminal task status and callback delivery status are separate/u
+  );
+
+  const pendingCallbackStatus = formatAkkWatchStatusCommandResult({
+    watch: {
+      watch_id: "terminal-watch-user-send-pending",
+      source: "terminal_user_explicit_fallback_watch",
+      terminal_id: exactTerminalId,
+      agent: "codex",
+      status: "active",
+      callback: {
+        pending: 1,
+        delivered: 0,
+        failed: 0,
+        superseded: 0
+      }
+    }
+  });
+  assert.match(pendingCallbackStatus, /^callback: pending \(1\)$/mu);
+  assert.doesNotMatch(pendingCallbackStatus, /^callback: failed/mu);
 
   const stopped = formatAkkUnwatchCommandResult({
     terminal_watch: {

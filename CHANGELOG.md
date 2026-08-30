@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Give user-explicit unmanaged fallback Watches their own `chat.send` callback profile instead of reusing the managed Send Gateway method. Recover the exact historical pre-I/O profile-mismatch receipts with their original idempotency keys, preserve ambiguous or delivered evidence, and expose callback delivery failures in Watch status.
+
 ## 0.12.22 - 2026-08-30
 
 ### Added

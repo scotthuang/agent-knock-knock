@@ -3,7 +3,7 @@ import type {
   CallbackWakeAcknowledgement
 } from "./openclaw-callback-transport.js";
 import {
-  createLegacyOpenClawCallbackRoute,
+  createTerminalWatchOpenClawCallbackRoute,
   type CallbackAttemptOutcome,
   type CallbackRouteV1,
   type CallbackTransport,
@@ -51,14 +51,10 @@ export function resolveTerminalWatchOpenClawCallback(
   watch: Pick<TerminalWatch, "openclaw_session" | "openclaw_bin">
 ): TerminalWatchCallbackResolution {
   return {
-    route: {
-      ...createLegacyOpenClawCallbackRoute({
-        controllerSessionId: watch.openclaw_session,
-        gatewayMethod: "chat.send",
-        openclawBin: watch.openclaw_bin
-      }),
-      capabilities: { wake: true, respond: false }
-    },
+    route: createTerminalWatchOpenClawCallbackRoute({
+      controllerSessionId: watch.openclaw_session,
+      openclawBin: watch.openclaw_bin
+    }),
     context: resolveTerminalWatchOpenClawCallbackContext(watch)
   };
 }

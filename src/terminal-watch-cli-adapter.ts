@@ -2,11 +2,9 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
+import { callbackRouteFingerprint } from "./callback-route-authority.js";
 import {
-  callbackRouteFingerprint,
-  callbackRouteForConversation
-} from "./callback-route-authority.js";
-import {
+  createTerminalWatchOpenClawCallbackRoute,
   parseCallbackRoute,
   type CallbackRouteV1
 } from "./callback-transport.js";
@@ -741,13 +739,22 @@ function callbackRouteForUserExplicitFallback(
   if (Object.hasOwn(options, "callbackRoute")) {
     return parseCallbackRoute(options.callbackRoute);
   }
-  const openclawSession = stringValue(options.openclawSession);
-  return callbackRouteForConversation({
-    gateway_method: options.gatewayMethod,
-    gateway_session: options.gatewaySession ?? openclawSession,
-    openclaw_session: openclawSession,
-    openclaw_bin: options.openclawBin,
-    gateway_url: options.gatewayUrl
+  // gatewayMethod describes the managed Send callback protocol. Its presence
+  // proves this invocation came from a legacy OpenClaw controller, but a
+  // Terminal Watch callback has its own fixed chat.send transport contract.
+  if (!stringValue(options.gatewayMethod)) return undefined;
+  // Terminal Watch state intentionally persists neither Gateway URLs nor
+  // secrets. A caller that needs either must provide an explicit Host route;
+  // user Send still proceeds when this best-effort callback cannot attach.
+  if (stringValue(options.gatewayUrl) || stringValue(options.token)) {
+    return undefined;
+  }
+  const controllerSessionId = stringValue(options.gatewaySession) ??
+    stringValue(options.openclawSession);
+  if (!controllerSessionId) return undefined;
+  return createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId,
+    openclawBin: options.openclawBin
   });
 }
 
@@ -2003,6 +2010,9 @@ function publicTerminalWatch(
     ...(watch.warnings ?? []),
     ...additionalWarnings
   ])];
+  const latestFailedCallback = [...watch.notification_outbox]
+    .reverse()
+    .find(({ status }) => status === "failed");
   return {
     watch_id: watch.watch_id,
     source: userExplicitFallback
@@ -2038,7 +2048,10 @@ function publicTerminalWatch(
       ).length,
       superseded: watch.notification_outbox.filter(
         ({ status }) => status === "superseded"
-      ).length
+      ).length,
+      ...(latestFailedCallback?.last_error_code
+        ? { last_error_code: latestFailedCallback.last_error_code }
+        : {})
     },
     ...(watch.settlement
       ? {

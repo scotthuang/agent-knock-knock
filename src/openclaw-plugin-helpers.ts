@@ -672,6 +672,22 @@ export function formatAkkWatchStatusCommandResult(
   const reason = nonEmptyString(settlement.reason_code) ??
     nonEmptyString(watch.reason);
   const completionText = nonEmptyString(settlement.completion_text);
+  const callback = recordValue(watch.callback);
+  const callbackFailed = Number(callback?.failed ?? 0);
+  const callbackDelivered = Number(callback?.delivered ?? 0);
+  const callbackPending = Number(callback?.pending ?? 0);
+  const callbackError = nonEmptyString(callback?.last_error_code);
+  const callbackLines = callbackFailed > 0
+    ? [
+        `callback: failed (${callbackFailed})`,
+        ...(callbackError ? [`callback error: ${callbackError}`] : []),
+        "The terminal task status and callback delivery status are separate. Watch status only reports delivery; wait for the supervisor or run reconcile-watches to attempt recovery."
+      ]
+    : callbackDelivered > 0
+      ? [`callback: delivered (${callbackDelivered})`]
+      : callbackPending > 0
+        ? [`callback: pending (${callbackPending})`]
+        : [];
   return [
     "AKK Terminal Watch status:",
     `watch: ${nonEmptyString(watch.watch_id) ?? "unknown"}`,
@@ -690,6 +706,7 @@ export function formatAkkWatchStatusCommandResult(
     ...(completionText
       ? [`completion: ${truncateText(completionText, 500)}`]
       : []),
+    ...callbackLines,
     userExplicitFallback
       ? "AKK sent this exact request through user-explicit unmanaged fallback and attached Watch for its callback; no managed Turn was created."
       : watch.watch_mode === "terminal_activity"
