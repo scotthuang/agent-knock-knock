@@ -64,8 +64,9 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /creates or activates an AKK Session but creates no Turn/u);
   assert.match(tmux, /multiple canonical roots/u);
   assert.match(tmux, /autoApprove\.rules\[\]\.workspaces/u);
-  assert.match(readme, /multiple canonical workspace roots/u);
-  assert.match(readme, /autoApprove\.rules\[\]\.workspaces/u);
+  const openclawOperations = read("docs/openclaw-operations.md");
+  assert.match(openclawOperations, /multiple canonical workspace roots/u);
+  assert.match(openclawOperations, /autoApprove\.rules\[\]\.workspaces/u);
   assert.match(tmux, /Direct `\/akk \.\.\.` commands work without changing the OpenClaw tool policy/u);
   assert.match(readme, /send a separate message/u);
   assert.doesNotMatch(tmux, /\/akk send\b/u);
@@ -118,13 +119,21 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   );
 });
 
-test("README and bundled skill keep advanced commands in their workflows", () => {
+test("operator guide and bundled skill keep advanced commands in their workflows", () => {
   const readme = read("README.md");
+  const operatorGuide = read("docs/operator-guide.md");
+  const operatorContract = operatorGuide.replace(/\s+/gu, " ");
+  const storage = read("docs/storage-and-logging.md");
+  const storageContract = storage.replace(/\s+/gu, " ");
   const skill = read("templates/openclaw-skills/agent-knock-knock/SKILL.md");
   const protocol = read("docs/bidirectional-agent-protocol.md");
   const quickstart = read("docs/quickstart-tmux.md");
   const changelog = read("CHANGELOG.md");
-  const usage = markdownSection(readme, "## Usage", "## Configuration");
+  const usage = markdownSection(
+    operatorGuide,
+    "## Command reference",
+    "## Reliable Send"
+  );
   const routing = markdownSection(
     skill,
     "## Chat Routing",
@@ -161,7 +170,7 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     assert.doesNotMatch(routing, new RegExp(escapeRegex(advancedCommand), "u"));
   }
 
-  for (const document of [readme, skill]) {
+  for (const document of [operatorContract, skill]) {
     assert.doesNotMatch(document, /defaultAgent|--default-agent/u);
     assert.doesNotMatch(document, /\/akk send\b|\/akk describe\b/u);
     assert.doesNotMatch(
@@ -272,32 +281,32 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(readme, /v23 `action_contracts`/u);
+  assert.match(operatorContract, /v23 `action_contracts`/u);
   assert.match(
-    readme,
+    operatorContract,
     /`terminal_user_explicit`[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state/u
   );
   assert.match(
-    readme,
+    operatorContract,
     /Composer visibility, stability, or exactness[\s\S]*`C-u`[\s\S]*paste window[\s\S]*Enter exactly once/u
   );
-  assert.match(readme, /Composer observation cannot veto Enter/u);
+  assert.match(operatorContract, /Composer observation cannot veto Enter/u);
   assert.match(
-    readme,
+    operatorContract,
     /unmanaged work[\s\S]*best-effort attaches a Terminal Watch[\s\S]*completion callback[\s\S]*failure[^.]*never vetoes/u
   );
   assert.match(skill, /v23 `action_contracts`/u);
-  assert.match(readme, /current writer protocol is 6/u);
+  assert.match(storageContract, /current writer protocol is 6/u);
   assert.match(
-    readme,
+    storageContract,
     /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 6/u
   );
   assert.match(
-    readme,
+    storageContract,
     /Protocols 3, 4, and 5 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
   );
   assert.match(
-    readme,
+    operatorContract,
     /If `previous` is present, use only its exact prefilled (?:semantic-ID )?action for a natural-language “刚才那个” request/u
   );
   assert.match(
@@ -309,14 +318,14 @@ test("README and bundled skill keep advanced commands in their workflows", () =>
     /For “previous” \/ “刚才那个”[^\n]*`previous\.available_actions\.resume_thread`[^\n]*use that exact (?:semantic-ID )?action(?: and|;) never substitute the newest row/u
   );
   assert.match(
-    readme,
+    operatorContract,
     /number and short-ID resume forms[^.]*displayed snapshot[^.]*neither is a durable identity or model authority/iu
   );
-  for (const document of [readme, protocol, quickstart]) {
+  for (const document of [operatorContract, protocol, quickstart]) {
     assert.match(document, /five(?:-| )minute(?:s)?/u);
     assert.match(document, /complete(?: native thread)? UUID/u);
   }
-  assert.match(readme, /candidate-set[^.]*changes/u);
+  assert.match(operatorContract, /candidate-set[^.]*changes/u);
   assert.match(quickstart, /candidate change/u);
   assert.match(
     protocol,
