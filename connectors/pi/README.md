@@ -11,8 +11,12 @@ socket.
 
 ## Status and compatibility
 
-This is a source-only POC. `@scotthuang/agent-knock-knock-pi` is **not
-published to npm**; load or install the local directory as described below.
+This is a POC prerelease distributed on npm as
+`@scotthuang/agent-knock-knock-pi`. Prereleases use the `next` dist-tag:
+
+```sh
+pi install npm:@scotthuang/agent-knock-knock-pi@next
+```
 
 The current compatibility contract is intentionally exact:
 
@@ -59,42 +63,26 @@ Wait for Codex to reach its interactive prompt, then detach with `Ctrl-b`
 followed by `d`. Use `claude` instead of `codex` to test Claude Code. An
 existing supported Herdr terminal works too.
 
-### 3. Build the local connector
-
-From the **agent-knock-knock repository root**, run:
+### 3. Install the connector
 
 ```sh
-AKK_REPO=/absolute/path/to/agent-knock-knock
-cd "$AKK_REPO"
-npm --prefix connectors/pi ci
-npm run pi:build
+pi install npm:@scotthuang/agent-knock-knock-pi@next
+pi list
 ```
 
-Alternatively, run the child-package commands from its own directory:
+Using `next` follows compatible Pi connector prereleases. To pin this exact
+build instead, install
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.1`; exact versions are pinned
+and are not advanced by Pi's bulk update command.
+
+### 4. Start Pi
 
 ```sh
-cd "$AKK_REPO/connectors/pi"
-npm ci
-npm run build
-```
-
-Do not run a bare root `npm run build` and assume it built this connector. The
-unambiguous root command is `npm run pi:build`; inside `connectors/pi`, use
-`npm run build`.
-
-### 4. Load it for one Pi run
-
-```sh
-pi -e "$AKK_REPO/connectors/pi"
-```
-
-Pi should show `AKK ready`. `-e` is temporary and changes no Pi package
-settings. To persist the same local source path instead:
-
-```sh
-pi install "$AKK_REPO/connectors/pi"
 pi
 ```
+
+Pi should show `AKK ready`. The package manifest registers the Extension, so
+no `-e` path or repository checkout is required.
 
 ### 5. Complete the first round trip
 
@@ -275,7 +263,7 @@ Example with isolated development state:
 ```sh
 AKK_PI_STORE_DIR=/absolute/private/path/akk-store \
 AKK_PI_STATE_DIR=/absolute/private/path/pi-akk-state \
-pi -e "$AKK_REPO/connectors/pi"
+pi
 ```
 
 Security and retention boundaries:
@@ -304,8 +292,8 @@ Security and retention boundaries:
 | Symptom | Check and recovery |
 | --- | --- |
 | `requires Pi 0.84.4` | Run `pi --version`, then reinstall the exact accepted release with `npm install -g @earendil-works/pi-coding-agent@0.84.4`. Newer Pi releases are not silently accepted by this POC. |
-| Pi never shows `AKK ready` | Confirm Node is at least 22.19, run `npm --prefix connectors/pi ci` and `npm run pi:build` from the repository root, then load the absolute `connectors/pi` path. A bare root `npm run build` does not build the child package. |
-| Module or `lib/index.js` not found | The local package has not been built, or Pi was given the repository root instead of the `connectors/pi` directory. Rebuild with one of the two documented cwd-specific command sets. |
+| Pi never shows `AKK ready` | Confirm Node is at least 22.19, run `pi list`, update or reinstall `npm:@scotthuang/agent-knock-knock-pi@next`, and fully restart Pi. For a source checkout, follow the local-development build commands below. |
+| Module or `lib/index.js` not found | Remove and reinstall the npm package. For a source checkout, confirm Pi was given `connectors/pi`, not the repository root, and rebuild with the documented cwd-specific command. |
 | `/akk list` finds no terminal | Start authenticated `codex` or `claude` inside supported tmux/Herdr under the same OS user and leave the process running. The connector never launches it. |
 | Send says the target is ambiguous | Run a fresh `/akk list` and use the exact displayed selector for `/akk`, or the prefilled semantic ID from that row's current tool action. |
 | Callback does not appear immediately | Pi may be busy, so the callback is queued as a follow-up. Wait for the current turn, then use fresh List and Status. After a Pi restart or branch change, the old callback route is intentionally not migrated. |
@@ -313,40 +301,57 @@ Security and retention boundaries:
 | Approval changed before confirmation | Refresh Status and review the newly observed prompt. Do not reuse an old approval offer or blindly retry an interrupted approval. |
 | Callback socket/profile is unavailable | The owning Pi runtime may have stopped or its temporary private directory may have disappeared. Restart Pi to create a fresh route; recover existing work with List/Status rather than copying socket paths or tokens. |
 | State-directory or Store permission error | Both override variables must be absolute and point to dedicated real directories. Stop Pi, inspect ownership and contents, then choose a new private directory if the existing path is unsafe or incompatible. |
-| Updated source still behaves like the old POC | Re-run `npm ci` and the connector-specific build, then fully restart Pi. A running Extension is not hot-replaced. |
+| Updated connector still behaves like the old POC | Run `pi update npm:@scotthuang/agent-knock-knock-pi` and fully restart Pi. For a source checkout, re-run `npm ci` and the connector-specific build first. A running Extension is not hot-replaced. |
 | Send result is uncertain | Do not automatically send the task again. Inspect Status, the exact pane, or the attached Watch; retrying terminal input could duplicate work. |
 
 ## Upgrade and uninstall
 
-Because the connector is not published, a local-path update means updating the
-repository, reinstalling its locked dependencies, rebuilding, and restarting
-Pi:
+Inspect and update the npm installation with Pi's package manager:
 
 ```sh
-cd "$AKK_REPO"
-git pull --ff-only
-npm --prefix connectors/pi ci
-npm run pi:build
+pi list
+pi update npm:@scotthuang/agent-knock-knock-pi
 ```
 
 Keep Pi at exactly `0.84.4` until this README declares another accepted
 version. Do not use an unverified Pi upgrade as a connector update.
 
-For a persistent local-path installation, first identify the exact source and
-then remove that same source:
+Remove the npm package by its package identity:
 
 ```sh
-pi list
-pi remove /absolute/path/to/agent-knock-knock/connectors/pi
+pi remove npm:@scotthuang/agent-knock-knock-pi
 ```
 
-`pi uninstall` is an alias for `pi remove`. A one-run `pi -e` load needs no
-uninstall; exiting Pi stops it. Removing the package does not stop or delete
-Codex/Claude terminals, model credentials, `~/.pi/agent/akk`, or the AKK Store.
-Those durable directories are retained for inspection/recovery and should be
-reviewed separately before any manual deletion.
+`pi uninstall` is an alias for `pi remove`. Removing the package does not stop
+or delete Codex/Claude terminals, model credentials, `~/.pi/agent/akk`, or the
+AKK Store. Those durable directories are retained for inspection/recovery and
+should be reviewed separately before any manual deletion.
 
 ## Development and verification
+
+To load a source checkout for one Pi run, build the connector explicitly:
+
+```sh
+AKK_REPO=/absolute/path/to/agent-knock-knock
+cd "$AKK_REPO"
+npm --prefix connectors/pi ci
+npm run pi:build
+pi -e "$AKK_REPO/connectors/pi"
+```
+
+The equivalent child-package build is:
+
+```sh
+cd "$AKK_REPO/connectors/pi"
+npm ci
+npm run build
+```
+
+Do not run a bare root `npm run build` and assume it built this connector. The
+unambiguous root command is `npm run pi:build`; inside `connectors/pi`, use
+`npm run build`. `pi -e` is temporary and changes no package settings. To
+persist a local source path, use `pi install "$AKK_REPO/connectors/pi"`; remove
+that same absolute source with `pi remove` when finished.
 
 From the repository root:
 
@@ -378,7 +383,9 @@ acceptance record on 2026-08-30 included:
   durable high-confidence delivered Status.
 
 These are POC acceptance results, not a promise of compatibility with every
-future Pi, Codex, Claude Code, tmux, or Herdr release. No npm release was made.
+future Pi, Codex, Claude Code, tmux, or Herdr release. Version
+`0.1.0-poc.1` is the first npm prerelease and is distributed through the
+`next` dist-tag; it does not change the AKK main package or ClawHub artifact.
 
 ## Deliberate POC limits
 
