@@ -1165,10 +1165,13 @@ function seededCodexRecoveryFixture(
   ];
   const run = async (args: string[]) => {
     if (options.execution === "black-box") {
+      // The child repeatedly launches fake tmux/process binaries. On a busy
+      // release host that process evidence can exceed 30 seconds even though
+      // every product-side probe keeps its own tighter bounded deadline.
       return spawnSync(
         process.execPath,
         [binPath, ...commandArguments(args)],
-        { encoding: "utf8", env, timeout: 30_000 }
+        { encoding: "utf8", env, timeout: 60_000 }
       );
     }
     return runInProcessCli(commandArguments(args), dependencies);
