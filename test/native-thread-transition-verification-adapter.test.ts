@@ -361,7 +361,10 @@ test("Codex verification waits for a resumed composer to finish MCP startup", as
   } as unknown as ResolvedTerminalConversation;
   const observed = await verifyNativeThreadTransition({
     operation: { kind: "new_thread" },
-    plan: NEW_THREAD_PLAN,
+    plan: {
+      ...NEW_THREAD_PLAN,
+      behaviorProfile: "codex-tui-0.151.0"
+    },
     beforeIdentity: {
       sessionId: BEFORE_THREAD,
       processUuid: FENCE.processUuid,
