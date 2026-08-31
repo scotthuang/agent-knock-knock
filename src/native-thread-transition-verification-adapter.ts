@@ -97,7 +97,22 @@ export type NativeThreadCompanionSet = Readonly<{
 // is safe for the post-transition /status probe. Keep polling without input
 // when the probe proves it did not start, allowing the default 30-second MCP
 // startup timeout plus repaint margin.
-const CODEX_POST_TRANSITION_SETTLE_ATTEMPTS = 400;
+const DEFAULT_POST_TRANSITION_SETTLE_ATTEMPTS = 100;
+const CODEX_MCP_POST_TRANSITION_SETTLE_ATTEMPTS = 400;
+
+function postTransitionSettleAttempts(
+  terminal: Pick<ResolvedTerminalConversation, "agent">,
+  plan: Pick<TerminalThreadLifecyclePlan, "behaviorProfile">
+): number {
+  if (terminal.agent !== "codex") {
+    return DEFAULT_POST_TRANSITION_SETTLE_ATTEMPTS;
+  }
+  return ["codex-tui-0.151.0", "codex-tui-generic-v1"].includes(
+    plan.behaviorProfile
+  )
+    ? CODEX_MCP_POST_TRANSITION_SETTLE_ATTEMPTS
+    : DEFAULT_POST_TRANSITION_SETTLE_ATTEMPTS;
+}
 
 export function nativeThreadRuntimeWithCompanionFences(
   runtime: TerminalRuntimeIdentity,
@@ -525,9 +540,10 @@ export async function verifyNativeThreadTransition(
   let observationScrollbackLines: number | undefined;
   let stableIdentity: TerminalNativeIdentity | undefined;
   let stableCount = 0;
+  const settleAttempts = postTransitionSettleAttempts(terminal, request.plan);
   for (
     let attempt = 0;
-    attempt < CODEX_POST_TRANSITION_SETTLE_ATTEMPTS;
+    attempt < settleAttempts;
     attempt += 1
   ) {
     let verifiedIdentity: TerminalNativeIdentity | undefined;
