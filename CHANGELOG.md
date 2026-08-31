@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Let Codex lifecycle verification wait safely for a resumed thread's bounded MCP startup to restore the exact empty Composer before sending the single post-resume `/status` probe. A proven `not_started` Composer observation is retried without terminal input; other failures retain their existing fail-closed behavior.
+- Let Codex `0.151.0` and forward-compatible lifecycle verification wait safely for a resumed thread's bounded MCP startup to restore the exact empty Composer before sending the single post-resume `/status` probe. A proven `not_started` Composer observation is retried without terminal input only for those profiles; historical profiles and other failures retain their existing fail-closed behavior.
 
 ## 0.12.23 - 2026-08-30
 

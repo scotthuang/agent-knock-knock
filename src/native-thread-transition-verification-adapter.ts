@@ -99,19 +99,37 @@ export type NativeThreadCompanionSet = Readonly<{
 // startup timeout plus repaint margin.
 const DEFAULT_POST_TRANSITION_SETTLE_ATTEMPTS = 100;
 const CODEX_MCP_POST_TRANSITION_SETTLE_ATTEMPTS = 400;
+const CODEX_MCP_SETTLEMENT_PROFILES = Object.freeze([
+  "codex-tui-0.151.0",
+  "codex-tui-generic-v1"
+]);
+
+function supportsCodexMcpSettlementRetry(
+  terminal: Pick<ResolvedTerminalConversation, "agent">,
+  plan: Pick<TerminalThreadLifecyclePlan, "behaviorProfile">
+): boolean {
+  return terminal.agent === "codex" &&
+    CODEX_MCP_SETTLEMENT_PROFILES.includes(plan.behaviorProfile);
+}
 
 function postTransitionSettleAttempts(
   terminal: Pick<ResolvedTerminalConversation, "agent">,
   plan: Pick<TerminalThreadLifecyclePlan, "behaviorProfile">
 ): number {
-  if (terminal.agent !== "codex") {
-    return DEFAULT_POST_TRANSITION_SETTLE_ATTEMPTS;
-  }
-  return ["codex-tui-0.151.0", "codex-tui-generic-v1"].includes(
-    plan.behaviorProfile
-  )
+  return supportsCodexMcpSettlementRetry(terminal, plan)
     ? CODEX_MCP_POST_TRANSITION_SETTLE_ATTEMPTS
     : DEFAULT_POST_TRANSITION_SETTLE_ATTEMPTS;
+}
+
+function isSafeCodexMcpSettlementRetry(
+  error: unknown,
+  terminal: Pick<ResolvedTerminalConversation, "agent">,
+  plan: Pick<TerminalThreadLifecyclePlan, "behaviorProfile">
+): boolean {
+  return supportsCodexMcpSettlementRetry(terminal, plan) &&
+    error instanceof NativeInspectionSubmissionError &&
+    error.stage === "not_started" &&
+    error.diagnostic === "composer_not_ready";
 }
 
 export function nativeThreadRuntimeWithCompanionFences(
@@ -637,11 +655,11 @@ export async function verifyNativeThreadTransition(
           observationScrollbackLines = receipt.observationScrollbackLines;
           probeSent = true;
         } catch (error) {
-          if (
-            !(error instanceof NativeInspectionSubmissionError) ||
-            error.stage !== "not_started" ||
-            error.diagnostic !== "composer_not_ready"
-          ) {
+          if (!isSafeCodexMcpSettlementRetry(
+            error,
+            terminal,
+            request.plan
+          )) {
             throw error;
           }
           // No text reached the composer. A resumed Codex thread may still be

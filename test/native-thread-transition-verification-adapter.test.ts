@@ -381,6 +381,49 @@ test("Codex verification waits for a resumed composer to finish MCP startup", as
   assert.equal(observed.sessionId, AFTER_THREAD);
 });
 
+test("historical Codex verification does not reinterpret a blocked composer as MCP startup", async () => {
+  let probeAttempts = 0;
+  const blocked = new NativeInspectionSubmissionError(
+    "not_started",
+    "Codex composer is not ready for a status probe",
+    { diagnostic: "composer_not_ready" }
+  );
+  const bridge = {
+    status: async () => idleStatus("transition-visible"),
+    submitCodexStatusProbe: async () => {
+      probeAttempts += 1;
+      throw blocked;
+    }
+  } as unknown as TerminalAgentBridge;
+  const terminal = {
+    conversationId: "terminal:v2:fixture",
+    agent: "codex",
+    pid: 123,
+    legacy: false,
+    terminalControl: TERMINAL_CONTROL,
+    adapter: {}
+  } as unknown as ResolvedTerminalConversation;
+
+  await assert.rejects(
+    verifyNativeThreadTransition({
+      operation: { kind: "new_thread" },
+      plan: {
+        ...NEW_THREAD_PLAN,
+        behaviorProfile: "codex-tui-0.146.0"
+      },
+      beforeIdentity: {
+        sessionId: BEFORE_THREAD,
+        processUuid: FENCE.processUuid,
+        processBirth: FENCE.processBirth,
+        evidence: "codex_status_card"
+      },
+      initialScreenDigest: "before-dispatch"
+    }, terminal, basePorts(bridge)),
+    (error: unknown) => error === blocked
+  );
+  assert.equal(probeAttempts, 1);
+});
+
 test("Claude verification reads exact rows before each status observation", async () => {
   const events: string[] = [];
   const rows: readonly TerminalThreadLifecycleAgentRow[] = [{
