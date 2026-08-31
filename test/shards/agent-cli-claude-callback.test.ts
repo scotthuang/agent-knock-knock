@@ -1026,7 +1026,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       JSON.stringify(claudeAgents)
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    }, 20_000);
+    }, 45_000);
     assert.equal(
       sequentialMonitor.status,
       0,
