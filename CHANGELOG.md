@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.24 - 2026-08-31
+
+### Added
+
+- Add an exact Codex `0.151.0` native lifecycle and `/status` inspection profile after validating its Composer, rollout identity, slash-popup, status-card, clear, exact-resume, and terminal Send surfaces in an isolated real TUI.
+
+### Fixed
+
+- Let Codex lifecycle verification wait safely for a resumed thread's bounded MCP startup to restore the exact empty Composer before sending the single post-resume `/status` probe. A proven `not_started` Composer observation is retried without terminal input; other failures retain their existing fail-closed behavior.
+
 ## 0.12.23 - 2026-08-30
 
 ### Fixed

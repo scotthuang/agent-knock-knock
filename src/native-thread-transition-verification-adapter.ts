@@ -9,6 +9,7 @@ import type {
   TerminalThreadLifecyclePlan
 } from "./terminal-agent-adapter.js";
 import {
+  NativeInspectionSubmissionError,
   TerminalAgentBridge,
   type ResolvedTerminalConversation,
   type TerminalBridgeStatus
@@ -89,6 +90,14 @@ export type NativeThreadCompanionSet = Readonly<{
   primary?: TerminalNativeIdentityFence;
   additional: TerminalNativeIdentityFence[];
 }>;
+
+// Resuming a Codex thread can restart configured MCP servers. Codex 0.151.0
+// keeps the composer visible while that bounded startup is still in progress,
+// so the broad activity classifier can report idle before the exact composer
+// is safe for the post-transition /status probe. Keep polling without input
+// when the probe proves it did not start, allowing the default 30-second MCP
+// startup timeout plus repaint margin.
+const CODEX_POST_TRANSITION_SETTLE_ATTEMPTS = 400;
 
 export function nativeThreadRuntimeWithCompanionFences(
   runtime: TerminalRuntimeIdentity,
@@ -516,7 +525,11 @@ export async function verifyNativeThreadTransition(
   let observationScrollbackLines: number | undefined;
   let stableIdentity: TerminalNativeIdentity | undefined;
   let stableCount = 0;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < CODEX_POST_TRANSITION_SETTLE_ATTEMPTS;
+    attempt += 1
+  ) {
     let verifiedIdentity: TerminalNativeIdentity | undefined;
     if (terminal.agent === "claude") {
       try {
@@ -598,14 +611,27 @@ export async function verifyNativeThreadTransition(
         screenDigest !== undefined &&
         screenDigest !== request.initialScreenDigest
       ) {
-        const receipt = await bridge.submitCodexStatusProbe(
-          terminal.terminalControl,
-          agentVersion,
-          { runtime: physicalRuntime }
-        );
-        postProbeBaselineDigest = receipt.observationBaselineDigest;
-        observationScrollbackLines = receipt.observationScrollbackLines;
-        probeSent = true;
+        try {
+          const receipt = await bridge.submitCodexStatusProbe(
+            terminal.terminalControl,
+            agentVersion,
+            { runtime: physicalRuntime }
+          );
+          postProbeBaselineDigest = receipt.observationBaselineDigest;
+          observationScrollbackLines = receipt.observationScrollbackLines;
+          probeSent = true;
+        } catch (error) {
+          if (
+            !(error instanceof NativeInspectionSubmissionError) ||
+            error.stage !== "not_started" ||
+            error.diagnostic !== "composer_not_ready"
+          ) {
+            throw error;
+          }
+          // No text reached the composer. A resumed Codex thread may still be
+          // settling its MCP startup surface, so this exact failure is safe to
+          // poll until the bounded verification deadline.
+        }
       } else if (
         status.reachable &&
         isFreshCodexPostProbeScreen({
