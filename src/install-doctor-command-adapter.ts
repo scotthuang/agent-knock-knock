@@ -66,7 +66,12 @@ export function runInstallOpenClaw(options: InstallDoctorCommandOptions): void {
 
   if (!skillOnly) {
     const pluginInstall = installOpenClawPlugin(openclawBin!, root);
-    steps.push({ name: "plugin_installed", path: root, mode: pluginInstall.mode });
+    steps.push({
+      name: "plugin_installed",
+      path: root,
+      mode: pluginInstall.mode,
+      capability_consent: pluginInstall.capabilityConsent
+    });
     const configOperations = [{
       path: "plugins.entries.agent-knock-knock.enabled",
       value: true
@@ -243,16 +248,29 @@ function installNextActions({
 function installOpenClawPlugin(
   openclawBin: string,
   root: string
-): { mode: "linked" | "replaced" } {
-  const linked = spawnSync(openclawBin, ["plugins", "install", "--link", root], {
-    encoding: "utf8",
-    maxBuffer: INSTALL_COMMAND_MAX_BUFFER_BYTES
-  });
+): {
+  mode: "linked" | "replaced";
+  capabilityConsent: "accepted" | "not_supported";
+} {
+  const capabilityConsentArgs = openClawCapabilityConsentArgs(openclawBin);
+  const capabilityConsent: "accepted" | "not_supported" =
+    capabilityConsentArgs.length > 0 ? "accepted" : "not_supported";
+  const linked = spawnSync(
+    openclawBin,
+    ["plugins", "install", "--link", ...capabilityConsentArgs, root],
+    {
+      encoding: "utf8",
+      maxBuffer: INSTALL_COMMAND_MAX_BUFFER_BYTES
+    }
+  );
   if (linked.error) {
     throw new Error(`openclaw plugins install failed to start: ${linked.error.message}`);
   }
   if (linked.status === 0) {
-    return { mode: "linked" };
+    return {
+      mode: "linked",
+      capabilityConsent
+    };
   }
   const failure = cleanProcessText(linked.stderr || linked.stdout)
     ?? `openclaw plugins install exited with status ${linked.status}`;
@@ -262,10 +280,26 @@ function installOpenClawPlugin(
   }
   runCheckedCommand(
     openclawBin,
-    ["plugins", "install", "--force", root],
+    ["plugins", "install", "--force", ...capabilityConsentArgs, root],
     "openclaw plugins replace"
   );
-  return { mode: "replaced" };
+  return {
+    mode: "replaced",
+    capabilityConsent
+  };
+}
+
+function openClawCapabilityConsentArgs(openclawBin: string): string[] {
+  const help = spawnSync(openclawBin, ["plugins", "install", "--help"], {
+    encoding: "utf8",
+    maxBuffer: INSTALL_COMMAND_MAX_BUFFER_BYTES
+  });
+  if (help.error || help.status !== 0) {
+    return [];
+  }
+  return `${help.stdout ?? ""}\n${help.stderr ?? ""}`.includes("--accept-capabilities")
+    ? ["--accept-capabilities"]
+    : [];
 }
 
 function runCheckedCommand(

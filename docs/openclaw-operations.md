@@ -45,6 +45,12 @@ npm install -g @scotthuang/agent-knock-knock
 agent-knock-knock install-openclaw --verify
 ```
 
+`install-openclaw` detects whether the installed OpenClaw supports capability
+consent. When supported, this explicit installation command passes
+`--accept-capabilities` to both fresh and replacement plugin installs and
+reports `capability_consent: "accepted"` in its result. Older OpenClaw versions
+continue through the same installation path without the unsupported option.
+
 Do not run `install-openclaw` after a ClawHub installation. These are
 alternative installation paths. For a nonstandard OpenClaw executable:
 

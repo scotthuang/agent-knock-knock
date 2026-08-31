@@ -35,7 +35,9 @@ test("install-openclaw replaces an existing plugin and installs its skill", asyn
     assert.equal(result.ready, false);
     assert.equal(result.next_actions[0].action, "verify");
     assert.equal(result.steps[0].mode, "replaced");
+    assert.equal(result.steps[0].capability_consent, "not_supported");
     assert.deepEqual(readCalls(callsPath), [
+      ["plugins", "install", "--help"],
       ["plugins", "install", "--link", packageRoot],
       ["plugins", "install", "--force", packageRoot],
       [
@@ -75,8 +77,49 @@ test("install-openclaw confirms the trusted local source when OpenClaw requires 
 
     assert.equal(result.steps[0].mode, "replaced");
     assert.deepEqual(readCalls(callsPath), [
+      ["plugins", "install", "--help"],
       ["plugins", "install", "--link", packageRoot],
       ["plugins", "install", "--force", packageRoot],
+      [
+        "config",
+        "set",
+        "--batch-json",
+        JSON.stringify([
+          {
+            path: "plugins.entries.agent-knock-knock.enabled",
+            value: true
+          }
+        ])
+      ],
+      ["gateway", "restart"]
+    ]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("install-openclaw accepts declared capabilities on supported OpenClaw versions", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-install-openclaw-consent-"));
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const fakeOpenClaw = path.join(tempDir, "openclaw");
+  const skillDest = path.join(tempDir, "skills", "agent-knock-knock", "SKILL.md");
+
+  try {
+    writeFakeOpenClaw(fakeOpenClaw, callsPath, "already_exists", true);
+    const result = await runCli([
+      "install-openclaw",
+      "--openclaw-bin",
+      fakeOpenClaw,
+      "--skill-path",
+      skillDest
+    ]);
+
+    assert.equal(result.steps[0].mode, "replaced");
+    assert.equal(result.steps[0].capability_consent, "accepted");
+    assert.deepEqual(readCalls(callsPath), [
+      ["plugins", "install", "--help"],
+      ["plugins", "install", "--link", "--accept-capabilities", packageRoot],
+      ["plugins", "install", "--force", "--accept-capabilities", packageRoot],
       [
         "config",
         "set",
@@ -250,7 +293,8 @@ test("install-openclaw skill-only can synchronize the skill without OpenClaw", a
 function writeFakeOpenClaw(
   filePath: string,
   callsPath: string,
-  linkFailure: "already_exists" | "trust_required" = "already_exists"
+  linkFailure: "already_exists" | "trust_required" = "already_exists",
+  supportsCapabilityConsent = false
 ) {
   const failure = linkFailure === "trust_required"
     ? "Install cancelled; rerun with --force after reviewing the source.\n"
@@ -261,6 +305,16 @@ function writeFakeOpenClaw(
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n", "utf8");
+if (args[0] === "plugins" && args[1] === "install" && args.includes("--help")) {
+  if (${JSON.stringify(supportsCapabilityConsent)}) {
+    process.stdout.write("  --accept-capabilities  Accept declared capabilities\\n");
+  }
+  process.exit(0);
+}
+if (${JSON.stringify(supportsCapabilityConsent)} && args[0] === "plugins" && args[1] === "install" && !args.includes("--accept-capabilities")) {
+  process.stderr.write("Plugin requires capability consent\\n");
+  process.exit(2);
+}
 if (args[0] === "plugins" && args[1] === "install" && args.includes("--link")) {
   process.stderr.write(${JSON.stringify(failure)});
   process.exit(1);

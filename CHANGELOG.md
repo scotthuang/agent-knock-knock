@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.25 - 2026-08-31
+
+### Fixed
+
+- Let the npm OpenClaw installer detect capability-consent support and pass `--accept-capabilities` through both fresh linked installs and trusted replacement installs. Older OpenClaw versions keep the existing argument shape, while installation receipts now report whether capability consent was accepted.
+
 ## 0.12.24 - 2026-08-31
 
 ### Added
