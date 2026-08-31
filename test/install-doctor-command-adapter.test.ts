@@ -84,6 +84,7 @@ test("install adapter preserves force fallback, copy/restart order, verification
       )
     );
     assert.deepEqual(readCalls(callsPath), [
+      ["plugins", "install", "--help"],
       ["plugins", "install", "--link", root],
       ["plugins", "install", "--force", root],
       ["config", "set", "--batch-json", JSON.stringify([{
