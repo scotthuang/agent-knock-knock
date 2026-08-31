@@ -6,10 +6,11 @@ import type {
   TerminalThreadLifecycleAgentRow,
   TerminalThreadLifecyclePlan
 } from "../src/terminal-agent-adapter.js";
-import type {
-  ResolvedTerminalConversation,
-  TerminalAgentBridge,
-  TerminalBridgeStatus
+import {
+  NativeInspectionSubmissionError,
+  type ResolvedTerminalConversation,
+  type TerminalAgentBridge,
+  type TerminalBridgeStatus
 } from "../src/terminal-agent-bridge.js";
 import {
   isCompleteNativeRollout as canonicalCompleteNativeRollout,
@@ -316,6 +317,65 @@ test("Codex verification orders one probe before companion-bound observations", 
     "lifecycle:observe",
     "identity:resolve"
   ]);
+});
+
+test("Codex verification waits for a resumed composer to finish MCP startup", async () => {
+  let statusCount = 0;
+  let probeAttempts = 0;
+  const bridge = {
+    status: async () => {
+      statusCount += 1;
+      return statusCount <= 3
+        ? idleStatus(`settling-${statusCount}`)
+        : idleStatus(`fresh-${statusCount}`, `Session ID: ${AFTER_THREAD}`);
+    },
+    submitCodexStatusProbe: async () => {
+      probeAttempts += 1;
+      if (probeAttempts <= 2) {
+        throw new NativeInspectionSubmissionError(
+          "not_started",
+          "Codex composer is still covered by MCP startup",
+          { diagnostic: "composer_not_ready" }
+        );
+      }
+      return {
+        observationBaselineDigest: "probe-baseline",
+        observationScrollbackLines: 240
+      };
+    }
+  } as unknown as TerminalAgentBridge;
+  const terminal = {
+    conversationId: "terminal:v2:fixture",
+    agent: "codex",
+    pid: 123,
+    legacy: false,
+    terminalControl: TERMINAL_CONTROL,
+    adapter: {
+      observeThreadLifecycle: () => ({
+        status: "verified",
+        nativeThreadId: AFTER_THREAD,
+        idle: true,
+        evidence: "codex_status_card"
+      })
+    }
+  } as unknown as ResolvedTerminalConversation;
+  const observed = await verifyNativeThreadTransition({
+    operation: { kind: "new_thread" },
+    plan: NEW_THREAD_PLAN,
+    beforeIdentity: {
+      sessionId: BEFORE_THREAD,
+      processUuid: FENCE.processUuid,
+      processBirth: FENCE.processBirth,
+      evidence: "codex_status_card"
+    },
+    initialScreenDigest: "before-dispatch"
+  }, terminal, {
+    ...basePorts(bridge),
+    resolveIdentity: async () => AFTER_IDENTITY
+  });
+
+  assert.equal(probeAttempts, 3);
+  assert.equal(observed.sessionId, AFTER_THREAD);
 });
 
 test("Claude verification reads exact rows before each status observation", async () => {

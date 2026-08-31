@@ -35,7 +35,7 @@ import {
   type TerminalProviderCapability
 } from "./terminal-control-ref.js";
 
-// Verified Codex profiles through 0.150.1 keep Enter in paste/newline mode for
+// Verified Codex profiles through 0.151.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
 // also require observable composer stability instead of treating this delay
 // alone as acceptance.
@@ -82,6 +82,10 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
   ],
+  "codex-tui-0.151.0": [
+    "  /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
+  ],
   "codex-tui-generic-v1": [
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
@@ -101,6 +105,7 @@ const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
   "codex-tui-0.148.0": 80,
   "codex-tui-0.149.1": 80,
   "codex-tui-0.150.1": 80,
+  "codex-tui-0.151.0": 80,
   "codex-tui-generic-v1": 80
 };
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<

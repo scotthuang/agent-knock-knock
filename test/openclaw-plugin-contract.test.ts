@@ -4557,8 +4557,8 @@ test("callback auto approval keeps its rule workspace boundary without global wo
 test("/akk doctor leaves the Gateway event loop free for its health check", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-doctor-"));
   const fakeCli = path.join(tempDir, "doctor.cjs");
-  const codexVersion = "0.150.1";
-  const codexNativeProfile = "codex-tui-0.150.1";
+  const codexVersion = "0.151.0";
+  const codexNativeProfile = "codex-tui-0.151.0";
   let command:
     | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
     | undefined;

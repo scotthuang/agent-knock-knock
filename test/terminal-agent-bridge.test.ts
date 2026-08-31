@@ -4861,7 +4861,7 @@ test("closed Codex status probe crosses a Herdr-style paste window before exactl
   });
   const result = await bridge.submitCodexStatusProbe(
     terminalControl(codexTerminalAgentAdapter),
-    "0.150.1",
+    "0.151.0",
     { runtime: { pid: 110 } }
   );
 
@@ -5910,7 +5910,7 @@ test("native status inspection accepts an exact current slash popup only at a pr
   );
 });
 
-test("Codex 0.147.0 through 0.150.1 require their exact ordered two-row slash popup", async () => {
+test("Codex 0.147.0 through 0.151.0 require their exact ordered two-row slash popup", async () => {
   class CurrentPopupProvider extends RecordingTerminalProvider {
     override async sendText(
       target: TerminalEndpointRef | string,
@@ -5942,7 +5942,13 @@ test("Codex 0.147.0 through 0.150.1 require their exact ordered two-row slash po
       };
     }
   };
-  for (const version of ["0.147.0", "0.148.0", "0.149.1", "0.150.1"]) {
+  for (const version of [
+    "0.147.0",
+    "0.148.0",
+    "0.149.1",
+    "0.150.1",
+    "0.151.0"
+  ]) {
     const provider = new CurrentPopupProvider([PANE]);
     const bridge = new TerminalAgentBridge({
       registry: createTerminalAgentAdapterRegistry([idlePopupAdapter]),
@@ -5960,7 +5966,7 @@ test("Codex 0.147.0 through 0.150.1 require their exact ordered two-row slash po
   }
 });
 
-test("Codex 0.150.1 native status refuses an incomplete two-row popup", async () => {
+test("Codex 0.151.0 native status refuses an incomplete two-row popup", async () => {
   class IncompleteCurrentPopupProvider extends RecordingTerminalProvider {
     private capturesAfterInjection = 0;
 
@@ -6010,7 +6016,7 @@ test("Codex 0.150.1 native status refuses an incomplete two-row popup", async ()
     bridge.submitNativeInspection(
       "codex",
       terminalControl(codexTerminalAgentAdapter),
-      codexStatusInspectionPlan("0.150.1"),
+      codexStatusInspectionPlan("0.151.0"),
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
