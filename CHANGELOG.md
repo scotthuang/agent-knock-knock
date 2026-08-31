@@ -9,6 +9,7 @@
 ### Fixed
 
 - Let Codex `0.151.0` and forward-compatible lifecycle verification wait safely for a resumed thread's bounded MCP startup to restore the exact empty Composer before sending the single post-resume `/status` probe. A proven `not_started` Composer observation is retried without terminal input only for those profiles; historical profiles and other failures retain their existing fail-closed behavior.
+- Preserve a bounded stable-recapture opportunity when the first exact native `/status` Composer capture itself exceeds the wall-clock settle deadline on a busy tmux server; mismatched or disappearing candidates still fail closed without Enter.
 
 ## 0.12.23 - 2026-08-30
 

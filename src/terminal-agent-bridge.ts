@@ -2452,10 +2452,11 @@ export class TerminalAgentBridge {
     let stableKind: TerminalNativeInspectionMaterializationKind | undefined;
     let stableSince: number | undefined;
     let stableCaptures = 0;
+    let capturesBeyondDeadline = 0;
     let lastMismatchDiagnostic: NativeInspectionSubmissionDiagnostic =
       "composer_not_exact";
 
-    while (this.nowMs() - startedAt <= settleTimeoutMs) {
+    while (true) {
       const captured = await this.captureInspection(adapter, terminalControl, {
         runtime,
         scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
@@ -2513,12 +2514,24 @@ export class TerminalAgentBridge {
 
       const elapsed = this.nowMs() - startedAt;
       const remaining = settleTimeoutMs - elapsed;
-      if (remaining <= 0) {
+      if (remaining <= 0 && !materialized) {
         break;
       }
+      if (remaining <= 0) {
+        capturesBeyondDeadline += 1;
+        if (
+          capturesBeyondDeadline > CODEX_EXACT_CANDIDATE_GRACE_CAPTURES
+        ) {
+          break;
+        }
+      }
+      const remainingStableMs = plan.composer.minimumStableMs -
+        (stableSince === undefined ? 0 : this.nowMs() - stableSince);
       await this.sleep(Math.min(
         CODEX_MULTILINE_SETTLE_POLL_MS,
-        remaining
+        remaining > 0
+          ? remaining
+          : Math.max(1, remainingStableMs)
       ));
     }
     throw new NativeInspectionDiagnosticError(

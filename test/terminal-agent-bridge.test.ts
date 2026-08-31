@@ -4895,6 +4895,71 @@ test("closed Codex status probe crosses a Herdr-style paste window before exactl
   );
 });
 
+test("closed Codex status probe preserves an exact candidate after a slow first capture", async () => {
+  let nowMs = 0;
+  class SlowFirstStatusCaptureProvider extends RecordingTerminalProvider {
+    injected = false;
+    delayed = false;
+
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      this.injected = true;
+      this.setScreen(target, [
+        "Ready",
+        "› /status",
+        "  /status      show current session configuration and token usage",
+        "  /statusline  configure which items appear in the status line"
+      ].join("\n"));
+    }
+
+    override async capture(
+      terminal: TerminalEndpointRef | string,
+      options: {
+        scrollbackLines?: number;
+        socketPath?: string;
+        preserveEscapes?: boolean;
+      } = {}
+    ): Promise<string> {
+      if (this.injected && !this.delayed) {
+        this.delayed = true;
+        nowMs += 2_500;
+      }
+      return super.capture(terminal, options);
+    }
+  }
+
+  const provider = new SlowFirstStatusCaptureProvider([PANE], {
+    [PANE.target]: codexPaddedStyledIdleScreen(80)
+  });
+  const bridge = new TerminalAgentBridge({
+    registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+    terminalProvider: provider,
+    async verifyIdentity() {},
+    nowMs: () => nowMs,
+    async sleep(milliseconds) {
+      nowMs += milliseconds;
+    }
+  });
+
+  const result = await bridge.submitCodexStatusProbe(
+    terminalControl(codexTerminalAgentAdapter),
+    "0.151.0",
+    { runtime: { pid: 110 } }
+  );
+
+  assert.equal(result.enterCount, 1);
+  assert.equal(result.materialization.kind, "exact_slash_popup");
+  assert.equal(provider.delayed, true);
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "keys").length,
+    1
+  );
+});
+
 test("Codex status freshness baseline matches the returned 240-line observation domain", async () => {
   let nowMs = 0;
   const unchangedLongScreen = [
