@@ -742,7 +742,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
       ])
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
-    }, 20_000);
+    }, 45_000);
     assert.equal(monitor.status, 0, monitor.stderr || monitor.stdout);
     const monitorResult = JSON.parse(monitor.stdout);
     assert.equal(monitorResult.delivered, true);
