@@ -241,6 +241,10 @@ function controlProviderRegistry({ options, dependencies }: Pick<
   }
   const isStatic = Boolean(options.terminalsJson || options.terminalScreensJson ||
     options.processesJson);
+  const diagnosticLog = (
+    event: string,
+    fields: Readonly<Record<string, unknown>>
+  ) => cliRuntimeLog("info", event, { ...fields });
   return createTerminalControlProviderRegistry([
     isStatic
       ? new StaticTerminalControlProvider({
@@ -253,8 +257,8 @@ function controlProviderRegistry({ options, dependencies }: Pick<
             : {}
         })
       : new TmuxTerminalControlProvider(),
-    ...(isStatic ? [] : [new HerdrTerminalControlProvider()])
-  ]);
+    ...(isStatic ? [] : [new HerdrTerminalControlProvider({ diagnosticLog })])
+  ], diagnosticLog);
 }
 function processSource({ options, dependencies }: Pick<
   CreateTerminalRuntimeCliAdapterInput,
@@ -273,7 +277,9 @@ function processSource({ options, dependencies }: Pick<
         : []
     );
   }
-  return new SystemTerminalProcessSource();
+  return new SystemTerminalProcessSource({
+    diagnosticLog: (event, fields) => cliRuntimeLog("info", event, { ...fields })
+  });
 }
 function claudeAgentRows(
   input: Pick<CreateTerminalRuntimeCliAdapterInput, "options" | "dependencies">,
@@ -459,6 +465,7 @@ function terminalAgentBridge(
     ...(input.dependencies.monotonicNowMs ?
       { nowMs: input.dependencies.monotonicNowMs } : {}),
     ...(input.dependencies.sleep ? { sleep: input.dependencies.sleep } : {}),
+    diagnosticLog: (event, fields) => cliRuntimeLog("info", event, { ...fields }),
     verifyIdentity: (request) => verifyTerminalIdentity(input, composition, request)
   });
 }

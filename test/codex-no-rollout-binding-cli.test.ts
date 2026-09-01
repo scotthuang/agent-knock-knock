@@ -4615,7 +4615,7 @@ for (const acceptanceCase of ["zero", "multiple"] as const) {
 }
 
 for (const identityCase of ["resolved", "unavailable"] as const) {
-  test(`one exact open root uses snapshot-bound candidate send when identity is ${identityCase}`, async () => {
+  test(`one exact open root keeps snapshot-bound candidate send when the constrained identity is ${identityCase}`, async () => {
     const fixture = createNoRolloutFixture({
       codexVersion: "0.147.0",
       terminalKind: "herdr",
@@ -4641,7 +4641,7 @@ for (const identityCase of ["resolved", "unavailable"] as const) {
       const terminal = await listFixtureTerminal(fixture);
       assert.equal(
         terminal.native_agent_identity_observation.status,
-        identityCase
+        "resolved"
       );
       assert.equal(terminal.management_state, "managed");
       assert.equal(terminal.managed.session_id, source.session_id);

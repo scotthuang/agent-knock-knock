@@ -12,6 +12,11 @@ export interface ProcessCommandResult {
   error?: Error;
 }
 
+export type TerminalProcessInventoryDiagnosticLog = (
+  event: string,
+  fields: Readonly<Record<string, unknown>>
+) => void;
+
 export interface TerminalProcessIncarnation {
   processUuid: string;
   processBirth: string;
@@ -89,11 +94,14 @@ export class StaticTerminalProcessSource implements TerminalProcessSource {
 export class SystemTerminalProcessSource implements TerminalProcessSource {
   readonly completeInventoryAuthority = true as const;
   private readonly runCommand: (command: string, args: string[]) => ProcessCommandResult;
+  private readonly diagnosticLog?: TerminalProcessInventoryDiagnosticLog;
 
   constructor(options: {
     runCommand?: (command: string, args: string[]) => ProcessCommandResult;
+    diagnosticLog?: TerminalProcessInventoryDiagnosticLog;
   } = {}) {
     this.runCommand = options.runCommand ?? runProcessCommand;
+    this.diagnosticLog = options.diagnosticLog;
   }
 
   async listProcessSnapshots(
@@ -105,7 +113,10 @@ export class SystemTerminalProcessSource implements TerminalProcessSource {
       throw new Error(ps.stderr || ps.error?.message || "ps failed");
     }
 
-    const snapshots = parseCompletePsProcessSnapshots(ps.stdout);
+    const snapshots = parseCompletePsProcessSnapshots(
+      ps.stdout,
+      this.diagnosticLog
+    );
     const candidates = snapshots.filter(isCandidate);
     if (candidates.length === 0) {
       return [];
@@ -146,7 +157,8 @@ export class SystemTerminalProcessSource implements TerminalProcessSource {
  * truncated output must never collapse into an apparently empty inventory.
  */
 function parseCompletePsProcessSnapshots(
-  output: string
+  output: string,
+  diagnosticLog?: TerminalProcessInventoryDiagnosticLog
 ): TerminalProcessSnapshot[] {
   if (typeof output !== "string" || output.length === 0) {
     throw new Error("ps returned an empty process inventory");
@@ -160,7 +172,7 @@ function parseCompletePsProcessSnapshots(
     throw new Error("ps returned an unexpected process inventory header");
   }
   const snapshots: TerminalProcessSnapshot[] = [];
-  for (const line of lines) {
+  for (const [lineIndex, line] of lines.entries()) {
     if (line.trim().length === 0) {
       continue;
     }
@@ -174,15 +186,32 @@ function parseCompletePsProcessSnapshots(
       !Number.isSafeInteger(pid) ||
       pid <= 0 ||
       !Number.isSafeInteger(ppid) ||
-      ppid < 0 ||
-      parseProcessElapsedSeconds(match[3]) === undefined
+      ppid < 0
     ) {
       throw new Error("ps returned an invalid process inventory row");
+    }
+    const elapsed = match[3];
+    const elapsedAvailable = parseProcessElapsedSeconds(elapsed) !== undefined;
+    if (!elapsedAvailable) {
+      emitTerminalProcessInventoryDiagnostic(
+        diagnosticLog,
+        "terminal_process_inventory_row",
+        {
+          status: "metadata_unavailable",
+          failure_kind: "elapsed_unparseable",
+          // The header is line 1 and `lines` starts at the first data row.
+          row_number: lineIndex + 2,
+          pid,
+          ppid,
+          elapsed_value: elapsed.slice(0, 64),
+          elapsed_value_length: elapsed.length
+        }
+      );
     }
     snapshots.push({
       pid,
       ppid,
-      elapsed: match[3],
+      ...(elapsedAvailable ? { elapsed } : {}),
       command: match[4]
     });
   }
@@ -190,6 +219,18 @@ function parseCompletePsProcessSnapshots(
     throw new Error("ps returned a header-only process inventory");
   }
   return snapshots;
+}
+
+function emitTerminalProcessInventoryDiagnostic(
+  diagnosticLog: TerminalProcessInventoryDiagnosticLog | undefined,
+  event: string,
+  fields: Readonly<Record<string, unknown>>
+): void {
+  try {
+    diagnosticLog?.(event, fields);
+  } catch {
+    // Diagnostics must never change process discovery behavior.
+  }
 }
 
 function selectedSnapshots(

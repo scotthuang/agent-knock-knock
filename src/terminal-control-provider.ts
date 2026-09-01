@@ -41,6 +41,11 @@ export interface TerminalViewport {
   rows: number;
 }
 
+export type TerminalDiscoveryDiagnosticLog = (
+  event: string,
+  fields: Readonly<Record<string, unknown>>
+) => void;
+
 export interface TerminalControlProvider {
   readonly kind: string;
   readonly supportedCapabilities: readonly TerminalControlCapability[];
@@ -73,7 +78,10 @@ export class TerminalControlProviderRegistry {
   private readonly providers = new Map<string, TerminalControlProvider>();
   private facade?: TerminalControlProvider;
 
-  constructor(providers: readonly TerminalControlProvider[] = []) {
+  constructor(
+    providers: readonly TerminalControlProvider[] = [],
+    private readonly diagnosticLog?: TerminalDiscoveryDiagnosticLog
+  ) {
     for (const provider of providers) {
       this.register(provider);
     }
@@ -120,7 +128,10 @@ export class TerminalControlProviderRegistry {
    * provider still performs its own endpoint-specific checks when dispatched.
    */
   asProvider(): TerminalControlProvider {
-    this.facade ??= new RegistryTerminalControlProvider(() => this.list());
+    this.facade ??= new RegistryTerminalControlProvider(
+      () => this.list(),
+      this.diagnosticLog
+    );
     return this.facade;
   }
 }
@@ -130,7 +141,8 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
   private readonly discoveryErrors = new Map<string, string>();
 
   constructor(
-    private readonly registeredProviders: () => TerminalControlProvider[]
+    private readonly registeredProviders: () => TerminalControlProvider[],
+    private readonly diagnosticLog?: TerminalDiscoveryDiagnosticLog
   ) {}
 
   get supportedCapabilities(): readonly TerminalControlCapability[] {
@@ -177,6 +189,16 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
             assertEndpointKind(terminal, provider.kind);
           }
           this.discoveryErrors.delete(provider.kind);
+          emitTerminalDiscoveryDiagnostic(
+            this.diagnosticLog,
+            "terminal_control_provider_discovery",
+            {
+              provider: provider.kind,
+              status: "available",
+              terminal_count: terminals.length,
+              terminals: terminals.map(terminalEndpointDiagnostic)
+            }
+          );
           return terminals;
         } catch (error) {
           // A provider that cannot prove its own endpoints must contribute no
@@ -185,6 +207,16 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
           this.discoveryErrors.set(
             provider.kind,
             terminalProviderErrorMessage(error)
+          );
+          emitTerminalDiscoveryDiagnostic(
+            this.diagnosticLog,
+            "terminal_control_provider_discovery",
+            {
+              provider: provider.kind,
+              status: "error",
+              error_name: error instanceof Error ? error.name : undefined,
+              error: terminalProviderErrorMessage(error)
+            }
           );
           return [];
         }
@@ -298,9 +330,34 @@ function intersectRegisteredCapabilities<T extends string>(
 }
 
 export function createTerminalControlProviderRegistry(
-  providers: readonly TerminalControlProvider[] = []
+  providers: readonly TerminalControlProvider[] = [],
+  diagnosticLog?: TerminalDiscoveryDiagnosticLog
 ): TerminalControlProviderRegistry {
-  return new TerminalControlProviderRegistry(providers);
+  return new TerminalControlProviderRegistry(providers, diagnosticLog);
+}
+
+function terminalEndpointDiagnostic(
+  terminal: TerminalEndpointRef
+): Record<string, unknown> {
+  return {
+    provider: terminal.identity.providerKind,
+    endpoint_key: terminal.identity.endpointKey,
+    resource_key: terminal.identity.resourceKey,
+    route: terminal.route.label,
+    process_anchor_pid: terminal.processAnchorPid
+  };
+}
+
+function emitTerminalDiscoveryDiagnostic(
+  diagnosticLog: TerminalDiscoveryDiagnosticLog | undefined,
+  event: string,
+  fields: Readonly<Record<string, unknown>>
+): void {
+  try {
+    diagnosticLog?.(event, fields);
+  } catch {
+    // Diagnostics must never change terminal discovery behavior.
+  }
 }
 
 /**
@@ -1077,18 +1134,59 @@ export async function enrichActiveProcessesWithTerminalControl<T extends ActiveT
   options: {
     capabilities?: readonly TerminalControlCapability[];
     processTree?: readonly TerminalProcessSnapshot[];
+    diagnosticLog?: TerminalDiscoveryDiagnosticLog;
   } = {}
 ): Promise<T[]> {
   const terminals = await provider.listTerminals();
   if (terminals.length === 0) {
+    for (const process of processes) {
+      emitTerminalDiscoveryDiagnostic(
+        options.diagnosticLog,
+        "terminal_process_association",
+        {
+          agent: process.agent,
+          pid: process.pid,
+          ppid: process.ppid,
+          terminal_count: 0,
+          matching_terminal_count: 0,
+          result: "no_terminal_candidates",
+          process_ancestry: processAncestryDiagnostic(process, options.processTree)
+        }
+      );
+    }
     return processes;
   }
 
   const matches = new Map<number, TerminalEndpointRef>();
   const processTree = options.processTree ?? processes;
   for (const process of processes) {
-    const matchingTerminals = terminals.filter((candidate) =>
-      provider.containsProcess(candidate, process, processTree)
+    const candidateObservations = terminals.map((candidate) => ({
+      terminal: candidate,
+      contains_process: provider.containsProcess(candidate, process, processTree)
+    }));
+    const matchingTerminals = candidateObservations
+      .filter((candidate) => candidate.contains_process)
+      .map((candidate) => candidate.terminal);
+    emitTerminalDiscoveryDiagnostic(
+      options.diagnosticLog,
+      "terminal_process_association",
+      {
+        agent: process.agent,
+        pid: process.pid,
+        ppid: process.ppid,
+        terminal_count: terminals.length,
+        matching_terminal_count: matchingTerminals.length,
+        result: matchingTerminals.length === 1
+          ? "matched"
+          : matchingTerminals.length === 0
+            ? "no_match"
+            : "ambiguous",
+        process_ancestry: processAncestryDiagnostic(process, processTree),
+        candidates: candidateObservations.map(({ terminal, contains_process }) => ({
+          ...terminalEndpointDiagnostic(terminal),
+          contains_process
+        }))
+      }
     );
     // Never guess when nested/multiple terminal providers both contain the
     // same process. A wrong match would grant control over an unrelated route.
@@ -1111,6 +1209,22 @@ export async function enrichActiveProcessesWithTerminalControl<T extends ActiveT
       )
     } as T;
   });
+}
+
+function processAncestryDiagnostic(
+  process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
+  processTree: readonly Pick<TerminalProcessSnapshot, "pid" | "ppid">[] = []
+): Array<{ pid: number; ppid?: number }> {
+  const byPid = new Map(processTree.map((candidate) => [candidate.pid, candidate]));
+  const ancestry: Array<{ pid: number; ppid?: number }> = [];
+  const seen = new Set<number>();
+  let current: Pick<TerminalProcessSnapshot, "pid" | "ppid"> | undefined = process;
+  while (current && !seen.has(current.pid)) {
+    ancestry.push({ pid: current.pid, ppid: current.ppid });
+    seen.add(current.pid);
+    current = current.ppid === undefined ? undefined : byPid.get(current.ppid);
+  }
+  return ancestry;
 }
 
 function assertEndpointKind(terminal: TerminalEndpointRef, kind: string): void {

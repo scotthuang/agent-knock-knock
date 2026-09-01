@@ -176,13 +176,33 @@ export function selectRootTerminalProcesses<Process extends {
   pid: number;
   ppid?: number;
   terminalControl?: TerminalControlRef;
-}>(processes: readonly Process[]): Process[] {
+}>(
+  processes: readonly Process[],
+  processTree: readonly Pick<Process, "pid" | "ppid">[] = processes
+): Process[] {
   const pids = new Set(
     processes.map((process) => `${process.agent}:${process.pid}`)
   );
-  const roots = processes.filter((process) =>
-    !process.ppid || !pids.has(`${process.agent}:${process.ppid}`)
+  const processByPid = new Map(
+    processTree.map((process) => [process.pid, process])
   );
+  const roots = processes.filter((process) => {
+    const visited = new Set<number>([process.pid]);
+    let ancestorPid = process.ppid;
+    while (
+      typeof ancestorPid === "number" &&
+      Number.isSafeInteger(ancestorPid) &&
+      ancestorPid > 1 &&
+      !visited.has(ancestorPid)
+    ) {
+      if (pids.has(`${process.agent}:${ancestorPid}`)) {
+        return false;
+      }
+      visited.add(ancestorPid);
+      ancestorPid = processByPid.get(ancestorPid)?.ppid;
+    }
+    return true;
+  });
   const seenTerminalIncarnations = new Set<string>();
   return roots.filter((process) => {
     const endpoint = process.terminalControl

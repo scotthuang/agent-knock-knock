@@ -661,6 +661,10 @@ test("terminal provider registry facade aggregates and dispatches by provider ki
 });
 
 test("terminal provider registry isolates discovery failures by provider", async () => {
+  const discoveryDiagnostics: Array<{
+    event: string;
+    fields: Readonly<Record<string, unknown>>;
+  }> = [];
   const tmux = new RecordingTerminalControlProvider(
     "tmux",
     ["screen_status", "send_keys"],
@@ -674,9 +678,28 @@ test("terminal provider registry isolates discovery failures by provider", async
   const provider = createTerminalControlProviderRegistry([
     tmux,
     herdr
-  ]).asProvider();
+  ], (event, fields) => discoveryDiagnostics.push({ event, fields })).asProvider();
 
   assert.deepEqual(await provider.listTerminals(), [tmux.terminal]);
+  assert.deepEqual(discoveryDiagnostics.map(({ event, fields }) => ({
+    event,
+    provider: fields.provider,
+    status: fields.status,
+    terminal_count: fields.terminal_count,
+    error: fields.error
+  })), [{
+    event: "terminal_control_provider_discovery",
+    provider: "tmux",
+    status: "available",
+    terminal_count: 1,
+    error: undefined
+  }, {
+    event: "terminal_control_provider_discovery",
+    provider: "herdr",
+    status: "error",
+    terminal_count: undefined,
+    error: "herdr discovery failed"
+  }]);
   assert.deepEqual(await provider.diagnostics(), {
     provider: "registry",
     providerKinds: ["tmux", "herdr"],

@@ -57,6 +57,10 @@ interface PaneState {
 
 interface HerdrHarness {
   provider: HerdrTerminalControlProvider;
+  diagnostics: Array<{
+    event: string;
+    fields: Readonly<Record<string, unknown>>;
+  }>;
   state: PaneState;
   requests: Array<{
     socketPath: string;
@@ -140,6 +144,7 @@ function createHarness(): HerdrHarness {
       command: "node old.js"
     },
     requests: [],
+    diagnostics: [],
     serverVersion: HERDR_EXACT_VERSION,
     serverProtocol: HERDR_EXACT_PROTOCOL,
     socketIdentity: SOCKET_IDENTITY,
@@ -274,6 +279,9 @@ function createHarness(): HerdrHarness {
       return commandSuccess(sessionListJson());
     },
     request,
+    diagnosticLog: (event, fields) => {
+      harness.diagnostics.push({ event, fields });
+    },
     statSocket: () => harness.socketIdentity,
     inspectTtyViewport: async (shellPid) => {
       harness.ttyViewportCalls.push(shellPid);
@@ -285,6 +293,24 @@ function createHarness(): HerdrHarness {
   });
   return harness;
 }
+
+test("Herdr discovery diagnostics identify a missing pane shell PID", async () => {
+  const harness = createHarness();
+  harness.state.shellPid = undefined;
+
+  assert.deepEqual(await harness.provider.listTerminals(), []);
+  assert.ok(harness.diagnostics.some(({ event, fields }) =>
+    event === "herdr_pane_process_observation" &&
+    fields.pane_id === "w1:p1" &&
+    fields.shell_pid_available === false
+  ));
+  assert.ok(harness.diagnostics.some(({ event, fields }) =>
+    event === "herdr_pane_endpoint_observation" &&
+    fields.pane_id === "w1:p1" &&
+    fields.status === "omitted" &&
+    fields.reason === "shell_pid_unavailable"
+  ));
+});
 
 test("parseHerdrSessionList maps official snake_case session records", () => {
   assert.deepEqual(parseHerdrSessionList(sessionListJson()), [SESSION]);

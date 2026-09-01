@@ -19,7 +19,10 @@ import {
   createConversation,
   type Conversation
 } from "../src/protocol.js";
-import { assertSafeTerminalSend } from "../src/terminal-authority-policy.js";
+import {
+  assertSafeTerminalSend,
+  selectRootTerminalProcesses
+} from "../src/terminal-authority-policy.js";
 import type { TerminalBridgeStatus } from "../src/terminal-agent-bridge.js";
 import {
   createTerminalEndpointRef,
@@ -32,6 +35,35 @@ import {
 const THREAD_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0101";
 const THREAD_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbb0102";
 const TMUX_SOCKET = "/private/tmp/tmux-501/default";
+
+test("root terminal selection follows unclassified ancestors", () => {
+  const terminalControl = canonicalTmuxControl({ target: "durable:0.0" });
+  const nested = {
+    agent: "codex" as const,
+    pid: 60350,
+    ppid: 60344,
+    terminalControl
+  };
+  const root = {
+    agent: "codex" as const,
+    pid: 15306,
+    ppid: 24473,
+    terminalControl
+  };
+
+  assert.deepEqual(
+    selectRootTerminalProcesses(
+      [nested, root],
+      [
+        nested,
+        { pid: 60344, ppid: 59970 },
+        { pid: 59970, ppid: 15306 },
+        root
+      ]
+    ),
+    [root]
+  );
+});
 
 function canonicalTmuxControl({
   target,

@@ -57,6 +57,7 @@ import {
   STORE_SESSION_AUTHORITY_PROTOCOL
 } from "./store.js";
 import {
+  parseTerminalConversationId,
   type TerminalAgentAdapterRegistry,
   type ActiveTerminalProcess,
   type TerminalControlRef,
@@ -870,6 +871,14 @@ async function observeExactTerminal(request: {
     (terminal) => stringValue(terminal.id) === terminalId
   );
   if (matches.length !== 1) {
+    const state = scan.summary.error ? "unavailable" : "absent";
+    runtimeLog("info", "terminal_exact_observation", {
+      terminal_id: terminalId,
+      state,
+      matching_terminal_count: matches.length,
+      observed_terminal_ids: scan.terminalControlled.map((terminal) => terminal.id),
+      scan_summary: scan.summary
+    });
     return scan.summary.error
       ? {
           state: "unavailable",
@@ -889,12 +898,25 @@ async function observeExactTerminal(request: {
     (terminal) => stringValue(terminal.id) === terminalId
   );
   if (projectedMatches.length !== 1) {
+    runtimeLog("info", "terminal_exact_observation", {
+      terminal_id: terminalId,
+      state: "unavailable",
+      stage: "projection",
+      matching_terminal_count: projectedMatches.length,
+      scan_summary: scan.summary
+    });
     return {
       state: "unavailable",
       reason: "the exact terminal could not be projected authoritatively",
       summary: scan.summary
     };
   }
+  runtimeLog("info", "terminal_exact_observation", {
+    terminal_id: terminalId,
+    state: "available",
+    matching_terminal_count: 1,
+    scan_summary: scan.summary
+  });
   return {
     state: "available",
     rawTerminal: matches[0],
@@ -988,6 +1010,16 @@ async function buildTerminalListGroup({
   const terminalDiagnostics = options.terminalDebug
     ? await terminalControlDiagnostics(terminalProvider)
     : undefined;
+  const exactTarget = terminalId
+    ? exactTerminalTargetDiagnostic(terminalId)
+    : undefined;
+  if (terminalId) {
+    runtimeLog("info", "terminal_exact_scan", {
+      stage: "started",
+      terminal_id: terminalId,
+      target: exactTarget
+    });
+  }
   const terminalControlled: Record<string, any>[] = [];
   let activeCount = 0;
   const errors: string[] = [];
@@ -999,18 +1031,68 @@ async function buildTerminalListGroup({
       ),
       { includeAncestors: true }
     );
+    if (terminalId) {
+      const targetPid = exactTarget?.pid;
+      runtimeLog("info", "terminal_exact_scan", {
+        stage: "process_inventory",
+        terminal_id: terminalId,
+        target_pid: targetPid,
+        snapshot_count: snapshots.length,
+        target_process_found: targetPid === undefined
+          ? undefined
+          : snapshots.some((snapshot) => snapshot.pid === targetPid),
+        target_process_snapshots: targetPid === undefined
+          ? []
+          : snapshots
+            .filter((snapshot) => snapshot.pid === targetPid)
+            .map((snapshot) => ({ pid: snapshot.pid, ppid: snapshot.ppid }))
+      });
+    }
     const activeSessions: ActiveTerminalProcess[] = await bridge.listProcesses(
       snapshots,
       adapters.map((adapter) => adapter.agent)
     );
-    const rootSessions = selectRootTerminalProcesses(activeSessions);
+    const rootSessions = selectRootTerminalProcesses(activeSessions, snapshots);
     const controlledSessions = rootSessions.filter(
       (session) => session.terminalControl !== undefined
     );
+    if (terminalId) {
+      const targetPid = exactTarget?.pid;
+      const targetSessions = targetPid === undefined
+        ? []
+        : activeSessions.filter((session) => session.pid === targetPid);
+      runtimeLog("info", "terminal_exact_scan", {
+        stage: "process_classification_and_association",
+        terminal_id: terminalId,
+        target_pid: targetPid,
+        classified_process_count: activeSessions.length,
+        root_process_count: rootSessions.length,
+        controlled_process_count: controlledSessions.length,
+        target_classified_count: targetSessions.length,
+        target_controlled_count: targetSessions.filter(
+          (session) => session.terminalControl !== undefined
+        ).length,
+        target_sessions: targetSessions.map((session) => ({
+          agent: session.agent,
+          pid: session.pid,
+          ppid: session.ppid,
+          kind: session.kind,
+          confidence: session.confidence,
+          selected_as_root: rootSessions.includes(session),
+          terminal_conversation_id: session.terminalControl
+            ? bridge.terminalConversationId(session)
+            : undefined,
+          terminal_control: terminalControlScanDiagnostic(
+            session.terminalControl
+          )
+        }))
+      });
+    }
     activeCount = controlledSessions.length;
     const selectedSessions = terminalId
-      ? controlledSessions.filter(
-          (session) => bridge.terminalConversationId(session) === terminalId
+      ? activeSessions.filter(
+          (session) => session.terminalControl !== undefined &&
+            bridge.terminalConversationId(session) === terminalId
         )
       : controlledSessions;
     for (const session of selectedSessions) {
@@ -1032,6 +1114,17 @@ async function buildTerminalListGroup({
     errors.push(error instanceof Error ? error.message : String(error));
   }
 
+  if (terminalId) {
+    runtimeLog("info", "terminal_exact_scan", {
+      stage: "complete",
+      terminal_id: terminalId,
+      controlled_process_count: activeCount,
+      terminal_row_count: terminalControlled.length,
+      terminal_row_ids: terminalControlled.map((terminal) => terminal.id),
+      errors
+    });
+  }
+
   return {
     terminalControlled,
     summary: {
@@ -1043,6 +1136,42 @@ async function buildTerminalListGroup({
       diagnostics: terminalDiagnostics,
       error: errors.length > 0 ? errors.join("; ") : undefined
     }
+  };
+}
+
+function exactTerminalTargetDiagnostic(
+  terminalId: string
+): Record<string, unknown> | undefined {
+  try {
+    const parsed = parseTerminalConversationId(terminalId);
+    return parsed ? {
+      provider: parsed.kind,
+      agent: parsed.agent,
+      route: parsed.target,
+      pid: parsed.pid
+    } : undefined;
+  } catch (error) {
+    return {
+      parse_error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function terminalControlScanDiagnostic(
+  terminalControl: TerminalControlRef | undefined
+): Record<string, unknown> | undefined {
+  if (!terminalControl) {
+    return undefined;
+  }
+  const control = terminalControl as unknown as Record<string, unknown>;
+  return {
+    kind: terminalControl.kind,
+    target: terminalControl.target,
+    pane_pid: control.panePid,
+    process_anchor_pid: control.processAnchorPid,
+    endpoint_key: control.endpointKey,
+    resource_key: control.resourceKey,
+    terminal_id: control.terminalId
   };
 }
 
@@ -1151,6 +1280,8 @@ async function terminalControlledListEntry(
     orphanedDispatch,
     nativeIdentityObservation,
     nativeAgentIdentity,
+    authorityNativeIdentityObservation,
+    authorityNativeAgentIdentity,
     codexOpenRootRolloutInventory,
     nativeProcessUuid,
     nativeProcessBirth,
@@ -1233,6 +1364,17 @@ async function terminalControlledListEntry(
     processUuid: nativeProcessUuid,
     processBirth: nativeProcessBirth,
     rollout: nativeAgentIdentity?.rollout
+  });
+  const authorityLifecycleBindingToken = unmanagedTerminalBindingToken({
+    terminalId: bridge.terminalConversationId(session),
+    terminalControl,
+    agent: session.agent,
+    pid: session.pid,
+    workspace: session.cwd ?? terminalControl.currentPath ?? cliCwd(),
+    nativeThreadId: authorityNativeAgentIdentity?.sessionId,
+    processUuid: nativeProcessUuid,
+    processBirth: nativeProcessBirth,
+    rollout: authorityNativeAgentIdentity?.rollout
   });
   const codexLifecycleIncarnationAvailable =
     session.agent !== "codex" ||
@@ -1323,6 +1465,11 @@ async function terminalControlledListEntry(
     // human native-thread switch.
     _automated_input_composer_ready: automatedInputComposerReady,
     _user_explicit_composer_ready: userExplicitComposerReady,
+    _native_identity_authority: {
+      observation: authorityNativeIdentityObservation,
+      identity: authorityNativeAgentIdentity,
+      lifecycle_binding_token: authorityLifecycleBindingToken
+    },
     ...(codexLatentClearResumeObservationValue
       ? {
           _codex_latent_clear_resume: {
@@ -1365,7 +1512,7 @@ async function terminalControlledListEntry(
       terminalState: effectiveTerminalState,
       lifecycleCapability,
       nativeInspectionCapability,
-      nativeAgentIdentity,
+      nativeAgentIdentity: authorityNativeAgentIdentity,
       nativeProcessUuid,
       nativeProcessBirth,
       codexLifecycleIncarnationAvailable,
@@ -1623,6 +1770,8 @@ interface TerminalNativeListIdentityObservation {
   orphanedDispatch?: TerminalDispatchLedgerDocument;
   nativeIdentityObservation: TerminalNativeIdentityObservation;
   nativeAgentIdentity?: TerminalNativeIdentity;
+  authorityNativeIdentityObservation: TerminalNativeIdentityObservation;
+  authorityNativeAgentIdentity?: TerminalNativeIdentity;
   codexOpenRootRolloutInventory?: CodexOpenRootRolloutInventory;
   nativeProcessUuid?: string;
   nativeProcessBirth?: string;
@@ -1661,8 +1810,9 @@ async function observeTerminalNativeListIdentity(
       });
     } catch (error) {
       // Preserve generic discovery when Store hints are unavailable. Once an
-      // exact hint exists, however, the constrained resolver below must fail
-      // closed rather than retrying without its managed lineage fences.
+      // exact hint exists, the constrained resolver below still evaluates it;
+      // a separate complete root inventory may later describe the physical
+      // read-only identity without granting managed mutation authority.
       runtimeLog("warn", "terminal_managed_identity_context_unavailable", {
         agent: session.agent,
         terminal_target: terminalControl.target,
@@ -1689,9 +1839,11 @@ async function observeTerminalNativeListIdentity(
       reason: error instanceof Error ? error.message : String(error)
     };
   }
-  const nativeAgentIdentity = nativeIdentityObservation.status === "resolved"
-    ? nativeIdentityObservation.identity
-    : undefined;
+  const authorityNativeIdentityObservation = nativeIdentityObservation;
+  const authorityNativeAgentIdentity =
+    authorityNativeIdentityObservation.status === "resolved"
+      ? authorityNativeIdentityObservation.identity
+      : undefined;
   let codexOpenRootRolloutInventory:
     | CodexOpenRootRolloutInventory
     | undefined;
@@ -1714,6 +1866,38 @@ async function observeTerminalNativeListIdentity(
       });
     }
   }
+  if (
+    session.agent === "codex" &&
+    nativeIdentityObservation.status === "unavailable" &&
+    codexOpenRootRolloutInventory?.status === "resolved" &&
+    codexOpenRootRolloutInventory.pid === session.pid
+  ) {
+    const constrainedReason = nativeIdentityObservation.reason;
+    const [identity] = codexOpenRootRolloutInventory.roots;
+    if (
+      identity.processUuid === codexOpenRootRolloutInventory.processUuid &&
+      identity.processBirth === codexOpenRootRolloutInventory.processBirth
+    ) {
+      nativeIdentityObservation = {
+        status: "resolved",
+        identity
+      };
+      runtimeLog(
+        "info",
+        "terminal_native_session_identity_resolved_from_unique_root_inventory",
+        {
+          agent: session.agent,
+          terminal_target: terminalControl.target,
+          pid: session.pid,
+          preferred_session_id: codexIdentityContext?.preferredSessionId,
+          resolved_session_id: identity.sessionId,
+          constrained_error: constrainedReason,
+          inventory_fingerprint:
+            codexOpenRootRolloutInventory.inventoryFingerprint
+        }
+      );
+    }
+  }
   if (nativeIdentityObservation.status === "unavailable") {
     runtimeLog("warn", "terminal_native_session_identity_unavailable", {
       agent: session.agent,
@@ -1722,6 +1906,9 @@ async function observeTerminalNativeListIdentity(
       error: nativeIdentityObservation.reason
     });
   }
+  const nativeAgentIdentity = nativeIdentityObservation.status === "resolved"
+    ? nativeIdentityObservation.identity
+    : undefined;
   let nativeProcessUuid = nativeAgentIdentity?.processUuid;
   let nativeProcessBirth = nativeAgentIdentity?.processBirth;
   let nativeProcessEvidence = nativeAgentIdentity?.evidence;
@@ -1752,6 +1939,8 @@ async function observeTerminalNativeListIdentity(
     orphanedDispatch,
     nativeIdentityObservation,
     nativeAgentIdentity,
+    authorityNativeIdentityObservation,
+    authorityNativeAgentIdentity,
     codexOpenRootRolloutInventory,
     nativeProcessUuid,
     nativeProcessBirth,
@@ -1837,7 +2026,7 @@ type TerminalFirstListContext = {
 };
 
 function observeTerminalListBindingAuthority(
-  terminal: Record<string, any>,
+  listedTerminal: Record<string, any>,
   context: TerminalFirstListContext
 ) {
   const {
@@ -1855,8 +2044,13 @@ function observeTerminalListBindingAuthority(
     _codex_latent_clear_resume: codexLatentClearResumeValue,
     _terminal_user_explicit_send_action: terminalUserExplicitSendAction,
     _terminal_status_snapshot: _terminalStatusSnapshot,
+    _native_identity_authority: nativeIdentityAuthorityValue,
     ...publicTerminal
-  } = terminal;
+  } = listedTerminal;
+  const terminal = terminalIdentityAuthorityView(
+    listedTerminal,
+    nativeIdentityAuthorityValue
+  );
   const codexOpenRootRolloutInventory = isRecord(
     codexOpenRootRolloutInventoryValue
   )
@@ -2100,6 +2294,7 @@ function observeTerminalListBindingAuthority(
       }
     : undefined;
   return {
+    authorityTerminal: terminal,
     automatedInputComposerReady,
     codexOpenRootRolloutInventory,
     codexLatentClearResumeValue,
@@ -2139,6 +2334,32 @@ function observeTerminalListBindingAuthority(
   };
 }
 
+function terminalIdentityAuthorityView(
+  terminal: Record<string, any>,
+  authorityValue: unknown
+): Record<string, any> {
+  if (!isRecord(authorityValue)) {
+    return terminal;
+  }
+  const observation = isRecord(authorityValue.observation)
+    ? authorityValue.observation
+    : { status: "not_observed" };
+  const identity = isRecord(authorityValue.identity)
+    ? authorityValue.identity
+    : undefined;
+  return {
+    ...terminal,
+    native_agent_session_id: stringValue(identity?.sessionId),
+    native_agent_rollout: isRecord(identity?.rollout)
+      ? identity.rollout
+      : undefined,
+    native_agent_identity_observation: observation,
+    lifecycle_binding_token:
+      stringValue(authorityValue.lifecycle_binding_token) ??
+      terminal.lifecycle_binding_token
+  };
+}
+
 function observeVerifiedEmptyTerminalAuthority(
   terminal: Record<string, any>,
   context: TerminalFirstListContext,
@@ -2167,7 +2388,7 @@ function observeVerifiedEmptyTerminalAuthority(
   const verifiedEmptySourceActiveElsewhere = Boolean(
     verifiedEmptySourceNativeThreadId &&
     terminals.some((candidate) =>
-      candidate !== terminal &&
+      stringValue(candidate.id) !== stringValue(terminal.id) &&
       candidate.agent === "codex" &&
       stringValue(candidate.native_agent_session_id)?.toLowerCase() ===
         verifiedEmptySourceNativeThreadId
@@ -2300,7 +2521,7 @@ function observeDeferredSourceAuthority(
   const deferredCodexSourceActiveElsewhere = Boolean(
     deferredCodexSourceNativeThreadId &&
     terminals.some((candidate) =>
-      candidate !== terminal &&
+      stringValue(candidate.id) !== stringValue(terminal.id) &&
       candidate.agent === "codex" &&
       stringValue(candidate.native_agent_session_id)?.toLowerCase() ===
         deferredCodexSourceNativeThreadId
@@ -3030,17 +3251,21 @@ function terminalFirstListProjection({
     nonterminalDeferredTransfers,
     conversationHasNonterminalDeferredTransfer
   };
-  const projectedTerminals = terminals.map((terminal) =>
-    renderTerminalFirstListEntry(
+  const projectedTerminals = terminals.map((terminal) => {
+    const binding = observeTerminalListBindingAuthority(
       terminal,
+      projectionContext
+    );
+    return renderTerminalFirstListEntry(
+      binding.authorityTerminal,
       projectionContext,
       observeTerminalListActionAuthority(
-        terminal,
+        binding.authorityTerminal,
         projectionContext,
-        observeTerminalListBindingAuthority(terminal, projectionContext)
+        binding
       )
-    )
-  );
+    );
+  });
 
   const unavailableManagedTurns = displayedConversations
     .filter((conversation) => {

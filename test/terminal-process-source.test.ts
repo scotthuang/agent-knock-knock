@@ -147,6 +147,78 @@ test("system process source keeps valid cwd rows from a partial lsof failure", a
   assert.deepEqual(calls[1].args.slice(-1), ["1100"]);
 });
 
+test("system process source keeps PID authority when elapsed metadata is malformed", async () => {
+  const diagnostics: Array<{
+    event: string;
+    fields: Readonly<Record<string, unknown>>;
+  }> = [];
+  const source = new SystemTerminalProcessSource({
+    runCommand(command): ProcessCommandResult {
+      if (command === "ps") {
+        return ok([
+          "  PID  PPID     ELAPSED COMMAND",
+          "  100     1       01:00 terminal shell",
+          " 1099   100           - short-lived unrelated process",
+          " 1100   100       00:12 codex"
+        ].join("\n") + "\n");
+      }
+      if (command === "lsof") {
+        return { status: 1, stdout: "", stderr: "lsof unavailable" };
+      }
+      return { status: 1, stdout: "", stderr: `unexpected command: ${command}` };
+    },
+    diagnosticLog(event, fields) {
+      diagnostics.push({ event, fields });
+    }
+  });
+
+  const snapshots = await source.listProcessSnapshots(
+    (snapshot) => snapshot.pid === 1100,
+    { includeAncestors: true }
+  );
+
+  assert.deepEqual(snapshots.map(({ pid, elapsed }) => ({ pid, elapsed })), [
+    { pid: 100, elapsed: "01:00" },
+    { pid: 1100, elapsed: "00:12" }
+  ]);
+  assert.deepEqual(diagnostics, [{
+    event: "terminal_process_inventory_row",
+    fields: {
+      status: "metadata_unavailable",
+      failure_kind: "elapsed_unparseable",
+      row_number: 3,
+      pid: 1099,
+      ppid: 100,
+      elapsed_value: "-",
+      elapsed_value_length: 1
+    }
+  }]);
+  assert.equal("command" in diagnostics[0]!.fields, false);
+});
+
+test("process inventory diagnostics cannot change discovery behavior", async () => {
+  const source = new SystemTerminalProcessSource({
+    runCommand(command): ProcessCommandResult {
+      if (command === "ps") {
+        return ok([
+          "  PID  PPID     ELAPSED COMMAND",
+          " 1100   100           - codex"
+        ].join("\n") + "\n");
+      }
+      return { status: 1, stdout: "", stderr: "lsof unavailable" };
+    },
+    diagnosticLog() {
+      throw new Error("diagnostic sink failed");
+    }
+  });
+
+  assert.deepEqual(await source.listProcessSnapshots(), [{
+    pid: 1100,
+    ppid: 100,
+    command: "codex"
+  }]);
+});
+
 test("system process source rejects incomplete or malformed successful ps inventories", async (t) => {
   const cases = [
     {

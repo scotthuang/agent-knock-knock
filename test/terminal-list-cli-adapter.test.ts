@@ -330,6 +330,40 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
   assert.equal(afterBrokenSibling.activity_state, "working");
 });
 
+test("list reports the unique physical Codex root when a stale managed preference rejects it", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-stale-managed-codex-preference-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const staleNativeThreadId = "019f0000-0000-7000-8000-000000000111";
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "pending",
+    false,
+    {},
+    "human-only",
+    false,
+    true,
+    "Working",
+    { rejectedPreferredSessionId: staleNativeThreadId }
+  );
+  const [terminal] = fixture.scan.terminalControlled;
+
+  assert.equal(terminal.native_agent_session_id, fixture.nativeThreadId);
+  assert.equal(
+    (terminal.native_agent_identity_observation as Record<string, unknown>)
+      .status,
+    "resolved"
+  );
+  assert.equal(terminal.activity_state, "working");
+  assert.equal(
+    terminal.native_agent_identity_evidence,
+    "codex_open_root_rollout_inventory"
+  );
+});
+
 test("list keeps a Codex task working and watchable beside a same-turn synthetic context row", async (t) => {
   const root = fs.mkdtempSync(path.join(
     os.tmpdir(),
@@ -1826,6 +1860,36 @@ test("exact terminal observation keeps native facts when a Watch record is corru
   );
 });
 
+test("exact terminal observation keeps its PID when a nested Codex process appears first", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-exact-nested-codex-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "pending",
+    false,
+    {},
+    "human-only",
+    true,
+    true,
+    "Working",
+    { nestedCodexDescendant: true }
+  );
+
+  assert.deepEqual(
+    fixture.scan.terminalControlled.map((terminal) => terminal.pid),
+    [4242],
+    "generic List must retain the ancestor process identity"
+  );
+  const observation = await fixture.facade.observeExactTerminal({
+    options: { storeDir: fixture.storeDir },
+    terminalId: fixture.terminalId
+  });
+  assert.equal(observation.state, "available");
+  if (observation.state !== "available") return;
+  assert.equal(observation.rawTerminal.pid, 4242);
+  assert.equal(observation.terminal.pid, 4242);
+});
+
 async function listCodexRolloutState(
   root: string,
   outcome: "pending" | "completed" | "aborted" | "malformed" | "partial",
@@ -1882,7 +1946,11 @@ async function createCodexRolloutListFixture(
     "human-only",
   canonicalTerminal = false,
   nativeIdentityHasRollout = true,
-  composerScreen = "› "
+  composerScreen = "› ",
+  fixtureOptions: {
+    nestedCodexDescendant?: boolean;
+    rejectedPreferredSessionId?: string;
+  } = {}
 ) {
   const nativeThreadId = "019f0000-0000-7000-8000-000000000777";
   const nativeTurnId = "019f0000-0000-7000-8000-000000000778";
@@ -2068,6 +2136,19 @@ async function createCodexRolloutListFixture(
       panePid: 9001
     }
   };
+  const nestedSession = {
+    ...session,
+    pid: 4243,
+    ppid: 9100,
+    command: "codex nested helper"
+  };
+  const processSnapshots = fixtureOptions.nestedCodexDescendant
+    ? [
+        session,
+        { pid: 9100, ppid: session.pid, command: "nested tool shell" },
+        nestedSession
+      ]
+    : [];
   const registry = new TerminalAgentAdapterRegistry([
     createCodexTerminalAgentAdapter()
   ]);
@@ -2082,10 +2163,12 @@ async function createCodexRolloutListFixture(
     registry,
     listProcesses: async () => includeBrokenSibling
       ? [brokenSession, session]
-      : [session],
+      : fixtureOptions.nestedCodexDescendant
+        ? [nestedSession, session]
+        : [session],
     terminalConversationId: (value: { pid: number }) => value.pid === 4241
       ? "terminal:v2:tmux:codex:durable:0.1:4241"
-      : terminalId,
+      : `terminal:v2:tmux:codex:durable:0.0:${value.pid}`,
     status: async () => ({
       approval_state: {
         scanned: true,
@@ -2109,12 +2192,13 @@ async function createCodexRolloutListFixture(
       createTerminalControlProvider: () => provider,
       createTerminalAgentBridge: () => bridge,
       createTerminalProcessSource: () => ({
-        listProcessSnapshots: async () => []
+        listProcessSnapshots: async () => processSnapshots
       }),
       agentVersionForRunningProcess: () => "0.150.1",
       codexLatentClearResumeObservation: () => undefined,
       codexManagedIdentityResolutionContext: () => ({
-        companions: { primary: undefined, additional: [] }
+        companions: { primary: undefined, additional: [] },
+        preferredSessionId: fixtureOptions.rejectedPreferredSessionId
       }),
       codexProcessIncarnationForPid: () => ({
         processUuid,
@@ -2130,10 +2214,20 @@ async function createCodexRolloutListFixture(
         codexOpenRootRolloutInventory,
       nativeInspectionComposerEmpty: () => true,
       observeCurrentNativeAgentSessionIdentity: async (
-        request: { pid: number }
+        request: { pid: number; preferredSessionId?: string }
       ) => {
         if (request.pid === 4241) {
           throw new Error("broken sibling identity probe");
+        }
+        if (
+          request.preferredSessionId &&
+          request.preferredSessionId ===
+            fixtureOptions.rejectedPreferredSessionId
+        ) {
+          throw new Error(
+            `Codex process ${request.pid} has an unexpected open root ` +
+            "rollout outside the preferred and exact companion identities"
+          );
         }
         return {
           status: "resolved",

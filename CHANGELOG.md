@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.26 - 2026-09-01
+
+### Added
+
+- Add structured Herdr session, pane-process, process-association, and exact-terminal discovery diagnostics so a missing terminal row can be localized without logging terminal contents or coding-agent commands.
+
+### Fixed
+
+- Preserve authoritative PID and ancestry rows when `ps` elapsed metadata is temporarily unavailable, and select the interactive Codex root through the complete process tree so nested helper processes cannot replace the terminal's stable PID.
+- Keep exact Terminal Watch observation bound to its requested PID even when a nested Codex process appears first, preventing a live Herdr pane from being misreported as `terminal_process_unavailable`.
+- Resolve the read-only physical Codex identity from a complete unique same-PID, same-incarnation open-root inventory when a stale managed Session preference rejects the current thread. Managed binding conflicts remain independently visible, while ambiguous roots and every mutation path continue to fail closed.
+
 ## 0.12.25 - 2026-08-31
 
 ### Fixed

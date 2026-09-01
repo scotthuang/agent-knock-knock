@@ -23,6 +23,7 @@ import {
 import {
   enrichActiveProcessesWithTerminalControl,
   TerminalControlInputNotSentError,
+  type TerminalDiscoveryDiagnosticLog,
   type TerminalControlProvider,
   type TerminalViewport
 } from "./terminal-control-provider.js";
@@ -771,6 +772,7 @@ export class TerminalAgentBridge {
   private readonly verifyIdentity?: TerminalIdentityVerifier;
   private readonly nowMs: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly diagnosticLog?: TerminalDiscoveryDiagnosticLog;
 
   constructor(options: {
     registry: TerminalAgentAdapterRegistry;
@@ -778,12 +780,14 @@ export class TerminalAgentBridge {
     verifyIdentity?: TerminalIdentityVerifier;
     nowMs?: () => number;
     sleep?: (milliseconds: number) => Promise<void>;
+    diagnosticLog?: TerminalDiscoveryDiagnosticLog;
   }) {
     this.registry = options.registry;
     this.terminalProvider = options.terminalProvider;
     this.verifyIdentity = options.verifyIdentity;
     this.nowMs = options.nowMs ?? (() => performance.now());
     this.sleep = options.sleep ?? terminalSettleDelay;
+    this.diagnosticLog = options.diagnosticLog;
   }
 
   adapterFor(agent: ExecutorKind | string): TerminalAgentAdapter {
@@ -811,7 +815,8 @@ export class TerminalAgentBridge {
         this.terminalProvider,
         {
           capabilities: terminalControlCapabilitiesForAdapter(adapter),
-          processTree: snapshots
+          processTree: snapshots,
+          diagnosticLog: this.diagnosticLog
         }
       ));
     }
@@ -833,7 +838,8 @@ export class TerminalAgentBridge {
     const adapter = this.registry.require(agent);
     return enrichActiveProcessesWithTerminalControl(processes, this.terminalProvider, {
       capabilities: terminalControlCapabilitiesForAdapter(adapter),
-      processTree: options.processTree
+      processTree: options.processTree,
+      diagnosticLog: this.diagnosticLog
     });
   }
 

@@ -7,6 +7,7 @@ import {
   TerminalControlInputNotSentError,
   TerminalControlUnavailableError,
   type CommandResult,
+  type TerminalDiscoveryDiagnosticLog,
   type TerminalControlProvider,
   type TerminalViewport
 } from "./terminal-control-provider.js";
@@ -371,6 +372,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
   private readonly request: HerdrRequestFunction;
   private readonly statSocket: (socketPath: string) => HerdrSocketIdentity;
   private readonly inspectTtyViewport: HerdrTtyViewportInspector;
+  private readonly diagnosticLog?: TerminalDiscoveryDiagnosticLog;
   private readonly endpointSocketIdentities =
     new WeakMap<TerminalEndpointRef, HerdrSocketIdentity>();
   private requestSequence = 0;
@@ -382,6 +384,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     requestTimeoutMs?: number;
     statSocket?: (socketPath: string) => HerdrSocketIdentity;
     inspectTtyViewport?: HerdrTtyViewportInspector;
+    diagnosticLog?: TerminalDiscoveryDiagnosticLog;
   } = {}) {
     this.commands = options.command
       ? [options.command]
@@ -390,6 +393,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     this.statSocket = options.statSocket ?? readHerdrSocketIdentity;
     this.inspectTtyViewport = options.inspectTtyViewport ??
       inspectHerdrTtyViewport;
+    this.diagnosticLog = options.diagnosticLog;
     const requestTimeoutMs = options.requestTimeoutMs;
     this.request = options.request ?? ((socketPath, request, requestOptions) =>
       requestHerdrUnixSocket(socketPath, request, {
@@ -448,15 +452,44 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
   }
 
   async listTerminals(): Promise<TerminalEndpointRef[]> {
+    this.logDiagnostic("herdr_terminal_discovery", {
+      stage: "session_list",
+      status: "started",
+      selected_command: this.selectedCommand
+    });
     let sessions: HerdrSessionInfo[];
     try {
       sessions = this.discoverSessions().filter((session) => session.running);
     } catch (error) {
       if (error instanceof HerdrProviderUnavailableError) {
+        this.logDiagnostic("herdr_terminal_discovery", {
+          stage: "session_list",
+          status: "unavailable",
+          selected_command: this.selectedCommand,
+          error_name: error.name,
+          error: describeError(error)
+        });
         return [];
       }
+      this.logDiagnostic("herdr_terminal_discovery", {
+        stage: "session_list",
+        status: "error",
+        selected_command: this.selectedCommand,
+        error_name: error instanceof Error ? error.name : undefined,
+        error: describeError(error)
+      });
       throw error;
     }
+    this.logDiagnostic("herdr_terminal_discovery", {
+      stage: "session_list",
+      status: "available",
+      selected_command: this.selectedCommand,
+      running_session_count: sessions.length,
+      sessions: sessions.map((session) => ({
+        name: session.name,
+        socket_path: session.socketPath
+      }))
+    });
     const inspections = await Promise.all(sessions.map(async (session) => {
       try {
         return await this.inspectSession(session);
@@ -465,8 +498,23 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         // this exact-gated provider, but must not break discovery by another
         // provider in the registry. Other live API failures remain fail-closed.
         if (error instanceof HerdrCompatibilityError) {
+          this.logDiagnostic("herdr_terminal_discovery", {
+            stage: "session_inspection",
+            status: "incompatible",
+            session: session.name,
+            socket_path: session.socketPath,
+            error: describeError(error)
+          });
           return undefined;
         }
+        this.logDiagnostic("herdr_terminal_discovery", {
+          stage: "session_inspection",
+          status: "error",
+          session: session.name,
+          socket_path: session.socketPath,
+          error_name: error instanceof Error ? error.name : undefined,
+          error: describeError(error)
+        });
         throw error;
       }
     }));
@@ -483,6 +531,17 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       }
       seen.add(key);
     }
+    this.logDiagnostic("herdr_terminal_discovery", {
+      stage: "complete",
+      status: "available",
+      terminal_count: endpoints.length,
+      terminals: endpoints.map((endpoint) => ({
+        route: endpoint.route.label,
+        terminal_id: endpoint.identity.resourceKey,
+        endpoint_key: endpoint.identity.endpointKey,
+        process_anchor_pid: endpoint.processAnchorPid
+      }))
+    });
     return endpoints;
   }
 
@@ -880,6 +939,17 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     await this.sendInput(resolved, { keys: translated });
   }
 
+  private logDiagnostic(
+    event: string,
+    fields: Readonly<Record<string, unknown>>
+  ): void {
+    try {
+      this.diagnosticLog?.(event, fields);
+    } catch {
+      // Diagnostics must never change Herdr discovery behavior.
+    }
+  }
+
   private discoverSessions(): HerdrSessionInfo[] {
     try {
       const { command, version } = this.probeCommand();
@@ -946,14 +1016,67 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
   private async inspectSession(
     session: HerdrSessionInfo
   ): Promise<HerdrSessionInspection> {
-    const socketIdentity = this.statSocket(session.socketPath);
-    await this.assertCompatibleServer(session, socketIdentity);
-    const result = await this.invoke(
-      session.socketPath,
-      "session.snapshot",
-      {},
-      { expectedSocketIdentity: socketIdentity }
-    );
+    let socketIdentity: HerdrSocketIdentity;
+    try {
+      socketIdentity = this.statSocket(session.socketPath);
+      this.logDiagnostic("herdr_session_observation", {
+        session: session.name,
+        socket_path: session.socketPath,
+        stage: "socket_identity",
+        status: "available",
+        socket_device: socketIdentity.device,
+        socket_inode: socketIdentity.inode,
+        socket_ctime_ns: socketIdentity.ctimeNs
+      });
+    } catch (error) {
+      this.logDiagnostic("herdr_session_observation", {
+        session: session.name,
+        socket_path: session.socketPath,
+        stage: "socket_identity",
+        status: "error",
+        error_name: error instanceof Error ? error.name : undefined,
+        error: describeError(error)
+      });
+      throw error;
+    }
+    try {
+      await this.assertCompatibleServer(session, socketIdentity);
+      this.logDiagnostic("herdr_session_observation", {
+        session: session.name,
+        socket_path: session.socketPath,
+        stage: "ping",
+        status: "available"
+      });
+    } catch (error) {
+      this.logDiagnostic("herdr_session_observation", {
+        session: session.name,
+        socket_path: session.socketPath,
+        stage: "ping",
+        status: "error",
+        error_name: error instanceof Error ? error.name : undefined,
+        error: describeError(error)
+      });
+      throw error;
+    }
+    let result: JsonRecord;
+    try {
+      result = await this.invoke(
+        session.socketPath,
+        "session.snapshot",
+        {},
+        { expectedSocketIdentity: socketIdentity }
+      );
+    } catch (error) {
+      this.logDiagnostic("herdr_session_observation", {
+        session: session.name,
+        socket_path: session.socketPath,
+        stage: "initial_snapshot",
+        status: "error",
+        error_name: error instanceof Error ? error.name : undefined,
+        error: describeError(error)
+      });
+      throw error;
+    }
     if (result.type !== "session_snapshot" || !isRecord(result.snapshot)) {
       throw new Error(
         `Herdr session ${session.name} returned an unexpected session.snapshot result`
@@ -973,14 +1096,27 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     }
     const panes = result.snapshot.panes.map((value, index) =>
       parsePaneInfo(value, `${session.name} pane ${index}`));
+    this.logDiagnostic("herdr_session_observation", {
+      session: session.name,
+      socket_path: session.socketPath,
+      stage: "initial_snapshot",
+      status: "available",
+      pane_count: panes.length,
+      panes: panes.map((pane) => ({
+        pane_id: pane.paneId,
+        terminal_id: pane.terminalId,
+        workspace_id: pane.workspaceId,
+        tab_id: pane.tabId
+      }))
+    });
     const processInfos = await Promise.all(panes.map(async (pane) => {
       try {
-          const processResult = await this.invoke(
-            session.socketPath,
-            "pane.process_info",
-            { pane_id: pane.paneId },
-            { expectedSocketIdentity: socketIdentity }
-          );
+        const processResult = await this.invoke(
+          session.socketPath,
+          "pane.process_info",
+          { pane_id: pane.paneId },
+          { expectedSocketIdentity: socketIdentity }
+        );
         if (
           processResult.type !== "pane_process_info" ||
           !isRecord(processResult.process_info)
@@ -989,13 +1125,50 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
             `Herdr pane.process_info returned an unexpected result for ${pane.paneId}`
           );
         }
-        return parsePaneProcessInfo(processResult.process_info, pane.paneId);
+        const processInfo = parsePaneProcessInfo(
+          processResult.process_info,
+          pane.paneId
+        );
+        this.logDiagnostic("herdr_pane_process_observation", {
+          session: session.name,
+          socket_path: session.socketPath,
+          pane_id: pane.paneId,
+          terminal_id: pane.terminalId,
+          stage: "pane_process_info",
+          status: "available",
+          shell_pid: processInfo.shellPid,
+          shell_pid_available: positiveInteger(processInfo.shellPid) !== undefined,
+          foreground_process_count: processInfo.foregroundProcesses.length,
+          foreground_pids: processInfo.foregroundProcesses.map(
+            (process) => process.pid
+          )
+        });
+        return processInfo;
       } catch (error) {
         // A pane may close between snapshot and inspection. It must not be
         // rebound to another resource; simply omit the vanished pane.
         if (error instanceof HerdrApiError && error.code === "pane_not_found") {
+          this.logDiagnostic("herdr_pane_process_observation", {
+            session: session.name,
+            socket_path: session.socketPath,
+            pane_id: pane.paneId,
+            terminal_id: pane.terminalId,
+            stage: "pane_process_info",
+            status: "omitted",
+            reason: "pane_not_found"
+          });
           return undefined;
         }
+        this.logDiagnostic("herdr_pane_process_observation", {
+          session: session.name,
+          socket_path: session.socketPath,
+          pane_id: pane.paneId,
+          terminal_id: pane.terminalId,
+          stage: "pane_process_info",
+          status: "error",
+          error_name: error instanceof Error ? error.name : undefined,
+          error: describeError(error)
+        });
         throw error;
       }
     }));
@@ -1004,12 +1177,25 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     // PTY. Re-read the authoritative snapshot after process inspection and
     // only join process data to a pane whose stable terminal identity and
     // route metadata are unchanged on the same socket incarnation.
-    const verifiedSnapshotResult = await this.invoke(
-      session.socketPath,
-      "session.snapshot",
-      {},
-      { expectedSocketIdentity: socketIdentity }
-    );
+    let verifiedSnapshotResult: JsonRecord;
+    try {
+      verifiedSnapshotResult = await this.invoke(
+        session.socketPath,
+        "session.snapshot",
+        {},
+        { expectedSocketIdentity: socketIdentity }
+      );
+    } catch (error) {
+      this.logDiagnostic("herdr_session_observation", {
+        session: session.name,
+        socket_path: session.socketPath,
+        stage: "verified_snapshot",
+        status: "error",
+        error_name: error instanceof Error ? error.name : undefined,
+        error: describeError(error)
+      });
+      throw error;
+    }
     if (
       verifiedSnapshotResult.type !== "session_snapshot" ||
       !isRecord(verifiedSnapshotResult.snapshot) ||
@@ -1027,6 +1213,13 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         return [pane.paneId, pane] as const;
       })
     );
+    this.logDiagnostic("herdr_session_observation", {
+      session: session.name,
+      socket_path: session.socketPath,
+      stage: "verified_snapshot",
+      status: "available",
+      pane_count: verifiedPanesByRoute.size
+    });
 
     const skippedWithoutShellPid: string[] = [];
     const endpoints: TerminalEndpointRef[] = [];
@@ -1043,12 +1236,32 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         verifiedPane.workspaceId !== pane.workspaceId ||
         verifiedPane.tabId !== pane.tabId
       ) {
+        this.logDiagnostic("herdr_pane_endpoint_observation", {
+          session: session.name,
+          socket_path: session.socketPath,
+          pane_id: pane.paneId,
+          terminal_id: pane.terminalId,
+          stage: "snapshot_join",
+          status: "omitted",
+          reason: !verifiedPane ? "pane_missing_from_verified_snapshot" :
+            "pane_identity_changed"
+        });
         continue;
       }
       if (!positiveInteger(processInfo.shellPid)) {
         // The current bridge requires a positive process anchor to prove PID
         // containment before mutations. Never substitute cwd or display data.
         skippedWithoutShellPid.push(pane.paneId);
+        this.logDiagnostic("herdr_pane_endpoint_observation", {
+          session: session.name,
+          socket_path: session.socketPath,
+          pane_id: pane.paneId,
+          terminal_id: pane.terminalId,
+          stage: "process_anchor",
+          status: "omitted",
+          reason: "shell_pid_unavailable",
+          shell_pid: processInfo.shellPid
+        });
         continue;
       }
       const endpoint = endpointFromPane(
@@ -1059,7 +1272,26 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       );
       this.endpointSocketIdentities.set(endpoint, socketIdentity);
       endpoints.push(endpoint);
+      this.logDiagnostic("herdr_pane_endpoint_observation", {
+        session: session.name,
+        socket_path: session.socketPath,
+        pane_id: pane.paneId,
+        terminal_id: pane.terminalId,
+        route: endpoint.route.label,
+        stage: "endpoint",
+        status: "available",
+        shell_pid: processInfo.shellPid,
+        process_anchor_pid: endpoint.processAnchorPid
+      });
     }
+    this.logDiagnostic("herdr_session_observation", {
+      session: session.name,
+      socket_path: session.socketPath,
+      stage: "complete",
+      status: "available",
+      endpoint_count: endpoints.length,
+      skipped_without_shell_pid: skippedWithoutShellPid
+    });
     return { session, endpoints, skippedWithoutShellPid };
   }
 
