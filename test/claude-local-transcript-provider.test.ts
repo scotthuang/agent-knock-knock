@@ -31,7 +31,7 @@ const PID = 42421;
 const AGENT_STARTED_AT_MS = 1784870000000;
 const VERSION = "2.1.218";
 const PREVIOUS_VERSION = "2.1.226";
-const CURRENT_VERSION = "2.1.251";
+const CURRENT_VERSION = "2.1.259";
 const LEGACY_VERSION = "2.1.198";
 const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
@@ -949,8 +949,8 @@ test("Claude resume candidates use complete versions and structural identity ins
   );
 });
 
-test("Claude 2.1.251 transcript supports lifecycle, acceptance, completion, and approval evidence", (t) => {
-  const fixture = createFixture(t, 237);
+test("Claude 2.1.259 transcript supports lifecycle, acceptance, completion, and approval evidence", (t) => {
+  const fixture = createFixture(t, 259);
   const request = "Verify the exact current Claude transcript profile";
   const anchor = fixture.capture();
   fixture.write(turnRecords({
@@ -1002,8 +1002,8 @@ test("Claude 2.1.251 transcript supports lifecycle, acceptance, completion, and 
   assert.equal(approval?.toolName, "Bash");
 });
 
-test("Claude 2.1.251 input-ready waiting rows can anchor sends but permission waits cannot", (t) => {
-  const fixture = createFixture(t, 251);
+test("Claude 2.1.259 input-ready waiting rows can anchor sends but permission waits cannot", (t) => {
+  const fixture = createFixture(t, 259);
   fixture.agentRows[0] = {
     ...fixture.agentRows[0],
     status: "waiting",

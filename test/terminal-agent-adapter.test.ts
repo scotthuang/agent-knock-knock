@@ -884,7 +884,8 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
     "0.148.0",
     "0.149.1",
     "0.150.1",
-    "0.151.0"
+    "0.151.0",
+    "0.153.0"
   ]) {
     const profile = probeCodexThreadLifecycle(version);
     assert.equal(profile.status, "supported");
@@ -893,7 +894,7 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
     assert.equal(profile.compatibilityWarning, undefined);
   }
 
-  const capabilities = probeCodexThreadLifecycle("0.151.0");
+  const capabilities = probeCodexThreadLifecycle("0.153.0");
   const unverified = probeCodexThreadLifecycle("0.152.0");
   assert.equal(unverified.status, "supported");
   assert.equal(unverified.behaviorProfile, CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE);
@@ -911,8 +912,8 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
   assert.equal(probeCodexThreadLifecycle(undefined).status, "unknown");
 
   assert.equal(
-    codexLifecycleBehaviorProfile("0.151.0"),
-    "codex-tui-0.151.0"
+    codexLifecycleBehaviorProfile("0.153.0"),
+    "codex-tui-0.153.0"
   );
   assert.equal(
     codexRuntimeCompatibilityProfile("0.152.0")?.behaviorProfile,
@@ -975,7 +976,8 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     "0.148.0",
     "0.149.1",
     "0.150.1",
-    "0.151.0"
+    "0.151.0",
+    "0.153.0"
   ]) {
     const capabilities = probeCodexNativeInspection(version);
     assert.equal(capabilities.status, "supported");
@@ -1255,6 +1257,61 @@ test("Codex 0.151.0 native inspection parses the current status card", () => {
     observed.result?.excerpt ?? "",
     /<redacted-account>/u
   );
+});
+
+test("Codex 0.153.0 native inspection parses the current status card", () => {
+  const nativeThreadId = "01a0688b-1d33-75a2-acf0-0a5ff11db738";
+  const screen = [
+    "/status",
+    "",
+    "╭──────────────────────────────────────────────────────────────────────╮",
+    "│  >_ OpenAI Codex (v0.153.0)                                          │",
+    "│                                                                      │",
+    "│ Visit https://chatgpt.com/codex/settings/usage for up-to-date        │",
+    "│ information on rate limits and credits                               │",
+    "│                                                                      │",
+    "│  Model:                gpt-5.6-sol (reasoning high, summaries auto)  │",
+    "│  Directory:            /private/tmp/akk-codex-0153-probe             │",
+    "│  Permissions:          Workspace (Ask for approval)                  │",
+    "│  Agents.md:            <none>                                        │",
+    "│  Account:              <redacted-account>                            │",
+    "│  Collaboration mode:   Default                                       │",
+    `│  Session:              ${nativeThreadId}          │`,
+    "│                                                                      │",
+    "│  Limits:               refresh requested; run /status again shortly. │",
+    "╰──────────────────────────────────────────────────────────────────────╯",
+    "",
+    "› Ask Codex to do anything",
+    "",
+    "  gpt-5.6-sol high · /private/tmp/akk-codex-0153-probe"
+  ].join("\n");
+
+  const observed = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "0.153.0"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.nativeThreadId, nativeThreadId);
+  assert.equal(observed.observedAgentVersion, "0.153.0");
+  assert.deepEqual(observed.result?.fields, [
+    {
+      name: "Model",
+      value: "gpt-5.6-sol (reasoning high, summaries auto)"
+    },
+    { name: "Directory", value: "/private/tmp/akk-codex-0153-probe" },
+    { name: "Permissions", value: "Workspace (Ask for approval)" },
+    { name: "Agents.md", value: "<none>" },
+    { name: "Account", value: "[REDACTED]" },
+    { name: "Collaboration mode", value: "Default" },
+    { name: "Session", value: nativeThreadId },
+    {
+      name: "Limits",
+      value: "refresh requested; run /status again shortly."
+    }
+  ]);
+  assert.doesNotMatch(observed.result?.excerpt ?? "", /<redacted-account>/u);
 });
 
 test("Codex native inspection observer requires the newest fresh exact status card", () => {

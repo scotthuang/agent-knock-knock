@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.27 - 2026-09-04
+
+### Added
+
+- Add exact Codex `0.153.0` and Claude Code `2.1.259` lifecycle and native-status profiles after isolated real-TUI validation of status inspection, prompt submission, durable session identity, new-thread, and exact-resume behavior.
+
+### Fixed
+
+- Exclude Codex `0.153.0` management and non-interactive subcommands from terminal discovery while preserving interactive prompts, option values, resume, and fork invocations.
+- Recognize Claude Code `2.1.259` value-taking CLI options and its Bash permission footer without the removed Ctrl+E hint; safely correlate the canonical auto-mode tip when it wraps at 80 columns without ever joining wrapped command text.
+- Give the exact Codex `0.153.0` profile the bounded MCP restart settlement used by verified current lifecycle transitions.
+
 ## 0.12.26 - 2026-09-01
 
 ### Added

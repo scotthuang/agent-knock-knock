@@ -5,7 +5,8 @@ const CODEX_LIFECYCLE_PROFILES: Readonly<Record<string, string>> = Object.freeze
   "0.148.0": "codex-tui-0.148.0",
   "0.149.1": "codex-tui-0.149.1",
   "0.150.1": "codex-tui-0.150.1",
-  "0.151.0": "codex-tui-0.151.0"
+  "0.151.0": "codex-tui-0.151.0",
+  "0.153.0": "codex-tui-0.153.0"
 });
 
 /**

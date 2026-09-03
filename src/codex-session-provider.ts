@@ -94,7 +94,75 @@ export interface RolloutExcerptOptions {
 }
 
 const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-const RESUME_SESSION_REGEX = new RegExp(`(?:^|\\s)resume\\s+(${UUID_PATTERN})(?:\\s|$)`, "i");
+const EXACT_UUID_REGEX = new RegExp(`^${UUID_PATTERN}$`, "i");
+
+const CODEX_NON_INTERACTIVE_SUBCOMMANDS = new Set([
+  "agents",
+  "exec",
+  "e",
+  "review",
+  "login",
+  "logout",
+  "mcp",
+  "plugin",
+  "mcp-server",
+  "app-server",
+  "remote-control",
+  "app",
+  "completion",
+  "update",
+  "doctor",
+  "sandbox",
+  "debug",
+  "apply",
+  "a",
+  "queue",
+  "archive",
+  "delete",
+  "migrate-rollouts",
+  "unarchive",
+  "cloud",
+  "exec-server",
+  "execpolicy",
+  "features",
+  "help",
+  "responses-api-proxy",
+  "stdio-to-uds",
+  "cloud-tasks"
+]);
+
+const CODEX_NON_INTERACTIVE_FLAGS = new Set([
+  "-h",
+  "--help",
+  "-V",
+  "--version"
+]);
+
+const CODEX_OPTIONS_WITH_VALUES = new Set([
+  "-c",
+  "--config",
+  "--enable",
+  "--disable",
+  "--remote",
+  "--remote-auth-token-env",
+  "-m",
+  "--model",
+  "--local-provider",
+  "-p",
+  "--profile",
+  "-s",
+  "--sandbox",
+  "-C",
+  "--cd",
+  "--add-dir",
+  "-a",
+  "--ask-for-approval"
+]);
+
+const CODEX_OPTIONS_WITH_MULTIPLE_VALUES = new Set([
+  "-i",
+  "--image"
+]);
 
 export function codexSessionsFromThreadRows(rows: CodexThreadRow[]): CodexSessionSummary[] {
   return rows
@@ -150,7 +218,7 @@ export function classifyCodexProcess(process: CodexProcessSnapshot): ActiveCodex
   if (!commandInvokesCodexCli(command)) {
     return undefined;
   }
-  if (commandInvokesCodexAppServer(command)) {
+  if (!commandInvokesInteractiveCodexCli(command)) {
     return undefined;
   }
 
@@ -165,7 +233,20 @@ export function classifyCodexProcess(process: CodexProcessSnapshot): ActiveCodex
 }
 
 export function extractResumeSessionId(command: string): string | undefined {
-  return RESUME_SESSION_REGEX.exec(command)?.[1];
+  const args = codexCliArguments(command);
+  if (!args) {
+    return undefined;
+  }
+  const inspection = inspectCodexTopLevelArguments(args);
+  if (
+    inspection.hasExitFlag ||
+    inspection.firstPositionalIndex === undefined ||
+    args[inspection.firstPositionalIndex] !== "resume"
+  ) {
+    return undefined;
+  }
+  const candidate = args[inspection.firstPositionalIndex + 1];
+  return candidate && EXACT_UUID_REGEX.test(candidate) ? candidate : undefined;
 }
 
 export function parseCodexRolloutJsonl(text: string, options: RolloutExcerptOptions = {}): RolloutExcerpt {
@@ -268,25 +349,145 @@ function baseProcess(process: CodexProcessSnapshot): Omit<ActiveCodexProcess, "k
 }
 
 function commandInvokesCodexCli(command: string): boolean {
-  const tokens = command.split(/\s+/).filter(Boolean);
+  return codexCliArguments(command) !== undefined;
+}
+
+function codexCliArguments(command: string): readonly string[] | undefined {
+  const tokens = tokenizeCommand(command);
   const firstCommandIndex = tokens.findIndex((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token));
   if (firstCommandIndex < 0) {
-    return false;
+    return undefined;
   }
 
   const first = tokens[firstCommandIndex];
   const second = tokens[firstCommandIndex + 1];
   if (pathBasename(first) === "codex") {
-    return true;
+    return tokens.slice(firstCommandIndex + 1);
   }
 
-  return pathBasename(first) === "node" && pathBasename(second) === "codex";
+  return pathBasename(first) === "node" && pathBasename(second) === "codex"
+    ? tokens.slice(firstCommandIndex + 2)
+    : undefined;
 }
 
-function commandInvokesCodexAppServer(command: string): boolean {
-  const tokens = command.split(/\s+/).filter(Boolean);
-  const codexIndex = tokens.findIndex((token) => pathBasename(token) === "codex");
-  return codexIndex >= 0 && tokens.slice(codexIndex + 1).includes("app-server");
+function commandInvokesInteractiveCodexCli(command: string): boolean {
+  const args = codexCliArguments(command);
+  if (!args) {
+    return false;
+  }
+  const inspection = inspectCodexTopLevelArguments(args);
+  if (inspection.hasExitFlag) {
+    return false;
+  }
+  if (inspection.firstPositionalIndex === undefined) {
+    return true;
+  }
+  return !CODEX_NON_INTERACTIVE_SUBCOMMANDS.has(
+    args[inspection.firstPositionalIndex]
+  );
+}
+
+function inspectCodexTopLevelArguments(args: readonly string[]): {
+  firstPositionalIndex?: number;
+  hasExitFlag: boolean;
+} {
+  let firstPositionalIndex: number | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === "--") {
+      break;
+    }
+    const flag = codexOptionFlag(token);
+    if (CODEX_NON_INTERACTIVE_FLAGS.has(flag)) {
+      return { firstPositionalIndex, hasExitFlag: true };
+    }
+    if (firstPositionalIndex !== undefined) {
+      continue;
+    }
+    if (token.startsWith("-")) {
+      if (
+        CODEX_OPTIONS_WITH_MULTIPLE_VALUES.has(flag) &&
+        !codexOptionHasInlineValue(token, flag)
+      ) {
+        while (args[index + 1] && !args[index + 1].startsWith("-")) {
+          index += 1;
+        }
+        continue;
+      }
+      if (
+        CODEX_OPTIONS_WITH_VALUES.has(flag) &&
+        !codexOptionHasInlineValue(token, flag)
+      ) {
+        index += 1;
+      }
+      continue;
+    }
+    firstPositionalIndex = index;
+  }
+  return { firstPositionalIndex, hasExitFlag: false };
+}
+
+function codexOptionFlag(token: string): string {
+  if (token.startsWith("--")) {
+    return token.split("=", 1)[0];
+  }
+  return token.length > 2 ? token.slice(0, 2) : token;
+}
+
+function codexOptionHasInlineValue(token: string, flag: string): boolean {
+  return flag.startsWith("--") ? token.includes("=") : token.length > 2;
+}
+
+function tokenizeCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let started = false;
+  for (const character of command.trim()) {
+    if (escaped) {
+      token += character;
+      escaped = false;
+      started = true;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) {
+        quote = undefined;
+      } else {
+        token += character;
+      }
+      started = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      if (started) {
+        tokens.push(token);
+        token = "";
+        started = false;
+      }
+      continue;
+    }
+    token += character;
+    started = true;
+  }
+  if (escaped) {
+    token += "\\";
+  }
+  if (started) {
+    tokens.push(token);
+  }
+  return tokens;
 }
 
 function userTurnFromRolloutRecord(

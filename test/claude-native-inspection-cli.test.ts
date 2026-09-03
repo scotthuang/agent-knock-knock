@@ -23,7 +23,7 @@ import {
 import { ensureStoreWritable, listConversations } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 
-for (const claudeVersion of ["2.1.218", "2.1.226", "2.1.237", "2.1.251"] as const) {
+for (const claudeVersion of ["2.1.218", "2.1.226", "2.1.237", "2.1.251", "2.1.259"] as const) {
   test(`Claude ${claudeVersion} native status inspection is snapshot-bound, modal-safe, and Store immutable`, async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-claude-native-inspect-")
@@ -361,7 +361,7 @@ function claudeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
-    ...(version === "2.1.251"
+    ...(["2.1.251", "2.1.259"].includes(version)
       ? ["  Peer address:        unix:///private/tmp/claude.sock"]
       : []),
     `  cwd:                 ${cwd}`,
@@ -371,7 +371,7 @@ function claudeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         all connected",
     "  Setting sources:     User settings",
-    ...(version === "2.1.251"
+    ...(["2.1.251", "2.1.259"].includes(version)
       ? ["  Managed settings (remote): connected"]
       : []),
     "",

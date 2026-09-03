@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   buildForkContextPackage,
+  classifyCodexProcess,
   codexSessionsFromThreadRows,
   discoverCodexProcesses,
   extractResumeSessionId,
@@ -87,8 +88,137 @@ test("Codex process discovery finds native CLI processes", () => {
   assert.equal(listActiveCodexCli(processes).length, 3);
 });
 
+test("Codex 0.153 top-level non-interactive commands are not discovered as TUI processes", () => {
+  const nonInteractiveCommands = [
+    "agents",
+    "exec",
+    "e",
+    "review",
+    "login",
+    "logout",
+    "mcp",
+    "plugin",
+    "mcp-server",
+    "app-server",
+    "remote-control",
+    "app",
+    "completion",
+    "update",
+    "doctor",
+    "sandbox",
+    "debug",
+    "apply",
+    "a",
+    "queue",
+    "archive",
+    "delete",
+    "migrate-rollouts",
+    "unarchive",
+    "cloud",
+    "exec-server",
+    "execpolicy",
+    "features",
+    "help",
+    "responses-api-proxy",
+    "stdio-to-uds",
+    "cloud-tasks"
+  ];
+
+  for (const subcommand of nonInteractiveCommands) {
+    assert.equal(
+      classifyCodexProcess({
+        pid: 300,
+        cwd: "/repo/project",
+        command: `/opt/codex/bin/codex ${subcommand}`
+      }),
+      undefined,
+      `${subcommand} must not be classified as an interactive Codex TUI`
+    );
+    assert.equal(
+      classifyCodexProcess({
+        pid: 301,
+        cwd: "/repo/project",
+        command: `node /opt/codex/bin/codex ${subcommand}`
+      }),
+      undefined,
+      `node-wrapped ${subcommand} must not be classified as an interactive Codex TUI`
+    );
+  }
+
+  for (const flag of ["-h", "--help", "-V", "--version"]) {
+    assert.equal(classifyCodexProcess({
+      pid: 302,
+      cwd: "/repo/project",
+      command: `/opt/codex/bin/codex ${flag}`
+    }), undefined);
+  }
+});
+
+test("Codex process discovery distinguishes option values from top-level commands", () => {
+  const interactiveCommands = [
+    "codex --model exec",
+    "codex -m review",
+    "codex --config plugin",
+    "codex -c app-server",
+    "codex --cd doctor",
+    "codex -C sandbox",
+    "codex --image /tmp/screenshot.png exec",
+    "codex -i /tmp/one.png review",
+    "codex -- exec",
+    `codex resume ${SESSION_ID}`,
+    `codex fork ${SESSION_ID}`,
+    `AKK_TEST=1 node /opt/codex/bin/codex resume ${SESSION_ID}`
+  ];
+  for (const command of interactiveCommands) {
+    assert.ok(
+      classifyCodexProcess({
+        pid: 400,
+        cwd: "/repo/project",
+        command
+      }),
+      `${command} must remain an interactive Codex TUI`
+    );
+  }
+
+  assert.equal(classifyCodexProcess({
+    pid: 401,
+    cwd: "/repo/project",
+    command: "codex --model gpt-5.6-sol exec"
+  }), undefined);
+  for (const command of [
+    "codex --image=/tmp/screenshot.png review",
+    "codex -i/tmp/screenshot.png review",
+    "AKK_TEST=1 node /opt/codex/bin/codex exec",
+    "codex hello --help",
+    `codex resume ${SESSION_ID} --version`
+  ]) {
+    assert.equal(classifyCodexProcess({
+      pid: 402,
+      cwd: "/repo/project",
+      command
+    }), undefined, `${command} must not be classified as an interactive Codex TUI`);
+  }
+});
+
 test("Codex resume session ids are extracted only from resume commands", () => {
   assert.equal(extractResumeSessionId(`codex resume ${SESSION_ID}`), SESSION_ID);
+  assert.equal(
+    extractResumeSessionId(`AKK_TEST=1 node bin/codex resume ${SESSION_ID}`),
+    SESSION_ID
+  );
+  assert.equal(
+    extractResumeSessionId(`codex --image=/tmp/screenshot.png resume ${SESSION_ID}`),
+    SESSION_ID
+  );
+  assert.equal(extractResumeSessionId(`codex --model resume ${SESSION_ID}`), undefined);
+  assert.equal(extractResumeSessionId(`codex --config resume ${SESSION_ID}`), undefined);
+  assert.equal(
+    extractResumeSessionId(`codex --image /tmp/screenshot.png resume ${SESSION_ID}`),
+    undefined
+  );
+  assert.equal(extractResumeSessionId(`codex fork ${SESSION_ID}`), undefined);
+  assert.equal(extractResumeSessionId(`codex -- resume ${SESSION_ID}`), undefined);
+  assert.equal(extractResumeSessionId(`echo resume ${SESSION_ID}`), undefined);
   assert.equal(extractResumeSessionId(`node bin/codex -- --full-auto`), undefined);
 });
 

@@ -145,12 +145,14 @@ const OPTIONS_WITH_VALUES = new Set([
   "--name",
   "--output-format",
   "--permission-mode",
+  "--permission-prompts",
   "--plugin-dir",
   "--plugin-url",
   "--remote-control-session-name-prefix",
   "--setting-sources",
   "--settings",
   "--system-prompt",
+  "--system-prompt-snapshot",
   "--tools"
 ]);
 
@@ -693,7 +695,7 @@ export function observeClaudeThreadLifecycle(
 }
 
 /**
- * Claude Code 2.1.251 can report an input-ready interactive composer as
+ * Claude Code 2.1.251 through 2.1.259 can report an input-ready interactive composer as
  * `waiting` without a `waitingFor` reason. A non-empty wait reason remains a
  * real blocked state and must never be promoted to idle.
  */
@@ -1472,10 +1474,12 @@ function claudePermissionVisibleCommandLine(screen: string): string | undefined 
   if (relativeHeaderIndex < 0) {
     return undefined;
   }
-  return lines
+  const detailLines = lines
     .slice(searchStart + relativeHeaderIndex + 1, markerIndex)
     .map((line) => line.trim())
-    .find((line) => Boolean(line) && !isClaudeAutoModeTipLine(line));
+    .filter(Boolean);
+  const withoutTip = omitExactClaudeAutoModeTip(detailLines);
+  return withoutTip?.[0];
 }
 
 function omitClaudePermissionDetails(
@@ -1738,6 +1742,24 @@ function isClaudeAutoModeChoice(label: string): boolean {
 function isClaudeAutoModeTipLine(line: string): boolean {
   return /^Tip:\s*auto mode handles these prompts for you\s*[—-]\s*choose ["“]switch to auto mode["”] below$/iu
     .test(line);
+}
+
+function omitExactClaudeAutoModeTip(
+  detailLines: readonly string[]
+): readonly string[] | undefined {
+  if (!detailLines[0]?.startsWith("Tip:")) {
+    return detailLines;
+  }
+  if (isClaudeAutoModeTipLine(detailLines[0])) {
+    return detailLines.slice(1);
+  }
+  if (
+    detailLines.length >= 2 &&
+    isClaudeAutoModeTipLine(`${detailLines[0]} ${detailLines[1]}`)
+  ) {
+    return detailLines.slice(2);
+  }
+  return undefined;
 }
 
 function isClaudePermissionFooterLine(line: string): boolean {

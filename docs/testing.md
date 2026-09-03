@@ -146,8 +146,8 @@ manifest entries; use these names directly rather than a shell wildcard:
 The mapping diagnoses a release gate; it never replaces the complete
 pre-publication full/release suite.
 Safety fences from #87, native lifecycle smoke tooling from #88, Store upgrade
-paths, Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0, OpenClaw boundaries, and verified
-Claude Code 2.1.218/2.1.226/2.1.237/2.1.251 schemas
+paths, Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0, OpenClaw boundaries, and verified
+Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259 schemas
 remain covered.
 
 ## #206 Terminal Watch fast contract

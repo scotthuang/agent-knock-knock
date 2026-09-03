@@ -91,7 +91,7 @@ export type NativeThreadCompanionSet = Readonly<{
   additional: TerminalNativeIdentityFence[];
 }>;
 
-// Resuming a Codex thread can restart configured MCP servers. Codex 0.151.0
+// Resuming a Codex thread can restart configured MCP servers. Codex 0.151.0+
 // keeps the composer visible while that bounded startup is still in progress,
 // so the broad activity classifier can report idle before the exact composer
 // is safe for the post-transition /status probe. Keep polling without input
@@ -101,6 +101,7 @@ const DEFAULT_POST_TRANSITION_SETTLE_ATTEMPTS = 100;
 const CODEX_MCP_POST_TRANSITION_SETTLE_ATTEMPTS = 400;
 const CODEX_MCP_SETTLEMENT_PROFILES = Object.freeze([
   "codex-tui-0.151.0",
+  "codex-tui-0.153.0",
   "codex-tui-generic-v1"
 ]);
 

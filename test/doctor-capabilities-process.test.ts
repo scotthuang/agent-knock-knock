@@ -61,8 +61,8 @@ test("doctor probes both terminal transports and their supported coding agents",
     openclaw: writeFakeExecutable(tempDir, "openclaw", `process.stdout.write("2026.7.1-2");`),
     tmux: writeFakeExecutable(tempDir, "tmux", `process.stdout.write("tmux 3.5a");`),
     herdr: writeFakeExecutable(tempDir, "herdr", `process.stdout.write("herdr 0.8.0");`),
-    codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("codex-cli 0.151.0");`),
-    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.251");`)
+    codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("codex-cli 0.153.0");`),
+    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.259");`)
   };
 
   try {
@@ -74,11 +74,11 @@ test("doctor probes both terminal transports and their supported coding agents",
     assert.equal(probes.every((probe) => probe.status === "ok"), true);
     assert.equal(
       probes.find((probe) => probe.command === "codex")?.native_profile,
-      "codex-tui-0.151.0"
+      "codex-tui-0.153.0"
     );
     assert.equal(
       probes.find((probe) => probe.command === "claude")?.native_profile,
-      "claude-code-2.1.251-native-status"
+      "claude-code-2.1.259-native-status"
     );
     assert.equal(
       probes.filter((probe) => ["codex", "claude"].includes(probe.command))
@@ -98,7 +98,7 @@ test("doctor keeps complete unverified coding-agent versions available with warn
         codex: writeFakeExecutable(
           tempDir,
           "codex-future",
-          `process.stdout.write("codex-cli 0.150.0");`
+          `process.stdout.write("codex-cli 0.153.1");`
         )
       }
     });
@@ -107,7 +107,7 @@ test("doctor keeps complete unverified coding-agent versions available with warn
         claude: writeFakeExecutable(
           tempDir,
           "claude-future",
-          `process.stdout.write("Claude Code 2.1.252");`
+          `process.stdout.write("Claude Code 2.1.260");`
         )
       }
     });

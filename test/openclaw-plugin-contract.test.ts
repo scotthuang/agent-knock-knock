@@ -610,7 +610,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "ab79c1306cf3eaf0ff580060943c47c565fe37a18322c68acfe4c242c32b04a1"
+    "43a6afcf8dc505138fd0e508041346ec272d7c21b6de12bc6e6df92d8a55ab28"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 16);
@@ -4557,8 +4557,8 @@ test("callback auto approval keeps its rule workspace boundary without global wo
 test("/akk doctor leaves the Gateway event loop free for its health check", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-doctor-"));
   const fakeCli = path.join(tempDir, "doctor.cjs");
-  const codexVersion = "0.151.0";
-  const codexNativeProfile = "codex-tui-0.151.0";
+  const codexVersion = "0.153.0";
+  const codexNativeProfile = "codex-tui-0.153.0";
   let command:
     | { handler?: (context: { args: string; sessionKey: string }) => Promise<any> }
     | undefined;
@@ -4574,11 +4574,11 @@ test("/akk doctor leaves the Gateway event loop free for its health check", asyn
       }, {
         command: "claude",
         available: true,
-        version: "2.1.252",
+        version: "2.1.260",
         native_profile_supported: false,
         native_actions_available: true,
         compatibility_warning:
-          "Claude Code 2.1.252 has not been regression-tested by AKK"
+          "Claude Code 2.1.260 has not been regression-tested by AKK"
       }],
       capabilities: {
         tmux: { checked: true, status: "ready" }
@@ -4651,7 +4651,7 @@ request.on("error", () => process.exit(4));
       );
       assert.match(
         result?.text ?? "",
-        /Claude Code: 2\.1\.252 \(native lifecycle\/status available with compatibility warning\)/u
+        /Claude Code: 2\.1\.260 \(native lifecycle\/status available with compatibility warning\)/u
       );
       assert.notEqual(result?.isError, true);
     } finally {

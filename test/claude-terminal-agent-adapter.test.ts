@@ -53,6 +53,13 @@ test("classifies only direct interactive Claude CLI processes", () => {
     })?.kind,
     "claude_cli"
   );
+  assert.equal(
+    classifyClaudeProcess({
+      pid: 14,
+      command: "claude --permission-prompts none --system-prompt-snapshot on"
+    })?.kind,
+    "claude_cli"
+  );
 
   for (const command of [
     "claude -p 'summarize this'",
@@ -72,6 +79,8 @@ test("classifies only direct interactive Claude CLI processes", () => {
     "claude ultrareview",
     "claude update",
     "claude upgrade",
+    "claude --permission-prompts none doctor",
+    "claude --system-prompt-snapshot on doctor",
     "claude --help",
     "/opt/bin/claude-wrapper claude",
     ".local/share/claude/versions/2.1.198",
@@ -86,7 +95,7 @@ test("classifies only direct interactive Claude CLI processes", () => {
 });
 
 test("verified Claude versions expose distinct closed modal native status plans", () => {
-  for (const version of ["2.1.218", "2.1.226", "2.1.237", "2.1.251"]) {
+  for (const version of ["2.1.218", "2.1.226", "2.1.237", "2.1.251", "2.1.259"]) {
     const capability = probeClaudeNativeInspection(version);
     assert.equal(capability.status, "supported");
     assert.equal(capability.statusInspection, true);
@@ -249,7 +258,7 @@ test("Claude native inspection requires a fresh exact current Status panel", () 
   }
 });
 
-for (const version of ["2.1.226", "2.1.237", "2.1.251"] as const) {
+for (const version of ["2.1.226", "2.1.237", "2.1.251", "2.1.259"] as const) {
   test(`Claude ${version} status inspection accepts only its exact Session-kind panel`, () => {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
     const screen = claudeStatusPanel(nativeThreadId, version);
@@ -269,7 +278,7 @@ for (const version of ["2.1.226", "2.1.237", "2.1.251"] as const) {
       )?.value,
       "interactive"
     );
-    if (version === "2.1.251") {
+    if (["2.1.251", "2.1.259"].includes(version)) {
       assert.equal(
         observed.result?.fields.find((field) =>
           field.name === "Peer address"
@@ -669,10 +678,28 @@ test("approves only the one-time Yes in the Claude 2.1.251 four-choice Bash dial
   }
 });
 
-test("Claude 2.1.251 auto-mode tip does not replace exact transcript command correlation", () => {
+test("Claude 2.1.259 Bash approval accepts the current footer without Ctrl+E", () => {
+  const command = "touch /workspace/approval-fixture";
+  const screen = currentClaude251PermissionScreen(command, 1).replace(
+    " · ctrl+e to explain",
+    ""
+  );
+  const approval = detectClaudeApprovalPrompt(screen);
+  assert.equal(approval.approvable, true);
+  if (!approval.approvable) {
+    assert.fail("expected the exact Claude 2.1.259 one-time choice");
+  }
+  assert.deepEqual(approval.action.keys, ["C-m"]);
+  assert.equal(
+    approval.promptEvidence?.profile,
+    "claude-bash-permission-prompt-v2"
+  );
+});
+
+test("Claude 2.1.259 wrapped auto-mode tip does not replace exact transcript command correlation", () => {
   const command = "touch /workspace/approval-fixture";
   const commandSha256 = createHash("sha256").update(command).digest("hex");
-  const inspection = createClaudeTerminalAgentAdapter({
+  const adapter = createClaudeTerminalAgentAdapter({
     detectPendingApproval() {
       return {
         source: "claude_transcript",
@@ -680,27 +707,28 @@ test("Claude 2.1.251 auto-mode tip does not replace exact transcript command cor
         command,
         cwd: "/workspace",
         toolName: "Bash",
-        toolUseId: "toolu_claude_251",
-        promptUuid: "prompt-claude-251",
-        assistantUuid: "assistant-claude-251",
-        claudeVersion: "2.1.251",
-        transcriptFileId: "transcript-claude-251",
+        toolUseId: "toolu_claude_259",
+        promptUuid: "prompt-claude-259",
+        assistantUuid: "assistant-claude-259",
+        claudeVersion: "2.1.259",
+        transcriptFileId: "transcript-claude-259",
         commandSha256,
         evidenceFingerprint: "a".repeat(64),
         observedEndOffsetBytes: 4096
       };
     }
-  }).inspectScreen({
-    screen: currentClaude251PermissionScreen(command, 1),
+  });
+  const inspect = (screen: string) => adapter.inspectScreen({
+    screen,
     runtime: {
       pid: 7200,
       cwd: "/workspace",
-      conversationId: "conversation-claude-251",
-      messageId: "message-claude-251",
+      conversationId: "conversation-claude-259",
+      messageId: "message-claude-259",
       terminalTarget: "claude-work:0.0"
     },
     managedRequest: {
-      sessionId: "session-claude-251",
+      sessionId: "session-claude-259",
       cwd: "/workspace",
       requestText: "Create the exact test fixture",
       requestHash: "request-hash",
@@ -708,12 +736,39 @@ test("Claude 2.1.251 auto-mode tip does not replace exact transcript command cor
       context: { managed: true }
     }
   });
-  assert.equal(inspection.approval.approvable, true);
-  if (!inspection.approval.approvable) {
-    assert.fail("expected transcript-correlated Claude 2.1.251 approval");
+
+  const currentScreen = currentClaude251PermissionScreen(command, 1)
+    .replace(" · ctrl+e to explain", "");
+  const wrappedTipScreen = currentScreen.replace(
+    'Tip: auto mode handles these prompts for you — choose "switch to auto mode" below',
+    'Tip: auto mode handles these prompts for you — choose "switch to auto mode"\n below'
+  );
+  for (const screen of [currentScreen, wrappedTipScreen]) {
+    const inspection = inspect(screen);
+    assert.equal(inspection.approval.approvable, true);
+    if (!inspection.approval.approvable) {
+      assert.fail("expected transcript-correlated Claude 2.1.259 approval");
+    }
+    assert.equal(inspection.approval.action.requestId, "toolu_claude_259");
+    assert.equal(inspection.approval.policyEvidence?.command, command);
   }
-  assert.equal(inspection.approval.action.requestId, "toolu_claude_251");
-  assert.equal(inspection.approval.policyEvidence?.command, command);
+
+  for (const screen of [
+    wrappedTipScreen.replace(" below", " missing"),
+    wrappedTipScreen.replace(command, "touch /workspace/\napproval-fixture")
+  ]) {
+    const inspection = inspect(screen);
+    assert.equal(inspection.approval.approvable, true);
+    if (!inspection.approval.approvable) {
+      assert.fail("expected privacy-safe Claude 2.1.259 approval detection");
+    }
+    assert.equal(inspection.approval.policyEvidence, undefined);
+    assert.equal(
+      inspection.approval.requestDetail,
+      "Bash request details omitted; inspect the live terminal pane directly"
+    );
+    assert.doesNotMatch(inspection.screenExcerpt, /approval-fixture/u);
+  }
 });
 
 test("hookless Claude policy evidence requires an exact screen and transcript intersection", () => {
@@ -1274,15 +1329,15 @@ test("Claude terminal capabilities expose durable completion only with a configu
 });
 
 test("Claude lifecycle plans keep exact profiles and optimistically support complete versions", () => {
-  for (const version of ["2.1.218", "2.1.226", "2.1.237", "2.1.251"]) {
+  for (const version of ["2.1.218", "2.1.226", "2.1.237", "2.1.251", "2.1.259"]) {
     const profile = probeClaudeThreadLifecycle(version);
     assert.equal(profile.status, "supported");
     assert.equal(profile.behaviorProfile, `claude-code-${version}`);
     assert.equal(profile.versionCompatibility, "verified");
     assert.equal(profile.compatibilityWarning, undefined);
   }
-  const capabilities = probeClaudeThreadLifecycle("2.1.251");
-  const unverified = probeClaudeThreadLifecycle("2.1.252");
+  const capabilities = probeClaudeThreadLifecycle("2.1.259");
+  const unverified = probeClaudeThreadLifecycle("2.1.260");
   assert.equal(unverified.status, "supported");
   assert.equal(unverified.newThread, true);
   assert.equal(unverified.resumeExact, true);
@@ -1439,7 +1494,7 @@ test("Claude lifecycle observer requires one idle exact-PID agents row", () => {
   );
 });
 
-test("Claude 2.1.251 input-ready waiting rows are idle only without a wait reason", () => {
+test("Claude 2.1.251 through 2.1.259 input-ready waiting rows are idle only without a wait reason", () => {
   assert.equal(isClaudeAgentIdleState({ status: "idle" }), true);
   assert.equal(isClaudeAgentIdleState({ status: "waiting" }), true);
   assert.equal(
@@ -1526,7 +1581,7 @@ function claudeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
-    ...(version === "2.1.251"
+    ...(["2.1.251", "2.1.259"].includes(version)
       ? ["  Peer address:        unix:///private/tmp/claude.sock"]
       : []),
     "  cwd:                 /repo",
@@ -1536,7 +1591,7 @@ function claudeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         1 failed · /mcp",
     "  Setting sources:     User settings, Project local settings",
-    ...(version === "2.1.251"
+    ...(["2.1.251", "2.1.259"].includes(version)
       ? ["  Managed settings (remote): connected"]
       : []),
     "",

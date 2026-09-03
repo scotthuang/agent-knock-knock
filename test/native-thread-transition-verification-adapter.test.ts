@@ -319,7 +319,7 @@ test("Codex verification orders one probe before companion-bound observations", 
   ]);
 });
 
-test("Codex verification waits for a resumed composer to finish MCP startup", async () => {
+test("Codex 0.153 verification waits for a resumed composer to finish MCP startup", async () => {
   let statusCount = 0;
   let probeAttempts = 0;
   const bridge = {
@@ -363,7 +363,7 @@ test("Codex verification waits for a resumed composer to finish MCP startup", as
     operation: { kind: "new_thread" },
     plan: {
       ...NEW_THREAD_PLAN,
-      behaviorProfile: "codex-tui-0.151.0"
+      behaviorProfile: "codex-tui-0.153.0"
     },
     beforeIdentity: {
       sessionId: BEFORE_THREAD,
