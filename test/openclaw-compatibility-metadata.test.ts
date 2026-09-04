@@ -30,6 +30,7 @@ const minimumApiVersion = "2026.5.12";
 const minimumApiRange = `>=${minimumApiVersion}`;
 const minimumHostVersion = "2026.6.5";
 const minimumHostRange = `>=${minimumHostVersion}`;
+const verifiedBuildVersion = "2026.9.1";
 const boundaryVersion = "2026.5.10-beta.2";
 
 test("OpenClaw compatibility metadata distinguishes the API and install floors", () => {
@@ -45,11 +46,11 @@ test("OpenClaw compatibility metadata distinguishes the API and install floors",
   );
 });
 
-test("OpenClaw build metadata matches the installed SDK and verified host floor", () => {
+test("OpenClaw build metadata matches the installed and verified SDK", () => {
   const buildVersion = packageJson.devDependencies?.openclaw;
-  assert.equal(typeof buildVersion, "string");
+  assert.equal(buildVersion, verifiedBuildVersion);
   assert.notEqual(buildVersion, minimumApiVersion);
-  assert.equal(buildVersion, minimumHostVersion);
+  assert.notEqual(buildVersion, minimumHostVersion);
   assert.equal(packageJson.openclaw?.build?.openclawVersion, buildVersion);
   assert.equal(packageJson.openclaw?.build?.pluginSdkVersion, buildVersion);
 });

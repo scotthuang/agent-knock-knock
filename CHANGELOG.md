@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.28 - 2026-09-04
+
+### Security
+
+- Update the verified OpenClaw build dependency to `2026.9.1` and ClawHub release tooling to `0.23.3`, then refresh the root and DeepSeek connector dependency locks to remove the reported vulnerable transitive versions without raising AKK's supported OpenClaw host floor.
+
+### Fixed
+
+- Let the OpenClaw compatibility and release matrix detect capability-consent support and accept the plugin's declared capabilities on hosts that require explicit consent.
+- Create the matrix's isolated callback session before asserting durable next-turn injection, matching the stricter persisted-session contract in current OpenClaw without weakening the minimum-host check.
+
 ## 0.12.27 - 2026-09-04
 
 ### Added

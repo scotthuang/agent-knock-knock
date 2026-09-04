@@ -391,6 +391,10 @@ async function verifyFullHost({
   });
   const openclawJson = (args, options = {}) =>
     parseJsonOutput(openclaw(args, options).stdout, args.join(" "));
+  const pluginInstallArgs = openClawPluginInstallArgs(
+    openclaw,
+    `npm-pack:${artifact}`
+  );
 
   setConfig(openclaw, "gateway.mode", "local");
   setConfig(openclaw, "gateway.port", port);
@@ -398,12 +402,7 @@ async function verifyFullHost({
   setConfig(openclaw, "gateway.auth.token", token);
   setConfig(openclaw, "agents.defaults.workspace", workspace);
 
-  openclaw([
-    "plugins",
-    "install",
-    `npm-pack:${artifact}`,
-    "--force"
-  ], {
+  openclaw(pluginInstallArgs, {
     timeoutMs: 4 * 60 * 1000
   });
   setConfig(openclaw, "plugins.allow", ["agent-knock-knock"]);
@@ -525,11 +524,53 @@ async function verifyFullHost({
       gateway,
       /agent-knock-knock monitor reconciliation: checked=\d+ launched=\d+ already_running=\d+ skipped=\d+ errors=0/u
     );
+    // OpenClaw 2026.6.5 cannot see plugin method scope descriptors from the
+    // standalone CLI process. Its first plugin RPC therefore pairs with the
+    // CLI default scopes. Exercise that legacy path before narrower core RPCs
+    // so the later callback is not mistaken for a device scope upgrade. A
+    // distinct callback identity keeps the real enqueue assertion independent
+    // across host versions with different bootstrap enqueue behavior.
+    const scopeBootstrapSuffix =
+      `gateway-scope-bootstrap-${safeName(version)}`;
+    const scopeBootstrap = gatewayCall({
+      env,
+      host,
+      method: "agent-knock-knock.callback",
+      params: callbackParams(scopeBootstrapSuffix),
+      port,
+      token,
+      workspace
+    });
+    assert.equal(scopeBootstrap.ok, true);
+    assert.equal(typeof scopeBootstrap.enqueued, "boolean");
+    assert.equal(scopeBootstrap.delivery_required, false);
+    assert.equal(scopeBootstrap.delivery_mode, "none");
+    assert.equal(
+      scopeBootstrap.session_key,
+      `agent:main:${scopeBootstrapSuffix}`
+    );
+
+    const callbackSuffix = `gateway-${safeName(version)}`;
+    const callbackSessionKey = `agent:main:${callbackSuffix}`;
+    const callbackSession = gatewayCall({
+      env,
+      host,
+      method: "sessions.create",
+      params: {
+        key: callbackSessionKey,
+        label: "AKK compatibility callback"
+      },
+      port,
+      token,
+      workspace
+    });
+    assert.equal(callbackSession.ok, true);
+    assert.equal(callbackSession.key, callbackSessionKey);
     const callback = gatewayCall({
       env,
       host,
       method: "agent-knock-knock.callback",
-      params: callbackParams(`gateway-${safeName(version)}`),
+      params: callbackParams(callbackSuffix),
       port,
       token,
       workspace
@@ -540,7 +581,7 @@ async function verifyFullHost({
     assert.equal(callback.delivery_mode, "none");
     assert.equal(
       callback.session_key,
-      `agent:main:gateway-${safeName(version)}`
+      callbackSessionKey
     );
 
     const health = gatewayCall({
@@ -603,12 +644,7 @@ async function verifyFullHost({
     await stopGateway(gateway);
   }
 
-  openclaw([
-    "plugins",
-    "install",
-    `npm-pack:${artifact}`,
-    "--force"
-  ], {
+  openclaw(pluginInstallArgs, {
     timeoutMs: 4 * 60 * 1000
   });
   const inspectAfterUpdate = openclawJson([
@@ -630,7 +666,9 @@ async function verifyFullHost({
     target,
     openclaw_version: version,
     result: "compatible",
-    install: "npm-pack --force",
+    install: pluginInstallArgs.includes("--accept-capabilities")
+      ? "npm-pack --force --accept-capabilities"
+      : "npm-pack --force",
     runtime_status: inspect.plugin?.status,
     tools: normalizedToolNames(inspect).length,
     command: "akk",
@@ -671,11 +709,12 @@ function verifyPluginLifecycle({
     timeoutMs: options.timeoutMs ?? 90_000,
     ...options
   });
+  const pluginInstallArgs = openClawPluginInstallArgs(openclaw, artifact);
 
   // A plain tarball is intentionally tracked as an archive. That lets the
   // candidate verify update CLI behavior without consulting npm, where the
   // previously published release still carries the old compatibility floor.
-  openclaw(["plugins", "install", artifact, "--force"], {
+  openclaw(pluginInstallArgs, {
     timeoutMs: 4 * 60 * 1000
   });
   const update = openclaw([
@@ -688,7 +727,7 @@ function verifyPluginLifecycle({
     `${update.stdout}\n${update.stderr}`,
     /Skipping "agent-knock-knock" \(source: archive\)/u
   );
-  openclaw(["plugins", "install", artifact, "--force"], {
+  openclaw(pluginInstallArgs, {
     timeoutMs: 4 * 60 * 1000
   });
   openclaw([
@@ -818,6 +857,23 @@ function setConfig(openclaw, key, value) {
     JSON.stringify(value),
     "--strict-json"
   ]);
+}
+
+function openClawPluginInstallArgs(openclaw, source) {
+  const help = openclaw(["plugins", "install", "--help"], {
+    allowNonzero: true
+  });
+  const supportsCapabilityConsent = help.status === 0 &&
+    `${help.stdout ?? ""}\n${help.stderr ?? ""}`.includes(
+      "--accept-capabilities"
+    );
+  return [
+    "plugins",
+    "install",
+    "--force",
+    ...(supportsCapabilityConsent ? ["--accept-capabilities"] : []),
+    source
+  ];
 }
 
 function gatewayCall({

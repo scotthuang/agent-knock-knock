@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.12.27",
+  "version": "0.12.28",
   "description": "Control local Codex and Claude Code from OpenClaw or compatible controller Hosts through shared terminals.",
   "license": "MIT",
   "type": "module",
@@ -43,8 +43,8 @@
       "minGatewayVersion": "2026.5.12"
     },
     "build": {
-      "openclawVersion": "2026.6.5",
-      "pluginSdkVersion": "2026.6.5"
+      "openclawVersion": "2026.9.1",
+      "pluginSdkVersion": "2026.9.1"
     },
     "release": {
       "publishToClawHub": true,
@@ -132,8 +132,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
-    "clawhub": "0.23.1",
-    "openclaw": "2026.6.5",
+    "clawhub": "0.23.3",
+    "openclaw": "2026.9.1",
     "typescript": "^7.0.2"
   },
   "dependencies": {
