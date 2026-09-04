@@ -10,6 +10,7 @@
 
 - Let the OpenClaw compatibility and release matrix detect capability-consent support and accept the plugin's declared capabilities on hosts that require explicit consent.
 - Create the matrix's isolated callback session before asserting durable next-turn injection, matching the stricter persisted-session contract in current OpenClaw without weakening the minimum-host check.
+- Omit absent optional state and log paths from callback injection metadata so the payload remains valid JSON under current OpenClaw's strict plugin-hook validation.
 
 ## 0.12.27 - 2026-09-04
 

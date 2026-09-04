@@ -298,8 +298,8 @@ async function handleCallback(api, params) {
       turn_id: turnId,
       message_id: messageId,
       message_type: stringValue(message.type) ?? "unknown",
-      state_path: stringValue(params.statePath),
-      log_path: stringValue(params.logPath)
+      ...(stringValue(params.statePath) ? { state_path: stringValue(params.statePath) } : {}),
+      ...(stringValue(params.logPath) ? { log_path: stringValue(params.logPath) } : {})
     }
   });
   const delivery = buildCallbackDeliveryPlan({

@@ -4033,9 +4033,7 @@ test("callback delivery uses the grouped OpenClaw session workflow API", async (
       session_id: "session-1",
       turn_id: "turn-1",
       message_id: "message-1",
-      message_type: "progress",
-      state_path: undefined,
-      log_path: undefined
+      message_type: "progress"
     }
   });
 
