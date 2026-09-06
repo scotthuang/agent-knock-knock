@@ -245,6 +245,10 @@ export interface TerminalNativeIdentityFence {
 
 export interface TerminalRuntimeIdentity {
   pid?: number;
+  /** Exact running native agent version used to select interaction profiles. */
+  agentVersion?: string;
+  /** Exact managed Turn authorized to answer a native questionnaire. */
+  turnId?: string;
   sessionId?: string;
   nativeSessionId?: string;
   nativeProcessUuid?: string;

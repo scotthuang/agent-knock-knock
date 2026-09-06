@@ -47,6 +47,22 @@ import {
   type ClaudeComposerBeforeEnterProof,
   type ClaudeInjectedPasteProofPorts
 } from "./claude-injected-paste-proof.js";
+import {
+  TERMINAL_INTERACTION_SCHEMA,
+  TERMINAL_INTERACTION_VERSION,
+  validateTerminalInteractionProjection,
+  validateTerminalInteractionResponse,
+  type TerminalInteractionAnswer,
+  type TerminalInteractionProjection,
+  type TerminalInteractionQuestion,
+  type TerminalInteractionResponse
+} from "./terminal-interaction-protocol.js";
+import {
+  inspectNativeQuestionnaire,
+  type NativeQuestionnaireActionPlan,
+  type NativeQuestionnaireInspection,
+  type NativeQuestionnaireQuestion
+} from "./terminal-questionnaire-adapter.js";
 
 // Verified Codex profiles through 0.153.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
@@ -195,6 +211,10 @@ const CLAUDE_NATIVE_STATUS_SETTLE_BY_PROFILE: Readonly<
   }
 };
 const CODEX_LARGE_PASTE_CHAR_THRESHOLD = 1_000;
+const TERMINAL_INTERACTION_TTL_MS = 10 * 60 * 1_000;
+const TERMINAL_INTERACTION_IDENTIFIER_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const TERMINAL_INTERACTION_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/u;
 
 /** A terminal send failed at a boundary that proves input never started. */
 export class TerminalInputNotStartedError extends Error {
@@ -309,6 +329,29 @@ export class NativeInspectionDismissalError extends Error {
   }
 }
 
+export type TerminalInteractionReservedStage =
+  | "reservation_uncertain"
+  | "text_uncertain"
+  | "key_uncertain";
+
+/**
+ * A response reservation or terminal input may already have happened. The
+ * same interaction must never be dispatched automatically after this error.
+ */
+export class TerminalInteractionDispatchReservedError extends Error {
+  readonly code = "AKK_TERMINAL_INTERACTION_DISPATCH_RESERVED";
+  readonly doNotRetry = true;
+
+  constructor(
+    readonly stage: TerminalInteractionReservedStage,
+    message: string,
+    options: { cause?: unknown } = {}
+  ) {
+    super(message, options);
+    this.name = "TerminalInteractionDispatchReservedError";
+  }
+}
+
 export interface TerminalBridgeStatus {
   provider: string;
   target: string;
@@ -353,7 +396,67 @@ export interface TerminalBridgeStatus {
     approval?: Record<string, unknown>;
     error?: string;
   };
+  /** Safe, semantic current-question projection; never terminal keys. */
+  interaction_state?: TerminalInteractionProjection;
+  /**
+   * Owner-private response fence. Public status renderers must remove this
+   * sibling field before returning terminal_status to a model or browser.
+   */
+  interaction_prompt_fingerprint?: string;
   capability_limitation?: string;
+}
+
+export interface TerminalInteractionAuthorizationContext {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  fingerprint: string;
+  projection: TerminalInteractionProjection;
+  response: TerminalInteractionResponse;
+  runtime?: TerminalRuntimeIdentity;
+}
+
+export interface TerminalInteractionAuthorizationDecision {
+  approved: boolean;
+  reason?: string;
+}
+
+export interface TerminalInteractionBeforeDispatchContext {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  fingerprint: string;
+  projection: TerminalInteractionProjection;
+  response: TerminalInteractionResponse;
+  runtime?: TerminalRuntimeIdentity;
+}
+
+export interface TerminalInteractionResponseExecution {
+  responded: boolean;
+  blocked: boolean;
+  reason?: string;
+  interactionId: string;
+  questionId?: string;
+  responseKind?: TerminalInteractionAnswer["response_kind"];
+  outcome?:
+    | "submitted_or_advanced"
+    | "custom_text_opened"
+    | "confirmed"
+    | "cancelled";
+}
+
+interface TerminalInteractionBridgeOffer {
+  readonly projection: TerminalInteractionProjection;
+  readonly promptFingerprint: string;
+  readonly actionPlan: NativeQuestionnaireActionPlan;
+  readonly nativeInspection: Exclude<
+    NativeQuestionnaireInspection,
+    { status: "none" }
+  >;
+}
+
+interface CapturedTerminalInteractionOffer {
+  readonly terminalControl: TerminalControlRef;
+  readonly inspection: TerminalScreenInspection;
+  readonly offer?: TerminalInteractionBridgeOffer;
 }
 
 export interface ResolvedTerminalConversation {
@@ -992,6 +1095,7 @@ export class TerminalAgentBridge {
   readonly terminalProvider: TerminalControlProvider;
   private readonly verifyIdentity?: TerminalIdentityVerifier;
   private readonly nowMs: () => number;
+  private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly diagnosticLog?: TerminalDiscoveryDiagnosticLog;
 
@@ -1000,6 +1104,7 @@ export class TerminalAgentBridge {
     terminalProvider: TerminalControlProvider;
     verifyIdentity?: TerminalIdentityVerifier;
     nowMs?: () => number;
+    now?: () => Date;
     sleep?: (milliseconds: number) => Promise<void>;
     diagnosticLog?: TerminalDiscoveryDiagnosticLog;
   }) {
@@ -1007,6 +1112,7 @@ export class TerminalAgentBridge {
     this.terminalProvider = options.terminalProvider;
     this.verifyIdentity = options.verifyIdentity;
     this.nowMs = options.nowMs ?? (() => performance.now());
+    this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? terminalSettleDelay;
     this.diagnosticLog = options.diagnosticLog;
   }
@@ -1179,7 +1285,8 @@ export class TerminalAgentBridge {
       const captured = await this.captureInspection(adapter, terminalControl, options);
       return statusFromInspection(adapter, captured.terminalControl, captured.inspection, {
         screen: captured.screen,
-        runtime: options.runtime
+        runtime: options.runtime,
+        now: this.now()
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3701,6 +3808,202 @@ export class TerminalAgentBridge {
     };
   }
 
+  async respondInteraction(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    response: TerminalInteractionResponse,
+    options: {
+      agentVersion: string;
+      expectedFingerprint: string;
+      expectedExpiresAt: string;
+      scrollbackLines?: number;
+      runtime?: TerminalRuntimeIdentity;
+      authorize?: (
+        context: TerminalInteractionAuthorizationContext
+      ) => TerminalInteractionAuthorizationDecision |
+        Promise<TerminalInteractionAuthorizationDecision>;
+      beforeDispatch?: (
+        context: TerminalInteractionBeforeDispatchContext
+      ) => void | Promise<void>;
+    }
+  ): Promise<TerminalInteractionResponseExecution> {
+    const runtime = {
+      ...options.runtime,
+      agentVersion: options.agentVersion
+    };
+    const optionReason = terminalInteractionOptionPreflightReason(
+      options,
+      runtime
+    );
+    if (optionReason) {
+      return blockedTerminalInteractionResponse(response, optionReason);
+    }
+    const first = await this.captureTerminalInteractionOffer(
+      agent,
+      terminalControl,
+      runtime,
+      options.scrollbackLines
+    ).catch((error) => error);
+    if (first instanceof Error) {
+      return blockedTerminalInteractionResponse(response, first.message);
+    }
+    const firstReason = terminalInteractionOfferPreflightReason(
+      first.offer,
+      options
+    );
+    if (firstReason || !first.offer) {
+      return blockedTerminalInteractionResponse(
+        response,
+        firstReason ?? "native questionnaire has no safe interaction offer",
+        first.offer
+      );
+    }
+    const validatedResponse = validateTerminalInteractionResponse(
+      response,
+      first.offer.projection,
+      { now: this.now() }
+    );
+    const capabilityReason = terminalInteractionCapabilityReason(
+      this.terminalProvider,
+      first.terminalControl,
+      first.offer.actionPlan
+    );
+    if (capabilityReason) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        capabilityReason,
+        first.offer
+      );
+    }
+    const authorization = await authorizeTerminalInteraction(
+      options.authorize,
+      interactionHookContext(
+        agent,
+        first.terminalControl,
+        first.offer,
+        validatedResponse,
+        runtime
+      )
+    );
+    if (!authorization.approved) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        authorization.reason ?? "terminal interaction response was not authorized",
+        first.offer
+      );
+    }
+    const afterAuthorization = await this.captureTerminalInteractionOffer(
+      agent,
+      first.terminalControl,
+      runtime,
+      options.scrollbackLines
+    ).catch((error) => error);
+    if (afterAuthorization instanceof Error) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        afterAuthorization.message,
+        first.offer
+      );
+    }
+    if (!sameTerminalInteractionOffer(first, afterAuthorization)) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        "native questionnaire changed after authorization",
+        first.offer
+      );
+    }
+    await reserveTerminalInteractionDispatch(
+      options.beforeDispatch,
+      interactionHookContext(
+        agent,
+        afterAuthorization.terminalControl,
+        afterAuthorization.offer!,
+        validatedResponse,
+        runtime
+      )
+    );
+    const finalCapture = await this.captureTerminalInteractionOffer(
+      agent,
+      afterAuthorization.terminalControl,
+      runtime,
+      options.scrollbackLines
+    ).catch((error) => {
+      if (options.beforeDispatch) {
+        throw terminalInteractionReservedError(
+          "reservation_uncertain",
+          error,
+          "cannot recapture native questionnaire after dispatch reservation"
+        );
+      }
+      return error;
+    });
+    if (finalCapture instanceof Error) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        finalCapture.message,
+        first.offer
+      );
+    }
+    if (!sameTerminalInteractionOffer(afterAuthorization, finalCapture)) {
+      if (options.beforeDispatch) {
+        throw new TerminalInteractionDispatchReservedError(
+          "reservation_uncertain",
+          "native questionnaire changed after dispatch reservation"
+        );
+      }
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        "native questionnaire changed before dispatch",
+        first.offer
+      );
+    }
+    const verified = await this.verifyTerminalIdentity(
+      agent,
+      finalCapture.terminalControl,
+      runtime
+    ).catch((error) => {
+      throw terminalInteractionReservedError(
+        options.beforeDispatch ? "reservation_uncertain" : "key_uncertain",
+        error,
+        "terminal identity could not be verified immediately before interaction dispatch"
+      );
+    });
+    if (!sameTerminalControlIdentity(finalCapture.terminalControl, verified)) {
+      throw new TerminalInteractionDispatchReservedError(
+        options.beforeDispatch ? "reservation_uncertain" : "key_uncertain",
+        "terminal identity changed after the final questionnaire capture"
+      );
+    }
+    const answer = validatedResponse.answers[0];
+    const outcome = await dispatchTerminalInteractionAnswer({
+      provider: this.terminalProvider,
+      terminalControl: verified,
+      actionPlan: finalCapture.offer!.actionPlan,
+      answer,
+      reverifyTerminalIdentity: async (currentControl) => {
+        const reverified = await this.verifyTerminalIdentity(
+          agent,
+          currentControl,
+          runtime
+        );
+        if (!sameTerminalControlIdentity(currentControl, reverified)) {
+          throw new Error(
+            "terminal identity changed between interaction text and Enter"
+          );
+        }
+        return reverified;
+      }
+    });
+    return {
+      responded: true,
+      blocked: false,
+      interactionId: validatedResponse.interaction_id,
+      questionId: answer.question_id,
+      responseKind: answer.response_kind,
+      outcome
+    };
+  }
+
   async monitorPoll(options: {
     agent: ExecutorKind;
     terminalControl: TerminalControlRef;
@@ -3732,7 +4035,8 @@ export class TerminalAgentBridge {
         inspection = captured.inspection;
         status = statusFromInspection(adapter, captured.terminalControl, inspection, {
           screen: captured.screen,
-          runtime: options.screenOptions?.runtime
+          runtime: options.screenOptions?.runtime,
+          now: this.now()
         });
       } catch (error) {
         status = failedScreenStatus(adapter, options.terminalControl, error);
@@ -3807,6 +4111,31 @@ export class TerminalAgentBridge {
         maxExcerptLength: options.maxExcerptLength,
         runtime: options.runtime,
         managedRequest: options.managedRequest
+      })
+    };
+  }
+
+  private async captureTerminalInteractionOffer(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    runtime: TerminalRuntimeIdentity,
+    scrollbackLines?: number
+  ): Promise<CapturedTerminalInteractionOffer> {
+    const adapter = this.registry.require(agent);
+    const captured = await this.captureInspection(adapter, terminalControl, {
+      scrollbackLines,
+      runtime
+    });
+    return {
+      terminalControl: captured.terminalControl,
+      inspection: captured.inspection,
+      offer: terminalInteractionBridgeOffer({
+        agent,
+        terminalControl: captured.terminalControl,
+        inspection: captured.inspection,
+        screen: captured.screen,
+        runtime,
+        now: this.now()
       })
     };
   }
@@ -4953,6 +5282,498 @@ function isTerminalApprovalPromptEvidence(
     /^[0-9a-f]{64}$/u.test(evidence.sha256);
 }
 
+function terminalInteractionTurnId(
+  runtime: TerminalRuntimeIdentity | undefined
+): string | undefined {
+  const candidate = runtime?.turnId ?? runtime?.conversationId;
+  return typeof candidate === "string" &&
+    TERMINAL_INTERACTION_IDENTIFIER_PATTERN.test(candidate)
+    ? candidate
+    : undefined;
+}
+
+function terminalInteractionExpiry(now: Date): string | undefined {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    return undefined;
+  }
+  const windowStart = Math.floor(nowMs / TERMINAL_INTERACTION_TTL_MS) *
+    TERMINAL_INTERACTION_TTL_MS;
+  return new Date(windowStart + TERMINAL_INTERACTION_TTL_MS).toISOString();
+}
+
+function terminalInteractionQuestion(
+  question: NativeQuestionnaireQuestion
+): TerminalInteractionQuestion {
+  const common = {
+    question_id: question.question_id,
+    prompt: question.prompt,
+    required: question.required
+  };
+  if (
+    question.response_kind === "single_select" ||
+    question.response_kind === "multi_select"
+  ) {
+    return {
+      ...common,
+      response_kind: question.response_kind,
+      options: question.options ?? []
+    };
+  }
+  return {
+    ...common,
+    response_kind: question.response_kind
+  };
+}
+
+function terminalInteractionCanonicalIdentity(
+  terminalControl: TerminalControlRef,
+  runtime: TerminalRuntimeIdentity
+): Record<string, unknown> | undefined {
+  if (!hasCanonicalTerminalEndpoint(terminalControl)) {
+    return undefined;
+  }
+  const terminal = terminalEndpointFromControlRef(terminalControl);
+  if (
+    !Number.isInteger(terminal.processAnchorPid) ||
+    Number(terminal.processAnchorPid) <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    terminal_identity: terminalEndpointIdentityKey(terminal),
+    terminal_process_anchor_pid: terminal.processAnchorPid,
+    agent_pid: runtime.pid,
+    native_session_id: runtime.nativeSessionId,
+    native_process_uuid: runtime.nativeProcessUuid,
+    native_process_birth: runtime.nativeProcessBirth,
+    native_process_started_at: runtime.nativeProcessStartedAt,
+    native_rollout: runtime.nativeRollout
+  };
+}
+
+function terminalInteractionBridgeOffer(input: {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  inspection: TerminalScreenInspection;
+  screen: string;
+  runtime?: TerminalRuntimeIdentity;
+  now: Date;
+}): TerminalInteractionBridgeOffer | undefined {
+  const turnId = terminalInteractionTurnId(input.runtime);
+  const agentVersion = input.runtime?.agentVersion;
+  const expiry = terminalInteractionExpiry(input.now);
+  const canonicalIdentity = input.runtime
+    ? terminalInteractionCanonicalIdentity(input.terminalControl, input.runtime)
+    : undefined;
+  if (
+    !turnId ||
+    typeof agentVersion !== "string" ||
+    agentVersion.length === 0 ||
+    !expiry ||
+    !canonicalIdentity ||
+    input.inspection.approval.blocked
+  ) {
+    return undefined;
+  }
+  const nativeInspection = inspectNativeQuestionnaire({
+    agent: input.agent,
+    version: agentVersion,
+    screen: input.screen
+  });
+  if (nativeInspection.status === "none") {
+    return undefined;
+  }
+  const authorityMaterial = JSON.stringify({
+    version: 1,
+    agent: input.agent,
+    turn_id: turnId,
+    terminal: canonicalIdentity,
+    profile: nativeInspection.profile,
+    prompt_sha256: nativeInspection.prompt_evidence.sha256
+  });
+  const promptFingerprint = createHash("sha256")
+    .update(`terminal-interaction-authority\0${authorityMaterial}`, "utf8")
+    .digest("hex");
+  const interactionId = `ti_${createHash("sha256")
+    .update(`terminal-interaction-public\0${authorityMaterial}`, "utf8")
+    .digest("hex")
+    .slice(0, 40)}`;
+  const question = terminalInteractionQuestion(nativeInspection.question);
+  const executable = nativeInspection.status === "actionable" &&
+    nativeInspection.action_plan.kind !== "manual_only";
+  const projection = validateTerminalInteractionProjection({
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_VERSION,
+    interaction_id: interactionId,
+    turn_id: turnId,
+    agent: input.agent,
+    kind: "questionnaire",
+    state: executable ? "pending" : "manual_required",
+    step: {
+      index: nativeInspection.current_step,
+      total: nativeInspection.total_steps
+    },
+    questions: [question],
+    expires_at: expiry,
+    capabilities: {
+      respond: executable,
+      batch_response: false,
+      free_text: question.response_kind === "free_text",
+      multi_select: question.response_kind === "multi_select"
+    }
+  });
+  return {
+    projection,
+    promptFingerprint,
+    actionPlan: nativeInspection.action_plan,
+    nativeInspection
+  };
+}
+
+function terminalInteractionOptionPreflightReason(
+  options: {
+    agentVersion: string;
+    expectedFingerprint: string;
+    expectedExpiresAt: string;
+    runtime?: TerminalRuntimeIdentity;
+  },
+  runtime: TerminalRuntimeIdentity
+): string | undefined {
+  if (
+    typeof options.agentVersion !== "string" ||
+    !/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/u.test(options.agentVersion)
+  ) {
+    return "an exact semantic agent version is required";
+  }
+  if (
+    options.runtime?.agentVersion !== undefined &&
+    options.runtime.agentVersion !== options.agentVersion
+  ) {
+    return "runtime agent version does not match the requested interaction profile";
+  }
+  if (!terminalInteractionTurnId(runtime)) {
+    return "a protocol-safe exact Turn id is required";
+  }
+  if (!TERMINAL_INTERACTION_FINGERPRINT_PATTERN.test(options.expectedFingerprint)) {
+    return "a valid interaction prompt fingerprint is required";
+  }
+  if (!Number.isFinite(Date.parse(options.expectedExpiresAt))) {
+    return "a valid interaction expiry is required";
+  }
+  return undefined;
+}
+
+function terminalInteractionOfferPreflightReason(
+  offer: TerminalInteractionBridgeOffer | undefined,
+  options: {
+    expectedFingerprint: string;
+    expectedExpiresAt: string;
+  }
+): string | undefined {
+  if (!offer) {
+    return "native questionnaire has no identity-fenced interaction offer";
+  }
+  if (
+    offer.projection.state !== "pending" ||
+    !offer.projection.capabilities.respond ||
+    offer.actionPlan.kind === "manual_only"
+  ) {
+    return `native questionnaire requires manual response: ${offer.nativeInspection.status === "manual_required"
+      ? offer.nativeInspection.reason
+      : "unsupported action plan"}`;
+  }
+  if (offer.promptFingerprint !== options.expectedFingerprint) {
+    return "native questionnaire fingerprint changed before execution";
+  }
+  if (offer.projection.expires_at !== options.expectedExpiresAt) {
+    return "native questionnaire expiry changed before execution";
+  }
+  return undefined;
+}
+
+function terminalInteractionCapabilityReason(
+  provider: TerminalControlProvider,
+  terminalControl: TerminalControlRef,
+  plan: NativeQuestionnaireActionPlan
+): string | undefined {
+  const requiresText = plan.kind === "free_text";
+  const missing = [
+    !terminalControl.capabilities.includes("screen_status")
+      ? "terminal:screen_status"
+      : undefined,
+    !terminalControl.capabilities.includes("send_keys")
+      ? "terminal:send_keys"
+      : undefined,
+    !provider.providerCapabilities.includes("stable_resource_resolution")
+      ? "provider:stable_resource_resolution"
+      : undefined,
+    !provider.providerCapabilities.includes("screen_capture")
+      ? "provider:screen_capture"
+      : undefined,
+    !provider.providerCapabilities.includes("key_delivery")
+      ? "provider:key_delivery"
+      : undefined,
+    requiresText && !provider.providerCapabilities.includes("text_delivery")
+      ? "provider:text_delivery"
+      : undefined
+  ].filter((value): value is string => value !== undefined);
+  return missing.length > 0
+    ? `terminal interaction capability preflight failed: ${missing.join(", ")}`
+    : undefined;
+}
+
+function blockedTerminalInteractionResponse(
+  response: TerminalInteractionResponse,
+  reason: string,
+  offer?: TerminalInteractionBridgeOffer
+): TerminalInteractionResponseExecution {
+  const answer = Array.isArray(response.answers) ? response.answers[0] : undefined;
+  return {
+    responded: false,
+    blocked: true,
+    reason,
+    interactionId: response.interaction_id,
+    questionId: answer?.question_id ?? offer?.projection.questions[0]?.question_id,
+    responseKind: answer?.response_kind
+  };
+}
+
+function interactionHookContext(
+  agent: ExecutorKind,
+  terminalControl: TerminalControlRef,
+  offer: TerminalInteractionBridgeOffer,
+  response: TerminalInteractionResponse,
+  runtime: TerminalRuntimeIdentity
+): TerminalInteractionAuthorizationContext {
+  return {
+    agent,
+    terminalControl,
+    fingerprint: offer.promptFingerprint,
+    projection: offer.projection,
+    response,
+    runtime
+  };
+}
+
+async function authorizeTerminalInteraction(
+  authorize: ((
+    context: TerminalInteractionAuthorizationContext
+  ) => TerminalInteractionAuthorizationDecision |
+    Promise<TerminalInteractionAuthorizationDecision>) | undefined,
+  context: TerminalInteractionAuthorizationContext
+): Promise<TerminalInteractionAuthorizationDecision> {
+  return authorize ? authorize(context) : { approved: true };
+}
+
+async function reserveTerminalInteractionDispatch(
+  beforeDispatch: ((
+    context: TerminalInteractionBeforeDispatchContext
+  ) => void | Promise<void>) | undefined,
+  context: TerminalInteractionBeforeDispatchContext
+): Promise<void> {
+  if (!beforeDispatch) {
+    return;
+  }
+  try {
+    await beforeDispatch(context);
+  } catch (error) {
+    throw terminalInteractionReservedError(
+      "reservation_uncertain",
+      error,
+      "terminal interaction dispatch reservation failed"
+    );
+  }
+}
+
+function sameTerminalInteractionOffer(
+  left: CapturedTerminalInteractionOffer,
+  right: CapturedTerminalInteractionOffer
+): boolean {
+  return Boolean(
+    left.offer &&
+    right.offer &&
+    sameTerminalControlIdentity(left.terminalControl, right.terminalControl) &&
+    left.offer.promptFingerprint === right.offer.promptFingerprint &&
+    JSON.stringify(left.offer.projection) === JSON.stringify(right.offer.projection) &&
+    JSON.stringify(left.offer.actionPlan) === JSON.stringify(right.offer.actionPlan)
+  );
+}
+
+function terminalInteractionReservedError(
+  stage: TerminalInteractionReservedStage,
+  error: unknown,
+  message: string
+): TerminalInteractionDispatchReservedError {
+  if (error instanceof TerminalInteractionDispatchReservedError) {
+    return error;
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  return new TerminalInteractionDispatchReservedError(
+    stage,
+    `${message}: ${detail}`,
+    { cause: error }
+  );
+}
+
+function terminalInteractionChoiceAction(
+  plan: Extract<NativeQuestionnaireActionPlan, { kind: "single_select" }>,
+  answer: Extract<TerminalInteractionAnswer, { response_kind: "single_select" }>
+): { key: string; outcome: TerminalInteractionResponseExecution["outcome"] } {
+  const choice = plan.choices.find(
+    (candidate) => candidate.option_id === answer.selected_option_ids[0]
+  );
+  const stage = choice?.stages[0];
+  if (
+    !choice ||
+    choice.stages.length !== 1 ||
+    stage?.kind !== "key" ||
+    !/^[1-5]$/u.test(stage.key)
+  ) {
+    throw new Error("single-select interaction has no closed adapter action");
+  }
+  return {
+    key: stage.key,
+    outcome: choice.outcome === "open_custom_text"
+      ? "custom_text_opened"
+      : "submitted_or_advanced"
+  };
+}
+
+function terminalInteractionConfirmKey(
+  plan: Extract<NativeQuestionnaireActionPlan, { kind: "confirm" }>,
+  answer: Extract<TerminalInteractionAnswer, { response_kind: "confirm" }>
+): string {
+  const stages = answer.confirm ? plan.confirm_stages : plan.cancel_stages;
+  const stage = stages[0];
+  const expected = answer.confirm ? "C-m" : "Escape";
+  if (stages.length !== 1 || stage?.kind !== "key" || stage.key !== expected) {
+    throw new Error("confirmation interaction has no closed adapter action");
+  }
+  return stage.key;
+}
+
+async function sendTerminalInteractionKeys(
+  provider: TerminalControlProvider,
+  terminalControl: TerminalControlRef,
+  keys: readonly string[]
+): Promise<void> {
+  try {
+    await provider.sendKeys(provider.endpoint(terminalControl), keys);
+  } catch (error) {
+    throw terminalInteractionReservedError(
+      "key_uncertain",
+      error,
+      "terminal interaction key dispatch is uncertain"
+    );
+  }
+}
+
+async function dispatchTerminalInteractionFreeText(input: {
+  provider: TerminalControlProvider;
+  terminalControl: TerminalControlRef;
+  plan: Extract<NativeQuestionnaireActionPlan, { kind: "free_text" }>;
+  answer: Extract<TerminalInteractionAnswer, { response_kind: "free_text" }>;
+  reverifyTerminalIdentity: (
+    terminalControl: TerminalControlRef
+  ) => Promise<TerminalControlRef>;
+}): Promise<"submitted_or_advanced"> {
+  const [textStage, enterStage] = input.plan.stages;
+  if (
+    input.plan.stages.length !== 2 ||
+    textStage?.kind !== "answer_text" ||
+    textStage.single_line !== true ||
+    textStage.max_characters < input.answer.text.length ||
+    enterStage?.kind !== "key" ||
+    enterStage.key !== "C-m"
+  ) {
+    throw new TerminalInteractionDispatchReservedError(
+      "reservation_uncertain",
+      "free-text interaction has no closed adapter action"
+    );
+  }
+  try {
+    await input.provider.sendText(
+      input.provider.endpoint(input.terminalControl),
+      input.answer.text
+    );
+  } catch (error) {
+    throw terminalInteractionReservedError(
+      "text_uncertain",
+      error,
+      "terminal interaction text dispatch is uncertain"
+    );
+  }
+  let enterControl: TerminalControlRef;
+  try {
+    enterControl = await input.reverifyTerminalIdentity(input.terminalControl);
+    if (!sameTerminalControlIdentity(input.terminalControl, enterControl)) {
+      throw new Error(
+        "terminal identity changed between interaction text and Enter"
+      );
+    }
+  } catch (error) {
+    throw terminalInteractionReservedError(
+      "text_uncertain",
+      error,
+      "terminal identity after interaction text dispatch is uncertain"
+    );
+  }
+  await sendTerminalInteractionKeys(
+    input.provider,
+    enterControl,
+    [enterStage.key]
+  );
+  return "submitted_or_advanced";
+}
+
+async function dispatchTerminalInteractionAnswer(input: {
+  provider: TerminalControlProvider;
+  terminalControl: TerminalControlRef;
+  actionPlan: NativeQuestionnaireActionPlan;
+  answer: TerminalInteractionAnswer;
+  reverifyTerminalIdentity: (
+    terminalControl: TerminalControlRef
+  ) => Promise<TerminalControlRef>;
+}): Promise<NonNullable<TerminalInteractionResponseExecution["outcome"]>> {
+  if (
+    input.actionPlan.kind === "single_select" &&
+    input.answer.response_kind === "single_select"
+  ) {
+    const action = terminalInteractionChoiceAction(input.actionPlan, input.answer);
+    await sendTerminalInteractionKeys(
+      input.provider,
+      input.terminalControl,
+      [action.key]
+    );
+    return action.outcome!;
+  }
+  if (
+    input.actionPlan.kind === "confirm" &&
+    input.answer.response_kind === "confirm"
+  ) {
+    const key = terminalInteractionConfirmKey(input.actionPlan, input.answer);
+    await sendTerminalInteractionKeys(input.provider, input.terminalControl, [key]);
+    return input.answer.confirm ? "confirmed" : "cancelled";
+  }
+  if (
+    input.actionPlan.kind === "free_text" &&
+    input.answer.response_kind === "free_text"
+  ) {
+    return dispatchTerminalInteractionFreeText({
+      provider: input.provider,
+      terminalControl: input.terminalControl,
+      plan: input.actionPlan,
+      answer: input.answer,
+      reverifyTerminalIdentity: input.reverifyTerminalIdentity
+    });
+  }
+  throw new TerminalInteractionDispatchReservedError(
+    "reservation_uncertain",
+    "terminal interaction answer does not have a closed adapter action"
+  );
+}
+
 function statusFromInspection(
   adapter: TerminalAgentAdapter,
   terminalControl: TerminalControlRef,
@@ -4960,6 +5781,7 @@ function statusFromInspection(
   options: {
     screen?: string;
     runtime?: TerminalRuntimeIdentity;
+    now?: Date;
   } = {}
 ): TerminalBridgeStatus {
   const approval = dispatchableApprovalInspection(adapter, inspection.approval);
@@ -4990,6 +5812,16 @@ function statusFromInspection(
         }] : [];
       })
     : [];
+  const interaction = options.screen === undefined
+    ? undefined
+    : terminalInteractionBridgeOffer({
+        agent: adapter.agent,
+        terminalControl,
+        inspection: { ...inspection, approval },
+        screen: options.screen,
+        runtime: options.runtime,
+        now: options.now ?? new Date()
+      });
   return {
     provider: terminalControl.kind,
     target: terminalControl.target,
@@ -5033,7 +5865,11 @@ function statusFromInspection(
         ? undefined
         : createHash("sha256").update(options.screen).digest("hex"),
       approval: approvalOutput(approval)
-    }
+    },
+    ...(interaction === undefined ? {} : {
+      interaction_state: interaction.projection,
+      interaction_prompt_fingerprint: interaction.promptFingerprint
+    })
   };
 }
 
