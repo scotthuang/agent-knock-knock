@@ -205,9 +205,16 @@ test("runtime identity requires the exact binding and adds committed companions 
   } satisfies Conversation;
   const facade = adapter({}, (ports) => {
     ports.store.storeDirForConversation = () => root;
+    ports.runtime.agentVersionForRunningProcess = (agent, pid) => {
+      assert.equal(agent, "codex");
+      assert.equal(pid, processIdentity.pid);
+      return "0.153.4";
+    };
   });
   const runtime = facade.terminalRuntimeIdentityForConversation(conversation, control);
   assert.equal(runtime.pid, processIdentity.pid);
+  assert.equal(runtime.turnId, "turn-main");
+  assert.equal(runtime.agentVersion, "0.153.4");
   assert.deepEqual(runtime.allowedPreMaterializationNativeIdentity, {
     sessionId: oldBinding.native_thread_id,
     processUuid: processIdentity.processUuid,

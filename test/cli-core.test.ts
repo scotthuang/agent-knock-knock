@@ -17,10 +17,17 @@ import {
   executeCliCommand,
   parseCliCommand
 } from "../src/cli-core.js";
+import { withCanonicalMutationLocks } from
+  "../src/mutation-transaction.js";
+import { ensureStoreWritable } from "../src/store.js";
+import type { TerminalControlRef } from
+  "../src/terminal-agent-adapter.js";
 import {
   createTerminalControlProviderRegistry,
   StaticTerminalControlProvider
 } from "../src/terminal-control-provider.js";
+import { createTerminalMutationCliRuntime } from
+  "../src/terminal-mutation-cli-runtime.js";
 import type { TerminalProcessSource } from "../src/terminal-process-source.js";
 import {
   runInProcessCli,
@@ -295,6 +302,73 @@ test("in-process delegates isolate durable bindings by scoped runtime env", asyn
   }
 });
 
+test("terminal mutation CLI wiring preserves canonical lock order", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cli-mutation-"));
+  const storeDir = path.join(root, "store");
+  const conversationDir = path.join(storeDir, "conversations", "turn-1");
+  const statePath = path.join(conversationDir, "state.json");
+  const logPath = path.join(conversationDir, "events.ndjson");
+  const terminalControl = {
+    kind: "tmux",
+    target: "test:0.0"
+  } as TerminalControlRef;
+  const effects: string[] = [];
+  ensureStoreWritable(storeDir);
+  fs.mkdirSync(conversationDir, { recursive: true });
+
+  const runtime = createTerminalMutationCliRuntime({
+    acquireFileLock(lockPath, options) {
+      effects.push(`state-lock:${lockPath}:${options?.timeoutMs ?? "default"}`);
+      return () => effects.push("state-unlock");
+    },
+    acquireTerminalBridgeSendLock(
+      observedStoreDir,
+      observedTerminalControl,
+      options
+    ) {
+      assert.equal(observedStoreDir, path.resolve(storeDir));
+      assert.equal(observedTerminalControl, terminalControl);
+      effects.push(`terminal-lock:${options?.timeoutMs}`);
+      return () => effects.push("terminal-unlock");
+    },
+    terminalBridgeRuntimeKey(observedTerminalControl) {
+      assert.equal(observedTerminalControl, terminalControl);
+      return "terminal:test:0.0";
+    }
+  });
+
+  try {
+    const locks = runtime.terminalWriterMutationLocks(
+      storeDir,
+      terminalControl
+    );
+    await withCanonicalMutationLocks(locks, (scopes, resources) =>
+      runtime.withTerminalDispatchStateScope(
+        scopes,
+        resources,
+        statePath,
+        logPath,
+        async (_stateScopes, stateResources) => {
+          assert.equal(stateResources.terminal.key, "terminal:test:0.0");
+          assert.equal(stateResources.storeWriter.key, path.resolve(storeDir));
+          assert.equal(stateResources.state.key, statePath);
+          effects.push("operation");
+        },
+        { timeoutMs: 1234 }
+      )
+    );
+    assert.deepEqual(effects, [
+      "terminal-lock:30000",
+      `state-lock:${statePath}.lock:1234`,
+      "operation",
+      "state-unlock",
+      "terminal-unlock"
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("cli-core AST remains a stable facade without owned state machines", () => {
   const root = path.resolve(import.meta.dirname, "../..");
   const sourcePath = path.join(root, "src/cli-core.ts");
@@ -315,9 +389,6 @@ test("cli-core AST remains a stable facade without owned state machines", () => 
       .filter(isFunctionDeclaration)
       .map((statement) => statement.name?.getText(sourceFile));
     assert.deepEqual(functions, [
-      "terminalWriterMutationLocks",
-      "terminalWriterStateMutationLocks",
-      "withTerminalDispatchStateScope",
       "terminalDispatchCapabilityRepositories",
       "parseCliCommand",
       "executeCliCommand",
@@ -343,6 +414,7 @@ test("cli-core AST remains a stable facade without owned state machines", () => 
       "toCamelCase",
       "usage"
     ]);
+    assert.match(source, /createTerminalMutationCliRuntime/u);
     assert.deepEqual(
       sourceFile.statements.filter(isClassDeclaration),
       [],

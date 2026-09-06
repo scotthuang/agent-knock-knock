@@ -61,6 +61,7 @@ const PUBLIC_COMMANDS = Object.freeze([
   "resume-thread",
   "reconcile-binding",
   "respond",
+  "respond-interaction",
   "approve",
   "cancel",
   "renew",
@@ -106,6 +107,7 @@ const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_status",
   "agent_knock_knock_send",
   "agent_knock_knock_respond",
+  "agent_knock_knock_respond_interaction",
   "agent_knock_knock_renew",
   "agent_knock_knock_retry_callback",
   "agent_knock_knock_cancel",
@@ -959,6 +961,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
     [...schemas.matchAll(/^export const ([A-Za-z]+Parameters) =/gmu)]
       .map((match) => match[1]),
     [
+      "respondInteractionParameters",
       "sendParameters",
       "respondParameters",
       "listParameters",
@@ -1021,6 +1024,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "reconcileBindingParameters",
       "renewParameters",
       "respondParameters",
+      "respondInteractionParameters",
       "resumeThreadParameters",
       "retryCallbackParameters",
       "sendParameters",

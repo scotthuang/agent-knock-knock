@@ -13,8 +13,7 @@ import {
 import { loadDeferredForegroundTransfer } from
   "./deferred-foreground-transfer.js";
 import {
-  createFileLockCliAdapter,
-  type FileLockAcquisitionOptions
+  createFileLockCliAdapter
 } from "./file-lock-cli-adapter.js";
 import {
   budgetAction,
@@ -127,21 +126,16 @@ import {
 import {
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
-import { assertSafeTerminalSend } from "./terminal-authority-policy.js";
 import {
-  canonicalMutationResource, capabilityGatedRepositoryOperation,
-  capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks,
-  withCanonicalStateMutationLock,
-  type CanonicalMutationResources,
-  type CanonicalMutationScopes,
-  type CanonicalStateMutationResources,
-  type CanonicalStateMutationScopes
+  assertSafeTerminalSend,
+  terminalControlsShareIncarnation
+} from "./terminal-authority-policy.js";
+import {
+  capabilityGatedRepositoryOperation,
+  capabilityGatedRepositoryPairOperation, withCanonicalMutationLocks
 } from "./mutation-transaction.js";
 import {
   bindTerminalDispatchRoute,
-  terminalDispatchStateLockPath,
-  terminalDispatchStateMutationResource,
-  terminalDispatchStateResourceForStore,
   type BoundTerminalDispatchRoute,
   type TerminalDispatchCapabilityRepositories
 } from "./terminal-dispatch-capability.js";
@@ -174,6 +168,8 @@ import {
 import {
   createTerminalMonitorSupervisionCliAdapter
 } from "./terminal-monitor-supervision-cli-adapter.js";
+import { createTerminalInteractionCliAdapter } from
+  "./terminal-interaction-cli-adapter.js";
 import {
   terminalDispatchLedgerLooksLifecycle,
   type TerminalDispatchLedgerDocument
@@ -181,6 +177,8 @@ import {
 import {
   createTerminalDispatchRepositoryCliAdapter
 } from "./terminal-dispatch-repository-cli-adapter.js";
+import { createTerminalMutationCliRuntime } from
+  "./terminal-mutation-cli-runtime.js";
 import {
   createTerminalDispatchRecoveryCliAdapter
 } from "./terminal-dispatch-recovery-cli-adapter.js";
@@ -242,6 +240,15 @@ const terminalDelegateSendBindingRepository =
   });
 const acquireTerminalBridgeSendLock = terminalDispatchRepository.acquire;
 const terminalBridgeRuntimeKey = terminalDispatchRepository.runtimeKey;
+const {
+  terminalWriterMutationLocks,
+  terminalWriterStateMutationLocks,
+  withTerminalDispatchStateScope
+} = createTerminalMutationCliRuntime({
+  acquireFileLock,
+  acquireTerminalBridgeSendLock,
+  terminalBridgeRuntimeKey
+});
 const loadTerminalBridgeDispatchLedger = terminalDispatchRepository.load;
 const saveTerminalBridgeDispatchLedger = terminalDispatchRepository.save;
 const restoreTerminalBridgeDispatchLedger = terminalDispatchRepository.restore;
@@ -291,70 +298,6 @@ const mutationManagedSessions = Object.freeze({
   load: gateRepository(["storeWriter"], "storeWriter", loadManagedSession),
   save: gateRepository(["storeWriter"], "storeWriter", saveManagedSession)
 });
-function terminalWriterMutationLocks(
-  storeDir: string,
-  terminalControl: TerminalControlRef,
-  options: { timeoutMs?: number; retryMs?: number } = {}
-) {
-  const canonicalStoreDir = path.resolve(storeDir);
-  return {
-    resources: {
-      terminal: canonicalMutationResource(terminalBridgeRuntimeKey(terminalControl), terminalControl),
-      storeWriter: canonicalMutationResource(canonicalStoreDir, canonicalStoreDir)
-    },
-    acquireTerminal: () => acquireTerminalBridgeSendLock(
-      canonicalStoreDir,
-      terminalControl,
-      { timeoutMs: options.timeoutMs ?? 30_000, retryMs: options.retryMs }
-    ),
-    withStoreWriter: <Result>(operation: () => Promise<Result>) =>
-      withStoreWriterLeaseAsync(canonicalStoreDir, operation, {
-        timeoutMs: options.timeoutMs
-      })
-  };
-}
-function terminalWriterStateMutationLocks(storeDir: string, terminalControl: TerminalControlRef, statePath: string, logPath: string) {
-  const locks = terminalWriterMutationLocks(storeDir, terminalControl);
-  const stateResource = terminalDispatchStateResourceForStore(
-    storeDir, statePath, logPath
-  );
-  return {
-    ...locks, resources: {
-      ...locks.resources,
-      state: stateResource
-    },
-    acquireState: () => acquireFileLock(
-      terminalDispatchStateLockPath(stateResource)
-    )
-  };
-}
-function withTerminalDispatchStateScope<Result>(
-  scopes: CanonicalMutationScopes,
-  resources: CanonicalMutationResources,
-  statePath: string,
-  logPath: string,
-  operation: (
-    scopes: CanonicalStateMutationScopes,
-    resources: CanonicalStateMutationResources
-  ) => Promise<Result>,
-  options: FileLockAcquisitionOptions = {}
-): Promise<Result> {
-  const stateResource = terminalDispatchStateMutationResource(
-    scopes, resources, statePath, logPath
-  );
-  return withCanonicalStateMutationLock(
-    scopes,
-    resources,
-    {
-      resource: stateResource,
-      acquire: () => acquireFileLock(
-        terminalDispatchStateLockPath(stateResource),
-        options
-      )
-    },
-    operation
-  );
-}
 
 function terminalDispatchCapabilityRepositories({
   previousLedger,
@@ -437,6 +380,7 @@ const SESSION_SELECTOR_COMMANDS = new Set([
   "status",
   "send",
   "respond",
+  "respond-interaction",
   "approve",
   "cancel",
   "renew",
@@ -447,6 +391,7 @@ const STORE_MUTATION_COMMANDS = new Set([
   "delegate",
   "send",
   "respond",
+  "respond-interaction",
   "approve",
   "cancel",
   "renew",
@@ -586,6 +531,8 @@ async function dispatchCliCommand(commandName, options) {
     await nativeThreadLifecycleFacade.runReconcileBinding(options);
   } else if (commandName === "respond") {
     await terminalCommandCliFacade.runRespond(options);
+  } else if (commandName === "respond-interaction") {
+    await terminalInteractionCliFacade.runRespondInteraction(options);
   } else if (commandName === "approve") {
     await terminalCommandCliFacade.runApprove(options);
   } else if (commandName === "cancel") {
@@ -738,6 +685,8 @@ const terminalIdentityAuthority = createTerminalIdentityAuthorityCliAdapter({
       terminalRuntime(options).createProcessSource(),
     createAgentRegistry: (options) =>
       terminalRuntime(options).createAgentRegistry(),
+    agentVersionForRunningProcess: (agent, pid) =>
+      agentVersionForRunningProcess(agent, pid, {}),
     observeNativeIdentity: (request) =>
       terminalAcceptanceCliFacade.observeNativeIdentity(request),
     probeCodexCurrentThread: (request) => probeCodexCurrentThread({
@@ -1478,6 +1427,53 @@ const terminalMonitorSupervisionCliFacade =
     }
   });
 
+const terminalInteractionCliFacade = createTerminalInteractionCliAdapter({
+  selection: {
+    loadConversation: loadConversationFromOptions,
+    terminalControlFromTakeover
+  },
+  authority: {
+    runtimeIdentity: terminalRuntimeIdentityForConversation,
+    assertTurnBindingCurrent,
+    assertManagedTerminalDispatchOwner,
+    sameTerminalIncarnation: terminalControlsShareIncarnation
+  },
+  terminal: { createBridge: createTerminalAgentBridge },
+  repository: {
+    loadState,
+    saveState,
+    appendEvent,
+    storeDirForConversationDir: (conversationDir) =>
+      pathsForConversationDir(conversationDir).storeDir,
+    withLockedTurn: async (input) => {
+      const locks = terminalWriterMutationLocks(
+        input.storeDir,
+        input.terminalControl
+      );
+      return withCanonicalMutationLocks(
+        locks,
+        (scopes, resources) => withTerminalDispatchStateScope(
+          scopes,
+          resources,
+          input.statePath,
+          input.logPath,
+          () => input.operation()
+        )
+      );
+    }
+  },
+  monitor: {
+    ensureAfterResponse: (input) =>
+      terminalMonitorSupervisionCliFacade
+        .ensureTerminalBridgeMonitorAfterApproval(input)
+  },
+  runtime: {
+    now: cliNow,
+    printJson,
+    log: runtimeLog
+  }
+});
+
 const terminalMaintenanceCliFacade = createTerminalMaintenanceCliFacade({
   runtime: {
     defaultAgentTimeoutMinutes: DEFAULT_AGENT_TIMEOUT_MINUTES,
@@ -1804,6 +1800,7 @@ function usage() {
   agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>
   agent-knock-knock reconcile-binding --terminal <exact-terminal-id> --conflicting-session <session-id> --expected-session-revision <n> --expected-binding-token <token> --expected-terminal-token <token>
   agent-knock-knock respond --turn <turn-id|selector> --message <text> [--conversation <selector>]
+  agent-knock-knock respond-interaction --turn <turn-id|selector> --interaction <id> --response-json <json> --expected-interaction-fingerprint <fingerprint> --expected-interaction-expires-at <timestamp>
   agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] [--decision approve_once|reject] [--expected-terminal-token <token>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--turn <turn-id|selector>] [--conversation <selector>]
   agent-knock-knock renew [--turn <turn-id|selector>] [--conversation <selector>]

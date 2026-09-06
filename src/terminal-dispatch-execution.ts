@@ -513,6 +513,7 @@ export function terminalRuntimeIdentityBase(
         : undefined,
     cwd: nonBlankString(takeover?.source_cwd) ?? terminalControl.currentPath,
     conversationId: conversation.conversation_id,
+    turnId: turnIdForConversation(conversation),
     messageId: nonBlankString(takeover?.terminal_bridge_message_id),
     terminalTarget: terminalControl.target
   };

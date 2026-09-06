@@ -26,6 +26,7 @@
         "resume-thread",
         "reconcile-binding",
         "respond",
+        "respond-interaction",
         "approve",
         "cancel",
         "renew",
@@ -58,7 +59,7 @@
       "version": 1,
       "transport": "mcp_stdio",
       "callback_driver": "command_json_v1",
-      "tool_count": 16,
+      "tool_count": 17,
       "authority_paths": [
         "schemas/host-profile-v1.schema.json",
         "src/command-json-callback-transport.ts",
@@ -124,6 +125,7 @@
         "agent_knock_knock_status",
         "agent_knock_knock_send",
         "agent_knock_knock_respond",
+        "agent_knock_knock_respond_interaction",
         "agent_knock_knock_renew",
         "agent_knock_knock_retry_callback",
         "agent_knock_knock_cancel",
@@ -366,7 +368,7 @@
       "id": "host-bridge-stdio-unit",
       "path": "test/host-bridge-stdio.test.ts",
       "tier": "fast",
-      "needle": "real Host Bridge stdio advertises 16 tools and exits on Host EOF"
+      "needle": "real Host Bridge stdio advertises 17 tools and exits on Host EOF"
     },
     {
       "id": "host-bridge-tools-unit",

@@ -132,6 +132,10 @@ export interface TerminalIdentityRuntimePorts {
     Promise<NativeAgentSessionIdentityObservation>;
   probeCodexCurrentThread(request: CodexProbeRequest):
     Promise<NativeAgentSessionIdentity>;
+  agentVersionForRunningProcess?(
+    agent: ExecutorKind,
+    pid: number
+  ): string | undefined;
 }
 
 export interface TerminalIdentityStorePorts {
@@ -334,7 +338,19 @@ function terminalRuntimeIdentityForConversation(
   conversation: Conversation,
   terminalControl: TerminalControlRef
 ): TerminalRuntimeIdentity {
-  const runtime = terminalRuntimeIdentityBase(conversation, terminalControl);
+  const runtimeBase = terminalRuntimeIdentityBase(conversation, terminalControl);
+  const runtime: TerminalRuntimeIdentity = {
+    ...runtimeBase,
+    ...(ports.runtime.agentVersionForRunningProcess &&
+      Number.isSafeInteger(runtimeBase.pid) && Number(runtimeBase.pid) > 1
+      ? {
+          agentVersion: ports.runtime.agentVersionForRunningProcess(
+            executorForConversation(conversation).kind,
+            Number(runtimeBase.pid)
+          )
+        }
+      : {})
+  };
   if (executorForConversation(conversation).kind !== "codex") {
     return runtime;
   }

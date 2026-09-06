@@ -1,0 +1,311 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  createTerminalInteractionCliAdapter,
+  type TerminalInteractionCliDependencies
+} from "../src/terminal-interaction-cli-adapter.js";
+import {
+  TerminalInteractionDispatchReservedError,
+  type ResolvedTerminalConversation,
+  type TerminalAgentBridge
+} from "../src/terminal-agent-bridge.js";
+import type { TerminalControlRef } from
+  "../src/terminal-agent-adapter.js";
+import { createConversation, type Conversation } from "../src/protocol.js";
+
+const NOW = new Date("2026-09-07T12:00:00.000Z");
+const EXPIRES = "2026-09-07T12:10:00.000Z";
+const FINGERPRINT = "a".repeat(64);
+const INTERACTION_ID = "interaction_1234567890abcdef";
+const QUESTION_ID = "question_1234567890abcdef";
+const OPTION_ID = "option_1234567890abcdef";
+
+const terminalControl = {
+  kind: "tmux",
+  target: "interaction:0.0",
+  currentPath: "/workspace/project",
+  panePid: 4242,
+  capabilities: ["screen_status", "send_keys"]
+} as TerminalControlRef;
+
+function managedTurn(): Conversation {
+  return {
+    ...createConversation({
+      userRequest: "ask a native question",
+      sessionId: "session-interaction",
+      turnId: "turn-interaction",
+      executorKind: "claude",
+      executorSession: "claude-interaction",
+      openclawSession: "agent:main:main",
+      workspace: "/workspace/project",
+      now: NOW
+    }),
+    status: "waiting_for_agent",
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_agent_pid: 4242,
+      terminal_bridge_message_id: "message-interaction",
+      native_session_id: "terminal:v2:tmux:claude:interaction:0.0:4242",
+      terminal_control: terminalControl
+    }
+  };
+}
+
+function responseJson(): string {
+  return JSON.stringify({
+    turn_id: "turn-interaction",
+    interaction_id: INTERACTION_ID,
+    answers: [{
+      question_id: QUESTION_ID,
+      response_kind: "single_select",
+      selected_option_ids: [OPTION_ID]
+    }]
+  });
+}
+
+function harness(input: {
+  bridge: Pick<TerminalAgentBridge, "resolveStoredTerminal" | "respondInteraction">;
+  conversation?: Conversation;
+}) {
+  let current = input.conversation ?? managedTurn();
+  const events: Record<string, unknown>[] = [];
+  const printed: Record<string, unknown>[] = [];
+  const calls: string[] = [];
+  const dependencies: TerminalInteractionCliDependencies = {
+    selection: {
+      loadConversation: () => ({
+        conversation: current,
+        statePath: "/store/conversations/turn-interaction/state.json",
+        logPath: "/store/conversations/turn-interaction/events.ndjson"
+      }),
+      terminalControlFromTakeover: (value) => {
+        if (!value || typeof value !== "object") return undefined;
+        return (value as Record<string, unknown>).terminal_control as
+          TerminalControlRef | undefined;
+      }
+    },
+    authority: {
+      runtimeIdentity: () => ({
+        pid: 4242,
+        conversationId: "turn-interaction",
+        turnId: "turn-interaction",
+        messageId: "message-interaction",
+        terminalTarget: terminalControl.target,
+        agentVersion: "2.1.263"
+      }),
+      assertTurnBindingCurrent: () => calls.push("binding"),
+      assertManagedTerminalDispatchOwner: () => calls.push("owner"),
+      sameTerminalIncarnation: (left, right) => left.target === right.target
+    },
+    terminal: {
+      createBridge: () => input.bridge as TerminalAgentBridge
+    },
+    repository: {
+      loadState: () => current,
+      saveState: (_path, conversation) => {
+        current = conversation;
+        calls.push("save");
+      },
+      appendEvent: (_path, event) => events.push(event),
+      storeDirForConversationDir: () => "/store",
+      withLockedTurn: async ({ operation }) => {
+        calls.push("lock");
+        return operation();
+      }
+    },
+    monitor: {
+      ensureAfterResponse: () => {
+        calls.push("monitor");
+        return { monitorPid: 9001 };
+      }
+    },
+    runtime: {
+      now: () => NOW,
+      printJson: (value) => printed.push(value),
+      log: (_level, event) => calls.push(`log:${event}`)
+    }
+  };
+  return {
+    facade: createTerminalInteractionCliAdapter(dependencies),
+    current: () => current,
+    events,
+    printed,
+    calls
+  };
+}
+
+function options(overrides: Record<string, unknown> = {}) {
+  return {
+    turn: "turn-interaction",
+    interaction: INTERACTION_ID,
+    responseJson: responseJson(),
+    expectedInteractionFingerprint: FINGERPRINT,
+    expectedInteractionExpiresAt: EXPIRES,
+    openclawSession: "agent:main:main",
+    ...overrides
+  };
+}
+
+function successfulBridge() {
+  return {
+    async resolveStoredTerminal(
+      ..._args: Parameters<TerminalAgentBridge["resolveStoredTerminal"]>
+    ): Promise<ResolvedTerminalConversation> {
+      return {
+        conversationId: "terminal:v2:tmux:claude:interaction:0.0:4242",
+        agent: "claude" as const,
+        pid: 4242,
+        legacy: false,
+        adapter: {} as ResolvedTerminalConversation["adapter"],
+        terminalControl
+      };
+    },
+    async respondInteraction(_agent, _control, response, executionOptions) {
+      const projection = {
+        interaction_id: INTERACTION_ID
+      } as never;
+      const context = {
+        agent: "claude" as const,
+        terminalControl,
+        fingerprint: FINGERPRINT,
+        projection,
+        response,
+        runtime: executionOptions.runtime
+      };
+      const authorized = await executionOptions.authorize?.(context);
+      assert.equal(authorized?.approved, true);
+      await executionOptions.beforeDispatch?.(context);
+      return {
+        responded: true,
+        blocked: false,
+        interactionId: INTERACTION_ID,
+        questionId: QUESTION_ID,
+        responseKind: "single_select" as const,
+        outcome: "submitted_or_advanced" as const
+      };
+    }
+  } satisfies Pick<
+    TerminalAgentBridge,
+    "resolveStoredTerminal" | "respondInteraction"
+  >;
+}
+
+test("semantic interaction response reserves once, audits without text, and resumes monitor", async () => {
+  const subject = harness({ bridge: successfulBridge() });
+
+  await subject.facade.runRespondInteraction(options());
+
+  const takeover = subject.current().native_session_takeover as
+    Record<string, unknown>;
+  assert.equal(subject.current().status, "waiting_for_agent");
+  assert.equal(takeover.terminal_bridge_interaction_dispatch, undefined);
+  assert.equal(takeover.terminal_bridge_last_interaction_id, INTERACTION_ID);
+  assert.equal(
+    takeover.terminal_bridge_last_interaction_fingerprint,
+    FINGERPRINT
+  );
+  assert.equal(subject.events.length, 1);
+  assert.equal(subject.events[0]?.event, "terminal_interaction_response_send");
+  assert.doesNotMatch(JSON.stringify(subject.events), /selected_option_ids/u);
+  assert.equal(subject.printed[0]?.responded, true);
+  assert.equal(subject.printed[0]?.monitor_pid, 9001);
+  assert.equal(subject.calls.filter((call) => call === "save").length, 2);
+  assert.ok(subject.calls.includes("owner"));
+  assert.ok(subject.calls.includes("monitor"));
+});
+
+test("controller-session mismatch fails before terminal resolution", async () => {
+  let resolved = false;
+  const bridge = successfulBridge();
+  const subject = harness({
+    bridge: {
+      ...bridge,
+      async resolveStoredTerminal(...args) {
+        resolved = true;
+        return bridge.resolveStoredTerminal(...args);
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => subject.facade.runRespondInteraction(
+      options({ openclawSession: "agent:other:session" })
+    ),
+    /different controller session/u
+  );
+  assert.equal(resolved, false);
+});
+
+test("a successfully consumed interaction fingerprint cannot be replayed", async () => {
+  const subject = harness({ bridge: successfulBridge() });
+
+  await subject.facade.runRespondInteraction(options());
+  await assert.rejects(
+    () => subject.facade.runRespondInteraction(options()),
+    /fingerprint was already consumed/u
+  );
+  assert.equal(
+    subject.calls.filter((call) => call === "monitor").length,
+    1
+  );
+});
+
+test("post-reservation uncertainty stalls the Turn and preserves one-shot receipt", async () => {
+  const bridge = successfulBridge();
+  const subject = harness({
+    bridge: {
+      ...bridge,
+      async respondInteraction(agent, control, response, executionOptions) {
+        const projection = { interaction_id: INTERACTION_ID } as never;
+        const context = {
+          agent,
+          terminalControl: control,
+          fingerprint: FINGERPRINT,
+          projection,
+          response,
+          runtime: executionOptions.runtime
+        };
+        await executionOptions.beforeDispatch?.(context);
+        throw new TerminalInteractionDispatchReservedError(
+          "key_uncertain",
+          "key dispatch outcome is uncertain"
+        );
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => subject.facade.runRespondInteraction(options()),
+    (error: unknown) =>
+      error instanceof TerminalInteractionDispatchReservedError &&
+      error.doNotRetry
+  );
+  const takeover = subject.current().native_session_takeover as
+    Record<string, unknown>;
+  const dispatch = takeover.terminal_bridge_interaction_dispatch as
+    Record<string, unknown>;
+  assert.equal(subject.current().status, "stalled");
+  assert.equal(dispatch.state, "uncertain");
+  assert.equal(dispatch.interaction_id, INTERACTION_ID);
+  assert.equal(subject.events[0]?.event,
+    "terminal_interaction_response_uncertain");
+  assert.doesNotMatch(JSON.stringify(subject.events), /selected_option_ids/u);
+  assert.equal(subject.calls.includes("monitor"), false);
+});
+
+test("expired offers and invalid response JSON fail before terminal input", async () => {
+  const subject = harness({ bridge: successfulBridge() });
+  await assert.rejects(
+    () => subject.facade.runRespondInteraction(options({
+      expectedInteractionExpiresAt: NOW.toISOString()
+    })),
+    /unexpired timestamp/u
+  );
+  await assert.rejects(
+    () => subject.facade.runRespondInteraction(options({
+      responseJson: "{"
+    })),
+    /response-json/u
+  );
+  assert.equal(subject.calls.length, 0);
+});
