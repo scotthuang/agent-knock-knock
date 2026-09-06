@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.30 - 2026-09-07
+
+### Added
+
+- Add an owner-bound `agent_knock_knock_respond_interaction` contract for exact native Claude Code and Codex questionnaires, including opaque single-select choices, stepwise multi-question flows, bounded free-text replies, and final confirmation or cancellation.
+- Add semantic `approve_once` and `reject` approval decisions when the current exact terminal prompt advertises a proven native rejection action.
+
+### Security
+
+- Bind every interactive response to the managed Turn, controller session, terminal and process incarnation, exact versioned screen fingerprint, expiry, and durable one-shot reservation. Unknown layouts, secret-bearing questions, stale offers, and uncertain post-input outcomes remain fail-closed without automatic retry.
+
 ## 0.12.29 - 2026-09-07
 
 ### Fixed

@@ -104,9 +104,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v23 exposes semantic arguments only", () => {
+test("the public action contract v24 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 23);
+  assert.equal(contracts.version, 24);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -120,6 +120,7 @@ test("the public action contract v23 exposes semantic arguments only", () => {
       "resume_thread",
       "reconcile_binding",
       "respond",
+      "respond_interaction",
       "status",
       "approve",
       "cancel",
@@ -143,12 +144,33 @@ test("the public action contract v23 exposes semantic arguments only", () => {
     "candidate_token",
     "expected_handoff_token",
     "expected_approval_fingerprint",
+    "expected_interaction_fingerprint",
+    "interaction_prompt_fingerprint",
     "binding_token",
     "lifecycle_binding_token"
   ]) {
     assert.equal(encoded.includes(forbidden), false, forbidden);
   }
   const actions = contracts.actions as Record<string, any>;
+  assert.match(
+    (contracts.instructions as string[]).join("\n"),
+    /native questionnaire response[\s\S]*same controller conversation[\s\S]*current pending interaction_state[\s\S]*one call resolves only the current step[\s\S]*refresh status[\s\S]*Never[\s\S]*manual_required[\s\S]*retry/iu
+  );
+  assert.deepEqual(actions.respond_interaction, {
+    tool: "agent_knock_knock_respond_interaction",
+    target_argument: "turn_id",
+    interaction_argument: "interaction_id",
+    required: ["turn_id", "interaction_id", "answers"],
+    candidate_source:
+      "terminal_status.interaction_state returned by agent_knock_knock_status in the same controller conversation",
+    answer_contract:
+      "Use only the current projection's opaque question_id and option_id values, or its bounded typed free_text answer. Raw terminal keys, menu indexes, rendered labels, prompt fingerprints, versions, and terminal commands are not accepted.",
+    one_step_per_call: true,
+    requires_fresh_status: true,
+    requires_same_controller_conversation: true,
+    manual_required_sends_input: false,
+    uncertain_retry_allowed: false
+  });
   assert.match(
     (contracts.instructions as string[]).join("\n"),
     /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*no Composer observation may veto Enter[\s\S]*Terminal Watch callback[\s\S]*no managed callback Turn[\s\S]*failure is reported/u

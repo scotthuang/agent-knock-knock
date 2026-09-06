@@ -2781,8 +2781,9 @@ retaining this commit as the historical comparison point.
 
 Issue #206 adds Terminal Watch as a new aggregate beside, not inside, the
 managed Session/Turn architecture. The v16 action-contract and 14-tool sections
-above remain immutable historical snapshots; the current public delta is list
-action-contract v23 and 16 registered OpenClaw tools. v23 keeps every structured
+above remain immutable historical snapshots; at the time of the #206 delta,
+the public surface was list action-contract v23 with 16 registered OpenClaw
+tools. v23 keeps every structured
 Send semantic-ID-only while making Codex `terminal_user_explicit` independent
 of Composer visibility, stability, and exactness. Its physical fallback clears
 the current Composer once, injects the new request, waits through the paste
@@ -2795,6 +2796,11 @@ captures a pre-Send provider boundary and best-effort attaches an exact
 request-bound Terminal Watch after Enter. The Watch supplies completion callback
 behavior without claiming a managed Turn, and its failure never revokes Send.
 No draft text or Composer digest crosses the model boundary.
+
+The later interactive-response release advances the current public surface to
+action-contract v24 and 17 OpenClaw tools. It adds a status-bound semantic
+questionnaire response action while keeping prompt fingerprints, terminal-key
+plans, and one-shot mutation authority private.
 
 ### Aggregate and persistence boundary
 

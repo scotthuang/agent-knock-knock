@@ -38,7 +38,15 @@ test("model-facing authority policy normalizes fields and preserves ordinary con
     "expectedSessionRevision",
     "expected-session-revision",
     "terminalBindingGeneration",
-    "terminal-binding-id"
+    "terminal-binding-id",
+    "interaction_prompt_fingerprint",
+    "expected-interaction-fingerprint",
+    "interaction_authority",
+    "owner_session",
+    "process_incarnation",
+    "source_file_identity",
+    "prompt_evidence",
+    "action_plan"
   ]) {
     assert.equal(isAkkModelFacingPrivateAuthorityField(field), true, field);
   }
@@ -87,6 +95,12 @@ test("model-facing authority policy normalizes fields and preserves ordinary con
   assert.match(
     sanitizeAkkModelFacingDiagnosticText(
       "bookkeeping conflict: expected revision 7, actual revision 8"
+    ),
+    /private authority changed/u
+  );
+  assert.match(
+    sanitizeAkkModelFacingDiagnosticText(
+      `interaction prompt fingerprint changed from ${"a".repeat(64)}`
     ),
     /private authority changed/u
   );
@@ -917,6 +931,22 @@ test("/akk approve accepts only a semantic Turn and delegates private fencing", 
     undefined,
     "the command adapter privately derives the approval fingerprint immediately before dispatch"
   );
+  assert.deepEqual(parseAkkCommand("approve conversation-1 reject"), {
+    action: "approve",
+    turnId: "conversation-1",
+    decision: "reject"
+  });
+  assert.deepEqual(parseAkkCommand("approve conversation-1 approve_once"), {
+    action: "approve",
+    turnId: "conversation-1",
+    decision: "approve_once"
+  });
+  for (const rawChoice of ["4", "No", "Escape", "--keys=n"]) {
+    assert.throws(
+      () => parseAkkCommand(`approve conversation-1 ${rawChoice}`),
+      /approve_once\|reject/u
+    );
+  }
   assert.throws(
     () => parseAkkCommand(
       "approve conversation-1 --expected-approval-fingerprint approval-1"

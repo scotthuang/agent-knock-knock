@@ -10,6 +10,7 @@ import {
 import { redactString } from "./runtime-log.js";
 import type {
   TerminalAgentAdapter,
+  TerminalApprovalAction,
   TerminalApprovalInspection,
   TerminalApprovalPromptEvidence,
   TerminalCompletionEvidence,
@@ -41,6 +42,7 @@ export type CodexApprovalPromptDetection =
       key: string;
       keys: readonly string[];
       label: string;
+      choices: readonly TerminalApprovalAction[];
       promptKind: string;
       command?: string;
       promptEvidence: TerminalApprovalPromptEvidence;
@@ -803,7 +805,10 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
         promptKind: detectedApproval.promptKind,
         command: detectedApproval.command,
         promptEvidence: detectedApproval.promptEvidence,
+        choices: detectedApproval.choices,
         action: {
+          decision: "approve_once",
+          mode: "keys",
           keys: detectedApproval.keys,
           label: detectedApproval.label
         }
@@ -848,9 +853,10 @@ export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDe
     };
   }
 
-  const primary = prompt.region.split("\n")
+  const options = prompt.region.split("\n")
     .map(parseCodexApprovalOption)
-    .find((option) => option?.number === 1);
+    .filter((option): option is CodexApprovalOptionRow => Boolean(option));
+  const primary = options.find((option) => option.number === 1);
   if (!primary) {
     return {
       approvable: false,
@@ -859,18 +865,39 @@ export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDe
     };
   }
   const key = primary.shortcut;
-  if (key !== "y") {
+  if (key !== "y" || !isCodexOneTimeApprovalChoice(primary.label)) {
     return {
       approvable: false,
-      reason: `primary approval shortcut is ${key}, not y`,
+      reason: key !== "y"
+        ? `primary approval shortcut is ${key}, not y`
+        : "primary Codex approval label is not a proven one-time choice",
       ...approvalCandidateFromPrompt(prompt.marker, prompt.region)
     };
   }
+  const rejectOptions = options.filter((option) =>
+    isCodexRejectChoice(option.label) &&
+    codexApprovalShortcutKeys(option.shortcut) !== undefined
+  );
+  const reject = rejectOptions.length === 1 ? rejectOptions[0] : undefined;
+  const rejectKeys = reject
+    ? codexApprovalShortcutKeys(reject.shortcut)
+    : undefined;
   return {
     approvable: true,
     key,
     keys: [key],
     label: primary.label,
+    choices: [{
+      decision: "approve_once",
+      mode: "keys",
+      keys: [key],
+      label: primary.label
+    }, ...(reject && rejectKeys ? [{
+      decision: "reject" as const,
+      mode: "keys" as const,
+      keys: rejectKeys,
+      label: reject.label
+    }] : [])],
     promptEvidence: terminalApprovalPromptEvidence(
       "codex-approval-prompt-v1",
       prompt.region
@@ -1063,6 +1090,24 @@ interface CodexApprovalOptionRow {
   number: number;
   label: string;
   shortcut: string;
+}
+
+function isCodexOneTimeApprovalChoice(label: string): boolean {
+  return /^(?:Yes|Yes, (?:proceed|allow|provide the requested info|grant these permissions for this turn))$/iu
+    .test(label);
+}
+
+function isCodexRejectChoice(label: string): boolean {
+  return /^(?:No|No, (?:and tell Codex what to do differently|but continue without it|continue without permissions))$/iu
+    .test(label);
+}
+
+function codexApprovalShortcutKeys(
+  shortcut: string
+): readonly string[] | undefined {
+  return /^[a-z]$/u.test(shortcut) && shortcut !== "y"
+    ? [shortcut]
+    : undefined;
 }
 
 function parseCodexApprovalOption(line: string): CodexApprovalOptionRow | undefined {

@@ -409,7 +409,7 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       "  $ npm install",
       "",
       "› 1. Yes, proceed (y)",
-      "  2. No, and tell Codex what to do differently (esc)",
+      "  2. No, and tell Codex what to do differently (n)",
       "",
       "  Press enter to confirm or esc to cancel"
     ].join("\n");
@@ -507,8 +507,8 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
       monitoredParsed.message.body.match(
         new RegExp(`- turn_id: ${conversationId}`, "gu")
       )?.length,
-      2,
-      "approve and cancel instructions must use only the semantic Turn id"
+      3,
+      "approve, reject, and stop instructions must use only the semantic Turn id"
     );
     assert.doesNotMatch(
       monitoredParsed.message.body,
@@ -526,9 +526,20 @@ test("terminal bridge monitor callbacks for Codex approval and approve resumes w
     assert.equal(gatewayParams.message.type, "question");
     assert.equal(
       gatewayParams.message.metadata.approve_command,
-      `AKK approve ${conversationId}`
+      `AKK approve ${conversationId} approve_once`
     );
-    assert.equal(gatewayParams.message.metadata.deny_command, `AKK cancel ${conversationId}`);
+    assert.equal(
+      gatewayParams.message.metadata.reject_command,
+      `AKK approve ${conversationId} reject`
+    );
+    assert.equal(
+      gatewayParams.message.metadata.reject_tool,
+      "agent_knock_knock_approve"
+    );
+    assert.equal(
+      gatewayParams.message.metadata.cancel_command,
+      `AKK cancel ${conversationId}`
+    );
     assert.equal(gatewayParams.message.metadata.approval_candidate.command, "npm install");
 
     const writeApprovalRecoveryClone = (

@@ -87,7 +87,9 @@ import {
   tryLoadManagedSession
 } from "./session-store.js";
 import {
+  isTerminalApprovalDecision,
   type TerminalAgentAdapterRegistry as TerminalRegistry,
+  type TerminalApprovalDecision,
   type TerminalControlRef,
   type TerminalDurableCompletionRequest,
   type TerminalRuntimeIdentity
@@ -250,6 +252,7 @@ export interface TerminalCommandCliOptions {
   claudeHome?: string;
   conversation?: string;
   conversationId?: string;
+  decision?: TerminalApprovalDecision;
   expectedApprovalFingerprint?: string;
   expectedCallbackConversationId?: string;
   expectedCallbackMessageId?: string;
@@ -7104,6 +7107,7 @@ async function runTurnResponse({ options, messageBody }) {
 }
 
 async function runApprove(options) {
+  const decision = terminalApprovalDecisionFromOptions(options);
   const terminalConversation = await resolveTerminalConversationFromOptions(options);
   if (terminalConversation) {
     assertExpectedHandoffTokenUsesExactTerminalSelector({
@@ -7113,6 +7117,11 @@ async function runApprove(options) {
     if (options.autoApproved === true) {
       throw new Error(
         "automatic approval requires an exact managed Turn and cannot use a raw terminal selector"
+      );
+    }
+    if (decision !== "approve_once") {
+      throw new Error(
+        "terminal-scoped approval supports approve_once only; use an exact managed Turn to reject"
       );
     }
     await runTerminalConversationApprove({
@@ -7141,6 +7150,9 @@ async function runApprove(options) {
     throw new Error(`conversation ${conversation.conversation_id} is not controlled through a terminal`);
   }
   const autoApproved = options.autoApproved === true;
+  if (autoApproved && decision !== "approve_once") {
+    throw new Error("automatic approval can only dispatch approve_once");
+  }
   const callbackAuthority = autoApprovalCallbackAuthorityFromOptions(options);
   if (
     !["waiting_for_agent", "waiting_for_openclaw"].includes(
@@ -7159,7 +7171,7 @@ async function runApprove(options) {
     : undefined;
   const suppliedExpectedFingerprint = stringValue(options.expectedApprovalFingerprint);
   const expectedFingerprint = suppliedExpectedFingerprint ??
-    stringValue(monitoredApproval?.fingerprint);
+    monitoredApprovalFingerprint(monitoredApproval, decision);
   const claudeScreenApproval = executor.kind === "claude";
   if (claudeScreenApproval) {
     const monitoredState = isRecord(monitoredApproval?.approval_state)
@@ -7248,7 +7260,10 @@ async function runApprove(options) {
       }
       if (
         !suppliedExpectedFingerprint ||
-        expectedFingerprint !== monitoredApproval?.fingerprint
+        expectedFingerprint !== monitoredApprovalFingerprint(
+          monitoredApproval,
+          decision
+        )
       ) {
         printJson({
           conversation,
@@ -7292,8 +7307,37 @@ async function runApprove(options) {
     options, conversation, statePath, logPath,
     nativeTakeover: nativeTakeover as Record<string, any>,
     terminalControl, executor, monitoredApproval, expectedFingerprint,
-    autoApproved, claudeScreenApproval
+    autoApproved, claudeScreenApproval, decision
   });
+}
+
+function terminalApprovalDecisionFromOptions(
+  options: Record<string, any>
+): TerminalApprovalDecision {
+  const value = options.decision ?? "approve_once";
+  if (!isTerminalApprovalDecision(value)) {
+    throw new Error(
+      "--decision must be one of: approve_once, reject"
+    );
+  }
+  return value;
+}
+
+function monitoredApprovalFingerprint(
+  approval: Record<string, unknown> | undefined,
+  decision: TerminalApprovalDecision
+): string | undefined {
+  if (decision === "approve_once") {
+    return stringValue(approval?.fingerprint);
+  }
+  const state = isRecord(approval?.approval_state)
+    ? approval.approval_state
+    : undefined;
+  const choices = Array.isArray(state?.choices) ? state.choices : [];
+  const choice = choices.find((candidate) =>
+    isRecord(candidate) && candidate.decision === decision
+  );
+  return isRecord(choice) ? stringValue(choice.fingerprint) : undefined;
 }
 
 function approvalPolicyCandidateForInspection({
@@ -7332,7 +7376,7 @@ function approvalPolicyCandidateForInspection({
 async function runManagedApprovalDispatch({
   options, conversation, statePath, logPath, nativeTakeover,
   terminalControl, executor, monitoredApproval, expectedFingerprint,
-  autoApproved, claudeScreenApproval
+  autoApproved, claudeScreenApproval, decision
 }: {
   options: Record<string, any>;
   conversation: Conversation;
@@ -7345,6 +7389,7 @@ async function runManagedApprovalDispatch({
   expectedFingerprint?: string;
   autoApproved: boolean;
   claudeScreenApproval: boolean;
+  decision: TerminalApprovalDecision;
 }): Promise<void> {
   const policyRuleId = stringValue(options.policyRuleId);
   const policyFingerprint = stringValue(options.policyFingerprint);
@@ -7406,7 +7451,8 @@ async function runManagedApprovalDispatch({
             nativeTakeover?.terminal_bridge_message_id ||
           (
             claudeScreenApproval &&
-            currentApproval?.fingerprint !== monitoredApproval?.fingerprint
+            monitoredApprovalFingerprint(currentApproval, decision) !==
+              monitoredApprovalFingerprint(monitoredApproval, decision)
           )
         )
       )
@@ -7440,6 +7486,7 @@ async function runManagedApprovalDispatch({
       executor.kind,
       currentControl,
       {
+        decision,
         expectedFingerprint,
         scrollbackLines: Number(options.scrollbackLines ?? 120),
         runtime: currentRuntimeIdentity,
@@ -7573,7 +7620,8 @@ async function runManagedApprovalDispatch({
                 latestConversation.status !== "waiting_for_openclaw" ||
                 latestTakeover.terminal_bridge_message_id !==
                   nativeTakeover?.terminal_bridge_message_id ||
-                latestApproval?.fingerprint !== fingerprint ||
+                monitoredApprovalFingerprint(latestApproval, decision) !==
+                  fingerprint ||
                 latestNotifiedAt === undefined ||
                 cliNowMs() - latestNotifiedAt > CLAUDE_SCREEN_APPROVAL_TTL_MS ||
                 expectedFingerprint !== fingerprint ||
@@ -7611,6 +7659,7 @@ async function runManagedApprovalDispatch({
                   terminal_bridge_approval_dispatch: {
                     state: "reserved",
                     attempt_id: randomUUID(),
+                    decision,
                     fingerprint,
                     keys,
                     terminal_target: dispatchControl.target,
@@ -7631,7 +7680,7 @@ async function runManagedApprovalDispatch({
     const effectivePolicyRuleId = executorPolicyDecision?.ruleId ?? policyRuleId;
     const effectivePolicyFingerprint =
       executorPolicyDecision?.policyFingerprint ?? policyFingerprint;
-    if (!approval.approved) {
+    if (approval.decisionDispatched !== true) {
       releaseApprovalStateLock();
       if (autoApproved) {
         appendEvent(logPath, {
@@ -7650,6 +7699,8 @@ async function runManagedApprovalDispatch({
       printJson({
         conversation,
         approved: false,
+        decision,
+        decision_dispatched: false,
         blocked: approval.blocked,
         reason: approval.reason,
         terminal_control: terminalControl,
@@ -7664,6 +7715,7 @@ async function runManagedApprovalDispatch({
       ts: cliNow().toISOString(),
       conversation_id: conversation.conversation_id,
       event: "terminal_approval_send",
+      decision,
       terminal_control: terminalControl,
       key: approval.key,
       keys: approval.keys,
@@ -7690,6 +7742,7 @@ async function runManagedApprovalDispatch({
     runtimeLog("info", "terminal_approval_send", {
       conversation_id: conversation.conversation_id,
       terminal_target: terminalControl.target,
+      decision,
       key: approval.key,
       keys: approval.keys,
       label: approval.label,
@@ -7734,6 +7787,7 @@ async function runManagedApprovalDispatch({
       terminal_bridge_approval_dispatch: undefined,
       terminal_bridge_approval_resolved_at: approvalResolvedAt,
       terminal_bridge_last_approval_fingerprint: actualFingerprint,
+      terminal_bridge_last_approval_decision: decision,
       terminal_bridge_last_approval_screen_digest:
         resolvedApprovalScreenDigest,
       terminal_bridge_last_approval_request_id:
@@ -7780,7 +7834,10 @@ async function runManagedApprovalDispatch({
 
     printJson({
       conversation: nextConversation,
-      approved: true,
+      approved: decision === "approve_once",
+      rejected: decision === "reject",
+      decision,
+      decision_dispatched: true,
       terminal_control: terminalControl,
       key: approval.key,
       keys: approval.keys,

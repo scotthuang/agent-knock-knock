@@ -23,6 +23,7 @@ const expectedToolNames = [
   "agent_knock_knock_status",
   "agent_knock_knock_send",
   "agent_knock_knock_respond",
+  "agent_knock_knock_respond_interaction",
   "agent_knock_knock_approve",
   "agent_knock_knock_renew",
   "agent_knock_knock_retry_callback",

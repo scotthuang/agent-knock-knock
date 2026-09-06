@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 1823,
-    "production_physical_loc": 123398,
+    "cli_core_max_physical_loc": 1820,
+    "production_physical_loc": 127716,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -982,6 +982,18 @@
       "owner": "terminal-identity-authority"
     },
     {
+      "path": "src/terminal-interaction-authority.ts",
+      "owner": "terminal-identity-authority"
+    },
+    {
+      "path": "src/terminal-interaction-cli-adapter.ts",
+      "owner": "terminal-command-adapter"
+    },
+    {
+      "path": "src/terminal-interaction-protocol.ts",
+      "owner": "terminal-action-projection"
+    },
+    {
       "path": "src/terminal-list-cli-adapter.ts",
       "owner": "terminal-list-application"
     },
@@ -1034,12 +1046,20 @@
       "owner": "terminal-monitor-supervision"
     },
     {
+      "path": "src/terminal-mutation-cli-runtime.ts",
+      "owner": "cli-runtime"
+    },
+    {
       "path": "src/terminal-process-facts.ts",
       "owner": "terminal-control"
     },
     {
       "path": "src/terminal-process-source.ts",
       "owner": "terminal-control"
+    },
+    {
+      "path": "src/terminal-questionnaire-adapter.ts",
+      "owner": "terminal-action-projection"
     },
     {
       "path": "src/terminal-runtime-cli-adapter.ts",

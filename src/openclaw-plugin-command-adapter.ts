@@ -4,6 +4,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { executorDefinitionForKind } from "./executors.js";
 import {
+  isTerminalApprovalDecision,
+  type TerminalApprovalDecision
+} from "./terminal-agent-adapter.js";
+import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
@@ -39,6 +43,7 @@ import {
   newThreadParameters,
   reconcileBindingParameters,
   renewParameters,
+  respondInteractionParameters,
   respondParameters,
   resumeThreadParameters,
   retryCallbackParameters,
@@ -50,11 +55,18 @@ import {
 import {
   consumeOpenClawPrivateAuthorityOffer,
   openClawApprovalAuthorityOfferKey,
+  openClawInteractionAuthorityOfferKey,
   rememberOpenClawPrivateAuthorityOffer,
   type OpenClawPrivateAuthorityOfferKey,
   type OpenClawPrivateAuthorityOfferPayload,
   type OpenClawPrivateAuthorityTarget
 } from "./openclaw-private-authority-offers.js";
+import {
+  TERMINAL_INTERACTION_LIMITS,
+  validateTerminalInteractionProjection,
+  validateTerminalInteractionResponse,
+  type TerminalInteractionProjection
+} from "./terminal-interaction-protocol.js";
 
 const MAX_DISPLAYED_RESUME_SNAPSHOTS = 512;
 const OPENCLAW_HANDOFF_AUTHORITY_KIND = "handoff";
@@ -427,6 +439,12 @@ export function registerOpenClawCommands(
             toolContext?.sessionId,
             result
           );
+          rememberDisplayedInteractionOffer(
+            api,
+            toolContext?.sessionKey,
+            toolContext?.sessionId,
+            result
+          );
           return rendered;
         } catch (error) {
           throw modelFacingToolError(error);
@@ -498,9 +516,24 @@ export function registerOpenClawCommands(
   });
 
   registerCliTool(api, {
+    name: "agent_knock_knock_respond_interaction",
+    description:
+      "Answer exactly one current native questionnaire step shown by agent_knock_knock_status in this controller conversation. Supply only the exact turn_id, interaction_id, and typed semantic answer using advertised question_id and option_id values. AKK consumes the displayed private offer and revalidates its prompt, expiry, owner, and terminal authority before any input. Raw keys, menu indexes, rendered labels, fingerprints, versions, and terminal commands are never accepted. An uncertain response must never be retried blindly.",
+    parameters: respondInteractionParameters,
+    buildArgs: (params, toolContext) => buildPrivateInteractionResponseArgs(
+      api,
+      params,
+      {
+        sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
+        sessionId: requiredOpenClawSessionId(toolContext?.sessionId)
+      }
+    )
+  });
+
+  registerCliTool(api, {
     name: "agent_knock_knock_approve",
     description:
-      "Manually approve the current exact permission request only after the user reviews and explicitly confirms it. Use turn_id for a managed Turn or terminal_id for a separately advertised terminal-scoped approval. AKK privately refreshes the approval prompt and terminal authority, then the CLI recaptures the same prompt under lock before sending keys. Never retry an interrupted approval blindly. This tool cannot enable automatic approval.",
+      "Dispatch one closed semantic decision for the current exact permission request only after the user reviews and explicitly chooses it. decision defaults to approve_once for compatibility; reject is available only on a managed Turn when the adapter proves a safe native reject choice. Use turn_id for a managed Turn or terminal_id for a separately advertised approve_once-only terminal action. AKK privately refreshes the prompt and authority, then recaptures it under lock. Raw keys, indexes, and labels are not accepted. Never retry an interrupted decision blindly.",
     parameters: approveParameters,
     buildArgs: (params, toolContext) => buildPrivateApprovalArgs(api, params, {
       sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
@@ -691,7 +724,10 @@ async function handleAkkCommand(
       );
     }
     const args = parsed.action === "approve"
-      ? await buildPrivateApprovalArgs(api, { turn_id: parsed.turnId }, {
+      ? await buildPrivateApprovalArgs(api, {
+          turn_id: parsed.turnId,
+          decision: parsed.decision
+        }, {
           sessionKey: requiredOpenClawSessionKey(ctx.sessionKey),
           sessionId: requiredOpenClawSessionId(ctx.sessionId)
         })
@@ -1729,14 +1765,69 @@ function rememberDisplayedApprovalOffer(
   const sessionKey = stringValue(sessionKeyValue);
   const sessionId = stringValue(sessionIdValue);
   if (!sessionKey || !sessionId || !isRecord(result)) return;
-  const fingerprints = currentApprovalFingerprints(result);
-  if (fingerprints.length !== 1) return;
+  const decisionFingerprints = currentApprovalDecisionFingerprints(result);
+  const fingerprint = decisionFingerprints.approve_once;
+  if (!fingerprint) return;
   const target = approvalTargetFromStatus(result);
   if (!target) return;
   rememberOpenClawPrivateAuthorityOffer(
     api,
     openClawApprovalAuthorityOfferKey(sessionKey, sessionId, target),
-    { fingerprint: fingerprints[0]! }
+    {
+      fingerprint,
+      decision_fingerprints: decisionFingerprints
+    }
+  );
+}
+
+interface DisplayedInteractionOfferPayload
+  extends OpenClawPrivateAuthorityOfferPayload {
+  readonly interaction_state?: unknown;
+}
+
+function rememberDisplayedInteractionOffer(
+  api: object,
+  sessionKeyValue: unknown,
+  sessionIdValue: unknown,
+  result: unknown
+): void {
+  const sessionKey = stringValue(sessionKeyValue);
+  const sessionId = stringValue(sessionIdValue);
+  if (!sessionKey || !sessionId || !isRecord(result)) return;
+  const terminalStatus = isRecord(result.terminal_status)
+    ? result.terminal_status
+    : undefined;
+  const fingerprint = stringValue(
+    terminalStatus?.interaction_prompt_fingerprint
+  );
+  if (!isExactInteractionFingerprint(fingerprint)) return;
+  let interactionState: TerminalInteractionProjection;
+  try {
+    interactionState = validateTerminalInteractionProjection(
+      terminalStatus?.interaction_state
+    );
+  } catch {
+    return;
+  }
+  if (
+    interactionState.state !== "pending" ||
+    interactionState.capabilities.respond !== true ||
+    publicTurnIdentity(result).turnId !== interactionState.turn_id
+  ) {
+    return;
+  }
+  rememberOpenClawPrivateAuthorityOffer(
+    api,
+    openClawInteractionAuthorityOfferKey(
+      sessionKey,
+      sessionId,
+      interactionState.turn_id,
+      interactionState.interaction_id
+    ),
+    {
+      fingerprint,
+      interaction_state: interactionState
+    }
   );
 }
 
@@ -1852,14 +1943,19 @@ function authoritativeHandoffActionArguments(
   });
 }
 
-function currentApprovalFingerprint(result: unknown): string {
-  const unique = isRecord(result) ? currentApprovalFingerprints(result) : [];
-  if (unique.length !== 1) {
+function currentApprovalFingerprint(
+  result: unknown,
+  decision: TerminalApprovalDecision
+): string {
+  const fingerprint = isRecord(result)
+    ? currentApprovalDecisionFingerprints(result)[decision]
+    : undefined;
+  if (!fingerprint) {
     throw new Error(
-      "the current status does not contain one exact approvable prompt; refresh status and ask the user to review it again"
+      `the current status does not contain one exact ${decision} choice; refresh status and ask the user to review it again`
     );
   }
-  return unique[0]!;
+  return fingerprint;
 }
 
 async function buildPrivateApprovalArgs(
@@ -1870,8 +1966,18 @@ async function buildPrivateApprovalArgs(
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const turnId = stringValue(params.turn_id);
   const terminalId = stringValue(params.terminal_id);
+  const decisionValue = params.decision ?? "approve_once";
+  if (!isTerminalApprovalDecision(decisionValue)) {
+    throw new Error("decision must be one of: approve_once, reject");
+  }
+  const decision = decisionValue;
   if (Boolean(turnId) === Boolean(terminalId)) {
     throw new Error("approve requires exactly one of turn_id or terminal_id");
+  }
+  if (terminalId && decision !== "approve_once") {
+    throw new Error(
+      "terminal-scoped approval supports approve_once only; reject requires an exact managed Turn"
+    );
   }
   const target: OpenClawPrivateAuthorityTarget = terminalId
     ? { type: "terminal_id", id: terminalId }
@@ -1879,9 +1985,15 @@ async function buildPrivateApprovalArgs(
   const offered = consumeOpenClawPrivateAuthorityOffer<
     OpenClawPrivateAuthorityOfferPayload
   >(api, openClawApprovalAuthorityOfferKey(sessionKey, sessionId, target));
-  const offeredFingerprint = stringValue(offered?.fingerprint) ??
+  const offeredDecisions = isRecord(offered?.decision_fingerprints)
+    ? offered.decision_fingerprints
+    : undefined;
+  const offeredFingerprint = stringValue(offeredDecisions?.[decision]) ??
+    (decision === "approve_once" ? stringValue(offered?.fingerprint) : undefined) ??
     (isRecord(offered?.args)
-      ? stringValue(offered.args.expected_approval_fingerprint)
+      ? decision === "approve_once"
+        ? stringValue(offered.args.expected_approval_fingerprint)
+        : undefined
       : undefined);
   if (!isExactApprovalFingerprint(offeredFingerprint)) {
     throw new Error(
@@ -1911,13 +2023,15 @@ async function buildPrivateApprovalArgs(
     args.push("--turn", requiredString(turnId, "turn_id"));
   }
   const currentFingerprint = currentApprovalFingerprint(
-    await runHostAwareCli(api, statusArgs)
+    await runHostAwareCli(api, statusArgs),
+    decision
   );
   if (currentFingerprint !== offeredFingerprint) {
     throw new Error(
       "the approval request changed after it was shown; refresh AKK status, ask the user to review the current request, and explicitly confirm again"
     );
   }
+  args.push("--decision", decision);
   args.push("--expected-approval-fingerprint", currentFingerprint);
   if (terminalId) {
     args.push(
@@ -1932,13 +2046,71 @@ async function buildPrivateApprovalArgs(
   return args;
 }
 
+function buildPrivateInteractionResponseArgs(
+  api,
+  params: Record<string, unknown>,
+  { sessionKey, sessionId }: { sessionKey: string; sessionId: string }
+): string[] {
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const turnId = requiredTerminalInteractionIdentifier(params.turn_id, "turn_id");
+  const interactionId = requiredTerminalInteractionIdentifier(
+    params.interaction_id,
+    "interaction_id"
+  );
+  const offered = consumeOpenClawPrivateAuthorityOffer<
+    DisplayedInteractionOfferPayload
+  >(
+    api,
+    openClawInteractionAuthorityOfferKey(
+      sessionKey,
+      sessionId,
+      turnId,
+      interactionId
+    )
+  );
+  const fingerprint = stringValue(offered?.fingerprint);
+  if (
+    !isExactInteractionFingerprint(fingerprint) ||
+    offered?.interaction_state === undefined
+  ) {
+    throw new Error(
+      "respond_interaction requires a current pending interaction shown by agent_knock_knock_status in this controller conversation; refresh status, review the current questions, and respond again"
+    );
+  }
+  const projection = validateTerminalInteractionProjection(
+    offered.interaction_state
+  );
+  const response = validateTerminalInteractionResponse(params, projection);
+  const args = [
+    "respond-interaction",
+    "--turn",
+    response.turn_id,
+    "--interaction",
+    response.interaction_id,
+    "--response-json",
+    JSON.stringify(response),
+    "--expected-interaction-fingerprint",
+    fingerprint,
+    "--expected-interaction-expires-at",
+    projection.expires_at,
+    "--openclaw-session",
+    sessionKey
+  ];
+  pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+  return args;
+}
+
 function isExactApprovalFingerprint(value: unknown): value is string {
   return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 }
 
-function currentApprovalFingerprints(
+function isExactInteractionFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function currentApprovalDecisionFingerprints(
   result: Record<string, unknown>
-): string[] {
+): Partial<Record<TerminalApprovalDecision, string>> {
   const terminalStatus = isRecord(result.terminal_status)
     ? result.terminal_status
     : undefined;
@@ -1948,14 +2120,35 @@ function currentApprovalFingerprints(
       ? terminalStatus.approval_state
       : undefined
   ];
-  return [...new Set(states.flatMap((state) => {
+  const found = new Map<TerminalApprovalDecision, Set<string>>();
+  const remember = (decision: TerminalApprovalDecision, value: unknown) => {
+    if (!isExactApprovalFingerprint(value)) return;
+    const fingerprints = found.get(decision) ?? new Set<string>();
+    fingerprints.add(value);
+    found.set(decision, fingerprints);
+  };
+  for (const state of states) {
     const fingerprint = state?.approvable === true
       ? stringValue(state.fingerprint)
       : undefined;
-    return fingerprint && /^[a-f0-9]{64}$/u.test(fingerprint)
-      ? [fingerprint]
-      : [];
-  }))];
+    remember("approve_once", fingerprint);
+    if (state?.approvable !== true || !Array.isArray(state.choices)) continue;
+    for (const choice of state.choices) {
+      if (
+        isRecord(choice) &&
+        isTerminalApprovalDecision(choice.decision)
+      ) {
+        remember(choice.decision, choice.fingerprint);
+      }
+    }
+  }
+  return Object.fromEntries(
+    [...found.entries()].flatMap(([decision, fingerprints]) =>
+      fingerprints.size === 1
+        ? [[decision, [...fingerprints][0]!]]
+        : []
+    )
+  );
 }
 
 function sanitizeModelFacingValue(
@@ -1995,6 +2188,14 @@ function sanitizeModelFacingValue(
       key === "live_native_thread_id" ||
       (key === "fingerprint" && parentKey === "approval_state")
     ) {
+      continue;
+    }
+    if (key === "interaction_state") {
+      try {
+        output[key] = validateTerminalInteractionProjection(item);
+      } catch {
+        continue;
+      }
       continue;
     }
     output[key] = sanitizeModelFacingValue(item, key, [...path, key]);
@@ -2719,6 +2920,20 @@ function requiredOpenClawSessionId(value: unknown): string {
     value,
     "Controller conversation incarnation for this confirmed action"
   );
+}
+
+function requiredTerminalInteractionIdentifier(
+  value: unknown,
+  name: string
+): string {
+  const identifier = requiredString(value, name);
+  if (
+    identifier.length > TERMINAL_INTERACTION_LIMITS.maxIdentifierLength ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(identifier)
+  ) {
+    throw new Error(`${name} must be an exact safe interaction identifier`);
+  }
+  return identifier;
 }
 
 function parseJson(text) {

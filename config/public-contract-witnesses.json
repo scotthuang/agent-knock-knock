@@ -26,6 +26,7 @@
         "resume-thread",
         "reconcile-binding",
         "respond",
+        "respond-interaction",
         "approve",
         "cancel",
         "renew",
@@ -58,7 +59,7 @@
       "version": 1,
       "transport": "mcp_stdio",
       "callback_driver": "command_json_v1",
-      "tool_count": 16,
+      "tool_count": 17,
       "authority_paths": [
         "schemas/host-profile-v1.schema.json",
         "src/command-json-callback-transport.ts",
@@ -81,7 +82,7 @@
       ]
     },
     "list_action": {
-      "version": 23,
+      "version": 24,
       "actions": [
         "send",
         "retry_submission",
@@ -93,6 +94,7 @@
         "resume_thread",
         "reconcile_binding",
         "respond",
+        "respond_interaction",
         "status",
         "approve",
         "cancel",
@@ -104,7 +106,7 @@
         "src/terminal-list-renderer.ts"
       ],
       "witnesses": [
-        "action-v23-unit",
+        "action-v24-unit",
         "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
@@ -124,6 +126,7 @@
         "agent_knock_knock_status",
         "agent_knock_knock_send",
         "agent_knock_knock_respond",
+        "agent_knock_knock_respond_interaction",
         "agent_knock_knock_renew",
         "agent_knock_knock_retry_callback",
         "agent_knock_knock_cancel",
@@ -195,10 +198,10 @@
   },
   "witnesses": [
     {
-      "id": "action-v23-unit",
+      "id": "action-v24-unit",
       "path": "test/terminal-list-renderer.test.ts",
       "tier": "fast",
-      "needle": "the public action contract v23 exposes semantic arguments only"
+      "needle": "the public action contract v24 exposes semantic arguments only"
     },
     {
       "id": "callback-cli-boundary",
@@ -366,7 +369,7 @@
       "id": "host-bridge-stdio-unit",
       "path": "test/host-bridge-stdio.test.ts",
       "tier": "fast",
-      "needle": "real Host Bridge stdio advertises 16 tools and exits on Host EOF"
+      "needle": "real Host Bridge stdio advertises 17 tools and exits on Host EOF"
     },
     {
       "id": "host-bridge-tools-unit",
@@ -829,13 +832,13 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The imported command service and pure renderer preserve action-contract v23 ordering, semantic model-facing arguments, version compatibility warnings without version-based action vetoes, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, best-effort exact fallback Watch callbacks that never revoke Send, working activity as non-vetoing diagnostic evidence, Claude exact-empty and managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v24 ordering, semantic model-facing arguments including status-bound interactive responses, version compatibility warnings without version-based action vetoes, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, best-effort exact fallback Watch callbacks that never revoke Send, working activity as non-vetoing diagnostic evidence, Claude exact-empty and managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
         "management-list-in-process",
         "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
-        "action-v23-unit"
+        "action-v24-unit"
       ],
       "retained_boundary_witnesses": [
         "codex-binding-boundary",

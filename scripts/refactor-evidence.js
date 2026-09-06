@@ -61,6 +61,7 @@ const PUBLIC_COMMANDS = Object.freeze([
   "resume-thread",
   "reconcile-binding",
   "respond",
+  "respond-interaction",
   "approve",
   "cancel",
   "renew",
@@ -87,6 +88,7 @@ const PUBLIC_ACTIONS = Object.freeze([
   "resume_thread",
   "reconcile_binding",
   "respond",
+  "respond_interaction",
   "status",
   "approve",
   "cancel",
@@ -106,6 +108,7 @@ const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_status",
   "agent_knock_knock_send",
   "agent_knock_knock_respond",
+  "agent_knock_knock_respond_interaction",
   "agent_knock_knock_renew",
   "agent_knock_knock_retry_callback",
   "agent_knock_knock_cancel",
@@ -959,6 +962,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
     [...schemas.matchAll(/^export const ([A-Za-z]+Parameters) =/gmu)]
       .map((match) => match[1]),
     [
+      "respondInteractionParameters",
       "sendParameters",
       "respondParameters",
       "listParameters",
@@ -1021,6 +1025,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "reconcileBindingParameters",
       "renewParameters",
       "respondParameters",
+      "respondInteractionParameters",
       "resumeThreadParameters",
       "retryCallbackParameters",
       "sendParameters",
@@ -1246,8 +1251,8 @@ function validatePublicContracts(value, {
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 23) {
-    fail("list action contract version must remain 23");
+  if (actions.version !== 24) {
+    fail("list action contract version must remain 24");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -1264,8 +1269,8 @@ function validatePublicContracts(value, {
   assertSourcePattern(
     repoRoot,
     "src/terminal-list-renderer.ts",
-    /version:\s*23\b/u,
-    "list action contract version 23"
+    /version:\s*24\b/u,
+    "list action contract version 24"
   );
 
   const openclaw = assertExactKeys(contracts.openclaw_tools, [

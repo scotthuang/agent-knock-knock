@@ -597,6 +597,17 @@ test("Codex 0.147 MCP elicitation and permissions menus produce complete prompt 
   }
   assert.equal(elicitation.key, "y");
   assert.equal(elicitation.promptKind, "unknown");
+  assert.deepEqual(elicitation.choices, [{
+    decision: "approve_once",
+    mode: "keys",
+    keys: ["y"],
+    label: "Yes, provide the requested info"
+  }, {
+    decision: "reject",
+    mode: "keys",
+    keys: ["n"],
+    label: "No, but continue without it"
+  }]);
   assert.deepEqual(
     elicitation.promptEvidence,
     terminalApprovalPromptEvidence(
@@ -627,6 +638,16 @@ test("Codex 0.147 MCP elicitation and permissions menus produce complete prompt 
   }
   assert.equal(permission.key, "y");
   assert.equal(permission.promptKind, "grant_permissions");
+  assert.deepEqual(permission.choices?.map((choice) => ({
+    decision: choice.decision,
+    keys: choice.keys
+  })), [{
+    decision: "approve_once",
+    keys: ["y"]
+  }, {
+    decision: "reject",
+    keys: ["d"]
+  }]);
   assert.deepEqual(
     permission.promptEvidence,
     terminalApprovalPromptEvidence(
@@ -635,6 +656,40 @@ test("Codex 0.147 MCP elicitation and permissions menus produce complete prompt 
     ),
     "the terminal No (d) row closes the complete permissions authority"
   );
+});
+
+test("Codex never exposes esc/Cancel or unknown labels as semantic decisions", () => {
+  const escReject = detectCodexApprovalPrompt([
+    "Would you like to run the following command?",
+    "",
+    "  $ npm test",
+    "",
+    "› 1. Yes, proceed (y)",
+    "  2. No, and tell Codex what to do differently (esc)",
+    "",
+    "  Press enter to confirm or esc to cancel"
+  ].join("\n"));
+  assert.equal(escReject.approvable, true);
+  if (!escReject.approvable) assert.fail("expected proven approve_once");
+  assert.deepEqual(
+    escReject.choices.map((choice) => choice.decision),
+    ["approve_once"]
+  );
+
+  const unknownApprove = detectCodexApprovalPrompt([
+    "Would you like to run the following command?",
+    "",
+    "  $ npm test",
+    "",
+    "› 1. Yes, remember this forever (y)",
+    "  2. No (n)",
+    "",
+    "  Press enter to confirm or esc to cancel"
+  ].join("\n"));
+  assert.equal(unknownApprove.approvable, false);
+  if (!unknownApprove.approvable) {
+    assert.match(unknownApprove.reason, /proven one-time/u);
+  }
 });
 
 test("Codex stale approval diagnostics never disclose secrets from post-prompt activity", () => {

@@ -4,10 +4,14 @@ import {
   formatTerminalConversationId,
   parseTerminalConversationId,
   terminalControlCapabilitiesForAdapter,
+  terminalApprovalActionForDecision,
+  terminalApprovalChoices,
   type ActiveTerminalProcess,
   type TerminalAgentAdapter,
   type TerminalAgentAdapterCapabilities,
   type TerminalAgentAdapterRegistry,
+  type TerminalApprovalAction,
+  type TerminalApprovalDecision,
   type TerminalCompletionEvidence,
   type TerminalControlCapability,
   type TerminalControlRef,
@@ -43,6 +47,22 @@ import {
   type ClaudeComposerBeforeEnterProof,
   type ClaudeInjectedPasteProofPorts
 } from "./claude-injected-paste-proof.js";
+import {
+  TERMINAL_INTERACTION_SCHEMA,
+  TERMINAL_INTERACTION_VERSION,
+  validateTerminalInteractionProjection,
+  validateTerminalInteractionResponse,
+  type TerminalInteractionAnswer,
+  type TerminalInteractionProjection,
+  type TerminalInteractionQuestion,
+  type TerminalInteractionResponse
+} from "./terminal-interaction-protocol.js";
+import {
+  inspectNativeQuestionnaire,
+  type NativeQuestionnaireActionPlan,
+  type NativeQuestionnaireInspection,
+  type NativeQuestionnaireQuestion
+} from "./terminal-questionnaire-adapter.js";
 
 // Verified Codex profiles through 0.153.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
@@ -191,6 +211,10 @@ const CLAUDE_NATIVE_STATUS_SETTLE_BY_PROFILE: Readonly<
   }
 };
 const CODEX_LARGE_PASTE_CHAR_THRESHOLD = 1_000;
+const TERMINAL_INTERACTION_TTL_MS = 10 * 60 * 1_000;
+const TERMINAL_INTERACTION_IDENTIFIER_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const TERMINAL_INTERACTION_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/u;
 
 /** A terminal send failed at a boundary that proves input never started. */
 export class TerminalInputNotStartedError extends Error {
@@ -305,6 +329,29 @@ export class NativeInspectionDismissalError extends Error {
   }
 }
 
+export type TerminalInteractionReservedStage =
+  | "reservation_uncertain"
+  | "text_uncertain"
+  | "key_uncertain";
+
+/**
+ * A response reservation or terminal input may already have happened. The
+ * same interaction must never be dispatched automatically after this error.
+ */
+export class TerminalInteractionDispatchReservedError extends Error {
+  readonly code = "AKK_TERMINAL_INTERACTION_DISPATCH_RESERVED";
+  readonly doNotRetry = true;
+
+  constructor(
+    readonly stage: TerminalInteractionReservedStage,
+    message: string,
+    options: { cause?: unknown } = {}
+  ) {
+    super(message, options);
+    this.name = "TerminalInteractionDispatchReservedError";
+  }
+}
+
 export interface TerminalBridgeStatus {
   provider: string;
   target: string;
@@ -327,6 +374,11 @@ export interface TerminalBridgeStatus {
     request_detail?: string;
     reason?: string;
     fingerprint?: string;
+    choices?: readonly {
+      decision: TerminalApprovalDecision;
+      label: string;
+      fingerprint: string;
+    }[];
     decision_mode?: "keys";
     request_id?: string;
     policy_evidence?: {
@@ -344,7 +396,67 @@ export interface TerminalBridgeStatus {
     approval?: Record<string, unknown>;
     error?: string;
   };
+  /** Safe, semantic current-question projection; never terminal keys. */
+  interaction_state?: TerminalInteractionProjection;
+  /**
+   * Owner-private response fence. Public status renderers must remove this
+   * sibling field before returning terminal_status to a model or browser.
+   */
+  interaction_prompt_fingerprint?: string;
   capability_limitation?: string;
+}
+
+export interface TerminalInteractionAuthorizationContext {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  fingerprint: string;
+  projection: TerminalInteractionProjection;
+  response: TerminalInteractionResponse;
+  runtime?: TerminalRuntimeIdentity;
+}
+
+export interface TerminalInteractionAuthorizationDecision {
+  approved: boolean;
+  reason?: string;
+}
+
+export interface TerminalInteractionBeforeDispatchContext {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  fingerprint: string;
+  projection: TerminalInteractionProjection;
+  response: TerminalInteractionResponse;
+  runtime?: TerminalRuntimeIdentity;
+}
+
+export interface TerminalInteractionResponseExecution {
+  responded: boolean;
+  blocked: boolean;
+  reason?: string;
+  interactionId: string;
+  questionId?: string;
+  responseKind?: TerminalInteractionAnswer["response_kind"];
+  outcome?:
+    | "submitted_or_advanced"
+    | "custom_text_opened"
+    | "confirmed"
+    | "cancelled";
+}
+
+interface TerminalInteractionBridgeOffer {
+  readonly projection: TerminalInteractionProjection;
+  readonly promptFingerprint: string;
+  readonly actionPlan: NativeQuestionnaireActionPlan;
+  readonly nativeInspection: Exclude<
+    NativeQuestionnaireInspection,
+    { status: "none" }
+  >;
+}
+
+interface CapturedTerminalInteractionOffer {
+  readonly terminalControl: TerminalControlRef;
+  readonly inspection: TerminalScreenInspection;
+  readonly offer?: TerminalInteractionBridgeOffer;
 }
 
 export interface ResolvedTerminalConversation {
@@ -358,6 +470,9 @@ export interface ResolvedTerminalConversation {
 
 export interface TerminalApprovalExecution {
   approved: boolean;
+  /** True after either approve_once or reject was dispatched exactly once. */
+  decisionDispatched?: boolean;
+  decision?: TerminalApprovalDecision;
   blocked: boolean;
   reason?: string;
   key?: string;
@@ -765,6 +880,7 @@ export interface TerminalApprovalAuthorizationContext {
   terminalControl: TerminalControlRef;
   inspection: TerminalScreenInspection;
   fingerprint?: string;
+  decision: TerminalApprovalDecision;
   runtime?: TerminalRuntimeIdentity;
 }
 
@@ -778,8 +894,193 @@ export interface TerminalApprovalKeyDispatchContext {
   terminalControl: TerminalControlRef;
   inspection: TerminalScreenInspection;
   fingerprint: string;
+  decision: TerminalApprovalDecision;
   keys: readonly string[];
   runtime?: TerminalRuntimeIdentity;
+}
+
+type TerminalApprovalPreflight =
+  | {
+      ready: true;
+      action: TerminalApprovalAction;
+      decisionMode: "keys";
+      fingerprintControl: TerminalControlRef;
+      fingerprint?: string;
+    }
+  | { ready: false; result: TerminalApprovalExecution };
+
+function terminalApprovalPreflight(input: {
+  adapter: TerminalAgentAdapter;
+  terminalControl: TerminalControlRef;
+  activeTerminalControl: TerminalControlRef;
+  inspection: TerminalScreenInspection;
+  screen: string;
+  decision: TerminalApprovalDecision;
+  expectedFingerprint?: string;
+  requiredDecisionMode?: "keys";
+  runtime?: TerminalRuntimeIdentity;
+}): TerminalApprovalPreflight {
+  const { adapter, inspection, decision } = input;
+  if (!inspection.approval.approvable) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: inspection.approval.blocked,
+      reason: inspection.approval.reason,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt
+    } };
+  }
+  if (
+    decision === "approve_once" &&
+    (inspection.approval.action.mode ?? "keys") === "keys" &&
+    inspection.approval.action.keys.length === 0
+  ) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      decision,
+      reason: `${adapter.displayName} approval action has no keys`,
+      label: inspection.approval.action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt
+    } };
+  }
+  const action = terminalApprovalActionForDecision(
+    inspection.approval,
+    decision
+  );
+  if (!action) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      decision,
+      reason: `${adapter.displayName} does not expose the ${decision} decision for this exact approval prompt`,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt
+    } };
+  }
+  const decisionMode = action.mode ?? "keys";
+  const canonicalFingerprint = terminalApprovalFingerprint(
+    adapter.agent,
+    input.activeTerminalControl,
+    inspection,
+    { screen: input.screen, runtime: input.runtime, decision }
+  );
+  if (
+    input.requiredDecisionMode &&
+    decisionMode !== input.requiredDecisionMode
+  ) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: `${adapter.displayName} approval mode ${decisionMode} is not eligible for this decision`,
+      decision,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      fingerprint: canonicalFingerprint,
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: action.requestId
+    } };
+  }
+  if (decisionMode === "keys" && action.keys.length === 0) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: `${adapter.displayName} approval action has no keys`,
+      decision,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt
+    } };
+  }
+  if (!isTerminalApprovalPromptEvidence(inspection.approval.promptEvidence)) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: `${adapter.displayName} approval prompt has no adapter-verified prompt evidence`,
+      decision,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: action.requestId
+    } };
+  }
+  const legacyFingerprint = hasCanonicalTerminalEndpoint(input.terminalControl)
+    ? undefined
+    : terminalApprovalFingerprint(
+        adapter.agent,
+        input.terminalControl,
+        inspection,
+        { screen: input.screen, runtime: input.runtime, decision }
+      );
+  const useLegacyFingerprint = Boolean(
+    input.expectedFingerprint &&
+    input.expectedFingerprint === legacyFingerprint
+  );
+  const fingerprintControl = useLegacyFingerprint
+    ? input.terminalControl
+    : input.activeTerminalControl;
+  const fingerprint = useLegacyFingerprint
+    ? legacyFingerprint
+    : canonicalFingerprint;
+  if (
+    adapter.agent === "claude" &&
+    !input.expectedFingerprint
+  ) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: "screen approval requires the latest expected fingerprint",
+      decision,
+      key: action.keys.length === 1 ? action.keys[0] : undefined,
+      keys: action.keys,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      cwd: inspection.approval.cwd,
+      toolName: inspection.approval.toolName,
+      requestDetail: inspection.approval.requestDetail,
+      fingerprint,
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: action.requestId
+    } };
+  }
+  if (
+    input.expectedFingerprint &&
+    input.expectedFingerprint !== fingerprint
+  ) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: "approval fingerprint changed before execution",
+      decision,
+      key: action.keys.length === 1 ? action.keys[0] : undefined,
+      keys: action.keys,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      fingerprint,
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: action.requestId
+    } };
+  }
+  return {
+    ready: true,
+    action,
+    decisionMode,
+    fingerprintControl,
+    fingerprint
+  };
 }
 
 export interface TerminalMonitorPoll {
@@ -794,6 +1095,7 @@ export class TerminalAgentBridge {
   readonly terminalProvider: TerminalControlProvider;
   private readonly verifyIdentity?: TerminalIdentityVerifier;
   private readonly nowMs: () => number;
+  private readonly now: () => Date;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly diagnosticLog?: TerminalDiscoveryDiagnosticLog;
 
@@ -802,6 +1104,7 @@ export class TerminalAgentBridge {
     terminalProvider: TerminalControlProvider;
     verifyIdentity?: TerminalIdentityVerifier;
     nowMs?: () => number;
+    now?: () => Date;
     sleep?: (milliseconds: number) => Promise<void>;
     diagnosticLog?: TerminalDiscoveryDiagnosticLog;
   }) {
@@ -809,6 +1112,7 @@ export class TerminalAgentBridge {
     this.terminalProvider = options.terminalProvider;
     this.verifyIdentity = options.verifyIdentity;
     this.nowMs = options.nowMs ?? (() => performance.now());
+    this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? terminalSettleDelay;
     this.diagnosticLog = options.diagnosticLog;
   }
@@ -981,7 +1285,8 @@ export class TerminalAgentBridge {
       const captured = await this.captureInspection(adapter, terminalControl, options);
       return statusFromInspection(adapter, captured.terminalControl, captured.inspection, {
         screen: captured.screen,
-        runtime: options.runtime
+        runtime: options.runtime,
+        now: this.now()
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3179,6 +3484,7 @@ export class TerminalAgentBridge {
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
     options: {
+      decision?: TerminalApprovalDecision;
       expectedFingerprint?: string;
       scrollbackLines?: number;
       runtime?: TerminalRuntimeIdentity;
@@ -3198,6 +3504,7 @@ export class TerminalAgentBridge {
     } = {}
   ): Promise<TerminalApprovalExecution> {
     const adapter = this.registry.require(agent);
+    const decision = options.decision ?? "approve_once";
     if (
       !adapter.capabilities.terminalApproval ||
       !terminalControl.capabilities.includes("terminal_approval")
@@ -3221,147 +3528,26 @@ export class TerminalAgentBridge {
     const captured = await this.captureInspection(adapter, terminalControl, options);
     const { inspection } = captured;
     const activeTerminalControl = captured.terminalControl;
-    if (!inspection.approval.approvable) {
-      return {
-        approved: false,
-        blocked: inspection.approval.blocked,
-        reason: inspection.approval.reason,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        screenExcerpt: inspection.screenExcerpt
-      };
-    }
-    const decisionMode = inspection.approval.action.mode ?? "keys";
-    if (options.requiredDecisionMode && decisionMode !== options.requiredDecisionMode) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: `${adapter.displayName} approval mode ${decisionMode} is not eligible for this decision`,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        fingerprint: terminalApprovalFingerprint(
-          adapter.agent,
-          activeTerminalControl,
-          inspection,
-          {
-            screen: captured.screen,
-            runtime: options.runtime
-          }
-        ),
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: inspection.approval.action.requestId
-      };
-    }
-    if (decisionMode === "keys" && inspection.approval.action.keys.length === 0) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: `${adapter.displayName} approval action has no keys`,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        screenExcerpt: inspection.screenExcerpt
-      };
-    }
-    if (
-      decisionMode === "keys" &&
-      !isTerminalApprovalPromptEvidence(
-        inspection.approval.promptEvidence
-      )
-    ) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: `${adapter.displayName} approval prompt has no adapter-verified prompt evidence`,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: inspection.approval.action.requestId
-      };
-    }
-    const canonicalFingerprint = terminalApprovalFingerprint(
-      adapter.agent,
+    const preflight = terminalApprovalPreflight({
+      adapter,
+      terminalControl,
       activeTerminalControl,
       inspection,
-      {
-        screen: captured.screen,
-        runtime: options.runtime
-      }
-    );
-    const legacyFingerprint = hasCanonicalTerminalEndpoint(terminalControl)
-      ? undefined
-      : terminalApprovalFingerprint(
-          adapter.agent,
-          terminalControl,
-          inspection,
-          {
-            screen: captured.screen,
-            runtime: options.runtime
-          }
-        );
-    const useLegacyFingerprint = Boolean(
-      options.expectedFingerprint &&
-      options.expectedFingerprint === legacyFingerprint
-    );
-    const fingerprintControl = useLegacyFingerprint
-      ? terminalControl
-      : activeTerminalControl;
-    const fingerprint = useLegacyFingerprint
-      ? legacyFingerprint
-      : canonicalFingerprint;
-    if (
-      adapter.agent === "claude" &&
-      decisionMode === "keys" &&
-      !options.expectedFingerprint
-    ) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: "screen approval requires the latest expected fingerprint",
-        key: inspection.approval.action.keys.length === 1
-          ? inspection.approval.action.keys[0]
-          : undefined,
-        keys: inspection.approval.action.keys,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        cwd: inspection.approval.cwd,
-        toolName: inspection.approval.toolName,
-        requestDetail: inspection.approval.requestDetail,
-        fingerprint,
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: inspection.approval.action.requestId
-      };
-    }
-    if (options.expectedFingerprint && options.expectedFingerprint !== fingerprint) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: "approval fingerprint changed before execution",
-        key: inspection.approval.action.keys.length === 1
-          ? inspection.approval.action.keys[0]
-          : undefined,
-        keys: inspection.approval.action.keys,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        fingerprint,
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: inspection.approval.action.requestId
-      };
-    }
+      screen: captured.screen,
+      decision,
+      expectedFingerprint: options.expectedFingerprint,
+      requiredDecisionMode: options.requiredDecisionMode,
+      runtime: options.runtime
+    });
+    if (!preflight.ready) return preflight.result;
+    const { action, decisionMode, fingerprintControl, fingerprint } = preflight;
     if (options.authorize) {
       const authorization = await options.authorize({
         agent: adapter.agent,
         terminalControl: activeTerminalControl,
         inspection,
         fingerprint,
+        decision,
         runtime: options.runtime
       });
       if (!authorization.approved) {
@@ -3369,11 +3555,12 @@ export class TerminalAgentBridge {
           approved: false,
           blocked: true,
           reason: authorization.reason ?? "approval was not authorized",
-          key: inspection.approval.action.keys.length === 1
-            ? inspection.approval.action.keys[0]
+          decision,
+          key: action.keys.length === 1
+            ? action.keys[0]
             : undefined,
-          keys: inspection.approval.action.keys,
-          label: inspection.approval.action.label,
+          keys: action.keys,
+          label: action.label,
           promptKind: inspection.approval.promptKind,
           command: inspection.approval.command,
           toolName: inspection.approval.toolName,
@@ -3381,7 +3568,7 @@ export class TerminalAgentBridge {
           fingerprint,
           screenExcerpt: inspection.screenExcerpt,
           decisionMode,
-          requestId: inspection.approval.action.requestId
+          requestId: action.requestId
         };
       }
     }
@@ -3404,14 +3591,29 @@ export class TerminalAgentBridge {
         screenExcerpt: recapturedInspection.screenExcerpt
       };
     }
-    const recapturedDecisionMode = recapturedInspection.approval.action.mode ?? "keys";
+    const recapturedAction = terminalApprovalActionForDecision(
+      recapturedInspection.approval,
+      decision
+    );
+    if (!recapturedAction) {
+      return {
+        approved: false,
+        blocked: true,
+        decision,
+        reason: `the ${decision} decision is no longer available after authorization`,
+        promptKind: recapturedInspection.approval.promptKind,
+        screenExcerpt: recapturedInspection.screenExcerpt
+      };
+    }
+    const recapturedDecisionMode = recapturedAction.mode ?? "keys";
     const recapturedFingerprint = terminalApprovalFingerprint(
       adapter.agent,
       fingerprintControl,
       recapturedInspection,
       {
         screen: recaptured.screen,
-        runtime: options.runtime
+        runtime: options.runtime,
+        decision
       }
     );
     if (recapturedDecisionMode !== decisionMode) {
@@ -3419,11 +3621,12 @@ export class TerminalAgentBridge {
         approved: false,
         blocked: true,
         reason: "approval decision mode changed after authorization",
-        key: recapturedInspection.approval.action.keys.length === 1
-          ? recapturedInspection.approval.action.keys[0]
+        decision,
+        key: recapturedAction.keys.length === 1
+          ? recapturedAction.keys[0]
           : undefined,
-        keys: recapturedInspection.approval.action.keys,
-        label: recapturedInspection.approval.action.label,
+        keys: recapturedAction.keys,
+        label: recapturedAction.label,
         promptKind: recapturedInspection.approval.promptKind,
         command: recapturedInspection.approval.command,
         cwd: recapturedInspection.approval.cwd,
@@ -3432,7 +3635,7 @@ export class TerminalAgentBridge {
         fingerprint: recapturedFingerprint,
         screenExcerpt: recapturedInspection.screenExcerpt,
         decisionMode: recapturedDecisionMode,
-        requestId: recapturedInspection.approval.action.requestId
+        requestId: recapturedAction.requestId
       };
     }
     if (recapturedFingerprint !== fingerprint) {
@@ -3440,11 +3643,12 @@ export class TerminalAgentBridge {
         approved: false,
         blocked: true,
         reason: "approval fingerprint changed after authorization",
-        key: recapturedInspection.approval.action.keys.length === 1
-          ? recapturedInspection.approval.action.keys[0]
+        decision,
+        key: recapturedAction.keys.length === 1
+          ? recapturedAction.keys[0]
           : undefined,
-        keys: recapturedInspection.approval.action.keys,
-        label: recapturedInspection.approval.action.label,
+        keys: recapturedAction.keys,
+        label: recapturedAction.label,
         promptKind: recapturedInspection.approval.promptKind,
         command: recapturedInspection.approval.command,
         cwd: recapturedInspection.approval.cwd,
@@ -3453,7 +3657,7 @@ export class TerminalAgentBridge {
         fingerprint: recapturedFingerprint,
         screenExcerpt: recapturedInspection.screenExcerpt,
         decisionMode: recapturedDecisionMode,
-        requestId: recapturedInspection.approval.action.requestId
+        requestId: recapturedAction.requestId
       };
     }
     const verifiedForApproval = await this.verifyTerminalIdentity(
@@ -3475,11 +3679,13 @@ export class TerminalAgentBridge {
       terminalControl: verifiedForApproval,
       inspection: recapturedInspection,
       fingerprint: recapturedFingerprint,
-      keys: recapturedInspection.approval.action.keys,
+      decision,
+      keys: recapturedAction.keys,
       runtime: options.runtime
     });
     let dispatchTerminalControl = verifiedForApproval;
     let dispatchInspection = recapturedInspection;
+    let dispatchAction = recapturedAction;
     if (options.beforeKeyDispatch) {
       const afterReservation = await this.captureInspection(
         adapter,
@@ -3500,15 +3706,29 @@ export class TerminalAgentBridge {
           screenExcerpt: afterReservationInspection.screenExcerpt
         };
       }
-      const afterReservationMode =
-        afterReservationInspection.approval.action.mode ?? "keys";
+      const afterReservationAction = terminalApprovalActionForDecision(
+        afterReservationInspection.approval,
+        decision
+      );
+      if (!afterReservationAction) {
+        return {
+          approved: false,
+          blocked: true,
+          decision,
+          reason: `the ${decision} decision is no longer available after dispatch reservation`,
+          promptKind: afterReservationInspection.approval.promptKind,
+          screenExcerpt: afterReservationInspection.screenExcerpt
+        };
+      }
+      const afterReservationMode = afterReservationAction.mode ?? "keys";
       const afterReservationFingerprint = terminalApprovalFingerprint(
         adapter.agent,
         fingerprintControl,
         afterReservationInspection,
         {
           screen: afterReservation.screen,
-          runtime: options.runtime
+          runtime: options.runtime,
+          decision
         }
       );
       if (
@@ -3518,12 +3738,13 @@ export class TerminalAgentBridge {
         return {
           approved: false,
           blocked: true,
+          decision,
           reason: "approval fingerprint changed after dispatch reservation",
-          key: afterReservationInspection.approval.action.keys.length === 1
-            ? afterReservationInspection.approval.action.keys[0]
+          key: afterReservationAction.keys.length === 1
+            ? afterReservationAction.keys[0]
             : undefined,
-          keys: afterReservationInspection.approval.action.keys,
-          label: afterReservationInspection.approval.action.label,
+          keys: afterReservationAction.keys,
+          label: afterReservationAction.label,
           promptKind: afterReservationInspection.approval.promptKind,
           command: afterReservationInspection.approval.command,
           cwd: afterReservationInspection.approval.cwd,
@@ -3532,11 +3753,12 @@ export class TerminalAgentBridge {
           fingerprint: afterReservationFingerprint,
           screenExcerpt: afterReservationInspection.screenExcerpt,
           decisionMode: afterReservationMode,
-          requestId: afterReservationInspection.approval.action.requestId
+          requestId: afterReservationAction.requestId
         };
       }
       dispatchTerminalControl = afterReservation.terminalControl;
       dispatchInspection = afterReservationInspection;
+      dispatchAction = afterReservationAction;
     }
     if (!dispatchInspection.approval.approvable) {
       return {
@@ -3564,23 +3786,234 @@ export class TerminalAgentBridge {
     }
     await this.terminalProvider.sendKeys(
       this.terminalProvider.endpoint(verifiedImmediatelyBeforeSend),
-      dispatchApproval.action.keys
+      dispatchAction.keys
     );
     return {
-      approved: true,
+      approved: decision === "approve_once",
+      decisionDispatched: true,
+      decision,
       blocked: false,
-      key: dispatchApproval.action.keys.length === 1
-        ? dispatchApproval.action.keys[0]
+      key: dispatchAction.keys.length === 1
+        ? dispatchAction.keys[0]
         : undefined,
-      keys: dispatchApproval.action.keys,
-      label: dispatchApproval.action.label,
+      keys: dispatchAction.keys,
+      label: dispatchAction.label,
       promptKind: dispatchApproval.promptKind,
       command: dispatchApproval.command,
       cwd: dispatchApproval.cwd,
       fingerprint: recapturedFingerprint,
       screenExcerpt: dispatchInspection.screenExcerpt,
       decisionMode: recapturedDecisionMode,
-      requestId: dispatchApproval.action.requestId
+      requestId: dispatchAction.requestId
+    };
+  }
+
+  async respondInteraction(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    response: TerminalInteractionResponse,
+    options: {
+      agentVersion: string;
+      expectedFingerprint: string;
+      expectedExpiresAt: string;
+      scrollbackLines?: number;
+      runtime?: TerminalRuntimeIdentity;
+      authorize?: (
+        context: TerminalInteractionAuthorizationContext
+      ) => TerminalInteractionAuthorizationDecision |
+        Promise<TerminalInteractionAuthorizationDecision>;
+      beforeDispatch?: (
+        context: TerminalInteractionBeforeDispatchContext
+      ) => void | Promise<void>;
+    }
+  ): Promise<TerminalInteractionResponseExecution> {
+    const runtime = {
+      ...options.runtime,
+      agentVersion: options.agentVersion
+    };
+    const optionReason = terminalInteractionOptionPreflightReason(
+      options,
+      runtime
+    );
+    if (optionReason) {
+      return blockedTerminalInteractionResponse(response, optionReason);
+    }
+    const first = await this.captureTerminalInteractionOffer(
+      agent,
+      terminalControl,
+      runtime,
+      options.scrollbackLines
+    ).catch((error) => error);
+    if (first instanceof Error) {
+      return blockedTerminalInteractionResponse(response, first.message);
+    }
+    const firstReason = terminalInteractionOfferPreflightReason(
+      first.offer,
+      options
+    );
+    if (firstReason || !first.offer) {
+      return blockedTerminalInteractionResponse(
+        response,
+        firstReason ?? "native questionnaire has no safe interaction offer",
+        first.offer
+      );
+    }
+    const validatedResponse = validateTerminalInteractionResponse(
+      response,
+      first.offer.projection,
+      { now: this.now() }
+    );
+    const planReason = terminalInteractionPlanPreflightReason(
+      validatedResponse,
+      first.offer.actionPlan
+    );
+    if (planReason) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        planReason,
+        first.offer
+      );
+    }
+    const capabilityReason = terminalInteractionCapabilityReason(
+      this.terminalProvider,
+      first.terminalControl,
+      first.offer.actionPlan
+    );
+    if (capabilityReason) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        capabilityReason,
+        first.offer
+      );
+    }
+    const authorization = await authorizeTerminalInteraction(
+      options.authorize,
+      interactionHookContext(
+        agent,
+        first.terminalControl,
+        first.offer,
+        validatedResponse,
+        runtime
+      )
+    );
+    if (!authorization.approved) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        authorization.reason ?? "terminal interaction response was not authorized",
+        first.offer
+      );
+    }
+    const afterAuthorization = await this.captureTerminalInteractionOffer(
+      agent,
+      first.terminalControl,
+      runtime,
+      options.scrollbackLines
+    ).catch((error) => error);
+    if (afterAuthorization instanceof Error) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        afterAuthorization.message,
+        first.offer
+      );
+    }
+    if (!sameTerminalInteractionOffer(first, afterAuthorization)) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        "native questionnaire changed after authorization",
+        first.offer
+      );
+    }
+    await reserveTerminalInteractionDispatch(
+      options.beforeDispatch,
+      interactionHookContext(
+        agent,
+        afterAuthorization.terminalControl,
+        afterAuthorization.offer!,
+        validatedResponse,
+        runtime
+      )
+    );
+    const finalCapture = await this.captureTerminalInteractionOffer(
+      agent,
+      afterAuthorization.terminalControl,
+      runtime,
+      options.scrollbackLines
+    ).catch((error) => {
+      if (options.beforeDispatch) {
+        throw terminalInteractionReservedError(
+          "reservation_uncertain",
+          error,
+          "cannot recapture native questionnaire after dispatch reservation"
+        );
+      }
+      return error;
+    });
+    if (finalCapture instanceof Error) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        finalCapture.message,
+        first.offer
+      );
+    }
+    if (!sameTerminalInteractionOffer(afterAuthorization, finalCapture)) {
+      if (options.beforeDispatch) {
+        throw new TerminalInteractionDispatchReservedError(
+          "reservation_uncertain",
+          "native questionnaire changed after dispatch reservation"
+        );
+      }
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        "native questionnaire changed before dispatch",
+        first.offer
+      );
+    }
+    const verified = await this.verifyTerminalIdentity(
+      agent,
+      finalCapture.terminalControl,
+      runtime
+    ).catch((error) => {
+      throw terminalInteractionReservedError(
+        options.beforeDispatch ? "reservation_uncertain" : "key_uncertain",
+        error,
+        "terminal identity could not be verified immediately before interaction dispatch"
+      );
+    });
+    if (!sameTerminalControlIdentity(finalCapture.terminalControl, verified)) {
+      throw new TerminalInteractionDispatchReservedError(
+        options.beforeDispatch ? "reservation_uncertain" : "key_uncertain",
+        "terminal identity changed after the final questionnaire capture"
+      );
+    }
+    const answer = validatedResponse.answers[0];
+    const outcome = await dispatchTerminalInteractionAnswer({
+      agent,
+      provider: this.terminalProvider,
+      terminalControl: verified,
+      actionPlan: finalCapture.offer!.actionPlan,
+      answer,
+      sleep: this.sleep,
+      reverifyTerminalIdentity: async (currentControl) => {
+        const reverified = await this.verifyTerminalIdentity(
+          agent,
+          currentControl,
+          runtime
+        );
+        if (!sameTerminalControlIdentity(currentControl, reverified)) {
+          throw new Error(
+            "terminal identity changed between interaction text and Enter"
+          );
+        }
+        return reverified;
+      }
+    });
+    return {
+      responded: true,
+      blocked: false,
+      interactionId: validatedResponse.interaction_id,
+      questionId: answer.question_id,
+      responseKind: answer.response_kind,
+      outcome
     };
   }
 
@@ -3615,7 +4048,8 @@ export class TerminalAgentBridge {
         inspection = captured.inspection;
         status = statusFromInspection(adapter, captured.terminalControl, inspection, {
           screen: captured.screen,
-          runtime: options.screenOptions?.runtime
+          runtime: options.screenOptions?.runtime,
+          now: this.now()
         });
       } catch (error) {
         status = failedScreenStatus(adapter, options.terminalControl, error);
@@ -3690,6 +4124,31 @@ export class TerminalAgentBridge {
         maxExcerptLength: options.maxExcerptLength,
         runtime: options.runtime,
         managedRequest: options.managedRequest
+      })
+    };
+  }
+
+  private async captureTerminalInteractionOffer(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    runtime: TerminalRuntimeIdentity,
+    scrollbackLines?: number
+  ): Promise<CapturedTerminalInteractionOffer> {
+    const adapter = this.registry.require(agent);
+    const captured = await this.captureInspection(adapter, terminalControl, {
+      scrollbackLines,
+      runtime
+    });
+    return {
+      terminalControl: captured.terminalControl,
+      inspection: captured.inspection,
+      offer: terminalInteractionBridgeOffer({
+        agent,
+        terminalControl: captured.terminalControl,
+        inspection: captured.inspection,
+        screen: captured.screen,
+        runtime,
+        now: this.now()
       })
     };
   }
@@ -4705,12 +5164,22 @@ export function terminalApprovalFingerprint(
   options: {
     screen?: string;
     runtime?: TerminalRuntimeIdentity;
+    decision?: TerminalApprovalDecision;
   } = {}
 ): string | undefined {
   if (!inspection.approval.approvable) {
     return undefined;
   }
-  const decisionMode = inspection.approval.action.mode ?? "keys";
+  const decision = options.decision ?? "approve_once";
+  const choices = terminalApprovalChoices(inspection.approval);
+  const action = terminalApprovalActionForDecision(
+    inspection.approval,
+    decision
+  );
+  if (!action) {
+    return undefined;
+  }
+  const decisionMode = action.mode ?? "keys";
   const promptEvidence = inspection.approval.promptEvidence;
   if (
     decisionMode === "keys" &&
@@ -4775,8 +5244,16 @@ export function terminalApprovalFingerprint(
         message_id: options.runtime?.messageId,
         terminal_target: options.runtime?.terminalTarget
       },
-      keys: inspection.approval.action.keys,
-      label: inspection.approval.action.label,
+      decision,
+      keys: action.keys,
+      label: action.label,
+      available_choices: choices.map((choice) => ({
+        decision: choice.decision,
+        keys: choice.keys,
+        label: choice.label,
+        mode: choice.mode ?? "keys",
+        request_id: choice.requestId
+      })),
       prompt_kind: inspection.approval.promptKind,
       command: inspection.approval.command,
       cwd: inspection.approval.cwd,
@@ -4800,7 +5277,7 @@ export function terminalApprovalFingerprint(
           }
         : undefined,
       decision_mode: decisionMode,
-      request_id: inspection.approval.action.requestId
+      request_id: action.requestId
     }))
     .digest("hex");
 }
@@ -4818,6 +5295,549 @@ function isTerminalApprovalPromptEvidence(
     /^[0-9a-f]{64}$/u.test(evidence.sha256);
 }
 
+function terminalInteractionTurnId(
+  runtime: TerminalRuntimeIdentity | undefined
+): string | undefined {
+  // Questionnaire mutation is managed-Turn-only. A raw terminal's
+  // conversationId is a discovery label, not durable response authority.
+  const candidate = runtime?.turnId;
+  return typeof candidate === "string" &&
+    TERMINAL_INTERACTION_IDENTIFIER_PATTERN.test(candidate)
+    ? candidate
+    : undefined;
+}
+
+function terminalInteractionExpiry(now: Date): string | undefined {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    return undefined;
+  }
+  const windowStart = Math.floor(nowMs / TERMINAL_INTERACTION_TTL_MS) *
+    TERMINAL_INTERACTION_TTL_MS;
+  return new Date(windowStart + TERMINAL_INTERACTION_TTL_MS).toISOString();
+}
+
+function terminalInteractionQuestion(
+  question: NativeQuestionnaireQuestion
+): TerminalInteractionQuestion {
+  const common = {
+    question_id: question.question_id,
+    prompt: question.prompt,
+    required: question.required
+  };
+  if (
+    question.response_kind === "single_select" ||
+    question.response_kind === "multi_select"
+  ) {
+    return {
+      ...common,
+      response_kind: question.response_kind,
+      options: question.options ?? []
+    };
+  }
+  return {
+    ...common,
+    response_kind: question.response_kind
+  };
+}
+
+function terminalInteractionCanonicalIdentity(
+  terminalControl: TerminalControlRef,
+  runtime: TerminalRuntimeIdentity
+): Record<string, unknown> | undefined {
+  if (!hasCanonicalTerminalEndpoint(terminalControl)) {
+    return undefined;
+  }
+  const terminal = terminalEndpointFromControlRef(terminalControl);
+  if (
+    !Number.isInteger(terminal.processAnchorPid) ||
+    Number(terminal.processAnchorPid) <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    terminal_identity: terminalEndpointIdentityKey(terminal),
+    terminal_process_anchor_pid: terminal.processAnchorPid,
+    agent_pid: runtime.pid,
+    native_session_id: runtime.nativeSessionId,
+    native_process_uuid: runtime.nativeProcessUuid,
+    native_process_birth: runtime.nativeProcessBirth,
+    native_process_started_at: runtime.nativeProcessStartedAt,
+    native_rollout: runtime.nativeRollout
+  };
+}
+
+function terminalInteractionBridgeOffer(input: {
+  agent: ExecutorKind;
+  terminalControl: TerminalControlRef;
+  inspection: TerminalScreenInspection;
+  screen: string;
+  runtime?: TerminalRuntimeIdentity;
+  now: Date;
+}): TerminalInteractionBridgeOffer | undefined {
+  const turnId = terminalInteractionTurnId(input.runtime);
+  const agentVersion = input.runtime?.agentVersion;
+  const expiry = terminalInteractionExpiry(input.now);
+  const canonicalIdentity = input.runtime
+    ? terminalInteractionCanonicalIdentity(input.terminalControl, input.runtime)
+    : undefined;
+  if (
+    !turnId ||
+    typeof agentVersion !== "string" ||
+    agentVersion.length === 0 ||
+    !expiry ||
+    !canonicalIdentity ||
+    input.inspection.approval.blocked
+  ) {
+    return undefined;
+  }
+  const nativeInspection = inspectNativeQuestionnaire({
+    agent: input.agent,
+    version: agentVersion,
+    screen: input.screen
+  });
+  if (nativeInspection.status === "none") {
+    return undefined;
+  }
+  const authorityMaterial = JSON.stringify({
+    version: 1,
+    agent: input.agent,
+    turn_id: turnId,
+    terminal: canonicalIdentity,
+    profile: nativeInspection.profile,
+    prompt_sha256: nativeInspection.prompt_evidence.sha256
+  });
+  const promptFingerprint = createHash("sha256")
+    .update(`terminal-interaction-authority\0${authorityMaterial}`, "utf8")
+    .digest("hex");
+  const interactionId = `ti_${createHash("sha256")
+    .update(`terminal-interaction-public\0${authorityMaterial}`, "utf8")
+    .digest("hex")
+    .slice(0, 40)}`;
+  const question = terminalInteractionQuestion(nativeInspection.question);
+  const executable = nativeInspection.status === "actionable" &&
+    nativeInspection.action_plan.kind !== "manual_only";
+  const responseUncertain =
+    input.runtime?.interactionDispatchState === "reserved" ||
+    input.runtime?.interactionDispatchState === "uncertain";
+  const projection = validateTerminalInteractionProjection({
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_VERSION,
+    interaction_id: interactionId,
+    turn_id: turnId,
+    agent: input.agent,
+    kind: "questionnaire",
+    state: responseUncertain
+      ? "response_uncertain"
+      : executable
+        ? "pending"
+        : "manual_required",
+    step: {
+      index: nativeInspection.current_step,
+      total: nativeInspection.total_steps
+    },
+    questions: [question],
+    expires_at: expiry,
+    capabilities: {
+      respond: executable && !responseUncertain,
+      batch_response: false,
+      free_text: question.response_kind === "free_text",
+      multi_select: question.response_kind === "multi_select"
+    }
+  });
+  return {
+    projection,
+    promptFingerprint,
+    actionPlan: nativeInspection.action_plan,
+    nativeInspection
+  };
+}
+
+function terminalInteractionOptionPreflightReason(
+  options: {
+    agentVersion: string;
+    expectedFingerprint: string;
+    expectedExpiresAt: string;
+    runtime?: TerminalRuntimeIdentity;
+  },
+  runtime: TerminalRuntimeIdentity
+): string | undefined {
+  if (
+    typeof options.agentVersion !== "string" ||
+    !/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/u.test(options.agentVersion)
+  ) {
+    return "an exact semantic agent version is required";
+  }
+  if (
+    options.runtime?.agentVersion !== undefined &&
+    options.runtime.agentVersion !== options.agentVersion
+  ) {
+    return "runtime agent version does not match the requested interaction profile";
+  }
+  if (!terminalInteractionTurnId(runtime)) {
+    return "a protocol-safe exact Turn id is required";
+  }
+  if (!TERMINAL_INTERACTION_FINGERPRINT_PATTERN.test(options.expectedFingerprint)) {
+    return "a valid interaction prompt fingerprint is required";
+  }
+  if (!Number.isFinite(Date.parse(options.expectedExpiresAt))) {
+    return "a valid interaction expiry is required";
+  }
+  return undefined;
+}
+
+function terminalInteractionOfferPreflightReason(
+  offer: TerminalInteractionBridgeOffer | undefined,
+  options: {
+    expectedFingerprint: string;
+    expectedExpiresAt: string;
+  }
+): string | undefined {
+  if (!offer) {
+    return "native questionnaire has no identity-fenced interaction offer";
+  }
+  if (
+    offer.projection.state !== "pending" ||
+    !offer.projection.capabilities.respond ||
+    offer.actionPlan.kind === "manual_only"
+  ) {
+    return `native questionnaire requires manual response: ${offer.nativeInspection.status === "manual_required"
+      ? offer.nativeInspection.reason
+      : "unsupported action plan"}`;
+  }
+  if (offer.promptFingerprint !== options.expectedFingerprint) {
+    return "native questionnaire fingerprint changed before execution";
+  }
+  if (offer.projection.expires_at !== options.expectedExpiresAt) {
+    return "native questionnaire expiry changed before execution";
+  }
+  return undefined;
+}
+
+function terminalInteractionCapabilityReason(
+  provider: TerminalControlProvider,
+  terminalControl: TerminalControlRef,
+  plan: NativeQuestionnaireActionPlan
+): string | undefined {
+  const requiresText = plan.kind === "free_text";
+  const missing = [
+    !terminalControl.capabilities.includes("screen_status")
+      ? "terminal:screen_status"
+      : undefined,
+    !terminalControl.capabilities.includes("send_keys")
+      ? "terminal:send_keys"
+      : undefined,
+    !provider.providerCapabilities.includes("stable_resource_resolution")
+      ? "provider:stable_resource_resolution"
+      : undefined,
+    !provider.providerCapabilities.includes("screen_capture")
+      ? "provider:screen_capture"
+      : undefined,
+    !provider.providerCapabilities.includes("key_delivery")
+      ? "provider:key_delivery"
+      : undefined,
+    requiresText && !provider.providerCapabilities.includes("text_delivery")
+      ? "provider:text_delivery"
+      : undefined
+  ].filter((value): value is string => value !== undefined);
+  return missing.length > 0
+    ? `terminal interaction capability preflight failed: ${missing.join(", ")}`
+    : undefined;
+}
+
+function terminalInteractionPlanPreflightReason(
+  response: TerminalInteractionResponse,
+  plan: NativeQuestionnaireActionPlan
+): string | undefined {
+  const answer = response.answers[0];
+  if (plan.kind !== "free_text" || answer?.response_kind !== "free_text") {
+    return undefined;
+  }
+  const textStage = plan.stages[0];
+  if (
+    textStage?.kind !== "answer_text" ||
+    !Number.isSafeInteger(textStage.max_characters) ||
+    textStage.max_characters < 1
+  ) {
+    return "native free-text interaction has no verified input limit";
+  }
+  return answer.text.length <= textStage.max_characters
+    ? undefined
+    : `free-text answer exceeds the verified native limit of ${textStage.max_characters} characters`;
+}
+
+function blockedTerminalInteractionResponse(
+  response: TerminalInteractionResponse,
+  reason: string,
+  offer?: TerminalInteractionBridgeOffer
+): TerminalInteractionResponseExecution {
+  const answer = Array.isArray(response.answers) ? response.answers[0] : undefined;
+  return {
+    responded: false,
+    blocked: true,
+    reason,
+    interactionId: response.interaction_id,
+    questionId: answer?.question_id ?? offer?.projection.questions[0]?.question_id,
+    responseKind: answer?.response_kind
+  };
+}
+
+function interactionHookContext(
+  agent: ExecutorKind,
+  terminalControl: TerminalControlRef,
+  offer: TerminalInteractionBridgeOffer,
+  response: TerminalInteractionResponse,
+  runtime: TerminalRuntimeIdentity
+): TerminalInteractionAuthorizationContext {
+  return {
+    agent,
+    terminalControl,
+    fingerprint: offer.promptFingerprint,
+    projection: offer.projection,
+    response,
+    runtime
+  };
+}
+
+async function authorizeTerminalInteraction(
+  authorize: ((
+    context: TerminalInteractionAuthorizationContext
+  ) => TerminalInteractionAuthorizationDecision |
+    Promise<TerminalInteractionAuthorizationDecision>) | undefined,
+  context: TerminalInteractionAuthorizationContext
+): Promise<TerminalInteractionAuthorizationDecision> {
+  return authorize ? authorize(context) : { approved: true };
+}
+
+async function reserveTerminalInteractionDispatch(
+  beforeDispatch: ((
+    context: TerminalInteractionBeforeDispatchContext
+  ) => void | Promise<void>) | undefined,
+  context: TerminalInteractionBeforeDispatchContext
+): Promise<void> {
+  if (!beforeDispatch) {
+    return;
+  }
+  try {
+    await beforeDispatch(context);
+  } catch (error) {
+    throw terminalInteractionReservedError(
+      "reservation_uncertain",
+      error,
+      "terminal interaction dispatch reservation failed"
+    );
+  }
+}
+
+function sameTerminalInteractionOffer(
+  left: CapturedTerminalInteractionOffer,
+  right: CapturedTerminalInteractionOffer
+): boolean {
+  return Boolean(
+    left.offer &&
+    right.offer &&
+    sameTerminalControlIdentity(left.terminalControl, right.terminalControl) &&
+    left.offer.promptFingerprint === right.offer.promptFingerprint &&
+    JSON.stringify(left.offer.projection) === JSON.stringify(right.offer.projection) &&
+    JSON.stringify(left.offer.actionPlan) === JSON.stringify(right.offer.actionPlan)
+  );
+}
+
+function terminalInteractionReservedError(
+  stage: TerminalInteractionReservedStage,
+  error: unknown,
+  message: string
+): TerminalInteractionDispatchReservedError {
+  if (error instanceof TerminalInteractionDispatchReservedError) {
+    return error;
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  return new TerminalInteractionDispatchReservedError(
+    stage,
+    `${message}: ${detail}`,
+    { cause: error }
+  );
+}
+
+function terminalInteractionChoiceAction(
+  plan: Extract<NativeQuestionnaireActionPlan, { kind: "single_select" }>,
+  answer: Extract<TerminalInteractionAnswer, { response_kind: "single_select" }>
+): { key: string; outcome: TerminalInteractionResponseExecution["outcome"] } {
+  const choice = plan.choices.find(
+    (candidate) => candidate.option_id === answer.selected_option_ids[0]
+  );
+  const stage = choice?.stages[0];
+  if (
+    !choice ||
+    choice.stages.length !== 1 ||
+    stage?.kind !== "key" ||
+    !/^[1-5]$/u.test(stage.key)
+  ) {
+    throw new Error("single-select interaction has no closed adapter action");
+  }
+  return {
+    key: stage.key,
+    outcome: choice.outcome === "open_custom_text"
+      ? "custom_text_opened"
+      : "submitted_or_advanced"
+  };
+}
+
+function terminalInteractionConfirmKey(
+  plan: Extract<NativeQuestionnaireActionPlan, { kind: "confirm" }>,
+  answer: Extract<TerminalInteractionAnswer, { response_kind: "confirm" }>
+): string {
+  const stages = answer.confirm ? plan.confirm_stages : plan.cancel_stages;
+  const stage = stages[0];
+  if (
+    stages.length !== 1 ||
+    stage?.kind !== "key" ||
+    !["C-m", "Escape", "1", "2"].includes(stage.key) ||
+    JSON.stringify(plan.confirm_stages) === JSON.stringify(plan.cancel_stages)
+  ) {
+    throw new Error("confirmation interaction has no closed adapter action");
+  }
+  return stage.key;
+}
+
+async function sendTerminalInteractionKeys(
+  provider: TerminalControlProvider,
+  terminalControl: TerminalControlRef,
+  keys: readonly string[]
+): Promise<void> {
+  try {
+    await provider.sendKeys(provider.endpoint(terminalControl), keys);
+  } catch (error) {
+    throw terminalInteractionReservedError(
+      "key_uncertain",
+      error,
+      "terminal interaction key dispatch is uncertain"
+    );
+  }
+}
+
+async function dispatchTerminalInteractionFreeText(input: {
+  agent: ExecutorKind;
+  provider: TerminalControlProvider;
+  terminalControl: TerminalControlRef;
+  plan: Extract<NativeQuestionnaireActionPlan, { kind: "free_text" }>;
+  answer: Extract<TerminalInteractionAnswer, { response_kind: "free_text" }>;
+  reverifyTerminalIdentity: (
+    terminalControl: TerminalControlRef
+  ) => Promise<TerminalControlRef>;
+  sleep: (milliseconds: number) => Promise<void>;
+}): Promise<"submitted_or_advanced"> {
+  const [textStage, enterStage] = input.plan.stages;
+  if (
+    input.plan.stages.length !== 2 ||
+    textStage?.kind !== "answer_text" ||
+    textStage.single_line !== true ||
+    textStage.max_characters < input.answer.text.length ||
+    enterStage?.kind !== "key" ||
+    enterStage.key !== "C-m"
+  ) {
+    throw new TerminalInteractionDispatchReservedError(
+      "reservation_uncertain",
+      "free-text interaction has no closed adapter action"
+    );
+  }
+  try {
+    await input.provider.sendText(
+      input.provider.endpoint(input.terminalControl),
+      input.answer.text
+    );
+  } catch (error) {
+    throw terminalInteractionReservedError(
+      "text_uncertain",
+      error,
+      "terminal interaction text dispatch is uncertain"
+    );
+  }
+  if (input.agent === "codex") {
+    try {
+      await input.sleep(CODEX_PASTE_ENTER_SETTLE_MS);
+    } catch (error) {
+      throw terminalInteractionReservedError(
+        "text_uncertain",
+        error,
+        "terminal interaction paste-settle outcome is uncertain"
+      );
+    }
+  }
+  let enterControl: TerminalControlRef;
+  try {
+    enterControl = await input.reverifyTerminalIdentity(input.terminalControl);
+    if (!sameTerminalControlIdentity(input.terminalControl, enterControl)) {
+      throw new Error(
+        "terminal identity changed between interaction text and Enter"
+      );
+    }
+  } catch (error) {
+    throw terminalInteractionReservedError(
+      "text_uncertain",
+      error,
+      "terminal identity after interaction text dispatch is uncertain"
+    );
+  }
+  await sendTerminalInteractionKeys(
+    input.provider,
+    enterControl,
+    [enterStage.key]
+  );
+  return "submitted_or_advanced";
+}
+
+async function dispatchTerminalInteractionAnswer(input: {
+  agent: ExecutorKind;
+  provider: TerminalControlProvider;
+  terminalControl: TerminalControlRef;
+  actionPlan: NativeQuestionnaireActionPlan;
+  answer: TerminalInteractionAnswer;
+  reverifyTerminalIdentity: (
+    terminalControl: TerminalControlRef
+  ) => Promise<TerminalControlRef>;
+  sleep: (milliseconds: number) => Promise<void>;
+}): Promise<NonNullable<TerminalInteractionResponseExecution["outcome"]>> {
+  if (
+    input.actionPlan.kind === "single_select" &&
+    input.answer.response_kind === "single_select"
+  ) {
+    const action = terminalInteractionChoiceAction(input.actionPlan, input.answer);
+    await sendTerminalInteractionKeys(
+      input.provider,
+      input.terminalControl,
+      [action.key]
+    );
+    return action.outcome!;
+  }
+  if (
+    input.actionPlan.kind === "confirm" &&
+    input.answer.response_kind === "confirm"
+  ) {
+    const key = terminalInteractionConfirmKey(input.actionPlan, input.answer);
+    await sendTerminalInteractionKeys(input.provider, input.terminalControl, [key]);
+    return input.answer.confirm ? "confirmed" : "cancelled";
+  }
+  if (
+    input.actionPlan.kind === "free_text" &&
+    input.answer.response_kind === "free_text"
+  ) {
+    return dispatchTerminalInteractionFreeText({
+      agent: input.agent,
+      provider: input.provider,
+      terminalControl: input.terminalControl,
+      plan: input.actionPlan,
+      answer: input.answer,
+      reverifyTerminalIdentity: input.reverifyTerminalIdentity,
+      sleep: input.sleep
+    });
+  }
+  throw new TerminalInteractionDispatchReservedError(
+    "reservation_uncertain",
+    "terminal interaction answer does not have a closed adapter action"
+  );
+}
+
 function statusFromInspection(
   adapter: TerminalAgentAdapter,
   terminalControl: TerminalControlRef,
@@ -4825,6 +5845,7 @@ function statusFromInspection(
   options: {
     screen?: string;
     runtime?: TerminalRuntimeIdentity;
+    now?: Date;
   } = {}
 ): TerminalBridgeStatus {
   const approval = dispatchableApprovalInspection(adapter, inspection.approval);
@@ -4837,6 +5858,34 @@ function statusFromInspection(
     },
     options
   );
+  const choices = approval.approvable
+    ? terminalApprovalChoices(approval).flatMap((choice) => {
+        if (!choice.decision) {
+          return [];
+        }
+        const choiceFingerprint = terminalApprovalFingerprint(
+          adapter.agent,
+          terminalControl,
+          { ...inspection, approval },
+          { ...options, decision: choice.decision }
+        );
+        return choiceFingerprint ? [{
+          decision: choice.decision,
+          label: choice.label,
+          fingerprint: choiceFingerprint
+        }] : [];
+      })
+    : [];
+  const interaction = options.screen === undefined
+    ? undefined
+    : terminalInteractionBridgeOffer({
+        agent: adapter.agent,
+        terminalControl,
+        inspection: { ...inspection, approval },
+        screen: options.screen,
+        runtime: options.runtime,
+        now: options.now ?? new Date()
+      });
   return {
     provider: terminalControl.kind,
     target: terminalControl.target,
@@ -4861,6 +5910,7 @@ function statusFromInspection(
       request_detail: approval.requestDetail,
       reason: approval.approvable ? undefined : approval.reason,
       fingerprint,
+      choices: choices.length > 0 ? choices : undefined,
       decision_mode: approval.approvable ? approval.action.mode ?? "keys" : undefined,
       request_id: approval.approvable ? approval.action.requestId : undefined,
       policy_evidence: approval.approvable && approval.policyEvidence
@@ -4879,7 +5929,11 @@ function statusFromInspection(
         ? undefined
         : createHash("sha256").update(options.screen).digest("hex"),
       approval: approvalOutput(approval)
-    }
+    },
+    ...(interaction === undefined ? {} : {
+      interaction_state: interaction.projection,
+      interaction_prompt_fingerprint: interaction.promptFingerprint
+    })
   };
 }
 
@@ -4954,6 +6008,10 @@ function approvalOutput(approval: TerminalScreenInspection["approval"]): Record<
     cwd: approval.cwd,
     toolName: approval.toolName,
     requestDetail: approval.requestDetail,
+    choices: terminalApprovalChoices(approval).map((choice) => ({
+      decision: choice.decision,
+      label: choice.label
+    })),
     policyEvidence: approval.policyEvidence
       ? {
           source: approval.policyEvidence.source,

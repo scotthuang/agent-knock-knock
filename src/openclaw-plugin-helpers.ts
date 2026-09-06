@@ -1,5 +1,9 @@
 import path from "node:path";
 import { recordValue } from "./value-guards.js";
+import {
+  isTerminalApprovalDecision,
+  type TerminalApprovalDecision
+} from "./terminal-agent-adapter.js";
 
 const MODEL_FACING_PRIVATE_AUTHORITY_PARTS = [
   ["expected", "terminal", "token"],
@@ -8,6 +12,15 @@ const MODEL_FACING_PRIVATE_AUTHORITY_PARTS = [
   ["candidate", "token"],
   ["expected", "approval", "fingerprint"],
   ["approval", "fingerprint"],
+  ["expected", "interaction", "fingerprint"],
+  ["interaction", "prompt", "fingerprint"],
+  ["interaction", "fingerprint"],
+  ["interaction", "authority"],
+  ["owner", "session"],
+  ["process", "incarnation"],
+  ["source", "file", "identity"],
+  ["prompt", "evidence"],
+  ["action", "plan"],
   ["expected", "session", "revision"],
   ["lifecycle", "binding", "token"],
   ["binding", "token"],
@@ -64,6 +77,7 @@ const LEGACY_APPROVAL_TERMINAL_INSTRUCTION =
 
 const MODEL_OPAQUE_AUTHORITY_FIELDS = new Set([
   "acceptanceevidence",
+  "actionplan",
   "attemptoutcome",
   "callbackenvelope",
   "callbackroute",
@@ -83,16 +97,21 @@ const MODEL_OPAQUE_AUTHORITY_FIELDS = new Set([
   "gatewaymethod",
   "gatewaysession",
   "gatewayurl",
+  "interactionauthority",
   "livenativethreadid",
   "nativesessiontakeover",
   "nonce",
   "openclawbin",
   "openclawsession",
+  "ownersession",
+  "processincarnation",
+  "promptevidence",
   "proof",
   "selectionhandle",
   "selectionsnapshot",
   "selectionscope",
-  "snapshotid"
+  "snapshotid",
+  "sourcefileidentity"
 ]);
 
 export function normalizeAkkModelFacingFieldName(key: string): string {
@@ -211,7 +230,7 @@ export function sanitizeAkkModelFacingDiagnosticText(
   const sanitized = sanitizeAkkModelFacingEmbeddedAuthorityText(message);
   if (
     sanitized !== message ||
-    /(?:\bexpected\s+(?:session\s+)?revision\b|\bactual\s+(?:session\s+)?revision\b|\b(?:terminal|binding|handoff|candidate)\s+token\b|\bapproval\s+fingerprint\b|\bbinding\s+(?:id|generation)\b|\bcompare-and-swap\b|\bCAS\b)/iu.test(
+    /(?:\bexpected\s+(?:session\s+)?revision\b|\bactual\s+(?:session\s+)?revision\b|\b(?:terminal|binding|handoff|candidate)\s+token\b|\b(?:approval|interaction(?:\s+prompt)?)\s+fingerprint\b|\bbinding\s+(?:id|generation)\b|\bcompare-and-swap\b|\bCAS\b)/iu.test(
       message
     )
   ) {
@@ -265,6 +284,7 @@ export type AkkCommand =
   | {
       action: "approve";
       turnId: string;
+      decision?: TerminalApprovalDecision;
     }
   | { action: "cancel"; turnId: string }
   | { action: "renew"; turnId: string; minutes?: string }
@@ -413,14 +433,21 @@ function parseAkkTurnCommand(
   if (action === "approve") {
     const { token: turnId, rest: approvalInput } = takeRequiredToken(
       rest,
-      "Usage: /akk approve <turn-selector>"
+      "Usage: /akk approve <turn-selector> [approve_once|reject]"
     );
-    if (approvalInput.trim()) {
-      throw new Error("Usage: /akk approve <turn-selector>");
+    const decisionInput = approvalInput.trim();
+    if (decisionInput && !isTerminalApprovalDecision(decisionInput)) {
+      throw new Error(
+        "Usage: /akk approve <turn-selector> [approve_once|reject]"
+      );
     }
+    const decision = isTerminalApprovalDecision(decisionInput)
+      ? decisionInput
+      : undefined;
     return {
       action: "approve",
-      turnId
+      turnId,
+      ...(decision ? { decision } : {})
     };
   }
   if (action === "cancel" || action === "stop") {
@@ -515,7 +542,7 @@ export function akkUsageText(): string {
     "/akk doctor",
     "/akk status [turn-selector|terminal-watch-id]",
     "/akk respond <turn-selector>: <answer>",
-    "/akk approve <turn-selector>",
+    "/akk approve <turn-selector> [approve_once|reject]",
     "/akk cancel <turn-selector>"
   ].join("\n");
 }

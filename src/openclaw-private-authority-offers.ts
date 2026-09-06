@@ -1,6 +1,7 @@
 export const OPENCLAW_PRIVATE_AUTHORITY_OFFER_TTL_MS = 10 * 60 * 1000;
 export const OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT = 512;
 export const OPENCLAW_APPROVAL_AUTHORITY_KIND = "approval";
+export const OPENCLAW_INTERACTION_AUTHORITY_KIND = "interaction";
 
 export interface OpenClawPrivateAuthorityTarget {
   type: string;
@@ -42,6 +43,23 @@ export function openClawApprovalAuthorityOfferKey(
     sessionId,
     kind: OPENCLAW_APPROVAL_AUTHORITY_KIND,
     target
+  };
+}
+
+export function openClawInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  turnId: string,
+  interactionId: string
+): OpenClawPrivateAuthorityOfferKey {
+  return {
+    sessionKey,
+    sessionId,
+    kind: OPENCLAW_INTERACTION_AUTHORITY_KIND,
+    target: {
+      type: "interaction_id",
+      id: JSON.stringify([turnId, interactionId])
+    }
   };
 }
 

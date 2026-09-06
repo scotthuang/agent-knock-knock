@@ -1211,7 +1211,11 @@ function transcriptApprovalScreenInspection(
       action: {
         ...screenInspection.approval.action,
         requestId: policyEvidence.requestId
-      }
+      },
+      choices: screenInspection.approval.choices?.map((choice) => ({
+        ...choice,
+        requestId: policyEvidence.requestId
+      }))
     },
     screenExcerpt: omitClaudePermissionDetails(
       options.screen,
@@ -1440,7 +1444,22 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
         : "claude-bash-permission-prompt-v1",
       lines.slice(absoluteHeaderIndex, promptRegionEnd + 1).join("\n")
     ),
+    choices: [{
+      decision: "approve_once",
+      mode: "keys",
+      keys: ["C-m"],
+      label: "Yes"
+    }, ...(currentLabels ? [{
+      // Claude Code 2.1.263 accepts the exact numeric menu accelerator as a
+      // single dispatch. Unlike Esc, this chooses the proven No row and
+      // returns to "What should Claude do instead?" without running Bash.
+      decision: "reject" as const,
+      mode: "keys" as const,
+      keys: ["4"],
+      label: choiceRows[3].label
+    }] : [])],
     action: {
+      decision: "approve_once",
       mode: "keys",
       keys: ["C-m"],
       label: "Yes"

@@ -1,4 +1,115 @@
 import { EXECUTOR_KINDS } from "./executors.js";
+import { TERMINAL_INTERACTION_LIMITS } from
+  "./terminal-interaction-protocol.js";
+
+const terminalInteractionIdentifierSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: TERMINAL_INTERACTION_LIMITS.maxIdentifierLength,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+};
+
+const terminalInteractionAnswerBase = {
+  question_id: {
+    ...terminalInteractionIdentifierSchema,
+    description:
+      "Opaque semantic question_id from the current interaction_state projection."
+  }
+};
+
+export const respondInteractionParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["turn_id", "interaction_id", "answers"],
+  properties: {
+    turn_id: {
+      ...terminalInteractionIdentifierSchema,
+      description:
+        "Exact authoritative Turn id from the current interaction_state projection."
+    },
+    interaction_id: {
+      ...terminalInteractionIdentifierSchema,
+      description:
+        "Exact opaque interaction id from the current status response in this controller conversation."
+    },
+    answers: {
+      type: "array",
+      minItems: 1,
+      maxItems: TERMINAL_INTERACTION_LIMITS.maxQuestions,
+      description:
+        "One typed current-step answer using only advertised opaque semantic ids. Raw keys, indexes, rendered labels, fingerprints, versions, and terminal commands are not accepted.",
+      items: {
+        oneOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "question_id",
+              "response_kind",
+              "selected_option_ids"
+            ],
+            properties: {
+              ...terminalInteractionAnswerBase,
+              response_kind: { const: "single_select" },
+              selected_option_ids: {
+                type: "array",
+                minItems: 1,
+                maxItems: 1,
+                uniqueItems: true,
+                items: terminalInteractionIdentifierSchema
+              }
+            }
+          },
+          {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "question_id",
+              "response_kind",
+              "selected_option_ids"
+            ],
+            properties: {
+              ...terminalInteractionAnswerBase,
+              response_kind: { const: "multi_select" },
+              selected_option_ids: {
+                type: "array",
+                minItems: 1,
+                maxItems: TERMINAL_INTERACTION_LIMITS.maxOptionsPerQuestion,
+                uniqueItems: true,
+                items: terminalInteractionIdentifierSchema
+              }
+            }
+          },
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["question_id", "response_kind", "text"],
+            properties: {
+              ...terminalInteractionAnswerBase,
+              response_kind: { const: "free_text" },
+              text: {
+                type: "string",
+                minLength: 1,
+                maxLength: TERMINAL_INTERACTION_LIMITS.maxTextAnswerLength,
+                pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+              }
+            }
+          },
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["question_id", "response_kind", "confirm"],
+            properties: {
+              ...terminalInteractionAnswerBase,
+              response_kind: { const: "confirm" },
+              confirm: { type: "boolean" }
+            }
+          }
+        ]
+      }
+    }
+  }
+};
 
 export const sendParameters = {
   type: "object",
@@ -416,6 +527,12 @@ export const approveParameters = {
     { required: ["terminal_id"] }
   ],
   properties: {
+    decision: {
+      type: "string",
+      enum: ["approve_once", "reject"],
+      description:
+        "Closed semantic decision from the current AKK status offer. Defaults to approve_once. Raw keys, menu indexes, and rendered labels are never accepted."
+    },
     turn_id: {
       type: "string",
       description: "Authoritative AKK turn id containing the approval prompt."

@@ -26,6 +26,7 @@
       "agent_knock_knock_status",
       "agent_knock_knock_send",
       "agent_knock_knock_respond",
+      "agent_knock_knock_respond_interaction",
       "agent_knock_knock_renew",
       "agent_knock_knock_retry_callback",
       "agent_knock_knock_cancel",
@@ -65,6 +66,9 @@
       "optional": true
     },
     "agent_knock_knock_respond": {
+      "optional": true
+    },
+    "agent_knock_knock_respond_interaction": {
       "optional": true
     },
     "agent_knock_knock_renew": {

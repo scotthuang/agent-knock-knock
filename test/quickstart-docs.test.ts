@@ -47,7 +47,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v23 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v24 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -126,6 +126,9 @@ test("operator guide and bundled skill keep advanced commands in their workflows
   const storage = read("docs/storage-and-logging.md");
   const storageContract = storage.replace(/\s+/gu, " ");
   const skill = read("templates/openclaw-skills/agent-knock-knock/SKILL.md");
+  const interactionDesign = read(
+    "docs/architecture/interactive-terminal-response.md"
+  );
   const protocol = read("docs/bidirectional-agent-protocol.md");
   const quickstart = read("docs/quickstart-tmux.md");
   const changelog = read("CHANGELOG.md");
@@ -281,7 +284,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(operatorContract, /v23 `action_contracts`/u);
+  assert.match(operatorContract, /v24 `action_contracts`/u);
   assert.match(
     operatorContract,
     /`terminal_user_explicit`[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state/u
@@ -295,7 +298,28 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     operatorContract,
     /unmanaged work[\s\S]*best-effort attaches a Terminal Watch[\s\S]*completion callback[\s\S]*failure[^.]*never vetoes/u
   );
-  assert.match(skill, /v23 `action_contracts`/u);
+  assert.match(skill, /v24 `action_contracts`/u);
+  assert.match(skill, /registers 17 OpenClaw tools/u);
+  assert.match(
+    skill,
+    /same controller conversation[\s\S]*agent_knock_knock_status\(\{turn_id\}\)[\s\S]*interaction_state[\s\S]*agent_knock_knock_respond_interaction[\s\S]*one call answers only the current step[\s\S]*call Status again/iu
+  );
+  assert.match(
+    skill,
+    /approve_once[\s\S]*reject[\s\S]*approve\(\{turn_id,decision\}\)[\s\S]*terminal-scoped[\s\S]*approve-once-only/u
+  );
+  assert.match(
+    skill,
+    /agent_knock_knock_cancel[\s\S]*explicitly intends to interrupt the whole Turn[\s\S]*never as a disguised No choice/u
+  );
+  assert.match(
+    interactionDesign,
+    /^Status: implemented public package contract$/mu
+  );
+  assert.doesNotMatch(
+    interactionDesign,
+    /not a published package contract|local POC implemented/u
+  );
   assert.match(storageContract, /current writer protocol is 6/u);
   assert.match(
     storageContract,

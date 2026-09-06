@@ -80,7 +80,7 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 23,
+    version: 24,
     instructions: [
       "Treat terminals[] as the primary resource and use only mutation actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Read-only Watch is the separate user-intent exception: one complete exact terminal_id may be watched even when available_actions.watch is absent. Either nested mutation action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "A complete but unverified Codex or Claude Code x.y.z version adds compatibility_warnings and action compatibility_warning diagnostics but never vetoes an otherwise eligible action. Execute the advertised action through the generic runtime protocol; actual UI, artifact, identity, and postcondition evidence decides success. Never automatically retry a result that says terminal input may already have occurred.",
@@ -94,6 +94,7 @@ export function listActionContracts(): JsonRecord {
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "Structured follow-current actions use only the exact terminal_id prefilled by that terminal row. Human slash commands may use an explicitly named discovery selector. AKK resolves and revalidates current action authority internally; never infer or guess a target.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
+      "A native questionnaire response is a separate status-bound mutation. In the same controller conversation, call agent_knock_knock_status for the exact managed turn, review its current pending interaction_state, and then call agent_knock_knock_respond_interaction with only that projection's turn_id, interaction_id, question_id, and option_id values or bounded typed text. One call resolves only the current step; refresh status before every later question or final confirmation. Never invent semantic ids, expose private prompt authority, respond when the state is manual_required, or retry a response whose terminal input may have occurred.",
       "Retry submission is never automatic. Only when the current exact Turn exposes available_actions.retry_submission, ask for explicit user confirmation and call its prefilled agent_knock_knock_send {turn_id} form unchanged. It never accepts replacement text or caller-selected terminal, Session, timeout, or callback route data, and execution revalidates the durable submission and live terminal under lock before any input.",
       "Manual approval binds the exact prompt the user reviewed. After explicit confirmation, call only the currently advertised approve action; AKK keeps the prompt authority private and recaptures the exact terminal, process, request, and prompt before sending a decision key. A prompt without complete exact evidence is not approvable.",
       "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action. When a Codex managed prompt has no usable AKK Turn owner, list may expose one manual terminal-scoped approve action after exact observation. It does not mutate the Turn or Session binding, has no durable dispatch receipt, and is never eligible for automatic approval. If its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly.",
@@ -289,6 +290,21 @@ export function listActionContracts(): JsonRecord {
         ordinary_use:
           "Answer an agent question inside the explicitly selected in-flight turn without creating another turn."
       },
+      respond_interaction: {
+        tool: "agent_knock_knock_respond_interaction",
+        target_argument: "turn_id",
+        interaction_argument: "interaction_id",
+        required: ["turn_id", "interaction_id", "answers"],
+        candidate_source:
+          "terminal_status.interaction_state returned by agent_knock_knock_status in the same controller conversation",
+        answer_contract:
+          "Use only the current projection's opaque question_id and option_id values, or its bounded typed free_text answer. Raw terminal keys, menu indexes, rendered labels, prompt fingerprints, versions, and terminal commands are not accepted.",
+        one_step_per_call: true,
+        requires_fresh_status: true,
+        requires_same_controller_conversation: true,
+        manual_required_sends_input: false,
+        uncertain_retry_allowed: false
+      },
       status: {
         tool: "agent_knock_knock_status",
         target_arguments: {
@@ -312,7 +328,10 @@ export function listActionContracts(): JsonRecord {
         managed_target_argument: "turn_id",
         terminal_target_argument: "terminal_id",
         required: [],
-        optional: [],
+        optional: ["decision"],
+        decisions: ["approve_once", "reject"],
+        decision_scope:
+          "Use only a semantic decision advertised by the current approval action. Never pass raw keys, menu indexes, or labels. Omission remains approve_once for compatibility.",
         terminal_scoped_scope:
           "Only the latest list-prefilled Codex terminal_id action may approve a managed current prompt without a usable Turn owner. It remains human-confirmed, uses private server-bound reviewed-prompt authority, revalidates exact terminal/process/Session/dispatch/prompt state before keys, never mutates managed state, has no durable dispatch receipt, cannot be auto-approved, and must not be blindly retried after an interrupted result.",
         approval_authority: "private_server_bound_reviewed_prompt",
@@ -649,6 +668,21 @@ function renderApprovalAction(input: {
     approve: {
       tool: "agent_knock_knock_approve",
       arguments: input.targetArguments,
+      choices: Array.isArray(input.approvalState.choices)
+        ? input.approvalState.choices.flatMap((choice) =>
+            isRecord(choice) &&
+              (choice.decision === "approve_once" || choice.decision === "reject") &&
+              (input.managedApprovalEligible || choice.decision !== "reject")
+              ? [{
+                  decision: choice.decision,
+                  label: stringValue(choice.label)
+                }]
+              : []
+          )
+        : [{
+            decision: "approve_once",
+            label: stringValue(input.approvalState.label)
+          }],
       missing_required: ["expected_approval_fingerprint"],
       before_call: {
         tool: "agent_knock_knock_status",

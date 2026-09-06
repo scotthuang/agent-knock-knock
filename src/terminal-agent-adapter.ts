@@ -36,7 +36,29 @@ export interface TerminalActivityInspection {
   reason: string;
 }
 
+/**
+ * Closed semantic decisions that an adapter may expose for a proven native
+ * approval prompt. Callers select one of these values; terminal keys, menu
+ * indexes, and rendered labels remain adapter-owned transport details.
+ */
+export const TERMINAL_APPROVAL_DECISIONS = [
+  "approve_once",
+  "reject"
+] as const;
+
+export type TerminalApprovalDecision =
+  typeof TERMINAL_APPROVAL_DECISIONS[number];
+
+export function isTerminalApprovalDecision(
+  value: unknown
+): value is TerminalApprovalDecision {
+  return typeof value === "string" &&
+    (TERMINAL_APPROVAL_DECISIONS as readonly string[]).includes(value);
+}
+
 export interface TerminalApprovalAction {
+  /** Closed caller-visible meaning; omitted only by legacy adapter fixtures. */
+  decision?: TerminalApprovalDecision;
   /** Terminal approval always uses an exact, ordered tmux key sequence. */
   mode?: "keys";
   /** Exact ordered tmux key sequence to send after prompt revalidation. */
@@ -121,6 +143,12 @@ export type TerminalApprovalInspection =
       policyEvidence?: TerminalApprovalPolicyEvidence;
       /** Adapter-verified digest of the exact, unredacted live prompt region. */
       promptEvidence?: TerminalApprovalPromptEvidence;
+      /**
+       * Complete safe decision set proven by this exact prompt. Persistent
+       * authorization choices are intentionally never represented here.
+       */
+      choices?: readonly TerminalApprovalAction[];
+      /** Legacy alias for the `approve_once` choice. */
       action: TerminalApprovalAction;
     }
   | {
@@ -134,6 +162,64 @@ export type TerminalApprovalInspection =
       requestDetail?: string;
       action?: undefined;
     };
+
+/**
+ * Normalize an adapter-owned approval offer. Any malformed or ambiguous
+ * explicit choice set fails closed. Legacy adapters expose approve_once only.
+ */
+export function terminalApprovalChoices(
+  approval: TerminalApprovalInspection
+): readonly TerminalApprovalAction[] {
+  if (!approval.approvable) {
+    return [];
+  }
+  const legacyApprove: TerminalApprovalAction = {
+    ...approval.action,
+    decision: approval.action.decision ?? "approve_once"
+  };
+  const offered = approval.choices?.length
+    ? approval.choices
+    : [legacyApprove];
+  const normalized = offered.map((choice) => ({
+    ...choice,
+    decision: choice.decision
+  }));
+  if (
+    legacyApprove.decision !== "approve_once" ||
+    normalized.some((choice) =>
+      !isTerminalApprovalDecision(choice.decision) ||
+      (choice.mode ?? "keys") !== "keys" ||
+      choice.keys.length === 0 ||
+      !choice.label
+    ) ||
+    new Set(normalized.map((choice) => choice.decision)).size !==
+      normalized.length
+  ) {
+    return [];
+  }
+  const approveOnce = normalized.find(
+    (choice) => choice.decision === "approve_once"
+  );
+  if (
+    !approveOnce ||
+    approveOnce.label !== legacyApprove.label ||
+    approveOnce.requestId !== legacyApprove.requestId ||
+    approveOnce.keys.length !== legacyApprove.keys.length ||
+    approveOnce.keys.some((key, index) => key !== legacyApprove.keys[index])
+  ) {
+    return [];
+  }
+  return normalized as readonly TerminalApprovalAction[];
+}
+
+export function terminalApprovalActionForDecision(
+  approval: TerminalApprovalInspection,
+  decision: TerminalApprovalDecision
+): TerminalApprovalAction | undefined {
+  return terminalApprovalChoices(approval).find(
+    (choice) => choice.decision === decision
+  );
+}
 
 export interface TerminalCompletionEvidence {
   source: "screen" | "durable";
@@ -159,6 +245,18 @@ export interface TerminalNativeIdentityFence {
 
 export interface TerminalRuntimeIdentity {
   pid?: number;
+  /** Exact running native agent version used to select interaction profiles. */
+  agentVersion?: string;
+  /** Exact managed Turn authorized to answer a native questionnaire. */
+  turnId?: string;
+  /**
+   * A durable interaction dispatch fence already exists for this Turn. While
+   * either state is present, status must never advertise another executable
+   * response even when the native prompt is still visible.
+   */
+  interactionDispatchState?: "reserved" | "uncertain";
+  interactionDispatchInteractionId?: string;
+  interactionDispatchPromptFingerprint?: string;
   sessionId?: string;
   nativeSessionId?: string;
   nativeProcessUuid?: string;
