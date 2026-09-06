@@ -77,6 +77,22 @@ const CODEX_CONFIRM = `
   Press enter to confirm or esc to go back
 `;
 
+const CLAUDE_FINAL_CONFIRM = `
+←  ☒ Color  ☒ Features  ✔ Submit  →
+
+Review your answers
+
+ ● Which color should the sample use?
+   → Red
+ ● Which features should be enabled?
+   → Fast
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+`;
+
 function inspection(screen: string): TerminalScreenInspection {
   return {
     activity: { state: "idle", reason: "test questionnaire" },
@@ -89,10 +105,12 @@ function inspection(screen: string): TerminalScreenInspection {
   };
 }
 
-function testAdapter(): TerminalAgentAdapter<"test_codex_questionnaire"> {
+function testAdapter(
+  agent: "codex" | "claude" = "codex"
+): TerminalAgentAdapter<"test_questionnaire"> {
   return {
-    agent: "codex",
-    displayName: "Test Codex",
+    agent,
+    displayName: `Test ${agent}`,
     capabilities: {
       processDiscovery: true,
       screenStatus: true,
@@ -105,8 +123,8 @@ function testAdapter(): TerminalAgentAdapter<"test_codex_questionnaire"> {
     classifyProcess(snapshot) {
       return {
         ...snapshot,
-        agent: "codex",
-        kind: "test_codex_questionnaire",
+        agent,
+        kind: "test_questionnaire",
         confidence: "high",
         reason: "test"
       };
@@ -177,14 +195,17 @@ class InteractionProvider extends StaticTerminalControlProvider {
 
 async function fixture(
   screen = CODEX_OPTIONS,
-  options: { verifyIdentity?: TerminalIdentityVerifier } = {}
+  options: {
+    verifyIdentity?: TerminalIdentityVerifier;
+    agent?: "codex" | "claude";
+  } = {}
 ): Promise<{
   adapter: TerminalAgentAdapter;
   provider: InteractionProvider;
   bridge: TerminalAgentBridge;
   control: TerminalControlRef;
 }> {
-  const adapter = testAdapter();
+  const adapter = testAdapter(options.agent);
   const provider = new InteractionProvider([screen]);
   const endpoint = (await provider.listTerminals())[0];
   assert.ok(endpoint);
@@ -271,8 +292,12 @@ test("status requires agent version, safe Turn id, and canonical process identit
   const unsafeTurn = await bridge.status("codex", control, {
     runtime: { ...RUNTIME, turnId: "bad turn" }
   });
+  const rawTerminalOnly = await bridge.status("codex", control, {
+    runtime: { ...RUNTIME, turnId: undefined }
+  });
   assert.equal(missingVersion.interaction_state, undefined);
   assert.equal(unsafeTurn.interaction_state, undefined);
+  assert.equal(rawTerminalOnly.interaction_state, undefined);
 
   const adapter = testAdapter();
   const legacyPane = {
@@ -663,5 +688,42 @@ test("verified confirmation dispatches exactly one closed key", async () => {
   assert.deepEqual(
     provider.operations.filter((operation) => operation.kind === "keys"),
     [{ kind: "keys", keys: ["Escape"] }]
+  );
+});
+
+test("Claude final review uses one exact semantic cancel key", async () => {
+  const { bridge, provider, control } = await fixture(
+    CLAUDE_FINAL_CONFIRM,
+    { agent: "claude" }
+  );
+  const runtime = { ...RUNTIME, agentVersion: "2.1.263" };
+  const status = await bridge.status("claude", control, { runtime });
+  const projection = status.interaction_state;
+  const fingerprint = status.interaction_prompt_fingerprint;
+  assert.ok(projection);
+  assert.ok(fingerprint);
+  provider.clearOperations();
+  const question = projection.questions[0]!;
+
+  const result = await bridge.respondInteraction("claude", control, {
+    interaction_id: projection.interaction_id,
+    turn_id: projection.turn_id,
+    answers: [{
+      question_id: question.question_id,
+      response_kind: "confirm",
+      confirm: false
+    }]
+  }, {
+    agentVersion: "2.1.263",
+    expectedFingerprint: fingerprint,
+    expectedExpiresAt: projection.expires_at,
+    runtime,
+    beforeDispatch() {}
+  });
+
+  assert.equal(result.outcome, "cancelled");
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    [{ kind: "keys", keys: ["2"] }]
   );
 });

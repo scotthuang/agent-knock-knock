@@ -175,12 +175,18 @@ const SECRET_INPUT_PATTERN =
   /(?:password|passphrase|api[ _-]?key|secret|access[ _-]?token|credential|private[ _-]?key|密码|口令|密钥|令牌)/iu;
 const CLAUDE_SELECTION_FOOTER =
   "Enter to select · Tab/Arrow keys to navigate · Esc to cancel";
+const CLAUDE_SINGLE_SELECTION_FOOTER =
+  "Enter to select · ↑/↓ to navigate · Esc to cancel";
+const CLAUDE_CUSTOM_TEXT_FOOTER =
+  "Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel";
 const CODEX_OPTIONS_FOOTER =
   "  tab to add notes | enter to submit answer | esc to interrupt";
 const CODEX_MULTI_OPTIONS_FOOTER =
   "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt";
 const CODEX_FREE_TEXT_FOOTER =
   "  enter to submit answer | esc to interrupt";
+const CODEX_MULTI_FREE_TEXT_FOOTER =
+  "  enter to submit all | ctrl + p / ctrl + n change question | esc to interrupt";
 const CODEX_UNANSWERED_FOOTER =
   "  Press enter to confirm or esc to go back";
 
@@ -243,22 +249,14 @@ function semanticId(prefix: "question" | "option", ...parts: unknown[]): string 
 }
 
 function hasClaudeQuestionnaireCandidate(lines: readonly string[]): boolean {
-  return lines.some((line) =>
-    /^←  [☐☒]/u.test(line) ||
-    /^☐ \S/u.test(line) ||
-    line === "Review your answers" ||
-    line === "Ready to submit your answers?" ||
-    line.includes("Enter to select ·") ||
-    line.includes("ctrl+g to edit in Vim")
-  );
+  const tail = lines.at(-1) ?? "";
+  return tail.includes("Enter to select ·") || tail === "  2. Cancel";
 }
 
 function hasCodexQuestionnaireCandidate(lines: readonly string[]): boolean {
-  return lines.some((line) =>
-    /^  Question \d+\/\d+ \(/u.test(line) ||
-    line === "  Submit with unanswered questions?" ||
-    line.includes("enter to submit answer | esc to interrupt")
-  );
+  const tail = lines.at(-1) ?? "";
+  return tail.includes("esc to interrupt") ||
+    /^  Press enter to confirm or esc to go back$/u.test(tail);
 }
 
 function candidateBounds(
@@ -344,7 +342,7 @@ function inspectClaudeQuestionnaire(
   }
   const bounds = candidateBounds(
     screen.lines,
-    (line) => /^←  [☐☒]/u.test(line) || /^☐ \S/u.test(line)
+    (line) => /^←  [☐☒]/u.test(line) || /^ [☐☒] \S/u.test(line)
   );
   if (options.version !== CLAUDE_VERSION) {
     return manualCandidate(
@@ -386,6 +384,15 @@ function inspectClaudeQuestionnaire(
 }
 
 function parseClaudeHeader(line: string): ClaudeHeader | undefined {
+  const single = /^ ☐ (\S.*)$/u.exec(line);
+  if (single?.[1] && single[1].trim() === single[1]) {
+    return {
+      tabs: [{ complete: false, label: single[1] }],
+      currentStep: 1,
+      totalSteps: 1,
+      finalReview: false
+    };
+  }
   const match = /^←  (.+)  ✔ Submit  →$/u.exec(line);
   if (!match?.[1]) {
     return undefined;
@@ -420,7 +427,8 @@ function parseClaudeHeader(line: string): ClaudeHeader | undefined {
 }
 
 function parseClaudeOptionLines(
-  lines: readonly string[]
+  lines: readonly string[],
+  kind: "single_select" | "multi_select"
 ): ParsedOptionRow[] | undefined {
   const options: ParsedOptionRow[] = [];
   for (const line of lines) {
@@ -438,7 +446,9 @@ function parseClaudeOptionLines(
       });
       continue;
     }
-    const description = /^ {5}(.+)$/u.exec(line)?.[1];
+    const description = kind === "multi_select"
+      ? /^ {2,5}(\S.*)$/u.exec(line)?.[1]
+      : /^ {5}(\S.*)$/u.exec(line)?.[1];
     const previous = options.at(-1);
     if (!description || !previous || previous.description !== undefined) {
       return undefined;
@@ -472,22 +482,46 @@ function parseClaudeChoiceRegion(
   lines: readonly string[]
 ): ClaudeChoiceRegion | undefined {
   const end = lines.length - 1;
-  if (end < 0 || lines[end] !== CLAUDE_SELECTION_FOOTER) {
+  const footer = lines[end] ?? "";
+  if (
+    end < 0 ||
+    (footer !== CLAUDE_SELECTION_FOOTER &&
+      footer !== CLAUDE_SINGLE_SELECTION_FOOTER)
+  ) {
     return undefined;
   }
-  const chatMatch = /^  ([1-9]\d*)\. Chat about this$/u.exec(lines[end - 1] ?? "");
-  const separatorIndex = end - 2;
+  const footerGap = lines[end - 1] === "" ? 1 : 0;
+  const chatIndex = end - 1 - footerGap;
+  const chatMatch = /^  ([1-9]\d*)\. Chat about this$/u.exec(lines[chatIndex] ?? "");
+  const separatorIndex = chatIndex - 1;
   if (!chatMatch?.[1] || !/^─{8,}$/u.test(lines[separatorIndex] ?? "")) {
     return undefined;
   }
   const start = lastIndexMatching(lines, (line) => parseClaudeHeader(line) !== undefined, separatorIndex);
-  const header = start >= 0 ? parseClaudeHeader(lines[start] ?? "") : undefined;
-  const prompt = lines[start + 1] ?? "";
-  if (!header || header.finalReview || prompt.length === 0 || prompt !== prompt.trim()) {
+  const parsedHeader = start >= 0
+    ? parseClaudeHeader(lines[start] ?? "")
+    : undefined;
+  const hasHeaderGap = lines[start + 1] === "";
+  const promptIndex = start + (hasHeaderGap ? 2 : 1);
+  const prompt = lines[promptIndex] ?? "";
+  const optionStart = promptIndex + (lines[promptIndex + 1] === "" ? 2 : 1);
+  if (
+    !parsedHeader ||
+    prompt.length === 0 ||
+    prompt !== prompt.trim() ||
+    (parsedHeader.totalSteps === 1) !==
+      (footer === CLAUDE_SINGLE_SELECTION_FOOTER)
+  ) {
     return undefined;
   }
-  const options = parseClaudeOptionLines(lines.slice(start + 2, separatorIndex));
-  const multiSelect = options?.every((option) => /^\[ \] /u.test(option.label));
+  const optionLines = lines.slice(optionStart, separatorIndex);
+  const multiSelect = optionLines.some((line) =>
+    /^(?:❯ |  )[1-9]\d*\. \[(?: |✔)\] /u.test(line)
+  );
+  const options = parseClaudeOptionLines(
+    optionLines,
+    multiSelect ? "multi_select" : "single_select"
+  );
   const expectedCustomLabel = multiSelect
     ? "[ ] Type something"
     : "Type something.";
@@ -495,11 +529,20 @@ function parseClaudeChoiceRegion(
     !options ||
     Number(chatMatch[1]) !== options.length + 1 ||
     options.at(-1)?.label !== expectedCustomLabel ||
-    options.at(-1)?.number !== 4
+    options.length < 3 ||
+    options.length > 5 ||
+    options.at(-1)?.number !== options.length
   ) {
     return undefined;
   }
-  return { start, end, footer: lines[end] ?? "", header, prompt, options };
+  const header = parsedHeader.finalReview
+    ? {
+        ...parsedHeader,
+        currentStep: parsedHeader.tabs.length,
+        finalReview: false
+      }
+    : parsedHeader;
+  return { start, end, footer, header, prompt, options };
 }
 
 function normalizedOptions(
@@ -519,7 +562,9 @@ function claudeChoiceInspection(
   lines: readonly string[],
   explicitSecret: boolean | undefined
 ): NativeQuestionnaireInspection {
-  const multiSelect = region.options.every((option) => /^\[ \] /u.test(option.label));
+  const multiSelect = region.options.every((option) =>
+    /^\[(?: |\u2714)\] /u.test(option.label)
+  );
   const mixedKinds = !multiSelect && region.options.some((option) => /^\[[^\]]*\] /u.test(option.label));
   const options = normalizedOptions(
     NATIVE_QUESTIONNAIRE_PROFILES.claude,
@@ -588,27 +633,32 @@ function parseClaudeFinalReview(
     lines,
     (line) => line === "Ready to submit your answers?"
   );
+  const afterReady = lines.slice(readyIndex + 1).filter((line) => line !== "");
   if (
     readyIndex < 2 ||
-    lines[readyIndex + 1] !== "❯ 1. Submit answers" ||
-    lines[readyIndex + 2] !== "  2. Cancel" ||
-    readyIndex + 2 !== lines.length - 1
+    afterReady.length !== 2 ||
+    afterReady[0] !== "❯ 1. Submit answers" ||
+    afterReady[1] !== "  2. Cancel"
   ) {
     return undefined;
   }
   const start = lastIndexMatching(lines, (line) => parseClaudeHeader(line) !== undefined, readyIndex);
   const header = start >= 0 ? parseClaudeHeader(lines[start] ?? "") : undefined;
-  if (!header?.finalReview || lines[start + 1] !== "Review your answers") {
+  const reviewLines = lines.slice(start + 1, readyIndex)
+    .filter((line) => line !== "");
+  if (!header?.finalReview || reviewLines[0] !== "Review your answers") {
     return undefined;
   }
-  const answerRows = lines.slice(start + 2, readyIndex);
+  const answerRows = reviewLines.slice(1);
   if (
-    answerRows.length !== header.tabs.length ||
-    answerRows.some((line) => !/^ ● \S.+ → \S.+$/u.test(line))
+    answerRows.length !== header.tabs.length * 2 ||
+    answerRows.some((line, index) => index % 2 === 0
+      ? !/^ ● \S.+\?$/u.test(line)
+      : !/^   → \S.*$/u.test(line))
   ) {
     return undefined;
   }
-  const end = readyIndex + 2;
+  const end = lines.length - 1;
   const question: NativeQuestionnaireQuestion = {
     question_id: semanticId("question", NATIVE_QUESTIONNAIRE_PROFILES.claude, "final-review", header.totalSteps),
     prompt: "Ready to submit your answers?",
@@ -616,8 +666,7 @@ function parseClaudeFinalReview(
     required: true
   };
   return {
-    status: "manual_required",
-    reason: "unproven_final_confirmation",
+    status: "actionable",
     agent: "claude",
     profile: NATIVE_QUESTIONNAIRE_PROFILES.claude,
     current_step: header.currentStep,
@@ -629,7 +678,11 @@ function parseClaudeFinalReview(
       start,
       end
     ),
-    action_plan: { kind: "manual_only" }
+    action_plan: {
+      kind: "confirm",
+      confirm_stages: [{ kind: "key", key: "1" }],
+      cancel_stages: [{ kind: "key", key: "2" }]
+    }
   };
 }
 
@@ -640,13 +693,41 @@ function parseClaudeCustomTextEdit(
     lines,
     (line) => line.includes("ctrl+g to edit in Vim")
   );
-  if (editIndex < 0 || editIndex !== lines.length - 1) {
+  if (
+    editIndex < 0 ||
+    editIndex !== lines.length - 1 ||
+    lines[editIndex] !== CLAUDE_CUSTOM_TEXT_FOOTER
+  ) {
     return undefined;
   }
   const start = lastIndexMatching(lines, (line) => parseClaudeHeader(line) !== undefined, editIndex);
   const header = start >= 0 ? parseClaudeHeader(lines[start] ?? "") : undefined;
-  const prompt = lines[start + 1] ?? "";
-  if (!header || header.finalReview || prompt.length === 0 || prompt !== prompt.trim()) {
+  const promptIndex = start + (lines[start + 1] === "" ? 2 : 1);
+  const prompt = lines[promptIndex] ?? "";
+  const optionStart = promptIndex + (lines[promptIndex + 1] === "" ? 2 : 1);
+  const footerGap = lines[editIndex - 1] === "" ? 1 : 0;
+  const chatIndex = editIndex - 1 - footerGap;
+  const chat = /^  ([1-9]\d*)\. Chat about this$/u.exec(lines[chatIndex] ?? "");
+  const separatorIndex = chatIndex - 1;
+  const options = parseClaudeOptionLines(
+    lines.slice(optionStart, separatorIndex),
+    "single_select"
+  );
+  if (
+    !header ||
+    header.finalReview ||
+    prompt.length === 0 ||
+    prompt !== prompt.trim() ||
+    !chat?.[1] ||
+    !/^\u2500{8,}$/u.test(lines[separatorIndex] ?? "") ||
+    !options ||
+    options.length < 3 ||
+    options.length > 5 ||
+    Number(chat[1]) !== options.length + 1 ||
+    options.at(-1)?.number !== options.length ||
+    options.at(-1)?.selected !== true ||
+    options.at(-1)?.label !== "Type something."
+  ) {
     return undefined;
   }
   const question: NativeQuestionnaireQuestion = {
@@ -656,8 +737,7 @@ function parseClaudeCustomTextEdit(
     required: true
   };
   return {
-    status: "manual_required",
-    reason: "unproven_custom_text_edit",
+    status: "actionable",
     agent: "claude",
     profile: NATIVE_QUESTIONNAIRE_PROFILES.claude,
     current_step: header.currentStep,
@@ -669,7 +749,17 @@ function parseClaudeCustomTextEdit(
       start,
       editIndex
     ),
-    action_plan: { kind: "manual_only" }
+    action_plan: {
+      kind: "free_text",
+      stages: [
+        {
+          kind: "answer_text",
+          single_line: true,
+          max_characters: MAX_TEXT_ANSWER_CHARACTERS
+        },
+        { kind: "key", key: "C-m" }
+      ]
+    }
   };
 }
 
@@ -787,8 +877,8 @@ function parseCodexQuestionRegion(
   const body = lines.slice(headerIndex + 2, end);
   const freeTextLines = body.filter((line) => line.length > 0);
   if (
-    header.totalSteps === 1 &&
-    footer === CODEX_FREE_TEXT_FOOTER &&
+    (footer === CODEX_FREE_TEXT_FOOTER ||
+      (header.totalSteps > 1 && footer === CODEX_MULTI_FREE_TEXT_FOOTER)) &&
     freeTextLines.length === 1 &&
     freeTextLines[0] === "  › Type your answer (optional)"
   ) {

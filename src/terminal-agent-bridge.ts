@@ -5285,7 +5285,9 @@ function isTerminalApprovalPromptEvidence(
 function terminalInteractionTurnId(
   runtime: TerminalRuntimeIdentity | undefined
 ): string | undefined {
-  const candidate = runtime?.turnId ?? runtime?.conversationId;
+  // Questionnaire mutation is managed-Turn-only. A raw terminal's
+  // conversationId is a discovery label, not durable response authority.
+  const candidate = runtime?.turnId;
   return typeof candidate === "string" &&
     TERMINAL_INTERACTION_IDENTIFIER_PATTERN.test(candidate)
     ? candidate
@@ -5646,8 +5648,12 @@ function terminalInteractionConfirmKey(
 ): string {
   const stages = answer.confirm ? plan.confirm_stages : plan.cancel_stages;
   const stage = stages[0];
-  const expected = answer.confirm ? "C-m" : "Escape";
-  if (stages.length !== 1 || stage?.kind !== "key" || stage.key !== expected) {
+  if (
+    stages.length !== 1 ||
+    stage?.kind !== "key" ||
+    !["C-m", "Escape", "1", "2"].includes(stage.key) ||
+    JSON.stringify(plan.confirm_stages) === JSON.stringify(plan.cancel_stages)
+  ) {
     throw new Error("confirmation interaction has no closed adapter action");
   }
   return stage.key;

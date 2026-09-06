@@ -1,6 +1,6 @@
 # Interactive terminal response design
 
-Status: local implementation candidate; not a published package contract
+Status: local POC implemented; not a published package contract
 
 ## Problem
 
@@ -51,8 +51,7 @@ AKK projects one currently visible interaction:
   "capabilities": {
     "batch_response": false,
     "free_text": false,
-    "multi_select": false,
-    "number": false
+    "multi_select": false
   }
 }
 ```
@@ -115,9 +114,10 @@ For each response AKK:
 4. resolves opaque semantic ids to an adapter-owned input plan;
 5. reserves the response durably before possible terminal input;
 6. dispatches one bounded native step;
-7. recaptures and proves that the old step disappeared and either the next
-   known step or normal agent activity appeared;
-8. records an audit event and rotates the interaction id.
+7. records an audit receipt without raw answer content and resumes the monitor;
+   and
+8. recaptures the next native state on Status, which rotates the interaction
+   id because the exact prompt fingerprint changed.
 
 If a failure occurs before terminal input, the response is safely rejected.
 If input may have occurred, the Turn becomes `response_uncertain`; AKK sends no
@@ -140,8 +140,13 @@ Observed locally in an isolated tmux session:
   current row and `4. No`; `Escape` cancels the dialog and is not modeled as
   semantic reject.
 
-Only exact recognized forms are eligible. `Tab to amend`, persistent Yes, auto
-mode, and any changed menu shape remain manual.
+The local POC executes exact single-select rows (including the transition into
+`Type something`), the recaptured single-line custom-text editor, and the
+separate final Submit/Cancel review. It detects multi-select screens but keeps
+them `manual_required`: safely toggling several checkboxes requires a
+recapture after every toggle and is intentionally deferred. `Tab to amend`,
+persistent Yes, auto mode, resized/wrapped variants, and any changed menu shape
+also remain manual.
 
 ### Codex 0.153.4
 
@@ -151,6 +156,8 @@ The installed client matches the current official TUI protocol:
   Other;
 - numeric selection advances a choice question;
 - optional notes/free-form answers use the composer;
+- the exact multi-question free-form footer is handled one current step at a
+  time;
 - unanswered-question confirmation is its own `Proceed` / `Go back` step.
 
 Codex does not currently expose a native multi-select question in this
@@ -159,13 +166,16 @@ and tests are added.
 
 ## Delivery stages
 
-1. **Permission parity**: expose `reject` only when an adapter proves an exact
-   safe native reject action; retain `approve_once` compatibility.
-2. **Read-only projection**: detect and report supported questionnaire steps,
-   including manual-required reasons.
-3. **Local response POC**: enable one current single-select, free-text, or
-   confirmation step with full pre-input fencing and uncertain-result audit.
-4. **Expanded native coverage**: multi-select, notes, navigation, and more
+1. **Permission parity (implemented locally)**: expose `reject` only when an
+   adapter proves an exact safe native reject action; retain `approve_once`
+   compatibility.
+2. **Read-only projection (implemented locally)**: detect and report supported
+   questionnaire steps while changed or unsupported shapes remain manual.
+3. **Local response POC (implemented locally)**: enable one current
+   single-select, free-text, or confirmation step with pre-input fencing,
+   durable one-shot reservation, and uncertain-result audit.
+4. **Expanded native coverage (not implemented)**: multi-select, notes,
+   navigation, and more
    version profiles only with captured fixtures and live regression evidence.
 5. **Host-native UX**: OpenClaw may render the projection using a future public
    session-bound `requestUserInput` API. Until then, the structured AKK tool is

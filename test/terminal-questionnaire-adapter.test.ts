@@ -41,6 +41,15 @@ const CODEX_FREEFORM = `
   enter to submit answer | esc to interrupt
 `;
 
+const CODEX_MULTI_FREEFORM = `
+  Question 2/2 (2 unanswered)
+  Share details.
+
+  › Type your answer (optional)
+
+  enter to submit all | ctrl + p / ctrl + n change question | esc to interrupt
+`;
+
 const CODEX_UNANSWERED_CONFIRM = `
   Submit with unanswered questions?
   2 unanswered questions
@@ -56,51 +65,67 @@ const CODEX_UNANSWERED_CONFIRM = `
 
 const CLAUDE_SINGLE_SELECT = `
 old conversation output
-←  ☐ Color  ☐ Pets  ✔ Submit  →
+ ☐ Color
+
 Which color do you prefer?
+
 ❯ 1. Red
      The color red
   2. Blue
      The color blue
-  3. Green
-     The color green
-  4. Type something.
+  3. Type something.
 ────────────────────────────────
-  5. Chat about this
-Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
 `;
 
 const CLAUDE_MULTI_SELECT = `
 ←  ☒ Color  ☐ Pets  ✔ Submit  →
+
 Which pets do you like?
+
 ❯ 1. [ ] Cat
+  Cat description
   2. [ ] Dog
-  3. [ ] Bird
-  4. [ ] Type something
+  Dog description
+  3. [ ] Type something
+     Submit
 ────────────────────────────────
-  5. Chat about this
+  4. Chat about this
+
 Enter to select · Tab/Arrow keys to navigate · Esc to cancel
 `;
 
 const CLAUDE_FINAL_REVIEW = `
 ←  ☒ Color  ☒ Pets  ✔ Submit  →
+
 Review your answers
- ● Which color do you prefer? → Blue
- ● Which pets do you like? → Cat, Bird
+
+ ● Which color do you prefer?
+   → Blue
+ ● Which pets do you like?
+   → Cat, Bird
+
 Ready to submit your answers?
+
 ❯ 1. Submit answers
   2. Cancel
 `;
 
 const CLAUDE_CUSTOM_TEXT_EDIT = `
-←  ☐ Drink  ✔ Submit  →
-Which drink do you prefer?
-❯ 1. Tea
-  2. Coffee
-  3. Water
-  4. Sparkling water
+ ☐ Color
+
+Which color do you prefer?
+
+  1. Red
+     The color red
+  2. Blue
+     The color blue
+❯ 3. Type something.
 ────────────────────────────────
-  5. Chat about this
+  4. Chat about this
+
 Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel
 `;
 
@@ -190,6 +215,18 @@ test("Codex exact freeform snapshot yields a bounded text-then-Enter plan", () =
   });
 });
 
+test("Codex exact multi-question freeform is actionable one step at a time", () => {
+  const parsed = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_MULTI_FREEFORM
+  }));
+
+  assert.deepEqual([parsed.current_step, parsed.total_steps], [2, 2]);
+  assert.equal(parsed.question.response_kind, "free_text");
+  assert.equal(parsed.action_plan.kind, "free_text");
+});
+
 test("Codex exact unanswered confirmation has closed confirm/cancel plans", () => {
   const parsed = actionable(inspectNativeQuestionnaire({
     agent: "codex",
@@ -217,11 +254,11 @@ test("Codex requires bottom-most exact footer and strict ordered numbering", () 
   })).reason, "changed_shape");
 
   const contentAfterFooter = `${CODEX_OPTIONS.trimEnd()}\nnew output below`;
-  assert.equal(manual(inspectNativeQuestionnaire({
+  assert.equal(inspectNativeQuestionnaire({
     agent: "codex",
     version: "0.153.4",
     screen: contentAfterFooter
-  })).reason, "changed_shape");
+  }).status, "none");
 
   const outOfOrder = CODEX_OPTIONS.replace("    2. Option 2", "    3. Option 2");
   assert.equal(manual(inspectNativeQuestionnaire({
@@ -275,12 +312,12 @@ test("Claude 2.1.263 exact framed choice exposes only semantic option ids", () =
   assert.equal(parsed.profile, NATIVE_QUESTIONNAIRE_PROFILES.claude);
   assert.deepEqual(
     [parsed.current_step, parsed.total_steps],
-    [1, 3]
+    [1, 1]
   );
   assert.equal(parsed.question.prompt, "Which color do you prefer?");
   assert.deepEqual(
     parsed.question.options?.map((option) => option.label),
-    ["Red", "Blue", "Green", "Type something."]
+    ["Red", "Blue", "Type something."]
   );
   assert.doesNotMatch(JSON.stringify(parsed.question), /"key"/u);
   assert.equal(parsed.action_plan.kind, "single_select");
@@ -288,10 +325,10 @@ test("Claude 2.1.263 exact framed choice exposes only semantic option ids", () =
     assert.equal(parsed.action_plan.choices.at(-1)?.outcome, "open_custom_text");
     assert.deepEqual(
       parsed.action_plan.choices.at(-1)?.stages,
-      [{ kind: "key", key: "4" }]
+      [{ kind: "key", key: "3" }]
     );
   }
-  assert.equal(parsed.prompt_evidence.exact_region.startsWith("←  ☐ Color"), true);
+  assert.equal(parsed.prompt_evidence.exact_region.startsWith(" ☐ Color"), true);
   assert.equal(parsed.prompt_evidence.exact_region.includes("old conversation"), false);
 });
 
@@ -310,40 +347,47 @@ test("Claude exact multi-select is detected but mutation fails closed", () => {
   assert.equal(parsed.question.response_kind, "multi_select");
   assert.deepEqual(
     parsed.question.options?.map((option) => option.label),
-    ["[ ] Cat", "[ ] Dog", "[ ] Bird", "[ ] Type something"]
+    ["[ ] Cat", "[ ] Dog", "[ ] Type something"]
   );
   assert.deepEqual(parsed.action_plan, { kind: "manual_only" });
 });
 
-test("Claude final review is recognized but remains manual without exact footer proof", () => {
-  const parsed = manual(inspectNativeQuestionnaire({
+test("Claude exact final review exposes closed submit and cancel actions", () => {
+  const parsed = actionable(inspectNativeQuestionnaire({
     agent: "claude",
     version: "2.1.263",
     screen: CLAUDE_FINAL_REVIEW
   }));
 
-  assert.equal(parsed.reason, "unproven_final_confirmation");
   assert.equal(parsed.question.prompt, "Ready to submit your answers?");
   assert.equal(parsed.question.response_kind, "confirm");
   assert.deepEqual(
     [parsed.current_step, parsed.total_steps],
     [3, 3]
   );
-  assert.deepEqual(parsed.action_plan, { kind: "manual_only" });
+  assert.deepEqual(parsed.action_plan, {
+    kind: "confirm",
+    confirm_stages: [{ kind: "key", key: "1" }],
+    cancel_stages: [{ kind: "key", key: "2" }]
+  });
 });
 
-test("Claude custom-text edit state never treats entered text as an option", () => {
-  const parsed = manual(inspectNativeQuestionnaire({
+test("Claude exact custom-text edit state exposes bounded free text", () => {
+  const parsed = actionable(inspectNativeQuestionnaire({
     agent: "claude",
     version: "2.1.263",
     screen: CLAUDE_CUSTOM_TEXT_EDIT
   }));
 
-  assert.equal(parsed.reason, "unproven_custom_text_edit");
   assert.equal(parsed.question.response_kind, "free_text");
   assert.equal(parsed.question.options, undefined);
-  assert.doesNotMatch(JSON.stringify(parsed.question), /Sparkling water/u);
-  assert.deepEqual(parsed.action_plan, { kind: "manual_only" });
+  assert.deepEqual(parsed.action_plan, {
+    kind: "free_text",
+    stages: [
+      { kind: "answer_text", single_line: true, max_characters: 4_096 },
+      { kind: "key", key: "C-m" }
+    ]
+  });
 });
 
 test("Claude selection rejects changed footer, frame, numbering, and cursor state", () => {
@@ -396,6 +440,12 @@ test("ANSI is stripped before exact evidence and unrelated Claude text stays abs
     agent: "claude",
     version: "2.1.263",
     screen: "Claude discussed a survey and then returned to its normal composer."
+  }).status, "none");
+
+  assert.equal(inspectNativeQuestionnaire({
+    agent: "claude",
+    version: "2.1.263",
+    screen: `${CLAUDE_SINGLE_SELECT.trimEnd()}\n\n❯ ordinary composer`
   }).status, "none");
 });
 
