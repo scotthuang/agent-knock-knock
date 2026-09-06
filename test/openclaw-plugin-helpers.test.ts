@@ -917,6 +917,22 @@ test("/akk approve accepts only a semantic Turn and delegates private fencing", 
     undefined,
     "the command adapter privately derives the approval fingerprint immediately before dispatch"
   );
+  assert.deepEqual(parseAkkCommand("approve conversation-1 reject"), {
+    action: "approve",
+    turnId: "conversation-1",
+    decision: "reject"
+  });
+  assert.deepEqual(parseAkkCommand("approve conversation-1 approve_once"), {
+    action: "approve",
+    turnId: "conversation-1",
+    decision: "approve_once"
+  });
+  for (const rawChoice of ["4", "No", "Escape", "--keys=n"]) {
+    assert.throws(
+      () => parseAkkCommand(`approve conversation-1 ${rawChoice}`),
+      /approve_once\|reject/u
+    );
+  }
   assert.throws(
     () => parseAkkCommand(
       "approve conversation-1 --expected-approval-fingerprint approval-1"

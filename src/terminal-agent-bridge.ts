@@ -4,10 +4,14 @@ import {
   formatTerminalConversationId,
   parseTerminalConversationId,
   terminalControlCapabilitiesForAdapter,
+  terminalApprovalActionForDecision,
+  terminalApprovalChoices,
   type ActiveTerminalProcess,
   type TerminalAgentAdapter,
   type TerminalAgentAdapterCapabilities,
   type TerminalAgentAdapterRegistry,
+  type TerminalApprovalAction,
+  type TerminalApprovalDecision,
   type TerminalCompletionEvidence,
   type TerminalControlCapability,
   type TerminalControlRef,
@@ -327,6 +331,11 @@ export interface TerminalBridgeStatus {
     request_detail?: string;
     reason?: string;
     fingerprint?: string;
+    choices?: readonly {
+      decision: TerminalApprovalDecision;
+      label: string;
+      fingerprint: string;
+    }[];
     decision_mode?: "keys";
     request_id?: string;
     policy_evidence?: {
@@ -358,6 +367,9 @@ export interface ResolvedTerminalConversation {
 
 export interface TerminalApprovalExecution {
   approved: boolean;
+  /** True after either approve_once or reject was dispatched exactly once. */
+  decisionDispatched?: boolean;
+  decision?: TerminalApprovalDecision;
   blocked: boolean;
   reason?: string;
   key?: string;
@@ -765,6 +777,7 @@ export interface TerminalApprovalAuthorizationContext {
   terminalControl: TerminalControlRef;
   inspection: TerminalScreenInspection;
   fingerprint?: string;
+  decision: TerminalApprovalDecision;
   runtime?: TerminalRuntimeIdentity;
 }
 
@@ -778,8 +791,193 @@ export interface TerminalApprovalKeyDispatchContext {
   terminalControl: TerminalControlRef;
   inspection: TerminalScreenInspection;
   fingerprint: string;
+  decision: TerminalApprovalDecision;
   keys: readonly string[];
   runtime?: TerminalRuntimeIdentity;
+}
+
+type TerminalApprovalPreflight =
+  | {
+      ready: true;
+      action: TerminalApprovalAction;
+      decisionMode: "keys";
+      fingerprintControl: TerminalControlRef;
+      fingerprint?: string;
+    }
+  | { ready: false; result: TerminalApprovalExecution };
+
+function terminalApprovalPreflight(input: {
+  adapter: TerminalAgentAdapter;
+  terminalControl: TerminalControlRef;
+  activeTerminalControl: TerminalControlRef;
+  inspection: TerminalScreenInspection;
+  screen: string;
+  decision: TerminalApprovalDecision;
+  expectedFingerprint?: string;
+  requiredDecisionMode?: "keys";
+  runtime?: TerminalRuntimeIdentity;
+}): TerminalApprovalPreflight {
+  const { adapter, inspection, decision } = input;
+  if (!inspection.approval.approvable) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: inspection.approval.blocked,
+      reason: inspection.approval.reason,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt
+    } };
+  }
+  if (
+    decision === "approve_once" &&
+    (inspection.approval.action.mode ?? "keys") === "keys" &&
+    inspection.approval.action.keys.length === 0
+  ) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      decision,
+      reason: `${adapter.displayName} approval action has no keys`,
+      label: inspection.approval.action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt
+    } };
+  }
+  const action = terminalApprovalActionForDecision(
+    inspection.approval,
+    decision
+  );
+  if (!action) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      decision,
+      reason: `${adapter.displayName} does not expose the ${decision} decision for this exact approval prompt`,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt
+    } };
+  }
+  const decisionMode = action.mode ?? "keys";
+  const canonicalFingerprint = terminalApprovalFingerprint(
+    adapter.agent,
+    input.activeTerminalControl,
+    inspection,
+    { screen: input.screen, runtime: input.runtime, decision }
+  );
+  if (
+    input.requiredDecisionMode &&
+    decisionMode !== input.requiredDecisionMode
+  ) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: `${adapter.displayName} approval mode ${decisionMode} is not eligible for this decision`,
+      decision,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      fingerprint: canonicalFingerprint,
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: action.requestId
+    } };
+  }
+  if (decisionMode === "keys" && action.keys.length === 0) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: `${adapter.displayName} approval action has no keys`,
+      decision,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt
+    } };
+  }
+  if (!isTerminalApprovalPromptEvidence(inspection.approval.promptEvidence)) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: `${adapter.displayName} approval prompt has no adapter-verified prompt evidence`,
+      decision,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: action.requestId
+    } };
+  }
+  const legacyFingerprint = hasCanonicalTerminalEndpoint(input.terminalControl)
+    ? undefined
+    : terminalApprovalFingerprint(
+        adapter.agent,
+        input.terminalControl,
+        inspection,
+        { screen: input.screen, runtime: input.runtime, decision }
+      );
+  const useLegacyFingerprint = Boolean(
+    input.expectedFingerprint &&
+    input.expectedFingerprint === legacyFingerprint
+  );
+  const fingerprintControl = useLegacyFingerprint
+    ? input.terminalControl
+    : input.activeTerminalControl;
+  const fingerprint = useLegacyFingerprint
+    ? legacyFingerprint
+    : canonicalFingerprint;
+  if (
+    adapter.agent === "claude" &&
+    !input.expectedFingerprint
+  ) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: "screen approval requires the latest expected fingerprint",
+      decision,
+      key: action.keys.length === 1 ? action.keys[0] : undefined,
+      keys: action.keys,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      cwd: inspection.approval.cwd,
+      toolName: inspection.approval.toolName,
+      requestDetail: inspection.approval.requestDetail,
+      fingerprint,
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: action.requestId
+    } };
+  }
+  if (
+    input.expectedFingerprint &&
+    input.expectedFingerprint !== fingerprint
+  ) {
+    return { ready: false, result: {
+      approved: false,
+      blocked: true,
+      reason: "approval fingerprint changed before execution",
+      decision,
+      key: action.keys.length === 1 ? action.keys[0] : undefined,
+      keys: action.keys,
+      label: action.label,
+      promptKind: inspection.approval.promptKind,
+      command: inspection.approval.command,
+      fingerprint,
+      screenExcerpt: inspection.screenExcerpt,
+      decisionMode,
+      requestId: action.requestId
+    } };
+  }
+  return {
+    ready: true,
+    action,
+    decisionMode,
+    fingerprintControl,
+    fingerprint
+  };
 }
 
 export interface TerminalMonitorPoll {
@@ -3179,6 +3377,7 @@ export class TerminalAgentBridge {
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
     options: {
+      decision?: TerminalApprovalDecision;
       expectedFingerprint?: string;
       scrollbackLines?: number;
       runtime?: TerminalRuntimeIdentity;
@@ -3198,6 +3397,7 @@ export class TerminalAgentBridge {
     } = {}
   ): Promise<TerminalApprovalExecution> {
     const adapter = this.registry.require(agent);
+    const decision = options.decision ?? "approve_once";
     if (
       !adapter.capabilities.terminalApproval ||
       !terminalControl.capabilities.includes("terminal_approval")
@@ -3221,147 +3421,26 @@ export class TerminalAgentBridge {
     const captured = await this.captureInspection(adapter, terminalControl, options);
     const { inspection } = captured;
     const activeTerminalControl = captured.terminalControl;
-    if (!inspection.approval.approvable) {
-      return {
-        approved: false,
-        blocked: inspection.approval.blocked,
-        reason: inspection.approval.reason,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        screenExcerpt: inspection.screenExcerpt
-      };
-    }
-    const decisionMode = inspection.approval.action.mode ?? "keys";
-    if (options.requiredDecisionMode && decisionMode !== options.requiredDecisionMode) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: `${adapter.displayName} approval mode ${decisionMode} is not eligible for this decision`,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        fingerprint: terminalApprovalFingerprint(
-          adapter.agent,
-          activeTerminalControl,
-          inspection,
-          {
-            screen: captured.screen,
-            runtime: options.runtime
-          }
-        ),
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: inspection.approval.action.requestId
-      };
-    }
-    if (decisionMode === "keys" && inspection.approval.action.keys.length === 0) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: `${adapter.displayName} approval action has no keys`,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        screenExcerpt: inspection.screenExcerpt
-      };
-    }
-    if (
-      decisionMode === "keys" &&
-      !isTerminalApprovalPromptEvidence(
-        inspection.approval.promptEvidence
-      )
-    ) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: `${adapter.displayName} approval prompt has no adapter-verified prompt evidence`,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: inspection.approval.action.requestId
-      };
-    }
-    const canonicalFingerprint = terminalApprovalFingerprint(
-      adapter.agent,
+    const preflight = terminalApprovalPreflight({
+      adapter,
+      terminalControl,
       activeTerminalControl,
       inspection,
-      {
-        screen: captured.screen,
-        runtime: options.runtime
-      }
-    );
-    const legacyFingerprint = hasCanonicalTerminalEndpoint(terminalControl)
-      ? undefined
-      : terminalApprovalFingerprint(
-          adapter.agent,
-          terminalControl,
-          inspection,
-          {
-            screen: captured.screen,
-            runtime: options.runtime
-          }
-        );
-    const useLegacyFingerprint = Boolean(
-      options.expectedFingerprint &&
-      options.expectedFingerprint === legacyFingerprint
-    );
-    const fingerprintControl = useLegacyFingerprint
-      ? terminalControl
-      : activeTerminalControl;
-    const fingerprint = useLegacyFingerprint
-      ? legacyFingerprint
-      : canonicalFingerprint;
-    if (
-      adapter.agent === "claude" &&
-      decisionMode === "keys" &&
-      !options.expectedFingerprint
-    ) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: "screen approval requires the latest expected fingerprint",
-        key: inspection.approval.action.keys.length === 1
-          ? inspection.approval.action.keys[0]
-          : undefined,
-        keys: inspection.approval.action.keys,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        cwd: inspection.approval.cwd,
-        toolName: inspection.approval.toolName,
-        requestDetail: inspection.approval.requestDetail,
-        fingerprint,
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: inspection.approval.action.requestId
-      };
-    }
-    if (options.expectedFingerprint && options.expectedFingerprint !== fingerprint) {
-      return {
-        approved: false,
-        blocked: true,
-        reason: "approval fingerprint changed before execution",
-        key: inspection.approval.action.keys.length === 1
-          ? inspection.approval.action.keys[0]
-          : undefined,
-        keys: inspection.approval.action.keys,
-        label: inspection.approval.action.label,
-        promptKind: inspection.approval.promptKind,
-        command: inspection.approval.command,
-        fingerprint,
-        screenExcerpt: inspection.screenExcerpt,
-        decisionMode,
-        requestId: inspection.approval.action.requestId
-      };
-    }
+      screen: captured.screen,
+      decision,
+      expectedFingerprint: options.expectedFingerprint,
+      requiredDecisionMode: options.requiredDecisionMode,
+      runtime: options.runtime
+    });
+    if (!preflight.ready) return preflight.result;
+    const { action, decisionMode, fingerprintControl, fingerprint } = preflight;
     if (options.authorize) {
       const authorization = await options.authorize({
         agent: adapter.agent,
         terminalControl: activeTerminalControl,
         inspection,
         fingerprint,
+        decision,
         runtime: options.runtime
       });
       if (!authorization.approved) {
@@ -3369,11 +3448,12 @@ export class TerminalAgentBridge {
           approved: false,
           blocked: true,
           reason: authorization.reason ?? "approval was not authorized",
-          key: inspection.approval.action.keys.length === 1
-            ? inspection.approval.action.keys[0]
+          decision,
+          key: action.keys.length === 1
+            ? action.keys[0]
             : undefined,
-          keys: inspection.approval.action.keys,
-          label: inspection.approval.action.label,
+          keys: action.keys,
+          label: action.label,
           promptKind: inspection.approval.promptKind,
           command: inspection.approval.command,
           toolName: inspection.approval.toolName,
@@ -3381,7 +3461,7 @@ export class TerminalAgentBridge {
           fingerprint,
           screenExcerpt: inspection.screenExcerpt,
           decisionMode,
-          requestId: inspection.approval.action.requestId
+          requestId: action.requestId
         };
       }
     }
@@ -3404,14 +3484,29 @@ export class TerminalAgentBridge {
         screenExcerpt: recapturedInspection.screenExcerpt
       };
     }
-    const recapturedDecisionMode = recapturedInspection.approval.action.mode ?? "keys";
+    const recapturedAction = terminalApprovalActionForDecision(
+      recapturedInspection.approval,
+      decision
+    );
+    if (!recapturedAction) {
+      return {
+        approved: false,
+        blocked: true,
+        decision,
+        reason: `the ${decision} decision is no longer available after authorization`,
+        promptKind: recapturedInspection.approval.promptKind,
+        screenExcerpt: recapturedInspection.screenExcerpt
+      };
+    }
+    const recapturedDecisionMode = recapturedAction.mode ?? "keys";
     const recapturedFingerprint = terminalApprovalFingerprint(
       adapter.agent,
       fingerprintControl,
       recapturedInspection,
       {
         screen: recaptured.screen,
-        runtime: options.runtime
+        runtime: options.runtime,
+        decision
       }
     );
     if (recapturedDecisionMode !== decisionMode) {
@@ -3419,11 +3514,12 @@ export class TerminalAgentBridge {
         approved: false,
         blocked: true,
         reason: "approval decision mode changed after authorization",
-        key: recapturedInspection.approval.action.keys.length === 1
-          ? recapturedInspection.approval.action.keys[0]
+        decision,
+        key: recapturedAction.keys.length === 1
+          ? recapturedAction.keys[0]
           : undefined,
-        keys: recapturedInspection.approval.action.keys,
-        label: recapturedInspection.approval.action.label,
+        keys: recapturedAction.keys,
+        label: recapturedAction.label,
         promptKind: recapturedInspection.approval.promptKind,
         command: recapturedInspection.approval.command,
         cwd: recapturedInspection.approval.cwd,
@@ -3432,7 +3528,7 @@ export class TerminalAgentBridge {
         fingerprint: recapturedFingerprint,
         screenExcerpt: recapturedInspection.screenExcerpt,
         decisionMode: recapturedDecisionMode,
-        requestId: recapturedInspection.approval.action.requestId
+        requestId: recapturedAction.requestId
       };
     }
     if (recapturedFingerprint !== fingerprint) {
@@ -3440,11 +3536,12 @@ export class TerminalAgentBridge {
         approved: false,
         blocked: true,
         reason: "approval fingerprint changed after authorization",
-        key: recapturedInspection.approval.action.keys.length === 1
-          ? recapturedInspection.approval.action.keys[0]
+        decision,
+        key: recapturedAction.keys.length === 1
+          ? recapturedAction.keys[0]
           : undefined,
-        keys: recapturedInspection.approval.action.keys,
-        label: recapturedInspection.approval.action.label,
+        keys: recapturedAction.keys,
+        label: recapturedAction.label,
         promptKind: recapturedInspection.approval.promptKind,
         command: recapturedInspection.approval.command,
         cwd: recapturedInspection.approval.cwd,
@@ -3453,7 +3550,7 @@ export class TerminalAgentBridge {
         fingerprint: recapturedFingerprint,
         screenExcerpt: recapturedInspection.screenExcerpt,
         decisionMode: recapturedDecisionMode,
-        requestId: recapturedInspection.approval.action.requestId
+        requestId: recapturedAction.requestId
       };
     }
     const verifiedForApproval = await this.verifyTerminalIdentity(
@@ -3475,11 +3572,13 @@ export class TerminalAgentBridge {
       terminalControl: verifiedForApproval,
       inspection: recapturedInspection,
       fingerprint: recapturedFingerprint,
-      keys: recapturedInspection.approval.action.keys,
+      decision,
+      keys: recapturedAction.keys,
       runtime: options.runtime
     });
     let dispatchTerminalControl = verifiedForApproval;
     let dispatchInspection = recapturedInspection;
+    let dispatchAction = recapturedAction;
     if (options.beforeKeyDispatch) {
       const afterReservation = await this.captureInspection(
         adapter,
@@ -3500,15 +3599,29 @@ export class TerminalAgentBridge {
           screenExcerpt: afterReservationInspection.screenExcerpt
         };
       }
-      const afterReservationMode =
-        afterReservationInspection.approval.action.mode ?? "keys";
+      const afterReservationAction = terminalApprovalActionForDecision(
+        afterReservationInspection.approval,
+        decision
+      );
+      if (!afterReservationAction) {
+        return {
+          approved: false,
+          blocked: true,
+          decision,
+          reason: `the ${decision} decision is no longer available after dispatch reservation`,
+          promptKind: afterReservationInspection.approval.promptKind,
+          screenExcerpt: afterReservationInspection.screenExcerpt
+        };
+      }
+      const afterReservationMode = afterReservationAction.mode ?? "keys";
       const afterReservationFingerprint = terminalApprovalFingerprint(
         adapter.agent,
         fingerprintControl,
         afterReservationInspection,
         {
           screen: afterReservation.screen,
-          runtime: options.runtime
+          runtime: options.runtime,
+          decision
         }
       );
       if (
@@ -3518,12 +3631,13 @@ export class TerminalAgentBridge {
         return {
           approved: false,
           blocked: true,
+          decision,
           reason: "approval fingerprint changed after dispatch reservation",
-          key: afterReservationInspection.approval.action.keys.length === 1
-            ? afterReservationInspection.approval.action.keys[0]
+          key: afterReservationAction.keys.length === 1
+            ? afterReservationAction.keys[0]
             : undefined,
-          keys: afterReservationInspection.approval.action.keys,
-          label: afterReservationInspection.approval.action.label,
+          keys: afterReservationAction.keys,
+          label: afterReservationAction.label,
           promptKind: afterReservationInspection.approval.promptKind,
           command: afterReservationInspection.approval.command,
           cwd: afterReservationInspection.approval.cwd,
@@ -3532,11 +3646,12 @@ export class TerminalAgentBridge {
           fingerprint: afterReservationFingerprint,
           screenExcerpt: afterReservationInspection.screenExcerpt,
           decisionMode: afterReservationMode,
-          requestId: afterReservationInspection.approval.action.requestId
+          requestId: afterReservationAction.requestId
         };
       }
       dispatchTerminalControl = afterReservation.terminalControl;
       dispatchInspection = afterReservationInspection;
+      dispatchAction = afterReservationAction;
     }
     if (!dispatchInspection.approval.approvable) {
       return {
@@ -3564,23 +3679,25 @@ export class TerminalAgentBridge {
     }
     await this.terminalProvider.sendKeys(
       this.terminalProvider.endpoint(verifiedImmediatelyBeforeSend),
-      dispatchApproval.action.keys
+      dispatchAction.keys
     );
     return {
-      approved: true,
+      approved: decision === "approve_once",
+      decisionDispatched: true,
+      decision,
       blocked: false,
-      key: dispatchApproval.action.keys.length === 1
-        ? dispatchApproval.action.keys[0]
+      key: dispatchAction.keys.length === 1
+        ? dispatchAction.keys[0]
         : undefined,
-      keys: dispatchApproval.action.keys,
-      label: dispatchApproval.action.label,
+      keys: dispatchAction.keys,
+      label: dispatchAction.label,
       promptKind: dispatchApproval.promptKind,
       command: dispatchApproval.command,
       cwd: dispatchApproval.cwd,
       fingerprint: recapturedFingerprint,
       screenExcerpt: dispatchInspection.screenExcerpt,
       decisionMode: recapturedDecisionMode,
-      requestId: dispatchApproval.action.requestId
+      requestId: dispatchAction.requestId
     };
   }
 
@@ -4705,12 +4822,22 @@ export function terminalApprovalFingerprint(
   options: {
     screen?: string;
     runtime?: TerminalRuntimeIdentity;
+    decision?: TerminalApprovalDecision;
   } = {}
 ): string | undefined {
   if (!inspection.approval.approvable) {
     return undefined;
   }
-  const decisionMode = inspection.approval.action.mode ?? "keys";
+  const decision = options.decision ?? "approve_once";
+  const choices = terminalApprovalChoices(inspection.approval);
+  const action = terminalApprovalActionForDecision(
+    inspection.approval,
+    decision
+  );
+  if (!action) {
+    return undefined;
+  }
+  const decisionMode = action.mode ?? "keys";
   const promptEvidence = inspection.approval.promptEvidence;
   if (
     decisionMode === "keys" &&
@@ -4775,8 +4902,16 @@ export function terminalApprovalFingerprint(
         message_id: options.runtime?.messageId,
         terminal_target: options.runtime?.terminalTarget
       },
-      keys: inspection.approval.action.keys,
-      label: inspection.approval.action.label,
+      decision,
+      keys: action.keys,
+      label: action.label,
+      available_choices: choices.map((choice) => ({
+        decision: choice.decision,
+        keys: choice.keys,
+        label: choice.label,
+        mode: choice.mode ?? "keys",
+        request_id: choice.requestId
+      })),
       prompt_kind: inspection.approval.promptKind,
       command: inspection.approval.command,
       cwd: inspection.approval.cwd,
@@ -4800,7 +4935,7 @@ export function terminalApprovalFingerprint(
           }
         : undefined,
       decision_mode: decisionMode,
-      request_id: inspection.approval.action.requestId
+      request_id: action.requestId
     }))
     .digest("hex");
 }
@@ -4837,6 +4972,24 @@ function statusFromInspection(
     },
     options
   );
+  const choices = approval.approvable
+    ? terminalApprovalChoices(approval).flatMap((choice) => {
+        if (!choice.decision) {
+          return [];
+        }
+        const choiceFingerprint = terminalApprovalFingerprint(
+          adapter.agent,
+          terminalControl,
+          { ...inspection, approval },
+          { ...options, decision: choice.decision }
+        );
+        return choiceFingerprint ? [{
+          decision: choice.decision,
+          label: choice.label,
+          fingerprint: choiceFingerprint
+        }] : [];
+      })
+    : [];
   return {
     provider: terminalControl.kind,
     target: terminalControl.target,
@@ -4861,6 +5014,7 @@ function statusFromInspection(
       request_detail: approval.requestDetail,
       reason: approval.approvable ? undefined : approval.reason,
       fingerprint,
+      choices: choices.length > 0 ? choices : undefined,
       decision_mode: approval.approvable ? approval.action.mode ?? "keys" : undefined,
       request_id: approval.approvable ? approval.action.requestId : undefined,
       policy_evidence: approval.approvable && approval.policyEvidence
@@ -4954,6 +5108,10 @@ function approvalOutput(approval: TerminalScreenInspection["approval"]): Record<
     cwd: approval.cwd,
     toolName: approval.toolName,
     requestDetail: approval.requestDetail,
+    choices: terminalApprovalChoices(approval).map((choice) => ({
+      decision: choice.decision,
+      label: choice.label
+    })),
     policyEvidence: approval.policyEvidence
       ? {
           source: approval.policyEvidence.source,

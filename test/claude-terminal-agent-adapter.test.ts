@@ -611,6 +611,17 @@ test("approves only the one-time Yes in the Claude 2.1.251 four-choice Bash dial
     assert.fail("expected the exact Claude 2.1.251 one-time choice");
   }
   assert.deepEqual(approval.action.keys, ["C-m"]);
+  assert.deepEqual(approval.choices, [{
+    decision: "approve_once",
+    mode: "keys",
+    keys: ["C-m"],
+    label: "Yes"
+  }, {
+    decision: "reject",
+    mode: "keys",
+    keys: ["4"],
+    label: "No"
+  }]);
   assert.equal(
     approval.promptEvidence?.profile,
     "claude-bash-permission-prompt-v2"
@@ -654,6 +665,11 @@ test("approves only the one-time Yes in the Claude 2.1.251 four-choice Bash dial
   assert.equal(
     autoOnly.promptEvidence?.profile,
     "claude-bash-permission-prompt-v2"
+  );
+  assert.deepEqual(
+    autoOnly.choices?.map((choice) => choice.decision),
+    ["approve_once"],
+    "the unverified three-row No accelerator must remain fail-closed"
   );
   const autoWithoutDescription = detectClaudeApprovalPrompt(
     currentClaude251PermissionScreen(command, 1, false).replace(

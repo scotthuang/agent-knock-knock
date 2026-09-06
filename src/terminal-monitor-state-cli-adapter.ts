@@ -3049,6 +3049,14 @@ function terminalBridgeApprovalInstructions(input: {
   const toolName = nonBlankString(approval.tool_name);
   const requestDetail = nonBlankString(approval.request_detail);
   const requestId = nonBlankString(approval.request_id);
+  const decisions = Array.isArray(approval.choices)
+    ? approval.choices.flatMap((choice) =>
+        isRecord(choice) &&
+          (choice.decision === "approve_once" || choice.decision === "reject")
+          ? [choice.decision]
+          : []
+      )
+    : ["approve_once"];
   const excerpt = nonBlankString(screen.excerpt) ??
     "(No terminal excerpt was available.)";
   const directReview = executor.kind === "claude" && decisionMode === "keys";
@@ -3063,6 +3071,7 @@ function terminalBridgeApprovalInstructions(input: {
     toolName,
     requestDetail,
     requestId,
+    decisions,
     excerpt,
     directReview
   }).filter((line): line is string => line !== undefined).join("\n");
@@ -3080,6 +3089,7 @@ function approvalInstructionLines(input: {
   toolName?: string;
   requestDetail?: string;
   requestId?: string;
+  decisions: string[];
   excerpt: string;
   directReview: boolean;
 }): Array<string | undefined> {
@@ -3112,8 +3122,15 @@ function approvalInstructionLines(input: {
     "",
     "If the user approves, call `agent_knock_knock_approve` with only:",
     `- turn_id: ${turnId}`,
+    "- decision: approve_once",
     "",
-    "If the user denies or wants to stop this request, call `agent_knock_knock_cancel` with:",
+    input.decisions.includes("reject")
+      ? "If the user rejects this permission but wants the Turn to continue, call `agent_knock_knock_approve` with only:"
+      : "This exact prompt has no adapter-proven reject transport; denial requires manual terminal resolution.",
+    input.decisions.includes("reject") ? `- turn_id: ${turnId}` : undefined,
+    input.decisions.includes("reject") ? "- decision: reject" : undefined,
+    input.decisions.includes("reject") ? "" : undefined,
+    "If the user wants to stop the managed Turn, call `agent_knock_knock_cancel` with:",
     `- turn_id: ${turnId}`,
     "",
     "Do not use raw tmux, shell, or manual key presses for this approval. Do not approve without explicit user confirmation."

@@ -416,6 +416,12 @@ export const approveParameters = {
     { required: ["terminal_id"] }
   ],
   properties: {
+    decision: {
+      type: "string",
+      enum: ["approve_once", "reject"],
+      description:
+        "Closed semantic decision from the current AKK status offer. Defaults to approve_once. Raw keys, menu indexes, and rendered labels are never accepted."
+    },
     turn_id: {
       type: "string",
       description: "Authoritative AKK turn id containing the approval prompt."

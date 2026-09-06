@@ -713,6 +713,13 @@ function approvalMetadata(
   input: Parameters<typeof recordMonitorApprovalNotification>[0],
   conversation: Conversation
 ): UnknownRecord {
+  const approvalState = isRecord(input.terminalStatus.approval_state)
+    ? input.terminalStatus.approval_state
+    : undefined;
+  const hasReject = Array.isArray(approvalState?.choices) &&
+    approvalState.choices.some((choice) =>
+      isRecord(choice) && choice.decision === "reject"
+    );
   const base = {
     source: "terminal_bridge",
     reason: input.kind === "question"
@@ -731,10 +738,14 @@ function approvalMetadata(
       fingerprint: input.fingerprint
     }),
     approve_command:
-      `AKK approve ${conversation.conversation_id}`,
-    deny_command: `AKK cancel ${conversation.conversation_id}`,
+      `AKK approve ${conversation.conversation_id} approve_once`,
+    ...(hasReject ? {
+      reject_command: `AKK approve ${conversation.conversation_id} reject`,
+      reject_tool: "agent_knock_knock_approve"
+    } : {}),
+    cancel_command: `AKK cancel ${conversation.conversation_id}`,
     approve_tool: "agent_knock_knock_approve",
-    deny_tool: "agent_knock_knock_cancel"
+    cancel_tool: "agent_knock_knock_cancel"
   };
 }
 

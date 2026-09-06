@@ -312,7 +312,10 @@ export function listActionContracts(): JsonRecord {
         managed_target_argument: "turn_id",
         terminal_target_argument: "terminal_id",
         required: [],
-        optional: [],
+        optional: ["decision"],
+        decisions: ["approve_once", "reject"],
+        decision_scope:
+          "Use only a semantic decision advertised by the current approval action. Never pass raw keys, menu indexes, or labels. Omission remains approve_once for compatibility.",
         terminal_scoped_scope:
           "Only the latest list-prefilled Codex terminal_id action may approve a managed current prompt without a usable Turn owner. It remains human-confirmed, uses private server-bound reviewed-prompt authority, revalidates exact terminal/process/Session/dispatch/prompt state before keys, never mutates managed state, has no durable dispatch receipt, cannot be auto-approved, and must not be blindly retried after an interrupted result.",
         approval_authority: "private_server_bound_reviewed_prompt",
@@ -649,6 +652,21 @@ function renderApprovalAction(input: {
     approve: {
       tool: "agent_knock_knock_approve",
       arguments: input.targetArguments,
+      choices: Array.isArray(input.approvalState.choices)
+        ? input.approvalState.choices.flatMap((choice) =>
+            isRecord(choice) &&
+              (choice.decision === "approve_once" || choice.decision === "reject") &&
+              (input.managedApprovalEligible || choice.decision !== "reject")
+              ? [{
+                  decision: choice.decision,
+                  label: stringValue(choice.label)
+                }]
+              : []
+          )
+        : [{
+            decision: "approve_once",
+            label: stringValue(input.approvalState.label)
+          }],
       missing_required: ["expected_approval_fingerprint"],
       before_call: {
         tool: "agent_knock_knock_status",

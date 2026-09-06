@@ -292,7 +292,20 @@ function inspectTestClaudeScreen(screen: string): TerminalScreenInspection {
           "test-approval-prompt-v1",
           approvalMatch[0]
         ),
-        action: { keys: ["Down", "C-m"], label: "Allow once" }
+        choices: [{
+          decision: "approve_once",
+          keys: ["Down", "C-m"],
+          label: "Allow once"
+        }, {
+          decision: "reject",
+          keys: ["n"],
+          label: "Reject once"
+        }],
+        action: {
+          decision: "approve_once",
+          keys: ["Down", "C-m"],
+          label: "Allow once"
+        }
       },
       screenExcerpt: screen
     };
@@ -3247,6 +3260,48 @@ test("bridge preserves ordered approval and cancellation key sequences", async (
       { kind: "keys", target: PANE.target, keys: ["Down", "C-m"], socketPath: PANE.socketPath },
       { kind: "keys", target: PANE.target, keys: ["Escape", "C-c"], socketPath: PANE.socketPath }
     ]
+  );
+});
+
+test("bridge binds a semantic reject choice through fingerprint, recapture, reservation, and one key dispatch", async () => {
+  const adapter = createTestClaudeAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "approval:npm test"
+  });
+  const bridge = createBridge(adapter, provider);
+  const control = terminalControl(adapter);
+  const status = await bridge.status("claude", control);
+  const reject = status.approval_state.choices?.find(
+    (choice) => choice.decision === "reject"
+  );
+  assert.ok(reject);
+  assert.notEqual(reject.fingerprint, status.approval_state.fingerprint);
+  let reserved = false;
+
+  const result = await bridge.approve("claude", control, {
+    decision: "reject",
+    expectedFingerprint: reject.fingerprint,
+    beforeKeyDispatch(context) {
+      reserved = true;
+      assert.equal(context.decision, "reject");
+      assert.deepEqual(context.keys, ["n"]);
+      assert.equal(context.fingerprint, reject.fingerprint);
+    }
+  });
+
+  assert.equal(reserved, true);
+  assert.equal(result.approved, false);
+  assert.equal(result.decisionDispatched, true);
+  assert.equal(result.decision, "reject");
+  assert.deepEqual(result.keys, ["n"]);
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind === "keys"),
+    [{
+      kind: "keys",
+      target: PANE.target,
+      keys: ["n"],
+      socketPath: PANE.socketPath
+    }]
   );
 });
 

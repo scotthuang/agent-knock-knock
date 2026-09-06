@@ -1,5 +1,9 @@
 import path from "node:path";
 import { recordValue } from "./value-guards.js";
+import {
+  isTerminalApprovalDecision,
+  type TerminalApprovalDecision
+} from "./terminal-agent-adapter.js";
 
 const MODEL_FACING_PRIVATE_AUTHORITY_PARTS = [
   ["expected", "terminal", "token"],
@@ -265,6 +269,7 @@ export type AkkCommand =
   | {
       action: "approve";
       turnId: string;
+      decision?: TerminalApprovalDecision;
     }
   | { action: "cancel"; turnId: string }
   | { action: "renew"; turnId: string; minutes?: string }
@@ -413,14 +418,21 @@ function parseAkkTurnCommand(
   if (action === "approve") {
     const { token: turnId, rest: approvalInput } = takeRequiredToken(
       rest,
-      "Usage: /akk approve <turn-selector>"
+      "Usage: /akk approve <turn-selector> [approve_once|reject]"
     );
-    if (approvalInput.trim()) {
-      throw new Error("Usage: /akk approve <turn-selector>");
+    const decisionInput = approvalInput.trim();
+    if (decisionInput && !isTerminalApprovalDecision(decisionInput)) {
+      throw new Error(
+        "Usage: /akk approve <turn-selector> [approve_once|reject]"
+      );
     }
+    const decision = isTerminalApprovalDecision(decisionInput)
+      ? decisionInput
+      : undefined;
     return {
       action: "approve",
-      turnId
+      turnId,
+      ...(decision ? { decision } : {})
     };
   }
   if (action === "cancel" || action === "stop") {
@@ -515,7 +527,7 @@ export function akkUsageText(): string {
     "/akk doctor",
     "/akk status [turn-selector|terminal-watch-id]",
     "/akk respond <turn-selector>: <answer>",
-    "/akk approve <turn-selector>",
+    "/akk approve <turn-selector> [approve_once|reject]",
     "/akk cancel <turn-selector>"
   ].join("\n");
 }

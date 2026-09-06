@@ -1804,7 +1804,7 @@ function usage() {
   agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>
   agent-knock-knock reconcile-binding --terminal <exact-terminal-id> --conflicting-session <session-id> --expected-session-revision <n> --expected-binding-token <token> --expected-terminal-token <token>
   agent-knock-knock respond --turn <turn-id|selector> --message <text> [--conversation <selector>]
-  agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] [--expected-terminal-token <token>] --expected-approval-fingerprint <fingerprint>
+  agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] [--decision approve_once|reject] [--expected-terminal-token <token>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--turn <turn-id|selector>] [--conversation <selector>]
   agent-knock-knock renew [--turn <turn-id|selector>] [--conversation <selector>]
   agent-knock-knock retry-callback [--turn <turn-id|selector>] [--conversation <selector>]

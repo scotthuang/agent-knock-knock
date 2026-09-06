@@ -2695,6 +2695,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         `const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";`,
         `const changed = fs.existsSync(${JSON.stringify(changedAuthorityPath)});`,
         `const approvalFingerprint = (changed ? "b" : "a").repeat(64);`,
+        `const rejectFingerprint = (changed ? "d" : "c").repeat(64);`,
         `const terminalToken = changed ? "terminal-token-changed" : "terminal-token-current";`,
         `const listResult = { terminals: [{ id: terminalId,`,
         `  available_actions: {`,
@@ -2715,7 +2716,8 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         `const conversationIndex = args.indexOf("--conversation");`,
         `const statusTarget = turnIndex >= 0 ? args[turnIndex + 1] : conversationIndex >= 0 ? args[conversationIndex + 1] : undefined;`,
         `const staleCallback = { message: { metadata: { terminal_status: { approval_state: { approvable: true, fingerprint: "f".repeat(64) } } } } };`,
-        `const statusResult = statusTarget?.startsWith("terminal:") ? { source: "terminal_control", conversation_id: statusTarget, approval_state: { approvable: true, fingerprint: approvalFingerprint }, callback_delivery: staleCallback } : { conversation_id: statusTarget, session_id: "session-controls", turn_id: statusTarget, approval_state: { approvable: true, fingerprint: approvalFingerprint }, callback_delivery: staleCallback };`,
+        `const approvalState = { approvable: true, fingerprint: approvalFingerprint, choices: [{ decision: "approve_once", label: "Yes", fingerprint: approvalFingerprint }, { decision: "reject", label: "No", fingerprint: rejectFingerprint }] };`,
+        `const statusResult = statusTarget?.startsWith("terminal:") ? { source: "terminal_control", conversation_id: statusTarget, approval_state: approvalState, callback_delivery: staleCallback } : { conversation_id: statusTarget, session_id: "session-controls", turn_id: statusTarget, approval_state: approvalState, callback_delivery: staleCallback };`,
         `const result = args[0] === "list" ? listResult : args[0] === "status" ? statusResult : args[0] === "reconcile-binding" ? { status: "reconciled", terminal_id: terminalId, turn_created: false } : unresolvedLifecycle ? {`,
         `  source: "terminal_control",`,
         `  terminal_control: { target: "work:0.0" },`,
@@ -2871,6 +2873,16 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     assert.deepEqual(approveTool.parameters?.not, {
       required: ["turn_id", "terminal_id"]
     });
+    assert.deepEqual(
+      approveTool.parameters?.properties?.decision?.enum,
+      ["approve_once", "reject"]
+    );
+    for (const forbidden of ["keys", "key", "index", "label"]) {
+      assert.equal(
+        Object.hasOwn(approveTool.parameters?.properties ?? {}, forbidden),
+        false
+      );
+    }
     assertNoModelOpaqueAuthority(
       approveTool.parameters,
       "$.agent_knock_knock_approve.parameters"
@@ -3034,6 +3046,14 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     await tools.get("agent_knock_knock_approve")?.execute?.("approve", {
       turn_id: "turn-approve"
     });
+    await tools.get("agent_knock_knock_status")?.execute?.(
+      "status-before-reject",
+      { turn_id: "turn-approve" }
+    );
+    await tools.get("agent_knock_knock_approve")?.execute?.("reject", {
+      turn_id: "turn-approve",
+      decision: "reject"
+    });
     const displayedTerminalApproval = await tools
       .get("agent_knock_knock_status")
       ?.execute?.("terminal-status-private-approval", {
@@ -3164,13 +3184,26 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         "approve",
         "--turn",
         "turn-approve",
+        "--decision",
+        "approve_once",
         "--expected-approval-fingerprint",
         "a".repeat(64)
       ],
       [
         "approve",
+        "--turn",
+        "turn-approve",
+        "--decision",
+        "reject",
+        "--expected-approval-fingerprint",
+        "c".repeat(64)
+      ],
+      [
+        "approve",
         "--conversation",
         "terminal:v2:tmux:codex:work:0.0:1234",
+        "--decision",
+        "approve_once",
         "--expected-approval-fingerprint",
         "a".repeat(64),
         "--expected-terminal-token",
