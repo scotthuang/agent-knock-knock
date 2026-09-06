@@ -109,8 +109,8 @@ test("final refactor evidence reproduces startup counts and historical selection
     contractCount: 5,
     witnessCount: 74,
     migrationCount: 11,
-    hostBridgeToolCount: 16,
-    openclawToolCount: 16,
+    hostBridgeToolCount: 17,
+    openclawToolCount: 17,
     storeProtocolCount: 6
   });
 });
