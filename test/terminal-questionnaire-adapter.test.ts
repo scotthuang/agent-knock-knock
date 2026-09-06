@@ -390,6 +390,27 @@ test("Claude exact custom-text edit state exposes bounded free text", () => {
   });
 });
 
+test("Claude custom-text edit keeps explicit and visible secret input manual", () => {
+  assert.equal(manual(inspectNativeQuestionnaire({
+    agent: "claude",
+    version: "2.1.263",
+    screen: CLAUDE_CUSTOM_TEXT_EDIT,
+    secret: true
+  })).reason, "secret_input");
+
+  const password = CLAUDE_CUSTOM_TEXT_EDIT.replace(
+    "Which color do you prefer?",
+    "Enter the password to continue."
+  );
+  const visibleSecret = manual(inspectNativeQuestionnaire({
+    agent: "claude",
+    version: "2.1.263",
+    screen: password
+  }));
+  assert.equal(visibleSecret.reason, "secret_input");
+  assert.deepEqual(visibleSecret.action_plan, { kind: "manual_only" });
+});
+
 test("Claude selection rejects changed footer, frame, numbering, and cursor state", () => {
   for (const changed of [
     CLAUDE_SINGLE_SELECT.replace("Esc to cancel", "Esc to close"),

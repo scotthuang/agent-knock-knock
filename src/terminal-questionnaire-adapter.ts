@@ -368,7 +368,14 @@ function inspectClaudeQuestionnaire(
   }
   const customTextEdit = parseClaudeCustomTextEdit(screen.lines);
   if (customTextEdit) {
-    return customTextEdit;
+    return isSecretQuestion(options.secret, customTextEdit.question)
+      ? {
+          ...customTextEdit,
+          status: "manual_required",
+          reason: "secret_input",
+          action_plan: { kind: "manual_only" }
+        }
+      : customTextEdit;
   }
   const choiceRegion = parseClaudeChoiceRegion(screen.lines);
   if (!choiceRegion) {
@@ -688,7 +695,7 @@ function parseClaudeFinalReview(
 
 function parseClaudeCustomTextEdit(
   lines: readonly string[]
-): NativeQuestionnaireInspection | undefined {
+): Extract<NativeQuestionnaireInspection, { status: "actionable" }> | undefined {
   const editIndex = lastIndexMatching(
     lines,
     (line) => line.includes("ctrl+g to edit in Vim")
