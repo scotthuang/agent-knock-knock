@@ -3,7 +3,7 @@
   "version": 1,
   "architecture": {
     "cli_core_max_physical_loc": 1823,
-    "production_physical_loc": 123398,
+    "production_physical_loc": 124260,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -980,6 +980,10 @@
     {
       "path": "src/terminal-identity-authority-service.ts",
       "owner": "terminal-identity-authority"
+    },
+    {
+      "path": "src/terminal-interaction-protocol.ts",
+      "owner": "terminal-action-projection"
     },
     {
       "path": "src/terminal-list-cli-adapter.ts",

@@ -92,6 +92,7 @@
     "test/terminal-dispatch-repository-cli-adapter.test.ts",
     "test/terminal-handoff-cli-adapter.test.ts",
     "test/terminal-identity-authority-service.test.ts",
+    "test/terminal-interaction-protocol.test.ts",
     "test/terminal-list-cli-adapter.test.ts",
     "test/terminal-list-renderer.test.ts",
     "test/terminal-maintenance-cli-adapter.test.ts",
