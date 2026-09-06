@@ -236,6 +236,36 @@ test("controller-session mismatch fails before terminal resolution", async () =>
   assert.equal(resolved, false);
 });
 
+test("callback gateway session never replaces the Turn's OpenClaw owner", async () => {
+  const conversation = {
+    ...managedTurn(),
+    gateway_session: "agent:callback:route"
+  };
+  const owner = harness({ bridge: successfulBridge(), conversation });
+  await owner.facade.runRespondInteraction(options());
+  assert.equal(owner.current().status, "waiting_for_agent");
+
+  let resolved = false;
+  const bridge = successfulBridge();
+  const callbackRoute = harness({
+    conversation,
+    bridge: {
+      ...bridge,
+      async resolveStoredTerminal(...args) {
+        resolved = true;
+        return bridge.resolveStoredTerminal(...args);
+      }
+    }
+  });
+  await assert.rejects(
+    () => callbackRoute.facade.runRespondInteraction(options({
+      openclawSession: "agent:callback:route"
+    })),
+    /different controller session/u
+  );
+  assert.equal(resolved, false);
+});
+
 test("a successfully consumed interaction fingerprint cannot be replayed", async () => {
   const subject = harness({ bridge: successfulBridge() });
 

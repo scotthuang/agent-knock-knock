@@ -507,8 +507,10 @@ function assertControllerSession(
 ): void {
   const requested = nonBlankString(requestedValue);
   if (!requested) return;
-  const stored = nonBlankString(conversation.gateway_session) ??
-    nonBlankString(conversation.openclaw_session);
+  // `gateway_session` is the callback delivery route and may intentionally
+  // differ from the controller that owns this Turn. It must never supersede
+  // the immutable OpenClaw owner for terminal input authority.
+  const stored = nonBlankString(conversation.openclaw_session);
   if (stored !== requested) {
     throw new Error(
       `turn ${turnIdForConversation(conversation)} belongs to a different ` +
