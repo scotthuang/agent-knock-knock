@@ -372,6 +372,27 @@ test("Claude exact final review exposes closed submit and cancel actions", () =>
   });
 });
 
+test("Claude final review containing a secret answer stays manual", () => {
+  const explicitSecret = manual(inspectNativeQuestionnaire({
+    agent: "claude",
+    version: "2.1.263",
+    screen: CLAUDE_FINAL_REVIEW,
+    secret: true
+  }));
+  assert.equal(explicitSecret.reason, "secret_input");
+
+  const visibleSecret = manual(inspectNativeQuestionnaire({
+    agent: "claude",
+    version: "2.1.263",
+    screen: CLAUDE_FINAL_REVIEW.replace(
+      "Which color do you prefer?",
+      "Enter the OTP to continue?"
+    )
+  }));
+  assert.equal(visibleSecret.reason, "secret_input");
+  assert.deepEqual(visibleSecret.action_plan, { kind: "manual_only" });
+});
+
 test("Claude exact custom-text edit state exposes bounded free text", () => {
   const parsed = actionable(inspectNativeQuestionnaire({
     agent: "claude",

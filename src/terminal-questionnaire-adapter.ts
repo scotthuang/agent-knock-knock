@@ -175,8 +175,30 @@ const ANSI_SEQUENCE_PATTERN =
   /[\u001B\u009B](?:(?:\[[0-?]*[ -/]*[@-~])|(?:\][^\u0007]*(?:\u0007|\u001B\\))|.)/gu;
 const UNSAFE_CONTROL_PATTERN =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u;
-const SECRET_INPUT_PATTERN =
-  /(?:password|passphrase|api[ _-]?key|secret|access[ _-]?token|credential|private[ _-]?key|密码|口令|密钥|令牌)/iu;
+const SECRET_INPUT_PATTERN = new RegExp([
+  "password",
+  "passphrase",
+  "api[ _-]?key",
+  "secret",
+  "access[ _-]?token",
+  "credential",
+  "private[ _-]?key",
+  "one[ _-]?time(?:[ _-](?:password|code))?",
+  "verification[ _-]?code",
+  "recovery[ _-]?code",
+  "seed[ _-]?phrase",
+  "mnemonic",
+  "two[ _-]?factor",
+  "auth(?:entication)?[ _-]?code",
+  "(?:^|[^A-Za-z0-9])(?:pin|otp|2fa|mfa)(?:[^A-Za-z0-9]|$)",
+  "密码",
+  "口令",
+  "密钥",
+  "令牌",
+  "验证码",
+  "助记词",
+  "恢复码"
+].join("|"), "iu");
 const CLAUDE_SELECTION_FOOTER =
   "Enter to select · Tab/Arrow keys to navigate · Esc to cancel";
 const CLAUDE_SINGLE_SELECTION_FOOTER =
@@ -368,7 +390,15 @@ function inspectClaudeQuestionnaire(
   }
   const finalReview = parseClaudeFinalReview(screen.lines);
   if (finalReview) {
-    return finalReview;
+    return options.secret === true ||
+        SECRET_INPUT_PATTERN.test(finalReview.prompt_evidence.exact_region)
+      ? {
+          ...finalReview,
+          status: "manual_required",
+          reason: "secret_input",
+          action_plan: { kind: "manual_only" }
+        }
+      : finalReview;
   }
   const customTextEdit = parseClaudeCustomTextEdit(screen.lines);
   if (customTextEdit) {
@@ -639,7 +669,7 @@ function claudeChoiceInspection(
 
 function parseClaudeFinalReview(
   lines: readonly string[]
-): NativeQuestionnaireInspection | undefined {
+): Extract<NativeQuestionnaireInspection, { status: "actionable" }> | undefined {
   const readyIndex = lastIndexMatching(
     lines,
     (line) => line === "Ready to submit your answers?"
