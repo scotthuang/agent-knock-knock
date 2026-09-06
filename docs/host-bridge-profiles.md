@@ -8,7 +8,7 @@ integration lifetime.
 ```text
 controller Host
 └─ foreground AKK Host Bridge (MCP over stdio)
-   ├─ the existing 16 semantic AKK tools
+   ├─ the existing 17 semantic AKK tools
    ├─ one startup-selected Host Profile v1
    ├─ Host-owned monitor and Terminal Watch lifecycle
    └─ the existing Session, Turn, Store, callback, and terminal core

@@ -22,6 +22,7 @@ const expectedToolNames = [
   "agent_knock_knock_status",
   "agent_knock_knock_send",
   "agent_knock_knock_respond",
+  "agent_knock_knock_respond_interaction",
   "agent_knock_knock_approve",
   "agent_knock_knock_renew",
   "agent_knock_knock_retry_callback",
@@ -39,7 +40,7 @@ test("host bridge captures the existing semantic tool contract once", () => {
   assert.ok(command.description.length > 0);
   assert.equal(registry.command(), command);
   assert.deepEqual(listed.map((tool) => tool.name), expectedToolNames);
-  assert.equal(new Set(listed.map((tool) => tool.name)).size, 16);
+  assert.equal(new Set(listed.map((tool) => tool.name)).size, 17);
   assert.equal(registry.list(), listed);
   for (const tool of listed) {
     assert.equal(registry.get(tool.name), tool);

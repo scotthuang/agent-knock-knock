@@ -207,9 +207,9 @@ export function createHostBridgeToolRegistry(
     throw new Error("host bridge did not capture the akk command");
   }
 
-  if (descriptors.length !== 16) {
+  if (descriptors.length !== 17) {
     throw new Error(
-      `host bridge expected 16 semantic tools, received ${descriptors.length}`
+      `host bridge expected 17 semantic tools, received ${descriptors.length}`
     );
   }
 

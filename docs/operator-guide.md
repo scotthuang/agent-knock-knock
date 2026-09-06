@@ -233,10 +233,11 @@ Status, then use only the action currently advertised by AKK.
 
 ## Structured tool surface
 
-First-party Hosts register the same 16 semantic tools: list, watch, unwatch,
+First-party Hosts register the same 17 semantic tools: list, watch, unwatch,
 list resumable threads, native inspect, new thread, reconcile binding, resume
 thread, status, send, respond, approve, renew, retry callback, cancel, and
-close. Model-facing mutations contain semantic IDs and user content only.
+close, plus typed native interaction response. Model-facing mutations contain
+semantic IDs and user content only.
 Selectors, pane routes, draft text, fingerprints, tokens, revisions, candidate
 fences, and binding generations stay inside the trusted Host adapter.
 

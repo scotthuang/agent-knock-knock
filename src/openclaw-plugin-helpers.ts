@@ -12,6 +12,15 @@ const MODEL_FACING_PRIVATE_AUTHORITY_PARTS = [
   ["candidate", "token"],
   ["expected", "approval", "fingerprint"],
   ["approval", "fingerprint"],
+  ["expected", "interaction", "fingerprint"],
+  ["interaction", "prompt", "fingerprint"],
+  ["interaction", "fingerprint"],
+  ["interaction", "authority"],
+  ["owner", "session"],
+  ["process", "incarnation"],
+  ["source", "file", "identity"],
+  ["prompt", "evidence"],
+  ["action", "plan"],
   ["expected", "session", "revision"],
   ["lifecycle", "binding", "token"],
   ["binding", "token"],
@@ -68,6 +77,7 @@ const LEGACY_APPROVAL_TERMINAL_INSTRUCTION =
 
 const MODEL_OPAQUE_AUTHORITY_FIELDS = new Set([
   "acceptanceevidence",
+  "actionplan",
   "attemptoutcome",
   "callbackenvelope",
   "callbackroute",
@@ -87,16 +97,21 @@ const MODEL_OPAQUE_AUTHORITY_FIELDS = new Set([
   "gatewaymethod",
   "gatewaysession",
   "gatewayurl",
+  "interactionauthority",
   "livenativethreadid",
   "nativesessiontakeover",
   "nonce",
   "openclawbin",
   "openclawsession",
+  "ownersession",
+  "processincarnation",
+  "promptevidence",
   "proof",
   "selectionhandle",
   "selectionsnapshot",
   "selectionscope",
-  "snapshotid"
+  "snapshotid",
+  "sourcefileidentity"
 ]);
 
 export function normalizeAkkModelFacingFieldName(key: string): string {
@@ -215,7 +230,7 @@ export function sanitizeAkkModelFacingDiagnosticText(
   const sanitized = sanitizeAkkModelFacingEmbeddedAuthorityText(message);
   if (
     sanitized !== message ||
-    /(?:\bexpected\s+(?:session\s+)?revision\b|\bactual\s+(?:session\s+)?revision\b|\b(?:terminal|binding|handoff|candidate)\s+token\b|\bapproval\s+fingerprint\b|\bbinding\s+(?:id|generation)\b|\bcompare-and-swap\b|\bCAS\b)/iu.test(
+    /(?:\bexpected\s+(?:session\s+)?revision\b|\bactual\s+(?:session\s+)?revision\b|\b(?:terminal|binding|handoff|candidate)\s+token\b|\b(?:approval|interaction(?:\s+prompt)?)\s+fingerprint\b|\bbinding\s+(?:id|generation)\b|\bcompare-and-swap\b|\bCAS\b)/iu.test(
       message
     )
   ) {

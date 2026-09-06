@@ -17,6 +17,7 @@ import {
   nativeInspectParameters,
   newThreadParameters,
   reconcileBindingParameters,
+  respondInteractionParameters,
   resumeThreadParameters,
   sendParameters,
   unwatchParameters,
@@ -24,6 +25,10 @@ import {
 } from "../src/openclaw-plugin-schemas.js";
 import { registerOpenClawCallbackGateway } from
   "../src/openclaw-plugin-callback-adapter.js";
+import {
+  bindOpenClawRelayPath,
+  registerOpenClawCommands
+} from "../src/openclaw-plugin-command-adapter.js";
 import { isAkkModelFacingPrivateAuthorityField } from
   "../src/openclaw-plugin-helpers.js";
 import {
@@ -168,6 +173,7 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     native_inspect: nativeInspectParameters,
     new_thread: newThreadParameters,
     reconcile_binding: reconcileBindingParameters,
+    respond_interaction: respondInteractionParameters,
     resume_thread: resumeThreadParameters,
     approve: approveParameters,
     close: closeParameters,
@@ -195,6 +201,20 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     "terminal_id",
     "native_thread_id"
   ]);
+  assert.deepEqual(respondInteractionParameters.required, [
+    "turn_id",
+    "interaction_id",
+    "answers"
+  ]);
+  assert.deepEqual(
+    Object.keys(respondInteractionParameters.properties),
+    ["turn_id", "interaction_id", "answers"]
+  );
+  assert.equal(respondInteractionParameters.additionalProperties, false);
+  assert.equal(
+    respondInteractionParameters.properties.answers.items.oneOf.length,
+    4
+  );
   assert.deepEqual(approveParameters.anyOf, [
     { required: ["turn_id"] },
     { required: ["terminal_id"] }
@@ -599,6 +619,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     "agent_knock_knock_status",
     "agent_knock_knock_send",
     "agent_knock_knock_respond",
+    "agent_knock_knock_respond_interaction",
     "agent_knock_knock_approve",
     "agent_knock_knock_renew",
     "agent_knock_knock_retry_callback",
@@ -610,10 +631,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "43a6afcf8dc505138fd0e508041346ec272d7c21b6de12bc6e6df92d8a55ab28"
+    "06a8118de211669736991b7af9155132c616bf6994a5935a11833a49009bef1b"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
-  assert.equal(contractedTools.length, 16);
+  assert.equal(contractedTools.length, 17);
   assert.match(
     manifest.description ?? "",
     /closed native status inspection/u
@@ -654,6 +675,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(contractedTools.includes("agent_knock_knock_send"), true);
   assert.equal(contractedTools.includes("agent_knock_knock_respond"), true);
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_respond_interaction"),
+    true
+  );
   assert.equal(contractedTools.includes("agent_knock_knock_watch"), true);
   assert.equal(contractedTools.includes("agent_knock_knock_unwatch"), true);
   assert.equal(
@@ -1160,7 +1185,15 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
   assert.equal(manifest.contracts.tools.includes("agent_knock_knock_respond"), true);
   assert.equal(manifest.toolMetadata.agent_knock_knock_respond.optional, true);
-  assert.equal(manifest.contracts.tools.length, 16);
+  assert.equal(
+    manifest.contracts.tools.includes("agent_knock_knock_respond_interaction"),
+    true
+  );
+  assert.equal(
+    manifest.toolMetadata.agent_knock_knock_respond_interaction.optional,
+    true
+  );
+  assert.equal(manifest.contracts.tools.length, 17);
   for (const terminalWatchTool of [
     "agent_knock_knock_watch",
     "agent_knock_knock_unwatch"
@@ -4700,8 +4733,254 @@ request.on("error", () => process.exit(4));
   }
 });
 
+test("OpenClaw interaction response consumes one session-bound private offer", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-interaction-tool-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.cjs");
+  const callsPath = path.join(directory, "calls.ndjson");
+  const turnId = "turn_interaction_1";
+  const interactionId = "interaction_1";
+  const questionId = "question_1";
+  const optionId = "option_safe";
+  const fingerprint = "a".repeat(64);
+  const expiresAt = "2099-09-08T00:00:00.000Z";
+  fs.writeFileSync(relayPath, interactionRelayFixture({
+    callsPath,
+    turnId,
+    interactionId,
+    questionId,
+    optionId,
+    fingerprint,
+    expiresAt
+  }), "utf8");
+
+  const factories = new Map<string, InteractionToolFactory>();
+  const api = {
+    pluginConfig: {},
+    logger: { info() {}, warn() {} },
+    registerCommand() {},
+    registerTool(
+      tool: ToolDefinition | InteractionToolFactory,
+      registration?: { readonly name?: unknown }
+    ) {
+      assert.equal(typeof registration?.name, "string");
+      const factory: InteractionToolFactory = typeof tool === "function"
+        ? tool
+        : () => tool;
+      factories.set(String(registration?.name), factory);
+    }
+  };
+  bindOpenClawRelayPath(api, relayPath);
+  registerOpenClawCommands(api, new Map());
+
+  const controllerA = {
+    sessionKey: "agent:test:main",
+    sessionId: "controller-incarnation-a"
+  };
+  const controllerB = {
+    sessionKey: "agent:test:main",
+    sessionId: "controller-incarnation-b"
+  };
+  const statusA = requiredInteractionTool(
+    factories,
+    "agent_knock_knock_status",
+    controllerA
+  );
+  const respondA = requiredInteractionTool(
+    factories,
+    "agent_knock_knock_respond_interaction",
+    controllerA
+  );
+  const respondB = requiredInteractionTool(
+    factories,
+    "agent_knock_knock_respond_interaction",
+    controllerB
+  );
+  const response = {
+    turn_id: turnId,
+    interaction_id: interactionId,
+    answers: [{
+      question_id: questionId,
+      response_kind: "single_select",
+      selected_option_ids: [optionId]
+    }]
+  };
+
+  const displayed = await statusA.execute!("status-1", { turn_id: turnId });
+  const displayedText = JSON.stringify(displayed);
+  assert.match(displayedText, /interaction_state/u);
+  assert.doesNotMatch(displayedText, /interaction_prompt_fingerprint/u);
+  assert.doesNotMatch(displayedText, /interaction_authority|owner_session|process_incarnation/u);
+  assert.doesNotMatch(displayedText, new RegExp(fingerprint, "u"));
+
+  await assert.rejects(
+    () => respondB.execute!("wrong-controller", response),
+    /requires a current pending interaction shown by agent_knock_knock_status in this controller conversation/u
+  );
+
+  await assert.rejects(
+    () => respondA.execute!("forbidden-authority", {
+      ...response,
+      expected_interaction_fingerprint: fingerprint
+    }),
+    /private authority changed or could not be verified/u
+  );
+  await assert.rejects(
+    () => respondA.execute!("consumed-after-invalid", response),
+    /requires a current pending interaction shown/u
+  );
+
+  await statusA.execute!("status-2", { turn_id: turnId });
+  const accepted = await respondA.execute!("response-1", response);
+  assert.equal(accepted.details?.responded, true);
+  assert.doesNotMatch(JSON.stringify(accepted), /fingerprint/u);
+  assert.doesNotMatch(JSON.stringify(accepted), new RegExp(fingerprint, "u"));
+  await assert.rejects(
+    () => respondA.execute!("replay", response),
+    /requires a current pending interaction shown/u
+  );
+
+  const calls = fs.readFileSync(callsPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+  assert.deepEqual(calls.map((argv) => argv[0]), [
+    "status",
+    "status",
+    "respond-interaction"
+  ]);
+  const mutation = calls[2] ?? [];
+  assert.equal(interactionOptionValue(mutation, "--turn"), turnId);
+  assert.equal(interactionOptionValue(mutation, "--interaction"), interactionId);
+  assert.deepEqual(
+    JSON.parse(requiredInteractionOptionValue(mutation, "--response-json")),
+    response
+  );
+  assert.equal(
+    interactionOptionValue(mutation, "--expected-interaction-fingerprint"),
+    fingerprint
+  );
+  assert.equal(
+    interactionOptionValue(mutation, "--expected-interaction-expires-at"),
+    expiresAt
+  );
+  assert.equal(
+    interactionOptionValue(mutation, "--openclaw-session"),
+    controllerA.sessionKey
+  );
+});
+
 function readManifest(): Manifest {
   return JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Manifest;
+}
+
+type InteractionToolContext = {
+  readonly sessionKey: string;
+  readonly sessionId: string;
+};
+
+type InteractionToolFactory = (
+  context: InteractionToolContext
+) => ToolDefinition;
+
+function requiredInteractionTool(
+  factories: Map<string, InteractionToolFactory>,
+  name: string,
+  context: InteractionToolContext
+): ToolDefinition {
+  const factory = factories.get(name);
+  assert.ok(factory, `${name} must be registered`);
+  const tool = factory(context);
+  assert.equal(typeof tool.execute, "function");
+  return tool;
+}
+
+function interactionOptionValue(
+  argv: readonly string[],
+  option: string
+): string | undefined {
+  const index = argv.indexOf(option);
+  return index === -1 ? undefined : argv[index + 1];
+}
+
+function requiredInteractionOptionValue(
+  argv: readonly string[],
+  option: string
+): string {
+  const value = interactionOptionValue(argv, option);
+  if (value === undefined) {
+    throw new Error(`${option} must have a value`);
+  }
+  return value;
+}
+
+function interactionRelayFixture(input: {
+  readonly callsPath: string;
+  readonly turnId: string;
+  readonly interactionId: string;
+  readonly questionId: string;
+  readonly optionId: string;
+  readonly fingerprint: string;
+  readonly expiresAt: string;
+}): string {
+  const interactionState = {
+    schema: "agent-knock-knock/terminal-interaction",
+    version: 1,
+    interaction_id: input.interactionId,
+    turn_id: input.turnId,
+    agent: "claude",
+    kind: "questionnaire",
+    state: "pending",
+    step: { index: 1, total: 1 },
+    questions: [{
+      question_id: input.questionId,
+      prompt: "Choose the safe option",
+      required: true,
+      response_kind: "single_select",
+      options: [
+        { option_id: input.optionId, label: "Safe" },
+        { option_id: "option_manual", label: "Manual" }
+      ]
+    }],
+    expires_at: input.expiresAt,
+    capabilities: {
+      respond: true,
+      batch_response: false,
+      free_text: false,
+      multi_select: false
+    }
+  };
+  return `
+const fs = require("node:fs");
+const argv = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(input.callsPath)}, JSON.stringify(argv) + "\\n");
+if (argv[0] === "status") {
+  process.stdout.write(JSON.stringify({
+    conversation_id: ${JSON.stringify(input.turnId)},
+    session_id: "session_interaction_1",
+    turn_id: ${JSON.stringify(input.turnId)},
+    terminal_status: {
+      interaction_state: ${JSON.stringify(interactionState)},
+      interaction_prompt_fingerprint: ${JSON.stringify(input.fingerprint)},
+      interaction_authority: { private: true },
+      owner_session: "private-owner",
+      process_incarnation: "private-process"
+    }
+  }));
+} else if (argv[0] === "respond-interaction") {
+  process.stdout.write(JSON.stringify({
+    responded: true,
+    conversation_id: ${JSON.stringify(input.turnId)},
+    session_id: "session_interaction_1",
+    turn_id: ${JSON.stringify(input.turnId)},
+    interaction_prompt_fingerprint: ${JSON.stringify(input.fingerprint)},
+    expected_interaction_fingerprint: ${JSON.stringify(input.fingerprint)}
+  }));
+} else {
+  process.stderr.write("unexpected command");
+  process.exitCode = 2;
+}
+`;
 }
 
 function requiredName(value: unknown, label: string): string {
