@@ -35,6 +35,14 @@ import {
   type TerminalEndpointRef,
   type TerminalProviderCapability
 } from "./terminal-control-ref.js";
+import {
+  CLAUDE_INJECTED_PASTE_FRAME_PROFILE,
+  claudeInjectedPasteProofEligible,
+  revalidateClaudeComposerProof,
+  settleClaudeInjectedPasteComposer,
+  type ClaudeComposerBeforeEnterProof,
+  type ClaudeInjectedPasteProofPorts
+} from "./claude-injected-paste-proof.js";
 
 // Verified Codex profiles through 0.153.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
@@ -1174,8 +1182,16 @@ export class TerminalAgentBridge {
     const textInjectedAt = this.nowMs();
     const preserveUserInput =
       options.userExplicitEnterAfterTextWithoutComposerVeto === true;
+    const allowClaudeInjectedPastePlaceholder =
+      claudeInjectedPasteProofEligible({
+        agent: adapter.agent,
+        multiline,
+        composerVerifiedImmediatelyBeforeText,
+        terminalControl: verifiedForText
+      });
     let postTextHookError: unknown;
     let verifiedForEnter: TerminalControlRef;
+    let claudeComposerProof: ClaudeComposerBeforeEnterProof | undefined;
     try {
       postTextHookError = await recordTerminalSendStage(
         options,
@@ -1204,6 +1220,16 @@ export class TerminalAgentBridge {
               options.allowWorkingComposerForUserExplicit === true
           }
         );
+      } else if (allowClaudeInjectedPastePlaceholder) {
+        claudeComposerProof = await settleClaudeInjectedPasteComposer({
+          terminalControl: verifiedForText,
+          expectedText: normalized,
+          runtime: options.runtime,
+          allowWorkingComposer:
+            options.allowWorkingComposerForUserExplicit === true,
+          ports: this.claudeInjectedPasteProofPorts(adapter)
+        });
+        verifiedForEnter = claudeComposerProof.terminalControl;
       } else if (requireExactComposer) {
         verifiedForEnter = await this.verifyExactComposerBeforeEnter(
           adapter,
@@ -1240,8 +1266,8 @@ export class TerminalAgentBridge {
       // can still edit the composer or change the native thread while that
       // callback is pending, so recapture before attempting Enter.
       if (requireExactComposer) {
-        verifiedForEnter = adapter.agent === "codex"
-          ? await this.settleCodexMultilineComposer(
+        if (adapter.agent === "codex") {
+          verifiedForEnter = await this.settleCodexMultilineComposer(
             adapter,
             terminalControl,
             normalized,
@@ -1252,14 +1278,27 @@ export class TerminalAgentBridge {
               allowWorkingComposer:
                 options.allowWorkingComposerForUserExplicit === true
             }
-          )
-          : await this.verifyExactComposerBeforeEnter(
+          );
+        } else if (
+          allowClaudeInjectedPastePlaceholder && claudeComposerProof
+        ) {
+          verifiedForEnter = await revalidateClaudeComposerProof({
+            proof: claudeComposerProof,
+            expectedText: normalized,
+            runtime: options.runtime,
+            allowWorkingComposer:
+              options.allowWorkingComposerForUserExplicit === true,
+            ports: this.claudeInjectedPasteProofPorts(adapter)
+          });
+        } else {
+          verifiedForEnter = await this.verifyExactComposerBeforeEnter(
             adapter,
             terminalControl,
             normalized,
             options.runtime,
             options.allowWorkingComposerForUserExplicit === true
           );
+        }
       } else if (options.beforeEnter) {
         verifiedForEnter = await this.verifyTerminalIdentity(
           adapter.agent,
@@ -1764,6 +1803,25 @@ export class TerminalAgentBridge {
       );
     }
     return verifiedImmediatelyBeforeEnter;
+  }
+
+  private claudeInjectedPasteProofPorts(
+    adapter: TerminalAgentAdapter
+  ): ClaudeInjectedPasteProofPorts {
+    return {
+      nowMs: this.nowMs,
+      sleep: this.sleep,
+      capture: (terminalControl, runtime) =>
+        this.captureInspection(adapter, terminalControl, {
+          runtime,
+          scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
+        }),
+      verifyIdentity: (terminalControl, runtime) =>
+        this.verifyTerminalIdentity(adapter.agent, terminalControl, runtime),
+      exactDraft: exactClaudeComposerCapture,
+      exactInjectedPastePlaceholder:
+        exactClaudeInjectedPastePlaceholderCapture
+    };
   }
 
   private async verifyExactEmptyComposerBeforeText(
@@ -4527,6 +4585,102 @@ function exactClaudeComposerCapture(
       .update(lines.slice(openIndex, closeIndex + 1).join("\n"))
       .digest("hex")
   };
+}
+
+function exactClaudeInjectedPastePlaceholderCapture(
+  screen: string,
+  expectedText: string
+): {
+  state: "exact_injected_paste_placeholder";
+  digest: string;
+  pasteId: number;
+  newlineCount: number;
+  frameProfile: string;
+} | undefined {
+  const expectedNewlineCount = (
+    composerComparableText(expectedText).match(/\n/gu) ?? []
+  ).length;
+  if (expectedNewlineCount === 0) {
+    return undefined;
+  }
+  const frame = exactClaudeComposerFrame(screen);
+  if (
+    !frame ||
+    frame.composerRows.length !== 1 ||
+    !claudeInjectedPastePlaceholderTrailingMatches(frame.trailing)
+  ) {
+    return undefined;
+  }
+  const placeholder =
+    /^\s*❯\s*\[Pasted text #([1-9]\d*) \+([1-9]\d*) lines\]\s*$/u
+      .exec(frame.composerRows[0]);
+  if (!placeholder) {
+    return undefined;
+  }
+  const pasteId = Number(placeholder[1]);
+  const newlineCount = Number(placeholder[2]);
+  if (
+    !Number.isSafeInteger(pasteId) ||
+    !Number.isSafeInteger(newlineCount) ||
+    newlineCount !== expectedNewlineCount
+  ) {
+    return undefined;
+  }
+  return {
+    state: "exact_injected_paste_placeholder",
+    digest: createHash("sha256")
+      .update(
+        frame.lines
+          .slice(frame.openIndex, frame.closeIndex + 1)
+          .concat(frame.trailing)
+          .join("\n")
+      )
+      .digest("hex"),
+    pasteId,
+    newlineCount,
+    frameProfile: CLAUDE_INJECTED_PASTE_FRAME_PROFILE
+  };
+}
+
+function claudeInjectedPastePlaceholderTrailingMatches(
+  lines: readonly string[]
+): boolean {
+  if (lines.length === 0) {
+    return false;
+  }
+  const hint = "paste again to expand";
+  const first = lines[0].trimStart();
+  if (!first.startsWith(hint)) {
+    return false;
+  }
+  const sameRowStatus = first.slice(hint.length);
+  if (sameRowStatus.length > 0 && !/^\s{2,}\S/u.test(sameRowStatus)) {
+    return false;
+  }
+  const footerRows = [
+    ...(sameRowStatus.trim().length > 0 ? [sameRowStatus.trim()] : []),
+    ...lines.slice(1).map((line) => line.trim())
+  ];
+  return footerRows.length === 0 ||
+    claudeNativeInspectionTrailingIsFooter(footerRows) ||
+    claudeInjectedPasteAuxiliaryFooterMatches(footerRows);
+}
+
+function claudeInjectedPasteAuxiliaryFooterMatches(
+  lines: readonly string[]
+): boolean {
+  if (lines.length === 0 || lines.length > 2) {
+    return false;
+  }
+  const autoUpdate = lines.filter((line) =>
+    line === "✘ Auto-update failed · Run claude doctor"
+  ).length;
+  const effort = lines.filter((line) =>
+    /^[●○◐◉] (?:low|medium|high|xhigh|max|ultracode) · \/effort$/u
+      .test(line)
+  ).length;
+  return autoUpdate <= 1 && effort <= 1 &&
+    autoUpdate + effort === lines.length;
 }
 
 function composerComparableText(value: string): string {

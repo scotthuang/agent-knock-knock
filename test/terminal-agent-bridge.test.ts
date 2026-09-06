@@ -1542,6 +1542,345 @@ test("managed user Send recaptures exact empty immediately before text", async (
     );
   });
 
+  await t.test(
+    "exact-empty Claude accepts its stable injected multiline paste placeholder once",
+    async () => {
+      const divider = "────────────────────────────────────────────────";
+      const multilineRequest = [
+        "第一行：修复 Claude 多行发送。",
+        "Second line keeps mixed-language input.",
+        "第三行：保持一次注入。",
+        "Fourth line proves the collapsed draft.",
+        "第五行：不要额外发送 Enter。",
+        "Sixth line closes the request.",
+        "第七行：完成。"
+      ].join("\n");
+      const newlineCount = multilineRequest.match(/\n/gu)?.length ?? 0;
+      let nowMs = 0;
+      class CollapsedClaudePasteProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(target, [
+            divider,
+            `❯ [Pasted text #1 +${newlineCount} lines]`,
+            divider,
+            "  paste again to expand       ✘ Auto-update failed · Run claude doctor",
+            "                              ● high · /effort"
+          ].join("\n"));
+        }
+      }
+      const provider = new CollapsedClaudePasteProvider([PANE], {
+        [PANE.target]: [
+          divider,
+          "❯ ",
+          divider,
+          "  ⏸ manual mode on · ? for shortcuts · ← for agents"
+        ].join("\n")
+      });
+      const adapter = createTestClaudeAdapter();
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([adapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+
+      const result = await bridge.send(
+        "claude",
+        terminalControl(adapter),
+        multilineRequest,
+        {
+          runtime: MANAGED_CLAUDE_RUNTIME,
+          requireExactEmptyComposerBeforeText: true,
+          requireExactComposerBeforeEnter: true
+        }
+      );
+
+      assert.equal(result.stage, "enter_dispatched");
+      assert.deepEqual(
+        provider.operations.flatMap((operation) =>
+          operation.kind === "capture"
+            ? []
+            : operation.kind === "text"
+              ? ["text"]
+              : [`keys:${operation.keys.join(",")}`]
+        ),
+        ["text", "keys:C-m"]
+      );
+      assert.equal(
+        provider.operations.filter((operation) => operation.kind === "text")
+          .length,
+        1,
+        "the placeholder proof is bound to one text delivery"
+      );
+      assert.equal(
+        provider.operations.filter((operation) =>
+          operation.kind === "keys" && operation.keys.includes("C-m")
+        ).length,
+        1,
+        "Claude receives exactly one Enter"
+      );
+      assert.ok(nowMs >= 30, "the placeholder must be captured stably");
+    }
+  );
+
+  await t.test(
+    "Claude injected paste placeholder fails closed on line-count mismatch",
+    async () => {
+      const divider = "────────────────────────────────────────────────";
+      const multilineRequest = "line one\nline two\nline three\nline four";
+      let nowMs = 0;
+      class WrongCountClaudePasteProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(target, [
+            divider,
+            "❯ [Pasted text #1 +2 lines]",
+            divider,
+            "  paste again to expand"
+          ].join("\n"));
+        }
+      }
+      const provider = new WrongCountClaudePasteProvider([PANE], {
+        [PANE.target]: [divider, "❯ ", divider].join("\n")
+      });
+      const adapter = createTestClaudeAdapter();
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([adapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+
+      await assert.rejects(
+        bridge.send("claude", terminalControl(adapter), multilineRequest, {
+          runtime: MANAGED_CLAUDE_RUNTIME,
+          requireExactEmptyComposerBeforeText: true,
+          requireExactComposerBeforeEnter: true
+        }),
+        /stable exact_injected_paste_placeholder/u
+      );
+      assert.equal(
+        provider.operations.some((operation) =>
+          operation.kind === "keys" && operation.keys.includes("C-m")
+        ),
+        false
+      );
+      assert.ok(nowMs >= 5_000);
+    }
+  );
+
+  await t.test(
+    "Claude injected paste placeholder rejects an unknown footer profile",
+    async () => {
+      const divider = "────────────────────────────────────────────────";
+      const multilineRequest = "line one\nline two\nline three\nline four";
+      let nowMs = 0;
+      class UnknownFooterClaudePasteProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(target, [
+            divider,
+            "❯ [Pasted text #1 +3 lines]",
+            divider,
+            "  paste again to expand       unknown interactive mode"
+          ].join("\n"));
+        }
+      }
+      const provider = new UnknownFooterClaudePasteProvider([PANE], {
+        [PANE.target]: [divider, "❯ ", divider].join("\n")
+      });
+      const adapter = createTestClaudeAdapter();
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([adapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+
+      await assert.rejects(
+        bridge.send("claude", terminalControl(adapter), multilineRequest, {
+          runtime: MANAGED_CLAUDE_RUNTIME,
+          requireExactEmptyComposerBeforeText: true,
+          requireExactComposerBeforeEnter: true
+        }),
+        /stable exact_injected_paste_placeholder/u
+      );
+      assert.equal(
+        provider.operations.some((operation) =>
+          operation.kind === "keys" && operation.keys.includes("C-m")
+        ),
+        false
+      );
+      assert.ok(nowMs >= 5_000);
+    }
+  );
+
+  await t.test(
+    "Claude injected paste placeholder drift after reservation blocks Enter",
+    async () => {
+      const divider = "────────────────────────────────────────────────";
+      const multilineRequest = "line one\nline two\nline three\nline four";
+      let nowMs = 0;
+      const placeholderScreen = (pasteId: number) => [
+        divider,
+        `❯ [Pasted text #${pasteId} +3 lines]`,
+        divider,
+        "  paste again to expand"
+      ].join("\n");
+      class DriftingClaudePasteProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(target, placeholderScreen(1));
+        }
+      }
+      const provider = new DriftingClaudePasteProvider([PANE], {
+        [PANE.target]: [divider, "❯ ", divider].join("\n")
+      });
+      const adapter = createTestClaudeAdapter();
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([adapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+
+      await assert.rejects(
+        bridge.send("claude", terminalControl(adapter), multilineRequest, {
+          runtime: MANAGED_CLAUDE_RUNTIME,
+          requireExactEmptyComposerBeforeText: true,
+          requireExactComposerBeforeEnter: true,
+          beforeEnter() {
+            provider.setScreen(PANE.target, placeholderScreen(2));
+          }
+        }),
+        /exact_injected_paste_placeholder changed before Enter/u
+      );
+      assert.equal(
+        provider.operations.some((operation) =>
+          operation.kind === "keys" && operation.keys.includes("C-m")
+        ),
+        false
+      );
+    }
+  );
+
+  await t.test(
+    "Claude injected paste placeholder never crosses terminal identity drift",
+    async () => {
+      const divider = "────────────────────────────────────────────────";
+      const multilineRequest = "line one\nline two\nline three\nline four";
+      let nowMs = 0;
+      class IdentityDriftClaudePasteProvider extends RecordingTerminalProvider {
+        override async sendText(
+          target: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendText(target, text, options);
+          this.setScreen(target, [
+            divider,
+            "❯ [Pasted text #1 +3 lines]",
+            divider,
+            "  paste again to expand"
+          ].join("\n"));
+        }
+      }
+      const provider = new IdentityDriftClaudePasteProvider([PANE], {
+        [PANE.target]: [divider, "❯ ", divider].join("\n")
+      });
+      const adapter = createTestClaudeAdapter();
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([adapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        },
+        async verifyIdentity({ terminalControl }) {
+          if (
+            provider.operations.some((operation) =>
+              operation.kind === "text"
+            )
+          ) {
+            throw new Error("Claude terminal identity drifted after paste");
+          }
+          return { terminalControl };
+        }
+      });
+
+      await assert.rejects(
+        bridge.send("claude", terminalControl(adapter), multilineRequest, {
+          runtime: MANAGED_CLAUDE_RUNTIME,
+          requireExactEmptyComposerBeforeText: true,
+          requireExactComposerBeforeEnter: true
+        }),
+        /identity drifted after paste/u
+      );
+      assert.equal(
+        provider.operations.some((operation) =>
+          operation.kind === "keys" && operation.keys.includes("C-m")
+        ),
+        false
+      );
+    }
+  );
+
+  await t.test(
+    "a pre-existing Claude paste placeholder is never injection authority",
+    async () => {
+      const divider = "────────────────────────────────────────────────";
+      const multilineRequest = "line one\nline two\nline three\nline four";
+      const provider = new RecordingTerminalProvider([PANE], {
+        [PANE.target]: [
+          divider,
+          "❯ [Pasted text #7 +3 lines]",
+          divider,
+          "  paste again to expand"
+        ].join("\n")
+      });
+      const adapter = createTestClaudeAdapter();
+      const bridge = createBridge(adapter, provider);
+
+      await assert.rejects(
+        bridge.send("claude", terminalControl(adapter), multilineRequest, {
+          runtime: MANAGED_CLAUDE_RUNTIME,
+          requireExactEmptyComposerBeforeText: true,
+          requireExactComposerBeforeEnter: true
+        }),
+        TerminalInputNotStartedError
+      );
+      assert.equal(
+        provider.operations.some((operation) => operation.kind !== "capture"),
+        false
+      );
+    }
+  );
+
   await t.test("Claude draft drift before text proves zero input", async () => {
     const divider = "────────────────────────────────────────────────";
     const provider = new RecordingTerminalProvider([PANE], {

@@ -3,7 +3,7 @@
   "version": 1,
   "architecture": {
     "cli_core_max_physical_loc": 1823,
-    "production_physical_loc": 122931,
+    "production_physical_loc": 123398,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -552,6 +552,10 @@
     {
       "path": "src/canonical-json.ts",
       "owner": "value-guards"
+    },
+    {
+      "path": "src/claude-injected-paste-proof.ts",
+      "owner": "terminal-dispatch-core"
     },
     {
       "path": "src/claude-lifecycle-compatibility.ts",
