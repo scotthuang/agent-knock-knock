@@ -3,9 +3,6 @@ import { isRecord, type UnknownRecord } from "./value-guards.js";
 export const TERMINAL_INTERACTION_SCHEMA =
   "agent-knock-knock/terminal-interaction" as const;
 export const TERMINAL_INTERACTION_VERSION = 1 as const;
-export const TERMINAL_INTERACTION_AUTHORITY_SCHEMA =
-  "agent-knock-knock/terminal-interaction-authority" as const;
-export const TERMINAL_INTERACTION_AUTHORITY_VERSION = 1 as const;
 
 export const TERMINAL_INTERACTION_KINDS = ["questionnaire"] as const;
 export const TERMINAL_INTERACTION_STATES = [
@@ -17,15 +14,16 @@ export const TERMINAL_INTERACTION_RESPONSE_KINDS = [
   "single_select",
   "multi_select",
   "free_text",
-  "number",
   "confirm"
 ] as const;
 export const TERMINAL_INTERACTION_AGENTS = ["codex", "claude"] as const;
 
 export const TERMINAL_INTERACTION_LIMITS = Object.freeze({
   maxProjectionBytes: 32 * 1024,
-  maxQuestions: 3,
-  maxOptionsPerQuestion: 4,
+  /** A projection is deliberately one native step, never a batch of keys. */
+  maxQuestions: 1,
+  /** Claude may render four declared options plus its automatic Other row. */
+  maxOptionsPerQuestion: 5,
   maxSteps: 16,
   maxIdentifierLength: 128,
   maxPromptLength: 4_096,
@@ -34,7 +32,6 @@ export const TERMINAL_INTERACTION_LIMITS = Object.freeze({
   maxOptionDescriptionLength: 1_024,
   maxPlaceholderLength: 256,
   maxTextAnswerLength: 4_096,
-  maxNumberUnitLength: 32,
   maxExpiresAtLength: 64
 });
 
@@ -78,18 +75,6 @@ export interface TerminalInteractionFreeTextQuestion
   readonly placeholder?: string;
 }
 
-export interface TerminalInteractionNumberQuestion
-  extends TerminalInteractionQuestionBase {
-  readonly response_kind: "number";
-  readonly number: {
-    readonly min: number;
-    readonly max: number;
-    readonly step?: number;
-    readonly default?: number;
-    readonly unit?: string;
-  };
-}
-
 export interface TerminalInteractionConfirmQuestion
   extends TerminalInteractionQuestionBase {
   readonly response_kind: "confirm";
@@ -99,7 +84,6 @@ export type TerminalInteractionQuestion =
   | TerminalInteractionSingleSelectQuestion
   | TerminalInteractionMultiSelectQuestion
   | TerminalInteractionFreeTextQuestion
-  | TerminalInteractionNumberQuestion
   | TerminalInteractionConfirmQuestion;
 
 export interface TerminalInteractionProjection {
@@ -115,12 +99,13 @@ export interface TerminalInteractionProjection {
     readonly total: number;
   };
   readonly questions: readonly TerminalInteractionQuestion[];
-  readonly expires_at?: string;
+  /** Pending interaction offers always expire and cannot be replayed. */
+  readonly expires_at: string;
   readonly capabilities: {
+    readonly respond: boolean;
     readonly batch_response: boolean;
     readonly free_text: boolean;
     readonly multi_select: boolean;
-    readonly number: boolean;
   };
 }
 
@@ -146,12 +131,6 @@ export interface TerminalInteractionFreeTextAnswer
   readonly text: string;
 }
 
-export interface TerminalInteractionNumberAnswer
-  extends TerminalInteractionAnswerBase {
-  readonly response_kind: "number";
-  readonly number: number;
-}
-
 export interface TerminalInteractionConfirmAnswer
   extends TerminalInteractionAnswerBase {
   readonly response_kind: "confirm";
@@ -162,48 +141,12 @@ export type TerminalInteractionAnswer =
   | TerminalInteractionSingleSelectAnswer
   | TerminalInteractionMultiSelectAnswer
   | TerminalInteractionFreeTextAnswer
-  | TerminalInteractionNumberAnswer
   | TerminalInteractionConfirmAnswer;
 
 export interface TerminalInteractionResponse {
   readonly interaction_id: string;
   readonly turn_id: string;
   readonly answers: readonly TerminalInteractionAnswer[];
-}
-
-export type TerminalInteractionAuthorityState =
-  | "durable_candidate"
-  | "live_surface_unconfirmed"
-  | "stable_pending"
-  | "published"
-  | "response_reserved"
-  | "executing_step"
-  | "awaiting_step_advance"
-  | "native_resolved"
-  | "superseded"
-  | "response_uncertain";
-
-/**
- * Private mutation authority. This must remain in the owner-private Store and
- * must never be spread into a TerminalInteractionProjection.
- */
-export interface TerminalInteractionAuthority {
-  readonly authority_schema: typeof TERMINAL_INTERACTION_AUTHORITY_SCHEMA;
-  readonly authority_version: typeof TERMINAL_INTERACTION_AUTHORITY_VERSION;
-  readonly interaction_id: string;
-  readonly turn_id: string;
-  readonly agent: TerminalInteractionAgent;
-  readonly state: TerminalInteractionAuthorityState;
-  readonly source_interaction_id: string;
-  readonly native_turn_id?: string;
-  readonly native_thread_id?: string;
-  readonly source_file_identity: string;
-  readonly source_fingerprint: string;
-  readonly terminal_binding_id: string;
-  readonly terminal_binding_generation: number;
-  readonly current_step: number;
-  readonly last_proven_stage?: string;
-  readonly expires_at?: string;
 }
 
 export type TerminalInteractionValidationCode =
@@ -219,7 +162,8 @@ export type TerminalInteractionValidationCode =
   | "answer_kind_mismatch"
   | "unknown_question"
   | "unknown_option"
-  | "missing_answer";
+  | "missing_answer"
+  | "expired";
 
 export class TerminalInteractionValidationError extends Error {
   constructor(
@@ -235,6 +179,7 @@ export class TerminalInteractionValidationError extends Error {
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const UNSAFE_CONTROL_CHARACTER_PATTERN =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u;
+const TERMINAL_ANSWER_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F-\u009F]/u;
 const SECRET_FIELD_NAMES = new Set([
   "secret",
   "isSecret",
@@ -312,13 +257,6 @@ function parseEnum<const Values extends readonly string[]>(
 function parseBoolean(value: unknown, path: string): boolean {
   if (typeof value !== "boolean") {
     fail("invalid_type", path, "must be a boolean");
-  }
-  return value;
-}
-
-function parseFiniteNumber(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    fail("invalid_type", path, "must be a finite number");
   }
   return value;
 }
@@ -418,48 +356,6 @@ function assertUniqueIds(ids: readonly string[], path: string): void {
   }
 }
 
-function parseNumberConstraints(
-  value: unknown,
-  path: string
-): TerminalInteractionNumberQuestion["number"] {
-  const record = parseRecord(value, path, [
-    "min",
-    "max",
-    "step",
-    "default",
-    "unit"
-  ]);
-  const min = parseFiniteNumber(record.min, `${path}.min`);
-  const max = parseFiniteNumber(record.max, `${path}.max`);
-  if (min > max) {
-    fail("invalid_value", path, "min must not exceed max");
-  }
-  const step = record.step === undefined
-    ? undefined
-    : parseFiniteNumber(record.step, `${path}.step`);
-  if (step !== undefined && step <= 0) {
-    fail("invalid_value", `${path}.step`, "must be greater than zero");
-  }
-  const defaultValue = record.default === undefined
-    ? undefined
-    : parseFiniteNumber(record.default, `${path}.default`);
-  if (defaultValue !== undefined && (defaultValue < min || defaultValue > max)) {
-    fail("invalid_value", `${path}.default`, "must be within min and max");
-  }
-  const unit = parseOptionalDisplayString(
-    record.unit,
-    `${path}.unit`,
-    TERMINAL_INTERACTION_LIMITS.maxNumberUnitLength
-  );
-  return {
-    min,
-    max,
-    ...(step === undefined ? {} : { step }),
-    ...(defaultValue === undefined ? {} : { default: defaultValue }),
-    ...(unit === undefined ? {} : { unit })
-  };
-}
-
 function questionAllowedKeys(
   responseKind: TerminalInteractionResponseKind
 ): readonly string[] {
@@ -469,9 +365,6 @@ function questionAllowedKeys(
   }
   if (responseKind === "free_text") {
     return [...base, "placeholder"];
-  }
-  if (responseKind === "number") {
-    return [...base, "number"];
   }
   return base;
 }
@@ -484,8 +377,7 @@ function parseQuestion(value: unknown, path: string): TerminalInteractionQuestio
     "required",
     "response_kind",
     "options",
-    "placeholder",
-    "number"
+    "placeholder"
   ]);
   const responseKind = parseEnum(
     candidate.response_kind,
@@ -528,13 +420,6 @@ function parseQuestion(value: unknown, path: string): TerminalInteractionQuestio
       ...(placeholder === undefined ? {} : { placeholder })
     };
   }
-  if (responseKind === "number") {
-    return {
-      ...common,
-      response_kind: responseKind,
-      number: parseNumberConstraints(record.number, `${path}.number`)
-    };
-  }
   return { ...common, response_kind: responseKind };
 }
 
@@ -574,12 +459,13 @@ function parseCapabilities(
   value: unknown
 ): TerminalInteractionProjection["capabilities"] {
   const record = parseRecord(value, "$.capabilities", [
+    "respond",
     "batch_response",
     "free_text",
-    "multi_select",
-    "number"
+    "multi_select"
   ]);
   return {
+    respond: parseBoolean(record.respond, "$.capabilities.respond"),
     batch_response: parseBoolean(
       record.batch_response,
       "$.capabilities.batch_response"
@@ -588,8 +474,7 @@ function parseCapabilities(
     multi_select: parseBoolean(
       record.multi_select,
       "$.capabilities.multi_select"
-    ),
-    number: parseBoolean(record.number, "$.capabilities.number")
+    )
   };
 }
 
@@ -597,13 +482,13 @@ function assertCapabilitiesMatchQuestions(
   capabilities: TerminalInteractionProjection["capabilities"],
   questions: readonly TerminalInteractionQuestion[]
 ): void {
-  if (questions.length > 1 && !capabilities.batch_response) {
-    fail("invalid_value", "$.capabilities.batch_response", "must cover multiple questions");
+  if (capabilities.batch_response) {
+    fail("invalid_value", "$.capabilities.batch_response", "is not supported by protocol version 1");
   }
   const requiredCapabilities = new Set(
     questions.map((question) => question.response_kind)
   );
-  for (const capability of ["free_text", "multi_select", "number"] as const) {
+  for (const capability of ["free_text", "multi_select"] as const) {
     if (requiredCapabilities.has(capability) && !capabilities[capability]) {
       fail(
         "invalid_value",
@@ -614,10 +499,7 @@ function assertCapabilitiesMatchQuestions(
   }
 }
 
-function parseExpiresAt(value: unknown): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
+function parseExpiresAt(value: unknown): string {
   const expiresAt = parseBoundedString(
     value,
     "$.expires_at",
@@ -666,7 +548,7 @@ export function validateTerminalInteractionProjection(
     state: parseEnum(record.state, "$.state", TERMINAL_INTERACTION_STATES),
     step: parseStep(record.step),
     questions,
-    ...(expiresAt === undefined ? {} : { expires_at: expiresAt }),
+    expires_at: expiresAt,
     capabilities
   };
 }
@@ -680,9 +562,6 @@ function answerAllowedKeys(
   }
   if (responseKind === "free_text") {
     return [...base, "text"];
-  }
-  if (responseKind === "number") {
-    return [...base, "number"];
   }
   return [...base, "confirm"];
 }
@@ -712,7 +591,6 @@ function parseAnswer(value: unknown, path: string): TerminalInteractionAnswer {
     "response_kind",
     "selected_option_ids",
     "text",
-    "number",
     "confirm"
   ]);
   const responseKind = parseEnum(
@@ -738,21 +616,22 @@ function parseAnswer(value: unknown, path: string): TerminalInteractionAnswer {
       TerminalInteractionMultiSelectAnswer;
   }
   if (responseKind === "free_text") {
-    return {
-      question_id: questionId,
-      response_kind: responseKind,
-      text: parseBoundedString(
-        record.text,
+    const text = parseBoundedString(
+      record.text,
+      `${path}.text`,
+      TERMINAL_INTERACTION_LIMITS.maxTextAnswerLength
+    );
+    if (TERMINAL_ANSWER_CONTROL_CHARACTER_PATTERN.test(text)) {
+      fail(
+        "control_character",
         `${path}.text`,
-        TERMINAL_INTERACTION_LIMITS.maxTextAnswerLength
-      )
-    };
-  }
-  if (responseKind === "number") {
+        "must be a single line without terminal control characters"
+      );
+    }
     return {
       question_id: questionId,
       response_kind: responseKind,
-      number: parseFiniteNumber(record.number, `${path}.number`)
+      text
     };
   }
   return {
@@ -790,12 +669,6 @@ function assertAnswerMatchesQuestion(
       }
     }
   }
-  if (answer.response_kind === "number") {
-    const constraints = (question as TerminalInteractionNumberQuestion).number;
-    if (answer.number < constraints.min || answer.number > constraints.max) {
-      fail("invalid_value", `${path}.number`, "must be within the projected range");
-    }
-  }
 }
 
 function parseAnswers(
@@ -819,9 +692,6 @@ function parseAnswers(
     return answer;
   });
   assertUniqueIds(answers.map((answer) => answer.question_id), "$.answers");
-  if (answers.length > projection.questions.length) {
-    fail("limit_exceeded", "$.answers", "cannot exceed projected question count");
-  }
   const answered = new Set(answers.map((answer) => answer.question_id));
   const missing = projection.questions.find(
     (question) => question.required && !answered.has(question.question_id)
@@ -829,17 +699,30 @@ function parseAnswers(
   if (missing) {
     fail("missing_answer", "$.answers", `missing required question ${missing.question_id}`);
   }
+  if (answers.length !== 1 || projection.questions.length !== 1) {
+    fail("invalid_value", "$.answers", "protocol version 1 requires exactly one current-step answer");
+  }
   return answers;
 }
 
 export function validateTerminalInteractionResponse(
   value: unknown,
-  projectionValue: unknown
+  authoritativeStoredProjection: unknown,
+  options: { now?: Date } = {}
 ): TerminalInteractionResponse {
   assertPayloadSize(value, "$response");
-  const projection = validateTerminalInteractionProjection(projectionValue);
+  const projection = validateTerminalInteractionProjection(
+    authoritativeStoredProjection
+  );
   if (projection.state !== "pending") {
     fail("response_not_allowed", "$.state", "interaction is not pending");
+  }
+  if (!projection.capabilities.respond) {
+    fail("response_not_allowed", "$.capabilities.respond", "interaction is not executable");
+  }
+  const now = options.now ?? new Date();
+  if (Date.parse(projection.expires_at) <= now.getTime()) {
+    fail("expired", "$.expires_at", "interaction offer has expired");
   }
   const record = parseRecord(value, "$", [
     "interaction_id",

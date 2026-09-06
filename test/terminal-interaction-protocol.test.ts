@@ -1,16 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  TERMINAL_INTERACTION_AUTHORITY_SCHEMA,
-  TERMINAL_INTERACTION_AUTHORITY_VERSION,
   TERMINAL_INTERACTION_LIMITS,
   TERMINAL_INTERACTION_SCHEMA,
   TERMINAL_INTERACTION_VERSION,
   TerminalInteractionValidationError,
-  type TerminalInteractionAuthority,
   validateTerminalInteractionProjection,
   validateTerminalInteractionResponse
 } from "../src/terminal-interaction-protocol.js";
+import {
+  TERMINAL_INTERACTION_AUTHORITY_SCHEMA,
+  TERMINAL_INTERACTION_AUTHORITY_VERSION,
+  type TerminalInteractionAuthority
+} from "../src/terminal-interaction-authority.js";
 
 function projection(overrides: Record<string, unknown> = {}): unknown {
   return {
@@ -22,6 +24,7 @@ function projection(overrides: Record<string, unknown> = {}): unknown {
     kind: "questionnaire",
     state: "pending",
     step: { index: 1, total: 1 },
+    expires_at: "2099-09-08T00:00:00.000Z",
     questions: [
       {
         question_id: "q1",
@@ -40,10 +43,10 @@ function projection(overrides: Record<string, unknown> = {}): unknown {
       }
     ],
     capabilities: {
+      respond: true,
       batch_response: false,
       free_text: false,
-      multi_select: false,
-      number: false
+      multi_select: false
     },
     ...overrides
   };
@@ -119,13 +122,6 @@ test("projection validator accepts each explicitly supported response kind", () 
       placeholder: "Short answer"
     },
     {
-      question_id: "count",
-      prompt: "How many?",
-      required: true,
-      response_kind: "number",
-      number: { min: 1, max: 5, step: 1, default: 2, unit: "items" }
-    },
-    {
       question_id: "confirm",
       prompt: "Continue?",
       required: true,
@@ -137,10 +133,10 @@ test("projection validator accepts each explicitly supported response kind", () 
     const parsed = validateTerminalInteractionProjection(projection({
       questions: [question],
       capabilities: {
+        respond: true,
         batch_response: false,
         free_text: question.response_kind === "free_text",
-        multi_select: question.response_kind === "multi_select",
-        number: question.response_kind === "number"
+        multi_select: question.response_kind === "multi_select"
       }
     }));
     assert.equal(parsed.questions[0]?.response_kind, question.response_kind);
@@ -187,9 +183,16 @@ test("projection rejects unknown fields and private authority material", () => {
     native_thread_id: "native_thread",
     source_file_identity: "private-file-token",
     source_fingerprint: "private-fingerprint",
+    live_frame_fingerprint: "private-frame-fingerprint",
+    runtime_profile: "codex-0.153.4-request-user-input-v1",
+    process_incarnation: "pid:123@private-birth",
+    owner_session: "agent:main:main",
+    turn_revision: "private-turn-revision",
     terminal_binding_id: "private-binding",
     terminal_binding_generation: 2,
-    current_step: 1
+    current_step: 1,
+    created_at: "2026-09-07T00:00:00.000Z",
+    expires_at: "2026-09-07T00:10:00.000Z"
   };
   expectValidationError(
     () => validateTerminalInteractionProjection({
@@ -237,10 +240,10 @@ test("projection enforces question, option, identifier, and text limits", () => 
         })
       ),
       capabilities: {
+        respond: true,
         batch_response: true,
         free_text: false,
-        multi_select: false,
-        number: false
+        multi_select: false
       }
     })),
     "limit_exceeded",
@@ -275,32 +278,26 @@ test("projection enforces question, option, identifier, and text limits", () => 
   );
 });
 
-test("projection rejects duplicate question and option ids", () => {
-  const duplicateQuestions = projection({
+test("projection rejects batched questions and duplicate option ids", () => {
+  const batchedQuestions = projection({
     questions: [
       {
-        question_id: "same",
+        question_id: "first",
         prompt: "First?",
-        required: false,
+        required: true,
         response_kind: "confirm"
       },
       {
-        question_id: "same",
+        question_id: "second",
         prompt: "Second?",
-        required: false,
+        required: true,
         response_kind: "confirm"
       }
-    ],
-    capabilities: {
-      batch_response: true,
-      free_text: false,
-      multi_select: false,
-      number: false
-    }
+    ]
   });
   expectValidationError(
-    () => validateTerminalInteractionProjection(duplicateQuestions),
-    "duplicate_id",
+    () => validateTerminalInteractionProjection(batchedQuestions),
+    "limit_exceeded",
     "$.questions"
   );
 
@@ -313,7 +310,7 @@ test("projection rejects duplicate question and option ids", () => {
   );
 });
 
-test("projection validates step, capabilities, ranges, and expiry", () => {
+test("projection validates step, capabilities, and expiry", () => {
   expectValidationError(
     () => validateTerminalInteractionProjection(projection({
       step: { index: 2, total: 1 }
@@ -334,57 +331,30 @@ test("projection validates step, capabilities, ranges, and expiry", () => {
     "$.capabilities.free_text"
   );
   expectValidationError(
-    () => validateTerminalInteractionProjection(projection({
-      questions: [{
-        question_id: "q1",
-        prompt: "Count",
-        required: true,
-        response_kind: "number",
-        number: { min: 2, max: 1 }
-      }],
-      capabilities: {
-        batch_response: false,
-        free_text: false,
-        multi_select: false,
-        number: true
-      }
-    })),
-    "invalid_value",
-    "$.questions[0].number"
-  );
-  expectValidationError(
     () => validateTerminalInteractionProjection(projection({ expires_at: "not-a-date" })),
     "invalid_value",
     "$.expires_at"
   );
 });
 
-test("response validator accepts typed answers and optional omissions", () => {
-  const questions = [
-    {
-      question_id: "q1",
-      prompt: "Pick any",
-      required: true,
-      response_kind: "multi_select",
-      options: [
-        { option_id: "a", label: "A" },
-        { option_id: "b", label: "B" }
-      ]
-    },
-    {
-      question_id: "q2",
-      prompt: "Optional note",
-      required: false,
-      response_kind: "free_text"
-    }
-  ];
+test("response validator accepts one typed current-step answer", () => {
+  const questions = [{
+    question_id: "q1",
+    prompt: "Pick any",
+    required: true,
+    response_kind: "multi_select",
+    options: [
+      { option_id: "a", label: "A" },
+      { option_id: "b", label: "B" }
+    ]
+  }];
   const inputProjection = projection({
     questions,
     capabilities: {
-      batch_response: true,
-      free_text: true,
-      multi_select: true,
-      number: false
+      respond: true,
+      batch_response: false,
+      free_text: false,
+      multi_select: true
     }
   });
   const inputResponse = response([{
@@ -464,7 +434,7 @@ test("response rejects unknown, duplicate, or missing question and option ids", 
   );
 });
 
-test("response rejects duplicate selected options and out-of-range numbers", () => {
+test("response rejects duplicate selected options", () => {
   const multiProjection = projection({
     questions: [{
       question_id: "q1",
@@ -477,10 +447,10 @@ test("response rejects duplicate selected options and out-of-range numbers", () 
       ]
     }],
     capabilities: {
+      respond: true,
       batch_response: false,
       free_text: false,
-      multi_select: true,
-      number: false
+      multi_select: true
     }
   });
   expectValidationError(
@@ -493,30 +463,6 @@ test("response rejects duplicate selected options and out-of-range numbers", () 
     "$.answers[0].selected_option_ids"
   );
 
-  const numberProjection = projection({
-    questions: [{
-      question_id: "q1",
-      prompt: "Count",
-      required: true,
-      response_kind: "number",
-      number: { min: 1, max: 5 }
-    }],
-    capabilities: {
-      batch_response: false,
-      free_text: false,
-      multi_select: false,
-      number: true
-    }
-  });
-  expectValidationError(
-    () => validateTerminalInteractionResponse(response([{
-      question_id: "q1",
-      response_kind: "number",
-      number: 6
-    }]), numberProjection),
-    "invalid_value",
-    "$.answers[0].number"
-  );
 });
 
 test("response is fenced to its exact pending interaction and rejects secrets", () => {
@@ -551,5 +497,74 @@ test("response is fenced to its exact pending interaction and rejects secrets", 
     }]), projection({ state: "manual_required" })),
     "response_not_allowed",
     "$.state"
+  );
+});
+
+test("response rejects expired, disabled, batched, and multiline input", () => {
+  const selectAnswer = {
+    question_id: "q1",
+    response_kind: "single_select",
+    selected_option_ids: ["local"]
+  };
+  expectValidationError(
+    () => validateTerminalInteractionResponse(
+      response([selectAnswer]),
+      projection({ expires_at: "2026-09-07T00:00:00.000Z" }),
+      { now: new Date("2026-09-07T00:00:01.000Z") }
+    ),
+    "expired",
+    "$.expires_at"
+  );
+  expectValidationError(
+    () => validateTerminalInteractionResponse(
+      response([selectAnswer]),
+      projection({
+        capabilities: {
+          respond: false,
+          batch_response: false,
+          free_text: false,
+          multi_select: false
+        }
+      })
+    ),
+    "response_not_allowed",
+    "$.capabilities.respond"
+  );
+
+  const textProjection = projection({
+    questions: [{
+      question_id: "q1",
+      prompt: "Explain",
+      required: true,
+      response_kind: "free_text"
+    }],
+    capabilities: {
+      respond: true,
+      batch_response: false,
+      free_text: true,
+      multi_select: false
+    }
+  });
+  expectValidationError(
+    () => validateTerminalInteractionResponse(response([{
+      question_id: "q1",
+      response_kind: "free_text",
+      text: "first line\nsecond line"
+    }]), textProjection),
+    "control_character",
+    "$.answers[0].text"
+  );
+
+  expectValidationError(
+    () => validateTerminalInteractionProjection(projection({
+      capabilities: {
+        respond: true,
+        batch_response: true,
+        free_text: false,
+        multi_select: false
+      }
+    })),
+    "invalid_value",
+    "$.capabilities.batch_response"
   );
 });
