@@ -200,7 +200,12 @@ test("runtime identity requires the exact binding and adds committed companions 
       terminal_agent_rollout: processIdentity.rollout,
       terminal_bridge_request_text: "takeover request",
       terminal_bridge_request_hash: "request-hash",
-      terminal_bridge_started_at: "2026-08-20T00:00:03.000Z"
+      terminal_bridge_started_at: "2026-08-20T00:00:03.000Z",
+      terminal_bridge_interaction_dispatch: {
+        state: "uncertain",
+        interaction_id: "ti_example",
+        interaction_prompt_fingerprint: "a".repeat(64)
+      }
     }
   } satisfies Conversation;
   const facade = adapter({}, (ports) => {
@@ -215,6 +220,9 @@ test("runtime identity requires the exact binding and adds committed companions 
   assert.equal(runtime.pid, processIdentity.pid);
   assert.equal(runtime.turnId, "turn-main");
   assert.equal(runtime.agentVersion, "0.153.4");
+  assert.equal(runtime.interactionDispatchState, "uncertain");
+  assert.equal(runtime.interactionDispatchInteractionId, "ti_example");
+  assert.equal(runtime.interactionDispatchPromptFingerprint, "a".repeat(64));
   assert.deepEqual(runtime.allowedPreMaterializationNativeIdentity, {
     sessionId: oldBinding.native_thread_id,
     processUuid: processIdentity.processUuid,

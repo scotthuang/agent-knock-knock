@@ -479,6 +479,15 @@ export function terminalRuntimeIdentityBase(
   const rollout = isRecord(takeover?.terminal_agent_rollout)
     ? takeover.terminal_agent_rollout
     : undefined;
+  const interactionDispatch =
+    isRecord(takeover?.terminal_bridge_interaction_dispatch)
+      ? takeover.terminal_bridge_interaction_dispatch
+      : undefined;
+  const interactionDispatchState =
+    interactionDispatch?.state === "reserved" ||
+      interactionDispatch?.state === "uncertain"
+      ? interactionDispatch.state
+      : undefined;
   const strict =
     Number(takeover?.terminal_agent_identity_protocol) === 1;
   const expectedSessionId = nonBlankString(
@@ -514,6 +523,17 @@ export function terminalRuntimeIdentityBase(
     cwd: nonBlankString(takeover?.source_cwd) ?? terminalControl.currentPath,
     conversationId: conversation.conversation_id,
     turnId: turnIdForConversation(conversation),
+    ...(interactionDispatchState
+      ? {
+          interactionDispatchState,
+          interactionDispatchInteractionId: nonBlankString(
+            interactionDispatch?.interaction_id
+          ),
+          interactionDispatchPromptFingerprint: nonBlankString(
+            interactionDispatch?.interaction_prompt_fingerprint
+          )
+        }
+      : {}),
     messageId: nonBlankString(takeover?.terminal_bridge_message_id),
     terminalTarget: terminalControl.target
   };

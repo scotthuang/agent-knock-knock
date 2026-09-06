@@ -249,6 +249,14 @@ export interface TerminalRuntimeIdentity {
   agentVersion?: string;
   /** Exact managed Turn authorized to answer a native questionnaire. */
   turnId?: string;
+  /**
+   * A durable interaction dispatch fence already exists for this Turn. While
+   * either state is present, status must never advertise another executable
+   * response even when the native prompt is still visible.
+   */
+  interactionDispatchState?: "reserved" | "uncertain";
+  interactionDispatchInteractionId?: string;
+  interactionDispatchPromptFingerprint?: string;
   sessionId?: string;
   nativeSessionId?: string;
   nativeProcessUuid?: string;

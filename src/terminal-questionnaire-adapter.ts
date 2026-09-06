@@ -167,6 +167,10 @@ const CODEX_VERSION = "0.153.4";
 const MAX_CAPTURE_CHARACTERS = 128 * 1024;
 const MAX_CAPTURE_LINES = 240;
 const MAX_TEXT_ANSWER_CHARACTERS = 4_096;
+// Claude collapses bracketed-paste payloads at 800 characters. Until the
+// custom-text editor has the same placeholder proof as managed Send, keep a
+// semantic response strictly below that boundary.
+const MAX_CLAUDE_TEXT_ANSWER_CHARACTERS = 799;
 const ANSI_SEQUENCE_PATTERN =
   /[\u001B\u009B](?:(?:\[[0-?]*[ -/]*[@-~])|(?:\][^\u0007]*(?:\u0007|\u001B\\))|.)/gu;
 const UNSAFE_CONTROL_PATTERN =
@@ -762,7 +766,7 @@ function parseClaudeCustomTextEdit(
         {
           kind: "answer_text",
           single_line: true,
-          max_characters: MAX_TEXT_ANSWER_CHARACTERS
+          max_characters: MAX_CLAUDE_TEXT_ANSWER_CHARACTERS
         },
         { kind: "key", key: "C-m" }
       ]

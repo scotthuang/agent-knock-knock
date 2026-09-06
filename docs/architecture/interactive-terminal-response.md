@@ -133,7 +133,8 @@ Observed locally in an isolated tmux session:
 
 - single-select: digit selects and advances/submits;
 - multi-select: digits toggle checkboxes, then `Tab` advances to review;
-- Other/free text: select `Type something`, enter text, then Enter;
+- Other/free text: select `Type something`, enter a single-line response below
+  Claude's 800-character paste-collapse threshold, then Enter;
 - multi-question: a tab header shows checked/unanswered sections;
 - final review: `Submit answers` / `Cancel` is a distinct confirmation step;
 - Bash permission prompt: the exact four-row form has one-time Yes as the
@@ -142,9 +143,11 @@ Observed locally in an isolated tmux session:
 
 The local POC executes exact single-select rows (including the transition into
 `Type something`), the recaptured single-line custom-text editor, and the
-separate final Submit/Cancel review. It detects multi-select screens but keeps
-them `manual_required`: safely toggling several checkboxes requires a
-recapture after every toggle and is intentionally deferred. `Tab to amend`,
+separate final Submit/Cancel review. Custom text is capped at 799 characters;
+larger answers fail before dispatch reservation until the editor gains the
+same collapsed-paste proof as managed Send. It detects multi-select screens
+but keeps them `manual_required`: safely toggling several checkboxes requires
+a recapture after every toggle and is intentionally deferred. `Tab to amend`,
 persistent Yes, auto mode, resized/wrapped variants, and any changed menu shape
 also remain manual.
 
@@ -156,6 +159,8 @@ The installed client matches the current official TUI protocol:
   Other;
 - numeric selection advances a choice question;
 - optional notes/free-form answers use the composer;
+- semantic free-text dispatch crosses the verified 121ms paste-suppression
+  window before its sole Enter;
 - the exact multi-question free-form footer is handled one current step at a
   time;
 - unanswered-question confirmation is its own `Proceed` / `Go back` step.

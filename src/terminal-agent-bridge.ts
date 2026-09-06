@@ -3863,6 +3863,17 @@ export class TerminalAgentBridge {
       first.offer.projection,
       { now: this.now() }
     );
+    const planReason = terminalInteractionPlanPreflightReason(
+      validatedResponse,
+      first.offer.actionPlan
+    );
+    if (planReason) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        planReason,
+        first.offer
+      );
+    }
     const capabilityReason = terminalInteractionCapabilityReason(
       this.terminalProvider,
       first.terminalControl,
@@ -3976,10 +3987,12 @@ export class TerminalAgentBridge {
     }
     const answer = validatedResponse.answers[0];
     const outcome = await dispatchTerminalInteractionAnswer({
+      agent,
       provider: this.terminalProvider,
       terminalControl: verified,
       actionPlan: finalCapture.offer!.actionPlan,
       answer,
+      sleep: this.sleep,
       reverifyTerminalIdentity: async (currentControl) => {
         const reverified = await this.verifyTerminalIdentity(
           agent,
@@ -5404,6 +5417,9 @@ function terminalInteractionBridgeOffer(input: {
   const question = terminalInteractionQuestion(nativeInspection.question);
   const executable = nativeInspection.status === "actionable" &&
     nativeInspection.action_plan.kind !== "manual_only";
+  const responseUncertain =
+    input.runtime?.interactionDispatchState === "reserved" ||
+    input.runtime?.interactionDispatchState === "uncertain";
   const projection = validateTerminalInteractionProjection({
     schema: TERMINAL_INTERACTION_SCHEMA,
     version: TERMINAL_INTERACTION_VERSION,
@@ -5411,7 +5427,11 @@ function terminalInteractionBridgeOffer(input: {
     turn_id: turnId,
     agent: input.agent,
     kind: "questionnaire",
-    state: executable ? "pending" : "manual_required",
+    state: responseUncertain
+      ? "response_uncertain"
+      : executable
+        ? "pending"
+        : "manual_required",
     step: {
       index: nativeInspection.current_step,
       total: nativeInspection.total_steps
@@ -5419,7 +5439,7 @@ function terminalInteractionBridgeOffer(input: {
     questions: [question],
     expires_at: expiry,
     capabilities: {
-      respond: executable,
+      respond: executable && !responseUncertain,
       batch_response: false,
       free_text: question.response_kind === "free_text",
       multi_select: question.response_kind === "multi_select"
@@ -5523,6 +5543,27 @@ function terminalInteractionCapabilityReason(
   return missing.length > 0
     ? `terminal interaction capability preflight failed: ${missing.join(", ")}`
     : undefined;
+}
+
+function terminalInteractionPlanPreflightReason(
+  response: TerminalInteractionResponse,
+  plan: NativeQuestionnaireActionPlan
+): string | undefined {
+  const answer = response.answers[0];
+  if (plan.kind !== "free_text" || answer?.response_kind !== "free_text") {
+    return undefined;
+  }
+  const textStage = plan.stages[0];
+  if (
+    textStage?.kind !== "answer_text" ||
+    !Number.isSafeInteger(textStage.max_characters) ||
+    textStage.max_characters < 1
+  ) {
+    return "native free-text interaction has no verified input limit";
+  }
+  return answer.text.length <= textStage.max_characters
+    ? undefined
+    : `free-text answer exceeds the verified native limit of ${textStage.max_characters} characters`;
 }
 
 function blockedTerminalInteractionResponse(
@@ -5676,6 +5717,7 @@ async function sendTerminalInteractionKeys(
 }
 
 async function dispatchTerminalInteractionFreeText(input: {
+  agent: ExecutorKind;
   provider: TerminalControlProvider;
   terminalControl: TerminalControlRef;
   plan: Extract<NativeQuestionnaireActionPlan, { kind: "free_text" }>;
@@ -5683,6 +5725,7 @@ async function dispatchTerminalInteractionFreeText(input: {
   reverifyTerminalIdentity: (
     terminalControl: TerminalControlRef
   ) => Promise<TerminalControlRef>;
+  sleep: (milliseconds: number) => Promise<void>;
 }): Promise<"submitted_or_advanced"> {
   const [textStage, enterStage] = input.plan.stages;
   if (
@@ -5710,6 +5753,17 @@ async function dispatchTerminalInteractionFreeText(input: {
       "terminal interaction text dispatch is uncertain"
     );
   }
+  if (input.agent === "codex") {
+    try {
+      await input.sleep(CODEX_PASTE_ENTER_SETTLE_MS);
+    } catch (error) {
+      throw terminalInteractionReservedError(
+        "text_uncertain",
+        error,
+        "terminal interaction paste-settle outcome is uncertain"
+      );
+    }
+  }
   let enterControl: TerminalControlRef;
   try {
     enterControl = await input.reverifyTerminalIdentity(input.terminalControl);
@@ -5734,6 +5788,7 @@ async function dispatchTerminalInteractionFreeText(input: {
 }
 
 async function dispatchTerminalInteractionAnswer(input: {
+  agent: ExecutorKind;
   provider: TerminalControlProvider;
   terminalControl: TerminalControlRef;
   actionPlan: NativeQuestionnaireActionPlan;
@@ -5741,6 +5796,7 @@ async function dispatchTerminalInteractionAnswer(input: {
   reverifyTerminalIdentity: (
     terminalControl: TerminalControlRef
   ) => Promise<TerminalControlRef>;
+  sleep: (milliseconds: number) => Promise<void>;
 }): Promise<NonNullable<TerminalInteractionResponseExecution["outcome"]>> {
   if (
     input.actionPlan.kind === "single_select" &&
@@ -5767,11 +5823,13 @@ async function dispatchTerminalInteractionAnswer(input: {
     input.answer.response_kind === "free_text"
   ) {
     return dispatchTerminalInteractionFreeText({
+      agent: input.agent,
       provider: input.provider,
       terminalControl: input.terminalControl,
       plan: input.actionPlan,
       answer: input.answer,
-      reverifyTerminalIdentity: input.reverifyTerminalIdentity
+      reverifyTerminalIdentity: input.reverifyTerminalIdentity,
+      sleep: input.sleep
     });
   }
   throw new TerminalInteractionDispatchReservedError(

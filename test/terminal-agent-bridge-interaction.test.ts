@@ -93,6 +93,22 @@ Ready to submit your answers?
   2. Cancel
 `;
 
+const CLAUDE_CUSTOM_TEXT_EDIT = `
+ ☐ Color
+
+Which color do you prefer?
+
+  1. Red
+     The color red
+  2. Blue
+     The color blue
+❯ 3. Type something.
+────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel
+`;
+
 function inspection(screen: string): TerminalScreenInspection {
   return {
     activity: { state: "idle", reason: "test questionnaire" },
@@ -198,6 +214,7 @@ async function fixture(
   options: {
     verifyIdentity?: TerminalIdentityVerifier;
     agent?: "codex" | "claude";
+    sleep?: (milliseconds: number) => Promise<void>;
   } = {}
 ): Promise<{
   adapter: TerminalAgentAdapter;
@@ -217,6 +234,7 @@ async function fixture(
     registry: createTerminalAgentAdapterRegistry([adapter]),
     terminalProvider: provider,
     verifyIdentity: options.verifyIdentity,
+    sleep: options.sleep,
     now: () => new Date(NOW)
   });
   return { adapter, provider, bridge, control };
@@ -323,6 +341,17 @@ test("status requires agent version, safe Turn id, and canonical process identit
     runtime: RUNTIME
   });
   assert.equal(legacy.interaction_state, undefined);
+});
+
+test("status makes a reserved or uncertain interaction dispatch non-retryable", async () => {
+  const { bridge, control } = await fixture();
+  for (const interactionDispatchState of ["reserved", "uncertain"] as const) {
+    const status = await bridge.status("codex", control, {
+      runtime: { ...RUNTIME, interactionDispatchState }
+    });
+    assert.equal(status.interaction_state?.state, "response_uncertain");
+    assert.equal(status.interaction_state?.capabilities.respond, false);
+  }
 });
 
 test("respondInteraction recaptures around hooks and dispatches one semantic key", async () => {
@@ -444,6 +473,7 @@ test("malformed semantic answers are rejected before terminal input", async () =
 test("free text sends text then one Enter and returns no transport details", async () => {
   let providerForVerification: InteractionProvider | undefined;
   let verifiedAfterText = false;
+  const settleDelays: number[] = [];
   const { bridge, provider, control } = await fixture(CODEX_FREEFORM, {
     async verifyIdentity(request) {
       if (providerForVerification?.operations.some((operation) =>
@@ -451,6 +481,9 @@ test("free text sends text then one Enter and returns no transport details", asy
         verifiedAfterText = true;
       }
       return { terminalControl: request.terminalControl };
+    },
+    async sleep(milliseconds) {
+      settleDelays.push(milliseconds);
     }
   });
   providerForVerification = provider;
@@ -489,7 +522,47 @@ test("free text sends text then one Enter and returns no transport details", asy
   assert.equal(result.responded, true);
   assert.equal(result.outcome, "submitted_or_advanced");
   assert.equal(verifiedAfterText, true);
+  assert.deepEqual(settleDelays, [121]);
   assert.doesNotMatch(JSON.stringify(result), /C-m|Use the isolated/u);
+});
+
+test("Claude oversized custom text is blocked before reservation or input", async () => {
+  const { bridge, provider, control } = await fixture(
+    CLAUDE_CUSTOM_TEXT_EDIT,
+    { agent: "claude" }
+  );
+  const runtime = { ...RUNTIME, agentVersion: "2.1.263" };
+  const status = await bridge.status("claude", control, { runtime });
+  const projection = status.interaction_state;
+  const fingerprint = status.interaction_prompt_fingerprint;
+  assert.ok(projection);
+  assert.ok(fingerprint);
+  provider.clearOperations();
+  let reserved = false;
+  const result = await bridge.respondInteraction("claude", control, {
+    interaction_id: projection.interaction_id,
+    turn_id: projection.turn_id,
+    answers: [{
+      question_id: projection.questions[0]!.question_id,
+      response_kind: "free_text",
+      text: "x".repeat(800)
+    }]
+  }, {
+    agentVersion: "2.1.263",
+    expectedFingerprint: fingerprint,
+    expectedExpiresAt: projection.expires_at,
+    runtime,
+    beforeDispatch() {
+      reserved = true;
+    }
+  });
+
+  assert.equal(result.responded, false);
+  assert.equal(result.blocked, true);
+  assert.match(result.reason ?? "", /verified native limit of 799/u);
+  assert.equal(reserved, false);
+  assert.equal(provider.operations.some((operation) =>
+    operation.kind === "text" || operation.kind === "keys"), false);
 });
 
 test("free text identity drift after text is uncertain and never sends Enter", async () => {

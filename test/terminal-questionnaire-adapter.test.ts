@@ -384,7 +384,7 @@ test("Claude exact custom-text edit state exposes bounded free text", () => {
   assert.deepEqual(parsed.action_plan, {
     kind: "free_text",
     stages: [
-      { kind: "answer_text", single_line: true, max_characters: 4_096 },
+      { kind: "answer_text", single_line: true, max_characters: 799 },
       { kind: "key", key: "C-m" }
     ]
   });
