@@ -160,7 +160,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 23);
+    assert.equal(listed.action_contracts.version, 24);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -324,6 +324,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         "resume_thread",
         "reconcile_binding",
         "respond",
+        "respond_interaction",
         "status",
         "approve",
         "cancel",
@@ -335,6 +336,20 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.equal(
       listed.action_contracts.actions.send.target_argument,
       "session_id"
+    );
+    assert.deepEqual(
+      listed.action_contracts.actions.respond_interaction.required,
+      ["turn_id", "interaction_id", "answers"]
+    );
+    assert.equal(
+      listed.action_contracts.actions.respond_interaction
+        .requires_same_controller_conversation,
+      true
+    );
+    assert.equal(
+      listed.action_contracts.actions.respond_interaction
+        .uncertain_retry_allowed,
+      false
     );
     assert.deepEqual(
       listed.action_contracts.actions.retry_submission,

@@ -286,7 +286,7 @@ lease, deduplication, and settlement behavior.
 The Host Profile, Host ID/version, trusted session, executable, argv,
 credentials, environment allowlist, acknowledgement rules, and Profile
 selection all belong to the administrator/Host boundary. None is accepted from
-the 16 model-facing semantic tool calls. MCP inputs are validated against the
+the 17 model-facing semantic tool calls. MCP inputs are validated against the
 existing closed tool schemas before the shared tool implementation runs.
 
 The Bridge or Host-native connector privately passes a fingerprinted Profile

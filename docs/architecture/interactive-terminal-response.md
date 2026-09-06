@@ -1,6 +1,6 @@
 # Interactive terminal response design
 
-Status: local POC implemented; not a published package contract
+Status: implemented public package contract
 
 ## Problem
 
@@ -78,7 +78,7 @@ The OpenClaw tool should be named
 ordinary `respond({turn_id, request})`, which injects a new composer message,
 and from `approve({turn_id, decision})`, which resolves a permission prompt.
 
-The first local implementation is step-oriented: one response call resolves
+The initial public implementation is step-oriented: one response call resolves
 only the currently projected step. AKK recaptures the next native question and
 publishes a new `interaction_id`. This makes multi-question and final-confirm
 flows explicit and avoids a blind batch of terminal input.
@@ -141,7 +141,7 @@ Observed locally in an isolated tmux session:
   current row and `4. No`; `Escape` cancels the dialog and is not modeled as
   semantic reject.
 
-The local POC executes exact single-select rows (including the transition into
+The initial public implementation executes exact single-select rows (including the transition into
 `Type something`), the recaptured single-line custom-text editor, and the
 separate final Submit/Cancel review. Custom text is capped at 799 characters;
 larger answers fail before dispatch reservation until the editor gains the
@@ -171,12 +171,12 @@ and tests are added.
 
 ## Delivery stages
 
-1. **Permission parity (implemented locally)**: expose `reject` only when an
+1. **Permission parity (implemented)**: expose `reject` only when an
    adapter proves an exact safe native reject action; retain `approve_once`
    compatibility.
-2. **Read-only projection (implemented locally)**: detect and report supported
+2. **Read-only projection (implemented)**: detect and report supported
    questionnaire steps while changed or unsupported shapes remain manual.
-3. **Local response POC (implemented locally)**: enable one current
+3. **Initial public response contract (implemented)**: enable one current
    single-select, free-text, or confirmation step with pre-input fencing,
    durable one-shot reservation, and uncertain-result audit.
 4. **Expanded native coverage (not implemented)**: multi-select, notes,

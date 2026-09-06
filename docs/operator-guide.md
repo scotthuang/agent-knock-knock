@@ -46,7 +46,7 @@ prefilled semantic IDs from a fresh list.
 
 ## Reliable Send
 
-The v23 `action_contracts` expose model-facing semantic IDs only. The trusted
+The v24 `action_contracts` expose model-facing semantic IDs only. The trusted
 adapter privately derives and revalidates terminal, process, binding, native
 thread, composer, approval, handoff, revision, and compare-and-swap evidence.
 Callers never supply those opaque fences.
@@ -56,6 +56,14 @@ proves exact request acceptance, monitors that Turn, and returns completion or
 attention callbacks to the initiating Host. A completed `turn_id` is history,
 not a destination for another task. A question inside a live Turn uses the
 advertised `respond` action with that Turn's `turn_id`.
+
+Native questionnaire prompts use `respond_interaction`, not ordinary
+`respond`. First obtain the current managed Turn's `interaction_state` from
+Status in the same controller conversation, show that exact step to the user,
+and submit only its advertised semantic question/option IDs or bounded typed
+text. One call resolves one current step. Refresh Status before every later
+question or final confirmation; never respond to `manual_required`, expired,
+changed, secret-bearing, or uncertain state.
 
 The user-priority `terminal_user_explicit` path requires one exact live
 physical terminal/process and a scanned, non-blocked approval state. Broken
