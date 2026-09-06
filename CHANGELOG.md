@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.29 - 2026-09-07
+
+### Fixed
+
+- Let an exact-empty managed Claude tmux send recognize the stable `[Pasted text #N +M lines]` composer produced by its single successful multiline paste. AKK now revalidates the same terminal incarnation, line count, closed frame/footer profile, and placeholder before dispatching exactly one Enter, instead of stalling while the collapsed draft is safe to submit.
+
 ## 0.12.28 - 2026-09-04
 
 ### Security
