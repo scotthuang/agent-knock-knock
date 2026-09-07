@@ -182,8 +182,10 @@ function scenarioFixture(
     {
       command: "send",
       args: [
-        "--session",
-        SESSION_B,
+        "--conversation",
+        terminalId,
+        "--expected-terminal-token",
+        "terminal-fence-b-1",
         "--message",
         [
           `AKK lifecycle smoke sentinel ${nonce}.`,
@@ -406,14 +408,15 @@ function terminalRow(input: {
       list_resumable_threads: {
         arguments: { terminal_id: input.terminalId }
       },
-      send: input.sessionId
-        ? {
-            arguments: { session_id: input.sessionId }
-          }
-        : {
-            arguments: { selector: input.terminalId },
-            missing_required: ["message"]
-          }
+      send: {
+        tool: "agent_knock_knock_send",
+        scope: "terminal_user_explicit",
+        arguments: {
+          selector: input.terminalId,
+          expected_terminal_token: `terminal-${input.bindingFence}`
+        },
+        missing_required: ["request"]
+      }
     }
   };
 }
@@ -472,8 +475,10 @@ test("runs the strict Codex lifecycle chain once and emits only allowlisted evid
   const candidate = (
     fixture.calls[6].result as { threads: Array<Record<string, unknown>> }
   ).threads[0];
-  assert.deepEqual(initialSend.missing_required, ["message"]);
+  assert.deepEqual(initialSend.missing_required, ["request"]);
   assert.equal(initialSend.arguments.session_id, undefined);
+  assert.equal(initialSend.arguments.selector, fixture.terminalId);
+  assert.equal(typeof initialSend.arguments.expected_terminal_token, "string");
   assert.equal(candidate.managed_session_id, undefined);
   const client = new ScriptedAkkClient(fixture.calls);
   const result = await runLifecycleScenario(
@@ -516,7 +521,93 @@ test("runs the strict Codex lifecycle chain once and emits only allowlisted evid
   assert.equal(serialized.includes(STATE_PATH), false);
   assert.equal(serialized.includes(EVENT_LOG_PATH), false);
   assert.equal(serialized.includes("candidate-codex"), false);
+  assert.equal(serialized.includes("terminal-fence-b-1"), false);
   client.assertComplete();
+});
+
+test("accepts the exact-Session send action without weakening result checks", async () => {
+  const fixture = scenarioFixture("claude");
+  rowFrom(fixture.calls[2]).available_actions.send = {
+    tool: "agent_knock_knock_send",
+    arguments: { session_id: SESSION_B },
+    missing_required: ["request"]
+  };
+  const messageIndex = fixture.calls[3].args.indexOf("--message");
+  assert.notEqual(messageIndex, -1);
+  fixture.calls[3].args = [
+    "--session",
+    SESSION_B,
+    ...fixture.calls[3].args.slice(messageIndex)
+  ];
+  const client = new ScriptedAkkClient(fixture.calls);
+  const result = await runLifecycleScenario(
+    fixture.config,
+    dependencies(client, [fixture.nonce])
+  );
+
+  assert.equal(result.status, "passed");
+  assert.equal(JSON.stringify(result).includes("terminal-fence-b-1"), false);
+  client.assertComplete();
+});
+
+test("post-New send action parsing fails closed on incomplete or mixed authority", async (t) => {
+  const cases: Array<{
+    name: string;
+    mutate: (action: Record<string, any>) => void;
+  }> = [
+    {
+      name: "missing terminal token",
+      mutate: (action) => { delete action.arguments.expected_terminal_token; }
+    },
+    {
+      name: "wrong terminal selector",
+      mutate: (action) => { action.arguments.selector = "terminal:other"; }
+    },
+    {
+      name: "mixed Session and terminal selectors",
+      mutate: (action) => { action.arguments.session_id = SESSION_B; }
+    },
+    {
+      name: "wrong action scope",
+      mutate: (action) => { action.scope = "session_exact"; }
+    },
+    {
+      name: "wrong action tool",
+      mutate: (action) => { action.tool = "other_send"; }
+    },
+    {
+      name: "wrong required request field",
+      mutate: (action) => { action.missing_required = ["message"]; }
+    },
+    {
+      name: "extra terminal argument",
+      mutate: (action) => { action.arguments.terminal_id = "terminal:other"; }
+    },
+    {
+      name: "wrong managed Session",
+      mutate: (action) => {
+        delete action.scope;
+        action.arguments = { session_id: "session-other" };
+      }
+    }
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const fixture = scenarioFixture("claude");
+      entry.mutate(rowFrom(fixture.calls[2]).available_actions.send);
+      const client = new ScriptedAkkClient(fixture.calls.slice(0, 3));
+      const result = await runLifecycleScenario(
+        fixture.config,
+        dependencies(client, [])
+      );
+
+      assert.equal(result.status, "uncertain");
+      assert.equal(result.error_code, "preflight_action");
+      assert.equal(client.calls.some((call) => call.command === "send"), false);
+      client.assertComplete();
+    });
+  }
 });
 
 test(

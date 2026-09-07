@@ -207,7 +207,22 @@ const NATIVE_THREAD_ID_PATTERN =
 interface TerminalAction {
   terminalId: string;
   expectedBindingToken?: string;
-  sessionId?: string;
+}
+
+type TerminalSendTarget =
+  | {
+      kind: "session_exact";
+      sessionId: string;
+    }
+  | {
+      kind: "terminal_user_explicit";
+      terminalId: string;
+      expectedTerminalToken: string;
+    };
+
+interface TerminalSendAction {
+  managedSessionId: string;
+  target: TerminalSendTarget;
 }
 
 type InternalTerminalEvidence = Omit<
@@ -232,7 +247,7 @@ interface InternalTerminalSnapshot {
   recentTurn?: Record<string, unknown> | null;
   newThreadAction?: TerminalAction;
   listResumableAction?: TerminalAction;
-  sendAction?: TerminalAction;
+  sendAction?: TerminalSendAction;
 }
 
 interface ResumeCandidateAction {
@@ -429,7 +444,8 @@ export async function runLifecycleScenario(
         snapshotEvidence.binding_generation !== 1 ||
         transition.turn_created !== false ||
         snapshotEvidence.turn_count !== 0 ||
-        snapshot.sendAction?.sessionId !== snapshotEvidence.session_id ||
+        snapshot.sendAction?.managedSessionId !==
+          snapshotEvidence.session_id ||
         snapshotEvidence.binding_fence === startEvidence.binding_fence ||
         snapshotEvidence.binding_id ===
           (startEvidence.binding_id ?? startEvidence.binding_fence)
@@ -456,8 +472,9 @@ export async function runLifecycleScenario(
     partial.activeAfterNew = afterNewEvidence;
 
     const sent = await runStep("send", "mutation", async () => {
-      const sessionId = afterNew.sendAction?.sessionId;
-      if (!sessionId || sessionId !== afterNew.evidence.session_id) {
+      const sendAction = afterNew.sendAction;
+      const sessionId = afterNew.evidence.session_id;
+      if (!sendAction || !sessionId || sendAction.managedSessionId !== sessionId) {
         abort("send_invalid");
       }
       const nonce = nonceFactory();
@@ -473,8 +490,7 @@ export async function runLifecycleScenario(
         dependencies.client,
         "send",
         [
-          "--session",
-          sessionId,
+          ...sendTargetArgs(sendAction.target),
           "--message",
           smokeRequest,
           "--background",
@@ -1110,39 +1126,28 @@ function selectTerminalActions(
 ): {
   newThreadAction: TerminalAction | undefined;
   listResumableAction: TerminalAction | undefined;
-  sendAction: TerminalAction | undefined;
+  sendAction: TerminalSendAction | undefined;
 } {
   const actions = recordValue(row.available_actions, "preflight_action");
   const newThreadAction = actionFor(actions, "new_thread", terminalId, {
-    bindingToken: true,
-    sessionId: false
+    bindingToken: true
   });
   const listResumableAction = actionFor(
     actions,
     "list_resumable_threads",
     terminalId,
-    { bindingToken: false, sessionId: false }
+    { bindingToken: false }
   );
-  // An unmanaged pane advertises Send with missing_required metadata, but it
-  // cannot include a Session until New materializes the first binding. Do not
-  // parse that intentionally incomplete action during the initial preflight.
+  // An unmanaged pane may advertise terminal-user-explicit Send, but this
+  // scenario requires New to materialize the managed Session whose Turn will
+  // be monitored. Do not accept the initial action as managed send authority.
   const sendAction = requirements.requireSend
-    ? actionFor(actions, "send", terminalId, {
-        bindingToken: false,
-        sessionId: true
-      })
+    ? sendActionFor(actions, terminalId, sessionId)
     : undefined;
   if (
     (requirements.requireNewThread && !newThreadAction) ||
     (requirements.requireListResumable && !listResumableAction) ||
     (requirements.requireSend && !sendAction)
-  ) {
-    abort("preflight_action");
-  }
-  if (
-    sendAction?.sessionId &&
-    sessionId &&
-    sendAction.sessionId !== sessionId
   ) {
     abort("preflight_action");
   }
@@ -1163,7 +1168,7 @@ function actionFor(
   actions: Record<string, unknown>,
   name: string,
   terminalId: string,
-  requirements: { bindingToken: boolean; sessionId: boolean }
+  requirements: { bindingToken: boolean }
 ): TerminalAction | undefined {
   const value = actions[name];
   if (value === undefined) {
@@ -1172,10 +1177,11 @@ function actionFor(
   if (!isRecord(value) || !isRecord(value.arguments)) {
     abort("preflight_action");
   }
-  const actionTerminalId = requirements.sessionId
-    ? terminalId
-    : requiredString(value.arguments.terminal_id, "preflight_action");
-  if (!requirements.sessionId && actionTerminalId !== terminalId) {
+  const actionTerminalId = requiredString(
+    value.arguments.terminal_id,
+    "preflight_action"
+  );
+  if (actionTerminalId !== terminalId) {
     abort("preflight_action");
   }
   const expectedBindingToken = requirements.bindingToken
@@ -1184,14 +1190,82 @@ function actionFor(
         "preflight_action"
       )
     : undefined;
-  const sessionId = requirements.sessionId
-    ? requiredString(value.arguments.session_id, "preflight_action")
-    : undefined;
   return {
     terminalId: actionTerminalId,
-    ...(expectedBindingToken ? { expectedBindingToken } : {}),
-    ...(sessionId ? { sessionId } : {})
+    ...(expectedBindingToken ? { expectedBindingToken } : {})
   };
+}
+
+function sendActionFor(
+  actions: Record<string, unknown>,
+  terminalId: string,
+  managedSessionId: string | null
+): TerminalSendAction | undefined {
+  const value = actions.send;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!managedSessionId || !isRecord(value) || !isRecord(value.arguments)) {
+    abort("preflight_action");
+  }
+  if (
+    value.tool !== "agent_knock_knock_send" ||
+    !Array.isArray(value.missing_required) ||
+    value.missing_required.length !== 1 ||
+    value.missing_required[0] !== "request"
+  ) {
+    abort("preflight_action");
+  }
+  const argumentKeys = Object.keys(value.arguments).sort();
+  const sessionId = stringValue(value.arguments.session_id);
+  const selector = stringValue(value.arguments.selector);
+  const expectedTerminalToken = stringValue(
+    value.arguments.expected_terminal_token
+  );
+  if (
+    sessionId &&
+    argumentKeys.length === 1 &&
+    argumentKeys[0] === "session_id" &&
+    value.scope === undefined
+  ) {
+    if (sessionId !== managedSessionId) {
+      abort("preflight_action");
+    }
+    return {
+      managedSessionId,
+      target: { kind: "session_exact", sessionId }
+    };
+  }
+  if (
+    !sessionId &&
+    argumentKeys.length === 2 &&
+    argumentKeys[0] === "expected_terminal_token" &&
+    argumentKeys[1] === "selector" &&
+    selector === terminalId &&
+    expectedTerminalToken &&
+    value.scope === "terminal_user_explicit"
+  ) {
+    return {
+      managedSessionId,
+      target: {
+        kind: "terminal_user_explicit",
+        terminalId,
+        expectedTerminalToken
+      }
+    };
+  }
+  abort("preflight_action");
+}
+
+function sendTargetArgs(target: TerminalSendTarget): string[] {
+  return target.kind === "session_exact"
+    ? ["--session", target.sessionId]
+    : [
+        "--conversation",
+        target.terminalId,
+        "--expected-terminal-token",
+        target.expectedTerminalToken
+      ];
 }
 
 function assertNoUnresolvedManagedTurns(
