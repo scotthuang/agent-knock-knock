@@ -553,6 +553,28 @@ const skillSource = path.join(
   "SKILL.md"
 );
 
+test("OpenClaw branding uses the portable fixed icon asset", () => {
+  const manifest = readManifest();
+  assert.equal(Object.hasOwn(manifest, "icon"), false);
+
+  const icon = fs.readFileSync(path.join(packageRoot, "assets", "icon.png"));
+  const documentationIcon = fs.readFileSync(
+    path.join(packageRoot, "docs", "assets", "agent-knock-knock-icon.png")
+  );
+  assert.deepEqual(icon, documentationIcon);
+  assert.deepEqual(
+    [...icon.subarray(0, 8)],
+    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+  );
+  assert.equal(icon.readUInt32BE(16), 512);
+  assert.equal(icon.readUInt32BE(20), 512);
+
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")
+  ) as { files?: string[] };
+  assert.ok(packageJson.files?.includes("assets/icon.png"));
+});
+
 test("OpenClaw runtime registrations match the published manifest", () => {
   const manifest = readManifest();
   const registeredCommands: string[] = [];
@@ -3980,6 +4002,11 @@ test("bundled OpenClaw skills exist and are included in the npm artifact", () =>
       `${documentationPath} must be included for ClawHub rendering and first-run help`
     );
   }
+  assert.equal(
+    packedFiles.has("assets/icon.png"),
+    true,
+    "assets/icon.png must be included for OpenClaw plugin branding"
+  );
 });
 
 test("callback delivery uses the grouped OpenClaw session workflow API", async () => {
