@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.32 - 2026-09-07
+
+### Fixed
+
+- Adopt OpenClaw 2026.9.2's portable `assets/icon.png` plugin branding convention and remove the unsupported top-level manifest icon URL, keeping the AKK icon packaged locally while restoring a warning-free ClawHub validation result.
+
 ## 0.12.31 - 2026-09-07
 
 ### Added
