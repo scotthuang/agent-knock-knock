@@ -6285,59 +6285,139 @@ test("live-gate New rejects an unmanaged Codex origin that is not persisted", as
   }
 });
 
-test("live-gate New accepts a persisted unmanaged Codex origin", async () => {
-  const fixture = createNoRolloutFixture({ persistedCandidate: true });
-  try {
-    const listed = await runCli([
-      "list",
-      ...codexNoRolloutStoreArgs(fixture),
-      "--no-approval-scan"
-    ], fixture.environment);
-    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
-    const terminal = JSON.parse(listed.stdout).terminals[0];
-    const expectedBindingToken = terminal.lifecycle_binding_token;
-    assert.equal(typeof expectedBindingToken, "string");
+test("live-gate New first Send accepts B beside seed A and rejects unknown C", async () => {
+  for (const inventoryCase of ["exact_companion", "unknown_third"] as const) {
+    const fixture = createNoRolloutFixture({ persistedCandidate: true });
+    try {
+      enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
+      const listed = await runCli([
+        "list",
+        ...codexNoRolloutStoreArgs(fixture),
+        "--no-approval-scan"
+      ], fixture.environment);
+      assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+      const terminal = JSON.parse(listed.stdout).terminals[0];
+      const expectedBindingToken = terminal.lifecycle_binding_token;
+      assert.equal(typeof expectedBindingToken, "string");
 
-    const transitioned = await runCli([
-      "new-thread",
-      "--terminal",
-      fixture.terminalId,
-      "--expected-binding-token",
-      expectedBindingToken,
-      "--require-restorable-origin",
-      ...codexNoRolloutStoreArgs(fixture)
-    ], fixture.environment);
+      const transitioned = await runCli([
+        "new-thread",
+        "--terminal",
+        fixture.terminalId,
+        "--expected-binding-token",
+        expectedBindingToken,
+        "--require-restorable-origin",
+        ...codexNoRolloutStoreArgs(fixture)
+      ], fixture.environment);
 
-    assert.equal(
-      transitioned.status,
-      0,
-      transitioned.stderr || transitioned.stdout
-    );
-    const transitionOutput = JSON.parse(transitioned.stdout);
-    assert.equal(
-      transitionOutput.status,
-      "committed",
-      transitioned.stdout
-    );
-    assert.equal(transitionOutput.native_thread_id, EXTERNAL_THREAD_ID);
-    const literalSends = readTmuxCalls(fixture.tmuxCallsPath)
-      .filter((call) =>
-        call.args[0] === "send-keys" && call.args.includes("-l")
-      )
-      .map((call) => call.args.at(-1));
-    assert.deepEqual(literalSends, ["/status", "/clear", "/status"]);
-    assert.equal(listConversations(fixture.storeDir).length, 0);
-    assert.equal(listManagedSessions(fixture.storeDir).length, 1);
-    const transitions = fs.readdirSync(
-      nativeThreadTransitionsDir(fixture.storeDir)
-    );
-    assert.equal(transitions.length, 1);
-    assert.equal(
-      loadNativeThreadTransition(fixture.storeDir, transitions[0]).status,
-      "committed"
-    );
-  } finally {
-    fixture.cleanup();
+      assert.equal(
+        transitioned.status,
+        0,
+        transitioned.stderr || transitioned.stdout
+      );
+      const transitionOutput = JSON.parse(transitioned.stdout);
+      assert.equal(
+        transitionOutput.status,
+        "committed",
+        transitioned.stdout
+      );
+      assert.equal(transitionOutput.native_thread_id, EXTERNAL_THREAD_ID);
+      const literalSends = readTmuxCalls(fixture.tmuxCallsPath)
+        .filter((call) =>
+          call.args[0] === "send-keys" && call.args.includes("-l")
+        )
+        .map((call) => call.args.at(-1));
+      assert.deepEqual(literalSends, ["/status", "/clear", "/status"]);
+      assert.equal(listConversations(fixture.storeDir).length, 0);
+      assert.equal(listManagedSessions(fixture.storeDir).length, 1);
+      const transitions = fs.readdirSync(
+        nativeThreadTransitionsDir(fixture.storeDir)
+      );
+      assert.equal(transitions.length, 1);
+      assert.equal(
+        loadNativeThreadTransition(fixture.storeDir, transitions[0]).status,
+        "committed"
+      );
+
+      const target = loadManagedSession(
+        fixture.storeDir,
+        String(transitionOutput.session_id)
+      );
+      assert.equal(target.binding?.native_thread_id, EXTERNAL_THREAD_ID);
+      assert.equal(target.binding?.native_process.rollout, undefined);
+      assert.equal(target.last_transition_id, transitions[0]);
+
+      const message = inventoryCase === "exact_companion"
+        ? "Accept B while the exact seed A rollout remains open."
+        : "Reject B when unknown root C appears after Enter.";
+      fixture.acceptanceNativeThreadIdsOnEnter = [EXTERNAL_THREAD_ID];
+      fixture.additionalOpenRootNativeThreadIdsOnEnter =
+        inventoryCase === "unknown_third"
+          ? [SECOND_EXTERNAL_THREAD_ID]
+          : [];
+      const callsBeforeSend = readTmuxCalls(fixture.tmuxCallsPath).length;
+      const sent = await runCli([
+        "send",
+        "--session",
+        target.session_id,
+        "--managed-only",
+        "--message",
+        message,
+        ...codexNoRolloutBackgroundSendArgs(fixture)
+      ], codexNativeAcceptanceEnv(fixture.environment));
+      assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+      const output = JSON.parse(sent.stdout);
+      if (inventoryCase === "exact_companion") {
+        assert.equal(output.delivered, true, sent.stdout);
+        assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+        assert.equal(output.conversation.native_thread_id, EXTERNAL_THREAD_ID);
+        const acceptedTurn = listConversations(fixture.storeDir).find((turn) =>
+          turn.turn_id === output.turn_id
+        );
+        assert.ok(acceptedTurn);
+        const acceptanceAnchor =
+          (acceptedTurn.native_session_takeover as Record<string, any>)
+            .codex_rollout_acceptance_anchor;
+        assert.equal(
+          acceptanceAnchor.version,
+          1
+        );
+        assert.equal(acceptanceAnchor.native_thread_id, EXTERNAL_THREAD_ID);
+        assert.deepEqual(
+          fixture.openRootRollouts?.map((root) => root.nativeThreadId),
+          [NATIVE_THREAD_ID, EXTERNAL_THREAD_ID]
+        );
+      } else {
+        assert.equal(output.delivered, false, sent.stdout);
+        assert.equal(output.status, "submission_uncertain", sent.stdout);
+        assert.equal(output.submission_outcome, "uncertain", sent.stdout);
+        assert.equal(output.do_not_retry, true, sent.stdout);
+        assert.deepEqual(
+          fixture.openRootRollouts?.map((root) => root.nativeThreadId),
+          [NATIVE_THREAD_ID, EXTERNAL_THREAD_ID, SECOND_EXTERNAL_THREAD_ID]
+        );
+      }
+      const taskDispatchCalls = readTmuxCalls(fixture.tmuxCallsPath)
+        .slice(callsBeforeSend)
+        .filter((call) => call.args[0] === "send-keys")
+        .map((call) => call.args);
+      assert.deepEqual(taskDispatchCalls,
+        [
+          ["send-keys", "-t", fixture.inputTarget, "-l", "/status"],
+          ["send-keys", "-t", fixture.inputTarget, "C-m"],
+          ["send-keys", "-t", fixture.inputTarget, "-l", message],
+          ["send-keys", "-t", fixture.inputTarget, "C-m"]
+        ]
+      );
+      // Strict Session identity refresh owns the /status pair above. The task
+      // transport itself must remain exactly one literal write plus Enter.
+      assert.deepEqual(taskDispatchCalls.slice(-2), [
+        ["send-keys", "-t", fixture.inputTarget, "-l", message],
+        ["send-keys", "-t", fixture.inputTarget, "C-m"]
+      ]);
+    } finally {
+      fixture.cleanup();
+    }
   }
 });
 
@@ -6802,6 +6882,7 @@ interface NoRolloutFixture {
     fd: string;
   }>;
   acceptanceNativeThreadIdsOnEnter?: string[];
+  additionalOpenRootNativeThreadIdsOnEnter?: string[];
   activeNativeThreadId: string;
   activeRolloutPath: string;
   viewportColumns: number | null;
@@ -8136,6 +8217,7 @@ interface FixtureMutableCheckpoint {
     fd: string;
   }>;
   acceptanceNativeThreadIdsOnEnter?: string[];
+  additionalOpenRootNativeThreadIdsOnEnter?: string[];
   clockMs: number;
   runtimeLogCount: number;
   ttyViewportInspectionCount: number;
@@ -8255,6 +8337,12 @@ function fixtureMutableCheckpoint(
           acceptanceNativeThreadIdsOnEnter:
             [...fixture.acceptanceNativeThreadIdsOnEnter]
         }),
+    ...(fixture.additionalOpenRootNativeThreadIdsOnEnter === undefined
+      ? {}
+      : {
+          additionalOpenRootNativeThreadIdsOnEnter:
+            [...fixture.additionalOpenRootNativeThreadIdsOnEnter]
+        }),
     clockMs: fixture.clockMs,
     runtimeLogCount: fixture.runtimeLogs.length,
     ttyViewportInspectionCount: fixture.ttyViewportInspectionPids.length
@@ -8284,6 +8372,10 @@ function restoreFixtureMutableCheckpoint(
     checkpoint.acceptanceNativeThreadIdsOnEnter === undefined
       ? undefined
       : [...checkpoint.acceptanceNativeThreadIdsOnEnter];
+  fixture.additionalOpenRootNativeThreadIdsOnEnter =
+    checkpoint.additionalOpenRootNativeThreadIdsOnEnter === undefined
+      ? undefined
+      : [...checkpoint.additionalOpenRootNativeThreadIdsOnEnter];
   fixture.clockMs = checkpoint.clockMs;
   fixture.runtimeLogs.length = checkpoint.runtimeLogCount;
   fixture.ttyViewportInspectionPids.length =
@@ -9137,6 +9229,14 @@ function runInProcessTmux(
             codexVersion: fixture.codexVersion,
             timestamp: new Date(nowMs).toISOString()
           }
+        );
+      }
+      for (const nativeThreadId of
+        fixture.additionalOpenRootNativeThreadIdsOnEnter ?? []) {
+        ensureFixtureCandidateRollout(
+          fixture,
+          nativeThreadId,
+          new Date(nowMs).toISOString()
         );
       }
       fs.writeFileSync(fixture.screenPath, "Working\n");
