@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.34 - 2026-09-08
+
+### Fixed
+
+- Recognize Codex `0.153.4` questionnaire footer tips when the terminal wraps them across exact tip boundaries, and accept the verified `enter to submit all` footer on the final option or free-text question, so multi-step questionnaires remain actionable instead of falling back to `manual_required`.
+
+### Security
+
+- Keep questionnaire footer matching fail-closed: only exact known tips in their expected order are accepted, while the raw physical footer layout remains part of the prompt fingerprint so a resize or redraw between Status and dispatch invalidates stale response authority.
+
 ## 0.12.33 - 2026-09-07
 
 ### Added

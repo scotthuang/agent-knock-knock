@@ -59,6 +59,18 @@ const CODEX_OPTIONS = `
   tab to add notes | enter to submit answer | esc to interrupt
 `;
 
+const CODEX_FINAL_OPTIONS_WRAPPED = `
+  Question 3/3 (1 unanswered)
+  Enable test notifications?
+
+  › 1. Enable  Enable notifications for this test.
+    2. Disable  Disable notifications for this test.
+    3. None of the above  Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit all
+  ←/→ to navigate questions | esc to interrupt
+`;
+
 const CODEX_FREEFORM = `
   Question 1/1 (1 unanswered)
   Share details.
@@ -396,6 +408,33 @@ test("respondInteraction recaptures around hooks and dispatches one semantic key
     [{ kind: "keys", keys: ["2"] }]
   );
   assert.doesNotMatch(JSON.stringify(result), /keys?|fingerprint/u);
+});
+
+test("wrapped Codex final option footer projects and dispatches one semantic key", async () => {
+  const { provider, control, bridge, projection, fingerprint } =
+    await offerFor(CODEX_FINAL_OPTIONS_WRAPPED);
+  assert.deepEqual(projection.step, { index: 3, total: 3 });
+  assert.equal(projection.state, "pending");
+  assert.equal(projection.capabilities.respond, true);
+
+  const result = await bridge.respondInteraction(
+    "codex",
+    control,
+    selectResponse(projection),
+    {
+      agentVersion: "0.153.4",
+      expectedFingerprint: fingerprint,
+      expectedExpiresAt: projection.expires_at,
+      runtime: RUNTIME
+    }
+  );
+
+  assert.equal(result.responded, true);
+  assert.equal(result.outcome, "submitted_or_advanced");
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [{ kind: "keys", keys: ["1"] }]
+  );
 });
 
 test("a pre-expiry reservation remains valid across the exact expiry bucket boundary", async () => {
