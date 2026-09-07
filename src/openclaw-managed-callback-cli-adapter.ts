@@ -49,7 +49,8 @@ export function createOpenClawManagedCallbackCliAdapter(
   const transport = createOpenClawCallbackTransport({
     now: ports.now,
     environment: ports.environment,
-    redactConversation: ports.redactConversation,
+    redactConversation: (conversation) =>
+      ports.redactConversation(callbackConversationProjection(conversation)),
     recordCallbackProcessDelivery
   });
 
@@ -121,4 +122,15 @@ export function createOpenClawManagedCallbackCliAdapter(
       }
     };
   }
+}
+
+/** Keep Store-private mutation and outbox authority out of Gateway params. */
+export function callbackConversationProjection(
+  conversation: Conversation
+): Conversation {
+  const projected = { ...conversation };
+  delete projected.native_session_takeover;
+  delete projected.callback_delivery;
+  delete projected.callback_notification_delivery;
+  return projected;
 }

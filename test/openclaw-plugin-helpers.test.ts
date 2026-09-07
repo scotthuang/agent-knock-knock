@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { AjvJsonSchemaValidator } from
+  "@modelcontextprotocol/sdk/validation/ajv";
 import {
   AKK_CALLBACK_METHOD,
   akkUsageText,
@@ -23,6 +25,7 @@ import {
   stripAkkLegacyApprovalInstructionTail
 } from "../src/openclaw-plugin-helpers.js";
 import {
+  respondInteractionParameters,
   statusParameters,
   unwatchParameters,
   watchParameters
@@ -31,6 +34,44 @@ import {
 const exactTerminalId = "terminal:v2:tmux:codex:work:0.0:1234";
 const currentNativeThreadId = "11111111-1111-4111-8111-111111111111";
 const resumableNativeThreadId = "22222222-2222-4222-8222-222222222222";
+
+test("respond interaction schema exposes provider-portable free text", () => {
+  const answerSchema = respondInteractionParameters.properties.answers.items;
+  assert.equal(answerSchema.type, "object");
+  assert.equal(answerSchema.additionalProperties, false);
+  assert.deepEqual(answerSchema.required, ["question_id", "response_kind"]);
+  assert.deepEqual(answerSchema.properties.response_kind.enum, [
+    "single_select",
+    "free_text",
+    "confirm"
+  ]);
+  assert.ok(answerSchema.properties.selected_option_ids);
+  assert.ok(answerSchema.properties.text);
+  assert.ok(answerSchema.properties.confirm);
+  assert.equal("oneOf" in answerSchema, false);
+
+  const validate = new AjvJsonSchemaValidator().getValidator(
+    respondInteractionParameters
+  );
+  assert.equal(validate({
+    turn_id: "turn-demo",
+    interaction_id: "ti_demo",
+    answers: [{
+      question_id: "question_demo",
+      response_kind: "free_text",
+      text: "Shadow"
+    }]
+  }).valid, true);
+  assert.equal(validate({
+    turn_id: "turn-demo",
+    interaction_id: "ti_demo",
+    answers: [{
+      question_id: "question_demo",
+      response_kind: "multi_select",
+      selected_option_ids: ["option_demo"]
+    }]
+  }).valid, false);
+});
 
 test("model-facing authority policy normalizes fields and preserves ordinary content", () => {
   for (const field of [

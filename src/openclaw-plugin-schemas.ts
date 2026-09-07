@@ -37,75 +37,43 @@ export const respondInteractionParameters = {
       minItems: 1,
       maxItems: TERMINAL_INTERACTION_LIMITS.maxQuestions,
       description:
-        "One typed current-step answer using only advertised opaque semantic ids. Raw keys, indexes, rendered labels, fingerprints, versions, and terminal commands are not accepted.",
+        "One typed current-step answer using only advertised opaque semantic ids. For single_select supply selected_option_ids; for free_text supply text; for confirm supply confirm. Supply no other answer field. Raw keys, indexes, rendered labels, fingerprints, versions, and terminal commands are not accepted.",
       items: {
-        oneOf: [
-          {
-            type: "object",
-            additionalProperties: false,
-            required: [
-              "question_id",
-              "response_kind",
-              "selected_option_ids"
-            ],
-            properties: {
-              ...terminalInteractionAnswerBase,
-              response_kind: { const: "single_select" },
-              selected_option_ids: {
-                type: "array",
-                minItems: 1,
-                maxItems: 1,
-                uniqueItems: true,
-                items: terminalInteractionIdentifierSchema
-              }
-            }
+        type: "object",
+        additionalProperties: false,
+        required: ["question_id", "response_kind"],
+        description:
+          "Provider-portable answer envelope. AKK revalidates the exact discriminator-specific shape against the current authoritative interaction before sending terminal input.",
+        properties: {
+          ...terminalInteractionAnswerBase,
+          response_kind: {
+            type: "string",
+            enum: ["single_select", "free_text", "confirm"],
+            description:
+              "Exact response_kind advertised for the current question. multi_select remains manual-only and is not accepted here."
           },
-          {
-            type: "object",
-            additionalProperties: false,
-            required: [
-              "question_id",
-              "response_kind",
-              "selected_option_ids"
-            ],
-            properties: {
-              ...terminalInteractionAnswerBase,
-              response_kind: { const: "multi_select" },
-              selected_option_ids: {
-                type: "array",
-                minItems: 1,
-                maxItems: TERMINAL_INTERACTION_LIMITS.maxOptionsPerQuestion,
-                uniqueItems: true,
-                items: terminalInteractionIdentifierSchema
-              }
-            }
+          selected_option_ids: {
+            type: "array",
+            minItems: 1,
+            maxItems: 1,
+            uniqueItems: true,
+            items: terminalInteractionIdentifierSchema,
+            description:
+              "Required only for single_select; exactly one advertised opaque option_id."
           },
-          {
-            type: "object",
-            additionalProperties: false,
-            required: ["question_id", "response_kind", "text"],
-            properties: {
-              ...terminalInteractionAnswerBase,
-              response_kind: { const: "free_text" },
-              text: {
-                type: "string",
-                minLength: 1,
-                maxLength: TERMINAL_INTERACTION_LIMITS.maxTextAnswerLength,
-                pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
-              }
-            }
+          text: {
+            type: "string",
+            minLength: 1,
+            maxLength: TERMINAL_INTERACTION_LIMITS.maxTextAnswerLength,
+            pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+            description:
+              "Required only for free_text; one non-empty line with no terminal control characters."
           },
-          {
-            type: "object",
-            additionalProperties: false,
-            required: ["question_id", "response_kind", "confirm"],
-            properties: {
-              ...terminalInteractionAnswerBase,
-              response_kind: { const: "confirm" },
-              confirm: { type: "boolean" }
-            }
+          confirm: {
+            type: "boolean",
+            description: "Required only for confirm."
           }
-        ]
+        }
       }
     }
   }

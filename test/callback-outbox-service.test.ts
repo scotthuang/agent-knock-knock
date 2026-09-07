@@ -703,6 +703,97 @@ test("approval preparation reuses its persisted callback identity", () => {
   assert.deepEqual(delivery.message, result.callbackMessage);
 });
 
+test("interaction preparation keeps its stable identity and exposes only safe questionnaire metadata", () => {
+  const harness = createHarness();
+  const privatePromptFingerprint = "a".repeat(64);
+  const interactionState = {
+    schema: "agent-knock-knock/terminal-interaction",
+    version: 1,
+    interaction_id: "ti_questionnaire_a",
+    turn_id: harness.conversation.turn_id,
+    agent: "codex",
+    kind: "questionnaire",
+    state: "pending",
+    step: { index: 1, total: 1 },
+    questions: [{
+      question_id: "question_a",
+      prompt: "Choose one option.",
+      required: true,
+      response_kind: "single_select",
+      options: [
+        { option_id: "option_a", label: "Option A" },
+        { option_id: "option_b", label: "Option B" }
+      ]
+    }],
+    expires_at: "2026-08-14T12:01:00.000Z",
+    capabilities: {
+      respond: true,
+      batch_response: false,
+      free_text: false,
+      multi_select: false
+    }
+  } as const;
+  const safeMetadata = {
+    source: "terminal_bridge",
+    reason: "interaction_required",
+    terminal: { provider: "tmux", target: "%11", agent: "codex" },
+    interaction_state: interactionState
+  };
+  Object.assign(harness.conversation as Conversation, {
+    gateway_method: "agent-knock-knock.callback",
+    native_session_takeover: {
+      terminal_bridge_interaction_notification: {
+        callback_message_id: "interaction-message-a",
+        callback_message_ts: "2026-08-14T11:59:00.000Z",
+        interaction_id: interactionState.interaction_id,
+        prompt_fingerprint: privatePromptFingerprint
+      }
+    }
+  });
+
+  const result = harness.service.prepareInteractionNotification({
+    options: { statePath: STATE_PATH },
+    statePath: STATE_PATH,
+    logPath: LOG_PATH,
+    conversation: harness.conversation,
+    actor: "codex",
+    body: "A native questionnaire is waiting for one response.",
+    metadata: safeMetadata
+  });
+
+  assert.equal(result.callbackMessage.id, "interaction-message-a");
+  assert.equal(result.callbackMessage.ts, "2026-08-14T11:59:00.000Z");
+  assert.equal(result.callbackMessage.type, "question");
+  assert.equal(result.callbackMessage.requires_response, true);
+  assert.deepEqual(
+    result.callbackMessage.metadata.interaction_state,
+    interactionState
+  );
+  assert.equal(
+    Object.hasOwn(result.callbackMessage.metadata, "interaction_prompt_fingerprint"),
+    false
+  );
+  assert.doesNotMatch(
+    JSON.stringify(result.callbackMessage),
+    new RegExp(privatePromptFingerprint, "u")
+  );
+  assert.ok(result.prepared);
+  assert.equal(result.prepared.outcome, "deliver");
+  assert.equal(result.prepared.conversation.status, "waiting_for_openclaw");
+  assert.equal(result.prepared.conversation.response_rounds_used, 1);
+  assert.equal(
+    result.prepared.conversation.callback_notification_delivery,
+    undefined
+  );
+  const delivery = harness.stored().callback_delivery as Record<string, unknown>;
+  assert.equal(delivery.kind, "interaction_notification");
+  assert.deepEqual(delivery.message, result.callbackMessage);
+  assert.doesNotMatch(
+    JSON.stringify(delivery.callback_envelope),
+    new RegExp(privatePromptFingerprint, "u")
+  );
+});
+
 test("approval without a gateway keeps the stable message out of the outbox", () => {
   const harness = createHarness();
   Object.assign(harness.conversation as Conversation, {

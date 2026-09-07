@@ -2,7 +2,11 @@ import {
   nonBlankString as stringValue,
   recordValue
 } from "./value-guards.js";
-import type { AgentMessage, Conversation } from "./protocol.js";
+import {
+  turnIdForConversation,
+  type AgentMessage,
+  type Conversation
+} from "./protocol.js";
 import {
   parseCallbackAttemptOutcome,
   type CallbackAttemptOutcome,
@@ -105,6 +109,68 @@ export function supersedeUnacceptedCallbackDeliveries(
     };
   }
   return next;
+}
+
+/**
+ * Fence only the lifecycle callback for the exact native questionnaire step
+ * that has just been answered. An accepted host transport is immutable
+ * evidence and must be allowed to settle; an unaccepted wake-up must never be
+ * retried after the terminal has already moved on.
+ */
+export function supersedeMatchingInteractionCallbackDelivery(
+  conversation: Conversation,
+  input: {
+    at: string;
+    interactionId: string;
+    fingerprint: string;
+  }
+): Conversation {
+  const takeover = recordValue(conversation.native_session_takeover);
+  const notification = recordValue(
+    takeover?.terminal_bridge_interaction_notification
+  );
+  const delivery = recordValue(conversation.callback_delivery);
+  const message = recordValue(delivery?.message);
+  const metadata = recordValue(message?.metadata);
+  const interactionState = recordValue(metadata?.interaction_state);
+  const callbackMessageId = stringValue(notification?.callback_message_id);
+  const terminalMessageId = stringValue(takeover?.terminal_bridge_message_id);
+  if (
+    !notification ||
+    !delivery ||
+    !message ||
+    !metadata ||
+    !interactionState ||
+    delivery.kind !== "interaction_notification" ||
+    !["pending", "failed"].includes(String(delivery.status ?? "")) ||
+    !callbackMessageId ||
+    message.id !== callbackMessageId ||
+    !terminalMessageId ||
+    notification.terminal_bridge_message_id !== terminalMessageId ||
+    notification.interaction_id !== input.interactionId ||
+    notification.prompt_fingerprint !== input.fingerprint ||
+    metadata.source !== "terminal_bridge" ||
+    metadata.reason !== "interaction_required" ||
+    interactionState.interaction_id !== input.interactionId ||
+    interactionState.turn_id !== turnIdForConversation(conversation) ||
+    callbackDeliveryHasAcceptedTransport(delivery)
+  ) {
+    return conversation;
+  }
+  return {
+    ...conversation,
+    callback_delivery: {
+      ...delivery,
+      status: "superseded",
+      superseded_at: input.at,
+      superseded_reason: "superseded_by_interaction_response",
+      attempt_pid: undefined,
+      attempt_lease_expires_at: undefined,
+      retry_monitor_pid: undefined,
+      next_attempt_at: undefined,
+      updated_at: input.at
+    }
+  };
 }
 
 export function classifyCallbackProcessFailure(

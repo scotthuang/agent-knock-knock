@@ -78,10 +78,19 @@ The OpenClaw tool should be named
 ordinary `respond({turn_id, request})`, which injects a new composer message,
 and from `approve({turn_id, decision})`, which resolves a permission prompt.
 
-The initial public implementation is step-oriented: one response call resolves
-only the currently projected step. AKK recaptures the next native question and
-publishes a new `interaction_id`. This makes multi-question and final-confirm
-flows explicit and avoids a blind batch of terminal input.
+The public implementation is step-oriented: one response call resolves only
+the currently projected step. The managed monitor recaptures the next native
+question, publishes a new `interaction_id`, and emits a new
+`interaction_required` callback for each supported actionable step. This makes
+multi-question and final-confirm flows explicit and avoids a blind batch of
+terminal input.
+
+The callback is a durable wake-up signal, not response authority. It contains
+only the public interaction projection and never the private prompt
+fingerprint or key plan. The owning OpenClaw conversation must call Status for
+the exact `turn_id`; displaying that fresh result creates the short-lived,
+conversation-bound private offer required by `respond_interaction`. A delayed
+or replayed callback therefore cannot authorize input by itself.
 
 ## Private authority
 
@@ -116,8 +125,10 @@ For each response AKK:
 6. dispatches one bounded native step;
 7. records an audit receipt without raw answer content and resumes the monitor;
    and
-8. recaptures the next native state on Status, which rotates the interaction
-   id because the exact prompt fingerprint changed.
+8. resumes the managed monitor, which recaptures the next native state, rotates
+   the interaction id when the exact prompt changes, and emits the next
+   supported-step callback. Status can always refresh the same projection
+   explicitly.
 
 If a failure occurs before terminal input, the response is safely rejected.
 If input may have occurred, the Turn becomes `response_uncertain`; AKK sends no
@@ -179,10 +190,15 @@ and tests are added.
 3. **Initial public response contract (implemented)**: enable one current
    single-select, free-text, or confirmation step with pre-input fencing,
    durable one-shot reservation, and uncertain-result audit.
-4. **Expanded native coverage (not implemented)**: multi-select, notes,
+4. **Managed interaction callback (implemented)**: durably notify the owning
+   controller about each actionable current step, require a fresh Status call
+   before response, permanently fence a consumed prompt fingerprint from
+   replay, and notify the next distinct questionnaire step independently.
+5. **Expanded native coverage (not implemented)**: multi-select (tracked in
+   [#292](https://github.com/scotthuang/agent-knock-knock/issues/292)), notes,
    navigation, and more
    version profiles only with captured fixtures and live regression evidence.
-5. **Host-native UX**: OpenClaw may render the projection using a future public
+6. **Host-native UX**: OpenClaw may render the projection using a future public
    session-bound `requestUserInput` API. Until then, the structured AKK tool is
    the authority boundary; a plugin must not use private Gateway methods.
 

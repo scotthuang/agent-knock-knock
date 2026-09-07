@@ -211,9 +211,27 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     ["turn_id", "interaction_id", "answers"]
   );
   assert.equal(respondInteractionParameters.additionalProperties, false);
+  assert.deepEqual(
+    respondInteractionParameters.properties.answers.items.required,
+    ["question_id", "response_kind"]
+  );
+  assert.deepEqual(
+    respondInteractionParameters.properties.answers.items.properties.response_kind.enum,
+    ["single_select", "free_text", "confirm"]
+  );
+  assert.ok(
+    respondInteractionParameters.properties.answers.items.properties
+      .selected_option_ids
+  );
+  assert.ok(
+    respondInteractionParameters.properties.answers.items.properties.text
+  );
+  assert.ok(
+    respondInteractionParameters.properties.answers.items.properties.confirm
+  );
   assert.equal(
-    respondInteractionParameters.properties.answers.items.oneOf.length,
-    4
+    "oneOf" in respondInteractionParameters.properties.answers.items,
+    false
   );
   assert.deepEqual(approveParameters.anyOf, [
     { required: ["turn_id"] },

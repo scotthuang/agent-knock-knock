@@ -518,7 +518,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_respond_interaction",
     description:
-      "Answer exactly one current native questionnaire step shown by agent_knock_knock_status in this controller conversation. Supply only the exact turn_id, interaction_id, and typed semantic answer using advertised question_id and option_id values. AKK consumes the displayed private offer and revalidates its prompt, expiry, owner, and terminal authority before any input. Raw keys, menu indexes, rendered labels, fingerprints, versions, and terminal commands are never accepted. An uncertain response must never be retried blindly.",
+      "Answer exactly one current native questionnaire step shown by agent_knock_knock_status in this controller conversation. Supply only the exact turn_id, interaction_id, and one typed semantic answer: single_select uses selected_option_ids with one advertised option_id; free_text uses text; confirm uses confirm. AKK consumes the displayed private offer and revalidates the exact discriminator-specific shape, prompt, expiry, owner, and terminal authority before any input. Raw keys, menu indexes, rendered labels, fingerprints, versions, and terminal commands are never accepted. An uncertain response must never be retried blindly.",
     parameters: respondInteractionParameters,
     buildArgs: (params, toolContext) => buildPrivateInteractionResponseArgs(
       api,

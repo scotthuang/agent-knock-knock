@@ -187,6 +187,17 @@ export interface ApprovalNotificationPreparationInput {
   recoverMissingOutbox?: boolean;
 }
 
+export interface InteractionNotificationPreparationInput {
+  options: CallbackPreparationOptions;
+  statePath: string;
+  logPath: string;
+  conversation: Conversation;
+  actor: Actor;
+  body: string;
+  metadata: Record<string, unknown>;
+  recoverMissingOutbox?: boolean;
+}
+
 export interface StallNotificationPreparationInput {
   options: CallbackPreparationOptions;
   statePath: string;
@@ -953,6 +964,9 @@ export function createCallbackOutboxService(
     prepareApprovalNotification: (
       input: ApprovalNotificationPreparationInput
     ) => prepareApprovalNotification(prepare, input),
+    prepareInteractionNotification: (
+      input: InteractionNotificationPreparationInput
+    ) => prepareInteractionNotification(prepare, input),
     prepareStallNotification: (input: StallNotificationPreparationInput) =>
       prepareStallNotification(prepare, input),
     prepareTerminalCompletion: (input: TerminalCompletionPreparationInput) =>
@@ -1046,6 +1060,57 @@ function prepareApprovalNotification(
   };
 }
 
+function prepareInteractionNotification(
+  prepare: (input: PrepareCallbackOutboxInput) => PreparedCallback,
+  input: InteractionNotificationPreparationInput
+) {
+  const callbackRoute = resolveManagedCallbackRoute({
+    options: input.options,
+    conversation: input.conversation
+  });
+  const identity = terminalInteractionCallbackIdentity(input.conversation);
+  const callbackMessage = createMessage({
+    conversation: input.conversation,
+    id: identity.id,
+    from: input.actor,
+    to: "openclaw",
+    type: "question",
+    requiresResponse: true,
+    body: input.body,
+    metadata: input.metadata,
+    now: identity.now
+  });
+  if (!callbackRoute) {
+    return {
+      callbackMessage,
+      delivered: false as const
+    };
+  }
+  return {
+    callbackMessage,
+    prepared: prepare({
+      options: {
+        ...input.options,
+        callbackRoute,
+        statePath: input.statePath,
+        log: input.logPath,
+        messageJson: JSON.stringify(callbackMessage),
+        gatewayMethod: input.conversation.gateway_method,
+        gatewaySession: input.conversation.gateway_session,
+        openclawSession: input.conversation.openclaw_session,
+        openclawBin: input.conversation.openclaw_bin,
+        gatewayUrl: input.conversation.gateway_url,
+        token: stringValue(input.conversation.gateway_token),
+        preserveMessageId: true,
+        callbackDeliveryKind: "interaction_notification",
+        recoverMissingOutbox: input.recoverMissingOutbox === true,
+        conversationOverride: input.conversation
+      },
+      logPath: input.logPath
+    })
+  };
+}
+
 function prepareStallNotification(
   prepare: (input: PrepareCallbackOutboxInput) => PreparedCallback,
   input: StallNotificationPreparationInput
@@ -1101,6 +1166,29 @@ function terminalApprovalCallbackIdentity(conversation: Conversation): {
   if (!id || !Number.isFinite(timestampMs)) {
     throw new Error(
       "terminal approval notification has no stable callback identity"
+    );
+  }
+  return { id, now: new Date(timestampMs) };
+}
+
+function terminalInteractionCallbackIdentity(conversation: Conversation): {
+  id: string;
+  now: Date;
+} {
+  const nativeTakeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const notification = isRecord(
+    nativeTakeover?.terminal_bridge_interaction_notification
+  )
+    ? nativeTakeover.terminal_bridge_interaction_notification
+    : undefined;
+  const id = stringValue(notification?.callback_message_id);
+  const timestamp = stringValue(notification?.callback_message_ts);
+  const timestampMs = Date.parse(String(timestamp ?? ""));
+  if (!id || !Number.isFinite(timestampMs)) {
+    throw new Error(
+      "terminal interaction notification has no stable callback identity"
     );
   }
   return { id, now: new Date(timestampMs) };

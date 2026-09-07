@@ -10,6 +10,7 @@ import {
 import {
   TerminalAgentBridge,
   TerminalInteractionDispatchReservedError,
+  TerminalInteractionInputNotStartedError,
   type TerminalIdentityVerifier
 } from "../src/terminal-agent-bridge.js";
 import { TerminalInteractionValidationError } from
@@ -215,6 +216,7 @@ async function fixture(
     verifyIdentity?: TerminalIdentityVerifier;
     agent?: "codex" | "claude";
     sleep?: (milliseconds: number) => Promise<void>;
+    now?: () => Date;
   } = {}
 ): Promise<{
   adapter: TerminalAgentAdapter;
@@ -235,7 +237,7 @@ async function fixture(
     terminalProvider: provider,
     verifyIdentity: options.verifyIdentity,
     sleep: options.sleep,
-    now: () => new Date(NOW)
+    now: options.now ?? (() => new Date(NOW))
   });
   return { adapter, provider, bridge, control };
 }
@@ -394,6 +396,83 @@ test("respondInteraction recaptures around hooks and dispatches one semantic key
     [{ kind: "keys", keys: ["2"] }]
   );
   assert.doesNotMatch(JSON.stringify(result), /keys?|fingerprint/u);
+});
+
+test("a pre-expiry reservation remains valid across the exact expiry bucket boundary", async () => {
+  let nowMs = Date.parse("2026-09-07T04:09:59.900Z");
+  const { bridge, provider, control } = await fixture(CODEX_OPTIONS, {
+    now: () => new Date(nowMs)
+  });
+  const status = await bridge.status("codex", control, { runtime: RUNTIME });
+  const projection = status.interaction_state;
+  const fingerprint = status.interaction_prompt_fingerprint;
+  assert.ok(projection);
+  assert.ok(fingerprint);
+  assert.equal(projection.expires_at, EXPECTED_EXPIRY);
+  provider.clearOperations();
+
+  const result = await bridge.respondInteraction(
+    "codex",
+    control,
+    selectResponse(projection, 1),
+    {
+      agentVersion: "0.153.4",
+      expectedFingerprint: fingerprint,
+      expectedExpiresAt: projection.expires_at,
+      runtime: RUNTIME,
+      beforeDispatch(context) {
+        assert.equal(context.projection.expires_at, EXPECTED_EXPIRY);
+        assert.ok(nowMs < Date.parse(context.projection.expires_at));
+        nowMs = Date.parse("2026-09-07T04:10:00.001Z");
+      }
+    }
+  );
+
+  assert.equal(result.responded, true);
+  assert.equal(result.outcome, "submitted_or_advanced");
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "capture").length,
+    3
+  );
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [{ kind: "keys", keys: ["2"] }]
+  );
+});
+
+test("an unreserved interaction cannot cross its original expiry", async () => {
+  let nowMs = Date.parse("2026-09-07T04:09:59.900Z");
+  const { bridge, provider, control } = await fixture(CODEX_OPTIONS, {
+    now: () => new Date(nowMs)
+  });
+  const status = await bridge.status("codex", control, { runtime: RUNTIME });
+  const projection = status.interaction_state;
+  const fingerprint = status.interaction_prompt_fingerprint;
+  assert.ok(projection);
+  assert.ok(fingerprint);
+  provider.clearOperations();
+
+  const result = await bridge.respondInteraction(
+    "codex",
+    control,
+    selectResponse(projection),
+    {
+      agentVersion: "0.153.4",
+      expectedFingerprint: fingerprint,
+      expectedExpiresAt: projection.expires_at,
+      runtime: RUNTIME,
+      authorize() {
+        nowMs = Date.parse("2026-09-07T04:10:00.001Z");
+        return { approved: true };
+      }
+    }
+  );
+
+  assert.equal(result.responded, false);
+  assert.equal(result.blocked, true);
+  assert.match(result.reason ?? "", /expir/u);
+  assert.equal(provider.operations.some((operation) =>
+    operation.kind === "text" || operation.kind === "keys"), false);
 });
 
 test("stale fingerprint is blocked before authorization and terminal input", async () => {
@@ -656,7 +735,7 @@ test("a possibly delivered free-text write is terminally uncertain and never sen
   );
 });
 
-test("post-reservation prompt drift consumes the attempt without terminal input", async () => {
+test("post-reservation prompt drift proves terminal input never started", async () => {
   const { bridge, provider, control, projection, fingerprint } = await offerFor();
   provider.setScreens([
     CODEX_OPTIONS,
@@ -675,9 +754,9 @@ test("post-reservation prompt drift consumes the attempt without terminal input"
       }
     }),
     (error: unknown) => {
-      assert.ok(error instanceof TerminalInteractionDispatchReservedError);
-      assert.equal(error.stage, "reservation_uncertain");
-      assert.equal(error.doNotRetry, true);
+      assert.ok(error instanceof TerminalInteractionInputNotStartedError);
+      assert.equal(error.code, "AKK_TERMINAL_INTERACTION_INPUT_NOT_STARTED");
+      assert.equal(error.stage, "input_not_started");
       return true;
     }
   );
