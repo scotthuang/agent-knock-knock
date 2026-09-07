@@ -3,13 +3,15 @@ import {
   AKK_CALLBACK_METHOD,
   stripAkkLegacyApprovalInstructionTail
 } from "./openclaw-plugin-helpers.js";
-import { runCli } from "./openclaw-plugin-command-adapter.js";
+import { runCliAsync } from "./openclaw-plugin-command-adapter.js";
 import { sameCanonicalStatePath } from
   "./terminal-dispatch-ledger-codec.js";
 import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
+
+const CALLBACK_AUTO_APPROVAL_CLI_TIMEOUT_MS = 20_000;
 
 export function registerOpenClawCallbackGateway(api): void {
   api.registerGatewayMethod(
@@ -252,7 +254,7 @@ async function handleCallback(api, params) {
   if (!messageId) {
     throw new Error("callback message.id is required");
   }
-  const autoApproval = tryAutoApproveCallback({
+  const autoApproval = await tryAutoApproveCallback({
     api,
     message,
     conversationId,
@@ -339,7 +341,7 @@ async function handleCallback(api, params) {
   };
 }
 
-function tryAutoApproveCallback({
+async function tryAutoApproveCallback({
   api,
   message,
   conversationId,
@@ -360,7 +362,7 @@ function tryAutoApproveCallback({
     return undefined;
   }
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-  const result = attemptAutoApproval({
+  const result = await attemptAutoApproval({
     message,
     policy: config.autoApprove,
     statePath,
@@ -372,7 +374,9 @@ function tryAutoApproveCallback({
       openclawSession
     },
     execute: (args) => {
-      return runCli(api, args);
+      return runCliAsync(api, args, {
+        timeoutMs: CALLBACK_AUTO_APPROVAL_CLI_TIMEOUT_MS
+      });
     }
   });
   if (result) {

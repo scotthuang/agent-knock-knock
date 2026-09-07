@@ -1060,7 +1060,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
     repoRoot,
     roles.callback_adapter,
     "./openclaw-plugin-command-adapter.js",
-    ["runCli"],
+    ["runCliAsync"],
     "OpenClaw callback-adapter role"
   );
   assertDirectNamedImport(

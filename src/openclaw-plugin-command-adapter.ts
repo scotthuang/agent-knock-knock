@@ -106,8 +106,8 @@ export function bindHostBridgeToolPresentation(api: object): void {
 /**
  * Keep an embedding Host's event loop responsive while AKK CLI work runs.
  *
- * OpenClaw deliberately retains its established synchronous relay behavior;
- * only public Host adapters opt into the asynchronous child-process runner.
+ * Every in-process Host, including the OpenClaw Gateway plugin, must opt into
+ * the asynchronous child-process runner before registering AKK tools.
  */
 export function bindHostBridgeAsyncRelay(api: object): void {
   hostBridgeAsyncRelayApis.add(api);
@@ -118,10 +118,15 @@ export function withHostBridgeInvocationSignal<T>(
   signal: AbortSignal | undefined,
   operation: () => Promise<T>
 ): Promise<T> {
-  if (signal?.aborted) {
+  const effectiveSignal = signal ??
+    hostBridgeInvocationStorage.getStore()?.signal;
+  if (effectiveSignal?.aborted) {
     return Promise.reject(hostBridgeAbortError());
   }
-  return hostBridgeInvocationStorage.run({ signal }, async () => operation());
+  return hostBridgeInvocationStorage.run(
+    { signal: effectiveSignal },
+    async () => operation()
+  );
 }
 
 export function registerOpenClawCommands(
@@ -426,29 +431,31 @@ export function registerOpenClawCommands(
       description:
         "Inspect one exact AKK-managed Turn by its authoritative turn_id, one durable Terminal Watch by its authoritative watch_id, or use only a raw terminal row's own prefilled compatibility selector. These targets are mutually exclusive. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. User-selected Watch status reports whether it uses an exact task anchor or best-effort terminal activity without implying Watch sent or adopted the task; that task may independently be managed. Automatic terminal_user_explicit fallback Watch status describes the exact request AKK physically sent without claiming a managed Turn. AKK never starts a coding agent.",
       parameters: statusParameters,
-      async execute(_toolCallId, params) {
-        try {
-          const result = await runHostAwareCli(
-            api,
-            buildStatusCliArgs(api, isRecord(params) ? params : {})
-          );
-          const rendered = toolResult(result);
-          rememberDisplayedApprovalOffer(
-            api,
-            toolContext?.sessionKey,
-            toolContext?.sessionId,
-            result
-          );
-          rememberDisplayedInteractionOffer(
-            api,
-            toolContext?.sessionKey,
-            toolContext?.sessionId,
-            result
-          );
-          return rendered;
-        } catch (error) {
-          throw modelFacingToolError(error);
-        }
+      async execute(_toolCallId, params, signal) {
+        return withHostBridgeInvocationSignal(signal, async () => {
+          try {
+            const result = await runHostAwareCli(
+              api,
+              buildStatusCliArgs(api, isRecord(params) ? params : {})
+            );
+            const rendered = toolResult(result);
+            rememberDisplayedApprovalOffer(
+              api,
+              toolContext?.sessionKey,
+              toolContext?.sessionId,
+              result
+            );
+            rememberDisplayedInteractionOffer(
+              api,
+              toolContext?.sessionKey,
+              toolContext?.sessionId,
+              result
+            );
+            return rendered;
+          } catch (error) {
+            throw modelFacingToolError(error);
+          }
+        });
       }
     }),
     { name: "agent_knock_knock_status", optional: true }
@@ -461,23 +468,25 @@ export function registerOpenClawCommands(
       description:
         "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process and a scanned, non-blocked approval state; parsed working activity and Codex Composer visibility, stability, or exactness do not veto it. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. The managed fast path may require exact empty before input, but after user-explicit Codex text injection it follows the same no-Composer-veto Enter rule. If broken internal AKK state prevents managed delivery before input, AKK delivers once as unmanaged work with no managed callback Turn, then best-effort attaches an exact Terminal Watch callback and releases stale management. Watch attachment failure never changes a successful Send and is reported in the delivery result. Once the mutation sequence begins, an uncertain result must not be automatically retried. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
       parameters: sendParameters,
-      async execute(toolCallId, params) {
-        try {
-          const result = await runSendRequest(
-            api,
-            isRecord(params) ? params : {},
-            toolContext,
-            terminalMessageIdForToolCall({
-              toolCallId,
-              sessionKey: toolContext?.sessionKey,
-              sessionId: toolContext?.sessionId,
-              toolName: "agent_knock_knock_send"
-            })
-          );
-          return toolResult(result, { submissionErrors: true });
-        } catch (error) {
-          throw modelFacingToolError(error);
-        }
+      async execute(toolCallId, params, signal) {
+        return withHostBridgeInvocationSignal(signal, async () => {
+          try {
+            const result = await runSendRequest(
+              api,
+              isRecord(params) ? params : {},
+              toolContext,
+              terminalMessageIdForToolCall({
+                toolCallId,
+                sessionKey: toolContext?.sessionKey,
+                sessionId: toolContext?.sessionId,
+                toolName: "agent_knock_knock_send"
+              })
+            );
+            return toolResult(result, { submissionErrors: true });
+          } catch (error) {
+            throw modelFacingToolError(error);
+          }
+        });
       }
     }),
     { name: "agent_knock_knock_send", optional: true }
@@ -2602,34 +2611,36 @@ function registerCliTool(
       name,
       description,
       parameters,
-      async execute(toolCallId, params) {
-        try {
-          const result = await runHostAwareCli(
-            api,
-            await buildArgs(
-              isRecord(params) ? params : {},
-              toolContext,
-              toolCallId
-            )
-          );
-          const rendered = toolResult(result, {
-            submissionErrors: name === "agent_knock_knock_respond",
-            normalizeTurnIdentity,
-            forceError:
-              typeof isErrorResult === "function" && isErrorResult(result) === true
-          });
-          if (name === "agent_knock_knock_list") {
-            rememberDisplayedPrivateAuthorityOffers(
+      async execute(toolCallId, params, signal) {
+        return withHostBridgeInvocationSignal(signal, async () => {
+          try {
+            const result = await runHostAwareCli(
               api,
-              toolContext?.sessionKey,
-              toolContext?.sessionId,
-              result
+              await buildArgs(
+                isRecord(params) ? params : {},
+                toolContext,
+                toolCallId
+              )
             );
+            const rendered = toolResult(result, {
+              submissionErrors: name === "agent_knock_knock_respond",
+              normalizeTurnIdentity,
+              forceError:
+                typeof isErrorResult === "function" && isErrorResult(result) === true
+            });
+            if (name === "agent_knock_knock_list") {
+              rememberDisplayedPrivateAuthorityOffers(
+                api,
+                toolContext?.sessionKey,
+                toolContext?.sessionId,
+                result
+              );
+            }
+            return rendered;
+          } catch (error) {
+            throw modelFacingToolError(error);
           }
-          return rendered;
-        } catch (error) {
-          throw modelFacingToolError(error);
-        }
+        });
       }
     }),
     { name, optional: true }

@@ -6,6 +6,7 @@ import {
   registerOpenClawCallbackGateway
 } from "./openclaw-plugin-callback-adapter.js";
 import {
+  bindHostBridgeAsyncRelay,
   bindOpenClawRelayPath,
   defaultOpenClawRelayPath,
   registerOpenClawCommands
@@ -34,6 +35,7 @@ function createPlugin(
       "Agent Knock Knock (AKK/akk) lets OpenClaw operate local Codex and Claude Code through shared tmux or Herdr terminals, with visible monitoring, approvals, callbacks, cancellation, and seamless human takeover.",
     register(api) {
       bindOpenClawRelayPath(api, relayPath);
+      bindHostBridgeAsyncRelay(api);
       registerOpenClawCallbackGateway(api);
       try {
         api.registerService?.(
