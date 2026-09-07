@@ -13,6 +13,7 @@ import type {
 } from "./terminal-agent-adapter.js";
 import {
   TerminalInteractionDispatchReservedError,
+  TerminalInteractionInputNotStartedError,
   type TerminalAgentBridge,
   type TerminalInteractionResponseExecution
 } from "./terminal-agent-bridge.js";
@@ -241,7 +242,9 @@ async function runRespondInteraction(
       const responseSha256 = createHash("sha256")
         .update(JSON.stringify(response), "utf8")
         .digest("hex");
-      let reserved = false;
+      let reservationWriteStarted = false;
+      let reservationConfirmed = false;
+      let reservationAttemptId: string | undefined;
       let execution: TerminalInteractionResponseExecution;
       try {
         execution = await bridge.respondInteraction(
@@ -282,17 +285,13 @@ async function runRespondInteraction(
               return { approved: true };
             },
             beforeDispatch: ({ projection, fingerprint, terminalControl }) => {
-              if (reserved) {
+              if (reservationWriteStarted) {
                 throw new Error(
                   "terminal interaction response dispatch was already reserved"
                 );
               }
               const latest = dependencies.repository.loadState(loaded.statePath);
               current = latest;
-              // Entering this hook consumes the caller's one-shot authority.
-              // Any exception from here is conservatively persisted as
-              // uncertain even when the provider has not yet received input.
-              reserved = true;
               const latestTakeover = takeoverFor(latest);
               const latestControl =
                 dependencies.selection.terminalControlFromTakeover(
@@ -307,8 +306,8 @@ async function runRespondInteraction(
                 ) ||
                 projection.interaction_id !== interactionId ||
                 fingerprint !== expectedFingerprint ||
-                Date.parse(expectedExpiresAt) <=
-                  dependencies.runtime.now().getTime()
+                latestTakeover?.terminal_bridge_message_id !==
+                  currentTakeover?.terminal_bridge_message_id
               ) {
                 throw new Error(
                   "terminal interaction authority changed before dispatch; refresh status"
@@ -320,14 +319,22 @@ async function runRespondInteraction(
                 terminalControl: latestControl,
                 action: "respond-interaction"
               });
-              const reservedAt = dependencies.runtime.now().toISOString();
+              const reservationTime = dependencies.runtime.now();
+              if (Date.parse(expectedExpiresAt) <= reservationTime.getTime()) {
+                throw new Error(
+                  "terminal interaction authority expired before dispatch; refresh status"
+                );
+              }
+              const reservedAt = reservationTime.toISOString();
+              const attemptId = randomUUID();
+              reservationAttemptId = attemptId;
               current = {
                 ...latest,
                 native_session_takeover: {
                   ...latestTakeover,
                   terminal_bridge_interaction_dispatch: {
                     state: "reserved",
-                    attempt_id: randomUUID(),
+                    attempt_id: attemptId,
                     interaction_id: interactionId,
                     interaction_prompt_fingerprint: fingerprint,
                     response_sha256: responseSha256,
@@ -339,12 +346,81 @@ async function runRespondInteraction(
                 },
                 updated_at: reservedAt
               };
+              // A save failure may have committed the one-shot receipt. From
+              // this point on, only an exact compensating clear can make the
+              // attempt safely retryable.
+              reservationWriteStarted = true;
               dependencies.repository.saveState(loaded.statePath, current);
+              reservationConfirmed = true;
             }
           }
         );
       } catch (error) {
-        if (reserved) {
+        if (
+          error instanceof TerminalInteractionInputNotStartedError &&
+          reservationConfirmed &&
+          reservationAttemptId
+        ) {
+          try {
+            releaseInteractionResponseReservation(dependencies, {
+              loaded,
+              attemptId: reservationAttemptId,
+              interactionId,
+              expectedFingerprint,
+              responseSha256,
+              terminalTarget: currentControl.target,
+              terminalBridgeMessageId:
+                currentTakeover?.terminal_bridge_message_id,
+              error
+            });
+          } catch (releaseError) {
+            const uncertain = new TerminalInteractionDispatchReservedError(
+              "reservation_uncertain",
+              "terminal interaction input did not start, but its dispatch reservation could not be safely released",
+              { cause: releaseError }
+            );
+            // Never restore the stale pre-cleanup snapshot over a newer state.
+            // Only the still-current exact receipt may be promoted to
+            // uncertain; a missing or different receipt is left untouched.
+            let latest: Conversation | undefined;
+            try {
+              latest = dependencies.repository.loadState(loaded.statePath);
+            } catch {
+              // The existing durable receipt remains the fail-closed fence.
+            }
+            const latestDispatch = latest
+              ? interactionDispatchFor(latest)
+              : undefined;
+            if (
+              latest &&
+              latestDispatch &&
+              terminalInteractionDispatchMatchesReservation(latestDispatch, {
+                attemptId: reservationAttemptId,
+                interactionId,
+                expectedFingerprint,
+                responseSha256,
+                terminalTarget: currentControl.target,
+                terminalBridgeMessageId:
+                  currentTakeover?.terminal_bridge_message_id
+              })
+            ) {
+              markInteractionResponseUncertain(dependencies, {
+                loaded,
+                conversation: latest,
+                interactionId,
+                expectedFingerprint,
+                responseSha256,
+                error: uncertain
+              });
+            }
+            throw uncertain;
+          }
+          throw new TerminalInteractionInputNotStartedError(
+            `${error.message}; no terminal input was sent, refresh status before responding again`,
+            { cause: error }
+          );
+        }
+        if (reservationWriteStarted) {
           markInteractionResponseUncertain(dependencies, {
             loaded,
             conversation: current,
@@ -368,7 +444,7 @@ async function runRespondInteraction(
         });
         return;
       }
-      if (!reserved) {
+      if (!reservationConfirmed) {
         throw new TerminalInteractionDispatchReservedError(
           "reservation_uncertain",
           "terminal interaction response was dispatched without a durable reservation"
@@ -445,6 +521,90 @@ async function runRespondInteraction(
       });
     }
   });
+}
+
+function releaseInteractionResponseReservation(
+  dependencies: TerminalInteractionCliDependencies,
+  input: {
+    loaded: LoadedInteractionTurn;
+    attemptId: string;
+    interactionId: string;
+    expectedFingerprint: string;
+    responseSha256: string;
+    terminalTarget: string;
+    terminalBridgeMessageId: unknown;
+    error: TerminalInteractionInputNotStartedError;
+  }
+): void {
+  const latest = dependencies.repository.loadState(input.loaded.statePath);
+  const takeover = takeoverFor(latest);
+  const dispatch = interactionDispatchFor(latest);
+  if (
+    !dispatch ||
+    !terminalInteractionDispatchMatchesReservation(dispatch, input)
+  ) {
+    throw new Error(
+      "the durable terminal interaction reservation no longer matches this attempt"
+    );
+  }
+  const at = dependencies.runtime.now().toISOString();
+  const nextTakeover: Record<string, unknown> = { ...takeover };
+  delete nextTakeover.terminal_bridge_interaction_dispatch;
+  nextTakeover.terminal_bridge_last_activity_at = at;
+  nextTakeover.terminal_bridge_last_activity_reason =
+    "interactive response rejected before terminal input";
+  const released: Conversation = {
+    ...latest,
+    native_session_takeover: nextTakeover,
+    updated_at: at
+  };
+  dependencies.repository.saveState(input.loaded.statePath, released);
+  dependencies.repository.appendEvent(input.loaded.logPath, {
+    ts: at,
+    conversation_id: released.conversation_id,
+    event: "terminal_interaction_response_not_started",
+    interaction_id: input.interactionId,
+    interaction_prompt_fingerprint: input.expectedFingerprint,
+    response_sha256: input.responseSha256,
+    attempt_id: input.attemptId,
+    reason: "terminal interaction response rejected before terminal input"
+  });
+  dependencies.runtime.log("warn", "terminal_interaction_response_not_started", {
+    conversation_id: released.conversation_id,
+    interaction_id: input.interactionId,
+    response_sha256: input.responseSha256,
+    attempt_id: input.attemptId,
+    error_name: input.error.name
+  });
+}
+
+function interactionDispatchFor(
+  conversation: Conversation
+): Record<string, unknown> | undefined {
+  const takeover = takeoverFor(conversation);
+  return isRecord(takeover?.terminal_bridge_interaction_dispatch)
+    ? takeover.terminal_bridge_interaction_dispatch
+    : undefined;
+}
+
+function terminalInteractionDispatchMatchesReservation(
+  dispatch: Record<string, unknown>,
+  expected: {
+    attemptId: string;
+    interactionId: string;
+    expectedFingerprint: string;
+    responseSha256: string;
+    terminalTarget: string;
+    terminalBridgeMessageId: unknown;
+  }
+): boolean {
+  return dispatch.state === "reserved" &&
+    dispatch.attempt_id === expected.attemptId &&
+    dispatch.interaction_id === expected.interactionId &&
+    dispatch.interaction_prompt_fingerprint === expected.expectedFingerprint &&
+    dispatch.response_sha256 === expected.responseSha256 &&
+    dispatch.terminal_target === expected.terminalTarget &&
+    dispatch.terminal_bridge_message_id === expected.terminalBridgeMessageId;
 }
 
 function markInteractionResponseUncertain(

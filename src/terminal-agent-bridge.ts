@@ -367,6 +367,23 @@ export class TerminalInteractionDispatchReservedError extends Error {
   }
 }
 
+/**
+ * A durable response reservation exists, but the bridge proved that no
+ * terminal text or key delivery was attempted. The caller must discard the
+ * one-shot offer and obtain a fresh status projection before trying again.
+ */
+export class TerminalInteractionInputNotStartedError extends Error {
+  readonly code = "AKK_TERMINAL_INTERACTION_INPUT_NOT_STARTED";
+  readonly stage = "input_not_started";
+  readonly doNotRetry = true;
+  readonly requiresFreshOffer = true;
+
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options);
+    this.name = "TerminalInteractionInputNotStartedError";
+  }
+}
+
 export interface TerminalBridgeStatus {
   provider: string;
   target: string;
@@ -3837,6 +3854,11 @@ export class TerminalAgentBridge {
         context: TerminalInteractionAuthorizationContext
       ) => TerminalInteractionAuthorizationDecision |
         Promise<TerminalInteractionAuthorizationDecision>;
+      /**
+       * Resolve only after the caller has durably persisted its one-shot
+       * dispatch receipt. A successful return is the offer lease acceptance
+       * boundary for the final read-only recapture.
+       */
       beforeDispatch?: (
         context: TerminalInteractionBeforeDispatchContext
       ) => void | Promise<void>;
@@ -3931,6 +3953,17 @@ export class TerminalAgentBridge {
         first.offer
       );
     }
+    const afterAuthorizationReason = terminalInteractionOfferPreflightReason(
+      afterAuthorization.offer,
+      options
+    );
+    if (afterAuthorizationReason) {
+      return blockedTerminalInteractionResponse(
+        validatedResponse,
+        afterAuthorizationReason,
+        first.offer
+      );
+    }
     if (!sameTerminalInteractionOffer(first, afterAuthorization)) {
       return blockedTerminalInteractionResponse(
         validatedResponse,
@@ -3955,8 +3988,7 @@ export class TerminalAgentBridge {
       options.scrollbackLines
     ).catch((error) => {
       if (options.beforeDispatch) {
-        throw terminalInteractionReservedError(
-          "reservation_uncertain",
+        throw terminalInteractionInputNotStartedError(
           error,
           "cannot recapture native questionnaire after dispatch reservation"
         );
@@ -3970,10 +4002,14 @@ export class TerminalAgentBridge {
         first.offer
       );
     }
-    if (!sameTerminalInteractionOffer(afterAuthorization, finalCapture)) {
+    if (!sameTerminalInteractionOffer(afterAuthorization, finalCapture, {
+      // A successfully returned beforeDispatch hook is the lease acceptance
+      // boundary. The projection expiry is bucketed and may roll over during
+      // this final, bounded recapture even though the questionnaire is exact.
+      ignoreExpiresAt: options.beforeDispatch !== undefined
+    })) {
       if (options.beforeDispatch) {
-        throw new TerminalInteractionDispatchReservedError(
-          "reservation_uncertain",
+        throw new TerminalInteractionInputNotStartedError(
           "native questionnaire changed after dispatch reservation"
         );
       }
@@ -3988,15 +4024,26 @@ export class TerminalAgentBridge {
       finalCapture.terminalControl,
       runtime
     ).catch((error) => {
+      if (options.beforeDispatch) {
+        throw terminalInteractionInputNotStartedError(
+          error,
+          "terminal identity could not be verified immediately before interaction dispatch"
+        );
+      }
       throw terminalInteractionReservedError(
-        options.beforeDispatch ? "reservation_uncertain" : "key_uncertain",
+        "key_uncertain",
         error,
         "terminal identity could not be verified immediately before interaction dispatch"
       );
     });
     if (!sameTerminalControlIdentity(finalCapture.terminalControl, verified)) {
+      if (options.beforeDispatch) {
+        throw new TerminalInteractionInputNotStartedError(
+          "terminal identity changed after the final questionnaire capture"
+        );
+      }
       throw new TerminalInteractionDispatchReservedError(
-        options.beforeDispatch ? "reservation_uncertain" : "key_uncertain",
+        "key_uncertain",
         "terminal identity changed after the final questionnaire capture"
       );
     }
@@ -5636,6 +5683,9 @@ async function reserveTerminalInteractionDispatch(
   try {
     await beforeDispatch(context);
   } catch (error) {
+    if (error instanceof TerminalInteractionInputNotStartedError) {
+      throw error;
+    }
     throw terminalInteractionReservedError(
       "reservation_uncertain",
       error,
@@ -5646,15 +5696,43 @@ async function reserveTerminalInteractionDispatch(
 
 function sameTerminalInteractionOffer(
   left: CapturedTerminalInteractionOffer,
-  right: CapturedTerminalInteractionOffer
+  right: CapturedTerminalInteractionOffer,
+  options: { ignoreExpiresAt?: boolean } = {}
 ): boolean {
+  const leftProjection = options.ignoreExpiresAt && left.offer
+    ? terminalInteractionProjectionWithoutExpiry(left.offer.projection)
+    : left.offer?.projection;
+  const rightProjection = options.ignoreExpiresAt && right.offer
+    ? terminalInteractionProjectionWithoutExpiry(right.offer.projection)
+    : right.offer?.projection;
   return Boolean(
     left.offer &&
     right.offer &&
     sameTerminalControlIdentity(left.terminalControl, right.terminalControl) &&
     left.offer.promptFingerprint === right.offer.promptFingerprint &&
-    JSON.stringify(left.offer.projection) === JSON.stringify(right.offer.projection) &&
+    JSON.stringify(leftProjection) === JSON.stringify(rightProjection) &&
     JSON.stringify(left.offer.actionPlan) === JSON.stringify(right.offer.actionPlan)
+  );
+}
+
+function terminalInteractionProjectionWithoutExpiry(
+  projection: TerminalInteractionProjection
+): Omit<TerminalInteractionProjection, "expires_at"> {
+  const { expires_at: _expiresAt, ...semanticProjection } = projection;
+  return semanticProjection;
+}
+
+function terminalInteractionInputNotStartedError(
+  error: unknown,
+  message: string
+): TerminalInteractionInputNotStartedError {
+  if (error instanceof TerminalInteractionInputNotStartedError) {
+    return error;
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  return new TerminalInteractionInputNotStartedError(
+    `${message}: ${detail}`,
+    { cause: error }
   );
 }
 
@@ -5688,7 +5766,9 @@ function terminalInteractionChoiceAction(
     stage?.kind !== "key" ||
     !/^[1-5]$/u.test(stage.key)
   ) {
-    throw new Error("single-select interaction has no closed adapter action");
+    throw new TerminalInteractionInputNotStartedError(
+      "single-select interaction has no closed adapter action"
+    );
   }
   return {
     key: stage.key,
@@ -5710,7 +5790,9 @@ function terminalInteractionConfirmKey(
     !["C-m", "Escape", "1", "2"].includes(stage.key) ||
     JSON.stringify(plan.confirm_stages) === JSON.stringify(plan.cancel_stages)
   ) {
-    throw new Error("confirmation interaction has no closed adapter action");
+    throw new TerminalInteractionInputNotStartedError(
+      "confirmation interaction has no closed adapter action"
+    );
   }
   return stage.key;
 }
@@ -5751,8 +5833,7 @@ async function dispatchTerminalInteractionFreeText(input: {
     enterStage?.kind !== "key" ||
     enterStage.key !== "C-m"
   ) {
-    throw new TerminalInteractionDispatchReservedError(
-      "reservation_uncertain",
+    throw new TerminalInteractionInputNotStartedError(
       "free-text interaction has no closed adapter action"
     );
   }
@@ -5847,8 +5928,7 @@ async function dispatchTerminalInteractionAnswer(input: {
       sleep: input.sleep
     });
   }
-  throw new TerminalInteractionDispatchReservedError(
-    "reservation_uncertain",
+  throw new TerminalInteractionInputNotStartedError(
     "terminal interaction answer does not have a closed adapter action"
   );
 }
