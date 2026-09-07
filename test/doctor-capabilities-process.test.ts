@@ -93,7 +93,16 @@ test("doctor probes both terminal transports and their supported coding agents",
 test("doctor keeps complete unverified coding-agent versions available with warnings", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-future-agents-"));
   try {
-    const codex = probeDoctorCommand("codex", {
+    const codexGap = probeDoctorCommand("codex", {
+      executables: {
+        codex: writeFakeExecutable(
+          tempDir,
+          "codex-gap",
+          `process.stdout.write("codex-cli 0.153.1");`
+        )
+      }
+    });
+    const codexFuture = probeDoctorCommand("codex", {
       executables: {
         codex: writeFakeExecutable(
           tempDir,
@@ -102,7 +111,16 @@ test("doctor keeps complete unverified coding-agent versions available with warn
         )
       }
     });
-    const claude = probeDoctorCommand("claude", {
+    const claudeGap = probeDoctorCommand("claude", {
+      executables: {
+        claude: writeFakeExecutable(
+          tempDir,
+          "claude-gap",
+          `process.stdout.write("Claude Code 2.1.260");`
+        )
+      }
+    });
+    const claudeFuture = probeDoctorCommand("claude", {
       executables: {
         claude: writeFakeExecutable(
           tempDir,
@@ -121,7 +139,7 @@ test("doctor keeps complete unverified coding-agent versions available with warn
       }
     });
 
-    for (const probe of [codex, claude]) {
+    for (const probe of [codexGap, codexFuture, claudeGap, claudeFuture]) {
       assert.equal(probe.status, "ok");
       assert.equal(probe.native_profile_supported, false);
       assert.equal(probe.native_actions_available, true);

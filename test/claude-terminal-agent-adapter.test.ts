@@ -1373,21 +1373,23 @@ test("Claude lifecycle plans keep exact profiles and optimistically support comp
     assert.equal(profile.compatibilityWarning, undefined);
   }
   const capabilities = probeClaudeThreadLifecycle("2.1.263");
-  const unverified = probeClaudeThreadLifecycle("2.1.264");
-  assert.equal(unverified.status, "supported");
-  assert.equal(unverified.newThread, true);
-  assert.equal(unverified.resumeExact, true);
-  assert.equal(unverified.candidateDiscovery, true);
-  assert.equal(unverified.versionCompatibility, "unverified");
-  assert.equal(
-    unverified.behaviorProfile,
-    CLAUDE_UNVERIFIED_LIFECYCLE_BEHAVIOR_PROFILE
-  );
-  assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
-  assert.equal(
-    planClaudeThreadLifecycle({ kind: "new_thread" }, unverified).command,
-    "/clear"
-  );
+  for (const version of ["2.1.260", "2.1.264"]) {
+    const unverified = probeClaudeThreadLifecycle(version);
+    assert.equal(unverified.status, "supported");
+    assert.equal(unverified.newThread, true);
+    assert.equal(unverified.resumeExact, true);
+    assert.equal(unverified.candidateDiscovery, true);
+    assert.equal(unverified.versionCompatibility, "unverified");
+    assert.equal(
+      unverified.behaviorProfile,
+      CLAUDE_UNVERIFIED_LIFECYCLE_BEHAVIOR_PROFILE
+    );
+    assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
+    assert.equal(
+      planClaudeThreadLifecycle({ kind: "new_thread" }, unverified).command,
+      "/clear"
+    );
+  }
   assert.equal(probeClaudeThreadLifecycle(undefined).status, "unknown");
   assert.equal(probeClaudeThreadLifecycle("2.1").status, "unknown");
   assert.deepEqual(

@@ -48,7 +48,9 @@ test("doctor recognizes exact native profiles without gating ordinary readiness"
     "claude-code-2.1.263-native-status"
   );
   assert.equal(doctorCodingAgentNativeProfile("codex", "0.150.0"), undefined);
+  assert.equal(doctorCodingAgentNativeProfile("codex", "0.153.1"), undefined);
   assert.equal(doctorCodingAgentNativeProfile("codex", "0.153.5"), undefined);
+  assert.equal(doctorCodingAgentNativeProfile("claude", "2.1.260"), undefined);
   assert.equal(doctorCodingAgentNativeProfile("claude", "2.1.264"), undefined);
 
   const result = evaluateDoctorCapabilities([

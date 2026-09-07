@@ -4638,11 +4638,11 @@ test("/akk doctor leaves the Gateway event loop free for its health check", asyn
       }, {
         command: "claude",
         available: true,
-        version: "2.1.264",
+        version: "2.1.260",
         native_profile_supported: false,
         native_actions_available: true,
         compatibility_warning:
-          "Claude Code 2.1.264 has not been regression-tested by AKK"
+          "Claude Code 2.1.260 has not been regression-tested by AKK"
       }],
       capabilities: {
         tmux: { checked: true, status: "ready" }

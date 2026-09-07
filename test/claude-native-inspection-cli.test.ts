@@ -207,7 +207,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226", "2.1.237", "2.1.251", "2.1.25
 
     const unverifiedArgs = commonArgs.map((argument) =>
       argument === JSON.stringify({ [claudePid]: claudeVersion })
-        ? JSON.stringify({ [claudePid]: "2.1.264" })
+        ? JSON.stringify({ [claudePid]: "2.1.227" })
         : argument
     );
     fs.writeFileSync(screenPath, initialScreen);

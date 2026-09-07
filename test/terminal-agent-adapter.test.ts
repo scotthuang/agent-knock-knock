@@ -951,18 +951,20 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
   }
 
   const capabilities = probeCodexThreadLifecycle("0.153.4");
-  const unverified = probeCodexThreadLifecycle("0.153.5");
-  assert.equal(unverified.status, "supported");
-  assert.equal(unverified.behaviorProfile, CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE);
-  assert.equal(unverified.versionCompatibility, "unverified");
-  assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
-  assert.equal(unverified.newThread, true);
-  assert.equal(unverified.resumeExact, true);
-  assert.equal(unverified.candidateDiscovery, true);
-  assert.equal(
-    planCodexThreadLifecycle({ kind: "new_thread" }, unverified).behaviorProfile,
-    CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE
-  );
+  for (const version of ["0.152.0", "0.153.5"]) {
+    const unverified = probeCodexThreadLifecycle(version);
+    assert.equal(unverified.status, "supported");
+    assert.equal(unverified.behaviorProfile, CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE);
+    assert.equal(unverified.versionCompatibility, "unverified");
+    assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
+    assert.equal(unverified.newThread, true);
+    assert.equal(unverified.resumeExact, true);
+    assert.equal(unverified.candidateDiscovery, true);
+    assert.equal(
+      planCodexThreadLifecycle({ kind: "new_thread" }, unverified).behaviorProfile,
+      CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE
+    );
+  }
   assert.equal(probeCodexThreadLifecycle("0.150").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle("0.150.0-01").status, "unsupported");
   assert.equal(probeCodexThreadLifecycle(undefined).status, "unknown");
@@ -974,6 +976,10 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
   assert.equal(
     codexLifecycleBehaviorProfile("0.153.4"),
     "codex-tui-0.153.4"
+  );
+  assert.equal(
+    codexRuntimeCompatibilityProfile("0.152.0")?.behaviorProfile,
+    CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE
   );
   assert.equal(
     codexRuntimeCompatibilityProfile("0.153.5")?.behaviorProfile,
@@ -1072,16 +1078,18 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     statusInspection: false,
     reason: "the running Codex version could not be verified"
   });
-  const unverified = probeCodexNativeInspection("0.153.5");
-  assert.equal(unverified.status, "supported");
-  assert.equal(unverified.statusInspection, true);
-  assert.equal(unverified.behaviorProfile, CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE);
-  assert.equal(unverified.versionCompatibility, "unverified");
-  assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
-  assert.equal(
-    planCodexNativeInspection({ kind: "status" }, unverified).behaviorProfile,
-    CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE
-  );
+  for (const version of ["0.152.0", "0.153.5"]) {
+    const unverified = probeCodexNativeInspection(version);
+    assert.equal(unverified.status, "supported");
+    assert.equal(unverified.statusInspection, true);
+    assert.equal(unverified.behaviorProfile, CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE);
+    assert.equal(unverified.versionCompatibility, "unverified");
+    assert.match(unverified.compatibilityWarning ?? "", /not been regression-tested/u);
+    assert.equal(
+      planCodexNativeInspection({ kind: "status" }, unverified).behaviorProfile,
+      CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE
+    );
+  }
   const invalid = probeCodexNativeInspection("0.150");
   assert.equal(invalid.status, "unsupported");
   assert.equal(invalid.statusInspection, false);

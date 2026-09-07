@@ -5480,7 +5480,7 @@ test("generic Codex native inspection shares the pre-text viewport gate", async 
     bridge.submitNativeInspection(
       "codex",
       terminalControl(codexTerminalAgentAdapter),
-      codexStatusInspectionPlan("0.153.5"),
+      codexStatusInspectionPlan("0.150.0"),
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -5875,6 +5875,7 @@ test("verified and unverified Claude versions use the closed stable composer and
     "2.1.237",
     "2.1.251",
     "2.1.259",
+    "2.1.260",
     "2.1.263",
     "2.1.264"
   ]) {
@@ -6007,6 +6008,7 @@ test("verified and generic Claude native status profiles accept the closed 80-co
     "2.1.237",
     "2.1.251",
     "2.1.259",
+    "2.1.260",
     "2.1.263",
     "2.1.264"
   ]) {

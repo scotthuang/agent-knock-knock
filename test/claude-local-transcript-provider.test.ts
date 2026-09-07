@@ -31,7 +31,7 @@ const PID = 42421;
 const AGENT_STARTED_AT_MS = 1784870000000;
 const VERSION = "2.1.218";
 const PREVIOUS_VERSION = "2.1.226";
-const CURRENT_VERSION = "2.1.263";
+const CURRENT_VERSION = "2.1.259";
 const LEGACY_VERSION = "2.1.198";
 const STARTED_AT = "2026-07-24T02:00:00.000Z";
 const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
@@ -949,82 +949,87 @@ test("Claude resume candidates use complete versions and structural identity ins
   );
 });
 
-test("Claude 2.1.263 transcript supports lifecycle, acceptance, completion, and approval evidence", (t) => {
-  const fixture = createFixture(t, 263);
-  const request = "Verify the exact current Claude transcript profile";
-  const anchor = fixture.capture();
-  fixture.write(turnRecords({
-    request,
-    assistantText: "Current Claude transcript accepted",
-    sessionId: fixture.sessionId,
-    version: CURRENT_VERSION
-  }));
+for (const [version, suffix] of [
+  ["2.1.259", 259],
+  ["2.1.263", 263]
+] as const) {
+  test(`Claude ${version} transcript supports lifecycle, acceptance, completion, and approval evidence`, (t) => {
+    const fixture = createFixture(t, suffix);
+    const request = "Verify the exact current Claude transcript profile";
+    const anchor = fixture.capture();
+    fixture.write(turnRecords({
+      request,
+      assistantText: "Current Claude transcript accepted",
+      sessionId: fixture.sessionId,
+      version
+    }));
 
-  const acceptance = fixture.detectAcceptance(anchor, request);
-  assert.equal(acceptance?.metadata?.claude_version, CURRENT_VERSION);
-  const completion = fixture.detect(anchor, request);
-  assert.equal(completion?.text, "Current Claude transcript accepted");
-  assert.equal(completion?.metadata?.claude_version, CURRENT_VERSION);
+    const acceptance = fixture.detectAcceptance(anchor, request);
+    assert.equal(acceptance?.metadata?.claude_version, version);
+    const completion = fixture.detect(anchor, request);
+    assert.equal(completion?.text, "Current Claude transcript accepted");
+    assert.equal(completion?.metadata?.claude_version, version);
 
-  const sessions = listClaudeHistoricalSessions({
-    cwd: fixture.workspace,
-    claudeHome: fixture.claudeHome,
-    agentVersion: CURRENT_VERSION
-  });
-  assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].claudeVersion, CURRENT_VERSION);
-  const candidate = listClaudeThreadLifecycleCandidates({
-    cwd: fixture.workspace,
-    claudeHome: fixture.claudeHome,
-    agentVersion: CURRENT_VERSION
-  })[0];
-  assert.equal(candidate.agentVersion, CURRENT_VERSION);
-  assert.equal(
-    revalidateClaudeThreadLifecycleCandidate(candidate.candidateToken, {
+    const sessions = listClaudeHistoricalSessions({
       cwd: fixture.workspace,
       claudeHome: fixture.claudeHome,
-      agentVersion: CURRENT_VERSION
-    }).status,
-    "valid"
-  );
+      agentVersion: version
+    });
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].claudeVersion, version);
+    const candidate = listClaudeThreadLifecycleCandidates({
+      cwd: fixture.workspace,
+      claudeHome: fixture.claudeHome,
+      agentVersion: version
+    })[0];
+    assert.equal(candidate.agentVersion, version);
+    assert.equal(
+      revalidateClaudeThreadLifecycleCandidate(candidate.candidateToken, {
+        cwd: fixture.workspace,
+        claudeHome: fixture.claudeHome,
+        agentVersion: version
+      }).status,
+      "valid"
+    );
 
-  const pending = createFixture(t, 238);
-  const pendingRequest = "Inspect the current Claude approval schema";
-  const pendingAnchor = pending.capture();
-  pending.write(pendingBashRecords({
-    request: pendingRequest,
-    command: "printf current-claude-profile",
-    sessionId: pending.sessionId,
-    version: CURRENT_VERSION
-  }));
-  const approval = pending.detectPending(pendingAnchor, pendingRequest);
-  assert.equal(approval?.claudeVersion, CURRENT_VERSION);
-  assert.equal(approval?.toolName, "Bash");
-});
+    const pending = createFixture(t, 238);
+    const pendingRequest = "Inspect the current Claude approval schema";
+    const pendingAnchor = pending.capture();
+    pending.write(pendingBashRecords({
+      request: pendingRequest,
+      command: "printf current-claude-profile",
+      sessionId: pending.sessionId,
+      version
+    }));
+    const approval = pending.detectPending(pendingAnchor, pendingRequest);
+    assert.equal(approval?.claudeVersion, version);
+    assert.equal(approval?.toolName, "Bash");
+  });
 
-test("Claude 2.1.263 input-ready waiting rows can anchor sends but permission waits cannot", (t) => {
-  const fixture = createFixture(t, 263);
-  fixture.agentRows[0] = {
-    ...fixture.agentRows[0],
-    status: "waiting",
-    waitingFor: undefined
-  };
-  assert.ok(fixture.capture());
+  test(`Claude ${version} input-ready waiting rows can anchor sends but permission waits cannot`, (t) => {
+    const fixture = createFixture(t, suffix);
+    fixture.agentRows[0] = {
+      ...fixture.agentRows[0],
+      status: "waiting",
+      waitingFor: undefined
+    };
+    assert.ok(fixture.capture());
 
-  fixture.agentRows[0] = {
-    ...fixture.agentRows[0],
-    status: "waiting",
-    waitingFor: "permission prompt"
-  };
-  assert.equal(captureClaudeTranscriptAnchor({
-    sessionId: fixture.sessionId,
-    cwd: fixture.workspace,
-    pid: PID,
-    claudeHome: fixture.claudeHome,
-    agentRows: fixture.agentRows,
-    now: new Date(CAPTURED_AT)
-  }), undefined);
-});
+    fixture.agentRows[0] = {
+      ...fixture.agentRows[0],
+      status: "waiting",
+      waitingFor: "permission prompt"
+    };
+    assert.equal(captureClaudeTranscriptAnchor({
+      sessionId: fixture.sessionId,
+      cwd: fixture.workspace,
+      pid: PID,
+      claudeHome: fixture.claudeHome,
+      agentRows: fixture.agentRows,
+      now: new Date(CAPTURED_AT)
+    }), undefined);
+  });
+}
 
 test("fallback Watch identifies one anchored Claude request from its hash only", (t) => {
   const fixture = createFixture(t, 240);
