@@ -30,6 +30,21 @@ const CODEX_MULTI_QUESTION = `
   tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt
 `;
 
+const CODEX_MULTI_QUESTION_WRAPPED = CODEX_MULTI_QUESTION.replace(
+  "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt",
+  "  tab to add notes | enter to submit answer | ←/→ to navigate questions\n  esc to interrupt"
+);
+
+const CODEX_MULTI_LAST_OPTION = CODEX_MULTI_QUESTION
+  .replace("Question 1/2 (2 unanswered)", "Question 2/2 (1 unanswered)")
+  .replace("Choose an option.", "Choose the final option.")
+  .replace("enter to submit answer", "enter to submit all");
+
+const CODEX_MULTI_LAST_OPTION_WRAPPED = CODEX_MULTI_LAST_OPTION.replace(
+  "  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt",
+  "  tab to add notes | enter to submit all\n  ←/→ to navigate questions | esc to interrupt"
+);
+
 const CODEX_FREEFORM = `
   Question 1/1 (1 unanswered)
   Share details.
@@ -49,6 +64,15 @@ const CODEX_MULTI_FREEFORM = `
 
   enter to submit all | ctrl + p / ctrl + n change question | esc to interrupt
 `;
+
+const CODEX_MULTI_FREEFORM_WRAPPED = CODEX_MULTI_FREEFORM.replace(
+  "  enter to submit all | ctrl + p / ctrl + n change question | esc to interrupt",
+  "  enter to submit all\n  ctrl + p / ctrl + n change question | esc to interrupt"
+);
+
+const CODEX_MULTI_FIRST_FREEFORM = CODEX_MULTI_FREEFORM
+  .replace("Question 2/2 (2 unanswered)", "Question 1/2 (2 unanswered)")
+  .replace("enter to submit all", "enter to submit answer");
 
 const CODEX_UNANSWERED_CONFIRM = `
   Submit with unanswered questions?
@@ -185,16 +209,54 @@ test("Codex 0.153.4 exact option snapshot yields one semantic question", () => {
 });
 
 test("Codex official multi-question header preserves current step and total", () => {
-  const parsed = actionable(inspectNativeQuestionnaire({
+  const unwrapped = actionable(inspectNativeQuestionnaire({
     agent: "codex",
     version: "0.153.4",
     screen: CODEX_MULTI_QUESTION
   }));
+  const wrapped = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_MULTI_QUESTION_WRAPPED
+  }));
 
-  assert.equal(parsed.current_step, 1);
-  assert.equal(parsed.total_steps, 2);
-  assert.equal(parsed.question.response_kind, "single_select");
-  assert.equal(parsed.action_plan.kind, "single_select");
+  assert.equal(unwrapped.current_step, 1);
+  assert.equal(unwrapped.total_steps, 2);
+  assert.equal(unwrapped.question.response_kind, "single_select");
+  assert.equal(unwrapped.action_plan.kind, "single_select");
+  assert.deepEqual(wrapped.question, unwrapped.question);
+  assert.deepEqual(wrapped.action_plan, unwrapped.action_plan);
+  assert.notEqual(
+    wrapped.prompt_evidence.sha256,
+    unwrapped.prompt_evidence.sha256
+  );
+  assert.equal(
+    wrapped.prompt_evidence.footer,
+    "  tab to add notes | enter to submit answer | ←/→ to navigate questions\n  esc to interrupt"
+  );
+});
+
+test("Codex final option question accepts exact submit-all footers", () => {
+  const unwrapped = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_MULTI_LAST_OPTION
+  }));
+  const wrapped = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_MULTI_LAST_OPTION_WRAPPED
+  }));
+
+  assert.deepEqual([unwrapped.current_step, unwrapped.total_steps], [2, 2]);
+  assert.equal(unwrapped.question.response_kind, "single_select");
+  assert.equal(unwrapped.action_plan.kind, "single_select");
+  assert.deepEqual(wrapped.question, unwrapped.question);
+  assert.deepEqual(wrapped.action_plan, unwrapped.action_plan);
+  assert.notEqual(
+    wrapped.prompt_evidence.sha256,
+    unwrapped.prompt_evidence.sha256
+  );
 });
 
 test("Codex exact freeform snapshot yields a bounded text-then-Enter plan", () => {
@@ -216,15 +278,33 @@ test("Codex exact freeform snapshot yields a bounded text-then-Enter plan", () =
 });
 
 test("Codex exact multi-question freeform is actionable one step at a time", () => {
-  const parsed = actionable(inspectNativeQuestionnaire({
+  const unwrapped = actionable(inspectNativeQuestionnaire({
     agent: "codex",
     version: "0.153.4",
     screen: CODEX_MULTI_FREEFORM
   }));
+  const wrapped = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_MULTI_FREEFORM_WRAPPED
+  }));
+  const first = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_MULTI_FIRST_FREEFORM
+  }));
 
-  assert.deepEqual([parsed.current_step, parsed.total_steps], [2, 2]);
-  assert.equal(parsed.question.response_kind, "free_text");
-  assert.equal(parsed.action_plan.kind, "free_text");
+  assert.deepEqual([unwrapped.current_step, unwrapped.total_steps], [2, 2]);
+  assert.equal(unwrapped.question.response_kind, "free_text");
+  assert.equal(unwrapped.action_plan.kind, "free_text");
+  assert.deepEqual(wrapped.question, unwrapped.question);
+  assert.deepEqual(wrapped.action_plan, unwrapped.action_plan);
+  assert.notEqual(
+    wrapped.prompt_evidence.sha256,
+    unwrapped.prompt_evidence.sha256
+  );
+  assert.deepEqual([first.current_step, first.total_steps], [1, 2]);
+  assert.equal(first.question.response_kind, "free_text");
 });
 
 test("Codex exact unanswered confirmation has closed confirm/cancel plans", () => {
@@ -265,6 +345,46 @@ test("Codex requires bottom-most exact footer and strict ordered numbering", () 
     agent: "codex",
     version: "0.153.4",
     screen: outOfOrder
+  })).reason, "changed_shape");
+
+  const earlySubmitAll = CODEX_MULTI_QUESTION.replace(
+    "enter to submit answer",
+    "enter to submit all"
+  );
+  assert.equal(manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: earlySubmitAll
+  })).reason, "changed_shape");
+
+  const finalSubmitAnswer = CODEX_MULTI_LAST_OPTION.replace(
+    "enter to submit all",
+    "enter to submit answer"
+  );
+  assert.equal(manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: finalSubmitAnswer
+  })).reason, "changed_shape");
+
+  const reorderedWrappedTips = CODEX_MULTI_QUESTION_WRAPPED.replace(
+    "tab to add notes | enter to submit answer",
+    "enter to submit answer | tab to add notes"
+  );
+  assert.equal(manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: reorderedWrappedTips
+  })).reason, "changed_shape");
+
+  const splitInsideTip = CODEX_MULTI_QUESTION_WRAPPED.replace(
+    "enter to submit answer",
+    "enter to submit\n  answer"
+  );
+  assert.equal(manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: splitInsideTip
   })).reason, "changed_shape");
 });
 

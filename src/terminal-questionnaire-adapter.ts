@@ -205,14 +205,13 @@ const CLAUDE_SINGLE_SELECTION_FOOTER =
   "Enter to select · ↑/↓ to navigate · Esc to cancel";
 const CLAUDE_CUSTOM_TEXT_FOOTER =
   "Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel";
-const CODEX_OPTIONS_FOOTER =
-  "  tab to add notes | enter to submit answer | esc to interrupt";
-const CODEX_MULTI_OPTIONS_FOOTER =
-  "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt";
-const CODEX_FREE_TEXT_FOOTER =
-  "  enter to submit answer | esc to interrupt";
-const CODEX_MULTI_FREE_TEXT_FOOTER =
-  "  enter to submit all | ctrl + p / ctrl + n change question | esc to interrupt";
+const CODEX_ADD_NOTES_TIP = "tab to add notes";
+const CODEX_SUBMIT_ANSWER_TIP = "enter to submit answer";
+const CODEX_SUBMIT_ALL_TIP = "enter to submit all";
+const CODEX_OPTION_NAVIGATION_TIP = "←/→ to navigate questions";
+const CODEX_FREE_TEXT_NAVIGATION_TIP =
+  "ctrl + p / ctrl + n change question";
+const CODEX_INTERRUPT_TIP = "esc to interrupt";
 const CODEX_UNANSWERED_FOOTER =
   "  Press enter to confirm or esc to go back";
 
@@ -903,11 +902,76 @@ function parseCodexOptionLines(
   return rows;
 }
 
+interface CodexFooterMatch {
+  readonly start: number;
+  readonly end: number;
+  readonly raw: string;
+}
+
+function codexSubmitTip(header: CodexHeader): string {
+  return header.totalSteps > 1 && header.currentStep === header.totalSteps
+    ? CODEX_SUBMIT_ALL_TIP
+    : CODEX_SUBMIT_ANSWER_TIP;
+}
+
+function codexOptionFooterTips(header: CodexHeader): readonly string[] {
+  return [
+    CODEX_ADD_NOTES_TIP,
+    codexSubmitTip(header),
+    ...(header.totalSteps > 1 ? [CODEX_OPTION_NAVIGATION_TIP] : []),
+    CODEX_INTERRUPT_TIP
+  ];
+}
+
+function codexFreeTextFooterTips(header: CodexHeader): readonly string[] {
+  return [
+    codexSubmitTip(header),
+    ...(header.totalSteps > 1 ? [CODEX_FREE_TEXT_NAVIGATION_TIP] : []),
+    CODEX_INTERRUPT_TIP
+  ];
+}
+
+/**
+ * Codex lays out footer tips again whenever the pane width changes. Accept only
+ * exact known tips, in their exact order, split at tip boundaries. The raw
+ * physical lines remain part of prompt evidence so a resize still rotates the
+ * dispatch fingerprint.
+ */
+function matchExactCodexFooter(
+  lines: readonly string[],
+  expectedTips: readonly string[]
+): CodexFooterMatch | undefined {
+  const end = lines.length - 1;
+  for (let lineCount = 1; lineCount <= expectedTips.length; lineCount += 1) {
+    const start = end - lineCount + 1;
+    if (start < 0) {
+      break;
+    }
+    const footerLines = lines.slice(start, end + 1);
+    if (!footerLines.every((line) => /^  \S/u.test(line))) {
+      continue;
+    }
+    const actualTips = footerLines.flatMap((line) =>
+      line.slice(2).split(" | ")
+    );
+    if (
+      actualTips.length === expectedTips.length &&
+      actualTips.every((tip, index) => tip === expectedTips[index])
+    ) {
+      return {
+        start,
+        end,
+        raw: footerLines.join("\n")
+      };
+    }
+  }
+  return undefined;
+}
+
 function parseCodexQuestionRegion(
   lines: readonly string[]
 ): CodexQuestionRegion | undefined {
   const end = lines.length - 1;
-  const footer = lines[end] ?? "";
   const headerIndex = lastIndexMatching(lines, (line) => parseCodexHeader(line) !== undefined, end);
   const header = headerIndex >= 0 ? parseCodexHeader(lines[headerIndex] ?? "") : undefined;
   const promptLine = lines[headerIndex + 1] ?? "";
@@ -915,35 +979,42 @@ function parseCodexQuestionRegion(
     return undefined;
   }
   const prompt = promptLine.slice(2);
-  const body = lines.slice(headerIndex + 2, end);
-  const freeTextLines = body.filter((line) => line.length > 0);
+  const freeTextFooter = matchExactCodexFooter(
+    lines,
+    codexFreeTextFooterTips(header)
+  );
+  const freeTextLines = freeTextFooter
+    ? lines.slice(headerIndex + 2, freeTextFooter.start)
+      .filter((line) => line.length > 0)
+    : [];
   if (
-    (footer === CODEX_FREE_TEXT_FOOTER ||
-      (header.totalSteps > 1 && footer === CODEX_MULTI_FREE_TEXT_FOOTER)) &&
+    freeTextFooter &&
     freeTextLines.length === 1 &&
     freeTextLines[0] === "  › Type your answer (optional)"
   ) {
     return {
       start: headerIndex,
       end,
-      footer,
+      footer: freeTextFooter.raw,
       header,
       prompt,
       freeText: true
     };
   }
-  const expectedFooter = header.totalSteps === 1
-    ? CODEX_OPTIONS_FOOTER
-    : CODEX_MULTI_OPTIONS_FOOTER;
-  if (footer !== expectedFooter) {
+  const optionFooter = matchExactCodexFooter(
+    lines,
+    codexOptionFooterTips(header)
+  );
+  if (!optionFooter) {
     return undefined;
   }
+  const body = lines.slice(headerIndex + 2, optionFooter.start);
   const options = parseCodexOptionLines(body);
   return options
     ? {
         start: headerIndex,
         end,
-        footer,
+        footer: optionFooter.raw,
         header,
         prompt,
         options,
