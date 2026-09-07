@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { AjvJsonSchemaValidator } from
+  "@modelcontextprotocol/sdk/validation/ajv";
 import {
   AKK_CALLBACK_METHOD,
   akkUsageText,
@@ -47,6 +49,28 @@ test("respond interaction schema exposes provider-portable free text", () => {
   assert.ok(answerSchema.properties.text);
   assert.ok(answerSchema.properties.confirm);
   assert.equal("oneOf" in answerSchema, false);
+
+  const validate = new AjvJsonSchemaValidator().getValidator(
+    respondInteractionParameters
+  );
+  assert.equal(validate({
+    turn_id: "turn-demo",
+    interaction_id: "ti_demo",
+    answers: [{
+      question_id: "question_demo",
+      response_kind: "free_text",
+      text: "Shadow"
+    }]
+  }).valid, true);
+  assert.equal(validate({
+    turn_id: "turn-demo",
+    interaction_id: "ti_demo",
+    answers: [{
+      question_id: "question_demo",
+      response_kind: "multi_select",
+      selected_option_ids: ["option_demo"]
+    }]
+  }).valid, false);
 });
 
 test("model-facing authority policy normalizes fields and preserves ordinary content", () => {
