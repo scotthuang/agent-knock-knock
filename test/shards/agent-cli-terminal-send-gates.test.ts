@@ -359,14 +359,39 @@ test("raw terminal send uses the target pid cwd from partial lsof output", async
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const processCalls = readJsonLines(processCallsPath);
     const lsofCalls = processCalls.filter((call) => call.command === "lsof");
+    const cwdLsofCalls = lsofCalls.filter((call) =>
+      call.args.includes("cwd")
+    );
+    const executableLsofCalls = lsofCalls.filter((call) =>
+      call.args.includes("txt")
+    );
+    assert.equal(
+      lsofCalls.length,
+      cwdLsofCalls.length + executableLsofCalls.length,
+      "the send may inspect only cwd or the target executable"
+    );
     assert.ok(
-      lsofCalls.length >= 2,
+      cwdLsofCalls.length >= 2,
       "raw resolution and the pre-send identity gate must both verify cwd"
     );
-    for (const call of lsofCalls) {
+    for (const call of cwdLsofCalls) {
       assert.deepEqual(call.args.slice(-2), ["-p", String(targetPid)]);
       assert.equal(call.args.includes(String(unrelatedPid)), false);
       assert.equal(call.args.includes(String(panePid)), false);
+    }
+    assert.ok(
+      executableLsofCalls.length >= 1,
+      "the managed runtime identity must inspect the target executable version"
+    );
+    for (const call of executableLsofCalls) {
+      assert.deepEqual(call.args, [
+        "-a",
+        "-p",
+        String(targetPid),
+        "-d",
+        "txt",
+        "-Fn"
+      ]);
     }
 
     const tmuxSends = readJsonLines(tmuxCallsPath)
