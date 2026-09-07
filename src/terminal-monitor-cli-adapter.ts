@@ -20,6 +20,10 @@ import type {
   TerminalAgentBridge,
   TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
+import {
+  validateTerminalInteractionProjection,
+  type TerminalInteractionProjection
+} from "./terminal-interaction-protocol.js";
 import type { TerminalBridgeSubmissionMutation } from
   "./terminal-dispatch-receipt.js";
 import type { TerminalSubmissionAcceptanceEvidence } from
@@ -28,6 +32,7 @@ import { StoreLockTimeoutError } from "./store.js";
 import type {
   MonitorApprovalCallbackRecord,
   MonitorApprovalNotificationResult,
+  MonitorInteractionNotificationResult,
   MonitorPollResult,
   MonitorSubmissionReconciliation,
   TerminalMonitorPresentation
@@ -688,6 +693,117 @@ export function recordMonitorApprovalNotification(input: {
   });
 }
 
+export interface InteractionNotificationAdapterPorts {
+  record(input: {
+    terminalControl: TerminalControlRef;
+    terminalStatus: TerminalBridgeStatus;
+    interactionId: string;
+    questionId: string;
+    fingerprint: string;
+    expectedConversation: {
+      conversationId: string;
+      status: ConversationStatus;
+      updatedAt: string;
+      messageId?: string;
+    };
+    onRecorded(
+      conversation: Conversation,
+      context?: { recoverMissingOutbox?: boolean }
+    ): MonitorApprovalCallbackRecord;
+  }): MonitorInteractionNotificationResult;
+  prepare(input: {
+    conversation: Conversation;
+    actor: Executor["actor"];
+    body: string;
+    metadata: UnknownRecord;
+    recoverMissingOutbox: boolean;
+  }): MonitorApprovalCallbackRecord;
+}
+
+export function recordMonitorInteractionNotification(input: {
+  conversation: Conversation;
+  executor: Executor;
+  terminalControl: TerminalControlRef;
+  terminalStatus: TerminalBridgeStatus;
+  currentMessageId?: string;
+  interactionId: string;
+  questionId: string;
+  fingerprint: string;
+  ports: InteractionNotificationAdapterPorts;
+}): MonitorInteractionNotificationResult {
+  return input.ports.record({
+    terminalControl: input.terminalControl,
+    terminalStatus: input.terminalStatus,
+    interactionId: input.interactionId,
+    questionId: input.questionId,
+    fingerprint: input.fingerprint,
+    expectedConversation: {
+      conversationId: input.conversation.conversation_id,
+      status: input.conversation.status,
+      updatedAt: input.conversation.updated_at,
+      messageId: input.currentMessageId
+    },
+    onRecorded: (conversation, context) => {
+      const interactionState = persistedInteractionNotificationProjection({
+        conversation,
+        interactionId: input.interactionId,
+        questionId: input.questionId
+      });
+      return input.ports.prepare({
+        conversation,
+        actor: input.executor.actor,
+        body: [
+          `${input.executor.display_name} is waiting for a native questionnaire response.`,
+          `Turn: ${conversation.turn_id}`,
+          `Terminal: ${input.terminalControl.target}`,
+          "Refresh this Turn with agent_knock_knock_status in the owning controller conversation, present the current interaction_state to the user, and answer exactly one advertised step with agent_knock_knock_respond_interaction."
+        ].join("\n"),
+        metadata: {
+          source: "terminal_bridge",
+          reason: "interaction_required",
+          terminal: {
+            provider: input.terminalStatus.provider,
+            target: input.terminalStatus.target,
+            agent: input.terminalStatus.agent
+          },
+          interaction_state: interactionState
+        },
+        recoverMissingOutbox: context?.recoverMissingOutbox === true
+      });
+    }
+  });
+}
+
+function persistedInteractionNotificationProjection(input: {
+  conversation: Conversation;
+  interactionId: string;
+  questionId: string;
+}): TerminalInteractionProjection {
+  const takeover = isRecord(input.conversation.native_session_takeover)
+    ? input.conversation.native_session_takeover
+    : undefined;
+  const notification = isRecord(
+    takeover?.terminal_bridge_interaction_notification
+  )
+    ? takeover.terminal_bridge_interaction_notification
+    : undefined;
+  const projection = validateTerminalInteractionProjection(
+    notification?.interaction_state
+  );
+  if (
+    notification?.interaction_id !== input.interactionId ||
+    notification?.question_id !== input.questionId ||
+    projection.interaction_id !== input.interactionId ||
+    projection.questions.length !== 1 ||
+    projection.questions[0]?.question_id !== input.questionId
+  ) {
+    throw new Error(
+      "persisted terminal interaction notification does not match its callback"
+    );
+  }
+  return projection;
+}
+
 function approvalBody(
   input: Parameters<typeof recordMonitorApprovalNotification>[0],
   conversation: Conversation
@@ -835,6 +951,10 @@ export function presentTerminalMonitor(
     case "approval_gateway_missing":
       presentApproval(result, write, base);
       return;
+    case "interaction_duplicate":
+    case "interaction_gateway_missing":
+      presentInteraction(result, write, base);
+      return;
     case "completion_duplicate":
       write({ ...base, completed: false, duplicate: true, reason: result.reason });
       return;
@@ -846,6 +966,39 @@ export function presentTerminalMonitor(
         detail: result.detail
       });
   }
+}
+
+function presentInteraction(
+  result: Extract<TerminalMonitorPresentation, {
+    kind: "interaction_duplicate" | "interaction_gateway_missing";
+  }>,
+  write: (value: UnknownRecord) => void,
+  base: UnknownRecord
+): void {
+  write({
+    ...base,
+    conversation: publicInteractionConversation(result.conversation),
+    awaiting_interaction: true,
+    ...(result.kind === "interaction_duplicate"
+      ? { duplicate: true }
+      : {
+          delivered: false,
+          message: result.callbackMessage,
+          reason: "gateway_method_missing"
+        }),
+    terminal_control: result.terminalControl,
+    interaction_state: result.interactionState
+  });
+}
+
+function publicInteractionConversation(
+  conversation: Conversation
+): Conversation {
+  const projected = { ...conversation };
+  delete projected.native_session_takeover;
+  delete projected.callback_delivery;
+  delete projected.callback_notification_delivery;
+  return projected;
 }
 
 function presentApproval(

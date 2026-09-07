@@ -19,6 +19,14 @@ const FINGERPRINT = "a".repeat(64);
 const INTERACTION_ID = "interaction_1234567890abcdef";
 const QUESTION_ID = "question_1234567890abcdef";
 const OPTION_ID = "option_1234567890abcdef";
+const INTERACTION_NOTIFICATION = {
+  terminal_bridge_message_id: "message-interaction",
+  interaction_id: INTERACTION_ID,
+  question_id: QUESTION_ID,
+  prompt_fingerprint: FINGERPRINT,
+  callback_message_id: "callback-interaction",
+  callback_message_ts: NOW.toISOString()
+};
 
 const terminalControl = {
   kind: "tmux",
@@ -41,10 +49,27 @@ function managedTurn(): Conversation {
       now: NOW
     }),
     status: "waiting_for_agent",
+    callback_delivery: {
+      kind: "interaction_notification",
+      status: "failed",
+      attempts: 1,
+      message: {
+        id: "callback-interaction",
+        metadata: {
+          source: "terminal_bridge",
+          reason: "interaction_required",
+          interaction_state: {
+            interaction_id: INTERACTION_ID,
+            turn_id: "turn-interaction"
+          }
+        }
+      }
+    },
     native_session_takeover: {
       terminal_bridge: true,
       terminal_agent_pid: 4242,
       terminal_bridge_message_id: "message-interaction",
+      terminal_bridge_interaction_notification: INTERACTION_NOTIFICATION,
       native_session_id: "terminal:v2:tmux:claude:interaction:0.0:4242",
       terminal_control: terminalControl
     }
@@ -204,6 +229,18 @@ test("semantic interaction response reserves once, audits without text, and resu
     takeover.terminal_bridge_last_interaction_fingerprint,
     FINGERPRINT
   );
+  assert.equal(
+    takeover.terminal_bridge_last_interaction_message_id,
+    "message-interaction"
+  );
+  assert.equal(
+    takeover.terminal_bridge_interaction_notification,
+    undefined
+  );
+  assert.equal(
+    (subject.current().callback_delivery as Record<string, unknown>).status,
+    "superseded"
+  );
   assert.equal(subject.events.length, 1);
   assert.equal(subject.events[0]?.event, "terminal_interaction_response_send");
   assert.doesNotMatch(JSON.stringify(subject.events), /selected_option_ids/u);
@@ -317,6 +354,14 @@ test("post-reservation uncertainty stalls the Turn and preserves one-shot receip
   assert.equal(subject.current().status, "stalled");
   assert.equal(dispatch.state, "uncertain");
   assert.equal(dispatch.interaction_id, INTERACTION_ID);
+  assert.deepEqual(
+    takeover.terminal_bridge_interaction_notification,
+    INTERACTION_NOTIFICATION
+  );
+  assert.equal(
+    takeover.terminal_bridge_last_interaction_message_id,
+    undefined
+  );
   assert.equal(subject.events[0]?.event,
     "terminal_interaction_response_uncertain");
   assert.doesNotMatch(JSON.stringify(subject.events), /selected_option_ids/u);

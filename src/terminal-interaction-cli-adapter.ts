@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import { supersedeMatchingInteractionCallbackDelivery } from
+  "./callback-outbox-policy.js";
 import {
   executorForConversation,
   turnIdForConversation,
@@ -373,11 +375,19 @@ async function runRespondInteraction(
         );
       }
       const answeredAt = dependencies.runtime.now().toISOString();
-      const latestTakeover = takeoverFor(current);
+      const callbackSafeConversation =
+        supersedeMatchingInteractionCallbackDelivery(current, {
+          at: answeredAt,
+          interactionId,
+          fingerprint: expectedFingerprint
+        });
+      const latestTakeover = takeoverFor(callbackSafeConversation);
       const nextTakeover: Record<string, unknown> = {
         ...latestTakeover,
         terminal_bridge_last_interaction_id: interactionId,
         terminal_bridge_last_interaction_fingerprint: expectedFingerprint,
+        terminal_bridge_last_interaction_message_id:
+          latestTakeover?.terminal_bridge_message_id,
         terminal_bridge_last_interaction_response_sha256: responseSha256,
         terminal_bridge_last_interaction_at: answeredAt,
         terminal_bridge_last_activity_at: answeredAt,
@@ -385,8 +395,9 @@ async function runRespondInteraction(
           "interactive response dispatched"
       };
       delete nextTakeover.terminal_bridge_interaction_dispatch;
+      delete nextTakeover.terminal_bridge_interaction_notification;
       const nextConversation: Conversation = {
-        ...current,
+        ...callbackSafeConversation,
         status: "waiting_for_agent",
         native_session_takeover: nextTakeover,
         updated_at: answeredAt

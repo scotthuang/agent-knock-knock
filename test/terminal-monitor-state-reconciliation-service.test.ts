@@ -17,7 +17,11 @@ import {
   managedSessionBindingToken,
   terminalBindingFrom
 } from "../src/managed-session.js";
-import { createConversation, type Conversation } from "../src/protocol.js";
+import {
+  createConversation,
+  createMessage,
+  type Conversation
+} from "../src/protocol.js";
 import {
   ensureStoreWritable,
   loadState,
@@ -33,6 +37,10 @@ import type { MonitorVerifiedDeadResult } from
 import type { TerminalMonitorEligibility } from
   "../src/terminal-monitor-reconciliation-eligibility.js";
 import type { TerminalControlRef } from "../src/terminal-control-ref.js";
+import type {
+  TerminalAgentBridge,
+  TerminalBridgeStatus
+} from "../src/terminal-agent-bridge.js";
 import {
   reconcileTerminalMonitorStateCandidate,
   type TerminalMonitorCallbackRecovery,
@@ -253,6 +261,234 @@ function compiledMonitorStateSource(startToken: string, endToken: string): strin
   assert.notEqual(end, -1, `missing ${endToken}`);
   return source.slice(start, end);
 }
+
+test("questionnaire notification persists before outbox and recovers its stable callback", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-monitor-question-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const paths = pathsForConversation("turn-question-callback", storeDir);
+  const owner = createConversation({
+    userRequest: "ask one native question",
+    sessionId: "session-question-callback",
+    turnId: "turn-question-callback",
+    openclawSession: "agent:main:question-callback",
+    executorKind: "claude",
+    executorSession: "claude-question-callback"
+  });
+  owner.status = "waiting_for_agent";
+  owner.store_dir = path.resolve(storeDir);
+  owner.conversation_dir = path.resolve(path.dirname(paths.statePath));
+  owner.state_path = path.resolve(paths.statePath);
+  owner.event_log_path = path.resolve(paths.logPath);
+  owner.native_session_takeover = {
+    terminal_bridge: true,
+    terminal_bridge_message_id: "message-question-callback",
+    terminal_bridge_started_at: owner.created_at,
+    terminal_bridge_last_activity_at: owner.created_at,
+    terminal_bridge_pre_send_screen_fingerprint: "screen-before",
+    terminal_control: CONTROL
+  };
+  saveState(paths.statePath, owner);
+
+  const fingerprint = "c".repeat(64);
+  const interactionState = {
+    schema: "agent-knock-knock/terminal-interaction" as const,
+    version: 1 as const,
+    interaction_id: "interaction-question-callback",
+    turn_id: owner.turn_id,
+    agent: "claude" as const,
+    kind: "questionnaire" as const,
+    state: "pending" as const,
+    step: { index: 1, total: 2 },
+    questions: [{
+      question_id: "question-callback-1",
+      prompt: "Choose one",
+      required: true,
+      response_kind: "single_select" as const,
+      options: [
+        { option_id: "option-a", label: "Option A" },
+        { option_id: "option-b", label: "Option B" }
+      ]
+    }],
+    expires_at: "2099-09-08T00:00:00.000Z",
+    capabilities: {
+      respond: true,
+      batch_response: false,
+      free_text: false,
+      multi_select: false
+    }
+  };
+  const terminalStatus: TerminalBridgeStatus = {
+    provider: "tmux",
+    target: CONTROL.target,
+    agent: "claude",
+    reachable: true,
+    capabilities: {} as TerminalBridgeStatus["capabilities"],
+    activity_state: "unknown",
+    activity_reason: "native questionnaire visible",
+    approval_state: { scanned: true, blocked: false, approvable: false },
+    screen: { digest: "screen-question" },
+    interaction_state: interactionState,
+    interaction_prompt_fingerprint: fingerprint
+  };
+  const bridge = {
+    async monitorPoll() {
+      return { status: terminalStatus };
+    }
+  } as unknown as TerminalAgentBridge;
+  const recoveryFlags: boolean[] = [];
+  let crashBeforeOutbox = true;
+  const dependencies = {
+    dispatch: {
+      repository: {
+        acquire: () => () => {},
+        load: () => undefined,
+        save: () => undefined
+      },
+      recovery: {
+        reconcilePrepared: (_control: unknown, ledger: unknown) => ledger,
+        prepareCompletion: () => {
+          throw new Error("completion must not run while question is pending");
+        },
+        stallAccepted: async ({ conversation }: { conversation: Conversation }) =>
+          ({ stalled: false, conversation })
+      }
+    },
+    acceptance: {
+      storeDirForConversation: () => storeDir,
+      markUncertain: ({ conversation }: { conversation: Conversation }) =>
+        conversation,
+      reconcileMonitor: async () => ({ outcome: "pending" }),
+      recoverVirgin: async ({ conversation }: { conversation: Conversation }) =>
+        ({ outcome: "not_accepted", conversation })
+    },
+    authority: {
+      identity: {
+        migrateLegacyTerminalAgentIdentity: async (
+          { conversation }: { conversation: Conversation }
+        ) => conversation,
+        terminalRuntimeIdentityForConversation: () => undefined,
+        terminalDurableRequestForConversation: () => undefined
+      },
+      handoff: {
+        recoverDeferredCodexForegroundTransferBeforeMutation: async () => {}
+      },
+      assertBindingCurrent: () => {},
+      terminalControlForConversation: () => CONTROL,
+      createBridge: () => bridge
+    },
+    callbacks: {
+      reconcileDelivery: async () => ({ attempted: false }),
+      prepareApprovalNotification: () => {
+        throw new Error("approval callback must not run");
+      },
+      prepareInteractionNotification: (input: {
+        conversation: Conversation;
+        actor: "claude-code";
+        body: string;
+        metadata: Record<string, unknown>;
+        recoverMissingOutbox?: boolean;
+      }) => {
+        recoveryFlags.push(input.recoverMissingOutbox === true);
+        const takeover = input.conversation.native_session_takeover as
+          Record<string, unknown>;
+        const notification = takeover
+          .terminal_bridge_interaction_notification as Record<string, unknown>;
+        const callbackId = String(notification.callback_message_id);
+        assert.equal(
+          (input.metadata.interaction_state as Record<string, unknown>)
+            .expires_at,
+          interactionState.expires_at
+        );
+        if (crashBeforeOutbox) {
+          crashBeforeOutbox = false;
+          throw new Error("simulated crash before interaction outbox");
+        }
+        const message = createMessage({
+          conversation: input.conversation,
+          id: callbackId,
+          from: input.actor,
+          to: "openclaw",
+          type: "question",
+          requiresResponse: true,
+          body: input.body,
+          metadata: input.metadata,
+          now: new Date(String(notification.callback_message_ts))
+        });
+        const preparedConversation: Conversation = {
+          ...input.conversation,
+          status: "waiting_for_openclaw",
+          callback_delivery: {
+            kind: "interaction_notification",
+            status: "pending",
+            attempts: 0,
+            message
+          },
+          updated_at: new Date().toISOString()
+        };
+        saveState(paths.statePath, preparedConversation);
+        return {
+          callbackMessage: message,
+          prepared: {
+            outcome: "record_only" as const,
+            conversation: preparedConversation,
+            message
+          }
+        };
+      },
+      runPrepared: (prepared: PreparedCallback) =>
+        callbackResult(prepared.conversation),
+      emitPreparedResult: () => {},
+      prepareStallNotification: () => ({ delivered: false })
+    },
+    runtime: {
+      isProcessAlive: () => false,
+      storeDir: () => storeDir,
+      print: () => {},
+      bindingSuperseded: () => undefined,
+      approvalTtlMs: 60_000,
+      callbackRetryLimit: 3
+    }
+  } as unknown as TerminalMonitorStateCliDependencies;
+  const adapter = createTerminalMonitorStateCliAdapter(dependencies);
+  const run = (initialConversation: Conversation) => adapter.runService({
+    options: {},
+    statePath: paths.statePath,
+    logPath: paths.logPath,
+    initialConversation,
+    expectedTerminalMessageId: "message-question-callback",
+    lifecycle: { startedRecorded: true },
+    configuration: () => ({
+      pollIntervalMs: 1,
+      timeoutMinutes: 60,
+      hardTimeoutMinutes: 720
+    }),
+    terminalBridge: () => bridge
+  });
+
+  await assert.rejects(
+    () => run(loadState(paths.statePath)),
+    /simulated crash before interaction outbox/u
+  );
+  const recorded = loadState(paths.statePath);
+  const firstNotification = (
+    recorded.native_session_takeover as Record<string, unknown>
+  ).terminal_bridge_interaction_notification as Record<string, unknown>;
+  assert.equal(recorded.callback_delivery, undefined);
+  assert.equal(firstNotification.prompt_fingerprint, fingerprint);
+  const stableCallbackId = firstNotification.callback_message_id;
+
+  await run(recorded);
+
+  const recovered = loadState(paths.statePath);
+  const recoveredMessage = (
+    recovered.callback_delivery as Record<string, unknown>
+  ).message as Record<string, unknown>;
+  assert.deepEqual(recoveryFlags, [false, true]);
+  assert.equal(recoveredMessage.id, stableCallbackId);
+  assert.equal(recovered.status, "waiting_for_openclaw");
+});
 
 function assertSourceOrder(source: string, tokens: readonly string[]): void {
   let cursor = 0;

@@ -5,7 +5,8 @@ import {
   createCallbackOutboxService, type ApprovalNotificationPreparationInput,
   type CallbackDeliveryReconciliationInput, type CallbackExecutionResult,
   type CallbackOutboxServicePorts, type CallbackPreparationOptions,
-  type CallbackRetryMonitorInput, type PreparedCallback,
+  type CallbackRetryMonitorInput, type InteractionNotificationPreparationInput,
+  type PreparedCallback,
   type StallNotificationPreparationInput,
   type TerminalCompletionPreparationInput
 } from "./callback-outbox-service.js";
@@ -76,6 +77,8 @@ export interface CallbackCliFacade {
   runRetryMonitor(input: CallbackRetryMonitorInput): void;
   prepareApprovalNotification(input: ApprovalNotificationPreparationInput): ReturnType<
     CallbackOutboxService["prepareApprovalNotification"]>;
+  prepareInteractionNotification(input: InteractionNotificationPreparationInput): ReturnType<
+    CallbackOutboxService["prepareInteractionNotification"]>;
   prepareStallNotification(input: StallNotificationPreparationInput): ReturnType<
     CallbackOutboxService["prepareStallNotification"]>;
   prepareTerminalCompletion(input: TerminalCompletionPreparationInput): ReturnType<
@@ -343,6 +346,8 @@ export function createCallbackCliFacade(
       callbackOutboxService().runRetryMonitor(input)),
     prepareApprovalNotification: (input) => call(() =>
       callbackOutboxService().prepareApprovalNotification(input)),
+    prepareInteractionNotification: (input) => call(() =>
+      callbackOutboxService().prepareInteractionNotification(input)),
     prepareStallNotification: (input) => call(() =>
       callbackOutboxService().prepareStallNotification(input)),
     prepareTerminalCompletion: (input) => call(() =>

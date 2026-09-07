@@ -59,6 +59,7 @@
     "test/openclaw-compatibility-metadata.test.ts",
     "test/openclaw-doctor.test.ts",
     "test/openclaw-host-lifecycle-adapter.test.ts",
+    "test/openclaw-plugin-callback-adapter.test.ts",
     "test/openclaw-plugin-helpers.test.ts",
     "test/production-module-ownership.test.ts",
     "test/protocol.test.ts",

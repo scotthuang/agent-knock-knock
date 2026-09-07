@@ -6,6 +6,7 @@ import {
   classifyCallbackProcessFailure,
   reduceCallbackRetryPolicy,
   supersedeCallbackNotificationDelivery,
+  supersedeMatchingInteractionCallbackDelivery,
   supersedeUnacceptedCallbackDeliveries,
   type CallbackRetryPolicyState
 } from "../src/callback-outbox-policy.js";
@@ -485,6 +486,95 @@ test("explicit Close supersedes both unaccepted callback lanes", () => {
     assert.equal(delivery.transport_started_at, NOW_ISO);
     assert.equal(delivery.attempt_pid, undefined);
   }
+});
+
+test("an answered interaction supersedes only its exact unaccepted callback", () => {
+  const conversation = createConversation({
+    userRequest: "answer a native questionnaire",
+    sessionId: "session-interaction",
+    turnId: "turn-interaction",
+    executorKind: "claude",
+    now: new Date(NOW_ISO)
+  });
+  const fingerprint = "a".repeat(64);
+  const matching: Conversation = {
+    ...conversation,
+    native_session_takeover: {
+      terminal_bridge_message_id: "terminal-message-a",
+      terminal_bridge_interaction_notification: {
+        terminal_bridge_message_id: "terminal-message-a",
+        callback_message_id: "interaction-callback-a",
+        interaction_id: "interaction-a",
+        prompt_fingerprint: fingerprint
+      }
+    },
+    callback_delivery: {
+      kind: "interaction_notification",
+      status: "pending",
+      attempts: 1,
+      attempt_pid: 4102,
+      attempt_lease_expires_at: "2026-08-14T12:02:00.000Z",
+      retry_monitor_pid: 4103,
+      next_attempt_at: "2026-08-14T12:03:00.000Z",
+      transport_started_at: "2026-08-14T12:00:30.000Z",
+      message: {
+        id: "interaction-callback-a",
+        metadata: {
+          source: "terminal_bridge",
+          reason: "interaction_required",
+          interaction_state: {
+            interaction_id: "interaction-a",
+            turn_id: "turn-interaction"
+          }
+        }
+      }
+    }
+  };
+
+  const superseded = supersedeMatchingInteractionCallbackDelivery(matching, {
+    at: NOW_ISO,
+    interactionId: "interaction-a",
+    fingerprint
+  });
+  const delivery = superseded.callback_delivery as Record<string, unknown>;
+  assert.equal(delivery.status, "superseded");
+  assert.equal(delivery.superseded_reason,
+    "superseded_by_interaction_response");
+  assert.equal(delivery.transport_started_at,
+    "2026-08-14T12:00:30.000Z");
+  assert.equal(delivery.attempt_pid, undefined);
+  assert.deepEqual(
+    disposition(beginCallbackRetryPolicy(delivery, LIMITS)),
+    {
+      state: "unavailable",
+      attempt: 1,
+      reason: "no pending or failed callback outbox is available"
+    }
+  );
+
+  const accepted: Conversation = {
+    ...matching,
+    callback_delivery: {
+      ...(matching.callback_delivery as Record<string, unknown>),
+      injection: { status: "accepted" }
+    }
+  };
+  assert.strictEqual(
+    supersedeMatchingInteractionCallbackDelivery(accepted, {
+      at: NOW_ISO,
+      interactionId: "interaction-a",
+      fingerprint
+    }),
+    accepted
+  );
+  assert.strictEqual(
+    supersedeMatchingInteractionCallbackDelivery(matching, {
+      at: NOW_ISO,
+      interactionId: "interaction-b",
+      fingerprint
+    }),
+    matching
+  );
 });
 
 test("transport-started callback reports a live attempt but never becomes retryable", () => {

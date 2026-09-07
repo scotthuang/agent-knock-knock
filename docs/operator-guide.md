@@ -58,12 +58,15 @@ not a destination for another task. A question inside a live Turn uses the
 advertised `respond` action with that Turn's `turn_id`.
 
 Native questionnaire prompts use `respond_interaction`, not ordinary
-`respond`. First obtain the current managed Turn's `interaction_state` from
-Status in the same controller conversation, show that exact step to the user,
-and submit only its advertised semantic question/option IDs or bounded typed
-text. One call resolves one current step. Refresh Status before every later
-question or final confirmation; never respond to `manual_required`, expired,
-changed, secret-bearing, or uncertain state.
+`respond`. For a supported pending step, the managed monitor sends an
+`interaction_required` callback to wake the owning controller conversation.
+That callback is notification only and carries no private response authority:
+first obtain the current managed Turn's `interaction_state` from Status in the
+same controller conversation, show that exact step to the user, and submit only
+its advertised semantic question/option IDs or bounded typed text. One call
+resolves one current step; the resumed monitor notifies the next supported step
+when it appears. Status remains the manual refresh fallback. Never respond to
+`manual_required`, expired, changed, secret-bearing, or uncertain state.
 
 The user-priority `terminal_user_explicit` path requires one exact live
 physical terminal/process and a scanned, non-blocked approval state. Broken

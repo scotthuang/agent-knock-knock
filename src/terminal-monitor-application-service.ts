@@ -1,5 +1,6 @@
 import {
   executorForConversation,
+  turnIdForConversation,
   type Conversation,
   type ConversationStatus,
   type Executor
@@ -103,6 +104,19 @@ export type TerminalMonitorPresentation =
       approvable: boolean;
     }
   | {
+      kind: "interaction_duplicate";
+      conversation: Conversation;
+      terminalControl: TerminalControlRef;
+      interactionState: NonNullable<TerminalBridgeStatus["interaction_state"]>;
+    }
+  | {
+      kind: "interaction_gateway_missing";
+      conversation: Conversation;
+      callbackMessage?: unknown;
+      terminalControl: TerminalControlRef;
+      interactionState: NonNullable<TerminalBridgeStatus["interaction_state"]>;
+    }
+  | {
       kind: "completion_duplicate";
       conversation: Conversation;
       reason: string;
@@ -139,6 +153,9 @@ export interface MonitorApprovalNotificationResult {
   stale: boolean;
   recorded?: MonitorApprovalCallbackRecord;
 }
+
+export type MonitorInteractionNotificationResult =
+  MonitorApprovalNotificationResult;
 
 export type MonitorCompletionPreparation =
   | {
@@ -195,6 +212,16 @@ export interface TerminalMonitorServicePorts {
       kind: "question" | "error";
       reason?: string;
     }): MonitorApprovalNotificationResult;
+    recordInteractionNotification(input: {
+      conversation: Conversation;
+      executor: Executor;
+      terminalControl: TerminalControlRef;
+      terminalStatus: TerminalBridgeStatus;
+      currentMessageId?: string;
+      interactionId: string;
+      questionId: string;
+      fingerprint: string;
+    }): MonitorInteractionNotificationResult;
   };
   authority: {
     initialize(): void;
@@ -1025,6 +1052,13 @@ async function handleObservedPoll(
   if (approval !== "proceed") {
     return approval;
   }
+  const interaction = handleInteractionObservation({
+    ...sampledApproval,
+    takeover: diagnostic.takeover
+  });
+  if (interaction !== "proceed") {
+    return interaction;
+  }
   const durable = input.poll.durableCompletion;
   const durableFingerprint = durable
     ? terminalMonitorActivityFingerprint(JSON.stringify({
@@ -1051,6 +1085,189 @@ async function handleObservedPoll(
     completionMetadata,
     completionFingerprint
   });
+}
+
+function handleInteractionObservation(
+  input: SampledPollInput
+): "proceed" | "continue" | "finished" {
+  const projection = input.terminalStatus.interaction_state;
+  const fingerprint = stringValue(
+    input.terminalStatus.interaction_prompt_fingerprint
+  );
+  const observationMatches = interactionObservationMatchesMonitor(
+    input,
+    projection
+  );
+  const takeover = takeoverFor(input.state.conversation) ?? input.takeover;
+  if (!projection) {
+    return "proceed";
+  }
+  const question = projection.questions[0];
+  const screenChangedSinceSend =
+    input.state.preSendScreenFingerprint !== undefined &&
+    input.currentScreenFingerprint !== undefined &&
+    input.currentScreenFingerprint !== input.state.preSendScreenFingerprint;
+  if (
+    projection.state !== "pending" ||
+    projection.capabilities.respond !== true ||
+    projection.questions.length !== 1 ||
+    !question ||
+    question.response_kind === "multi_select"
+  ) {
+    return "proceed";
+  }
+  const actionable =
+    observationMatches &&
+    input.state.conversation.status === "waiting_for_agent" &&
+    projection.turn_id === turnIdForConversation(input.state.conversation) &&
+    typeof fingerprint === "string" &&
+    /^[0-9a-f]{64}$/u.test(fingerprint) &&
+    screenChangedSinceSend;
+  if (!actionable || !fingerprint) {
+    input.ports.runtime.log("warn", "terminal_bridge_interaction_not_actionable", {
+      conversation_id: input.state.conversation.conversation_id,
+      terminal_target: input.terminalControl.target,
+      interaction_id: projection.interaction_id,
+      interaction_state: projection.state,
+      response_kind: question?.response_kind,
+      screen_changed_since_send: screenChangedSinceSend,
+      reason: "native questionnaire lacks a current executable monitor offer"
+    });
+    return "proceed";
+  }
+  if (
+    stringValue(takeover?.terminal_bridge_last_interaction_message_id) ===
+      input.currentMessageId &&
+    stringValue(takeover?.terminal_bridge_last_interaction_fingerprint) ===
+      fingerprint
+  ) {
+    input.state.pollPolicyState = {
+      ...input.state.pollPolicyState,
+      previousScreenFingerprint: input.currentScreenFingerprint
+    };
+    input.ports.runtime.log(
+      "info",
+      "terminal_bridge_consumed_interaction_screen_still_visible",
+      {
+        conversation_id: input.state.conversation.conversation_id,
+        terminal_target: input.terminalControl.target,
+        interaction_id: projection.interaction_id,
+        question_id: question.question_id
+      }
+    );
+    return "proceed";
+  }
+  const notification = input.ports.state.recordInteractionNotification({
+    conversation: input.state.conversation,
+    executor: input.state.executor,
+    terminalControl: input.terminalControl,
+    terminalStatus: input.terminalStatus,
+    currentMessageId: input.currentMessageId,
+    interactionId: projection.interaction_id,
+    questionId: question.question_id,
+    fingerprint
+  });
+  if (notification.stale) {
+    input.state.pollPolicyState = {
+      ...input.state.pollPolicyState,
+      previousScreenFingerprint: input.currentScreenFingerprint
+    };
+    input.ports.runtime.sleep(input.configuration.pollIntervalMs);
+    return "continue";
+  }
+  if (notification.duplicate) {
+    input.ports.presentation.emit({
+      kind: "interaction_duplicate",
+      conversation: notification.conversation,
+      terminalControl: input.terminalControl,
+      interactionState: projection
+    });
+    return "finished";
+  }
+  input.ports.state.appendEvent({
+    ts: input.ports.runtime.now().toISOString(),
+    conversation_id: notification.conversation.conversation_id,
+    event: "terminal_bridge_interaction_detected",
+    terminal_control: input.terminalControl,
+    interaction_id: projection.interaction_id,
+    question_id: question.question_id,
+    response_kind: question.response_kind
+  });
+  const prepared = notification.recorded?.prepared;
+  if (!prepared) {
+    input.ports.presentation.emit({
+      kind: "interaction_gateway_missing",
+      conversation: notification.conversation,
+      callbackMessage: notification.recorded?.callbackMessage,
+      terminalControl: input.terminalControl,
+      interactionState: projection
+    });
+    return "finished";
+  }
+  const result = input.ports.callbacks.run(prepared, { emit: false });
+  const afterCallback = input.ports.state.load();
+  const afterTakeover = takeoverFor(afterCallback);
+  const consumed =
+    input.ports.authority.isWaitingForAgent(afterCallback.status) &&
+    afterTakeover?.terminal_bridge_interaction_notification === undefined &&
+    stringValue(afterTakeover?.terminal_bridge_message_id) ===
+      input.currentMessageId &&
+    stringValue(afterTakeover?.terminal_bridge_last_interaction_message_id) ===
+      input.currentMessageId &&
+    stringValue(afterTakeover?.terminal_bridge_last_interaction_id) ===
+      projection.interaction_id &&
+    stringValue(afterTakeover?.terminal_bridge_last_interaction_fingerprint) ===
+      fingerprint;
+  if (!consumed) {
+    input.ports.callbacks.emit({
+      ...result,
+      conversation: interactionCallbackPublicConversation(result.conversation)
+    });
+    return "finished";
+  }
+  input.state.conversation = afterCallback;
+  input.state.pollPolicyState = {
+    previousScreenFingerprint: input.currentScreenFingerprint
+  };
+  input.state.lastActivityAtMs =
+    validTerminalMonitorTimestampMs(
+      afterTakeover?.terminal_bridge_last_activity_at
+    ) ?? input.ports.runtime.nowMs();
+  input.state.lastPersistedActivityAtMs = input.state.lastActivityAtMs;
+  input.state.persistedActivityReason = stringValue(
+    afterTakeover?.terminal_bridge_last_activity_reason
+  );
+  input.ports.state.appendEvent({
+    ts: input.ports.runtime.now().toISOString(),
+    conversation_id: afterCallback.conversation_id,
+    event: "terminal_bridge_monitor_continued_after_interaction",
+    terminal_control: input.terminalControl,
+    interaction_id: projection.interaction_id,
+    question_id: question.question_id
+  });
+  input.ports.runtime.sleep(input.configuration.pollIntervalMs);
+  return "continue";
+}
+
+function interactionCallbackPublicConversation(
+  conversation: Conversation
+): Conversation {
+  const projected = { ...conversation };
+  delete projected.native_session_takeover;
+  delete projected.callback_delivery;
+  delete projected.callback_notification_delivery;
+  return projected;
+}
+
+function interactionObservationMatchesMonitor(
+  input: SampledPollInput,
+  projection: TerminalBridgeStatus["interaction_state"]
+): boolean {
+  return input.terminalStatus.reachable &&
+    input.terminalStatus.provider === input.terminalControl.kind &&
+    input.terminalStatus.target === input.terminalControl.target &&
+    input.terminalStatus.agent === input.state.executor.kind &&
+    (projection === undefined || projection.agent === input.state.executor.kind);
 }
 
 function persistDetectorDiagnostic(input: SampledPollInput): {

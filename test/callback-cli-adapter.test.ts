@@ -18,8 +18,10 @@ import {
   type CallbackAttemptOutcome,
   type CallbackRouteV1
 } from "../src/callback-transport.js";
-import { createOpenClawManagedCallbackCliAdapter } from
-  "../src/openclaw-managed-callback-cli-adapter.js";
+import {
+  callbackConversationProjection,
+  createOpenClawManagedCallbackCliAdapter
+} from "../src/openclaw-managed-callback-cli-adapter.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 import {
   createConversation,
@@ -44,6 +46,35 @@ const CALLBACK_ROUTE: CallbackRouteV1 = {
   controller_session_id: "controller-session",
   capabilities: { wake: false, respond: true }
 };
+
+test("callback Gateway conversation projection omits Store-private authority", () => {
+  const conversation: Conversation = {
+    ...createConversation({
+      userRequest: "project callback identity",
+      sessionId: "session-callback-projection",
+      turnId: "turn-callback-projection",
+      executorKind: "claude",
+      now: NOW
+    }),
+    native_session_takeover: {
+      terminal_bridge_interaction_notification: {
+        prompt_fingerprint: "a".repeat(64)
+      }
+    },
+    callback_delivery: { status: "pending" },
+    callback_notification_delivery: { status: "pending" }
+  };
+
+  const projected = callbackConversationProjection(conversation);
+
+  assert.equal(projected.conversation_id, conversation.conversation_id);
+  assert.equal(projected.session_id, conversation.session_id);
+  assert.equal(projected.turn_id, conversation.turn_id);
+  assert.equal(projected.native_session_takeover, undefined);
+  assert.equal(projected.callback_delivery, undefined);
+  assert.equal(projected.callback_notification_delivery, undefined);
+  assert.doesNotMatch(JSON.stringify(projected), /prompt_fingerprint/u);
+});
 
 test("OpenClaw managed callback composition resolves one immutable attempt", () => {
   const conversation = createConversation({
@@ -678,7 +709,8 @@ test("public facade declarations are typed and retain only five port groups", ()
   );
   for (const method of [
     "retryDisposition", "reconcileDelivery", "runRetryMonitor",
-    "prepareApprovalNotification", "prepareStallNotification",
+    "prepareApprovalNotification", "prepareInteractionNotification",
+    "prepareStallNotification",
     "prepareTerminalCompletion", "runPrepared"
   ]) {
     assert.match(declaration, new RegExp(`\\b${method}\\b`, "u"));

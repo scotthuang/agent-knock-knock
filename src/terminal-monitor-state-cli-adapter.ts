@@ -62,6 +62,10 @@ import {
   type TerminalAgentBridge,
   type TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
+import {
+  validateTerminalInteractionProjection,
+  type TerminalInteractionProjection
+} from "./terminal-interaction-protocol.js";
 import { terminalControlFromTakeover } from "./terminal-runtime-cli-adapter.js";
 import {
   terminalControlsShareIncarnation
@@ -92,9 +96,11 @@ import {
   presentTerminalMonitor,
   reconcileMonitorAcceptance,
   recordMonitorApprovalNotification,
+  recordMonitorInteractionNotification,
   repairLaggingAcceptedMonitorAuthority,
   recoverPreparedMonitorSubmission,
   type ApprovalNotificationAdapterPorts,
+  type InteractionNotificationAdapterPorts,
   terminalMonitorStoreLeaseTimeout,
   terminalMonitorStoreOperationTimeout
 } from "./terminal-monitor-cli-adapter.js";
@@ -186,7 +192,8 @@ export interface TerminalMonitorStateCliDependencies {
   };
   callbacks: Pick<
     CallbackCliFacade,
-    "reconcileDelivery" | "prepareApprovalNotification" | "runPrepared" |
+    "reconcileDelivery" | "prepareApprovalNotification" |
+      "prepareInteractionNotification" | "runPrepared" |
       "emitPreparedResult" | "prepareStallNotification"
   >;
   runtime: {
@@ -299,6 +306,10 @@ type ApprovalRecordRequest = Parameters<
   ApprovalNotificationAdapterPorts["record"]
 >[0];
 
+type InteractionRecordRequest = Parameters<
+  InteractionNotificationAdapterPorts["record"]
+>[0];
+
 interface ApprovalPersistenceContext {
   input: ApprovalRecordRequest & TerminalMonitorStatePaths;
   conversation: Conversation;
@@ -308,6 +319,19 @@ interface ApprovalPersistenceContext {
   previousNotifiedAt?: number;
   previousCallbackMessageId?: string;
   matchingApprovalOutbox: boolean;
+  conflictingActiveOutbox: boolean;
+}
+
+interface InteractionPersistenceContext {
+  input: InteractionRecordRequest & TerminalMonitorStatePaths;
+  conversation: Conversation;
+  nativeTakeover: Record<string, unknown>;
+  interactionScreenDigest?: string;
+  previousNotification?: Record<string, unknown>;
+  previousInteractionState?: TerminalInteractionProjection;
+  previousCallbackMessageId?: string;
+  matchingInteractionOutbox: boolean;
+  activeOutbox: boolean;
   conflictingActiveOutbox: boolean;
 }
 
@@ -1086,6 +1110,24 @@ class TerminalMonitorStateCliApplication {
                   }),
               approvalInstructions: terminalBridgeApprovalInstructions,
               approvalCandidate: terminalMonitorApprovalCandidate
+            }
+          }),
+        recordInteractionNotification: (request) =>
+          recordMonitorInteractionNotification({
+            ...request,
+            ports: {
+              record: (recordRequest) => this.#recordInteractionNotification({
+                ...recordRequest,
+                statePath: input.statePath,
+                logPath: input.logPath
+              }),
+              prepare: (prepareRequest) =>
+                this.#dependencies.callbacks.prepareInteractionNotification({
+                  options: { ...input.options, statePath: input.statePath },
+                  statePath: input.statePath,
+                  logPath: input.logPath,
+                  ...prepareRequest
+                })
             }
           })
       },
@@ -1943,6 +1985,248 @@ class TerminalMonitorStateCliApplication {
       terminal_control: context.input.terminalControl,
       fingerprint: context.input.fingerprint,
       screen_digest: context.approvalScreenDigest
+    });
+    const recorded = context.input.onRecorded(conversation);
+    return {
+      conversation: recorded.prepared?.conversation ?? conversation,
+      duplicate: false,
+      stale: false,
+      recorded
+    };
+  }
+
+  #recordInteractionNotification(
+    input: InteractionRecordRequest & TerminalMonitorStatePaths
+  ) {
+    const storeDir = pathsForConversationDir(path.dirname(input.statePath))
+      .storeDir;
+    return withStoreWriterLease(storeDir, () => {
+      const release = this.#stateFileLock.acquire(`${input.statePath}.lock`);
+      try {
+        const conversation = loadState(input.statePath);
+        if (!this.#interactionSnapshotMatches(conversation, input)) {
+          return {
+            conversation,
+            duplicate: false,
+            stale: true,
+            recorded: undefined
+          };
+        }
+        return this.#recordMatchingInteraction(
+          this.#interactionPersistenceContext(conversation, input)
+        );
+      } finally {
+        release();
+      }
+    });
+  }
+
+  #interactionSnapshotMatches(
+    conversation: Conversation,
+    input: InteractionRecordRequest
+  ): boolean {
+    const takeover = takeoverFor(conversation);
+    const currentControl = terminalControlFromTakeover(takeover);
+    const projection = input.terminalStatus.interaction_state;
+    return conversation.status === "waiting_for_agent" &&
+      conversation.conversation_id === input.expectedConversation.conversationId &&
+      conversation.status === input.expectedConversation.status &&
+      conversation.updated_at === input.expectedConversation.updatedAt &&
+      takeover?.terminal_bridge === true &&
+      nonBlankString(takeover.terminal_bridge_message_id) ===
+        input.expectedConversation.messageId &&
+      currentControl !== undefined &&
+      terminalControlsShareIncarnation(currentControl, input.terminalControl) &&
+      projection?.interaction_id === input.interactionId &&
+      projection.questions.length === 1 &&
+      projection.questions[0]?.question_id === input.questionId &&
+      input.terminalStatus.interaction_prompt_fingerprint === input.fingerprint;
+  }
+
+  #interactionPersistenceContext(
+    conversation: Conversation,
+    input: InteractionRecordRequest & TerminalMonitorStatePaths
+  ): InteractionPersistenceContext {
+    const nativeTakeover = { ...takeoverFor(conversation) };
+    const screen = isRecord(input.terminalStatus.screen)
+      ? input.terminalStatus.screen
+      : undefined;
+    const interactionScreenDigest = nonBlankString(screen?.digest);
+    const previousNotification = isRecord(
+      nativeTakeover.terminal_bridge_interaction_notification
+    )
+      ? nativeTakeover.terminal_bridge_interaction_notification
+      : undefined;
+    const previousInteractionState = validInteractionProjection(
+      previousNotification?.interaction_state
+    );
+    const callbackDelivery = isRecord(conversation.callback_delivery)
+      ? conversation.callback_delivery
+      : undefined;
+    const callbackMessage = isRecord(callbackDelivery?.message)
+      ? callbackDelivery.message
+      : undefined;
+    const callbackMetadata = isRecord(callbackMessage?.metadata)
+      ? callbackMessage.metadata
+      : undefined;
+    const callbackInteractionState = validInteractionProjection(
+      callbackMetadata?.interaction_state
+    );
+    const previousCallbackMessageId = nonBlankString(
+      previousNotification?.callback_message_id
+    );
+    const matchingInteractionOutbox =
+      callbackDelivery?.kind === "interaction_notification" &&
+      previousCallbackMessageId !== undefined &&
+      callbackMessage?.id === previousCallbackMessageId &&
+      callbackMetadata?.source === "terminal_bridge" &&
+      callbackMetadata?.reason === "interaction_required" &&
+      callbackInteractionState !== undefined &&
+      callbackInteractionState.interaction_id ===
+        previousNotification?.interaction_id &&
+      callbackInteractionState.questions.length === 1 &&
+      callbackInteractionState.questions[0]?.question_id ===
+        previousNotification?.question_id &&
+      callbackInteractionState.turn_id === turnIdForConversation(conversation);
+    const deliveryStatus = nonBlankString(callbackDelivery?.status);
+    const deliveryAttempts = Number(callbackDelivery?.attempts ?? 0);
+    const activeOutbox =
+      deliveryStatus === "pending" ||
+      (
+        deliveryStatus === "failed" &&
+        Number.isFinite(deliveryAttempts) &&
+        deliveryAttempts <= this.#dependencies.runtime.callbackRetryLimit
+      );
+    const conflictingActiveOutbox = activeOutbox && !matchingInteractionOutbox;
+    return {
+      input,
+      conversation,
+      nativeTakeover,
+      interactionScreenDigest,
+      previousNotification,
+      previousInteractionState,
+      previousCallbackMessageId,
+      matchingInteractionOutbox,
+      activeOutbox,
+      conflictingActiveOutbox
+    };
+  }
+
+  #recordMatchingInteraction(context: InteractionPersistenceContext) {
+    const duplicate =
+      context.previousNotification?.terminal_bridge_message_id ===
+        context.input.expectedConversation.messageId &&
+      context.previousNotification?.interaction_id ===
+        context.input.interactionId &&
+      context.previousNotification?.question_id === context.input.questionId &&
+      context.previousNotification?.prompt_fingerprint ===
+        context.input.fingerprint &&
+      context.previousInteractionState?.interaction_id ===
+        context.input.interactionId &&
+      context.previousInteractionState.questions.length === 1 &&
+      context.previousInteractionState.questions[0]?.question_id ===
+        context.input.questionId;
+    if (
+      context.conflictingActiveOutbox ||
+      (context.activeOutbox && !duplicate)
+    ) {
+      return {
+        conversation: context.conversation,
+        duplicate: false,
+        stale: true,
+        deferred: true,
+        recorded: undefined
+      };
+    }
+    if (!duplicate) {
+      return this.#recordNewInteraction(context);
+    }
+    if (!context.matchingInteractionOutbox) {
+      return this.#recoverInteractionOutbox(context);
+    }
+    return {
+      conversation: context.conversation,
+      duplicate: true,
+      stale: false,
+      recorded: undefined
+    };
+  }
+
+  #recoverInteractionOutbox(context: InteractionPersistenceContext) {
+    const messageId = context.previousCallbackMessageId ?? `msg-${randomUUID()}`;
+    const messageTs = nonBlankString(
+      context.previousNotification?.callback_message_ts
+    ) ?? nonBlankString(context.previousNotification?.notified_at) ??
+      cliNow().toISOString();
+    const conversation = context.previousCallbackMessageId
+      ? context.conversation
+      : {
+          ...context.conversation,
+          native_session_takeover: {
+            ...context.nativeTakeover,
+            terminal_bridge_interaction_notification: {
+              ...context.previousNotification,
+              callback_message_id: messageId,
+              callback_message_ts: messageTs
+            }
+          }
+        };
+    if (!context.previousCallbackMessageId) {
+      saveState(context.input.statePath, conversation);
+    }
+    const recorded = context.input.onRecorded(conversation, {
+      recoverMissingOutbox: true
+    });
+    appendEvent(context.input.logPath, {
+      ts: cliNow().toISOString(),
+      conversation_id: conversation.conversation_id,
+      event: "terminal_bridge_interaction_notification_outbox_recovered",
+      terminal_control: context.input.terminalControl,
+      interaction_id: context.input.interactionId,
+      question_id: context.input.questionId,
+      callback_message_id: messageId
+    });
+    return {
+      conversation: recorded.prepared?.conversation ?? conversation,
+      duplicate: false,
+      recovered: true,
+      stale: false,
+      recorded
+    };
+  }
+
+  #recordNewInteraction(context: InteractionPersistenceContext) {
+    const now = cliNow().toISOString();
+    const callbackMessageId = `msg-${randomUUID()}`;
+    const conversation: Conversation = {
+      ...context.conversation,
+      native_session_takeover: {
+        ...context.nativeTakeover,
+        terminal_bridge_interaction_notification: {
+          terminal_bridge_message_id:
+            context.input.expectedConversation.messageId,
+          interaction_id: context.input.interactionId,
+          question_id: context.input.questionId,
+          prompt_fingerprint: context.input.fingerprint,
+          screen_digest: context.interactionScreenDigest,
+          notified_at: now,
+          terminal_control: context.input.terminalControl,
+          interaction_state: context.input.terminalStatus.interaction_state,
+          callback_message_id: callbackMessageId,
+          callback_message_ts: now
+        }
+      },
+      updated_at: now
+    };
+    saveState(context.input.statePath, conversation);
+    appendEvent(context.input.logPath, {
+      ts: now,
+      conversation_id: context.conversation.conversation_id,
+      event: "terminal_bridge_interaction_notification_recorded",
+      terminal_control: context.input.terminalControl,
+      interaction_id: context.input.interactionId,
+      question_id: context.input.questionId,
+      screen_digest: context.interactionScreenDigest
     });
     const recorded = context.input.onRecorded(conversation);
     return {
@@ -2992,6 +3276,16 @@ function approvalCanBeCleared(
     validTerminalMonitorTimestampMs(
       takeover.terminal_bridge_last_approval_prompt_cleared_at
     ) === undefined;
+}
+
+function validInteractionProjection(
+  value: unknown
+): TerminalInteractionProjection | undefined {
+  try {
+    return validateTerminalInteractionProjection(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function detectorDiagnostic(
