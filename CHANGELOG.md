@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Update the isolated lifecycle release smoke to consume the current terminal-scoped Send action and its exact terminal fence while keeping that authority out of published evidence.
+- Recognize the current terminal-scoped Send projection in the isolated lifecycle smoke while keeping its dispatch on the strict managed-only path and all terminal authority out of published evidence.
 
 ## 0.12.30 - 2026-09-07
 

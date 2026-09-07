@@ -182,10 +182,9 @@ function scenarioFixture(
     {
       command: "send",
       args: [
-        "--conversation",
-        terminalId,
-        "--expected-terminal-token",
-        "terminal-fence-b-1",
+        "--session",
+        SESSION_B,
+        "--managed-only",
         "--message",
         [
           `AKK lifecycle smoke sentinel ${nonce}.`,
@@ -532,13 +531,6 @@ test("accepts the exact-Session send action without weakening result checks", as
     arguments: { session_id: SESSION_B },
     missing_required: ["request"]
   };
-  const messageIndex = fixture.calls[3].args.indexOf("--message");
-  assert.notEqual(messageIndex, -1);
-  fixture.calls[3].args = [
-    "--session",
-    SESSION_B,
-    ...fixture.calls[3].args.slice(messageIndex)
-  ];
   const client = new ScriptedAkkClient(fixture.calls);
   const result = await runLifecycleScenario(
     fixture.config,
@@ -547,6 +539,23 @@ test("accepts the exact-Session send action without weakening result checks", as
 
   assert.equal(result.status, "passed");
   assert.equal(JSON.stringify(result).includes("terminal-fence-b-1"), false);
+  client.assertComplete();
+});
+
+test("accepts a terminal send action with an exact managed fast-path fence", async () => {
+  const fixture = scenarioFixture("codex");
+  rowFrom(fixture.calls[2]).available_actions.send.arguments
+    .expected_managed_terminal_token = "managed-terminal-fence-b-1";
+  const client = new ScriptedAkkClient(fixture.calls);
+  const result = await runLifecycleScenario(
+    fixture.config,
+    dependencies(client, [fixture.nonce])
+  );
+
+  assert.equal(result.status, "passed");
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("terminal-fence-b-1"), false);
+  assert.equal(serialized.includes("managed-terminal-fence-b-1"), false);
   client.assertComplete();
 });
 
@@ -582,6 +591,12 @@ test("post-New send action parsing fails closed on incomplete or mixed authority
     {
       name: "extra terminal argument",
       mutate: (action) => { action.arguments.terminal_id = "terminal:other"; }
+    },
+    {
+      name: "empty managed terminal fence",
+      mutate: (action) => {
+        action.arguments.expected_managed_terminal_token = "   ";
+      }
     },
     {
       name: "wrong managed Session",
@@ -1075,6 +1090,30 @@ test("send bookkeeping warning is uncertain and never starts the monitor", async
 
   assert.equal(result.status, "uncertain");
   assert.equal(result.error_code, "send_uncertain");
+  assert.equal(client.calls.filter((call) => call.command === "send").length, 1);
+  assert.equal(client.calls.some((call) => call.command === "monitor"), false);
+  client.assertComplete();
+});
+
+test("managed lifecycle send rejects an unmanaged fallback-shaped receipt", async () => {
+  const fixture = scenarioFixture("codex");
+  fixture.calls[3] = {
+    ...fixture.calls[3],
+    result: {
+      delivered: true,
+      status: "async_pending",
+      scope: "terminal_user_explicit",
+      watch_id: "watch-unmanaged"
+    }
+  };
+  const client = new ScriptedAkkClient(fixture.calls.slice(0, 4));
+  const result = await runLifecycleScenario(
+    fixture.config,
+    dependencies(client, [fixture.nonce])
+  );
+
+  assert.equal(result.status, "uncertain");
+  assert.equal(result.error_code, "send_invalid");
   assert.equal(client.calls.filter((call) => call.command === "send").length, 1);
   assert.equal(client.calls.some((call) => call.command === "monitor"), false);
   client.assertComplete();

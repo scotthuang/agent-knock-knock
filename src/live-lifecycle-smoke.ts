@@ -209,20 +209,8 @@ interface TerminalAction {
   expectedBindingToken?: string;
 }
 
-type TerminalSendTarget =
-  | {
-      kind: "session_exact";
-      sessionId: string;
-    }
-  | {
-      kind: "terminal_user_explicit";
-      terminalId: string;
-      expectedTerminalToken: string;
-    };
-
 interface TerminalSendAction {
   managedSessionId: string;
-  target: TerminalSendTarget;
 }
 
 type InternalTerminalEvidence = Omit<
@@ -486,11 +474,17 @@ export async function runLifecycleScenario(
         `AKK lifecycle smoke sentinel ${nonce}.`,
         "请确认这条多语言、多行请求已经由原生 Agent 接收；不要修改任何文件。"
       ].join("\n");
+      // The public action proves Send is currently offered, but may be the
+      // terminal-user-explicit shape whose zero-input recovery can fall back
+      // to unmanaged delivery. This proof must retain the post-New Session,
+      // so exercise the strict managed state machine with no fallback.
       const output = await invoke(
         dependencies.client,
         "send",
         [
-          ...sendTargetArgs(sendAction.target),
+          "--session",
+          sessionId,
+          "--managed-only",
           "--message",
           smokeRequest,
           "--background",
@@ -1222,6 +1216,13 @@ function sendActionFor(
   const expectedTerminalToken = stringValue(
     value.arguments.expected_terminal_token
   );
+  const hasExpectedManagedTerminalToken = Object.hasOwn(
+    value.arguments,
+    "expected_managed_terminal_token"
+  );
+  const expectedManagedTerminalToken = stringValue(
+    value.arguments.expected_managed_terminal_token
+  );
   if (
     sessionId &&
     argumentKeys.length === 1 &&
@@ -1232,40 +1233,26 @@ function sendActionFor(
       abort("preflight_action");
     }
     return {
-      managedSessionId,
-      target: { kind: "session_exact", sessionId }
+      managedSessionId
     };
   }
   if (
     !sessionId &&
-    argumentKeys.length === 2 &&
-    argumentKeys[0] === "expected_terminal_token" &&
-    argumentKeys[1] === "selector" &&
+    argumentKeys.length === (hasExpectedManagedTerminalToken ? 3 : 2) &&
+    argumentKeys.includes("expected_terminal_token") &&
+    (!hasExpectedManagedTerminalToken ||
+      argumentKeys.includes("expected_managed_terminal_token")) &&
+    argumentKeys.includes("selector") &&
     selector === terminalId &&
     expectedTerminalToken &&
+    (!hasExpectedManagedTerminalToken || expectedManagedTerminalToken) &&
     value.scope === "terminal_user_explicit"
   ) {
     return {
-      managedSessionId,
-      target: {
-        kind: "terminal_user_explicit",
-        terminalId,
-        expectedTerminalToken
-      }
+      managedSessionId
     };
   }
   abort("preflight_action");
-}
-
-function sendTargetArgs(target: TerminalSendTarget): string[] {
-  return target.kind === "session_exact"
-    ? ["--session", target.sessionId]
-    : [
-        "--conversation",
-        target.terminalId,
-        "--expected-terminal-token",
-        target.expectedTerminalToken
-      ];
 }
 
 function assertNoUnresolvedManagedTurns(
