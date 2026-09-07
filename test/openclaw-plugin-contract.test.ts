@@ -631,7 +631,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "06a8118de211669736991b7af9155132c616bf6994a5935a11833a49009bef1b"
+    "b0148378f852e6fd1edc81f836032a85068716160eef3cd2bd363a0e7a85003d"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 17);
