@@ -133,6 +133,25 @@ const CLAUDE_LIFECYCLE_PROFILES: Readonly<
       "2.1.251",
       "2.1.259"
     ])
+  }),
+  "2.1.263": Object.freeze({
+    lifecycleBehaviorProfile: "claude-code-2.1.263",
+    nativeInspectionBehaviorProfile:
+      "claude-code-2.1.263-native-status",
+    nativeInspectionComposerStableMs: 80,
+    nativeInspectionComposerSettleTimeoutMs: 5_000,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_251,
+    nativeStatusPanelRequiredValues: Object.freeze({
+      "Session kind": "interactive"
+    }),
+    resumableSourceVersions: Object.freeze([
+      "2.1.218",
+      "2.1.226",
+      "2.1.237",
+      "2.1.251",
+      "2.1.259",
+      "2.1.263"
+    ])
   })
 });
 

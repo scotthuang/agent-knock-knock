@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.31 - 2026-09-07
+
+### Added
+
+- Promote Codex `0.153.4` and Claude Code `2.1.263` to exact regression-tested lifecycle and native-status profiles, alongside their interactive-questionnaire profiles, after isolated real-TUI validation.
+
 ## 0.12.30 - 2026-09-07
 
 ### Added

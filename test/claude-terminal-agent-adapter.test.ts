@@ -95,7 +95,14 @@ test("classifies only direct interactive Claude CLI processes", () => {
 });
 
 test("verified Claude versions expose distinct closed modal native status plans", () => {
-  for (const version of ["2.1.218", "2.1.226", "2.1.237", "2.1.251", "2.1.259"]) {
+  for (const version of [
+    "2.1.218",
+    "2.1.226",
+    "2.1.237",
+    "2.1.251",
+    "2.1.259",
+    "2.1.263"
+  ]) {
     const capability = probeClaudeNativeInspection(version);
     assert.equal(capability.status, "supported");
     assert.equal(capability.statusInspection, true);
@@ -136,7 +143,7 @@ test("verified Claude versions expose distinct closed modal native status plans"
     reason: "the running Claude Code version could not be verified"
   });
   for (const version of [
-    "2.1.217", "2.1.219", "2.1.227", "2.1.238", "3.0.0",
+    "2.1.217", "2.1.219", "2.1.227", "2.1.238", "2.1.264", "3.0.0",
     "9007199254740992.0.0"
   ]) {
     const unverified = probeClaudeNativeInspection(version);
@@ -258,7 +265,13 @@ test("Claude native inspection requires a fresh exact current Status panel", () 
   }
 });
 
-for (const version of ["2.1.226", "2.1.237", "2.1.251", "2.1.259"] as const) {
+for (const version of [
+  "2.1.226",
+  "2.1.237",
+  "2.1.251",
+  "2.1.259",
+  "2.1.263"
+] as const) {
   test(`Claude ${version} status inspection accepts only its exact Session-kind panel`, () => {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
     const screen = claudeStatusPanel(nativeThreadId, version);
@@ -278,7 +291,7 @@ for (const version of ["2.1.226", "2.1.237", "2.1.251", "2.1.259"] as const) {
       )?.value,
       "interactive"
     );
-    if (["2.1.251", "2.1.259"].includes(version)) {
+    if (["2.1.251", "2.1.259", "2.1.263"].includes(version)) {
       assert.equal(
         observed.result?.fields.find((field) =>
           field.name === "Peer address"
@@ -1345,15 +1358,22 @@ test("Claude terminal capabilities expose durable completion only with a configu
 });
 
 test("Claude lifecycle plans keep exact profiles and optimistically support complete versions", () => {
-  for (const version of ["2.1.218", "2.1.226", "2.1.237", "2.1.251", "2.1.259"]) {
+  for (const version of [
+    "2.1.218",
+    "2.1.226",
+    "2.1.237",
+    "2.1.251",
+    "2.1.259",
+    "2.1.263"
+  ]) {
     const profile = probeClaudeThreadLifecycle(version);
     assert.equal(profile.status, "supported");
     assert.equal(profile.behaviorProfile, `claude-code-${version}`);
     assert.equal(profile.versionCompatibility, "verified");
     assert.equal(profile.compatibilityWarning, undefined);
   }
-  const capabilities = probeClaudeThreadLifecycle("2.1.259");
-  const unverified = probeClaudeThreadLifecycle("2.1.260");
+  const capabilities = probeClaudeThreadLifecycle("2.1.263");
+  const unverified = probeClaudeThreadLifecycle("2.1.264");
   assert.equal(unverified.status, "supported");
   assert.equal(unverified.newThread, true);
   assert.equal(unverified.resumeExact, true);
@@ -1510,7 +1530,7 @@ test("Claude lifecycle observer requires one idle exact-PID agents row", () => {
   );
 });
 
-test("Claude 2.1.251 through 2.1.259 input-ready waiting rows are idle only without a wait reason", () => {
+test("Claude 2.1.251 through 2.1.263 input-ready waiting rows are idle only without a wait reason", () => {
   assert.equal(isClaudeAgentIdleState({ status: "idle" }), true);
   assert.equal(isClaudeAgentIdleState({ status: "waiting" }), true);
   assert.equal(
@@ -1597,7 +1617,7 @@ function claudeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
-    ...(["2.1.251", "2.1.259"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
       ? ["  Peer address:        unix:///private/tmp/claude.sock"]
       : []),
     "  cwd:                 /repo",
@@ -1607,7 +1627,7 @@ function claudeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         1 failed · /mcp",
     "  Setting sources:     User settings, Project local settings",
-    ...(["2.1.251", "2.1.259"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
       ? ["  Managed settings (remote): connected"]
       : []),
     "",

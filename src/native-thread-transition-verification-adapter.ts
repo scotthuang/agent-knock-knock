@@ -102,6 +102,7 @@ const CODEX_MCP_POST_TRANSITION_SETTLE_ATTEMPTS = 400;
 const CODEX_MCP_SETTLEMENT_PROFILES = Object.freeze([
   "codex-tui-0.151.0",
   "codex-tui-0.153.0",
+  "codex-tui-0.153.4",
   "codex-tui-generic-v1"
 ]);
 

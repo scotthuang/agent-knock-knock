@@ -419,7 +419,7 @@ function claudeNativeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
-    ...(["2.1.251", "2.1.259"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
       ? ["  Peer address:        unix:///private/tmp/claude.sock"]
       : []),
     "  cwd:                 /repo",
@@ -428,7 +428,7 @@ function claudeNativeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         all connected",
     "  Setting sources:     User settings",
-    ...(["2.1.251", "2.1.259"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
       ? ["  Managed settings (remote): connected"]
       : []),
     "",
@@ -5480,7 +5480,7 @@ test("generic Codex native inspection shares the pre-text viewport gate", async 
     bridge.submitNativeInspection(
       "codex",
       terminalControl(codexTerminalAgentAdapter),
-      codexStatusInspectionPlan("0.150.0"),
+      codexStatusInspectionPlan("0.153.5"),
       { runtime: { pid: 110 } }
     ),
     (error: unknown) => {
@@ -5870,7 +5870,14 @@ test("native status inspection can settle against an injected monotonic clock", 
 });
 
 test("verified and unverified Claude versions use the closed stable composer and modal dismissal", async () => {
-  for (const version of ["2.1.226", "2.1.237", "2.1.251", "2.1.259", "2.1.260"]) {
+  for (const version of [
+    "2.1.226",
+    "2.1.237",
+    "2.1.251",
+    "2.1.259",
+    "2.1.263",
+    "2.1.264"
+  ]) {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
     const idleScreen = [
       "────────────────────────────────────────────────",
@@ -5995,7 +6002,14 @@ test("verified and generic Claude native status profiles accept the closed 80-co
       this.setScreen(target, claudeNarrowNativeComposerScreen(text));
     }
   }
-  for (const version of ["2.1.226", "2.1.237", "2.1.251", "2.1.259", "2.1.260"]) {
+  for (const version of [
+    "2.1.226",
+    "2.1.237",
+    "2.1.251",
+    "2.1.259",
+    "2.1.263",
+    "2.1.264"
+  ]) {
     const adapter = createClaudeTerminalAgentAdapter();
     const provider = new NarrowClaudeProvider([PANE]);
     const bridge = new TerminalAgentBridge({
@@ -6014,60 +6028,62 @@ test("verified and generic Claude native status profiles accept the closed 80-co
   }
 });
 
-test("Claude 2.1.259 native status rejects a non-prefix truncated popup", async () => {
-  const adapter = createClaudeTerminalAgentAdapter();
-  class DriftedNarrowClaudeProvider extends RecordingTerminalProvider {
-    private capturesAfterInjection = 0;
+for (const version of ["2.1.259", "2.1.263"] as const) {
+  test(`Claude ${version} native status rejects a non-prefix truncated popup`, async () => {
+    const adapter = createClaudeTerminalAgentAdapter();
+    class DriftedNarrowClaudeProvider extends RecordingTerminalProvider {
+      private capturesAfterInjection = 0;
 
-    override async sendText(
-      target: TerminalEndpointRef | string,
-      text: string,
-      options: { socketPath?: string } = {}
-    ): Promise<void> {
-      await super.sendText(target, text, options);
-      this.setScreen(
-        target,
-        claudeNarrowNativeComposerScreen(text).replace("tool st…", "tool xx…")
-      );
-    }
-
-    override async capture(
-      target: TerminalEndpointRef | string,
-      options: { scrollbackLines?: number; socketPath?: string } = {}
-    ): Promise<string> {
-      this.capturesAfterInjection += 1;
-      if (this.capturesAfterInjection >= 8) {
-        throw new Error("bounded test capture stop after rejecting popup");
+      override async sendText(
+        target: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendText(target, text, options);
+        this.setScreen(
+          target,
+          claudeNarrowNativeComposerScreen(text).replace("tool st…", "tool xx…")
+        );
       }
-      return super.capture(target, options);
+
+      override async capture(
+        target: TerminalEndpointRef | string,
+        options: { scrollbackLines?: number; socketPath?: string } = {}
+      ): Promise<string> {
+        this.capturesAfterInjection += 1;
+        if (this.capturesAfterInjection >= 8) {
+          throw new Error("bounded test capture stop after rejecting popup");
+        }
+        return super.capture(target, options);
+      }
     }
-  }
-  const provider = new DriftedNarrowClaudeProvider([PANE]);
-  const bridge = new TerminalAgentBridge({
-    registry: createTerminalAgentAdapterRegistry([adapter]),
-    terminalProvider: provider,
-    async verifyIdentity() {}
+    const provider = new DriftedNarrowClaudeProvider([PANE]);
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([adapter]),
+      terminalProvider: provider,
+      async verifyIdentity() {}
+    });
+    await assert.rejects(
+      bridge.submitNativeInspection(
+        "claude",
+        terminalControl(adapter),
+        claudeStatusInspectionPlan(version),
+        { runtime: { pid: 110 } }
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof NativeInspectionSubmissionError);
+        assert.equal(error.stage, "text_injected");
+        return true;
+      }
+    );
+    assert.equal(
+      provider.operations.some((operation) =>
+        operation.kind === "keys" && operation.keys.includes("C-m")
+      ),
+      false
+    );
   });
-  await assert.rejects(
-    bridge.submitNativeInspection(
-      "claude",
-      terminalControl(adapter),
-      claudeStatusInspectionPlan("2.1.259"),
-      { runtime: { pid: 110 } }
-    ),
-    (error: unknown) => {
-      assert.ok(error instanceof NativeInspectionSubmissionError);
-      assert.equal(error.stage, "text_injected");
-      return true;
-    }
-  );
-  assert.equal(
-    provider.operations.some((operation) =>
-      operation.kind === "keys" && operation.keys.includes("C-m")
-    ),
-    false
-  );
-});
+}
 
 test("Claude native modal dismissal fails closed on evidence drift and never sends Escape", async () => {
   const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
@@ -6369,7 +6385,7 @@ test("native status inspection accepts an exact current slash popup only at a pr
   );
 });
 
-test("Codex 0.147.0 through 0.153.0 require their exact ordered two-row slash popup", async () => {
+test("Codex 0.147.0 through 0.153.4 require their exact ordered two-row slash popup", async () => {
   class CurrentPopupProvider extends RecordingTerminalProvider {
     override async sendText(
       target: TerminalEndpointRef | string,
@@ -6407,7 +6423,8 @@ test("Codex 0.147.0 through 0.153.0 require their exact ordered two-row slash po
     "0.149.1",
     "0.150.1",
     "0.151.0",
-    "0.153.0"
+    "0.153.0",
+    "0.153.4"
   ]) {
     const provider = new CurrentPopupProvider([PANE]);
     const bridge = new TerminalAgentBridge({
@@ -6426,72 +6443,74 @@ test("Codex 0.147.0 through 0.153.0 require their exact ordered two-row slash po
   }
 });
 
-test("Codex 0.153.0 native status refuses an incomplete two-row popup", async () => {
-  class IncompleteCurrentPopupProvider extends RecordingTerminalProvider {
-    private capturesAfterInjection = 0;
+for (const version of ["0.153.0", "0.153.4"] as const) {
+  test(`Codex ${version} native status refuses an incomplete two-row popup`, async () => {
+    class IncompleteCurrentPopupProvider extends RecordingTerminalProvider {
+      private capturesAfterInjection = 0;
 
-    override async sendText(
-      target: TerminalEndpointRef | string,
-      text: string,
-      options: { socketPath?: string } = {}
-    ): Promise<void> {
-      await super.sendText(target, text, options);
-      this.setScreen(target, [
-        "› /status",
-        "",
-        "  /status      show current session configuration and token usage"
-      ].join("\n"));
-    }
-
-    override async capture(
-      target: TerminalEndpointRef | string,
-      options: { scrollbackLines?: number; socketPath?: string } = {}
-    ): Promise<string> {
-      this.capturesAfterInjection += 1;
-      if (this.capturesAfterInjection >= 8) {
-        throw new Error("bounded test capture stop after rejecting popup");
+      override async sendText(
+        target: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendText(target, text, options);
+        this.setScreen(target, [
+          "› /status",
+          "",
+          "  /status      show current session configuration and token usage"
+        ].join("\n"));
       }
-      return super.capture(target, options);
-    }
-  }
 
-  const provider = new IncompleteCurrentPopupProvider([PANE]);
-  const idlePopupAdapter = {
-    ...codexTerminalAgentAdapter,
-    inspectScreen(options: Parameters<
-      typeof codexTerminalAgentAdapter.inspectScreen
-    >[0]) {
-      return {
-        ...codexTerminalAgentAdapter.inspectScreen(options),
-        activity: { state: "idle" as const, reason: "test-only idle" }
-      };
+      override async capture(
+        target: TerminalEndpointRef | string,
+        options: { scrollbackLines?: number; socketPath?: string } = {}
+      ): Promise<string> {
+        this.capturesAfterInjection += 1;
+        if (this.capturesAfterInjection >= 8) {
+          throw new Error("bounded test capture stop after rejecting popup");
+        }
+        return super.capture(target, options);
+      }
     }
-  };
-  const bridge = new TerminalAgentBridge({
-    registry: createTerminalAgentAdapterRegistry([idlePopupAdapter]),
-    terminalProvider: provider,
-    async verifyIdentity() {}
+
+    const provider = new IncompleteCurrentPopupProvider([PANE]);
+    const idlePopupAdapter = {
+      ...codexTerminalAgentAdapter,
+      inspectScreen(options: Parameters<
+        typeof codexTerminalAgentAdapter.inspectScreen
+      >[0]) {
+        return {
+          ...codexTerminalAgentAdapter.inspectScreen(options),
+          activity: { state: "idle" as const, reason: "test-only idle" }
+        };
+      }
+    };
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([idlePopupAdapter]),
+      terminalProvider: provider,
+      async verifyIdentity() {}
+    });
+    await assert.rejects(
+      bridge.submitNativeInspection(
+        "codex",
+        terminalControl(codexTerminalAgentAdapter),
+        codexStatusInspectionPlan(version),
+        { runtime: { pid: 110 } }
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof NativeInspectionSubmissionError);
+        assert.equal(error.stage, "text_injected");
+        return true;
+      }
+    );
+    assert.equal(
+      provider.operations.some((operation) =>
+        operation.kind === "keys" && operation.keys.includes("C-m")
+      ),
+      false
+    );
   });
-  await assert.rejects(
-    bridge.submitNativeInspection(
-      "codex",
-      terminalControl(codexTerminalAgentAdapter),
-      codexStatusInspectionPlan("0.153.0"),
-      { runtime: { pid: 110 } }
-    ),
-    (error: unknown) => {
-      assert.ok(error instanceof NativeInspectionSubmissionError);
-      assert.equal(error.stage, "text_injected");
-      return true;
-    }
-  );
-  assert.equal(
-    provider.operations.some((operation) =>
-      operation.kind === "keys" && operation.keys.includes("C-m")
-    ),
-    false
-  );
-});
+}
 
 test("native status inspection rejects an unprofiled slash popup description before Enter", async () => {
   class UnprofiledPopupProvider extends RecordingTerminalProvider {
