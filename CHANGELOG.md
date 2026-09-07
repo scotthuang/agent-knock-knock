@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.33 - 2026-09-07
+
+### Added
+
+- Notify the owning OpenClaw conversation whenever a managed Claude Code or Codex Turn reaches a supported native questionnaire step, then resume monitoring so sequential questions and final confirmation each receive their own durable callback.
+
+### Fixed
+
+- Expose portable OpenClaw response schemas for single-select, bounded free-text, and confirmation answers while retaining strict semantic validation against the current terminal question.
+- Treat a durable interaction reservation as the expiry acceptance boundary, preventing a questionnaire recapture that crosses a ten-minute lease bucket from being falsely reported as changed and stalling the Turn. Proven zero-input failures now release only their exact reservation and require a fresh Status; genuinely uncertain terminal input remains fail-closed.
+
+### Security
+
+- Keep interaction callbacks notification-only: the owning controller must obtain a fresh Status-bound private offer before responding, and multi-select, stale, secret-bearing, changed, or uncertain prompts remain non-actionable.
+
 ## 0.12.32 - 2026-09-07
 
 ### Fixed
