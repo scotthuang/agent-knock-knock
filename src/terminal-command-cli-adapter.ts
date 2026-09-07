@@ -3495,7 +3495,8 @@ async function recoverPartialTerminalSubmissionRetryAcceptance(
   const durableEvidence = await context.execution.detectAcceptance({
     executor: "codex",
     conversation: state.conversation,
-    terminalControl
+    terminalControl,
+    ...terminalAcceptanceCompanionFences(state.conversation, terminalControl)
   });
   assertTerminalSubmissionRetryTurnOpen({
     statePath,
@@ -3623,7 +3624,11 @@ async function recoverTerminalSubmissionRetryAcceptance(
     : await context.execution.detectAcceptance({
         executor: "codex",
         conversation: state.conversation,
-        terminalControl
+        terminalControl,
+        ...terminalAcceptanceCompanionFences(
+          state.conversation,
+          terminalControl
+        )
       });
   assertTerminalSubmissionRetryTurnOpen({
     statePath,
@@ -4284,6 +4289,10 @@ async function runTerminalSubmissionExactDraftEnter(input: {
     executor: "codex",
     conversation: enteredConversation,
     terminalControl: input.terminalControl,
+    ...terminalAcceptanceCompanionFences(
+      enteredConversation,
+      input.terminalControl
+    ),
     timeoutMs,
     pollIntervalMs: Math.max(10, Math.min(
       timeoutMs,
@@ -4735,6 +4744,10 @@ async function runTerminalSubmissionReplacement(input: {
       executor: "codex",
       conversation: enteredConversation,
       terminalControl: input.terminalControl,
+      ...terminalAcceptanceCompanionFences(
+        enteredConversation,
+        input.terminalControl
+      ),
       timeoutMs,
       pollIntervalMs: Math.max(10, Math.min(
         timeoutMs,
@@ -9163,6 +9176,7 @@ async function terminalDispatchAcceptance({
     executor: executor.kind,
     conversation,
     terminalControl,
+    ...terminalAcceptanceCompanionFences(conversation, terminalControl),
     timeoutMs,
     pollIntervalMs: Math.max(10, Math.min(
       timeoutMs,
@@ -9171,6 +9185,28 @@ async function terminalDispatchAcceptance({
     )),
     scrollbackLines: Number(options.scrollbackLines ?? 240)
   });
+}
+
+function terminalAcceptanceCompanionFences(
+  conversation: Conversation,
+  terminalControl: TerminalControlRef
+): {
+  allowedCompanionIdentity?: CodexPreMaterializationIdentity;
+  allowedAdditionalIdentities?: CodexPreMaterializationIdentity[];
+} {
+  if (executorForConversation(conversation).kind !== "codex") {
+    return {};
+  }
+  const runtime = terminalRuntimeIdentityForConversation(
+    conversation,
+    terminalControl
+  );
+  return {
+    allowedCompanionIdentity:
+      runtime.allowedPreMaterializationNativeIdentity,
+    allowedAdditionalIdentities:
+      runtime.allowedAdditionalNativeIdentities
+  };
 }
 
 function launchAcceptedTerminalMonitor({

@@ -61,8 +61,8 @@ test("doctor probes both terminal transports and their supported coding agents",
     openclaw: writeFakeExecutable(tempDir, "openclaw", `process.stdout.write("2026.7.1-2");`),
     tmux: writeFakeExecutable(tempDir, "tmux", `process.stdout.write("tmux 3.5a");`),
     herdr: writeFakeExecutable(tempDir, "herdr", `process.stdout.write("herdr 0.8.0");`),
-    codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("codex-cli 0.153.0");`),
-    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.259");`)
+    codex: writeFakeExecutable(tempDir, "codex", `process.stdout.write("codex-cli 0.153.4");`),
+    claude: writeFakeExecutable(tempDir, "claude", `process.stdout.write("2.1.263");`)
   };
 
   try {
@@ -74,11 +74,11 @@ test("doctor probes both terminal transports and their supported coding agents",
     assert.equal(probes.every((probe) => probe.status === "ok"), true);
     assert.equal(
       probes.find((probe) => probe.command === "codex")?.native_profile,
-      "codex-tui-0.153.0"
+      "codex-tui-0.153.4"
     );
     assert.equal(
       probes.find((probe) => probe.command === "claude")?.native_profile,
-      "claude-code-2.1.259-native-status"
+      "claude-code-2.1.263-native-status"
     );
     assert.equal(
       probes.filter((probe) => ["codex", "claude"].includes(probe.command))
@@ -93,21 +93,39 @@ test("doctor probes both terminal transports and their supported coding agents",
 test("doctor keeps complete unverified coding-agent versions available with warnings", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-future-agents-"));
   try {
-    const codex = probeDoctorCommand("codex", {
+    const codexGap = probeDoctorCommand("codex", {
       executables: {
         codex: writeFakeExecutable(
           tempDir,
-          "codex-future",
+          "codex-gap",
           `process.stdout.write("codex-cli 0.153.1");`
         )
       }
     });
-    const claude = probeDoctorCommand("claude", {
+    const codexFuture = probeDoctorCommand("codex", {
+      executables: {
+        codex: writeFakeExecutable(
+          tempDir,
+          "codex-future",
+          `process.stdout.write("codex-cli 0.153.5");`
+        )
+      }
+    });
+    const claudeGap = probeDoctorCommand("claude", {
+      executables: {
+        claude: writeFakeExecutable(
+          tempDir,
+          "claude-gap",
+          `process.stdout.write("Claude Code 2.1.260");`
+        )
+      }
+    });
+    const claudeFuture = probeDoctorCommand("claude", {
       executables: {
         claude: writeFakeExecutable(
           tempDir,
           "claude-future",
-          `process.stdout.write("Claude Code 2.1.260");`
+          `process.stdout.write("Claude Code 2.1.264");`
         )
       }
     });
@@ -121,7 +139,7 @@ test("doctor keeps complete unverified coding-agent versions available with warn
       }
     });
 
-    for (const probe of [codex, claude]) {
+    for (const probe of [codexGap, codexFuture, claudeGap, claudeFuture]) {
       assert.equal(probe.status, "ok");
       assert.equal(probe.native_profile_supported, false);
       assert.equal(probe.native_actions_available, true);

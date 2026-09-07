@@ -695,7 +695,7 @@ export function observeClaudeThreadLifecycle(
 }
 
 /**
- * Claude Code 2.1.251 through 2.1.259 can report an input-ready interactive composer as
+ * Claude Code 2.1.251 through 2.1.263 can report an input-ready interactive composer as
  * `waiting` without a `waitingFor` reason. A non-empty wait reason remains a
  * real blocked state and must never be promoted to idle.
  */

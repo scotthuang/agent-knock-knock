@@ -9,6 +9,8 @@ import {
   type TerminalAcceptanceBridge,
   type TerminalAcceptanceCliDependencies
 } from "../src/terminal-acceptance-cli-adapter.js";
+import type { CodingAgentSessionProvider } from
+  "../src/agent-session-provider.js";
 import { callbackRouteFingerprintForConversation } from
   "../src/callback-route-authority.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
@@ -28,6 +30,7 @@ import {
   terminalBridgeRequestFingerprint,
   terminalBridgeSubmission
 } from "../src/terminal-dispatch-receipt.js";
+import { fingerprint } from "../src/terminal-submission-facts.js";
 import {
   ensureStoreWritable,
   loadState,
@@ -433,6 +436,146 @@ test("user-abandoned deferred acceptance is neutral without terminal I/O", async
   assert.equal(result.outcome, "not_accepted");
   assert.equal("conversation" in result && result.conversation, conversation);
   assert.equal(terminalReads, 0);
+});
+
+test("monitor restart forwards exact Codex companion fences to the provider", async () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const control: TerminalControlRef = {
+    kind: "tmux",
+    target: "akk:0.0",
+    session: "akk",
+    window: 0,
+    pane: 0,
+    panePid: 42,
+    currentPath: "/workspace/project",
+    capabilities: []
+  };
+  const primary = {
+    sessionId: "22222222-2222-4222-8222-222222222222",
+    processUuid: "codex-pid:42:birth:1",
+    processBirth: "1",
+    rollout: {
+      fd: "8r",
+      device: "1",
+      inode: "42",
+      path: "/tmp/codex-primary.jsonl"
+    }
+  };
+  const additional = {
+    sessionId: "33333333-3333-4333-8333-333333333333",
+    processUuid: "codex-pid:42:birth:1",
+    processBirth: "1",
+    rollout: {
+      fd: "9r",
+      device: "1",
+      inode: "43",
+      path: "/tmp/codex-additional.jsonl"
+    }
+  };
+  const anchorBase = {
+    schema: "agent-knock-knock/codex-rollout-acceptance-anchor" as const,
+    version: 1 as const,
+    mode: "pre_materialization" as const,
+    native_thread_id: threadId,
+    process_uuid: "codex-pid:42:birth:1",
+    process_birth: "1",
+    captured_at: "2026-08-15T00:00:00.000Z",
+    file_existed: false,
+    offset_bytes: 0,
+    expected_empty_native_session: true as const
+  };
+  const anchor = {
+    ...anchorBase,
+    anchor_fingerprint: fingerprint(anchorBase)
+  };
+  const requestText = "reconcile the exact dispatched request";
+  const conversation = {
+    ...createConversation({
+      userRequest: requestText,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      executorKind: "codex",
+      now: new Date("2026-08-15T00:00:00.000Z")
+    }),
+    status: "waiting_for_agent" as const,
+    native_thread_id: threadId,
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_bridge_message_id: "message-1",
+      terminal_bridge_request_text: requestText,
+      terminal_bridge_request_hash:
+        terminalBridgeRequestFingerprint(requestText),
+      terminal_agent_pid: 42,
+      codex_rollout_acceptance_anchor: anchor,
+      terminal_bridge_submission: {
+        status: "enter_dispatched",
+        message_id: "message-1",
+        prepared_at: "2026-08-15T00:00:00.000Z",
+        text_injected_at: "2026-08-15T00:00:01.000Z",
+        enter_dispatched_at: "2026-08-15T00:00:02.000Z",
+        last_proven_stage: "enter_dispatched"
+      }
+    }
+  };
+  let resolverArguments:
+    Parameters<CodingAgentSessionProvider["resolveActiveSessionIdentityForPid"]>
+      | undefined;
+  const provider = {
+    agent: "codex",
+    resolveActiveSessionIdentityForPid: async (
+      ...args: Parameters<
+        CodingAgentSessionProvider["resolveActiveSessionIdentityForPid"]
+      >
+    ) => {
+      resolverArguments = args;
+      return undefined;
+    }
+  } as unknown as CodingAgentSessionProvider;
+  let runtimeIdentityCalls = 0;
+  const facade = createTerminalAcceptanceCliFacade({
+    native: {
+      codexProvider: () => provider
+    },
+    terminal: {
+      runtimeIdentity: (observedConversation, observedControl) => {
+        runtimeIdentityCalls += 1;
+        assert.equal(observedConversation, conversation);
+        assert.equal(observedControl, control);
+        return {
+          allowedPreMaterializationNativeIdentity: primary,
+          allowedAdditionalNativeIdentities: [additional]
+        };
+      }
+    },
+    authority: {
+      assertTurnCurrent: () => undefined,
+      terminalControl: () => control
+    }
+  } as unknown as TerminalAcceptanceCliDependencies);
+  const result = await facade.reconcileMonitor({
+    options: {},
+    conversation,
+    statePath: "/tmp/akk-monitor-restart/store/conversations/turn-1/state.json",
+    logPath: "/tmp/akk-monitor-restart/store/conversations/turn-1/events.ndjson",
+    terminalControl: control,
+    executor: resolveExecutor({ kind: "codex" }),
+    terminalBridge: {
+      proveExactDraftStillPresent: async () => false,
+      resolveStoredTerminal: async () => {
+        throw new Error("bound acceptance must not resolve a deferred terminal");
+      }
+    }
+  });
+
+  assert.equal(result.outcome, "pending");
+  assert.equal(runtimeIdentityCalls >= 1, true);
+  assert.deepEqual(resolverArguments, [
+    42,
+    "/workspace/project",
+    threadId,
+    { ...primary, evidence: "managed_transition_before_identity" },
+    [{ ...additional, evidence: "managed_transition_ancestor_identity" }]
+  ]);
 });
 
 test("acceptance uncertainty cannot revive an explicit Close that wins the Store lock", (t) => {

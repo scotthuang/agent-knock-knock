@@ -11,6 +11,7 @@ import type { TerminalNativeIdentity } from
   "../src/terminal-binding-authority.js";
 import {
   TerminalDispatchExecutionService,
+  type CodexPreMaterializationIdentity,
   type TerminalDispatchExecutionPorts
 } from "../src/terminal-dispatch-execution.js";
 import {
@@ -45,6 +46,28 @@ const IDENTITY: TerminalNativeIdentity = {
     path: "/tmp/rollout-a.jsonl"
   },
   evidence: "test_exact_identity"
+};
+const COMPANION_IDENTITY: CodexPreMaterializationIdentity = {
+  sessionId: "22222222-2222-4222-8222-222222222222",
+  processUuid: "process-a",
+  processBirth: "birth-a",
+  rollout: {
+    fd: "9",
+    device: "1",
+    inode: "43",
+    path: "/tmp/rollout-companion.jsonl"
+  }
+};
+const ADDITIONAL_COMPANION_IDENTITY: CodexPreMaterializationIdentity = {
+  sessionId: "33333333-3333-4333-8333-333333333333",
+  processUuid: "process-a",
+  processBirth: "birth-a",
+  rollout: {
+    fd: "10",
+    device: "1",
+    inode: "44",
+    path: "/tmp/rollout-additional.jsonl"
+  }
 };
 
 function sha256(value: string): string {
@@ -373,6 +396,87 @@ test("Codex capture and polling observe a late durable ACK in port order", async
     "resolve:codex",
     "detect:bound:2"
   ]);
+});
+
+test("Codex bound acceptance forwards exact companions on every poll", async () => {
+  let resolutions = 0;
+  const accepted = evidence();
+  const additional = [ADDITIONAL_COMPANION_IDENTITY];
+  const { service } = harness({
+    resolveCodex: async (request) => {
+      resolutions += 1;
+      assert.equal(request.preferredSessionId, THREAD_ID);
+      assert.equal(request.allowedCompanionIdentity, COMPANION_IDENTITY);
+      assert.equal(request.allowedAdditionalIdentities, additional);
+      return IDENTITY;
+    },
+    detectBoundCodex: () => resolutions === 2 ? accepted : undefined
+  });
+  const result = await service.pollAcceptance({
+    executor: "codex",
+    conversation: conversation(),
+    terminalControl: TERMINAL_CONTROL,
+    allowedCompanionIdentity: COMPANION_IDENTITY,
+    allowedAdditionalIdentities: additional,
+    timeoutMs: 30,
+    pollIntervalMs: 10,
+    scrollbackLines: 120
+  });
+  assert.deepEqual(result, { outcome: "agent_accepted", evidence: accepted });
+  assert.equal(resolutions, 2);
+});
+
+test("Codex bound acceptance keeps missing and unknown roots fail closed", async () => {
+  for (const fixture of [
+    {
+      name: "missing companion authority",
+      companions: {},
+      reason: "preferred session is not the sole open root rollout"
+    },
+    {
+      name: "unknown open root",
+      companions: {
+        allowedCompanionIdentity: COMPANION_IDENTITY,
+        allowedAdditionalIdentities: [ADDITIONAL_COMPANION_IDENTITY]
+      },
+      reason: "open root rollout is not an exact allowed companion"
+    }
+  ] as const) {
+    let acceptanceDetectorCalled = false;
+    const { service } = harness({
+      resolveCodex: async (request) => {
+        assert.equal(
+          request.allowedCompanionIdentity,
+          fixture.companions.allowedCompanionIdentity
+        );
+        assert.equal(
+          request.allowedAdditionalIdentities,
+          fixture.companions.allowedAdditionalIdentities
+        );
+        throw new Error(fixture.reason);
+      },
+      detectBoundCodex: () => {
+        acceptanceDetectorCalled = true;
+        return evidence();
+      }
+    });
+    const result = await service.pollAcceptance({
+      executor: "codex",
+      conversation: conversation(),
+      terminalControl: TERMINAL_CONTROL,
+      ...fixture.companions,
+      timeoutMs: 30,
+      pollIntervalMs: 10,
+      scrollbackLines: 120
+    });
+    assert.equal(result.outcome, "uncertain", fixture.name);
+    assert.match(
+      result.outcome === "uncertain" ? result.reason : "",
+      new RegExp(fixture.reason, "u"),
+      fixture.name
+    );
+    assert.equal(acceptanceDetectorCalled, false, fixture.name);
+  }
 });
 
 test("persistent Codex pending distinguishes exact draft proof from no proof", async () => {

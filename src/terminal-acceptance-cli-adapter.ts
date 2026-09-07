@@ -814,12 +814,23 @@ class TerminalAcceptanceCliApplication {
         }
       },
       acceptance: {
-        detect: (executor, conversation) =>
-          this.execution(input.options).detectAcceptance({
+        detect: (executor, conversation) => {
+          const runtime = executor === "codex"
+            ? this.#dependencies.terminal.runtimeIdentity(
+                conversation,
+                input.terminalControl
+              )
+            : undefined;
+          return this.execution(input.options).detectAcceptance({
             executor,
             conversation,
-            terminalControl: input.terminalControl
-          })
+            terminalControl: input.terminalControl,
+            allowedCompanionIdentity:
+              runtime?.allowedPreMaterializationNativeIdentity,
+            allowedAdditionalIdentities:
+              runtime?.allowedAdditionalNativeIdentities
+          });
+        }
       },
       terminal: {
         proveExactDraftStillPresent: (conversation, requestText) =>

@@ -159,6 +159,11 @@ test("lifecycle live smoke requires two opt-ins and never retries a mutation", (
   assert.match(source, /attemptedMutations\s*=\s*new Set/u);
   assert.match(source, /attemptedMutations\.has/u);
   assert.match(source, /attemptedMutations\.add/u);
+  assert.match(
+    source,
+    /\[\s*"--terminal",\s*"--session",\s*"--conversation",\s*"--state"\s*\]/u,
+    "every lifecycle mutation target must participate in the one-shot fence"
+  );
   assert.match(source, /Refusing to retry lifecycle mutation/u);
   assert.match(
     source,

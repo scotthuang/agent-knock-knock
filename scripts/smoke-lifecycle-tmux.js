@@ -438,7 +438,12 @@ function productionEnvironment() {
 }
 
 function mutationIdentity(args) {
-  for (const option of ["--terminal", "--session", "--state"]) {
+  for (const option of [
+    "--terminal",
+    "--session",
+    "--conversation",
+    "--state"
+  ]) {
     const index = args.indexOf(option);
     if (index >= 0 && args[index + 1]) {
       return `${option}:${args[index + 1]}`;

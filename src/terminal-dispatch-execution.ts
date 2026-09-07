@@ -155,6 +155,8 @@ export interface TerminalAcceptanceDetectionRequest {
   executor: ExecutorKind;
   conversation: Conversation;
   terminalControl: TerminalControlRef;
+  allowedCompanionIdentity?: CodexPreMaterializationIdentity;
+  allowedAdditionalIdentities?: readonly CodexPreMaterializationIdentity[];
 }
 
 export interface TerminalAcceptancePollRequest
@@ -1029,7 +1031,9 @@ export class TerminalDispatchExecutionService {
       agent: "codex",
       pid,
       cwd: request.terminalControl.currentPath,
-      preferredSessionId: nonBlankString(validated.native_thread_id)
+      preferredSessionId: nonBlankString(validated.native_thread_id),
+      allowedCompanionIdentity: request.allowedCompanionIdentity,
+      allowedAdditionalIdentities: request.allowedAdditionalIdentities
     });
     if (!identity) {
       return undefined;

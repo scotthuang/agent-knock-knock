@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.31 - 2026-09-07
+
+### Added
+
+- Promote Codex `0.153.4` and Claude Code `2.1.263` to exact regression-tested lifecycle and native-status profiles, alongside their interactive-questionnaire profiles, after isolated real-TUI validation.
+
+### Fixed
+
+- Recognize the current terminal-scoped Send projection in the isolated lifecycle smoke while keeping its dispatch on the strict managed-only path and all terminal authority out of published evidence.
+- Preserve exact committed Codex lifecycle companion fences through submission acceptance and monitor recovery, so a first Send after `/new` is not falsely stalled when Codex keeps the predecessor rollout open; unknown roots remain fail-closed.
+
 ## 0.12.30 - 2026-09-07
 
 ### Added
