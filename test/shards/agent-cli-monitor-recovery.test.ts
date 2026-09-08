@@ -11,7 +11,8 @@ import {
   pathsForConversation,
   storeConversationsDir,
   storeManifestPath,
-  storeSessionsDir
+  storeSessionsDir,
+  withStoreWriterLeaseAsync
 } from "../../src/store.js";
 import {
   listManagedSessions,
@@ -144,7 +145,16 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
     const sendKeysBefore = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys").length;
 
-    const first = spawnAgentCliProcess(monitorArgs, testEnv);
+    const firstMonitor = spawnAgentCliCaptured(monitorArgs, testEnv);
+    const first = firstMonitor.child;
+    let firstExit: {
+      status: number | null;
+      stdout: string;
+      stderr: string;
+    } | undefined;
+    void firstMonitor.result.then((result) => {
+      firstExit = result;
+    });
     childProcesses.push(first);
     await waitForCondition(
       () => eventCount(logPath, "terminal_bridge_monitor_started") === 1,
@@ -164,41 +174,41 @@ test("terminal bridge monitor singleton rejects a live owner and reclaims a dead
       })}\n`
     );
 
-    const writerLockPath = path.join(storeDir, ".akk-writer.lock");
-    fs.writeFileSync(
-      writerLockPath,
-      `${JSON.stringify({
-        pid: process.pid,
-        token: "issue-93-live-writer-contention",
-        created_at: new Date().toISOString()
-      })}\n`,
-      { mode: 0o600 }
-    );
-    await waitForCondition(
-      () => fs.existsSync(runtimeLogDir) &&
-        fs.readdirSync(runtimeLogDir).some((name) => {
-          if (!name.endsWith(".ndjson")) {
-            return false;
+    await withStoreWriterLeaseAsync(storeDir, async () => {
+      await waitForCondition(
+        () => {
+          if (firstExit) {
+            throw new Error(
+              `terminal bridge monitor exited during Store contention ` +
+              `(status=${String(firstExit.status)}): ` +
+              `${firstExit.stderr || firstExit.stdout}`
+            );
           }
-          const contents = fs.readFileSync(
-            path.join(runtimeLogDir, name),
-            "utf8"
-          );
-          return contents.includes(
-            '"event":"terminal_bridge_monitor_binding_check_deferred"'
-          ) || contents.includes(
-            '"event":"terminal_bridge_monitor_store_operation_deferred"'
-          );
-        }),
-      "the monitor to observe an actual Store-lock timeout",
-      45_000
-    );
-    assert.equal(
-      first.exitCode,
-      null,
-      "a Store writer timeout must defer the binding check, not stop monitoring"
-    );
-    fs.unlinkSync(writerLockPath);
+          return fs.existsSync(runtimeLogDir) &&
+            fs.readdirSync(runtimeLogDir).some((name) => {
+              if (!name.endsWith(".ndjson")) {
+                return false;
+              }
+              const contents = fs.readFileSync(
+                path.join(runtimeLogDir, name),
+                "utf8"
+              );
+              return contents.includes(
+                '"event":"terminal_bridge_monitor_binding_check_deferred"'
+              ) || contents.includes(
+                '"event":"terminal_bridge_monitor_store_operation_deferred"'
+              );
+            });
+        },
+        "the monitor to observe an actual Store-lock timeout",
+        45_000
+      );
+      assert.equal(
+        first.exitCode,
+        null,
+        "a Store writer timeout must defer the binding check, not stop monitoring"
+      );
+    });
     await waitForCondition(
       () =>
         eventCount(
