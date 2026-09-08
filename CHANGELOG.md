@@ -16,10 +16,12 @@
 
 - Give human-explicit Send a bounded one-second Store/state lock grace while keeping terminal acquisition non-blocking, so brief monitor-supervision writer leases do not unnecessarily downgrade an otherwise manageable questionnaire to a notification-only Watch.
 - Preserve the exact pre-send Codex rollout candidates as Turn-scoped monitor companions after one rollout accepts the request, so a still-open predecessor does not suppress questionnaire discovery or response authority after managed promotion.
+- Transfer one unchanged detached Session claim to the provisional managed Session when its exact source-less Codex candidate accepts the new Send, so a closed prior Turn cannot stall the next questionnaire on the same native thread.
 
 ### Security
 
 - Keep physical target, process incarnation, composer/interaction, and duplicate-dispatch checks fail-closed while preventing rollout, Session, Store, or callback uncertainty from vetoing an explicitly selected human Send. Replaced, deleted, ambiguous, multiply accepting, or unreadable rollout evidence remains uncertain and is never replayed automatically.
+- Bind detached-claim transfer to the frozen v3 acceptance anchor and CAS-fenced Session state. Claim drift, blocking work, ambiguous owners, or changed terminal/workspace authority remains post-dispatch uncertainty with no automatic resend.
 
 ## 0.12.37 - 2026-09-08
 

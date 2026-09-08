@@ -91,7 +91,7 @@ function recordingPorts(
       }
     },
     authority: {
-      assertExclusive: async ({ sessionId }) => {
+      prepareIdentityClaim: async ({ sessionId }) => {
         events.push(`exclusive:${sessionId}`);
       },
       assertTurn: (identity) => {

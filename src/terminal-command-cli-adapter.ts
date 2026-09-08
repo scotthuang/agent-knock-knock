@@ -23,9 +23,11 @@ import {
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
   captureCodexCandidateSetRolloutAcceptanceAnchor,
+  type CodexCandidateSetRolloutAcceptanceAnchor,
   type CodexRolloutAcceptanceAnchor,
   validateCodexRolloutAcceptanceAnchor
 } from "./terminal-submission-acceptance.js";
+import { fingerprint } from "./terminal-submission-facts.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -123,6 +125,7 @@ import {
   type ApprovalCandidate
 } from "./approval-policy.js";
 import {
+  rolloutFileIdentityMatches,
   type TerminalNativeIdentity as NativeAgentSessionIdentity
 } from "./terminal-binding-authority.js";
 import {
@@ -177,6 +180,7 @@ import * as dispatchApplication from "./terminal-dispatch-application.js";
 import { decideUserExplicitTerminalInputSafety } from
   "./terminal-dispatch-policy.js";
 import type {
+  CodexDetachedCandidateSessionClaimSet,
   DeferredCodexForegroundBindingBoundary,
   TerminalDispatchTerminal,
   TerminalControlSendRequest,
@@ -375,6 +379,13 @@ interface TerminalCommandCliRawPorts {
     terminalControl: TerminalControlRef;
     excludedManagedSessionId?: string;
     allowedManagedSessionIds?: string[];
+  }): Promise<void>;
+  prepareManagedSessionNativeIdentityClaim(request: {
+    options: TerminalCommandCliOptions;
+    conversation: Conversation;
+    terminalControl: TerminalControlRef;
+    identity: NativeAgentSessionIdentity;
+    storeDir: string;
   }): Promise<void>;
   assertObservedHandoffTransportBoundary(request: {
     options: TerminalCommandCliOptions;
@@ -4926,6 +4937,71 @@ interface RawTerminalInitialAuthority {
   knownCodexCompanions: CodexAllowedCompanionSet;
 }
 
+function captureDetachedCodexCandidateSessionClaims(input: {
+  storeDir: string;
+  terminal: TerminalCommandTarget;
+  inventory: CodexOpenRootRolloutInventory;
+  anchor: CodexCandidateSetRolloutAcceptanceAnchor;
+}): CodexDetachedCandidateSessionClaimSet | undefined {
+  const { inventory, terminal } = input;
+  const candidates = new Map(inventory.roots.map((root) => [
+    root.sessionId.toLowerCase(),
+    root
+  ]));
+  const claims = listManagedSessions(input.storeDir).flatMap((session) => {
+    const binding = session.binding;
+    const nativeThreadId = binding?.native_thread_id?.toLowerCase();
+    const candidate = nativeThreadId ? candidates.get(nativeThreadId) : undefined;
+    if (
+      session.status !== "detached" || session.agent !== "codex" ||
+      !binding || !nativeThreadId || !candidate ||
+      !isCompleteNativeRollout(binding.native_process.rollout) ||
+      path.resolve(session.workspace) !==
+        path.resolve(terminal.terminalControl.currentPath ?? "") ||
+      binding.native_process.pid !== inventory.pid ||
+      binding.native_process.process_uuid !== inventory.processUuid ||
+      binding.native_process.process_birth !== inventory.processBirth ||
+      candidate.processUuid !== inventory.processUuid ||
+      candidate.processBirth !== inventory.processBirth ||
+      !terminalControlAliasMatches(
+        binding.terminal_id,
+        binding.terminal_control,
+        terminal.conversationId,
+        terminal.terminalControl
+      ) ||
+      !rolloutFileIdentityMatches(
+        binding.native_process.rollout,
+        candidate.rollout
+      )
+    ) {
+      return [];
+    }
+    return [{
+      session_id: session.session_id,
+      session_revision: managedSessionRevision(session),
+      session_binding_token: managedSessionBindingToken(session),
+      binding_id: binding.binding_id,
+      binding_generation: binding.generation,
+      native_thread_id: nativeThreadId,
+      process_uuid: inventory.processUuid,
+      process_birth: inventory.processBirth,
+      source_rollout: { ...binding.native_process.rollout },
+      candidate_rollout: { ...candidate.rollout }
+    }];
+  }).sort((left, right) =>
+    left.native_thread_id.localeCompare(right.native_thread_id) ||
+    left.session_id.localeCompare(right.session_id)
+  );
+  if (claims.length === 0) return undefined;
+  const base = {
+    schema: "agent-knock-knock/codex-detached-candidate-session-claims" as const,
+    version: 1 as const,
+    anchor_fingerprint: input.anchor.anchor_fingerprint,
+    claims
+  };
+  return { ...base, claims_fingerprint: fingerprint(base) };
+}
+
 function rawTerminalInitialAuthority({
   options,
   terminal,
@@ -6351,6 +6427,15 @@ async function prepareRawTerminalDispatchAuthority(input: {
           now: cliNow()
         })
       : undefined;
+  const postSendCodexDetachedSessionClaims = postSendCodexCandidateAnchor &&
+      sourceLessCodexCandidateInventory
+    ? captureDetachedCodexCandidateSessionClaims({
+        storeDir,
+        terminal,
+        inventory: sourceLessCodexCandidateInventory,
+        anchor: postSendCodexCandidateAnchor
+      })
+    : undefined;
   const freshSendAuthority = decideTerminalSendAuthority({
     ownership: "conflict",
     verifiedEmpty: Boolean(verifiedEmptyHandoff),
@@ -6386,7 +6471,8 @@ async function prepareRawTerminalDispatchAuthority(input: {
     verifiedEmptyHandoff,
     handoff,
     deferredCodexForegroundBinding,
-    postSendCodexCandidateAnchor
+    postSendCodexCandidateAnchor,
+    postSendCodexDetachedSessionClaims
   };
 }
 
@@ -6460,7 +6546,8 @@ async function runManagedRawTerminalSendAttempt(
       verifiedEmptyHandoff,
       handoff,
       deferredCodexForegroundBinding,
-      postSendCodexCandidateAnchor
+      postSendCodexCandidateAnchor,
+      postSendCodexDetachedSessionClaims
     } = await prepareRawTerminalDispatchAuthority({
       options,
       messageBody,
@@ -6729,6 +6816,7 @@ async function runManagedRawTerminalSendAttempt(
             : undefined,
         verifiedEmptyCodexHandoff: verifiedEmptyHandoff?.boundary,
         postSendCodexCandidateAnchor,
+        postSendCodexDetachedSessionClaims,
         deferredCodexForegroundBinding
       });
       attempt.result = controlSendResult;
@@ -8821,15 +8909,25 @@ async function resolveTerminalDispatchSubmissionOwner(
           acceptedAt: cliNow().toISOString()
         });
       } else {
-        await assertNativeThreadHasExclusiveOwnership({
-          options,
-          agent: executor.kind,
-          currentPid: terminalAgentPid,
-          nativeThreadId: boundIdentity.sessionId,
-          storeDir: identityRoute.storeDir,
-          terminalControl,
-          excludedManagedSessionId: sessionIdForConversation(boundConversation)
-        });
+        if (executor.kind === "codex") {
+          await rawPort("prepareManagedSessionNativeIdentityClaim")({
+            options,
+            conversation: boundConversation,
+            identity: boundIdentity,
+            storeDir: identityRoute.storeDir,
+            terminalControl
+          });
+        } else {
+          await assertNativeThreadHasExclusiveOwnership({
+            options,
+            agent: executor.kind,
+            currentPid: terminalAgentPid,
+            nativeThreadId: boundIdentity.sessionId,
+            storeDir: identityRoute.storeDir,
+            terminalControl,
+            excludedManagedSessionId: sessionIdForConversation(boundConversation)
+          });
+        }
         persistManagedSessionNativeIdentity({
           conversation: boundConversation,
           terminalControl,
@@ -9104,7 +9202,8 @@ function createTerminalDispatchRuntime(
     nextConversation,
     executor,
     message,
-    recordRawAttachmentAfterSend = false
+    recordRawAttachmentAfterSend = false,
+    postSendCodexDetachedSessionClaims
   } = request;
   const {
     bridge,
@@ -9137,6 +9236,8 @@ function createTerminalDispatchRuntime(
         monitorLockVersion: monitorOwner.LOCK_VERSION,
         preSendScreenFingerprint,
         codexRolloutAcceptanceAnchor,
+        codexDetachedCandidateSessionClaims:
+          postSendCodexDetachedSessionClaims,
         claudeTranscriptAnchor,
         claudeHome
       })

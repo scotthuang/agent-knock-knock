@@ -71,11 +71,12 @@ export interface ManagedTurnRecoveryPorts {
     detect(identity: TerminalNativeIdentity, requestHash: string): boolean;
   };
   authority: {
-    assertExclusive(input: {
+    prepareIdentityClaim(input: {
       pid: number;
       nativeThreadId: string;
       terminalControl: TerminalControlRef;
       sessionId: string;
+      identity: TerminalNativeIdentity;
     }): Promise<void>;
     assertTurn(identity?: TerminalNativeIdentity): void;
   };
@@ -191,11 +192,12 @@ export class ManagedTurnRecoveryService {
       return { state: "pending" };
     }
 
-    await this.#ports.authority.assertExclusive({
+    await this.#ports.authority.prepareIdentityClaim({
       pid: facts.pid as number,
       nativeThreadId: identity.sessionId,
       terminalControl,
-      sessionId: facts.sessionId as string
+      sessionId: facts.sessionId as string,
+      identity
     });
     if (!sessionNativeThreadId) {
       const proof = this.#ports.persistence.persistSessionIdentity(identity);

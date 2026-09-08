@@ -37,6 +37,7 @@ export interface TerminalBridgeStateInput {
   monitorLockVersion: number;
   preSendScreenFingerprint?: string;
   codexRolloutAcceptanceAnchor?: unknown;
+  codexDetachedCandidateSessionClaims?: unknown;
   claudeTranscriptAnchor?: unknown;
   claudeHome?: string;
 }
@@ -85,6 +86,7 @@ export function withTerminalBridgeState({
   monitorLockVersion,
   preSendScreenFingerprint,
   codexRolloutAcceptanceAnchor,
+  codexDetachedCandidateSessionClaims,
   claudeTranscriptAnchor,
   claudeHome
 }: TerminalBridgeStateInput): Conversation {
@@ -102,6 +104,8 @@ export function withTerminalBridgeState({
       terminal_bridge_request_hash: terminalBridgeRequestFingerprint(requestText),
       terminal_bridge_pre_send_screen_fingerprint: preSendScreenFingerprint,
       codex_rollout_acceptance_anchor: codexRolloutAcceptanceAnchor,
+      codex_detached_candidate_session_claims:
+        codexDetachedCandidateSessionClaims,
       claude_transcript_anchor: claudeTranscriptAnchor,
       claude_home: claudeHome,
       terminal_bridge_completion_claim: undefined,

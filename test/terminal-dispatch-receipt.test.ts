@@ -89,6 +89,7 @@ test("terminal bridge state preserves exact keys and pretty JSON bytes", () => {
     monitorLockVersion: 3,
     preSendScreenFingerprint: "screen-a",
     codexRolloutAcceptanceAnchor: { version: 2 },
+    codexDetachedCandidateSessionClaims: { version: 1 },
     claudeTranscriptAnchor: undefined,
     claudeHome: undefined
   });
@@ -103,6 +104,7 @@ test("terminal bridge state preserves exact keys and pretty JSON bytes", () => {
       terminal_bridge_request_hash: sha256(REQUEST_TEXT),
       terminal_bridge_pre_send_screen_fingerprint: "screen-a",
       codex_rollout_acceptance_anchor: { version: 2 },
+      codex_detached_candidate_session_claims: { version: 1 },
       claude_transcript_anchor: undefined,
       claude_home: undefined,
       terminal_bridge_completion_claim: undefined,

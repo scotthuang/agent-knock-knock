@@ -453,6 +453,20 @@ export function exactRolloutMatches(
   );
 }
 
+/** Stable Codex rollout-file identity; an open descriptor may churn. */
+export function rolloutFileIdentityMatches(
+  left: unknown,
+  right: TerminalNativeRolloutIdentity | undefined
+): boolean {
+  return Boolean(
+    isCompleteNativeRollout(left) &&
+    isCompleteNativeRollout(right) &&
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.path === right.path
+  );
+}
+
 export function candidateSourceRootAuthorityMatches(
   roots: readonly TerminalCodexOpenRootIdentity[],
   sourceThreadId: string | undefined,
