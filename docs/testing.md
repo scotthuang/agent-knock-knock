@@ -15,8 +15,9 @@ duplicated, or unclassified.
 | `npm run test:affected` | Complete fast tier plus mapped integration tests; unknown or shared-core changes run the full tier | Maintainer/release diagnostics only; not an ordinary development command |
 | `npm run test:full` | The exact union of fast and integration tests | Immediate pre-publication gate for an actual npm or ClawHub release |
 | `npm test` | Compatibility alias for `test:full` | Same release-only boundary as `test:full` |
-| `npm run test:release` | Full suite, isolated OpenClaw compatibility matrix, ClawHub runtime validation, and ClawHub publish dry-run | Immediate pre-publication gate for an actual npm or ClawHub release |
+| `npm run test:release` | Full suite, isolated current-build OpenClaw compatibility check, ClawHub runtime validation, and ClawHub publish dry-run | Immediate pre-publication gate for an actual npm or ClawHub release |
 | `npm run test:release:live` | The release tier plus credentialed native Codex and Claude lifecycle smoke/attestation | Optional release-time diagnostic with dedicated prepared tmux panes |
+| `npm run compat:openclaw` | Full minimum/current/API-boundary OpenClaw compatibility matrix | Periodic maintainer check and any change to declared compatibility floors; not required for every package release |
 
 During normal development, debugging, refactoring, review, local installation,
 and local verification, run only `npm run test:fast`. Type checking, builds,
@@ -29,6 +30,12 @@ The live release tier can make authenticated coding-agent turns. It is never
 selected by `npm test` or `test:release`; opting in is an explicit operational
 decision. The ordinary release tier builds in temporary state and does not
 control a real coding-agent pane.
+
+Routine releases exercise the OpenClaw version pinned by
+`openclaw.build.openclawVersion`. The slower minimum Host, minimum Plugin API,
+and adjacent unsupported boundary checks remain available through
+`npm run compat:openclaw` for periodic compatibility review. Run the full
+matrix whenever a declared OpenClaw compatibility floor changes.
 
 The live gate requires both complete panes, a new private evidence path outside
 the repository, the environment opt-in, and the command-line confirmation. It

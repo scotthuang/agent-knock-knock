@@ -107,6 +107,7 @@
     "clawhub:validate": "npm run build && clawhub --workdir . package validate . --out .clawhub-validation --runtime --allow-execute --no-mock-sdk",
     "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --topics tmux,codex,claude-code,agent-orchestration,terminal-handoff --dry-run",
     "compat:openclaw": "npm run build && node scripts/verify-openclaw-compatibility.js",
+    "compat:openclaw:current": "npm run build && node scripts/verify-openclaw-compatibility.js --target current",
     "deepseek:build": "npm --prefix connectors/deepseek-harness run build",
     "deepseek:typecheck": "npm --prefix connectors/deepseek-harness run typecheck",
     "deepseek:test:fast": "npm --prefix connectors/deepseek-harness run test:fast",
