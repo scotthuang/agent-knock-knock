@@ -74,6 +74,30 @@ const CODEX_MULTI_FIRST_FREEFORM = CODEX_MULTI_FREEFORM
   .replace("Question 2/2 (2 unanswered)", "Question 1/2 (2 unanswered)")
   .replace("enter to submit all", "enter to submit answer");
 
+const CODEX_CUSTOM_OPTIONS = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+  › 1. Fast feedback (Recommended)  Use this concise preset answer.
+    2. Type something.  Type a free-form one-sentence answer.
+    3. None of the above  Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`;
+
+const CODEX_CUSTOM_TEXT_EDIT = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+    1. Fast feedback (Recommended)  Use this concise preset answer.
+    2. Type something.  Type a free-form one-sentence answer.
+  › 3. None of the above  Optionally, add details in notes (tab).
+
+  › Add notes
+
+  tab or esc to clear notes | enter to submit all
+`;
+
 const CODEX_UNANSWERED_CONFIRM = `
   Submit with unanswered questions?
   2 unanswered questions
@@ -305,6 +329,86 @@ test("Codex exact multi-question freeform is actionable one step at a time", () 
   );
   assert.deepEqual([first.current_step, first.total_steps], [1, 2]);
   assert.equal(first.question.response_kind, "free_text");
+});
+
+test("Codex guarded custom choices open notes before exposing free text", () => {
+  assert.equal(
+    NATIVE_QUESTIONNAIRE_PROFILES.codex,
+    "codex/0.153.4/request-user-input-v2"
+  );
+  const choice = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_CUSTOM_OPTIONS
+  }));
+  assert.equal(choice.question.response_kind, "single_select");
+  assert.deepEqual(
+    choice.question.options?.map((option) => option.label),
+    ["Fast feedback (Recommended)", "Type something.", "None of the above"]
+  );
+  assert.equal(choice.action_plan.kind, "single_select");
+  if (choice.action_plan.kind === "single_select") {
+    assert.deepEqual(choice.action_plan.choices.map((item) => ({
+      outcome: item.outcome,
+      keys: item.stages.map((stage) =>
+        stage.kind === "key" ? stage.key : "text"
+      )
+    })), [
+      { outcome: "submit_or_advance", keys: ["1"] },
+      { outcome: "open_custom_text", keys: ["Down", "Down", "Tab"] },
+      { outcome: "submit_or_advance", keys: ["3"] }
+    ]);
+  }
+
+  const editor = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_CUSTOM_TEXT_EDIT
+  }));
+  assert.equal(editor.question.response_kind, "free_text");
+  assert.equal(editor.question.required, true);
+  assert.equal(editor.question.options, undefined);
+  assert.deepEqual(editor.action_plan, {
+    kind: "free_text",
+    stages: [
+      { kind: "answer_text", single_line: true, max_characters: 4_096 },
+      { kind: "key", key: "C-m" }
+    ]
+  });
+  assert.notEqual(editor.question.question_id, choice.question.question_id);
+  assert.notEqual(editor.prompt_evidence.sha256, choice.prompt_evidence.sha256);
+});
+
+test("Codex custom-text aliases require the exact native Other authority", () => {
+  const aliasOnly = manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_OPTIONS.replace("Option 2", "Type something.")
+  }));
+  assert.equal(aliasOnly.reason, "changed_shape");
+  assert.deepEqual(aliasOnly.action_plan, { kind: "manual_only" });
+
+  const changedOther = CODEX_CUSTOM_OPTIONS.replace(
+    "Optionally, add details in notes (tab).",
+    "Add a custom answer."
+  );
+  const changed = manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: changedOther
+  }));
+  assert.equal(changed.reason, "changed_shape");
+  assert.deepEqual(changed.action_plan, { kind: "manual_only" });
+
+  const typedDraft = CODEX_CUSTOM_TEXT_EDIT.replace(
+    "  › Add notes",
+    "  › existing human draft"
+  );
+  assert.equal(manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: typedDraft
+  })).reason, "changed_shape");
 });
 
 test("Codex exact unanswered confirmation has closed confirm/cancel plans", () => {

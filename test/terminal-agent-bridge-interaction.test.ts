@@ -80,6 +80,30 @@ const CODEX_FREEFORM = `
   enter to submit answer | esc to interrupt
 `;
 
+const CODEX_CUSTOM_OPTIONS = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+  › 1. Fast feedback (Recommended)  Use this concise preset answer.
+    2. Type something.  Type a free-form one-sentence answer.
+    3. None of the above  Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`;
+
+const CODEX_CUSTOM_TEXT_EDIT = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+    1. Fast feedback (Recommended)  Use this concise preset answer.
+    2. Type something.  Type a free-form one-sentence answer.
+  › 3. None of the above  Optionally, add details in notes (tab).
+
+  › Add notes
+
+  tab or esc to clear notes | enter to submit all
+`;
+
 const CODEX_CONFIRM = `
   Submit with unanswered questions?
   2 unanswered questions
@@ -120,6 +144,22 @@ Which color do you prefer?
   4. Chat about this
 
 Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel
+`;
+
+const CLAUDE_SINGLE_SELECT = `
+ ☐ Color
+
+Which color do you prefer?
+
+❯ 1. Red
+     The color red
+  2. Blue
+     The color blue
+  3. Type something.
+────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
 `;
 
 function inspection(screen: string): TerminalScreenInspection {
@@ -434,6 +474,140 @@ test("wrapped Codex final option footer projects and dispatches one semantic key
   assert.deepEqual(
     provider.operations.filter((operation) => operation.kind !== "capture"),
     [{ kind: "keys", keys: ["1"] }]
+  );
+});
+
+test("Codex custom choice opens notes before a separate free-text response", async () => {
+  const { bridge, provider, control } = await fixture(CODEX_CUSTOM_OPTIONS);
+  const choiceStatus = await bridge.status("codex", control, { runtime: RUNTIME });
+  const choiceProjection = choiceStatus.interaction_state;
+  const choiceFingerprint = choiceStatus.interaction_prompt_fingerprint;
+  assert.ok(choiceProjection);
+  assert.ok(choiceFingerprint);
+  assert.equal(choiceProjection.questions[0]?.response_kind, "single_select");
+  provider.clearOperations();
+
+  const opened = await bridge.respondInteraction(
+    "codex",
+    control,
+    selectResponse(choiceProjection, 1),
+    {
+      agentVersion: "0.153.4",
+      expectedFingerprint: choiceFingerprint,
+      expectedExpiresAt: choiceProjection.expires_at,
+      runtime: RUNTIME
+    }
+  );
+  assert.equal(opened.responded, true);
+  assert.equal(opened.outcome, "custom_text_opened");
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [{ kind: "keys", keys: ["Down", "Down", "Tab"] }]
+  );
+
+  provider.setScreens([CODEX_CUSTOM_TEXT_EDIT]);
+  provider.operations.length = 0;
+  const textStatus = await bridge.status("codex", control, { runtime: RUNTIME });
+  const textProjection = textStatus.interaction_state;
+  const textFingerprint = textStatus.interaction_prompt_fingerprint;
+  assert.ok(textProjection);
+  assert.ok(textFingerprint);
+  assert.notEqual(textProjection.interaction_id, choiceProjection.interaction_id);
+  assert.equal(textProjection.questions[0]?.response_kind, "free_text");
+  assert.equal(textProjection.capabilities.free_text, true);
+  provider.clearOperations();
+
+  const textQuestion = textProjection.questions[0]!;
+  const answered = await bridge.respondInteraction("codex", control, {
+    interaction_id: textProjection.interaction_id,
+    turn_id: textProjection.turn_id,
+    answers: [{
+      question_id: textQuestion.question_id,
+      response_kind: "free_text",
+      text: "Fast feedback makes a great developer experience."
+    }]
+  }, {
+    agentVersion: "0.153.4",
+    expectedFingerprint: textFingerprint,
+    expectedExpiresAt: textProjection.expires_at,
+    runtime: RUNTIME
+  });
+  assert.equal(answered.responded, true);
+  assert.equal(answered.outcome, "submitted_or_advanced");
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [
+      {
+        kind: "text",
+        text: "Fast feedback makes a great developer experience."
+      },
+      { kind: "keys", keys: ["C-m"] }
+    ]
+  );
+});
+
+test("Codex custom navigation is one non-retryable key dispatch", async () => {
+  const { bridge, provider, control } = await fixture(CODEX_CUSTOM_OPTIONS);
+  const status = await bridge.status("codex", control, { runtime: RUNTIME });
+  const projection = status.interaction_state;
+  const fingerprint = status.interaction_prompt_fingerprint;
+  assert.ok(projection);
+  assert.ok(fingerprint);
+  provider.clearOperations();
+  provider.failKeys = true;
+
+  await assert.rejects(
+    bridge.respondInteraction(
+      "codex",
+      control,
+      selectResponse(projection, 1),
+      {
+        agentVersion: "0.153.4",
+        expectedFingerprint: fingerprint,
+        expectedExpiresAt: projection.expires_at,
+        runtime: RUNTIME,
+        beforeDispatch() {}
+      }
+    ),
+    (error: unknown) =>
+      error instanceof TerminalInteractionDispatchReservedError &&
+      error.stage === "key_uncertain" &&
+      error.doNotRetry
+  );
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [{ kind: "keys", keys: ["Down", "Down", "Tab"] }]
+  );
+});
+
+test("Claude custom choice retains its exact direct-digit transition", async () => {
+  const { bridge, provider, control } = await fixture(CLAUDE_SINGLE_SELECT, {
+    agent: "claude"
+  });
+  const runtime = { ...RUNTIME, agentVersion: "2.1.263" };
+  const status = await bridge.status("claude", control, { runtime });
+  const projection = status.interaction_state;
+  const fingerprint = status.interaction_prompt_fingerprint;
+  assert.ok(projection);
+  assert.ok(fingerprint);
+  provider.clearOperations();
+
+  const opened = await bridge.respondInteraction(
+    "claude",
+    control,
+    selectResponse(projection, 2),
+    {
+      agentVersion: "2.1.263",
+      expectedFingerprint: fingerprint,
+      expectedExpiresAt: projection.expires_at,
+      runtime
+    }
+  );
+  assert.equal(opened.responded, true);
+  assert.equal(opened.outcome, "custom_text_opened");
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [{ kind: "keys", keys: ["3"] }]
   );
 });
 

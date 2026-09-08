@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.36 - Unreleased
+
+### Fixed
+
+- Treat a guarded Codex `0.153.4` `Type something.` alias beside the exact native Other row as a two-step custom-answer flow: bounded cursor movement selects native Other and opens Notes without submitting the alias literally, then a fresh `free_text` interaction sends the user's text. Native Other itself remains directly selectable without Notes.
+
+### Security
+
+- Accept Codex custom text only from the exact empty `Add notes` editor and known footer, keeping changed Other rows, existing human drafts, unknown layouts, and uncertain multi-key delivery fail-closed.
+
 ## 0.12.35 - 2026-09-08
 
 ### Fixed

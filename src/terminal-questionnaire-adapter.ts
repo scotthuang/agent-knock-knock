@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
   claude: "claude-code/2.1.263/ask-user-question-v1",
-  codex: "codex/0.153.4/request-user-input-v1"
+  codex: "codex/0.153.4/request-user-input-v2"
 } as const);
 
 export type NativeQuestionnaireAgent = "claude" | "codex";
@@ -159,7 +159,8 @@ interface CodexQuestionRegion {
   readonly header: CodexHeader;
   readonly prompt: string;
   readonly options?: readonly ParsedOptionRow[];
-  readonly freeText: boolean;
+  readonly mode: "options" | "free_text" | "custom_text";
+  readonly customTextOption?: ParsedOptionRow;
 }
 
 const CLAUDE_VERSION = "2.1.263";
@@ -206,6 +207,7 @@ const CLAUDE_SINGLE_SELECTION_FOOTER =
 const CLAUDE_CUSTOM_TEXT_FOOTER =
   "Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel";
 const CODEX_ADD_NOTES_TIP = "tab to add notes";
+const CODEX_CLEAR_NOTES_TIP = "tab or esc to clear notes";
 const CODEX_SUBMIT_ANSWER_TIP = "enter to submit answer";
 const CODEX_SUBMIT_ALL_TIP = "enter to submit all";
 const CODEX_OPTION_NAVIGATION_TIP = "←/→ to navigate questions";
@@ -214,6 +216,11 @@ const CODEX_FREE_TEXT_NAVIGATION_TIP =
 const CODEX_INTERRUPT_TIP = "esc to interrupt";
 const CODEX_UNANSWERED_FOOTER =
   "  Press enter to confirm or esc to go back";
+const CODEX_NOTES_PLACEHOLDER = "  › Add notes";
+const CODEX_CUSTOM_TEXT_LABEL = "Type something.";
+const CODEX_OTHER_OPTION_LABEL = "None of the above";
+const CODEX_OTHER_OPTION_DESCRIPTION =
+  "Optionally, add details in notes (tab).";
 
 export function inspectNativeQuestionnaire(
   options: InspectNativeQuestionnaireOptions
@@ -281,6 +288,7 @@ function hasClaudeQuestionnaireCandidate(lines: readonly string[]): boolean {
 function hasCodexQuestionnaireCandidate(lines: readonly string[]): boolean {
   const tail = lines.at(-1) ?? "";
   return tail.includes("esc to interrupt") ||
+    lines.slice(-2).some((line) => line.includes(CODEX_CLEAR_NOTES_TIP)) ||
     /^  Press enter to confirm or esc to go back$/u.test(tail);
 }
 
@@ -931,6 +939,71 @@ function codexFreeTextFooterTips(header: CodexHeader): readonly string[] {
   ];
 }
 
+function codexCustomTextFooterTips(header: CodexHeader): readonly string[] {
+  return [CODEX_CLEAR_NOTES_TIP, codexSubmitTip(header)];
+}
+
+function codexHasCanonicalOther(options: readonly ParsedOptionRow[]): boolean {
+  const other = options.at(-1);
+  return other?.label === CODEX_OTHER_OPTION_LABEL &&
+    other.description === CODEX_OTHER_OPTION_DESCRIPTION;
+}
+
+function codexCustomTextSurfaceProven(
+  options: readonly ParsedOptionRow[]
+): boolean {
+  return codexHasCanonicalOther(options) &&
+    options.filter((option) => option.label === CODEX_CUSTOM_TEXT_LABEL).length <= 1;
+}
+
+function codexHasUnprovenCustomTextCandidate(
+  options: readonly ParsedOptionRow[]
+): boolean {
+  const candidateVisible = options.some((option) =>
+    option.label === CODEX_CUSTOM_TEXT_LABEL ||
+    option.label === CODEX_OTHER_OPTION_LABEL
+  );
+  return candidateVisible && !codexCustomTextSurfaceProven(options);
+}
+
+/**
+ * Codex itself appends the canonical Other row. Some models also emit the
+ * Claude-style label from the user request as a normal option. Only treat that
+ * exact alias as a text affordance when the same exact Codex Other row proves
+ * this is the known request_user_input surface.
+ */
+function isCodexCustomTextOption(
+  option: ParsedOptionRow,
+  _index: number,
+  options: readonly ParsedOptionRow[]
+): boolean {
+  return codexCustomTextSurfaceProven(options) &&
+    option.label === CODEX_CUSTOM_TEXT_LABEL;
+}
+
+function codexOpenCustomTextStages(
+  options: readonly ParsedOptionRow[]
+): readonly NativeQuestionnaireActionStage[] {
+  const selectedIndex = options.findIndex((option) => option.selected);
+  // Codex serializes Notes together with the selected option label. Always
+  // enter the editor through its exact client-generated Other row so a
+  // model-provided "Type something." compatibility alias is never submitted
+  // as the literal answer. The Other row itself remains a normal direct
+  // selection, preserving the ability to submit it without Notes.
+  const targetIndex = options.length - 1;
+  if (selectedIndex < 0 || targetIndex < 0 || targetIndex >= options.length) {
+    return [];
+  }
+  const downCount = (targetIndex - selectedIndex + options.length) % options.length;
+  return [
+    ...Array.from(
+      { length: downCount },
+      () => ({ kind: "key" as const, key: "Down" })
+    ),
+    { kind: "key" as const, key: "Tab" }
+  ];
+}
+
 /**
  * Codex lays out footer tips again whenever the pane width changes. Accept only
  * exact known tips, in their exact order, split at tip boundaries. The raw
@@ -998,8 +1071,43 @@ function parseCodexQuestionRegion(
       footer: freeTextFooter.raw,
       header,
       prompt,
-      freeText: true
+      mode: "free_text"
     };
+  }
+  const customTextFooter = matchExactCodexFooter(
+    lines,
+    codexCustomTextFooterTips(header)
+  );
+  if (customTextFooter) {
+    const body = lines.slice(headerIndex + 2, customTextFooter.start);
+    const nonBlankIndexes = body.flatMap((line, index) =>
+      line.length > 0 ? [index] : []
+    );
+    const placeholderIndex = nonBlankIndexes.at(-1);
+    const options = placeholderIndex === undefined ||
+        body[placeholderIndex] !== CODEX_NOTES_PLACEHOLDER
+      ? undefined
+      : parseCodexOptionLines(body.slice(0, placeholderIndex));
+    const selectedIndex = options?.findIndex((option) => option.selected) ?? -1;
+    const selected = options?.[selectedIndex];
+    if (
+      options &&
+      selected &&
+      codexHasCanonicalOther(options) &&
+      selectedIndex === options.length - 1
+    ) {
+      return {
+        start: headerIndex,
+        end,
+        footer: customTextFooter.raw,
+        header,
+        prompt,
+        options,
+        mode: "custom_text",
+        customTextOption: selected
+      };
+    }
+    return undefined;
   }
   const optionFooter = matchExactCodexFooter(
     lines,
@@ -1018,7 +1126,7 @@ function parseCodexQuestionRegion(
         header,
         prompt,
         options,
-        freeText: false
+        mode: "options"
       }
     : undefined;
 }
@@ -1028,20 +1136,26 @@ function codexQuestionInspection(
   lines: readonly string[],
   explicitSecret: boolean | undefined
 ): NativeQuestionnaireInspection {
-  const options = region.options
+  const normalized = region.options
     ? normalizedOptions(NATIVE_QUESTIONNAIRE_PROFILES.codex, region.prompt, region.options)
     : undefined;
+  const textMode = region.mode !== "options";
   const question: NativeQuestionnaireQuestion = {
     question_id: semanticId(
       "question",
       NATIVE_QUESTIONNAIRE_PROFILES.codex,
       region.prompt,
-      region.header.currentStep
+      region.header.currentStep,
+      ...(region.mode === "custom_text"
+        ? ["custom-text", region.customTextOption?.number, region.customTextOption?.label]
+        : [])
     ),
     prompt: region.prompt,
-    response_kind: region.freeText ? "free_text" : "single_select",
-    required: !region.freeText,
-    ...(options === undefined ? {} : { options })
+    response_kind: textMode ? "free_text" : "single_select",
+    required: region.mode !== "free_text",
+    ...(region.mode !== "options" || normalized === undefined
+      ? {}
+      : { options: normalized })
   };
   const base = {
     agent: "codex" as const,
@@ -1057,10 +1171,20 @@ function codexQuestionInspection(
       region.footer
     )
   };
-  if (isSecretQuestion(explicitSecret, question)) {
+  const secretProbe = normalized === undefined
+    ? question
+    : { ...question, options: normalized };
+  if (isSecretQuestion(explicitSecret, secretProbe)) {
     return { ...base, status: "manual_required", reason: "secret_input", action_plan: { kind: "manual_only" } };
   }
-  if (region.freeText) {
+  if (
+    region.mode === "options" &&
+    region.options !== undefined &&
+    codexHasUnprovenCustomTextCandidate(region.options)
+  ) {
+    return { ...base, status: "manual_required", reason: "changed_shape", action_plan: { kind: "manual_only" } };
+  }
+  if (textMode) {
     return {
       ...base,
       status: "actionable",
@@ -1082,11 +1206,19 @@ function codexQuestionInspection(
     status: "actionable",
     action_plan: {
       kind: "single_select",
-      choices: (options ?? []).map((option, index) => ({
-        option_id: option.option_id,
-        outcome: "submit_or_advance",
-        stages: [{ kind: "key", key: String(index + 1) }]
-      }))
+      choices: (normalized ?? []).map((option, index) => {
+        const customText = region.options !== undefined &&
+          isCodexCustomTextOption(region.options[index]!, index, region.options);
+        return {
+          option_id: option.option_id,
+          outcome: customText
+            ? "open_custom_text" as const
+            : "submit_or_advance" as const,
+          stages: customText && region.options
+            ? codexOpenCustomTextStages(region.options)
+            : [{ kind: "key" as const, key: String(index + 1) }]
+        };
+      })
     }
   };
 }
