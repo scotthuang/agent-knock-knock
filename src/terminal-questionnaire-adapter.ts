@@ -882,37 +882,61 @@ function parseCodexOptionLines(
   lines: readonly string[]
 ): ParsedOptionRow[] | undefined {
   const nonBlank = lines.filter((line) => line.length > 0);
-  const options = nonBlank.map((line) => {
+  const options: ParsedOptionRow[] = [];
+  const descriptionColumns: Array<number | undefined> = [];
+  for (const line of nonBlank) {
     const match = /^  (› |  )([1-4])\. (.+)$/u.exec(line);
     if (!match?.[2] || !match[3]) {
-      return undefined;
+      const continuation = /^( +)(\S.*)$/u.exec(line);
+      const previousIndex = options.length - 1;
+      const previous = options[previousIndex];
+      const descriptionColumn = descriptionColumns[previousIndex];
+      if (
+        !continuation?.[1] ||
+        !continuation[2] ||
+        !previous?.description ||
+        descriptionColumn === undefined ||
+        continuation[1].length !== descriptionColumn
+      ) {
+        return undefined;
+      }
+      options[previousIndex] = {
+        ...previous,
+        description: `${previous.description} ${continuation[2]}`
+      };
+      continue;
     }
     const contentParts = match[3].split(/ {2,}/u);
     if (contentParts.length > 2 || !contentParts[0]) {
       return undefined;
     }
-    return {
+    const separator = / {2,}/u.exec(match[3]);
+    options.push({
       number: Number(match[2]),
       selected: match[1] === "› ",
       label: contentParts[0],
       ...(contentParts[1] ? { description: contentParts[1] } : {})
-    };
-  });
+    });
+    descriptionColumns.push(
+      separator?.index !== undefined && separator[0] && contentParts[1]
+        ? line.length - match[3].length + separator.index + separator[0].length
+        : undefined
+    );
+  }
   if (
     options.length < 2 ||
     options.length > 4 ||
-    options.some((option) => option === undefined)
+    descriptionColumns.length !== options.length
   ) {
     return undefined;
   }
-  const rows = options as ParsedOptionRow[];
   if (
-    rows.some((option, index) => option.number !== index + 1) ||
-    rows.filter((option) => option.selected).length !== 1
+    options.some((option, index) => option.number !== index + 1) ||
+    options.filter((option) => option.selected).length !== 1
   ) {
     return undefined;
   }
-  return rows;
+  return options;
 }
 
 interface CodexFooterMatch {

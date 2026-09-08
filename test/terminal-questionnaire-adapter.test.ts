@@ -108,6 +108,18 @@ const CODEX_NATIVE_OTHER_OPTIONS = `
   tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
 `;
 
+const CODEX_WRAPPED_DESCRIPTION_OPTIONS = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+  › 1. Clear defaults (Recommended)  Prioritize predictable behavior and reduce
+                                     ambiguity.
+    2. Detailed guidance  Explain every relevant tradeoff.
+    3. None of the above  Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`;
+
 const CODEX_NATIVE_OTHER_TEXT_EDIT = `
   Question 2/2 (1 unanswered)
   In one sentence: what makes a great developer experience?
@@ -437,6 +449,51 @@ test("Codex derives a Notes choice while preserving native Other direct selectio
   assert.equal(editor.question.response_kind, "free_text");
   assert.equal(editor.question.required, true);
   assert.equal(editor.action_plan.kind, "free_text");
+});
+
+test("Codex joins exact-column wrapped option descriptions on the final question", () => {
+  const wrapped = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_WRAPPED_DESCRIPTION_OPTIONS
+  }));
+  const unwrapped = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_WRAPPED_DESCRIPTION_OPTIONS.replace(
+      "reduce\n                                     ambiguity.",
+      "reduce ambiguity."
+    )
+  }));
+
+  assert.deepEqual([wrapped.current_step, wrapped.total_steps], [2, 2]);
+  assert.equal(
+    wrapped.prompt_evidence.footer,
+    "  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt"
+  );
+  assert.deepEqual(wrapped.question, unwrapped.question);
+  assert.deepEqual(wrapped.action_plan, unwrapped.action_plan);
+  assert.equal(
+    wrapped.question.options?.[0]?.description,
+    "Prioritize predictable behavior and reduce ambiguity."
+  );
+  assert.notEqual(
+    wrapped.prompt_evidence.sha256,
+    unwrapped.prompt_evidence.sha256
+  );
+});
+
+test("Codex rejects malformed option-description continuation indentation", () => {
+  const changed = manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_WRAPPED_DESCRIPTION_OPTIONS.replace(
+      "                                     ambiguity.",
+      "                                    ambiguity."
+    )
+  }));
+  assert.equal(changed.reason, "changed_shape");
+  assert.deepEqual(changed.action_plan, { kind: "manual_only" });
 });
 
 test("Codex custom-text aliases require the exact native Other authority", () => {
