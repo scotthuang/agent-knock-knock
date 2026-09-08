@@ -4778,7 +4778,7 @@ request.on("error", () => process.exit(4));
   }
 });
 
-test("OpenClaw interaction response consumes one session-bound private offer", async (t) => {
+test("OpenClaw interaction response consumes one session-bound private offer after displayed expiry", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-interaction-tool-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const relayPath = path.join(directory, "relay.cjs");
@@ -4788,7 +4788,7 @@ test("OpenClaw interaction response consumes one session-bound private offer", a
   const questionId = "question_1";
   const optionId = "option_safe";
   const fingerprint = "a".repeat(64);
-  const expiresAt = "2099-09-08T00:00:00.000Z";
+  const expiresAt = "2000-09-08T00:00:00.000Z";
   fs.writeFileSync(relayPath, interactionRelayFixture({
     callsPath,
     turnId,

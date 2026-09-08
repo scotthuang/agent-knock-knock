@@ -104,6 +104,28 @@ const CODEX_CUSTOM_TEXT_EDIT = `
   tab or esc to clear notes | enter to submit all
 `;
 
+const CODEX_NATIVE_OTHER_OPTIONS = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+  › 1. Clear defaults (Recommended)  Use the default configuration.
+    2. None of the above  Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`;
+
+const CODEX_NATIVE_OTHER_TEXT_EDIT = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+    1. Clear defaults (Recommended)  Use the default configuration.
+  › 2. None of the above  Optionally, add details in notes (tab).
+
+  › Add notes
+
+  tab or esc to clear notes | enter to submit all
+`;
+
 const CODEX_CONFIRM = `
   Submit with unanswered questions?
   2 unanswered questions
@@ -502,7 +524,7 @@ test("Codex custom choice opens notes before a separate free-text response", asy
   assert.equal(opened.outcome, "custom_text_opened");
   assert.deepEqual(
     provider.operations.filter((operation) => operation.kind !== "capture"),
-    [{ kind: "keys", keys: ["Down", "Down", "Tab"] }]
+    [{ kind: "keys", keys: ["Down", "Down", "C-m"] }]
   );
 
   provider.setScreens([CODEX_CUSTOM_TEXT_EDIT]);
@@ -546,6 +568,115 @@ test("Codex custom choice opens notes before a separate free-text response", asy
   );
 });
 
+test("Codex derived custom choice enters native Other Notes and accepts free text", async () => {
+  const { bridge, provider, control } = await fixture(CODEX_NATIVE_OTHER_OPTIONS);
+  const choiceStatus = await bridge.status("codex", control, { runtime: RUNTIME });
+  const choiceProjection = choiceStatus.interaction_state;
+  const choiceFingerprint = choiceStatus.interaction_prompt_fingerprint;
+  assert.ok(choiceProjection);
+  assert.ok(choiceFingerprint);
+  const choiceQuestion = choiceProjection.questions[0];
+  assert.ok(choiceQuestion);
+  assert.equal(choiceQuestion.response_kind, "single_select");
+  assert.ok("options" in choiceQuestion);
+  assert.deepEqual(
+    choiceQuestion.options.map((option) => option.label),
+    [
+      "Clear defaults (Recommended)",
+      "Type something.",
+      "None of the above"
+    ]
+  );
+  provider.clearOperations();
+
+  const opened = await bridge.respondInteraction(
+    "codex",
+    control,
+    selectResponse(choiceProjection, 1),
+    {
+      agentVersion: "0.153.4",
+      expectedFingerprint: choiceFingerprint,
+      expectedExpiresAt: choiceProjection.expires_at,
+      runtime: RUNTIME
+    }
+  );
+  assert.equal(opened.responded, true);
+  assert.equal(opened.outcome, "custom_text_opened");
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [{ kind: "keys", keys: ["Down", "C-m"] }]
+  );
+
+  provider.setScreens([CODEX_NATIVE_OTHER_TEXT_EDIT]);
+  provider.clearOperations();
+  const textStatus = await bridge.status("codex", control, { runtime: RUNTIME });
+  const textProjection = textStatus.interaction_state;
+  const textFingerprint = textStatus.interaction_prompt_fingerprint;
+  assert.ok(textProjection);
+  assert.ok(textFingerprint);
+  const textQuestion = textProjection.questions[0];
+  assert.ok(textQuestion);
+  assert.equal(textQuestion.response_kind, "free_text");
+  assert.equal(textProjection.capabilities.free_text, true);
+  provider.clearOperations();
+
+  const answered = await bridge.respondInteraction("codex", control, {
+    interaction_id: textProjection.interaction_id,
+    turn_id: textProjection.turn_id,
+    answers: [{
+      question_id: textQuestion.question_id,
+      response_kind: "free_text",
+      text: "Clear defaults with room for explicit overrides."
+    }]
+  }, {
+    agentVersion: "0.153.4",
+    expectedFingerprint: textFingerprint,
+    expectedExpiresAt: textProjection.expires_at,
+    runtime: RUNTIME
+  });
+  assert.equal(answered.responded, true);
+  assert.equal(answered.outcome, "submitted_or_advanced");
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [
+      {
+        kind: "text",
+        text: "Clear defaults with room for explicit overrides."
+      },
+      { kind: "keys", keys: ["C-m"] }
+    ]
+  );
+});
+
+test("Codex canonical Other remains a distinct direct literal choice", async () => {
+  const { bridge, provider, control } = await fixture(CODEX_NATIVE_OTHER_OPTIONS);
+  const status = await bridge.status("codex", control, { runtime: RUNTIME });
+  const projection = status.interaction_state;
+  const fingerprint = status.interaction_prompt_fingerprint;
+  assert.ok(projection);
+  assert.ok(fingerprint);
+  provider.clearOperations();
+
+  const result = await bridge.respondInteraction(
+    "codex",
+    control,
+    selectResponse(projection, 2),
+    {
+      agentVersion: "0.153.4",
+      expectedFingerprint: fingerprint,
+      expectedExpiresAt: projection.expires_at,
+      runtime: RUNTIME
+    }
+  );
+
+  assert.equal(result.responded, true);
+  assert.equal(result.outcome, "submitted_or_advanced");
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [{ kind: "keys", keys: ["2"] }]
+  );
+});
+
 test("Codex custom navigation is one non-retryable key dispatch", async () => {
   const { bridge, provider, control } = await fixture(CODEX_CUSTOM_OPTIONS);
   const status = await bridge.status("codex", control, { runtime: RUNTIME });
@@ -576,7 +707,7 @@ test("Codex custom navigation is one non-retryable key dispatch", async () => {
   );
   assert.deepEqual(
     provider.operations.filter((operation) => operation.kind !== "capture"),
-    [{ kind: "keys", keys: ["Down", "Down", "Tab"] }]
+    [{ kind: "keys", keys: ["Down", "Down", "C-m"] }]
   );
 });
 
@@ -653,7 +784,7 @@ test("a pre-expiry reservation remains valid across the exact expiry bucket boun
   );
 });
 
-test("an unreserved interaction cannot cross its original expiry", async () => {
+test("an expired displayed offer is live-recaptured before one exact response", async () => {
   let nowMs = Date.parse("2026-09-07T04:09:59.900Z");
   const { bridge, provider, control } = await fixture(CODEX_OPTIONS, {
     now: () => new Date(nowMs)
@@ -664,6 +795,7 @@ test("an unreserved interaction cannot cross its original expiry", async () => {
   assert.ok(projection);
   assert.ok(fingerprint);
   provider.clearOperations();
+  nowMs = Date.parse("2026-09-07T04:10:00.001Z");
 
   const result = await bridge.respondInteraction(
     "codex",
@@ -673,17 +805,75 @@ test("an unreserved interaction cannot cross its original expiry", async () => {
       agentVersion: "0.153.4",
       expectedFingerprint: fingerprint,
       expectedExpiresAt: projection.expires_at,
-      runtime: RUNTIME,
-      authorize() {
-        nowMs = Date.parse("2026-09-07T04:10:00.001Z");
-        return { approved: true };
-      }
+      runtime: RUNTIME
+    }
+  );
+
+  assert.equal(result.responded, true);
+  assert.equal(result.blocked, false);
+  assert.equal(result.outcome, "submitted_or_advanced");
+  assert.equal(
+    provider.operations.filter((operation) => operation.kind === "capture").length,
+    3
+  );
+  assert.deepEqual(
+    provider.operations.filter((operation) => operation.kind !== "capture"),
+    [{ kind: "keys", keys: ["1"] }]
+  );
+});
+
+test("an expired displayed offer still fails closed when the live prompt changed", async () => {
+  let nowMs = Date.parse("2026-09-07T04:09:59.900Z");
+  const { bridge, provider, control } = await fixture(CODEX_OPTIONS, {
+    now: () => new Date(nowMs)
+  });
+  const status = await bridge.status("codex", control, { runtime: RUNTIME });
+  const projection = status.interaction_state;
+  const fingerprint = status.interaction_prompt_fingerprint;
+  assert.ok(projection);
+  assert.ok(fingerprint);
+  provider.setScreens([
+    CODEX_OPTIONS.replace("Choose an option.", "Choose another option.")
+  ]);
+  provider.clearOperations();
+  nowMs = Date.parse("2026-09-07T04:10:00.001Z");
+
+  const result = await bridge.respondInteraction(
+    "codex",
+    control,
+    selectResponse(projection),
+    {
+      agentVersion: "0.153.4",
+      expectedFingerprint: fingerprint,
+      expectedExpiresAt: projection.expires_at,
+      runtime: RUNTIME
     }
   );
 
   assert.equal(result.responded, false);
   assert.equal(result.blocked, true);
-  assert.match(result.reason ?? "", /expir/u);
+  assert.match(result.reason ?? "", /fingerprint changed/u);
+  assert.equal(provider.operations.some((operation) =>
+    operation.kind === "text" || operation.kind === "keys"), false);
+});
+
+test("a mismatched future expiry remains invalid without terminal input", async () => {
+  const { bridge, provider, control, projection, fingerprint } = await offerFor();
+  const result = await bridge.respondInteraction(
+    "codex",
+    control,
+    selectResponse(projection),
+    {
+      agentVersion: "0.153.4",
+      expectedFingerprint: fingerprint,
+      expectedExpiresAt: "2026-09-07T04:20:00.000Z",
+      runtime: RUNTIME
+    }
+  );
+
+  assert.equal(result.responded, false);
+  assert.equal(result.blocked, true);
+  assert.match(result.reason ?? "", /expiry changed/u);
   assert.equal(provider.operations.some((operation) =>
     operation.kind === "text" || operation.kind === "keys"), false);
 });

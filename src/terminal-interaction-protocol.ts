@@ -708,7 +708,15 @@ function parseAnswers(
 export function validateTerminalInteractionResponse(
   value: unknown,
   authoritativeStoredProjection: unknown,
-  options: { now?: Date } = {}
+  options: {
+    now?: Date;
+    /**
+     * Internal dispatch paths may validate a displayed answer shape against an
+     * expired projection only because they subsequently recapture and prove
+     * the exact live terminal questionnaire before sending any input.
+     */
+    allowExpiredForLiveRecapture?: boolean;
+  } = {}
 ): TerminalInteractionResponse {
   assertPayloadSize(value, "$response");
   const projection = validateTerminalInteractionProjection(
@@ -721,7 +729,10 @@ export function validateTerminalInteractionResponse(
     fail("response_not_allowed", "$.capabilities.respond", "interaction is not executable");
   }
   const now = options.now ?? new Date();
-  if (Date.parse(projection.expires_at) <= now.getTime()) {
+  if (
+    !options.allowExpiredForLiveRecapture &&
+    Date.parse(projection.expires_at) <= now.getTime()
+  ) {
     fail("expired", "$.expires_at", "interaction offer has expired");
   }
   const record = parseRecord(value, "$", [

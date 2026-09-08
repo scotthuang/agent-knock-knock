@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
   claude: "claude-code/2.1.263/ask-user-question-v1",
-  codex: "codex/0.153.4/request-user-input-v2"
+  codex: "codex/0.153.4/request-user-input-v3"
 } as const);
 
 export type NativeQuestionnaireAgent = "claude" | "codex";
@@ -161,6 +161,11 @@ interface CodexQuestionRegion {
   readonly options?: readonly ParsedOptionRow[];
   readonly mode: "options" | "free_text" | "custom_text";
   readonly customTextOption?: ParsedOptionRow;
+}
+
+interface CodexProjectedChoice {
+  readonly option: NativeQuestionnaireOption;
+  readonly action: NativeQuestionnaireChoiceAction;
 }
 
 const CLAUDE_VERSION = "2.1.263";
@@ -967,10 +972,11 @@ function codexHasUnprovenCustomTextCandidate(
 }
 
 /**
- * Codex itself appends the canonical Other row. Some models also emit the
- * Claude-style label from the user request as a normal option. Only treat that
- * exact alias as a text affordance when the same exact Codex Other row proves
- * this is the known request_user_input surface.
+ * Some models emit the Claude-style label from the user request as a normal
+ * option. Treat only that alias as a custom-text request when the same exact
+ * client-generated Codex Other row proves the known request_user_input
+ * surface. When the alias is absent, codexProjectedChoices adds an equivalent
+ * semantic affordance without claiming that it was rendered by the terminal.
  */
 function isCodexCustomTextOption(
   option: ParsedOptionRow,
@@ -986,10 +992,10 @@ function codexOpenCustomTextStages(
 ): readonly NativeQuestionnaireActionStage[] {
   const selectedIndex = options.findIndex((option) => option.selected);
   // Codex serializes Notes together with the selected option label. Always
-  // enter the editor through its exact client-generated Other row so a
-  // model-provided "Type something." compatibility alias is never submitted
-  // as the literal answer. The Other row itself remains a normal direct
-  // selection, preserving the ability to submit it without Notes.
+  // enter the editor through its exact client-generated Other row so neither
+  // a model-provided "Type something." compatibility alias nor a numeric
+  // shortcut submits a literal label. Codex 0.153.4's native Accept action on
+  // this row opens Notes; the subsequent capture becomes a free-text step.
   const targetIndex = options.length - 1;
   if (selectedIndex < 0 || targetIndex < 0 || targetIndex >= options.length) {
     return [];
@@ -1000,7 +1006,60 @@ function codexOpenCustomTextStages(
       { length: downCount },
       () => ({ kind: "key" as const, key: "Down" })
     ),
-    { kind: "key" as const, key: "Tab" }
+    { kind: "key" as const, key: "C-m" }
+  ];
+}
+
+function codexProjectedChoices(
+  prompt: string,
+  options: readonly ParsedOptionRow[]
+): readonly CodexProjectedChoice[] {
+  const profile = NATIVE_QUESTIONNAIRE_PROFILES.codex;
+  const normalized = normalizedOptions(profile, prompt, options);
+  const nativeChoices = normalized.map((option, index): CodexProjectedChoice => {
+    const customText = isCodexCustomTextOption(options[index]!, index, options);
+    return {
+      option,
+      action: {
+        option_id: option.option_id,
+        outcome: customText ? "open_custom_text" : "submit_or_advance",
+        stages: customText
+          ? codexOpenCustomTextStages(options)
+          : [{ kind: "key", key: String(options[index]!.number) }]
+      }
+    };
+  });
+  if (
+    !codexCustomTextSurfaceProven(options) ||
+    options.some((option) => option.label === CODEX_CUSTOM_TEXT_LABEL)
+  ) {
+    return nativeChoices;
+  }
+  const otherIndex = options.length - 1;
+  const customOption: NativeQuestionnaireOption = {
+    option_id: semanticId(
+      "option",
+      profile,
+      prompt,
+      "native-other-notes",
+      options[otherIndex]?.number,
+      options[otherIndex]?.label
+    ),
+    label: CODEX_CUSTOM_TEXT_LABEL,
+    description: "Enter a free-form answer through Codex Notes."
+  };
+  const customChoice: CodexProjectedChoice = {
+    option: customOption,
+    action: {
+      option_id: customOption.option_id,
+      outcome: "open_custom_text",
+      stages: codexOpenCustomTextStages(options)
+    }
+  };
+  return [
+    ...nativeChoices.slice(0, otherIndex),
+    customChoice,
+    ...nativeChoices.slice(otherIndex)
   ];
 }
 
@@ -1136,9 +1195,17 @@ function codexQuestionInspection(
   lines: readonly string[],
   explicitSecret: boolean | undefined
 ): NativeQuestionnaireInspection {
-  const normalized = region.options
-    ? normalizedOptions(NATIVE_QUESTIONNAIRE_PROFILES.codex, region.prompt, region.options)
+  const nativeNormalized = region.options
+    ? normalizedOptions(
+      NATIVE_QUESTIONNAIRE_PROFILES.codex,
+      region.prompt,
+      region.options
+    )
     : undefined;
+  const projectedChoices = region.mode === "options" && region.options
+    ? codexProjectedChoices(region.prompt, region.options)
+    : undefined;
+  const publicOptions = projectedChoices?.map((choice) => choice.option);
   const textMode = region.mode !== "options";
   const question: NativeQuestionnaireQuestion = {
     question_id: semanticId(
@@ -1153,9 +1220,9 @@ function codexQuestionInspection(
     prompt: region.prompt,
     response_kind: textMode ? "free_text" : "single_select",
     required: region.mode !== "free_text",
-    ...(region.mode !== "options" || normalized === undefined
+    ...(region.mode !== "options" || publicOptions === undefined
       ? {}
-      : { options: normalized })
+      : { options: publicOptions })
   };
   const base = {
     agent: "codex" as const,
@@ -1171,9 +1238,9 @@ function codexQuestionInspection(
       region.footer
     )
   };
-  const secretProbe = normalized === undefined
+  const secretProbe = nativeNormalized === undefined
     ? question
-    : { ...question, options: normalized };
+    : { ...question, options: nativeNormalized };
   if (isSecretQuestion(explicitSecret, secretProbe)) {
     return { ...base, status: "manual_required", reason: "secret_input", action_plan: { kind: "manual_only" } };
   }
@@ -1206,19 +1273,7 @@ function codexQuestionInspection(
     status: "actionable",
     action_plan: {
       kind: "single_select",
-      choices: (normalized ?? []).map((option, index) => {
-        const customText = region.options !== undefined &&
-          isCodexCustomTextOption(region.options[index]!, index, region.options);
-        return {
-          option_id: option.option_id,
-          outcome: customText
-            ? "open_custom_text" as const
-            : "submit_or_advance" as const,
-          stages: customText && region.options
-            ? codexOpenCustomTextStages(region.options)
-            : [{ kind: "key" as const, key: String(index + 1) }]
-        };
-      })
+      choices: (projectedChoices ?? []).map((choice) => choice.action)
     }
   };
 }

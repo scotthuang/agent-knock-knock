@@ -3886,7 +3886,8 @@ export class TerminalAgentBridge {
     }
     const firstReason = terminalInteractionOfferPreflightReason(
       first.offer,
-      options
+      options,
+      this.now()
     );
     if (firstReason || !first.offer) {
       return blockedTerminalInteractionResponse(
@@ -3898,7 +3899,13 @@ export class TerminalAgentBridge {
     const validatedResponse = validateTerminalInteractionResponse(
       response,
       first.offer.projection,
-      { now: this.now() }
+      {
+        now: this.now(),
+        // The capture immediately above is the authoritative freshness proof.
+        // A wall-clock bucket boundary must not override exact live terminal
+        // evidence before any input has been sent.
+        allowExpiredForLiveRecapture: true
+      }
     );
     const planReason = terminalInteractionPlanPreflightReason(
       validatedResponse,
@@ -3955,7 +3962,8 @@ export class TerminalAgentBridge {
     }
     const afterAuthorizationReason = terminalInteractionOfferPreflightReason(
       afterAuthorization.offer,
-      options
+      options,
+      this.now()
     );
     if (afterAuthorizationReason) {
       return blockedTerminalInteractionResponse(
@@ -3964,7 +3972,12 @@ export class TerminalAgentBridge {
         first.offer
       );
     }
-    if (!sameTerminalInteractionOffer(first, afterAuthorization)) {
+    if (!sameTerminalInteractionOffer(first, afterAuthorization, {
+      // expires_at is generated from AKK wall-clock freshness buckets, not
+      // from the native prompt. All semantic projection and action-plan fields
+      // still have to match exactly.
+      ignoreExpiresAt: true
+    })) {
       return blockedTerminalInteractionResponse(
         validatedResponse,
         "native questionnaire changed after authorization",
@@ -4003,10 +4016,10 @@ export class TerminalAgentBridge {
       );
     }
     if (!sameTerminalInteractionOffer(afterAuthorization, finalCapture, {
-      // A successfully returned beforeDispatch hook is the lease acceptance
-      // boundary. The projection expiry is bucketed and may roll over during
-      // this final, bounded recapture even though the questionnaire is exact.
-      ignoreExpiresAt: options.beforeDispatch !== undefined
+      // The projection expiry is bucketed and may roll over during this final,
+      // bounded recapture even though the questionnaire is exact. Prompt,
+      // action plan, terminal identity, and owner remain exact-match fences.
+      ignoreExpiresAt: true
     })) {
       if (options.beforeDispatch) {
         throw new TerminalInteractionInputNotStartedError(
@@ -5553,7 +5566,8 @@ function terminalInteractionOfferPreflightReason(
   options: {
     expectedFingerprint: string;
     expectedExpiresAt: string;
-  }
+  },
+  now: Date
 ): string | undefined {
   if (!offer) {
     return "native questionnaire has no identity-fenced interaction offer";
@@ -5570,7 +5584,10 @@ function terminalInteractionOfferPreflightReason(
   if (offer.promptFingerprint !== options.expectedFingerprint) {
     return "native questionnaire fingerprint changed before execution";
   }
-  if (offer.projection.expires_at !== options.expectedExpiresAt) {
+  if (
+    offer.projection.expires_at !== options.expectedExpiresAt &&
+    Date.parse(options.expectedExpiresAt) > now.getTime()
+  ) {
     return "native questionnaire expiry changed before execution";
   }
   return undefined;
@@ -5782,7 +5799,7 @@ function terminalInteractionChoiceAction(
     choice.stages.length >= 1 &&
     choice.stages.length <= 4 &&
     keys.length === choice.stages.length &&
-    keys.at(-1) === "Tab" &&
+    keys.at(-1) === "C-m" &&
     keys.slice(0, -1).every((key) => key === "Down");
   if (!directChoice && !directCustomTextChoice && !navigatedCustomTextChoice) {
     throw new TerminalInteractionInputNotStartedError(

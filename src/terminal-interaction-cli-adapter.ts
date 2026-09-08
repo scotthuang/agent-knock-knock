@@ -116,9 +116,9 @@ async function runRespondInteraction(
   const expectedFingerprint = requiredFingerprint(
     options.expectedInteractionFingerprint
   );
-  const expectedExpiresAt = requiredFutureTimestamp(
+  const expectedExpiresAt = requiredTimestamp(
     options.expectedInteractionExpiresAt,
-    dependencies.runtime.now()
+    "--expected-interaction-expires-at must be a valid timestamp"
   );
   const response = parseInteractionResponse(options.responseJson);
   if (response.turn_id !== turnSelector) {
@@ -319,12 +319,12 @@ async function runRespondInteraction(
                 terminalControl: latestControl,
                 action: "respond-interaction"
               });
+              // The displayed expiry is an offer freshness boundary, not a
+              // native terminal deadline. The bridge has just recaptured the
+              // same exact questionnaire under this Turn/terminal lock; that
+              // live projection, fingerprint, identity, and owner proof are
+              // the dispatch authority.
               const reservationTime = dependencies.runtime.now();
-              if (Date.parse(expectedExpiresAt) <= reservationTime.getTime()) {
-                throw new Error(
-                  "terminal interaction authority expired before dispatch; refresh status"
-                );
-              }
               const reservedAt = reservationTime.toISOString();
               const attemptId = randomUUID();
               reservationAttemptId = attemptId;
@@ -709,17 +709,10 @@ function requiredFingerprint(value: unknown): string {
   return parsed;
 }
 
-function requiredFutureTimestamp(value: unknown, now: Date): string {
-  const parsed = requiredString(
-    value,
-    "--expected-interaction-expires-at is required"
-  );
+function requiredTimestamp(value: unknown, message: string): string {
+  const parsed = requiredString(value, message);
   const milliseconds = Date.parse(parsed);
-  if (!Number.isFinite(milliseconds) || milliseconds <= now.getTime()) {
-    throw new Error(
-      "--expected-interaction-expires-at must be an unexpired timestamp"
-    );
-  }
+  if (!Number.isFinite(milliseconds)) throw new Error(message);
   return parsed;
 }
 

@@ -527,7 +527,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_respond_interaction",
     description:
-      "Answer exactly one current native questionnaire step shown by agent_knock_knock_status in this controller conversation. Supply only the exact turn_id, interaction_id, and one typed semantic answer: single_select uses selected_option_ids with one advertised option_id; free_text uses text; confirm uses confirm. AKK consumes the displayed private offer and revalidates the exact discriminator-specific shape, prompt, expiry, owner, and terminal authority before any input. Raw keys, menu indexes, rendered labels, fingerprints, versions, and terminal commands are never accepted. An uncertain response must never be retried blindly.",
+      "Answer exactly one current native questionnaire step shown by agent_knock_knock_status in this controller conversation. Supply only the exact turn_id, interaction_id, and one typed semantic answer: single_select uses selected_option_ids with one advertised option_id; free_text uses text; confirm uses confirm. AKK consumes the displayed private offer and revalidates the exact discriminator-specific shape, prompt, owner, and terminal authority before any input. A displayed expiry is a freshness boundary: after it passes, AKK must prove the same exact live questionnaire again instead of rejecting an otherwise live prompt. Raw keys, menu indexes, rendered labels, fingerprints, versions, and terminal commands are never accepted. An uncertain response must never be retried blindly.",
     parameters: respondInteractionParameters,
     buildArgs: (params, toolContext) => buildPrivateInteractionResponseArgs(
       api,
@@ -2089,7 +2089,13 @@ function buildPrivateInteractionResponseArgs(
   const projection = validateTerminalInteractionProjection(
     offered.interaction_state
   );
-  const response = validateTerminalInteractionResponse(params, projection);
+  const response = validateTerminalInteractionResponse(params, projection, {
+    // This consumes a still-live, session/incarnation-bound private offer. The
+    // CLI/bridge path always performs exact live terminal recaptures before it
+    // can reserve or dispatch input, so projection expiry is a recheck trigger
+    // here rather than proof that the native questionnaire disappeared.
+    allowExpiredForLiveRecapture: true
+  });
   const args = [
     "respond-interaction",
     "--turn",
