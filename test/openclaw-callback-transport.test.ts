@@ -283,8 +283,10 @@ test("gateway method preserves payload, redaction, process limits, and token env
     "agent.callback",
     "--params"
   ]);
-  assert.deepEqual(call.args.slice(-3), [
+  assert.deepEqual(call.args.slice(-5), [
     "--json",
+    "--timeout",
+    "25000",
     "--url",
     "ws://gateway.test"
   ]);
@@ -341,7 +343,9 @@ test("placeholder tokens preserve the execution environment by reference", () =>
     "chat.send",
     "--params",
     JSON.stringify({ idempotencyKey: "run-placeholder" }),
-    "--json"
+    "--json",
+    "--timeout",
+    "25000"
   ]);
 });
 
@@ -503,6 +507,8 @@ test("chat wake keeps accepted, progress, record, and agent wait order", () => {
   assert.deepEqual(
     harness.spawnCalls.map((call) => ({
       method: call.args[2],
+      cliTimeout:
+        call.args[call.args.indexOf("--timeout") + 1],
       timeout: call.options.timeout,
       maxBuffer: call.options.maxBuffer,
       killSignal: call.options.killSignal
@@ -510,18 +516,21 @@ test("chat wake keeps accepted, progress, record, and agent wait order", () => {
     [
       {
         method: "agent.callback",
+        cliTimeout: "25000",
         timeout: 30_000,
         maxBuffer: 10 * 1024 * 1024,
         killSignal: "SIGKILL"
       },
       {
         method: "chat.send",
+        cliTimeout: "25000",
         timeout: 30_000,
         maxBuffer: 10 * 1024 * 1024,
         killSignal: "SIGKILL"
       },
       {
         method: "agent.wait",
+        cliTimeout: "25000",
         timeout: 30_000,
         maxBuffer: 10 * 1024 * 1024,
         killSignal: "SIGKILL"
@@ -559,6 +568,12 @@ test("sessions.send acknowledgements can complete without agent.wait", () => {
   assert.deepEqual(
     harness.spawnCalls.map((call) => call.args[2]),
     ["agent.callback", "sessions.send"]
+  );
+  assert.deepEqual(
+    harness.spawnCalls.map((call) =>
+      call.args[call.args.indexOf("--timeout") + 1]
+    ),
+    ["25000", "25000"]
   );
   assert.equal(result.kind, "gateway_method+sessions_send");
   assert.deepEqual(result.run_observation, {

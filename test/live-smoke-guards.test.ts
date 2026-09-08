@@ -18,6 +18,12 @@ test("ordinary npm test stays non-live and the explicit live release tier is wir
   const testScript = String(packageJson.scripts?.test ?? "");
   const releaseScript = String(packageJson.scripts?.["test:release"] ?? "");
   const liveScript = String(packageJson.scripts?.["test:release:live"] ?? "");
+  const currentCompatibilityScript = String(
+    packageJson.scripts?.["compat:openclaw:current"] ?? ""
+  );
+  const fullCompatibilityScript = String(
+    packageJson.scripts?.["compat:openclaw"] ?? ""
+  );
   const runner = readPackageFile("scripts/run-release-tests.js");
 
   assert.doesNotMatch(testScript, /AKK_RUN_LIVE/u);
@@ -25,6 +31,10 @@ test("ordinary npm test stays non-live and the explicit live release tier is wir
   assert.match(releaseScript, /run-release-tests\.js$/u);
   assert.match(liveScript, /run-release-tests\.js --live$/u);
   assert.doesNotMatch(releaseScript, /--live/u);
+  assert.match(runner, /"compat:openclaw:current"/u);
+  assert.doesNotMatch(runner, /\n\s*"compat:openclaw",/u);
+  assert.match(currentCompatibilityScript, /--target current$/u);
+  assert.match(fullCompatibilityScript, /verify-openclaw-compatibility\.js$/u);
   assert.match(runner, /AKK_RUN_LIVE_LIFECYCLE_SMOKE/u);
   assert.match(runner, /"--confirm-live"/u);
   assert.match(runner, /"--codex-target"/u);

@@ -279,7 +279,7 @@ test("auto approval CLI arguments carry the trusted policy for executor-side rev
   ]);
 });
 
-test("auto approval callback executes only a matching trusted policy", () => {
+test("auto approval callback executes only a matching trusted policy", async () => {
   const message = {
     type: "question",
     metadata: {
@@ -292,7 +292,7 @@ test("auto approval callback executes only a matching trusted policy", () => {
     }
   };
   const calls: string[][] = [];
-  const approved = attemptAutoApproval({
+  const approved = await attemptAutoApproval({
     message,
     policy,
     statePath: "/tmp/task/state.json",
@@ -308,7 +308,7 @@ test("auto approval callback executes only a matching trusted policy", () => {
   assert.equal(approved?.monitor_pid, 42);
   assert.equal(calls.length, 1);
 
-  const disabled = attemptAutoApproval({
+  const disabled = await attemptAutoApproval({
     message,
     policy: { enabled: false },
     statePath: "/tmp/task/state.json",
@@ -323,8 +323,39 @@ test("auto approval callback executes only a matching trusted policy", () => {
   assert.equal(calls.length, 1);
 });
 
-test("auto approval callback falls back to asking when fingerprint execution is rejected", () => {
-  const result = attemptAutoApproval({
+test("async auto approval preserves the trusted policy decision", async () => {
+  const message = {
+    type: "question",
+    metadata: {
+      source: "terminal_bridge",
+      reason: "approval_required",
+      approval_candidate: {
+        ...candidate,
+        terminal_target: candidate.terminalTarget
+      }
+    }
+  };
+  const calls: string[][] = [];
+  const approved = await attemptAutoApproval({
+    message,
+    policy,
+    statePath: "/tmp/task/state.json",
+    async execute(args) {
+      calls.push(args);
+      await Promise.resolve();
+      return { approved: true, monitor_pid: 84 };
+    }
+  });
+
+  assert.equal(approved?.approved, true);
+  assert.equal(approved?.handled, true);
+  assert.equal(approved?.rule_id, "safe-status");
+  assert.equal(approved?.monitor_pid, 84);
+  assert.equal(calls.length, 1);
+});
+
+test("auto approval callback falls back to asking when fingerprint execution is rejected", async () => {
+  const result = await attemptAutoApproval({
     message: {
       type: "question",
       metadata: {
@@ -346,7 +377,7 @@ test("auto approval callback falls back to asking when fingerprint execution is 
   assert.match(result?.reason ?? "", /fingerprint changed/);
 });
 
-test("auto approval retries treat only a locally consumed fingerprint as handled", () => {
+test("auto approval retries treat only a locally consumed fingerprint as handled", async () => {
   const message = {
     type: "question",
     metadata: {
@@ -358,7 +389,7 @@ test("auto approval retries treat only a locally consumed fingerprint as handled
       }
     }
   };
-  const consumed = attemptAutoApproval({
+  const consumed = await attemptAutoApproval({
     message,
     policy,
     statePath: "/tmp/task/state.json",
@@ -372,7 +403,7 @@ test("auto approval retries treat only a locally consumed fingerprint as handled
   assert.equal(consumed?.handled, true);
   assert.equal(consumed?.action, "already_approved");
 
-  const missingNotification = attemptAutoApproval({
+  const missingNotification = await attemptAutoApproval({
     message,
     policy,
     statePath: "/tmp/task/state.json",
@@ -385,7 +416,7 @@ test("auto approval retries treat only a locally consumed fingerprint as handled
   assert.equal(missingNotification?.action, "ask");
 });
 
-test("Claude callback defers raw command matching to the local executor", () => {
+test("Claude callback defers raw command matching to the local executor", async () => {
   const claudePolicy = {
     enabled: true,
     rules: [{
@@ -418,7 +449,7 @@ test("Claude callback defers raw command matching to the local executor", () => 
     }
   };
   const calls: string[][] = [];
-  const result = attemptAutoApproval({
+  const result = await attemptAutoApproval({
     message,
     policy: claudePolicy,
     statePath: "/tmp/task/state.json",

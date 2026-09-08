@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.35 - 2026-09-08
+
+### Fixed
+
+- Run OpenClaw plugin CLI relays asynchronously so `list --reconcile`, Send, Status, questionnaire responses, and callback-side approval work cannot freeze the Gateway event loop while a monitor reconnects.
+- Propagate OpenClaw invocation cancellation through asynchronous relay work, and give Gateway callback, chat, session, and wait calls an explicit 25-second CLI deadline inside AKK's 30-second delivery watchdog.
+
+### Changed
+
+- Keep routine releases focused on the build-pinned OpenClaw version. The slower minimum-host and Plugin API boundary matrix remains available through `npm run compat:openclaw` for periodic compatibility review and compatibility-floor changes.
+
 ## 0.12.34 - 2026-09-08
 
 ### Fixed

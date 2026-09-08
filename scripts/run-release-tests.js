@@ -5,7 +5,7 @@ const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const invocation = parseInvocation(process.argv.slice(2));
 const scripts = [
   "test:full",
-  "compat:openclaw",
+  "compat:openclaw:current",
   "clawhub:validate",
   "clawhub:dry-run"
 ];

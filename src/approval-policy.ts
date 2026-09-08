@@ -197,7 +197,7 @@ export function autoApprovalCliArgs({
   ];
 }
 
-export function attemptAutoApproval({
+export async function attemptAutoApproval({
   message,
   policy,
   statePath,
@@ -208,8 +208,10 @@ export function attemptAutoApproval({
   policy: unknown;
   statePath?: string;
   callbackAuthority?: AutoApprovalCallbackAuthority;
-  execute: (args: string[]) => Record<string, any>;
-}): AutoApprovalAttempt | undefined {
+  execute: (
+    args: string[]
+  ) => Record<string, any> | Promise<Record<string, any>>;
+}): Promise<AutoApprovalAttempt | undefined> {
   const candidate = approvalCandidateFromMessage(message);
   if (!candidate) {
     return undefined;
@@ -252,7 +254,7 @@ export function attemptAutoApproval({
     };
   }
 
-  const result = execute(cliArgs);
+  const result = await execute(cliArgs);
   const effectiveRuleId = stringValue(result.policy_rule_id) ?? decision.ruleId;
   const effectivePolicyFingerprint =
     stringValue(result.policy_fingerprint) ??

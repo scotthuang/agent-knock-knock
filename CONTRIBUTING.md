@@ -45,13 +45,18 @@ and any intentionally skipped credentialed smoke. `package.json` currently has
 no separate lint script, so use `git diff --check` as the whitespace/patch
 format gate and report that fact explicitly.
 
-OpenClaw compatibility changes must also pass the isolated host matrix:
+Routine releases verify the current build-pinned OpenClaw host through
+`npm run test:release`. Run the complete isolated host matrix periodically and
+whenever a declared OpenClaw compatibility floor changes:
 
 ```bash
 npm run compat:openclaw
 ```
 
-The matrix derives the supported Host, Plugin API, and build versions from `package.json`, then verifies the adjacent failing API boundary. It uses only temporary OpenClaw state and does not make credentialed coding-agent turns.
+The complete matrix derives the supported Host, Plugin API, and build versions
+from `package.json`, then verifies the adjacent failing API boundary. It uses
+only temporary OpenClaw state and does not make credentialed coding-agent
+turns.
 
 If your change touches logging, callbacks, or trace output, also review the output for secrets and local-only data. Trace output must not expose agent thinking text, raw callback payloads, gateway tokens, API keys, passwords, or proxy credentials.
 

@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { registerOpenClawCallbackGateway } from
   "../src/openclaw-plugin-callback-adapter.js";
+import { createOpenClawPluginForTest } from "../src/openclaw-plugin.js";
 import { createConversation, createMessage } from "../src/protocol.js";
 import { isRecord } from "../src/value-guards.js";
 
@@ -48,6 +53,93 @@ function callbackHarness() {
     response: () => response
   };
 }
+
+interface OpenClawListTool {
+  execute(
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<{ details?: unknown }>;
+}
+
+function registerOpenClawListTool(relayPath: string): OpenClawListTool {
+  let listTool: OpenClawListTool | undefined;
+  (
+    createOpenClawPluginForTest(relayPath) as unknown as {
+      register(api: Record<string, any>): void;
+    }
+  ).register({
+    pluginConfig: {},
+    logger: { info() {}, warn() {} },
+    registerGatewayMethod() {},
+    registerService() {},
+    registerCommand() {},
+    registerTool(tool, options) {
+      if (options?.name !== "agent_knock_knock_list") return;
+      listTool = typeof tool === "function"
+        ? tool({ sessionKey: "agent:test:async", sessionId: "controller-1" })
+        : tool;
+    }
+  });
+  assert.ok(listTool?.execute);
+  return listTool;
+}
+
+test("OpenClaw plugin CLI relay leaves the Gateway event loop responsive", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-async-"));
+  const relayPath = path.join(directory, "relay.cjs");
+  const server = http.createServer((_request, response) => {
+    response.writeHead(204);
+    response.end();
+  });
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const probeUrl = `http://127.0.0.1:${address.port}/probe`;
+  fs.writeFileSync(
+    relayPath,
+    [
+      'const http = require("node:http");',
+      `const request = http.get(${JSON.stringify(probeUrl)}, (response) => {`,
+      "  response.resume();",
+      "  response.on(\"end\", () => {",
+      "    process.stdout.write(JSON.stringify({ terminals: [], terminal_watches: [] }));",
+      "  });",
+      "});",
+      "request.setTimeout(3000, () => { request.destroy(); process.exit(3); });",
+      "request.on(\"error\", () => process.exit(4));"
+    ].join("\n"),
+    "utf8"
+  );
+
+  const listTool = registerOpenClawListTool(relayPath);
+  const result = await listTool.execute("tool-call-async", {});
+  assert.deepEqual(result.details, { terminals: [], terminal_watches: [] });
+});
+
+test("OpenClaw plugin aborts its asynchronous CLI relay", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-abort-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.mjs");
+  fs.writeFileSync(
+    relayPath,
+    "setTimeout(() => process.stdout.write(JSON.stringify({ terminals: [] })), 1000);\n",
+    "utf8"
+  );
+  const listTool = registerOpenClawListTool(relayPath);
+  const abort = new AbortController();
+  const execution = listTool.execute("tool-call-abort", {}, abort.signal);
+  abort.abort();
+
+  await assert.rejects(execution, (error: unknown) =>
+    error instanceof Error && error.name === "AbortError"
+  );
+});
 
 test("native questionnaire callbacks require Status before one semantic response", async () => {
   const harness = callbackHarness();

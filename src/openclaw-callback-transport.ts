@@ -26,8 +26,8 @@ import {
 } from "./value-guards.js";
 
 const CALLBACK_DELIVERY_TIMEOUT_MS = 30_000;
+const CALLBACK_DELIVERY_CLI_TIMEOUT_MS = 25_000;
 const CALLBACK_AGENT_WAIT_TIMEOUT_MS = 20_000;
-const CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS = 25_000;
 const CALLBACK_AGENT_WAIT_PROCESS_TIMEOUT_MS = 30_000;
 const CALLBACK_PROCESS_MAX_BUFFER = 1024 * 1024 * 10;
 const DEFAULT_OPENCLAW_GATEWAY_URL = "ws://127.0.0.1:18789";
@@ -895,7 +895,9 @@ export function createOpenClawCallbackTransport(
         conversation: ports.redactConversation(conversation),
         message
       }),
-      "--json"
+      "--json",
+      "--timeout",
+      String(CALLBACK_DELIVERY_CLI_TIMEOUT_MS)
     ];
 
     if (gatewayUrl) {
@@ -925,7 +927,9 @@ export function createOpenClawCallbackTransport(
       "sessions.send",
       "--params",
       JSON.stringify(params),
-      "--json"
+      "--json",
+      "--timeout",
+      String(CALLBACK_DELIVERY_CLI_TIMEOUT_MS)
     ];
 
     if (gatewayUrl) {
@@ -955,7 +959,9 @@ export function createOpenClawCallbackTransport(
       "chat.send",
       "--params",
       JSON.stringify(params),
-      "--json"
+      "--json",
+      "--timeout",
+      String(CALLBACK_DELIVERY_CLI_TIMEOUT_MS)
     ];
 
     if (gatewayUrl) {
@@ -990,7 +996,7 @@ export function createOpenClawCallbackTransport(
       }),
       "--json",
       "--timeout",
-      String(CALLBACK_AGENT_WAIT_CLI_TIMEOUT_MS)
+      String(CALLBACK_DELIVERY_CLI_TIMEOUT_MS)
     ];
 
     if (gatewayUrl) {
