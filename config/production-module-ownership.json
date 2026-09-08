@@ -3,7 +3,7 @@
   "version": 1,
   "architecture": {
     "cli_core_max_physical_loc": 1820,
-    "production_physical_loc": 130742,
+    "production_physical_loc": 130878,
     "cli_core_importers": [
       "src/cli.ts"
     ]

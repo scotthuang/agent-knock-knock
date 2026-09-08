@@ -15,6 +15,7 @@
 ### Fixed
 
 - Give human-explicit Send a bounded one-second Store/state lock grace while keeping terminal acquisition non-blocking, so brief monitor-supervision writer leases do not unnecessarily downgrade an otherwise manageable questionnaire to a notification-only Watch.
+- Preserve the exact pre-send Codex rollout candidates as Turn-scoped monitor companions after one rollout accepts the request, so a still-open predecessor does not suppress questionnaire discovery or response authority after managed promotion.
 
 ### Security
 

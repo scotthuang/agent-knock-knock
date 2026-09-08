@@ -16,8 +16,9 @@ import type { ExecutorKind } from "./executors.js";
 import { isExactNativeThreadId, managedSessionBindingToken,
   managedSessionRevision, terminalBindingFrom, type ManagedSessionState,
   type NativeThreadTransition } from "./managed-session.js";
-import { executorForConversation, sessionIdForConversation,
-  turnIdForConversation, type Conversation } from "./protocol.js";
+import { executorForConversation, isTerminalDispatchOwnerReleasedStatus,
+  sessionIdForConversation, turnIdForConversation, type Conversation } from
+  "./protocol.js";
 import { listManagedSessions, loadManagedSession, loadNativeThreadTransition,
   saveManagedSession, tryLoadManagedSession } from "./session-store.js";
 import { listConversations } from "./store.js";
@@ -62,15 +63,19 @@ import type { DeferredCodexForegroundDispatchSnapshot,
   TerminalDispatchTerminal } from "./terminal-dispatch-composition.js";
 import type { TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
-import { terminalBridgeSubmission } from "./terminal-dispatch-receipt.js";
+import { terminalAcceptanceEvidenceForConversation,
+  terminalBridgeRequestFingerprint,
+  terminalBridgeSubmission } from "./terminal-dispatch-receipt.js";
 import { detectCodexBoundRolloutCompletion,
+  validateCodexRolloutAcceptanceAnchor,
   type CodexRolloutAcceptanceAnchor,
   type TerminalSubmissionAcceptanceEvidence } from
   "./terminal-submission-acceptance.js";
 import type { BoundTerminalAgentProcessObservation,
   VerifiedDeadAgentCompletionObservation } from
   "./verified-dead-agent-policy.js";
-import { type TerminalNativeIdentity as NativeAgentSessionIdentity } from
+import { exactRolloutMatches,
+  type TerminalNativeIdentity as NativeAgentSessionIdentity } from
   "./terminal-binding-authority.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
 
@@ -375,8 +380,139 @@ function terminalRuntimeIdentityForConversation(
   ) {
     return runtime;
   }
-  return withCodexCompanionFences(runtime,
-    codexAllowedCompanionSetForManagedSession({ storeDir, session: managedSession }));
+  const managedCompanions = codexAllowedCompanionSetForManagedSession({
+    storeDir,
+    session: managedSession
+  });
+  const turnCompanions = codexCandidateCompanionsForActiveTurn({
+    ports,
+    conversation,
+    managedSession,
+    runtime,
+    terminalControl
+  });
+  return withCodexCompanionFences(runtime, codexCompanionSet({
+    primary: managedCompanions.primary ?? turnCompanions[0],
+    candidates: [...managedCompanions.additional, ...turnCompanions]
+  }));
+}
+
+/**
+ * A version-3 acceptance anchor freezes every exact root that was already
+ * open before one human-priority Send. Once a different root uniquely accepts
+ * that request, those baseline roots remain safe companions for this Turn's
+ * monitor. They are deliberately Turn-scoped: an unclaimed baseline root must
+ * never become durable Session ownership merely because it stayed open.
+ */
+function codexCandidateCompanionsForActiveTurn(input: {
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput;
+  conversation: Conversation;
+  managedSession: ManagedSessionState;
+  runtime: TerminalRuntimeIdentity;
+  terminalControl: TerminalControlRef;
+}): CodexPreMaterializationIdentity[] {
+  if (isTerminalDispatchOwnerReleasedStatus(input.conversation.status)) {
+    return [];
+  }
+  const takeover = isRecord(input.conversation.native_session_takeover)
+    ? input.conversation.native_session_takeover
+    : undefined;
+  let anchor: CodexRolloutAcceptanceAnchor;
+  try {
+    anchor = validateCodexRolloutAcceptanceAnchor(
+      takeover?.codex_rollout_acceptance_anchor
+    );
+  } catch {
+    return [];
+  }
+  if (anchor.version !== 3) {
+    return [];
+  }
+  const binding = input.managedSession.binding;
+  const runtimeCwd = stringValue(input.runtime.cwd);
+  const terminalCwd = stringValue(input.terminalControl.currentPath);
+  const requestText = String(
+    takeover?.terminal_bridge_request_text ??
+      input.conversation.user_request ?? ""
+  );
+  const requestHash = terminalBridgeRequestFingerprint(requestText);
+  const messageId = stringValue(takeover?.terminal_bridge_message_id);
+  const submission = terminalBridgeSubmission(input.conversation);
+  if (
+    Number(takeover?.terminal_agent_identity_protocol) !== 1 ||
+    submission?.status !== "agent_accepted"
+  ) {
+    return [];
+  }
+  let acceptanceEvidence: TerminalSubmissionAcceptanceEvidence;
+  try {
+    acceptanceEvidence = terminalAcceptanceEvidenceForConversation(
+      input.conversation,
+      requestText,
+      submission.acceptance_evidence
+    );
+  } catch {
+    return [];
+  }
+  if (
+    !binding ||
+    !messageId ||
+    stringValue(submission.message_id) !== messageId ||
+    !requestHash ||
+    stringValue(takeover?.terminal_bridge_request_hash) !== requestHash ||
+    stringValue(submission.request_hash) !== requestHash ||
+    stringValue(submission.binding_id) !== binding.binding_id ||
+    Number(submission.binding_generation) !== binding.generation ||
+    stringValue(submission.native_thread_id) !== binding.native_thread_id ||
+    acceptanceEvidence.anchorFingerprint !== anchor.anchor_fingerprint ||
+    acceptanceEvidence.nativeThreadId !== binding.native_thread_id ||
+    !exactRolloutMatches(
+      binding.native_process.rollout,
+      input.runtime.nativeRollout
+    ) ||
+    anchor.inventory_pid !== input.runtime.pid ||
+    anchor.inventory_pid !== binding.native_process.pid ||
+    anchor.process_uuid !== input.runtime.nativeProcessUuid ||
+    anchor.process_uuid !== binding.native_process.process_uuid ||
+    anchor.process_birth !== input.runtime.nativeProcessBirth ||
+    anchor.process_birth !== binding.native_process.process_birth ||
+    !anchor.inventory_cwd ||
+    !runtimeCwd ||
+    !terminalCwd ||
+    !input.ports.environment.workspaceMatches(
+      anchor.inventory_cwd,
+      input.managedSession.workspace
+    ) ||
+    !input.ports.environment.workspaceMatches(anchor.inventory_cwd, runtimeCwd) ||
+    !input.ports.environment.workspaceMatches(anchor.inventory_cwd, terminalCwd)
+  ) {
+    return [];
+  }
+  const boundCandidate = anchor.candidate_rollouts.find((candidate) =>
+    candidate.native_thread_id === binding.native_thread_id
+  );
+  if (
+    (boundCandidate && !exactRolloutMatches(
+      boundCandidate.rollout,
+      binding.native_process.rollout
+    )) ||
+    anchor.candidate_rollouts.some((candidate) =>
+      candidate.native_thread_id !== binding.native_thread_id &&
+      exactRolloutMatches(candidate.rollout, binding.native_process.rollout)
+    )
+  ) {
+    return [];
+  }
+  return anchor.candidate_rollouts
+    .filter((candidate) =>
+      candidate.native_thread_id !== binding.native_thread_id
+    )
+    .map((candidate) => ({
+      sessionId: candidate.native_thread_id,
+      processUuid: anchor.process_uuid,
+      processBirth: anchor.process_birth,
+      rollout: candidate.rollout
+    }));
 }
 
 function terminalDurableRequestForConversation(
