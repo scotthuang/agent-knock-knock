@@ -25,6 +25,7 @@ import type {
   TerminalDurableCompletionRequest
 } from "./terminal-agent-adapter.js";
 import type { Conversation } from "./protocol.js";
+import { rolloutFileIdentityMatches } from "./terminal-binding-authority.js";
 import {
   type TerminalDispatchOwnership
 } from "./terminal-action-projection.js";
@@ -1584,7 +1585,12 @@ function fallbackQuestionnaireObservation(input: {
     input.exactTerminal.state !== "available" ||
     !input.rawTerminal ||
     !input.projectedTerminal ||
-    !input.terminalMatches
+    !input.terminalMatches ||
+    !fallbackQuestionnaireContextMatches(
+      input.watch,
+      input.rawTerminal,
+      input.observationCheckpoint
+    )
   ) {
     return undefined;
   }
@@ -1623,6 +1629,42 @@ function fallbackQuestionnaireObservation(input: {
     reason_code: "terminal_questionnaire_requires_manual_response",
     manual_interaction: manualInteraction
   };
+}
+
+/**
+ * Durable fallback completion remains bound to its accepted provider artifact
+ * even after the pane moves elsewhere. A live questionnaire is different: it
+ * may be attributed to a Watch only while that exact accepted native context
+ * is still the one rendered in the pane.
+ */
+function fallbackQuestionnaireContextMatches(
+  watch: TerminalWatch,
+  terminal: Record<string, unknown>,
+  checkpoint: TerminalWatchObservationCheckpoint
+): boolean {
+  if (
+    watch.anchor.schema !==
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+  ) {
+    return true;
+  }
+  if (
+    !("schema" in checkpoint) ||
+    checkpoint.schema !==
+      "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint" ||
+    !checkpoint.accepted_identity
+  ) {
+    return false;
+  }
+  const accepted = checkpoint.accepted_identity;
+  return stringValue(terminal.native_agent_session_id)?.toLowerCase() ===
+      accepted.native_thread_id &&
+    stringValue(terminal.native_agent_process_uuid) === accepted.process_uuid &&
+    stringValue(terminal.native_agent_process_birth) === accepted.process_birth &&
+    rolloutFileIdentityMatches(
+      terminal.native_agent_rollout,
+      accepted.rollout
+    );
 }
 
 function terminalWatchScreenExcerpt(

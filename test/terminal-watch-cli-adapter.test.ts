@@ -323,7 +323,13 @@ test("accepted unmanaged fallback notifies each Codex questionnaire once without
   );
 
   terminal = withTerminalWatchScreen(
-    fixture.terminal,
+    {
+      ...fixture.terminal,
+      native_agent_rollout: {
+        ...record(fixture.terminal.native_agent_rollout),
+        fd: "41r"
+      }
+    },
     CODEX_FALLBACK_QUESTION_TWO
   );
   await facade.runReconcileWatches(options);
@@ -333,6 +339,319 @@ test("accepted unmanaged fallback notifies each Codex questionnaire once without
       record(deliveries[1].envelope.event.metadata?.manual_interaction)
         .current_step,
     2
+  );
+});
+
+test("fallback Watch never attributes a questionnaire from another Codex thread", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:fallback-context-fence",
+    openclawBin: "/opt/openclaw/bin/openclaw"
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000294",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  const request = "Keep this fallback Watch on its exact Codex context";
+  const requestHash = createHash("sha256").update(request).digest("hex");
+  const options = { storeDir: fixture.storeDir, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(fixture.terminal.id),
+      agent: "codex",
+      pid: Number(fixture.terminal.pid),
+      terminalControl: fixture.terminal.terminal_control as never
+    },
+    requestHash,
+    messageId: "message-fallback-context-fence",
+    physicalToken: "7".repeat(64)
+  });
+  assert.ok(prepared);
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+
+  const acceptedTurnId = "019f0000-0000-7000-8000-000000000294";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    fallbackAcceptedTurnRecords(request, acceptedTurnId)
+      .map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+  terminal = withTerminalWatchScreen(
+    fixture.terminal,
+    CODEX_FALLBACK_QUESTION_ONE
+  );
+  fixture.advance();
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 1);
+  assert.equal(
+    deliveries[0].envelope.event.type,
+    "interaction_manual_required"
+  );
+
+  const otherThreadId = "019f0000-0000-7000-8000-000000000293";
+  const otherRolloutPath = path.join(
+    path.dirname(fixture.rolloutPath),
+    "other-rollout.jsonl"
+  );
+  fs.writeFileSync(otherRolloutPath, `${JSON.stringify({
+    timestamp: "2026-08-21T01:00:01.000Z",
+    type: "session_meta",
+    payload: {
+      id: otherThreadId,
+      timestamp: "2026-08-21T01:00:01.000Z",
+      cwd: path.dirname(fixture.rolloutPath),
+      originator: "codex-tui",
+      source: "cli",
+      cli_version: "0.153.4"
+    }
+  })}\n`, { mode: 0o600 });
+  const otherStat = fs.statSync(otherRolloutPath);
+  terminal = withTerminalWatchScreen({
+    ...fixture.terminal,
+    native_agent_session_id: otherThreadId,
+    native_agent_rollout: {
+      fd: "52r",
+      device: String(otherStat.dev),
+      inode: String(otherStat.ino),
+      path: otherRolloutPath
+    }
+  }, CODEX_FALLBACK_QUESTION_TWO);
+  await facade.runReconcileWatches(options);
+  assert.equal(
+    deliveries.length,
+    1,
+    "a different thread in the same pane/process cannot inherit the old Watch"
+  );
+
+  terminal = withTerminalWatchScreen({
+    ...fixture.terminal,
+    native_agent_session_id: undefined,
+    native_agent_rollout: undefined
+  }, CODEX_FALLBACK_QUESTION_TWO);
+  await facade.runReconcileWatches(options);
+  assert.equal(
+    deliveries.length,
+    1,
+    "ambiguous or unavailable live identity fails closed for screen attribution"
+  );
+
+  fs.appendFileSync(fixture.rolloutPath, `${JSON.stringify({
+    timestamp: "2026-08-21T01:00:02.000Z",
+    type: "event_msg",
+    payload: {
+      type: "task_complete",
+      turn_id: acceptedTurnId,
+      last_agent_message: "Old exact rollout still completed"
+    }
+  })}\n`);
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 2);
+  assert.equal(deliveries[1].envelope.event.type, "completed");
+  assert.equal(
+    deliveries[1].envelope.event.metadata?.completion_text,
+    "Old exact rollout still completed"
+  );
+});
+
+test("fallback Watch settles an aborted Codex turn before reading later screens", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:fallback-abort",
+    openclawBin: "/opt/openclaw/bin/openclaw"
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000292",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  const request = "Stop this fallback Watch on exact native abort";
+  const options = { storeDir: fixture.storeDir, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(fixture.terminal.id),
+      agent: "codex",
+      pid: Number(fixture.terminal.pid),
+      terminalControl: fixture.terminal.terminal_control as never
+    },
+    requestHash: createHash("sha256").update(request).digest("hex"),
+    messageId: "message-fallback-abort",
+    physicalToken: "5".repeat(64)
+  });
+  assert.ok(prepared);
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+
+  const acceptedTurnId = "019f0000-0000-7000-8000-000000000292";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    fallbackAcceptedTurnRecords(request, acceptedTurnId)
+      .map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+  terminal = withTerminalWatchScreen(
+    fixture.terminal,
+    CODEX_FALLBACK_QUESTION_ONE
+  );
+  fixture.advance();
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 1);
+
+  fs.appendFileSync(fixture.rolloutPath, `${JSON.stringify({
+    timestamp: "2026-08-21T01:00:01.900Z",
+    type: "event_msg",
+    payload: {
+      type: "turn_aborted",
+      turn_id: acceptedTurnId,
+      reason: "interrupted"
+    }
+  })}\n`);
+  terminal = withTerminalWatchScreen(
+    fixture.terminal,
+    CODEX_FALLBACK_QUESTION_TWO
+  );
+  await facade.runReconcileWatches(options);
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, prepared.watchId).status,
+    "failed"
+  );
+  if (deliveries.length === 1) {
+    await facade.runReconcileWatches(options);
+  }
+  assert.deepEqual(
+    deliveries.map((delivery) => delivery.envelope.event.type),
+    ["interaction_manual_required", "failed"]
+  );
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 2, "an aborted Watch cannot read later screens");
+});
+
+test("fallback Watch invalidates when a later Codex turn crosses its open turn", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:fallback-later-turn",
+    openclawBin: "/opt/openclaw/bin/openclaw"
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000291",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  const request = "Invalidate this Watch if another turn overtakes it";
+  const options = { storeDir: fixture.storeDir, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(fixture.terminal.id),
+      agent: "codex",
+      pid: Number(fixture.terminal.pid),
+      terminalControl: fixture.terminal.terminal_control as never
+    },
+    requestHash: createHash("sha256").update(request).digest("hex"),
+    messageId: "message-fallback-later-turn",
+    physicalToken: "4".repeat(64)
+  });
+  assert.ok(prepared);
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+
+  const acceptedTurnId = "019f0000-0000-7000-8000-000000000291";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    [
+      ...fallbackAcceptedTurnRecords(request, acceptedTurnId),
+      {
+        timestamp: "2026-08-21T01:00:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: "019f0000-0000-7000-8000-000000000290"
+        }
+      }
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+  terminal = withTerminalWatchScreen(
+    fixture.terminal,
+    CODEX_FALLBACK_QUESTION_ONE
+  );
+  fixture.advance();
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].envelope.event.type, "invalidated");
+  assert.equal(
+    deliveries[0].envelope.event.metadata?.reason_code,
+    "native_completion_later_turn_started"
+  );
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, prepared.watchId).status,
+    "invalidated"
   );
 });
 
@@ -2411,6 +2730,34 @@ function withTerminalWatchScreen(
       screen: { excerpt }
     }
   };
+}
+
+function fallbackAcceptedTurnRecords(
+  request: string,
+  turnId: string
+): unknown[] {
+  return [
+    {
+      timestamp: "2026-08-21T01:00:01.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId }
+    },
+    {
+      timestamp: "2026-08-21T01:00:01.001Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: request }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId }
+      }
+    },
+    {
+      timestamp: "2026-08-21T01:00:01.002Z",
+      type: "event_msg",
+      payload: { type: "user_message", message: request }
+    }
+  ];
 }
 
 function createFixture(

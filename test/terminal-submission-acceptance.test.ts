@@ -2012,6 +2012,108 @@ test("bound Codex completion remains pending when only other native turns comple
   }
 });
 
+test("bound Codex completion settles an exact abort as a redacted failure", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-abort-process";
+    const processBirth = "codex-abort-birth";
+    const targetSuffix = 250;
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, targetSuffix));
+    const currentIdentity = {
+      sessionId: SESSION_ID,
+      processUuid,
+      processBirth,
+      rollout: fixture.identity
+    };
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+    appendRecords(fixture.path, [
+      turnAbortedRecord(
+        targetSuffix,
+        "interrupted with sk-supersecret123456789"
+      )
+    ]);
+
+    const result = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "completed");
+    if (result.status !== "completed") return;
+    assert.equal(result.diagnostics.code, "abort_found");
+    assert.equal(result.completion.outcome, "failure");
+    assert.equal(result.completion.id, turnId(targetSuffix));
+    assert.equal(
+      result.completion.text,
+      "Codex task stopped: interrupted with sk-[REDACTED]"
+    );
+    assert.equal(
+      result.completion.metadata?.match,
+      "bound_rollout_turn_aborted"
+    );
+    assert.equal(result.diagnostics.observed_turn_aborted_records, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bound Codex completion invalidates an unsettled turn crossed by a later task", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-later-turn-process";
+    const processBirth = "codex-later-turn-birth";
+    const targetSuffix = 260;
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, targetSuffix));
+    const currentIdentity = {
+      sessionId: SESSION_ID,
+      processUuid,
+      processBirth,
+      rollout: fixture.identity
+    };
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+    appendRecords(
+      fixture.path,
+      acceptedTurnRecords("a later native request", targetSuffix + 1)
+    );
+
+    const result = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "failure");
+    assert.equal(result.diagnostics.code, "later_turn_started");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("bound Codex completion returns typed failures for identity drift and duplicate completion", () => {
   const fixture = codexFixture();
   try {

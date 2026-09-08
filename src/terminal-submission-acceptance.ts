@@ -36,6 +36,7 @@ export type {
 
 export type CodexBoundRolloutCompletionCode =
   | "completion_found"
+  | "abort_found"
   | "exact_turn_not_complete"
   | "partial_rollout_record"
   | "rollout_changed_during_scan"
@@ -50,7 +51,11 @@ export type CodexBoundRolloutCompletionCode =
   | "scan_limit_exceeded"
   | "invalid_rollout_jsonl"
   | "duplicate_exact_completion"
-  | "invalid_exact_completion";
+  | "duplicate_exact_abort"
+  | "conflicting_exact_settlement"
+  | "later_turn_started"
+  | "invalid_exact_completion"
+  | "invalid_exact_abort";
 
 export interface CodexBoundRolloutCompletionDiagnostics {
   detector: "codex_exact_bound_rollout";
@@ -63,6 +68,7 @@ export interface CodexBoundRolloutCompletionDiagnostics {
   observed_end_offset_bytes?: number;
   scanned_records?: number;
   observed_task_complete_records?: number;
+  observed_turn_aborted_records?: number;
   detail?: string;
 }
 
@@ -342,6 +348,11 @@ export function observeCodexHumanStartedActiveTask(
           observedEndOffsetBytes: before.size,
           safeResumeOffsetBytes
         };
+      }
+      if (completion.status === "aborted") {
+        throw new Error(
+          "Codex active-task abort evidence escaped its exact lifecycle fence"
+        );
       }
       return {
         status: "completed",
@@ -1737,7 +1748,8 @@ export function detectCodexBoundRolloutCompletion(options: {
     const scanDiagnostics = {
       ...observedDiagnostics,
       scanned_records: scan.scannedRecords,
-      observed_task_complete_records: scan.observedTaskCompleteRecords
+      observed_task_complete_records: scan.observedTaskCompleteRecords,
+      observed_turn_aborted_records: scan.observedTurnAbortedRecords
     };
     if (scan.status === "failure") {
       return codexCompletionFailure(scan.code, scan.detail, scanDiagnostics);
@@ -1748,6 +1760,44 @@ export function detectCodexBoundRolloutCompletion(options: {
         scanDiagnostics,
         "the accepted Codex native turn has no durable task_complete record yet"
       );
+    }
+
+    if (scan.status === "aborted") {
+      const reason = truncateCompletionText(
+        redactString(scan.reason ?? "interrupted")
+      );
+      const completion: TerminalCompletionEvidence = {
+        source: "durable",
+        outcome: "failure",
+        text: truncateCompletionText(
+          redactString(`Codex task stopped: ${reason}`)
+        ),
+        ...(scan.timestamp ? { timestamp: scan.timestamp } : {}),
+        id: acceptanceId,
+        confidence: "high",
+        metadata: {
+          match: "bound_rollout_turn_aborted",
+          turn_id: acceptanceId,
+          native_thread_id: expectedNativeThreadId,
+          anchor_fingerprint: anchor.anchor_fingerprint,
+          rollout_identity_fingerprint:
+            rolloutDiagnostics.rollout_identity_fingerprint,
+          abort_reason: reason,
+          scan_start_offset_bytes: scanStartOffset,
+          observed_end_offset_bytes: before.size,
+          scanned_records: scan.scannedRecords,
+          observed_task_complete_records: scan.observedTaskCompleteRecords,
+          observed_turn_aborted_records: scan.observedTurnAbortedRecords
+        }
+      };
+      return {
+        status: "completed",
+        completion,
+        diagnostics: {
+          ...scanDiagnostics,
+          code: "abort_found"
+        }
+      };
     }
 
     const completion: TerminalCompletionEvidence = {
@@ -1767,7 +1817,8 @@ export function detectCodexBoundRolloutCompletion(options: {
         scan_start_offset_bytes: scanStartOffset,
         observed_end_offset_bytes: before.size,
         scanned_records: scan.scannedRecords,
-        observed_task_complete_records: scan.observedTaskCompleteRecords
+        observed_task_complete_records: scan.observedTaskCompleteRecords,
+        observed_turn_aborted_records: scan.observedTurnAbortedRecords
       }
     };
     return {
@@ -1802,21 +1853,36 @@ type ExactCodexTaskCompleteScan =
       timestamp?: string;
       scannedRecords: number;
       observedTaskCompleteRecords: number;
+      observedTurnAbortedRecords: number;
+    }
+  | {
+      status: "aborted";
+      reason?: string;
+      timestamp?: string;
+      scannedRecords: number;
+      observedTaskCompleteRecords: number;
+      observedTurnAbortedRecords: number;
     }
   | {
       status: "pending";
       scannedRecords: number;
       observedTaskCompleteRecords: number;
+      observedTurnAbortedRecords: number;
     }
   | {
       status: "failure";
       code:
         | "invalid_rollout_jsonl"
         | "duplicate_exact_completion"
-        | "invalid_exact_completion";
+        | "duplicate_exact_abort"
+        | "conflicting_exact_settlement"
+        | "later_turn_started"
+        | "invalid_exact_completion"
+        | "invalid_exact_abort";
       detail: string;
       scannedRecords: number;
       observedTaskCompleteRecords: number;
+      observedTurnAbortedRecords: number;
     };
 
 function scanExactCodexTaskComplete(
@@ -1825,7 +1891,17 @@ function scanExactCodexTaskComplete(
 ): ExactCodexTaskCompleteScan {
   let scannedRecords = 0;
   let observedTaskCompleteRecords = 0;
-  const exactMatches: Array<Record<string, any>> = [];
+  let observedTurnAbortedRecords = 0;
+  let exactTaskStartedIndex: number | undefined;
+  let laterTaskStartedIndex: number | undefined;
+  const exactMatches: Array<{
+    value: Record<string, any>;
+    index: number;
+  }> = [];
+  const exactAborts: Array<{
+    value: Record<string, any>;
+    index: number;
+  }> = [];
   for (const rawLine of text.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (!line) {
@@ -1840,10 +1916,42 @@ function scanExactCodexTaskComplete(
         code: "invalid_rollout_jsonl",
         detail: `Codex bound completion suffix contains invalid JSONL at record ${scannedRecords + 1}`,
         scannedRecords,
-        observedTaskCompleteRecords
+        observedTaskCompleteRecords,
+        observedTurnAbortedRecords
       };
     }
+    const recordIndex = scannedRecords;
     scannedRecords += 1;
+    if (
+      isRecord(value) &&
+      value.type === "event_msg" &&
+      isRecord(value.payload) &&
+      value.payload.type === "task_started"
+    ) {
+      const turnId = optionalString(value.payload.turn_id)?.toLowerCase();
+      if (turnId === acceptanceId) {
+        exactTaskStartedIndex ??= recordIndex;
+      } else if (
+        exactTaskStartedIndex !== undefined &&
+        laterTaskStartedIndex === undefined
+      ) {
+        laterTaskStartedIndex = recordIndex;
+      }
+      continue;
+    }
+    if (
+      isRecord(value) &&
+      value.type === "event_msg" &&
+      isRecord(value.payload) &&
+      value.payload.type === "turn_aborted"
+    ) {
+      observedTurnAbortedRecords += 1;
+      const turnId = optionalString(value.payload.turn_id)?.toLowerCase();
+      if (turnId === acceptanceId) {
+        exactAborts.push({ value, index: recordIndex });
+      }
+      continue;
+    }
     if (
       !isRecord(value) ||
       value.type !== "event_msg" ||
@@ -1855,28 +1963,94 @@ function scanExactCodexTaskComplete(
     observedTaskCompleteRecords += 1;
     const turnId = optionalString(value.payload.turn_id)?.toLowerCase();
     if (turnId === acceptanceId) {
-      exactMatches.push(value);
+      exactMatches.push({ value, index: recordIndex });
     }
   }
 
-  if (exactMatches.length === 0) {
-    return {
-      status: "pending",
-      scannedRecords,
-      observedTaskCompleteRecords
-    };
-  }
   if (exactMatches.length > 1) {
     return {
       status: "failure",
       code: "duplicate_exact_completion",
       detail: "the exact accepted Codex turn has duplicate task_complete records",
       scannedRecords,
-      observedTaskCompleteRecords
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+  if (exactAborts.length > 1) {
+    return {
+      status: "failure",
+      code: "duplicate_exact_abort",
+      detail: "the exact accepted Codex turn has duplicate turn_aborted records",
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+  if (exactMatches.length > 0 && exactAborts.length > 0) {
+    return {
+      status: "failure",
+      code: "conflicting_exact_settlement",
+      detail:
+        "the exact accepted Codex turn has conflicting completion and abort records",
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
     };
   }
 
-  const match = exactMatches[0];
+  const exactSettlementIndex = exactMatches[0]?.index ?? exactAborts[0]?.index;
+  if (
+    laterTaskStartedIndex !== undefined &&
+    (exactSettlementIndex === undefined ||
+      laterTaskStartedIndex < exactSettlementIndex)
+  ) {
+    return {
+      status: "failure",
+      code: "later_turn_started",
+      detail:
+        "a later Codex native turn started before the exact accepted turn settled",
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+
+  if (exactAborts.length === 1) {
+    const match = exactAborts[0].value;
+    if (match.timestamp !== undefined && !validTimestamp(match.timestamp)) {
+      return {
+        status: "failure",
+        code: "invalid_exact_abort",
+        detail: "the exact Codex turn_aborted record has an invalid timestamp",
+        scannedRecords,
+        observedTaskCompleteRecords,
+        observedTurnAbortedRecords
+      };
+    }
+    const payload = match.payload as Record<string, any>;
+    return {
+      status: "aborted",
+      reason: optionalString(payload.reason),
+      ...(match.timestamp !== undefined
+        ? { timestamp: String(match.timestamp) }
+        : {}),
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+
+  if (exactMatches.length === 0) {
+    return {
+      status: "pending",
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+
+  const match = exactMatches[0].value;
   const payload = match.payload as Record<string, any>;
   const textValue = optionalString(payload.last_agent_message);
   if (!textValue) {
@@ -1885,7 +2059,8 @@ function scanExactCodexTaskComplete(
       code: "invalid_exact_completion",
       detail: "the exact Codex task_complete record has no final agent message",
       scannedRecords,
-      observedTaskCompleteRecords
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
     };
   }
   if (match.timestamp !== undefined && !validTimestamp(match.timestamp)) {
@@ -1894,7 +2069,8 @@ function scanExactCodexTaskComplete(
       code: "invalid_exact_completion",
       detail: "the exact Codex task_complete record has an invalid timestamp",
       scannedRecords,
-      observedTaskCompleteRecords
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
     };
   }
   return {
@@ -1904,7 +2080,8 @@ function scanExactCodexTaskComplete(
       ? { timestamp: String(match.timestamp) }
       : {}),
     scannedRecords,
-    observedTaskCompleteRecords
+    observedTaskCompleteRecords,
+    observedTurnAbortedRecords
   };
 }
 
@@ -1932,6 +2109,7 @@ function codexCompletionFailure(
   code: Exclude<
     CodexBoundRolloutCompletionCode,
     | "completion_found"
+    | "abort_found"
     | "exact_turn_not_complete"
     | "partial_rollout_record"
     | "rollout_changed_during_scan"
