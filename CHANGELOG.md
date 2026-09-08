@@ -12,6 +12,10 @@
 - Make human-explicit Send results distinguish physical terminal dispatch, native agent acceptance, managed ownership, and observation mode. Legacy delivery fields remain available as compatibility aliases during the 0.13 transition.
 - Continue candidate acceptance across the frozen pre-send roots and the current root inventory, so a rollout whose original FD closes can still be proven by its unchanged path, device, inode, and byte boundary.
 
+### Fixed
+
+- Give human-explicit Send a bounded one-second Store/state lock grace while keeping terminal acquisition non-blocking, so brief monitor-supervision writer leases do not unnecessarily downgrade an otherwise manageable questionnaire to a notification-only Watch.
+
 ### Security
 
 - Keep physical target, process incarnation, composer/interaction, and duplicate-dispatch checks fail-closed while preventing rollout, Session, Store, or callback uncertainty from vetoing an explicitly selected human Send. Replaced, deleted, ambiguous, multiply accepting, or unreadable rollout evidence remains uncertain and is never replayed automatically.

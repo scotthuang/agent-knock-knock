@@ -233,6 +233,8 @@ import * as dispatchReceipt from "./terminal-dispatch-receipt.js";
 import type { TerminalBridgeSubmissionMutation } from
   "./terminal-dispatch-receipt.js";
 import type { FileLockAcquisitionOptions } from "./file-lock-cli-adapter.js";
+import type { TerminalWriterMutationLockOptions } from
+  "./terminal-mutation-cli-runtime.js";
 import {
   expandHome,
   positiveMilliseconds,
@@ -697,7 +699,7 @@ interface TerminalCommandCliRawPorts {
   terminalWriterMutationLocks(
     storeDir: string,
     terminalControl: TerminalControlRef,
-    options?: FileLockAcquisitionOptions
+    options?: TerminalWriterMutationLockOptions
   ): CanonicalMutationLockPorts;
   textSummary(
     text: unknown,
@@ -927,6 +929,11 @@ const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
 const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS = 5000;
 const DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS = 50;
+// Human-explicit Send still falls back to one physical terminal dispatch when
+// managed preparation is genuinely unavailable. Give ordinary Store/monitor
+// contention a short chance to clear first so a transient writer lease does
+// not unnecessarily discard managed questionnaire response authority.
+const USER_EXPLICIT_MANAGED_LOCK_GRACE_MS = 1_000;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
 
 interface TerminalReplayExpectation {
@@ -6410,7 +6417,12 @@ async function runManagedRawTerminalSendAttempt(
   await withCanonicalMutationLocks(terminalWriterMutationLocks(
     rawStoreDir,
     terminalConversation.terminalControl,
-    deferZeroInputFailurePresentation ? { timeoutMs: 0 } : undefined
+    deferZeroInputFailurePresentation
+      ? {
+          terminalTimeoutMs: 0,
+          storeWriterTimeoutMs: USER_EXPLICIT_MANAGED_LOCK_GRACE_MS
+        }
+      : undefined
   ), async (scopes, resources) => {
     await assertFreshUserExplicitTerminalSendTargetWhileLocked(
       options,
@@ -6721,7 +6733,9 @@ async function runManagedRawTerminalSendAttempt(
       });
       attempt.result = controlSendResult;
       },
-      deferZeroInputFailurePresentation ? { timeoutMs: 0 } : undefined
+      deferZeroInputFailurePresentation
+        ? { timeoutMs: USER_EXPLICIT_MANAGED_LOCK_GRACE_MS }
+        : undefined
     );
   });
   if (!controlSendResult) {

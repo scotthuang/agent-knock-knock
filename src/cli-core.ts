@@ -247,7 +247,7 @@ const {
 } = createTerminalMutationCliRuntime({
   acquireFileLock,
   acquireTerminalBridgeSendLock,
-  terminalBridgeRuntimeKey
+  terminalBridgeRuntimeKey, withStoreWriterLeaseAsync
 });
 const loadTerminalBridgeDispatchLedger = terminalDispatchRepository.load;
 const saveTerminalBridgeDispatchLedger = terminalDispatchRepository.save;

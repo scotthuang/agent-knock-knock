@@ -4232,9 +4232,7 @@ test("v3 acceptance monitor defers a contended writer without weakening durable 
         fs.unlinkSync(writerLockPath);
       }, 10250);
     `;
-    lockReleaser = spawn(process.execPath, ["-e", releaseScript], {
-      stdio: "ignore"
-    });
+    lockReleaser = spawnFixtureNodeEval(releaseScript);
 
     const monitored = await runCli([
       "monitor",
@@ -4858,6 +4856,93 @@ test("multi-root unavailable identity uses the exact inventory token and binds t
     assert.deepEqual(fixture.ttyViewportInspectionPids, []);
     assertSingleTaskInput(fixture, message);
   } finally {
+    fixture.cleanup();
+  }
+});
+
+test("human terminal Send keeps managed ownership across transient writer contention", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Keep this explicit Send managed after the writer lease clears.";
+  const writerLockPath = path.join(fixture.storeDir, ".akk-writer.lock");
+  let lockReleaser: ReturnType<typeof spawn> | undefined;
+  try {
+    enableFixtureCandidateInventory(fixture, [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ]);
+    const terminal = await listFixtureTerminal(fixture);
+    const action = assertTerminalUserExplicitSendAction(terminal);
+    fs.writeFileSync(writerLockPath, `${JSON.stringify({
+      pid: process.pid,
+      token: "human-send-transient-writer-contention",
+      created_at: new Date().toISOString()
+    })}\n`, { mode: 0o600 });
+    lockReleaser = spawnFixtureNodeEval(`
+      const fs = require("node:fs");
+      const writerLockPath = ${JSON.stringify(writerLockPath)};
+      const terminalLockDir = ${JSON.stringify(path.join(
+        String(fixture.environment.AKK_RUNTIME_DIR),
+        "terminal-locks"
+      ))};
+      const deadline = Date.now() + 5000;
+      const releaseAfterTerminalLock = () => {
+        const locks = fs.existsSync(terminalLockDir)
+          ? fs.readdirSync(terminalLockDir).filter((name) =>
+              name.startsWith("terminal-bridge-send-") && name.endsWith(".lock")
+            )
+          : [];
+        if (locks.length >= 2) {
+          setTimeout(() => fs.unlinkSync(writerLockPath), 50);
+          return;
+        }
+        if (Date.now() >= deadline) process.exit(2);
+        setTimeout(releaseAfterTerminalLock, 5);
+      };
+      releaseAfterTerminalLock();
+    `);
+    fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+
+    const sendArgs = userExplicitDeferredForegroundSendArgs(
+      fixture,
+      action,
+      message
+    );
+    sendArgs.push(
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:test:writer-grace",
+      "--openclaw-session",
+      "agent:test:writer-grace"
+    );
+    const sent = await runCli(
+      sendArgs,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+    assert.equal(output.management_mode, "managed", sent.stdout);
+    assert.equal(output.agent_acceptance, "proven", sent.stdout);
+    assert.equal(output.delivered_unmanaged, undefined);
+    assert.deepEqual(output.capabilities, {
+      callback: true,
+      interaction_notify: true,
+      interaction_respond: true
+    });
+    assert.equal(listManagedSessions(fixture.storeDir).length, 1);
+    assert.equal(listConversations(fixture.storeDir).length, 1);
+    assert.equal(
+      loadManagedSession(fixture.storeDir, String(output.session_id))
+        .binding?.native_thread_id,
+      NATIVE_THREAD_ID
+    );
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    if (lockReleaser && lockReleaser.exitCode === null) {
+      lockReleaser.kill("SIGKILL");
+    }
+    fs.rmSync(writerLockPath, { force: true });
     fixture.cleanup();
   }
 });
@@ -8667,6 +8752,10 @@ function runCliSubprocess(args: string[], env: NodeJS.ProcessEnv) {
     env,
     timeout: 60_000
   });
+}
+
+function spawnFixtureNodeEval(source: string) {
+  return spawn(process.execPath, ["-e", source], { stdio: "ignore" });
 }
 
 const inProcessFixtures = new Map<string, NoRolloutFixture>();

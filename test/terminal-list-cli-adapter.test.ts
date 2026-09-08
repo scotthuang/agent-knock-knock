@@ -1171,12 +1171,14 @@ test("list token falls back to one unmanaged send and replays by message id", as
     managedLockOptions,
     [
       undefined,
-      { timeoutMs: 0 },
-      { timeoutMs: 0 },
-      { timeoutMs: 0 },
-      { timeoutMs: 0 }
+      { terminalTimeoutMs: 0, storeWriterTimeoutMs: 1_000 },
+      { terminalTimeoutMs: 0, storeWriterTimeoutMs: 1_000 },
+      { terminalTimeoutMs: 0, storeWriterTimeoutMs: 1_000 },
+      { terminalTimeoutMs: 0, storeWriterTimeoutMs: 1_000 }
     ],
-    "managed-only keeps its legacy lock policy while user-priority Send never waits"
+    "managed-only keeps its legacy lock policy while user-priority Send " +
+      "never waits for the terminal and grants transient Store contention " +
+      "a one-second grace period"
   );
 
   const intentRoot = path.join(runtimeDir, "terminal-user-send-intents");
