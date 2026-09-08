@@ -169,7 +169,17 @@ The installed client matches the current official TUI protocol:
 - `RequestUserInput` contains 1-3 questions with 2-3 options and automatic
   Other;
 - numeric selection advances a choice question;
-- optional notes/free-form answers use the composer;
+- the client-generated `None of the above` row is Codex's canonical Notes
+  carrier; a guarded model-provided `Type something.` alias is treated as a
+  custom-answer request only when that exact native Other row proves the known
+  surface;
+- choosing that alias moves to the native Other row with bounded cursor
+  movement and opens Notes with `Tab`, never submitting the alias's literal
+  label; choosing native Other itself remains an ordinary direct selection;
+- the recaptured empty `Add notes` composer becomes a separate free-text
+  interaction step;
+- Codex submits that text as `user_note: ...` alongside `None of the above`;
+  it does not expose a Claude-style bare custom-answer value;
 - semantic free-text dispatch crosses the verified 121ms paste-suppression
   window before its sole Enter;
 - the exact multi-question free-form footer is handled one current step at a
@@ -195,9 +205,9 @@ and tests are added.
    before response, permanently fence a consumed prompt fingerprint from
    replay, and notify the next distinct questionnaire step independently.
 5. **Expanded native coverage (not implemented)**: multi-select (tracked in
-   [#292](https://github.com/scotthuang/agent-knock-knock/issues/292)), notes,
-   navigation, and more
-   version profiles only with captured fixtures and live regression evidence.
+   [#292](https://github.com/scotthuang/agent-knock-knock/issues/292)),
+   arbitrary per-option Notes, broader navigation, and more version profiles
+   only with captured fixtures and live regression evidence.
 6. **Host-native UX**: OpenClaw may render the projection using a future public
    session-bound `requestUserInput` API. Until then, the structured AKK tool is
    the authority boundary; a plugin must not use private Gateway methods.

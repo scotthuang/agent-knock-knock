@@ -5753,25 +5753,44 @@ function terminalInteractionReservedError(
 }
 
 function terminalInteractionChoiceAction(
+  agent: ExecutorKind,
   plan: Extract<NativeQuestionnaireActionPlan, { kind: "single_select" }>,
   answer: Extract<TerminalInteractionAnswer, { response_kind: "single_select" }>
-): { key: string; outcome: TerminalInteractionResponseExecution["outcome"] } {
+): { keys: readonly string[]; outcome: TerminalInteractionResponseExecution["outcome"] } {
   const choice = plan.choices.find(
     (candidate) => candidate.option_id === answer.selected_option_ids[0]
   );
-  const stage = choice?.stages[0];
-  if (
-    !choice ||
-    choice.stages.length !== 1 ||
-    stage?.kind !== "key" ||
-    !/^[1-5]$/u.test(stage.key)
-  ) {
+  if (!choice) {
+    throw new TerminalInteractionInputNotStartedError(
+      "single-select interaction has no closed adapter action"
+    );
+  }
+  const keys = choice.stages.flatMap((stage) =>
+    stage.kind === "key" ? [stage.key] : []
+  );
+  const directChoice = choice.outcome === "submit_or_advance" &&
+    choice.stages.length === 1 &&
+    keys.length === 1 &&
+    /^[1-5]$/u.test(keys[0]!);
+  const directCustomTextChoice = agent === "claude" &&
+    choice.outcome === "open_custom_text" &&
+    choice.stages.length === 1 &&
+    keys.length === 1 &&
+    /^[1-5]$/u.test(keys[0]!);
+  const navigatedCustomTextChoice = agent === "codex" &&
+    choice.outcome === "open_custom_text" &&
+    choice.stages.length >= 1 &&
+    choice.stages.length <= 4 &&
+    keys.length === choice.stages.length &&
+    keys.at(-1) === "Tab" &&
+    keys.slice(0, -1).every((key) => key === "Down");
+  if (!directChoice && !directCustomTextChoice && !navigatedCustomTextChoice) {
     throw new TerminalInteractionInputNotStartedError(
       "single-select interaction has no closed adapter action"
     );
   }
   return {
-    key: stage.key,
+    keys,
     outcome: choice.outcome === "open_custom_text"
       ? "custom_text_opened"
       : "submitted_or_advanced"
@@ -5898,11 +5917,15 @@ async function dispatchTerminalInteractionAnswer(input: {
     input.actionPlan.kind === "single_select" &&
     input.answer.response_kind === "single_select"
   ) {
-    const action = terminalInteractionChoiceAction(input.actionPlan, input.answer);
+    const action = terminalInteractionChoiceAction(
+      input.agent,
+      input.actionPlan,
+      input.answer
+    );
     await sendTerminalInteractionKeys(
       input.provider,
       input.terminalControl,
-      [action.key]
+      action.keys
     );
     return action.outcome!;
   }
