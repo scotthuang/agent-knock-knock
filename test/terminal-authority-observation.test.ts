@@ -12,12 +12,17 @@ import {
   deferredCandidateSourceTurnHistory,
   deferredCodexForegroundDispatchSnapshot,
   humanExplicitCallbackDebtDisposition,
+  humanExplicitCallbackDebtManagedTokenMatches,
   observeDeferredCodexAuthority,
   type DeferredForegroundAuthorityAdapterPorts
 } from "../src/deferred-foreground-authority-cli-adapter.js";
-import type { ManagedSessionState } from "../src/managed-session.js";
+import {
+  managedSessionBindingToken,
+  type ManagedSessionState
+} from "../src/managed-session.js";
 import {
   createConversation,
+  createMessage,
   type Conversation
 } from "../src/protocol.js";
 import {
@@ -802,10 +807,43 @@ test("candidate history keeps current-generation callback and attention gates", 
 
 test("human-explicit callback supersede is exact, terminal, and fail-closed", () => {
   const base = session("session-callback-debt");
+  const canonicalTerminalControl = {
+    ...base.binding!.terminal_control,
+    capabilities: [...base.binding!.terminal_control.capabilities]
+  } as TerminalControlRef;
+  const endpointKey = `socket:${canonicalTerminalControl.socketPath}`;
+  createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: "pane-id:%20"
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(
+        endpointKey,
+        canonicalTerminalControl.target,
+        canonicalTerminalControl.socketPath
+      ),
+      label: canonicalTerminalControl.target,
+      currentCommand: canonicalTerminalControl.currentCommand,
+      currentPath: canonicalTerminalControl.currentPath
+    },
+    processAnchorPid: canonicalTerminalControl.panePid,
+    capabilities: canonicalTerminalControl.capabilities,
+    providerRef: canonicalTerminalControl
+  });
+  const legacyTerminalControl = {
+    ...canonicalTerminalControl,
+    capabilities: [...canonicalTerminalControl.capabilities]
+  } as TerminalControlRef;
   const source: ManagedSessionState = {
     ...base,
     binding: {
       ...base.binding!,
+      // Persisted control remains legacy-shaped even after the additive
+      // Session and Turn endpoint records carry the canonical pane identity.
+      terminal_control: legacyTerminalControl,
+      terminal_endpoint: terminalControlEvidence(canonicalTerminalControl),
       binding_id: "binding-callback-debt",
       generation: 7,
       native_thread_id: THREAD_A,
@@ -820,42 +858,93 @@ test("human-explicit callback supersede is exact, terminal, and fail-closed", ()
       }
     }
   };
-  const debt = (): Conversation => ({
-    ...createConversation({
-      userRequest: "completed managed request",
-      sessionId: source.session_id,
-      turnId: "turn-callback-debt",
-      workspace: source.workspace,
-      executorKind: "codex",
-      now: new Date("2026-09-08T22:10:37.000Z")
-    }),
-    status: "idle",
-    terminal_binding_id: source.binding!.binding_id,
-    terminal_binding_generation: source.binding!.generation,
-    native_thread_id: THREAD_A,
-    callback_delivery: {
-      status: "failed",
-      message: {
-        type: "done",
-        requires_response: false
-      }
-    },
-    native_session_takeover: {
+  const debt = (turnId = "turn-callback-debt"): Conversation => {
+    const conversation: Conversation = {
+      ...createConversation({
+        userRequest: "completed managed request",
+        sessionId: source.session_id,
+        turnId,
+        workspace: source.workspace,
+        executorKind: "codex",
+        now: new Date("2026-09-08T22:10:37.000Z")
+      }),
+      status: "idle",
+      store_dir: "/store",
       terminal_binding_id: source.binding!.binding_id,
       terminal_binding_generation: source.binding!.generation,
-      terminal_agent_session_id: THREAD_A,
-      terminal_agent_pid: source.binding!.native_process.pid,
-      terminal_agent_process_uuid:
-        source.binding!.native_process.process_uuid,
-      terminal_agent_process_birth:
-        source.binding!.native_process.process_birth,
-      terminal_agent_rollout: source.binding!.native_process.rollout,
-      terminal_control: source.binding!.terminal_control,
-      terminal_bridge_submission: { status: "agent_accepted" }
-    }
-  });
+      native_thread_id: THREAD_A,
+      native_session_takeover: {
+        terminal_bridge_message_id: `message-${turnId}`,
+        terminal_binding_id: source.binding!.binding_id,
+        terminal_binding_generation: source.binding!.generation,
+        terminal_agent_session_id: THREAD_A,
+        terminal_agent_pid: source.binding!.native_process.pid,
+        terminal_agent_process_uuid:
+          source.binding!.native_process.process_uuid,
+        terminal_agent_process_birth:
+          source.binding!.native_process.process_birth,
+        terminal_agent_rollout: source.binding!.native_process.rollout,
+        terminal_control: source.binding!.terminal_control,
+        terminal_endpoint: terminalControlEvidence(canonicalTerminalControl),
+        terminal_bridge_submission: {
+          status: "agent_accepted",
+          session_id: source.session_id,
+          turn_id: turnId,
+          message_id: `message-${turnId}`,
+          binding_id: source.binding!.binding_id,
+          binding_generation: source.binding!.generation,
+          native_thread_id: THREAD_A,
+          executor_kind: "codex",
+          openclaw_session: "agent:main:main",
+          store_dir: "/store",
+          terminal_target: source.binding!.terminal_control.target,
+          terminal_socket_path:
+            source.binding!.terminal_control.socketPath ?? null,
+          terminal_pane_pid: source.binding!.terminal_control.panePid,
+          terminal_endpoint: terminalControlEvidence(canonicalTerminalControl)
+        }
+      }
+    };
+    return {
+      ...conversation,
+      callback_delivery: {
+        status: "failed",
+        attempt_outcome: {
+          disposition: "retryable_failure",
+          error_code: "controller_temporarily_unavailable"
+        },
+        message: createMessage({
+          conversation,
+          id: `callback-${turnId}`,
+          from: "codex",
+          to: "openclaw",
+          type: "done",
+          body: "The managed request completed.",
+          now: new Date("2026-09-08T22:10:38.000Z")
+        })
+      }
+    };
+  };
 
   const candidate = debt();
+  assert.equal(
+    humanExplicitCallbackDebtManagedTokenMatches(undefined, source),
+    true,
+    "a human-priority Send may omit the managed fast-path token"
+  );
+  assert.equal(
+    humanExplicitCallbackDebtManagedTokenMatches(
+      managedSessionBindingToken(source),
+      source
+    ),
+    true,
+    "the exact current managed token preserves callback-debt repair"
+  );
+  assert.equal(
+    humanExplicitCallbackDebtManagedTokenMatches("stale-managed-token", source),
+    false,
+    "a mismatched managed token remains fail-closed"
+  );
   assert.equal(
     humanExplicitCallbackDebtDisposition(candidate, source),
     "supersedable"
@@ -880,8 +969,37 @@ test("human-explicit callback supersede is exact, terminal, and fail-closed", ()
   }, source), undefined, "accepted controller transport is immutable");
   assert.equal(humanExplicitCallbackDebtDisposition({
     ...candidate,
+    callback_delivery: {
+      ...(candidate.callback_delivery as Record<string, unknown>),
+      attempt_outcome: { disposition: "uncertain" }
+    }
+  }, source), undefined, "malformed callback outcome remains fail-closed");
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
     native_thread_id: THREAD_B
   }, source), undefined, "binding identity drift rejects supersede");
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    native_session_takeover: {
+      ...(candidate.native_session_takeover as Record<string, unknown>),
+      terminal_bridge_submission: {
+        ...((candidate.native_session_takeover as Record<string, any>)
+          .terminal_bridge_submission as Record<string, unknown>),
+        turn_id: "turn-cross-boundary-receipt"
+      }
+    }
+  }, source), undefined, "cross-Turn submission receipt rejects supersede");
+  const endpoint = terminalControlEvidence(canonicalTerminalControl);
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    native_session_takeover: {
+      ...(candidate.native_session_takeover as Record<string, unknown>),
+      terminal_endpoint: {
+        ...endpoint,
+        resource_key: "pane-id:%99"
+      }
+    }
+  }, source), undefined, "conflicting endpoint incarnation rejects supersede");
   assert.equal(humanExplicitCallbackDebtDisposition({
     ...candidate,
     native_session_takeover: {
@@ -889,6 +1007,54 @@ test("human-explicit callback supersede is exact, terminal, and fail-closed", ()
       terminal_bridge_interaction_notification: { state: "pending" }
     }
   }, source), undefined, "pending interaction rejects supersede");
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    callback_delivery: {
+      ...(candidate.callback_delivery as Record<string, unknown>),
+      transport_started_at: "2026-09-08T22:10:39.000Z",
+      attempt_pid: 4_200,
+      attempt_lease_expires_at: "2026-09-08T22:12:39.000Z",
+      attempt_outcome: {
+        disposition: "uncertain",
+        error_code: "controller_acceptance_observation_lost",
+        observed_at: "2026-09-08T22:10:40.000Z"
+      }
+    }
+  }, source), "supersedable",
+  "human-priority Send explicitly retires future retries after uncertainty");
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    callback_delivery: {
+      status: "pending",
+      message: (candidate.callback_delivery as Record<string, unknown>).message,
+      attempts: 0
+    }
+  }, source), "supersedable",
+  "a queued callback whose transport never started may be retired");
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    callback_delivery: {
+      status: "pending",
+      message: (candidate.callback_delivery as Record<string, unknown>).message,
+      transport_started_at: "2026-09-08T22:10:39.000Z",
+      attempt_pid: 4_200,
+      attempt_lease_expires_at: "2026-09-08T22:12:39.000Z"
+    }
+  }, source), undefined, "an in-flight pending callback remains fail-closed");
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    callback_notification_delivery: { status: "delivered" }
+  }, source), "supersedable",
+  "settled advisory notification history does not block lifecycle debt");
+  const callbackFreeHistory: Conversation = {
+    ...debt("turn-callback-free-history"),
+    callback_delivery: undefined
+  };
+  assert.equal(
+    humanExplicitCallbackDebtDisposition(callbackFreeHistory, source),
+    "settled",
+    "an exact accepted Turn with no callback route is settled history"
+  );
 
   const superseded: Conversation = {
     ...candidate,
@@ -905,12 +1071,17 @@ test("human-explicit callback supersede is exact, terminal, and fail-closed", ()
   );
   assert.notEqual(
     deferredCandidateSourceTurnHistory(
-      deferredAuthorityPorts(undefined, { turns: [superseded] }),
+      deferredAuthorityPorts(undefined, {
+        turns: [
+          superseded,
+          callbackFreeHistory
+        ]
+      }),
       "/store",
       source
     ),
     undefined,
-    "a safely superseded completion callback no longer poisons history"
+    "superseded callback and settled no-route Turn compose as safe history"
   );
   assert.equal(deferredCandidateSourceTurnHistory(
     deferredAuthorityPorts(undefined, {

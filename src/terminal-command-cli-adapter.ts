@@ -14,6 +14,7 @@ import {
   callbackRouteFingerprintForConversation
 } from "./callback-route-authority.js";
 import {
+  callbackDeliveryAttemptOutcome,
   supersedeUnacceptedCallbackDeliveries
 } from
   "./callback-outbox-policy.js";
@@ -42,7 +43,10 @@ import {
 } from "./deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from
   "./deferred-foreground-transfer-policy.js";
-import { humanExplicitCallbackDebtDisposition } from
+import {
+  humanExplicitCallbackDebtDisposition,
+  humanExplicitCallbackDebtManagedTokenMatches
+} from
   "./deferred-foreground-authority-cli-adapter.js";
 import type {
   CodexOpenRootRolloutInventory
@@ -6320,10 +6324,13 @@ async function supersedeExactHumanExplicitCallbackDebt(input: {
   if (
     terminal.agent !== "codex" ||
     stringValue(options.expectedUserExplicitTerminalToken) === undefined ||
-    expectedManagedToken !== undefined ||
     !session ||
     session.status !== "bound" ||
     !binding ||
+    !humanExplicitCallbackDebtManagedTokenMatches(
+      expectedManagedToken,
+      session
+    ) ||
     !candidateInventory ||
     !exactBoundCodexSendSource({
       kind: "candidate",
@@ -6392,6 +6399,18 @@ async function supersedeExactHumanExplicitCallbackDebt(input: {
           event: "callback_delivery_superseded_by_user_explicit_send",
           status: current.status,
           reason: USER_EXPLICIT_CALLBACK_SUPERSEDE_REASON,
+          prior_callback_status: isRecord(current.callback_delivery)
+            ? current.callback_delivery.status
+            : undefined,
+          prior_callback_attempt_disposition:
+            callbackDeliveryAttemptOutcome(current.callback_delivery)
+              ?.disposition,
+          // An uncertain transport may already have reached the controller.
+          // This records that the human-priority Send retired only future
+          // callback retries; it never asserts that delivery did not occur.
+          human_override_of_uncertain_callback:
+            callbackDeliveryAttemptOutcome(current.callback_delivery)
+              ?.disposition === "uncertain",
           terminal_input_sent: false,
           terminal_input_dispatched: false
         });
@@ -6606,7 +6625,10 @@ async function prepareRawTerminalDispatchAuthority(input: {
   ) {
     throw new Error(
       "managed continuation authority is unavailable for the current " +
-      "terminal context; the physical terminal authority remains valid"
+      "terminal context" +
+      (userExplicitTerminalToken
+        ? "; the physical terminal authority remains valid"
+        : "; refresh AKK list before retrying managed delivery")
     );
   }
   return {

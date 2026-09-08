@@ -173,7 +173,7 @@ test("human-explicit callback debt is fenced under the Turn lock before deferred
   );
   assertOrdered(supersede, [
     "expectedUserExplicitTerminalToken",
-    "expectedManagedToken !== undefined",
+    "humanExplicitCallbackDebtManagedTokenMatches",
     "exactBoundCodexSendSource",
     "sessionHasUnresolvedForegroundMutation",
     "humanExplicitCallbackDebtDisposition",
@@ -182,7 +182,8 @@ test("human-explicit callback debt is fenced under the Turn lock before deferred
     "JSON.stringify(current.callback_delivery) !== expectedDelivery",
     "supersedeUnacceptedCallbackDeliveries",
     "saveState",
-    "callback_delivery_superseded_by_user_explicit_send"
+    "callback_delivery_superseded_by_user_explicit_send",
+    "human_override_of_uncertain_callback"
   ]);
   const authority = compiledFunctionSource(
     "prepareRawTerminalDispatchAuthority",
@@ -196,6 +197,14 @@ test("human-explicit callback debt is fenced under the Turn lock before deferred
   assert.match(
     authority,
     /managed continuation authority is unavailable/u
+  );
+  assert.match(
+    authority,
+    /userExplicitTerminalToken[\s\S]*physical terminal authority remains valid/u
+  );
+  assert.match(
+    authority,
+    /refresh AKK list before retrying managed delivery/u
   );
   assert.doesNotMatch(
     authority,

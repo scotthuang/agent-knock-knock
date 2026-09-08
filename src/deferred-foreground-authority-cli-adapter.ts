@@ -5,7 +5,10 @@ import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
 import { callbackExpectedForPrimaryOutbox } from
   "./callback-route-authority.js";
-import { callbackDeliveryHasAcceptedTransport } from
+import {
+  callbackDeliveryAttemptOutcome,
+  callbackDeliveryHasAcceptedTransport
+} from
   "./callback-outbox-policy.js";
 import { canonicalJson } from "./canonical-json.js";
 import type {
@@ -30,6 +33,8 @@ import {
   isTerminalDispatchOwnerReleasedStatus,
   sessionIdForConversation,
   turnIdForConversation,
+  validateMessageForConversation,
+  type AgentMessage,
   type Conversation
 } from "./protocol.js";
 import {
@@ -48,6 +53,7 @@ import { rolloutFileIdentityMatches } from
   "./terminal-binding-authority.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import {
+  sameTerminalControlEvidenceIncarnation,
   terminalControlEvidenceMatches,
   terminalEndpointFromControlRef
 } from "./terminal-control-ref.js";
@@ -345,6 +351,23 @@ export type HumanExplicitCallbackDebtDisposition =
   | "settled";
 
 /**
+ * A private managed token is an optional fast-path hint for human Send. It may
+ * be omitted, but a supplied token must still name the exact current binding.
+ */
+export function humanExplicitCallbackDebtManagedTokenMatches(
+  expectedManagedToken: unknown,
+  session: ManagedSessionState
+): boolean {
+  const expected = stringValue(expectedManagedToken);
+  try {
+    return expected === undefined ||
+      expected === managedSessionBindingToken(session);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Classify callback state only after the Turn has been proven to belong to the
  * exact current binding generation. Undefined is deliberately fail-closed.
  */
@@ -368,6 +391,62 @@ export function humanExplicitCallbackDebtDisposition(
   const rollout = isCompleteNativeRollout(takeover?.terminal_agent_rollout)
     ? takeover.terminal_agent_rollout
     : undefined;
+  const terminalControlMatches = Boolean(
+    takeover?.terminal_control &&
+    sameTerminalControlEvidenceIncarnation(
+      takeover.terminal_control,
+      binding?.terminal_control
+    ) &&
+    (
+      takeover.terminal_endpoint === undefined ||
+      sameTerminalControlEvidenceIncarnation(
+        takeover.terminal_endpoint,
+        binding?.terminal_endpoint ?? binding?.terminal_control
+      )
+    )
+  );
+  const turnStoreDir = stringValue(turn.store_dir);
+  const submissionStoreDir = stringValue(submission?.store_dir);
+  const exactSubmission = Boolean(
+    submission?.status === "agent_accepted" &&
+    stringValue(submission.session_id) === session.session_id &&
+    stringValue(submission.turn_id) === turnIdForConversation(turn) &&
+    stringValue(submission.binding_id) === binding?.binding_id &&
+    Number(submission.binding_generation) === binding?.generation &&
+    stringValue(submission.native_thread_id) === binding?.native_thread_id &&
+    stringValue(submission.executor_kind) === "codex" &&
+    stringValue(submission.openclaw_session) === turn.openclaw_session &&
+    stringValue(submission.terminal_target) === binding?.terminal_control.target &&
+    (submission.terminal_socket_path ?? undefined) ===
+      (binding?.terminal_control.socketPath ?? undefined) &&
+    Number(submission.terminal_pane_pid) === binding?.terminal_control.panePid &&
+    (
+      submission.terminal_endpoint === undefined ||
+      sameTerminalControlEvidenceIncarnation(
+        submission.terminal_endpoint,
+        binding?.terminal_endpoint ?? binding?.terminal_control
+      )
+    ) &&
+    path.resolve(turn.workspace) === path.resolve(session.workspace) &&
+    (
+      turnStoreDir === undefined
+        ? submissionStoreDir === undefined
+        : submissionStoreDir !== undefined &&
+          path.resolve(submissionStoreDir) === path.resolve(turnStoreDir)
+    )
+  );
+  let callbackMessageValid = false;
+  if (callbackMessage) {
+    try {
+      validateMessageForConversation(
+        turn,
+        callbackMessage as unknown as AgentMessage
+      );
+      callbackMessageValid = true;
+    } catch {
+      // Corrupt or cross-Turn callback payloads are never superseded.
+    }
+  }
   const exactBinding = Boolean(
     session.agent === "codex" &&
     session.status === "bound" &&
@@ -385,28 +464,37 @@ export function humanExplicitCallbackDebtDisposition(
     takeover?.terminal_agent_process_birth ===
       binding.native_process.process_birth &&
     rolloutFileIdentityMatches(binding.native_process.rollout, rollout) &&
-    terminalControlEvidenceMatches(
-      takeover?.terminal_endpoint ?? takeover?.terminal_control,
-      binding.terminal_control,
-      { requireProcessAnchor: true }
-    )
+    terminalControlMatches
   );
+  const notificationDelivery = isRecord(turn.callback_notification_delivery)
+    ? turn.callback_notification_delivery
+    : undefined;
+  const notificationDebtSettled = notificationDelivery === undefined ||
+    notificationDelivery.status === "delivered" ||
+    (
+      notificationDelivery.status === "superseded" &&
+      stringValue(notificationDelivery.superseded_at) !== undefined &&
+      stringValue(notificationDelivery.superseded_reason) !== undefined &&
+      !callbackDeliveryHasAcceptedTransport(notificationDelivery)
+    );
   const noInteractiveDebt = Boolean(
     takeover &&
     takeover.terminal_bridge_interaction_notification === undefined &&
     takeover.terminal_bridge_interaction_dispatch === undefined &&
     takeover.terminal_bridge_approval === undefined &&
     takeover.terminal_bridge_approval_dispatch === undefined &&
-    turn.callback_notification_delivery === undefined
+    notificationDebtSettled
   );
   if (
     !exactBinding ||
+    !exactSubmission ||
     !isTerminalDispatchOwnerReleasedStatus(turn.status) ||
-    !noInteractiveDebt ||
-    submission?.status !== "agent_accepted" ||
-    !callbackDelivery
+    !noInteractiveDebt
   ) {
     return undefined;
+  }
+  if (!callbackDelivery) {
+    return callbackExpectedForPrimaryOutbox(turn) ? undefined : "settled";
   }
   if (callbackDelivery.status === "delivered") {
     return "settled";
@@ -420,13 +508,43 @@ export function humanExplicitCallbackDebtDisposition(
   ) {
     return "settled";
   }
-  return ["pending", "failed"].includes(
-    String(callbackDelivery.status ?? "")
-  ) &&
+  const outcomePresent = Object.hasOwn(callbackDelivery, "attempt_outcome");
+  let attemptOutcome: ReturnType<typeof callbackDeliveryAttemptOutcome>;
+  try {
+    attemptOutcome = callbackDeliveryAttemptOutcome(callbackDelivery);
+  } catch {
+    return undefined;
+  }
+  const transportNotStarted =
+    stringValue(callbackDelivery.transport_started_at) === undefined &&
+    callbackDelivery.attempt_pid == null &&
+    stringValue(callbackDelivery.attempt_lease_expires_at) === undefined;
+  // Human-priority Send deliberately retires a failed lifecycle callback with
+  // a valid non-accepted result, including `uncertain`. In that case the old
+  // callback may already have reached the controller: supersede means only
+  // "do not retry this obsolete completion", never "proven undelivered".
+  const safelyOverrideableStatus = callbackDelivery.status === "failed"
+    ? (
+        attemptOutcome !== undefined &&
+        attemptOutcome.disposition !== "accepted"
+      )
+    : callbackDelivery.status === "pending" &&
+      !outcomePresent &&
+      transportNotStarted;
+  return safelyOverrideableStatus &&
     !callbackDeliveryHasAcceptedTransport(callbackDelivery) &&
+    callbackMessageValid &&
     callbackMessage &&
     ["done", "error"].includes(String(callbackMessage.type ?? "")) &&
-    callbackMessage.requires_response === false
+    callbackMessage.requires_response === false &&
+    (
+      stringValue(callbackDelivery.kind) === undefined ||
+      callbackDelivery.kind === "lifecycle"
+    ) &&
+    (
+      stringValue(callbackDelivery.final_status) === undefined ||
+      callbackDelivery.final_status === turn.status
+    )
     ? "supersedable"
     : undefined;
 }
