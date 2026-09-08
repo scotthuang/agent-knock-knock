@@ -32,6 +32,7 @@ import {
 import {
   captureCodexCandidateSetRolloutAcceptanceAnchor,
   captureCodexRolloutAcceptanceAnchor,
+  detectCodexBoundQuestionnaireAttribution,
   detectCodexBoundRolloutCompletion,
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
@@ -1585,12 +1586,7 @@ function fallbackQuestionnaireObservation(input: {
     input.exactTerminal.state !== "available" ||
     !input.rawTerminal ||
     !input.projectedTerminal ||
-    !input.terminalMatches ||
-    !fallbackQuestionnaireContextMatches(
-      input.watch,
-      input.rawTerminal,
-      input.observationCheckpoint
-    )
+    !input.terminalMatches
   ) {
     return undefined;
   }
@@ -1607,6 +1603,14 @@ function fallbackQuestionnaireObservation(input: {
     screen
   });
   if (inspection.status === "none") return undefined;
+  if (!fallbackQuestionnaireContextMatches(
+    input.watch,
+    input.rawTerminal,
+    input.observationCheckpoint,
+    inspection
+  )) {
+    return undefined;
+  }
 
   const manualInteraction = terminalWatchManualInteractionSummary(inspection);
   return {
@@ -1640,7 +1644,8 @@ function fallbackQuestionnaireObservation(input: {
 function fallbackQuestionnaireContextMatches(
   watch: TerminalWatch,
   terminal: Record<string, unknown>,
-  checkpoint: TerminalWatchObservationCheckpoint
+  checkpoint: TerminalWatchObservationCheckpoint,
+  inspection: Exclude<NativeQuestionnaireInspection, { status: "none" }>
 ): boolean {
   if (
     watch.anchor.schema !==
@@ -1652,12 +1657,14 @@ function fallbackQuestionnaireContextMatches(
     !("schema" in checkpoint) ||
     checkpoint.schema !==
       "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint" ||
-    !checkpoint.accepted_identity
+    !checkpoint.accepted_identity ||
+    !checkpoint.acceptance_evidence
   ) {
     return false;
   }
   const accepted = checkpoint.accepted_identity;
-  return stringValue(terminal.native_agent_session_id)?.toLowerCase() ===
+  const exactLiveContext =
+    stringValue(terminal.native_agent_session_id)?.toLowerCase() ===
       accepted.native_thread_id &&
     stringValue(terminal.native_agent_process_uuid) === accepted.process_uuid &&
     stringValue(terminal.native_agent_process_birth) === accepted.process_birth &&
@@ -1665,6 +1672,39 @@ function fallbackQuestionnaireContextMatches(
       terminal.native_agent_rollout,
       accepted.rollout
     );
+  if (exactLiveContext) return true;
+
+  const inventory = terminal._codex_open_root_rollout_inventory;
+  if (!isRecord(inventory)) return false;
+  const attribution = detectCodexBoundQuestionnaireAttribution({
+    currentInventory: inventory as unknown as CodexOpenRootRolloutInventory,
+    acceptedIdentity: {
+      sessionId: accepted.native_thread_id,
+      processUuid: accepted.process_uuid,
+      processBirth: accepted.process_birth,
+      rollout: accepted.rollout
+    },
+    acceptanceId: checkpoint.acceptance_evidence.acceptanceId,
+    screen: {
+      currentStep: inspection.current_step,
+      totalSteps: inspection.total_steps,
+      prompt: inspection.question.prompt,
+      responseKind: inspection.question.response_kind,
+      ...(inspection.question.options
+        ? {
+            options: inspection.question.options.map((option) => ({
+              label: option.label,
+              ...(option.description
+                ? { description: option.description }
+                : {})
+            }))
+          }
+        : {}),
+      exactShape: inspection.status === "actionable" &&
+        inspection.question.response_kind !== "multi_select"
+    }
+  });
+  return attribution.status === "matched";
 }
 
 function terminalWatchScreenExcerpt(

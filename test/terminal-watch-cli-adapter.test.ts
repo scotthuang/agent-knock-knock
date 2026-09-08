@@ -342,6 +342,147 @@ test("accepted unmanaged fallback notifies each Codex questionnaire once without
   );
 });
 
+test("fallback Watch attributes its accepted questionnaire across ambiguous Codex roots", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const otherThreadId = "019f0000-0000-7000-8000-000000000293";
+  const otherRolloutPath = path.join(
+    path.dirname(fixture.rolloutPath),
+    "ambiguous-other-rollout.jsonl"
+  );
+  fs.writeFileSync(otherRolloutPath, `${JSON.stringify({
+    timestamp: "2026-08-21T01:00:00.050Z",
+    type: "session_meta",
+    payload: {
+      id: otherThreadId,
+      timestamp: "2026-08-21T01:00:00.050Z",
+      cwd: path.dirname(fixture.rolloutPath),
+      originator: "codex-tui",
+      source: "cli",
+      cli_version: "0.153.4"
+    }
+  })}\n`, { mode: 0o600 });
+  const otherStat = fs.statSync(otherRolloutPath);
+  const processUuid = String(fixture.terminal.native_agent_process_uuid);
+  const processBirth = String(fixture.terminal.native_agent_process_birth);
+  const acceptedRoot = {
+    sessionId: String(fixture.terminal.native_agent_session_id),
+    processUuid,
+    processBirth,
+    rollout: structuredClone(record(fixture.terminal.native_agent_rollout)),
+    evidence: "codex_open_root_rollout" as const
+  };
+  const otherRoot = {
+    sessionId: otherThreadId,
+    processUuid,
+    processBirth,
+    rollout: {
+      fd: "52r",
+      device: String(otherStat.dev),
+      inode: String(otherStat.ino),
+      path: otherRolloutPath
+    },
+    evidence: "codex_open_root_rollout" as const
+  };
+  let terminal: Record<string, any> = {
+    ...fixture.terminal,
+    _codex_open_root_rollout_inventory: codexInventoryForTerminal(
+      fixture.terminal,
+      [acceptedRoot, otherRoot]
+    )
+  };
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:fallback-multi-root-questionnaire",
+    openclawBin: "/opt/openclaw/bin/openclaw"
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000293",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  const request = "Ask this exact Codex turn a native question";
+  const options = { storeDir: fixture.storeDir, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(terminal.id),
+      agent: "codex",
+      pid: Number(terminal.pid),
+      terminalControl: terminal.terminal_control as never
+    },
+    requestHash: createHash("sha256").update(request).digest("hex"),
+    messageId: "message-fallback-multi-root-questionnaire",
+    physicalToken: "8".repeat(64)
+  });
+  assert.ok(prepared);
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+
+  const acceptedTurnId = "019f0000-0000-7000-8000-000000000292";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    [
+      ...fallbackAcceptedTurnRecords(request, acceptedTurnId),
+      fallbackRequestUserInputRecord(
+        acceptedTurnId,
+        "fallback-questionnaire-call-292"
+      )
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+
+  fixture.advance();
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 0);
+  assert.ok(
+    loadTerminalWatch(fixture.storeDir, prepared.watchId)
+      .observation_checkpoint &&
+      "accepted_identity" in loadTerminalWatch(
+        fixture.storeDir,
+        prepared.watchId
+      ).observation_checkpoint
+  );
+
+  const ambiguousAcceptedRoot = {
+    ...acceptedRoot,
+    rollout: { ...acceptedRoot.rollout, fd: "91r" }
+  };
+  terminal = withTerminalWatchScreen({
+    ...terminal,
+    native_agent_session_id: undefined,
+    native_agent_rollout: undefined,
+    _codex_open_root_rollout_inventory: codexInventoryForTerminal(
+      terminal,
+      [ambiguousAcceptedRoot, otherRoot]
+    )
+  }, CODEX_FALLBACK_QUESTION_ONE);
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 1);
+  assert.equal(
+    deliveries[0].envelope.event.type,
+    "interaction_manual_required"
+  );
+});
+
 test("fallback Watch never attributes a questionnaire from another Codex thread", async (t) => {
   const fixture = createFixture(t, "human-only", "0.153.4");
   const deliveries: CallbackTransportDeliverInput[] = [];
@@ -2760,6 +2901,44 @@ function fallbackAcceptedTurnRecords(
   ];
 }
 
+function fallbackRequestUserInputRecord(
+  turnId: string,
+  callId: string
+): unknown {
+  return {
+    timestamp: "2026-08-21T01:00:01.500Z",
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "request_user_input",
+      call_id: callId,
+      arguments: JSON.stringify({
+        questions: [
+          {
+            id: "framework",
+            header: "Framework",
+            question: "Choose a framework.",
+            options: [
+              { label: "React", description: "Component model." },
+              { label: "Vue", description: "Progressive framework." }
+            ]
+          },
+          {
+            id: "runner",
+            header: "Test runner",
+            question: "Choose a test runner.",
+            options: [
+              { label: "Vitest", description: "Fast feedback." },
+              { label: "Node test", description: "Built in." }
+            ]
+          }
+        ]
+      }),
+      internal_chat_message_metadata_passthrough: { turn_id: turnId }
+    }
+  };
+}
+
 function createFixture(
   t: test.TestContext,
   rootUserRowOrder: RootUserRowOrder = "human-only",
@@ -2940,7 +3119,10 @@ function codexInventoryForTerminal(
   return {
     ...authority,
     status: roots.length === 0 ? "verified_absent" as const :
-      "resolved" as const,
+      roots.length === 1 ? "resolved" as const : "unbound" as const,
+    ...(roots.length > 1
+      ? { reason: "multiple_open_root_rollouts" as const }
+      : {}),
     inventoryFingerprint: createHash("sha256")
       .update(JSON.stringify(authority))
       .digest("hex")
