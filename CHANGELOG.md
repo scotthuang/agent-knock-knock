@@ -5,7 +5,7 @@
 ### Fixed
 
 - Derive a guarded Codex custom-text choice when `0.153.4` renders only its client-generated `None of the above` row. The derived action uses native Other's Accept-to-Notes path, while the native Other semantic choice keeps its distinct direct-submit behavior.
-- Join Codex option-description continuations only when a narrow pane wraps them at the exact native description column, so final `enter to submit all` questions remain actionable without accepting ambiguous layouts.
+- Join Codex option-description continuations only when a narrow pane wraps them at the exact native description column without crossing a physical blank frame boundary, so final `enter to submit all` questions remain actionable without accepting ambiguous layouts.
 - Treat an elapsed interaction projection timestamp as a mandatory live-recapture boundary instead of terminal-questionnaire death. OpenClaw and CLI responses proceed only when the same Turn, owner, terminal identity, prompt fingerprint, semantic projection, and action plan are proven again under lock.
 
 ### Security

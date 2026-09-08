@@ -881,10 +881,24 @@ function parseCodexHeader(line: string): CodexHeader | undefined {
 function parseCodexOptionLines(
   lines: readonly string[]
 ): ParsedOptionRow[] | undefined {
-  const nonBlank = lines.filter((line) => line.length > 0);
+  const firstNonBlank = lines.findIndex((line) => line.length > 0);
+  if (firstNonBlank < 0) {
+    return undefined;
+  }
+  let lastNonBlank = lines.length - 1;
+  while (lastNonBlank > firstNonBlank && lines[lastNonBlank]?.length === 0) {
+    lastNonBlank -= 1;
+  }
+  const optionLines = lines.slice(firstNonBlank, lastNonBlank + 1);
+  // A physical blank line is a native frame boundary, never a soft-wrap
+  // continuation. Preserve that boundary so unrelated same-column text cannot
+  // inherit the preceding option's description authority.
+  if (optionLines.some((line) => line.length === 0)) {
+    return undefined;
+  }
   const options: ParsedOptionRow[] = [];
   const descriptionColumns: Array<number | undefined> = [];
-  for (const line of nonBlank) {
+  for (const line of optionLines) {
     const match = /^  (› |  )([1-4])\. (.+)$/u.exec(line);
     if (!match?.[2] || !match[3]) {
       const continuation = /^( +)(\S.*)$/u.exec(line);

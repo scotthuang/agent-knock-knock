@@ -496,6 +496,19 @@ test("Codex rejects malformed option-description continuation indentation", () =
   assert.deepEqual(changed.action_plan, { kind: "manual_only" });
 });
 
+test("Codex rejects same-column text after an internal blank option boundary", () => {
+  const changed = manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_WRAPPED_DESCRIPTION_OPTIONS.replace(
+      "reduce\n                                     ambiguity.",
+      "reduce\n\n                                     unrelated status text."
+    )
+  }));
+  assert.equal(changed.reason, "changed_shape");
+  assert.deepEqual(changed.action_plan, { kind: "manual_only" });
+});
+
 test("Codex custom-text aliases require the exact native Other authority", () => {
   const aliasOnly = manual(inspectNativeQuestionnaire({
     agent: "codex",
