@@ -2188,7 +2188,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.match(
       sendTool?.description ?? "",
-      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*parsed working activity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no managed callback Turn[\s\S]*Terminal Watch callback/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned non-blocked approval state[\s\S]*no active native questionnaire[\s\S]*parsed working activity[\s\S]*Codex rollout ambiguity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*source-less Codex terminal[\s\S]*provisional Session\/Turn[\s\S]*managed preparation fails[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*no interaction response authority/u
     );
     const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
     assert.match(
@@ -3602,13 +3602,22 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     const fallbackResult = {
       delivered: true,
       delivered_unmanaged: true,
+      terminal_input_dispatched: true,
+      agent_acceptance: "unproven",
       callback_expected: true,
       callback_mode: "terminal_watch",
       watch_id: "terminal-watch-user-send-fixture",
       terminal_id: terminalId,
       message_id: "message-user-priority-send",
       scope: "terminal_user_explicit",
-      management_mode: "unmanaged_fallback"
+      management_mode: "unmanaged",
+      observation_mode: "terminal_watch",
+      capabilities: {
+        callback: true,
+        interaction_notify: true,
+        interaction_respond: false
+      },
+      legacy_management_mode: "unmanaged_fallback"
     };
     const managedReplayResult = {
       delivered: true,
@@ -3792,7 +3801,7 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
   }
 });
 
-test("OpenClaw surfaces delivered-but-unfenced sends as errors that must not be retried", async () => {
+test("OpenClaw reports delivered-but-unfenced sends as successful dispatches that must not be retried", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-unfenced-"));
   const fakeCli = path.join(tempDir, "unfenced.cjs");
   let command:
@@ -3853,7 +3862,7 @@ test("OpenClaw surfaces delivered-but-unfenced sends as errors that must not be 
         args,
         sessionKey: "agent:test:unfenced"
       });
-      assert.equal(result?.isError, true, args);
+      assert.notEqual(result?.isError, true, args);
       assert.match(result?.text ?? "", /could not bind|could not fence/u, args);
       assert.match(result?.text ?? "", /do not retry/u, args);
       assert.doesNotMatch(result?.text ?? "", /yield now/u, args);
@@ -3863,8 +3872,11 @@ test("OpenClaw surfaces delivered-but-unfenced sends as errors that must not be 
     const toolResponse = await sendTool?.execute?.("unfenced-send", {
       request: "Inspect the repository"
     });
-    assert.equal(toolResponse?.isError, true);
+    assert.notEqual(toolResponse?.isError, true);
     assert.equal(toolResponse?.details?.status, "submission_unfenced");
+    assert.equal(toolResponse?.details?.delivered, true);
+    assert.equal(toolResponse?.details?.terminal_input_dispatched, true);
+    assert.equal(toolResponse?.details?.agent_acceptance, "unproven");
     assert.equal(toolResponse?.details?.do_not_retry, true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
