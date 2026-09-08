@@ -515,6 +515,17 @@ test("response rejects expired, disabled, batched, and multiline input", () => {
     "expired",
     "$.expires_at"
   );
+  assert.deepEqual(
+    validateTerminalInteractionResponse(
+      response([selectAnswer]),
+      projection({ expires_at: "2026-09-07T00:00:00.000Z" }),
+      {
+        now: new Date("2026-09-07T00:00:01.000Z"),
+        allowExpiredForLiveRecapture: true
+      }
+    ).answers,
+    [selectAnswer]
+  );
   expectValidationError(
     () => validateTerminalInteractionResponse(
       response([selectAnswer]),

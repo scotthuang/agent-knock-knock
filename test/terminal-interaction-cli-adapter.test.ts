@@ -512,13 +512,25 @@ test("zero-input cleanup never overwrites a different durable reservation", asyn
   assert.equal(subject.calls.filter((call) => call === "save").length, 1);
 });
 
-test("expired offers and invalid response JSON fail before terminal input", async () => {
+test("an expired displayed timestamp reaches the bridge live-recapture path", async () => {
+  const subject = harness({ bridge: successfulBridge() });
+  await subject.facade.runRespondInteraction(options({
+    expectedInteractionExpiresAt: NOW.toISOString()
+  }));
+
+  assert.equal(subject.current().status, "waiting_for_agent");
+  assert.equal(subject.printed[0]?.responded, true);
+  assert.ok(subject.calls.includes("owner"));
+  assert.ok(subject.calls.includes("save"));
+});
+
+test("invalid expiry timestamps and response JSON fail before terminal input", async () => {
   const subject = harness({ bridge: successfulBridge() });
   await assert.rejects(
     () => subject.facade.runRespondInteraction(options({
-      expectedInteractionExpiresAt: NOW.toISOString()
+      expectedInteractionExpiresAt: "not-a-timestamp"
     })),
-    /unexpired timestamp/u
+    /valid timestamp/u
   );
   await assert.rejects(
     () => subject.facade.runRespondInteraction(options({

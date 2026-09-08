@@ -118,7 +118,8 @@ For each response AKK:
 
 1. acquires terminal, Store-writer, and Turn-state locks in canonical order;
 2. revalidates owner, Turn status, binding generation, process/native identity,
-   expiry, and the current private interaction offer;
+   and the current private interaction offer; an elapsed displayed expiry
+   forces this live revalidation but does not claim the native prompt died;
 3. recaptures the screen and requires the same exact prompt fingerprint;
 4. resolves opaque semantic ids to an adapter-owned input plan;
 5. reserves the response durably before possible terminal input;
@@ -168,14 +169,15 @@ The installed client matches the current official TUI protocol:
 
 - `RequestUserInput` contains 1-3 questions with 2-3 options and automatic
   Other;
-- numeric selection advances a choice question;
+- numeric selection advances an ordinary choice question, but would bypass
+  Notes and submit the literal label for the native Other row;
 - the client-generated `None of the above` row is Codex's canonical Notes
-  carrier; a guarded model-provided `Type something.` alias is treated as a
-  custom-answer request only when that exact native Other row proves the known
-  surface;
-- choosing that alias moves to the native Other row with bounded cursor
-  movement and opens Notes with `Tab`, never submitting the alias's literal
-  label; choosing native Other itself remains an ordinary direct selection;
+  carrier; when the model did not supply a `Type something.` alias, AKK derives
+  that separate semantic free-text choice beside the proven native row;
+- choosing the guarded or derived free-text choice moves to native Other with
+  bounded cursor movement and invokes Codex's native Accept action, which
+  opens Notes without submitting a literal label; choosing native Other itself
+  retains its distinct numeric direct-submit behavior;
 - the recaptured empty `Add notes` composer becomes a separate free-text
   interaction step;
 - Codex submits that text as `user_note: ...` alongside `None of the above`;

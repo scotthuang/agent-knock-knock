@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.37 - 2026-09-08
+
+### Fixed
+
+- Derive a guarded Codex custom-text choice when `0.153.4` renders only its client-generated `None of the above` row. The derived action uses native Other's Accept-to-Notes path, while the native Other semantic choice keeps its distinct direct-submit behavior.
+- Join Codex option-description continuations only when a narrow pane wraps them at the exact native description column without crossing a physical blank frame boundary, so final `enter to submit all` questions remain actionable without accepting ambiguous layouts.
+- Treat an elapsed interaction projection timestamp as a mandatory live-recapture boundary instead of terminal-questionnaire death. OpenClaw and CLI responses proceed only when the same Turn, owner, terminal identity, prompt fingerprint, semantic projection, and action plan are proven again under lock.
+
+### Security
+
+- Keep the public expiry validator fail-closed by default and allow stale-shape validation only in internal dispatch paths that always perform exact live terminal recapture before reservation or input. Changed or missing prompts continue to send zero input.
+
 ## 0.12.36 - 2026-09-08
 
 ### Fixed

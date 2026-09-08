@@ -98,6 +98,40 @@ const CODEX_CUSTOM_TEXT_EDIT = `
   tab or esc to clear notes | enter to submit all
 `;
 
+const CODEX_NATIVE_OTHER_OPTIONS = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+  › 1. Clear defaults (Recommended)  Use the default configuration.
+    2. None of the above  Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`;
+
+const CODEX_WRAPPED_DESCRIPTION_OPTIONS = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+  › 1. Clear defaults (Recommended)  Prioritize predictable behavior and reduce
+                                     ambiguity.
+    2. Detailed guidance  Explain every relevant tradeoff.
+    3. None of the above  Optionally, add details in notes (tab).
+
+  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`;
+
+const CODEX_NATIVE_OTHER_TEXT_EDIT = `
+  Question 2/2 (1 unanswered)
+  In one sentence: what makes a great developer experience?
+
+    1. Clear defaults (Recommended)  Use the default configuration.
+  › 2. None of the above  Optionally, add details in notes (tab).
+
+  › Add notes
+
+  tab or esc to clear notes | enter to submit all
+`;
+
 const CODEX_UNANSWERED_CONFIRM = `
   Submit with unanswered questions?
   2 unanswered questions
@@ -334,7 +368,7 @@ test("Codex exact multi-question freeform is actionable one step at a time", () 
 test("Codex guarded custom choices open notes before exposing free text", () => {
   assert.equal(
     NATIVE_QUESTIONNAIRE_PROFILES.codex,
-    "codex/0.153.4/request-user-input-v2"
+    "codex/0.153.4/request-user-input-v3"
   );
   const choice = actionable(inspectNativeQuestionnaire({
     agent: "codex",
@@ -355,7 +389,7 @@ test("Codex guarded custom choices open notes before exposing free text", () => 
       )
     })), [
       { outcome: "submit_or_advance", keys: ["1"] },
-      { outcome: "open_custom_text", keys: ["Down", "Down", "Tab"] },
+      { outcome: "open_custom_text", keys: ["Down", "Down", "C-m"] },
       { outcome: "submit_or_advance", keys: ["3"] }
     ]);
   }
@@ -377,6 +411,102 @@ test("Codex guarded custom choices open notes before exposing free text", () => 
   });
   assert.notEqual(editor.question.question_id, choice.question.question_id);
   assert.notEqual(editor.prompt_evidence.sha256, choice.prompt_evidence.sha256);
+});
+
+test("Codex derives a Notes choice while preserving native Other direct selection", () => {
+  const choice = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_NATIVE_OTHER_OPTIONS
+  }));
+  assert.deepEqual(
+    choice.question.options?.map((option) => option.label),
+    [
+      "Clear defaults (Recommended)",
+      "Type something.",
+      "None of the above"
+    ]
+  );
+  assert.equal(choice.action_plan.kind, "single_select");
+  if (choice.action_plan.kind === "single_select") {
+    assert.deepEqual(choice.action_plan.choices.map((item) => ({
+      outcome: item.outcome,
+      keys: item.stages.map((stage) =>
+        stage.kind === "key" ? stage.key : "text"
+      )
+    })), [
+      { outcome: "submit_or_advance", keys: ["1"] },
+      { outcome: "open_custom_text", keys: ["Down", "C-m"] },
+      { outcome: "submit_or_advance", keys: ["2"] }
+    ]);
+  }
+
+  const editor = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_NATIVE_OTHER_TEXT_EDIT
+  }));
+  assert.equal(editor.question.response_kind, "free_text");
+  assert.equal(editor.question.required, true);
+  assert.equal(editor.action_plan.kind, "free_text");
+});
+
+test("Codex joins exact-column wrapped option descriptions on the final question", () => {
+  const wrapped = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_WRAPPED_DESCRIPTION_OPTIONS
+  }));
+  const unwrapped = actionable(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_WRAPPED_DESCRIPTION_OPTIONS.replace(
+      "reduce\n                                     ambiguity.",
+      "reduce ambiguity."
+    )
+  }));
+
+  assert.deepEqual([wrapped.current_step, wrapped.total_steps], [2, 2]);
+  assert.equal(
+    wrapped.prompt_evidence.footer,
+    "  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt"
+  );
+  assert.deepEqual(wrapped.question, unwrapped.question);
+  assert.deepEqual(wrapped.action_plan, unwrapped.action_plan);
+  assert.equal(
+    wrapped.question.options?.[0]?.description,
+    "Prioritize predictable behavior and reduce ambiguity."
+  );
+  assert.notEqual(
+    wrapped.prompt_evidence.sha256,
+    unwrapped.prompt_evidence.sha256
+  );
+});
+
+test("Codex rejects malformed option-description continuation indentation", () => {
+  const changed = manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_WRAPPED_DESCRIPTION_OPTIONS.replace(
+      "                                     ambiguity.",
+      "                                    ambiguity."
+    )
+  }));
+  assert.equal(changed.reason, "changed_shape");
+  assert.deepEqual(changed.action_plan, { kind: "manual_only" });
+});
+
+test("Codex rejects same-column text after an internal blank option boundary", () => {
+  const changed = manual(inspectNativeQuestionnaire({
+    agent: "codex",
+    version: "0.153.4",
+    screen: CODEX_WRAPPED_DESCRIPTION_OPTIONS.replace(
+      "reduce\n                                     ambiguity.",
+      "reduce\n\n                                     unrelated status text."
+    )
+  }));
+  assert.equal(changed.reason, "changed_shape");
+  assert.deepEqual(changed.action_plan, { kind: "manual_only" });
 });
 
 test("Codex custom-text aliases require the exact native Other authority", () => {
