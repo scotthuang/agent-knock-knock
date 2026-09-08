@@ -166,6 +166,43 @@ test("terminal command facade preserves fake-port order and isolates async runti
   ]);
 });
 
+test("human-explicit callback debt is fenced under the Turn lock before deferred authority", () => {
+  const supersede = compiledFunctionSource(
+    "supersedeExactHumanExplicitCallbackDebt",
+    "prepareRawTerminalDispatchAuthority"
+  );
+  assertOrdered(supersede, [
+    "expectedUserExplicitTerminalToken",
+    "expectedManagedToken !== undefined",
+    "exactBoundCodexSendSource",
+    "sessionHasUnresolvedForegroundMutation",
+    "humanExplicitCallbackDebtDisposition",
+    "withTerminalDispatchStateScope",
+    "loadState",
+    "JSON.stringify(current.callback_delivery) !== expectedDelivery",
+    "supersedeUnacceptedCallbackDeliveries",
+    "saveState",
+    "callback_delivery_superseded_by_user_explicit_send"
+  ]);
+  const authority = compiledFunctionSource(
+    "prepareRawTerminalDispatchAuthority",
+    "runManagedRawTerminalSendAttempt"
+  );
+  assertOrdered(authority, [
+    "inspectCodexOpenRootRolloutInventory",
+    "supersedeExactHumanExplicitCallbackDebt",
+    "prepareDeferredCodexForegroundBinding"
+  ]);
+  assert.match(
+    authority,
+    /managed continuation authority is unavailable/u
+  );
+  assert.doesNotMatch(
+    authority,
+    /expected terminal token no longer authorizes/u
+  );
+});
+
 test("exact Turn submission retry rejects mixed send options before terminal resolution", async () => {
   const events: string[] = [];
   const gate = deferredGate();

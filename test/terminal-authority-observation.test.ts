@@ -11,6 +11,7 @@ import {
 import {
   deferredCandidateSourceTurnHistory,
   deferredCodexForegroundDispatchSnapshot,
+  humanExplicitCallbackDebtDisposition,
   observeDeferredCodexAuthority,
   type DeferredForegroundAuthorityAdapterPorts
 } from "../src/deferred-foreground-authority-cli-adapter.js";
@@ -797,6 +798,137 @@ test("candidate history keeps current-generation callback and attention gates", 
       source
     ), undefined, fixture.name);
   }
+});
+
+test("human-explicit callback supersede is exact, terminal, and fail-closed", () => {
+  const base = session("session-callback-debt");
+  const source: ManagedSessionState = {
+    ...base,
+    binding: {
+      ...base.binding!,
+      binding_id: "binding-callback-debt",
+      generation: 7,
+      native_thread_id: THREAD_A,
+      native_process: {
+        ...base.binding!.native_process,
+        rollout: {
+          fd: "31",
+          device: "1",
+          inode: "301",
+          path: "/repo/callback-debt.jsonl"
+        }
+      }
+    }
+  };
+  const debt = (): Conversation => ({
+    ...createConversation({
+      userRequest: "completed managed request",
+      sessionId: source.session_id,
+      turnId: "turn-callback-debt",
+      workspace: source.workspace,
+      executorKind: "codex",
+      now: new Date("2026-09-08T22:10:37.000Z")
+    }),
+    status: "idle",
+    terminal_binding_id: source.binding!.binding_id,
+    terminal_binding_generation: source.binding!.generation,
+    native_thread_id: THREAD_A,
+    callback_delivery: {
+      status: "failed",
+      message: {
+        type: "done",
+        requires_response: false
+      }
+    },
+    native_session_takeover: {
+      terminal_binding_id: source.binding!.binding_id,
+      terminal_binding_generation: source.binding!.generation,
+      terminal_agent_session_id: THREAD_A,
+      terminal_agent_pid: source.binding!.native_process.pid,
+      terminal_agent_process_uuid:
+        source.binding!.native_process.process_uuid,
+      terminal_agent_process_birth:
+        source.binding!.native_process.process_birth,
+      terminal_agent_rollout: source.binding!.native_process.rollout,
+      terminal_control: source.binding!.terminal_control,
+      terminal_bridge_submission: { status: "agent_accepted" }
+    }
+  });
+
+  const candidate = debt();
+  assert.equal(
+    humanExplicitCallbackDebtDisposition(candidate, source),
+    "supersedable"
+  );
+  for (const status of ["waiting_for_openclaw", "stalled"] as const) {
+    assert.equal(
+      humanExplicitCallbackDebtDisposition({ ...candidate, status }, source),
+      undefined,
+      status
+    );
+  }
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    callback_delivery: {
+      ...(candidate.callback_delivery as Record<string, unknown>),
+      attempt_outcome: {
+        disposition: "accepted",
+        accepted_at: "2026-09-08T22:17:59.000Z",
+        acceptance_id: "accepted-controller-callback"
+      }
+    }
+  }, source), undefined, "accepted controller transport is immutable");
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    native_thread_id: THREAD_B
+  }, source), undefined, "binding identity drift rejects supersede");
+  assert.equal(humanExplicitCallbackDebtDisposition({
+    ...candidate,
+    native_session_takeover: {
+      ...(candidate.native_session_takeover as Record<string, unknown>),
+      terminal_bridge_interaction_notification: { state: "pending" }
+    }
+  }, source), undefined, "pending interaction rejects supersede");
+
+  const superseded: Conversation = {
+    ...candidate,
+    callback_delivery: {
+      ...(candidate.callback_delivery as Record<string, unknown>),
+      status: "superseded",
+      superseded_at: "2026-09-08T22:18:00.000Z",
+      superseded_reason: "superseded_by_user_explicit_send"
+    }
+  };
+  assert.equal(
+    humanExplicitCallbackDebtDisposition(superseded, source),
+    "settled"
+  );
+  assert.notEqual(
+    deferredCandidateSourceTurnHistory(
+      deferredAuthorityPorts(undefined, { turns: [superseded] }),
+      "/store",
+      source
+    ),
+    undefined,
+    "a safely superseded completion callback no longer poisons history"
+  );
+  assert.equal(deferredCandidateSourceTurnHistory(
+    deferredAuthorityPorts(undefined, {
+      turns: [{
+        ...superseded,
+        callback_delivery: {
+          ...(superseded.callback_delivery as Record<string, unknown>),
+          attempt_outcome: {
+            disposition: "accepted",
+            accepted_at: "2026-09-08T22:17:59.000Z",
+            acceptance_id: "accepted-controller-callback"
+          }
+        }
+      }]
+    }),
+    "/store",
+    source
+  ), undefined, "accepted transport cannot masquerade as safe supersede");
 });
 
 test("send authority preserves verified, external, deferred precedence", () => {

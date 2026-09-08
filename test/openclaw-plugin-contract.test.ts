@@ -1287,6 +1287,7 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   for (const privateCliFence of [
     "--expected-approval-fingerprint",
     "--expected-binding-token",
+    "--expected-managed-terminal-token",
     "--expected-terminal-token",
     "--candidate-token"
   ]) {
@@ -1296,6 +1297,11 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
       `${privateCliFence} remains an adapter-private CLI fence`
     );
   }
+  assert.match(
+    commandSource,
+    /expected_managed_terminal_token[\s\S]*?--expected-managed-terminal-token/u,
+    "the private managed fast-path offer must reach the CLI fence"
+  );
   assert.match(commandSource, /name: "agent_knock_knock_renew"/u);
   assert.match(commandSource, /name: "agent_knock_knock_watch"/u);
   assert.match(commandSource, /name: "agent_knock_knock_unwatch"/u);
@@ -2073,7 +2079,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
         `const result = args[0] === "list" ? { terminals: [{`,
         `  id: terminalId, available_actions: { send: {`,
         `    tool: "agent_knock_knock_send",`,
-        `    arguments: { selector: terminalId, expected_terminal_token: "terminal-token-current", request: "continue" }`,
+        `    arguments: { selector: terminalId, expected_terminal_token: "terminal-token-current", expected_managed_terminal_token: "managed-terminal-token-current", request: "continue" }`,
         `  } }`,
         `}] } : sendResult;`,
         "process.stdout.write(JSON.stringify(result));"
@@ -2356,6 +2362,10 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       "Discover the initial terminal"
     );
     assert.equal(
+      optionValue(calls[3] ?? [], "--expected-managed-terminal-token"),
+      "managed-terminal-token-current"
+    );
+    assert.equal(
       optionValue(calls[3] ?? [], "--message-id"),
       `msg-openclaw-${createHash("sha256").update(JSON.stringify([
         "agent:test:main",
@@ -2422,6 +2432,10 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.equal(
       optionValue(calls[9] ?? [], "--message"),
       "Continue in the human-selected terminal context"
+    );
+    assert.equal(
+      optionValue(calls[9] ?? [], "--expected-managed-terminal-token"),
+      "managed-terminal-token-current"
     );
   } finally {
     await reconciliationService?.stop?.();

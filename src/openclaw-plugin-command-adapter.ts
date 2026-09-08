@@ -1575,6 +1575,9 @@ async function runSendRequest(
         "current internal terminal send authority"
       )
     : undefined;
+  const expectedManagedTerminalToken = terminalAction
+    ? stringValue(terminalAction.expected_managed_terminal_token)
+    : undefined;
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const openclawSession =
     stringValue(toolContext?.sessionKey) ??
@@ -1591,6 +1594,11 @@ async function runSendRequest(
     args,
     "--expected-terminal-token",
     expectedTerminalToken
+  );
+  pushOptional(
+    args,
+    "--expected-managed-terminal-token",
+    expectedManagedTerminalToken
   );
   args.push(
     "--message",

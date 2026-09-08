@@ -13,7 +13,9 @@ import {
   callbackExpectedForConversationWithLegacyFallback,
   callbackRouteFingerprintForConversation
 } from "./callback-route-authority.js";
-import { supersedeUnacceptedCallbackDeliveries } from
+import {
+  supersedeUnacceptedCallbackDeliveries
+} from
   "./callback-outbox-policy.js";
 import {
   captureClaudeTranscriptAnchor,
@@ -35,8 +37,13 @@ import {
 import {
   deferredForegroundActiveMessageId,
   isDeferredForegroundSubmissionRetryPending,
+  listDeferredForegroundTransfers,
   type DeferredForegroundTransfer
 } from "./deferred-foreground-transfer.js";
+import { isFinalDeferredForegroundTransferStatus } from
+  "./deferred-foreground-transfer-policy.js";
+import { humanExplicitCallbackDebtDisposition } from
+  "./deferred-foreground-authority-cli-adapter.js";
 import type {
   CodexOpenRootRolloutInventory
 } from "./agent-session-provider.js";
@@ -84,6 +91,7 @@ import {
   type NativeThreadTransition
 } from "./managed-session.js";
 import {
+  listNativeThreadTransitions,
   listManagedSessions,
   loadManagedSession,
   saveManagedSession,
@@ -130,6 +138,7 @@ import {
 } from "./terminal-binding-authority.js";
 import {
   codexCompanionsPresentInOpenRootInventory,
+  exactBoundCodexSendSource,
   isCompleteNativeRollout,
   nativeIdentityMatchesCodexPreMaterialization,
   terminalControlAliasMatches,
@@ -6268,6 +6277,131 @@ async function runManagedRawTerminalSend(
   }
 }
 
+const USER_EXPLICIT_CALLBACK_SUPERSEDE_REASON =
+  "superseded_by_user_explicit_send";
+
+function sessionHasUnresolvedForegroundMutation(
+  storeDir: string,
+  sessionId: string
+): boolean {
+  try {
+    if (listNativeThreadTransitions(storeDir).some((transition) =>
+      (transition.source_session_id === sessionId ||
+        transition.target_session_id === sessionId) &&
+      !["committed", "aborted"].includes(transition.status)
+    )) {
+      return true;
+    }
+    return listDeferredForegroundTransfers(storeDir).some((transfer) =>
+      (transfer.source_session_id === sessionId ||
+        transfer.target_session_id === sessionId) &&
+      !isFinalDeferredForegroundTransferStatus(transfer.status)
+    );
+  } catch {
+    // Corrupt or unreadable lifecycle evidence must never be bypassed.
+    return true;
+  }
+}
+
+async function supersedeExactHumanExplicitCallbackDebt(input: {
+  options: Record<string, any>;
+  terminal: TerminalCommandTarget;
+  session?: ManagedSessionState;
+  candidateInventory?: CodexOpenRootRolloutInventory;
+  storeDir: string;
+  scopes: CanonicalMutationScopes;
+  resources: CanonicalMutationResources;
+}): Promise<boolean> {
+  const {
+    options, terminal, session, candidateInventory, storeDir, scopes, resources
+  } = input;
+  const expectedManagedToken = stringValue(options.expectedTerminalToken);
+  const binding = session?.binding;
+  if (
+    terminal.agent !== "codex" ||
+    stringValue(options.expectedUserExplicitTerminalToken) === undefined ||
+    expectedManagedToken !== undefined ||
+    !session ||
+    session.status !== "bound" ||
+    !binding ||
+    !candidateInventory ||
+    !exactBoundCodexSendSource({
+      kind: "candidate",
+      sourceSession: session,
+      context: {
+        terminalId: terminal.conversationId,
+        terminalControl: terminal.terminalControl,
+        pid: terminal.pid,
+        workspace: terminal.terminalControl.currentPath,
+        liveProcessUuid: candidateInventory.processUuid,
+        liveProcessBirth: candidateInventory.processBirth
+      },
+      inventory: candidateInventory,
+      sourceRolloutAuthority: "present"
+    }) ||
+    sessionHasUnresolvedForegroundMutation(storeDir, session.session_id)
+  ) {
+    return false;
+  }
+  const bindingTurns = managedTurnsForSession(storeDir, session.session_id)
+    .filter((turn) =>
+      turn.terminal_binding_id === binding.binding_id &&
+      turn.terminal_binding_generation === binding.generation
+    );
+  const dispositions = bindingTurns.map((turn) => ({
+    turn,
+    disposition: humanExplicitCallbackDebtDisposition(turn, session)
+  }));
+  const candidates = dispositions
+    .filter(({ disposition }) => disposition === "supersedable")
+    .map(({ turn }) => turn);
+  if (
+    candidates.length === 0 ||
+    dispositions.some(({ disposition }) => disposition === undefined)
+  ) {
+    return false;
+  }
+  let superseded = 0;
+  for (const candidate of candidates) {
+    const paths = pathsForConversation(candidate.conversation_id, storeDir);
+    const expectedDelivery = JSON.stringify(candidate.callback_delivery);
+    await withTerminalDispatchStateScope(
+      scopes,
+      resources,
+      paths.statePath,
+      paths.logPath,
+      async () => {
+        const current = loadState(paths.statePath);
+        if (
+          JSON.stringify(current.callback_delivery) !== expectedDelivery ||
+          humanExplicitCallbackDebtDisposition(current, session) !==
+            "supersedable"
+        ) {
+          return;
+        }
+        const at = cliNow().toISOString();
+        const next = supersedeUnacceptedCallbackDeliveries(current, {
+          at,
+          reason: USER_EXPLICIT_CALLBACK_SUPERSEDE_REASON
+        });
+        if (next.callback_delivery === current.callback_delivery) return;
+        saveState(paths.statePath, next);
+        appendEvent(paths.logPath, {
+          ts: at,
+          conversation_id: current.conversation_id,
+          event: "callback_delivery_superseded_by_user_explicit_send",
+          status: current.status,
+          reason: USER_EXPLICIT_CALLBACK_SUPERSEDE_REASON,
+          terminal_input_sent: false,
+          terminal_input_dispatched: false
+        });
+        superseded += 1;
+      }
+    );
+  }
+  return superseded === candidates.length;
+}
+
 async function prepareRawTerminalDispatchAuthority(input: {
   options: Record<string, any>;
   messageBody: string;
@@ -6402,6 +6536,17 @@ async function prepareRawTerminalDispatchAuthority(input: {
       !handoff.session?.binding?.native_process.rollout
       ? physicalNativeIdentityBeforeHandoff
       : handoff.identity;
+  if (!handoff.adopted) {
+    await supersedeExactHumanExplicitCallbackDebt({
+      options,
+      terminal,
+      session: claimedSession,
+      candidateInventory: deferredCodexCandidateInventory,
+      storeDir,
+      scopes,
+      resources
+    });
+  }
   const deferredCodexForegroundBinding = !handoff.adopted
     ? await prepareDeferredCodexForegroundBinding({
         options,
@@ -6460,8 +6605,8 @@ async function prepareRawTerminalDispatchAuthority(input: {
     freshSendAuthority.mode === "conflict"
   ) {
     throw new Error(
-      "the expected terminal token no longer authorizes the current " +
-      "terminal context; refresh AKK list"
+      "managed continuation authority is unavailable for the current " +
+      "terminal context; the physical terminal authority remains valid"
     );
   }
   return {
