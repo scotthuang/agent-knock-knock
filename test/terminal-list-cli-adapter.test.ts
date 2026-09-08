@@ -1005,7 +1005,8 @@ test("list token falls back to one unmanaged send and replays by message id", as
   assert.equal(firstOutput.delivered, true);
   assert.equal(firstOutput.delivered_unmanaged, true);
   assert.notEqual(firstOutput.replayed, true);
-  assert.equal(firstOutput.management_mode, "unmanaged_fallback");
+  assert.equal(firstOutput.management_mode, "unmanaged");
+  assert.equal(firstOutput.legacy_management_mode, "unmanaged_fallback");
   assert.equal(firstOutput.composer_disposition, "replaced_current_composer");
   assert.equal(firstOutput.composer_cleared_before_send, true);
   assert.equal(firstOutput.replaced_existing_draft, true);
@@ -1229,7 +1230,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
     () => facade.runSend(managedReplayOptions)
   );
   const managedReplayOutput = JSON.parse(managedReplay.stdout);
-  assert.equal(managedReplayOutput.delivered, false);
+  assert.equal(managedReplayOutput.delivered, true);
   assert.equal(managedReplayOutput.replayed, true);
   assert.equal(
     managedReplayOutput.submission_outcome,

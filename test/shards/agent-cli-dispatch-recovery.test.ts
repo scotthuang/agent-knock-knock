@@ -253,7 +253,11 @@ test("safe-aborted strict managed retry rejects binding drift while user-priorit
     const delegateOutput = JSON.parse(delegateRetry.stdout);
     assert.equal(delegateOutput.delivered, true);
     assert.equal(delegateOutput.delivered_unmanaged, true);
-    assert.equal(delegateOutput.management_mode, "unmanaged_fallback");
+    assert.equal(delegateOutput.management_mode, "unmanaged");
+    assert.equal(
+      delegateOutput.legacy_management_mode,
+      "unmanaged_fallback"
+    );
     assert.equal(delegateOutput.scope, "terminal_user_explicit");
     assert.equal(delegateOutput.message_id, stableMessageId);
     assert.equal(delegateOutput.callback_expected, false);
@@ -272,7 +276,11 @@ test("safe-aborted strict managed retry rejects binding drift while user-priorit
     assert.equal(replayedOutput.replayed, true);
     assert.equal(replayedOutput.delivered, true);
     assert.equal(replayedOutput.delivered_unmanaged, true);
-    assert.equal(replayedOutput.management_mode, "unmanaged_fallback");
+    assert.equal(replayedOutput.management_mode, "unmanaged");
+    assert.equal(
+      replayedOutput.legacy_management_mode,
+      "unmanaged_fallback"
+    );
     assert.equal(replayedOutput.scope, "terminal_user_explicit");
     assert.equal(replayedOutput.message_id, stableMessageId);
     assert.equal(replayedOutput.callback_expected, false);

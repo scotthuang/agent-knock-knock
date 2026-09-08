@@ -19,20 +19,25 @@ remain private.
 ## Compatibility manifest
 
 The manifest checks storage format and writer behavior separately. An unknown
-`format_version` is not read. The current writer protocol is 6; writer
-protocols 1 through 5 are supported predecessors and inspection reports them
+`format_version` is not read. The current writer protocol is 7; writer
+protocols 1 through 6 are supported predecessors and inspection reports them
 as `upgradeable`.
 
 Upgrading protocol 1 or 2 validates predecessor Turn records,
 deterministically derives and durably materializes authoritative Session
 records, quarantines ambiguous Session bindings, and finishes by atomically
-publishing protocol 6. Existing Turn state, event logs, and the original
+publishing protocol 7. Existing Turn state, event logs, and the original
 manifest `created_at` remain unchanged.
 
-Protocols 3, 4, and 5 already have Session authority, so their upgrade is an
+Protocols 3 through 6 already have Session authority, so their upgrade is an
 atomic manifest-only writer fence with no data migration. Protocol 6 prevents
-older writers from rejecting or damaging schema-v2 Terminal Watch records. Any
-other writer-protocol mismatch remains readable for normal queries, while
+older writers from rejecting or damaging schema-v2 Terminal Watch records.
+Protocol 7 keeps that schema at version 2 while fencing the new
+`interaction_manual_required` notification kind and its bounded callback
+metadata from protocol-6 writers that cannot interpret them. Downgrading to a
+protocol-6 reader after protocol 7 has written that notification is not
+supported; older strict Terminal Watch decoders may reject the record. Core
+Session/Turn data remains readable across a writer-protocol mismatch, while
 explicit reconciliation reports `skipped` and every mutation fails before
 terminal or Host side effects.
 

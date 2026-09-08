@@ -39,6 +39,10 @@ import {
   type CodexRolloutAcceptanceIdentity,
   type TerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-acceptance.js";
+import {
+  inspectNativeQuestionnaire,
+  type NativeQuestionnaireInspection
+} from "./terminal-questionnaire-adapter.js";
 import type {
   TerminalControlEvidence,
   TerminalControlRef
@@ -61,18 +65,21 @@ import {
   type TerminalWatchService
 } from "./terminal-watch-service.js";
 import {
+  assertTerminalWatchManualInteractionSummary,
   createClaudeUserExplicitFallbackWatchAnchor,
   createCodexUserExplicitFallbackWatchAnchor,
   createTerminalActivityWatchAnchor,
   createTerminalWatchStore,
   isTerminalActivityWatch,
   isUserExplicitFallbackWatch,
+  terminalWatchNotificationOnlyRoute,
   terminalUserExplicitFallbackWatchId,
   type TerminalWatch,
   type TerminalWatchAnchor,
   type ClaudeUserExplicitFallbackWatchObservationCheckpoint,
   type CodexUserExplicitFallbackWatchObservationCheckpoint,
   type TerminalWatchObservationCheckpoint,
+  type TerminalWatchManualInteractionSummary,
   type TerminalWatchTerminalIdentity,
   type TerminalActivityState,
   type TerminalActivityWatchObservationCheckpoint,
@@ -217,7 +224,7 @@ export function createTerminalWatchCliAdapter(
     options: TerminalWatchCliOptions
   ): TerminalWatchService {
     const explicitRoute = Object.hasOwn(options, "callbackRoute")
-      ? parseCallbackRoute(options.callbackRoute)
+      ? terminalWatchNotificationOnlyRoute(options.callbackRoute)
       : undefined;
     const repository = createTerminalWatchStore(
       dependencies.storeDirFromOptions(options),
@@ -252,6 +259,17 @@ export function createTerminalWatchCliAdapter(
             error_code: "terminal_watch_callback_agent_invalid"
           };
         }
+        const manualInteraction = metadata.manual_interaction;
+        if (manualInteraction !== undefined) {
+          try {
+            assertTerminalWatchManualInteractionSummary(manualInteraction);
+          } catch {
+            return {
+              disposition: "permanent_failure",
+              error_code: "terminal_watch_callback_interaction_invalid"
+            };
+          }
+        }
         callback.deliver({
           watchId: input.envelope.source.kind === "terminal_watch"
             ? input.envelope.source.watch_id
@@ -275,6 +293,7 @@ export function createTerminalWatchCliAdapter(
           detail: typeof metadata.reason_code === "string"
             ? metadata.reason_code
             : undefined,
+          manualInteraction,
           completionText: typeof metadata.completion_text === "string"
             ? metadata.completion_text
             : undefined
@@ -502,7 +521,7 @@ export function createTerminalWatchCliAdapter(
   async function runWatch(options: TerminalWatchCliOptions): Promise<void> {
     const terminalId = requiredString(options.terminal, "--terminal");
     const callbackRoute = Object.hasOwn(options, "callbackRoute")
-      ? parseCallbackRoute(options.callbackRoute)
+      ? terminalWatchNotificationOnlyRoute(options.callbackRoute)
       : undefined;
     const openclawSession = callbackRoute?.controller_session_id ??
       requiredString(options.openclawSession, "--openclaw-session");
@@ -728,7 +747,7 @@ function routeBoundWatchCallbackRoute(
   watch: Pick<TerminalWatch, "openclaw_session">
 ): CallbackRouteV1 {
   return Object.freeze({
-    ...template,
+    ...terminalWatchNotificationOnlyRoute(template),
     controller_session_id: watch.openclaw_session
   });
 }
@@ -737,7 +756,7 @@ function callbackRouteForUserExplicitFallback(
   options: TerminalWatchCliOptions
 ): CallbackRouteV1 | undefined {
   if (Object.hasOwn(options, "callbackRoute")) {
-    return parseCallbackRoute(options.callbackRoute);
+    return terminalWatchNotificationOnlyRoute(options.callbackRoute);
   }
   // gatewayMethod describes the managed Send callback protocol. Its presence
   // proves this invocation came from a legacy OpenClaw controller, but a
@@ -1273,6 +1292,7 @@ async function observeUserExplicitFallbackTerminalWatch(input: {
     watch,
     exactTerminal,
     rawTerminal,
+    projectedTerminal,
     terminalMatches,
     observedAt,
     options,
@@ -1443,6 +1463,20 @@ async function observeUserExplicitFallbackTerminalWatch(input: {
         `native_completion_${completion.diagnostics.code}`
       );
     }
+    const interaction = fallbackQuestionnaireObservation({
+      watch,
+      exactTerminal,
+      rawTerminal,
+      projectedTerminal,
+      terminalMatches,
+      observedAt,
+      observationCheckpoint: codexFallbackAcceptedCheckpoint(
+        watch,
+        acceptance,
+        currentIdentity
+      )
+    });
+    if (interaction) return interaction;
     return fallbackPendingOrTerminalObservation({
       watch,
       exactTerminal,
@@ -1516,6 +1550,16 @@ async function observeUserExplicitFallbackTerminalWatch(input: {
       acceptedCheckpoint
     );
   }
+  const interaction = fallbackQuestionnaireObservation({
+    watch,
+    exactTerminal,
+    rawTerminal,
+    projectedTerminal,
+    terminalMatches,
+    observedAt,
+    observationCheckpoint: acceptedCheckpoint
+  });
+  if (interaction) return interaction;
   return fallbackPendingOrTerminalObservation({
     watch,
     exactTerminal,
@@ -1525,6 +1569,120 @@ async function observeUserExplicitFallbackTerminalWatch(input: {
     observedEndOffsetBytes: observation.observedEndOffsetBytes,
     observationCheckpoint: acceptedCheckpoint
   });
+}
+
+function fallbackQuestionnaireObservation(input: {
+  watch: TerminalWatch;
+  exactTerminal: ExactTerminalWatchObservation;
+  rawTerminal?: Record<string, unknown>;
+  projectedTerminal?: Record<string, unknown>;
+  terminalMatches: boolean;
+  observedAt: string;
+  observationCheckpoint: TerminalWatchObservationCheckpoint;
+}): TerminalWatchObservation | undefined {
+  if (
+    input.exactTerminal.state !== "available" ||
+    !input.rawTerminal ||
+    !input.projectedTerminal ||
+    !input.terminalMatches
+  ) {
+    return undefined;
+  }
+  const screen = terminalWatchScreenExcerpt(
+    input.rawTerminal,
+    input.projectedTerminal
+  );
+  const version = terminalWatchCapturedAgentVersion(input.watch);
+  if (!screen || !version) return undefined;
+
+  const inspection = inspectNativeQuestionnaire({
+    agent: input.watch.agent,
+    version,
+    screen
+  });
+  if (inspection.status === "none") return undefined;
+
+  const manualInteraction = terminalWatchManualInteractionSummary(inspection);
+  return {
+    ...terminalWatchObservationFence(input.watch),
+    kind: "interaction_manual_required",
+    observed_at: input.observedAt,
+    last_activity_at: input.observedAt,
+    observation_checkpoint: input.observationCheckpoint,
+    evidence_fingerprint: sha256({
+      schema:
+        "agent-knock-knock/terminal-watch-manual-interaction-fingerprint",
+      version: 1,
+      watch_id: input.watch.watch_id,
+      anchor_fingerprint: input.watch.anchor.anchor_fingerprint,
+      profile: inspection.profile,
+      current_step: inspection.current_step,
+      total_steps: inspection.total_steps,
+      question: inspection.question
+    }),
+    reason_code: "terminal_questionnaire_requires_manual_response",
+    manual_interaction: manualInteraction
+  };
+}
+
+function terminalWatchScreenExcerpt(
+  rawTerminal: Record<string, unknown>,
+  projectedTerminal: Record<string, unknown>
+): string | undefined {
+  const direct = stringValue(projectedTerminal.screen_excerpt) ??
+    stringValue(rawTerminal.screen_excerpt);
+  if (direct) return direct;
+  const status = isRecord(rawTerminal._terminal_status_snapshot)
+    ? rawTerminal._terminal_status_snapshot
+    : undefined;
+  const screen = status && isRecord(status.screen) ? status.screen : undefined;
+  return stringValue(screen?.excerpt);
+}
+
+function terminalWatchManualInteractionSummary(
+  inspection: Exclude<NativeQuestionnaireInspection, { status: "none" }>
+): TerminalWatchManualInteractionSummary {
+  const exposeQuestion = inspection.status === "actionable";
+  return {
+    kind: "questionnaire",
+    response_kind: inspection.question.response_kind,
+    required: inspection.question.required,
+    current_step: inspection.current_step,
+    total_steps: inspection.total_steps,
+    parser_status: inspection.status,
+    ...(exposeQuestion
+      ? {
+          prompt: boundedInteractionText(inspection.question.prompt, 1_000),
+          ...(inspection.question.options &&
+              inspection.question.options.length > 0
+            ? {
+                options: inspection.question.options.slice(0, 8).map(
+                  (option) => ({
+                    label: boundedInteractionText(option.label, 300),
+                    ...(option.description
+                      ? {
+                          description: boundedInteractionText(
+                            option.description,
+                            600
+                          )
+                        }
+                      : {})
+                  })
+                )
+              }
+            : {})
+        }
+      : { manual_reason: inspection.reason })
+  };
+}
+
+function boundedInteractionText(value: string, maxCharacters: number): string {
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F-\u009F]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, maxCharacters);
+  return normalized || "Native questionnaire";
 }
 
 function fallbackPendingOrTerminalObservation(input: {

@@ -918,6 +918,161 @@ test("candidate-set Codex acceptance admits a unique new PID-open root from offs
   }
 });
 
+test("candidate-set recovery scans a persisted post-anchor root after its descriptor closes", () => {
+  const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c456";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture([], nativeThreadId);
+  try {
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({ processUuid, processBirth, roots: [] }),
+      now: new Date("2026-08-07T00:59:58.000Z")
+    });
+    const recoveryCandidate = candidateIdentity(
+      nativeThreadId,
+      processUuid,
+      processBirth,
+      { ...fixture.identity, fd: "91r" }
+    );
+    const pending = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: []
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate
+    });
+    assert.equal(pending.status, "pending");
+    if (pending.status === "pending") {
+      assert.equal(pending.exact_matches, 0);
+    }
+
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 506));
+
+    const closed = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: []
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate
+    });
+    assert.equal(closed.status, "accepted");
+    if (closed.status === "accepted") {
+      assert.equal(closed.identity.sessionId, nativeThreadId);
+      assert.equal(closed.identity.rollout.fd, "91r");
+      assert.equal(closed.evidence.metadata?.anchor_offset_bytes, 0);
+    }
+
+    const reopened = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [candidateIdentity(
+          nativeThreadId,
+          processUuid,
+          processBirth,
+          fixture.identity
+        )]
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate
+    });
+    assert.equal(reopened.status, "accepted");
+    if (reopened.status === "accepted") {
+      assert.equal(reopened.identity.rollout.fd, fixture.identity.fd);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("candidate-set recovery fails closed when its persisted post-anchor root is replaced", () => {
+  const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c457";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture([], nativeThreadId);
+  try {
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({ processUuid, processBirth, roots: [] }),
+      now: new Date("2026-08-07T00:59:58.000Z")
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 507));
+    const recoveryCandidate = candidateIdentity(
+      nativeThreadId,
+      processUuid,
+      processBirth,
+      fixture.identity
+    );
+    fs.renameSync(fixture.path, `${fixture.path}.replaced`);
+    fs.writeFileSync(fixture.path, "", { mode: 0o600 });
+
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: []
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_scan_invalid");
+      assert.match(result.reason, /descriptor identity does not match/u);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("candidate-set recovery rejects a persisted candidate that conflicts with the current root", () => {
+  const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c458";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const persisted = codexFixture([], nativeThreadId);
+  const current = codexFixture([], nativeThreadId);
+  try {
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({ processUuid, processBirth, roots: [] })
+    });
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [candidateIdentity(
+          nativeThreadId,
+          processUuid,
+          processBirth,
+          current.identity
+        )]
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate: candidateIdentity(
+        nativeThreadId,
+        processUuid,
+        processBirth,
+        persisted.identity
+      )
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_inventory_changed");
+      assert.match(result.reason, /conflicts with the current root inventory/u);
+    }
+  } finally {
+    persisted.cleanup();
+    current.cleanup();
+  }
+});
+
 test("candidate-set Codex acceptance rejects a newly opened historical rollout", () => {
   const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c455";
   const processBirth = "Tue Aug  4 14:15:13 2026";
@@ -953,7 +1108,7 @@ test("candidate-set Codex acceptance rejects a newly opened historical rollout",
   }
 });
 
-test("candidate-set Codex acceptance is uncertain for a missing anchor or multiple exact matches", () => {
+test("candidate-set Codex acceptance scans a frozen root after its process descriptor closes", () => {
   const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
   const first = codexFixture([], SESSION_ID);
   const second = codexFixture([], secondId);
@@ -979,20 +1134,279 @@ test("candidate-set Codex acceptance is uncertain for a missing anchor or multip
         roots: [firstIdentity, secondIdentity]
       })
     });
-    const missing = detectCodexCandidateSetRolloutAcceptance({
+
+    appendRecords(first.path, acceptedTurnRecords(REQUEST, 503));
+    const accepted = detectCodexCandidateSetRolloutAcceptance({
       anchor,
       currentInventory: candidateInventory({
         processUuid,
         processBirth,
-        roots: [firstIdentity]
+        roots: [secondIdentity]
       }),
       requestHash: REQUEST_HASH
     });
-    assert.equal(missing.status, "uncertain");
-    if (missing.status === "uncertain") {
-      assert.equal(missing.code, "candidate_inventory_changed");
+    assert.equal(accepted.status, "accepted");
+    if (accepted.status === "accepted") {
+      assert.equal(accepted.identity.sessionId, SESSION_ID);
+      assert.deepEqual(accepted.identity.rollout, first.identity);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance scans anchored and newly open roots as one set", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const thirdId = "019ee559-7bb8-7fd1-970c-0f7b6978c454";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const third = codexFixture([], thirdId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const thirdIdentity = candidateIdentity(
+      thirdId,
+      processUuid,
+      processBirth,
+      third.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      }),
+      now: new Date("2026-08-07T00:59:58.000Z")
+    });
+
+    appendRecords(third.path, acceptedTurnRecords(REQUEST, 504));
+    const accepted = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [secondIdentity, thirdIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(accepted.status, "accepted");
+    if (accepted.status === "accepted") {
+      assert.equal(accepted.identity.sessionId, thirdId);
+      assert.equal(accepted.evidence.metadata?.anchor_offset_bytes, 0);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+    third.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance tolerates descriptor churn for the same frozen file", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture([], SESSION_ID);
+  try {
+    const initialIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      fixture.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [initialIdentity]
+      })
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 505));
+    const reopenedIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      { ...fixture.identity, fd: "91r" }
+    );
+
+    const accepted = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [reopenedIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(accepted.status, "accepted");
+    if (accepted.status === "accepted") {
+      assert.equal(accepted.identity.rollout.fd, "91r");
+      appendRecords(fixture.path, [
+        taskCompleteRecord(505, "Descriptor-churn exact result")
+      ]);
+      const completion = detectCodexBoundRolloutCompletion({
+        anchor,
+        acceptanceEvidence: accepted.evidence,
+        currentIdentity: accepted.identity,
+        requestHash: REQUEST_HASH
+      });
+      assert.equal(completion.status, "completed");
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance fails closed when a closed frozen root is replaced or deleted", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      })
+    });
+    fs.renameSync(first.path, `${first.path}.replaced`);
+    fs.writeFileSync(first.path, "", { mode: 0o600 });
+
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [secondIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_scan_invalid");
+      assert.match(result.reason, /descriptor identity does not match/u);
     }
 
+    fs.rmSync(first.path);
+    const deleted = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [secondIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(deleted.status, "uncertain");
+    if (deleted.status === "uncertain") {
+      assert.equal(deleted.code, "candidate_scan_invalid");
+      assert.match(deleted.reason, /ENOENT|no such file/u);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance fails closed for an incomplete closed root", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      })
+    });
+    fs.appendFileSync(first.path, '{"type":"event_msg"');
+
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [secondIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_scan_invalid");
+      assert.match(result.reason, /closed with an incomplete rollout/u);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance detects multiple exact matches across its root union", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      })
+    });
     appendRecords(first.path, acceptedTurnRecords(REQUEST, 503));
     appendRecords(second.path, acceptedTurnRecords(REQUEST, 504));
     const duplicate = detectCodexCandidateSetRolloutAcceptance({
@@ -1000,7 +1414,7 @@ test("candidate-set Codex acceptance is uncertain for a missing anchor or multip
       currentInventory: candidateInventory({
         processUuid,
         processBirth,
-        roots: [firstIdentity, secondIdentity]
+        roots: [firstIdentity]
       }),
       requestHash: REQUEST_HASH
     });
@@ -1128,7 +1542,7 @@ test("durable replay preserves exact native proof and never upgrades legacy tran
         expected
       });
       assert.equal(transportReplay.replayed, true);
-      assert.equal(transportReplay.delivered, false);
+      assert.equal(transportReplay.delivered, true);
       assert.equal(transportReplay.submission_outcome, "pending_acceptance");
       assert.equal(transportReplay.delivery_receipt, proofLevel);
       assert.equal(transportReplay.do_not_retry, true);
@@ -1140,7 +1554,7 @@ test("durable replay preserves exact native proof and never upgrades legacy tran
       expected
     });
     assert.equal(invalidReplay.replayed, true);
-    assert.equal(invalidReplay.delivered, false);
+    assert.equal(invalidReplay.delivered, true);
     assert.equal(invalidReplay.submission_outcome, "uncertain");
   } finally {
     fixture.cleanup();

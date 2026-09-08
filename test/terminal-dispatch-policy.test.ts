@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   decideTerminalDispatchPreflight,
   decideTerminalDispatchReplayAcceptance,
+  decideUserExplicitTerminalInputSafety,
   isActiveTerminalDispatchStatus,
   isRecoverableTerminalDispatchStatus,
   terminalDispatchPreflightRequiresOwner,
@@ -237,6 +238,11 @@ test("replay acceptance preserves delivered and invalid facts independently", ()
       expected: { accepted: false, invalid: false }
     },
     {
+      delivered: true,
+      submissionOutcome: "pending_acceptance",
+      expected: { accepted: false, invalid: false }
+    },
+    {
       delivered: false,
       submissionOutcome: "uncertain",
       expected: { accepted: false, invalid: true }
@@ -244,7 +250,7 @@ test("replay acceptance preserves delivered and invalid facts independently", ()
     {
       delivered: true,
       submissionOutcome: "uncertain",
-      expected: { accepted: true, invalid: true }
+      expected: { accepted: false, invalid: true }
     }
   ];
 
@@ -254,4 +260,39 @@ test("replay acceptance preserves delivered and invalid facts independently", ()
       fixture.expected
     );
   }
+});
+
+test("human-priority Send bypasses management state but never a questionnaire input mode", () => {
+  const ready = {
+    reachable: true,
+    approvalScanned: true,
+    approvalBlocked: false,
+    awaitingApproval: false,
+    questionnaireActive: false
+  };
+  assert.deepEqual(decideUserExplicitTerminalInputSafety(ready), {
+    action: "proceed"
+  });
+  assert.deepEqual(decideUserExplicitTerminalInputSafety({
+    ...ready,
+    approvalScanned: false
+  }), {
+    action: "reject",
+    reason: "the explicitly selected terminal approval state could not be verified"
+  });
+  assert.deepEqual(decideUserExplicitTerminalInputSafety({
+    ...ready,
+    questionnaireActive: true
+  }), {
+    action: "reject",
+    reason: "the explicitly selected terminal is waiting at a native questionnaire"
+  });
+  assert.deepEqual(decideUserExplicitTerminalInputSafety({
+    ...ready,
+    approvalBlocked: true,
+    approvalReason: "permission prompt is open"
+  }), {
+    action: "reject",
+    reason: "permission prompt is open"
+  });
 });

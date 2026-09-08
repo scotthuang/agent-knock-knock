@@ -87,6 +87,7 @@ import {
   captureCodexRolloutAcceptanceAnchor,
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
+  validateCodexRolloutAcceptanceAnchor,
   type CodexRolloutAcceptanceAnchor,
   type TerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-acceptance.js";
@@ -620,7 +621,61 @@ class TerminalAcceptanceCliApplication {
           options: input.options,
           agent: "codex",
           ...request
-        })
+        }),
+        resolveCandidate: async ({
+          pid,
+          cwd,
+          requestHash,
+          recoveryIdentity
+        }) => {
+          const anchor = validateCodexRolloutAcceptanceAnchor(rawAnchor);
+          if (anchor.version !== 3) {
+            throw new Error(
+              "candidate-set Codex recovery requires a version 3 anchor"
+            );
+          }
+          if (
+            recoveryIdentity &&
+            (
+              !isExactNativeThreadId(recoveryIdentity.sessionId) ||
+              !recoveryIdentity.processUuid ||
+              !recoveryIdentity.processBirth ||
+              !isCompleteNativeRollout(recoveryIdentity.rollout)
+            )
+          ) {
+            throw new Error(
+              "candidate-set Codex recovery identity is incomplete"
+            );
+          }
+          const recoveryCandidate = recoveryIdentity
+            ? {
+                sessionId: recoveryIdentity.sessionId,
+                processUuid: recoveryIdentity.processUuid as string,
+                processBirth: recoveryIdentity.processBirth as string,
+                rollout: recoveryIdentity.rollout as NonNullable<
+                  TerminalNativeIdentity["rollout"]
+                >,
+                evidence: "codex_open_root_rollout" as const
+              }
+            : undefined;
+          const result = detectCodexCandidateSetRolloutAcceptance({
+            anchor,
+            currentInventory: await this.inspectCodexOpenRoots({
+              options: input.options,
+              pid,
+              cwd
+            }),
+            requestHash,
+            recoveryCandidate
+          });
+          if (result.status === "uncertain") {
+            throw new Error(
+              `Codex candidate-set recovery is uncertain (${result.code}): ` +
+              result.reason
+            );
+          }
+          return result.status === "accepted" ? result.identity : undefined;
+        }
       },
       acceptance: {
         detect: (identity, requestHash) => Boolean(detectCodexRolloutAcceptance({

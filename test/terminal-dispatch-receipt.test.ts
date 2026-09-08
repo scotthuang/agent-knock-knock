@@ -12,6 +12,8 @@ import {
   terminalBridgeRequestFingerprint,
   terminalBridgeSubmission,
   terminalBridgeSubmissionReceipts,
+  terminalInputDispatchedForConversation,
+  terminalSubmissionIndicatesInputDispatched,
   unresolvedTerminalBridgeSubmission,
   withTerminalBridgeState
 } from "../src/terminal-dispatch-receipt.js";
@@ -159,6 +161,39 @@ test("prepared receipt preserves exact Object.keys and durable state bytes", () 
   assert.deepEqual(terminalBridgeSubmissionReceipts(preparedReceipt()), [expected]);
   assert.deepEqual(unresolvedTerminalBridgeSubmission(preparedReceipt()), expected);
   assert.equal(terminalBridgeRequestFingerprint(""), undefined);
+});
+
+test("Close audit facts preserve a durable terminal input stage", () => {
+  const prepared = preparedReceipt();
+  assert.equal(terminalInputDispatchedForConversation(prepared), false);
+  assert.equal(
+    terminalSubmissionIndicatesInputDispatched({
+      status: "uncertain",
+      last_proven_stage: "prepared"
+    }),
+    false
+  );
+
+  const injected = applyTerminalBridgeSubmission({
+    conversation: prepared,
+    messageId: "message-a",
+    requestText: REQUEST_TEXT,
+    status: "text_injected",
+    preparedAt: STARTED_AT,
+    textInjectedAt: "2026-08-14T12:00:01.000Z"
+  }, {
+    dispatcherPid: 4102,
+    storeDir: STORE_DIR,
+    terminalControl: TERMINAL_CONTROL
+  });
+  assert.equal(terminalInputDispatchedForConversation(injected), true);
+  assert.equal(
+    terminalSubmissionIndicatesInputDispatched({
+      status: "uncertain",
+      last_proven_stage: "text_injected"
+    }),
+    true
+  );
 });
 
 test("receipt history is append-only and immutable within one generation", () => {

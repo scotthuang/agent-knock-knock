@@ -793,7 +793,7 @@ test("explicit management-only Close bypasses only the source-history fence", ()
     assert.throws(
       () => appendExplicitUserCloseEvent(turn.paths.logPath, {
         ...closeEvent,
-        terminal_input_sent: true
+        terminal_input_sent: "unknown"
       }),
       /must record management-only closure/u
     );
@@ -1062,7 +1062,7 @@ test("non-empty protocol 4 upgrades to the current protocol without rewriting Tu
   }
 });
 
-test("protocol 5 upgrades to protocol 6 as the Terminal Watch v2 writer fence", () => {
+test("protocol 5 Terminal Watch v2 predecessor upgrades directly to the current writer fence", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p5-"));
   const storeDir = path.join(sandbox, "store");
   const createdAt = "2026-08-27T01:00:00.000Z";
@@ -1076,9 +1076,41 @@ test("protocol 5 upgrades to protocol 6 as the Terminal Watch v2 writer fence", 
     assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
     const upgraded = ensureStoreWritable(storeDir);
 
-    assert.equal(upgraded.writer_protocol, 6);
+    assert.equal(upgraded.writer_protocol, STORE_WRITER_PROTOCOL);
     assert.equal(upgraded.created_at, createdAt);
     assert.notEqual(fs.statSync(manifestPath).ino, previousInode);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("protocol 6 upgrades to protocol 7 as the manual-interaction Terminal Watch writer fence", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p6-"));
+  const storeDir = path.join(sandbox, "store");
+  const createdAt = "2026-09-08T00:00:00.000Z";
+  try {
+    const manifestPath = writeStoreManifest(storeDir, {
+      writerProtocol: 6,
+      createdAt
+    });
+    const previousInode = fs.statSync(manifestPath).ino;
+    const terminalWatchesDir = path.join(storeDir, "terminal-watches");
+    fs.mkdirSync(terminalWatchesDir, { recursive: true, mode: 0o700 });
+    const watchSentinel = path.join(terminalWatchesDir, "schema-v2-sentinel");
+    fs.writeFileSync(watchSentinel, "terminal-watch-schema-v2-bytes\n", {
+      mode: 0o600
+    });
+    const previousWatch = fileSnapshot(watchSentinel);
+
+    const compatibility = inspectStoreCompatibility(storeDir);
+    assert.equal(compatibility.status, "upgradeable");
+    assert.equal(compatibility.writer_protocol, 6);
+    const upgraded = ensureStoreWritable(storeDir);
+
+    assert.equal(upgraded.writer_protocol, 7);
+    assert.equal(upgraded.created_at, createdAt);
+    assert.notEqual(fs.statSync(manifestPath).ino, previousInode);
+    assert.deepEqual(fileSnapshot(watchSentinel), previousWatch);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

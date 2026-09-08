@@ -166,6 +166,40 @@ function approvalNotification(
   return notification;
 }
 
+function manualInteractionNotification(
+  owner: TerminalWatch,
+  evidenceFingerprint = "e".repeat(64)
+): TerminalWatchNotification {
+  const notificationId = terminalWatchNotificationId(
+    owner.watch_id,
+    "interaction_manual_required",
+    evidenceFingerprint
+  );
+  return {
+    notification_id: notificationId,
+    idempotency_key: terminalWatchNotificationIdempotencyKey(
+      owner.watch_id,
+      notificationId
+    ),
+    kind: "interaction_manual_required",
+    evidence_fingerprint: evidenceFingerprint,
+    reason_code: "terminal_questionnaire_requires_manual_response",
+    manual_interaction: {
+      kind: "questionnaire",
+      response_kind: "single_select",
+      required: true,
+      current_step: 1,
+      total_steps: 2,
+      parser_status: "actionable",
+      prompt: "Choose a framework",
+      options: [{ label: "React" }, { label: "Vue" }]
+    },
+    status: "pending",
+    attempts: 0,
+    created_at: CREATED_AT
+  };
+}
+
 function tempStore(t: test.TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-watch-store-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -356,6 +390,60 @@ test("legacy v1 notifications may omit both callback snapshot fields", (t) => {
     undefined
   );
   assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
+});
+
+test("manual questionnaire notification round-trips with strict bounded metadata", (t) => {
+  const storeDir = tempStore(t);
+  const candidate = watch("terminal-watch-manual-questionnaire");
+  candidate.notification_outbox = [manualInteractionNotification(candidate)];
+  const saved = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
+
+  const oversized = structuredClone(candidate);
+  oversized.notification_outbox[0].manual_interaction!.prompt = "x".repeat(1_001);
+  assert.throws(
+    () => assertTerminalWatch(oversized, oversized.watch_id, {
+      allowMissingRevision: true
+    }),
+    /safe text bound/u
+  );
+
+  const wrongKind = structuredClone(candidate);
+  wrongKind.notification_outbox[0].kind = "approval";
+  assert.throws(
+    () => assertTerminalWatch(wrongKind, wrongKind.watch_id, {
+      allowMissingRevision: true
+    }),
+    /only a manual-interaction/u
+  );
+
+  const manualOnlyWithQuestionText = structuredClone(candidate);
+  const manualOnlySummary = manualOnlyWithQuestionText.notification_outbox[0]
+    .manual_interaction!;
+  manualOnlySummary.parser_status = "manual_required";
+  manualOnlySummary.manual_reason = "questionnaire_shape_unrecognized";
+  assert.throws(
+    () => assertTerminalWatch(
+      manualOnlyWithQuestionText,
+      manualOnlyWithQuestionText.watch_id,
+      { allowMissingRevision: true }
+    ),
+    /cannot expose prompt or options/u
+  );
+
+  const actionableWithoutPrompt = structuredClone(candidate);
+  delete actionableWithoutPrompt.notification_outbox[0].manual_interaction!
+    .prompt;
+  assert.throws(
+    () => assertTerminalWatch(
+      actionableWithoutPrompt,
+      actionableWithoutPrompt.watch_id,
+      { allowMissingRevision: true }
+    ),
+    /requires a bounded prompt/u
+  );
 });
 
 test("known fallback callback profile mismatch is repaired and made retryable with the same identity", (t) => {

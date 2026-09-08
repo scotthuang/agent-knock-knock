@@ -3597,7 +3597,7 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
       management_mode: "unmanaged_fallback"
     };
     const managedReplayResult = {
-      delivered: false,
+      delivered: true,
       replayed: true,
       status: "submission_pending_acceptance",
       submission_outcome: "pending_acceptance",
@@ -3608,6 +3608,18 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
       scope: "terminal_user_explicit",
       management_mode: "managed"
     };
+    const textOnlyResult = {
+      delivered: false,
+      status: "submission_uncertain",
+      submission_outcome: "uncertain",
+      delivery_receipt: "text_injected",
+      terminal_input_dispatched: true,
+      do_not_retry: true,
+      terminal_id: terminalId,
+      message_id: "message-text-only",
+      scope: "terminal_user_explicit",
+      management_mode: "managed"
+    };
     fs.writeFileSync(
       fakeCli,
       [
@@ -3615,13 +3627,15 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
         `const terminalId = ${JSON.stringify(terminalId)};`,
         `const fallback = ${JSON.stringify(fallbackResult)};`,
         `const managedReplay = ${JSON.stringify(managedReplayResult)};`,
+        `const textOnly = ${JSON.stringify(textOnlyResult)};`,
         `const result = args[0] === "list" ? { terminals: [{`,
         `  id: terminalId, available_actions: { send: {`,
         `    tool: "agent_knock_knock_send", arguments: {`,
         `      selector: terminalId, expected_terminal_token: "private-physical-token"`,
         `    }`,
         `  } }`,
-        `}] } : args.includes("pending-managed") ? managedReplay : fallback;`,
+        `}] } : args.includes("pending-managed") ? managedReplay : ` +
+          `args.includes("text-only") ? textOnly : fallback;`,
         "process.stdout.write(JSON.stringify(result));"
       ].join("\n"),
       "utf8"
@@ -3690,6 +3704,15 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     assert.notEqual(toolResult?.isError, true);
     assert.equal(toolResult?.details?.delivered, true);
     assert.equal(toolResult?.details?.delivered_unmanaged, true);
+    assert.equal(toolResult?.details?.terminal_input_dispatched, true);
+    assert.equal(toolResult?.details?.agent_acceptance, "unproven");
+    assert.equal(toolResult?.details?.management_mode, "unmanaged");
+    assert.equal(toolResult?.details?.observation_mode, "terminal_watch");
+    assert.deepEqual(toolResult?.details?.capabilities, {
+      callback: true,
+      interaction_notify: true,
+      interaction_respond: false
+    });
     assert.equal(toolResult?.details?.scope, "terminal_user_explicit");
     assert.equal(
       JSON.stringify(toolResult?.details).includes("private-physical-token"),
@@ -3704,6 +3727,10 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     assert.equal(delegatedToolResult?.details?.delivered, true);
     assert.equal(
       delegatedToolResult?.details?.management_mode,
+      "unmanaged"
+    );
+    assert.equal(
+      delegatedToolResult?.details?.legacy_management_mode,
       "unmanaged_fallback"
     );
     assert.equal(delegatedToolResult?.details?.scope, "terminal_user_explicit");
@@ -3712,10 +3739,10 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
       args: "only: pending-managed",
       sessionKey: "agent:test:user-priority-send"
     });
-    assert.equal(pendingCommand?.isError, true);
+    assert.notEqual(pendingCommand?.isError, true);
     assert.match(
       String(pendingCommand?.text ?? ""),
-      /already dispatched this managed terminal Send/u
+      /confirmed this managed terminal Send was already delivered/u
     );
     assert.match(String(pendingCommand?.text ?? ""), /do not resend/u);
 
@@ -3723,10 +3750,29 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
       terminal_id: terminalId,
       request: "pending-managed"
     });
-    assert.equal(pendingTool?.isError, true);
-    assert.equal(pendingTool?.details?.delivered, false);
+    assert.notEqual(pendingTool?.isError, true);
+    assert.equal(pendingTool?.details?.delivered, true);
     assert.equal(pendingTool?.details?.delivery_receipt, "enter_dispatched");
     assert.equal(pendingTool?.details?.do_not_retry, true);
+
+    const textOnlyCommand = await command?.handler?.({
+      args: "only: text-only",
+      sessionKey: "agent:test:user-priority-send"
+    });
+    assert.equal(textOnlyCommand?.isError, true);
+    assert.match(
+      String(textOnlyCommand?.text ?? ""),
+      /could not prove that Enter was dispatched/u
+    );
+
+    const textOnlyTool = await sendTool?.execute?.("tool-text-only", {
+      terminal_id: terminalId,
+      request: "text-only"
+    });
+    assert.equal(textOnlyTool?.isError, true);
+    assert.equal(textOnlyTool?.details?.terminal_input_dispatched, true);
+    assert.equal(textOnlyTool?.details?.agent_acceptance, "unproven");
+    assert.equal(textOnlyTool?.details?.do_not_retry, true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

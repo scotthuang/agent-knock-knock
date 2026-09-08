@@ -1151,7 +1151,8 @@ export function captureCodexCandidateSetRolloutAcceptanceAnchor({
 export function detectCodexCandidateSetRolloutAcceptance({
   anchor: anchorValue,
   currentInventory: inventoryValue,
-  requestHash: requestHashValue
+  requestHash: requestHashValue,
+  recoveryCandidate: recoveryCandidateValue
 }: CodexCandidateSetRolloutAcceptanceRequest):
 CodexCandidateSetRolloutAcceptanceResult {
   const anchor = validateCodexRolloutAcceptanceAnchor(anchorValue);
@@ -1181,20 +1182,53 @@ CodexCandidateSetRolloutAcceptanceResult {
     };
   }
 
+  let recoveryCandidate: CodexOpenRootRolloutIdentity | undefined;
+  if (recoveryCandidateValue) {
+    try {
+      recoveryCandidate = validateCodexRecoveryCandidateForAcceptance(
+        recoveryCandidateValue,
+        anchor
+      );
+    } catch (error) {
+      return {
+        status: "uncertain",
+        code: "candidate_inventory_changed",
+        reason: error instanceof Error ? error.message : String(error),
+        inspected_candidates: 0,
+        exact_matches: 0
+      };
+    }
+  }
+
   const anchoredByThread = new Map(
     anchor.candidate_rollouts.map((candidate) => [
       candidate.native_thread_id,
       candidate
     ])
   );
+  const anchoredByFile = new Map(
+    anchor.candidate_rollouts.map((candidate) => [
+      codexRolloutInodeKey(candidate.rollout),
+      candidate
+    ])
+  );
   const currentByThread = new Map(
     inventory.roots.map((identity) => [identity.sessionId, identity])
   );
-  for (const identity of inventory.roots) {
+  const currentByFile = new Map(
+    inventory.roots.map((identity) => [
+      codexRolloutInodeKey(identity.rollout),
+      identity
+    ])
+  );
+  for (const identity of [
+    ...inventory.roots,
+    ...(recoveryCandidate ? [recoveryCandidate] : [])
+  ]) {
     const anchored = anchoredByThread.get(identity.sessionId);
     if (
       anchored &&
-      !sameRolloutIdentity(anchored.rollout, identity.rollout)
+      !sameRolloutFileIdentity(anchored.rollout, identity.rollout)
     ) {
       return {
         status: "uncertain",
@@ -1205,32 +1239,91 @@ CodexCandidateSetRolloutAcceptanceResult {
         exact_matches: 0
       };
     }
-  }
-  for (const anchored of anchor.candidate_rollouts) {
-    if (!currentByThread.has(anchored.native_thread_id)) {
+    const anchoredFile = anchoredByFile.get(
+      codexRolloutInodeKey(identity.rollout)
+    );
+    if (
+      anchoredFile &&
+      anchoredFile.native_thread_id !== identity.sessionId
+    ) {
       return {
         status: "uncertain",
         code: "candidate_inventory_changed",
         reason:
-          `Codex candidate ${anchored.native_thread_id} is no longer open in the exact process inventory`,
+          `Codex candidate rollout changed native thread identity from ` +
+          `${anchoredFile.native_thread_id} to ${identity.sessionId} after capture`,
         inspected_candidates: 0,
         exact_matches: 0
       };
     }
   }
-
+  if (recoveryCandidate) {
+    const currentThread = currentByThread.get(recoveryCandidate.sessionId);
+    const currentFile = currentByFile.get(
+      codexRolloutInodeKey(recoveryCandidate.rollout)
+    );
+    if (
+      (currentThread && !sameRolloutFileIdentity(
+        currentThread.rollout,
+        recoveryCandidate.rollout
+      )) ||
+      (currentFile && currentFile.sessionId !== recoveryCandidate.sessionId)
+    ) {
+      return {
+        status: "uncertain",
+        code: "candidate_inventory_changed",
+        reason:
+          "persisted Codex recovery candidate conflicts with the current root inventory",
+        inspected_candidates: 0,
+        exact_matches: 0
+      };
+    }
+  }
+  // A Codex thread may close (or reopen) its process FD while the acceptance
+  // poll is running. The captured path/device/inode/offset remains the durable
+  // read authority in that case, so inspect the union rather than treating a
+  // missing lsof row as evidence that the candidate changed identity.
   const candidates: Array<{
     identity: CodexOpenRootRolloutIdentity;
     offsetBytes: number;
     requireFreshHeader: boolean;
-  }> = inventory.roots.map((identity) => {
-    const anchored = anchoredByThread.get(identity.sessionId);
-    return {
-      identity,
-      offsetBytes: anchored?.offset_bytes ?? 0,
-      requireFreshHeader: anchored === undefined
-    };
-  });
+    currentlyOpen: boolean;
+  }> = [
+    ...anchor.candidate_rollouts.map((anchored) => ({
+      identity:
+        currentByThread.get(anchored.native_thread_id) ??
+        (recoveryCandidate?.sessionId === anchored.native_thread_id
+          ? recoveryCandidate
+          : {
+              sessionId: anchored.native_thread_id,
+              processUuid: anchor.process_uuid,
+              processBirth: anchor.process_birth,
+              rollout: anchored.rollout,
+              evidence: "codex_open_root_rollout" as const
+            }),
+      offsetBytes: anchored.offset_bytes,
+      requireFreshHeader: false,
+      currentlyOpen: currentByThread.has(anchored.native_thread_id)
+    })),
+    ...inventory.roots
+      .filter((identity) => !anchoredByThread.has(identity.sessionId))
+      .map((identity) => ({
+        identity,
+        offsetBytes: 0,
+        requireFreshHeader: true,
+        currentlyOpen: true
+      })),
+    ...(recoveryCandidate &&
+      !anchoredByThread.has(recoveryCandidate.sessionId) &&
+      !currentByThread.has(recoveryCandidate.sessionId)
+      ? [{
+          identity: recoveryCandidate,
+          offsetBytes: 0,
+          requireFreshHeader: true,
+          currentlyOpen: false
+        }]
+      : [])
+  ];
 
   const matches: Array<{
     identity: CodexOpenRootRolloutIdentity;
@@ -1261,6 +1354,17 @@ CodexCandidateSetRolloutAcceptanceResult {
       };
     }
     if (scan.status === "incomplete") {
+      if (!candidate.currentlyOpen) {
+        return {
+          status: "uncertain",
+          code: "candidate_scan_invalid",
+          reason:
+            `Codex candidate ${candidate.identity.sessionId} closed with an ` +
+            "incomplete rollout record after capture",
+          inspected_candidates: candidates.indexOf(candidate) + 1,
+          exact_matches: matches.length
+        };
+      }
       incompleteCandidates += 1;
     } else if (scan.status === "accepted") {
       matches.push({
@@ -1519,7 +1623,12 @@ export function detectCodexBoundRolloutCompletion(options: {
   const anchoredRollout = anchor.version === 3
     ? acceptedCandidate?.rollout
     : anchor.rollout;
-  if (anchoredRollout && !sameRolloutIdentity(anchoredRollout, rollout)) {
+  const anchoredRolloutMatches = !anchoredRollout || (
+    anchor.version === 3
+      ? sameRolloutFileIdentity(anchoredRollout, rollout)
+      : sameRolloutIdentity(anchoredRollout, rollout)
+  );
+  if (!anchoredRolloutMatches) {
     return codexCompletionFailure(
       "rollout_identity_mismatch",
       new Error("Codex rollout identity changed after terminal acceptance"),
@@ -2172,6 +2281,33 @@ function validateCodexOpenRootInventoryForAcceptance(
   return value;
 }
 
+function validateCodexRecoveryCandidateForAcceptance(
+  value: CodexOpenRootRolloutIdentity,
+  anchor: CodexCandidateSetRolloutAcceptanceAnchor
+): CodexOpenRootRolloutIdentity {
+  if (!isRecord(value)) {
+    throw new Error("persisted Codex recovery candidate is invalid");
+  }
+  const sessionId = exactNativeThreadId(value.sessionId);
+  const rollout = normalizedRolloutIdentity(value.rollout);
+  if (
+    value.processUuid !== anchor.process_uuid ||
+    value.processBirth !== anchor.process_birth ||
+    value.evidence !== "codex_open_root_rollout"
+  ) {
+    throw new Error(
+      "persisted Codex recovery candidate has different process authority"
+    );
+  }
+  return {
+    sessionId,
+    processUuid: anchor.process_uuid,
+    processBirth: anchor.process_birth,
+    rollout,
+    evidence: "codex_open_root_rollout"
+  };
+}
+
 function openExactRollout(rollout: CodexRolloutIdentity): {
   fd: number;
   stat: fs.Stats;
@@ -2256,9 +2392,20 @@ function sameRolloutIdentity(
   right: CodexRolloutIdentity
 ): boolean {
   return left.fd === right.fd &&
-    left.device === right.device &&
+    sameRolloutFileIdentity(left, right);
+}
+
+function sameRolloutFileIdentity(
+  left: CodexRolloutIdentity,
+  right: CodexRolloutIdentity
+): boolean {
+  return left.device === right.device &&
     left.inode === right.inode &&
     left.path === right.path;
+}
+
+function codexRolloutInodeKey(rollout: CodexRolloutIdentity): string {
+  return `${rollout.device}:${rollout.inode}`;
 }
 
 function optionalString(value: unknown): string | undefined {

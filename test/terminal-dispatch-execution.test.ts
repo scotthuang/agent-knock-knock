@@ -11,6 +11,7 @@ import type { TerminalNativeIdentity } from
   "../src/terminal-binding-authority.js";
 import {
   TerminalDispatchExecutionService,
+  terminalRuntimeIdentityBase,
   type CodexPreMaterializationIdentity,
   type TerminalDispatchExecutionPorts
 } from "../src/terminal-dispatch-execution.js";
@@ -545,6 +546,96 @@ test("Codex candidate uncertainty short-circuits polling without draft proof", a
     "inventory:codex",
     "detect:candidates:uncertain"
   ]);
+});
+
+test("candidate-set monitor carries a durable Turn identity after its root FD closes", async () => {
+  const accepted = evidence();
+  const anchor = candidateAnchor();
+  const { service, trace } = harness({
+    detectCodexCandidates(request) {
+      trace.push("detect:candidates:durable");
+      assert.deepEqual(request.recoveryCandidate, {
+        sessionId: THREAD_ID,
+        processUuid: "process-a",
+        processBirth: "birth-a",
+        rollout: IDENTITY.rollout,
+        evidence: "codex_open_root_rollout"
+      });
+      return {
+        status: "accepted",
+        identity: request.recoveryCandidate!,
+        evidence: accepted
+      };
+    }
+  });
+  const result = await service.detectAcceptance({
+    executor: "codex",
+    conversation: conversation("codex", anchor),
+    terminalControl: TERMINAL_CONTROL
+  });
+  assert.deepEqual(result, accepted);
+  assert.deepEqual(trace, [
+    "authority:monitor",
+    "inventory:codex",
+    "detect:candidates:durable"
+  ]);
+});
+
+test("candidate-set live identity becomes the exact monitor runtime fence after FD reopen", async () => {
+  const liveIdentity: TerminalNativeIdentity = {
+    ...IDENTITY,
+    rollout: { ...IDENTITY.rollout!, fd: "91r" }
+  };
+  const { service } = harness({
+    detectCodexCandidates: () => ({
+      status: "accepted",
+      identity: {
+        ...liveIdentity,
+        processUuid: liveIdentity.processUuid!,
+        processBirth: liveIdentity.processBirth!,
+        rollout: liveIdentity.rollout!,
+        evidence: "codex_open_root_rollout"
+      },
+      evidence: evidence()
+    })
+  });
+  const identity = await service.pollNativeIdentity({
+    executor: "codex",
+    terminalControl: TERMINAL_CONTROL,
+    pid: 5102,
+    requiredCodexAcceptance: {
+      anchor: candidateAnchor(),
+      requestHash: REQUEST_HASH
+    },
+    attempts: 1
+  });
+  assert.equal(identity?.rollout?.fd, "91r");
+  const bound = service.withNativeIdentity(
+    conversation("codex", candidateAnchor()),
+    identity!
+  );
+  const runtime = terminalRuntimeIdentityBase(bound, TERMINAL_CONTROL);
+  assert.deepEqual(runtime.nativeRollout, liveIdentity.rollout);
+  assert.doesNotThrow(() => service.assertTurnIdentity({
+    conversation: bound,
+    currentIdentity: liveIdentity,
+    operation: "monitor"
+  }));
+});
+
+test("candidate-set monitor rejects inconsistent durable Turn identity before inventory", async () => {
+  const current = conversation("codex", candidateAnchor());
+  current.native_thread_id = "22222222-2222-4222-8222-222222222222";
+  const { service, trace } = harness();
+  await assert.rejects(
+    service.detectAcceptance({
+      executor: "codex",
+      conversation: current,
+      terminalControl: TERMINAL_CONTROL
+    }),
+    /durable Codex Turn identity is incomplete or inconsistent/u
+  );
+  assert.deepEqual(trace, ["authority:monitor"]);
 });
 
 test("Claude acceptance uses its typed detector and skips Codex ports", async () => {

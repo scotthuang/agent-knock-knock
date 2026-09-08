@@ -78,6 +78,10 @@ function recordingPorts(
       resolve: async ({ preferredSessionId }) => {
         events.push(`resolve:${preferredSessionId ?? "fresh"}`);
         return IDENTITY;
+      },
+      resolveCandidate: async ({ requestHash }) => {
+        events.push(`resolve-candidate:${requestHash}`);
+        return IDENTITY;
       }
     },
     acceptance: {
@@ -136,6 +140,118 @@ test("missing exact acceptance stays pending before ownership or persistence", a
     "resolve:fresh",
     `detect:${"a".repeat(64)}`
   ]);
+});
+
+test("candidate-set recovery treats its uniquely accepted identity as acceptance proof", async () => {
+  const events: string[] = [];
+  const result = await new ManagedTurnRecoveryService(recordingPorts(events))
+    .recover(facts({ anchorVersion: 3 }));
+  assert.equal(result.state, "recovered");
+  assert.deepEqual(events, [
+    `resolve-candidate:${"a".repeat(64)}`,
+    "exclusive:session-1",
+    "persist:session",
+    "persist:turn",
+    `assert:${IDENTITY.sessionId}`
+  ]);
+});
+
+test("candidate-set recovery follows a durable rollout across descriptor churn", async () => {
+  const events: string[] = [];
+  const reopenedIdentity: TerminalNativeIdentity = {
+    ...IDENTITY,
+    rollout: { ...ROLLOUT, fd: "91r" }
+  };
+  const ports = recordingPorts(events);
+  ports.identity.resolveCandidate = async ({ requestHash, recoveryIdentity }) => {
+    events.push(`resolve-candidate:${requestHash}`);
+    assert.deepEqual(recoveryIdentity, IDENTITY);
+    return reopenedIdentity;
+  };
+  const result = await new ManagedTurnRecoveryService(ports).recover(facts({
+    anchorVersion: 3,
+    sessionBinding: {
+      bindingId: "binding-1",
+      generation: 3,
+      pid: 42,
+      terminalIncarnationMatches: true,
+      nativeThreadId: IDENTITY.sessionId,
+      processUuid: IDENTITY.processUuid,
+      processBirth: IDENTITY.processBirth,
+      rollout: ROLLOUT
+    }
+  }));
+  assert.equal(result.state, "recovered");
+  assert.deepEqual(result.identity, reopenedIdentity);
+  assert.deepEqual(events, [
+    `resolve-candidate:${"a".repeat(64)}`,
+    "exclusive:session-1",
+    "persist:turn",
+    `assert:${IDENTITY.sessionId}`
+  ]);
+});
+
+test("candidate-set recovery accepts a stable persisted Session proof after descriptor churn", async () => {
+  const events: string[] = [];
+  const reopenedIdentity: TerminalNativeIdentity = {
+    ...IDENTITY,
+    rollout: { ...ROLLOUT, fd: "91r" }
+  };
+  const ports = recordingPorts(events);
+  ports.identity.resolveCandidate = async ({ requestHash, recoveryIdentity }) => {
+    events.push(`resolve-candidate:${requestHash}`);
+    assert.deepEqual(recoveryIdentity, IDENTITY);
+    return reopenedIdentity;
+  };
+  ports.persistence.persistSessionIdentity = () => {
+    events.push("persist:session");
+    return {
+      nativeThreadId: IDENTITY.sessionId,
+      processUuid: IDENTITY.processUuid,
+      processBirth: IDENTITY.processBirth,
+      rollout: ROLLOUT
+    };
+  };
+  const result = await new ManagedTurnRecoveryService(ports).recover(facts({
+    anchorVersion: 3,
+    turnNativeThreadId: IDENTITY.sessionId,
+    turnRollout: ROLLOUT
+  }));
+  assert.equal(result.state, "recovered");
+  assert.deepEqual(events, [
+    `resolve-candidate:${"a".repeat(64)}`,
+    "exclusive:session-1",
+    "persist:session",
+    `assert:${IDENTITY.sessionId}`
+  ]);
+});
+
+test("version 2 recovery keeps descriptor identity strict", async () => {
+  const events: string[] = [];
+  const ports = recordingPorts(events);
+  ports.identity.resolve = async ({ preferredSessionId }) => {
+    events.push(`resolve:${preferredSessionId ?? "fresh"}`);
+    return {
+      ...IDENTITY,
+      rollout: { ...ROLLOUT, fd: "91r" }
+    };
+  };
+  await assert.rejects(
+    new ManagedTurnRecoveryService(ports).recover(facts({
+      sessionBinding: {
+        bindingId: "binding-1",
+        generation: 3,
+        pid: 42,
+        terminalIncarnationMatches: true,
+        nativeThreadId: IDENTITY.sessionId,
+        processUuid: IDENTITY.processUuid,
+        processBirth: IDENTITY.processBirth,
+        rollout: ROLLOUT
+      }
+    })),
+    /native identity changed before binding recovery/u
+  );
+  assert.deepEqual(events, [`resolve:${IDENTITY.sessionId}`]);
 });
 
 test("durable Session identity finishes only the missing Turn side", async () => {

@@ -91,6 +91,11 @@ export function assertSafeTerminalSend(
         `${displayName} is waiting at a permission dialog`
     );
   }
+  if (terminalStatus.interaction_state !== undefined) {
+    throw new Error(
+      `${displayName} is waiting at a native questionnaire`
+    );
+  }
   if (terminalStatus.activity_state !== "idle") {
     throw new Error(
       `${displayName} terminal is ${

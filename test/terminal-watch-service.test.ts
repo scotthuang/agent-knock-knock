@@ -39,6 +39,8 @@ const START = "2026-08-21T00:00:00.000Z";
 const REQUEST_HASH = "a".repeat(64);
 const APPROVAL_FINGERPRINT = "b".repeat(64);
 const COMPLETION_FINGERPRINT = "c".repeat(64);
+const INTERACTION_FINGERPRINT = "e".repeat(64);
+const NEXT_INTERACTION_FINGERPRINT = "f".repeat(64);
 
 function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -359,6 +361,104 @@ test("approval remains active and enqueues once per exact fingerprint", async (t
     id: "nonce-1"
   });
   assert.equal((await state.service.reconcileAll()).callbacks_delivered, 0);
+});
+
+test("manual questionnaire notifications are bounded, response-disabled, and idempotent per prompt", async (t) => {
+  const state = harness(t);
+  const created = state.service.create(exactInput());
+  const manualInteraction = {
+    kind: "questionnaire" as const,
+    response_kind: "single_select" as const,
+    required: true,
+    current_step: 1,
+    total_steps: 2,
+    parser_status: "actionable" as const,
+    prompt: "Choose a framework",
+    options: [
+      { label: "React", description: "Component model" },
+      { label: "Vue" }
+    ]
+  };
+  state.advance(1_000);
+  const firstAt = "2026-08-21T00:00:01.000Z";
+  state.observations.push(
+    (watch) => observed(watch, "interaction_manual_required", firstAt, {
+      evidence_fingerprint: INTERACTION_FINGERPRINT,
+      reason_code: "terminal_questionnaire_requires_manual_response",
+      manual_interaction: manualInteraction
+    }),
+    (watch) => observed(watch, "interaction_manual_required", firstAt, {
+      evidence_fingerprint: INTERACTION_FINGERPRINT,
+      reason_code: "terminal_questionnaire_requires_manual_response",
+      manual_interaction: manualInteraction
+    })
+  );
+  const first = await state.service.reconcile(created.watch_id);
+  assert.equal(first.status, "active");
+  assert.equal(first.notification_outbox.length, 1);
+  assert.deepEqual(
+    first.notification_outbox[0].manual_interaction,
+    manualInteraction
+  );
+  const duplicate = await state.service.reconcile(created.watch_id);
+  assert.equal(duplicate.notification_outbox.length, 1);
+  assert.equal(
+    terminalWatchRevision(duplicate),
+    terminalWatchRevision(first)
+  );
+
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 1);
+  assert.equal(state.deliveries.length, 1);
+  const delivery = state.deliveries[0];
+  assert.equal(delivery.kind, "interaction_manual_required");
+  assert.deepEqual(delivery.route.capabilities, {
+    wake: true,
+    respond: false
+  });
+  assert.equal(
+    delivery.envelope.event.type,
+    "interaction_manual_required"
+  );
+  assert.deepEqual(
+    delivery.envelope.event.metadata?.manual_interaction,
+    manualInteraction
+  );
+  assert.match(
+    delivery.envelope.event.body,
+    /Terminal Watch has no response authority/u
+  );
+  assert.match(
+    delivery.envelope.event.body,
+    /manual TUI response required/u
+  );
+  assert.doesNotMatch(
+    JSON.stringify(delivery.envelope),
+    /prompt_evidence|exact_region|action_plan|ArrowDown|prompt_fingerprint/u
+  );
+
+  state.advance(1_000);
+  const secondAt = "2026-08-21T00:00:02.000Z";
+  state.observations.push((watch) => observed(
+    watch,
+    "interaction_manual_required",
+    secondAt,
+    {
+      evidence_fingerprint: NEXT_INTERACTION_FINGERPRINT,
+      reason_code: "terminal_questionnaire_requires_manual_response",
+      manual_interaction: {
+        ...manualInteraction,
+        current_step: 2,
+        prompt: "Choose a test runner"
+      }
+    }
+  ));
+  const second = await state.service.reconcile(created.watch_id);
+  assert.equal(second.notification_outbox.length, 2);
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 1);
+  assert.deepEqual(
+    state.deliveries.map(({ kind }) => kind),
+    ["interaction_manual_required", "interaction_manual_required"]
+  );
 });
 
 test("pending observations advance only the durable provider checkpoint", async (t) => {

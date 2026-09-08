@@ -44,9 +44,9 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   : 0;
 
 export const STORE_FORMAT_VERSION = 1;
-export const STORE_WRITER_PROTOCOL = 6;
+export const STORE_WRITER_PROTOCOL = 7;
 export const STORE_SESSION_AUTHORITY_PROTOCOL = 3;
-const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4, 5]);
+const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4, 5, 6]);
 
 export interface StoreManifest {
   schema: typeof STORE_SCHEMA;
@@ -743,7 +743,11 @@ function assertExplicitUserCloseEvent(event: EventRecord): void {
     typeof event.reason !== "string" ||
     event.reason.trim().length === 0 ||
     event.disposition !== "user_abandoned_management" ||
-    event.terminal_input_sent !== false ||
+    typeof event.terminal_input_sent !== "boolean" ||
+    (
+      event.terminal_input_dispatched !== undefined &&
+      event.terminal_input_dispatched !== event.terminal_input_sent
+    ) ||
     event.coding_agent_stopped !== false
   ) {
     throw new Error(
@@ -1493,7 +1497,7 @@ function upgradeStoreWriterProtocolWhileLocked(storeDir: string): void {
   const previous = readStoreManifestSnapshot(manifestPath);
   assertUpgradeableStoreManifest(previous.manifest, storeDir);
 
-  // Protocol 3 already has authoritative Session state. Protocols 3/4/5 only
+  // Protocol 3 already has authoritative Session state. Protocols 3 through 6 only
   // publish the newer writer fence atomically; protocols 1/2 still need the
   // one-time Session materialization before publication.
   const requiresSessionMaterialization = previous.manifest.writer_protocol <

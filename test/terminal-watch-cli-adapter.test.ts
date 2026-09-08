@@ -14,6 +14,7 @@ import {
 } from "../src/terminal-watch-callback-cli-adapter.js";
 import type { Conversation } from "../src/protocol.js";
 import {
+  createTerminalWatchOpenClawCallbackRoute,
   createLegacyOpenClawCallbackRoute,
   type CallbackTransportDeliverInput
 } from "../src/callback-transport.js";
@@ -25,11 +26,35 @@ import {
   terminalWatchNotificationIdempotencyKey,
   terminalWatchesDir
 } from "../src/terminal-watch-store.js";
+import {
+  STORE_WRITER_PROTOCOL,
+  storeManifestPath
+} from "../src/store.js";
 
 const THREAD_ID = "019f0000-0000-7000-8000-000000000206";
 const TASK_ID = "019f0000-0000-7000-8000-000000000207";
 const TOKEN = "a".repeat(64);
 type RootUserRowOrder = "human-only" | "synthetic-first" | "human-first";
+
+const CODEX_FALLBACK_QUESTION_ONE = `
+  Question 1/2 (2 unanswered)
+  Choose a framework.
+
+  › 1. React  Component model.
+    2. Vue  Progressive framework.
+
+  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt
+`;
+
+const CODEX_FALLBACK_QUESTION_TWO = `
+  Question 2/2 (1 unanswered)
+  Choose a test runner.
+
+  › 1. Vitest  Fast feedback.
+    2. Node test  Built in.
+
+  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`;
 
 test("user-explicit fallback attaches after terminal exit and recovers completion before its first sweep", async (t) => {
   const fixture = createFixture(t);
@@ -80,6 +105,11 @@ test("user-explicit fallback attaches after terminal exit and recovers completio
     physicalToken: "d".repeat(64)
   });
   assert.ok(prepared);
+  assert.deepEqual(
+    prepared.callbackRoute.capabilities,
+    { wake: true, respond: false },
+    "a trusted Host route is reduced to notification-only authority"
+  );
 
   const fallbackTurnId = "019f0000-0000-7000-8000-000000000299";
   fs.appendFileSync(
@@ -137,6 +167,11 @@ test("user-explicit fallback attaches after terminal exit and recovers completio
     listed[0].source,
     "terminal_user_explicit_fallback_watch"
   );
+  assert.deepEqual(
+    loadTerminalWatch(fixture.storeDir, prepared.watchId)?.callback_route
+      ?.capabilities,
+    { wake: true, respond: false }
+  );
 
   fixture.advance();
   await facade.runReconcileWatches(options);
@@ -155,6 +190,305 @@ test("user-explicit fallback attaches after terminal exit and recovers completio
       watchId: prepared.watchId
     })?.watch_id,
     prepared.watchId
+  );
+});
+
+test("accepted unmanaged fallback notifies each Codex questionnaire once without response authority", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:fallback-questionnaire",
+    openclawBin: "/opt/openclaw/bin/openclaw"
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000298",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  const request = "Ask two harmless native questions";
+  const requestHash = createHash("sha256").update(request).digest("hex");
+  const options = { storeDir: fixture.storeDir, callbackRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(fixture.terminal.id),
+      agent: "codex",
+      pid: Number(fixture.terminal.pid),
+      terminalControl: fixture.terminal.terminal_control as never
+    },
+    requestHash,
+    messageId: "message-fallback-questionnaire",
+    physicalToken: "9".repeat(64)
+  });
+  assert.ok(prepared);
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+
+  terminal = withTerminalWatchScreen(
+    fixture.terminal,
+    CODEX_FALLBACK_QUESTION_ONE
+  );
+  fixture.advance();
+  await facade.runReconcileWatches(options);
+  assert.equal(
+    deliveries.length,
+    0,
+    "a visible questionnaire cannot notify before exact request acceptance"
+  );
+
+  const fallbackTurnId = "019f0000-0000-7000-8000-000000000298";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    [
+      {
+        timestamp: "2026-08-21T01:00:00.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: fallbackTurnId }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.201Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: request }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: fallbackTurnId
+          }
+        }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.202Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: request }
+      }
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 1);
+  const first = deliveries[0];
+  assert.equal(first.envelope.event.type, "interaction_manual_required");
+  assert.deepEqual(first.route.capabilities, { wake: true, respond: false });
+  assert.deepEqual(first.envelope.event.metadata?.manual_interaction, {
+    kind: "questionnaire",
+    response_kind: "single_select",
+    required: true,
+    current_step: 1,
+    total_steps: 2,
+    parser_status: "actionable",
+    prompt: "Choose a framework.",
+    options: [
+      { label: "React", description: "Component model." },
+      { label: "Vue", description: "Progressive framework." }
+    ]
+  });
+  assert.doesNotMatch(
+    JSON.stringify(first.envelope),
+    /prompt_evidence|exact_region|action_plan|prompt_fingerprint|option_id|"key"/u
+  );
+
+  terminal = withTerminalWatchScreen(
+    fixture.terminal,
+    CODEX_FALLBACK_QUESTION_ONE
+      .replace("› 1. React", "  1. React")
+      .replace("  2. Vue", "› 2. Vue")
+  );
+  await facade.runReconcileWatches(options);
+  assert.equal(
+    deliveries.length,
+    1,
+    "moving the native cursor does not create a new logical question"
+  );
+
+  terminal = withTerminalWatchScreen(
+    fixture.terminal,
+    CODEX_FALLBACK_QUESTION_TWO
+  );
+  await facade.runReconcileWatches(options);
+  assert.equal(deliveries.length, 2);
+  assert.equal(
+    deliveries[1].envelope.event.metadata?.manual_interaction &&
+      record(deliveries[1].envelope.event.metadata?.manual_interaction)
+        .current_step,
+    2
+  );
+});
+
+test("protocol-6 fallback Watch reduces a persisted response route before questionnaire delivery", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  const legacyHostRoute = {
+    schema: "agent-knock-knock/callback-route" as const,
+    version: 1 as const,
+    transport: "command_json_v1" as const,
+    profile_id: "protocol-6-host",
+    profile_revision: "1",
+    controller_session_id: "agent:main:protocol-6-fallback",
+    capabilities: { wake: true, respond: true }
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000295",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: () => {},
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  const request = "Ask one harmless native question";
+  const options = { storeDir: fixture.storeDir, callbackRoute: legacyHostRoute };
+  const prepared = await facade.prepareUserExplicitFallbackWatch({
+    options,
+    terminal: {
+      conversationId: String(fixture.terminal.id),
+      agent: "codex",
+      pid: Number(fixture.terminal.pid),
+      terminalControl: fixture.terminal.terminal_control as never
+    },
+    requestHash: createHash("sha256").update(request).digest("hex"),
+    messageId: "message-protocol-6-questionnaire",
+    physicalToken: "6".repeat(64)
+  });
+  assert.ok(prepared);
+  await facade.attachUserExplicitFallbackWatch({ options, prepared });
+
+  // Recreate an active predecessor Watch whose trusted Host route still
+  // carried response authority. Protocol 6 did not know about questionnaire
+  // notifications, so only the top-level creation route needs migration at
+  // the new notification claim boundary.
+  const watchPath = pathsForTerminalWatch(
+    prepared.watchId,
+    fixture.storeDir
+  ).statePath;
+  const predecessor = JSON.parse(fs.readFileSync(watchPath, "utf8"));
+  predecessor.callback_route = legacyHostRoute;
+  fs.writeFileSync(watchPath, `${JSON.stringify(predecessor)}\n`, { mode: 0o600 });
+  const manifestPath = storeManifestPath(fixture.storeDir);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.writer_protocol = 6;
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+    mode: 0o600
+  });
+
+  const readablePredecessor = loadTerminalWatch(
+    fixture.storeDir,
+    prepared.watchId
+  );
+  assert.deepEqual(
+    readablePredecessor.callback_route?.capabilities,
+    { wake: true, respond: true },
+    "the predecessor remains readable without rewriting its creation route"
+  );
+
+  const fallbackTurnId = "019f0000-0000-7000-8000-000000000295";
+  fs.appendFileSync(
+    fixture.rolloutPath,
+    [
+      {
+        timestamp: "2026-08-21T01:00:00.200Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: fallbackTurnId }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.201Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: request }],
+          internal_chat_message_metadata_passthrough: {
+            turn_id: fallbackTurnId
+          }
+        }
+      },
+      {
+        timestamp: "2026-08-21T01:00:00.202Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: request }
+      }
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n"
+  );
+  terminal = withTerminalWatchScreen(
+    fixture.terminal,
+    CODEX_FALLBACK_QUESTION_ONE
+  );
+  fixture.advance();
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+
+  assert.equal(deliveries.length, 1);
+  assert.equal(
+    deliveries[0].envelope.event.type,
+    "interaction_manual_required"
+  );
+  assert.deepEqual(deliveries[0].route, {
+    ...legacyHostRoute,
+    capabilities: { wake: true, respond: false }
+  });
+  assert.equal(
+    Object.hasOwn(deliveries[0].envelope.route, "capabilities"),
+    false,
+    "the canonical envelope references the profile without duplicating authority"
+  );
+  const upgraded = loadTerminalWatch(fixture.storeDir, prepared.watchId);
+  assert.deepEqual(
+    upgraded.callback_route?.capabilities,
+    { wake: true, respond: true },
+    "the immutable predecessor route is retained for backward readability"
+  );
+  assert.deepEqual(
+    upgraded.notification_outbox[0].callback_route?.capabilities,
+    { wake: true, respond: false }
+  );
+  assert.equal(
+    Object.hasOwn(
+      upgraded.notification_outbox[0].callback_envelope?.route ?? {},
+      "capabilities"
+    ),
+    false
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(manifestPath, "utf8")).writer_protocol,
+    STORE_WRITER_PROTOCOL
   );
 });
 
@@ -1319,7 +1653,10 @@ test("Terminal Watch snapshots and delivers the trusted generic Host route", asy
   });
 
   assert.equal(deliveries.length, 1);
-  assert.deepEqual(deliveries[0].route, callbackRoute);
+  assert.deepEqual(deliveries[0].route, {
+    ...callbackRoute,
+    capabilities: { wake: true, respond: false }
+  });
   assert.equal(
     deliveries[0].envelope.route.controller_session_id,
     "host-session-1"
@@ -2062,6 +2399,18 @@ function exactTerminalObservation(
         summary: {}
       }
     : { state: "absent" as const, summary: {} };
+}
+
+function withTerminalWatchScreen(
+  terminal: Record<string, any>,
+  excerpt: string
+): Record<string, any> {
+  return {
+    ...terminal,
+    _terminal_status_snapshot: {
+      screen: { excerpt }
+    }
+  };
 }
 
 function createFixture(

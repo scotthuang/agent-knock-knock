@@ -376,6 +376,15 @@ test("closed Turn fences new and resumed submission retry before I/O or sidecar 
       );
       const result = JSON.parse(execution.stdout);
       assert.equal(result.terminal_input_sent, false);
+      assert.equal(result.terminal_input_dispatched, false);
+      assert.equal(result.delivered, false);
+      assert.equal(result.agent_acceptance, "unproven");
+      assert.equal(result.observation_mode, "none");
+      assert.deepEqual(result.capabilities, {
+        callback: false,
+        interaction_notify: false,
+        interaction_respond: false
+      });
       assert.equal(result.conversation.status, "closed");
       assert.match(result.reason, /explicitly closed.*no retry state was changed/u);
       assert.deepEqual(effects, [
@@ -528,6 +537,13 @@ test("exact Turn retry wires durable authority before composer input", () => {
   assert.match(terminalOutcome, /safeToRetry: false/u);
   assert.match(terminalOutcome, /safe_to_retry: false/u);
   assert.match(terminalOutcome, /terminal_input_sent: true/u);
+  const retryPresentation = compiledFunctionSource(
+    "printTerminalSubmissionRetryOutcome",
+    "loadExactTerminalSubmissionRetryTurn"
+  );
+  assert.match(retryPresentation, /terminalSendResultContract/u);
+  assert.match(retryPresentation, /durableTerminalInputDispatched/u);
+  assert.match(retryPresentation, /delivered: enterDispatched/u);
   const exactDraft = compiledFunctionSource(
     "runTerminalSubmissionExactDraftEnter",
     "runTerminalSubmissionReplacement"
@@ -603,11 +619,24 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
     "terminalUserSendIntentContext"
   );
   assertOrdered(liveSafety, [
-    "status?.reachable !== true",
-    "approval?.scanned !== true",
-    "approval?.blocked === true",
-    'status.activity_state === "awaiting_approval"',
-    "waiting at an approval prompt"
+    "const decision = decideUserExplicitTerminalInputSafety({",
+    "reachable: status?.reachable === true",
+    "approvalScanned: approval?.scanned === true",
+    "approvalBlocked: approval?.blocked === true",
+    'awaitingApproval: status?.activity_state === "awaiting_approval"',
+    "questionnaireActive: status?.interaction_state !== undefined",
+    'if (decision.action === "reject")',
+    "throw new Error(decision.reason)"
+  ]);
+
+  const managedSafety = compiledFunctionSource(
+    "assertTerminalPreSendStatus",
+    "prepareTerminalControlSend"
+  );
+  assertOrdered(managedSafety, [
+    "request.options.expectedUserExplicitTerminalToken",
+    "assertSafeUserExplicitTerminalSend(status)",
+    "const deferredCodexPrompt"
   ]);
 
   const fallback = compiledFunctionSource(
@@ -651,6 +680,16 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
 });
 
 test("same-ID replay presentation cannot degrade into a fresh Send", () => {
+  const replayPresentation = compiledFunctionSource(
+    "printReplayedUserExplicitSend",
+    "reserveUserExplicitSendIntent"
+  );
+  assertOrdered(replayPresentation, [
+    'deliveryMode === "managed"',
+    'managementMode: "managed"',
+    'observationMode: "none"',
+    "callbackAvailable: false"
+  ]);
   const reservation = compiledFunctionSource(
     "reserveUserExplicitSendIntent",
     "cancelProvenZeroInputUserExplicitSendIntent"
@@ -989,7 +1028,7 @@ test("facade wiring preserves replay validation and presentation priority", () =
     "readNdjsonLog(logPath)",
     "replayLoggedMessageMismatch(",
     "body: requestText",
-    "printJson({",
+    "presentTerminalDispatchReplay({",
     "return true"
   ]);
 
@@ -1005,8 +1044,18 @@ test("facade wiring preserves replay validation and presentation priority", () =
   ]);
   assertOrdered(storedReplay, [
     "body: requestText",
-    "printJson({",
+    "presentTerminalDispatchReplay({",
     "return true"
+  ]);
+
+  const rawManagedSend = compiledFunctionSource(
+    "runManagedRawTerminalSendAttempt",
+    "runManagedSessionSend"
+  );
+  assertOrdered(rawManagedSend, [
+    "replayExactActiveTerminalSubmission({",
+    "options.expectedUserExplicitTerminalToken",
+    "userExplicitTerminalId: terminalConversation.conversationId"
   ]);
 
   const managedSend = compiledFunctionSource(

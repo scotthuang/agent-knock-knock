@@ -1,4 +1,5 @@
 import {
+  isTerminalDispatchOwnerReleasedStatus,
   sessionIdForConversation,
   turnIdForConversation,
   type AgentMessage,
@@ -17,6 +18,197 @@ import type { terminalSubmissionReplayReceipt } from
 import { isRecord } from "./value-guards.js";
 
 type ReplayReceipt = ReturnType<typeof terminalSubmissionReplayReceipt>;
+
+export type TerminalSendAgentAcceptance = "proven" | "unproven";
+export type TerminalSendManagementMode = "managed" | "unmanaged";
+export type TerminalSendObservationMode =
+  | "managed_monitor"
+  | "terminal_watch"
+  | "none";
+
+export interface TerminalSendResultCapabilities {
+  callback: boolean;
+  interaction_notify: boolean;
+  interaction_respond: boolean;
+}
+
+export interface TerminalSendResultContract {
+  terminal_input_dispatched: boolean;
+  agent_acceptance: TerminalSendAgentAcceptance;
+  management_mode: TerminalSendManagementMode;
+  observation_mode: TerminalSendObservationMode;
+  capabilities: TerminalSendResultCapabilities;
+  /** Compatibility value used by 0.12.x readers. */
+  legacy_management_mode: "managed" | "unmanaged_fallback";
+}
+
+export interface NormalizedTerminalSendResultContract
+  extends TerminalSendResultContract {
+  /** Compatibility alias: true only when Enter dispatch is proven. */
+  delivered: boolean;
+}
+
+/** Keep transport, native acceptance, management, and observation orthogonal. */
+export function terminalSendResultContract(input: Readonly<{
+  terminalInputDispatched: boolean;
+  agentAcceptance: TerminalSendAgentAcceptance;
+  managementMode: TerminalSendManagementMode;
+  observationMode: TerminalSendObservationMode;
+  callbackAvailable: boolean;
+  interactionNotificationAvailable?: boolean;
+  interactionResponseAvailable?: boolean;
+}>): TerminalSendResultContract {
+  const callbackAvailable = input.callbackAvailable &&
+    input.observationMode !== "none";
+  return {
+    terminal_input_dispatched: input.terminalInputDispatched,
+    agent_acceptance: input.agentAcceptance,
+    management_mode: input.managementMode,
+    observation_mode: input.observationMode,
+    capabilities: {
+      callback: callbackAvailable,
+      interaction_notify:
+        callbackAvailable &&
+        (input.interactionNotificationAvailable ?? false),
+      interaction_respond:
+        callbackAvailable &&
+        input.managementMode === "managed" &&
+        input.agentAcceptance === "proven" &&
+        (input.interactionResponseAvailable ?? false)
+    },
+    legacy_management_mode: input.managementMode === "managed"
+      ? "managed"
+      : "unmanaged_fallback"
+  };
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
+/**
+ * Compatibility predicate for the one legacy `delivered` fact. Text
+ * injection is terminal input, but delivery is not complete until Enter has
+ * durable proof. Older presenters encoded post-Enter rejection/uncertainty as
+ * `delivered: false`, so retain those stronger receipt facts while excluding
+ * retry refusals which explicitly sent no input.
+ */
+export function terminalSendEnterDispatched(
+  value: unknown
+): boolean {
+  const result = record(value);
+  if (!result) return false;
+  if (result.delivered === true) return true;
+  const receipt = String(result.delivery_receipt ?? "");
+  const outcome = String(result.submission_outcome ?? "");
+  const status = String(result.status ?? "");
+  const lastProvenStage = String(result.last_proven_stage ?? "");
+  const retryState = String(result.submission_retry_state ?? "");
+  if (
+    (typeof result.enter_dispatched_at === "string" &&
+      result.enter_dispatched_at.trim() !== "") ||
+    (typeof result.agent_accepted_at === "string" &&
+      result.agent_accepted_at.trim() !== "") ||
+    ["enter_dispatched", "agent_accepted"].includes(lastProvenStage) ||
+    ["enter_dispatched", "agent_accepted"].includes(retryState)
+  ) {
+    return true;
+  }
+  if ([
+    "submitted",
+    "enter_dispatched",
+    "agent_accepted",
+    "not_accepted"
+  ].includes(receipt)) {
+    return true;
+  }
+  if ([
+    "submitted",
+    "agent_accepted",
+    "pending_acceptance",
+    "not_accepted"
+  ].includes(outcome)) {
+    return true;
+  }
+  if ([
+    "submitted",
+    "enter_dispatched",
+    "agent_accepted",
+    "not_accepted"
+  ].includes(status) || status === "delivered_unfenced") {
+    return true;
+  }
+  if (
+    receipt === "uncertain" &&
+    outcome === "uncertain" &&
+    result.terminal_input_sent !== false
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Normalize Send output from an older CLI without weakening error policy. */
+export function normalizedTerminalSendResultContract(
+  value: Readonly<Record<string, unknown>>
+): NormalizedTerminalSendResultContract {
+  const receipt = String(value.delivery_receipt ?? "");
+  const outcome = String(value.submission_outcome ?? "");
+  const enterDispatched = terminalSendEnterDispatched(value);
+  const terminalInputDispatched =
+    typeof value.terminal_input_dispatched === "boolean"
+      ? value.terminal_input_dispatched
+      : enterDispatched
+        ? true
+        : ["text_injected", "submitted", "enter_dispatched", "agent_accepted"]
+            .includes(receipt) ||
+          ["text_injected"].includes(String(value.status ?? ""));
+  const agentAcceptance = value.agent_acceptance === "proven" ||
+      (outcome === "agent_accepted" && receipt === "agent_accepted" &&
+        value.delivered === true)
+    ? "proven"
+    : "unproven";
+  const managementMode = value.management_mode === "unmanaged" ||
+      value.management_mode === "unmanaged_fallback" ||
+      value.legacy_management_mode === "unmanaged_fallback" ||
+      value.delivered_unmanaged === true
+    ? "unmanaged"
+    : "managed";
+  const existingCapabilities = record(value.capabilities);
+  const legacyCallbackAvailable = value.callback_expected === true;
+  const callbackAvailable = typeof existingCapabilities?.callback === "boolean"
+    ? existingCapabilities.callback
+    : legacyCallbackAvailable;
+  const explicitObservation = value.observation_mode;
+  const observationMode: TerminalSendObservationMode =
+    explicitObservation === "managed_monitor" ||
+      explicitObservation === "terminal_watch" ||
+      explicitObservation === "none"
+      ? explicitObservation
+      : value.callback_mode === "terminal_watch" && callbackAvailable
+        ? "terminal_watch"
+        : callbackAvailable && managementMode === "managed"
+          ? "managed_monitor"
+          : "none";
+  return {
+    delivered: enterDispatched,
+    ...terminalSendResultContract({
+      terminalInputDispatched,
+      agentAcceptance,
+      managementMode,
+      observationMode,
+      callbackAvailable,
+      interactionNotificationAvailable:
+        typeof existingCapabilities?.interaction_notify === "boolean"
+          ? existingCapabilities.interaction_notify
+          : callbackAvailable && managementMode === "managed",
+      interactionResponseAvailable:
+        typeof existingCapabilities?.interaction_respond === "boolean"
+          ? existingCapabilities.interaction_respond
+          : agentAcceptance === "proven"
+    })
+  };
+}
 
 export interface TerminalDispatchPresentationContext {
   message: AgentMessage;
@@ -79,12 +271,23 @@ export function presentTerminalDispatchReplay(
     receiptConversationId: string;
     receiptMessageId: string;
     callbackExpected: boolean;
+    userExplicit?: Readonly<{
+      terminalId: string;
+      messageId: string;
+    }>;
   }>,
   context: TerminalDispatchPresentationContext,
   ports: TerminalDispatchPresentationPorts
 ): void {
   const sessionId = sessionIdForConversation(input.owner);
   const turnId = turnIdForConversation(input.owner);
+  const ownerReleased = isTerminalDispatchOwnerReleasedStatus(
+    input.owner.status
+  );
+  const callbackAvailable = input.callbackExpected &&
+    !input.acceptanceInvalid &&
+    !ownerReleased;
+  const enterDispatched = terminalSendEnterDispatched(input.receipt);
   ports.write({
     session_id: sessionId,
     turn_id: turnId,
@@ -104,30 +307,48 @@ export function presentTerminalDispatchReplay(
         turn_id: turnId
       }
     },
-    delivered: input.receipt.delivered,
+    delivered: enterDispatched,
     status: input.receipt.status,
     submission_outcome: input.receipt.submission_outcome,
     background: true,
-    callback_expected: input.callbackExpected,
+    callback_expected: callbackAvailable,
     terminal_control: context.terminalControl,
     executor: context.executor,
+    ...(input.userExplicit
+      ? {
+          scope: "terminal_user_explicit",
+          terminal_id: input.userExplicit.terminalId,
+          message_id: input.userExplicit.messageId
+        }
+      : {}),
+    ...terminalSendResultContract({
+      terminalInputDispatched: enterDispatched,
+      agentAcceptance: input.accepted ? "proven" : "unproven",
+      managementMode: "managed",
+      observationMode: callbackAvailable ? "managed_monitor" : "none",
+      callbackAvailable,
+      interactionNotificationAvailable: input.accepted,
+      interactionResponseAvailable: input.accepted
+    }),
     replayed: input.receipt.replayed,
     delivery_receipt: input.receipt.delivery_receipt,
     ...(input.receipt.do_not_retry
       ? { do_not_retry: input.receipt.do_not_retry }
       : {}),
-    reason: input.accepted
+    reason: ownerReleased
+      ? "AKK replayed a durable terminal receipt owned by a released Turn; no additional terminal input was sent and no callback remains."
+      : input.accepted
       ? "AKK replayed the durable native acceptance receipt for an identical active terminal request and did not send terminal input again."
       : input.acceptanceInvalid
-        ? `AKK refused to replay an invalid native acceptance receipt (${input.receipt.evidence_error ?? "evidence validation failed"}); no terminal input was sent.`
+        ? `AKK refused to replay an invalid native acceptance receipt (${input.receipt.evidence_error ?? "evidence validation failed"}); no additional terminal input was sent.`
         : "AKK replayed the original transport-level receipt without upgrading it to native acceptance and did not send terminal input again.",
-    openclaw_next_action: input.accepted
+    openclaw_next_action: input.accepted && !ownerReleased
       ? ports.nextAction({
           conversationId: input.receiptConversationId,
           sessionId,
           turnId,
           source: "terminal_control",
-          callbackExpected: input.callbackExpected
+          callbackExpected: callbackAvailable
         })
       : {
           action: "inspect",
@@ -135,7 +356,9 @@ export function presentTerminalDispatchReplay(
           session_id: sessionId,
           turn_id: turnId,
           do_not_retry: true,
-          reason: input.acceptanceInvalid
+          reason: ownerReleased
+            ? "The durable receipt belongs to a released Turn; no callback remains. Inspect current terminal state before starting new work."
+            : input.acceptanceInvalid
             ? "The stored native acceptance evidence is invalid; inspect and explicitly close this Turn."
             : "Only terminal transport is proven; wait for native acceptance or inspect the shared pane."
         }
@@ -206,6 +429,13 @@ export function presentTerminalZeroInputAbort(
     terminal_control: context.terminalControl,
     monitor_pid: monitorPid ?? null,
     executor: context.executor,
+    ...terminalSendResultContract({
+      terminalInputDispatched: false,
+      agentAcceptance: "unproven",
+      managementMode: "managed",
+      observationMode: "none",
+      callbackAvailable: false
+    }),
     safe_to_retry: failure.outcome.safeToRetry,
     do_not_retry: !failure.outcome.safeToRetry,
     reason: text.reason,
@@ -233,7 +463,7 @@ export function presentTerminalIdentityFailure(
     turn_id: turnIdForConversation(conversation),
     conversation,
     message: context.message,
-    delivered: false,
+    delivered: true,
     status: "submission_uncertain",
     submission_outcome: "uncertain",
     background: true,
@@ -243,6 +473,13 @@ export function presentTerminalIdentityFailure(
     executor: context.executor,
     delivery_receipt: "enter_dispatched",
     do_not_retry: true,
+    ...terminalSendResultContract({
+      terminalInputDispatched: true,
+      agentAcceptance: "unproven",
+      managementMode: "managed",
+      observationMode: "none",
+      callbackAvailable: false
+    }),
     reason,
     openclaw_next_action: {
       action: "inspect",
@@ -267,20 +504,35 @@ export function presentTerminalUncertain(
   context: TerminalDispatchPresentationContext,
   ports: TerminalDispatchPresentationPorts
 ): void {
+  // Transport uncertainty is not monitor-eligible. A configured callback
+  // route alone does not prove that an observation sidecar exists.
+  const callbackExpected = false;
   ports.write({
     session_id: sessionIdForConversation(input.conversation),
     turn_id: turnIdForConversation(input.conversation),
     conversation: input.conversation,
     message: context.message,
-    delivered: false,
+    delivered: input.enterDispatched,
     status: "submission_uncertain",
     submission_outcome: "uncertain",
     background: true,
-    callback_expected: callbackExpectedForConversation(input.conversation),
+    callback_expected: callbackExpected,
     terminal_control: context.terminalControl,
     monitor_pid: input.monitorPid ?? null,
     executor: context.executor,
+    delivery_receipt: input.enterDispatched
+      ? "enter_dispatched"
+      : input.textInjected
+        ? "text_injected"
+        : undefined,
     do_not_retry: true,
+    ...terminalSendResultContract({
+      terminalInputDispatched: input.textInjected || input.enterDispatched,
+      agentAcceptance: "unproven",
+      managementMode: "managed",
+      observationMode: callbackExpected ? "managed_monitor" : "none",
+      callbackAvailable: callbackExpected
+    }),
     stalled_conversation_ids: input.stalledConversationIds,
     reason: input.enterDispatched
       ? "AKK dispatched Enter but native acceptance or its exact identity became uncertain. Do not retry automatically; inspect this conversation and pane."
@@ -313,12 +565,13 @@ export function presentTerminalCompleted(
   const accepted = outcome === "agent_accepted";
   const pending = outcome === "pending_acceptance";
   const callbackExpected = callbackExpectedForConversation(input.conversation);
+  const callbackAvailable = callbackExpected && (accepted || pending);
   ports.write({
     session_id: sessionIdForConversation(input.conversation),
     turn_id: turnIdForConversation(input.conversation),
     conversation: input.conversation,
     message: context.message,
-    delivered: accepted,
+    delivered: true,
     status: accepted
       ? "async_pending"
       : pending
@@ -328,11 +581,20 @@ export function presentTerminalCompleted(
           : "submission_uncertain",
     submission_outcome: outcome,
     background: true,
-    callback_expected: callbackExpected && (accepted || pending),
+    callback_expected: callbackAvailable,
     terminal_control: context.terminalControl,
     monitor_pid: input.monitorPid ?? null,
     executor: context.executor,
     budget: ports.budget(input.conversation),
+    ...terminalSendResultContract({
+      terminalInputDispatched: true,
+      agentAcceptance: accepted ? "proven" : "unproven",
+      managementMode: "managed",
+      observationMode: callbackAvailable ? "managed_monitor" : "none",
+      callbackAvailable,
+      interactionNotificationAvailable: accepted,
+      interactionResponseAvailable: accepted
+    }),
     delivery_receipt: accepted
       ? "agent_accepted"
       : pending

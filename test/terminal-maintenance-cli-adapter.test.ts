@@ -732,6 +732,7 @@ test("explicit Close persists user intent when linked cleanup is missing", async
     reason: "user chose to release AKK management",
     disposition: "user_abandoned_management",
     terminal_input_sent: false,
+    terminal_input_dispatched: false,
     coding_agent_stopped: false,
     tmux_pane_closed: false
   });

@@ -917,6 +917,13 @@ test("safe terminal send keeps status getter and rejection priority", () => {
     ...unreachable,
     reachable: true,
     approval_state: { scanned: true, blocked: false, approvable: false },
+    interaction_state: { state: "pending" },
+    activity_state: "idle"
+  } as unknown as TerminalBridgeStatus), /native questionnaire/u);
+  assert.throws(() => assertSafeTerminalSend("codex", {
+    ...unreachable,
+    reachable: true,
+    approval_state: { scanned: true, blocked: false, approvable: false },
     activity_state: "working"
   }), /Codex terminal is working, not idle/u);
   assert.doesNotThrow(() => assertSafeTerminalSend("codex", {

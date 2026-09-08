@@ -164,9 +164,9 @@ The fast tier owns the deterministic Terminal Watch contract:
 | Fast witness | Contract proved |
 | --- | --- |
 | `test/terminal-watch-store.test.ts` | Owner-private atomic schema-v2 records under `terminal-watches/`, legacy-v1 normalization, strict load/list validation, revision CAS, exact provider anchors plus terminal-activity anchors/checkpoints and immutable warnings, and `writer -> per-watch` lock order |
-| `test/terminal-watch-service.test.ts` | Restart/list recovery, timeout and terminal settlement, approval dedupe without automatic approval, exact observation fences, terminal-activity checkpoint persistence, callback claim-crash recovery, retry, and deterministic idempotency |
-| `test/terminal-submission-acceptance.test.ts`, `test/claude-local-transcript-provider.test.ts` | Preferred exact Codex rollout and Claude current-turn transcript anchors; drift invalidates an already exact-anchored Watch, while absence or structural incompatibility at manual-Watch creation can be downgraded to a warning and terminal-activity fallback |
-| `test/terminal-watch-cli-adapter.test.ts`, `test/terminal-watch-callback-cli-adapter.test.ts` | Exact-task capture when available; best-effort `terminal_activity` fallback after observed activity and consecutive stable-idle sweeps; `watch_mode`/`confidence`/warning projection; no terminal input or Session/Turn ownership; managed ownership, version/artifact uncertainty, binding metadata, and action advertisement as non-veto diagnostics; hard failure only for an absent/unobservable exact terminal or unwritable Store; privacy-safe callbacks that never present stable idle as exact task completion; pre-Send exact fallback anchors and restart-safe delivery metadata |
+| `test/terminal-watch-service.test.ts` | Restart/list recovery, timeout and terminal settlement, approval and manual-questionnaire dedupe without automatic response authority, exact observation fences, terminal-activity checkpoint persistence, callback claim-crash recovery, retry, and deterministic idempotency |
+| `test/terminal-submission-acceptance.test.ts`, `test/claude-local-transcript-provider.test.ts` | Preferred exact Codex rollout and Claude current-turn transcript anchors; source-less Codex candidate-set acceptance over anchored plus current roots, including closed-FD frozen-file scans and fail-closed replacement/deletion/multiple-acceptor evidence; drift invalidates an already exact-anchored Watch, while absence or structural incompatibility at manual-Watch creation can be downgraded to a warning and terminal-activity fallback |
+| `test/terminal-watch-cli-adapter.test.ts`, `test/terminal-watch-callback-cli-adapter.test.ts` | Exact-task capture when available; best-effort `terminal_activity` fallback after observed activity and consecutive stable-idle sweeps; `watch_mode`/`confidence`/warning projection; no terminal input or Session/Turn ownership; managed ownership, version/artifact uncertainty, binding metadata, and action advertisement as non-veto diagnostics; hard failure only for an absent/unobservable exact terminal or unwritable Store; privacy-safe callbacks that never present stable idle as exact task completion; pre-Send exact fallback anchors, restart-safe delivery metadata, and bounded idempotent `interaction_manual_required` callbacks with `respond:false` |
 | `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Broad read-only Watch discovery, direct user-explicit Watch by exact `terminal_id` even without advertisement, Watch status/unwatch routing and formatting, action-contract v24 semantic-ID-only projection including same-controller status-bound questionnaire response, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, automatic fallback Watch callback semantics, Claude empty-only isolation, and the documented terminal selection → exact-task-or-activity Watch workflow |
 
 The current public surface has 17 OpenClaw tools. Terminal Watch adds the
@@ -198,11 +198,17 @@ sequence even when the Composer is invisible, truncated, unstable, or nonempty,
 with no post-text Composer veto. Claude user-explicit Send, native inspection,
 and lifecycle input remain exact-empty-only; managed delivery may require exact
 empty before input, but its user-explicit Codex Enter is not post-text gated.
+The Send result contract independently proves physical dispatch, native
+acceptance, management mode, observation mode, and callback/interaction
+capabilities. Durable close audit facts come from dispatch receipts rather than
+human-readable close prose. Candidate-set recovery may leave a provisional Turn
+pending until exactly one rollout accepts its immutable request hash; it never
+replays terminal input while resolving that identity.
 The semantic
 `native_thread_id` remains public for resume. The plugin/CLI still derives and
-revalidates those private fences under lock. Store format remains 1; writer
-protocol 6 fences the schema-v2 Watch checkpoint and fallback-origin records
-from older writers.
+revalidates those private fences under lock. Store format remains 1 and the
+Terminal Watch schema remains 2; writer protocol 7 fences manual-interaction
+notification state and bounded callback metadata from protocol-6 writers.
 
 ## Profiling
 

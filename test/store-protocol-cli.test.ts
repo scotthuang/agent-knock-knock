@@ -323,7 +323,8 @@ test("explicit physical send bypasses a newer writer protocol without mutating S
     const output = JSON.parse(result.stdout);
     assert.equal(output.delivered, true);
     assert.equal(output.delivered_unmanaged, true);
-    assert.equal(output.management_mode, "unmanaged_fallback");
+    assert.equal(output.management_mode, "unmanaged");
+    assert.equal(output.legacy_management_mode, "unmanaged_fallback");
     assert.equal(output.scope, "terminal_user_explicit");
     assert.equal(pendingText, "");
     assert.deepEqual(terminalProvider.literalInputs(), [message]);

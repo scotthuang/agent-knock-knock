@@ -177,7 +177,7 @@ test("the public action contract v24 exposes semantic arguments only", () => {
   );
   assert.match(
     (contracts.instructions as string[]).join("\n"),
-    /parsed working activity does not veto/u
+    /parsed working activity and Codex rollout ambiguity do not veto/u
   );
   assert.match(
     actions.send.initial_attach_scope,

@@ -100,6 +100,13 @@ export interface TerminalControlSendRequest {
     transition: NativeThreadTransition;
   };
   verifiedEmptyCodexHandoff?: VerifiedEmptyCodexHandoffBoundary;
+  /**
+   * Physical-terminal human Send may have no authoritative predecessor
+   * Session while Codex exposes an ambiguous open-root set. Freeze that set
+   * before input and bind the provisional raw-attach Session only after one
+   * rollout durably accepts the exact request.
+   */
+  postSendCodexCandidateAnchor?: CodexCandidateSetRolloutAcceptanceAnchor;
   deferredCodexForegroundBinding?: DeferredCodexForegroundBindingBoundary;
   continuingTurnResponse?: boolean;
 }

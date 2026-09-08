@@ -12,10 +12,12 @@ import {
   TERMINAL_WATCH_SCHEMA,
   TERMINAL_WATCH_VERSION,
   assertTerminalWatch,
+  assertTerminalWatchManualInteractionSummary,
   assertTerminalWatchObservationCheckpoint,
   initialTerminalWatchObservationCheckpoint,
   terminalWatchIdentityFingerprint,
   terminalWatchCallbackEnvelope,
+  terminalWatchNotificationOnlyRoute,
   terminalWatchNotificationCallbackSnapshot,
   terminalWatchNotificationId,
   terminalWatchNotificationIdempotencyKey,
@@ -26,6 +28,7 @@ import {
   type TerminalWatchCallbackMessageInput,
   type TerminalWatchNotification,
   type TerminalWatchNotificationKind,
+  type TerminalWatchManualInteractionSummary,
   type TerminalWatchObservationCheckpoint,
   type TerminalWatchStatus,
   type TerminalWatchStore,
@@ -90,6 +93,12 @@ export type TerminalWatchObservation =
       kind: "approval";
       evidence_fingerprint: string;
       reason_code?: string;
+    })
+  | (TerminalWatchObservationBase & {
+      kind: "interaction_manual_required";
+      evidence_fingerprint: string;
+      reason_code?: string;
+      manual_interaction: TerminalWatchManualInteractionSummary;
     })
   | (TerminalWatchObservationBase & {
       kind: "completed" | "failed";
@@ -373,6 +382,41 @@ export function createTerminalWatchService(
         { expectedRevision: terminalWatchRevision(current) }
       );
     }
+    if (observation.kind === "interaction_manual_required") {
+      const duplicate = current.notification_outbox.some((notification) =>
+        notification.kind === "interaction_manual_required" &&
+        notification.evidence_fingerprint === observation.evidence_fingerprint
+      );
+      if (duplicate) {
+        if (
+          activityAt === current.last_activity_at &&
+          !checkpointChanged
+        ) {
+          return current;
+        }
+        return dependencies.repository.save({
+          ...current,
+          observation_checkpoint: checkpoint,
+          last_activity_at: activityAt,
+          updated_at: now
+        }, { expectedRevision: terminalWatchRevision(current) });
+      }
+      const next = withManualInteractionNotification({
+        ...current,
+        observation_checkpoint: checkpoint,
+        last_activity_at: activityAt,
+        updated_at: now
+      }, {
+        evidenceFingerprint: observation.evidence_fingerprint,
+        reasonCode: observation.reason_code,
+        manualInteraction: observation.manual_interaction,
+        createdAt: now
+      });
+      return dependencies.repository.save(
+        next,
+        { expectedRevision: terminalWatchRevision(current) }
+      );
+    }
     return saveSettlement(current, {
       kind: observation.kind,
       evidenceFingerprint: observation.evidence_fingerprint,
@@ -435,7 +479,10 @@ export function createTerminalWatchService(
         completion_timestamp: input.completionTimestamp
       },
       notification_outbox: [
-        ...supersedeUndeliveredApprovals(current.notification_outbox, input.updatedAt),
+        ...supersedeUndeliveredAttentionNotifications(
+          current.notification_outbox,
+          input.updatedAt
+        ),
         notification
       ]
     };
@@ -481,7 +528,8 @@ function createTerminalWatchNotificationDelivery(input: {
       const first = current.notification_outbox[index];
       if (
         current.status !== "active" &&
-        first?.kind === "approval" &&
+        first !== undefined &&
+        isAttentionNotification(first) &&
         notificationIsClaimable(first, now)
       ) {
         current = dependencies.repository.save({
@@ -490,7 +538,7 @@ function createTerminalWatchNotificationDelivery(input: {
           notification_outbox: replaceAt(
             current.notification_outbox,
             index,
-            supersededApprovalNotification(first, now)
+            supersededAttentionNotification(first, now)
           )
         }, { expectedRevision: terminalWatchRevision(current) });
         index = firstUnresolvedNotificationIndex(current);
@@ -515,7 +563,10 @@ function createTerminalWatchNotificationDelivery(input: {
         }
         if (callback) {
           try {
-            const route = parseCallbackRoute(callback.route);
+            const parsedRoute = parseCallbackRoute(callback.route);
+            const route = selected.kind === "interaction_manual_required"
+              ? terminalWatchNotificationOnlyRoute(parsedRoute)
+              : parsedRoute;
             snapshotted = {
               ...selected,
               callback_route: route,
@@ -596,8 +647,8 @@ function createTerminalWatchNotificationDelivery(input: {
             last_attempt_at: selected.last_attempt_at,
             delivered_at: now
           })
-        : selected.kind === "approval" && current.status !== "active"
-          ? supersededApprovalNotification(selected, now)
+        : isAttentionNotification(selected) && current.status !== "active"
+          ? supersededAttentionNotification(selected, now)
           : withNotificationReceipt(selected, {
             status: "failed",
             attempts: selected.attempts,
@@ -1135,6 +1186,9 @@ function assertObservationForWatch(
       safeReasonCode(observation.reason_code, undefined);
     }
   }
+  if (observation.kind === "interaction_manual_required") {
+    assertTerminalWatchManualInteractionSummary(observation.manual_interaction);
+  }
   if (observation.kind === "completed" || observation.kind === "failed") {
     if (
       observation.completion_text !== undefined &&
@@ -1186,12 +1240,37 @@ function withApprovalNotification(
   };
 }
 
+function withManualInteractionNotification(
+  watch: TerminalWatch,
+  input: {
+    evidenceFingerprint: string;
+    reasonCode?: string;
+    manualInteraction: TerminalWatchManualInteractionSummary;
+    createdAt: string;
+  }
+): TerminalWatch {
+  assertTerminalWatchManualInteractionSummary(input.manualInteraction);
+  const notification = pendingNotification(
+    watch.watch_id,
+    "interaction_manual_required",
+    input.evidenceFingerprint,
+    input.createdAt,
+    input.reasonCode,
+    input.manualInteraction
+  );
+  return {
+    ...watch,
+    notification_outbox: [...watch.notification_outbox, notification]
+  };
+}
+
 function pendingNotification(
   watchId: string,
   kind: TerminalWatchNotificationKind,
   evidenceFingerprint: string,
   createdAt: string,
-  reasonCode?: string
+  reasonCode?: string,
+  manualInteraction?: TerminalWatchManualInteractionSummary
 ): TerminalWatchNotification {
   assertSha256(evidenceFingerprint, "terminal Watch notification fingerprint");
   const notificationId = terminalWatchNotificationId(
@@ -1210,30 +1289,33 @@ function pendingNotification(
     reason_code: reasonCode === undefined
       ? undefined
       : safeReasonCode(reasonCode, undefined),
+    ...(manualInteraction === undefined
+      ? {}
+      : { manual_interaction: manualInteraction }),
     status: "pending",
     attempts: 0,
     created_at: createdAt
   };
 }
 
-function supersedeUndeliveredApprovals(
+function supersedeUndeliveredAttentionNotifications(
   notifications: readonly TerminalWatchNotification[],
   supersededAt: string
 ): TerminalWatchNotification[] {
   return notifications.map((notification) => {
     if (
-      notification.kind !== "approval" ||
+      !isAttentionNotification(notification) ||
       notification.status === "delivered" ||
       notification.status === "delivering" ||
       notification.status === "superseded"
     ) {
       return notification;
     }
-    return supersededApprovalNotification(notification, supersededAt);
+    return supersededAttentionNotification(notification, supersededAt);
   });
 }
 
-function supersededApprovalNotification(
+function supersededAttentionNotification(
   notification: TerminalWatchNotification,
   supersededAt: string
 ): TerminalWatchNotification {
@@ -1251,6 +1333,7 @@ type TerminalWatchNotificationReceipt = Omit<
   | "kind"
   | "evidence_fingerprint"
   | "reason_code"
+  | "manual_interaction"
   | "callback_route"
   | "callback_envelope"
   | "created_at"
@@ -1267,6 +1350,9 @@ function withNotificationReceipt(
     kind: notification.kind,
     evidence_fingerprint: notification.evidence_fingerprint,
     reason_code: notification.reason_code,
+    ...(notification.manual_interaction === undefined
+      ? {}
+      : { manual_interaction: notification.manual_interaction }),
     ...(Object.hasOwn(notification, "callback_route")
       ? { callback_route: notification.callback_route }
       : {}),
@@ -1276,6 +1362,13 @@ function withNotificationReceipt(
     created_at: notification.created_at,
     ...receipt
   };
+}
+
+function isAttentionNotification(
+  notification: TerminalWatchNotification
+): boolean {
+  return notification.kind === "approval" ||
+    notification.kind === "interaction_manual_required";
 }
 
 function notificationIsClaimable(

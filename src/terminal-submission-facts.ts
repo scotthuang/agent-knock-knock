@@ -86,6 +86,11 @@ export interface CodexCandidateSetRolloutAcceptanceRequest {
   anchor: CodexCandidateSetRolloutAcceptanceAnchor;
   currentInventory: CodexOpenRootRolloutInventory;
   requestHash: string;
+  /**
+   * A post-anchor acceptor already persisted to one recovery side may have
+   * closed its process FD before the other side was committed.
+   */
+  recoveryCandidate?: CodexOpenRootRolloutIdentity;
 }
 
 export type CodexCandidateSetRolloutAcceptanceResult =

@@ -89,6 +89,55 @@ test("virgin acceptance closes binding before the second detector and commit", a
   assert.equal(result.outcome, "accepted");
 });
 
+test("candidate-set acceptance rebinds and rescans closed-root evidence before commit", async () => {
+  const events: string[] = [];
+  let recoveries = 0;
+  const current = turn({ codexAnchorVersion: 3 });
+  const service = new TerminalAcceptanceApplicationService<Turn>({
+    clock: { nowMs: () => 2_000 },
+    binding: {
+      recover: async (value) => {
+        recoveries += 1;
+        events.push(`recover:${recoveries}`);
+        return {
+          turn: value,
+          state: recoveries === 1 ? "pending" : "recovered"
+        };
+      }
+    },
+    acceptance: {
+      detect: async () => {
+        events.push("detect:closed-recovery-candidate");
+        return EVIDENCE;
+      }
+    },
+    terminal: {
+      proveExactDraftStillPresent: async () => {
+        throw new Error("accepted input must not inspect the composer");
+      }
+    },
+    repository: {
+      commit: async ({ turn: value, resolution }) => {
+        events.push(`commit:${resolution.outcome}`);
+        return value;
+      }
+    }
+  });
+  const result = await service.reconcile({
+    executor: "codex",
+    turn: current,
+    project: (item) => item.facts
+  });
+  assert.equal(result.outcome, "accepted");
+  assert.deepEqual(events, [
+    "recover:1",
+    "detect:closed-recovery-candidate",
+    "recover:2",
+    "detect:closed-recovery-candidate",
+    "commit:agent_accepted"
+  ]);
+});
+
 test("possible input remains pending and never becomes a replayable abort", async () => {
   const events: string[] = [];
   const current = turn({ codexAnchorVersion: 1 });

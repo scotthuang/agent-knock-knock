@@ -67,6 +67,10 @@ import {
   validateTerminalInteractionResponse,
   type TerminalInteractionProjection
 } from "./terminal-interaction-protocol.js";
+import {
+  normalizedTerminalSendResultContract,
+  terminalSendEnterDispatched
+} from "./terminal-dispatch-presenter.js";
 
 const MAX_DISPLAYED_RESUME_SNAPSHOTS = 512;
 const OPENCLAW_HANDOFF_AUTHORITY_KIND = "handoff";
@@ -466,7 +470,7 @@ export function registerOpenClawCommands(
       label: "AKK Send",
       name: "agent_knock_knock_send",
       description:
-        "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process and a scanned, non-blocked approval state; parsed working activity and Codex Composer visibility, stability, or exactness do not veto it. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. The managed fast path may require exact empty before input, but after user-explicit Codex text injection it follows the same no-Composer-veto Enter rule. If broken internal AKK state prevents managed delivery before input, AKK delivers once as unmanaged work with no managed callback Turn, then best-effort attaches an exact Terminal Watch callback and releases stale management. Watch attachment failure never changes a successful Send and is reported in the delivery result. Once the mutation sequence begins, an uncertain result must not be automatically retried. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
+        "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process, a scanned non-blocked approval state, and no active native questionnaire; parsed working activity, Codex rollout ambiguity, AKK management state, and Codex Composer visibility, stability, or exactness do not veto physical delivery. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. A source-less Codex terminal freezes all current rollout roots before input, then promotes a provisional Session/Turn only when exactly one anchored or newly opened rollout durably accepts the exact request hash; zero matches remain pending and ambiguity becomes uncertain without replay. If managed preparation fails before input, AKK still delivers once as unmanaged work, then best-effort attaches an exact Terminal Watch callback. Such a Watch may notify that a questionnaire needs manual TUI input, but it has no interaction response authority. Read terminal_input_dispatched, agent_acceptance, management_mode, observation_mode, and capabilities independently. Watch attachment failure never changes a successful Send. Once the mutation sequence begins, an uncertain result must not be automatically retried. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
       parameters: sendParameters,
       async execute(toolCallId, params, signal) {
         return withHostBridgeInvocationSignal(signal, async () => {
@@ -707,15 +711,11 @@ async function handleAkkCommand(
       }, {
         sessionKey: ctx.sessionKey
       });
-      if (result.scope === "terminal_user_explicit") {
-        return {
-          text: formatSendCommandResult(result),
-          isError: sendCommandResultIsError(result)
-        };
-      }
       return {
-        text: formatDelegateCommandResult(result),
-        isError: result.status !== "async_pending"
+        text: result.scope === "terminal_user_explicit"
+          ? formatSendCommandResult(result)
+          : formatDelegateCommandResult(result),
+        isError: sendCommandResultIsError(result)
       };
     }
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -802,12 +802,17 @@ async function handleAkkCommand(
 }
 
 function sendCommandResultIsError(result) {
-  return result.delivered === true &&
-    result.scope === "terminal_user_explicit"
+  return isSuccessfulTerminalDispatch(result)
     ? false
     : terminalSubmissionReported(result)
       ? !isAkkNativeSubmissionAccepted(result)
       : result.status === "delivered_unfenced";
+}
+
+function isSuccessfulTerminalDispatch(
+  result: unknown
+): boolean {
+  return isRecord(result) && terminalSendEnterDispatched(result);
 }
 
 async function handleAkkLifecycleCommand(
@@ -1188,50 +1193,68 @@ function formatRetryCallbackCommandResult(result) {
   ].join("\n");
 }
 
-function formatSendCommandResult(result) {
-  if (
-    result.scope === "terminal_user_explicit"
-  ) {
-    const unmanaged = result.delivered_unmanaged === true;
-    const replayed = result.replayed === true;
-    const watchCallback = unmanaged &&
-      result.callback_expected === true &&
-      result.callback_mode === "terminal_watch" &&
-      typeof result.watch_id === "string"
-        ? result.watch_id
-        : undefined;
-    if (result.delivered !== true) {
-      return [
-        "AKK already dispatched this managed terminal Send; native acceptance is still pending.",
-        `terminal: ${result.terminal_id ?? "unknown"}`,
-        `message: ${result.message_id ?? "unknown"}`,
-        "delivery: Enter dispatched; do not resend this message id.",
-        "next: inspect AKK status or the terminal; wait for the existing managed Turn."
-      ].join("\n");
-    }
+function formatUnconfirmedTerminalUserExplicitSendResult(result) {
+  const terminalInputDispatched = result.terminal_input_dispatched === true;
+  const enterDispatched = terminalSendEnterDispatched(result);
+  if (!enterDispatched) {
     return [
-      unmanaged
-        ? replayed
-          ? "AKK confirmed this direct terminal Send was already delivered."
-          : "AKK delivered the user's request directly to the coding agent."
-        : replayed
-          ? "AKK confirmed this managed terminal Send was already delivered."
-          : "AKK delivered the user's terminal Send through managed routing.",
+      terminalInputDispatched
+        ? "AKK started this terminal Send, but could not prove that Enter was dispatched."
+        : "AKK stopped this terminal Send before any terminal input was proven.",
       `terminal: ${result.terminal_id ?? "unknown"}`,
       `message: ${result.message_id ?? "unknown"}`,
-      `delivery: ${unmanaged ? "unmanaged fallback" : "managed"}`,
-      ...(unmanaged
-        ? [watchCallback
-            ? `callback: Terminal Watch ${watchCallback}; no managed AKK Turn was created.`
-            : "callback: unavailable; no managed AKK Turn was created."]
-        : []),
-      unmanaged
-        ? watchCallback
-          ? "next: wait for the Terminal Watch callback; watch-status is the recovery path."
-          : "next: refresh AKK list and use Watch to observe the still-running coding-agent task."
-        : "next: refresh AKK list; do not resend this message id."
+      terminalInputDispatched
+        ? "delivery: text input may be present; do not resend this message id."
+        : "delivery: no terminal input proven.",
+      "next: inspect AKK status and the terminal before deciding whether to continue."
     ].join("\n");
   }
+  return [
+    "AKK already dispatched this managed terminal Send; native acceptance is still pending.",
+    `terminal: ${result.terminal_id ?? "unknown"}`,
+    `message: ${result.message_id ?? "unknown"}`,
+    "delivery: Enter dispatched; do not resend this message id.",
+    "next: inspect AKK status or the terminal; wait for the existing managed Turn."
+  ].join("\n");
+}
+
+function formatTerminalUserExplicitSendResult(result) {
+  if (!terminalSendEnterDispatched(result)) {
+    return formatUnconfirmedTerminalUserExplicitSendResult(result);
+  }
+  const unmanaged = result.delivered_unmanaged === true;
+  const replayed = result.replayed === true;
+  const watchCallback = unmanaged &&
+    result.callback_expected === true &&
+    result.callback_mode === "terminal_watch" &&
+    typeof result.watch_id === "string"
+      ? result.watch_id
+      : undefined;
+  return [
+    unmanaged
+      ? replayed
+        ? "AKK confirmed this direct terminal Send was already delivered."
+        : "AKK delivered the user's request directly to the coding agent."
+      : replayed
+        ? "AKK confirmed this managed terminal Send was already delivered."
+        : "AKK delivered the user's terminal Send through managed routing.",
+    `terminal: ${result.terminal_id ?? "unknown"}`,
+    `message: ${result.message_id ?? "unknown"}`,
+    `delivery: ${unmanaged ? "unmanaged fallback" : "managed"}`,
+    ...(unmanaged
+      ? [watchCallback
+          ? `callback: Terminal Watch ${watchCallback}; no managed AKK Turn was created.`
+          : "callback: unavailable; no managed AKK Turn was created."]
+      : []),
+    unmanaged
+      ? watchCallback
+        ? "next: wait for the Terminal Watch callback; watch-status is the recovery path."
+        : "next: refresh AKK list and use Watch to observe the still-running coding-agent task."
+      : "next: refresh AKK list; do not resend this message id."
+  ].join("\n");
+}
+
+function formatManagedSendCommandResult(result) {
   const conversation = result.conversation ?? {};
   const conversationId = conversation.conversation_id ?? result.conversation_id ?? "unknown";
   const sessionId = conversation.session_id ?? result.session_id ?? conversationId;
@@ -1314,6 +1337,12 @@ function formatSendCommandResult(result) {
       ? "next: yield now and wait for the AKK callback or an explicit status request."
       : `launched: ${result.launched === true ? "yes" : "no"}`
   ].join("\n");
+}
+
+function formatSendCommandResult(result) {
+  return result.scope === "terminal_user_explicit"
+    ? formatTerminalUserExplicitSendResult(result)
+    : formatManagedSendCommandResult(result);
 }
 
 function formatCancelCommandResult(result) {
@@ -1476,7 +1505,12 @@ function terminalScreenExcerpt(result): string | undefined {
     : `…${text.slice(-1599)}`;
 }
 
-async function runSendRequest(api, params, toolContext, messageId?: string) {
+async function runSendRequest(
+  api,
+  params,
+  toolContext,
+  messageId?: string
+): Promise<Record<string, any>> {
   if (Object.hasOwn(params, "turn_id")) {
     const unexpected = Object.keys(params).filter((key) => key !== "turn_id");
     if (unexpected.length > 0) {
@@ -1494,7 +1528,11 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
     const args = ["send", "--turn", turnId];
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
-    return runHostAwareCli(api, args);
+    const result = await runHostAwareCli(api, args);
+    return {
+      ...result,
+      ...normalizedTerminalSendResultContract(result)
+    };
   }
   const requestedType = Object.hasOwn(params, "type")
     ? stringValue(params.type)
@@ -1584,7 +1622,11 @@ async function runSendRequest(api, params, toolContext, messageId?: string) {
   pushOptional(args, "--gateway-method", CALLBACK_METHOD);
   pushOptional(args, "--gateway-session", openclawSession);
   pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
-  return runHostAwareCli(api, args);
+  const result = await runHostAwareCli(api, args);
+  return {
+    ...result,
+    ...normalizedTerminalSendResultContract(result)
+  };
 }
 
 function toolResult(
@@ -2278,10 +2320,7 @@ function isSubmissionError(result: unknown): boolean {
   if (!isRecord(result)) {
     return false;
   }
-  if (
-    result.delivered === true &&
-    result.scope === "terminal_user_explicit"
-  ) {
+  if (isSuccessfulTerminalDispatch(result)) {
     return false;
   }
   if (terminalSubmissionReported(result)) {
@@ -2387,7 +2426,11 @@ function consistentResultIdentity(field, sources) {
   return expected?.identity;
 }
 
-async function runDelegate(api, params, toolContext) {
+async function runDelegate(
+  api,
+  params,
+  toolContext
+): Promise<Record<string, any>> {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   const request = requiredString(params.request, "request");
   const openclawSession =
@@ -2418,7 +2461,10 @@ async function runDelegate(api, params, toolContext) {
     // A uniquely delegated user-priority Send may deliberately complete
     // without creating a managed Turn. Preserve that terminal receipt for the
     // shared Send formatter instead of inventing Session/Turn identity.
-    return parsed;
+    return {
+      ...parsed,
+      ...normalizedTerminalSendResultContract(parsed)
+    };
   }
   const conversationId = stringValue(parsed.conversation_id) ??
     (isRecord(parsed.conversation)
@@ -2502,6 +2548,7 @@ async function runDelegate(api, params, toolContext) {
     callback_method: hostBridgePresentationApis.has(api)
       ? "command_json_v1"
       : CALLBACK_METHOD,
+    ...normalizedTerminalSendResultContract(parsed),
     ...(submissionUnfenced
       ? {
           submission_outcome: "submitted",

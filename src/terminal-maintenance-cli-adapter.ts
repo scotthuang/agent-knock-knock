@@ -35,7 +35,11 @@ import { terminalControlsShareIncarnation } from
 import { terminalControlEvidenceMatches } from "./terminal-control-ref.js";
 import { terminalControlFromTakeover } from
   "./terminal-runtime-cli-adapter.js";
-import { terminalBridgeSubmission } from "./terminal-dispatch-receipt.js";
+import {
+  terminalBridgeSubmission,
+  terminalInputDispatchedForConversation,
+  terminalSubmissionIndicatesInputDispatched
+} from "./terminal-dispatch-receipt.js";
 import { terminalDispatchLedgerLooksLifecycle,
   type TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
@@ -984,6 +988,18 @@ async function runClose(options: TerminalMaintenanceCliOptions): Promise<void> {
       const closedAt = stringValue(conversation.closed_at) ?? now;
       const closeReason = stringValue(options.reason) ??
         stringValue(conversation.close_reason) ?? "closed by request";
+      let terminalInputSent: boolean;
+      try {
+        terminalInputSent = terminalInputDispatchedForConversation(
+          conversation
+        );
+      } catch {
+        // A damaged historical receipt must not erase the current durable
+        // dispatch stage while the user is releasing management.
+        terminalInputSent = terminalSubmissionIndicatesInputDispatched(
+          terminalBridgeSubmission(conversation)
+        );
+      }
       const closed = {
         ...supersedeUnacceptedCallbackDeliveries(conversation, {
           at: now,
@@ -1051,7 +1067,8 @@ async function runClose(options: TerminalMaintenanceCliOptions): Promise<void> {
           status: "closed",
           reason: closed.close_reason,
           disposition: "user_abandoned_management",
-          terminal_input_sent: false,
+          terminal_input_sent: terminalInputSent,
+          terminal_input_dispatched: terminalInputSent,
           coding_agent_stopped: false,
           tmux_pane_closed: false
         });
@@ -1075,7 +1092,8 @@ async function runClose(options: TerminalMaintenanceCliOptions): Promise<void> {
         conversation: closed,
         closed: true,
         management_released: true,
-        terminal_input_sent: false,
+        terminal_input_sent: terminalInputSent,
+        terminal_input_dispatched: terminalInputSent,
         coding_agent_stopped: false,
         tmux_pane_closed: false,
         next_action:

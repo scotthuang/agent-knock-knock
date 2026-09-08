@@ -22,6 +22,7 @@ import {
 } from "./claude-local-transcript-provider.js";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
+  captureCodexCandidateSetRolloutAcceptanceAnchor,
   type CodexRolloutAcceptanceAnchor,
   validateCodexRolloutAcceptanceAnchor
 } from "./terminal-submission-acceptance.js";
@@ -173,6 +174,8 @@ import {
   type TerminalDispatchLedgerDocument
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatchApplication from "./terminal-dispatch-application.js";
+import { decideUserExplicitTerminalInputSafety } from
+  "./terminal-dispatch-policy.js";
 import type {
   DeferredCodexForegroundBindingBoundary,
   TerminalDispatchTerminal,
@@ -221,6 +224,8 @@ import {
   presentTerminalCompleted,
   presentTerminalDispatchReplay,
   presentTerminalIdentityFailure,
+  terminalSendEnterDispatched,
+  terminalSendResultContract,
   presentTerminalUncertain,
   presentTerminalZeroInputAbort as renderTerminalZeroInputAbort
 } from "./terminal-dispatch-presenter.js";
@@ -1186,7 +1191,8 @@ function replayExactActiveTerminalSubmission({
   expectedSessionId,
   expectedTurnId,
   expectedMessageType = "task",
-  expectedStatePath
+  expectedStatePath,
+  userExplicitTerminalId
 }: {
   options: Record<string, any>;
   terminalControl: TerminalControlRef;
@@ -1196,6 +1202,7 @@ function replayExactActiveTerminalSubmission({
   expectedTurnId?: string;
   expectedMessageType?: "task" | "answer";
   expectedStatePath?: string;
+  userExplicitTerminalId?: string;
 }): boolean {
   const messageId = stringValue(options.messageId);
   if (!messageId) {
@@ -1285,7 +1292,8 @@ function replayExactActiveTerminalSubmission({
     expectedSessionId,
     expectedTurnId,
     expectedMessageType,
-    expectedStatePath
+    expectedStatePath,
+    userExplicitTerminalId
   })) {
     return true;
   }
@@ -1298,7 +1306,7 @@ function replayExactActiveTerminalSubmission({
     throw new Error(
       `terminal idempotency key ${messageId} already has durable ` +
       `${String(ledgerReceipt.status)} proof and cannot be dispatched again; ` +
-      "no terminal input was sent"
+      "no additional terminal input was sent"
     );
   }
   const incarnationLedger = resolveTerminalDispatchLedgerPaneIncarnation(
@@ -1411,46 +1419,31 @@ function replayExactActiveTerminalSubmission({
     owner,
     ledger.callback_expected
   );
-  printJson({
-    session_id: sessionIdForConversation(owner),
-    turn_id: turnIdForConversation(owner),
-    conversation: owner,
-    message: replayedMessage,
-    delivered: replayReceipt.delivered,
-    status: replayReceipt.status,
-    submission_outcome: replayReceipt.submission_outcome,
-    background: true,
-    callback_expected: !acceptanceInvalid && callbackExpected,
-    terminal_control: terminalControl,
-    executor,
-    replayed: replayReceipt.replayed,
-    delivery_receipt: replayReceipt.delivery_receipt,
-    ...(replayReceipt.do_not_retry
-      ? { do_not_retry: replayReceipt.do_not_retry }
-      : {}),
-    reason: replayReceipt.delivered
-      ? "AKK replayed the durable native acceptance receipt and sent no additional terminal input."
-      : acceptanceInvalid
-        ? "AKK replayed an invalid native acceptance receipt as uncertain and sent no additional terminal input."
-        : "AKK replayed the original transport proof without upgrading it and sent no additional terminal input.",
-    openclaw_next_action: replayReceipt.delivered
-      ? openClawYieldNextAction({
-          conversationId: owner.conversation_id,
-          sessionId: sessionIdForConversation(owner),
-          turnId: turnIdForConversation(owner),
-          source: "terminal_control",
-          callbackExpected
-        })
-      : {
-          action: "inspect",
-          conversation_id: owner.conversation_id,
-          session_id: sessionIdForConversation(owner),
-          turn_id: turnIdForConversation(owner),
-          do_not_retry: true,
-          reason: acceptanceInvalid
-            ? "Stored native acceptance evidence is invalid."
-            : "Only terminal transport is proven."
+  presentTerminalDispatchReplay({
+    owner,
+    receipt: replayReceipt,
+    accepted: replayReceipt.submission_outcome === "agent_accepted",
+    acceptanceInvalid,
+    receiptConversationId: owner.conversation_id,
+    receiptMessageId: messageId,
+    callbackExpected,
+    ...(userExplicitTerminalId
+      ? {
+          userExplicit: {
+            terminalId: userExplicitTerminalId,
+            messageId
+          }
         }
+      : {})
+  }, {
+    message: replayedMessage as AgentMessage,
+    executor,
+    terminalControl
+  }, {
+    write: printJson,
+    budget: budgetAction,
+    nextAction: openClawYieldNextAction,
+    summarize: textSummary
   });
   return true;
 }
@@ -1673,7 +1666,8 @@ function replayExactStoredTerminalSubmission({
   expectedSessionId,
   expectedTurnId,
   expectedMessageType,
-  expectedStatePath
+  expectedStatePath,
+  userExplicitTerminalId
 }: {
   options: Record<string, any>;
   terminalControl: TerminalControlRef;
@@ -1685,6 +1679,7 @@ function replayExactStoredTerminalSubmission({
   expectedTurnId?: string;
   expectedMessageType: "task" | "answer";
   expectedStatePath?: string;
+  userExplicitTerminalId?: string;
 }): boolean {
   const allMatches = listConversations(expectedStoreDir).flatMap((owner) =>
     terminalBridgeSubmissionReceipts(owner)
@@ -1765,7 +1760,7 @@ function replayExactStoredTerminalSubmission({
   )) {
     throw new Error(
       `terminal idempotency key ${messageId} has durable ${String(receipt.status)} ` +
-      "proof and must not be retried; no terminal input was sent"
+      "proof and must not be retried; no additional terminal input was sent"
     );
   }
 
@@ -1806,46 +1801,31 @@ function replayExactStoredTerminalSubmission({
       });
   const acceptanceInvalid = replayReceipt.submission_outcome === "uncertain";
   const callbackExpected = callbackExpectedForConversation(owner);
-  printJson({
-    session_id: sessionIdForConversation(owner),
-    turn_id: turnIdForConversation(owner),
-    conversation: owner,
-    message: replayedMessage,
-    delivered: replayReceipt.delivered,
-    status: replayReceipt.status,
-    submission_outcome: replayReceipt.submission_outcome,
-    background: true,
-    callback_expected: !acceptanceInvalid && callbackExpected,
-    terminal_control: terminalControl,
-    executor,
-    replayed: true,
-    delivery_receipt: replayReceipt.delivery_receipt,
-    ...(replayReceipt.do_not_retry
-      ? { do_not_retry: replayReceipt.do_not_retry }
-      : {}),
-    reason: replayReceipt.delivered
-      ? "AKK replayed the stored durable native acceptance receipt and sent no additional terminal input."
-      : acceptanceInvalid
-        ? "AKK replayed an invalid stored native acceptance receipt as uncertain and sent no additional terminal input."
-        : "AKK replayed the stored transport proof without upgrading it and sent no additional terminal input.",
-    openclaw_next_action: replayReceipt.delivered
-      ? openClawYieldNextAction({
-          conversationId: owner.conversation_id,
-          sessionId: sessionIdForConversation(owner),
-          turnId: turnIdForConversation(owner),
-          source: "terminal_control",
-          callbackExpected
-        })
-      : {
-          action: "inspect",
-          conversation_id: owner.conversation_id,
-          session_id: sessionIdForConversation(owner),
-          turn_id: turnIdForConversation(owner),
-          do_not_retry: true,
-          reason: acceptanceInvalid
-            ? "Stored native acceptance evidence is invalid."
-            : "Only terminal transport is proven."
+  presentTerminalDispatchReplay({
+    owner,
+    receipt: replayReceipt,
+    accepted: replayReceipt.submission_outcome === "agent_accepted",
+    acceptanceInvalid,
+    receiptConversationId: owner.conversation_id,
+    receiptMessageId: messageId,
+    callbackExpected,
+    ...(userExplicitTerminalId
+      ? {
+          userExplicit: {
+            terminalId: userExplicitTerminalId,
+            messageId
+          }
         }
+      : {})
+  }, {
+    message: replayedMessage as AgentMessage,
+    executor,
+    terminalControl
+  }, {
+    write: printJson,
+    budget: budgetAction,
+    nextAction: openClawYieldNextAction,
+    summarize: textSummary
   });
   return true;
 }
@@ -1855,6 +1835,18 @@ const terminalBridgeSubmissionReceipts =
   dispatchReceipt.terminalBridgeSubmissionReceipts;
 const unresolvedTerminalBridgeSubmission =
   dispatchReceipt.unresolvedTerminalBridgeSubmission;
+
+function durableTerminalInputDispatched(
+  conversation: Conversation
+): boolean {
+  try {
+    return dispatchReceipt.terminalInputDispatchedForConversation(conversation);
+  } catch {
+    return dispatchReceipt.terminalSubmissionIndicatesInputDispatched(
+      terminalBridgeSubmission(conversation)
+    );
+  }
+}
 
 function assertNoUnresolvedTerminalBridgeSubmission(
   storeDir: string,
@@ -2777,12 +2769,29 @@ function printTerminalSubmissionRetryOutcome(input: {
   terminalInputSent: boolean;
   reason: string;
 }): void {
+  const submission = terminalBridgeSubmission(input.conversation);
+  const enterDispatched = input.terminalInputSent ||
+    ["agent_accepted", "enter_dispatched", "not_accepted"].includes(
+      input.outcome
+    ) ||
+    terminalSendEnterDispatched(submission) ||
+    ["enter_dispatched", "agent_accepted"].includes(
+      String(input.attempt?.state ?? "")
+    );
+  const terminalInputDispatched = enterDispatched ||
+    durableTerminalInputDispatched(input.conversation);
+  const accepted = input.outcome === "agent_accepted";
+  const pending = input.outcome === "enter_dispatched";
+  const callbackAvailable =
+    !isTerminalDispatchOwnerReleasedStatus(input.conversation.status) &&
+    (accepted || pending) &&
+    callbackExpectedForConversation(input.conversation);
   printJson({
     session_id: sessionIdForConversation(input.conversation),
     turn_id: turnIdForConversation(input.conversation),
     conversation: input.conversation,
-    delivered: input.outcome === "agent_accepted",
-    delivery_receipt: input.outcome === "agent_accepted"
+    delivered: enterDispatched,
+    delivery_receipt: accepted
       ? "agent_accepted"
       : input.outcome === "enter_dispatched" ||
           input.outcome === "not_accepted"
@@ -2805,9 +2814,16 @@ function printTerminalSubmissionRetryOutcome(input: {
     replayed: true,
     terminal_control: input.terminalControl,
     terminal_input_sent: input.terminalInputSent,
-    callback_expected: ["refused", "not_accepted"].includes(input.outcome)
-      ? false
-      : callbackExpectedForConversation(input.conversation),
+    callback_expected: callbackAvailable,
+    ...terminalSendResultContract({
+      terminalInputDispatched,
+      agentAcceptance: accepted ? "proven" : "unproven",
+      managementMode: "managed",
+      observationMode: callbackAvailable ? "managed_monitor" : "none",
+      callbackAvailable,
+      interactionNotificationAvailable: accepted,
+      interactionResponseAvailable: accepted
+    }),
     ...(input.attempt
       ? {
           submission_retry_attempt_id: input.attempt.attempt_id,
@@ -5263,6 +5279,7 @@ function releaseTerminalManagementForExplicitSendUnderWriter(input: {
           );
         }
         try {
+          const terminalInputSent = durableTerminalInputDispatched(current);
           appendExplicitUserCloseEvent(paths.logPath, {
             ts: now,
             conversation_id: current.conversation_id,
@@ -5270,7 +5287,8 @@ function releaseTerminalManagementForExplicitSendUnderWriter(input: {
             status: "closed",
             reason: closed.close_reason as string,
             disposition: "user_abandoned_management",
-            terminal_input_sent: false,
+            terminal_input_sent: terminalInputSent,
+            terminal_input_dispatched: terminalInputSent,
             coding_agent_stopped: false,
             tmux_pane_closed: false
           });
@@ -5406,27 +5424,19 @@ function explicitTerminalSendIntentRuntimeDir(): string {
 function assertSafeUserExplicitTerminalSend(
   status: TerminalBridgeStatus | undefined
 ): void {
-  if (status?.reachable !== true) {
-    throw new Error("the explicitly selected terminal is unreachable");
-  }
-  const approval = isRecord(status.approval_state)
+  const approval = status && isRecord(status.approval_state)
     ? status.approval_state
     : undefined;
-  if (approval?.scanned !== true) {
-    throw new Error(
-      "the explicitly selected terminal approval state could not be verified"
-    );
-  }
-  if (approval?.blocked === true) {
-    throw new Error(
-      stringValue(approval.reason) ??
-        "the explicitly selected terminal is waiting at an approval prompt"
-    );
-  }
-  if (status.activity_state === "awaiting_approval") {
-    throw new Error(
-      "the explicitly selected terminal is waiting at an approval prompt"
-    );
+  const decision = decideUserExplicitTerminalInputSafety({
+    reachable: status?.reachable === true,
+    approvalScanned: approval?.scanned === true,
+    approvalBlocked: approval?.blocked === true,
+    approvalReason: stringValue(approval?.reason),
+    awaitingApproval: status?.activity_state === "awaiting_approval",
+    questionnaireActive: status?.interaction_state !== undefined
+  });
+  if (decision.action === "reject") {
+    throw new Error(decision.reason);
   }
 }
 
@@ -5565,13 +5575,19 @@ function printReplayedUserExplicitSend(
 ): void {
   if (deliveryMode === "managed") {
     printJson({
-      delivered: false,
+      delivered: true,
       replayed: true,
       status: "submission_pending_acceptance",
       submission_outcome: "pending_acceptance",
       delivery_receipt: "enter_dispatched",
       do_not_retry: true,
-      management_mode: "managed",
+      ...terminalSendResultContract({
+        terminalInputDispatched: true,
+        agentAcceptance: "unproven",
+        managementMode: "managed",
+        observationMode: "none",
+        callbackAvailable: false
+      }),
       terminal_id: terminal.conversationId,
       message_id: intent.messageId,
       scope: "terminal_user_explicit"
@@ -5587,11 +5603,20 @@ function printReplayedUserExplicitSend(
     options,
     watchId
   });
+  const callbackAvailable = callbackReceipt?.callback_expected === true;
   printJson({
     delivered: true,
     delivered_unmanaged: true,
+    delivery_receipt: "enter_dispatched",
     ...(callbackReceipt ?? { callback_expected: false }),
-    management_mode: "unmanaged_fallback",
+    ...terminalSendResultContract({
+      terminalInputDispatched: true,
+      agentAcceptance: "unproven",
+      managementMode: "unmanaged",
+      observationMode: callbackAvailable ? "terminal_watch" : "none",
+      callbackAvailable,
+      interactionNotificationAvailable: callbackAvailable
+    }),
     replayed: true,
     terminal_id: terminal.conversationId,
     message_id: intent.messageId,
@@ -6002,9 +6027,11 @@ async function runUserExplicitTerminalFallback(
       composer_disposition: composerDisposition,
       delivered_unmanaged: true
     });
+    const callbackAvailable = callbackReceipt?.callback_expected === true;
     printJson({
       delivered: true,
       delivered_unmanaged: true,
+      delivery_receipt: "enter_dispatched",
       cleanup_warnings: cleanupWarnings,
       intent_warnings: intentWarnings,
       callback_warnings: callbackWarnings,
@@ -6012,7 +6039,14 @@ async function runUserExplicitTerminalFallback(
       terminal_id: fresh.conversationId,
       message_id: messageId,
       scope: "terminal_user_explicit",
-      management_mode: "unmanaged_fallback",
+      ...terminalSendResultContract({
+        terminalInputDispatched: true,
+        agentAcceptance: "unproven",
+        managementMode: "unmanaged",
+        observationMode: callbackAvailable ? "terminal_watch" : "none",
+        callbackAvailable,
+        interactionNotificationAvailable: callbackAvailable
+      }),
       composer_disposition: composerDisposition,
       composer_cleared_before_send: true,
       // Deprecated compatibility alias. The v22 policy always dispatches
@@ -6151,6 +6185,204 @@ async function runManagedRawTerminalSend(
   }
 }
 
+async function prepareRawTerminalDispatchAuthority(input: {
+  options: Record<string, any>;
+  messageBody: string;
+  terminal: TerminalCommandTarget;
+  storeDir: string;
+  scopes: CanonicalMutationScopes;
+  resources: CanonicalMutationResources;
+}) {
+  const {
+    options, messageBody, terminal, storeDir, scopes, resources
+  } = input;
+  const initialAuthority = rawTerminalInitialAuthority({
+    options,
+    terminal,
+    storeDir
+  });
+  let { claimedSession, knownCodexCompanions } = initialAuthority;
+  const {
+    suppliedExpectedTerminalToken,
+    implicitCodexCandidateAuthority
+  } = initialAuthority;
+  const userExplicitTerminalToken = stringValue(
+    options.expectedUserExplicitTerminalToken
+  );
+  const nativeIdentityObservation =
+    await observeCurrentNativeAgentSessionIdentity({
+      options,
+      agent: terminal.agent,
+      pid: terminal.pid,
+      cwd: terminal.terminalControl.currentPath,
+      preferredSessionId: knownCodexCompanions.primary
+        ? claimedSession?.binding?.native_thread_id
+        : undefined,
+      allowedCompanionIdentity: knownCodexCompanions.primary,
+      allowedAdditionalIdentities: knownCodexCompanions.additional
+    });
+  let deferredCodexCandidateInventory:
+    | CodexOpenRootRolloutInventory
+    | undefined;
+  if (
+    terminal.agent === "codex" &&
+    (
+      userExplicitTerminalToken ||
+      suppliedExpectedTerminalToken ||
+      implicitCodexCandidateAuthority
+    )
+  ) {
+    try {
+      const inventory = await inspectCodexOpenRootRolloutInventory({
+        options,
+        pid: terminal.pid,
+        cwd: terminal.terminalControl.currentPath
+      });
+      // An empty set is meaningful only for a source-less human Send: it is
+      // the frozen proof that the first accepting rollout must appear after
+      // Enter. Preserve the older bound/deferred behavior otherwise.
+      if (
+        inventory.roots.length > 0 ||
+        (userExplicitTerminalToken !== undefined && claimedSession === undefined)
+      ) {
+        deferredCodexCandidateInventory = inventory;
+      }
+    } catch (error) {
+      if (
+        (
+          userExplicitTerminalToken !== undefined &&
+          claimedSession === undefined
+        ) ||
+        implicitCodexCandidateAuthority ||
+        nativeIdentityObservation.status === "unavailable"
+      ) {
+        throw new Error(
+          `native Codex foreground attribution requires a fresh complete ` +
+          `open-root inventory: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
+  assertRawTerminalCandidateAuthority({
+    terminal,
+    nativeIdentityObservation,
+    deferredCodexCandidateInventory,
+    implicitCodexCandidateAuthority
+  });
+  const sourceLessCodexCandidateInventory =
+    terminal.agent === "codex" &&
+      userExplicitTerminalToken !== undefined &&
+      claimedSession === undefined
+      ? deferredCodexCandidateInventory
+      : undefined;
+  let currentNativeIdentity =
+    sourceLessCodexCandidateInventory === undefined &&
+      nativeIdentityObservation.status === "resolved"
+      ? nativeIdentityObservation.identity
+      : undefined;
+  // A fresh nonempty inventory is the stronger physical authority for an
+  // implicit candidate send. Do not let an earlier verified-absent
+  // observation divert this path into the token-only empty handoff.
+  const verifiedEmptyHandoff = implicitCodexCandidateAuthority
+    ? undefined
+    : await maybeDetachVerifiedEmptyCodexSource({
+        options,
+        terminal,
+        sourceSession: claimedSession,
+        observation: nativeIdentityObservation
+      });
+  if (verifiedEmptyHandoff) {
+    // The old rollout is conclusively closed. Never carry it forward as a
+    // pre-materialization companion for the new virgin Session.
+    claimedSession = undefined;
+    knownCodexCompanions = { additional: [] };
+    currentNativeIdentity = undefined;
+  }
+  const physicalNativeIdentityBeforeHandoff = currentNativeIdentity;
+  let handoff = await maybeAdoptObservedExternalThread({
+    options,
+    terminal,
+    // A no-token raw send to an already managed rollout-backed Codex pane is
+    // an internal follow-current delegation, not a sole-root continuation.
+    sourceSession: implicitCodexCandidateAuthority
+      ? undefined
+      : claimedSession,
+    resolvedIdentity: sourceLessCodexCandidateInventory
+      ? undefined
+      : currentNativeIdentity,
+    storeDir
+  });
+  currentNativeIdentity =
+    handoff.adopted && terminal.agent === "codex" &&
+      !handoff.session?.binding?.native_process.rollout
+      ? physicalNativeIdentityBeforeHandoff
+      : handoff.identity;
+  const deferredCodexForegroundBinding = !handoff.adopted
+    ? await prepareDeferredCodexForegroundBinding({
+        options,
+        scope: bindDeferredForegroundWriterScope(scopes, resources),
+        terminal,
+        sourceSession: claimedSession,
+        observation: nativeIdentityObservation,
+        candidateInventory: deferredCodexCandidateInventory,
+        requestText: String(messageBody),
+        allowImplicitFreshAuthority: implicitCodexCandidateAuthority
+      })
+    : undefined;
+  const postSendCodexCandidateAnchor =
+    terminal.agent === "codex" &&
+      userExplicitTerminalToken !== undefined &&
+      sourceLessCodexCandidateInventory !== undefined &&
+      verifiedEmptyHandoff === undefined &&
+      !handoff.adopted &&
+      deferredCodexForegroundBinding === undefined &&
+      claimedSession === undefined
+      ? captureCodexCandidateSetRolloutAcceptanceAnchor({
+          inventory: sourceLessCodexCandidateInventory,
+          now: cliNow()
+        })
+      : undefined;
+  const freshSendAuthority = decideTerminalSendAuthority({
+    ownership: "conflict",
+    verifiedEmpty: Boolean(verifiedEmptyHandoff),
+    externalHandoff: handoff.adopted,
+    deferred: Boolean(deferredCodexForegroundBinding)
+  });
+  if (
+    freshSendAuthority.mode === "deferred" &&
+    deferredCodexForegroundBinding
+  ) {
+    claimedSession = undefined;
+    knownCodexCompanions = { additional: [] };
+    currentNativeIdentity = undefined;
+    handoff = { identity: undefined, adopted: false };
+  } else if (
+    (
+      userExplicitTerminalToken ||
+      suppliedExpectedTerminalToken ||
+      implicitCodexCandidateAuthority
+    ) &&
+    !postSendCodexCandidateAnchor &&
+    freshSendAuthority.mode === "conflict"
+  ) {
+    throw new Error(
+      "the expected terminal token no longer authorizes the current " +
+      "terminal context; refresh AKK list"
+    );
+  }
+  return {
+    nativeIdentityObservation,
+    knownCodexCompanions,
+    currentNativeIdentity,
+    verifiedEmptyHandoff,
+    handoff,
+    deferredCodexForegroundBinding,
+    postSendCodexCandidateAnchor
+  };
+}
+
 async function runManagedRawTerminalSendAttempt(
   options: Record<string, any>,
   messageBody: string,
@@ -6196,7 +6428,10 @@ async function runManagedRawTerminalSendAttempt(
       terminalControl: terminalConversation.terminalControl,
       requestText: String(messageBody),
       expectedStoreDir: rawStoreDir,
-      expectedMessageType: "task"
+      expectedMessageType: "task",
+      ...(stringValue(options.expectedUserExplicitTerminalToken)
+        ? { userExplicitTerminalId: terminalConversation.conversationId }
+        : {})
     })) {
       controlSendResult = { outcome: "replayed" };
       attempt.result = controlSendResult;
@@ -6206,145 +6441,22 @@ async function runManagedRawTerminalSendAttempt(
       rawStoreDir,
       terminalConversation.terminalControl
     );
-    const initialAuthority = rawTerminalInitialAuthority({
-      options,
-      terminal: terminalConversation,
-      storeDir: rawStoreDir
-    });
-    let {
-      claimedSession,
-      knownCodexCompanions
-    } = initialAuthority;
     const {
-      suppliedExpectedTerminalToken,
-      implicitCodexCandidateAuthority
-    } = initialAuthority;
-    const nativeIdentityObservation =
-      await observeCurrentNativeAgentSessionIdentity({
-        options,
-        agent: terminalConversation.agent,
-        pid: terminalConversation.pid,
-        cwd: terminalConversation.terminalControl.currentPath,
-        preferredSessionId: knownCodexCompanions.primary
-          ? claimedSession?.binding?.native_thread_id
-          : undefined,
-        allowedCompanionIdentity: knownCodexCompanions.primary,
-        allowedAdditionalIdentities: knownCodexCompanions.additional
-      });
-    let deferredCodexCandidateInventory:
-      | CodexOpenRootRolloutInventory
-      | undefined;
-    if (
-      terminalConversation.agent === "codex" &&
-      (suppliedExpectedTerminalToken || implicitCodexCandidateAuthority)
-    ) {
-      try {
-        const inventory = await inspectCodexOpenRootRolloutInventory({
-          options,
-          pid: terminalConversation.pid,
-          cwd: terminalConversation.terminalControl.currentPath
-        });
-        if (inventory.roots.length > 0) {
-          deferredCodexCandidateInventory = inventory;
-        }
-      } catch (error) {
-        if (
-          implicitCodexCandidateAuthority ||
-          nativeIdentityObservation.status === "unavailable"
-        ) {
-          throw new Error(
-            `native Codex foreground attribution requires a fresh complete ` +
-            `open-root inventory: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          );
-        }
-      }
-    }
-    assertRawTerminalCandidateAuthority({
-      terminal: terminalConversation,
       nativeIdentityObservation,
-      deferredCodexCandidateInventory,
-      implicitCodexCandidateAuthority
-    });
-    let currentNativeIdentity =
-      nativeIdentityObservation.status === "resolved"
-        ? nativeIdentityObservation.identity
-        : undefined;
-    // A fresh nonempty inventory is the stronger physical authority for an
-    // implicit candidate send. Do not let an earlier verified-absent
-    // observation divert this path into the token-only empty handoff.
-    const verifiedEmptyHandoff = implicitCodexCandidateAuthority
-      ? undefined
-      : await maybeDetachVerifiedEmptyCodexSource({
-          options,
-          terminal: terminalConversation,
-          sourceSession: claimedSession,
-          observation: nativeIdentityObservation
-        });
-    if (verifiedEmptyHandoff) {
-      // The old rollout is conclusively closed.  Never carry it forward as
-      // a pre-materialization companion for the new virgin Session.
-      claimedSession = undefined;
-      knownCodexCompanions = { additional: [] };
-      currentNativeIdentity = undefined;
-    }
-    const physicalNativeIdentityBeforeHandoff = currentNativeIdentity;
-    let handoff = await maybeAdoptObservedExternalThread({
+      knownCodexCompanions,
+      currentNativeIdentity,
+      verifiedEmptyHandoff,
+      handoff,
+      deferredCodexForegroundBinding,
+      postSendCodexCandidateAnchor
+    } = await prepareRawTerminalDispatchAuthority({
       options,
+      messageBody,
       terminal: terminalConversation,
-      // A no-token raw send to an already managed rollout-backed Codex pane
-      // is an internal follow-current delegation, never a sole-root strict
-      // continuation or an external-handoff adoption. The dedicated v3
-      // transfer below owns attribution and lineage.
-      sourceSession: implicitCodexCandidateAuthority
-        ? undefined
-        : claimedSession,
-      resolvedIdentity: currentNativeIdentity,
-      storeDir: rawStoreDir
+      storeDir: rawStoreDir,
+      scopes,
+      resources
     });
-    currentNativeIdentity =
-      handoff.adopted &&
-        terminalConversation.agent === "codex" &&
-        !handoff.session?.binding?.native_process.rollout
-        ? physicalNativeIdentityBeforeHandoff
-        : handoff.identity;
-    const deferredCodexForegroundBinding = !handoff.adopted
-        ? await prepareDeferredCodexForegroundBinding({
-            options,
-            scope: bindDeferredForegroundWriterScope(scopes, resources),
-            terminal: terminalConversation,
-            sourceSession: claimedSession,
-            observation: nativeIdentityObservation,
-            candidateInventory: deferredCodexCandidateInventory,
-            requestText: String(messageBody),
-            allowImplicitFreshAuthority:
-              implicitCodexCandidateAuthority
-          })
-      : undefined;
-    const freshSendAuthority = decideTerminalSendAuthority({
-      ownership: "conflict",
-      verifiedEmpty: Boolean(verifiedEmptyHandoff),
-      externalHandoff: handoff.adopted,
-      deferred: Boolean(deferredCodexForegroundBinding)
-    });
-    if (
-      freshSendAuthority.mode === "deferred" &&
-      deferredCodexForegroundBinding
-    ) {
-      claimedSession = undefined;
-      knownCodexCompanions = { additional: [] };
-      currentNativeIdentity = undefined;
-      handoff = { identity: undefined, adopted: false };
-    } else if (
-      (suppliedExpectedTerminalToken || implicitCodexCandidateAuthority) &&
-      freshSendAuthority.mode === "conflict"
-    ) {
-      throw new Error(
-        "the expected terminal token no longer authorizes the current " +
-        "terminal context; refresh AKK list"
-      );
-    }
     let managedSession = deferredCodexForegroundBinding
       ? undefined
       : handoff.session ??
@@ -6604,7 +6716,8 @@ async function runManagedRawTerminalSendAttempt(
               }
             : undefined,
         verifiedEmptyCodexHandoff: verifiedEmptyHandoff?.boundary,
-          deferredCodexForegroundBinding
+        postSendCodexCandidateAnchor,
+        deferredCodexForegroundBinding
       });
       attempt.result = controlSendResult;
       },
@@ -8219,15 +8332,121 @@ async function runTerminalConversationApprove({
   }
 }
 
+function terminalSendCandidateAcceptanceAnchor(
+  request: TerminalControlSendRequest
+) {
+  return request.deferredCodexForegroundBinding?.candidateAcceptanceAnchor ??
+    request.postSendCodexCandidateAnchor;
+}
+
+function assertTerminalNativeBindingBeforeSend(input: {
+  execution: TerminalDispatchExecutionService;
+  conversation: Conversation;
+  currentNativeIdentity?: NativeAgentSessionIdentity;
+  needsPostSendNativeBinding: boolean;
+  allowedPreMaterializationIdentity?: CodexPreMaterializationIdentity;
+}): void {
+  if (!input.needsPostSendNativeBinding) {
+    input.execution.assertTurnIdentity({
+      conversation: input.conversation,
+      currentIdentity: input.currentNativeIdentity,
+      operation: "send to"
+    });
+    return;
+  }
+  if (
+    input.currentNativeIdentity &&
+    !nativeIdentityMatchesCodexPreMaterialization(
+      input.currentNativeIdentity,
+      input.allowedPreMaterializationIdentity
+    )
+  ) {
+    throw new Error(
+      "native agent session appeared while preparing an unmaterialized terminal binding; refresh list and retry"
+    );
+  }
+}
+
+function terminalPreSendRuntime(input: {
+  request: TerminalControlSendRequest;
+  terminalControl: TerminalControlRef;
+  terminalAgentPid: number;
+}): TerminalRuntimeIdentity {
+  const { request, terminalControl, terminalAgentPid } = input;
+  const {
+    conversation,
+    nextConversation,
+    executor,
+    message,
+    allowedPreMaterializationIdentity,
+    allowedAdditionalIdentities = [],
+    deferredCodexForegroundBinding
+  } = request;
+  const candidateAnchor = terminalSendCandidateAcceptanceAnchor(request);
+  return {
+    ...(candidateAnchor
+      ? terminalRuntimeForLiveIdentity({
+          terminal: deferredCodexForegroundBinding?.terminal ?? {
+            conversationId: conversation.conversation_id,
+            agent: executor.kind,
+            pid: terminalAgentPid,
+            terminalControl
+          },
+          physicalOnly: true
+        })
+      : terminalRuntimeIdentityForConversation(
+          nextConversation,
+          terminalControl
+        )),
+    allowedPreMaterializationNativeIdentity:
+      allowedPreMaterializationIdentity,
+    allowedAdditionalNativeIdentities: allowedAdditionalIdentities,
+    messageId: message.id
+  };
+}
+
+function assertTerminalPreSendStatus(input: {
+  request: TerminalControlSendRequest;
+  status: TerminalBridgeStatus;
+}): void {
+  const { request, status } = input;
+  if (stringValue(request.options.expectedUserExplicitTerminalToken)) {
+    // Managed promotion is only a sidecar for a human-priority Send. It may
+    // relax lifecycle/activity attribution, never the shared physical gate
+    // that proves this TUI is not an approval or questionnaire input mode.
+    assertSafeUserExplicitTerminalSend(status);
+  }
+  const deferredCodexPrompt = Boolean(
+    request.verifiedEmptyCodexHandoff ||
+    request.deferredCodexForegroundBinding ||
+    request.postSendCodexCandidateAnchor
+  );
+  if (!deferredCodexPrompt) {
+    assertSafeTerminalSend(request.executor.kind, status);
+    return;
+  }
+  if (
+    request.executor.kind !== "codex" ||
+    status.reachable !== true ||
+    status.approval_state.blocked === true ||
+    status.interaction_state !== undefined ||
+    !["idle", "unknown"].includes(status.activity_state)
+  ) {
+    throw new Error(
+      `Codex deferred foreground send is not at a safe prompt ` +
+      `(${status.activity_state}: ${status.activity_reason})`
+    );
+  }
+}
+
 async function prepareTerminalControlSend(
   request: TerminalControlSendRequest
 ) {
   const {
-    transaction, options, conversation, nextConversation, executor, message,
+    transaction, options, conversation, executor, message,
     recordRawAttachmentAfterSend = false,
     allowedPreMaterializationIdentity,
     allowedAdditionalIdentities = [],
-    verifiedEmptyCodexHandoff,
     deferredCodexForegroundBinding,
     continuingTurnResponse = false
   } = request;
@@ -8312,8 +8531,8 @@ async function prepareTerminalControlSend(
   const expectedManagedNativeThreadId = stringValue(
     sendTakeover?.terminal_agent_expected_session_id
   ) ?? stringValue(sendTakeover?.terminal_agent_session_id);
-  const currentNativeIdentity = deferredCodexForegroundBinding
-      ?.candidateAcceptanceAnchor
+  const candidateSetAnchor = terminalSendCandidateAcceptanceAnchor(request);
+  const currentNativeIdentity = candidateSetAnchor
     ? undefined
     : await execution.resolveCurrentNativeIdentity({
         agent: executor.kind,
@@ -8335,40 +8554,18 @@ async function prepareTerminalControlSend(
   );
   const needsPostSendNativeBinding =
     virginRawAttach || pendingManagedNativeBinding;
-  if (needsPostSendNativeBinding) {
-    if (
-      currentNativeIdentity &&
-      !nativeIdentityMatchesCodexPreMaterialization(
-        currentNativeIdentity,
-        allowedPreMaterializationIdentity
-      )
-    ) {
-      throw new Error(
-        "native agent session appeared while preparing an unmaterialized terminal binding; refresh list and retry"
-      );
-    }
-  } else {
-    execution.assertTurnIdentity({
-      conversation,
-      currentIdentity: currentNativeIdentity,
-      operation: "send to"
-    });
-  }
-  const preSendRuntime: TerminalRuntimeIdentity = {
-    ...(deferredCodexForegroundBinding?.candidateAcceptanceAnchor
-      ? terminalRuntimeForLiveIdentity({
-          terminal: deferredCodexForegroundBinding.terminal,
-          physicalOnly: true
-        })
-      : terminalRuntimeIdentityForConversation(
-          nextConversation,
-          terminalControl
-        )),
-    allowedPreMaterializationNativeIdentity:
-      allowedPreMaterializationIdentity,
-    allowedAdditionalNativeIdentities: allowedAdditionalIdentities,
-    messageId: message.id
-  };
+  assertTerminalNativeBindingBeforeSend({
+    execution,
+    conversation,
+    currentNativeIdentity,
+    needsPostSendNativeBinding,
+    allowedPreMaterializationIdentity
+  });
+  const preSendRuntime = terminalPreSendRuntime({
+    request,
+    terminalControl,
+    terminalAgentPid
+  });
   let preSendScreenFingerprint: string | undefined;
   let codexRolloutAcceptanceAnchor: CodexRolloutAcceptanceAnchor | undefined;
   let claudeTranscriptAnchor: ClaudeTranscriptAnchor | undefined;
@@ -8380,21 +8577,7 @@ async function prepareTerminalControlSend(
       scrollbackLines: Number(options.scrollbackLines ?? 120),
       runtime: preSendRuntime
     });
-    if (verifiedEmptyCodexHandoff || deferredCodexForegroundBinding) {
-      if (
-        executor.kind !== "codex" ||
-        status.reachable !== true ||
-        status.approval_state.blocked === true ||
-        !["idle", "unknown"].includes(status.activity_state)
-      ) {
-        throw new Error(
-          `Codex deferred foreground send is not at a safe prompt ` +
-          `(${status.activity_state}: ${status.activity_reason})`
-        );
-      }
-    } else {
-      assertSafeTerminalSend(executor.kind, status);
-    }
+    assertTerminalPreSendStatus({ request, status });
     const userExplicitManagedCodexAttempt = Boolean(
       stringValue(options.expectedUserExplicitTerminalToken)
     );
@@ -8458,8 +8641,7 @@ async function prepareTerminalControlSend(
           ),
           allowedPreMaterializationIdentity,
           needsPostSendNativeBinding,
-          candidateSetAnchor:
-            deferredCodexForegroundBinding?.candidateAcceptanceAnchor
+          candidateSetAnchor
         });
       } else {
         claudeTranscriptAnchor = captureClaudeTranscriptAnchor({
@@ -8549,8 +8731,7 @@ async function resolveTerminalDispatchSubmissionOwner(
       ),
       allowedPreMaterializationIdentity,
       allowedAdditionalIdentities,
-      ...(deferredBinding &&
-          acceptanceAnchor &&
+      ...(acceptanceAnchor &&
           [2, 3].includes(acceptanceAnchor.version)
         ? {
             requiredCodexAcceptance: {
@@ -8643,7 +8824,8 @@ async function resolveTerminalDispatchSubmissionOwner(
         });
       }
       if (
-        acceptanceAnchor?.version === 2 &&
+        acceptanceAnchor &&
+        [2, 3].includes(acceptanceAnchor.version) &&
         cliEnv().AKK_TEST_EXIT_AFTER_VIRGIN_SESSION_BINDING === "1"
       ) {
         cliExit(86);
@@ -8714,7 +8896,6 @@ async function resolveTerminalDispatchSubmissionOwner(
     return ready(boundConversation);
   }
   if (
-    deferredBinding &&
     acceptanceAnchor?.version === 3 &&
     bindingError === undefined
   ) {
@@ -9451,7 +9632,8 @@ async function runTerminalDispatchTransport({
       );
     }
     if (
-      codexRolloutAcceptanceAnchor?.version === 2 &&
+      codexRolloutAcceptanceAnchor &&
+      [2, 3].includes(codexRolloutAcceptanceAnchor.version) &&
       cliEnv().AKK_TEST_EXIT_AFTER_VIRGIN_ENTER_DISPATCHED === "1"
     ) {
       cliExit(86);

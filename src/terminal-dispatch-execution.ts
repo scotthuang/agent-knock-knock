@@ -11,9 +11,10 @@ import {
   turnIdForConversation,
   type Conversation
 } from "./protocol.js";
-import type {
-  ManagedSessionState,
-  NativeThreadTransition
+import {
+  isExactNativeThreadId,
+  type ManagedSessionState,
+  type NativeThreadTransition
 } from "./managed-session.js";
 import type {
   TerminalControlRef,
@@ -1014,13 +1015,17 @@ export class TerminalDispatchExecutionService {
     const validated = validateCodexRolloutAcceptanceAnchor(anchor);
     const pid = Number(takeover?.terminal_agent_pid);
     if (validated.version === 3) {
+      const recoveryCandidate = durableCodexAcceptanceRecoveryCandidate(
+        request.conversation
+      );
       const result = this.#ports.acceptance.detectCodexCandidates({
         anchor: validated,
         currentInventory: await this.inspectCodexOpenRootInventory(
           pid,
           request.terminalControl.currentPath
         ),
-        requestHash
+        requestHash,
+        recoveryCandidate
       });
       if (result.status === "uncertain") {
         throw candidateAcceptanceError(result);
@@ -1460,6 +1465,45 @@ function sameRollout(left: unknown, right: unknown): boolean {
     nonBlankString(left.device) === nonBlankString(right.device) &&
     nonBlankString(left.inode) === nonBlankString(right.inode) &&
     nonBlankString(left.path) === nonBlankString(right.path);
+}
+
+function durableCodexAcceptanceRecoveryCandidate(
+  conversation: Conversation
+): CodexCandidateSetRolloutAcceptanceRequest["recoveryCandidate"] {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const turnThreadId = nonBlankString(conversation.native_thread_id);
+  const takeoverThreadId = nonBlankString(
+    takeover?.terminal_agent_session_id
+  );
+  const rawRollout = takeover?.terminal_agent_rollout;
+  if (!turnThreadId && !takeoverThreadId && rawRollout === undefined) {
+    return undefined;
+  }
+  const processUuid = nonBlankString(takeover?.terminal_agent_process_uuid);
+  const processBirth = nonBlankString(takeover?.terminal_agent_process_birth);
+  if (
+    !turnThreadId ||
+    !takeoverThreadId ||
+    !isExactNativeThreadId(turnThreadId) ||
+    !isExactNativeThreadId(takeoverThreadId) ||
+    turnThreadId.toLowerCase() !== takeoverThreadId.toLowerCase() ||
+    !processUuid ||
+    !processBirth ||
+    !isCompleteNativeRollout(rawRollout)
+  ) {
+    throw new Error(
+      "durable Codex Turn identity is incomplete or inconsistent during candidate-set acceptance"
+    );
+  }
+  return {
+    sessionId: turnThreadId.toLowerCase(),
+    processUuid,
+    processBirth,
+    rollout: rawRollout,
+    evidence: "codex_open_root_rollout"
+  };
 }
 
 function optionalValueMatches(

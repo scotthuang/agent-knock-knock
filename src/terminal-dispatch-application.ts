@@ -50,6 +50,8 @@ export interface TerminalDispatchAuditEvent {
   dispatcher_pid?: number;
   error?: ReturnType<typeof textSummary>;
   delivered?: boolean;
+  terminal_input_dispatched?: boolean;
+  agent_acceptance?: "proven" | "unproven";
   do_not_retry?: boolean;
   delivery_receipt?: TerminalOrdinaryDispatchStatus;
   safe_to_retry?: boolean;
@@ -324,7 +326,9 @@ export class TerminalDispatchApplication {
       ),
       event: this.#event(at, "terminal_agent_identity_binding_failed", {
         error: textSummary(reason),
-        delivered: false,
+        delivered: true,
+        terminal_input_dispatched: true,
+        agent_acceptance: "unproven",
         do_not_retry: true
       })
     });
@@ -336,7 +340,9 @@ export class TerminalDispatchApplication {
         agent: this.#context.executor.kind,
         terminal_target: this.#context.terminalControl.target,
         error: reason,
-        delivered: false,
+        delivered: true,
+        terminal_input_dispatched: true,
+        agent_acceptance: "unproven",
         do_not_retry: true
       }
     );
@@ -598,7 +604,7 @@ export class TerminalDispatchApplication {
 
   recordPostSubmissionBookkeeping(
     conversation: Conversation,
-    delivered: boolean,
+    agentAccepted: boolean,
     nowIso: () => string
   ): string | undefined {
     const message = textSummary(this.#context.message.body);
@@ -630,7 +636,9 @@ export class TerminalDispatchApplication {
           conversation_id: conversation.conversation_id,
           terminal_target: this.#context.terminalControl.target,
           error: warning,
-          delivered
+          delivered: true,
+          terminal_input_dispatched: true,
+          agent_acceptance: agentAccepted ? "proven" : "unproven"
         }
       );
       try {
@@ -640,7 +648,9 @@ export class TerminalDispatchApplication {
           event: "terminal_message_post_submit_bookkeeping_failed",
           terminal_control: this.#context.terminalControl,
           error: textSummary(warning),
-          delivered
+          delivered: true,
+          terminal_input_dispatched: true,
+          agent_acceptance: agentAccepted ? "proven" : "unproven"
         });
       } catch {
         // The durable receipt remains authoritative when the event log fails.

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.0 - 2026-09-09
+
+### Added
+
+- Promote terminal-scoped Codex sends from a frozen open-rollout candidate set after exactly one rollout durably accepts the request, including the first task after `/clear` when the foreground rollout does not exist before Enter.
+- Notify the owning controller when an unmanaged fallback Watch observes a native questionnaire that requires manual TUI input, without granting that Watch response or key-dispatch authority.
+
+### Changed
+
+- Make human-explicit Send results distinguish physical terminal dispatch, native agent acceptance, managed ownership, and observation mode. Legacy delivery fields remain available as compatibility aliases during the 0.13 transition.
+- Continue candidate acceptance across the frozen pre-send roots and the current root inventory, so a rollout whose original FD closes can still be proven by its unchanged path, device, inode, and byte boundary.
+
+### Security
+
+- Keep physical target, process incarnation, composer/interaction, and duplicate-dispatch checks fail-closed while preventing rollout, Session, Store, or callback uncertainty from vetoing an explicitly selected human Send. Replaced, deleted, ambiguous, multiply accepting, or unreadable rollout evidence remains uncertain and is never replayed automatically.
+
 ## 0.12.37 - 2026-09-08
 
 ### Fixed
