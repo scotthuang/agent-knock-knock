@@ -5192,6 +5192,9 @@ test("OpenClaw interaction response consumes one session-bound private offer aft
     () => respondA.execute!("replay", response),
     /requires a current pending interaction shown/u
   );
+  await statusA.execute!("status-v2", { turn_id: turnId, trace: true });
+  const acceptedV2 = await respondA.execute!("response-v2", response);
+  assert.equal(acceptedV2.details?.responded, true);
 
   const calls = fs.readFileSync(callsPath, "utf8")
     .trim()
@@ -5199,6 +5202,8 @@ test("OpenClaw interaction response consumes one session-bound private offer aft
     .map((line) => JSON.parse(line) as string[]);
   assert.deepEqual(calls.map((argv) => argv[0]), [
     "status",
+    "status",
+    "respond-interaction",
     "status",
     "respond-interaction"
   ]);
@@ -5220,6 +5225,137 @@ test("OpenClaw interaction response consumes one session-bound private offer aft
   assert.equal(
     interactionOptionValue(mutation, "--openclaw-session"),
     controllerA.sessionKey
+  );
+  const v2Mutation = calls[4] ?? [];
+  assert.equal(interactionOptionValue(v2Mutation, "--turn"), turnId);
+  assert.deepEqual(
+    JSON.parse(requiredInteractionOptionValue(v2Mutation, "--response-json")),
+    {
+      interaction_id: interactionId,
+      subject: {
+        kind: "managed_turn",
+        turn_id: turnId,
+        message_id: "message_interaction_1"
+      },
+      turn_id: turnId,
+      answers: response.answers
+    }
+  );
+});
+
+test("OpenClaw Watch interaction response is subject-bound and dispatches --watch", async (t) => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-watch-interaction-tool-")
+  );
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.cjs");
+  const callsPath = path.join(directory, "calls.ndjson");
+  const watchId = "terminal-watch-interaction-1";
+  const interactionId = "interaction_watch_1";
+  const questionId = "question_watch_1";
+  const optionId = "option_watch_safe";
+  const fingerprint = "b".repeat(64);
+  const anchorFingerprint = "c".repeat(64);
+  const expiresAt = "2030-09-08T00:00:00.000Z";
+  fs.writeFileSync(relayPath, watchInteractionRelayFixture({
+    callsPath,
+    watchId,
+    interactionId,
+    questionId,
+    optionId,
+    fingerprint,
+    anchorFingerprint,
+    expiresAt
+  }), "utf8");
+
+  const factories = new Map<string, InteractionToolFactory>();
+  const api = {
+    pluginConfig: {},
+    logger: { info() {}, warn() {} },
+    registerCommand() {},
+    registerTool(
+      tool: ToolDefinition | InteractionToolFactory,
+      registration?: { readonly name?: unknown }
+    ) {
+      assert.equal(typeof registration?.name, "string");
+      factories.set(
+        String(registration?.name),
+        typeof tool === "function" ? tool : () => tool
+      );
+    }
+  };
+  bindOpenClawRelayPath(api, relayPath);
+  registerOpenClawCommands(api, new Map());
+
+  const controller = {
+    sessionKey: "agent:test:watch",
+    sessionId: "controller-watch-incarnation"
+  };
+  const status = requiredInteractionTool(
+    factories,
+    "agent_knock_knock_status",
+    controller
+  );
+  const respond = requiredInteractionTool(
+    factories,
+    "agent_knock_knock_respond_interaction",
+    controller
+  );
+  const response = {
+    watch_id: watchId,
+    interaction_id: interactionId,
+    answers: [{
+      question_id: questionId,
+      response_kind: "single_select",
+      selected_option_ids: [optionId]
+    }]
+  };
+
+  const displayed = await status.execute!("watch-status", { watch_id: watchId });
+  const displayedText = JSON.stringify(displayed);
+  assert.match(displayedText, /interaction_state/u);
+  assert.match(displayedText, new RegExp(watchId, "u"));
+  assert.doesNotMatch(displayedText, /interaction_prompt_fingerprint/u);
+  assert.doesNotMatch(displayedText, new RegExp(fingerprint, "u"));
+  assert.doesNotMatch(displayedText, new RegExp(anchorFingerprint, "u"));
+
+  await assert.rejects(
+    () => respond.execute!("wrong-subject", {
+      turn_id: watchId,
+      interaction_id: interactionId,
+      answers: response.answers
+    }),
+    /requires a current pending interaction shown/u
+  );
+  const accepted = await respond.execute!("watch-response", response);
+  assert.equal(accepted.details?.responded, true);
+  await assert.rejects(
+    () => respond.execute!("watch-replay", response),
+    /requires a current pending interaction shown/u
+  );
+
+  const calls = fs.readFileSync(callsPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+  assert.deepEqual(calls.map((argv) => argv[0]), [
+    "watch-status",
+    "respond-interaction"
+  ]);
+  const mutation = calls[1] ?? [];
+  assert.equal(interactionOptionValue(mutation, "--watch"), watchId);
+  assert.equal(interactionOptionValue(mutation, "--turn"), undefined);
+  assert.deepEqual(
+    JSON.parse(requiredInteractionOptionValue(mutation, "--response-json")),
+    {
+      interaction_id: interactionId,
+      subject: {
+        kind: "terminal_watch",
+        watch_id: watchId,
+        anchor_fingerprint: anchorFingerprint
+      },
+      answers: response.answers
+    }
   );
 });
 
@@ -5303,6 +5439,18 @@ function interactionRelayFixture(input: {
       multi_select: false
     }
   };
+  const subjectInteractionState = {
+    ...interactionState,
+    version: 2,
+    subject: {
+      kind: "managed_turn",
+      turn_id: input.turnId,
+      message_id: "message_interaction_1"
+    },
+    surface_id: "surface_managed_interaction_1",
+    prompt_fingerprint: input.fingerprint,
+    response_authority: "executable"
+  };
   return `
 const fs = require("node:fs");
 const argv = process.argv.slice(2);
@@ -5313,7 +5461,9 @@ if (argv[0] === "status") {
     session_id: "session_interaction_1",
     turn_id: ${JSON.stringify(input.turnId)},
     terminal_status: {
-      interaction_state: ${JSON.stringify(interactionState)},
+      interaction_state: argv.includes("--trace")
+        ? ${JSON.stringify(subjectInteractionState)}
+        : ${JSON.stringify(interactionState)},
       interaction_prompt_fingerprint: ${JSON.stringify(input.fingerprint)},
       interaction_authority: { private: true },
       owner_session: "private-owner",
@@ -5328,6 +5478,76 @@ if (argv[0] === "status") {
     turn_id: ${JSON.stringify(input.turnId)},
     interaction_prompt_fingerprint: ${JSON.stringify(input.fingerprint)},
     expected_interaction_fingerprint: ${JSON.stringify(input.fingerprint)}
+  }));
+} else {
+  process.stderr.write("unexpected command");
+  process.exitCode = 2;
+}
+`;
+}
+
+function watchInteractionRelayFixture(input: {
+  readonly callsPath: string;
+  readonly watchId: string;
+  readonly interactionId: string;
+  readonly questionId: string;
+  readonly optionId: string;
+  readonly fingerprint: string;
+  readonly anchorFingerprint: string;
+  readonly expiresAt: string;
+}): string {
+  const interactionState = {
+    schema: "agent-knock-knock/terminal-interaction",
+    version: 2,
+    interaction_id: input.interactionId,
+    subject: {
+      kind: "terminal_watch",
+      watch_id: input.watchId,
+      anchor_fingerprint: input.anchorFingerprint
+    },
+    agent: "codex",
+    kind: "questionnaire",
+    state: "pending",
+    step: { index: 1, total: 2 },
+    questions: [{
+      question_id: input.questionId,
+      prompt: "Choose the safe Watch option",
+      required: true,
+      response_kind: "single_select",
+      options: [
+        { option_id: input.optionId, label: "Safe" },
+        { option_id: "option_watch_manual", label: "Manual" }
+      ]
+    }],
+    expires_at: input.expiresAt,
+    surface_id: "surface_watch_interaction_1",
+    prompt_fingerprint: input.fingerprint,
+    response_authority: "executable",
+    capabilities: {
+      respond: true,
+      batch_response: false,
+      free_text: false,
+      multi_select: false
+    }
+  };
+  return `
+const fs = require("node:fs");
+const argv = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(input.callsPath)}, JSON.stringify(argv) + "\\n");
+if (argv[0] === "watch-status") {
+  process.stdout.write(JSON.stringify({
+    watch: {
+      watch_id: ${JSON.stringify(input.watchId)},
+      status: "active",
+      interaction_state: ${JSON.stringify(interactionState)},
+      interaction_prompt_fingerprint: ${JSON.stringify(input.fingerprint)}
+    }
+  }));
+} else if (argv[0] === "respond-interaction") {
+  process.stdout.write(JSON.stringify({
+    responded: true,
+    watch_id: ${JSON.stringify(input.watchId)},
+    interaction_id: ${JSON.stringify(input.interactionId)}
   }));
 } else {
   process.stderr.write("unexpected command");

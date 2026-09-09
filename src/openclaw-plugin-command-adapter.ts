@@ -59,15 +59,18 @@ import {
   openClawApprovalAuthorityOfferKey,
   openClawInteractionAuthorityOfferKey,
   rememberOpenClawPrivateAuthorityOffer,
+  type OpenClawInteractionAuthoritySubjectKind,
   type OpenClawPrivateAuthorityOfferKey,
   type OpenClawPrivateAuthorityOfferPayload,
   type OpenClawPrivateAuthorityTarget
 } from "./openclaw-private-authority-offers.js";
 import {
   TERMINAL_INTERACTION_LIMITS,
-  validateTerminalInteractionProjection,
-  validateTerminalInteractionResponse,
-  type TerminalInteractionProjection
+  TERMINAL_INTERACTION_SUBJECT_VERSION,
+  terminalInteractionSubjectId,
+  validateAnyTerminalInteractionProjection,
+  validateAnyTerminalInteractionResponse,
+  type TerminalInteractionAnyProjection
 } from "./terminal-interaction-protocol.js";
 import {
   normalizedTerminalSendResultContract,
@@ -535,7 +538,7 @@ export function registerOpenClawCommands(
   registerCliTool(api, {
     name: "agent_knock_knock_respond_interaction",
     description:
-      "Answer exactly one current native questionnaire step shown by agent_knock_knock_status in this controller conversation. Supply only the exact turn_id, interaction_id, and one typed semantic answer: single_select uses selected_option_ids with one advertised option_id; free_text uses text; confirm uses confirm. AKK consumes the displayed private offer and revalidates the exact discriminator-specific shape, prompt, owner, and terminal authority before any input. A displayed expiry is a freshness boundary: after it passes, AKK must prove the same exact live questionnaire again instead of rejecting an otherwise live prompt. Raw keys, menu indexes, rendered labels, fingerprints, versions, and terminal commands are never accepted. An uncertain response must never be retried blindly.",
+      "Answer exactly one current native questionnaire step shown by agent_knock_knock_status in this controller conversation. Supply exactly one authoritative subject target: turn_id for a managed Turn or watch_id for an interactive Terminal Watch, plus interaction_id and one typed semantic answer. single_select uses selected_option_ids with one advertised option_id; free_text uses text; confirm uses confirm. AKK consumes only that subject's displayed private offer and revalidates the exact discriminator-specific shape, prompt, owner, task attribution, and terminal authority before any input. A displayed expiry is a freshness boundary: after it passes, AKK must prove the same exact live questionnaire again instead of rejecting an otherwise live prompt. Raw keys, menu indexes, rendered labels, fingerprints, versions, and terminal commands are never accepted. An uncertain response must never be retried blindly.",
     parameters: respondInteractionParameters,
     buildArgs: (params, toolContext) => buildPrivateInteractionResponseArgs(
       api,
@@ -1956,6 +1959,18 @@ interface DisplayedInteractionOfferPayload
   readonly interaction_state?: unknown;
 }
 
+interface DisplayedInteractionStatus {
+  readonly fields: Record<string, unknown>;
+  readonly expectedSubjectKind: OpenClawInteractionAuthoritySubjectKind;
+  readonly expectedSubjectId?: string;
+}
+
+interface OpenClawInteractionSubjectTarget {
+  readonly kind: OpenClawInteractionAuthoritySubjectKind;
+  readonly id: string;
+  readonly cliOption: "--turn" | "--watch";
+}
+
 function rememberDisplayedInteractionOffer(
   api: object,
   sessionKeyValue: unknown,
@@ -1965,25 +1980,33 @@ function rememberDisplayedInteractionOffer(
   const sessionKey = stringValue(sessionKeyValue);
   const sessionId = stringValue(sessionIdValue);
   if (!sessionKey || !sessionId || !isRecord(result)) return;
-  const terminalStatus = isRecord(result.terminal_status)
-    ? result.terminal_status
-    : undefined;
+  const displayed = displayedInteractionStatus(result);
+  if (!displayed) return;
   const fingerprint = stringValue(
-    terminalStatus?.interaction_prompt_fingerprint
+    displayed.fields.interaction_prompt_fingerprint
   );
   if (!isExactInteractionFingerprint(fingerprint)) return;
-  let interactionState: TerminalInteractionProjection;
+  let interactionState: TerminalInteractionAnyProjection;
   try {
-    interactionState = validateTerminalInteractionProjection(
-      terminalStatus?.interaction_state
+    interactionState = validateAnyTerminalInteractionProjection(
+      displayed.fields.interaction_state
     );
   } catch {
     return;
   }
+  const subject = interactionProjectionSubject(interactionState);
   if (
     interactionState.state !== "pending" ||
     interactionState.capabilities.respond !== true ||
-    publicTurnIdentity(result).turnId !== interactionState.turn_id
+    subject.kind !== displayed.expectedSubjectKind ||
+    subject.id !== displayed.expectedSubjectId ||
+    (
+      interactionState.version === TERMINAL_INTERACTION_SUBJECT_VERSION &&
+      (
+        interactionState.response_authority !== "executable" ||
+        interactionState.prompt_fingerprint !== fingerprint
+      )
+    )
   ) {
     return;
   }
@@ -1992,7 +2015,8 @@ function rememberDisplayedInteractionOffer(
     openClawInteractionAuthorityOfferKey(
       sessionKey,
       sessionId,
-      interactionState.turn_id,
+      subject.kind,
+      subject.id,
       interactionState.interaction_id
     ),
     {
@@ -2000,6 +2024,48 @@ function rememberDisplayedInteractionOffer(
       interaction_state: interactionState
     }
   );
+}
+
+function displayedInteractionStatus(
+  result: Record<string, unknown>
+): DisplayedInteractionStatus | undefined {
+  const watch = isRecord(result.watch) ? result.watch : undefined;
+  if (watch) {
+    return {
+      fields: watch,
+      expectedSubjectKind: "terminal_watch",
+      expectedSubjectId: stringValue(watch.watch_id)
+    };
+  }
+  const terminalStatus = isRecord(result.terminal_status)
+    ? result.terminal_status
+    : undefined;
+  if (terminalStatus) {
+    return {
+      fields: terminalStatus,
+      expectedSubjectKind: "managed_turn",
+      expectedSubjectId: publicTurnIdentity(result).turnId
+    };
+  }
+  if (result.interaction_state === undefined) return undefined;
+  const watchId = stringValue(result.watch_id);
+  return {
+    fields: result,
+    expectedSubjectKind: watchId ? "terminal_watch" : "managed_turn",
+    expectedSubjectId: watchId ?? publicTurnIdentity(result).turnId
+  };
+}
+
+function interactionProjectionSubject(
+  projection: TerminalInteractionAnyProjection
+): Pick<OpenClawInteractionSubjectTarget, "kind" | "id"> {
+  if (projection.version === TERMINAL_INTERACTION_SUBJECT_VERSION) {
+    return {
+      kind: projection.subject.kind,
+      id: terminalInteractionSubjectId(projection.subject)
+    };
+  }
+  return { kind: "managed_turn", id: projection.turn_id };
 }
 
 function approvalTargetFromStatus(
@@ -2223,7 +2289,7 @@ function buildPrivateInteractionResponseArgs(
   { sessionKey, sessionId }: { sessionKey: string; sessionId: string }
 ): string[] {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-  const turnId = requiredTerminalInteractionIdentifier(params.turn_id, "turn_id");
+  const requestedSubject = requestedInteractionSubject(params);
   const interactionId = requiredTerminalInteractionIdentifier(
     params.interaction_id,
     "interaction_id"
@@ -2235,7 +2301,8 @@ function buildPrivateInteractionResponseArgs(
     openClawInteractionAuthorityOfferKey(
       sessionKey,
       sessionId,
-      turnId,
+      requestedSubject.kind,
+      requestedSubject.id,
       interactionId
     )
   );
@@ -2248,20 +2315,26 @@ function buildPrivateInteractionResponseArgs(
       "respond_interaction requires a current pending interaction shown by agent_knock_knock_status in this controller conversation; refresh status, review the current questions, and respond again"
     );
   }
-  const projection = validateTerminalInteractionProjection(
+  const projection = validateAnyTerminalInteractionProjection(
     offered.interaction_state
   );
-  const response = validateTerminalInteractionResponse(params, projection, {
-    // This consumes a still-live, session/incarnation-bound private offer. The
-    // CLI/bridge path always performs exact live terminal recaptures before it
-    // can reserve or dispatch input, so projection expiry is a recheck trigger
-    // here rather than proof that the native questionnaire disappeared.
-    allowExpiredForLiveRecapture: true
-  });
+  assertInteractionSubjectMatchesProjection(requestedSubject, projection);
+  const responseInput = interactionResponseForProjection(params, projection);
+  const response = validateAnyTerminalInteractionResponse(
+    responseInput,
+    projection,
+    {
+      // This consumes a still-live, session/incarnation-bound private offer.
+      // The CLI/bridge path always performs exact live terminal recaptures
+      // before it can reserve or dispatch input, so projection expiry is a
+      // recheck trigger rather than proof that the questionnaire disappeared.
+      allowExpiredForLiveRecapture: true
+    }
+  );
   const args = [
     "respond-interaction",
-    "--turn",
-    response.turn_id,
+    requestedSubject.cliOption,
+    requestedSubject.id,
     "--interaction",
     response.interaction_id,
     "--response-json",
@@ -2275,6 +2348,58 @@ function buildPrivateInteractionResponseArgs(
   ];
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   return args;
+}
+
+function requestedInteractionSubject(
+  params: Record<string, unknown>
+): OpenClawInteractionSubjectTarget {
+  const hasTurn = Object.hasOwn(params, "turn_id");
+  const hasWatch = Object.hasOwn(params, "watch_id");
+  if (hasTurn === hasWatch) {
+    throw new Error(
+      "respond_interaction requires exactly one of turn_id or watch_id"
+    );
+  }
+  return hasTurn
+    ? {
+        kind: "managed_turn",
+        id: requiredTerminalInteractionIdentifier(params.turn_id, "turn_id"),
+        cliOption: "--turn"
+      }
+    : {
+        kind: "terminal_watch",
+        id: requiredTerminalInteractionIdentifier(params.watch_id, "watch_id"),
+        cliOption: "--watch"
+      };
+}
+
+function assertInteractionSubjectMatchesProjection(
+  requested: OpenClawInteractionSubjectTarget,
+  projection: TerminalInteractionAnyProjection
+): void {
+  const projected = interactionProjectionSubject(projection);
+  if (requested.kind !== projected.kind || requested.id !== projected.id) {
+    throw new Error(
+      "respond_interaction target does not match the displayed interaction subject; refresh status and respond to its exact turn_id or watch_id"
+    );
+  }
+}
+
+function interactionResponseForProjection(
+  params: Record<string, unknown>,
+  projection: TerminalInteractionAnyProjection
+): Record<string, unknown> {
+  if (projection.version !== TERMINAL_INTERACTION_SUBJECT_VERSION) {
+    return params;
+  }
+  return {
+    interaction_id: params.interaction_id,
+    subject: projection.subject,
+    ...(projection.subject.kind === "managed_turn"
+      ? { turn_id: params.turn_id }
+      : {}),
+    answers: params.answers
+  };
 }
 
 function isExactApprovalFingerprint(value: unknown): value is string {
@@ -2369,7 +2494,11 @@ function sanitizeModelFacingValue(
     }
     if (key === "interaction_state") {
       try {
-        output[key] = validateTerminalInteractionProjection(item);
+        output[key] = sanitizeModelFacingValue(
+          validateAnyTerminalInteractionProjection(item),
+          undefined,
+          [...path, key]
+        );
       } catch {
         continue;
       }
