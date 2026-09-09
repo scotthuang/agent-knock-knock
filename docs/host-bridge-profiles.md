@@ -8,7 +8,7 @@ integration lifetime.
 ```text
 controller Host
 └─ foreground AKK Host Bridge (MCP over stdio)
-   ├─ the existing 17 semantic AKK tools
+   ├─ the existing 19 semantic AKK tools
    ├─ one startup-selected Host Profile v1
    ├─ Host-owned monitor and Terminal Watch lifecycle
    └─ the existing Session, Turn, Store, callback, and terminal core
@@ -286,7 +286,7 @@ lease, deduplication, and settlement behavior.
 The Host Profile, Host ID/version, trusted session, executable, argv,
 credentials, environment allowlist, acknowledgement rules, and Profile
 selection all belong to the administrator/Host boundary. None is accepted from
-the 17 model-facing semantic tool calls. MCP inputs are validated against the
+the 19 model-facing semantic tool calls. MCP inputs are validated against the
 existing closed tool schemas before the shared tool implementation runs.
 
 The Bridge or Host-native connector privately passes a fingerprinted Profile

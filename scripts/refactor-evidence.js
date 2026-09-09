@@ -58,6 +58,7 @@ const PUBLIC_COMMANDS = Object.freeze([
   "threads",
   "native-inspect",
   "native-status",
+  "identify-foreground",
   "resume-thread",
   "reconcile-binding",
   "respond",
@@ -85,6 +86,8 @@ const PUBLIC_ACTIONS = Object.freeze([
   "new_thread",
   "list_resumable_threads",
   "native_inspect",
+  "identify_foreground",
+  "identify_and_send",
   "resume_thread",
   "reconcile_binding",
   "respond",
@@ -102,6 +105,8 @@ const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
   "agent_knock_knock_native_inspect",
+  "agent_knock_knock_identify_foreground",
+  "agent_knock_knock_identify_and_send",
   "agent_knock_knock_new_thread",
   "agent_knock_knock_reconcile_binding",
   "agent_knock_knock_resume_thread",
@@ -970,6 +975,8 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "unwatchParameters",
       "listResumableThreadsParameters",
       "nativeInspectParameters",
+      "identifyForegroundParameters",
+      "identifyAndSendParameters",
       "newThreadParameters",
       "reconcileBindingParameters",
       "resumeThreadParameters",
@@ -1018,6 +1025,8 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "approveParameters",
       "cancelParameters",
       "closeParameters",
+      "identifyAndSendParameters",
+      "identifyForegroundParameters",
       "listParameters",
       "listResumableThreadsParameters",
       "nativeInspectParameters",
@@ -1251,8 +1260,8 @@ function validatePublicContracts(value, {
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 24) {
-    fail("list action contract version must remain 24");
+  if (actions.version !== 25) {
+    fail("list action contract version must remain 25");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -1269,8 +1278,8 @@ function validatePublicContracts(value, {
   assertSourcePattern(
     repoRoot,
     "src/terminal-list-renderer.ts",
-    /version:\s*24\b/u,
-    "list action contract version 24"
+    /version:\s*25\b/u,
+    "list action contract version 25"
   );
 
   const openclaw = assertExactKeys(contracts.openclaw_tools, [

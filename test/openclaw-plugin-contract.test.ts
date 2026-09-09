@@ -14,6 +14,8 @@ import * as openclawPluginRuntime from "../src/openclaw-plugin.js";
 import {
   approveParameters,
   closeParameters,
+  identifyAndSendParameters,
+  identifyForegroundParameters,
   nativeInspectParameters,
   newThreadParameters,
   reconcileBindingParameters,
@@ -171,6 +173,8 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   const mutationSchemas = {
     send: sendParameters,
     native_inspect: nativeInspectParameters,
+    identify_foreground: identifyForegroundParameters,
+    identify_and_send: identifyAndSendParameters,
     new_thread: newThreadParameters,
     reconcile_binding: reconcileBindingParameters,
     respond_interaction: respondInteractionParameters,
@@ -188,6 +192,15 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     "terminal_id",
     "inspection"
   ]);
+  assert.deepEqual(identifyForegroundParameters.required, ["terminal_id"]);
+  assert.deepEqual(identifyAndSendParameters.required, [
+    "terminal_id",
+    "request"
+  ]);
+  assert.equal(
+    Object.hasOwn(identifyForegroundParameters.properties, "request"),
+    false
+  );
   assert.match(
     String(nativeInspectParameters.properties.inspection.description),
     /regression-tested[\s\S]*another complete x\.y\.z version remains callable[\s\S]*compatibility warning/u
@@ -653,6 +666,8 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     "agent_knock_knock_unwatch",
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_native_inspect",
+    "agent_knock_knock_identify_foreground",
+    "agent_knock_knock_identify_and_send",
     "agent_knock_knock_new_thread",
     "agent_knock_knock_reconcile_binding",
     "agent_knock_knock_resume_thread",
@@ -671,10 +686,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "0b98a6923f6e85afd2b3528d5c4911536cf2165a92681b2a05b2c4b0b02f4c83"
+    "c5a8d2d9b2d3d0963da6d8ae353313c5850530f752e52878fda4d8e084cadc2c"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
-  assert.equal(contractedTools.length, 17);
+  assert.equal(contractedTools.length, 19);
   assert.match(
     manifest.description ?? "",
     /closed native status inspection/u
@@ -727,6 +742,14 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     contractedTools.includes("agent_knock_knock_native_inspect"),
+    true
+  );
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_identify_foreground"),
+    true
+  );
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_identify_and_send"),
     true
   );
   assert.equal(contractedTools.includes("agent_knock_knock_new_thread"), true);
@@ -1233,7 +1256,7 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     manifest.toolMetadata.agent_knock_knock_respond_interaction.optional,
     true
   );
-  assert.equal(manifest.contracts.tools.length, 17);
+  assert.equal(manifest.contracts.tools.length, 19);
   for (const terminalWatchTool of [
     "agent_knock_knock_watch",
     "agent_knock_knock_unwatch"
@@ -1244,6 +1267,8 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   for (const lifecycleTool of [
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_native_inspect",
+    "agent_knock_knock_identify_foreground",
+    "agent_knock_knock_identify_and_send",
     "agent_knock_knock_new_thread",
     "agent_knock_knock_reconcile_binding",
     "agent_knock_knock_resume_thread"
@@ -1309,6 +1334,8 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.match(commandSource, /name: "agent_knock_knock_reconcile_binding"/u);
   assert.match(commandSource, /name: "agent_knock_knock_list_resumable_threads"/u);
   assert.match(commandSource, /name: "agent_knock_knock_native_inspect"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_identify_foreground"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_identify_and_send"/u);
   assert.match(commandSource, /name: "agent_knock_knock_resume_thread"/u);
   assert.match(
     commandSource,
@@ -1613,6 +1640,118 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
       }),
       /inspection must be status/u
     );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("OpenClaw foreground identification keeps physical authority private and atomic", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-plugin-identify-foreground-")
+  );
+  const fakeCli = path.join(tempDir, "identify-foreground.cjs");
+  const callsPath = path.join(tempDir, "calls.ndjson");
+  const terminalId = "terminal:v2:tmux:codex:identify:0.0:1234";
+  const tools = new Map<string, ToolDefinition>();
+
+  try {
+    fs.writeFileSync(
+      fakeCli,
+      [
+        `const fs = require("node:fs");`,
+        `const args = process.argv.slice(2);`,
+        `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
+        `const terminalId = ${JSON.stringify(terminalId)};`,
+        `let result;`,
+        `if (args[0] === "list") result = { terminals: [{ id: terminalId, available_actions: {`,
+        `  identify_foreground: { tool: "agent_knock_knock_identify_foreground", arguments: { terminal_id: terminalId, expected_terminal_token: "private-physical-token" } },`,
+        `  identify_and_send: { tool: "agent_knock_knock_identify_and_send", arguments: { terminal_id: terminalId, expected_terminal_token: "private-physical-token" }, missing_required: ["request"] }`,
+        `} }] };`,
+        `else if (args[0] === "identify-foreground") result = { status: "observed", inspection: "identify_foreground", terminal_id: terminalId, native_thread_id: "11111111-1111-4111-8111-111111111111", foreground_proof: { scope: "ephemeral_diagnostic_only", grants_authority: false }, store_mutation: false, session_created: false, turn_created: false };`,
+        `else result = { delivered: true, status: "submission_pending_acceptance", terminal_input_dispatched: true, agent_acceptance: "unproven", management_mode: "managed", observation_mode: "terminal_monitor", capabilities: { callback: true, interaction_notify: true, interaction_respond: true } };`,
+        `process.stdout.write(JSON.stringify(result));`
+      ].join("\n"),
+      "utf8"
+    );
+
+    (
+      createOpenClawPluginForTest(fakeCli) as unknown as {
+        register(api: Record<string, any>): void;
+      }
+    ).register({
+      pluginConfig: { storeDir: "/private/akk-store" },
+      logger: { info() {}, warn() {} },
+      registerGatewayMethod() {},
+      registerService() {},
+      registerCommand() {},
+      registerTool(
+        tool: ToolDefinition | ToolFactory,
+        options?: { name?: string }
+      ) {
+        const definition = typeof tool === "function" ? tool({}) : tool;
+        if (options?.name) tools.set(options.name, definition);
+      }
+    });
+
+    const identify = tools.get("agent_knock_knock_identify_foreground");
+    const atomicSend = tools.get("agent_knock_knock_identify_and_send");
+    assert.ok(identify);
+    assert.ok(atomicSend);
+    assert.deepEqual(identify.parameters?.required, ["terminal_id"]);
+    assert.deepEqual(atomicSend.parameters?.required, ["terminal_id", "request"]);
+    assertNoModelOpaqueAuthority(identify.parameters);
+    assertNoModelOpaqueAuthority(atomicSend.parameters);
+
+    const identified = await identify.execute?.("identify-call", {
+      terminal_id: terminalId
+    });
+    assert.equal(identified?.details?.status, "observed");
+    assert.equal(identified?.details?.store_mutation, false);
+    assertModelToolResultHasNoOpaqueAuthority(identified);
+
+    const sent = await atomicSend.execute?.("atomic-send-call", {
+      terminal_id: terminalId,
+      request: "Run one safe task"
+    });
+    assert.equal(sent?.details?.delivered, true);
+    assert.equal(sent?.details?.management_mode, "managed");
+    assertModelToolResultHasNoOpaqueAuthority(sent);
+
+    const calls = fs.readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    const authorityRefreshes = calls.filter((args) => args[0] === "list");
+    assert.equal(authorityRefreshes.length, 2);
+    assert.equal(
+      authorityRefreshes.every((args) => !args.includes("--reconcile")),
+      true,
+      "P2 authority refresh must remain read-only before the explicit probe"
+    );
+    const identifyCall = calls.find((args) => args[0] === "identify-foreground");
+    assert.deepEqual(identifyCall, [
+      "identify-foreground",
+      "--terminal",
+      terminalId,
+      "--expected-terminal-token",
+      "private-physical-token",
+      "--store-dir",
+      "/private/akk-store"
+    ]);
+    const sendCall = calls.find((args) =>
+      args[0] === "send" && args.includes("--identify-foreground")
+    );
+    assert.ok(sendCall);
+    assert.deepEqual(sendCall?.slice(0, 8), [
+      "send",
+      "--conversation",
+      terminalId,
+      "--expected-terminal-token",
+      "private-physical-token",
+      "--identify-foreground",
+      "--message",
+      "Run one safe task"
+    ]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

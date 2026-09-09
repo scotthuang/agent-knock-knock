@@ -67,7 +67,10 @@ import {
   exactCodexReadyStyledComposerCapture,
   TerminalAgentBridge,
   type ResolvedTerminalConversation,
-  type TerminalBridgeStatus
+  type TerminalActivityState,
+  type TerminalBridgeStatus,
+  type TerminalDurableActivityState,
+  type TerminalNativeIdentityState
 } from "./terminal-agent-bridge.js";
 import {
   captureCodexHumanStartedActiveTaskAnchor,
@@ -232,8 +235,13 @@ interface DeferredCodexAuthorityObservation {
 export interface TerminalListScanEntry {
   agent?: string;
   activity_state?: string;
+  durable_activity_reason?: string;
+  durable_activity_state?: string;
   cwd?: string;
   id?: string;
+  native_identity_state?: string;
+  screen_reason?: string;
+  screen_state?: string;
   short_ref?: string;
   terminal_control?: { target?: string; [field: string]: unknown };
   workspace?: string;
@@ -1297,14 +1305,15 @@ async function terminalControlledListEntry(
     terminalState,
     nativeIdentityObservation,
     nativeAgentIdentity,
+    nativeIdentityAuthorityObservation: authorityNativeIdentityObservation,
+    codexOpenRootRolloutInventory,
     nativeProcessUuid,
     nativeProcessBirth
   });
   const terminalStatusSnapshot = effectiveTerminalState._terminal_status_snapshot
-    ? terminalBridgeStatusWithActivity(
+    ? terminalBridgeStatusWithProjection(
         effectiveTerminalState._terminal_status_snapshot,
-        effectiveTerminalState.activity_state,
-        effectiveTerminalState.activity_reason
+        effectiveTerminalState
       )
     : undefined;
   const statusCardObservation = session.agent === "codex" &&
@@ -1415,6 +1424,22 @@ async function terminalControlledListEntry(
       error: error instanceof Error ? error.message : String(error)
     });
   }
+  const commands = terminalListCommands({
+    agent: session.agent,
+    terminalControl,
+    terminalState: effectiveTerminalState,
+    lifecycleCapability,
+    nativeInspectionCapability,
+    nativeAgentIdentity: authorityNativeAgentIdentity,
+    nativeProcessUuid,
+    nativeProcessBirth,
+    codexLifecycleIncarnationAvailable,
+    automatedInputComposerReady,
+    hasOrphanedDispatch: orphanedDispatch !== undefined,
+    terminalHasBlockingTurn,
+    terminalHasInteraction:
+      terminalStatusSnapshot?.interaction_state !== undefined
+  });
   const entry = {
     id: bridge.terminalConversationId(session),
     short_ref: sessionShortRef(bridge.terminalConversationId(session)),
@@ -1454,6 +1479,11 @@ async function terminalControlledListEntry(
     approval_state: effectiveTerminalState.approval_state,
     activity_state: effectiveTerminalState.activity_state,
     activity_reason: effectiveTerminalState.activity_reason,
+    screen_state: effectiveTerminalState.screen_state,
+    screen_reason: effectiveTerminalState.screen_reason,
+    native_identity_state: effectiveTerminalState.native_identity_state,
+    durable_activity_state: effectiveTerminalState.durable_activity_state,
+    durable_activity_reason: effectiveTerminalState.durable_activity_reason,
     // Internal exact-observation evidence. The public projection strips this
     // object; raw terminal status reuses it so screen, approval, and activity
     // all describe the same capture.
@@ -1506,20 +1536,7 @@ async function terminalControlledListEntry(
           }
         }
       : {}),
-    commands: terminalListCommands({
-      agent: session.agent,
-      terminalControl,
-      terminalState: effectiveTerminalState,
-      lifecycleCapability,
-      nativeInspectionCapability,
-      nativeAgentIdentity: authorityNativeAgentIdentity,
-      nativeProcessUuid,
-      nativeProcessBirth,
-      codexLifecycleIncarnationAvailable,
-      automatedInputComposerReady,
-      hasOrphanedDispatch: orphanedDispatch !== undefined,
-      terminalHasBlockingTurn
-    })
+    commands
   };
   const renderedActions = renderAvailableListActions(entry);
   const terminalUserExplicitSendAuthority =
@@ -1559,20 +1576,51 @@ async function terminalControlledListEntry(
             : {})
         }
       : undefined;
+  const foregroundIdentificationActions =
+    terminalUserExplicitSendAuthority.eligible &&
+      commands.identify_foreground === true
+      ? {
+          identify_foreground: {
+            tool: "agent_knock_knock_identify_foreground",
+            arguments: {
+              terminal_id: entry.id,
+              expected_terminal_token:
+                terminalUserExplicitSendAuthority.expectedTerminalToken
+            },
+            scope: "ephemeral_diagnostic_only",
+            grants_authority: false,
+            requires_user_intent: true
+          },
+          identify_and_send: {
+            tool: "agent_knock_knock_identify_and_send",
+            arguments: {
+              terminal_id: entry.id,
+              expected_terminal_token:
+                terminalUserExplicitSendAuthority.expectedTerminalToken
+            },
+            missing_required: ["request"],
+            scope: "terminal_atomic_identify_and_send",
+            requires_user_intent: true
+          }
+        }
+      : {};
   const { commands: _commands, ...publicEntry } = entry;
   return {
     ...publicEntry,
     ...(terminalUserExplicitSendAction
       ? { _terminal_user_explicit_send_action: terminalUserExplicitSendAction }
       : {}),
-    available_actions: renderedActions
+    available_actions: {
+      ...renderedActions,
+      ...foregroundIdentificationActions
+    }
   };
 }
 
 function terminalListCommands(input: {
   agent: ExecutorKind;
   terminalControl: TerminalControlRef;
-  terminalState: TerminalListState;
+  terminalState: EffectiveTerminalListState;
   lifecycleCapability: {
     status: string;
     newThread: boolean;
@@ -1589,6 +1637,7 @@ function terminalListCommands(input: {
   automatedInputComposerReady: boolean;
   hasOrphanedDispatch: boolean;
   terminalHasBlockingTurn: boolean;
+  terminalHasInteraction: boolean;
 }) {
   const {
     agent,
@@ -1602,8 +1651,24 @@ function terminalListCommands(input: {
     codexLifecycleIncarnationAvailable,
     automatedInputComposerReady,
     hasOrphanedDispatch,
-    terminalHasBlockingTurn
+    terminalHasBlockingTurn,
+    terminalHasInteraction
   } = input;
+  const foregroundIdentificationEligible =
+    agent === "codex" &&
+    nativeInspectionCapability.status === "supported" &&
+    nativeInspectionCapability.statusInspection === true &&
+    terminalState.screen_state === "idle" &&
+    terminalState.native_identity_state !== "resolved" &&
+    terminalState.approval_state.scanned === true &&
+    terminalState.approval_state.blocked !== true &&
+    automatedInputComposerReady &&
+    codexLifecycleIncarnationAvailable &&
+    terminalControl.capabilities.includes("send_keys") &&
+    terminalControl.capabilities.includes("screen_status") &&
+    !terminalHasInteraction &&
+    !hasOrphanedDispatch &&
+    !terminalHasBlockingTurn;
   return {
     send: !terminalHasBlockingTurn,
     approve: terminalControl.capabilities.includes("terminal_approval") &&
@@ -1637,6 +1702,8 @@ function terminalListCommands(input: {
       ) &&
       !hasOrphanedDispatch &&
       !terminalHasBlockingTurn,
+    identify_foreground: foregroundIdentificationEligible,
+    identify_and_send: foregroundIdentificationEligible,
     watch:
       terminalControl.capabilities.includes("screen_status") ||
       Boolean(
@@ -1653,9 +1720,17 @@ interface TerminalListState {
   };
   activity_state: TerminalBridgeStatus["activity_state"];
   activity_reason: string;
+  screen_state: TerminalActivityState;
+  screen_reason: string;
   capability_limitation?: string;
   screen_excerpt?: string;
   _terminal_status_snapshot?: TerminalBridgeStatus;
+}
+
+interface EffectiveTerminalListState extends TerminalListState {
+  native_identity_state: TerminalNativeIdentityState;
+  durable_activity_state: TerminalDurableActivityState;
+  durable_activity_reason: string;
 }
 
 function effectiveTerminalListState(input: {
@@ -1663,27 +1738,48 @@ function effectiveTerminalListState(input: {
   terminalState: TerminalListState;
   nativeIdentityObservation: TerminalNativeIdentityObservation;
   nativeAgentIdentity?: TerminalNativeIdentity;
+  nativeIdentityAuthorityObservation: TerminalNativeIdentityObservation;
+  codexOpenRootRolloutInventory?: CodexOpenRootRolloutInventory;
   nativeProcessUuid?: string;
   nativeProcessBirth?: string;
-}): TerminalListState {
+}): EffectiveTerminalListState {
   const {
     session,
     terminalState,
     nativeIdentityObservation,
     nativeAgentIdentity,
+    nativeIdentityAuthorityObservation,
+    codexOpenRootRolloutInventory,
     nativeProcessUuid,
     nativeProcessBirth
   } = input;
-  if (
-    session.agent !== "codex" ||
+  const nativeIdentityState = terminalNativeIdentityState({
+    observation: nativeIdentityAuthorityObservation,
+    codexOpenRootRolloutInventory
+  });
+  if (session.agent !== "codex") {
+    return terminalListStateWithStatusAxes({
+      terminalState,
+      legacyState: terminalState,
+      nativeIdentityState,
+      durableActivityState: "unknown",
+      durableActivityReason:
+        `durable activity evidence is unavailable for ${session.agent} terminals`
+    });
+  }
+  const liveScreenStateWins =
     terminalState.activity_state === "working" ||
     terminalState.activity_state === "awaiting_approval" ||
-    terminalState.approval_state.blocked === true
-  ) {
-    return terminalState;
-  }
+    terminalState.approval_state.blocked === true;
   if (nativeIdentityObservation.status === "verified_absent") {
-    return terminalState;
+    return terminalListStateWithStatusAxes({
+      terminalState,
+      legacyState: terminalState,
+      nativeIdentityState,
+      durableActivityState: "unknown",
+      durableActivityReason:
+        "durable Codex activity is unknown because no open native rollout was observed"
+    });
   }
   if (
     nativeIdentityObservation.status !== "resolved" ||
@@ -1692,13 +1788,26 @@ function effectiveTerminalListState(input: {
     !nativeProcessUuid ||
     !nativeProcessBirth
   ) {
-    return terminalListStateWithUnavailableDurableActivity(
+    const reason = nativeIdentityObservation.status === "unavailable"
+      ? nativeIdentityObservation.reason ??
+        "exact Codex identity observation failed"
+      : nativeIdentityState === "ambiguous"
+        ? "the foreground Codex native identity is ambiguous"
+        : "exact Codex rollout/process identity is incomplete";
+    const legacyState = liveScreenStateWins
+      ? terminalState
+      : terminalListStateWithUnavailableDurableActivity(
+          terminalState,
+          reason
+        );
+    return terminalListStateWithStatusAxes({
       terminalState,
-      nativeIdentityObservation.status === "unavailable"
-        ? nativeIdentityObservation.reason ??
-          "exact Codex identity observation failed"
-        : "exact Codex rollout/process identity is incomplete"
-    );
+      legacyState,
+      nativeIdentityState,
+      durableActivityState: "unknown",
+      durableActivityReason:
+        `durable Codex activity evidence is unavailable: ${reason}`
+    });
   }
   const currentIdentity: CodexRolloutAcceptanceIdentity = {
     sessionId: nativeAgentIdentity.sessionId,
@@ -1707,15 +1816,34 @@ function effectiveTerminalListState(input: {
     rollout: nativeAgentIdentity.rollout
   };
   try {
-    if (!captureCodexHumanStartedActiveTaskAnchor({ currentIdentity })) {
-      return terminalState;
-    }
-    return {
-      ...terminalState,
-      activity_state: "working",
-      activity_reason:
-        "Codex rollout contains an exact unfinished human-started task"
-    };
+    const activeTask = Boolean(
+      captureCodexHumanStartedActiveTaskAnchor({ currentIdentity })
+    );
+    const activeTaskReason =
+      "Codex rollout contains an exact unfinished human-started task";
+    const durableActivityState = nativeIdentityState === "resolved"
+      ? activeTask ? "working" : "idle"
+      : "unknown";
+    const durableActivityReason = nativeIdentityState !== "resolved"
+      ? `durable Codex activity evidence is unavailable because the ` +
+        `foreground native identity is ${nativeIdentityState}`
+      : activeTask
+        ? activeTaskReason
+        : "exact Codex rollout contains no unfinished human-started task";
+    const legacyState = liveScreenStateWins || !activeTask
+      ? terminalState
+      : {
+          ...terminalState,
+          activity_state: "working" as const,
+          activity_reason: activeTaskReason
+        };
+    return terminalListStateWithStatusAxes({
+      terminalState,
+      legacyState,
+      nativeIdentityState,
+      durableActivityState,
+      durableActivityReason
+    });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     runtimeLog("warn", "terminal_durable_activity_unavailable", {
@@ -1723,11 +1851,57 @@ function effectiveTerminalListState(input: {
       pid: session.pid,
       reason
     });
-    return terminalListStateWithUnavailableDurableActivity(
+    const legacyState = liveScreenStateWins
+      ? terminalState
+      : terminalListStateWithUnavailableDurableActivity(
+          terminalState,
+          reason
+        );
+    return terminalListStateWithStatusAxes({
       terminalState,
-      reason
-    );
+      legacyState,
+      nativeIdentityState,
+      durableActivityState: "unknown",
+      durableActivityReason:
+        `durable Codex activity evidence is unavailable: ${reason}`
+    });
   }
+}
+
+function terminalNativeIdentityState(input: {
+  observation: TerminalNativeIdentityObservation;
+  codexOpenRootRolloutInventory?: CodexOpenRootRolloutInventory;
+}): TerminalNativeIdentityState {
+  if (input.observation.status === "resolved") {
+    return "resolved";
+  }
+  if (input.codexOpenRootRolloutInventory?.status === "unbound") {
+    return "ambiguous";
+  }
+  if (
+    input.observation.status === "verified_absent" ||
+    input.codexOpenRootRolloutInventory?.status === "verified_absent"
+  ) {
+    return "verified_absent";
+  }
+  return "unavailable";
+}
+
+function terminalListStateWithStatusAxes(input: {
+  terminalState: TerminalListState;
+  legacyState: TerminalListState;
+  nativeIdentityState: TerminalNativeIdentityState;
+  durableActivityState: TerminalDurableActivityState;
+  durableActivityReason: string;
+}): EffectiveTerminalListState {
+  return {
+    ...input.legacyState,
+    screen_state: input.terminalState.screen_state,
+    screen_reason: input.terminalState.screen_reason,
+    native_identity_state: input.nativeIdentityState,
+    durable_activity_state: input.durableActivityState,
+    durable_activity_reason: input.durableActivityReason
+  };
 }
 
 function terminalListStateWithUnavailableDurableActivity(
@@ -1742,24 +1916,37 @@ function terminalListStateWithUnavailableDurableActivity(
   };
 }
 
-function terminalBridgeStatusWithActivity(
+function terminalBridgeStatusWithProjection(
   status: TerminalBridgeStatus,
-  activityState: TerminalBridgeStatus["activity_state"],
-  activityReason: string
+  projection: EffectiveTerminalListState
 ): TerminalBridgeStatus {
   const descriptors = Object.getOwnPropertyDescriptors(status);
   descriptors.activity_state = {
     configurable: true,
     enumerable: true,
-    value: activityState,
+    value: projection.activity_state,
     writable: true
   };
   descriptors.activity_reason = {
     configurable: true,
     enumerable: true,
-    value: activityReason,
+    value: projection.activity_reason,
     writable: true
   };
+  for (const [field, value] of Object.entries({
+    screen_state: projection.screen_state,
+    screen_reason: projection.screen_reason,
+    native_identity_state: projection.native_identity_state,
+    durable_activity_state: projection.durable_activity_state,
+    durable_activity_reason: projection.durable_activity_reason
+  })) {
+    descriptors[field] = {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true
+    };
+  }
   return Object.create(
     Object.getPrototypeOf(status),
     descriptors
@@ -4147,7 +4334,9 @@ async function listStateForTerminal(
         reason: "approval scan disabled"
       },
       activity_state: "unknown",
-      activity_reason: "terminal screen scan disabled"
+      activity_reason: "terminal screen scan disabled",
+      screen_state: "unknown",
+      screen_reason: "terminal screen scan disabled"
     };
   }
   try {
@@ -4162,6 +4351,8 @@ async function listStateForTerminal(
       },
       activity_state: status.activity_state,
       activity_reason: status.activity_reason,
+      screen_state: status.screen_state ?? status.activity_state,
+      screen_reason: status.screen_reason ?? status.activity_reason,
       capability_limitation: status.capability_limitation,
       _terminal_status_snapshot: status,
       // Internal projection evidence; terminalControlledListEntry selects all
@@ -4177,7 +4368,9 @@ async function listStateForTerminal(
         error: error instanceof Error ? error.message : String(error)
       },
       activity_state: "unknown",
-      activity_reason: error instanceof Error ? error.message : String(error)
+      activity_reason: error instanceof Error ? error.message : String(error),
+      screen_state: "unknown",
+      screen_reason: error instanceof Error ? error.message : String(error)
     };
   }
 }

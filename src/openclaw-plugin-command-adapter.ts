@@ -37,6 +37,8 @@ import {
   approveParameters,
   cancelParameters,
   closeParameters,
+  identifyAndSendParameters,
+  identifyForegroundParameters,
   listParameters,
   listResumableThreadsParameters,
   nativeInspectParameters,
@@ -287,6 +289,8 @@ export function registerOpenClawCommands(
       return args;
     }
   });
+
+  registerForegroundIdentificationTools(api);
 
   registerCliTool(api, {
     name: "agent_knock_knock_new_thread",
@@ -622,6 +626,107 @@ export function registerOpenClawCommands(
         "--store-dir",
         resolvePluginStoreDir(config)
       );
+      return args;
+    }
+  });
+}
+
+function registerForegroundIdentificationTools(api): void {
+  registerCliTool(api, {
+    name: "agent_knock_knock_identify_foreground",
+    description:
+      "Explicitly identify the foreground Codex native thread in one exact idle terminal by issuing the closed /status probe once. The result is a short-lived diagnostic bound to the current pane, process, cwd, and screen generation; it creates no Session or Turn and grants no later response, approval, lifecycle, or send authority. Ordinary list/status never runs this probe.",
+    parameters: identifyForegroundParameters,
+    normalizeTurnIdentity: false,
+    buildArgs: async (params) => {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const terminalId = requiredString(params.terminal_id, "terminal_id");
+      const action = await privateTerminalActionArguments(
+        api,
+        terminalId,
+        "agent_knock_knock_identify_foreground",
+        { reconcile: false }
+      );
+      const args = [
+        "identify-foreground",
+        "--terminal",
+        terminalId,
+        "--expected-terminal-token",
+        requiredString(
+          action.expected_terminal_token,
+          "current internal foreground-identification terminal authority"
+        )
+      ];
+      pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+      pushOptional(args, "--codex-home", stringValue(config.codexHome));
+      return args;
+    }
+  });
+
+  registerCliTool(api, {
+    name: "agent_knock_knock_identify_and_send",
+    description:
+      "Explicitly identify the foreground Codex native thread with one closed /status probe, then dispatch one task while retaining the same terminal lock. This is an optional managed-attachment enhancement, not a prerequisite for ordinary human Send. The short-lived status observation never becomes durable identity: only the rollout that uniquely accepts the exact task may own the resulting Session/Turn. If the probe or boundary becomes uncertain, AKK does not send or retry the task.",
+    parameters: identifyAndSendParameters,
+    isErrorResult: isSubmissionError,
+    buildArgs: async (params, toolContext, toolCallId) => {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const terminalId = requiredString(params.terminal_id, "terminal_id");
+      const action = await privateTerminalActionArguments(
+        api,
+        terminalId,
+        "agent_knock_knock_identify_and_send",
+        { reconcile: false }
+      );
+      const openclawSession =
+        stringValue(toolContext?.sessionKey) ?? "agent:main:main";
+      const args = [
+        "send",
+        "--conversation",
+        terminalId,
+        "--expected-terminal-token",
+        requiredString(
+          action.expected_terminal_token,
+          "current internal identify-and-send terminal authority"
+        ),
+        "--identify-foreground",
+        "--message",
+        requiredString(params.request, "request"),
+        "--background"
+      ];
+      pushOptional(
+        args,
+        "--message-id",
+        terminalMessageIdForToolCall({
+          toolCallId,
+          sessionKey: openclawSession,
+          sessionId: toolContext?.sessionId,
+          toolName: "agent_knock_knock_identify_and_send"
+        })
+      );
+      pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+      pushOptional(
+        args,
+        "--idle-timeout-minutes",
+        numberString(params.idleTimeoutMinutes) ??
+          numberString(config.idleTimeoutMinutes)
+      );
+      pushOptional(
+        args,
+        "--agent-timeout-minutes",
+        numberString(params.agentTimeoutMinutes) ??
+          numberString(config.agentTimeoutMinutes)
+      );
+      pushOptional(
+        args,
+        "--agent-hard-timeout-minutes",
+        numberString(params.agentHardTimeoutMinutes) ??
+          numberString(config.agentHardTimeoutMinutes)
+      );
+      pushOptional(args, "--openclaw-session", openclawSession);
+      pushOptional(args, "--gateway-method", CALLBACK_METHOD);
+      pushOptional(args, "--gateway-session", openclawSession);
+      pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
       return args;
     }
   });
@@ -1664,9 +1769,13 @@ function toolResult(
   };
 }
 
-async function privateList(api): Promise<Record<string, unknown>> {
+async function privateList(
+  api,
+  options: { reconcile?: boolean } = {}
+): Promise<Record<string, unknown>> {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-  const args = ["list", "--reconcile"];
+  const args = ["list"];
+  if (options.reconcile !== false) args.push("--reconcile");
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(
     args,
@@ -1694,11 +1803,13 @@ async function privateThreadDiscovery(
 async function privateTerminalActionArguments(
   api,
   terminalId: string,
-  tool: string
+  tool: string,
+  options: { reconcile?: boolean } = {}
 ): Promise<Record<string, unknown>> {
   return privateActionArguments(api, {
     tool,
     terminalId,
+    reconcile: options.reconcile,
     matches: (argumentsValue) =>
       stringValue(argumentsValue.terminal_id) === terminalId
   });
@@ -1709,10 +1820,11 @@ async function privateActionArguments(
   input: {
     tool: string;
     terminalId?: string;
+    reconcile?: boolean;
     matches: (argumentsValue: Record<string, unknown>) => boolean;
   }
 ): Promise<Record<string, unknown>> {
-  const result = await privateList(api);
+  const result = await privateList(api, { reconcile: input.reconcile });
   const terminals = input.terminalId
     ? terminalRows(result).filter((terminal) =>
         stringValue(terminal.id) === input.terminalId
@@ -2638,7 +2750,10 @@ function terminalMessageIdForToolCall({
   toolCallId: unknown;
   sessionKey: unknown;
   sessionId: unknown;
-  toolName: "agent_knock_knock_send" | "agent_knock_knock_respond";
+  toolName:
+    | "agent_knock_knock_send"
+    | "agent_knock_knock_identify_and_send"
+    | "agent_knock_knock_respond";
 }): string | undefined {
   const toolCallId = stringValue(toolCallIdValue);
   if (!toolCallId) {
@@ -2684,7 +2799,9 @@ function registerCliTool(
               )
             );
             const rendered = toolResult(result, {
-              submissionErrors: name === "agent_knock_knock_respond",
+              submissionErrors:
+                name === "agent_knock_knock_respond" ||
+                name === "agent_knock_knock_identify_and_send",
               normalizeTurnIdentity,
               forceError:
                 typeof isErrorResult === "function" && isErrorResult(result) === true

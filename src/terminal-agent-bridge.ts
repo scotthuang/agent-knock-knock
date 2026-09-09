@@ -384,14 +384,38 @@ export class TerminalInteractionInputNotStartedError extends Error {
   }
 }
 
+export type TerminalActivityState =
+  | "awaiting_approval"
+  | "working"
+  | "idle"
+  | "unknown";
+
+export type TerminalNativeIdentityState =
+  | "resolved"
+  | "ambiguous"
+  | "verified_absent"
+  | "unavailable";
+
+export type TerminalDurableActivityState = "working" | "idle" | "unknown";
+
 export interface TerminalBridgeStatus {
   provider: string;
   target: string;
   agent: ExecutorKind;
   reachable: boolean;
   capabilities: Readonly<TerminalAgentAdapterCapabilities>;
-  activity_state: "awaiting_approval" | "working" | "idle" | "unknown";
+  activity_state: TerminalActivityState;
   activity_reason: string;
+  /** Raw live-screen classification before durable identity reconciliation. */
+  screen_state?: TerminalActivityState;
+  /** Adapter evidence for screen_state. */
+  screen_reason?: string;
+  /** Safe foreground-native-identity summary projected by list/status. */
+  native_identity_state?: TerminalNativeIdentityState;
+  /** Durable task activity projected from exact native artifacts. */
+  durable_activity_state?: TerminalDurableActivityState;
+  /** Evidence or limitation for durable_activity_state. */
+  durable_activity_reason?: string;
   approval_state: {
     scanned: boolean;
     blocked: boolean;
@@ -1330,6 +1354,8 @@ export class TerminalAgentBridge {
         capabilities: adapter.capabilities,
         activity_state: "unknown",
         activity_reason: message,
+        screen_state: "unknown",
+        screen_reason: message,
         approval_state: {
           scanned: false,
           blocked: false,
@@ -6029,6 +6055,8 @@ function statusFromInspection(
     capabilities: adapter.capabilities,
     activity_state: inspection.activity.state,
     activity_reason: inspection.activity.reason,
+    screen_state: inspection.activity.state,
+    screen_reason: inspection.activity.reason,
     approval_state: {
       scanned: true,
       blocked: approval.blocked,
@@ -6109,6 +6137,8 @@ function failedScreenStatus(
     capabilities: adapter.capabilities,
     activity_state: "unknown",
     activity_reason: message,
+    screen_state: "unknown",
+    screen_reason: message,
     approval_state: {
       scanned: false,
       blocked: false,
@@ -6174,6 +6204,8 @@ function unsupportedScreenStatus(
     capabilities: adapter.capabilities,
     activity_state: "unknown",
     activity_reason: reason,
+    screen_state: "unknown",
+    screen_reason: reason,
     approval_state: {
       scanned: false,
       blocked: false,

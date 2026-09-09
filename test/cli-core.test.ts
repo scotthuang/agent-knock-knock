@@ -421,6 +421,60 @@ test("terminal mutation CLI gives terminal and Store writer independent lock bud
   }
 });
 
+test("terminal mutation CLI forwards work between terminal and writer locks", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cli-lock-hook-"));
+  const storeDir = path.join(root, "store");
+  const terminalControl = {
+    kind: "tmux",
+    target: "test:0.0"
+  } as TerminalControlRef;
+  const effects: string[] = [];
+
+  const runtime = createTerminalMutationCliRuntime({
+    acquireFileLock() {
+      return () => {};
+    },
+    acquireTerminalBridgeSendLock() {
+      effects.push("terminal-lock");
+      return () => effects.push("terminal-unlock");
+    },
+    terminalBridgeRuntimeKey() {
+      return "terminal:test:0.0";
+    },
+    async withStoreWriterLeaseAsync(_storeDir, operation) {
+      effects.push("writer-lock");
+      try {
+        return await operation();
+      } finally {
+        effects.push("writer-unlock");
+      }
+    }
+  });
+
+  try {
+    await withCanonicalMutationLocks(
+      runtime.terminalWriterMutationLocks(storeDir, terminalControl, {
+        afterTerminalAcquired: async () => {
+          effects.push("after-terminal");
+        }
+      }),
+      async () => {
+        effects.push("operation");
+      }
+    );
+    assert.deepEqual(effects, [
+      "terminal-lock",
+      "after-terminal",
+      "writer-lock",
+      "operation",
+      "writer-unlock",
+      "terminal-unlock"
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("cli-core AST remains a stable facade without owned state machines", () => {
   const root = path.resolve(import.meta.dirname, "../..");
   const sourcePath = path.join(root, "src/cli-core.ts");

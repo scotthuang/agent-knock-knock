@@ -268,6 +268,56 @@ export const nativeInspectParameters = {
   }
 };
 
+export const identifyForegroundParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full Codex terminal_id from the current identify_foreground action. AKK sends the closed /status probe exactly once under the terminal lock and returns only a short-lived diagnostic foreground observation. It does not bind a Session or authorize later input."
+    }
+  }
+};
+
+export const identifyAndSendParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id", "request"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full Codex terminal_id from the current identify_and_send action. AKK keeps one terminal lock from the explicit /status foreground probe through the single task dispatch; final durable identity still comes only from exact request acceptance."
+    },
+    request: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Task text sent exactly once after the foreground probe remains current."
+    },
+    idleTimeoutMinutes: {
+      type: "number",
+      description:
+        "Minutes a completed or idle AKK Turn record is retained before controlled reconciliation closes it."
+    },
+    agentTimeoutMinutes: {
+      type: "number",
+      description: "Callback inactivity timeout in minutes."
+    },
+    agentHardTimeoutMinutes: {
+      type: "number",
+      exclusiveMinimum: 0,
+      description: "Maximum terminal monitor lifetime in minutes."
+    }
+  }
+};
+
 export const newThreadParameters = {
   type: "object",
   additionalProperties: false,

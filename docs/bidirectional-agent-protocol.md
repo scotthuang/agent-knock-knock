@@ -29,7 +29,16 @@ tmux or Herdr terminal / verified process incarnation
 - A `watch_id` identifies an observation-only aggregate for a user-selected exact terminal. It prefers one provider-correlated task, may fall back to that terminal/process activity epoch, and may also identify one exact request already delivered through user-explicit unmanaged fallback. It is never a Session, Turn, dispatch receipt, terminal owner, or terminal-input authority.
 - A terminal binding generation identifies one verified terminal-to-native-thread attachment. Native lifecycle transitions advance it even though they create no Turn.
 
-Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v24 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `native_inspect({terminal_id,inspection})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, `respond_interaction({turn_id,interaction_id,answers})`, managed `approve({turn_id,decision})` or approve-once-only terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Approval, questionnaire response, handoff takeover, and reconciliation require explicit user intent and fresh source state. The trusted plugin/CLI privately derives and revalidates terminal, binding, candidate, prompt, interaction, composer, handoff, revision, and compare-and-swap fences; the model never transports them. Store format remains 1 and writer protocol is 7; Terminal Watch schema remains 2.
+List and Status preserve three independent evidence axes. `screen_state`
+classifies the bounded live TUI, `native_identity_state` reports whether the
+foreground native session is resolved, ambiguous, verified absent, or
+unavailable, and `durable_activity_state` reports exact artifact-backed task
+activity when available. The legacy `activity_state` remains conservative for
+compatibility; it can be `unknown` while the screen is visibly idle because
+native identity or durable activity is ambiguous. These axes are diagnostic
+and never replace a current `available_actions` entry as mutation authority.
+
+Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v25 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `native_inspect({terminal_id,inspection})`, `identify_foreground({terminal_id})`, `identify_and_send({terminal_id,request})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, `respond_interaction({turn_id,interaction_id,answers})`, managed `approve({turn_id,decision})` or approve-once-only terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Approval, questionnaire response, handoff takeover, and reconciliation require explicit user intent and fresh source state. The trusted plugin/CLI privately derives and revalidates terminal, binding, candidate, prompt, interaction, composer, handoff, revision, and compare-and-swap fences; the model never transports them. Store format remains 1 and writer protocol is 7; Terminal Watch schema remains 2.
 
 ## Turn Flow
 
@@ -43,6 +52,25 @@ Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` rem
 Steps 2–6 describe managed delivery, which may require an exact empty Composer before input. For an advertised `terminal_user_explicit` Send, the selected live terminal/process and direct input-safety checks authorize the one physical Send; rollout, Session, Store, and callback state are sidecar management evidence rather than vetoes. Codex freezes the complete pre-send open-rollout inventory, clears the current Composer once, injects the request, waits through the paste window, and dispatches Enter exactly once. It then scans the frozen candidates together with newly opened roots. One rollout that uniquely accepts the exact request hash is promoted to the managed Session/Turn; zero matches remain pending/unproven, while multiple matches or changed file/process authority become uncertain without replay. Claude Code remains exact-empty-only, and after Codex text injection no Composer observation may veto Enter.
 
 If managed preparation still fails before input, physical-terminal authority performs the same single Send and best-effort persists an exact request-bound Terminal Watch. That Watch supplies completion callbacks and can emit an idempotent `interaction_manual_required` notification when a safely correlated native questionnaire appears, but it has `respond:false`: the human must answer in the TUI. Watch attachment failure is reported without changing or retrying the successful Send. Send output treats transport, native acceptance, management, and observation as separate facts through `terminal_input_dispatched`, `agent_acceptance`, `management_mode`, `observation_mode`, and `capabilities`; legacy delivery fields remain compatibility aliases. Once the Codex mutation sequence begins, an uncertain result must never be retried automatically.
+
+P2 adds an explicit path for an exact-empty idle Codex pane whose foreground
+rollout cannot be selected safely. `identify_foreground({terminal_id})` holds
+the exact terminal lock and dispatches the closed `/status` probe once. It is
+read-only with respect to the AKK Store, but it is terminal input. Its proof is
+bound to the pane, process incarnation, real cwd, agent version, and screen
+generation, expires after 30 seconds, and grants no binding or mutation
+authority after the lock is released. It creates no Session, Turn, receipt,
+monitor, or callback.
+
+`identify_and_send({terminal_id,request})` is the atomic actionable form. It
+retains one terminal lock from the probe through the requested task, rechecks
+the live boundary before task input, and still grants durable Session/Turn
+identity only to the rollout that uniquely accepts the exact request. The
+status UUID is provisional evidence, never durable ownership. Probe or boundary
+uncertainty stops before the task and cannot be retried automatically. This
+operation is optional: ordinary human Send continues to follow its independent
+user-priority contract, and ordinary Send, List, and Status never trigger a
+foreground probe.
 
 An ordinary send never targets a completed or historical `turn_id`. If the current Turn is in the compatibility state `waiting_for_openclaw` because the coding agent asked a question, the controller Host uses `respond(turn_id, answer)`; that answer remains inside the same Turn.
 
@@ -69,7 +97,7 @@ callback path. Existing OpenClaw Store fields remain readable and dual-written
 for compatibility; OpenClaw-specific `sessionKey`, Gateway calls, executable
 paths, and credentials stay inside the trusted OpenClaw adapter. No route,
 profile, controller-session identity, token, composer digest, draft text, or
-transport evidence is exposed through the v24 model-facing contract. A new
+transport evidence is exposed through the v25 model-facing contract. A new
 controller Host still needs a trusted session-context adapter and runtime
 integration; the protocol boundary is not a standalone supervisor.
 
@@ -91,7 +119,7 @@ A terminal-activity Watch makes no task-identity claim. Its checkpoint must firs
 
 An approval observation appends at most one notification per exact fingerprint and leaves either Watch mode active. It never sends approval keys and never enters automatic approval; a human must inspect and decide in the TUI. Exact-task completion/failure, best-effort stable idle, timeout, invalidation, or explicit `unwatch` settles once and enqueues one terminal notification. Deterministic notification IDs and idempotency keys, append-only receipts, claim leases, and retry timestamps make callback recovery crash-safe: transport is at-least-once, while the idempotency key makes the logical notification effectively at-most-once.
 
-The current first-party Host surface has 17 registered tools and emits list action-contract v24. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls. The v24 Send shape remains `send({session_id|terminal_id,request})`; the Codex composer policy is advertised as `replace_current_composer_and_submit`, not as another model-supplied argument. The added interaction tool consumes only the current same-controller Status projection and never exposes its private prompt fingerprint or terminal-key plan.
+The current core Host Adapter surface has 19 registered tools and emits list action-contract v25. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls. The v25 ordinary Send shape remains `send({session_id|terminal_id,request})`; the Codex composer policy is advertised as `replace_current_composer_and_submit`, not as another model-supplied argument. The interaction tool consumes only the current same-controller Status projection and never exposes its private prompt fingerprint or terminal-key plan. The two foreground-identification tools are separate, advertised Codex-only operations and are never implicit ordinary-Send preprocessing.
 
 ## Native Thread Transitions
 
@@ -115,6 +143,16 @@ For the next ordinary send, refresh `agent_knock_knock_list` and use only the re
 `agent_knock_knock_status` is an AKK Turn/screen inspection. It does not execute a coding-agent slash command. Native inspection is a separate terminal action advertised when the adapter, terminal identity, private binding fence, idle composer, and ownership state are currently safe. An unverified semantic agent version adds a warning but does not hide the action.
 
 The `agent_knock_knock_native_inspect` contract accepts exactly two fields: the full `terminal_id` and `inspection="status"`. The adapter owns the closed command, and AKK derives the fresh binding fence internally; callers cannot supply a command string or opaque authority. Regression-tested profiles cover Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4 and Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263. Other complete `x.y.z` versions use the generic runtime profile with a compatibility warning; unchanged UI behavior succeeds, while incompatible behavior fails or is reported uncertain without automatic retry. Claude's modal Status panel must be freshly proven, parsed, dismissed once, and followed by the same idle empty composer. `/usage`, `/cost`, `/stats`, `/usage-credits`, `/model`, `/compact`, and arbitrary slash commands remain unavailable. Bare Codex `/usage` opens an interactive menu whose later Enter can select an account-side usage-limit reset, so it must not be treated as a read-only inspection.
+
+Foreground identification is a separate Codex-only capability for a physically
+exact but durably ambiguous pane. `agent_knock_knock_identify_foreground`
+accepts only the advertised `terminal_id`; it sends `/status` once and returns
+a 30-second diagnostic proof while leaving the Store unchanged. That proof is
+not an authority object and cannot be supplied to any later call.
+`agent_knock_knock_identify_and_send` accepts the advertised `terminal_id` and
+one `request`, and consumes the foreground observation only while the same
+terminal lock remains held. It neither weakens exact request acceptance nor
+turns the status UUID into durable identity.
 
 Native inspection is serialized against send, lifecycle transition, approval, cancellation, monitoring terminal access, and recovery. It verifies the exact slash composer beyond the versioned Enter-suppression window, sends at most one Enter, proves one fresh bounded/redacted status result, and requires an idle postcondition. It creates no Session, Turn, dispatch receipt, monitor, callback, or response-round state. Any stale private fence, non-empty composer, identity/version drift, unresolved Turn/transition/dispatch, unproven Enter, or ambiguous result fails closed without a blind second Enter.
 

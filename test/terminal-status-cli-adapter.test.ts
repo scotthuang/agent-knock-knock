@@ -73,6 +73,8 @@ function terminalStatus(): TerminalBridgeStatus {
     capabilities: {} as TerminalBridgeStatus["capabilities"],
     activity_state: "idle",
     activity_reason: "input prompt",
+    screen_state: "idle",
+    screen_reason: "input prompt",
     approval_state: {
       scanned: true,
       blocked: false,
@@ -214,6 +216,16 @@ function dependencies(input: {
           activityState,
           activityReason: input.listActivityReason ??
             observedStatus.activity_reason,
+          screenState: observedStatus.screen_state ??
+            observedStatus.activity_state,
+          screenReason: observedStatus.screen_reason ??
+            observedStatus.activity_reason,
+          nativeIdentityState:
+            observedStatus.native_identity_state ?? "unavailable",
+          durableActivityState:
+            observedStatus.durable_activity_state ?? "unknown",
+          durableActivityReason: observedStatus.durable_activity_reason ??
+            "durable terminal activity evidence is unavailable",
           watchActionAvailable: input.watchActionAvailable ??
             ["working", "awaiting_approval"].includes(activityState)
         };
@@ -450,6 +462,12 @@ test("raw status uses one durable list observation for activity and Watch discov
         activityState: "working",
         activityReason:
           "Codex rollout contains an exact unfinished human-started task",
+        screenState: "idle",
+        screenReason: "visible composer looked idle",
+        nativeIdentityState: "resolved",
+        durableActivityState: "working",
+        durableActivityReason:
+          "Codex rollout contains an exact unfinished human-started task",
         watchActionAvailable: true,
         terminalStatus: durableStatus
       };
@@ -464,6 +482,17 @@ test("raw status uses one durable list observation for activity and Watch discov
   assert.equal(output.terminal_status.activity_state, "working");
   assert.equal(
     output.terminal_status.activity_reason,
+    "Codex rollout contains an exact unfinished human-started task"
+  );
+  assert.equal(output.terminal_status.screen_state, "idle");
+  assert.equal(
+    output.terminal_status.screen_reason,
+    "visible composer looked idle"
+  );
+  assert.equal(output.terminal_status.native_identity_state, "resolved");
+  assert.equal(output.terminal_status.durable_activity_state, "working");
+  assert.equal(
+    output.terminal_status.durable_activity_reason,
     "Codex rollout contains an exact unfinished human-started task"
   );
   assert.equal(output.terminal_screen.excerpt, "ready");
@@ -611,6 +640,10 @@ test("raw status fails closed when authoritative list observation fails", async 
     "durable terminal activity evidence is unavailable: " +
       "authoritative list scan failed"
   );
+  assert.equal(output.terminal_status.screen_state, "idle");
+  assert.equal(output.terminal_status.screen_reason, "input prompt");
+  assert.equal(output.terminal_status.native_identity_state, "unavailable");
+  assert.equal(output.terminal_status.durable_activity_state, "unknown");
   assert.equal(Object.hasOwn(output, "terminal_watch_hint"), false);
   assert.deepEqual(authorityEvents, ["list-observation"]);
   assert.ok(logs.includes("terminal_list_observation_unavailable"));
@@ -643,6 +676,9 @@ test("raw status fails closed when authoritative list observation is absent", as
     output.terminal_status.activity_reason,
     "durable terminal activity evidence is unavailable"
   );
+  assert.equal(output.terminal_status.screen_state, "idle");
+  assert.equal(output.terminal_status.native_identity_state, "unavailable");
+  assert.equal(output.terminal_status.durable_activity_state, "unknown");
   assert.equal(Object.hasOwn(output, "terminal_watch_hint"), false);
 });
 

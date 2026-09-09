@@ -18,6 +18,7 @@ import type {
   CanonicalStateMutationScopes
 } from "../src/mutation-transaction.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
+import { unmanagedTerminalBindingToken } from "../src/managed-session.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 import { loadState, pathsForConversation, saveState } from "../src/store.js";
 import {
@@ -163,6 +164,193 @@ test("terminal command facade preserves fake-port order and isolates async runti
     "B:selector",
     "A:resolve:after",
     "A:selector"
+  ]);
+});
+
+test("atomic foreground identification failure sends no task and never falls back unmanaged", async (t) => {
+  const sandbox = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-identify-and-send-zero-input-"
+  ));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+  const workspace = path.join(sandbox, "workspace");
+  const storeDir = path.join(sandbox, "store");
+  const runtimeDir = path.join(sandbox, "runtime");
+  fs.mkdirSync(workspace, { recursive: true });
+  const terminalControl = {
+    kind: "tmux" as const,
+    target: "identify-atomic:0.0",
+    session: "identify-atomic",
+    window: 0,
+    pane: 0,
+    panePid: 42,
+    currentPath: workspace,
+    capabilities: ["send_keys" as const, "screen_status" as const]
+  };
+  const terminal = {
+    conversationId: "terminal:v2:tmux:identify-atomic:0.0:42",
+    agent: "codex" as const,
+    pid: 42,
+    legacy: false,
+    adapter: {},
+    terminalControl
+  } as unknown as ResolvedTerminalConversation;
+  const processUuid = "11111111-1111-4111-8111-111111111111";
+  const processBirth = "2026-09-09T00:00:00.000Z";
+  const expectedTerminalToken = unmanagedTerminalBindingToken({
+    terminalId: terminal.conversationId,
+    terminalControl,
+    agent: "codex",
+    pid: 42,
+    workspace,
+    processUuid,
+    processBirth
+  });
+  const events: string[] = [];
+  const implemented = {
+    required<Value>(value: Value | null | undefined, label: string): Value {
+      if (value === undefined || value === null) throw new Error(label);
+      return value;
+    },
+    async resolveTerminalConversationFromOptions() {
+      return terminal;
+    },
+    processIncarnationForPid() {
+      return { processUuid, processBirth, evidence: "process_birth" as const };
+    },
+    terminalBridgeRuntimeKey() {
+      return "tmux:identify-atomic:0.0:42";
+    },
+    storeDirFromOptions() {
+      return storeDir;
+    },
+    assertExpectedHandoffTokenUsesExactTerminalSelector() {},
+    terminalWriterMutationLocks(
+      _storeDir: string,
+      _control: typeof terminalControl,
+      options?: { afterTerminalAcquired?: () => void | Promise<void> }
+    ) {
+      return {
+        resources: {
+          terminal: { key: "terminal", value: terminalControl },
+          storeWriter: { key: "writer", value: storeDir }
+        },
+        acquireTerminal() {
+          events.push("terminal:acquire");
+          return () => events.push("terminal:release");
+        },
+        afterTerminalAcquired: options?.afterTerminalAcquired,
+        async withStoreWriter<Result>(operation: () => Promise<Result>) {
+          events.push("writer:acquire");
+          return operation();
+        }
+      };
+    },
+    async identifyCodexForegroundWhileLocked() {
+      events.push("identify");
+      throw new Error("test-only foreground changed");
+    }
+  } satisfies Partial<TerminalCommandPorts>;
+  const ports = new Proxy(implemented, {
+    get(target, property, receiver) {
+      if (Reflect.has(target, property)) {
+        return Reflect.get(target, property, receiver);
+      }
+      throw new Error(`unmanaged fallback unexpectedly accessed ${String(property)}`);
+    }
+  }) as unknown as TerminalCommandPorts;
+  const facade = terminalCommandCliAdapter.createTerminalCommandCliFacade({
+    ports
+  });
+  const options = {
+    conversation: terminal.conversationId,
+    expectedTerminalToken,
+    identifyForeground: true,
+    message: "atomic task must remain unsent",
+    messageId: "message-identify-atomic-zero-input",
+    background: true,
+    storeDir
+  };
+  await assert.rejects(
+    runCliCommandExecution("send", options, {
+      cwd: workspace,
+      env: { ...process.env, AKK_RUNTIME_DIR: runtimeDir }
+    }, () => facade.runSend(options)),
+    /test-only foreground changed/u
+  );
+  assert.deepEqual(events, [
+    "terminal:acquire",
+    "identify",
+    "terminal:release"
+  ]);
+});
+
+test("atomic foreground proof cannot authorize persistence and is rechecked at text boundary", () => {
+  const authority = compiledFunctionSource(
+    "prepareRawTerminalDispatchAuthority",
+    "runManagedRawTerminalSendAttempt"
+  );
+  assertOrdered(authority, [
+    "const atomicForegroundIdentification = options.identifyForeground === true",
+    "rawTerminalObservedIdentityForPreparation",
+    "maybePrepareVerifiedEmptyCodexHandoff",
+    "let handoff = atomicForegroundIdentification",
+    "{ identity: undefined, adopted: false }",
+    ": await maybeAdoptObservedExternalThread",
+    "assertAtomicForegroundCandidateInventory",
+    "prepareDeferredCodexForegroundBinding",
+    "captureCodexCandidateSetRolloutAcceptanceAnchor",
+    "assertAtomicForegroundAcceptanceBoundary"
+  ]);
+  const identityPolicy = compiledFunctionSource(
+    "rawTerminalObservedIdentityForPreparation",
+    "maybePrepareVerifiedEmptyCodexHandoff"
+  );
+  assert.match(
+    identityPolicy,
+    /input\.atomicForegroundIdentification[\s\S]*?return undefined[\s\S]*?return input\.observation\.identity/u,
+    "diagnostic /status identity must remain unavailable to persistence"
+  );
+  const verifiedEmptyPolicy = compiledFunctionSource(
+    "maybePrepareVerifiedEmptyCodexHandoff",
+    "assertAtomicForegroundCandidateInventory"
+  );
+  assert.match(
+    verifiedEmptyPolicy,
+    /input\.implicitCandidateAuthority \|\|\s*input\.atomicForegroundIdentification[\s\S]*?return undefined/u,
+    "atomic mode must not detach a Session using the diagnostic proof"
+  );
+  const acceptancePolicy = compiledFunctionSource(
+    "assertAtomicForegroundAcceptanceBoundary",
+    "prepareRawTerminalDispatchAuthority"
+  );
+  assert.match(
+    acceptancePolicy,
+    /input\.deferred\?\.candidateAcceptanceAnchor \|\| input\.postSend/u,
+    "atomic mode must require exact task-acceptance authority before persistence"
+  );
+
+  const managed = compiledFunctionSource(
+    "runManagedRawTerminalSendAttempt",
+    "runManagedSessionSend"
+  );
+  assert.match(
+    managed,
+    /options\.identifyForeground !== true && !\([\s\S]*?verifyCodexPendingManagedSendStatus/u,
+    "atomic mode must not run the status-card-only second /status probe"
+  );
+
+  const transport = compiledFunctionSource(
+    "terminalDispatchTransportLifecycle",
+    "terminalDispatchAcceptance"
+  );
+  assertOrdered(transport, [
+    "const lifecycleBeforeText = lifecycle.beforeText",
+    "options.identifyForeground === true",
+    "await lifecycleBeforeText?.()",
+    "prepared.terminalBridge.status",
+    "assertAtomicForegroundIdentificationProof",
+    "requireExactEmptyComposerBeforeText: true"
   ]);
 });
 

@@ -35,6 +35,16 @@ The optional `managed.current_turn` is active work; `managed.recent_turn` is
 retained history and does not occupy the terminal. Attention-needed records
 whose pane is unavailable appear in `unavailable_managed_turns[]`.
 
+Terminal status has three independent evidence axes. `screen_state` describes
+the bounded live TUI (`idle`, `working`, `awaiting_approval`, or `unknown`);
+`native_identity_state` describes foreground native-session resolution
+(`resolved`, `ambiguous`, `verified_absent`, or `unavailable`); and
+`durable_activity_state` describes exact rollout/transcript task evidence
+(`idle`, `working`, or `unknown`). The legacy `activity_state` remains a
+conservative compatibility projection and can therefore be `unknown` while
+`screen_state` is `idle`. These fields are diagnostic; `available_actions`
+remains the authority for tool calls.
+
 Human-facing selectors are a slash-command convenience. Structured tools use
 semantic identities: `session_id` for strict continuation, `terminal_id` for
 the currently verified physical terminal, `turn_id` for one managed dispatch,
@@ -46,7 +56,7 @@ prefilled semantic IDs from a fresh list.
 
 ## Reliable Send
 
-The v24 `action_contracts` expose model-facing semantic IDs only. The trusted
+The v25 `action_contracts` expose model-facing semantic IDs only. The trusted
 adapter privately derives and revalidates terminal, process, binding, native
 thread, composer, approval, handoff, revision, and compare-and-swap evidence.
 Callers never supply those opaque fences.
@@ -114,6 +124,26 @@ Until promotion commits, strict `session_id` send, `respond`, managed
 remain unavailable. This provisional path can still work in a narrow pane
 because it binds from acceptance rather than automating native `/status`.
 
+### Explicit Codex foreground identification
+
+When a recent `/clear` has not yet materialized a rollout, or several open
+rollouts make `native_identity_state="ambiguous"`, a fresh List may advertise
+two Codex-only actions. `identify_foreground({terminal_id})` holds the exact
+terminal lock and sends the closed `/status` probe exactly once, but performs
+no Store mutation and creates no Session, Turn, receipt, monitor, or callback.
+The returned proof expires after 30 seconds and is diagnostic only: it cannot
+authorize Send, approval, questionnaire response, lifecycle input, or a later
+binding after the lock is released.
+
+`identify_and_send({terminal_id,request})` is the actionable atomic form. It
+keeps one terminal lock from foreground identification through the one task
+dispatch. The status UUID is provisional; only one rollout that later accepts
+the exact request can become durable Session/Turn identity. A changed or
+uncertain probe boundary stops before the task and is not retried
+automatically. This optional enhancement is not a prerequisite for ordinary
+human Send: ordinary Send retains its user-priority behavior and does not run
+`/status`. Normal List and Status are also observation-only and never probe.
+
 ## Terminal Watch
 
 Watch is read-only and user-intent-first:
@@ -175,11 +205,12 @@ natural-language “刚才那个” request. Never substitute the newest termina
 
 Do not ask AKK to send `/clear`, `/new`, `/resume`, `/status`, Codex `/fork`,
 `/side`, `/btw`, Claude `/branch`, or another first-line native slash command
-as an ordinary task. Use the advertised lifecycle or native-inspection action,
-express the outcome in natural language, or type an unsupported command
-directly in the TUI. AKK revalidates the entire candidate snapshot before
-terminal input; candidate-set changes fail closed. A replaced or changed
-transcript/rollout cannot be resumed under stale metadata.
+as an ordinary task. Use the advertised lifecycle, native-inspection, or
+Codex foreground-identification action, express the outcome in natural
+language, or type an unsupported command directly in the TUI. AKK revalidates
+the entire candidate snapshot before terminal input; candidate-set changes
+fail closed. A replaced or changed transcript/rollout cannot be resumed under
+stale metadata.
 
 ## AKK Status and native inspection
 
@@ -187,6 +218,14 @@ transcript/rollout cannot be resumed under stale metadata.
 coding agent's `/status`. Native inspection is a separate, closed action:
 `native_inspect({terminal_id,inspection:"status"})`. It accepts no arbitrary
 command and creates no AKK Turn, Session, receipt, monitor, or callback.
+
+Native inspection and foreground identification are different contracts.
+`native_inspect` inspects an already attributable native context. The explicit
+Codex-only `identify_foreground` action is available for an otherwise safe but
+ambiguous foreground and returns only the 30-second non-authorizing diagnostic
+described above. `identify_and_send` consumes its observation without
+releasing the terminal lock; callers must never cache a standalone proof and
+use it as authority for a later action.
 
 Codex native `/status` inspection requires an exact viewport of at least 80
 columns so the complete UUID can be proven. An ordinary terminal-scoped task
@@ -244,11 +283,13 @@ Status, then use only the action currently advertised by AKK.
 
 ## Structured tool surface
 
-First-party Hosts register the same 17 semantic tools: list, watch, unwatch,
-list resumable threads, native inspect, new thread, reconcile binding, resume
-thread, status, send, respond, approve, renew, retry callback, cancel, and
-close, plus typed native interaction response. Model-facing mutations contain
-semantic IDs and user content only.
+The current OpenClaw plugin and Host Adapter register 19 semantic tools: list,
+watch, unwatch, list resumable threads, native inspect, identify foreground,
+identify and send, new thread, reconcile binding, resume thread, status, send,
+respond, typed native interaction response, approve, renew, retry callback,
+cancel, and close. Model-facing mutations contain semantic IDs and user
+content only. Connector prereleases that pin an earlier AKK runtime retain the
+tool surface documented by that connector release.
 Selectors, pane routes, draft text, fingerprints, tokens, revisions, candidate
 fences, and binding generations stay inside the trusted Host adapter.
 

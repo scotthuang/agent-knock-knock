@@ -6,6 +6,7 @@ import {
   createHash,
   randomUUID
 } from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -239,6 +240,10 @@ import type {
   TerminalDispatchExecutionService
 } from "./terminal-dispatch-execution.js";
 import {
+  CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES,
+  type CodexForegroundIdentificationProof
+} from "./native-thread-lifecycle-cli-adapter.js";
+import {
   presentTerminalCompleted,
   presentTerminalDispatchReplay,
   presentTerminalIdentityFailure,
@@ -286,6 +291,8 @@ export interface TerminalCommandCliOptions {
   expectedCallbackTurnId?: string;
   expectedManagedTerminalToken?: string;
   expectedTerminalToken?: string;
+  /** Explicit P2 atomic identify-then-send mode; never inferred by ordinary Send. */
+  identifyForeground?: boolean;
   /** Internal copy of the user-priority token while managed fast path runs. */
   expectedUserExplicitTerminalToken?: string;
   logDir?: string;
@@ -493,6 +500,11 @@ interface TerminalCommandCliRawPorts {
     pid: number;
     cwd?: string;
   }): Promise<CodexOpenRootRolloutInventory>;
+  identifyCodexForegroundWhileLocked(request: {
+    options: TerminalCommandCliOptions;
+    terminal: TerminalCommandTarget;
+    expectedTerminalToken: string;
+  }): Promise<CodexForegroundIdentificationProof>;
   isDiscoverableTmuxConversation(conversation: Conversation): boolean;
   loadClaudeAgentRows(
     options?: TerminalCommandCliOptions,
@@ -782,6 +794,12 @@ export interface TerminalCommandCliFacade {
 const terminalCommandContext =
   new AsyncLocalStorage<TerminalCommandCliDependencies>();
 
+// An atomic identify-and-send proof is deliberately an in-process,
+// unforgeable side channel. It must never be accepted from CLI arguments or
+// persisted as Session authority.
+const foregroundIdentificationProofs =
+  new WeakMap<object, CodexForegroundIdentificationProof>();
+
 function terminalCommandRuntime(): TerminalCommandCliDependencies {
   const runtime = terminalCommandContext.getStore();
   if (!runtime) {
@@ -851,6 +869,8 @@ const exactSafeAbortedRecoveredSessionMatches =
   rawPort("exactSafeAbortedRecoveredSessionMatches");
 const inspectCodexOpenRootRolloutInventory =
   rawPort("inspectCodexOpenRootRolloutInventory");
+const identifyCodexForegroundWhileLocked =
+  rawPort("identifyCodexForegroundWhileLocked");
 const isDiscoverableTmuxConversation =
   rawPort("isDiscoverableTmuxConversation");
 const loadClaudeAgentRows = rawPort("loadClaudeAgentRows");
@@ -6174,9 +6194,20 @@ async function runRawTerminalSend(
   messageBody: string,
   terminalConversation: TerminalCommandTarget
 ): Promise<void> {
+  const identifyForeground = options.identifyForeground === true;
   const suppliedExpectedTerminalToken = stringValue(
     options.expectedTerminalToken
   );
+  if (identifyForeground && terminalConversation.agent !== "codex") {
+    throw new Error(
+      "atomic foreground identification currently supports only Codex terminals"
+    );
+  }
+  if (identifyForeground && !suppliedExpectedTerminalToken) {
+    throw new Error(
+      "atomic foreground identification requires --expected-terminal-token"
+    );
+  }
   const userExplicitAuthorityRequested = Boolean(
     suppliedExpectedTerminalToken && options.managedOnly !== true
   );
@@ -6239,6 +6270,18 @@ async function runRawTerminalSend(
       );
     }
     return;
+  }
+  if (identifyForeground) {
+    // The explicit atomic contract never falls back to unmanaged delivery:
+    // doing so would discard the very identity/respond capability the caller
+    // asked this operation to establish. The task payload is proven unsent,
+    // so release its same-id reservation for an explicit later retry.
+    cancelProvenZeroInputUserExplicitSendIntent(
+      intentLease,
+      terminalConversation,
+      managedResult.failure
+    );
+    throw managedResult.failure;
   }
   return runUserExplicitTerminalFallback(
     explicitOptions,
@@ -6422,6 +6465,72 @@ async function supersedeExactHumanExplicitCallbackDebt(input: {
   return superseded === candidates.length;
 }
 
+function rawTerminalObservedIdentityForPreparation(input: {
+  atomicForegroundIdentification: boolean;
+  sourceLessCandidateInventory?: CodexOpenRootRolloutInventory;
+  observation: NativeAgentSessionIdentityObservation;
+}): NativeAgentSessionIdentity | undefined {
+  if (
+    input.atomicForegroundIdentification ||
+    input.sourceLessCandidateInventory !== undefined ||
+    input.observation.status !== "resolved"
+  ) {
+    return undefined;
+  }
+  return input.observation.identity;
+}
+
+async function maybePrepareVerifiedEmptyCodexHandoff(input: {
+  options: TerminalCommandCliOptions;
+  terminal: TerminalCommandTarget;
+  sourceSession?: ManagedSessionState;
+  observation: NativeAgentSessionIdentityObservation;
+  implicitCandidateAuthority: boolean;
+  atomicForegroundIdentification: boolean;
+}): Promise<{
+  detached: ManagedSessionState;
+  boundary: VerifiedEmptyCodexHandoffBoundary;
+} | undefined> {
+  if (
+    input.implicitCandidateAuthority ||
+    input.atomicForegroundIdentification
+  ) {
+    return undefined;
+  }
+  return maybeDetachVerifiedEmptyCodexSource({
+    options: input.options,
+    terminal: input.terminal,
+    sourceSession: input.sourceSession,
+    observation: input.observation
+  });
+}
+
+function assertAtomicForegroundCandidateInventory(input: {
+  enabled: boolean;
+  claimedSession?: ManagedSessionState;
+  inventory?: CodexOpenRootRolloutInventory;
+}): void {
+  if (!input.enabled || input.claimedSession === undefined) return;
+  if (input.inventory && input.inventory.roots.length > 0) return;
+  throw new Error(
+    "atomic foreground identification requires a fresh nonempty " +
+    "candidate-set acceptance boundary; no task input was sent"
+  );
+}
+
+function assertAtomicForegroundAcceptanceBoundary(input: {
+  enabled: boolean;
+  deferred?: DeferredCodexForegroundBindingBoundary;
+  postSend?: CodexCandidateSetRolloutAcceptanceAnchor;
+}): void {
+  if (!input.enabled) return;
+  if (input.deferred?.candidateAcceptanceAnchor || input.postSend) return;
+  throw new Error(
+    "atomic foreground identification could not establish an exact " +
+    "task-acceptance boundary; no task input was sent"
+  );
+}
+
 async function prepareRawTerminalDispatchAuthority(input: {
   options: Record<string, any>;
   messageBody: string;
@@ -6433,6 +6542,7 @@ async function prepareRawTerminalDispatchAuthority(input: {
   const {
     options, messageBody, terminal, storeDir, scopes, resources
   } = input;
+  const atomicForegroundIdentification = options.identifyForeground === true;
   const initialAuthority = rawTerminalInitialAuthority({
     options,
     terminal,
@@ -6514,22 +6624,22 @@ async function prepareRawTerminalDispatchAuthority(input: {
       claimedSession === undefined
       ? deferredCodexCandidateInventory
       : undefined;
-  let currentNativeIdentity =
-    sourceLessCodexCandidateInventory === undefined &&
-      nativeIdentityObservation.status === "resolved"
-      ? nativeIdentityObservation.identity
-      : undefined;
+  let currentNativeIdentity = rawTerminalObservedIdentityForPreparation({
+    atomicForegroundIdentification,
+    sourceLessCandidateInventory: sourceLessCodexCandidateInventory,
+    observation: nativeIdentityObservation
+  });
   // A fresh nonempty inventory is the stronger physical authority for an
   // implicit candidate send. Do not let an earlier verified-absent
   // observation divert this path into the token-only empty handoff.
-  const verifiedEmptyHandoff = implicitCodexCandidateAuthority
-    ? undefined
-    : await maybeDetachVerifiedEmptyCodexSource({
-        options,
-        terminal,
-        sourceSession: claimedSession,
-        observation: nativeIdentityObservation
-      });
+  const verifiedEmptyHandoff = await maybePrepareVerifiedEmptyCodexHandoff({
+    options,
+    terminal,
+    sourceSession: claimedSession,
+    observation: nativeIdentityObservation,
+    implicitCandidateAuthority: implicitCodexCandidateAuthority,
+    atomicForegroundIdentification
+  });
   if (verifiedEmptyHandoff) {
     // The old rollout is conclusively closed. Never carry it forward as a
     // pre-materialization companion for the new virgin Session.
@@ -6538,19 +6648,25 @@ async function prepareRawTerminalDispatchAuthority(input: {
     currentNativeIdentity = undefined;
   }
   const physicalNativeIdentityBeforeHandoff = currentNativeIdentity;
-  let handoff = await maybeAdoptObservedExternalThread({
-    options,
-    terminal,
-    // A no-token raw send to an already managed rollout-backed Codex pane is
-    // an internal follow-current delegation, not a sole-root continuation.
-    sourceSession: implicitCodexCandidateAuthority
-      ? undefined
-      : claimedSession,
-    resolvedIdentity: sourceLessCodexCandidateInventory
-      ? undefined
-      : currentNativeIdentity,
-    storeDir
-  });
+  // The status card emitted by identify_foreground is diagnostic evidence,
+  // never handoff authority. Let the existing candidate-set/deferred path
+  // bind only the rollout that later accepts the exact task request.
+  let handoff = atomicForegroundIdentification
+    ? { identity: undefined, adopted: false as const }
+    : await maybeAdoptObservedExternalThread({
+        options,
+        terminal,
+        // A no-token raw send to an already managed rollout-backed Codex pane
+        // is an internal follow-current delegation, not a sole-root
+        // continuation.
+        sourceSession: implicitCodexCandidateAuthority
+          ? undefined
+          : claimedSession,
+        resolvedIdentity: sourceLessCodexCandidateInventory
+          ? undefined
+          : currentNativeIdentity,
+        storeDir
+      });
   currentNativeIdentity =
     handoff.adopted && terminal.agent === "codex" &&
       !handoff.session?.binding?.native_process.rollout
@@ -6567,6 +6683,11 @@ async function prepareRawTerminalDispatchAuthority(input: {
       resources
     });
   }
+  assertAtomicForegroundCandidateInventory({
+    enabled: atomicForegroundIdentification,
+    claimedSession,
+    inventory: deferredCodexCandidateInventory
+  });
   const deferredCodexForegroundBinding = !handoff.adopted
     ? await prepareDeferredCodexForegroundBinding({
         options,
@@ -6601,6 +6722,11 @@ async function prepareRawTerminalDispatchAuthority(input: {
         anchor: postSendCodexCandidateAnchor
       })
     : undefined;
+  assertAtomicForegroundAcceptanceBoundary({
+    enabled: atomicForegroundIdentification,
+    deferred: deferredCodexForegroundBinding,
+    postSend: postSendCodexCandidateAnchor
+  });
   const freshSendAuthority = decideTerminalSendAuthority({
     ownership: "conflict",
     verifiedEmpty: Boolean(verifiedEmptyHandoff),
@@ -6668,15 +6794,45 @@ async function runManagedRawTerminalSendAttempt(
   }
   const rawStoreDir = storeDirFromOptions(options);
   let controlSendResult: TerminalControlSendResult | undefined;
-  await withCanonicalMutationLocks(terminalWriterMutationLocks(
-    rawStoreDir,
-    terminalConversation.terminalControl,
+  const atomicForegroundIdentification = options.identifyForeground === true;
+  foregroundIdentificationProofs.delete(options);
+  const userExplicitLockOptions: TerminalWriterMutationLockOptions | undefined =
     deferZeroInputFailurePresentation
       ? {
           terminalTimeoutMs: 0,
           storeWriterTimeoutMs: USER_EXPLICIT_MANAGED_LOCK_GRACE_MS
         }
-      : undefined
+      : undefined;
+  const lockOptions: TerminalWriterMutationLockOptions | undefined =
+    atomicForegroundIdentification
+      ? {
+          ...userExplicitLockOptions,
+          afterTerminalAcquired: async () => {
+            const expectedTerminalToken = required(
+              stringValue(options.expectedUserExplicitTerminalToken),
+              "atomic foreground identification requires fresh physical terminal authority"
+            );
+            const proof = await identifyCodexForegroundWhileLocked({
+              options,
+              terminal: terminalConversation,
+              expectedTerminalToken
+            });
+            if (
+              proof.terminalId !== terminalConversation.conversationId ||
+              proof.pid !== terminalConversation.pid
+            ) {
+              throw new Error(
+                "foreground identification returned evidence for a different terminal"
+              );
+            }
+            foregroundIdentificationProofs.set(options, proof);
+          }
+        }
+      : userExplicitLockOptions;
+  await withCanonicalMutationLocks(terminalWriterMutationLocks(
+    rawStoreDir,
+    terminalConversation.terminalControl,
+    lockOptions
   ), async (scopes, resources) => {
     await assertFreshUserExplicitTerminalSendTargetWhileLocked(
       options,
@@ -6816,7 +6972,7 @@ async function runManagedRawTerminalSendAttempt(
       currentNativeIdentity?.sessionId === logicalNativeIdentity?.sessionId
         ? currentNativeIdentity
         : undefined;
-    if (!(
+    if (options.identifyForeground !== true && !(
       handoff.adopted &&
       terminalConversation.agent === "codex" &&
       !managedSession.binding?.native_process.rollout
@@ -8709,6 +8865,81 @@ function assertTerminalPreSendStatus(input: {
   }
 }
 
+function assertAtomicForegroundIdentificationProof(input: {
+  options: Record<string, any>;
+  executor: Executor;
+  terminalControl: TerminalControlRef;
+  terminalAgentPid: number;
+  status: TerminalBridgeStatus;
+}): void {
+  if (input.options.identifyForeground !== true) return;
+  if (input.executor.kind !== "codex") {
+    throw new Error(
+      "atomic foreground identification currently supports only Codex terminals"
+    );
+  }
+  const proof = foregroundIdentificationProofs.get(input.options);
+  if (!proof) {
+    throw new Error(
+      "atomic foreground identification proof is unavailable; no task input was sent"
+    );
+  }
+  const expiresAtMs = Date.parse(proof.expiresAt);
+  if (!Number.isFinite(expiresAtMs) || cliNowMs() >= expiresAtMs) {
+    throw new Error(
+      "atomic foreground identification proof expired before task dispatch; no task input was sent"
+    );
+  }
+  const processIncarnation = processIncarnationForPid(input.terminalAgentPid);
+  if (
+    proof.pid !== input.terminalAgentPid ||
+    proof.processUuid !== processIncarnation.processUuid ||
+    proof.processBirth !== processIncarnation.processBirth
+  ) {
+    throw new Error(
+      "Codex process incarnation changed after foreground identification; no task input was sent"
+    );
+  }
+  const cwd = stringValue(input.terminalControl.currentPath);
+  let realCwd: string | undefined;
+  try {
+    realCwd = cwd ? fs.realpathSync(cwd) : undefined;
+  } catch {
+    realCwd = undefined;
+  }
+  if (!realCwd || realCwd !== proof.realCwd) {
+    throw new Error(
+      "Codex terminal cwd changed after foreground identification; no task input was sent"
+    );
+  }
+  if (
+    !stringValue(input.status.screen.digest) ||
+    input.status.screen.digest !== proof.postProbeScreenDigest
+  ) {
+    throw new Error(
+      "Codex screen generation changed after foreground identification; no task input was sent"
+    );
+  }
+  const observation = createRuntimeTerminalAgentRegistry(input.options)
+    .require("codex")
+    .observeNativeInspection?.({
+      operation: { kind: "status" },
+      screen: input.status.screen.excerpt ?? "",
+      expectedNativeThreadId: proof.nativeThreadId,
+      expectedAgentVersion: proof.agentVersion,
+      expectedCwd: proof.realCwd
+    });
+  if (
+    observation?.status !== "observed" ||
+    observation.nativeThreadId !== proof.nativeThreadId ||
+    observation.evidenceFingerprint !== proof.evidenceFingerprint
+  ) {
+    throw new Error(
+      "Codex /status identity changed after foreground identification; no task input was sent"
+    );
+  }
+}
+
 async function prepareTerminalControlSend(
   request: TerminalControlSendRequest
 ) {
@@ -8844,8 +9075,18 @@ async function prepareTerminalControlSend(
     : undefined;
   try {
     const status = await terminalBridge.status(executor.kind, terminalControl, {
-      scrollbackLines: Number(options.scrollbackLines ?? 120),
+      scrollbackLines: options.identifyForeground === true
+        ? foregroundIdentificationProofs.get(options)
+            ?.observationScrollbackLines ?? 240
+        : Number(options.scrollbackLines ?? 120),
       runtime: preSendRuntime
+    });
+    assertAtomicForegroundIdentificationProof({
+      options,
+      executor,
+      terminalControl,
+      terminalAgentPid,
+      status
     });
     assertTerminalPreSendStatus({ request, status });
     const userExplicitManagedCodexAttempt = Boolean(
@@ -9606,18 +9847,45 @@ function terminalDispatchTransportLifecycle({
     recordStage: (stage, at, afterDurable) =>
       application.recordTransportStage(stage, at, afterDurable)
   });
+  const lifecycleBeforeText = lifecycle.beforeText;
+  const guardedLifecycle = options.identifyForeground === true
+    ? {
+        ...lifecycle,
+        beforeText: async () => {
+          await lifecycleBeforeText?.();
+          const proof = foregroundIdentificationProofs.get(options);
+          const status = await prepared.terminalBridge.status(
+            request.executor.kind,
+            prepared.terminalControl,
+            {
+              runtime: prepared.preSendRuntime,
+              scrollbackLines:
+                proof?.observationScrollbackLines ??
+                CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES
+            }
+          );
+          assertAtomicForegroundIdentificationProof({
+            options,
+            executor: request.executor,
+            terminalControl: prepared.terminalControl,
+            terminalAgentPid: prepared.terminalAgentPid,
+            status
+          });
+        }
+      }
+    : lifecycle;
   const userExplicitTerminalSend = Boolean(
     stringValue(options.expectedUserExplicitTerminalToken)
   );
   return userExplicitTerminalSend
     ? {
-        ...lifecycle,
+        ...guardedLifecycle,
         requireExactEmptyComposerBeforeText: true,
         ...(request.executor.kind === "codex"
           ? { userExplicitEnterAfterTextWithoutComposerVeto: true }
           : {})
       }
-    : lifecycle;
+    : guardedLifecycle;
 }
 
 async function terminalDispatchAcceptance({

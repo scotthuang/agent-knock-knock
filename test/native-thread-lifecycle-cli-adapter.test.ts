@@ -1,14 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import {
   cliDependencies,
   runCliCommandExecution
 } from "../src/cli-runtime-context.js";
-import type { ManagedSessionState } from "../src/managed-session.js";
 import {
+  unmanagedTerminalBindingToken,
+  type ManagedSessionState
+} from "../src/managed-session.js";
+import {
+  CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES,
+  CODEX_FOREGROUND_IDENTIFICATION_TTL_MS,
   createNativeThreadLifecycleCliAdapter,
   type CreateNativeThreadLifecycleCliAdapterInput
 } from "../src/native-thread-lifecycle-cli-adapter.js";
@@ -401,6 +407,285 @@ test("native inspection dispatches Enter once, revalidates, and presents under l
   assert.equal(events.filter((event) => event === "identity:resolve").length, 3);
   assert.ok(events.indexOf("output:print") < events.indexOf("lock:release"));
   assert.equal(events.at(-1), "lock:release");
+});
+
+test("Codex foreground identification bypasses ambiguous native resolution and emits one ephemeral proof", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-identify-foreground-")
+  );
+  try {
+    const events: string[] = [];
+    const control: TerminalControlRef = {
+      ...TMUX_CONTROL,
+      currentPath: fs.realpathSync(tempDir),
+      capabilities: ["send_keys", "screen_status"]
+    };
+    const foregroundTerminal = terminal("codex", control);
+    const adapter = supportedAdapter();
+    const processIncarnation = {
+      processUuid: "codex-pid:42:birth:foreground",
+      processBirth: "foreground"
+    };
+    const postProbeScreenDigest = "b".repeat(64);
+    const statusOptions: Array<{
+      scrollbackLines?: number;
+      runtime?: Record<string, unknown>;
+    }> = [];
+    let observationCount = 0;
+    let enterCount = 0;
+    const bridge = {
+      resolveConversationId: async () => foregroundTerminal,
+      resolveStoredTerminal: async (
+        _agent: unknown,
+        _pid: unknown,
+        _control: unknown,
+        runtimeIdentity: Record<string, unknown>
+      ) => {
+        events.push("terminal:resolve");
+        assert.equal(runtimeIdentity.nativeSessionId, undefined);
+        assert.equal(runtimeIdentity.nativeProcessUuid, undefined);
+        assert.equal(runtimeIdentity.nativeProcessBirth, undefined);
+        return foregroundTerminal;
+      },
+      status: async (
+        _agent: unknown,
+        _control: unknown,
+        options: {
+          scrollbackLines?: number;
+          runtime?: Record<string, unknown>;
+        }
+      ) => {
+        statusOptions.push(options);
+        return {
+          provider: "tmux",
+          target: control.target,
+          agent: "codex",
+          reachable: true,
+          capabilities: adapter.capabilities,
+          activity_state: "idle",
+          activity_reason: "exact idle fixture",
+          approval_state: {
+            scanned: true,
+            blocked: false,
+            approvable: false
+          },
+          screen: { excerpt: "›", digest: postProbeScreenDigest }
+        };
+      },
+      submitNativeInspection: async (
+        _agent: unknown,
+        _control: unknown,
+        _plan: unknown,
+        options: { beforeEnter(): Promise<void> }
+      ) => {
+        events.push("submit:text");
+        await options.beforeEnter();
+        enterCount += 1;
+        events.push("submit:enter");
+        return {
+          enterCount: 1,
+          materialization: {
+            kind: "exact_slash_composer",
+            digest: "private-materialization-digest",
+            stableForMs: 100,
+            stableCaptures: 2
+          },
+          preEnterScreenDigest: "before",
+          preEnterEvidenceInventory: []
+        };
+      },
+      observeNativeInspection: async (
+        _agent: unknown,
+        _control: unknown,
+        _request: unknown,
+        options: { scrollbackLines?: number }
+      ) => {
+        observationCount += 1;
+        events.push(`observe:${observationCount}`);
+        assert.equal(
+          options.scrollbackLines,
+          CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES
+        );
+        return {
+          status: {
+            provider: "tmux",
+            target: control.target,
+            agent: "codex",
+            reachable: true,
+            capabilities: adapter.capabilities,
+            activity_state: "idle",
+            activity_reason: "fresh status",
+            approval_state: {
+              scanned: true,
+              blocked: false,
+              approvable: false
+            },
+            screen: { excerpt: "›", digest: postProbeScreenDigest }
+          },
+          screenDigest: `sha256:${postProbeScreenDigest}`,
+          observation: {
+            status: "observed",
+            nativeThreadId: NATIVE_ID,
+            observedAgentVersion: "1.2.3",
+            evidence: "codex_status_card",
+            evidenceFingerprint: `sha256:${"a".repeat(64)}`,
+            screenFingerprint: `sha256:${postProbeScreenDigest}`,
+            result: {
+              kind: "native_status",
+              nativeThreadId: NATIVE_ID,
+              agentVersion: "1.2.3",
+              fields: [],
+              excerpt: "bounded status"
+            }
+          }
+        };
+      }
+    } as unknown as TerminalAgentBridge;
+    let output: Record<string, unknown> | undefined;
+    const lifecycle = facade({
+      events,
+      adapter,
+      bridge,
+      processIncarnation: () => processIncarnation,
+      print: (value) => {
+        events.push("output:print");
+        output = value as Record<string, unknown>;
+      }
+    });
+    const expectedTerminalToken = unmanagedTerminalBindingToken({
+      terminalId: foregroundTerminal.conversationId,
+      terminalControl: control,
+      agent: "codex",
+      pid: foregroundTerminal.pid,
+      workspace: control.currentPath ?? "",
+      ...processIncarnation
+    });
+
+    await lifecycle.runIdentifyForeground({
+      terminal: foregroundTerminal.conversationId,
+      expectedTerminalToken
+    });
+
+    assert.equal(enterCount, 1);
+    assert.equal(observationCount, 2);
+    assert.equal(
+      events.filter((event) => event === "identity:resolve").length,
+      0,
+      "multi-rollout native identity resolution must not gate the physical probe"
+    );
+    assert.equal(events.at(-1), "lock:release");
+    assert.ok(events.indexOf("output:print") < events.indexOf("lock:release"));
+    assert.ok(statusOptions.length >= 2);
+    assert.equal(
+      statusOptions.every((options) =>
+        options.scrollbackLines ===
+          CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES
+      ),
+      true
+    );
+    const foregroundProof = output?.foreground_proof as Record<string, unknown>;
+    assert.equal(foregroundProof.scope, "ephemeral_diagnostic_only");
+    assert.equal(foregroundProof.grants_authority, false);
+    assert.equal(foregroundProof.ttl_ms, CODEX_FOREGROUND_IDENTIFICATION_TTL_MS);
+    assert.equal(
+      Date.parse(String(foregroundProof.expires_at)) -
+        Date.parse(String(foregroundProof.observed_at)),
+      CODEX_FOREGROUND_IDENTIFICATION_TTL_MS
+    );
+    const publicJson = JSON.stringify(output);
+    assert.doesNotMatch(
+      publicJson,
+      /expectedTerminalToken|expected_terminal_token|processUuid|process_uuid|digest|raw.screen/iu
+    );
+    assert.equal(output?.store_mutation, false);
+    assert.equal(output?.session_created, false);
+    assert.equal(output?.turn_created, false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex foreground identification rejects a questionnaire or stale physical token before input", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-identify-foreground-blocked-")
+  );
+  try {
+    const control: TerminalControlRef = {
+      ...TMUX_CONTROL,
+      currentPath: fs.realpathSync(tempDir),
+      capabilities: ["send_keys", "screen_status"]
+    };
+    const foregroundTerminal = terminal("codex", control);
+    const adapter = supportedAdapter();
+    const processIncarnation = {
+      processUuid: "codex-pid:42:birth:blocked",
+      processBirth: "blocked"
+    };
+    let inputCount = 0;
+    const questionnaireBridge = {
+      resolveConversationId: async () => foregroundTerminal,
+      resolveStoredTerminal: async () => foregroundTerminal,
+      status: async () => ({
+        provider: "tmux",
+        target: control.target,
+        agent: "codex",
+        reachable: true,
+        capabilities: adapter.capabilities,
+        activity_state: "idle",
+        activity_reason: "questionnaire fixture",
+        approval_state: {
+          scanned: true,
+          blocked: false,
+          approvable: false
+        },
+        screen: { excerpt: "›", digest: "questionnaire-screen" },
+        interaction_state: { state: "pending" },
+        submitNativeInspection: async () => {
+          inputCount += 1;
+          throw new Error("must not submit")
+        }
+      }),
+      submitNativeInspection: async () => {
+        inputCount += 1;
+        throw new Error("must not submit");
+      }
+    } as unknown as TerminalAgentBridge;
+    const expectedTerminalToken = unmanagedTerminalBindingToken({
+      terminalId: foregroundTerminal.conversationId,
+      terminalControl: control,
+      agent: "codex",
+      pid: foregroundTerminal.pid,
+      workspace: control.currentPath ?? "",
+      ...processIncarnation
+    });
+    await assert.rejects(
+      facade({
+        adapter,
+        bridge: questionnaireBridge,
+        processIncarnation: () => processIncarnation
+      }).runIdentifyForeground({
+        terminal: foregroundTerminal.conversationId,
+        expectedTerminalToken
+      }),
+      /questionnaire response/u
+    );
+    assert.equal(inputCount, 0);
+
+    await assert.rejects(
+      facade({
+        adapter,
+        bridge: questionnaireBridge,
+        processIncarnation: () => processIncarnation
+      }).runIdentifyForeground({
+        terminal: foregroundTerminal.conversationId,
+        expectedTerminalToken: "stale-token"
+      }),
+      /physical terminal token is stale/u
+    );
+    assert.equal(inputCount, 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("Codex candidate providers stay lazy and async-execution isolated", async () => {

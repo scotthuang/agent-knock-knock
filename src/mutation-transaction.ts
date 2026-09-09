@@ -14,6 +14,7 @@ export type CanonicalStateMutationScopes = CanonicalMutationScopes & Readonly<{ 
 export type CanonicalMutationLockPorts = Readonly<{
   resources: CanonicalMutationResources;
   acquireTerminal: () => Awaitable<() => void>;
+  afterTerminalAcquired?: () => Awaitable<void>;
   withStoreWriter: <Result>(operation: () => Promise<Result>) => Promise<Result>;
   acquireState?: () => Awaitable<() => void>;
 }>;
@@ -84,19 +85,37 @@ export async function withCanonicalMutationLocks<Result, Ports extends Canonical
     scopes: ScopesForPorts<Ports>, resources: ResourcesForPorts<Ports>) => Promise<Result>
 ): Promise<Result> {
   const transaction = {};
-  return withAcquiredScope(transaction, "terminal", ports.resources.terminal, ports.acquireTerminal, (terminal) =>
-    ports.withStoreWriter(async () => {
-      const storeWriter = createScope(transaction, "storeWriter", ports.resources.storeWriter);
-      const invoke = (state?: MutationScope<"state">) => operation(
-        { terminal, storeWriter, ...(state ? { state } : {}) } as ScopesForPorts<Ports>, ports.resources as ResourcesForPorts<Ports>
-      );
-      try {
-        if (!ports.acquireState) return await invoke();
-        const stateResource = ports.resources.state;
-        if (!stateResource) throw new Error("state mutation lock requires a canonical resource");
-        return await withAcquiredScope(transaction, "state", stateResource, ports.acquireState, invoke);
-      } finally { expireScope(storeWriter); }
-    }));
+  return withAcquiredScope(
+    transaction,
+    "terminal",
+    ports.resources.terminal,
+    ports.acquireTerminal,
+    async (terminal) => {
+      await ports.afterTerminalAcquired?.();
+      return ports.withStoreWriter(async () => {
+        const storeWriter = createScope(
+          transaction, "storeWriter", ports.resources.storeWriter
+        );
+        const invoke = (state?: MutationScope<"state">) => operation(
+          { terminal, storeWriter, ...(state ? { state } : {}) } as
+            ScopesForPorts<Ports>,
+          ports.resources as ResourcesForPorts<Ports>
+        );
+        try {
+          if (!ports.acquireState) return await invoke();
+          const stateResource = ports.resources.state;
+          if (!stateResource) {
+            throw new Error(
+              "state mutation lock requires a canonical resource"
+            );
+          }
+          return await withAcquiredScope(
+            transaction, "state", stateResource, ports.acquireState, invoke
+          );
+        } finally { expireScope(storeWriter); }
+      });
+    }
+  );
 }
 
 /** Add one state scope to the currently active terminal + writer transaction. */
