@@ -63,6 +63,33 @@ test("respond interaction schema exposes provider-portable free text", () => {
     }]
   }).valid, true);
   assert.equal(validate({
+    watch_id: "terminal-watch-demo",
+    interaction_id: "ti_demo",
+    answers: [{
+      question_id: "question_demo",
+      response_kind: "free_text",
+      text: "Shadow"
+    }]
+  }).valid, true);
+  assert.equal(validate({
+    turn_id: "turn-demo",
+    watch_id: "terminal-watch-demo",
+    interaction_id: "ti_demo",
+    answers: [{
+      question_id: "question_demo",
+      response_kind: "free_text",
+      text: "Shadow"
+    }]
+  }).valid, false);
+  assert.equal(validate({
+    interaction_id: "ti_demo",
+    answers: [{
+      question_id: "question_demo",
+      response_kind: "free_text",
+      text: "Shadow"
+    }]
+  }).valid, false);
+  assert.equal(validate({
     turn_id: "turn-demo",
     interaction_id: "ti_demo",
     answers: [{

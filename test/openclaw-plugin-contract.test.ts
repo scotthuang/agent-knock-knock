@@ -38,6 +38,9 @@ import {
   OPENCLAW_PRIVATE_AUTHORITY_OFFER_TTL_MS,
   consumeOpenClawPrivateAuthorityOffer,
   openClawApprovalAuthorityOfferKey,
+  openClawInteractionAuthorityOfferKey,
+  openClawManagedTurnInteractionAuthorityOfferKey,
+  openClawTerminalWatchInteractionAuthorityOfferKey,
   peekOpenClawPrivateAuthorityOffer,
   rememberOpenClawPrivateAuthorityOffer
 } from "../src/openclaw-private-authority-offers.js";
@@ -215,13 +218,22 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     "native_thread_id"
   ]);
   assert.deepEqual(respondInteractionParameters.required, [
-    "turn_id",
     "interaction_id",
     "answers"
   ]);
+  assert.deepEqual(respondInteractionParameters.oneOf, [
+    {
+      required: ["turn_id"],
+      not: { required: ["watch_id"] }
+    },
+    {
+      required: ["watch_id"],
+      not: { required: ["turn_id"] }
+    }
+  ]);
   assert.deepEqual(
     Object.keys(respondInteractionParameters.properties),
-    ["turn_id", "interaction_id", "answers"]
+    ["turn_id", "watch_id", "interaction_id", "answers"]
   );
   assert.equal(respondInteractionParameters.additionalProperties, false);
   assert.deepEqual(
@@ -384,6 +396,91 @@ test("private authority offers are isolated, bounded, merged, expiring, and sing
       nowMs + OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT + 1
     ),
     { sequence: OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT }
+  );
+});
+
+test("interaction authority offers isolate managed Turn and Terminal Watch subjects", () => {
+  const api = {};
+  const nowMs = 5_000;
+  const sessionKey = "agent:main:interaction-subjects";
+  const sessionId = "openclaw-conversation-subjects";
+  const sharedSubjectId = "subject-shared";
+  const interactionId = "ti_shared";
+  const legacyManagedKey = openClawInteractionAuthorityOfferKey(
+    sessionKey,
+    sessionId,
+    sharedSubjectId,
+    interactionId
+  );
+  const managedKey = openClawManagedTurnInteractionAuthorityOfferKey(
+    sessionKey,
+    sessionId,
+    sharedSubjectId,
+    interactionId
+  );
+  const watchKey = openClawTerminalWatchInteractionAuthorityOfferKey(
+    sessionKey,
+    sessionId,
+    sharedSubjectId,
+    interactionId
+  );
+
+  assert.deepEqual(legacyManagedKey, managedKey);
+  assert.deepEqual(
+    managedKey,
+    openClawInteractionAuthorityOfferKey(
+      sessionKey,
+      sessionId,
+      "managed_turn",
+      sharedSubjectId,
+      interactionId
+    )
+  );
+  assert.deepEqual(
+    watchKey,
+    openClawInteractionAuthorityOfferKey(
+      sessionKey,
+      sessionId,
+      "terminal_watch",
+      sharedSubjectId,
+      interactionId
+    )
+  );
+  assert.notDeepEqual(managedKey, watchKey);
+  rememberOpenClawPrivateAuthorityOffer(
+    api,
+    managedKey,
+    { fingerprint: "a".repeat(64), subject_kind: "managed_turn" },
+    nowMs
+  );
+  rememberOpenClawPrivateAuthorityOffer(
+    api,
+    watchKey,
+    { fingerprint: "b".repeat(64), subject_kind: "terminal_watch" },
+    nowMs
+  );
+  assert.equal(
+    peekOpenClawPrivateAuthorityOffer(api, managedKey, nowMs)?.subject_kind,
+    "managed_turn"
+  );
+  assert.equal(
+    consumeOpenClawPrivateAuthorityOffer(api, watchKey, nowMs)?.subject_kind,
+    "terminal_watch"
+  );
+  assert.equal(
+    peekOpenClawPrivateAuthorityOffer(api, managedKey, nowMs)?.subject_kind,
+    "managed_turn",
+    "consuming a Watch offer must not consume the same-id managed offer"
+  );
+  assert.throws(
+    () => openClawInteractionAuthorityOfferKey(
+      sessionKey,
+      sessionId,
+      "unsupported" as "managed_turn",
+      sharedSubjectId,
+      interactionId
+    ),
+    /interaction subject kind is invalid/u
   );
 });
 

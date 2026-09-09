@@ -2,6 +2,13 @@ export const OPENCLAW_PRIVATE_AUTHORITY_OFFER_TTL_MS = 10 * 60 * 1000;
 export const OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT = 512;
 export const OPENCLAW_APPROVAL_AUTHORITY_KIND = "approval";
 export const OPENCLAW_INTERACTION_AUTHORITY_KIND = "interaction";
+export const OPENCLAW_INTERACTION_AUTHORITY_SUBJECT_KINDS = [
+  "managed_turn",
+  "terminal_watch"
+] as const;
+
+export type OpenClawInteractionAuthoritySubjectKind =
+  typeof OPENCLAW_INTERACTION_AUTHORITY_SUBJECT_KINDS[number];
 
 export interface OpenClawPrivateAuthorityTarget {
   type: string;
@@ -46,21 +53,81 @@ export function openClawApprovalAuthorityOfferKey(
   };
 }
 
+/**
+ * Legacy managed-Turn overload retained while callers migrate to the explicit
+ * subject-aware form below.
+ */
 export function openClawInteractionAuthorityOfferKey(
   sessionKey: string,
   sessionId: string,
   turnId: string,
   interactionId: string
+): OpenClawPrivateAuthorityOfferKey;
+export function openClawInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  subjectKind: OpenClawInteractionAuthoritySubjectKind,
+  subjectId: string,
+  interactionId: string
+): OpenClawPrivateAuthorityOfferKey;
+export function openClawInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  subjectKindOrTurnId: OpenClawInteractionAuthoritySubjectKind | string,
+  subjectIdOrInteractionId: string,
+  explicitInteractionId?: string
 ): OpenClawPrivateAuthorityOfferKey {
+  const legacyManagedTurn = explicitInteractionId === undefined;
+  const subjectKind = legacyManagedTurn
+    ? "managed_turn"
+    : interactionAuthoritySubjectKind(subjectKindOrTurnId);
+  const subjectId = exactNonBlank(
+    legacyManagedTurn ? subjectKindOrTurnId : subjectIdOrInteractionId,
+    "interaction subject id"
+  );
+  const interactionId = exactNonBlank(
+    legacyManagedTurn ? subjectIdOrInteractionId : explicitInteractionId,
+    "interaction id"
+  );
   return {
     sessionKey,
     sessionId,
     kind: OPENCLAW_INTERACTION_AUTHORITY_KIND,
     target: {
-      type: "interaction_id",
-      id: JSON.stringify([turnId, interactionId])
+      type: "interaction_subject",
+      id: JSON.stringify([subjectKind, subjectId, interactionId])
     }
   };
+}
+
+export function openClawManagedTurnInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  turnId: string,
+  interactionId: string
+): OpenClawPrivateAuthorityOfferKey {
+  return openClawInteractionAuthorityOfferKey(
+    sessionKey,
+    sessionId,
+    "managed_turn",
+    turnId,
+    interactionId
+  );
+}
+
+export function openClawTerminalWatchInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  watchId: string,
+  interactionId: string
+): OpenClawPrivateAuthorityOfferKey {
+  return openClawInteractionAuthorityOfferKey(
+    sessionKey,
+    sessionId,
+    "terminal_watch",
+    watchId,
+    interactionId
+  );
 }
 
 export function rememberOpenClawPrivateAuthorityOffer(
@@ -174,6 +241,21 @@ function exactIdentifier(value: unknown, label: string): string {
     throw new Error(`private authority offer ${label} is invalid`);
   }
   return text;
+}
+
+function interactionAuthoritySubjectKind(
+  value: unknown
+): OpenClawInteractionAuthoritySubjectKind {
+  if (
+    !OPENCLAW_INTERACTION_AUTHORITY_SUBJECT_KINDS.includes(
+      value as OpenClawInteractionAuthoritySubjectKind
+    )
+  ) {
+    throw new Error(
+      "private authority offer interaction subject kind is invalid"
+    );
+  }
+  return value as OpenClawInteractionAuthoritySubjectKind;
 }
 
 function exactNonBlank(value: unknown, label: string): string {
