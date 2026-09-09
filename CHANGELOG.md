@@ -1,21 +1,12 @@
 # Changelog
 
-## Unreleased
-
-### Added
-
-- Let newly created exact Terminal Watches notify and answer supported native Codex and Claude Code questionnaires through the same owner-bound `respond_interaction` contract used by managed Turns. Activity/best-effort Watches and migrated legacy records remain notification-only.
-
-### Security
-
-- Revalidate controller ownership, terminal/process/native-task identity, prompt surface, and responder priority immediately before Watch input. Managed Turns take precedence, while stale, reserved, uncertain, consumed, manual-only, or ambiguous interactions remain fail-closed without replay.
-
-## 0.13.0 - 2026-09-09
+## 0.13.0 - 2026-09-10
 
 ### Added
 
 - Promote terminal-scoped Codex sends from a frozen open-rollout candidate set after exactly one rollout durably accepts the request, including the first task after `/clear` when the foreground rollout does not exist before Enter.
 - Notify the owning controller when an unmanaged fallback Watch observes a native questionnaire that requires manual TUI input, without granting that Watch response or key-dispatch authority.
+- Let newly created exact Terminal Watches notify and answer supported native Codex and Claude Code questionnaires through the same owner-bound `respond_interaction` contract used by managed Turns. Activity/best-effort Watches and migrated legacy records remain notification-only.
 
 ### Changed
 
@@ -38,6 +29,7 @@
 - Keep physical target, process incarnation, composer/interaction, and duplicate-dispatch checks fail-closed while preventing rollout, Session, Store, or callback uncertainty from vetoing an explicitly selected human Send. Replaced, deleted, ambiguous, multiply accepting, or unreadable rollout evidence remains uncertain and is never replayed automatically.
 - Bind detached-claim transfer to the frozen v3 acceptance anchor and CAS-fenced Session state. Claim drift, blocking work, ambiguous owners, or changed terminal/workspace authority remains post-dispatch uncertainty with no automatic resend.
 - Limit callback-debt supersession to the exact released binding generation with a validated terminal, native thread, rollout, submission receipt, and final lifecycle message. Active interactions, approvals, transitions, in-flight callbacks, accepted transports, stale managed tokens, and cross-Turn evidence remain fail-closed; an explicitly overridden uncertain callback is retained as audit evidence and is never retried.
+- Revalidate controller ownership, terminal/process/native-task identity, prompt surface, and responder priority immediately before Watch input. Managed Turns take precedence, while stale, reserved, uncertain, consumed, manual-only, or ambiguous interactions remain fail-closed without replay.
 
 ## 0.12.37 - 2026-09-08
 
