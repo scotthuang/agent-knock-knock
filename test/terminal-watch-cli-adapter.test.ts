@@ -3139,6 +3139,7 @@ test("a newer stale Codex task Watch cannot claim the current surface", async (t
 test("a newer stale Claude prompt Watch cannot claim the current surface", async (t) => {
   const fixture = createClaudeQuestionnaireFixture(t);
   const printed: unknown[] = [];
+  const deliveries: CallbackTransportDeliverInput[] = [];
   let terminal = fixture.terminal;
   const controller = "agent:main:watch-stale-claude-task";
   const route = createTerminalWatchOpenClawCallbackRoute({
@@ -3157,7 +3158,20 @@ test("a newer stale Claude prompt Watch cannot claim the current surface", async
     storeDirFromOptions: () => fixture.storeDir,
     terminalDispatchOwnership: () => ({ state: "none" }),
     terminalIncarnationBlockingTurns: () => [],
-    printJson: (value) => printed.push(value)
+    printJson: (value) => printed.push(value),
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
   });
   await facade.runWatch({
     terminal: fixture.terminal.id as string,
@@ -3180,6 +3194,12 @@ test("a newer stale Claude prompt Watch cannot claim the current surface", async
     true,
     "the current Claude prompt must begin with exact response authority"
   );
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute: route
+  });
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].envelope.event.type, "interaction_required");
   assert.equal(
     current.anchor.schema,
     "agent-knock-knock/claude-human-started-active-task-anchor"
@@ -3190,6 +3210,7 @@ test("a newer stale Claude prompt Watch cannot claim the current surface", async
       "agent-knock-knock/claude-human-started-active-task-anchor" ||
     !current.current_interaction
   ) throw new Error("Claude exact Watch fixture was not captured");
+  assert.equal(current.anchor.claude_version, "2.1.267");
   const { anchor_fingerprint: _oldFingerprint, ...staleAnchorBase } = {
     ...current.anchor,
     prompt_uuid: "019f0000-0000-7000-8000-000000000310",
@@ -4008,7 +4029,7 @@ function createClaudeQuestionnaireFixture(t: test.TestContext) {
   fs.mkdirSync(workspace, { recursive: true });
   const pid = 6311;
   const startedAt = 1784870000000;
-  const version = "2.1.263";
+  const version = "2.1.267";
   fs.writeFileSync(transcriptPath, `${JSON.stringify({
     uuid: "019f0000-0000-7000-8000-000000000312",
     parentUuid: null,

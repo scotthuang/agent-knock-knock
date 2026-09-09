@@ -951,7 +951,9 @@ test("Claude resume candidates use complete versions and structural identity ins
 
 for (const [version, suffix] of [
   ["2.1.259", 259],
-  ["2.1.263", 263]
+  ["2.1.263", 263],
+  ["2.1.266", 266],
+  ["2.1.267", 267]
 ] as const) {
   test(`Claude ${version} transcript supports lifecycle, acceptance, completion, and approval evidence`, (t) => {
     const fixture = createFixture(t, suffix);

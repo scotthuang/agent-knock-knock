@@ -193,6 +193,18 @@ const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "/ide Manage IDE integrations and show status",
     "/usage Show session cost, plan usage, and activity stats"
   ],
+  "claude-code-2.1.266-native-status": [
+    "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
+    "/statusline Set up Claude Code's status line UI",
+    "/ide Manage IDE integrations and show status",
+    "/usage Show session cost, plan usage, and activity stats"
+  ],
+  "claude-code-2.1.267-native-status": [
+    "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
+    "/statusline Set up Claude Code's status line UI",
+    "/ide Manage IDE integrations and show status",
+    "/usage Show session cost, plan usage, and activity stats"
+  ],
   "claude-code-unverified-native-status-v1": [
     "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
     "/statusline Set up Claude Code's status line UI",
@@ -224,6 +236,14 @@ const CLAUDE_NATIVE_STATUS_SETTLE_BY_PROFILE: Readonly<
     maximumSettleMs: 5_000
   },
   "claude-code-2.1.263-native-status": {
+    minimumStableMs: 80,
+    maximumSettleMs: 5_000
+  },
+  "claude-code-2.1.266-native-status": {
+    minimumStableMs: 80,
+    maximumSettleMs: 5_000
+  },
+  "claude-code-2.1.267-native-status": {
     minimumStableMs: 80,
     maximumSettleMs: 5_000
   },

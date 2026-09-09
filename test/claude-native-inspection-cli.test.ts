@@ -23,7 +23,16 @@ import {
 import { ensureStoreWritable, listConversations } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
 
-for (const claudeVersion of ["2.1.218", "2.1.226", "2.1.237", "2.1.251", "2.1.259", "2.1.263"] as const) {
+for (const claudeVersion of [
+  "2.1.218",
+  "2.1.226",
+  "2.1.237",
+  "2.1.251",
+  "2.1.259",
+  "2.1.263",
+  "2.1.266",
+  "2.1.267"
+] as const) {
   test(`Claude ${claudeVersion} native status inspection is snapshot-bound, modal-safe, and Store immutable`, async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-claude-native-inspect-")
@@ -207,7 +216,7 @@ for (const claudeVersion of ["2.1.218", "2.1.226", "2.1.237", "2.1.251", "2.1.25
 
     const unverifiedArgs = commonArgs.map((argument) =>
       argument === JSON.stringify({ [claudePid]: claudeVersion })
-        ? JSON.stringify({ [claudePid]: "2.1.227" })
+        ? JSON.stringify({ [claudePid]: "2.1.268" })
         : argument
     );
     fs.writeFileSync(screenPath, initialScreen);
@@ -361,7 +370,7 @@ function claudeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
-    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267"].includes(version)
       ? ["  Peer address:        unix:///private/tmp/claude.sock"]
       : []),
     `  cwd:                 ${cwd}`,
@@ -371,8 +380,11 @@ function claudeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         all connected",
     "  Setting sources:     User settings",
-    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267"].includes(version)
       ? ["  Managed settings (remote): connected"]
+      : []),
+    ...(["2.1.263", "2.1.266", "2.1.267"].includes(version)
+      ? ["  Organization policy: failed to load through proxy"]
       : []),
     "",
     "  Esc to cancel"
