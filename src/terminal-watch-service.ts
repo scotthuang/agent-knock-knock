@@ -14,6 +14,7 @@ import {
   assertTerminalWatch,
   assertTerminalWatchManualInteractionSummary,
   assertTerminalWatchObservationCheckpoint,
+  initialTerminalWatchInteractionPolicy,
   initialTerminalWatchObservationCheckpoint,
   terminalWatchIdentityFingerprint,
   terminalWatchCallbackEnvelope,
@@ -204,6 +205,7 @@ export function createTerminalWatchService(
       anchor: input.anchor,
       observation_checkpoint:
         initialTerminalWatchObservationCheckpoint(input.anchor),
+      interaction_policy: initialTerminalWatchInteractionPolicy(input.anchor),
       ...(input.warnings && input.warnings.length > 0
         ? { warnings: [...new Set(input.warnings)] }
         : {}),

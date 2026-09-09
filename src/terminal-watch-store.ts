@@ -51,10 +51,21 @@ import {
   terminalRouteKeyFromEvidence,
   type TerminalControlEvidence
 } from "./terminal-control-ref.js";
+import {
+  sameTerminalInteractionSubject,
+  validateTerminalInteractionSubjectProjection,
+  type TerminalInteractionSubjectProjection
+} from "./terminal-interaction-protocol.js";
+import {
+  aggregateMatchesProjection,
+  reduceTerminalInteractionAggregate,
+  validateTerminalInteractionAggregate,
+  type TerminalInteractionAggregate
+} from "./terminal-interaction-core.js";
 import { isRecord } from "./value-guards.js";
 
 export const TERMINAL_WATCH_SCHEMA = "agent-knock-knock/terminal-watch" as const;
-export const TERMINAL_WATCH_VERSION = 2 as const;
+export const TERMINAL_WATCH_VERSION = 3 as const;
 export const TERMINAL_WATCHES_DIRECTORY =
   STORE_TERMINAL_WATCHES_DIRECTORY;
 
@@ -84,6 +95,10 @@ const TERMINAL_WATCH_NOTIFICATION_STATUSES = [
   "delivered",
   "superseded"
 ] as const;
+export const TERMINAL_WATCH_INTERACTION_POLICIES = [
+  "notify_only",
+  "respond_when_exact"
+] as const;
 const TERMINAL_WATCH_MANUAL_INTERACTION_RESPONSE_KINDS = [
   "single_select",
   "multi_select",
@@ -100,6 +115,8 @@ const TERMINAL_WATCH_MANUAL_INTERACTION_MAX_OPTION_DESCRIPTION_CHARACTERS =
 export type TerminalWatchStatus = typeof TERMINAL_WATCH_STATUSES[number];
 export type TerminalWatchTerminalStatus =
   typeof TERMINAL_WATCH_TERMINAL_STATUSES[number];
+export type TerminalWatchInteractionPolicy =
+  typeof TERMINAL_WATCH_INTERACTION_POLICIES[number];
 
 export interface TerminalWatchTerminalIdentity {
   terminal_id: string;
@@ -146,6 +163,20 @@ export function isTerminalActivityWatch(
 } {
   return watch.anchor.schema ===
     "agent-knock-knock/terminal-activity-watch-anchor";
+}
+
+/**
+ * New exact-task Watches opt in to fail-closed interaction response authority.
+ * Best-effort activity Watches can notify about a questionnaire but can never
+ * become terminal-input authorities.
+ */
+export function initialTerminalWatchInteractionPolicy(
+  anchor: TerminalWatchAnchor
+): TerminalWatchInteractionPolicy {
+  return anchor.schema ===
+      "agent-knock-knock/terminal-activity-watch-anchor"
+    ? "notify_only"
+    : "respond_when_exact";
 }
 
 export function createTerminalActivityWatchAnchor(input: {
@@ -454,6 +485,18 @@ export interface TerminalWatchSettlement {
 }
 
 /**
+ * Privacy-safe durable state for the questionnaire currently attributed to a
+ * Watch. The public projection is intentionally bounded by the interaction
+ * protocol. The aggregate stores only opaque identities, fingerprints,
+ * timestamps, and response receipts; native key plans, raw terminal frames,
+ * and answer text never cross this persistence boundary.
+ */
+export interface TerminalWatchCurrentInteraction {
+  projection: TerminalInteractionSubjectProjection;
+  aggregate: TerminalInteractionAggregate;
+}
+
+/**
  * Durable observation authority for work started by a human in a coding-agent
  * TUI. It is deliberately not a Conversation, Turn, Session, dispatch receipt,
  * or terminal-input authority.
@@ -467,6 +510,9 @@ export interface TerminalWatch {
   terminal: TerminalWatchTerminalIdentity;
   anchor: TerminalWatchAnchor;
   observation_checkpoint: TerminalWatchObservationCheckpoint;
+  /** Immutable creation-time response policy. Legacy records are notify-only. */
+  interaction_policy: TerminalWatchInteractionPolicy;
+  current_interaction?: TerminalWatchCurrentInteraction;
   /** Immutable creation-time diagnostics; none of these veto observation. */
   warnings?: string[];
   /** Immutable callback authority captured by a native Host at Watch creation. */
@@ -671,6 +717,24 @@ export interface TerminalWatchStore {
     options: TerminalWatchSaveOptions
   ): TerminalWatch;
   withWatchLock<Result>(watchId: string, operation: () => Result): Result;
+  /**
+   * Hold the canonical Store writer lease while a caller inserts an
+   * interaction-authority lock before acquiring the per-Watch state lock.
+   * The scope is synchronous and becomes invalid when this callback returns.
+   */
+  withWriterLease<Result>(
+    operation: (scope: TerminalWatchWriterScope) => Result
+  ): Result;
+}
+
+export interface TerminalWatchWriterScope {
+  list(): TerminalWatch[];
+  load(watchId: string): TerminalWatch;
+  save(
+    watch: TerminalWatch,
+    options: TerminalWatchSaveOptions
+  ): TerminalWatch;
+  withWatchLock<Result>(watchId: string, operation: () => Result): Result;
 }
 
 export interface TerminalWatchReconciliationScanError {
@@ -733,23 +797,70 @@ export function withTerminalWatchLock<Result>(
   locks: TerminalWatchFileLockPort,
   operation: () => Result
 ): Result {
+  return withStoreWriterLease(storeDir, () =>
+    withTerminalWatchStateLock(storeDir, watchId, locks, operation));
+}
+
+function withTerminalWatchStateLock<Result>(
+  storeDir: string,
+  watchId: string,
+  locks: TerminalWatchFileLockPort,
+  operation: () => Result
+): Result {
   const paths = pathsForTerminalWatch(watchId, storeDir);
-  return withStoreWriterLease(storeDir, () => {
-    ensureDir(paths.root);
-    assertOwnerPrivateDirectory(paths.root, "terminal Watch root");
-    const release = locks.acquire(paths.lockPath);
-    try {
-      return operation();
-    } finally {
-      release();
-    }
-  });
+  ensureDir(paths.root);
+  assertOwnerPrivateDirectory(paths.root, "terminal Watch root");
+  const release = locks.acquire(paths.lockPath);
+  try {
+    return operation();
+  } finally {
+    release();
+  }
 }
 
 export function createTerminalWatchStore(
   storeDir: string,
   locks: TerminalWatchFileLockPort
 ): TerminalWatchStore {
+  const withWriterLease = <Result>(
+    operation: (scope: TerminalWatchWriterScope) => Result
+  ): Result => withStoreWriterLease(storeDir, () => {
+    let active = true;
+    const assertActive = (): void => {
+      if (!active) {
+        throw new Error("terminal Watch writer scope is no longer active");
+      }
+    };
+    const scope: TerminalWatchWriterScope = Object.freeze({
+      list: () => {
+        assertActive();
+        return listTerminalWatches(storeDir);
+      },
+      load: (watchId: string) => {
+        assertActive();
+        return loadTerminalWatch(storeDir, watchId);
+      },
+      save: (
+        watch: TerminalWatch,
+        options: TerminalWatchSaveOptions
+      ) => {
+        assertActive();
+        return saveTerminalWatch(storeDir, watch, options);
+      },
+      withWatchLock: <ScopeResult>(
+        watchId: string,
+        inner: () => ScopeResult
+      ) => {
+        assertActive();
+        return withTerminalWatchStateLock(storeDir, watchId, locks, inner);
+      }
+    });
+    try {
+      return operation(scope);
+    } finally {
+      active = false;
+    }
+  });
   return Object.freeze({
     list: () => listTerminalWatches(storeDir),
     scanForReconciliation: () => scanTerminalWatchesForReconciliation(storeDir),
@@ -757,7 +868,8 @@ export function createTerminalWatchStore(
     save: (watch: TerminalWatch, options: TerminalWatchSaveOptions) =>
       saveTerminalWatch(storeDir, watch, options),
     withWatchLock: <Result>(watchId: string, operation: () => Result) =>
-      withTerminalWatchLock(storeDir, watchId, locks, operation)
+      withTerminalWatchLock(storeDir, watchId, locks, operation),
+    withWriterLease
   });
 }
 
@@ -872,6 +984,8 @@ const WATCH_FIELDS = {
   terminal: assertTerminalIdentity,
   anchor: IGNORE_VALUE,
   observation_checkpoint: IGNORE_VALUE,
+  interaction_policy: oneOfGuard(TERMINAL_WATCH_INTERACTION_POLICIES),
+  current_interaction: optionalGuard(IGNORE_VALUE),
   warnings: optionalGuard(WARNING_LIST),
   callback_route: optionalGuard(IGNORE_VALUE),
   openclaw_session: assertNonEmptyString,
@@ -994,6 +1108,15 @@ export function assertTerminalWatch(
     watch.observation_checkpoint,
     watch.anchor
   );
+  if (
+    isTerminalActivityWatch(watch) &&
+    watch.interaction_policy !== "notify_only"
+  ) {
+    throw new Error(
+      "a terminal activity Watch must remain interaction notify-only"
+    );
+  }
+  assertTerminalWatchCurrentInteraction(watch.current_interaction, watch);
   const checkpoint = watch.observation_checkpoint;
   if (
     isTerminalActivityWatch(watch) &&
@@ -1241,7 +1364,8 @@ function decodeTerminalWatch(
   const sourceVersion = isRecord(value) ? value.version : undefined;
   const normalized = normalizeLegacyTerminalWatch(value);
   assertTerminalWatch(normalized, expectedWatchId);
-  const repaired = sourceVersion === TERMINAL_WATCH_VERSION
+  const repaired = sourceVersion === 2 ||
+      sourceVersion === TERMINAL_WATCH_VERSION
     ? repairMisroutedUserExplicitFallbackCallback(normalized)
     : normalized;
   assertTerminalWatch(repaired, expectedWatchId);
@@ -1343,14 +1467,20 @@ function normalizeLegacyTerminalWatch(value: unknown): unknown {
   if (
     !isRecord(value) ||
     value.schema !== TERMINAL_WATCH_SCHEMA ||
-    (value.version !== 1 && value.version !== TERMINAL_WATCH_VERSION) ||
+    (
+      value.version !== 1 &&
+      value.version !== 2 &&
+      value.version !== TERMINAL_WATCH_VERSION
+    ) ||
     !isRecord(value.anchor)
   ) {
     return value;
   }
+  // Response authority is never inferred while reading a predecessor record.
+  // Only a newly-created v3 Watch may opt in explicitly.
   const versionNormalized = value.version === TERMINAL_WATCH_VERSION
     ? value
-    : { ...value, version: TERMINAL_WATCH_VERSION };
+    : legacyTerminalWatchV3(value);
   if (value.observation_checkpoint !== undefined) {
     return versionNormalized;
   }
@@ -1379,6 +1509,23 @@ function normalizeLegacyTerminalWatch(value: unknown): unknown {
     };
   }
   return versionNormalized;
+}
+
+function legacyTerminalWatchV3(
+  value: Record<string, unknown>
+): Record<string, unknown> {
+  // Pre-v3 schemas did not define either field. Discard, rather than trust,
+  // hand-added response authority or interaction state while migrating.
+  const {
+    interaction_policy: _legacyInteractionPolicy,
+    current_interaction: _legacyCurrentInteraction,
+    ...legacy
+  } = value;
+  return {
+    ...legacy,
+    version: TERMINAL_WATCH_VERSION,
+    interaction_policy: "notify_only"
+  };
 }
 
 export function assertTerminalWatchObservationCheckpoint(
@@ -1917,6 +2064,120 @@ export function assertTerminalWatchManualInteractionSummary(
   }
 }
 
+export function assertTerminalWatchCurrentInteraction(
+  value: unknown,
+  watch: Pick<
+    TerminalWatch,
+    | "watch_id"
+    | "agent"
+    | "anchor"
+    | "interaction_policy"
+    | "created_at"
+    | "updated_at"
+    | "status"
+  >
+): asserts value is TerminalWatchCurrentInteraction | undefined {
+  if (value === undefined) return;
+  assertStrictRecord(value, "terminal Watch current interaction", {
+    projection: IGNORE_VALUE,
+    aggregate: IGNORE_VALUE
+  });
+  const projection = validateTerminalInteractionSubjectProjection(
+    value.projection
+  );
+  const aggregate = validateTerminalInteractionAggregate(value.aggregate);
+  if (
+    projection.subject.kind !== "terminal_watch" ||
+    projection.subject.watch_id !== watch.watch_id ||
+    projection.subject.anchor_fingerprint !==
+      watch.anchor.anchor_fingerprint ||
+    aggregate.subject.kind !== "terminal_watch" ||
+    !sameTerminalInteractionSubject(projection.subject, aggregate.subject)
+  ) {
+    throw new Error(
+      "terminal Watch interaction subject does not match its exact Watch anchor"
+    );
+  }
+  if (projection.agent !== watch.agent) {
+    throw new Error("terminal Watch interaction agent does not match its Watch");
+  }
+  if (!aggregateMatchesProjection(aggregate, projection)) {
+    throw new Error(
+      "terminal Watch interaction aggregate does not match its public projection"
+    );
+  }
+  if (
+    watch.interaction_policy === "notify_only" &&
+    (
+      projection.response_authority !== "notify_only" ||
+      aggregate.response_authority !== "notify_only" ||
+      projection.capabilities.respond
+    )
+  ) {
+    throw new Error(
+      "a notify-only terminal Watch cannot persist response authority"
+    );
+  }
+  for (const [timestamp, label] of [
+    [projection.expires_at, "projection expiry"],
+    [aggregate.created_at, "aggregate creation"],
+    [aggregate.expires_at, "aggregate expiry"],
+    [aggregate.reservation?.reserved_at, "reservation time"],
+    [aggregate.resolution?.resolved_at, "resolution time"]
+  ] as const) {
+    if (timestamp !== undefined) {
+      assertTimestamp(timestamp, `terminal Watch interaction ${label}`);
+    }
+  }
+  const createdAt = Date.parse(aggregate.created_at);
+  const watchCreatedAt = Date.parse(watch.created_at);
+  const watchUpdatedAt = Date.parse(watch.updated_at);
+  if (
+    createdAt < watchCreatedAt ||
+    createdAt > watchUpdatedAt ||
+    Date.parse(aggregate.expires_at) <= createdAt ||
+    (
+      aggregate.reservation !== undefined &&
+      (
+        Date.parse(aggregate.reservation.reserved_at) < createdAt ||
+        Date.parse(aggregate.reservation.reserved_at) > watchUpdatedAt
+      )
+    ) ||
+    (
+      aggregate.resolution !== undefined &&
+      (
+        Date.parse(aggregate.resolution.resolved_at) <
+          Date.parse(
+            aggregate.reservation?.reserved_at ?? aggregate.created_at
+          ) ||
+        Date.parse(aggregate.resolution.resolved_at) > watchUpdatedAt
+      )
+    )
+  ) {
+    throw new Error("terminal Watch interaction timestamps are not monotonic");
+  }
+  if (aggregate.resolution !== undefined) {
+    assertReasonCode(
+      aggregate.resolution.reason_code,
+      "terminal Watch interaction resolution reason"
+    );
+  }
+  if (aggregate.reservation !== undefined) {
+    assertNonEmptyString(
+      aggregate.reservation.attempt_id,
+      "terminal Watch interaction reservation attempt id"
+    );
+  }
+  if (
+    watch.status !== "active" &&
+    (aggregate.state === "pending" || aggregate.state === "reserved")
+  ) {
+    throw new Error(
+      "a settled terminal Watch cannot retain an actionable interaction"
+    );
+  }
+}
+
 function assertBoundedInteractionText(
   value: unknown,
   label: string,
@@ -2078,6 +2339,11 @@ function assertTerminalWatchAdvance(
     ["agent", current.agent, candidate.agent],
     ["terminal", current.terminal, candidate.terminal],
     ["anchor", current.anchor, candidate.anchor],
+    [
+      "interaction_policy",
+      current.interaction_policy,
+      candidate.interaction_policy
+    ],
     ["warnings", current.warnings, candidate.warnings],
     ["callback_route", current.callback_route, candidate.callback_route],
     ["openclaw_session", current.openclaw_session, candidate.openclaw_session],
@@ -2105,6 +2371,10 @@ function assertTerminalWatchAdvance(
     current.observation_checkpoint,
     candidate.observation_checkpoint
   );
+  assertTerminalWatchInteractionAdvance(
+    current.current_interaction,
+    candidate.current_interaction
+  );
   if (
     current.status !== "active" &&
     candidate.status !== current.status
@@ -2122,6 +2392,8 @@ function assertTerminalWatchAdvance(
       candidate.last_activity_at !== current.last_activity_at ||
       JSON.stringify(candidate.observation_checkpoint) !==
         JSON.stringify(current.observation_checkpoint) ||
+      canonicalJson(candidate.current_interaction) !==
+        canonicalJson(current.current_interaction) ||
       candidate.notification_outbox.length !== current.notification_outbox.length
     ) {
       throw new Error(
@@ -2137,6 +2409,129 @@ function assertTerminalWatchAdvance(
     );
   }
   assertNotificationAdvance(current.notification_outbox, candidate.notification_outbox);
+}
+
+function assertTerminalWatchInteractionAdvance(
+  current: TerminalWatchCurrentInteraction | undefined,
+  candidate: TerminalWatchCurrentInteraction | undefined
+): void {
+  if (current === undefined) {
+    if (candidate !== undefined && candidate.aggregate.state !== "pending") {
+      throw new Error(
+        "a terminal Watch interaction must be created pending"
+      );
+    }
+    return;
+  }
+  if (candidate === undefined) {
+    throw new Error("terminal Watch current interaction cannot be removed");
+  }
+  const before = current.aggregate;
+  const after = candidate.aggregate;
+  if (!sameTerminalInteractionSubject(before.subject, after.subject)) {
+    throw new Error("terminal Watch interaction subject cannot change");
+  }
+  if (before.interaction_id !== after.interaction_id) {
+    if (
+      !["consumed", "response_uncertain", "superseded"].includes(
+        before.state
+      ) ||
+      after.state !== "pending" ||
+      before.surface_id === after.surface_id ||
+      Date.parse(after.created_at) < Date.parse(
+        before.resolution?.resolved_at ?? before.created_at
+      )
+    ) {
+      throw new Error(
+        "terminal Watch cannot replace an unresolved interaction"
+      );
+    }
+    return;
+  }
+
+  const expected = expectedTerminalWatchInteractionAggregate(before, after);
+  if (canonicalJson(expected) !== canonicalJson(after)) {
+    throw new Error(
+      `terminal Watch interaction cannot advance ${before.state} to ${after.state}`
+    );
+  }
+  assertTerminalWatchInteractionProjectionAdvance(
+    current.projection,
+    candidate.projection,
+    before,
+    after
+  );
+}
+
+function expectedTerminalWatchInteractionAggregate(
+  current: TerminalInteractionAggregate,
+  candidate: TerminalInteractionAggregate
+): TerminalInteractionAggregate {
+  if (current.state === candidate.state) {
+    if (
+      current.state === "pending" &&
+      current.expires_at !== candidate.expires_at
+    ) {
+      return reduceTerminalInteractionAggregate(current, {
+        type: "refresh",
+        expires_at: candidate.expires_at
+      });
+    }
+    return current;
+  }
+  if (candidate.state === "reserved" && candidate.reservation) {
+    return reduceTerminalInteractionAggregate(current, {
+      type: "reserve",
+      attempt_id: candidate.reservation.attempt_id,
+      response_hash: candidate.reservation.response_hash,
+      at: candidate.reservation.reserved_at
+    });
+  }
+  if (
+    (candidate.state === "consumed" ||
+      candidate.state === "response_uncertain") &&
+    candidate.resolution
+  ) {
+    return reduceTerminalInteractionAggregate(current, {
+      type: candidate.state === "consumed"
+        ? "consume"
+        : "response_uncertain",
+      at: candidate.resolution.resolved_at,
+      reason_code: candidate.resolution.reason_code
+    });
+  }
+  if (candidate.state === "superseded" && candidate.resolution) {
+    return reduceTerminalInteractionAggregate(current, {
+      type: "supersede",
+      at: candidate.resolution.resolved_at,
+      reason_code: candidate.resolution.reason_code
+    });
+  }
+  return current;
+}
+
+function assertTerminalWatchInteractionProjectionAdvance(
+  current: TerminalInteractionSubjectProjection,
+  candidate: TerminalInteractionSubjectProjection,
+  before: TerminalInteractionAggregate,
+  after: TerminalInteractionAggregate
+): void {
+  if (canonicalJson(current) === canonicalJson(candidate)) return;
+  if (before.state === "pending" && after.state === "pending") {
+    const expected = { ...current, expires_at: after.expires_at };
+    if (canonicalJson(expected) === canonicalJson(candidate)) return;
+  }
+  if (after.state === "response_uncertain") {
+    const expected = {
+      ...current,
+      state: "response_uncertain" as const,
+      capabilities: { ...current.capabilities, respond: false }
+    };
+    if (canonicalJson(expected) === canonicalJson(candidate)) return;
+  }
+  throw new Error(
+    "terminal Watch interaction public projection changed outside a safe state transition"
+  );
 }
 
 function assertFallbackCheckpointAdvance(
