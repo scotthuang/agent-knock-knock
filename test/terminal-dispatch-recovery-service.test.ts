@@ -77,6 +77,7 @@ function createHarness(input: {
     | { status: "invalid"; reason: string };
   completion?: VerifiedDeadAgentCompletionObservation<TerminalCompletionEvidence>;
   ledgerResolved?: boolean;
+  localCompletionSuperseded?: boolean;
 } = {}) {
   const trace: string[] = [];
   const current = conversation();
@@ -146,7 +147,12 @@ function createHarness(input: {
       },
       assertLocalCompletion() {
         trace.push("authority:local-completion");
-        return { ledgerResolved: input.ledgerResolved ?? false };
+        return {
+          ledgerResolved: input.ledgerResolved ?? false,
+          ...(input.localCompletionSuperseded
+            ? { supersededByNewerDispatch: true }
+            : {})
+        };
       }
     },
     evidence: {
@@ -301,6 +307,22 @@ test("local completion settles only after exact authority and remains idempotent
     logPath: REQUEST.logPath
   }).recovered, false);
   assert.deepEqual(settled.trace, [
+    "transaction:local:enter",
+    "authority:local-completion",
+    "transaction:local:exit"
+  ]);
+
+  const superseded = createHarness({ localCompletionSuperseded: true });
+  assert.deepEqual(superseded.service.settleLocalCompletion({
+    storeDir: REQUEST.storeDir,
+    statePath: REQUEST.statePath,
+    logPath: REQUEST.logPath
+  }), {
+    handled: true,
+    recovered: false,
+    reason: "local_terminal_completion_superseded_by_newer_dispatch"
+  });
+  assert.deepEqual(superseded.trace, [
     "transaction:local:enter",
     "authority:local-completion",
     "transaction:local:exit"

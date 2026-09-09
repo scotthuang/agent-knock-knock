@@ -361,6 +361,58 @@ test("reconciliation honors current then legacy ownership and fresh launch facts
   assert.equal(failed.events.length, 0);
 });
 
+test("reconciliation counts historical skips without masking active failures", async () => {
+  const historical = {
+    ...conversation("closed"),
+    conversation_id: "turn-historical"
+  };
+  const active = {
+    ...conversation("waiting_for_agent"),
+    conversation_id: "turn-active"
+  };
+  const observed: string[] = [];
+  const instance = fixture({
+    listConversations: () => [historical, active],
+    reconcileState: async (input) => {
+      observed.push(input.listed.conversation_id);
+      if (input.listed === historical) {
+        return {
+          kind: "handled",
+          counter: "skipped",
+          item: {
+            conversation_id: historical.conversation_id,
+            status: "skipped",
+            reason: "conversation_status_closed"
+          }
+        };
+      }
+      throw new Error("malformed active native identity");
+    }
+  });
+
+  const result = await instance.facade.reconcileMonitors({}, {
+    includeCallbackRecovery: false,
+    reason: "test"
+  });
+
+  assert.deepEqual(observed, ["turn-historical", "turn-active"]);
+  assert.equal(result.checked, 2);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.errors, 1);
+  assert.deepEqual(result.items, [
+    {
+      conversation_id: "turn-historical",
+      status: "skipped",
+      reason: "conversation_status_closed"
+    },
+    {
+      conversation_id: "turn-active",
+      status: "error",
+      reason: "malformed active native identity"
+    }
+  ]);
+});
+
 test("monitor routing retains singleton lock and lazy configuration boundaries", async () => {
   let configurationReads = 0;
   let bridgeCreates = 0;

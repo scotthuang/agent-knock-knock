@@ -751,6 +751,158 @@ test("explicit user Close short-circuits every monitor recovery port", async () 
   });
 });
 
+test("owner-released terminal Turns skip native monitor recovery", async () => {
+  const statuses = [
+    "closed",
+    "idle",
+    "cancelled",
+    "failed"
+  ] satisfies Conversation["status"][];
+
+  for (const status of statuses) {
+    const trace: string[] = [];
+    const fixture = portsFixture(trace);
+    const listed: Conversation = { ...fixture.listed, status };
+    fixture.ports.state.isTerminalBridge = (candidate) => {
+      assert.strictEqual(candidate, listed);
+      trace.push("terminal-bridge");
+      return true;
+    };
+
+    const result = await reconcile(listed, fixture.ports);
+
+    assert.deepEqual(trace, [
+      "local",
+      "callback-reconcile",
+      "terminal-bridge"
+    ], status);
+    assert.deepEqual(result, {
+      kind: "handled",
+      counter: "skipped",
+      item: {
+        conversation_id: "turn-1",
+        status: "skipped",
+        reason: `conversation_status_${status}`
+      }
+    }, status);
+  }
+});
+
+test("a stalled terminal Turn still enters exact crash-lag recovery", async () => {
+  const trace: string[] = [];
+  const fixture = portsFixture(trace);
+  const listed: Conversation = { ...fixture.listed, status: "stalled" };
+  fixture.ports.state.isTerminalBridge = (candidate) => {
+    assert.strictEqual(candidate, listed);
+    trace.push("terminal-bridge");
+    return true;
+  };
+  fixture.ports.authority.migrateIdentity = async (candidate, paths) => {
+    assert.strictEqual(candidate, listed);
+    assert.strictEqual(paths, PATHS);
+    trace.push("migrate");
+    return fixture.migrated;
+  };
+
+  const result = await reconcile(listed, fixture.ports);
+
+  assert.deepEqual(trace, [
+    "local",
+    "callback-reconcile",
+    "terminal-bridge",
+    "migrate",
+    "submission-retry",
+    "verified-dead",
+    "deferred",
+    "submission-retry-finalize",
+    "virgin",
+    "binding",
+    "eligibility"
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    kind: "candidate",
+    conversation: fixture.virgin,
+    eligibility: fixture.eligibility
+  });
+});
+
+test("callback recovery precedes the owner-released monitor-state fence", async () => {
+  const trace: string[] = [];
+  const fixture = portsFixture(trace);
+  const listed: Conversation = { ...fixture.listed, status: "idle" };
+  fixture.ports.callbacks.reconcile = () => {
+    trace.push("callback-reconcile");
+    return {
+      handled: true,
+      conversationId: listed.conversation_id,
+      status: "launched",
+      reason: "callback_recovery_launched",
+      monitorPid: 73
+    };
+  };
+
+  const result = await reconcile(listed, fixture.ports);
+
+  assert.deepEqual(trace, ["local", "callback-reconcile"]);
+  assert.deepEqual(result, {
+    kind: "handled",
+    counter: "launched",
+    item: {
+      conversation_id: "turn-1",
+      status: "launched",
+      reason: "callback_recovery_launched",
+      monitor_pid: 73
+    }
+  });
+});
+
+test("local completion precedes the owner-released monitor-state fence", async () => {
+  const trace: string[] = [];
+  const fixture = portsFixture(trace);
+  const listed: Conversation = { ...fixture.listed, status: "closed" };
+  fixture.ports.completion.settleLocal = () => {
+    trace.push("local");
+    return {
+      handled: true,
+      recovered: true,
+      reason: "local_completion_recovered"
+    };
+  };
+
+  const result = await reconcile(listed, fixture.ports);
+
+  assert.deepEqual(trace, ["local"]);
+  assert.deepEqual(result, {
+    kind: "handled",
+    counter: "skipped",
+    item: {
+      conversation_id: "turn-1",
+      status: "recovered",
+      reason: "local_completion_recovered"
+    }
+  });
+});
+
+test("malformed active monitor state still reports its authority failure", async () => {
+  const trace: string[] = [];
+  const fixture = portsFixture(trace);
+  fixture.ports.authority.migrateIdentity = async () => {
+    trace.push("migrate");
+    throw new Error("malformed active native identity");
+  };
+
+  await assert.rejects(
+    reconcile(fixture.listed, fixture.ports),
+    /malformed active native identity/u
+  );
+  assert.deepEqual(trace, [
+    "local",
+    "callback-reconcile",
+    "terminal-bridge",
+    "migrate"
+  ]);
+});
+
 test("startup retry recovery preserves terminal outcomes and finalizes accepted crash lags", () => {
   const recovery = compiledMonitorStateSource(
     "async #recoverSubmissionRetry(",

@@ -16,6 +16,7 @@ import {
   TERMINAL_WATCH_VERSION,
   TerminalWatchConflictError,
   assertTerminalWatch,
+  createCodexUserExplicitFallbackWatchAnchor,
   createClaudeUserExplicitFallbackWatchAnchor,
   createTerminalActivityWatchAnchor,
   createTerminalWatchStore,
@@ -53,8 +54,10 @@ import {
   type ClaudeHumanStartedActiveTaskAnchor,
   type ClaudeTranscriptAnchor
 } from "../src/claude-local-transcript-provider.js";
-import type { CodexHumanStartedActiveTaskAnchor } from
-  "../src/terminal-submission-acceptance.js";
+import {
+  captureCodexRolloutAcceptanceAnchor,
+  type CodexHumanStartedActiveTaskAnchor
+} from "../src/terminal-submission-acceptance.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
 
 const THREAD_ID = "11111111-1111-4111-8111-111111111111";
@@ -231,6 +234,75 @@ function approvalNotification(
   return notification;
 }
 
+/** Exact callback presentation persisted by Watch v1 and early Watch v2. */
+function predecessorCallbackEnvelopeFixture(
+  owner: TerminalWatch,
+  notification: TerminalWatchNotification,
+  route: CallbackRouteV1,
+  origin: "human_started" | "user_explicit_fallback"
+): CallbackEnvelopeV1 {
+  if (
+    notification.kind === "interaction_required" ||
+    notification.kind === "interaction_manual_required"
+  ) {
+    throw new Error("predecessor Watches did not persist interaction events");
+  }
+  const event = notification.kind === "approval"
+    ? "approval_required"
+    : notification.kind;
+  const reasonCode = notification.kind === "approval"
+    ? notification.reason_code
+    : notification.reason_code ?? owner.settlement?.reason_code;
+  const eventInstruction = event === "approval_required"
+    ? "Tell the user that the observed TUI task is waiting for approval and ask the human to inspect and decide in the named live TUI. Do not call any AKK approval tool or action, do not send approval keys, and do not use autoApprove."
+    : event === "completed"
+      ? origin === "user_explicit_fallback"
+        ? "Tell the user that the request delivered through AKK's user-explicit unmanaged fallback completed and summarize only the bounded completion text below."
+        : "Tell the user that the human-started TUI task completed and summarize only the bounded completion text below."
+      : "Tell the user that Terminal Watch stopped without a verified successful completion and explain the exact reason below.";
+  const completionText = notification.kind === "completed" ||
+      notification.kind === "failed"
+    ? owner.settlement?.completion_text
+    : undefined;
+  return createCallbackEnvelope({
+    route,
+    deliveryId: notification.notification_id,
+    idempotencyKey: notification.idempotency_key,
+    source: {
+      kind: "terminal_watch",
+      watch_id: owner.watch_id,
+      terminal_id: owner.terminal.terminal_id
+    },
+    event: {
+      id: notification.notification_id,
+      type: event,
+      body: [
+        "Continue this controller conversation from the Agent Knock Knock Terminal Watch event below.",
+        origin === "user_explicit_fallback"
+          ? "AKK delivered this exact request through terminal_user_explicit unmanaged fallback and then attached Terminal Watch. It is not a managed AKK Turn."
+          : "This is an observation of a task started by the human directly in Codex or Claude Code. It is not an AKK Turn and AKK did not send terminal input.",
+        eventInstruction,
+        "Do not poll files, processes, terminal panes, stdout, or stderr. Use only this structured event.",
+        "",
+        `[AKK Terminal Watch: ${event}]`,
+        `Watch: ${owner.watch_id}`,
+        `Terminal: ${owner.terminal.terminal_id}`,
+        `Agent: ${owner.agent}`,
+        ...(reasonCode ? [`Detail: ${reasonCode}`] : []),
+        ...(completionText
+          ? ["", "Bounded completion text:", completionText]
+          : [])
+      ].join("\n"),
+      requires_response: true,
+      metadata: {
+        agent: owner.agent,
+        ...(reasonCode ? { reason_code: reasonCode } : {}),
+        ...(completionText ? { completion_text: completionText } : {})
+      }
+    }
+  });
+}
+
 function manualInteractionNotification(
   owner: TerminalWatch,
   evidenceFingerprint = "e".repeat(64)
@@ -269,6 +341,109 @@ function tempStore(t: test.TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-watch-store-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return path.join(directory, "store");
+}
+
+function writePredecessorCallbackWatchFixture(
+  storeDir: string,
+  version: 1 | 2,
+  watchId: string
+): {
+  raw: Record<string, unknown>;
+  statePath: string;
+} {
+  const route = createLegacyOpenClawCallbackRoute({
+    controllerSessionId: "openclaw-session-1",
+    gatewayMethod: "chat.send",
+    openclawBin: "/usr/local/bin/openclaw"
+  });
+  let active: TerminalWatch = {
+    ...watch(watchId),
+    callback_route: route
+  };
+  if (version === 2) {
+    const acceptanceAnchor = captureCodexRolloutAcceptanceAnchor({
+      processUuid: "codex-process-uuid",
+      processBirth: "codex-process-birth",
+      nativeThreadId: THREAD_ID,
+      mode: "pre_materialization",
+      expectedEmptyNativeSession: true,
+      now: new Date(CREATED_AT)
+    });
+    const anchor = createCodexUserExplicitFallbackWatchAnchor({
+      acceptanceAnchor,
+      requestHash: SHA_B,
+      codexVersion: "0.148.0"
+    });
+    active = {
+      ...active,
+      anchor,
+      observation_checkpoint: initialTerminalWatchObservationCheckpoint(anchor)
+    };
+  }
+  const created = saveTerminalWatch(storeDir, active, {
+    expectedRevision: null
+  });
+  const observedAt = "2026-08-21T00:00:01.000Z";
+  const evidence = version === 1 ? "c".repeat(64) : "d".repeat(64);
+  const kind = version === 1 ? "completed" as const : "invalidated" as const;
+  const notificationId = terminalWatchNotificationId(
+    watchId,
+    kind,
+    evidence
+  );
+  const settledOwner: TerminalWatch = {
+    ...created,
+    updated_at: observedAt,
+    status: kind,
+    settlement: {
+      kind,
+      evidence_fingerprint: evidence,
+      observed_at: observedAt,
+      reason_code: version === 1
+        ? "anchored_task_completed"
+        : "fallback_terminal_identity_changed",
+      ...(version === 1 ? { completion_text: "fixture complete" } : {})
+    },
+    notification_outbox: []
+  };
+  const notification: TerminalWatchNotification = {
+    notification_id: notificationId,
+    idempotency_key: terminalWatchNotificationIdempotencyKey(
+      watchId,
+      notificationId
+    ),
+    kind,
+    evidence_fingerprint: evidence,
+    reason_code: settledOwner.settlement!.reason_code,
+    callback_route: route,
+    status: version === 1 ? "delivered" : "failed",
+    attempts: 1,
+    created_at: observedAt,
+    last_attempt_at: observedAt,
+    ...(version === 1
+      ? { delivered_at: observedAt }
+      : {
+          failed_at: observedAt,
+          next_attempt_at: observedAt,
+          last_error_code: "callback_retryable_fixture"
+        })
+  };
+  notification.callback_envelope = predecessorCallbackEnvelopeFixture(
+    settledOwner,
+    notification,
+    route,
+    version === 1 ? "human_started" : "user_explicit_fallback"
+  );
+  const raw = structuredClone({
+    ...settledOwner,
+    notification_outbox: [notification]
+  }) as unknown as Record<string, unknown>;
+  raw.version = version;
+  delete raw.interaction_policy;
+  delete raw.current_interaction;
+  const statePath = pathsForTerminalWatch(watchId, storeDir).statePath;
+  fs.writeFileSync(statePath, `${JSON.stringify(raw)}\n`, { mode: 0o600 });
+  return { raw, statePath };
 }
 
 test("terminal Watch Store persists private atomic records and lists them", (t) => {
@@ -679,6 +854,216 @@ test("legacy v1/v2 Watch migration never infers interaction response authority",
       expectedRevision: terminalWatchRevision(migrated)
     });
     assert.equal(persisted.interaction_policy, "notify_only");
+  }
+});
+
+test("real v1 and early-v2 callback presentation snapshots remain readable and saveable", (t) => {
+  const storeDir = tempStore(t);
+  const fixtures = [
+    writePredecessorCallbackWatchFixture(
+      storeDir,
+      1,
+      "terminal-watch-real-v1-callback-envelope"
+    ),
+    writePredecessorCallbackWatchFixture(
+      storeDir,
+      2,
+      "terminal-watch-real-v2-fallback-callback-envelope"
+    )
+  ];
+
+  for (const fixture of fixtures) {
+    const before = fs.readFileSync(fixture.statePath);
+    const watchId = String(fixture.raw.watch_id);
+    const rawNotification = (fixture.raw.notification_outbox as Array<
+      TerminalWatchNotification
+    >)[0];
+    assert.deepEqual(
+      Object.keys(rawNotification.callback_envelope!.event.metadata!).sort(),
+      fixture.raw.status === "completed"
+        ? ["agent", "completion_text", "reason_code"]
+        : ["agent", "reason_code"]
+    );
+    const loaded = loadTerminalWatch(storeDir, watchId);
+    assert.equal(loaded.version, TERMINAL_WATCH_VERSION);
+    assert.equal(loaded.interaction_policy, "notify_only");
+    assert.deepEqual(fs.readFileSync(fixture.statePath), before);
+
+    const notification = loaded.notification_outbox[0];
+    assert.deepEqual(
+      Object.keys(notification.callback_envelope!.event.metadata!).sort(),
+      loaded.status === "completed"
+        ? [
+            "agent",
+            "completion_text",
+            "confidence",
+            "reason_code",
+            "watch_mode",
+            "watch_origin"
+          ]
+        : [
+            "agent",
+            "confidence",
+            "reason_code",
+            "watch_mode",
+            "watch_origin"
+          ]
+    );
+    assert.doesNotThrow(() =>
+      terminalWatchNotificationCallbackSnapshot(loaded, notification)
+    );
+
+    const persisted = saveTerminalWatch(storeDir, loaded, {
+      expectedRevision: terminalWatchRevision(loaded)
+    });
+    assert.equal(persisted.version, TERMINAL_WATCH_VERSION);
+    assert.deepEqual(loadTerminalWatch(storeDir, watchId), persisted);
+  }
+
+  const scan = scanTerminalWatchesForReconciliation(storeDir);
+  assert.equal(scan.errors.length, 0);
+  assert.equal(scan.watches.length, 2);
+});
+
+test("predecessor callback presentation compatibility keeps immutable identities fail-closed", (t) => {
+  const storeDir = tempStore(t);
+  const fixture = writePredecessorCallbackWatchFixture(
+    storeDir,
+    1,
+    "terminal-watch-v1-callback-tampering"
+  );
+  const predecessorShapedV3 = structuredClone(fixture.raw);
+  predecessorShapedV3.version = TERMINAL_WATCH_VERSION;
+  predecessorShapedV3.interaction_policy = "notify_only";
+  fs.writeFileSync(
+    fixture.statePath,
+    `${JSON.stringify(predecessorShapedV3)}\n`,
+    { mode: 0o600 }
+  );
+  assert.throws(
+    () => loadTerminalWatch(
+      storeDir,
+      "terminal-watch-v1-callback-tampering"
+    ),
+    /snapshot does not match its immutable identity/u,
+    "a v3 record cannot opt into predecessor presentation compatibility"
+  );
+
+  const mutations: Array<{
+    name: string;
+    mutate(
+      owner: Record<string, unknown>,
+      notification: Record<string, unknown>,
+      envelope: CallbackEnvelopeV1
+    ): void;
+  }> = [
+    {
+      name: "controller route",
+      mutate(_owner, notification, envelope) {
+        const callbackRoute = notification.callback_route as CallbackRouteV1;
+        notification.callback_route = {
+          ...callbackRoute,
+          controller_session_id: "redirected-controller"
+        };
+        envelope.route.controller_session_id = "redirected-controller";
+      }
+    },
+    {
+      name: "route profile",
+      mutate(_owner, notification, envelope) {
+        const callbackRoute = notification.callback_route as CallbackRouteV1;
+        notification.callback_route = {
+          ...callbackRoute,
+          profile_revision: "sha256:redirected-profile"
+        };
+        envelope.route.profile_revision = "sha256:redirected-profile";
+      }
+    },
+    {
+      name: "Watch source",
+      mutate(_owner, _notification, envelope) {
+        if (envelope.source.kind !== "terminal_watch") {
+          throw new Error("expected terminal Watch callback source");
+        }
+        envelope.source.watch_id = "terminal-watch-redirected";
+      }
+    },
+    {
+      name: "terminal source",
+      mutate(_owner, _notification, envelope) {
+        if (envelope.source.kind !== "terminal_watch") {
+          throw new Error("expected terminal Watch callback source");
+        }
+        envelope.source.terminal_id = "terminal:v2:redirected";
+      }
+    },
+    {
+      name: "delivery id",
+      mutate(_owner, _notification, envelope) {
+        envelope.delivery_id = "callback-delivery-redirected";
+      }
+    },
+    {
+      name: "idempotency key",
+      mutate(_owner, _notification, envelope) {
+        envelope.idempotency_key = "agent-knock-knock:redirected";
+      }
+    },
+    {
+      name: "event id",
+      mutate(_owner, _notification, envelope) {
+        envelope.event.id = "notification-redirected";
+      }
+    },
+    {
+      name: "event type",
+      mutate(_owner, _notification, envelope) {
+        envelope.event.type = "failed";
+      }
+    },
+    {
+      name: "response bit",
+      mutate(_owner, _notification, envelope) {
+        envelope.event.requires_response = false;
+      }
+    },
+    {
+      name: "presentation body",
+      mutate(_owner, _notification, envelope) {
+        envelope.event.body = "tampered predecessor callback body";
+      }
+    },
+    {
+      name: "presentation metadata",
+      mutate(_owner, _notification, envelope) {
+        envelope.event.metadata = {
+          ...envelope.event.metadata,
+          attacker_controlled: true
+        };
+      }
+    }
+  ];
+
+  for (const mutation of mutations) {
+    const corrupt = structuredClone(fixture.raw);
+    const notification = (corrupt.notification_outbox as Array<
+      Record<string, unknown>
+    >)[0];
+    const envelope = notification.callback_envelope as CallbackEnvelopeV1;
+    mutation.mutate(corrupt, notification, envelope);
+    fs.writeFileSync(
+      fixture.statePath,
+      `${JSON.stringify(corrupt)}\n`,
+      { mode: 0o600 }
+    );
+    assert.throws(
+      () => loadTerminalWatch(
+        storeDir,
+        "terminal-watch-v1-callback-tampering"
+      ),
+      Error,
+      mutation.name
+    );
   }
 });
 

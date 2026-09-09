@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import { deterministicTerminalCallbackMessageId } from
+  "../src/callback-outbox-service.js";
 import { callbackRouteFingerprintForConversation } from
   "../src/callback-route-authority.js";
 import { createConversation } from "../src/protocol.js";
@@ -239,6 +241,210 @@ test("transaction adapter releases state and writer before terminal after reload
   assert.deepEqual(trace, ["terminal:acquire", "terminal:release"]);
   assert.equal(fs.existsSync(`${statePath}.lock`), false);
   assert.equal(fs.existsSync(path.join(storeDir, ".akk-writer.lock")), false);
+});
+
+test("local completion skips only an exact receipt superseded by a newer dispatch", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-local-completion-superseded-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { storeDir, statePath, logPath } = conversationPaths(root);
+  const completionFingerprint = "c".repeat(64);
+  const completionId = "completion-1";
+  const claimedAt = "2026-08-15T04:06:00.000Z";
+  const accepted = acceptedConversation({ statePath, logPath });
+  const callbackMessageId = deterministicTerminalCallbackMessageId({
+    conversationId: accepted.conversation_id,
+    terminalMessageId: "message-1",
+    completionFingerprint,
+    outcome: "success"
+  });
+  const completed = {
+    ...accepted,
+    status: "idle" as const,
+    idle_since: claimedAt,
+    native_session_takeover: {
+      ...accepted.native_session_takeover,
+      terminal_bridge_completion_claim: {
+        callback_message_id: callbackMessageId,
+        completion_fingerprint: completionFingerprint,
+        completion_id: completionId,
+        claimed_at: claimedAt,
+        outcome: "success"
+      }
+    }
+  };
+  writeConversation(statePath, completed);
+  fs.writeFileSync(logPath, [
+    {
+      ts: claimedAt,
+      conversation_id: completed.conversation_id,
+      event: "terminal_bridge_completion_claimed",
+      terminal_bridge_message_id: "message-1",
+      completion_fingerprint: completionFingerprint,
+      completion_id: completionId,
+      callback_message_id: callbackMessageId,
+      outcome: "success"
+    },
+    {
+      ts: claimedAt,
+      conversation_id: completed.conversation_id,
+      event: "terminal_bridge_completion_detected",
+      terminal_bridge_message_id: "message-1",
+      completion_id: completionId,
+      callback_message_id: callbackMessageId,
+      completion_outcome: "success"
+    },
+    {
+      ts: claimedAt,
+      conversation_id: completed.conversation_id,
+      session_id: completed.session_id,
+      turn_id: completed.turn_id,
+      event: "message",
+      message: {
+        id: callbackMessageId,
+        type: "done",
+        to: "openclaw",
+        requires_response: false,
+        metadata: { terminal_bridge_message_id: "message-1" }
+      }
+    }
+  ].map((event) => JSON.stringify(event)).join("\n") + "\n", {
+    mode: 0o600
+  });
+
+  const acceptedReceipt: TerminalDispatchLedgerDocument = {
+    ...basicAcceptedLedger({ storeDir, statePath, logPath }),
+    openclaw_session: accepted.openclaw_session,
+    terminal_endpoint: terminalControlEvidence(CONTROL)
+  };
+  const newerLedger: TerminalDispatchLedgerDocument = {
+    ...acceptedReceipt,
+    status: "resolved",
+    generation_id: "message-2",
+    conversation_id: "turn-2",
+    session_id: "session-2",
+    turn_id: "turn-2",
+    message_id: "message-2",
+    prepared_at: "2026-08-15T05:00:00.000Z",
+    resolved_at: "2026-08-15T05:01:00.000Z",
+    state_path: path.join(storeDir, "conversations", "turn-2", "state.json"),
+    event_log_path: path.join(
+      storeDir,
+      "conversations",
+      "turn-2",
+      "events.ndjson"
+    ),
+    terminal_submission_receipts: [acceptedReceipt]
+  };
+  let currentLedger: TerminalDispatchLedgerDocument | undefined = newerLedger;
+  let currentProcessAnchor: number | undefined = CONTROL.panePid;
+  let resolveCalls = 0;
+  const repository = {
+    acquire: () => () => undefined,
+    load: () => currentLedger,
+    resolve: () => {
+      resolveCalls += 1;
+      return false;
+    },
+    matchesControl: () => true,
+    processAnchor: () => currentProcessAnchor
+  } as unknown as TerminalDispatchRepositoryCliAdapter;
+  const facade = createTerminalDispatchRecoveryCliAdapter({
+    repository,
+    authority: {
+      terminalControl: () => CONTROL,
+      assertNoDeferredTransfer: () => undefined,
+      assertTurnBindingCurrent: () => undefined,
+      storeDirForConversation: () => storeDir
+    },
+    observation: {
+      process: async () => ({ status: "unverifiable", reason: "unused" }),
+      completion: async () => ({ status: "unverifiable", reason: "unused" })
+    },
+    completion: {
+      prepare: () => {
+        throw new Error("unused completion preparation");
+      }
+    },
+    runtime: { isProcessAlive: () => false }
+  });
+  const settle = () => facade.settleLocalCompletion({
+    storeDir,
+    statePath,
+    logPath
+  });
+
+  await runCliCommandExecution("superseded-local-completion-test", {}, {
+    runtimeLog: () => undefined
+  }, async () => {
+    assert.deepEqual(settle(), {
+      handled: true,
+      recovered: false,
+      reason: "local_terminal_completion_superseded_by_newer_dispatch"
+    });
+    assert.equal(resolveCalls, 0);
+
+    currentLedger = {
+      ...newerLedger,
+      terminal_submission_receipts: []
+    };
+    assert.throws(settle, /has no exact accepted terminal ledger/u);
+
+    currentLedger = {
+      ...newerLedger,
+      prepared_at: claimedAt
+    };
+    assert.throws(settle, /has no exact accepted terminal ledger/u);
+
+    currentLedger = {
+      ...newerLedger,
+      conversation_id: completed.conversation_id
+    };
+    assert.throws(settle, /has no exact accepted terminal ledger/u);
+
+    currentLedger = {
+      ...newerLedger,
+      status: "corrupt"
+    };
+    assert.throws(settle, /has no exact accepted terminal ledger/u);
+
+    currentLedger = newerLedger;
+    currentProcessAnchor = undefined;
+    assert.throws(settle, /has no exact accepted terminal ledger/u);
+
+    currentProcessAnchor = CONTROL.panePid + 1;
+    assert.throws(settle, /has no exact accepted terminal ledger/u);
+
+    currentProcessAnchor = CONTROL.panePid;
+    currentLedger = {
+      ...newerLedger,
+      state_path: path.join(storeDir, "elsewhere", "turn-2", "state.json")
+    };
+    assert.throws(settle, /has no exact accepted terminal ledger/u);
+
+    currentLedger = {
+      ...newerLedger,
+      conversation_id: "../../escaped-turn",
+      turn_id: "../../escaped-turn",
+      state_path: path.join(
+        storeDir,
+        "conversations",
+        "../../escaped-turn",
+        "state.json"
+      ),
+      event_log_path: path.join(
+        storeDir,
+        "conversations",
+        "../../escaped-turn",
+        "events.ndjson"
+      )
+    };
+    assert.throws(settle, /invalid conversation id/u);
+  });
+  assert.equal(resolveCalls, 0);
+  assert.deepEqual(loadState(statePath), completed);
 });
 
 test("prepared owner mismatch observes neither clock nor Store binding facts", async (t) => {

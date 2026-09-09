@@ -2,6 +2,7 @@ import type { CallbackExecutionResult, PreparedCallback } from
   "./callback-outbox-service.js";
 import {
   isExplicitUserAbandonedManagementTurn,
+  isTerminalDispatchOwnerReleasedStatus,
   type Conversation
 } from "./protocol.js";
 import type {
@@ -149,6 +150,21 @@ export async function reconcileTerminalMonitorStateCandidate(input: {
 
   if (!input.ports.state.isTerminalBridge(input.listed)) {
     return { kind: "ignored" };
+  }
+
+  // Local completion and callback delivery recovery must retain the first
+  // opportunity to settle durable work. Once those have declined, a Turn
+  // whose terminal-dispatch ownership is already released cannot require a
+  // terminal monitor. Those historical states must not enter native
+  // identity/submission recovery: their Session binding may have been
+  // intentionally detached or replaced. Other non-waiting states, especially
+  // `stalled`, must continue through recovery because an exact crash-lag may
+  // still restore their durable submission authority.
+  if (isTerminalDispatchOwnerReleasedStatus(input.listed.status)) {
+    return handled("skipped", input.listed.conversation_id, {
+      status: "skipped",
+      reason: `conversation_status_${String(input.listed.status ?? "missing")}`
+    });
   }
 
   let conversation = await input.ports.authority.migrateIdentity(
