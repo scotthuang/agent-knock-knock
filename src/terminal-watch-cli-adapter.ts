@@ -2008,8 +2008,14 @@ function terminalWatchQuestionnaireObservation(input: {
     stringValue(input.rawTerminal.agent_version);
   if (!screen || !version) return undefined;
 
+  const responseWatch = input.observationCheckpoint
+    ? {
+        ...input.watch,
+        observation_checkpoint: input.observationCheckpoint
+      }
+    : input.watch;
   const responseDecision = terminalWatchResponseDecision(
-    input.watch,
+    responseWatch,
     input.rawTerminal,
     input.options,
     input.dependencies
@@ -2168,6 +2174,7 @@ function terminalWatchResponseDecision(
     watch.status !== "active" ||
     watch.interaction_policy !== "respond_when_exact" ||
     isTerminalActivityWatch(watch) ||
+    !terminalWatchCandidateMatchesLiveContext(watch, rawTerminal) ||
     (watch.callback_route !== undefined &&
       watch.callback_route.capabilities?.respond !== true)
   ) {
@@ -2199,6 +2206,8 @@ function terminalWatchResponseDecision(
       candidate.status === "active" &&
       candidate.interaction_policy === "respond_when_exact" &&
       !isTerminalActivityWatch(candidate) &&
+      (candidate.callback_route === undefined ||
+        candidate.callback_route.capabilities?.respond === true) &&
       candidate.terminal.terminal_id === watch.terminal.terminal_id &&
       terminalWatchCandidateMatchesLiveContext(candidate, rawTerminal)
     );
