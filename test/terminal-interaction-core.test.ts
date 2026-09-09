@@ -89,7 +89,7 @@ test("subject-neutral builder gives monitor and Watch the same surface identity"
   );
   assert.equal(managed.projection.turn_id, "turn_123");
   assert.equal("turn_id" in watch.projection, false);
-  assert.equal(watch.projection.prompt_fingerprint, PROMPT_SHA);
+  assert.match(watch.projection.prompt_fingerprint, /^[0-9a-f]{64}$/u);
   assert.equal(
     JSON.stringify(watch.projection).includes("private native screen region"),
     false

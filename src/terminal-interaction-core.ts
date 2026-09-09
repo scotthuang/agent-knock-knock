@@ -75,6 +75,10 @@ export type TerminalInteractionAggregateEvent =
       readonly at: string;
     }
   | {
+      /** Exact proof that reservation completed but no terminal input began. */
+      readonly type: "release";
+    }
+  | {
       readonly type: "consume";
       readonly at: string;
       readonly reason_code: string;
@@ -201,7 +205,16 @@ export function buildTerminalInteractionOffer(
     throw new TypeError("native questionnaire agent does not match offer agent");
   }
   const subject = validateTerminalInteractionSubject(input.subject);
-  const promptFingerprint = input.inspection.prompt_evidence.sha256;
+  // Native exact regions include cursor/highlight state. Public identity must
+  // stay stable when the user or TUI merely moves the selection within the
+  // same semantic question; exact action plans are still recaptured three
+  // times immediately around dispatch.
+  const promptFingerprint = sha256("terminal-interaction-prompt", {
+    profile: input.inspection.profile,
+    current_step: input.inspection.current_step,
+    total_steps: input.inspection.total_steps,
+    question: input.inspection.question
+  });
   const surfaceMaterial = {
     version: 1,
     agent: input.agent,
@@ -355,6 +368,16 @@ export function reduceTerminalInteractionAggregate(
           response_hash: event.response_hash,
           reserved_at: event.at
         }
+      };
+      break;
+    case "release":
+      if (current.state !== "reserved") {
+        throw transitionError(current.state, event.type);
+      }
+      next = {
+        ...current,
+        state: "pending",
+        reservation: undefined
       };
       break;
     case "consume":

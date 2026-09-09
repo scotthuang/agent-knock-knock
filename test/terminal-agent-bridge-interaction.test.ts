@@ -8,6 +8,7 @@ import {
   type TerminalScreenInspection
 } from "../src/terminal-agent-adapter.js";
 import {
+  captureTerminalInteractionRuntimeOffer,
   TerminalAgentBridge,
   TerminalInteractionDispatchReservedError,
   TerminalInteractionInputNotStartedError,
@@ -44,6 +45,7 @@ const RUNTIME: TerminalRuntimeIdentity = {
   pid: 701,
   agentVersion: "0.153.4",
   turnId: "turn_123",
+  messageId: "message_123",
   conversationId: "conversation_123",
   terminalTarget: PANE.target
 };
@@ -376,6 +378,87 @@ test("status and monitor project only safe semantics with a stable exact offer",
     poll.status.interaction_state?.interaction_id,
     first.interaction_state?.interaction_id
   );
+});
+
+test("managed and Watch runtimes share one native surface identity", async () => {
+  for (const scenario of [
+    {
+      agent: "codex" as const,
+      version: "0.153.4",
+      screen: CODEX_OPTIONS,
+      nativeSessionId: "018f0000-0000-7000-8000-000000000001",
+      nativeProcessUuid: "codex-process-1",
+      nativeProcessBirth: "codex-birth-1",
+      nativeRollout: {
+        fd: "12",
+        device: "16777234",
+        inode: "4242",
+        path: "/tmp/rollout-1.jsonl"
+      }
+    },
+    {
+      agent: "claude" as const,
+      version: "2.1.263",
+      screen: CLAUDE_SINGLE_SELECT,
+      nativeSessionId: "claude-session-1",
+      nativeProcessUuid: "claude-process-1",
+      nativeProcessBirth: "claude-birth-1",
+      nativeRollout: undefined
+    }
+  ]) {
+    const { control } = await fixture(scenario.screen, {
+      agent: scenario.agent
+    });
+    const native = {
+      pid: 701,
+      agentVersion: scenario.version,
+      nativeSessionId: scenario.nativeSessionId,
+      nativeProcessUuid: scenario.nativeProcessUuid,
+      nativeProcessBirth: scenario.nativeProcessBirth,
+      ...(scenario.nativeRollout
+        ? { nativeRollout: scenario.nativeRollout }
+        : {}),
+      terminalTarget: PANE.target
+    };
+    const managed = captureTerminalInteractionRuntimeOffer({
+      agent: scenario.agent,
+      terminalControl: control,
+      screen: scenario.screen,
+      runtime: {
+        ...native,
+        turnId: "turn_surface_1",
+        messageId: "message_surface_1"
+      },
+      now: NOW
+    });
+    const watch = captureTerminalInteractionRuntimeOffer({
+      agent: scenario.agent,
+      terminalControl: control,
+      screen: scenario.screen,
+      runtime: {
+        ...native,
+        // Exact Watch discovery has this extra live identity fence while the
+        // durable managed-Turn takeover currently does not.
+        nativeProcessStartedAt: 1_788_888_888_000,
+        interactionSubject: {
+          kind: "terminal_watch",
+          watch_id: "terminal-watch-surface-1",
+          anchor_fingerprint: "a".repeat(64)
+        },
+        interactionResponseAuthority: "executable"
+      },
+      now: NOW
+    });
+
+    assert.ok(managed, `${scenario.agent} managed offer`);
+    assert.ok(watch, `${scenario.agent} Watch offer`);
+    assert.equal(managed.surfaceId, watch.surfaceId, scenario.agent);
+    assert.equal(managed.promptFingerprint, watch.promptFingerprint);
+    assert.notEqual(
+      managed.projection.interaction_id,
+      watch.projection.interaction_id
+    );
+  }
 });
 
 test("status requires agent version, safe Turn id, and canonical process identity", async () => {
@@ -1162,6 +1245,66 @@ test("post-reservation prompt drift proves terminal input never started", async 
       assert.equal(error.stage, "input_not_started");
       return true;
     }
+  );
+  assert.equal(reservations, 1);
+  assert.equal(provider.operations.some((operation) =>
+    operation.kind === "text" || operation.kind === "keys"), false);
+});
+
+test("semantic cursor identity stays stable while final action-plan drift sends no input", async () => {
+  const movedCursor = CLAUDE_SINGLE_SELECT
+    .replace("❯ 1. Red", "  1. Red")
+    .replace("  2. Blue", "❯ 2. Blue");
+  const runtime: TerminalRuntimeIdentity = {
+    ...RUNTIME,
+    agentVersion: "2.1.263"
+  };
+  const { bridge, provider, control } = await fixture(CLAUDE_SINGLE_SELECT, {
+    agent: "claude"
+  });
+  const initial = captureTerminalInteractionRuntimeOffer({
+    agent: "claude",
+    terminalControl: control,
+    screen: CLAUDE_SINGLE_SELECT,
+    runtime,
+    now: NOW
+  });
+  const moved = captureTerminalInteractionRuntimeOffer({
+    agent: "claude",
+    terminalControl: control,
+    screen: movedCursor,
+    runtime,
+    now: NOW
+  });
+  assert.ok(initial);
+  assert.ok(moved);
+  assert.equal(initial.promptFingerprint, moved.promptFingerprint);
+  assert.equal(initial.surfaceId, moved.surfaceId);
+  assert.notDeepEqual(initial.actionPlan, moved.actionPlan);
+
+  provider.setScreens([
+    CLAUDE_SINGLE_SELECT,
+    CLAUDE_SINGLE_SELECT,
+    movedCursor
+  ]);
+  provider.clearOperations();
+  let reservations = 0;
+  await assert.rejects(
+    bridge.respondInteraction(
+      "claude",
+      control,
+      selectResponse(initial.projection),
+      {
+        agentVersion: "2.1.263",
+        expectedFingerprint: initial.promptFingerprint,
+        expectedExpiresAt: initial.projection.expires_at,
+        runtime,
+        beforeDispatch() {
+          reservations += 1;
+        }
+      }
+    ),
+    TerminalInteractionInputNotStartedError
   );
   assert.equal(reservations, 1);
   assert.equal(provider.operations.some((operation) =>
