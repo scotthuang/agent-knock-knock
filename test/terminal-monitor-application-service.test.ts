@@ -116,12 +116,14 @@ function status(
 }
 
 const INTERACTION_FINGERPRINT = "a".repeat(64);
+const INTERACTION_SURFACE_ID = `tis_${"b".repeat(40)}`;
 
 function interactionStatus(input: {
   agent?: "codex" | "claude";
   fingerprint?: string;
   interactionId?: string;
   questionId?: string;
+  surfaceId?: string;
 } = {}): TerminalBridgeStatus {
   const agent = input.agent ?? "codex";
   return {
@@ -132,6 +134,7 @@ function interactionStatus(input: {
     screen: { digest: "screen-question" },
     interaction_prompt_fingerprint:
       input.fingerprint ?? INTERACTION_FINGERPRINT,
+    interaction_surface_id: input.surfaceId ?? INTERACTION_SURFACE_ID,
     interaction_state: {
       schema: TERMINAL_INTERACTION_SCHEMA,
       version: TERMINAL_INTERACTION_VERSION,
@@ -835,6 +838,37 @@ test("a consumed native questionnaire fingerprint is never replayed", async () =
   ));
 });
 
+test("a questionnaire without an exact private surface claim is not notified", async () => {
+  const trace: string[] = [];
+  const owner = conversation({
+    terminal_bridge_pre_send_screen_fingerprint: "screen-before"
+  });
+  const stopped = { ...owner, status: "idle" as const };
+  const withoutSurface = interactionStatus();
+  delete withoutSurface.interaction_surface_id;
+  const ports = fakePorts(trace, owner);
+  let loads = 0;
+  ports.state.load = () => {
+    trace.push("state.load");
+    return loads++ === 0 ? owner : stopped;
+  };
+  ports.authority.poll = async () => ({
+    kind: "observed",
+    poll: { status: withoutSurface }
+  });
+
+  await runTerminalMonitor({
+    initialConversation: owner,
+    expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION,
+    lifecycle: { startedRecorded: true },
+    ports
+  });
+
+  assert.equal(trace.includes("interaction.record"), false);
+  assert.ok(trace.includes("log:terminal_bridge_interaction_not_actionable"));
+});
+
 test("a distinct questionnaire step after a consumed response is notified", async () => {
   const trace: string[] = [];
   const owner = conversation({
@@ -1037,6 +1071,7 @@ test("interaction outbox recovery reuses the persisted immutable projection", ()
       interaction_id: storedProjection.interaction_id,
       question_id: storedProjection.questions[0]!.question_id,
       prompt_fingerprint: INTERACTION_FINGERPRINT,
+      surface_id: INTERACTION_SURFACE_ID,
       callback_message_id: "callback-interaction-1",
       callback_message_ts: "1970-01-01T00:00:00.000Z",
       interaction_state: storedProjection
@@ -1053,6 +1088,7 @@ test("interaction outbox recovery reuses the persisted immutable projection", ()
     interactionId: storedProjection.interaction_id,
     questionId: storedProjection.questions[0]!.question_id,
     fingerprint: INTERACTION_FINGERPRINT,
+    surfaceId: INTERACTION_SURFACE_ID,
     ports: {
       record: ({ onRecorded }) => ({
         conversation: owner,
@@ -1073,6 +1109,12 @@ test("interaction outbox recovery reuses the persisted immutable projection", ()
   assert.notEqual(
     preparedProjection.expires_at,
     currentStatus.interaction_state?.expires_at
+  );
+  assert.equal(Object.hasOwn(preparedMetadata ?? {}, "surface_id"), false);
+  assert.equal(
+    JSON.stringify(preparedMetadata).includes(INTERACTION_SURFACE_ID),
+    false,
+    "owner-private surface identity must not enter callback metadata"
   );
 });
 
@@ -1105,6 +1147,7 @@ test("manual interaction callback is notification-only and gives no response com
       interaction_id: projection.interaction_id,
       question_id: "question-manual",
       prompt_fingerprint: INTERACTION_FINGERPRINT,
+      surface_id: INTERACTION_SURFACE_ID,
       callback_message_id: "callback-manual-1",
       callback_message_ts: "1970-01-01T00:00:00.000Z",
       interaction_state: projection
@@ -1125,6 +1168,7 @@ test("manual interaction callback is notification-only and gives no response com
     interactionId: projection.interaction_id,
     questionId: "question-manual",
     fingerprint: INTERACTION_FINGERPRINT,
+    surfaceId: INTERACTION_SURFACE_ID,
     ports: {
       record: ({ onRecorded }) => ({
         conversation: owner,

@@ -700,6 +700,7 @@ export interface InteractionNotificationAdapterPorts {
     interactionId: string;
     questionId: string;
     fingerprint: string;
+    surfaceId: string;
     expectedConversation: {
       conversationId: string;
       status: ConversationStatus;
@@ -730,6 +731,7 @@ export function recordMonitorInteractionNotification(input: {
   interactionId: string;
   questionId: string;
   fingerprint: string;
+  surfaceId: string;
   ports: InteractionNotificationAdapterPorts;
 }): MonitorInteractionNotificationResult {
   return input.ports.record({
@@ -738,6 +740,7 @@ export function recordMonitorInteractionNotification(input: {
     interactionId: input.interactionId,
     questionId: input.questionId,
     fingerprint: input.fingerprint,
+    surfaceId: input.surfaceId,
     expectedConversation: {
       conversationId: input.conversation.conversation_id,
       status: input.conversation.status,
@@ -748,7 +751,8 @@ export function recordMonitorInteractionNotification(input: {
       const interactionState = persistedInteractionNotificationProjection({
         conversation,
         interactionId: input.interactionId,
-        questionId: input.questionId
+        questionId: input.questionId,
+        surfaceId: input.surfaceId
       });
       const executable = interactionState.state === "pending" &&
         interactionState.capabilities.respond === true &&
@@ -792,6 +796,7 @@ function persistedInteractionNotificationProjection(input: {
   conversation: Conversation;
   interactionId: string;
   questionId: string;
+  surfaceId: string;
 }): TerminalInteractionProjection {
   const takeover = isRecord(input.conversation.native_session_takeover)
     ? input.conversation.native_session_takeover
@@ -807,6 +812,7 @@ function persistedInteractionNotificationProjection(input: {
   if (
     notification?.interaction_id !== input.interactionId ||
     notification?.question_id !== input.questionId ||
+    notification?.surface_id !== input.surfaceId ||
     projection.interaction_id !== input.interactionId ||
     projection.questions.length !== 1 ||
     projection.questions[0]?.question_id !== input.questionId

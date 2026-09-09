@@ -2040,7 +2040,9 @@ class TerminalMonitorStateCliApplication {
       projection?.interaction_id === input.interactionId &&
       projection.questions.length === 1 &&
       projection.questions[0]?.question_id === input.questionId &&
-      input.terminalStatus.interaction_prompt_fingerprint === input.fingerprint;
+      input.terminalStatus.interaction_prompt_fingerprint === input.fingerprint &&
+      input.terminalStatus.interaction_surface_id === input.surfaceId &&
+      validTerminalInteractionSurfaceId(input.surfaceId);
   }
 
   #interactionPersistenceContext(
@@ -2092,6 +2094,7 @@ class TerminalMonitorStateCliApplication {
       callbackInteractionState.questions.length === 1 &&
       callbackInteractionState.questions[0]?.question_id ===
         previousNotification?.question_id &&
+      previousNotification?.surface_id === input.surfaceId &&
       callbackInteractionState.turn_id === turnIdForConversation(conversation);
     const deliveryStatus = nonBlankString(callbackDelivery?.status);
     const deliveryAttempts = Number(callbackDelivery?.attempts ?? 0);
@@ -2126,6 +2129,7 @@ class TerminalMonitorStateCliApplication {
       context.previousNotification?.question_id === context.input.questionId &&
       context.previousNotification?.prompt_fingerprint ===
         context.input.fingerprint &&
+      context.previousNotification?.surface_id === context.input.surfaceId &&
       context.previousInteractionState?.interaction_id ===
         context.input.interactionId &&
       context.previousInteractionState.questions.length === 1 &&
@@ -2213,6 +2217,7 @@ class TerminalMonitorStateCliApplication {
           interaction_id: context.input.interactionId,
           question_id: context.input.questionId,
           prompt_fingerprint: context.input.fingerprint,
+          surface_id: context.input.surfaceId,
           screen_digest: context.interactionScreenDigest,
           notified_at: now,
           terminal_control: context.input.terminalControl,
@@ -3291,6 +3296,10 @@ function validInteractionProjection(
   } catch {
     return undefined;
   }
+}
+
+function validTerminalInteractionSurfaceId(value: unknown): value is string {
+  return typeof value === "string" && /^tis_[0-9a-f]{40}$/u.test(value);
 }
 
 function detectorDiagnostic(

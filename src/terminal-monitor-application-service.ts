@@ -221,6 +221,7 @@ export interface TerminalMonitorServicePorts {
       interactionId: string;
       questionId: string;
       fingerprint: string;
+      surfaceId: string;
     }): MonitorInteractionNotificationResult;
   };
   authority: {
@@ -1094,6 +1095,9 @@ function handleInteractionObservation(
   const fingerprint = stringValue(
     input.terminalStatus.interaction_prompt_fingerprint
   );
+  const surfaceId = terminalInteractionSurfaceId(
+    input.terminalStatus.interaction_surface_id
+  );
   const observationMatches = interactionObservationMatchesMonitor(
     input,
     projection
@@ -1125,8 +1129,9 @@ function handleInteractionObservation(
     projection.turn_id === turnIdForConversation(input.state.conversation) &&
     typeof fingerprint === "string" &&
     /^[0-9a-f]{64}$/u.test(fingerprint) &&
+    surfaceId !== undefined &&
     screenChangedSinceSend;
-  if (!attributable || !fingerprint) {
+  if (!attributable || !fingerprint || !surfaceId) {
     input.ports.runtime.log("warn", "terminal_bridge_interaction_not_actionable", {
       conversation_id: input.state.conversation.conversation_id,
       terminal_target: input.terminalControl.target,
@@ -1173,7 +1178,8 @@ function handleInteractionObservation(
       input.currentMessageId &&
     stringValue(previousNotification?.interaction_id) ===
       projection.interaction_id &&
-    stringValue(previousNotification?.prompt_fingerprint) === fingerprint
+    stringValue(previousNotification?.prompt_fingerprint) === fingerprint &&
+    stringValue(previousNotification?.surface_id) === surfaceId
   ) {
     input.state.pollPolicyState = {
       ...input.state.pollPolicyState,
@@ -1190,7 +1196,8 @@ function handleInteractionObservation(
     currentMessageId: input.currentMessageId,
     interactionId: projection.interaction_id,
     questionId: question.question_id,
-    fingerprint
+    fingerprint,
+    surfaceId
   });
   if (notification.stale) {
     input.state.pollPolicyState = {
@@ -1301,6 +1308,13 @@ function handleInteractionObservation(
   });
   input.ports.runtime.sleep(input.configuration.pollIntervalMs);
   return "continue";
+}
+
+function terminalInteractionSurfaceId(value: unknown): string | undefined {
+  const candidate = stringValue(value);
+  return candidate && /^tis_[0-9a-f]{40}$/u.test(candidate)
+    ? candidate
+    : undefined;
 }
 
 function interactionCallbackPublicConversation(
