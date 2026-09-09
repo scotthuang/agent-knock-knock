@@ -330,7 +330,8 @@ test("terminal approval notification releases the state lock and late settlement
     const closedParsed = JSON.parse(closed.stdout);
     assert.equal(closedParsed.conversation.status, "closed");
     assert.equal(closedParsed.management_released, true);
-    assert.equal(closedParsed.terminal_input_sent, false);
+    assert.equal(closedParsed.terminal_input_sent, true);
+    assert.equal(closedParsed.terminal_input_dispatched, true);
     assert.equal(
       monitoring.child.exitCode,
       null,

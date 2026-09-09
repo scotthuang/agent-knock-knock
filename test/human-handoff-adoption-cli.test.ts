@@ -1774,7 +1774,8 @@ test("explicit Close ignores the obsolete verified-dead crash seam and commits S
     const output = JSON.parse(closed.stdout);
     assert.equal(output.closed, true);
     assert.equal(output.management_released, true);
-    assert.equal(output.terminal_input_sent, false);
+    assert.equal(output.terminal_input_sent, true);
+    assert.equal(output.terminal_input_dispatched, true);
     assert.equal(output.terminal_dispatch_resolved, true);
     const closedState = JSON.parse(
       fs.readFileSync(paths.statePath, "utf8")

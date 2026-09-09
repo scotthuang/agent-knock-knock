@@ -398,7 +398,8 @@ test("managed Close uses the Store writer rather than the terminal lock and prev
     const closeParsed = JSON.parse(closeResult.stdout);
     assert.equal(closeParsed.closed, true);
     assert.equal(closeParsed.management_released, true);
-    assert.equal(closeParsed.terminal_input_sent, false);
+    assert.equal(closeParsed.terminal_input_sent, true);
+    assert.equal(closeParsed.terminal_input_dispatched, true);
     assert.equal(closeParsed.conversation.status, "closed");
     assert.equal(
       closeParsed.conversation.close_race_marker,

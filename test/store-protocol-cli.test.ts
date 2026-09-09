@@ -18,8 +18,10 @@ import {
   STORE_WRITER_PROTOCOL,
   storeManifestPath
 } from "../src/store.js";
-import { InlineCodexLocalSessionAdapter } from
+import type { CodexLocalSessionAdapter } from
   "../src/codex-local-session-provider.js";
+import { inspectCodexOpenRootRolloutInventory } from
+  "../src/codex-store-adapter.js";
 import {
   MutableRecordingTerminalProvider,
   MutableTerminalProcessSource,
@@ -404,6 +406,20 @@ test("managed-first physical Send revalidates process birth under its terminal l
             command: "codex",
             cwd: workspace
           };
+          const codexLocalSessionAdapter: CodexLocalSessionAdapter = {
+            listThreadRows: async () => [],
+            readRollout: async () => undefined,
+            listProcessSnapshots: async () => [processSnapshot],
+            resolveActiveSessionIdentityForPid: async () => undefined,
+            inspectOpenRootRolloutInventoryForPid: async (pid, cwd) =>
+              inspectCodexOpenRootRolloutInventory({
+                codexHome: path.join(tempDir, "codex-home"),
+                pid,
+                cwd,
+                processBirth: originalBirth,
+                lsofOutput: `p${pid}\n`
+              })
+          };
           const dependencies = terminalCliDependencies({
             terminalProvider,
             processSource: new MutableTerminalProcessSource([processSnapshot]),
@@ -417,9 +433,7 @@ test("managed-first physical Send revalidates process birth under its terminal l
             },
             overrides: {
               agentVersionForRunningProcess: () => "0.149.1",
-              codexLocalSessionAdapter: new InlineCodexLocalSessionAdapter({
-                processes: [processSnapshot]
-              }),
+              codexLocalSessionAdapter,
               codexProcessBirthForPid: () => originalBirth,
               processBirthForPid: () => {
                 if (!sending) return originalBirth;

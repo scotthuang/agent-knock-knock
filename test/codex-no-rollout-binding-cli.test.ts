@@ -622,7 +622,9 @@ test("virgin Codex process drift after Enter quarantines the provisional binding
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const output = JSON.parse(result.stdout);
-    assert.equal(output.delivered, false);
+    assert.equal(output.delivered, true);
+    assert.equal(output.terminal_input_dispatched, true);
+    assert.equal(output.agent_acceptance, "unproven");
     assert.equal(output.status, "submission_uncertain");
     assert.equal(output.do_not_retry, true);
     assert.match(output.reason, /process incarnation changed/u);
@@ -3622,7 +3624,9 @@ test("abandoned deferred history blocks replay but not an explicit terminal send
     });
     assert.equal(uncertain.status, 0, uncertain.stderr || uncertain.stdout);
     const output = JSON.parse(uncertain.stdout);
-    assert.equal(output.delivered, false);
+    assert.equal(output.delivered, true);
+    assert.equal(output.terminal_input_dispatched, true);
+    assert.equal(output.agent_acceptance, "unproven");
     assert.equal(output.status, "submission_uncertain");
     let transfer = soleDeferredForegroundTransfer(fixture);
     assert.equal(transfer.status, "uncertain");
@@ -4076,7 +4080,9 @@ test("callbackless candidate pending acceptance restarts into one local completi
     );
     assert.equal(pending.status, 0, pending.stderr || pending.stdout);
     const pendingOutput = JSON.parse(pending.stdout);
-    assert.equal(pendingOutput.delivered, false);
+    assert.equal(pendingOutput.delivered, true);
+    assert.equal(pendingOutput.terminal_input_dispatched, true);
+    assert.equal(pendingOutput.agent_acceptance, "unproven");
     assert.equal(pendingOutput.status, "submission_pending_acceptance");
     assert.equal(pendingOutput.submission_outcome, "pending_acceptance");
     assert.equal(pendingOutput.callback_expected, false);
@@ -5087,9 +5093,10 @@ test("source-less human Send recovers a zero-match candidate without replay", as
   }
 });
 
-test("source-less human Send makes multiple exact candidate matches uncertain without replay", async () => {
+test("source-less human Send with a stable id makes multiple exact candidate matches uncertain without redispatch", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   const message = "Never guess between two source-less exact acceptors.";
+  const messageId = `msg-openclaw-${"8".repeat(64)}`;
   try {
     enableFixtureCandidateInventory(fixture, [
       NATIVE_THREAD_ID,
@@ -5101,17 +5108,20 @@ test("source-less human Send makes multiple exact candidate matches uncertain wi
       NATIVE_THREAD_ID,
       EXTERNAL_THREAD_ID
     ];
-    const args = userExplicitDeferredForegroundSendArgs(
-      fixture,
-      action,
-      message
-    );
+    const args = [
+      ...userExplicitDeferredForegroundSendArgs(fixture, action, message),
+      "--message-id",
+      messageId
+    ];
     const sent = await runCli(
       args,
       codexNativeAcceptanceEnv(fixture.environment)
     );
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, sent.stdout);
+    assert.equal(output.terminal_input_dispatched, true, sent.stdout);
+    assert.equal(output.agent_acceptance, "unproven", sent.stdout);
     assert.equal(output.status, "submission_uncertain");
     assert.equal(output.submission_outcome, "uncertain");
     assert.equal(output.do_not_retry, true);
@@ -5122,8 +5132,18 @@ test("source-less human Send makes multiple exact candidate matches uncertain wi
       args,
       codexNativeAcceptanceEnv(fixture.environment)
     );
-    assert.equal(replay.status, 1, replay.stdout);
-    assert.match(replay.stderr, /uncertain|do not retry|dispatch ledger/iu);
+    assert.equal(replay.status, 0, replay.stderr || replay.stdout);
+    const replayOutput = JSON.parse(replay.stdout);
+    assert.equal(replayOutput.replayed, true, replay.stdout);
+    assert.equal(replayOutput.delivered, true, replay.stdout);
+    assert.equal(replayOutput.terminal_input_dispatched, true, replay.stdout);
+    assert.equal(replayOutput.agent_acceptance, "unproven", replay.stdout);
+    assert.equal(replayOutput.status, "submission_uncertain", replay.stdout);
+    assert.equal(replayOutput.submission_outcome, "uncertain", replay.stdout);
+    assert.equal(replayOutput.delivery_receipt, "enter_dispatched", replay.stdout);
+    assert.equal(replayOutput.do_not_retry, true, replay.stdout);
+    assert.equal(replayOutput.management_mode, "managed", replay.stdout);
+    assert.equal(replayOutput.message_id, messageId, replay.stdout);
     assertSingleTaskInput(fixture, message);
   } finally {
     fixture.cleanup();
@@ -5706,7 +5726,9 @@ async function assertSafeAbortedStatusCardDelegateRetry(
     assert.equal(replayed.status, 0, replayed.stderr || replayed.stdout);
     const replayedOutput = JSON.parse(replayed.stdout);
     assert.equal(replayedOutput.replayed, true, replayed.stdout);
-    assert.equal(replayedOutput.delivered, false, replayed.stdout);
+    assert.equal(replayedOutput.delivered, true, replayed.stdout);
+    assert.equal(replayedOutput.terminal_input_dispatched, true);
+    assert.equal(replayedOutput.agent_acceptance, "unproven");
     assert.equal(replayedOutput.status, "submission_pending_acceptance");
     assert.equal(replayedOutput.submission_outcome, "pending_acceptance");
     assert.equal(replayedOutput.delivery_receipt, "enter_dispatched");
@@ -6661,7 +6683,9 @@ test("live-gate New first Send accepts B beside seed A and rejects unknown C", a
           [NATIVE_THREAD_ID, EXTERNAL_THREAD_ID]
         );
       } else {
-        assert.equal(output.delivered, false, sent.stdout);
+        assert.equal(output.delivered, true, sent.stdout);
+        assert.equal(output.terminal_input_dispatched, true, sent.stdout);
+        assert.equal(output.agent_acceptance, "unproven", sent.stdout);
         assert.equal(output.status, "submission_uncertain", sent.stdout);
         assert.equal(output.submission_outcome, "uncertain", sent.stdout);
         assert.equal(output.do_not_retry, true, sent.stdout);

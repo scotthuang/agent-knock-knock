@@ -810,7 +810,7 @@ Git history.
 ### Codex no-rollout process-contract consolidation
 
 The canonical integration witness
-`test/codex-no-rollout-binding-cli.test.ts` still declares the same 97 named
+`test/codex-no-rollout-binding-cli.test.ts` declares 102 named
 tests with their original assertions. `config/test-file-shards.json` assigns
 every declaration to exactly one of eight worker entrypoints. Test-tier
 selection, production ownership, affected-test selection, public-contract
