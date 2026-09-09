@@ -77,6 +77,7 @@ Suppose several Codex or Claude Code jobs are already running in tmux or Herdr:
 
 - **Watch without babysitting.** `/akk watch <terminal>` observes work already in progress and sends a callback when it finishes, needs approval, or becomes blocked. You can leave the terminal and continue from your phone or another chat client.
 - **Send without typing in a tiny remote console.** `/akk <selector>: <message>` sends your natural-language instruction to the selected live coding-agent terminal. An explicit user Send has priority over stale AKK management state.
+- **Identify an ambiguous Codex foreground explicitly.** When several rollout files or a recent `/clear` prevent durable attribution, an advertised foreground-identification action can inspect one exact idle pane without guessing which rollout is current.
 - **Inspect and recover.** `/akk status <turn-or-watch>` shows current state when a callback is delayed. Durable callback records and Watches provide a recovery path after transient Host failures.
 - **Approve deliberately.** AKK can surface Codex or Claude Code permission requests and submit an explicit human decision. It preserves the coding agent's existing permission mode.
 - **Hand control back and forth.** Attach to the same tmux or Herdr pane whenever you want. AKK does not create a parallel hidden conversation.
@@ -107,6 +108,8 @@ OpenClaw / Pi / DeepSeek Harness
 ```
 
 For a managed Send, AKK verifies the selected terminal and coding-agent process, writes one user request, monitors that exact Turn, and returns completion or attention callbacks to the initiating Host session. If stale AKK bookkeeping blocks an explicit Codex Send before terminal input, AKK can fall back to a verified one-time physical Send and attach a read-only Watch for callback and Status recovery.
+
+In the current OpenClaw plugin and core Host Adapter, an idle Codex pane with ambiguous foreground rollout identity may advertise `identify_foreground`. That action issues one closed `/status` command to the exact pane. It does not mutate the AKK Store, but it does type into the visible terminal. Its 30-second result is diagnostic only and grants no later authority. The separate `identify_and_send` action keeps one terminal lock across the probe and one requested task, then relies on exact request acceptance—not the status card—for durable Session and Turn identity. Ordinary Send, List, and Status never run this probe.
 
 AKK is local-first: there is no hosted control plane or telemetry. It stores only the local state needed for routing, lifecycle recovery, callback delivery, and idempotency.
 

@@ -2802,6 +2802,13 @@ action-contract v24 and 17 OpenClaw tools. It adds a status-bound semantic
 questionnaire response action while keeping prompt fingerprints, terminal-key
 plans, and one-shot mutation authority private.
 
+Issue #298 P2 subsequently advances the current core surface to action-contract
+v25 and 19 OpenClaw tools. It adds explicit Codex `identify_foreground` and
+atomic `identify_and_send` operations plus independent screen, native-identity,
+and durable-activity status axes. The standalone 30-second `/status` proof is
+diagnostic only and is not persisted as reusable identity authority; normal
+Send, List, and Status do not run the probe.
+
 ### Aggregate and persistence boundary
 
 `TerminalWatch` schema v2 represents either one task that a human started

@@ -167,9 +167,9 @@ The fast tier owns the deterministic Terminal Watch contract:
 | `test/terminal-watch-service.test.ts` | Restart/list recovery, timeout and terminal settlement, approval and manual-questionnaire dedupe without automatic response authority, exact observation fences, terminal-activity checkpoint persistence, callback claim-crash recovery, retry, and deterministic idempotency |
 | `test/terminal-submission-acceptance.test.ts`, `test/claude-local-transcript-provider.test.ts` | Preferred exact Codex rollout and Claude current-turn transcript anchors; source-less Codex candidate-set acceptance over anchored plus current roots, including closed-FD frozen-file scans and fail-closed replacement/deletion/multiple-acceptor evidence; drift invalidates an already exact-anchored Watch, while absence or structural incompatibility at manual-Watch creation can be downgraded to a warning and terminal-activity fallback |
 | `test/terminal-watch-cli-adapter.test.ts`, `test/terminal-watch-callback-cli-adapter.test.ts` | Exact-task capture when available; best-effort `terminal_activity` fallback after observed activity and consecutive stable-idle sweeps; `watch_mode`/`confidence`/warning projection; no terminal input or Session/Turn ownership; managed ownership, version/artifact uncertainty, binding metadata, and action advertisement as non-veto diagnostics; hard failure only for an absent/unobservable exact terminal or unwritable Store; privacy-safe callbacks that never present stable idle as exact task completion; pre-Send exact fallback anchors, restart-safe delivery metadata, and bounded idempotent `interaction_manual_required` callbacks with `respond:false` |
-| `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Broad read-only Watch discovery, direct user-explicit Watch by exact `terminal_id` even without advertisement, Watch status/unwatch routing and formatting, action-contract v24 semantic-ID-only projection including same-controller status-bound questionnaire response, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, automatic fallback Watch callback semantics, Claude empty-only isolation, and the documented terminal selection → exact-task-or-activity Watch workflow |
+| `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Broad read-only Watch discovery, direct user-explicit Watch by exact `terminal_id` even without advertisement, Watch status/unwatch routing and formatting, action-contract v25 semantic-ID-only projection including same-controller status-bound questionnaire response and explicit foreground identification, three-axis terminal status, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, automatic fallback Watch callback semantics, Claude empty-only isolation, and the documented terminal selection → exact-task-or-activity Watch workflow |
 
-The current public surface has 17 OpenClaw tools. Terminal Watch adds the
+The current public surface has 19 OpenClaw tools. Terminal Watch adds the
 `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`
 CLI entries. OpenClaw's supervisor coordinates managed-monitor and Watch
 reconciliation in the same non-overlapping lifecycle but with independent error
@@ -184,7 +184,7 @@ shown activity and then stable idle across consecutive observations, carries
 controller that the signal is not exact task-completion proof. An initially
 idle or unknown terminal cannot settle until activity has first been observed.
 
-The v24 fast contract also proves that structured model actions expose semantic
+The v25 fast contract also proves that structured model actions expose semantic
 IDs only: Watch uses `terminal_id`; send uses mutually exclusive `session_id` or
 `terminal_id`; native inspection, new, resume, and reconcile use their documented
 terminal/session/thread IDs; and approve or handoff retains explicit-confirmation

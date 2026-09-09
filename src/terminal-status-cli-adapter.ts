@@ -39,6 +39,7 @@ import {
   summarizeConversation,
   summarizeEvent,
   type CodexTerminalContext,
+  type TerminalStatusListObservation,
   type TerminalStatusJsonObject,
   type TerminalStatusSummaryPorts
 } from "./terminal-status-facts.js";
@@ -174,13 +175,6 @@ export interface TerminalStatusWatchHintAuthorityPorts {
   ): Promise<TerminalStatusListObservation | undefined>;
 }
 
-export interface TerminalStatusListObservation {
-  activityState: TerminalBridgeStatus["activity_state"];
-  activityReason: string;
-  watchActionAvailable: boolean;
-  terminalStatus?: TerminalBridgeStatus;
-}
-
 export interface TerminalStatusCliDependencies {
   selection: TerminalStatusSelectionPorts;
   observation: TerminalStatusObservationPorts;
@@ -314,21 +308,22 @@ async function runTerminalControlStatus(
     options,
     terminalId
   });
-  const terminalStatus = terminalListObservation?.terminalStatus ??
-    terminalStatusWithOptionalListActivity(
-      await facade.terminalStatusForControl(
-        terminalConversation.agent,
-        terminalConversation.terminalControl,
-        options,
-        {
-          pid: terminalConversation.pid,
-          cwd: terminalConversation.terminalControl.currentPath,
-          conversationId: terminalConversation.conversationId,
-          terminalTarget: terminalConversation.terminalControl.target
-        }
-      ),
-      terminalListObservation
+  const observedTerminalStatus = terminalListObservation?.terminalStatus ??
+    await facade.terminalStatusForControl(
+      terminalConversation.agent,
+      terminalConversation.terminalControl,
+      options,
+      {
+        pid: terminalConversation.pid,
+        cwd: terminalConversation.terminalControl.currentPath,
+        conversationId: terminalConversation.conversationId,
+        terminalTarget: terminalConversation.terminalControl.target
+      }
     );
+  const terminalStatus = terminalStatusWithOptionalListActivity(
+    observedTerminalStatus,
+    terminalListObservation
+  );
   const context = await terminalStatusContext(
     dependencies, facade, terminalConversation, terminalStatus, options);
   const terminalWatchHint = await terminalWatchHintForRawTerminal({
@@ -383,6 +378,31 @@ function terminalStatusWithListActivity(
     value: observation.activityReason,
     writable: true
   };
+  const screenState = observation.screenState ??
+    terminalStatus.screen_state ?? terminalStatus.activity_state;
+  const screenReason = observation.screenReason ??
+    terminalStatus.screen_reason ?? terminalStatus.activity_reason;
+  const nativeIdentityState = observation.nativeIdentityState ??
+    terminalStatus.native_identity_state ?? "unavailable";
+  const durableActivityState = observation.durableActivityState ??
+    terminalStatus.durable_activity_state ?? "unknown";
+  const durableActivityReason = observation.durableActivityReason ??
+    terminalStatus.durable_activity_reason ??
+    "durable terminal activity evidence is unavailable";
+  for (const [field, value] of Object.entries({
+    screen_state: screenState,
+    screen_reason: screenReason,
+    native_identity_state: nativeIdentityState,
+    durable_activity_state: durableActivityState,
+    durable_activity_reason: durableActivityReason
+  })) {
+    descriptors[field] = {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true
+    };
+  }
   return Object.create(
     Object.getPrototypeOf(terminalStatus),
     descriptors

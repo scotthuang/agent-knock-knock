@@ -104,9 +104,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v24 exposes semantic arguments only", () => {
+test("the public action contract v25 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 24);
+  assert.equal(contracts.version, 25);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -117,6 +117,8 @@ test("the public action contract v24 exposes semantic arguments only", () => {
       "new_thread",
       "list_resumable_threads",
       "native_inspect",
+      "identify_foreground",
+      "identify_and_send",
       "resume_thread",
       "reconcile_binding",
       "respond",
@@ -152,6 +154,13 @@ test("the public action contract v24 exposes semantic arguments only", () => {
     assert.equal(encoded.includes(forbidden), false, forbidden);
   }
   const actions = contracts.actions as Record<string, any>;
+  assert.equal(actions.identify_foreground.proof_ttl_ms, 30000);
+  assert.equal(actions.identify_foreground.proof_grants_authority, false);
+  assert.equal(actions.identify_and_send.unmanaged_fallback, false);
+  assert.equal(
+    actions.identify_and_send.final_identity_source,
+    "unique_exact_request_acceptance"
+  );
   assert.match(
     (contracts.instructions as string[]).join("\n"),
     /native questionnaire response[\s\S]*same controller conversation[\s\S]*current pending interaction_state[\s\S]*one call resolves only the current step[\s\S]*refresh status[\s\S]*Never[\s\S]*manual_required[\s\S]*retry/iu

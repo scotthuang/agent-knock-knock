@@ -80,7 +80,7 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 24,
+    version: 25,
     instructions: [
       "Treat terminals[] as the primary resource and use only mutation actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Read-only Watch is the separate user-intent exception: one complete exact terminal_id may be watched even when available_actions.watch is absent. Either nested mutation action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "A complete but unverified Codex or Claude Code x.y.z version adds compatibility_warnings and action compatibility_warning diagnostics but never vetoes an otherwise eligible action. Execute the advertised action through the generic runtime protocol; actual UI, artifact, identity, and postcondition evidence decides success. Never automatically retry a result that says terminal input may already have occurred.",
@@ -89,6 +89,7 @@ export function listActionContracts(): JsonRecord {
       "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, is only a discovery choice. If that terminal already has one rollout-backed managed Codex source, the managed fast path captures fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. If that managed path proves zero input and fails, the separate terminal_user_explicit path may deliver once as unmanaged work.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations use terminal_id and, for resume, one complete native_thread_id; AKK resolves and revalidates current lifecycle authority internally. They never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id. AKK resolves current lifecycle authority internally, and AKK status does not execute a native slash command.",
+      "Foreground identification is an explicit Codex-only diagnostic for an exact empty idle Composer whose native identity is unresolved. identify_foreground sends exactly one closed /status under the terminal lock, mutates no Store state, and returns a 30-second pane/process/cwd/screen-bound observation that grants no later authority. identify_and_send keeps that same terminal lock, revalidates the observation, and sends one task; it never falls back to unmanaged delivery. Final Session identity still comes only from the rollout that uniquely accepts the exact task. Ordinary list, status, and send never invoke this probe.",
       "Terminal Watch is a read-only user-directed observation of one exact live terminal. AKK prefers an exact durable task anchor and otherwise degrades to best-effort terminal-activity observation; version, artifact, managed ownership, and stale action-advertisement uncertainty produce warnings rather than vetoing Watch. It sends no terminal input and creates no AKK Session or Turn. Pass the exact terminal_id and use watch_id for later status or unwatch operations.",
       "A verified, idle human native-thread switch may expose a terminal-scoped send; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound operation only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source or any otherwise eligible quiescent rollout-backed source with a complete nonempty pinned open-rollout inventory may also expose this exact action. One materialized rollout does not prove the current Codex TUI foreground thread, and a /clear resume hint is diagnostic only. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. Explicit Close always honors the user's decision to release AKK management of the selected Turn; it sends no terminal input, never stops the coding agent or pane, and reports best-effort cleanup warnings without vetoing the Close. Refresh list afterward and use Watch when the coding agent is still working. Other input-producing binding actions remain fail-closed.",
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
@@ -112,7 +113,28 @@ export function listActionContracts(): JsonRecord {
         authoritative_for_tool_calls: false
       },
       activity_state: {
-        terminals: "terminal_screen_activity_classification",
+        terminals: "legacy_conservative_effective_activity_projection",
+        authoritative_for_tool_calls: false
+      },
+      screen_state: {
+        terminals: "live_terminal_screen_activity_classification",
+        authoritative_for_tool_calls: false
+      },
+      screen_reason: {
+        terminals: "bounded_evidence_for_screen_state",
+        authoritative_for_tool_calls: false
+      },
+      native_identity_state: {
+        terminals:
+          "foreground_native_identity_resolution_without_mutation_authority",
+        authoritative_for_tool_calls: false
+      },
+      durable_activity_state: {
+        terminals: "exact_native_artifact_task_activity_when_available",
+        authoritative_for_tool_calls: false
+      },
+      durable_activity_reason: {
+        terminals: "bounded_evidence_or_limitation_for_durable_activity_state",
         authoritative_for_tool_calls: false
       },
       managed: {
@@ -258,6 +280,33 @@ export function listActionContracts(): JsonRecord {
         mutates_store: false,
         sends_terminal_input: true,
         candidate_source: "terminals[].available_actions.native_inspect"
+      },
+      identify_foreground: {
+        tool: "agent_knock_knock_identify_foreground",
+        target_argument: "terminal_id",
+        required: ["terminal_id"],
+        creates_turn: false,
+        creates_session: false,
+        mutates_store: false,
+        sends_terminal_input: true,
+        terminal_submission: "exactly_one_closed_status_probe",
+        proof_ttl_ms: 30000,
+        proof_grants_authority: false,
+        requires_user_intent: true,
+        candidate_source: "terminals[].available_actions.identify_foreground"
+      },
+      identify_and_send: {
+        tool: "agent_knock_knock_identify_and_send",
+        target_argument: "terminal_id",
+        required: ["terminal_id", "request"],
+        creates_turn: true,
+        creates_session: true,
+        sends_terminal_input: true,
+        terminal_lock_scope: "status_probe_through_task_dispatch",
+        unmanaged_fallback: false,
+        final_identity_source: "unique_exact_request_acceptance",
+        requires_user_intent: true,
+        candidate_source: "terminals[].available_actions.identify_and_send"
       },
       resume_thread: {
         tool: "agent_knock_knock_resume_thread",

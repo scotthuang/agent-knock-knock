@@ -13,7 +13,10 @@ import {
   type Conversation
 } from "./protocol.js";
 import type {
-  TerminalBridgeStatus
+  TerminalActivityState,
+  TerminalBridgeStatus,
+  TerminalDurableActivityState,
+  TerminalNativeIdentityState
 } from "./terminal-agent-bridge.js";
 import type {
   TerminalControlRef
@@ -37,6 +40,92 @@ export interface CodexTerminalContext extends TerminalStatusJsonObject {
 export interface TerminalStatusSummaryPorts {
   callbackRetryDisposition(delivery: unknown): { state: string } | undefined;
   textSummary(value: unknown): unknown;
+}
+
+export interface TerminalStatusListObservation {
+  activityState: TerminalBridgeStatus["activity_state"];
+  activityReason: string;
+  screenState?: TerminalActivityState;
+  screenReason?: string;
+  nativeIdentityState?: TerminalNativeIdentityState;
+  durableActivityState?: TerminalDurableActivityState;
+  durableActivityReason?: string;
+  watchActionAvailable: boolean;
+  terminalStatus?: TerminalBridgeStatus;
+}
+
+function terminalActivityState(value: unknown): TerminalActivityState | undefined {
+  return value === "awaiting_approval" || value === "working" ||
+    value === "idle" || value === "unknown"
+    ? value
+    : undefined;
+}
+
+function terminalNativeIdentityState(
+  value: unknown
+): TerminalNativeIdentityState | undefined {
+  return value === "resolved" || value === "ambiguous" ||
+    value === "verified_absent" || value === "unavailable"
+    ? value
+    : undefined;
+}
+
+function terminalDurableActivityState(
+  value: unknown
+): TerminalDurableActivityState | undefined {
+  return value === "working" || value === "idle" || value === "unknown"
+    ? value
+    : undefined;
+}
+
+export function terminalStatusListObservationFromProjection(input: {
+  terminal: Readonly<Record<string, unknown>>;
+  rawTerminal: Readonly<Record<string, unknown>>;
+  watchActionAvailable: boolean;
+}): TerminalStatusListObservation {
+  const { terminal, rawTerminal } = input;
+  const activityState = terminalActivityState(terminal.activity_state);
+  const activityReason = stringValue(terminal.activity_reason);
+  if (!activityState || !activityReason) {
+    return {
+      activityState: "unknown",
+      activityReason: "authoritative terminal activity evidence is incomplete",
+      watchActionAvailable: false
+    };
+  }
+  const terminalStatus = isRecord(rawTerminal._terminal_status_snapshot)
+    ? rawTerminal._terminal_status_snapshot as unknown as TerminalBridgeStatus
+    : undefined;
+  return {
+    activityState,
+    activityReason,
+    screenState: terminalActivityState(terminal.screen_state) ??
+      terminalActivityState(rawTerminal.screen_state) ??
+      terminalActivityState(terminalStatus?.screen_state) ??
+      terminalActivityState(terminalStatus?.activity_state) ??
+      "unknown",
+    screenReason: stringValue(terminal.screen_reason) ??
+      stringValue(rawTerminal.screen_reason) ??
+      terminalStatus?.screen_reason ?? terminalStatus?.activity_reason ??
+      "terminal screen activity evidence is unavailable",
+    nativeIdentityState:
+      terminalNativeIdentityState(terminal.native_identity_state) ??
+      terminalNativeIdentityState(rawTerminal.native_identity_state) ??
+      terminalNativeIdentityState(terminalStatus?.native_identity_state) ??
+      "unavailable",
+    durableActivityState:
+      terminalDurableActivityState(terminal.durable_activity_state) ??
+      terminalDurableActivityState(rawTerminal.durable_activity_state) ??
+      terminalDurableActivityState(terminalStatus?.durable_activity_state) ??
+      "unknown",
+    durableActivityReason:
+      stringValue(terminal.durable_activity_reason) ??
+      stringValue(rawTerminal.durable_activity_reason) ??
+      terminalStatus?.durable_activity_reason ??
+      "durable terminal activity evidence is unavailable",
+    watchActionAvailable: input.watchActionAvailable,
+    ...(terminalStatus ? { terminalStatus } : {})
+  };
 }
 
 interface CodexHistoryCandidate extends TerminalStatusJsonObject {

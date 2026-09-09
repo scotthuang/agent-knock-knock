@@ -74,6 +74,38 @@ import { nonBlankString } from "./value-guards.js";
 
 export type NativeLifecycleCliOptions = Readonly<Record<string, unknown>>;
 
+export const CODEX_FOREGROUND_IDENTIFICATION_TTL_MS = 30_000;
+export const CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES = 240;
+
+/**
+ * Short-lived diagnostic evidence returned only to the in-process caller.
+ *
+ * This is deliberately not a Store binding or an authorization token. The
+ * caller must remain inside the same terminal lock and must still use the
+ * ordinary request-acceptance path before creating durable Session authority.
+ */
+export interface CodexForegroundIdentificationProof {
+  readonly terminalId: string;
+  readonly pid: number;
+  readonly processUuid: string;
+  readonly processBirth: string;
+  readonly realCwd: string;
+  readonly nativeThreadId: string;
+  readonly agentVersion: string;
+  readonly behaviorProfile: string;
+  readonly evidenceFingerprint: string;
+  readonly postProbeScreenDigest: string;
+  readonly observationScrollbackLines:
+    typeof CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES;
+  readonly observedAt: string;
+  readonly expiresAt: string;
+  readonly terminalSubmission: {
+    readonly command: "/status";
+    readonly enterCount: 1;
+    readonly materialization: NativeInspectionSubmission["materialization"];
+  };
+}
+
 export interface NativeLifecycleSnapshot {
   readonly identity?: TerminalNativeIdentity;
   readonly runtimeIdentity?: TerminalNativeIdentity;
@@ -134,7 +166,7 @@ interface NativeLifecycleIdentityPorts {
     processBirth: string;
   };
   runtimeForLiveIdentity(input: {
-    terminal: ResolvedTerminalConversation;
+    terminal: LifecycleTerminalObservation;
     identity?: TerminalNativeIdentity;
     expectedEmptyNativeSession?: boolean;
     physicalOnly?: boolean;
@@ -225,9 +257,15 @@ export interface NativeThreadLifecycleCliFacade {
   ): TerminalAgentAdapter;
   runList(options: NativeLifecycleCliOptions): Promise<void>;
   runInspect(options: NativeLifecycleCliOptions): Promise<void>;
+  runIdentifyForeground(options: NativeLifecycleCliOptions): Promise<void>;
+  identifyCodexForegroundWhileLocked(input: {
+    options: NativeLifecycleCliOptions;
+    terminal: LifecycleTerminalObservation;
+    expectedTerminalToken: string;
+  }): Promise<CodexForegroundIdentificationProof>;
   assertSameInspectionTerminal(
-    expected: ResolvedTerminalConversation,
-    actual: ResolvedTerminalConversation,
+    expected: LifecycleTerminalObservation,
+    actual: LifecycleTerminalObservation,
     stage: string
   ): void;
   codexLatentClearResumeObservation(input: {
@@ -251,6 +289,9 @@ export function createNativeThreadLifecycleCliAdapter(
     agentAdapter: (options, agent) => app.agentAdapter(options, agent),
     runList: (options) => app.runList(options),
     runInspect: (options) => app.runInspect(options),
+    runIdentifyForeground: (options) => app.runIdentifyForeground(options),
+    identifyCodexForegroundWhileLocked: (input) =>
+      app.identifyCodexForegroundWhileLocked(input),
     assertSameInspectionTerminal: (expected, actual, stage) =>
       app.assertSameInspectionTerminal(expected, actual, stage),
     codexLatentClearResumeObservation,
@@ -612,8 +653,8 @@ class NativeThreadLifecycleCliApplication {
   }
 
   assertSameInspectionTerminal(
-    expected: ResolvedTerminalConversation,
-    actual: ResolvedTerminalConversation,
+    expected: LifecycleTerminalObservation,
+    actual: LifecycleTerminalObservation,
     stage: string
   ): void {
     const expectedPath = expected.terminalControl.currentPath;
@@ -634,11 +675,17 @@ class NativeThreadLifecycleCliApplication {
 
   assertInspectionReady(input: {
     options: NativeLifecycleCliOptions;
-    terminal: ResolvedTerminalConversation;
+    terminal: LifecycleTerminalObservation;
     terminalStatus?: TerminalBridgeStatus;
     session?: ManagedSessionState;
   }): void {
     const { options, terminal, terminalStatus, session } = input;
+    if (terminalStatus?.interaction_state !== undefined) {
+      throw new Error(
+        `terminal ${terminal.terminalControl.target} is waiting for a native ` +
+        "questionnaire response; answer or cancel it before native inspection"
+      );
+    }
     if (terminalStatus && (
       terminalStatus.reachable !== true ||
       terminalStatus.activity_state !== "idle" ||
@@ -819,7 +866,7 @@ class NativeThreadLifecycleCliApplication {
 
   async assertInspectionComposerReady(input: {
     options: NativeLifecycleCliOptions;
-    terminal: ResolvedTerminalConversation;
+    terminal: LifecycleTerminalObservation;
   }): Promise<void> {
     if (input.terminal.agent === "codex") {
       await this.ports.identity.assertCodexComposerReady({
@@ -837,6 +884,413 @@ class NativeThreadLifecycleCliApplication {
     if (!isExactClaudeNativeInspectionIdleComposer(screen)) {
       throw new Error(
         "Claude composer contains input or is not at the exact idle frame; refusing automated terminal input"
+      );
+    }
+  }
+
+  validateForegroundIdentificationOptions(
+    options: NativeLifecycleCliOptions
+  ): string {
+    if (options.command !== undefined || options.message !== undefined) {
+      throw new Error(
+        "foreground identification does not accept a command or message payload"
+      );
+    }
+    return required(
+      nonBlankString(options.expectedTerminalToken),
+      "--expected-terminal-token is required"
+    );
+  }
+
+  async runIdentifyForeground(
+    options: NativeLifecycleCliOptions
+  ): Promise<void> {
+    const expectedTerminalToken =
+      this.validateForegroundIdentificationOptions(options);
+    const terminal = await this.resolveLifecycleTerminal(options);
+    if (terminal.agent !== "codex") {
+      throw new Error(
+        "foreground identification currently supports only Codex terminals"
+      );
+    }
+    const storeDir = this.ports.state.storeDir(options);
+    const release = this.ports.state.acquireTerminal(
+      storeDir,
+      terminal.terminalControl,
+      { timeoutMs: 30_000 }
+    );
+    try {
+      const proof = await this.identifyCodexForegroundWhileLocked({
+        options,
+        terminal,
+        expectedTerminalToken
+      });
+      this.ports.output.print({
+        status: "observed",
+        inspection: "identify_foreground",
+        terminal_id: proof.terminalId,
+        agent: "codex",
+        agent_version: proof.agentVersion,
+        behavior_profile: proof.behaviorProfile,
+        native_thread_id: proof.nativeThreadId,
+        foreground_proof: {
+          scope: "ephemeral_diagnostic_only",
+          observed_at: proof.observedAt,
+          expires_at: proof.expiresAt,
+          ttl_ms: CODEX_FOREGROUND_IDENTIFICATION_TTL_MS,
+          grants_authority: false
+        },
+        terminal_submission: {
+          command: proof.terminalSubmission.command,
+          enter_count: proof.terminalSubmission.enterCount,
+          materialization_kind:
+            proof.terminalSubmission.materialization.kind
+        },
+        store_mutation: false,
+        session_created: false,
+        turn_created: false,
+        receipt_created: false,
+        monitor_created: false,
+        callback_created: false
+      });
+    } finally {
+      release();
+    }
+  }
+
+  async identifyCodexForegroundWhileLocked(input: {
+    options: NativeLifecycleCliOptions;
+    terminal: LifecycleTerminalObservation;
+    expectedTerminalToken: string;
+  }): Promise<CodexForegroundIdentificationProof> {
+    if (input.terminal.agent !== "codex") {
+      throw new Error(
+        "foreground identification currently supports only Codex terminals"
+      );
+    }
+    if (!nonBlankString(input.expectedTerminalToken)) {
+      throw new Error("foreground identification requires a terminal token");
+    }
+
+    const bridge = this.ports.runtime.forOptions(input.options).createBridge();
+    const physicalRuntime = this.ports.identity.runtimeForLiveIdentity({
+      terminal: input.terminal,
+      physicalOnly: true
+    });
+    const terminal = await bridge.resolveStoredTerminal(
+      "codex",
+      input.terminal.pid,
+      input.terminal.terminalControl,
+      physicalRuntime
+    );
+    this.assertSameInspectionTerminal(
+      input.terminal,
+      terminal,
+      "while waiting for foreground-identification control"
+    );
+    const realCwd = this.realForegroundWorkspace(terminal);
+    const processIncarnation =
+      this.ports.identity.processIncarnation(terminal.pid);
+    this.assertForegroundPhysicalToken({
+      terminal,
+      processIncarnation,
+      expectedTerminalToken: input.expectedTerminalToken
+    });
+
+    const runtimeFacade = this.ports.runtime.forOptions(input.options);
+    const agentVersion = required(
+      nonBlankString(runtimeFacade.agentVersionForRunningProcess(
+        "codex",
+        terminal.pid
+      )),
+      "Codex foreground identification requires a verified running version"
+    );
+    const adapter = runtimeFacade.createAgentRegistry().require("codex");
+    const capability = adapter.probeNativeInspection?.(agentVersion);
+    if (
+      capability?.status !== "supported" ||
+      capability.statusInspection !== true
+    ) {
+      throw new Error(
+        capability?.reason ??
+        "Codex foreground identification has no supported /status profile"
+      );
+    }
+    const plan = adapter.planNativeInspection?.(
+      { kind: "status" },
+      capability
+    );
+    if (
+      !plan ||
+      plan.operation.kind !== "status" ||
+      plan.command !== "/status" ||
+      plan.effect !== "read_only" ||
+      plan.expectedResult.presentation !== "inline"
+    ) {
+      throw new Error(
+        "the Codex adapter did not produce the closed inline /status plan"
+      );
+    }
+
+    const initialStatus = await bridge.status(
+      "codex",
+      terminal.terminalControl,
+      {
+        runtime: physicalRuntime,
+        scrollbackLines: CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES
+      }
+    );
+    this.assertInspectionReady({
+      options: input.options,
+      terminal,
+      terminalStatus: initialStatus
+    });
+    this.assertForegroundHasNoLifecycleTransition(input.options, terminal);
+    await this.assertInspectionComposerReady({
+      options: input.options,
+      terminal
+    });
+
+    const context: NativeInspectionContext = {
+      options: input.options,
+      terminal,
+      snapshot: {
+        codexCompanions: { additional: [] },
+        capabilities: adapter.probeThreadLifecycle?.(agentVersion) ?? {
+          status: "unknown",
+          agentVersion,
+          newThread: false,
+          resumeExact: false,
+          reason: "thread lifecycle capability is outside this diagnostic"
+        },
+        version: agentVersion,
+        bindingToken: input.expectedTerminalToken,
+        bindingTokens: [input.expectedTerminalToken]
+      },
+      bridge,
+      plan,
+      runtime: physicalRuntime,
+      expectedBindingToken: input.expectedTerminalToken,
+      foregroundBoundary: {
+        processUuid: processIncarnation.processUuid,
+        processBirth: processIncarnation.processBirth,
+        realCwd,
+        agentVersion,
+        expectedTerminalToken: input.expectedTerminalToken
+      }
+    };
+
+    const submission = await this.submitInspection(context);
+    try {
+      const observed = await this.observeStableInspection(context, submission);
+      const finalTerminal = await bridge.resolveStoredTerminal(
+        "codex",
+        terminal.pid,
+        terminal.terminalControl,
+        physicalRuntime
+      );
+      const finalStatus = required(
+        await this.assertFreshForegroundBoundary({
+          context,
+          terminal: finalTerminal,
+          stage: "after foreground identification",
+          requireReadyScreen: true
+        }),
+        "Codex foreground status revalidation is unavailable"
+      );
+      const nativeThreadId = required(
+        isExactNativeThreadId(observed.observation.nativeThreadId)
+          ? observed.observation.nativeThreadId
+          : undefined,
+        "Codex /status did not prove one exact foreground native thread"
+      );
+      const evidenceFingerprint = required(
+        nonBlankString(observed.observation.evidenceFingerprint),
+        "Codex /status did not produce exact evidence"
+      );
+      const postProbeScreenDigest = required(
+        nonBlankString(finalStatus.screen.digest),
+        "Codex foreground screen digest is unavailable"
+      );
+      const observedScreenDigest = required(
+        bareNativeInspectionScreenDigest(observed.screenDigest),
+        "Codex foreground observation screen digest is malformed"
+      );
+      if (observedScreenDigest !== postProbeScreenDigest) {
+        throw new Error(
+          "Codex screen changed after the stable /status observation"
+        );
+      }
+      const observedAt = new Date();
+      const proof: CodexForegroundIdentificationProof = {
+        terminalId: terminal.conversationId,
+        pid: terminal.pid,
+        processUuid: processIncarnation.processUuid,
+        processBirth: processIncarnation.processBirth,
+        realCwd,
+        nativeThreadId,
+        agentVersion,
+        behaviorProfile: plan.behaviorProfile,
+        evidenceFingerprint,
+        postProbeScreenDigest,
+        observationScrollbackLines:
+          CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES,
+        observedAt: observedAt.toISOString(),
+        expiresAt: new Date(
+          observedAt.getTime() + CODEX_FOREGROUND_IDENTIFICATION_TTL_MS
+        ).toISOString(),
+        terminalSubmission: Object.freeze({
+          command: "/status" as const,
+          enterCount: 1 as const,
+          materialization: submission.materialization
+        })
+      };
+      return Object.freeze(proof);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (/do not retry automatically/iu.test(detail)) throw error;
+      throw new Error(
+        "Codex foreground-identification Enter was dispatched exactly once, " +
+        "but its postcondition became uncertain; do not retry automatically: " +
+        detail
+      );
+    }
+  }
+
+  async assertFreshForegroundBoundary(input: {
+    context: NativeInspectionContext;
+    terminal: ResolvedTerminalConversation;
+    stage: string;
+    requireReadyScreen: boolean;
+  }): Promise<TerminalBridgeStatus | undefined> {
+    const boundary = required(
+      input.context.foregroundBoundary,
+      "foreground-identification boundary is missing"
+    );
+    this.assertSameInspectionTerminal(
+      input.context.terminal,
+      input.terminal,
+      input.stage
+    );
+    if (this.realForegroundWorkspace(input.terminal) !== boundary.realCwd) {
+      throw new Error(
+        `terminal real cwd changed ${input.stage}; refresh AKK list`
+      );
+    }
+    const processIncarnation =
+      this.ports.identity.processIncarnation(input.terminal.pid);
+    if (
+      processIncarnation.processUuid !== boundary.processUuid ||
+      processIncarnation.processBirth !== boundary.processBirth
+    ) {
+      throw new Error(
+        `Codex process incarnation changed ${input.stage}; refresh AKK list`
+      );
+    }
+    this.assertForegroundPhysicalToken({
+      terminal: input.terminal,
+      processIncarnation,
+      expectedTerminalToken: boundary.expectedTerminalToken
+    });
+    const currentVersion = this.ports.runtime.forOptions(input.context.options)
+      .agentVersionForRunningProcess("codex", input.terminal.pid);
+    if (currentVersion !== boundary.agentVersion) {
+      throw new Error(
+        `Codex version changed ${input.stage}; refresh AKK list`
+      );
+    }
+    this.assertInspectionReady({
+      options: input.context.options,
+      terminal: input.terminal
+    });
+    this.assertForegroundHasNoLifecycleTransition(
+      input.context.options,
+      input.terminal
+    );
+    if (!input.requireReadyScreen) {
+      return undefined;
+    }
+    const status = await input.context.bridge.status(
+      "codex",
+      input.terminal.terminalControl,
+      {
+        runtime: input.context.runtime,
+        scrollbackLines: CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES
+      }
+    );
+    this.assertInspectionReady({
+      options: input.context.options,
+      terminal: input.terminal,
+      terminalStatus: status
+    });
+    await this.assertInspectionComposerReady({
+      options: input.context.options,
+      terminal: input.terminal
+    });
+    return status;
+  }
+
+  assertForegroundPhysicalToken(input: {
+    terminal: LifecycleTerminalObservation;
+    processIncarnation: { processUuid: string; processBirth: string };
+    expectedTerminalToken: string;
+  }): void {
+    const actual = unmanagedTerminalBindingToken({
+      terminalId: input.terminal.conversationId,
+      terminalControl: input.terminal.terminalControl,
+      agent: "codex",
+      pid: input.terminal.pid,
+      workspace: input.terminal.terminalControl.currentPath ?? "",
+      processUuid: input.processIncarnation.processUuid,
+      processBirth: input.processIncarnation.processBirth
+    });
+    if (actual !== input.expectedTerminalToken) {
+      throw new Error(
+        "the physical terminal token is stale; refresh AKK list"
+      );
+    }
+  }
+
+  realForegroundWorkspace(
+    terminal: LifecycleTerminalObservation
+  ): string {
+    const cwd = required(
+      nonBlankString(terminal.terminalControl.currentPath),
+      "Codex terminal cwd is unavailable"
+    );
+    let realCwd: string;
+    try {
+      realCwd = fs.realpathSync(cwd);
+    } catch {
+      throw new Error("Codex terminal cwd cannot be resolved exactly");
+    }
+    if (!fs.statSync(realCwd).isDirectory()) {
+      throw new Error("Codex terminal cwd is not a directory");
+    }
+    return realCwd;
+  }
+
+  assertForegroundHasNoLifecycleTransition(
+    options: NativeLifecycleCliOptions,
+    terminal: LifecycleTerminalObservation
+  ): void {
+    const storeDir = this.ports.state.storeDir(options);
+    const related = listManagedSessions(storeDir).filter((session) =>
+      Boolean(session.binding && terminalControlAliasMatches(
+        session.binding.terminal_id,
+        session.binding.terminal_control,
+        terminal.conversationId,
+        terminal.terminalControl
+      ))
+    );
+    const unresolved = related.find((session) =>
+      ["transitioning", "quarantined"].includes(session.status) ||
+      this.ports.state.hasUnresolvedTransition(storeDir, session)
+    );
+    if (unresolved) {
+      throw new Error(
+        `managed Session ${unresolved.session_id} has an unresolved ` +
+        "native-thread transition"
       );
     }
   }
@@ -979,10 +1433,19 @@ class NativeThreadLifecycleCliApplication {
               context.terminal.terminalControl,
               context.runtime
             );
-            await this.assertFreshInspectionBoundary({
-              context, terminal,
-              stage: "immediately before native status submission"
-            });
+            if (context.foregroundBoundary) {
+              await this.assertFreshForegroundBoundary({
+                context,
+                terminal,
+                stage: "immediately before native status submission",
+                requireReadyScreen: false
+              });
+            } else {
+              await this.assertFreshInspectionBoundary({
+                context, terminal,
+                stage: "immediately before native status submission"
+              });
+            }
           }
         }
       );
@@ -1057,11 +1520,17 @@ class NativeThreadLifecycleCliApplication {
         : context.runtime;
     let fingerprint: string | undefined;
     let stable: TerminalNativeInspectionObservation | undefined;
+    let stableScreenDigest: string | undefined;
     let count = 0;
     for (let attempt = 0; attempt < 50; attempt += 1) {
       const observed = await context.bridge.observeNativeInspection(
         context.terminal.agent, context.terminal.terminalControl, request,
-        { runtime: postEnterRuntime, scrollbackLines: 240 }
+        {
+          runtime: postEnterRuntime,
+          scrollbackLines: context.foregroundBoundary
+            ? CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES
+            : 240
+        }
       );
       if (freshInspectionObservation(
         context.plan, submission.preEnterScreenDigest, observed
@@ -1072,20 +1541,27 @@ class NativeThreadLifecycleCliApplication {
           count = 1;
         }
         stable = observed.observation;
+        stableScreenDigest = observed.screenDigest;
         if (count >= 2) break;
       } else {
         fingerprint = undefined;
         stable = undefined;
+        stableScreenDigest = undefined;
         count = 0;
       }
       await this.ports.runtime.sleep(100);
     }
-    if (!stable || count < 2) {
+    if (!stable || !stableScreenDigest || count < 2) {
       throw new Error(
         "native status inspection Enter was dispatched exactly once, but a fresh exact status result was not proven; do not retry automatically"
       );
     }
-    return { observation: stable, request, postEnterRuntime };
+    return {
+      observation: stable,
+      request,
+      postEnterRuntime,
+      screenDigest: stableScreenDigest
+    };
   }
 
   async dismissInspection(
@@ -1225,12 +1701,26 @@ interface NativeInspectionContext {
   plan: TerminalNativeInspectionPlan;
   runtime: TerminalRuntimeIdentity;
   expectedBindingToken: string;
+  foregroundBoundary?: {
+    processUuid: string;
+    processBirth: string;
+    realCwd: string;
+    agentVersion: string;
+    expectedTerminalToken: string;
+  };
 }
 
 interface NativeInspectionObservationResult {
   observation: TerminalNativeInspectionObservation;
   request: TerminalNativeInspectionObservationRequest;
   postEnterRuntime: TerminalRuntimeIdentity;
+  screenDigest: string;
+}
+
+function bareNativeInspectionScreenDigest(
+  fingerprint: string
+): string | undefined {
+  return /^sha256:([0-9a-f]{64})$/u.exec(fingerprint)?.[1];
 }
 
 function freshInspectionObservation(
@@ -1245,6 +1735,7 @@ function freshInspectionObservation(
           observed.status.activity_state
         )) &&
     observed.status.approval_state.blocked !== true &&
+    observed.status.interaction_state === undefined &&
     observed.screenDigest !== preEnterScreenDigest &&
     observed.observation.status === "observed" &&
     observed.observation.result?.kind === "native_status" &&

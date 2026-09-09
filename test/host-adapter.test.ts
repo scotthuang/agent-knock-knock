@@ -17,6 +17,8 @@ const expectedToolNames = [
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
   "agent_knock_knock_native_inspect",
+  "agent_knock_knock_identify_foreground",
+  "agent_knock_knock_identify_and_send",
   "agent_knock_knock_new_thread",
   "agent_knock_knock_reconcile_binding",
   "agent_knock_knock_resume_thread",

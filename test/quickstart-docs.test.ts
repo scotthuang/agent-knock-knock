@@ -47,7 +47,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v24 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v25 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -284,7 +284,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(operatorContract, /v24 `action_contracts`/u);
+  assert.match(operatorContract, /v25 `action_contracts`/u);
   assert.match(
     operatorContract,
     /`terminal_user_explicit`[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state/u
@@ -298,8 +298,8 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     operatorContract,
     /unmanaged work[\s\S]*best-effort attaches a Terminal Watch[\s\S]*completion callback[\s\S]*failure[^.]*never vetoes/u
   );
-  assert.match(skill, /v24 `action_contracts`/u);
-  assert.match(skill, /registers 17 OpenClaw tools/u);
+  assert.match(skill, /v25 `action_contracts`/u);
+  assert.match(skill, /registers 19 OpenClaw tools/u);
   assert.match(
     skill,
     /same controller conversation[\s\S]*agent_knock_knock_status\(\{turn_id\}\)[\s\S]*interaction_state[\s\S]*agent_knock_knock_respond_interaction[\s\S]*one call answers only the current step[\s\S]*call Status again/iu

@@ -102,7 +102,7 @@ const METADATA_CONTEXT = Object.freeze({
 });
 
 /**
- * Adapt AKK's established slash command and 17 semantic tools to a native Host.
+ * Adapt AKK's established slash command and 19 semantic tools to a native Host.
  *
  * Public metadata is captured exactly once. Executable registries are created
  * lazily per exact Host authority object so private approvals, action offers,

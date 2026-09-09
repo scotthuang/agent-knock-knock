@@ -94,7 +94,8 @@ import {
   createTerminalWatchCliAdapter
 } from "./terminal-watch-cli-adapter.js";
 import {
-  isDiscoverableTmuxConversation
+  isDiscoverableTmuxConversation,
+  terminalStatusListObservationFromProjection
 } from "./terminal-status-facts.js";
 import {
   createTerminalCommandCliFacade
@@ -523,8 +524,8 @@ async function dispatchCliCommand(commandName, options) {
     await nativeThreadLifecycleFacade.runNewThread(options);
   } else if (commandName === "list-resumable-threads" || commandName === "threads") {
     await runListResumableThreads(options);
-  } else if (commandName === "native-inspect" || commandName === "native-status") {
-    await runNativeInspect(options);
+  } else if (Object.hasOwn(nativeInspectionCommands, String(commandName))) {
+    await nativeInspectionCommands[String(commandName)]!(options);
   } else if (commandName === "resume-thread") {
     await nativeThreadLifecycleFacade.runResumeThread(options);
   } else if (commandName === "reconcile-binding") {
@@ -1103,7 +1104,14 @@ const nativeThreadLifecycleFacade = Object.freeze({
 });
 
 const runListResumableThreads = nativeThreadLifecycleFacade.runList;
-const runNativeInspect = nativeThreadLifecycleFacade.runInspect;
+const nativeInspectionCommands: Readonly<Record<
+  string,
+  typeof nativeThreadLifecycleFacade.runInspect
+>> = Object.freeze({
+  "native-inspect": nativeThreadLifecycleFacade.runInspect,
+  "native-status": nativeThreadLifecycleFacade.runInspect,
+  "identify-foreground": nativeThreadLifecycleFacade.runIdentifyForeground
+});
 const codexLatentClearResumeObservation =
   nativeThreadLifecycleFacade.codexLatentClearResumeObservation;
 const nativeInspectionComposerEmpty =
@@ -1164,38 +1172,13 @@ const terminalStatusCliFacade = createTerminalStatusCliFacade({
       }
       const terminal = observation.terminal;
       const rawTerminal = observation.rawTerminal;
-      const activityState = terminal.activity_state;
-      const activityReason = stringValue(terminal.activity_reason);
-      if (
-        (
-          activityState !== "awaiting_approval" &&
-          activityState !== "working" &&
-          activityState !== "idle" &&
-          activityState !== "unknown"
-        ) ||
-        !activityReason
-      ) {
-        return {
-          activityState: "unknown",
-          activityReason:
-            "authoritative terminal activity evidence is incomplete",
-          watchActionAvailable: false
-        };
-      }
-      return {
-        activityState,
-        activityReason,
+      return terminalStatusListObservationFromProjection({
+        terminal,
+        rawTerminal,
         watchActionAvailable: Boolean(
           exactTerminalWatchAction(terminal, terminalId)
-        ),
-        ...(isRecord(rawTerminal._terminal_status_snapshot)
-          ? {
-              terminalStatus:
-                rawTerminal._terminal_status_snapshot as unknown as
-                  TerminalBridgeStatus
-            }
-          : {})
-      };
+        )
+      });
     }
   },
   projection: {
@@ -1699,6 +1682,8 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
         .ensureTerminalBridgeMonitorAfterApproval(input),
     exactSafeAbortedRecoveredSessionMatches,
     inspectCodexOpenRootRolloutInventory,
+    identifyCodexForegroundWhileLocked: (input) =>
+      nativeThreadLifecycleFacade.identifyCodexForegroundWhileLocked(input),
     isDiscoverableTmuxConversation,
     loadClaudeAgentRows,
     loadConversationFromOptions,
@@ -1803,6 +1788,7 @@ function usage() {
   agent-knock-knock clear-thread --terminal <exact-terminal-id> --expected-binding-token <token>
   agent-knock-knock list-resumable-threads --terminal <exact-terminal-id> [--selection-scope <opaque-scope>]
   agent-knock-knock native-inspect --terminal <exact-terminal-id> --inspection status --expected-binding-token <token>
+  agent-knock-knock identify-foreground --terminal <exact-terminal-id> --expected-terminal-token <token>
   agent-knock-knock resume-thread --terminal <exact-terminal-id> --native-thread <uuid> --expected-binding-token <token> --candidate-token <token>
   agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>
   agent-knock-knock reconcile-binding --terminal <exact-terminal-id> --conflicting-session <session-id> --expected-session-revision <n> --expected-binding-token <token> --expected-terminal-token <token>

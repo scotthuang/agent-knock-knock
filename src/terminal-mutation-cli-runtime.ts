@@ -38,6 +38,7 @@ export type TerminalWriterMutationLockOptions =
   FileLockAcquisitionOptions & Readonly<{
     terminalTimeoutMs?: number;
     storeWriterTimeoutMs?: number;
+    afterTerminalAcquired?: () => void | Promise<void>;
   }>;
 
 export function createTerminalMutationCliRuntime(
@@ -69,6 +70,9 @@ export function createTerminalMutationCliRuntime(
           retryMs: options.retryMs
         }
       ),
+      ...(options.afterTerminalAcquired
+        ? { afterTerminalAcquired: options.afterTerminalAcquired }
+        : {}),
       withStoreWriter: <Result>(operation: () => Promise<Result>) =>
         ports.withStoreWriterLeaseAsync(canonicalStoreDir, operation, {
           timeoutMs: options.storeWriterTimeoutMs ?? options.timeoutMs

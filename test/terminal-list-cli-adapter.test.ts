@@ -278,6 +278,10 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   const pending = await listCodexRolloutState(root, "pending");
+  assert.equal(pending.screen_state, "idle");
+  assert.equal(pending.screen_reason, "idle-looking fixture screen");
+  assert.equal(pending.native_identity_state, "resolved");
+  assert.equal(pending.durable_activity_state, "working");
   assert.equal(pending.activity_state, "working");
   assert.match(
     String(pending.activity_reason),
@@ -294,6 +298,9 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
 
   for (const settled of ["completed", "aborted"] as const) {
     const listed = await listCodexRolloutState(root, settled);
+    assert.equal(listed.screen_state, "idle", settled);
+    assert.equal(listed.native_identity_state, "resolved", settled);
+    assert.equal(listed.durable_activity_state, "idle", settled);
     assert.equal(listed.activity_state, "idle", settled);
     assert.ok(
       listed.available_actions.watch,
@@ -303,6 +310,9 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
   }
 
   const unavailable = await listCodexRolloutState(root, "malformed");
+  assert.equal(unavailable.screen_state, "idle");
+  assert.equal(unavailable.native_identity_state, "resolved");
+  assert.equal(unavailable.durable_activity_state, "unknown");
   assert.equal(unavailable.activity_state, "unknown");
   assert.match(
     String(unavailable.activity_reason),
@@ -317,6 +327,9 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
   }
   assert.ok(unavailable.available_actions.watch);
   const partial = await listCodexRolloutState(root, "partial");
+  assert.equal(partial.screen_state, "idle");
+  assert.equal(partial.native_identity_state, "resolved");
+  assert.equal(partial.durable_activity_state, "unknown");
   assert.equal(partial.activity_state, "unknown");
   assert.equal(partial.available_actions.send, undefined);
   assert.ok(partial.available_actions.watch);
@@ -328,6 +341,93 @@ test("list promotes an exact unfinished Codex rollout over an idle-looking scree
   );
   assert.equal(afterBrokenSibling.id, "terminal:v2:tmux:codex:durable:0.0:4242");
   assert.equal(afterBrokenSibling.activity_state, "working");
+});
+
+test("list separates an idle Codex screen from ambiguous native identity", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-ambiguous-native-identity-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    true,
+    "› ",
+    { ambiguousOpenRoots: true }
+  );
+  const [terminal] = fixture.scan.terminalControlled;
+
+  assert.equal(terminal.screen_state, "idle");
+  assert.equal(terminal.screen_reason, "idle-looking fixture screen");
+  assert.equal(terminal.native_identity_state, "ambiguous");
+  assert.equal(terminal.durable_activity_state, "unknown");
+  assert.match(
+    String(terminal.durable_activity_reason),
+    /foreground native session is ambiguous|open root rollout/iu
+  );
+  assert.equal(
+    terminal.activity_state,
+    "unknown",
+    "the legacy safety projection remains conservative"
+  );
+  const actions = terminal.available_actions as Record<string, any>;
+  assert.equal(
+    actions.identify_foreground?.tool,
+    "agent_knock_knock_identify_foreground"
+  );
+  assert.equal(
+    actions.identify_and_send?.tool,
+    "agent_knock_knock_identify_and_send"
+  );
+  assert.equal(actions.identify_and_send?.missing_required?.[0], "request");
+  assert.equal(
+    actions.identify_foreground?.arguments?.terminal_id,
+    terminal.id
+  );
+  assert.equal(
+    typeof actions.identify_foreground?.arguments?.expected_terminal_token,
+    "string"
+  );
+  assert.equal(
+    actions.identify_foreground?.arguments?.expected_terminal_token,
+    actions.identify_and_send?.arguments?.expected_terminal_token
+  );
+
+  const workingFixture = await createCodexRolloutListFixture(
+    path.join(root, "working"),
+    "completed",
+    false,
+    {},
+    "human-only",
+    false,
+    true,
+    "Working",
+    {
+      ambiguousOpenRoots: true,
+      screenActivityState: "working"
+    }
+  );
+  const [working] = workingFixture.scan.terminalControlled;
+  assert.equal(working.screen_state, "working");
+  assert.equal(working.native_identity_state, "ambiguous");
+  assert.equal(working.durable_activity_state, "unknown");
+  assert.equal(
+    working.activity_state,
+    "working",
+    "a live working screen still wins in the legacy projection"
+  );
+  assert.equal(
+    (working.available_actions as Record<string, unknown>)
+      .identify_foreground,
+    undefined,
+    "a working screen must never advertise a /status probe"
+  );
 });
 
 test("list reports the unique physical Codex root when a stale managed preference rejects it", async (t) => {
@@ -357,6 +457,13 @@ test("list reports the unique physical Codex root when a stale managed preferenc
       .status,
     "resolved"
   );
+  assert.equal(terminal.screen_state, "idle");
+  assert.equal(
+    terminal.native_identity_state,
+    "unavailable",
+    "a unique open root remains an artifact candidate, not foreground proof"
+  );
+  assert.equal(terminal.durable_activity_state, "unknown");
   assert.equal(terminal.activity_state, "working");
   assert.equal(
     terminal.native_agent_identity_evidence,
@@ -1479,6 +1586,14 @@ test("healthy managed terminal keeps physical Send separate from its fast path",
     false,
     "the zero-rollout boundary remains private"
   );
+  assert.equal(observed.terminal.screen_state, "idle");
+  assert.equal(observed.terminal.native_identity_state, "resolved");
+  assert.equal(observed.terminal.durable_activity_state, "unknown");
+  assert.equal(
+    observed.terminal.activity_state,
+    "unknown",
+    "legacy activity remains conservative without an exact rollout"
+  );
   assert.equal(observed.terminal.management_state, "managed");
   assert.equal(
     Object.hasOwn(observed.terminal, "_terminal_user_explicit_send_action"),
@@ -1951,8 +2066,10 @@ async function createCodexRolloutListFixture(
   nativeIdentityHasRollout = true,
   composerScreen = "› ",
   fixtureOptions: {
+    ambiguousOpenRoots?: boolean;
     nestedCodexDescendant?: boolean;
     rejectedPreferredSessionId?: string;
+    screenActivityState?: "working" | "idle";
   } = {}
 ) {
   const nativeThreadId = "019f0000-0000-7000-8000-000000000777";
@@ -2056,26 +2173,47 @@ async function createCodexRolloutListFixture(
     inode: String(stat.ino),
     path: rolloutPath
   };
+  const openRootIdentities = nativeIdentityHasRollout
+    ? [{
+        sessionId: nativeThreadId,
+        processUuid,
+        processBirth,
+        rollout: rolloutIdentity,
+        evidence: "codex_open_root_rollout" as const
+      },
+      ...(fixtureOptions.ambiguousOpenRoots
+        ? [{
+            sessionId: "019f0000-0000-7000-8000-000000000779",
+            processUuid,
+            processBirth,
+            rollout: {
+              ...rolloutIdentity,
+              fd: "13r",
+              inode: `${stat.ino}-stale`,
+              path: path.join(workspace, "stale-rollout.jsonl")
+            },
+            evidence: "codex_open_root_rollout" as const
+          }]
+        : [])]
+    : [];
   const inventoryAuthority = {
     schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
     version: 1 as const,
     pid: 4242,
     processUuid,
     processBirth,
-    roots: nativeIdentityHasRollout
-      ? [{
-          sessionId: nativeThreadId,
-          processUuid,
-          processBirth,
-          rollout: rolloutIdentity,
-          evidence: "codex_open_root_rollout" as const
-        }]
-      : []
+    roots: openRootIdentities
   };
   const codexOpenRootRolloutInventory = {
     ...inventoryAuthority,
-    status: nativeIdentityHasRollout ? "resolved" as const :
-      "verified_absent" as const,
+    status: fixtureOptions.ambiguousOpenRoots
+      ? "unbound" as const
+      : nativeIdentityHasRollout
+        ? "resolved" as const
+        : "verified_absent" as const,
+    ...(fixtureOptions.ambiguousOpenRoots
+      ? { reason: "multiple_open_root_rollouts" as const }
+      : {}),
     inventoryFingerprint: createHash("sha256")
       .update(JSON.stringify(inventoryAuthority))
       .digest("hex")
@@ -2179,8 +2317,10 @@ async function createCodexRolloutListFixture(
         approvable: false,
         reason: "no approval prompt"
       },
-      activity_state: "idle",
-      activity_reason: "idle-looking fixture screen",
+      activity_state: fixtureOptions.screenActivityState ?? "idle",
+      activity_reason: fixtureOptions.screenActivityState === "working"
+        ? "working fixture screen"
+        : "idle-looking fixture screen",
       screen: { excerpt: composerScreen }
     })
   };
@@ -2221,6 +2361,12 @@ async function createCodexRolloutListFixture(
       ) => {
         if (request.pid === 4241) {
           throw new Error("broken sibling identity probe");
+        }
+        if (fixtureOptions.ambiguousOpenRoots) {
+          throw new Error(
+            `Codex process ${request.pid} has 2 open root rollout files; ` +
+            "the foreground native session is ambiguous"
+          );
         }
         if (
           request.preferredSessionId &&

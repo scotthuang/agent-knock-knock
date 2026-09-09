@@ -82,6 +82,73 @@ test("mutation lock shell acquires canonically and releases in reverse", async (
   ]);
 });
 
+test("after-terminal hook runs once inside terminal scope before writer acquisition", async () => {
+  const { events, ports } = fixture();
+  let resolveHook: (() => void) | undefined;
+  const hookPending = new Promise<void>((resolve) => {
+    resolveHook = resolve;
+  });
+
+  const transaction = withCanonicalMutationLocks({
+    ...ports,
+    afterTerminalAcquired: async () => {
+      events.push("after terminal start");
+      await hookPending;
+      events.push("after terminal complete");
+    }
+  }, async () => {
+    events.push("operation");
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [
+    "acquire terminal",
+    "after terminal start"
+  ]);
+  resolveHook!();
+  await transaction;
+  assert.deepEqual(events, [
+    "acquire terminal",
+    "after terminal start",
+    "after terminal complete",
+    "acquire writer",
+    "acquire state",
+    "operation",
+    "release state",
+    "release writer",
+    "release terminal"
+  ]);
+});
+
+test("after-terminal hook failure skips writer and releases terminal", async () => {
+  const expected = new Error("after-terminal failure");
+  const { events, ports } = fixture();
+  let hookCalls = 0;
+  let operationCalls = 0;
+
+  await assert.rejects(
+    withCanonicalMutationLocks({
+      ...ports,
+      afterTerminalAcquired: async () => {
+        hookCalls += 1;
+        events.push("after terminal");
+        throw expected;
+      }
+    }, async () => {
+      operationCalls += 1;
+    }),
+    (error) => error === expected
+  );
+
+  assert.equal(hookCalls, 1);
+  assert.equal(operationCalls, 0);
+  assert.deepEqual(events, [
+    "acquire terminal",
+    "after terminal",
+    "release terminal"
+  ]);
+});
+
 test("mutation transaction skips only the absent state scope", async () => {
   const { events, ports } = fixture({ withState: false });
   await withCanonicalMutationLocks(ports, async () => {

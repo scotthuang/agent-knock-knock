@@ -323,6 +323,8 @@ test("available actions preserve legacy insertion order and approval-last rule",
   const action = (id: string) => ({ id });
   const sessionActions: TerminalActionSet<{ id: string }> = {
     status: action("status"),
+    identify_foreground: action("identify"),
+    identify_and_send: action("identify-send"),
     send: action("raw-send"),
     close: action("close")
   };
@@ -337,6 +339,8 @@ test("available actions preserve legacy insertion order and approval-last rule",
   });
   const legacy = {
     status: action("status"),
+    identify_foreground: action("identify"),
+    identify_and_send: action("identify-send"),
     close: action("close"),
     send: action("verified-send"),
     reconcile_binding: action("reconcile"),

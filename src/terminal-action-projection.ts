@@ -23,6 +23,8 @@ export type TerminalActionName =
   | "new_thread"
   | "list_resumable_threads"
   | "native_inspect"
+  | "identify_foreground"
+  | "identify_and_send"
   | "resume_thread"
   | "reconcile_binding"
   | "respond"
@@ -537,6 +539,12 @@ function safeConflictActions<Action>(
 ): TerminalActionSet<Action> {
   return {
     ...(isAction(actions.status) ? { status: actions.status } : {}),
+    ...(isAction(actions.identify_foreground)
+      ? { identify_foreground: actions.identify_foreground }
+      : {}),
+    ...(isAction(actions.identify_and_send)
+      ? { identify_and_send: actions.identify_and_send }
+      : {}),
     ...(isAction(actions.close) ? { close: actions.close } : {})
   };
 }

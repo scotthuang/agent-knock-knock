@@ -160,7 +160,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 24);
+    assert.equal(listed.action_contracts.version, 25);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -171,7 +171,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /parsed working activity does not veto/u
+      /parsed working activity(?: does not veto| and Codex rollout ambiguity do not veto)/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -233,6 +233,24 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.equal(
       listed.action_contracts.field_semantics.activity_state
+        .authoritative_for_tool_calls,
+      false
+    );
+    assert.equal(
+      listed.action_contracts.field_semantics.activity_state.terminals,
+      "legacy_conservative_effective_activity_projection"
+    );
+    assert.equal(
+      listed.action_contracts.field_semantics.screen_state.terminals,
+      "live_terminal_screen_activity_classification"
+    );
+    assert.equal(
+      listed.action_contracts.field_semantics.native_identity_state
+        .authoritative_for_tool_calls,
+      false
+    );
+    assert.equal(
+      listed.action_contracts.field_semantics.durable_activity_state
         .authoritative_for_tool_calls,
       false
     );
