@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.13.1 - 2026-09-10
+
+### Fixed
+
+- Reconcile owner-released historical Turns without attempting obsolete native-identity recovery, while preserving active, stalled, malformed, ambiguous, and tampered records for explicit handling.
+- Read and safely upgrade exact v1/early-v2 Terminal Watch callback presentations, and recognize an accepted historical completion receipt only when a newer terminal dispatch has strictly superseded its top-level ledger entry. The repaired Store now reconciles 222 Turns and scans 80 Watches with zero errors.
+- Add exact lifecycle, native-status, and AskUserQuestion profiles for Claude Code `2.1.266` and `2.1.267`, including the optional `Organization policy` Status row introduced in `2.1.261`. The field is also accepted by the `2.1.263` profile and its value is always redacted.
+- Keep Codex `0.153.4` as the latest exact regression-tested stable profile after reviewing the installed client and official release behavior; the newer `0.154.0` builds remain prereleases and are not promoted.
+
+### Security
+
+- Bind Claude questionnaire identities and prompt fingerprints to the exact client version, reject malformed or inherited version-registry keys, and send no terminal input when a saved interaction crosses a client-version change.
+- Preserve Store repair idempotency and historical data: compatibility recovery requires exact receipts, process and path evidence, and never deletes valid active Sessions, Turns, or Watches.
+
 ## 0.13.0 - 2026-09-10
 
 ### Added
