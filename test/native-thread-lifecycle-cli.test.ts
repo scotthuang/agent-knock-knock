@@ -73,6 +73,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
       screenPath,
       statusCountPath,
       materializedPath,
+      rolloutPath,
       target,
       panePid,
       workspace,
@@ -363,6 +364,9 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
       { recursive: true, force: true }
     );
 
+    // The replacement rollout opened with the successful post-clear status
+    // probe, so recovery can roll it forward into an exact managed Session.
+    assert.equal(fs.existsSync(materializedPath), true);
     const sourceSendAfterCrash = runCli([
       "send",
       "--session",
@@ -406,6 +410,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
       false
     );
 
+    assert.equal(fs.existsSync(materializedPath), true);
     const sent = runCli([
       "send",
       "--session",
@@ -429,6 +434,9 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     );
     const sentResult = JSON.parse(sent.stdout);
     assert.equal(sentResult.delivered, true, sent.stdout);
+    assert.equal(sentResult.delivery_receipt, "agent_accepted", sent.stdout);
+    assert.equal(sentResult.agent_acceptance, "proven", sent.stdout);
+    assert.equal(sentResult.management_mode, "managed", sent.stdout);
     assert.equal(sentResult.status, "async_pending", sent.stdout);
     assert.notEqual(sentResult.turn_id, sentResult.session_id);
     const turns = listConversations(storeDir);
@@ -436,11 +444,18 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     assert.equal(turns[0].session_id, sentResult.session_id);
     assert.equal(turns[0].turn_id, sentResult.turn_id);
     const sessionsAfterRecovery = listManagedSessions(storeDir);
-    assert.equal(sessionsAfterRecovery.length, 2);
+    assert.equal(sessionsAfterRecovery.length, 3);
     const currentSession = sessionsAfterRecovery.find((entry) =>
-      entry.status === "bound"
+      entry.session_id === sentResult.session_id
     );
     assert.ok(currentSession);
+    assert.equal(currentSession.status, "bound");
+    assert.equal(
+      sessionsAfterRecovery.find((entry) =>
+        entry.session_id === recoveredTarget.session_id
+      )?.status,
+      "detached"
+    );
     assert.equal(currentSession.binding?.binding_id, turns[0].terminal_binding_id);
     assert.equal(
       currentSession.binding?.generation,
@@ -460,11 +475,10 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     const sentText = readJsonLines(tmuxCallsPath)
       .filter((call) => call.args[0] === "send-keys" && call.args.includes("-l"))
       .map((call) => call.args.at(-1));
-    assert.deepEqual(sentText.slice(-6), [
+    assert.deepEqual(sentText.slice(-5), [
+      "/status",
       "/status",
       "/clear",
-      "/status",
-      "/status",
       "/status",
       "Inspect the repository and report the current branch."
     ]);
@@ -504,6 +518,7 @@ function writeLifecycleFakeTmux(options: {
   screenPath: string;
   statusCountPath: string;
   materializedPath: string;
+  rolloutPath: string;
   target: string;
   panePid: number;
   workspace: string;
@@ -540,6 +555,10 @@ if (args[0] === "send-keys" && args.includes("-l")) {
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Cleared\\n› ");
   } else {
     fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
+    fs.writeFileSync(
+      ${JSON.stringify(`${options.rolloutPath}.pending-input`)},
+      text
+    );
     const [first = "", ...continuation] = String(text).split("\\n");
     fs.writeFileSync(
       ${JSON.stringify(options.screenPath)},
@@ -564,12 +583,43 @@ if (args[0] === "send-keys" && args.includes("C-m")) {
     const id = next === 1
       ? ${JSON.stringify(options.oldNativeThreadId)}
       : ${JSON.stringify(options.newNativeThreadId)};
+    if (id === ${JSON.stringify(options.newNativeThreadId)}) {
+      fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
+    }
     fs.writeFileSync(
       ${JSON.stringify(options.screenPath)},
       "/status\\nprobe-" + next + "\\nSession: " + id + "\\n" +
       ${JSON.stringify(CODEX_EMPTY_COMPOSER_SCREEN)}
     );
   } else if (screen.startsWith("Ready\\n› ")) {
+    const pendingPath = ${JSON.stringify(`${options.rolloutPath}.pending-input`)};
+    if (fs.existsSync(pendingPath)) {
+      const request = fs.readFileSync(pendingPath, "utf8");
+      const turnId = require("node:crypto").randomUUID();
+      const timestamp = new Date().toISOString();
+      const records = [
+        {
+          timestamp,
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: turnId }
+        },
+        {
+          timestamp,
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: request }],
+            internal_chat_message_metadata_passthrough: { turn_id: turnId }
+          }
+        }
+      ];
+      fs.appendFileSync(
+        ${JSON.stringify(options.rolloutPath)},
+        records.map((record) => JSON.stringify(record)).join("\\n") + "\\n"
+      );
+      fs.rmSync(pendingPath, { force: true });
+    }
     fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
   }
   process.exit(0);
@@ -682,6 +732,10 @@ function tmux(args) {
         fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Cleared\\n› ");
       } else {
         fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
+        fs.writeFileSync(
+          ${JSON.stringify(`${options.rolloutPath}.pending-input`)},
+          text
+        );
         const [first = "", ...continuation] = String(text).split("\\n");
         fs.writeFileSync(
           ${JSON.stringify(options.screenPath)},
@@ -704,12 +758,43 @@ function tmux(args) {
         const id = next === 1
           ? ${JSON.stringify(options.oldNativeThreadId)}
           : ${JSON.stringify(options.newNativeThreadId)};
+        if (id === ${JSON.stringify(options.newNativeThreadId)}) {
+          fs.writeFileSync(${JSON.stringify(options.materializedPath)}, "ready");
+        }
         fs.writeFileSync(
           ${JSON.stringify(options.screenPath)},
           "/status\\nprobe-" + next + "\\nSession: " + id + "\\n" +
           ${JSON.stringify(CODEX_EMPTY_COMPOSER_SCREEN)}
         );
       } else if (screen.startsWith("Ready\\n› ")) {
+        const pendingPath = ${JSON.stringify(`${options.rolloutPath}.pending-input`)};
+        if (fs.existsSync(pendingPath)) {
+          const request = fs.readFileSync(pendingPath, "utf8");
+          const turnId = require("node:crypto").randomUUID();
+          const timestamp = new Date().toISOString();
+          const records = [
+            {
+              timestamp,
+              type: "event_msg",
+              payload: { type: "task_started", turn_id: turnId }
+            },
+            {
+              timestamp,
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: request }],
+                internal_chat_message_metadata_passthrough: { turn_id: turnId }
+              }
+            }
+          ];
+          fs.appendFileSync(
+            ${JSON.stringify(options.rolloutPath)},
+            records.map((record) => JSON.stringify(record)).join("\\n") + "\\n"
+          );
+          fs.rmSync(pendingPath, { force: true });
+        }
         fs.writeFileSync(${JSON.stringify(options.screenPath)}, "Working\\n");
       }
     }

@@ -627,7 +627,10 @@ test("virgin Codex process drift after Enter quarantines the provisional binding
     assert.equal(output.agent_acceptance, "unproven");
     assert.equal(output.status, "submission_uncertain");
     assert.equal(output.do_not_retry, true);
-    assert.match(output.reason, /process incarnation changed/u);
+    assert.match(
+      output.reason,
+      /process or native thread identity changed during acceptance polling/u
+    );
     const sessions = listManagedSessions(fixture.storeDir);
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0].status, "quarantined");
@@ -912,6 +915,8 @@ test("a provisional attach orphan keeps fenced reconciliation alongside user-pri
     assert.equal(terminal.management_conflict.kind, "provisional_orphan");
     assert.deepEqual(Object.keys(terminal.available_actions), [
       "status",
+      "identify_foreground",
+      "identify_and_send",
       "reconcile_binding",
       "send"
     ]);
@@ -4878,6 +4883,10 @@ test("human terminal Send keeps managed ownership across transient writer conten
     ]);
     const terminal = await listFixtureTerminal(fixture);
     const action = assertTerminalUserExplicitSendAction(terminal);
+    fs.mkdirSync(fixture.storeDir, {
+      recursive: true,
+      mode: 0o700
+    });
     fs.writeFileSync(writerLockPath, `${JSON.stringify({
       pid: process.pid,
       token: "human-send-transient-writer-contention",
@@ -5138,8 +5147,16 @@ test("source-less human Send with a stable id makes multiple exact candidate mat
     assert.equal(replayOutput.delivered, true, replay.stdout);
     assert.equal(replayOutput.terminal_input_dispatched, true, replay.stdout);
     assert.equal(replayOutput.agent_acceptance, "unproven", replay.stdout);
-    assert.equal(replayOutput.status, "submission_uncertain", replay.stdout);
-    assert.equal(replayOutput.submission_outcome, "uncertain", replay.stdout);
+    assert.equal(
+      replayOutput.status,
+      "submission_pending_acceptance",
+      replay.stdout
+    );
+    assert.equal(
+      replayOutput.submission_outcome,
+      "pending_acceptance",
+      replay.stdout
+    );
     assert.equal(replayOutput.delivery_receipt, "enter_dispatched", replay.stdout);
     assert.equal(replayOutput.do_not_retry, true, replay.stdout);
     assert.equal(replayOutput.management_mode, "managed", replay.stdout);

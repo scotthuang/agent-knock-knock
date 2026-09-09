@@ -1,8 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type {
+  ActiveAgentSessionIdentity,
+  CodexOpenRootRolloutInventory
+} from "../src/agent-session-provider.js";
+import type { CodexLocalSessionAdapter } from
+  "../src/codex-local-session-provider.js";
+import type { TerminalProcessSnapshot } from
+  "../src/terminal-agent-adapter.js";
 import {
   MutableRecordingTerminalProvider,
   runInProcessCli,
@@ -689,15 +698,56 @@ function runDelegate(args: string[]) {
 function runCli(command: string, args: string[]) {
   const clock = new VirtualClock();
   const panes = jsonOption<TerminalPane[]>(args, "--terminals-json") ?? [];
+  const processes = jsonOption<TerminalProcessSnapshot[]>(
+    args,
+    "--processes-json"
+  ) ?? [];
   const screens = jsonOption<Record<string, string>>(
     args,
     "--terminal-screens-json"
   ) ?? {};
+  const suppliedIdentities = jsonOption<
+    Record<string, ActiveAgentSessionIdentity>
+  >(args, "--codex-active-session-identities-json") ?? {};
+  const identities = new Map<number, ActiveAgentSessionIdentity>(
+    Object.entries(suppliedIdentities).map(([pid, identity]) => [
+      Number(pid),
+      identity
+    ])
+  );
+  for (const process of processes) {
+    if (process.command !== "codex" || identities.has(process.pid)) {
+      continue;
+    }
+    if (!process.cwd) {
+      throw new Error(
+        `delegate Codex fixture ${process.pid} requires a workspace`
+      );
+    }
+    identities.set(process.pid, codexNativeIdentityFixture({
+      workspace: process.cwd,
+      codexPid: process.pid
+    }));
+  }
+  const processForTarget = new Map(
+    panes.flatMap((pane) => {
+      const process = processes.find((candidate) =>
+        candidate.command === "codex" && candidate.ppid === pane.panePid
+      );
+      return process ? [[pane.target, process] as const] : [];
+    })
+  );
+  const pendingRequests = new Map<string, string>();
+  const expectedRequest = stringOption(args, "--request") ??
+    stringOption(args, "--message");
   const provider = new MutableRecordingTerminalProvider({
     panes,
     screens,
     hooks: {
       sendText(operation, terminal) {
+        if (expectedRequest === operation.text) {
+          pendingRequests.set(operation.target, operation.text);
+        }
         terminal.setScreen(
           operation.target,
           codexComposerScreen(operation.text)
@@ -705,13 +755,66 @@ function runCli(command: string, args: string[]) {
       },
       sendKeys(operation, terminal) {
         if (operation.keys.includes("C-u")) {
+          pendingRequests.delete(operation.target);
           terminal.setScreen(operation.target, CODEX_EXACT_IDLE_COMPOSER);
         } else if (operation.keys.includes("C-m")) {
+          const request = pendingRequests.get(operation.target);
+          const process = processForTarget.get(operation.target);
+          const identity = process && identities.get(process.pid);
+          if (request && identity?.rollout) {
+            appendCodexAcceptance(identity.rollout.path, request);
+            pendingRequests.delete(operation.target);
+          }
           terminal.setScreen(operation.target, "Working\n");
         }
       }
     }
   });
+  const codexLocalSessionAdapter: CodexLocalSessionAdapter = {
+    listThreadRows: async () => [],
+    readRollout: async (rolloutPath) =>
+      fs.existsSync(rolloutPath)
+        ? fs.readFileSync(rolloutPath, "utf8")
+        : undefined,
+    listProcessSnapshots: async () => processes,
+    resolveActiveSessionIdentityForPid: async (pid) => identities.get(pid),
+    inspectOpenRootRolloutInventoryForPid: async (pid, cwd) => {
+      const identity = identities.get(pid);
+      if (
+        !identity?.processUuid ||
+        !identity.processBirth ||
+        !identity.rollout
+      ) {
+        throw new Error(
+          `delegate Codex fixture ${pid} has no complete open-root identity`
+        );
+      }
+      const root = {
+        ...identity,
+        processUuid: identity.processUuid,
+        processBirth: identity.processBirth,
+        rollout: identity.rollout,
+        evidence: "codex_open_root_rollout" as const
+      };
+      const authority = {
+        schema: "agent-knock-knock/codex-open-root-rollout-inventory" as const,
+        version: 1 as const,
+        pid,
+        processUuid: root.processUuid,
+        processBirth: root.processBirth,
+        ...(cwd ? { cwd: path.resolve(cwd) } : {}),
+        roots: [root] as [typeof root]
+      };
+      const inventory: CodexOpenRootRolloutInventory = {
+        ...authority,
+        status: "resolved",
+        inventoryFingerprint: createHash("sha256")
+          .update(JSON.stringify(authority))
+          .digest("hex")
+      };
+      return inventory;
+    }
+  };
   return runInProcessCli([command, ...args], {
     cwd: process.cwd(),
     env: {
@@ -722,6 +825,9 @@ function runCli(command: string, args: string[]) {
     },
     processBirthForPid: (pid) => `fixture-process-birth-${pid}`,
     codexProcessBirthForPid: (pid) => `fixture-process-birth-${pid}`,
+    codexLocalSessionAdapter,
+    agentVersionForRunningProcess: (agent) =>
+      agent === "codex" ? "0.153.4" : "2.1.263",
     now: clock.now,
     monotonicNowMs: clock.nowMs,
     sleep: clock.sleep,
@@ -737,6 +843,37 @@ function jsonOption<T>(args: string[], option: string): T | undefined {
   return index >= 0 && args[index + 1]
     ? JSON.parse(args[index + 1]) as T
     : undefined;
+}
+
+function stringOption(args: string[], option: string): string | undefined {
+  const index = args.indexOf(option);
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
+function appendCodexAcceptance(rolloutPath: string, request: string): void {
+  const turnId = randomUUID();
+  const timestamp = new Date().toISOString();
+  const records = [
+    {
+      timestamp,
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId }
+    },
+    {
+      timestamp,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: request }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId }
+      }
+    }
+  ];
+  fs.appendFileSync(
+    rolloutPath,
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`
+  );
 }
 
 function codexComposerScreen(text: string): string {
@@ -767,9 +904,10 @@ function terminalFixtureArgs(options: {
 function codexNativeIdentityFixture(options: {
   workspace: string;
   codexPid: number;
-}): Record<string, unknown> {
+}): ActiveAgentSessionIdentity {
   const sessionId =
     `00000000-0000-4000-8000-${String(options.codexPid).padStart(12, "0")}`;
+  const processBirth = `fixture-process-birth-${options.codexPid}`;
   const rolloutPath = path.join(
     options.workspace,
     ".codex",
@@ -795,8 +933,8 @@ function codexNativeIdentityFixture(options: {
   const rolloutStat = fs.statSync(rolloutPath);
   return {
     sessionId,
-    processUuid: `codex-process-${options.codexPid}`,
-    processBirth: `fixture-process-birth-${options.codexPid}`,
+    processUuid: `codex-pid:${options.codexPid}:birth:${processBirth}`,
+    processBirth,
     rollout: {
       fd: "17",
       device: String(rolloutStat.dev),

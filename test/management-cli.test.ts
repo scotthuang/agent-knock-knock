@@ -339,6 +339,8 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         "new_thread",
         "list_resumable_threads",
         "native_inspect",
+        "identify_foreground",
+        "identify_and_send",
         "resume_thread",
         "reconcile_binding",
         "respond",
@@ -357,7 +359,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.deepEqual(
       listed.action_contracts.actions.respond_interaction.required,
-      ["turn_id", "interaction_id", "answers"]
+      ["interaction_id", "answers"]
     );
     assert.equal(
       listed.action_contracts.actions.respond_interaction

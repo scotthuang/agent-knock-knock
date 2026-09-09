@@ -1193,7 +1193,8 @@ for (const agent of ["codex", "claude"] as const) {
       const closedOutput = JSON.parse(closed.stdout);
       assert.equal(closedOutput.closed, true);
       assert.equal(closedOutput.management_released, true);
-      assert.equal(closedOutput.terminal_input_sent, false);
+      assert.equal(closedOutput.terminal_input_sent, true);
+      assert.equal(closedOutput.terminal_input_dispatched, true);
       assert.equal(closedOutput.terminal_dispatch_resolved, true);
       assert.match(String(closedOutput.next_action ?? ""), /Watch/u);
 
