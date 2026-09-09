@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import type { CodexOpenRootRolloutInventory } from
-  "./agent-session-provider.js";
+import {
+  CodexTransientDuplicateOpenRootDescriptorsError,
+  type CodexOpenRootRolloutInventory
+} from "./agent-session-provider.js";
 import { callbackExpectedForConversationWithLegacyFallback } from
   "./callback-route-authority.js";
 import type { ExecutorKind } from "./executors.js";
@@ -1054,6 +1056,7 @@ export class TerminalDispatchExecutionService {
     request: TerminalAcceptancePollRequest
   ): Promise<TerminalDispatchAcceptance> {
     const deadline = this.#ports.clock.nowMs() + request.timeoutMs;
+    let observedTransientCodexDescriptorOverlap = false;
     while (true) {
       try {
         const evidence = await this.detectAcceptance(request);
@@ -1061,12 +1064,20 @@ export class TerminalDispatchExecutionService {
           return { outcome: "agent_accepted", evidence };
         }
       } catch (error) {
-        return { outcome: "uncertain", reason: errorText(error) };
+        if (
+          !(error instanceof CodexTransientDuplicateOpenRootDescriptorsError)
+        ) {
+          return { outcome: "uncertain", reason: errorText(error) };
+        }
+        observedTransientCodexDescriptorOverlap = true;
       }
       if (this.#ports.clock.nowMs() >= deadline) {
         break;
       }
       await this.#ports.clock.sleep(request.pollIntervalMs);
+    }
+    if (observedTransientCodexDescriptorOverlap) {
+      return { outcome: "pending_acceptance" };
     }
     if (this.#syntheticAcceptanceOutcome === "not_accepted") {
       return draftNotAccepted();
@@ -1166,7 +1177,17 @@ export class TerminalDispatchExecutionService {
     const attempts = request.attempts ?? 40;
     const delayMs = request.delayMs ?? 50;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const identity = await this.#pollNativeIdentityAttempt(request);
+      let identity: TerminalNativeIdentity | "pending";
+      try {
+        identity = await this.#pollNativeIdentityAttempt(request);
+      } catch (error) {
+        if (
+          !(error instanceof CodexTransientDuplicateOpenRootDescriptorsError)
+        ) {
+          throw error;
+        }
+        identity = "pending";
+      }
       if (identity !== "pending") {
         return identity;
       }

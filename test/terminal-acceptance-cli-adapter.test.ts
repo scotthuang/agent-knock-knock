@@ -9,8 +9,10 @@ import {
   type TerminalAcceptanceBridge,
   type TerminalAcceptanceCliDependencies
 } from "../src/terminal-acceptance-cli-adapter.js";
-import type { CodingAgentSessionProvider } from
-  "../src/agent-session-provider.js";
+import {
+  CodexTransientDuplicateOpenRootDescriptorsError,
+  type CodingAgentSessionProvider
+} from "../src/agent-session-provider.js";
 import { callbackRouteFingerprintForConversation } from
   "../src/callback-route-authority.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
@@ -845,6 +847,7 @@ test("monitor restart forwards exact Codex companion fences to the provider", as
   let resolverArguments:
     Parameters<CodingAgentSessionProvider["resolveActiveSessionIdentityForPid"]>
       | undefined;
+  let resolverCalls = 0;
   const provider = {
     agent: "codex",
     resolveActiveSessionIdentityForPid: async (
@@ -852,7 +855,11 @@ test("monitor restart forwards exact Codex companion fences to the provider", as
         CodingAgentSessionProvider["resolveActiveSessionIdentityForPid"]
       >
     ) => {
+      resolverCalls += 1;
       resolverArguments = args;
+      if (resolverCalls === 1) {
+        throw new CodexTransientDuplicateOpenRootDescriptorsError(42);
+      }
       return undefined;
     }
   } as unknown as CodingAgentSessionProvider;
@@ -877,7 +884,8 @@ test("monitor restart forwards exact Codex companion fences to the provider", as
       terminalControl: () => control
     }
   } as unknown as TerminalAcceptanceCliDependencies);
-  const result = await facade.reconcileMonitor({
+  let draftProofs = 0;
+  const reconcile = () => facade.reconcileMonitor({
     options: {},
     conversation,
     statePath: "/tmp/akk-monitor-restart/store/conversations/turn-1/state.json",
@@ -885,14 +893,26 @@ test("monitor restart forwards exact Codex companion fences to the provider", as
     terminalControl: control,
     executor: resolveExecutor({ kind: "codex" }),
     terminalBridge: {
-      proveExactDraftStillPresent: async () => false,
+      proveExactDraftStillPresent: async () => {
+        draftProofs += 1;
+        return false;
+      },
       resolveStoredTerminal: async () => {
         throw new Error("bound acceptance must not resolve a deferred terminal");
       }
     }
   });
 
-  assert.equal(result.outcome, "pending");
+  assert.equal((await reconcile()).outcome, "pending");
+  assert.equal(draftProofs, 0);
+  assert.equal((await reconcile()).outcome, "pending");
+  assert.equal(draftProofs, 1);
+  await assert.rejects(async () => {
+    provider.resolveActiveSessionIdentityForPid = async () => {
+      throw new Error("conflicting root identities");
+    };
+    await reconcile();
+  }, /conflicting root identities/u);
   assert.equal(runtimeIdentityCalls >= 1, true);
   assert.deepEqual(resolverArguments, [
     42,

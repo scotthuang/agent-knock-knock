@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
+import {
+  CodexTransientDuplicateOpenRootDescriptorsError,
+  type CodexOpenRootRolloutInventory
+} from "../src/agent-session-provider.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
 import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
@@ -73,6 +77,28 @@ const ADDITIONAL_COMPANION_IDENTITY: CodexPreMaterializationIdentity = {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function resolvedCodexInventory(
+  fd = IDENTITY.rollout!.fd
+): Extract<CodexOpenRootRolloutInventory, { status: "resolved" }> {
+  return {
+    schema: "agent-knock-knock/codex-open-root-rollout-inventory",
+    version: 1,
+    status: "resolved",
+    pid: 5102,
+    processUuid: "process-a",
+    processBirth: "birth-a",
+    cwd: "/workspace",
+    roots: [{
+      sessionId: THREAD_ID,
+      processUuid: "process-a",
+      processBirth: "birth-a",
+      rollout: { ...IDENTITY.rollout!, fd },
+      evidence: "codex_open_root_rollout"
+    }],
+    inventoryFingerprint: "a".repeat(64)
+  };
 }
 
 function boundAnchor(): CodexRolloutAcceptanceAnchor {
@@ -160,6 +186,8 @@ function conversation(
 
 interface HarnessOverrides {
   resolveCodex?: TerminalDispatchExecutionPorts["native"]["resolveCodex"];
+  inspectCodexOpenRoots?:
+    TerminalDispatchExecutionPorts["native"]["inspectCodexOpenRoots"];
   captureCodex?: TerminalDispatchExecutionPorts["acceptance"]["captureCodex"];
   detectCodexCandidates?:
     TerminalDispatchExecutionPorts["acceptance"]["detectCodexCandidates"];
@@ -189,7 +217,7 @@ function harness(overrides: HarnessOverrides = {}) {
         trace.push("resolve:codex");
         return IDENTITY;
       }),
-      inspectCodexOpenRoots: async () => {
+      inspectCodexOpenRoots: overrides.inspectCodexOpenRoots ?? (async () => {
         trace.push("inventory:codex");
         return {
           schema: "agent-knock-knock/codex-open-root-rollout-inventory",
@@ -202,7 +230,7 @@ function harness(overrides: HarnessOverrides = {}) {
           roots: [],
           inventoryFingerprint: "a".repeat(64)
         };
-      },
+      }),
       claudeRows: () => [],
       codexProcessIncarnation: () => ({
         processUuid: "process-a",
@@ -548,6 +576,118 @@ test("Codex candidate uncertainty short-circuits polling without draft proof", a
   ]);
 });
 
+test("Codex acceptance waits through exact duplicate descriptors and recovers", async () => {
+  let inventories = 0;
+  const accepted = evidence();
+  const { service, trace } = harness({
+    inspectCodexOpenRoots: async () => {
+      inventories += 1;
+      trace.push(`inventory:codex:${inventories}`);
+      if (inventories === 1) {
+        throw new CodexTransientDuplicateOpenRootDescriptorsError(5102);
+      }
+      return resolvedCodexInventory();
+    },
+    detectCodexCandidates() {
+      trace.push("detect:candidates:accepted");
+      return {
+        status: "accepted",
+        identity: resolvedCodexInventory().roots[0],
+        evidence: accepted
+      };
+    },
+    proveExactDraftStillPresent: async () => {
+      trace.push("draft:must-not-run");
+      return true;
+    }
+  });
+  const result = await service.pollAcceptance({
+    executor: "codex",
+    conversation: conversation("codex", candidateAnchor()),
+    terminalControl: TERMINAL_CONTROL,
+    timeoutMs: 30,
+    pollIntervalMs: 10,
+    scrollbackLines: 120
+  });
+  assert.deepEqual(result, { outcome: "agent_accepted", evidence: accepted });
+  assert.deepEqual(trace, [
+    "authority:monitor",
+    "inventory:codex:1",
+    "sleep:10",
+    "authority:monitor",
+    "inventory:codex:2",
+    "detect:candidates:accepted"
+  ]);
+});
+
+test("persistent exact duplicate descriptors leave Codex acceptance pending without draft replay proof", async () => {
+  let inventories = 0;
+  const { service, trace } = harness({
+    inspectCodexOpenRoots: async () => {
+      inventories += 1;
+      trace.push(`inventory:codex:${inventories}`);
+      throw new CodexTransientDuplicateOpenRootDescriptorsError(5102);
+    },
+    detectCodexCandidates() {
+      trace.push("detect:must-not-run");
+      return { status: "pending", inspected_candidates: 0, exact_matches: 0 };
+    },
+    proveExactDraftStillPresent: async () => {
+      trace.push("draft:must-not-run");
+      return true;
+    }
+  });
+  const result = await service.pollAcceptance({
+    executor: "codex",
+    conversation: conversation("codex", candidateAnchor()),
+    terminalControl: TERMINAL_CONTROL,
+    timeoutMs: 20,
+    pollIntervalMs: 10,
+    scrollbackLines: 120
+  });
+  assert.deepEqual(result, { outcome: "pending_acceptance" });
+  assert.deepEqual(trace, [
+    "authority:monitor",
+    "inventory:codex:1",
+    "sleep:10",
+    "authority:monitor",
+    "inventory:codex:2",
+    "sleep:10",
+    "authority:monitor",
+    "inventory:codex:3"
+  ]);
+});
+
+test("Codex acceptance keeps non-transient inventory conflicts immediately uncertain", async () => {
+  const { service, trace } = harness({
+    inspectCodexOpenRoots: async () => {
+      trace.push("inventory:codex:conflict");
+      throw new Error("Codex process 5102 has conflicting rollout identities");
+    },
+    proveExactDraftStillPresent: async () => {
+      trace.push("draft:must-not-run");
+      return true;
+    }
+  });
+  const result = await service.pollAcceptance({
+    executor: "codex",
+    conversation: conversation("codex", candidateAnchor()),
+    terminalControl: TERMINAL_CONTROL,
+    timeoutMs: 30,
+    pollIntervalMs: 10,
+    scrollbackLines: 120
+  });
+  assert.equal(result.outcome, "uncertain");
+  assert.match(
+    result.outcome === "uncertain" ? result.reason : "",
+    /conflicting rollout identities/u
+  );
+  assert.deepEqual(trace, [
+    "authority:monitor",
+    "inventory:codex:conflict"
+  ]);
+});
+
 test("candidate-set monitor carries a durable Turn identity after its root FD closes", async () => {
   const accepted = evidence();
   const anchor = candidateAnchor();
@@ -621,6 +761,111 @@ test("candidate-set live identity becomes the exact monitor runtime fence after 
     currentIdentity: liveIdentity,
     operation: "monitor"
   }));
+});
+
+test("Codex native identity polling retries only exact duplicate descriptors", async () => {
+  let inventories = 0;
+  const liveIdentity = resolvedCodexInventory("47r").roots[0];
+  const { service, trace } = harness({
+    inspectCodexOpenRoots: async () => {
+      inventories += 1;
+      trace.push(`inventory:codex:${inventories}`);
+      if (inventories < 3) {
+        throw new CodexTransientDuplicateOpenRootDescriptorsError(5102);
+      }
+      return resolvedCodexInventory("47r");
+    },
+    detectCodexCandidates() {
+      trace.push("detect:candidates:accepted");
+      return {
+        status: "accepted",
+        identity: liveIdentity,
+        evidence: evidence()
+      };
+    }
+  });
+  const identity = await service.pollNativeIdentity({
+    executor: "codex",
+    terminalControl: TERMINAL_CONTROL,
+    pid: 5102,
+    requiredCodexAcceptance: {
+      anchor: candidateAnchor(),
+      requestHash: REQUEST_HASH
+    },
+    attempts: 3,
+    delayMs: 10
+  });
+  assert.equal(identity?.rollout?.fd, "47r");
+  assert.deepEqual(trace, [
+    "inventory:codex:1",
+    "sleep:10",
+    "inventory:codex:2",
+    "sleep:10",
+    "inventory:codex:3",
+    "detect:candidates:accepted"
+  ]);
+});
+
+test("persistent exact duplicate descriptors never bind a Codex native identity", async () => {
+  let inventories = 0;
+  const { service, trace } = harness({
+    inspectCodexOpenRoots: async () => {
+      inventories += 1;
+      trace.push(`inventory:codex:${inventories}`);
+      throw new CodexTransientDuplicateOpenRootDescriptorsError(5102);
+    },
+    detectCodexCandidates() {
+      trace.push("detect:must-not-run");
+      return {
+        status: "accepted",
+        identity: resolvedCodexInventory().roots[0],
+        evidence: evidence()
+      };
+    }
+  });
+  const identity = await service.pollNativeIdentity({
+    executor: "codex",
+    terminalControl: TERMINAL_CONTROL,
+    pid: 5102,
+    requiredCodexAcceptance: {
+      anchor: candidateAnchor(),
+      requestHash: REQUEST_HASH
+    },
+    attempts: 3,
+    delayMs: 10
+  });
+  assert.equal(identity, undefined);
+  assert.deepEqual(trace, [
+    "inventory:codex:1",
+    "sleep:10",
+    "inventory:codex:2",
+    "sleep:10",
+    "inventory:codex:3"
+  ]);
+});
+
+test("Codex native identity polling does not retry generic inventory errors", async () => {
+  const { service, trace } = harness({
+    inspectCodexOpenRoots: async () => {
+      trace.push("inventory:codex:conflict");
+      throw new Error("Codex process 5102 has conflicting rollout identities");
+    }
+  });
+  await assert.rejects(
+    service.pollNativeIdentity({
+      executor: "codex",
+      terminalControl: TERMINAL_CONTROL,
+      pid: 5102,
+      requiredCodexAcceptance: {
+        anchor: candidateAnchor(),
+        requestHash: REQUEST_HASH
+      },
+      attempts: 3,
+      delayMs: 10
+    }),
+    /conflicting rollout identities/u
+  );
+  assert.deepEqual(trace, ["inventory:codex:conflict"]);
 });
 
 test("candidate-set monitor rejects inconsistent durable Turn identity before inventory", async () => {

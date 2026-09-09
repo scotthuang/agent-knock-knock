@@ -11,6 +11,20 @@ export type ForkContextCapability = "full" | "partial" | "unavailable";
 export type ActiveSessionCapability = "process_scan" | "unavailable";
 export type TakeoverCapability = "plan_only" | "unavailable";
 
+export class CodexTransientDuplicateOpenRootDescriptorsError extends Error {
+  readonly code = "AKK_CODEX_TRANSIENT_DUPLICATE_OPEN_ROOT_DESCRIPTORS";
+  readonly pid: number;
+
+  constructor(pid: number) {
+    super(
+      `Codex process ${pid} has duplicate open root rollout identities ` +
+      "from transient descriptors of one exact rollout"
+    );
+    this.name = "CodexTransientDuplicateOpenRootDescriptorsError";
+    this.pid = pid;
+  }
+}
+
 export interface AgentSessionCapabilities {
   historicalSessions: HistoricalSessionCapability;
   forkContext: ForkContextCapability;

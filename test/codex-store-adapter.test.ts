@@ -4,6 +4,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { CodexTransientDuplicateOpenRootDescriptorsError } from
+  "../src/agent-session-provider.js";
 import {
   CodexStoreAdapter,
   buildThreadByIdSelect,
@@ -534,7 +536,13 @@ test("Codex store adapter fails closed when the same root rollout has multiple d
     }) + "\n", "utf8");
     await assert.rejects(
       adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
-      /duplicate open root rollout identities/u
+      (error: unknown) => {
+        assert.ok(
+          error instanceof CodexTransientDuplicateOpenRootDescriptorsError
+        );
+        assert.match(error.message, /duplicate open root rollout identities/u);
+        return true;
+      }
     );
     await assert.rejects(
       adapter.resolveActiveSessionIdentityForPid(
@@ -542,10 +550,90 @@ test("Codex store adapter fails closed when the same root rollout has multiple d
         "/repo/project",
         SESSION_ID
       ),
-      /duplicate open root rollout identities/u
+      CodexTransientDuplicateOpenRootDescriptorsError
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex store adapter keeps conflicting duplicate rollout identities non-transient", async () => {
+  for (const fixture of ["different_inode", "same_inode_different_path"] as const) {
+    const dir = fs.mkdtempSync(path.join(
+      os.tmpdir(),
+      `akk-codex-rollout-conflict-${fixture}-`
+    ));
+    const firstPath = path.join(
+      dir,
+      "sessions",
+      "first",
+      `rollout-${SESSION_ID}.jsonl`
+    );
+    const secondPath = path.join(
+      dir,
+      "sessions",
+      "second",
+      `rollout-${SESSION_ID}.jsonl`
+    );
+    try {
+      fs.mkdirSync(path.dirname(firstPath), { recursive: true });
+      fs.mkdirSync(path.dirname(secondPath), { recursive: true });
+      const metadata = JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: SESSION_ID,
+          cwd: "/repo/project",
+          originator: "codex-tui",
+          source: "cli"
+        }
+      }) + "\n";
+      fs.writeFileSync(firstPath, metadata, "utf8");
+      if (fixture === "same_inode_different_path") {
+        fs.linkSync(firstPath, secondPath);
+      } else {
+        fs.writeFileSync(secondPath, metadata, "utf8");
+      }
+      const adapter = new CodexStoreAdapter({
+        codexHome: dir,
+        runCommand(command): CommandResult {
+          if (command === "ps") {
+            return ok("Tue Aug  4 14:15:13 2026\n");
+          }
+          return ok([firstPath, secondPath].flatMap((filePath, index) => {
+            const stat = fs.statSync(filePath, { bigint: true });
+            return [
+              `f${20 + index}r`,
+              "tREG",
+              `D${stat.dev}`,
+              `i${stat.ino}`,
+              `n${filePath}`
+            ];
+          }).join("\n"));
+        }
+      });
+      await assert.rejects(
+        adapter.inspectOpenRootRolloutInventoryForPid(
+          4242,
+          "/repo/project"
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof Error, fixture);
+          assert.equal(
+            error instanceof CodexTransientDuplicateOpenRootDescriptorsError,
+            false,
+            fixture
+          );
+          assert.match(
+            error.message,
+            /duplicate open root rollout identities/u,
+            fixture
+          );
+          return true;
+        }
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

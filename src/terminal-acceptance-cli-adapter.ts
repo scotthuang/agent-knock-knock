@@ -1,10 +1,11 @@
 // CLI infrastructure for native acceptance and managed Turn persistence.
 import path from "node:path";
 
-import type {
-  ActiveAgentSessionIdentity,
-  CodexOpenRootRolloutInventory,
-  CodingAgentSessionProvider
+import {
+  CodexTransientDuplicateOpenRootDescriptorsError,
+  type ActiveAgentSessionIdentity,
+  type CodexOpenRootRolloutInventory,
+  type CodingAgentSessionProvider
 } from "./agent-session-provider.js";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
@@ -1078,11 +1079,19 @@ class TerminalAcceptanceCliApplication {
         commit: (request) => this.#commitAcceptance(input, request)
       }
     });
-    const result = await service.reconcile({
-      executor: input.executor.kind,
-      turn: input.conversation,
-      project: acceptanceFacts
-    });
+    let result: Awaited<ReturnType<typeof service.reconcile>>;
+    try {
+      result = await service.reconcile({
+        executor: input.executor.kind,
+        turn: input.conversation,
+        project: acceptanceFacts
+      });
+    } catch (error) {
+      if (error instanceof CodexTransientDuplicateOpenRootDescriptorsError) {
+        return { outcome: "pending" };
+      }
+      throw error;
+    }
     return result.outcome === "pending"
       ? result
       : { outcome: result.outcome, conversation: result.turn };
