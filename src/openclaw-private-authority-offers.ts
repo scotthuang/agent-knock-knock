@@ -130,6 +130,48 @@ export function openClawTerminalWatchInteractionAuthorityOfferKey(
   );
 }
 
+/**
+ * Invalidates every interaction response offer previously displayed for one
+ * exact subject in one exact controller conversation. Status uses this as a
+ * refresh boundary before it publishes at most one offer from the new
+ * snapshot, so an old interaction id cannot remain actionable for the rest of
+ * its TTL after the terminal UI disappears or changes.
+ */
+export function invalidateOpenClawInteractionAuthorityOffersForSubject(
+  api: object,
+  sessionKey: string,
+  sessionId: string,
+  subjectKind: OpenClawInteractionAuthoritySubjectKind,
+  subjectId: string,
+  nowMs = Date.now()
+): number {
+  const exactApi = assertApi(api);
+  const exactSessionKey = exactNonBlank(sessionKey, "sessionKey");
+  const exactSessionId = exactNonBlank(sessionId, "sessionId");
+  const exactSubjectKind = interactionAuthoritySubjectKind(subjectKind);
+  const exactSubjectId = exactNonBlank(subjectId, "interaction subject id");
+  assertNow(nowMs);
+  const store = storesByApi.get(exactApi);
+  if (!store) return 0;
+  pruneExpiredOffers(store, nowMs);
+  let invalidated = 0;
+  for (const normalizedKey of store.entries.keys()) {
+    if (
+      normalizedInteractionOfferMatchesSubject(
+        normalizedKey,
+        exactSessionKey,
+        exactSessionId,
+        exactSubjectKind,
+        exactSubjectId
+      )
+    ) {
+      store.entries.delete(normalizedKey);
+      invalidated += 1;
+    }
+  }
+  return invalidated;
+}
+
 export function rememberOpenClawPrivateAuthorityOffer(
   api: object,
   key: OpenClawPrivateAuthorityOfferKey,
@@ -233,6 +275,37 @@ function privateAuthorityOfferKey(
   const targetType = exactIdentifier(key?.target?.type, "target.type");
   const targetId = exactNonBlank(key?.target?.id, "target.id");
   return JSON.stringify([sessionKey, sessionId, kind, targetType, targetId]);
+}
+
+function normalizedInteractionOfferMatchesSubject(
+  normalizedKey: string,
+  sessionKey: string,
+  sessionId: string,
+  subjectKind: OpenClawInteractionAuthoritySubjectKind,
+  subjectId: string
+): boolean {
+  try {
+    const key = JSON.parse(normalizedKey) as unknown;
+    if (
+      !Array.isArray(key) ||
+      key.length !== 5 ||
+      key[0] !== sessionKey ||
+      key[1] !== sessionId ||
+      key[2] !== OPENCLAW_INTERACTION_AUTHORITY_KIND ||
+      key[3] !== "interaction_subject" ||
+      typeof key[4] !== "string"
+    ) {
+      return false;
+    }
+    const target = JSON.parse(key[4]) as unknown;
+    return Array.isArray(target) &&
+      target.length === 3 &&
+      target[0] === subjectKind &&
+      target[1] === subjectId &&
+      typeof target[2] === "string";
+  } catch {
+    return false;
+  }
 }
 
 function exactIdentifier(value: unknown, label: string): string {

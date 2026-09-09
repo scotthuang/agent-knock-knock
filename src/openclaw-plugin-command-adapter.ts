@@ -56,6 +56,7 @@ import {
 } from "./openclaw-plugin-schemas.js";
 import {
   consumeOpenClawPrivateAuthorityOffer,
+  invalidateOpenClawInteractionAuthorityOffersForSubject,
   openClawApprovalAuthorityOfferKey,
   openClawInteractionAuthorityOfferKey,
   rememberOpenClawPrivateAuthorityOffer,
@@ -445,14 +446,7 @@ export function registerOpenClawCommands(
       async execute(_toolCallId, params, signal) {
         return withHostBridgeInvocationSignal(signal, async () => {
           try {
-            const result = await runHostAwareCli(
-              api,
-              buildStatusCliArgs(
-                api,
-                isRecord(params) ? params : {},
-                toolContext
-              )
-            );
+            const result = await runStatusRequest(api, params, toolContext);
             const rendered = toolResult(result);
             rememberDisplayedApprovalOffer(
               api,
@@ -1602,6 +1596,22 @@ function buildStatusCliArgs(api, params, toolContext) {
   return args;
 }
 
+async function runStatusRequest(
+  api,
+  params: unknown,
+  toolContext: { sessionKey?: unknown; sessionId?: unknown } | undefined
+): Promise<Record<string, any>> {
+  const statusParams = isRecord(params) ? params : {};
+  const statusArgs = buildStatusCliArgs(api, statusParams, toolContext);
+  invalidateRequestedInteractionOffers(
+    api,
+    toolContext?.sessionKey,
+    toolContext?.sessionId,
+    statusParams
+  );
+  return runHostAwareCli(api, statusArgs);
+}
+
 function terminalScreenExcerpt(result): string | undefined {
   const screen = result.terminal_screen;
   const text = typeof screen === "string"
@@ -1988,6 +1998,15 @@ function rememberDisplayedInteractionOffer(
   if (!sessionKey || !sessionId || !isRecord(result)) return;
   const displayed = displayedInteractionStatus(result);
   if (!displayed) return;
+  const expectedSubjectId = stringValue(displayed.expectedSubjectId);
+  if (!expectedSubjectId || expectedSubjectId === "unknown") return;
+  invalidateOpenClawInteractionAuthorityOffersForSubject(
+    api,
+    sessionKey,
+    sessionId,
+    displayed.expectedSubjectKind,
+    expectedSubjectId
+  );
   const fingerprint = stringValue(
     displayed.fields.interaction_prompt_fingerprint
   );
@@ -2005,7 +2024,7 @@ function rememberDisplayedInteractionOffer(
     interactionState.state !== "pending" ||
     interactionState.capabilities.respond !== true ||
     subject.kind !== displayed.expectedSubjectKind ||
-    subject.id !== displayed.expectedSubjectId ||
+    subject.id !== expectedSubjectId ||
     (
       interactionState.version === TERMINAL_INTERACTION_SUBJECT_VERSION &&
       (
@@ -2029,6 +2048,37 @@ function rememberDisplayedInteractionOffer(
       fingerprint,
       interaction_state: interactionState
     }
+  );
+}
+
+function invalidateRequestedInteractionOffers(
+  api: object,
+  sessionKeyValue: unknown,
+  sessionIdValue: unknown,
+  params: Record<string, unknown>
+): void {
+  const sessionKey = stringValue(sessionKeyValue);
+  const sessionId = stringValue(sessionIdValue);
+  if (!sessionKey || !sessionId) return;
+  const watchId = stringValue(params.watch_id);
+  if (watchId) {
+    invalidateOpenClawInteractionAuthorityOffersForSubject(
+      api,
+      sessionKey,
+      sessionId,
+      "terminal_watch",
+      watchId
+    );
+    return;
+  }
+  const turnId = stringValue(params.turn_id);
+  if (!turnId) return;
+  invalidateOpenClawInteractionAuthorityOffersForSubject(
+    api,
+    sessionKey,
+    sessionId,
+    "managed_turn",
+    turnId
   );
 }
 
