@@ -212,6 +212,50 @@ test("native questionnaire callbacks require Status before one semantic response
   assert.doesNotMatch(visible, /make the product decision/u);
 });
 
+test("manual native questionnaire callback instructs manual handling without response tools", async () => {
+  const harness = callbackHarness();
+  const turnId = "turn-interaction-manual";
+  const conversation = createConversation({
+    userRequest: "unsupported native questionnaire",
+    sessionId: "session-interaction-manual",
+    turnId,
+    openclawSession: "agent:main:interaction-manual",
+    executorKind: "claude",
+    executorSession: "claude-interaction-manual"
+  });
+  const message = createMessage({
+    conversation,
+    id: "message-interaction-manual",
+    from: "claude-code",
+    to: "openclaw",
+    type: "question",
+    requiresResponse: false,
+    body: "Claude Code needs this questionnaire answered directly in the terminal.",
+    metadata: {
+      source: "terminal_bridge",
+      reason: "interaction_manual_required"
+    }
+  });
+
+  await harness.handler()({
+    params: {
+      sessionKey: "agent:main:interaction-manual",
+      conversation,
+      message
+    },
+    respond: harness.respond
+  });
+
+  assert.equal(harness.response()?.ok, true);
+  const visible = harness.visible();
+  assert.match(visible, /cannot answer safely/u);
+  assert.match(visible, /manual terminal input is required/u);
+  assert.match(visible, /Do not call agent_knock_knock_respond or agent_knock_knock_respond_interaction/u);
+  assert.doesNotMatch(visible, /\[AKK response command\]/u);
+  assert.doesNotMatch(visible, /\[AKK native interaction refresh required\]/u);
+  assert.doesNotMatch(visible, /make the product decision/u);
+});
+
 test("ordinary question callbacks retain the managed respond workflow", async () => {
   const harness = callbackHarness();
   const conversation = createConversation({

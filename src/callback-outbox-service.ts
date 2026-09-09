@@ -195,6 +195,8 @@ export interface InteractionNotificationPreparationInput {
   actor: Actor;
   body: string;
   metadata: Record<string, unknown>;
+  /** Manual-only observations wake the controller without transferring Turn ownership. */
+  requiresResponse?: boolean;
   recoverMissingOutbox?: boolean;
 }
 
@@ -1075,7 +1077,7 @@ function prepareInteractionNotification(
     from: input.actor,
     to: "openclaw",
     type: "question",
-    requiresResponse: true,
+    requiresResponse: input.requiresResponse !== false,
     body: input.body,
     metadata: input.metadata,
     now: identity.now

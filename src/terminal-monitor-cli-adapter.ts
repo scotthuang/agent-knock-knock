@@ -716,6 +716,7 @@ export interface InteractionNotificationAdapterPorts {
     actor: Executor["actor"];
     body: string;
     metadata: UnknownRecord;
+    requiresResponse: boolean;
     recoverMissingOutbox: boolean;
   }): MonitorApprovalCallbackRecord;
 }
@@ -749,18 +750,30 @@ export function recordMonitorInteractionNotification(input: {
         interactionId: input.interactionId,
         questionId: input.questionId
       });
+      const executable = interactionState.state === "pending" &&
+        interactionState.capabilities.respond === true &&
+        interactionState.questions[0]?.response_kind !== "multi_select";
       return input.ports.prepare({
         conversation,
         actor: input.executor.actor,
-        body: [
-          `${input.executor.display_name} is waiting for a native questionnaire response.`,
-          `Turn: ${conversation.turn_id}`,
-          `Terminal: ${input.terminalControl.target}`,
-          "Refresh this Turn with agent_knock_knock_status in the owning controller conversation, present the current interaction_state to the user, and answer exactly one advertised step with agent_knock_knock_respond_interaction."
-        ].join("\n"),
+        body: executable
+          ? [
+              `${input.executor.display_name} is waiting for a native questionnaire response.`,
+              `Turn: ${conversation.turn_id}`,
+              `Terminal: ${input.terminalControl.target}`,
+              "Refresh this Turn with agent_knock_knock_status in the owning controller conversation, present the current interaction_state to the user, and answer exactly one advertised step with agent_knock_knock_respond_interaction."
+            ].join("\n")
+          : [
+              `${input.executor.display_name} is waiting at a native questionnaire that AKK cannot answer safely.`,
+              `Turn: ${conversation.turn_id}`,
+              `Terminal: ${input.terminalControl.target}`,
+              "Review and answer this questionnaire directly in the terminal. AKK intentionally sends no terminal input for this interaction shape."
+            ].join("\n"),
         metadata: {
           source: "terminal_bridge",
-          reason: "interaction_required",
+          reason: executable
+            ? "interaction_required"
+            : "interaction_manual_required",
           terminal: {
             provider: input.terminalStatus.provider,
             target: input.terminalStatus.target,
@@ -768,6 +781,7 @@ export function recordMonitorInteractionNotification(input: {
           },
           interaction_state: interactionState
         },
+        requiresResponse: executable,
         recoverMissingOutbox: context?.recoverMissingOutbox === true
       });
     }

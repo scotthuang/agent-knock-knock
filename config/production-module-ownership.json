@@ -990,6 +990,10 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-interaction-core.ts",
+      "owner": "terminal-action-projection"
+    },
+    {
       "path": "src/terminal-interaction-protocol.ts",
       "owner": "terminal-action-projection"
     },

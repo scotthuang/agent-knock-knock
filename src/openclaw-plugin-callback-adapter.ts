@@ -204,7 +204,8 @@ function callbackStringField(label, owner, field) {
 type CallbackOfferState =
   | "not_applicable"
   | "approval_refresh_required"
-  | "interaction_refresh_required";
+  | "interaction_refresh_required"
+  | "interaction_manual_required";
 
 function callbackOfferState(
   message: Record<string, unknown>,
@@ -217,6 +218,13 @@ function callbackOfferState(
   // incarnation-bound offer instead.
   if (stringValue(messageMetadata?.reason) === "approval_required") {
     return "approval_refresh_required";
+  }
+  if (
+    message.type === "question" &&
+    stringValue(messageMetadata?.source) === "terminal_bridge" &&
+    stringValue(messageMetadata?.reason) === "interaction_manual_required"
+  ) {
+    return "interaction_manual_required";
   }
   return message.type === "question" &&
       message.requires_response === true &&
@@ -446,8 +454,11 @@ function buildCallbackDeliveryPlan({
     ? "The callback could not establish private approval authority. Do not call approve from this callback alone. First call agent_knock_knock_status with only its exact turn_id, present the current approval request, and ask for an explicit user decision."
     : callbackOffer === "interaction_refresh_required"
       ? "This callback reports a native terminal questionnaire. Do not call agent_knock_knock_respond or agent_knock_knock_respond_interaction from the callback alone. First call agent_knock_knock_status with only its exact turn_id in this controller conversation, present the fresh pending interaction_state to the user, and only after their answer call agent_knock_knock_respond_interaction with the advertised semantic IDs. Answer exactly one current step and never guess raw keys, menu indexes, or labels."
+      : callbackOffer === "interaction_manual_required"
+        ? "This callback reports a native terminal questionnaire that AKK cannot answer safely. Inform the user that manual terminal input is required. Do not call agent_knock_knock_respond or agent_knock_knock_respond_interaction and do not guess keys, menu indexes, labels, or answer text."
       : "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and use agent_knock_knock_respond with its exact turn_id. If it is done, summarize the result to the user.";
-  const inspectionGuidance = callbackOffer === "interaction_refresh_required"
+  const inspectionGuidance = callbackOffer === "interaction_refresh_required" ||
+      callbackOffer === "interaction_manual_required"
     ? "Do not inspect files, processes, sessions, stdout, or stderr. The only authorized live refresh for this callback is agent_knock_knock_status with its exact turn_id."
     : "Do not poll files, processes, sessions, stdout, or stderr. Use only the structured callback payload below.";
   return {
@@ -488,6 +499,8 @@ function formatCallbackInjection({
     ? formatApprovalRefreshShortcut(turnId)
     : callbackOffer === "interaction_refresh_required"
       ? formatInteractionRefreshShortcut(turnId)
+      : callbackOffer === "interaction_manual_required"
+        ? ""
       : type === "done"
         ? formatDoneShortcuts(sessionId, turnId)
         : message.requires_response === true || type === "question" || type === "blocked"

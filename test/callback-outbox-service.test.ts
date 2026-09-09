@@ -794,6 +794,47 @@ test("interaction preparation keeps its stable identity and exposes only safe qu
   );
 });
 
+test("manual interaction preparation wakes without transferring Turn ownership", () => {
+  const harness = createHarness();
+  Object.assign(harness.conversation as Conversation, {
+    gateway_method: "agent-knock-knock.callback",
+    native_session_takeover: {
+      terminal_bridge_interaction_notification: {
+        callback_message_id: "interaction-manual-a",
+        callback_message_ts: "2026-08-14T11:59:00.000Z",
+        interaction_id: "ti_manual_a",
+        prompt_fingerprint: "a".repeat(64)
+      }
+    }
+  });
+
+  const result = harness.service.prepareInteractionNotification({
+    options: { statePath: STATE_PATH },
+    statePath: STATE_PATH,
+    logPath: LOG_PATH,
+    conversation: harness.conversation,
+    actor: "codex",
+    body: "Manual terminal response is required.",
+    metadata: {
+      source: "terminal_bridge",
+      reason: "interaction_manual_required"
+    },
+    requiresResponse: false
+  });
+
+  assert.equal(result.callbackMessage.type, "question");
+  assert.equal(result.callbackMessage.requires_response, false);
+  assert.ok(result.prepared);
+  assert.equal(result.prepared.conversation.status, "waiting_for_agent");
+  assert.equal(result.prepared.conversation.response_rounds_used, 0);
+  const delivery = harness.stored().callback_delivery as Record<string, unknown>;
+  assert.equal(delivery.kind, "interaction_notification");
+  assert.equal(
+    (delivery.message as Record<string, unknown>).requires_response,
+    false
+  );
+});
+
 test("approval without a gateway keeps the stable message out of the outbox", () => {
   const harness = createHarness();
   Object.assign(harness.conversation as Conversation, {

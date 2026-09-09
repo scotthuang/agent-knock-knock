@@ -2072,6 +2072,11 @@ class TerminalMonitorStateCliApplication {
     const callbackInteractionState = validInteractionProjection(
       callbackMetadata?.interaction_state
     );
+    const callbackInteractionReason = callbackInteractionState?.state === "pending" &&
+        callbackInteractionState.capabilities.respond === true &&
+        callbackInteractionState.questions[0]?.response_kind !== "multi_select"
+      ? "interaction_required"
+      : "interaction_manual_required";
     const previousCallbackMessageId = nonBlankString(
       previousNotification?.callback_message_id
     );
@@ -2080,7 +2085,7 @@ class TerminalMonitorStateCliApplication {
       previousCallbackMessageId !== undefined &&
       callbackMessage?.id === previousCallbackMessageId &&
       callbackMetadata?.source === "terminal_bridge" &&
-      callbackMetadata?.reason === "interaction_required" &&
+      callbackMetadata?.reason === callbackInteractionReason &&
       callbackInteractionState !== undefined &&
       callbackInteractionState.interaction_id ===
         previousNotification?.interaction_id &&

@@ -906,7 +906,7 @@ test("a cancelling Turn never creates a questionnaire callback", async () => {
   assert.equal(trace.includes("callback.run"), false);
 });
 
-test("manual multi-select projection produces no interaction callback", async () => {
+test("manual multi-select projection notifies without stopping managed monitoring", async () => {
   const trace: string[] = [];
   const owner = conversation({
     terminal_bridge_pre_send_screen_fingerprint: "screen-before"
@@ -933,10 +933,25 @@ test("manual multi-select projection produces no interaction callback", async ()
     }
   };
   const ports = fakePorts(trace, owner);
-  ports.authority.poll = async () => ({
-    kind: "observed",
-    poll: { status: manual, completion: COMPLETION }
-  });
+  ports.state.recordInteractionNotification = () => {
+    trace.push("interaction.record");
+    return {
+      conversation: owner,
+      duplicate: false,
+      stale: false,
+      recorded: { prepared: fakePrepared(owner) }
+    };
+  };
+  let polls = 0;
+  ports.authority.poll = async () => {
+    polls += 1;
+    return {
+      kind: "observed",
+      poll: polls === 1
+        ? { status: manual }
+        : { status: status(), completion: COMPLETION }
+    };
+  };
 
   await runTerminalMonitor({
     initialConversation: owner,
@@ -946,10 +961,16 @@ test("manual multi-select projection produces no interaction callback", async ()
     ports
   });
 
-  assert.equal(trace.includes("interaction.record"), false);
+  assert.equal(trace.includes("interaction.record"), true);
+  assert.equal(trace.includes("callback.run"), true);
+  assert.equal(trace.includes("callback.emit"), false);
   assert.equal(trace.includes(
-    "event:terminal_bridge_interaction_detected"
-  ), false);
+    "event:terminal_bridge_interaction_manual_required"
+  ), true);
+  assert.equal(trace.includes(
+    "event:terminal_bridge_interaction_manual_notification_dispatched"
+  ), true);
+  assert.equal(trace.includes("completion.prepare"), true);
 });
 
 test("monitor continues when interaction response is consumed during callback delivery", async () => {
@@ -1052,6 +1073,78 @@ test("interaction outbox recovery reuses the persisted immutable projection", ()
   assert.notEqual(
     preparedProjection.expires_at,
     currentStatus.interaction_state?.expires_at
+  );
+});
+
+test("manual interaction callback is notification-only and gives no response command", () => {
+  const manualStatus = interactionStatus();
+  const projection = {
+    ...manualStatus.interaction_state!,
+    state: "manual_required" as const,
+    questions: [{
+      question_id: "question-manual",
+      prompt: "Select every applicable option",
+      response_kind: "multi_select" as const,
+      required: true,
+      options: [
+        { option_id: "one", label: "One" },
+        { option_id: "two", label: "Two" }
+      ]
+    }],
+    capabilities: {
+      respond: false,
+      batch_response: false,
+      free_text: false,
+      multi_select: true
+    }
+  };
+  manualStatus.interaction_state = projection;
+  const owner = conversation({
+    terminal_bridge_interaction_notification: {
+      terminal_bridge_message_id: "message-1",
+      interaction_id: projection.interaction_id,
+      question_id: "question-manual",
+      prompt_fingerprint: INTERACTION_FINGERPRINT,
+      callback_message_id: "callback-manual-1",
+      callback_message_ts: "1970-01-01T00:00:00.000Z",
+      interaction_state: projection
+    }
+  });
+  let preparation: {
+    body: string;
+    metadata: Record<string, unknown>;
+    requiresResponse: boolean;
+  } | undefined;
+
+  recordMonitorInteractionNotification({
+    conversation: owner,
+    executor: owner.executor,
+    terminalControl: CONTROL,
+    terminalStatus: manualStatus,
+    currentMessageId: "message-1",
+    interactionId: projection.interaction_id,
+    questionId: "question-manual",
+    fingerprint: INTERACTION_FINGERPRINT,
+    ports: {
+      record: ({ onRecorded }) => ({
+        conversation: owner,
+        duplicate: false,
+        stale: false,
+        recorded: onRecorded(owner)
+      }),
+      prepare: (input) => {
+        preparation = input;
+        return { prepared: fakePrepared(owner) };
+      }
+    }
+  });
+
+  assert.equal(preparation?.requiresResponse, false);
+  assert.equal(preparation?.metadata.reason, "interaction_manual_required");
+  assert.match(preparation?.body ?? "", /answer this questionnaire directly/u);
+  assert.doesNotMatch(
+    preparation?.body ?? "",
+    /agent_knock_knock_respond_interaction/u
   );
 });
 
