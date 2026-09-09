@@ -458,6 +458,14 @@ async function runRespondInteraction(
           fingerprint: expectedFingerprint
         });
       const latestTakeover = takeoverFor(callbackSafeConversation);
+      const interactionNotification = isRecord(
+        latestTakeover?.terminal_bridge_interaction_notification
+      )
+        ? latestTakeover.terminal_bridge_interaction_notification
+        : undefined;
+      const consumedSurfaceId = nonBlankString(
+        interactionNotification?.surface_id
+      );
       const nextTakeover: Record<string, unknown> = {
         ...latestTakeover,
         terminal_bridge_last_interaction_id: interactionId,
@@ -470,6 +478,11 @@ async function runRespondInteraction(
         terminal_bridge_last_activity_reason:
           "interactive response dispatched"
       };
+      delete nextTakeover.terminal_bridge_last_interaction_surface_id;
+      if (consumedSurfaceId) {
+        nextTakeover.terminal_bridge_last_interaction_surface_id =
+          consumedSurfaceId;
+      }
       delete nextTakeover.terminal_bridge_interaction_dispatch;
       delete nextTakeover.terminal_bridge_interaction_notification;
       const nextConversation: Conversation = {

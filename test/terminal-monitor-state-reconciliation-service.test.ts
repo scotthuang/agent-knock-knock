@@ -292,6 +292,7 @@ test("questionnaire notification persists before outbox and recovers its stable 
   saveState(paths.statePath, owner);
 
   const fingerprint = "c".repeat(64);
+  const surfaceId = `tis_${"d".repeat(40)}`;
   const interactionState = {
     schema: "agent-knock-knock/terminal-interaction" as const,
     version: 1 as const,
@@ -330,7 +331,8 @@ test("questionnaire notification persists before outbox and recovers its stable 
     approval_state: { scanned: true, blocked: false, approvable: false },
     screen: { digest: "screen-question" },
     interaction_state: interactionState,
-    interaction_prompt_fingerprint: fingerprint
+    interaction_prompt_fingerprint: fingerprint,
+    interaction_surface_id: surfaceId
   };
   const bridge = {
     async monitorPoll() {
@@ -401,6 +403,8 @@ test("questionnaire notification persists before outbox and recovers its stable 
             .expires_at,
           interactionState.expires_at
         );
+        assert.equal(Object.hasOwn(input.metadata, "surface_id"), false);
+        assert.equal(JSON.stringify(input.metadata).includes(surfaceId), false);
         if (crashBeforeOutbox) {
           crashBeforeOutbox = false;
           throw new Error("simulated crash before interaction outbox");
@@ -477,6 +481,7 @@ test("questionnaire notification persists before outbox and recovers its stable 
   ).terminal_bridge_interaction_notification as Record<string, unknown>;
   assert.equal(recorded.callback_delivery, undefined);
   assert.equal(firstNotification.prompt_fingerprint, fingerprint);
+  assert.equal(firstNotification.surface_id, surfaceId);
   const stableCallbackId = firstNotification.callback_message_id;
 
   await run(recorded);

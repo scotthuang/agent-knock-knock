@@ -1,9 +1,14 @@
-import type { TerminalInteractionAgent } from
+import type {
+  TerminalInteractionAgent,
+  TerminalInteractionResponseAuthority,
+  TerminalInteractionSubject
+} from
   "./terminal-interaction-protocol.js";
 
 export const TERMINAL_INTERACTION_AUTHORITY_SCHEMA =
   "agent-knock-knock/terminal-interaction-authority" as const;
 export const TERMINAL_INTERACTION_AUTHORITY_VERSION = 1 as const;
+export const TERMINAL_INTERACTION_SUBJECT_AUTHORITY_VERSION = 2 as const;
 
 export type TerminalInteractionAuthorityState =
   | "durable_candidate"
@@ -45,4 +50,93 @@ export interface TerminalInteractionAuthority {
   readonly created_at: string;
   readonly expires_at: string;
   readonly last_proven_stage?: string;
+}
+
+/**
+ * Subject-aware private authority. Unlike the v1 managed-only record above,
+ * this shape can fence an exact Watch without inventing a Turn id.
+ */
+export interface TerminalInteractionSubjectAuthority {
+  readonly authority_schema: typeof TERMINAL_INTERACTION_AUTHORITY_SCHEMA;
+  readonly authority_version:
+    typeof TERMINAL_INTERACTION_SUBJECT_AUTHORITY_VERSION;
+  readonly interaction_id: string;
+  readonly subject: TerminalInteractionSubject;
+  readonly agent: TerminalInteractionAgent;
+  readonly state: TerminalInteractionAuthorityState;
+  readonly response_authority: TerminalInteractionResponseAuthority;
+  readonly surface_id: string;
+  readonly prompt_fingerprint: string;
+  readonly source_interaction_id: string;
+  readonly native_turn_id?: string;
+  readonly native_thread_id?: string;
+  readonly source_file_identity: string;
+  readonly live_frame_fingerprint: string;
+  readonly runtime_profile: string;
+  readonly process_incarnation: string;
+  readonly owner_session: string;
+  readonly terminal_binding_id: string;
+  readonly terminal_binding_generation: number;
+  readonly exact_task_anchor_fingerprint: string;
+  readonly current_step: number;
+  readonly created_at: string;
+  readonly expires_at: string;
+  readonly last_proven_stage?: string;
+}
+
+export type TerminalInteractionAnyAuthority =
+  | TerminalInteractionAuthority
+  | TerminalInteractionSubjectAuthority;
+
+export type TerminalInteractionResponderClass =
+  | "managed_turn"
+  | "exact_request_watch"
+  | "exact_task_watch"
+  | "activity_watch";
+
+export interface TerminalInteractionResponderClaim {
+  readonly owner_id: string;
+  readonly owner_session: string;
+  readonly surface_id: string;
+  readonly responder_class: TerminalInteractionResponderClass;
+  readonly response_authority: TerminalInteractionResponseAuthority;
+  /** Creation time of this durable ownership claim; newer same-class claims win. */
+  readonly created_at: string;
+}
+
+const RESPONDER_CLASS_PRIORITY: Readonly<Record<
+  TerminalInteractionResponderClass,
+  number
+>> = Object.freeze({
+  managed_turn: 400,
+  exact_request_watch: 300,
+  exact_task_watch: 200,
+  activity_watch: 100
+});
+
+/**
+ * Deterministic arbitration for claims about one native surface. Notification
+ * fan-out remains a caller policy; this chooses terminal mutation ownership.
+ */
+export function selectTerminalInteractionResponder(
+  claims: readonly TerminalInteractionResponderClaim[]
+): TerminalInteractionResponderClaim | undefined {
+  return claims
+    .filter((claim) =>
+      claim.response_authority === "executable" &&
+      claim.responder_class !== "activity_watch")
+    .slice()
+    .sort((left, right) => {
+      const priority = RESPONDER_CLASS_PRIORITY[right.responder_class] -
+        RESPONDER_CLASS_PRIORITY[left.responder_class];
+      if (priority !== 0) {
+        return priority;
+      }
+      const recency = right.created_at.localeCompare(left.created_at);
+      if (recency !== 0) {
+        return recency;
+      }
+      const session = left.owner_session.localeCompare(right.owner_session);
+      return session !== 0 ? session : left.owner_id.localeCompare(right.owner_id);
+    })[0];
 }

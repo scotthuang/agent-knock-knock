@@ -700,6 +700,7 @@ export interface InteractionNotificationAdapterPorts {
     interactionId: string;
     questionId: string;
     fingerprint: string;
+    surfaceId: string;
     expectedConversation: {
       conversationId: string;
       status: ConversationStatus;
@@ -716,6 +717,7 @@ export interface InteractionNotificationAdapterPorts {
     actor: Executor["actor"];
     body: string;
     metadata: UnknownRecord;
+    requiresResponse: boolean;
     recoverMissingOutbox: boolean;
   }): MonitorApprovalCallbackRecord;
 }
@@ -729,6 +731,7 @@ export function recordMonitorInteractionNotification(input: {
   interactionId: string;
   questionId: string;
   fingerprint: string;
+  surfaceId: string;
   ports: InteractionNotificationAdapterPorts;
 }): MonitorInteractionNotificationResult {
   return input.ports.record({
@@ -737,6 +740,7 @@ export function recordMonitorInteractionNotification(input: {
     interactionId: input.interactionId,
     questionId: input.questionId,
     fingerprint: input.fingerprint,
+    surfaceId: input.surfaceId,
     expectedConversation: {
       conversationId: input.conversation.conversation_id,
       status: input.conversation.status,
@@ -747,20 +751,33 @@ export function recordMonitorInteractionNotification(input: {
       const interactionState = persistedInteractionNotificationProjection({
         conversation,
         interactionId: input.interactionId,
-        questionId: input.questionId
+        questionId: input.questionId,
+        surfaceId: input.surfaceId
       });
+      const executable = interactionState.state === "pending" &&
+        interactionState.capabilities.respond === true &&
+        interactionState.questions[0]?.response_kind !== "multi_select";
       return input.ports.prepare({
         conversation,
         actor: input.executor.actor,
-        body: [
-          `${input.executor.display_name} is waiting for a native questionnaire response.`,
-          `Turn: ${conversation.turn_id}`,
-          `Terminal: ${input.terminalControl.target}`,
-          "Refresh this Turn with agent_knock_knock_status in the owning controller conversation, present the current interaction_state to the user, and answer exactly one advertised step with agent_knock_knock_respond_interaction."
-        ].join("\n"),
+        body: executable
+          ? [
+              `${input.executor.display_name} is waiting for a native questionnaire response.`,
+              `Turn: ${conversation.turn_id}`,
+              `Terminal: ${input.terminalControl.target}`,
+              "Refresh this Turn with agent_knock_knock_status in the owning controller conversation, present the current interaction_state to the user, and answer exactly one advertised step with agent_knock_knock_respond_interaction."
+            ].join("\n")
+          : [
+              `${input.executor.display_name} is waiting at a native questionnaire that AKK cannot answer safely.`,
+              `Turn: ${conversation.turn_id}`,
+              `Terminal: ${input.terminalControl.target}`,
+              "Review and answer this questionnaire directly in the terminal. AKK intentionally sends no terminal input for this interaction shape."
+            ].join("\n"),
         metadata: {
           source: "terminal_bridge",
-          reason: "interaction_required",
+          reason: executable
+            ? "interaction_required"
+            : "interaction_manual_required",
           terminal: {
             provider: input.terminalStatus.provider,
             target: input.terminalStatus.target,
@@ -768,6 +785,7 @@ export function recordMonitorInteractionNotification(input: {
           },
           interaction_state: interactionState
         },
+        requiresResponse: executable,
         recoverMissingOutbox: context?.recoverMissingOutbox === true
       });
     }
@@ -778,6 +796,7 @@ function persistedInteractionNotificationProjection(input: {
   conversation: Conversation;
   interactionId: string;
   questionId: string;
+  surfaceId: string;
 }): TerminalInteractionProjection {
   const takeover = isRecord(input.conversation.native_session_takeover)
     ? input.conversation.native_session_takeover
@@ -793,6 +812,7 @@ function persistedInteractionNotificationProjection(input: {
   if (
     notification?.interaction_id !== input.interactionId ||
     notification?.question_id !== input.questionId ||
+    notification?.surface_id !== input.surfaceId ||
     projection.interaction_id !== input.interactionId ||
     projection.questions.length !== 1 ||
     projection.questions[0]?.question_id !== input.questionId

@@ -34,8 +34,11 @@ import {
 import {
   hasCanonicalTerminalEndpoint,
   sameTerminalControlIncarnation,
+  terminalControlEvidenceMatches,
   terminalEndpointFromControlRef,
+  terminalEndpointIdentityFromEvidence,
   terminalEndpointIdentityKey,
+  type TerminalControlEvidence,
   type TerminalEndpointRef,
   type TerminalProviderCapability
 } from "./terminal-control-ref.js";
@@ -50,19 +53,23 @@ import {
 import {
   TERMINAL_INTERACTION_SCHEMA,
   TERMINAL_INTERACTION_VERSION,
+  validateAnyTerminalInteractionResponse,
   validateTerminalInteractionProjection,
-  validateTerminalInteractionResponse,
+  type TerminalInteractionAnyProjection,
+  type TerminalInteractionAnyResponse,
   type TerminalInteractionAnswer,
   type TerminalInteractionProjection,
-  type TerminalInteractionQuestion,
-  type TerminalInteractionResponse
+  type TerminalInteractionSubject,
+  type TerminalInteractionSubjectProjection
 } from "./terminal-interaction-protocol.js";
 import {
-  inspectNativeQuestionnaire,
-  type NativeQuestionnaireActionPlan,
-  type NativeQuestionnaireInspection,
-  type NativeQuestionnaireQuestion
-} from "./terminal-questionnaire-adapter.js";
+  captureTerminalInteraction
+} from "./terminal-interaction-core.js";
+import type {
+  NativeQuestionnaireActionPlan,
+  NativeQuestionnaireInspection
+} from
+  "./terminal-questionnaire-adapter.js";
 
 // Verified Codex profiles through 0.153.4 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
@@ -453,12 +460,14 @@ export interface TerminalBridgeStatus {
     error?: string;
   };
   /** Safe, semantic current-question projection; never terminal keys. */
-  interaction_state?: TerminalInteractionProjection;
+  interaction_state?: TerminalInteractionAnyProjection;
   /**
    * Owner-private response fence. Public status renderers must remove this
    * sibling field before returning terminal_status to a model or browser.
    */
   interaction_prompt_fingerprint?: string;
+  /** Owner-private cross-observer identity used for Monitor/Watch arbitration. */
+  interaction_surface_id?: string;
   capability_limitation?: string;
 }
 
@@ -466,8 +475,8 @@ export interface TerminalInteractionAuthorizationContext {
   agent: ExecutorKind;
   terminalControl: TerminalControlRef;
   fingerprint: string;
-  projection: TerminalInteractionProjection;
-  response: TerminalInteractionResponse;
+  projection: TerminalInteractionAnyProjection;
+  response: TerminalInteractionResponseInput;
   runtime?: TerminalRuntimeIdentity;
 }
 
@@ -480,8 +489,8 @@ export interface TerminalInteractionBeforeDispatchContext {
   agent: ExecutorKind;
   terminalControl: TerminalControlRef;
   fingerprint: string;
-  projection: TerminalInteractionProjection;
-  response: TerminalInteractionResponse;
+  projection: TerminalInteractionAnyProjection;
+  response: TerminalInteractionResponseInput;
   runtime?: TerminalRuntimeIdentity;
 }
 
@@ -499,15 +508,26 @@ export interface TerminalInteractionResponseExecution {
     | "cancelled";
 }
 
-interface TerminalInteractionBridgeOffer {
-  readonly projection: TerminalInteractionProjection;
+/** Input is validated against the freshly recaptured v1/v2 projection. */
+type TerminalInteractionResponseInput = {
+  readonly interaction_id: string;
+  readonly turn_id?: string;
+  readonly subject?: TerminalInteractionSubject;
+  readonly answers: readonly TerminalInteractionAnswer[];
+};
+
+export interface TerminalInteractionRuntimeOffer {
+  readonly projection: TerminalInteractionAnyProjection;
   readonly promptFingerprint: string;
+  readonly surfaceId: string;
   readonly actionPlan: NativeQuestionnaireActionPlan;
   readonly nativeInspection: Exclude<
     NativeQuestionnaireInspection,
     { status: "none" }
   >;
 }
+
+type TerminalInteractionBridgeOffer = TerminalInteractionRuntimeOffer;
 
 interface CapturedTerminalInteractionOffer {
   readonly terminalControl: TerminalControlRef;
@@ -3869,7 +3889,7 @@ export class TerminalAgentBridge {
   async respondInteraction(
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
-    response: TerminalInteractionResponse,
+    response: TerminalInteractionResponseInput,
     options: {
       agentVersion: string;
       expectedFingerprint: string;
@@ -3922,7 +3942,7 @@ export class TerminalAgentBridge {
         first.offer
       );
     }
-    const validatedResponse = validateTerminalInteractionResponse(
+    const validatedResponse = validateAnyTerminalInteractionResponse(
       response,
       first.offer.projection,
       {
@@ -4243,13 +4263,13 @@ export class TerminalAgentBridge {
     return {
       terminalControl: captured.terminalControl,
       inspection: captured.inspection,
-      offer: terminalInteractionBridgeOffer({
+      offer: captureTerminalInteractionRuntimeOffer({
         agent,
         terminalControl: captured.terminalControl,
-        inspection: captured.inspection,
         screen: captured.screen,
         runtime,
-        now: this.now()
+        now: this.now(),
+        approvalBlocked: captured.inspection.approval.blocked
       })
     };
   }
@@ -5408,6 +5428,20 @@ function terminalInteractionTurnId(
     : undefined;
 }
 
+function terminalInteractionSubject(
+  runtime: TerminalRuntimeIdentity | undefined
+): TerminalInteractionSubject | undefined {
+  if (runtime?.interactionSubject) {
+    return runtime.interactionSubject;
+  }
+  const turnId = terminalInteractionTurnId(runtime);
+  const messageId = runtime?.messageId;
+  return turnId && typeof messageId === "string" &&
+      TERMINAL_INTERACTION_IDENTIFIER_PATTERN.test(messageId)
+    ? { kind: "managed_turn", turn_id: turnId, message_id: messageId }
+    : undefined;
+}
+
 function terminalInteractionExpiry(now: Date): string | undefined {
   const nowMs = now.getTime();
   if (!Number.isFinite(nowMs)) {
@@ -5418,33 +5452,8 @@ function terminalInteractionExpiry(now: Date): string | undefined {
   return new Date(windowStart + TERMINAL_INTERACTION_TTL_MS).toISOString();
 }
 
-function terminalInteractionQuestion(
-  question: NativeQuestionnaireQuestion
-): TerminalInteractionQuestion {
-  const common = {
-    question_id: question.question_id,
-    prompt: question.prompt,
-    required: question.required
-  };
-  if (
-    question.response_kind === "single_select" ||
-    question.response_kind === "multi_select"
-  ) {
-    return {
-      ...common,
-      response_kind: question.response_kind,
-      options: question.options ?? []
-    };
-  }
-  return {
-    ...common,
-    response_kind: question.response_kind
-  };
-}
-
 function terminalInteractionCanonicalIdentity(
-  terminalControl: TerminalControlRef,
-  runtime: TerminalRuntimeIdentity
+  terminalControl: TerminalControlRef
 ): Record<string, unknown> | undefined {
   if (!hasCanonicalTerminalEndpoint(terminalControl)) {
     return undefined;
@@ -5456,101 +5465,137 @@ function terminalInteractionCanonicalIdentity(
   ) {
     return undefined;
   }
+  // Surface identity is shared by independent observers. Keep physical
+  // terminal identity separate from runtime-native identity so an optional
+  // observer-only fence (for example processStartedAt) cannot split one live
+  // questionnaire into different Monitor and Watch surfaces. Dispatch still
+  // revalidates the complete runtime immediately before any terminal input.
   return {
     terminal_identity: terminalEndpointIdentityKey(terminal),
-    terminal_process_anchor_pid: terminal.processAnchorPid,
+    terminal_process_anchor_pid: terminal.processAnchorPid
+  };
+}
+
+function terminalInteractionNativeTaskIdentity(
+  runtime: TerminalRuntimeIdentity
+): Record<string, unknown> {
+  // Include only native-task fields that both managed Turn and exact Watch
+  // observations can derive from their durable anchors. Optional runtime
+  // verification fields remain on `runtime`; they are identity fences, not
+  // cross-observer surface identity.
+  return {
     agent_pid: runtime.pid,
     native_session_id: runtime.nativeSessionId,
     native_process_uuid: runtime.nativeProcessUuid,
     native_process_birth: runtime.nativeProcessBirth,
-    native_process_started_at: runtime.nativeProcessStartedAt,
-    native_rollout: runtime.nativeRollout
+    native_rollout: runtime.nativeRollout,
+    expected_native_session_id: runtime.expectedNativeSessionId,
+    expected_empty_native_session: runtime.expectedEmptyNativeSession === true
   };
 }
 
-function terminalInteractionBridgeOffer(input: {
+function legacyManagedInteractionProjection(
+  projection: TerminalInteractionSubjectProjection
+): TerminalInteractionProjection {
+  if (projection.subject.kind !== "managed_turn") {
+    throw new TypeError("only managed interaction subjects have a v1 projection");
+  }
+  return validateTerminalInteractionProjection({
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_VERSION,
+    interaction_id: projection.interaction_id,
+    turn_id: projection.subject.turn_id,
+    agent: projection.agent,
+    kind: projection.kind,
+    state: projection.state,
+    step: projection.step,
+    questions: projection.questions,
+    expires_at: projection.expires_at,
+    capabilities: projection.capabilities
+  });
+}
+
+export function captureTerminalInteractionRuntimeOffer(input: {
   agent: ExecutorKind;
   terminalControl: TerminalControlRef;
-  inspection: TerminalScreenInspection;
   screen: string;
   runtime?: TerminalRuntimeIdentity;
   now: Date;
+  approvalBlocked?: boolean;
+  /** Exact durable Watch endpoint evidence for legacy provider refs. */
+  trustedTerminalEvidence?: TerminalControlEvidence;
 }): TerminalInteractionBridgeOffer | undefined {
-  const turnId = terminalInteractionTurnId(input.runtime);
+  const subject = terminalInteractionSubject(input.runtime);
   const agentVersion = input.runtime?.agentVersion;
   const expiry = terminalInteractionExpiry(input.now);
   const canonicalIdentity = input.runtime
-    ? terminalInteractionCanonicalIdentity(input.terminalControl, input.runtime)
+    ? terminalInteractionCanonicalIdentity(input.terminalControl) ??
+      terminalInteractionTrustedWatchIdentity(
+        input.terminalControl,
+        input.runtime,
+        input.trustedTerminalEvidence
+      )
     : undefined;
   if (
-    !turnId ||
+    !subject ||
     typeof agentVersion !== "string" ||
     agentVersion.length === 0 ||
     !expiry ||
     !canonicalIdentity ||
-    input.inspection.approval.blocked
+    input.approvalBlocked === true
   ) {
     return undefined;
   }
-  const nativeInspection = inspectNativeQuestionnaire({
+  const coreOffer = captureTerminalInteraction({
+    subject,
     agent: input.agent,
-    version: agentVersion,
-    screen: input.screen
+    agentVersion,
+    canonicalTerminalIdentity: canonicalIdentity,
+    nativeTaskIdentity: terminalInteractionNativeTaskIdentity(input.runtime!),
+    screen: input.screen,
+    now: input.now,
+    expiresAt: expiry,
+    responseUncertain:
+      input.runtime?.interactionDispatchState === "reserved" ||
+      input.runtime?.interactionDispatchState === "uncertain",
+    responseAuthority:
+      input.runtime?.interactionResponseAuthority ?? "executable",
+    includeLegacyTurnId: subject.kind === "managed_turn"
   });
-  if (nativeInspection.status === "none") {
+  if (!coreOffer) {
     return undefined;
   }
-  const authorityMaterial = JSON.stringify({
-    version: 1,
-    agent: input.agent,
-    turn_id: turnId,
-    terminal: canonicalIdentity,
-    profile: nativeInspection.profile,
-    prompt_sha256: nativeInspection.prompt_evidence.sha256
-  });
-  const promptFingerprint = createHash("sha256")
-    .update(`terminal-interaction-authority\0${authorityMaterial}`, "utf8")
-    .digest("hex");
-  const interactionId = `ti_${createHash("sha256")
-    .update(`terminal-interaction-public\0${authorityMaterial}`, "utf8")
-    .digest("hex")
-    .slice(0, 40)}`;
-  const question = terminalInteractionQuestion(nativeInspection.question);
-  const executable = nativeInspection.status === "actionable" &&
-    nativeInspection.action_plan.kind !== "manual_only";
-  const responseUncertain =
-    input.runtime?.interactionDispatchState === "reserved" ||
-    input.runtime?.interactionDispatchState === "uncertain";
-  const projection = validateTerminalInteractionProjection({
-    schema: TERMINAL_INTERACTION_SCHEMA,
-    version: TERMINAL_INTERACTION_VERSION,
-    interaction_id: interactionId,
-    turn_id: turnId,
-    agent: input.agent,
-    kind: "questionnaire",
-    state: responseUncertain
-      ? "response_uncertain"
-      : executable
-        ? "pending"
-        : "manual_required",
-    step: {
-      index: nativeInspection.current_step,
-      total: nativeInspection.total_steps
-    },
-    questions: [question],
-    expires_at: expiry,
-    capabilities: {
-      respond: executable && !responseUncertain,
-      batch_response: false,
-      free_text: question.response_kind === "free_text",
-      multi_select: question.response_kind === "multi_select"
-    }
-  });
   return {
-    projection,
-    promptFingerprint,
-    actionPlan: nativeInspection.action_plan,
-    nativeInspection
+    projection: subject.kind === "managed_turn"
+      ? legacyManagedInteractionProjection(coreOffer.projection)
+      : coreOffer.projection,
+    promptFingerprint: coreOffer.promptFingerprint,
+    surfaceId: coreOffer.surfaceId,
+    actionPlan: coreOffer.actionPlan,
+    nativeInspection: coreOffer.nativeInspection
+  };
+}
+
+function terminalInteractionTrustedWatchIdentity(
+  terminalControl: TerminalControlRef,
+  runtime: TerminalRuntimeIdentity,
+  evidence: TerminalControlEvidence | undefined
+): Record<string, unknown> | undefined {
+  if (
+    runtime.interactionSubject?.kind !== "terminal_watch" ||
+    !evidence ||
+    !terminalControlEvidenceMatches(evidence, terminalControl)
+  ) {
+    return undefined;
+  }
+  const identity = terminalEndpointIdentityFromEvidence(evidence);
+  if (!identity || !Number.isSafeInteger(evidence.process_anchor_pid) ||
+      Number(evidence.process_anchor_pid) <= 0) {
+    return undefined;
+  }
+  return {
+    terminal_identity: terminalEndpointIdentityKey(identity),
+    terminal_process_anchor_pid: evidence.process_anchor_pid
   };
 }
 
@@ -5575,8 +5620,8 @@ function terminalInteractionOptionPreflightReason(
   ) {
     return "runtime agent version does not match the requested interaction profile";
   }
-  if (!terminalInteractionTurnId(runtime)) {
-    return "a protocol-safe exact Turn id is required";
+  if (!terminalInteractionSubject(runtime)) {
+    return "a protocol-safe exact interaction subject is required";
   }
   if (!TERMINAL_INTERACTION_FINGERPRINT_PATTERN.test(options.expectedFingerprint)) {
     return "a valid interaction prompt fingerprint is required";
@@ -5651,7 +5696,7 @@ function terminalInteractionCapabilityReason(
 }
 
 function terminalInteractionPlanPreflightReason(
-  response: TerminalInteractionResponse,
+  response: TerminalInteractionResponseInput,
   plan: NativeQuestionnaireActionPlan
 ): string | undefined {
   const answer = response.answers[0];
@@ -5672,7 +5717,7 @@ function terminalInteractionPlanPreflightReason(
 }
 
 function blockedTerminalInteractionResponse(
-  response: TerminalInteractionResponse,
+  response: TerminalInteractionResponseInput,
   reason: string,
   offer?: TerminalInteractionBridgeOffer
 ): TerminalInteractionResponseExecution {
@@ -5691,7 +5736,7 @@ function interactionHookContext(
   agent: ExecutorKind,
   terminalControl: TerminalControlRef,
   offer: TerminalInteractionBridgeOffer,
-  response: TerminalInteractionResponse,
+  response: TerminalInteractionResponseInput,
   runtime: TerminalRuntimeIdentity
 ): TerminalInteractionAuthorizationContext {
   return {
@@ -5759,8 +5804,8 @@ function sameTerminalInteractionOffer(
 }
 
 function terminalInteractionProjectionWithoutExpiry(
-  projection: TerminalInteractionProjection
-): Omit<TerminalInteractionProjection, "expires_at"> {
+  projection: TerminalInteractionAnyProjection
+): Omit<TerminalInteractionAnyProjection, "expires_at"> {
   const { expires_at: _expiresAt, ...semanticProjection } = projection;
   return semanticProjection;
 }
@@ -6039,13 +6084,13 @@ function statusFromInspection(
     : [];
   const interaction = options.screen === undefined
     ? undefined
-    : terminalInteractionBridgeOffer({
+    : captureTerminalInteractionRuntimeOffer({
         agent: adapter.agent,
         terminalControl,
-        inspection: { ...inspection, approval },
         screen: options.screen,
         runtime: options.runtime,
-        now: options.now ?? new Date()
+        now: options.now ?? new Date(),
+        approvalBlocked: approval.blocked
       });
   return {
     provider: terminalControl.kind,
@@ -6095,7 +6140,8 @@ function statusFromInspection(
     },
     ...(interaction === undefined ? {} : {
       interaction_state: interaction.projection,
-      interaction_prompt_fingerprint: interaction.promptFingerprint
+      interaction_prompt_fingerprint: interaction.promptFingerprint,
+      interaction_surface_id: interaction.surfaceId
     })
   };
 }

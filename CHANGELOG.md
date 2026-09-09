@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Let newly created exact Terminal Watches notify and answer supported native Codex and Claude Code questionnaires through the same owner-bound `respond_interaction` contract used by managed Turns. Activity/best-effort Watches and migrated legacy records remain notification-only.
+
+### Security
+
+- Revalidate controller ownership, terminal/process/native-task identity, prompt surface, and responder priority immediately before Watch input. Managed Turns take precedence, while stale, reserved, uncertain, consumed, manual-only, or ambiguous interactions remain fail-closed without replay.
+
 ## 0.13.0 - 2026-09-09
 
 ### Added

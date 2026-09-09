@@ -19,6 +19,7 @@ import {
   createClaudeUserExplicitFallbackWatchAnchor,
   createTerminalActivityWatchAnchor,
   createTerminalWatchStore,
+  initialTerminalWatchInteractionPolicy,
   initialTerminalWatchObservationCheckpoint,
   listTerminalWatches,
   loadTerminalWatch,
@@ -33,8 +34,20 @@ import {
   type ClaudeUserExplicitFallbackWatchObservationCheckpoint,
   type TerminalWatch,
   type TerminalWatchNotification,
-  type TerminalWatchTerminalIdentity
+  type TerminalWatchCurrentInteraction,
+  type TerminalWatchTerminalIdentity,
+  type TerminalWatchWriterScope
 } from "../src/terminal-watch-store.js";
+import {
+  TERMINAL_INTERACTION_SCHEMA,
+  TERMINAL_INTERACTION_SUBJECT_VERSION,
+  type TerminalInteractionSubjectProjection
+} from "../src/terminal-interaction-protocol.js";
+import {
+  createTerminalInteractionAggregate,
+  reduceTerminalInteractionAggregate,
+  type TerminalInteractionAggregate
+} from "../src/terminal-interaction-core.js";
 import {
   claudeTranscriptAnchorFingerprint,
   type ClaudeHumanStartedActiveTaskAnchor,
@@ -119,6 +132,7 @@ function watch(watchId = "terminal-watch-store-fixture"): TerminalWatch {
     terminal: identity,
     anchor: codexAnchor(),
     observation_checkpoint: { safe_resume_offset_bytes: 30 },
+    interaction_policy: "respond_when_exact",
     openclaw_session: "openclaw-session-1",
     openclaw_bin: "/usr/local/bin/openclaw",
     created_at: CREATED_AT,
@@ -127,6 +141,57 @@ function watch(watchId = "terminal-watch-store-fixture"): TerminalWatch {
     status: "active",
     last_activity_at: "2026-08-20T23:59:59.000Z",
     notification_outbox: []
+  };
+}
+
+function currentInteraction(
+  owner: TerminalWatch,
+  options: {
+    authority?: "executable" | "notify_only";
+    interactionId?: string;
+    surfaceId?: string;
+    promptFingerprint?: string;
+    expiresAt?: string;
+  } = {}
+): TerminalWatchCurrentInteraction {
+  const authority = options.authority ?? "executable";
+  const projection: TerminalInteractionSubjectProjection = {
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_SUBJECT_VERSION,
+    subject: {
+      kind: "terminal_watch",
+      watch_id: owner.watch_id,
+      anchor_fingerprint: owner.anchor.anchor_fingerprint
+    },
+    interaction_id: options.interactionId ?? "ti_watch_store_fixture",
+    agent: owner.agent,
+    kind: "questionnaire",
+    state: "pending",
+    step: { index: 1, total: 2 },
+    questions: [{
+      question_id: "question_watch_store_fixture",
+      prompt: "Choose a framework",
+      required: true,
+      response_kind: "single_select",
+      options: [
+        { option_id: "option_react", label: "React" },
+        { option_id: "option_vue", label: "Vue" }
+      ]
+    }],
+    expires_at: options.expiresAt ?? "2026-08-21T00:10:00.000Z",
+    surface_id: options.surfaceId ?? "tis_watch_store_fixture",
+    prompt_fingerprint: options.promptFingerprint ?? "d".repeat(64),
+    response_authority: authority,
+    capabilities: {
+      respond: authority === "executable",
+      batch_response: false,
+      free_text: false,
+      multi_select: false
+    }
+  };
+  return {
+    projection,
+    aggregate: createTerminalInteractionAggregate(projection, CREATED_AT)
   };
 }
 
@@ -234,6 +299,7 @@ test("terminal-activity Watch round-trips its confidence checkpoint and immutabl
     ...watch("terminal-watch-activity-fallback"),
     anchor,
     observation_checkpoint: initialTerminalWatchObservationCheckpoint(anchor),
+    interaction_policy: "notify_only",
     warnings: [
       "exact_task_anchor_unavailable: rollout identity was incomplete",
       "terminal_activity_fallback: stable idle is best-effort"
@@ -303,6 +369,317 @@ test("terminal-activity Watch round-trips its confidence checkpoint and immutabl
     }, advanced.watch_id),
     /cannot already carry stable-idle settlement evidence/u
   );
+});
+
+test("new exact Watches default to response-when-exact while activity Watches stay notify-only", () => {
+  assert.equal(
+    initialTerminalWatchInteractionPolicy(codexAnchor()),
+    "respond_when_exact"
+  );
+  const activityAnchor = createTerminalActivityWatchAnchor({
+    capturedAt: new Date(CREATED_AT),
+    terminalId: "terminal:v2:fixture",
+    pid: 700,
+    initialActivityState: "working"
+  });
+  assert.equal(
+    initialTerminalWatchInteractionPolicy(activityAnchor),
+    "notify_only"
+  );
+  const candidate: TerminalWatch = {
+    ...watch("terminal-watch-activity-policy-rejected"),
+    anchor: activityAnchor,
+    observation_checkpoint:
+      initialTerminalWatchObservationCheckpoint(activityAnchor)
+  };
+  assert.throws(
+    () => assertTerminalWatch(candidate, candidate.watch_id, {
+      allowMissingRevision: true
+    }),
+    /activity Watch must remain interaction notify-only/u
+  );
+});
+
+test("Watch interaction projection and aggregate persist without private terminal actions or answers", (t) => {
+  const storeDir = tempStore(t);
+  const candidate = watch("terminal-watch-durable-interaction");
+  candidate.current_interaction = currentInteraction(candidate);
+  const pending = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  assert.deepEqual(loadTerminalWatch(storeDir, pending.watch_id), pending);
+  const serialized = fs.readFileSync(
+    pathsForTerminalWatch(pending.watch_id, storeDir).statePath,
+    "utf8"
+  );
+  for (const forbidden of [
+    "action_plan",
+    "raw_screen",
+    "terminal_keys",
+    "selected_option_ids",
+    "answer_text"
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+
+  const reservedAggregate = reduceTerminalInteractionAggregate(
+    pending.current_interaction!.aggregate,
+    {
+      type: "reserve",
+      attempt_id: "interaction-attempt-1",
+      response_hash: "f".repeat(64),
+      at: "2026-08-21T00:00:01.000Z"
+    }
+  );
+  const reserved = saveTerminalWatch(storeDir, {
+    ...pending,
+    updated_at: "2026-08-21T00:00:01.000Z",
+    current_interaction: {
+      projection: pending.current_interaction!.projection,
+      aggregate: reservedAggregate
+    }
+  }, { expectedRevision: terminalWatchRevision(pending) });
+  assert.equal(reserved.current_interaction?.aggregate.state, "reserved");
+
+  const consumedAggregate = reduceTerminalInteractionAggregate(
+    reserved.current_interaction!.aggregate,
+    {
+      type: "consume",
+      at: "2026-08-21T00:00:02.000Z",
+      reason_code: "native_questionnaire_advanced"
+    }
+  );
+  const consumed = saveTerminalWatch(storeDir, {
+    ...reserved,
+    updated_at: "2026-08-21T00:00:02.000Z",
+    current_interaction: {
+      projection: reserved.current_interaction!.projection,
+      aggregate: consumedAggregate
+    }
+  }, { expectedRevision: terminalWatchRevision(reserved) });
+  assert.equal(consumed.current_interaction?.aggregate.state, "consumed");
+  assert.equal(
+    consumed.current_interaction?.aggregate.reservation?.response_hash,
+    "f".repeat(64)
+  );
+  assert.equal(
+    Object.hasOwn(
+      consumed.current_interaction?.aggregate.reservation ?? {},
+      "response"
+    ),
+    false
+  );
+});
+
+test("Watch interaction persistence rejects authority escalation and invalid phase skips", (t) => {
+  const storeDir = tempStore(t);
+  const notifyOnly = watch("terminal-watch-notify-only-interaction");
+  notifyOnly.interaction_policy = "notify_only";
+  notifyOnly.current_interaction = currentInteraction(notifyOnly);
+  assert.throws(
+    () => saveTerminalWatch(storeDir, notifyOnly, { expectedRevision: null }),
+    /notify-only terminal Watch cannot persist response authority/u
+  );
+
+  const candidate = watch("terminal-watch-invalid-interaction-transition");
+  candidate.current_interaction = currentInteraction(candidate);
+  const pending = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  const impossible: TerminalInteractionAggregate = {
+    ...pending.current_interaction!.aggregate,
+    state: "consumed",
+    reservation: {
+      attempt_id: "interaction-attempt-skipped",
+      response_hash: "f".repeat(64),
+      reserved_at: "2026-08-21T00:00:01.000Z"
+    },
+    resolution: {
+      resolved_at: "2026-08-21T00:00:02.000Z",
+      reason_code: "native_questionnaire_advanced"
+    }
+  };
+  assert.throws(
+    () => saveTerminalWatch(storeDir, {
+      ...pending,
+      updated_at: "2026-08-21T00:00:02.000Z",
+      current_interaction: {
+        projection: pending.current_interaction!.projection,
+        aggregate: impossible
+      }
+    }, { expectedRevision: terminalWatchRevision(pending) }),
+    /cannot transition from pending via consume/u
+  );
+});
+
+test("Watch interaction persistence supports refresh, uncertain, superseded, and next-step replacement", (t) => {
+  const storeDir = tempStore(t);
+  const candidate = watch("terminal-watch-interaction-recovery");
+  candidate.current_interaction = currentInteraction(candidate);
+  const pending = saveTerminalWatch(storeDir, candidate, {
+    expectedRevision: null
+  });
+  const refreshedAggregate = reduceTerminalInteractionAggregate(
+    pending.current_interaction!.aggregate,
+    {
+      type: "refresh",
+      expires_at: "2026-08-21T00:20:00.000Z",
+      response_authority: "notify_only"
+    }
+  );
+  const refreshed = saveTerminalWatch(storeDir, {
+    ...pending,
+    updated_at: "2026-08-21T00:00:01.000Z",
+    current_interaction: {
+      projection: {
+        ...pending.current_interaction!.projection,
+        expires_at: refreshedAggregate.expires_at,
+        response_authority: "notify_only",
+        capabilities: {
+          ...pending.current_interaction!.projection.capabilities,
+          respond: false
+        }
+      },
+      aggregate: refreshedAggregate
+    }
+  }, { expectedRevision: terminalWatchRevision(pending) });
+  assert.equal(
+    refreshed.current_interaction?.projection.response_authority,
+    "notify_only"
+  );
+  const executableAggregate = reduceTerminalInteractionAggregate(
+    refreshed.current_interaction!.aggregate,
+    {
+      type: "refresh",
+      expires_at: refreshedAggregate.expires_at,
+      response_authority: "executable"
+    }
+  );
+  const executable = saveTerminalWatch(storeDir, {
+    ...refreshed,
+    updated_at: "2026-08-21T00:00:02.000Z",
+    current_interaction: {
+      projection: {
+        ...refreshed.current_interaction!.projection,
+        response_authority: "executable",
+        capabilities: {
+          ...refreshed.current_interaction!.projection.capabilities,
+          respond: true
+        }
+      },
+      aggregate: executableAggregate
+    }
+  }, { expectedRevision: terminalWatchRevision(refreshed) });
+  const reservedAggregate = reduceTerminalInteractionAggregate(
+    executable.current_interaction!.aggregate,
+    {
+      type: "reserve",
+      attempt_id: "interaction-attempt-uncertain",
+      response_hash: "f".repeat(64),
+      at: "2026-08-21T00:00:03.000Z"
+    }
+  );
+  const reserved = saveTerminalWatch(storeDir, {
+    ...executable,
+    updated_at: "2026-08-21T00:00:03.000Z",
+    current_interaction: {
+      projection: executable.current_interaction!.projection,
+      aggregate: reservedAggregate
+    }
+  }, { expectedRevision: terminalWatchRevision(executable) });
+  const uncertainAggregate = reduceTerminalInteractionAggregate(
+    reserved.current_interaction!.aggregate,
+    {
+      type: "response_uncertain",
+      at: "2026-08-21T00:00:04.000Z",
+      reason_code: "terminal_response_outcome_uncertain"
+    }
+  );
+  const uncertain = saveTerminalWatch(storeDir, {
+    ...reserved,
+    updated_at: "2026-08-21T00:00:04.000Z",
+    current_interaction: {
+      projection: {
+        ...reserved.current_interaction!.projection,
+        state: "response_uncertain",
+        capabilities: {
+          ...reserved.current_interaction!.projection.capabilities,
+          respond: false
+        }
+      },
+      aggregate: uncertainAggregate
+    }
+  }, { expectedRevision: terminalWatchRevision(reserved) });
+  assert.equal(
+    uncertain.current_interaction?.aggregate.state,
+    "response_uncertain"
+  );
+
+  const next = currentInteraction(uncertain, {
+    interactionId: "ti_watch_store_next_step",
+    surfaceId: "tis_watch_store_next_step",
+    promptFingerprint: "e".repeat(64),
+    expiresAt: "2026-08-21T00:30:00.000Z"
+  });
+  const replaced = saveTerminalWatch(storeDir, {
+    ...uncertain,
+    updated_at: "2026-08-21T00:00:05.000Z",
+    current_interaction: {
+      ...next,
+      aggregate: {
+        ...next.aggregate,
+        created_at: "2026-08-21T00:00:05.000Z"
+      }
+    }
+  }, { expectedRevision: terminalWatchRevision(uncertain) });
+  assert.equal(
+    replaced.current_interaction?.aggregate.interaction_id,
+    "ti_watch_store_next_step"
+  );
+
+  const supersededAggregate = reduceTerminalInteractionAggregate(
+    replaced.current_interaction!.aggregate,
+    {
+      type: "supersede",
+      at: "2026-08-21T00:00:06.000Z",
+      reason_code: "higher_priority_responder_claimed_surface"
+    }
+  );
+  const superseded = saveTerminalWatch(storeDir, {
+    ...replaced,
+    updated_at: "2026-08-21T00:00:06.000Z",
+    current_interaction: {
+      projection: replaced.current_interaction!.projection,
+      aggregate: supersededAggregate
+    }
+  }, { expectedRevision: terminalWatchRevision(replaced) });
+  assert.equal(superseded.current_interaction?.aggregate.state, "superseded");
+});
+
+test("legacy v1/v2 Watch migration never infers interaction response authority", (t) => {
+  const storeDir = tempStore(t);
+  for (const version of [1, 2]) {
+    const watchId = `terminal-watch-legacy-policy-v${version}`;
+    const canonical = saveTerminalWatch(storeDir, watch(watchId), {
+      expectedRevision: null
+    });
+    const legacy = structuredClone(canonical) as unknown as
+      Record<string, unknown>;
+    legacy.version = version;
+    legacy.interaction_policy = "respond_when_exact";
+    legacy.current_interaction = { injected: "untrusted" };
+    const statePath = pathsForTerminalWatch(watchId, storeDir).statePath;
+    fs.writeFileSync(statePath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+
+    const migrated = loadTerminalWatch(storeDir, watchId);
+    assert.equal(migrated.version, TERMINAL_WATCH_VERSION);
+    assert.equal(migrated.interaction_policy, "notify_only");
+    assert.equal(migrated.current_interaction, undefined);
+    const persisted = saveTerminalWatch(storeDir, migrated, {
+      expectedRevision: terminalWatchRevision(migrated)
+    });
+    assert.equal(persisted.interaction_policy, "notify_only");
+  }
 });
 
 test("legacy v1 Watch records without a checkpoint remain readable and upgrade on save", (t) => {
@@ -959,6 +1336,24 @@ test("terminal Watch Store exposes writer-before-watch lock transactions", (t) =
     "acquire:terminal-watch-lock-fixture.json.lock",
     "operation",
     "release:terminal-watch-lock-fixture.json.lock"
+  ]);
+
+  let escapedScope: TerminalWatchWriterScope | undefined;
+  repository.withWriterLease((scope) => {
+    escapedScope = scope;
+    scope.withWatchLock("terminal-watch-scoped-lock-fixture", () => {
+      events.push("scoped-operation");
+      assert.deepEqual(scope.list(), []);
+    });
+  });
+  assert.throws(
+    () => escapedScope!.list(),
+    /writer scope is no longer active/u
+  );
+  assert.deepEqual(events.slice(3), [
+    "acquire:terminal-watch-scoped-lock-fixture.json.lock",
+    "scoped-operation",
+    "release:terminal-watch-scoped-lock-fixture.json.lock"
   ]);
 });
 

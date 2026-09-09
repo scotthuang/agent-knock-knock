@@ -221,6 +221,7 @@ export interface TerminalMonitorServicePorts {
       interactionId: string;
       questionId: string;
       fingerprint: string;
+      surfaceId: string;
     }): MonitorInteractionNotificationResult;
   };
   authority: {
@@ -1094,6 +1095,9 @@ function handleInteractionObservation(
   const fingerprint = stringValue(
     input.terminalStatus.interaction_prompt_fingerprint
   );
+  const surfaceId = terminalInteractionSurfaceId(
+    input.terminalStatus.interaction_surface_id
+  );
   const observationMatches = interactionObservationMatchesMonitor(
     input,
     projection
@@ -1107,23 +1111,27 @@ function handleInteractionObservation(
     input.state.preSendScreenFingerprint !== undefined &&
     input.currentScreenFingerprint !== undefined &&
     input.currentScreenFingerprint !== input.state.preSendScreenFingerprint;
-  if (
-    projection.state !== "pending" ||
-    projection.capabilities.respond !== true ||
-    projection.questions.length !== 1 ||
-    !question ||
-    question.response_kind === "multi_select"
-  ) {
+  if (projection.questions.length !== 1 || !question) {
     return "proceed";
   }
-  const actionable =
+  const executable = projection.state === "pending" &&
+    projection.capabilities.respond === true &&
+    question.response_kind !== "multi_select";
+  const manualRequired = projection.state === "manual_required" ||
+    !projection.capabilities.respond ||
+    question.response_kind === "multi_select";
+  if (!executable && !manualRequired) {
+    return "proceed";
+  }
+  const attributable =
     observationMatches &&
     input.state.conversation.status === "waiting_for_agent" &&
     projection.turn_id === turnIdForConversation(input.state.conversation) &&
     typeof fingerprint === "string" &&
     /^[0-9a-f]{64}$/u.test(fingerprint) &&
+    surfaceId !== undefined &&
     screenChangedSinceSend;
-  if (!actionable || !fingerprint) {
+  if (!attributable || !fingerprint || !surfaceId) {
     input.ports.runtime.log("warn", "terminal_bridge_interaction_not_actionable", {
       conversation_id: input.state.conversation.conversation_id,
       terminal_target: input.terminalControl.target,
@@ -1131,7 +1139,9 @@ function handleInteractionObservation(
       interaction_state: projection.state,
       response_kind: question?.response_kind,
       screen_changed_since_send: screenChangedSinceSend,
-      reason: "native questionnaire lacks a current executable monitor offer"
+      reason: manualRequired
+        ? "native questionnaire lacks exact managed-task attribution"
+        : "native questionnaire lacks a current executable monitor offer"
     });
     return "proceed";
   }
@@ -1157,6 +1167,27 @@ function handleInteractionObservation(
     );
     return "proceed";
   }
+  const previousNotification = isRecord(
+    takeover?.terminal_bridge_interaction_notification
+  )
+    ? takeover.terminal_bridge_interaction_notification
+    : undefined;
+  if (
+    manualRequired &&
+    stringValue(previousNotification?.terminal_bridge_message_id) ===
+      input.currentMessageId &&
+    stringValue(previousNotification?.interaction_id) ===
+      projection.interaction_id &&
+    stringValue(previousNotification?.prompt_fingerprint) === fingerprint &&
+    stringValue(previousNotification?.surface_id) === surfaceId
+  ) {
+    input.state.pollPolicyState = {
+      ...input.state.pollPolicyState,
+      previousScreenFingerprint: input.currentScreenFingerprint
+    };
+    input.ports.runtime.sleep(input.configuration.pollIntervalMs);
+    return "continue";
+  }
   const notification = input.ports.state.recordInteractionNotification({
     conversation: input.state.conversation,
     executor: input.state.executor,
@@ -1165,7 +1196,8 @@ function handleInteractionObservation(
     currentMessageId: input.currentMessageId,
     interactionId: projection.interaction_id,
     questionId: question.question_id,
-    fingerprint
+    fingerprint,
+    surfaceId
   });
   if (notification.stale) {
     input.state.pollPolicyState = {
@@ -1176,6 +1208,15 @@ function handleInteractionObservation(
     return "continue";
   }
   if (notification.duplicate) {
+    if (manualRequired) {
+      input.state.conversation = notification.conversation;
+      input.state.pollPolicyState = {
+        ...input.state.pollPolicyState,
+        previousScreenFingerprint: input.currentScreenFingerprint
+      };
+      input.ports.runtime.sleep(input.configuration.pollIntervalMs);
+      return "continue";
+    }
     input.ports.presentation.emit({
       kind: "interaction_duplicate",
       conversation: notification.conversation,
@@ -1187,7 +1228,9 @@ function handleInteractionObservation(
   input.ports.state.appendEvent({
     ts: input.ports.runtime.now().toISOString(),
     conversation_id: notification.conversation.conversation_id,
-    event: "terminal_bridge_interaction_detected",
+    event: manualRequired
+      ? "terminal_bridge_interaction_manual_required"
+      : "terminal_bridge_interaction_detected",
     terminal_control: input.terminalControl,
     interaction_id: projection.interaction_id,
     question_id: question.question_id,
@@ -1207,6 +1250,24 @@ function handleInteractionObservation(
   const result = input.ports.callbacks.run(prepared, { emit: false });
   const afterCallback = input.ports.state.load();
   const afterTakeover = takeoverFor(afterCallback);
+  if (manualRequired) {
+    input.state.conversation = afterCallback;
+    input.state.pollPolicyState = {
+      ...input.state.pollPolicyState,
+      previousScreenFingerprint: input.currentScreenFingerprint
+    };
+    input.ports.state.appendEvent({
+      ts: input.ports.runtime.now().toISOString(),
+      conversation_id: afterCallback.conversation_id,
+      event: "terminal_bridge_interaction_manual_notification_dispatched",
+      terminal_control: input.terminalControl,
+      interaction_id: projection.interaction_id,
+      question_id: question.question_id,
+      delivered: result.delivered
+    });
+    input.ports.runtime.sleep(input.configuration.pollIntervalMs);
+    return "continue";
+  }
   const consumed =
     input.ports.authority.isWaitingForAgent(afterCallback.status) &&
     afterTakeover?.terminal_bridge_interaction_notification === undefined &&
@@ -1247,6 +1308,13 @@ function handleInteractionObservation(
   });
   input.ports.runtime.sleep(input.configuration.pollIntervalMs);
   return "continue";
+}
+
+function terminalInteractionSurfaceId(value: unknown): string | undefined {
+  const candidate = stringValue(value);
+  return candidate && /^tis_[0-9a-f]{40}$/u.test(candidate)
+    ? candidate
+    : undefined;
 }
 
 function interactionCallbackPublicConversation(

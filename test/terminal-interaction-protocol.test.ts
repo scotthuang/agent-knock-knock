@@ -3,10 +3,17 @@ import assert from "node:assert/strict";
 import {
   TERMINAL_INTERACTION_LIMITS,
   TERMINAL_INTERACTION_SCHEMA,
+  TERMINAL_INTERACTION_SUBJECT_VERSION,
   TERMINAL_INTERACTION_VERSION,
   TerminalInteractionValidationError,
+  sameTerminalInteractionSubject,
+  terminalInteractionSubjectId,
+  terminalInteractionSubjectKey,
+  validateAnyTerminalInteractionProjection,
   validateTerminalInteractionProjection,
-  validateTerminalInteractionResponse
+  validateTerminalInteractionResponse,
+  validateTerminalInteractionSubjectProjection,
+  validateTerminalInteractionSubjectResponse
 } from "../src/terminal-interaction-protocol.js";
 import {
   TERMINAL_INTERACTION_AUTHORITY_SCHEMA,
@@ -60,6 +67,41 @@ function response(
     interaction_id: "ti_123",
     turn_id: "turn_123",
     answers,
+    ...overrides
+  };
+}
+
+const SHA = "a".repeat(64);
+
+function subjectProjection(
+  subject: Record<string, unknown>,
+  overrides: Record<string, unknown> = {}
+): unknown {
+  return {
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_SUBJECT_VERSION,
+    interaction_id: "ti_subject",
+    subject,
+    agent: "codex",
+    kind: "questionnaire",
+    state: "pending",
+    step: { index: 1, total: 1 },
+    expires_at: "2099-09-08T00:00:00.000Z",
+    surface_id: "tis_surface",
+    prompt_fingerprint: SHA,
+    response_authority: "executable",
+    questions: [{
+      question_id: "q1",
+      prompt: "Continue?",
+      required: true,
+      response_kind: "confirm"
+    }],
+    capabilities: {
+      respond: true,
+      batch_response: false,
+      free_text: false,
+      multi_select: false
+    },
     ...overrides
   };
 }
@@ -577,5 +619,101 @@ test("response rejects expired, disabled, batched, and multiline input", () => {
     })),
     "invalid_value",
     "$.capabilities.batch_response"
+  );
+});
+
+test("subject-aware v2 represents exact Watch ownership without a fake turn", () => {
+  const subject = {
+    kind: "terminal_watch",
+    watch_id: "terminal-watch-123",
+    anchor_fingerprint: SHA
+  } as const;
+  const parsed = validateTerminalInteractionSubjectProjection(
+    subjectProjection(subject)
+  );
+
+  assert.equal(parsed.version, 2);
+  assert.deepEqual(parsed.subject, subject);
+  assert.equal("turn_id" in parsed, false);
+  assert.equal(terminalInteractionSubjectId(parsed.subject), "terminal-watch-123");
+  assert.equal(
+    terminalInteractionSubjectKey(parsed.subject),
+    "terminal_watch:terminal-watch-123"
+  );
+  assert.deepEqual(validateAnyTerminalInteractionProjection(parsed), parsed);
+});
+
+test("subject-aware v2 validates managed legacy alias but makes subject authoritative", () => {
+  const subject = {
+    kind: "managed_turn",
+    turn_id: "turn_123",
+    message_id: "msg_123"
+  } as const;
+  const parsed = validateTerminalInteractionSubjectProjection(
+    subjectProjection(subject, { turn_id: "turn_123" })
+  );
+  assert.equal(parsed.subject.kind, "managed_turn");
+  assert.equal(parsed.turn_id, "turn_123");
+  assert.equal(sameTerminalInteractionSubject(subject, parsed.subject), true);
+
+  expectValidationError(
+    () => validateTerminalInteractionSubjectProjection(
+      subjectProjection(subject, { turn_id: "turn_other" })
+    ),
+    "interaction_mismatch",
+    "$.turn_id"
+  );
+});
+
+test("subject-aware v2 forbids Watch turn aliases and notify-only response claims", () => {
+  const subject = {
+    kind: "terminal_watch",
+    watch_id: "terminal-watch-123",
+    anchor_fingerprint: SHA
+  } as const;
+  expectValidationError(
+    () => validateTerminalInteractionSubjectProjection(
+      subjectProjection(subject, { turn_id: "fake-turn" })
+    ),
+    "unknown_field",
+    "$.turn_id"
+  );
+  expectValidationError(
+    () => validateTerminalInteractionSubjectProjection(subjectProjection(subject, {
+      response_authority: "notify_only"
+    })),
+    "invalid_value",
+    "$.capabilities.respond"
+  );
+});
+
+test("subject-aware response is fenced to full Watch subject evidence", () => {
+  const subject = {
+    kind: "terminal_watch",
+    watch_id: "terminal-watch-123",
+    anchor_fingerprint: SHA
+  } as const;
+  const inputProjection = subjectProjection(subject);
+  const inputResponse = {
+    interaction_id: "ti_subject",
+    subject,
+    answers: [{
+      question_id: "q1",
+      response_kind: "confirm",
+      confirm: true
+    }]
+  };
+  assert.deepEqual(
+    validateTerminalInteractionSubjectResponse(inputResponse, inputProjection),
+    inputResponse
+  );
+
+  expectValidationError(
+    () => validateTerminalInteractionSubjectResponse({
+      ...inputResponse,
+      subject: { ...subject, anchor_fingerprint: "b".repeat(64) }
+    }, inputProjection),
+    "interaction_mismatch",
+    "$.subject"
   );
 });

@@ -20,12 +20,27 @@ const terminalInteractionAnswerBase = {
 export const respondInteractionParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["turn_id", "interaction_id", "answers"],
+  required: ["interaction_id", "answers"],
+  oneOf: [
+    {
+      required: ["turn_id"],
+      not: { required: ["watch_id"] }
+    },
+    {
+      required: ["watch_id"],
+      not: { required: ["turn_id"] }
+    }
+  ],
   properties: {
     turn_id: {
       ...terminalInteractionIdentifierSchema,
       description:
         "Exact authoritative Turn id from the current interaction_state projection."
+    },
+    watch_id: {
+      ...terminalInteractionIdentifierSchema,
+      description:
+        "Exact authoritative Terminal Watch id from the current interaction_state projection. Supply exactly one of turn_id or watch_id."
     },
     interaction_id: {
       ...terminalInteractionIdentifierSchema,

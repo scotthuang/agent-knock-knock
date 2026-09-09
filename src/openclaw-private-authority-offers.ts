@@ -2,6 +2,13 @@ export const OPENCLAW_PRIVATE_AUTHORITY_OFFER_TTL_MS = 10 * 60 * 1000;
 export const OPENCLAW_PRIVATE_AUTHORITY_OFFER_LIMIT = 512;
 export const OPENCLAW_APPROVAL_AUTHORITY_KIND = "approval";
 export const OPENCLAW_INTERACTION_AUTHORITY_KIND = "interaction";
+export const OPENCLAW_INTERACTION_AUTHORITY_SUBJECT_KINDS = [
+  "managed_turn",
+  "terminal_watch"
+] as const;
+
+export type OpenClawInteractionAuthoritySubjectKind =
+  typeof OPENCLAW_INTERACTION_AUTHORITY_SUBJECT_KINDS[number];
 
 export interface OpenClawPrivateAuthorityTarget {
   type: string;
@@ -46,21 +53,123 @@ export function openClawApprovalAuthorityOfferKey(
   };
 }
 
+/**
+ * Legacy managed-Turn overload retained while callers migrate to the explicit
+ * subject-aware form below.
+ */
 export function openClawInteractionAuthorityOfferKey(
   sessionKey: string,
   sessionId: string,
   turnId: string,
   interactionId: string
+): OpenClawPrivateAuthorityOfferKey;
+export function openClawInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  subjectKind: OpenClawInteractionAuthoritySubjectKind,
+  subjectId: string,
+  interactionId: string
+): OpenClawPrivateAuthorityOfferKey;
+export function openClawInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  subjectKindOrTurnId: OpenClawInteractionAuthoritySubjectKind | string,
+  subjectIdOrInteractionId: string,
+  explicitInteractionId?: string
 ): OpenClawPrivateAuthorityOfferKey {
+  const legacyManagedTurn = explicitInteractionId === undefined;
+  const subjectKind = legacyManagedTurn
+    ? "managed_turn"
+    : interactionAuthoritySubjectKind(subjectKindOrTurnId);
+  const subjectId = exactNonBlank(
+    legacyManagedTurn ? subjectKindOrTurnId : subjectIdOrInteractionId,
+    "interaction subject id"
+  );
+  const interactionId = exactNonBlank(
+    legacyManagedTurn ? subjectIdOrInteractionId : explicitInteractionId,
+    "interaction id"
+  );
   return {
     sessionKey,
     sessionId,
     kind: OPENCLAW_INTERACTION_AUTHORITY_KIND,
     target: {
-      type: "interaction_id",
-      id: JSON.stringify([turnId, interactionId])
+      type: "interaction_subject",
+      id: JSON.stringify([subjectKind, subjectId, interactionId])
     }
   };
+}
+
+export function openClawManagedTurnInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  turnId: string,
+  interactionId: string
+): OpenClawPrivateAuthorityOfferKey {
+  return openClawInteractionAuthorityOfferKey(
+    sessionKey,
+    sessionId,
+    "managed_turn",
+    turnId,
+    interactionId
+  );
+}
+
+export function openClawTerminalWatchInteractionAuthorityOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  watchId: string,
+  interactionId: string
+): OpenClawPrivateAuthorityOfferKey {
+  return openClawInteractionAuthorityOfferKey(
+    sessionKey,
+    sessionId,
+    "terminal_watch",
+    watchId,
+    interactionId
+  );
+}
+
+/**
+ * Invalidates every interaction response offer previously displayed for one
+ * exact subject in one exact controller conversation. Status uses this as a
+ * refresh boundary before it publishes at most one offer from the new
+ * snapshot, so an old interaction id cannot remain actionable for the rest of
+ * its TTL after the terminal UI disappears or changes.
+ */
+export function invalidateOpenClawInteractionAuthorityOffersForSubject(
+  api: object,
+  sessionKey: string,
+  sessionId: string,
+  subjectKind: OpenClawInteractionAuthoritySubjectKind,
+  subjectId: string,
+  nowMs = Date.now()
+): number {
+  const exactApi = assertApi(api);
+  const exactSessionKey = exactNonBlank(sessionKey, "sessionKey");
+  const exactSessionId = exactNonBlank(sessionId, "sessionId");
+  const exactSubjectKind = interactionAuthoritySubjectKind(subjectKind);
+  const exactSubjectId = exactNonBlank(subjectId, "interaction subject id");
+  assertNow(nowMs);
+  const store = storesByApi.get(exactApi);
+  if (!store) return 0;
+  pruneExpiredOffers(store, nowMs);
+  let invalidated = 0;
+  for (const normalizedKey of store.entries.keys()) {
+    if (
+      normalizedInteractionOfferMatchesSubject(
+        normalizedKey,
+        exactSessionKey,
+        exactSessionId,
+        exactSubjectKind,
+        exactSubjectId
+      )
+    ) {
+      store.entries.delete(normalizedKey);
+      invalidated += 1;
+    }
+  }
+  return invalidated;
 }
 
 export function rememberOpenClawPrivateAuthorityOffer(
@@ -168,12 +277,58 @@ function privateAuthorityOfferKey(
   return JSON.stringify([sessionKey, sessionId, kind, targetType, targetId]);
 }
 
+function normalizedInteractionOfferMatchesSubject(
+  normalizedKey: string,
+  sessionKey: string,
+  sessionId: string,
+  subjectKind: OpenClawInteractionAuthoritySubjectKind,
+  subjectId: string
+): boolean {
+  try {
+    const key = JSON.parse(normalizedKey) as unknown;
+    if (
+      !Array.isArray(key) ||
+      key.length !== 5 ||
+      key[0] !== sessionKey ||
+      key[1] !== sessionId ||
+      key[2] !== OPENCLAW_INTERACTION_AUTHORITY_KIND ||
+      key[3] !== "interaction_subject" ||
+      typeof key[4] !== "string"
+    ) {
+      return false;
+    }
+    const target = JSON.parse(key[4]) as unknown;
+    return Array.isArray(target) &&
+      target.length === 3 &&
+      target[0] === subjectKind &&
+      target[1] === subjectId &&
+      typeof target[2] === "string";
+  } catch {
+    return false;
+  }
+}
+
 function exactIdentifier(value: unknown, label: string): string {
   const text = exactNonBlank(value, label);
   if (!/^[a-z][a-z0-9_.-]{0,63}$/u.test(text)) {
     throw new Error(`private authority offer ${label} is invalid`);
   }
   return text;
+}
+
+function interactionAuthoritySubjectKind(
+  value: unknown
+): OpenClawInteractionAuthoritySubjectKind {
+  if (
+    !OPENCLAW_INTERACTION_AUTHORITY_SUBJECT_KINDS.includes(
+      value as OpenClawInteractionAuthoritySubjectKind
+    )
+  ) {
+    throw new Error(
+      "private authority offer interaction subject kind is invalid"
+    );
+  }
+  return value as OpenClawInteractionAuthoritySubjectKind;
 }
 
 function exactNonBlank(value: unknown, label: string): string {

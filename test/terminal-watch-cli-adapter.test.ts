@@ -7,11 +7,19 @@ import path from "node:path";
 import { createTerminalWatchCliAdapter } from
   "../src/terminal-watch-cli-adapter.js";
 import {
+  TerminalInteractionInputNotStartedError,
+  type TerminalAgentBridge,
+  type TerminalInteractionAuthorizationContext,
+  type TerminalInteractionResponseExecution
+} from "../src/terminal-agent-bridge.js";
+import {
   createTerminalWatchCallbackCliAdapter,
   resolveTerminalWatchOpenClawCallback,
   type TerminalWatchCallbackCliAdapter,
   type TerminalWatchCallbackInput
 } from "../src/terminal-watch-callback-cli-adapter.js";
+import { initialClaudeHumanStartedActiveTaskCheckpoint } from
+  "../src/claude-local-transcript-provider.js";
 import type { Conversation } from "../src/protocol.js";
 import {
   createTerminalWatchOpenClawCallbackRoute,
@@ -19,13 +27,23 @@ import {
   type CallbackTransportDeliverInput
 } from "../src/callback-transport.js";
 import {
+  createTerminalInteractionAggregate
+} from "../src/terminal-interaction-core.js";
+import {
   loadTerminalWatch,
   pathsForTerminalWatch,
+  saveTerminalWatch,
   terminalWatchCallbackEnvelope,
   terminalWatchNotificationId,
   terminalWatchNotificationIdempotencyKey,
+  terminalWatchRevision,
   terminalWatchesDir
 } from "../src/terminal-watch-store.js";
+import {
+  validateTerminalInteractionSubjectProjection,
+  type
+  TerminalInteractionSubjectProjection
+} from "../src/terminal-interaction-protocol.js";
 import {
   STORE_WRITER_PROTOCOL,
   storeManifestPath
@@ -54,6 +72,23 @@ const CODEX_FALLBACK_QUESTION_TWO = `
     2. Node test  Built in.
 
   tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`;
+
+const CLAUDE_NATIVE_QUESTION = `
+old conversation output
+ ☐ Color
+
+Which color do you prefer?
+
+❯ 1. Red
+     The color red
+  2. Blue
+     The color blue
+  3. Type something.
+────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
 `;
 
 test("user-explicit fallback attaches after terminal exit and recovers completion before its first sweep", async (t) => {
@@ -107,8 +142,8 @@ test("user-explicit fallback attaches after terminal exit and recovers completio
   assert.ok(prepared);
   assert.deepEqual(
     prepared.callbackRoute.capabilities,
-    { wake: true, respond: false },
-    "a trusted Host route is reduced to notification-only authority"
+    { wake: true, respond: true },
+    "a new exact fallback Watch preserves its trusted response-capable route"
   );
 
   const fallbackTurnId = "019f0000-0000-7000-8000-000000000299";
@@ -170,7 +205,7 @@ test("user-explicit fallback attaches after terminal exit and recovers completio
   assert.deepEqual(
     loadTerminalWatch(fixture.storeDir, prepared.watchId)?.callback_route
       ?.capabilities,
-    { wake: true, respond: false }
+    { wake: true, respond: true }
   );
 
   fixture.advance();
@@ -181,7 +216,7 @@ test("user-explicit fallback attaches after terminal exit and recovers completio
     callbacks[0].completionText,
     "Fallback Watch recovered exact completion"
   );
-  facade.runWatchStatus({ ...options, watch: prepared.watchId });
+  await facade.runWatchStatus({ ...options, watch: prepared.watchId });
   const settled = record(record(printed.at(-1)).watch);
   assert.equal(settled.status, "completed");
   assert.equal(
@@ -796,7 +831,7 @@ test("fallback Watch invalidates when a later Codex turn crosses its open turn",
   );
 });
 
-test("protocol-6 fallback Watch reduces a persisted response route before questionnaire delivery", async (t) => {
+test("response-capable fallback Watch preserves its route for questionnaire delivery", async (t) => {
   const fixture = createFixture(t, "human-only", "0.153.4");
   const deliveries: CallbackTransportDeliverInput[] = [];
   let terminal: Record<string, any> = fixture.terminal;
@@ -918,12 +953,9 @@ test("protocol-6 fallback Watch reduces a persisted response route before questi
   assert.equal(deliveries.length, 1);
   assert.equal(
     deliveries[0].envelope.event.type,
-    "interaction_manual_required"
+    "interaction_required"
   );
-  assert.deepEqual(deliveries[0].route, {
-    ...legacyHostRoute,
-    capabilities: { wake: true, respond: false }
-  });
+  assert.deepEqual(deliveries[0].route, legacyHostRoute);
   assert.equal(
     Object.hasOwn(deliveries[0].envelope.route, "capabilities"),
     false,
@@ -937,7 +969,7 @@ test("protocol-6 fallback Watch reduces a persisted response route before questi
   );
   assert.deepEqual(
     upgraded.notification_outbox[0].callback_route?.capabilities,
-    { wake: true, respond: false }
+    { wake: true, respond: true }
   );
   assert.equal(
     Object.hasOwn(
@@ -1030,7 +1062,8 @@ test("OpenClaw user-explicit fallback snapshots and delivers the Terminal Watch 
     prepared.callbackRoute,
     resolveTerminalWatchOpenClawCallback({
       openclaw_session: openclawSession,
-      openclaw_bin: openclawBin
+      openclaw_bin: openclawBin,
+      interaction_policy: "respond_when_exact"
     }).route
   );
   assert.notEqual(
@@ -1108,7 +1141,7 @@ test("OpenClaw user-explicit fallback snapshots and delivers the Terminal Watch 
     settled.notification_outbox[0].idempotency_key
   );
   assert.equal(settled.notification_outbox[0].last_error_code, undefined);
-  facade.runWatchStatus({ ...options, watch: prepared.watchId });
+  await facade.runWatchStatus({ ...options, watch: prepared.watchId });
   const publicWatch = record(record(printed.at(-1)).watch);
   assert.deepEqual(publicWatch.callback, {
     pending: 0,
@@ -1284,7 +1317,7 @@ test("legacy failed fallback callback is repaired and delivered once through cha
   );
   assert.equal(recovered.notification_outbox[0].attempts, 2);
   assert.equal(recovered.notification_outbox[0].status, "delivered");
-  recoveryFacade.runWatchStatus({
+  await recoveryFacade.runWatchStatus({
     storeDir: fixture.storeDir,
     watch: prepared.watchId
   });
@@ -2010,7 +2043,7 @@ test("Terminal Watch CLI observes one exact human-started Codex task and deliver
     callbacks[0].completionText,
     "Terminal Watch verified completion"
   );
-  facade.runWatchStatus({ storeDir: fixture.storeDir, watch: watchId });
+  await facade.runWatchStatus({ storeDir: fixture.storeDir, watch: watchId });
   const settled = record(record(printed.at(-1)).watch);
   assert.equal(settled.status, "completed");
   assert.equal(record(settled.callback).superseded, 1);
@@ -2115,7 +2148,7 @@ test("Terminal Watch snapshots and delivers the trusted generic Host route", asy
   assert.equal(deliveries.length, 1);
   assert.deepEqual(deliveries[0].route, {
     ...callbackRoute,
-    capabilities: { wake: true, respond: false }
+    capabilities: { wake: true, respond: true }
   });
   assert.equal(
     deliveries[0].envelope.route.controller_session_id,
@@ -2271,7 +2304,7 @@ test("Terminal Watch accepts a paired human prompt beside a same-turn synthetic 
       `Completed with ${rootUserRowOrder} context`,
       rootUserRowOrder
     );
-    facade.runWatchStatus({
+    await facade.runWatchStatus({
       storeDir: fixture.storeDir,
       watch: String(created.watch_id)
     });
@@ -2336,7 +2369,7 @@ test("exact durable completion wins when the terminal switches before reconcilia
   assert.equal(callbacks[0].event, "completed");
   assert.equal(callbacks[0].completionText, "Completion survived terminal drift");
   const watchId = String(record(record(printed[0]).watch).watch_id);
-  facade.runWatchStatus({ storeDir: fixture.storeDir, watch: watchId });
+  await facade.runWatchStatus({ storeDir: fixture.storeDir, watch: watchId });
   assert.equal(record(record(printed.at(-1)).watch).status, "completed");
 });
 
@@ -2371,7 +2404,7 @@ test("an unavailable exact terminal observation is retryable", async (t) => {
   unavailable = true;
   fixture.advance();
   await facade.runReconcileWatches({ storeDir: fixture.storeDir });
-  facade.runWatchStatus({ storeDir: fixture.storeDir, watch: watchId });
+  await facade.runWatchStatus({ storeDir: fixture.storeDir, watch: watchId });
   assert.equal(record(record(printed.at(-1)).watch).status, "active");
 });
 
@@ -2544,7 +2577,7 @@ test("Terminal Watch derives read-only identity when the lifecycle token is malf
   );
   fixture.advance();
   await facade.runReconcileWatches({ storeDir: fixture.storeDir });
-  facade.runWatchStatus({
+  await facade.runWatchStatus({
     storeDir: fixture.storeDir,
     watch: String(created.watch_id)
   });
@@ -2753,7 +2786,7 @@ test("Terminal Watch falls back to a read-only activity epoch and settles after 
   assert.equal(facade.listPublicWatches(fixture.storeDir).length, 2);
   fixture.advance();
   await facade.runReconcileWatches({ storeDir: fixture.storeDir });
-  facade.runWatchStatus({
+  await facade.runWatchStatus({
     storeDir: fixture.storeDir,
     watch: String(first.watch_id)
   });
@@ -2789,7 +2822,7 @@ test("Terminal Watch falls back to a read-only activity epoch and settles after 
     ]
   );
 
-  facade.runWatchStatus({
+  await facade.runWatchStatus({
     storeDir: fixture.storeDir,
     watch: String(first.watch_id)
   });
@@ -2843,6 +2876,1023 @@ test("Terminal Watch rejects only when neither durable task nor screen activity 
     /neither a durable task anchor nor a read-only screen-status observation path/u
   );
   assert.deepEqual(facade.listPublicWatches(fixture.storeDir), []);
+});
+
+test("exact Watch Status projects an actionable questionnaire and cursor redraw notifies once", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const printed: unknown[] = [];
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  let blockers: Conversation[] = [];
+  const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:exact-questionnaire",
+    openclawBin: "/opt/openclaw/bin/openclaw",
+    respond: true
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000271",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => blockers,
+    printJson: (value) => printed.push(value),
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const watchId = String(record(record(printed.at(-1)).watch).watch_id);
+  terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
+  fixture.advance();
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const publicWatch = record(record(printed.at(-1)).watch);
+  const projection = record(publicWatch.interaction_state);
+  assert.equal(publicWatch.interaction_policy, "respond_when_exact");
+  assert.equal(record(publicWatch.capabilities).interaction_respond, true);
+  assert.equal(projection.version, 2);
+  assert.equal(record(projection.subject).kind, "terminal_watch");
+  assert.equal(record(projection.subject).watch_id, watchId);
+  assert.equal(projection.response_authority, "executable");
+  assert.equal(record(projection.capabilities).respond, true);
+  assert.equal(Object.hasOwn(projection, "turn_id"), false);
+
+  await facade.runWatchStatus({ storeDir: fixture.storeDir, watch: watchId });
+  const anonymousStatus = record(record(printed.at(-1)).watch);
+  assert.equal(record(anonymousStatus.capabilities).interaction_respond, false);
+  assert.equal(Object.hasOwn(anonymousStatus, "interaction_state"), false);
+  assert.equal(
+    Object.hasOwn(anonymousStatus, "interaction_prompt_fingerprint"),
+    false
+  );
+  assert.equal(
+    Object.hasOwn(record(anonymousStatus.available_actions), "respond_interaction"),
+    false
+  );
+  const listed = record(
+    facade.listPublicWatches(fixture.storeDir)
+      .find((candidate) => candidate.watch_id === watchId)
+  );
+  assert.equal(Object.hasOwn(listed, "interaction_state"), false);
+  assert.equal(Object.hasOwn(listed, "interaction_prompt_fingerprint"), false);
+  assert.equal(
+    Object.hasOwn(record(listed.available_actions), "respond_interaction"),
+    false
+  );
+  await assert.rejects(
+    () => facade.runWatchStatus({
+      storeDir: fixture.storeDir,
+      watch: watchId,
+      openclawSession: "agent:main:not-owner"
+    }),
+    /different controller session; executable interaction details were not disclosed/u
+  );
+
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].envelope.event.type, "interaction_required");
+  blockers = [managedInteractionTurn(
+    String(projection.surface_id),
+    String(projection.prompt_fingerprint),
+    callbackRoute.controller_session_id
+  )];
+  fixture.setNow("2026-08-21T01:00:03.000Z");
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const suppressed = record(record(printed.at(-1)).watch);
+  assert.equal(record(suppressed.capabilities).interaction_respond, false);
+  assert.equal(
+    record(record(suppressed.interaction_state).capabilities).respond,
+    false
+  );
+  assert.equal(
+    record(suppressed.interaction_state).response_authority,
+    "notify_only"
+  );
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1, "managed precedence must not add a callback");
+
+  blockers = [];
+  fixture.setNow("2026-08-21T01:00:04.000Z");
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const restored = record(record(printed.at(-1)).watch);
+  assert.equal(record(restored.capabilities).interaction_respond, true);
+  assert.equal(
+    record(restored.interaction_state).response_authority,
+    "executable"
+  );
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1, "restoring one surface must not repeat callback");
+  terminal = withTerminalWatchScreen(
+    terminal,
+    CODEX_FALLBACK_QUESTION_ONE
+      .replace("› 1. React", "  1. React")
+      .replace("  2. Vue", "› 2. Vue")
+  );
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1, "cursor redraw must keep one surface event");
+});
+
+test("a newer stale Codex task Watch cannot claim the current surface", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const printed: unknown[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  const controller = "agent:main:watch-stale-codex-task";
+  const route = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: controller,
+    openclawBin: "/opt/openclaw/bin/openclaw",
+    respond: true
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000305",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value)
+  });
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: controller,
+    callbackRoute: route
+  });
+  const watchId = String(record(record(printed.at(-1)).watch).watch_id);
+  terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
+  fixture.advance();
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  const current = loadTerminalWatch(fixture.storeDir, watchId);
+  assert.equal(
+    current.anchor.schema,
+    "agent-knock-knock/codex-human-started-active-task-anchor"
+  );
+  assert.ok(current.current_interaction);
+  if (
+    current.anchor.schema !==
+      "agent-knock-knock/codex-human-started-active-task-anchor" ||
+    !current.current_interaction
+  ) throw new Error("Codex exact Watch fixture was not captured");
+  const { anchor_fingerprint: _oldFingerprint, ...staleAnchorBase } = {
+    ...current.anchor,
+    turn_id: "019f0000-0000-7000-8000-000000000306"
+  };
+  const staleAnchor = {
+    ...staleAnchorBase,
+    anchor_fingerprint: createHash("sha256")
+      .update(JSON.stringify(staleAnchorBase))
+      .digest("hex")
+  };
+  const staleId = "terminal-watch-stale-codex-task";
+  const staleProjection = validateTerminalInteractionSubjectProjection({
+    ...current.current_interaction.projection,
+    turn_id: undefined,
+    interaction_id: `ti_${"9".repeat(40)}`,
+    subject: {
+      kind: "terminal_watch" as const,
+      watch_id: staleId,
+      anchor_fingerprint: staleAnchor.anchor_fingerprint
+    }
+  });
+  const staleCreatedAt = "2026-08-21T01:00:05.000Z";
+  const stale = structuredClone(current);
+  delete stale.revision;
+  stale.watch_id = staleId;
+  stale.anchor = staleAnchor;
+  stale.created_at = staleCreatedAt;
+  stale.updated_at = staleCreatedAt;
+  stale.last_activity_at = staleCreatedAt;
+  stale.notification_outbox = [];
+  stale.current_interaction = {
+    projection: staleProjection,
+    aggregate: createTerminalInteractionAggregate(
+      staleProjection,
+      staleCreatedAt
+    )
+  };
+  saveTerminalWatch(fixture.storeDir, stale, { expectedRevision: null });
+
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "same terminal and surface are insufficient without the exact Codex task"
+  );
+});
+
+test("a newer stale Claude prompt Watch cannot claim the current surface", async (t) => {
+  const fixture = createClaudeQuestionnaireFixture(t);
+  const printed: unknown[] = [];
+  let terminal = fixture.terminal;
+  const controller = "agent:main:watch-stale-claude-task";
+  const route = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: controller,
+    openclawBin: "/opt/openclaw/bin/openclaw",
+    respond: true
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => fixture.agentRows,
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000309",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value)
+  });
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: controller,
+    callbackRoute: route,
+    claudeHome: fixture.claudeHome
+  });
+  const watchId = String(record(record(printed.at(-1)).watch).watch_id);
+  terminal = withTerminalWatchScreen(terminal, CLAUDE_NATIVE_QUESTION);
+  fixture.advance();
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller,
+    claudeHome: fixture.claudeHome
+  });
+  const current = loadTerminalWatch(fixture.storeDir, watchId);
+  assert.equal(
+    current.current_interaction?.projection.capabilities.respond,
+    true,
+    "the current Claude prompt must begin with exact response authority"
+  );
+  assert.equal(
+    current.anchor.schema,
+    "agent-knock-knock/claude-human-started-active-task-anchor"
+  );
+  assert.ok(current.current_interaction);
+  if (
+    current.anchor.schema !==
+      "agent-knock-knock/claude-human-started-active-task-anchor" ||
+    !current.current_interaction
+  ) throw new Error("Claude exact Watch fixture was not captured");
+  const { anchor_fingerprint: _oldFingerprint, ...staleAnchorBase } = {
+    ...current.anchor,
+    prompt_uuid: "019f0000-0000-7000-8000-000000000310",
+    request_hash: "7".repeat(64)
+  };
+  const staleAnchor = {
+    ...staleAnchorBase,
+    anchor_fingerprint: createHash("sha256")
+      .update(JSON.stringify(staleAnchorBase))
+      .digest("hex")
+  };
+  const staleId = "terminal-watch-stale-claude-task";
+  const staleProjection = validateTerminalInteractionSubjectProjection({
+    ...current.current_interaction.projection,
+    turn_id: undefined,
+    interaction_id: `ti_${"7".repeat(40)}`,
+    subject: {
+      kind: "terminal_watch",
+      watch_id: staleId,
+      anchor_fingerprint: staleAnchor.anchor_fingerprint
+    }
+  });
+  const staleCreatedAt = "2026-08-21T01:00:05.000Z";
+  const stale = structuredClone(current);
+  delete stale.revision;
+  stale.watch_id = staleId;
+  stale.anchor = staleAnchor;
+  stale.observation_checkpoint =
+    initialClaudeHumanStartedActiveTaskCheckpoint(staleAnchor);
+  stale.created_at = staleCreatedAt;
+  stale.updated_at = staleCreatedAt;
+  stale.last_activity_at = staleCreatedAt;
+  stale.notification_outbox = [];
+  stale.current_interaction = {
+    projection: staleProjection,
+    aggregate: createTerminalInteractionAggregate(
+      staleProjection,
+      staleCreatedAt
+    )
+  };
+  saveTerminalWatch(fixture.storeDir, stale, { expectedRevision: null });
+
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller,
+    claudeHome: fixture.claudeHome
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "same Claude session and surface are insufficient without the exact prompt"
+  );
+});
+
+test("newer exact Watch wins one surface while loser notification follows controller scope", async (t) => {
+  for (const sameController of [true, false]) {
+    const fixture = createFixture(t, "human-only", "0.153.4");
+    const printed: unknown[] = [];
+    let terminal: Record<string, any> = fixture.terminal;
+    const firstController = `agent:main:watch-election-${sameController}`;
+    const secondController = sameController
+      ? firstController
+      : "agent:main:watch-election-other";
+    const firstRoute = createTerminalWatchOpenClawCallbackRoute({
+      controllerSessionId: firstController,
+      openclawBin: "/opt/openclaw/bin/openclaw",
+      respond: true
+    });
+    const secondRoute = createTerminalWatchOpenClawCallbackRoute({
+      controllerSessionId: secondController,
+      openclawBin: "/opt/openclaw/bin/openclaw",
+      respond: true
+    });
+    const facade = createTerminalWatchCliAdapter({
+      acquireFileLock: () => () => {},
+      acquireTerminalLock: () => () => {},
+      observeExactTerminal: async ({ terminalId }) =>
+        exactTerminalObservation([terminal], terminalId),
+      loadClaudeAgentRows: () => [],
+      now: fixture.now,
+      randomUUID: () => sameController
+        ? "00000000-0000-4000-8000-000000000281"
+        : "00000000-0000-4000-8000-000000000282",
+      storeDirFromOptions: () => fixture.storeDir,
+      terminalDispatchOwnership: () => ({ state: "none" }),
+      terminalIncarnationBlockingTurns: () => [],
+      printJson: (value) => printed.push(value)
+    });
+    await facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      openclawSession: firstController,
+      callbackRoute: firstRoute
+    });
+    const firstId = String(record(record(printed.at(-1)).watch).watch_id);
+    const first = loadTerminalWatch(fixture.storeDir, firstId);
+    const secondId = `terminal-watch-newer-election-${sameController}`;
+    const secondCreatedAt = "2026-08-21T01:00:01.000Z";
+    const second = structuredClone(first);
+    delete second.revision;
+    second.watch_id = secondId;
+    second.callback_route = secondRoute;
+    second.openclaw_session = secondController;
+    second.created_at = secondCreatedAt;
+    second.updated_at = secondCreatedAt;
+    second.last_activity_at = secondCreatedAt;
+    second.notification_outbox = [];
+    second.current_interaction = undefined;
+    saveTerminalWatch(fixture.storeDir, second, { expectedRevision: null });
+
+    terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
+    fixture.setNow("2026-08-21T01:00:02.000Z");
+    await facade.runWatchStatus({
+      storeDir: fixture.storeDir,
+      watch: firstId,
+      openclawSession: firstController
+    });
+    await facade.runWatchStatus({
+      storeDir: fixture.storeDir,
+      watch: secondId,
+      openclawSession: secondController
+    });
+    await facade.runWatchStatus({
+      storeDir: fixture.storeDir,
+      watch: firstId,
+      openclawSession: firstController
+    });
+
+    const older = loadTerminalWatch(fixture.storeDir, firstId);
+    const newer = loadTerminalWatch(fixture.storeDir, secondId);
+    assert.equal(older.current_interaction?.projection.capabilities.respond, false);
+    assert.equal(newer.current_interaction?.projection.capabilities.respond, true);
+    assert.equal(newer.notification_outbox[0]?.kind, "interaction_required");
+    if (sameController) {
+      assert.equal(
+        older.notification_outbox.every((notification) =>
+          notification.status === "superseded"),
+        true,
+        "same-controller loser must suppress its duplicate callback"
+      );
+    } else {
+      assert.equal(
+        older.notification_outbox.at(-1)?.kind,
+        "interaction_manual_required",
+        "another controller may observe the surface without response authority"
+      );
+    }
+  }
+});
+
+test("terminal-activity Watch projects questionnaire notification without response authority", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const header = fs.readFileSync(fixture.rolloutPath, "utf8").split("\n")[0];
+  fs.writeFileSync(fixture.rolloutPath, `${header}\n`, { mode: 0o600 });
+  const printed: unknown[] = [];
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:activity-questionnaire",
+    openclawBin: "/opt/openclaw/bin/openclaw",
+    respond: true
+  });
+  const terminal = withTerminalWatchScreen(
+    { ...fixture.terminal, available_actions: {}, activity_state: "working" },
+    CODEX_FALLBACK_QUESTION_ONE
+  );
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000272",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value),
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  await facade.runWatch({
+    terminal: terminal.id as string,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const watchId = String(record(record(printed.at(-1)).watch).watch_id);
+  fixture.advance();
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const publicWatch = record(record(printed.at(-1)).watch);
+  const projection = record(publicWatch.interaction_state);
+  assert.equal(publicWatch.watch_mode, "terminal_activity");
+  assert.equal(publicWatch.interaction_policy, "notify_only");
+  assert.equal(record(publicWatch.capabilities).interaction_respond, false);
+  assert.equal(projection.response_authority, "notify_only");
+  assert.equal(record(projection.capabilities).respond, false);
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1);
+  assert.equal(
+    deliveries[0].envelope.event.type,
+    "interaction_manual_required"
+  );
+  assert.deepEqual(deliveries[0].route.capabilities, {
+    wake: true,
+    respond: false
+  });
+});
+
+test("Watch respond_interaction live-revalidates an expired offer and consumes one reservation", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const printed: unknown[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  let watchId = "";
+  let terminalInputs = 0;
+  let terminalLocks = 0;
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => {
+      terminalLocks += 1;
+      return () => {};
+    },
+    createBridge: () => watchInteractionBridge({
+      storeDir: fixture.storeDir,
+      watchId: () => watchId,
+      mode: "success",
+      onTerminalInput: () => {
+        terminalInputs += 1;
+      }
+    }),
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000273",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value)
+  });
+  const controller = "agent:main:watch-response-success";
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: controller
+  });
+  watchId = String(record(record(printed.at(-1)).watch).watch_id);
+  terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
+  fixture.advance();
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  const offered = loadTerminalWatch(fixture.storeDir, watchId)
+    .current_interaction!.projection;
+  fixture.setNow("2026-08-21T01:11:30.000Z");
+  await facade.runRespondInteraction({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    interaction: offered.interaction_id,
+    expectedInteractionFingerprint: offered.prompt_fingerprint,
+    expectedInteractionExpiresAt: offered.expires_at,
+    responseJson: watchInteractionResponse(offered),
+    openclawSession: controller
+  });
+  assert.equal(terminalInputs, 1);
+  assert.equal(terminalLocks, 1);
+  const consumed = loadTerminalWatch(fixture.storeDir, watchId);
+  assert.equal(consumed.current_interaction?.aggregate.state, "consumed");
+  assert.equal(
+    consumed.current_interaction?.aggregate.reservation?.response_hash.length,
+    64
+  );
+  assert.equal(
+    consumed.current_interaction?.projection.expires_at === offered.expires_at,
+    false,
+    "live status recapture must refresh stale offer freshness"
+  );
+  assert.equal(record(printed.at(-1)).responded, true);
+});
+
+test("Watch response rejects controller mismatch and managed precedence before terminal input", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.153.4");
+  const printed: unknown[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  let watchId = "";
+  let terminalInputs = 0;
+  let blockers: Conversation[] = [];
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    createBridge: () => watchInteractionBridge({
+      storeDir: fixture.storeDir,
+      watchId: () => watchId,
+      mode: "success",
+      onTerminalInput: () => {
+        terminalInputs += 1;
+      }
+    }),
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000274",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => blockers,
+    printJson: (value) => printed.push(value)
+  });
+  const controller = "agent:main:watch-response-owner";
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: controller
+  });
+  watchId = String(record(record(printed.at(-1)).watch).watch_id);
+  terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
+  fixture.advance();
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  const offered = loadTerminalWatch(fixture.storeDir, watchId)
+    .current_interaction!.projection;
+  const responseOptions = {
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    interaction: offered.interaction_id,
+    expectedInteractionFingerprint: offered.prompt_fingerprint,
+    expectedInteractionExpiresAt: offered.expires_at,
+    responseJson: watchInteractionResponse(offered)
+  };
+  await assert.rejects(
+    () => facade.runRespondInteraction({
+      ...responseOptions,
+      openclawSession: "agent:main:not-owner"
+    }),
+    /different controller session; no terminal input was sent/u
+  );
+  blockers = [managedTurn()];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "a managed Turn without a private surface claim must not suppress Watch"
+  );
+  blockers = [managedInteractionTurn(
+    "tis_0000000000000000000000000000000000000000",
+    offered.prompt_fingerprint,
+    controller
+  )];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "a managed claim for another surface must not suppress Watch"
+  );
+  blockers = [managedInteractionTurn(
+    offered.surface_id,
+    offered.prompt_fingerprint,
+    "agent:main:another-controller"
+  )];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  const crossController = loadTerminalWatch(fixture.storeDir, watchId);
+  assert.equal(
+    crossController.current_interaction?.projection.capabilities.respond,
+    false,
+    "another controller's exact managed claim must leave this Watch notify-only"
+  );
+  assert.equal(
+    crossController.notification_outbox.at(-1)?.kind,
+    "interaction_manual_required"
+  );
+  blockers = [managedInteractionTurn(
+    offered.surface_id,
+    offered.prompt_fingerprint,
+    controller,
+    { respond: false }
+  )];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "a managed manual-only projection must not claim response authority"
+  );
+  blockers = [managedInteractionTurn(
+    offered.surface_id,
+    offered.prompt_fingerprint,
+    controller,
+    { state: "manual_required" }
+  )];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "a non-pending managed projection must not claim response authority"
+  );
+  blockers = [managedInteractionTurn(
+    offered.surface_id,
+    offered.prompt_fingerprint,
+    controller,
+    { omitNotifiedAt: true }
+  )];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "a managed claim without notified_at must fail closed"
+  );
+  blockers = [managedConsumedInteractionTurn(
+    offered.surface_id,
+    offered.prompt_fingerprint,
+    controller
+  )];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    false,
+    "a consumed managed response must fence the still-visible native surface"
+  );
+  blockers = [];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "removing the consumed surface owner restores exact Watch authority"
+  );
+  blockers = [managedInteractionTurn(
+    offered.surface_id,
+    offered.prompt_fingerprint,
+    controller
+  )];
+  await assert.rejects(
+    () => facade.runRespondInteraction({
+      ...responseOptions,
+      openclawSession: controller
+    }),
+    /no matching executable interaction offer/u
+  );
+  assert.equal(terminalInputs, 0);
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.aggregate
+      .state,
+    "pending"
+  );
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    false,
+    "managed precedence must revoke the stale executable offer"
+  );
+});
+
+test("Watch response re-arbitrates managed and newer Watch claims after authorization", async (t) => {
+  for (const scenario of ["managed", "newer_watch"] as const) {
+    const fixture = createFixture(t, "human-only", "0.153.4");
+    const printed: unknown[] = [];
+    let terminal: Record<string, any> = fixture.terminal;
+    let watchId = "";
+    let siblingId = "";
+    let offered: TerminalInteractionSubjectProjection | undefined;
+    let blockers: Conversation[] = [];
+    let terminalInputs = 0;
+    const controller = `agent:main:watch-race-${scenario}`;
+    const route = createTerminalWatchOpenClawCallbackRoute({
+      controllerSessionId: controller,
+      openclawBin: "/opt/openclaw/bin/openclaw",
+      respond: true
+    });
+    const facade = createTerminalWatchCliAdapter({
+      acquireFileLock: () => () => {},
+      acquireTerminalLock: () => () => {},
+      createBridge: () => watchInteractionBridge({
+        storeDir: fixture.storeDir,
+        watchId: () => watchId,
+        mode: "success",
+        onTerminalInput: () => {
+          terminalInputs += 1;
+        },
+        afterAuthorize: () => {
+          assert.ok(offered);
+          if (scenario === "managed") {
+            blockers = [managedInteractionTurn(
+              offered.surface_id,
+              offered.prompt_fingerprint,
+              controller
+            )];
+            return;
+          }
+          const sibling = loadTerminalWatch(fixture.storeDir, siblingId);
+          const siblingProjection = validateTerminalInteractionSubjectProjection({
+            ...offered,
+            turn_id: undefined,
+            interaction_id: `ti_${"8".repeat(40)}`,
+            subject: {
+              kind: "terminal_watch" as const,
+              watch_id: siblingId,
+              anchor_fingerprint: sibling.anchor.anchor_fingerprint
+            }
+          });
+          const insertedAt = "2026-08-21T01:00:03.000Z";
+          saveTerminalWatch(fixture.storeDir, {
+            ...sibling,
+            current_interaction: {
+              projection: siblingProjection,
+              aggregate: createTerminalInteractionAggregate(
+                siblingProjection,
+                insertedAt
+              )
+            },
+            updated_at: insertedAt,
+            last_activity_at: insertedAt
+          }, { expectedRevision: terminalWatchRevision(sibling) });
+        }
+      }),
+      observeExactTerminal: async ({ terminalId }) =>
+        exactTerminalObservation([terminal], terminalId),
+      loadClaudeAgentRows: () => [],
+      now: fixture.now,
+      randomUUID: () => scenario === "managed"
+        ? "00000000-0000-4000-8000-000000000307"
+        : "00000000-0000-4000-8000-000000000308",
+      storeDirFromOptions: () => fixture.storeDir,
+      terminalDispatchOwnership: () => ({ state: "none" }),
+      terminalIncarnationBlockingTurns: () => blockers,
+      printJson: (value) => printed.push(value)
+    });
+    await facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      openclawSession: controller,
+      callbackRoute: route
+    });
+    watchId = String(record(record(printed.at(-1)).watch).watch_id);
+    terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
+    fixture.advance();
+    await facade.runWatchStatus({
+      storeDir: fixture.storeDir,
+      watch: watchId,
+      openclawSession: controller
+    });
+    offered = loadTerminalWatch(fixture.storeDir, watchId)
+      .current_interaction?.projection;
+    assert.ok(offered);
+    if (scenario === "newer_watch") {
+      const current = loadTerminalWatch(fixture.storeDir, watchId);
+      const sibling = structuredClone(current);
+      delete sibling.revision;
+      siblingId = "terminal-watch-authorize-race-newer";
+      sibling.watch_id = siblingId;
+      sibling.created_at = "2026-08-21T01:00:03.000Z";
+      sibling.updated_at = sibling.created_at;
+      sibling.last_activity_at = sibling.created_at;
+      sibling.current_interaction = undefined;
+      sibling.notification_outbox = [];
+      saveTerminalWatch(fixture.storeDir, sibling, { expectedRevision: null });
+    }
+
+    await assert.rejects(
+      () => facade.runRespondInteraction({
+        storeDir: fixture.storeDir,
+        watch: watchId,
+        interaction: offered!.interaction_id,
+        expectedInteractionFingerprint: offered!.prompt_fingerprint,
+        expectedInteractionExpiresAt: offered!.expires_at,
+        responseJson: watchInteractionResponse(offered!),
+        openclawSession: controller
+      }),
+      /interaction ownership changed before dispatch/u
+    );
+    assert.equal(terminalInputs, 0, `${scenario} race must send zero input`);
+    assert.equal(
+      loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.aggregate
+        .state,
+      "pending",
+      "failed arbitration must not persist a dispatch reservation"
+    );
+  }
+});
+
+test("Watch response releases a proven pre-input failure and freezes uncertain input", async (t) => {
+  for (const scenario of [
+    { mode: "input_not_started" as const, expected: "pending", inputs: 0 },
+    { mode: "input_uncertain" as const, expected: "response_uncertain", inputs: 1 }
+  ]) {
+    const fixture = createFixture(t, "human-only", "0.153.4");
+    const printed: unknown[] = [];
+    let terminal: Record<string, any> = fixture.terminal;
+    let watchId = "";
+    let terminalInputs = 0;
+    const facade = createTerminalWatchCliAdapter({
+      acquireFileLock: () => () => {},
+      acquireTerminalLock: () => () => {},
+      createBridge: () => watchInteractionBridge({
+        storeDir: fixture.storeDir,
+        watchId: () => watchId,
+        mode: scenario.mode,
+        onTerminalInput: () => {
+          terminalInputs += 1;
+        }
+      }),
+      observeExactTerminal: async ({ terminalId }) =>
+        exactTerminalObservation([terminal], terminalId),
+      loadClaudeAgentRows: () => [],
+      now: fixture.now,
+      randomUUID: () => scenario.mode === "input_not_started"
+        ? "00000000-0000-4000-8000-000000000275"
+        : "00000000-0000-4000-8000-000000000276",
+      storeDirFromOptions: () => fixture.storeDir,
+      terminalDispatchOwnership: () => ({ state: "none" }),
+      terminalIncarnationBlockingTurns: () => [],
+      printJson: (value) => printed.push(value)
+    });
+    const controller = `agent:main:watch-${scenario.mode}`;
+    await facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      openclawSession: controller
+    });
+    watchId = String(record(record(printed.at(-1)).watch).watch_id);
+    terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
+    fixture.advance();
+    await facade.runWatchStatus({
+      storeDir: fixture.storeDir,
+      watch: watchId,
+      openclawSession: controller
+    });
+    const offered = loadTerminalWatch(fixture.storeDir, watchId)
+      .current_interaction!.projection;
+    await assert.rejects(() => facade.runRespondInteraction({
+      storeDir: fixture.storeDir,
+      watch: watchId,
+      interaction: offered.interaction_id,
+      expectedInteractionFingerprint: offered.prompt_fingerprint,
+      expectedInteractionExpiresAt: offered.expires_at,
+      responseJson: watchInteractionResponse(offered),
+      openclawSession: controller
+    }));
+    const settled = loadTerminalWatch(fixture.storeDir, watchId)
+      .current_interaction!;
+    assert.equal(settled.aggregate.state, scenario.expected, scenario.mode);
+    assert.equal(terminalInputs, scenario.inputs, scenario.mode);
+    assert.equal(
+      settled.projection.capabilities.respond,
+      scenario.mode === "input_not_started",
+      scenario.mode
+    );
+  }
 });
 
 function exactTerminalObservation(
@@ -2939,6 +3989,99 @@ function fallbackRequestUserInputRecord(
   };
 }
 
+function createClaudeQuestionnaireFixture(t: test.TestContext) {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-terminal-watch-claude-questionnaire-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const claudeHome = path.join(root, ".claude");
+  const workspace = path.join(root, "workspace");
+  const sessionId = "019f0000-0000-7000-8000-000000000311";
+  const projectsDirectory = path.join(
+    claudeHome,
+    "projects",
+    workspace.replace(/[^A-Za-z0-9]/gu, "-")
+  );
+  const transcriptPath = path.join(projectsDirectory, `${sessionId}.jsonl`);
+  fs.mkdirSync(projectsDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(workspace, { recursive: true });
+  const pid = 6311;
+  const startedAt = 1784870000000;
+  const version = "2.1.263";
+  fs.writeFileSync(transcriptPath, `${JSON.stringify({
+    uuid: "019f0000-0000-7000-8000-000000000312",
+    parentUuid: null,
+    isSidechain: false,
+    entrypoint: "cli",
+    timestamp: "2026-08-21T01:00:00.000Z",
+    sessionId,
+    version,
+    cwd: workspace,
+    type: "user",
+    promptId: "019f0000-0000-7000-8000-000000000313",
+    message: {
+      role: "user",
+      content: "Ask one native questionnaire"
+    }
+  })}\n`, { mode: 0o600 });
+  let now = new Date("2026-08-21T01:00:00.100Z");
+  const agentRows = [{
+    pid,
+    cwd: workspace,
+    kind: "interactive" as const,
+    sessionId,
+    startedAt,
+    status: "working" as const
+  }];
+  return {
+    claudeHome,
+    storeDir: path.join(root, "store"),
+    agentRows,
+    now: () => new Date(now),
+    advance: () => {
+      now = new Date("2026-08-21T01:00:02.000Z");
+    },
+    terminal: {
+      id: "terminal:v2:claude:questionnaire-fixture",
+      source: "terminal",
+      agent: "claude",
+      pid,
+      workspace,
+      cwd: workspace,
+      native_agent_session_id: sessionId,
+      native_agent_process_uuid: `claude-pid:${pid}:birth:${startedAt}`,
+      native_agent_process_birth: String(startedAt),
+      native_agent_process_started_at: startedAt,
+      agent_version: version,
+      lifecycle_binding_token: "e".repeat(64),
+      activity_state: "working",
+      approval_state: { blocked: false, approvable: false },
+      terminal_control: {
+        kind: "tmux",
+        target: "claude-watch-session:0.0",
+        session: "claude-watch-session",
+        window: 0,
+        pane: 0,
+        panePid: 6300,
+        currentCommand: "claude",
+        currentPath: workspace,
+        capabilities: ["screen_status", "durable_completion"]
+      },
+      available_actions: {
+        watch: {
+          tool: "agent_knock_knock_watch",
+          arguments: {
+            terminal_id: "terminal:v2:claude:questionnaire-fixture"
+          },
+          requires_user_intent: true,
+          use: "Monitor this human-started external task."
+        }
+      }
+    } as Record<string, any>
+  };
+}
+
 function createFixture(
   t: test.TestContext,
   rootUserRowOrder: RootUserRowOrder = "human-only",
@@ -3016,6 +4159,9 @@ function createFixture(
     now: () => new Date(now),
     advance: () => {
       now = new Date("2026-08-21T01:00:02.000Z");
+    },
+    setNow: (value: string) => {
+      now = new Date(value);
     },
     terminal: {
       id: "terminal:v2:watch-fixture",
@@ -3146,6 +4292,167 @@ function managedTurn(): Conversation {
     created_at: "2026-08-21T00:00:00.000Z",
     updated_at: "2026-08-21T00:00:01.000Z"
   } as Conversation;
+}
+
+function managedInteractionTurn(
+  surfaceId: string,
+  promptFingerprint: string,
+  openclawSession = "agent:main:main",
+  options: {
+    respond?: boolean;
+    state?: "pending" | "manual_required";
+    omitNotifiedAt?: boolean;
+  } = {}
+): Conversation {
+  const turn = managedTurn();
+  const interactionId = "ti_managed_watch_arbitration_fixture";
+  const questionId = "question_managed_watch_arbitration_fixture";
+  const respond = options.respond !== false;
+  return {
+    ...turn,
+    openclaw_session: openclawSession,
+    native_session_takeover: {
+      terminal_bridge_interaction_notification: {
+        interaction_id: interactionId,
+        question_id: questionId,
+        prompt_fingerprint: promptFingerprint,
+        surface_id: surfaceId,
+        ...(options.omitNotifiedAt
+          ? {}
+          : { notified_at: "2026-08-21T01:00:02.500Z" }),
+        interaction_state: {
+          schema: "agent-knock-knock/terminal-interaction",
+          version: 1,
+          interaction_id: interactionId,
+          turn_id: turn.turn_id,
+          agent: "codex",
+          kind: "questionnaire",
+          state: options.state ?? (respond ? "pending" : "manual_required"),
+          step: { index: 1, total: 1 },
+          questions: [{
+            question_id: questionId,
+            prompt: "Choose a framework",
+            required: true,
+            response_kind: "single_select",
+            options: [
+              { option_id: "option_react", label: "React" },
+              { option_id: "option_vue", label: "Vue" }
+            ]
+          }],
+          expires_at: "2026-08-21T01:10:00.000Z",
+          capabilities: {
+            respond,
+            batch_response: false,
+            free_text: false,
+            multi_select: false
+          }
+        }
+      }
+    }
+  };
+}
+
+function managedConsumedInteractionTurn(
+  surfaceId: string,
+  promptFingerprint: string,
+  openclawSession = "agent:main:main"
+): Conversation {
+  return {
+    ...managedTurn(),
+    openclaw_session: openclawSession,
+    status: "waiting_for_agent",
+    native_session_takeover: {
+      terminal_bridge_last_interaction_id:
+        "ti_managed_watch_consumed_fixture",
+      terminal_bridge_last_interaction_surface_id: surfaceId,
+      terminal_bridge_last_interaction_fingerprint: promptFingerprint,
+      terminal_bridge_last_interaction_at: "2026-08-21T01:00:02.500Z"
+    }
+  };
+}
+
+type WatchBridgeMode = "success" | "input_not_started" | "input_uncertain";
+
+function watchInteractionBridge(input: {
+  storeDir: string;
+  watchId(): string;
+  mode: WatchBridgeMode;
+  onTerminalInput(): void;
+  afterAuthorize?(context: TerminalInteractionAuthorizationContext):
+    void | Promise<void>;
+}): TerminalAgentBridge {
+  const bridge: Pick<TerminalAgentBridge, "respondInteraction"> = {
+    async respondInteraction(
+      agent,
+      terminalControl,
+      response,
+      options
+    ): Promise<TerminalInteractionResponseExecution> {
+      const watch = loadTerminalWatch(input.storeDir, input.watchId());
+      const projection = watch.current_interaction?.projection;
+      assert.ok(projection);
+      const context: TerminalInteractionAuthorizationContext = {
+        agent,
+        terminalControl,
+        fingerprint: projection.prompt_fingerprint,
+        projection,
+        response,
+        runtime: options.runtime
+      };
+      const authorization = await options.authorize?.(context) ?? {
+        approved: true
+      };
+      if (!authorization.approved) {
+        return {
+          responded: false,
+          blocked: true,
+          reason: authorization.reason,
+          interactionId: response.interaction_id
+        };
+      }
+      await input.afterAuthorize?.(context);
+      await options.beforeDispatch?.(context);
+      if (input.mode === "input_not_started") {
+        throw new TerminalInteractionInputNotStartedError(
+          "fixture proved no terminal input was attempted"
+        );
+      }
+      input.onTerminalInput();
+      if (input.mode === "input_uncertain") {
+        throw new Error("fixture lost terminal acknowledgement after input");
+      }
+      const answer = response.answers[0];
+      return {
+        responded: true,
+        blocked: false,
+        interactionId: response.interaction_id,
+        questionId: answer?.question_id,
+        responseKind: answer?.response_kind,
+        outcome: "submitted_or_advanced"
+      };
+    }
+  };
+  return bridge as TerminalAgentBridge;
+}
+
+function watchInteractionResponse(
+  projection: TerminalInteractionSubjectProjection
+): string {
+  assert.equal(projection.subject.kind, "terminal_watch");
+  const question = projection.questions[0];
+  assert.equal(question?.response_kind, "single_select");
+  if (!question || question.response_kind !== "single_select") {
+    throw new Error("expected single-select Watch fixture");
+  }
+  return JSON.stringify({
+    interaction_id: projection.interaction_id,
+    subject: projection.subject,
+    answers: [{
+      question_id: question.question_id,
+      response_kind: "single_select",
+      selected_option_ids: [question.options[0].option_id]
+    }]
+  });
 }
 
 function record(value: unknown): Record<string, any> {

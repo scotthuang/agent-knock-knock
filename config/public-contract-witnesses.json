@@ -156,7 +156,7 @@
       "current_writer_protocol": 7,
       "session_authority_protocol": 3,
       "terminal_watch_schema": "agent-knock-knock/terminal-watch",
-      "terminal_watch_version": 2,
+      "terminal_watch_version": 3,
       "upgradeable_writer_protocols": [
         1,
         2,

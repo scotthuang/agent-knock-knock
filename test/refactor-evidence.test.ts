@@ -1100,7 +1100,7 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
 
   const terminalWatchSchemaDrift =
     loadJson("config/public-contract-witnesses.json");
-  terminalWatchSchemaDrift.contracts.store_protocols.terminal_watch_version = 3;
+  terminalWatchSchemaDrift.contracts.store_protocols.terminal_watch_version = 4;
   assert.throws(
     () => validate(terminalWatchSchemaDrift),
     /Terminal Watch schema contract changed/u

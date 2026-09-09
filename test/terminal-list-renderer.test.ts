@@ -163,15 +163,21 @@ test("the public action contract v25 exposes semantic arguments only", () => {
   );
   assert.match(
     (contracts.instructions as string[]).join("\n"),
-    /native questionnaire response[\s\S]*same controller conversation[\s\S]*current pending interaction_state[\s\S]*one call resolves only the current step[\s\S]*refresh status[\s\S]*Never[\s\S]*manual_required[\s\S]*retry/iu
+    /native questionnaire response[\s\S]*same controller conversation[\s\S]*managed Turn or response-capable exact Watch[\s\S]*current pending interaction_state[\s\S]*turn_id or watch_id[\s\S]*one call resolves only the current step[\s\S]*refresh status[\s\S]*manual_required interactions are notification-only[\s\S]*retry/iu
   );
   assert.deepEqual(actions.respond_interaction, {
     tool: "agent_knock_knock_respond_interaction",
-    target_argument: "turn_id",
+    target_arguments: {
+      exactly_one_of: ["turn_id", "watch_id"]
+    },
+    managed_target_argument: "turn_id",
+    watch_target_argument: "watch_id",
     interaction_argument: "interaction_id",
-    required: ["turn_id", "interaction_id", "answers"],
+    required: ["interaction_id", "answers"],
     candidate_source:
-      "terminal_status.interaction_state returned by agent_knock_knock_status in the same controller conversation",
+      "terminal_status.interaction_state for a managed Turn or watch.interaction_state for a response-capable exact Watch, returned by agent_knock_knock_status in the same controller conversation",
+    watch_scope:
+      "Only an exact current Watch interaction whose Status projection advertises capabilities.respond=true may use watch_id. Terminal-activity and manual_required Watch interactions remain notification-only.",
     answer_contract:
       "Use only the current projection's opaque question_id and option_id values, or its bounded typed free_text answer. Raw terminal keys, menu indexes, rendered labels, prompt fingerprints, versions, and terminal commands are not accepted.",
     one_step_per_call: true,

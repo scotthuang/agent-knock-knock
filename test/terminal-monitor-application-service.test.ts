@@ -116,12 +116,14 @@ function status(
 }
 
 const INTERACTION_FINGERPRINT = "a".repeat(64);
+const INTERACTION_SURFACE_ID = `tis_${"b".repeat(40)}`;
 
 function interactionStatus(input: {
   agent?: "codex" | "claude";
   fingerprint?: string;
   interactionId?: string;
   questionId?: string;
+  surfaceId?: string;
 } = {}): TerminalBridgeStatus {
   const agent = input.agent ?? "codex";
   return {
@@ -132,6 +134,7 @@ function interactionStatus(input: {
     screen: { digest: "screen-question" },
     interaction_prompt_fingerprint:
       input.fingerprint ?? INTERACTION_FINGERPRINT,
+    interaction_surface_id: input.surfaceId ?? INTERACTION_SURFACE_ID,
     interaction_state: {
       schema: TERMINAL_INTERACTION_SCHEMA,
       version: TERMINAL_INTERACTION_VERSION,
@@ -835,6 +838,37 @@ test("a consumed native questionnaire fingerprint is never replayed", async () =
   ));
 });
 
+test("a questionnaire without an exact private surface claim is not notified", async () => {
+  const trace: string[] = [];
+  const owner = conversation({
+    terminal_bridge_pre_send_screen_fingerprint: "screen-before"
+  });
+  const stopped = { ...owner, status: "idle" as const };
+  const withoutSurface = interactionStatus();
+  delete withoutSurface.interaction_surface_id;
+  const ports = fakePorts(trace, owner);
+  let loads = 0;
+  ports.state.load = () => {
+    trace.push("state.load");
+    return loads++ === 0 ? owner : stopped;
+  };
+  ports.authority.poll = async () => ({
+    kind: "observed",
+    poll: { status: withoutSurface }
+  });
+
+  await runTerminalMonitor({
+    initialConversation: owner,
+    expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION,
+    lifecycle: { startedRecorded: true },
+    ports
+  });
+
+  assert.equal(trace.includes("interaction.record"), false);
+  assert.ok(trace.includes("log:terminal_bridge_interaction_not_actionable"));
+});
+
 test("a distinct questionnaire step after a consumed response is notified", async () => {
   const trace: string[] = [];
   const owner = conversation({
@@ -906,7 +940,7 @@ test("a cancelling Turn never creates a questionnaire callback", async () => {
   assert.equal(trace.includes("callback.run"), false);
 });
 
-test("manual multi-select projection produces no interaction callback", async () => {
+test("manual multi-select projection notifies without stopping managed monitoring", async () => {
   const trace: string[] = [];
   const owner = conversation({
     terminal_bridge_pre_send_screen_fingerprint: "screen-before"
@@ -933,10 +967,25 @@ test("manual multi-select projection produces no interaction callback", async ()
     }
   };
   const ports = fakePorts(trace, owner);
-  ports.authority.poll = async () => ({
-    kind: "observed",
-    poll: { status: manual, completion: COMPLETION }
-  });
+  ports.state.recordInteractionNotification = () => {
+    trace.push("interaction.record");
+    return {
+      conversation: owner,
+      duplicate: false,
+      stale: false,
+      recorded: { prepared: fakePrepared(owner) }
+    };
+  };
+  let polls = 0;
+  ports.authority.poll = async () => {
+    polls += 1;
+    return {
+      kind: "observed",
+      poll: polls === 1
+        ? { status: manual }
+        : { status: status(), completion: COMPLETION }
+    };
+  };
 
   await runTerminalMonitor({
     initialConversation: owner,
@@ -946,10 +995,16 @@ test("manual multi-select projection produces no interaction callback", async ()
     ports
   });
 
-  assert.equal(trace.includes("interaction.record"), false);
+  assert.equal(trace.includes("interaction.record"), true);
+  assert.equal(trace.includes("callback.run"), true);
+  assert.equal(trace.includes("callback.emit"), false);
   assert.equal(trace.includes(
-    "event:terminal_bridge_interaction_detected"
-  ), false);
+    "event:terminal_bridge_interaction_manual_required"
+  ), true);
+  assert.equal(trace.includes(
+    "event:terminal_bridge_interaction_manual_notification_dispatched"
+  ), true);
+  assert.equal(trace.includes("completion.prepare"), true);
 });
 
 test("monitor continues when interaction response is consumed during callback delivery", async () => {
@@ -1016,6 +1071,7 @@ test("interaction outbox recovery reuses the persisted immutable projection", ()
       interaction_id: storedProjection.interaction_id,
       question_id: storedProjection.questions[0]!.question_id,
       prompt_fingerprint: INTERACTION_FINGERPRINT,
+      surface_id: INTERACTION_SURFACE_ID,
       callback_message_id: "callback-interaction-1",
       callback_message_ts: "1970-01-01T00:00:00.000Z",
       interaction_state: storedProjection
@@ -1032,6 +1088,7 @@ test("interaction outbox recovery reuses the persisted immutable projection", ()
     interactionId: storedProjection.interaction_id,
     questionId: storedProjection.questions[0]!.question_id,
     fingerprint: INTERACTION_FINGERPRINT,
+    surfaceId: INTERACTION_SURFACE_ID,
     ports: {
       record: ({ onRecorded }) => ({
         conversation: owner,
@@ -1052,6 +1109,86 @@ test("interaction outbox recovery reuses the persisted immutable projection", ()
   assert.notEqual(
     preparedProjection.expires_at,
     currentStatus.interaction_state?.expires_at
+  );
+  assert.equal(Object.hasOwn(preparedMetadata ?? {}, "surface_id"), false);
+  assert.equal(
+    JSON.stringify(preparedMetadata).includes(INTERACTION_SURFACE_ID),
+    false,
+    "owner-private surface identity must not enter callback metadata"
+  );
+});
+
+test("manual interaction callback is notification-only and gives no response command", () => {
+  const manualStatus = interactionStatus();
+  const projection = {
+    ...manualStatus.interaction_state!,
+    state: "manual_required" as const,
+    questions: [{
+      question_id: "question-manual",
+      prompt: "Select every applicable option",
+      response_kind: "multi_select" as const,
+      required: true,
+      options: [
+        { option_id: "one", label: "One" },
+        { option_id: "two", label: "Two" }
+      ]
+    }],
+    capabilities: {
+      respond: false,
+      batch_response: false,
+      free_text: false,
+      multi_select: true
+    }
+  };
+  manualStatus.interaction_state = projection;
+  const owner = conversation({
+    terminal_bridge_interaction_notification: {
+      terminal_bridge_message_id: "message-1",
+      interaction_id: projection.interaction_id,
+      question_id: "question-manual",
+      prompt_fingerprint: INTERACTION_FINGERPRINT,
+      surface_id: INTERACTION_SURFACE_ID,
+      callback_message_id: "callback-manual-1",
+      callback_message_ts: "1970-01-01T00:00:00.000Z",
+      interaction_state: projection
+    }
+  });
+  let preparation: {
+    body: string;
+    metadata: Record<string, unknown>;
+    requiresResponse: boolean;
+  } | undefined;
+
+  recordMonitorInteractionNotification({
+    conversation: owner,
+    executor: owner.executor,
+    terminalControl: CONTROL,
+    terminalStatus: manualStatus,
+    currentMessageId: "message-1",
+    interactionId: projection.interaction_id,
+    questionId: "question-manual",
+    fingerprint: INTERACTION_FINGERPRINT,
+    surfaceId: INTERACTION_SURFACE_ID,
+    ports: {
+      record: ({ onRecorded }) => ({
+        conversation: owner,
+        duplicate: false,
+        stale: false,
+        recorded: onRecorded(owner)
+      }),
+      prepare: (input) => {
+        preparation = input;
+        return { prepared: fakePrepared(owner) };
+      }
+    }
+  });
+
+  assert.equal(preparation?.requiresResponse, false);
+  assert.equal(preparation?.metadata.reason, "interaction_manual_required");
+  assert.match(preparation?.body ?? "", /answer this questionnaire directly/u);
+  assert.doesNotMatch(
+    preparation?.body ?? "",
+    /agent_knock_knock_respond_interaction/u
   );
 });
 

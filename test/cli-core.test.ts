@@ -499,6 +499,7 @@ test("cli-core AST remains a stable facade without owned state machines", () => 
       "parseCliCommand",
       "executeCliCommand",
       "dispatchCliCommand",
+      "runRespondInteractionCommand",
       "preflightStoreWriter",
       "terminalRuntime",
       "createTerminalControlProvider",
