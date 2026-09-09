@@ -447,7 +447,11 @@ export function registerOpenClawCommands(
           try {
             const result = await runHostAwareCli(
               api,
-              buildStatusCliArgs(api, isRecord(params) ? params : {})
+              buildStatusCliArgs(
+                api,
+                isRecord(params) ? params : {},
+                toolContext
+              )
             );
             const rendered = toolResult(result);
             rememberDisplayedApprovalOffer(
@@ -477,7 +481,7 @@ export function registerOpenClawCommands(
       label: "AKK Send",
       name: "agent_knock_knock_send",
       description:
-        "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process, a scanned non-blocked approval state, and no active native questionnaire; parsed working activity, Codex rollout ambiguity, AKK management state, and Codex Composer visibility, stability, or exactness do not veto physical delivery. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. A source-less Codex terminal freezes all current rollout roots before input, then promotes a provisional Session/Turn only when exactly one anchored or newly opened rollout durably accepts the exact request hash; zero matches remain pending and ambiguity becomes uncertain without replay. If managed preparation fails before input, AKK still delivers once as unmanaged work, then best-effort attaches an exact Terminal Watch callback. Such a Watch may notify that a questionnaire needs manual TUI input, but it has no interaction response authority. Read terminal_input_dispatched, agent_acceptance, management_mode, observation_mode, and capabilities independently. Watch attachment failure never changes a successful Send. Once the mutation sequence begins, an uncertain result must not be automatically retried. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
+        "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process, a scanned non-blocked approval state, and no active native questionnaire; parsed working activity, Codex rollout ambiguity, AKK management state, and Codex Composer visibility, stability, or exactness do not veto physical delivery. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. A source-less Codex terminal freezes all current rollout roots before input, then promotes a provisional Session/Turn only when exactly one anchored or newly opened rollout durably accepts the exact request hash; zero matches remain pending and ambiguity becomes uncertain without replay. If managed preparation fails before input, AKK still delivers once as unmanaged work, then best-effort attaches an exact Terminal Watch callback. After exact request acceptance and terminal attribution, a supported questionnaire on that Watch may expose owner-bound response authority through Status and its watch_id; terminal-activity observations and manual_required interactions remain notification-only. Read terminal_input_dispatched, agent_acceptance, management_mode, observation_mode, and capabilities independently. Watch attachment failure never changes a successful Send. Once the mutation sequence begins, an uncertain result must not be automatically retried. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
       parameters: sendParameters,
       async execute(toolCallId, params, signal) {
         return withHostBridgeInvocationSignal(signal, async () => {
@@ -1550,7 +1554,7 @@ function publicTurnIdentity(result) {
   };
 }
 
-function buildStatusCliArgs(api, params) {
+function buildStatusCliArgs(api, params, toolContext) {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   if (Object.hasOwn(params, "watch_id")) {
     if (
@@ -1565,7 +1569,9 @@ function buildStatusCliArgs(api, params) {
     const watchArgs = [
       "watch-status",
       "--watch",
-      watchId
+      watchId,
+      "--openclaw-session",
+      requiredOpenClawSessionKey(toolContext?.sessionKey)
     ];
     pushOptional(
       watchArgs,

@@ -302,7 +302,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
   assert.match(skill, /registers 19 OpenClaw tools/u);
   assert.match(
     skill,
-    /same controller conversation[\s\S]*agent_knock_knock_status\(\{turn_id\}\)[\s\S]*interaction_state[\s\S]*agent_knock_knock_respond_interaction[\s\S]*one call answers only the current step[\s\S]*call Status again/iu
+    /same controller conversation[\s\S]*agent_knock_knock_status[\s\S]*turn_id[\s\S]*managed Turn[\s\S]*watch_id[\s\S]*response-capable exact Watch[\s\S]*interaction_state[\s\S]*agent_knock_knock_respond_interaction[\s\S]*same exact subject id[\s\S]*one call answers only the current step[\s\S]*call Status again/iu
   );
   assert.match(
     skill,

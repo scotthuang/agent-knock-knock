@@ -2424,7 +2424,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.match(
       sendTool?.description ?? "",
-      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned non-blocked approval state[\s\S]*no active native questionnaire[\s\S]*parsed working activity[\s\S]*Codex rollout ambiguity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*source-less Codex terminal[\s\S]*provisional Session\/Turn[\s\S]*managed preparation fails[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*no interaction response authority/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned non-blocked approval state[\s\S]*no active native questionnaire[\s\S]*parsed working activity[\s\S]*Codex rollout ambiguity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*source-less Codex terminal[\s\S]*provisional Session\/Turn[\s\S]*managed preparation fails[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*exact request acceptance[\s\S]*owner-bound response authority[\s\S]*watch_id[\s\S]*manual_required interactions remain notification-only/u
     );
     const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
     assert.match(
@@ -5311,6 +5311,23 @@ test("OpenClaw Watch interaction response is subject-bound and dispatches --watc
     }]
   };
 
+  const statusWithoutControllerSession = requiredInteractionTool(
+    factories,
+    "agent_knock_knock_status",
+    { sessionId: "controller-watch-without-session-key" }
+  );
+  await assert.rejects(
+    () => statusWithoutControllerSession.execute!("watch-status-no-owner", {
+      watch_id: watchId
+    }),
+    /Controller session identity for this confirmed action is required/u
+  );
+  assert.equal(
+    fs.existsSync(callsPath),
+    false,
+    "Watch Status without controller ownership must fail before spawning the CLI"
+  );
+
   const displayed = await status.execute!("watch-status", { watch_id: watchId });
   const displayedText = JSON.stringify(displayed);
   assert.match(displayedText, /interaction_state/u);
@@ -5342,6 +5359,10 @@ test("OpenClaw Watch interaction response is subject-bound and dispatches --watc
     "watch-status",
     "respond-interaction"
   ]);
+  assert.equal(
+    interactionOptionValue(calls[0] ?? [], "--openclaw-session"),
+    controller.sessionKey
+  );
   const mutation = calls[1] ?? [];
   assert.equal(interactionOptionValue(mutation, "--watch"), watchId);
   assert.equal(interactionOptionValue(mutation, "--turn"), undefined);
@@ -5364,8 +5385,8 @@ function readManifest(): Manifest {
 }
 
 type InteractionToolContext = {
-  readonly sessionKey: string;
-  readonly sessionId: string;
+  readonly sessionKey?: string;
+  readonly sessionId?: string;
 };
 
 type InteractionToolFactory = (
