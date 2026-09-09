@@ -141,6 +141,13 @@ export interface LegacyOpenClawCallbackRouteInput {
 export interface TerminalWatchOpenClawCallbackRouteInput {
   controllerSessionId: unknown;
   openclawBin?: unknown;
+  /**
+   * Exact-task Watches may advertise response authority to their owning Host.
+   * This does not itself authorize terminal input: Status must still mint a
+   * controller-incarnation-bound private interaction offer and the CLI must
+   * recapture the same exact native questionnaire under its mutation locks.
+   */
+  respond?: boolean;
 }
 
 export interface CallbackRouteCandidate {
@@ -282,7 +289,7 @@ export function createTerminalWatchOpenClawCallbackRoute(
       gatewayMethod: "chat.send",
       openclawBin: input.openclawBin
     }),
-    capabilities: { wake: true, respond: false }
+    capabilities: { wake: true, respond: input.respond === true }
   };
 }
 

@@ -4,6 +4,10 @@ import type {
   TerminalControlCapability,
   TerminalControlRef
 } from "./terminal-control-ref.js";
+import type {
+  TerminalInteractionResponseAuthority,
+  TerminalInteractionSubject
+} from "./terminal-interaction-protocol.js";
 
 export type {
   TerminalControlCapability,
@@ -249,6 +253,14 @@ export interface TerminalRuntimeIdentity {
   agentVersion?: string;
   /** Exact managed Turn authorized to answer a native questionnaire. */
   turnId?: string;
+  /**
+   * Subject-neutral questionnaire owner. Managed callers may omit this while
+   * the bridge derives it from the exact Turn/message pair; Watch callers must
+   * provide their durable exact-task subject explicitly.
+   */
+  interactionSubject?: TerminalInteractionSubject;
+  /** A Watch can deliberately observe without receiving terminal mutation authority. */
+  interactionResponseAuthority?: TerminalInteractionResponseAuthority;
   /**
    * A durable interaction dispatch fence already exists for this Turn. While
    * either state is present, status must never advertise another executable

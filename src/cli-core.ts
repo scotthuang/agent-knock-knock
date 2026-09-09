@@ -399,6 +399,7 @@ const STORE_MUTATION_COMMANDS = new Set([
   "reconcile-monitors",
   "reconcile-watches",
   "watch-terminal",
+  "watch-status",
   "unwatch-terminal",
   "close",
   "callback",
@@ -513,7 +514,7 @@ async function dispatchCliCommand(commandName, options) {
   } else if (commandName === "watch-terminal") {
     await terminalWatchCliFacade.runWatch(options);
   } else if (commandName === "watch-status") {
-    terminalWatchCliFacade.runWatchStatus(options);
+    await terminalWatchCliFacade.runWatchStatus(options);
   } else if (commandName === "unwatch-terminal") {
     await terminalWatchCliFacade.runUnwatch(options);
   } else if (commandName === "status") {
@@ -533,7 +534,7 @@ async function dispatchCliCommand(commandName, options) {
   } else if (commandName === "respond") {
     await terminalCommandCliFacade.runRespond(options);
   } else if (commandName === "respond-interaction") {
-    await terminalInteractionCliFacade.runRespondInteraction(options);
+    await runRespondInteractionCommand(options);
   } else if (commandName === "approve") {
     await terminalCommandCliFacade.runApprove(options);
   } else if (commandName === "cancel") {
@@ -562,6 +563,17 @@ async function dispatchCliCommand(commandName, options) {
     usage();
     setCliExitCode(commandName ? 1 : 0);
   }
+}
+
+async function runRespondInteractionCommand(options): Promise<void> {
+  if (!stringValue(options.watch)) {
+    await terminalInteractionCliFacade.runRespondInteraction(options);
+    return;
+  }
+  if (stringValue(options.turn)) {
+    throw new Error("respond-interaction accepts exactly one of --turn or --watch");
+  }
+  await terminalWatchCliFacade.runRespondInteraction(options);
 }
 
 function preflightStoreWriter(commandName, options): void {
@@ -1274,6 +1286,8 @@ const terminalWatchCliFacade = createTerminalWatchCliAdapter({
     acquireTerminalBridgeSendLock(storeDir, terminalControl, {
       timeoutMs: 30_000
     }),
+  createBridge: createTerminalAgentBridge,
+  withStoreWriterLeaseAsync,
   observeExactTerminal: terminalListCliFacade.observeExactTerminal,
   loadClaudeAgentRows,
   now: cliNow,
@@ -1793,7 +1807,7 @@ function usage() {
   agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>
   agent-knock-knock reconcile-binding --terminal <exact-terminal-id> --conflicting-session <session-id> --expected-session-revision <n> --expected-binding-token <token> --expected-terminal-token <token>
   agent-knock-knock respond --turn <turn-id|selector> --message <text> [--conversation <selector>]
-  agent-knock-knock respond-interaction --turn <turn-id|selector> --interaction <id> --response-json <json> --expected-interaction-fingerprint <fingerprint> --expected-interaction-expires-at <timestamp>
+  agent-knock-knock respond-interaction (--turn <turn-id|selector> | --watch <watch-id>) --interaction <id> --response-json <json> --expected-interaction-fingerprint <fingerprint> --expected-interaction-expires-at <timestamp>
   agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] [--decision approve_once|reject] [--expected-terminal-token <token>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--turn <turn-id|selector>] [--conversation <selector>]
   agent-knock-knock renew [--turn <turn-id|selector>] [--conversation <selector>]

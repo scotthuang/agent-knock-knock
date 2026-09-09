@@ -49,12 +49,14 @@ export interface TerminalWatchCallbackCliAdapter {
 }
 
 export function resolveTerminalWatchOpenClawCallback(
-  watch: Pick<TerminalWatch, "openclaw_session" | "openclaw_bin">
+  watch: Pick<TerminalWatch, "openclaw_session" | "openclaw_bin"> &
+    Partial<Pick<TerminalWatch, "interaction_policy">>
 ): TerminalWatchCallbackResolution {
   return {
     route: createTerminalWatchOpenClawCallbackRoute({
       controllerSessionId: watch.openclaw_session,
-      openclawBin: watch.openclaw_bin
+      openclawBin: watch.openclaw_bin,
+      respond: watch.interaction_policy === "respond_when_exact"
     }),
     context: resolveTerminalWatchOpenClawCallbackContext(watch)
   };
