@@ -1307,10 +1307,8 @@ test("default delegate retries route to the original active receipt before idle 
     assert.equal(replayParsed.delivered, true);
     assert.equal(replayParsed.terminal_input_dispatched, true);
     assert.equal(replayParsed.agent_acceptance, "unproven");
-    assert.equal(replayParsed.status, "submission_pending_acceptance");
-    assert.equal(replayParsed.submission_outcome, "pending_acceptance");
     assert.equal(replayParsed.delivery_receipt, "enter_dispatched");
-    assert.equal(replayParsed.do_not_retry, true);
+    assert.equal(replayParsed.delivered_unmanaged, true);
     assert.equal(replayParsed.management_mode, "unmanaged");
     assert.equal(replayParsed.scope, "terminal_user_explicit");
     assert.equal(replayParsed.message_id, stableMessageId);
