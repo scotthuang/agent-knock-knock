@@ -100,6 +100,8 @@ export interface TerminalInteractionResponderClaim {
   readonly surface_id: string;
   readonly responder_class: TerminalInteractionResponderClass;
   readonly response_authority: TerminalInteractionResponseAuthority;
+  /** Creation time of this durable ownership claim; newer same-class claims win. */
+  readonly created_at: string;
 }
 
 const RESPONDER_CLASS_PRIORITY: Readonly<Record<
@@ -120,13 +122,19 @@ export function selectTerminalInteractionResponder(
   claims: readonly TerminalInteractionResponderClaim[]
 ): TerminalInteractionResponderClaim | undefined {
   return claims
-    .filter((claim) => claim.response_authority === "executable")
+    .filter((claim) =>
+      claim.response_authority === "executable" &&
+      claim.responder_class !== "activity_watch")
     .slice()
     .sort((left, right) => {
       const priority = RESPONDER_CLASS_PRIORITY[right.responder_class] -
         RESPONDER_CLASS_PRIORITY[left.responder_class];
       if (priority !== 0) {
         return priority;
+      }
+      const recency = right.created_at.localeCompare(left.created_at);
+      if (recency !== 0) {
+        return recency;
       }
       const session = left.owner_session.localeCompare(right.owner_session);
       return session !== 0 ? session : left.owner_id.localeCompare(right.owner_id);

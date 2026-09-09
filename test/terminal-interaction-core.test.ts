@@ -223,22 +223,72 @@ test("responder arbitration is deterministic and managed-first", () => {
       owner_session: "agent:main:main",
       surface_id: "surface-1",
       responder_class: "exact_request_watch" as const,
-      response_authority: "executable" as const
+      response_authority: "executable" as const,
+      created_at: "2026-09-09T00:00:02.000Z"
     },
     {
       owner_id: "turn-a",
       owner_session: "agent:main:main",
       surface_id: "surface-1",
       responder_class: "managed_turn" as const,
-      response_authority: "executable" as const
+      response_authority: "executable" as const,
+      created_at: "2026-09-09T00:00:01.000Z"
     },
     {
       owner_id: "activity-a",
       owner_session: "agent:main:main",
       surface_id: "surface-1",
       responder_class: "activity_watch" as const,
-      response_authority: "notify_only" as const
+      response_authority: "executable" as const,
+      created_at: "2026-09-09T00:00:03.000Z"
+    },
+    {
+      owner_id: "exact-task-newer",
+      owner_session: "agent:main:main",
+      surface_id: "surface-1",
+      responder_class: "exact_task_watch" as const,
+      response_authority: "executable" as const,
+      created_at: "2026-09-09T00:00:04.000Z"
     }
   ];
   assert.equal(selectTerminalInteractionResponder(claims)?.owner_id, "turn-a");
+
+  const watchOnly = claims.filter(({ responder_class }) =>
+    responder_class !== "managed_turn");
+  assert.equal(
+    selectTerminalInteractionResponder(watchOnly)?.owner_id,
+    "watch-a",
+    "an activity Watch can never execute even when its claim is malformed"
+  );
+  assert.equal(
+    selectTerminalInteractionResponder([
+      {
+        ...claims[0],
+        owner_id: "watch-older",
+        created_at: "2026-09-09T00:00:01.000Z"
+      },
+      {
+        ...claims[0],
+        owner_id: "watch-newer",
+        created_at: "2026-09-09T00:00:04.000Z"
+      }
+    ])?.owner_id,
+    "watch-newer"
+  );
+  assert.equal(
+    selectTerminalInteractionResponder([{
+      ...claims[1],
+      response_authority: "notify_only"
+    }]),
+    undefined
+  );
+  const tied = [
+    { ...claims[0], owner_id: "watch-b" },
+    { ...claims[0], owner_id: "watch-a" }
+  ];
+  assert.equal(selectTerminalInteractionResponder(tied)?.owner_id, "watch-a");
+  assert.equal(
+    selectTerminalInteractionResponder([...tied].reverse())?.owner_id,
+    "watch-a"
+  );
 });
