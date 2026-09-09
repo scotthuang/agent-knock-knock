@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES,
   NATIVE_QUESTIONNAIRE_PROFILES,
+  claudeNativeQuestionnaireProfile,
   inspectNativeQuestionnaire,
   type NativeQuestionnaireInspection
 } from "../src/terminal-questionnaire-adapter.js";
@@ -686,6 +688,45 @@ test("Claude 2.1.263 exact framed choice exposes only semantic option ids", () =
   assert.equal(parsed.prompt_evidence.exact_region.includes("old conversation"), false);
 });
 
+for (const version of ["2.1.266", "2.1.267"] as const) {
+  test(`Claude ${version} keeps the exact questionnaire state machine under a version-bound profile`, () => {
+    const profile = claudeNativeQuestionnaireProfile(version);
+    assert.equal(profile, CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES[version]);
+    assert.notEqual(profile, NATIVE_QUESTIONNAIRE_PROFILES.claude);
+
+    const choice = actionable(inspectNativeQuestionnaire({
+      agent: "claude",
+      version,
+      screen: CLAUDE_SINGLE_SELECT
+    }));
+    const customText = actionable(inspectNativeQuestionnaire({
+      agent: "claude",
+      version,
+      screen: CLAUDE_CUSTOM_TEXT_EDIT
+    }));
+    const finalReview = actionable(inspectNativeQuestionnaire({
+      agent: "claude",
+      version,
+      screen: CLAUDE_FINAL_REVIEW
+    }));
+
+    assert.equal(choice.profile, profile);
+    assert.equal(choice.prompt_evidence.profile, profile);
+    assert.equal(choice.action_plan.kind, "single_select");
+    assert.equal(customText.profile, profile);
+    assert.equal(customText.question.response_kind, "free_text");
+    assert.equal(finalReview.profile, profile);
+    assert.equal(finalReview.question.response_kind, "confirm");
+
+    const previous = actionable(inspectNativeQuestionnaire({
+      agent: "claude",
+      version: "2.1.263",
+      screen: CLAUDE_SINGLE_SELECT
+    }));
+    assert.notEqual(choice.question.question_id, previous.question.question_id);
+  });
+}
+
 test("Claude exact multi-select is detected but mutation fails closed", () => {
   const parsed = manual(inspectNativeQuestionnaire({
     agent: "claude",
@@ -802,11 +843,21 @@ test("Claude selection rejects changed footer, frame, numbering, and cursor stat
 });
 
 test("Claude unsupported versions and secret questions fail closed", () => {
-  assert.equal(manual(inspectNativeQuestionnaire({
-    agent: "claude",
-    version: "2.1.264",
-    screen: CLAUDE_SINGLE_SELECT
-  })).reason, "unsupported_version");
+  for (const version of [
+    "2.1.264",
+    "2.1.265",
+    "2.1.268",
+    "constructor",
+    "toString",
+    "__proto__"
+  ]) {
+    assert.equal(manual(inspectNativeQuestionnaire({
+      agent: "claude",
+      version,
+      screen: CLAUDE_SINGLE_SELECT
+    })).reason, "unsupported_version");
+    assert.equal(claudeNativeQuestionnaireProfile(version), undefined);
+  }
 
   const secret = CLAUDE_SINGLE_SELECT.replace(
     "Which color do you prefer?",

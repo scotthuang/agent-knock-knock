@@ -1,9 +1,28 @@
 import { createHash } from "node:crypto";
 
+export const CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
+  Record<string, string>
+> = Object.freeze({
+  "2.1.263": "claude-code/2.1.263/ask-user-question-v1",
+  "2.1.266": "claude-code/2.1.266/ask-user-question-v1",
+  "2.1.267": "claude-code/2.1.267/ask-user-question-v1"
+});
+
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
-  claude: "claude-code/2.1.263/ask-user-question-v1",
+  // Compatibility export for the original questionnaire profile. New Claude
+  // versions resolve through claudeNativeQuestionnaireProfile so their
+  // fingerprints and durable interaction ids stay version-bound.
+  claude: CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES["2.1.263"],
   codex: "codex/0.153.4/request-user-input-v3"
 } as const);
+
+export function claudeNativeQuestionnaireProfile(
+  version: string
+): string | undefined {
+  return Object.hasOwn(CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES, version)
+    ? CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES[version]
+    : undefined;
+}
 
 export type NativeQuestionnaireAgent = "claude" | "codex";
 export type NativeQuestionnaireResponseKind =
@@ -168,7 +187,6 @@ interface CodexProjectedChoice {
   readonly action: NativeQuestionnaireChoiceAction;
 }
 
-const CLAUDE_VERSION = "2.1.263";
 const CODEX_VERSION = "0.153.4";
 const MAX_CAPTURE_CHARACTERS = 128 * 1024;
 const MAX_CAPTURE_LINES = 240;
@@ -382,7 +400,8 @@ function inspectClaudeQuestionnaire(
     screen.lines,
     (line) => /^←  [☐☒]/u.test(line) || /^ [☐☒] \S/u.test(line)
   );
-  if (options.version !== CLAUDE_VERSION) {
+  const profile = claudeNativeQuestionnaireProfile(options.version);
+  if (!profile) {
     return manualCandidate(
       "claude",
       `claude-code/${options.version}/unsupported-questionnaire`,
@@ -394,13 +413,13 @@ function inspectClaudeQuestionnaire(
   if (screen.hadUnsafeControl) {
     return manualCandidate(
       "claude",
-      NATIVE_QUESTIONNAIRE_PROFILES.claude,
+      profile,
       screen.lines,
       bounds,
       "changed_shape"
     );
   }
-  const finalReview = parseClaudeFinalReview(screen.lines);
+  const finalReview = parseClaudeFinalReview(screen.lines, profile);
   if (finalReview) {
     return options.secret === true ||
         SECRET_INPUT_PATTERN.test(finalReview.prompt_evidence.exact_region)
@@ -412,7 +431,7 @@ function inspectClaudeQuestionnaire(
         }
       : finalReview;
   }
-  const customTextEdit = parseClaudeCustomTextEdit(screen.lines);
+  const customTextEdit = parseClaudeCustomTextEdit(screen.lines, profile);
   if (customTextEdit) {
     return isSecretQuestion(options.secret, customTextEdit.question)
       ? {
@@ -427,13 +446,18 @@ function inspectClaudeQuestionnaire(
   if (!choiceRegion) {
     return manualCandidate(
       "claude",
-      NATIVE_QUESTIONNAIRE_PROFILES.claude,
+      profile,
       screen.lines,
       bounds,
       "changed_shape"
     );
   }
-  return claudeChoiceInspection(choiceRegion, screen.lines, options.secret);
+  return claudeChoiceInspection(
+    choiceRegion,
+    screen.lines,
+    options.secret,
+    profile
+  );
 }
 
 function parseClaudeHeader(line: string): ClaudeHeader | undefined {
@@ -613,21 +637,22 @@ function normalizedOptions(
 function claudeChoiceInspection(
   region: ClaudeChoiceRegion,
   lines: readonly string[],
-  explicitSecret: boolean | undefined
+  explicitSecret: boolean | undefined,
+  profile: string
 ): NativeQuestionnaireInspection {
   const multiSelect = region.options.every((option) =>
     /^\[(?: |\u2714)\] /u.test(option.label)
   );
   const mixedKinds = !multiSelect && region.options.some((option) => /^\[[^\]]*\] /u.test(option.label));
   const options = normalizedOptions(
-    NATIVE_QUESTIONNAIRE_PROFILES.claude,
+    profile,
     region.prompt,
     region.options
   );
   const question: NativeQuestionnaireQuestion = {
     question_id: semanticId(
       "question",
-      NATIVE_QUESTIONNAIRE_PROFILES.claude,
+      profile,
       region.prompt,
       region.header.currentStep
     ),
@@ -637,7 +662,7 @@ function claudeChoiceInspection(
     options
   };
   const evidence = promptEvidence(
-    NATIVE_QUESTIONNAIRE_PROFILES.claude,
+    profile,
     lines,
     region.start,
     region.end,
@@ -645,7 +670,7 @@ function claudeChoiceInspection(
   );
   const base = {
     agent: "claude" as const,
-    profile: NATIVE_QUESTIONNAIRE_PROFILES.claude,
+    profile,
     current_step: region.header.currentStep,
     total_steps: region.header.totalSteps,
     question,
@@ -680,7 +705,8 @@ function claudeChoiceInspection(
 }
 
 function parseClaudeFinalReview(
-  lines: readonly string[]
+  lines: readonly string[],
+  profile: string
 ): Extract<NativeQuestionnaireInspection, { status: "actionable" }> | undefined {
   const readyIndex = lastIndexMatching(
     lines,
@@ -713,7 +739,7 @@ function parseClaudeFinalReview(
   }
   const end = lines.length - 1;
   const question: NativeQuestionnaireQuestion = {
-    question_id: semanticId("question", NATIVE_QUESTIONNAIRE_PROFILES.claude, "final-review", header.totalSteps),
+    question_id: semanticId("question", profile, "final-review", header.totalSteps),
     prompt: "Ready to submit your answers?",
     response_kind: "confirm",
     required: true
@@ -721,12 +747,12 @@ function parseClaudeFinalReview(
   return {
     status: "actionable",
     agent: "claude",
-    profile: NATIVE_QUESTIONNAIRE_PROFILES.claude,
+    profile,
     current_step: header.currentStep,
     total_steps: header.totalSteps,
     question,
     prompt_evidence: promptEvidence(
-      NATIVE_QUESTIONNAIRE_PROFILES.claude,
+      profile,
       lines,
       start,
       end
@@ -740,7 +766,8 @@ function parseClaudeFinalReview(
 }
 
 function parseClaudeCustomTextEdit(
-  lines: readonly string[]
+  lines: readonly string[],
+  profile: string
 ): Extract<NativeQuestionnaireInspection, { status: "actionable" }> | undefined {
   const editIndex = lastIndexMatching(
     lines,
@@ -784,7 +811,7 @@ function parseClaudeCustomTextEdit(
     return undefined;
   }
   const question: NativeQuestionnaireQuestion = {
-    question_id: semanticId("question", NATIVE_QUESTIONNAIRE_PROFILES.claude, prompt, "custom-text"),
+    question_id: semanticId("question", profile, prompt, "custom-text"),
     prompt,
     response_kind: "free_text",
     required: true
@@ -792,12 +819,12 @@ function parseClaudeCustomTextEdit(
   return {
     status: "actionable",
     agent: "claude",
-    profile: NATIVE_QUESTIONNAIRE_PROFILES.claude,
+    profile,
     current_step: header.currentStep,
     total_steps: header.totalSteps,
     question,
     prompt_evidence: promptEvidence(
-      NATIVE_QUESTIONNAIRE_PROFILES.claude,
+      profile,
       lines,
       start,
       editIndex

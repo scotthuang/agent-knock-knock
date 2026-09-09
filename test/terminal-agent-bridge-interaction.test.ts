@@ -398,7 +398,7 @@ test("managed and Watch runtimes share one native surface identity", async () =>
     },
     {
       agent: "claude" as const,
-      version: "2.1.263",
+      version: "2.1.267",
       screen: CLAUDE_SINGLE_SELECT,
       nativeSessionId: "claude-session-1",
       nativeProcessUuid: "claude-process-1",
@@ -794,35 +794,70 @@ test("Codex custom navigation is one non-retryable key dispatch", async () => {
   );
 });
 
-test("Claude custom choice retains its exact direct-digit transition", async () => {
+for (const version of ["2.1.263", "2.1.266", "2.1.267"] as const) {
+  test(`Claude ${version} custom choice retains its exact direct-digit transition`, async () => {
+    const { bridge, provider, control } = await fixture(CLAUDE_SINGLE_SELECT, {
+      agent: "claude"
+    });
+    const runtime = { ...RUNTIME, agentVersion: version };
+    const status = await bridge.status("claude", control, { runtime });
+    const projection = status.interaction_state;
+    const fingerprint = status.interaction_prompt_fingerprint;
+    assert.ok(projection);
+    assert.ok(fingerprint);
+    provider.clearOperations();
+
+    const opened = await bridge.respondInteraction(
+      "claude",
+      control,
+      selectResponse(projection, 2),
+      {
+        agentVersion: version,
+        expectedFingerprint: fingerprint,
+        expectedExpiresAt: projection.expires_at,
+        runtime
+      }
+    );
+    assert.equal(opened.responded, true);
+    assert.equal(opened.outcome, "custom_text_opened");
+    assert.deepEqual(
+      provider.operations.filter((operation) => operation.kind !== "capture"),
+      [{ kind: "keys", keys: ["3"] }]
+    );
+  });
+}
+
+test("Claude interaction offers cannot cross an exact client-version change", async () => {
   const { bridge, provider, control } = await fixture(CLAUDE_SINGLE_SELECT, {
     agent: "claude"
   });
-  const runtime = { ...RUNTIME, agentVersion: "2.1.263" };
-  const status = await bridge.status("claude", control, { runtime });
-  const projection = status.interaction_state;
-  const fingerprint = status.interaction_prompt_fingerprint;
+  const originalRuntime = { ...RUNTIME, agentVersion: "2.1.266" };
+  const offered = await bridge.status("claude", control, {
+    runtime: originalRuntime
+  });
+  const projection = offered.interaction_state;
+  const fingerprint = offered.interaction_prompt_fingerprint;
   assert.ok(projection);
   assert.ok(fingerprint);
   provider.clearOperations();
 
-  const opened = await bridge.respondInteraction(
+  const changedRuntime = { ...RUNTIME, agentVersion: "2.1.267" };
+  const result = await bridge.respondInteraction(
     "claude",
     control,
-    selectResponse(projection, 2),
+    selectResponse(projection),
     {
-      agentVersion: "2.1.263",
+      agentVersion: "2.1.267",
       expectedFingerprint: fingerprint,
       expectedExpiresAt: projection.expires_at,
-      runtime
+      runtime: changedRuntime
     }
   );
-  assert.equal(opened.responded, true);
-  assert.equal(opened.outcome, "custom_text_opened");
-  assert.deepEqual(
-    provider.operations.filter((operation) => operation.kind !== "capture"),
-    [{ kind: "keys", keys: ["3"] }]
-  );
+  assert.equal(result.responded, false);
+  assert.equal(result.blocked, true);
+  assert.match(result.reason ?? "", /fingerprint changed/u);
+  assert.equal(provider.operations.some((operation) =>
+    operation.kind === "text" || operation.kind === "keys"), false);
 });
 
 test("a pre-expiry reservation remains valid across the exact expiry bucket boundary", async () => {

@@ -139,9 +139,10 @@ unsupported option counts, changed prompts, or unprovable postconditions are
 
 ## Native behavior profiles
 
-### Claude Code 2.1.263
+### Claude Code 2.1.263, 2.1.266, and 2.1.267
 
-Observed locally in an isolated tmux session:
+Claude Code 2.1.263 was observed locally in an isolated tmux session; the
+versioned profiles retain this exact behavior contract:
 
 - single-select: digit selects and advances/submits;
 - multi-select: digits toggle checkboxes, then `Tab` advances to review;
@@ -152,6 +153,14 @@ Observed locally in an isolated tmux session:
 - Bash permission prompt: the exact four-row form has one-time Yes as the
   current row and `4. No`; `Escape` cancels the dialog and is not modeled as
   semantic reject.
+
+The installed 2.1.266 binary and Anthropic's official 2.1.267 Darwin arm64
+artifact retain the same bounded questionnaire, collapsed-paste, and Status
+anchors. Each version has a distinct interaction profile so a durable offer
+cannot cross a client-version change. Claude Code 2.1.261 also introduced an
+optional `Organization policy` Status row when managed policy loading fails;
+the 2.1.263/2.1.266/2.1.267 profiles allow that exact field and redact its
+value.
 
 The initial public implementation executes exact single-select rows (including the transition into
 `Type something`), the recaptured single-line custom-text editor, and the

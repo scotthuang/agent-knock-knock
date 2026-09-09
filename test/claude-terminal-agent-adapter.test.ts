@@ -101,7 +101,9 @@ test("verified Claude versions expose distinct closed modal native status plans"
     "2.1.237",
     "2.1.251",
     "2.1.259",
-    "2.1.263"
+    "2.1.263",
+    "2.1.266",
+    "2.1.267"
   ]) {
     const capability = probeClaudeNativeInspection(version);
     assert.equal(capability.status, "supported");
@@ -143,7 +145,8 @@ test("verified Claude versions expose distinct closed modal native status plans"
     reason: "the running Claude Code version could not be verified"
   });
   for (const version of [
-    "2.1.217", "2.1.219", "2.1.227", "2.1.238", "2.1.264", "3.0.0",
+    "2.1.217", "2.1.219", "2.1.227", "2.1.238", "2.1.264", "2.1.265",
+    "2.1.268", "3.0.0",
     "9007199254740992.0.0"
   ]) {
     const unverified = probeClaudeNativeInspection(version);
@@ -270,7 +273,9 @@ for (const version of [
   "2.1.237",
   "2.1.251",
   "2.1.259",
-  "2.1.263"
+  "2.1.263",
+  "2.1.266",
+  "2.1.267"
 ] as const) {
   test(`Claude ${version} status inspection accepts only its exact Session-kind panel`, () => {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
@@ -291,7 +296,7 @@ for (const version of [
       )?.value,
       "interactive"
     );
-    if (["2.1.251", "2.1.259", "2.1.263"].includes(version)) {
+    if (["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267"].includes(version)) {
       assert.equal(
         observed.result?.fields.find((field) =>
           field.name === "Peer address"
@@ -304,6 +309,14 @@ for (const version of [
         )?.value,
         "connected"
       );
+      if (["2.1.263", "2.1.266", "2.1.267"].includes(version)) {
+        assert.equal(
+          observed.result?.fields.find((field) =>
+            field.name === "Organization policy"
+          )?.value,
+          "[REDACTED]"
+        );
+      }
     }
 
     const oldProfileWithNewField = claudeStatusPanel(
@@ -355,6 +368,28 @@ for (const version of [
     );
   });
 }
+
+test("Claude 2.1.263 Organization policy status row is optional", () => {
+  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+  const screen = claudeStatusPanel(nativeThreadId, "2.1.263").replace(
+    "  Organization policy: failed to load through proxy\n",
+    ""
+  );
+  const observed = observeClaudeNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "2.1.263",
+    expectedCwd: "/repo"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(
+    observed.result?.fields.some((field) =>
+      field.name === "Organization policy"
+    ),
+    false
+  );
+});
 
 test("Claude native status parser fails closed on stale, malformed, and historical panels", () => {
   const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
@@ -1364,7 +1399,9 @@ test("Claude lifecycle plans keep exact profiles and optimistically support comp
     "2.1.237",
     "2.1.251",
     "2.1.259",
-    "2.1.263"
+    "2.1.263",
+    "2.1.266",
+    "2.1.267"
   ]) {
     const profile = probeClaudeThreadLifecycle(version);
     assert.equal(profile.status, "supported");
@@ -1372,8 +1409,8 @@ test("Claude lifecycle plans keep exact profiles and optimistically support comp
     assert.equal(profile.versionCompatibility, "verified");
     assert.equal(profile.compatibilityWarning, undefined);
   }
-  const capabilities = probeClaudeThreadLifecycle("2.1.263");
-  for (const version of ["2.1.260", "2.1.264"]) {
+  const capabilities = probeClaudeThreadLifecycle("2.1.267");
+  for (const version of ["2.1.260", "2.1.264", "2.1.265", "2.1.268"]) {
     const unverified = probeClaudeThreadLifecycle(version);
     assert.equal(unverified.status, "supported");
     assert.equal(unverified.newThread, true);
@@ -1532,7 +1569,7 @@ test("Claude lifecycle observer requires one idle exact-PID agents row", () => {
   );
 });
 
-test("Claude 2.1.251 through 2.1.263 input-ready waiting rows are idle only without a wait reason", () => {
+test("Claude 2.1.251 through 2.1.267 input-ready waiting rows are idle only without a wait reason", () => {
   assert.equal(isClaudeAgentIdleState({ status: "idle" }), true);
   assert.equal(isClaudeAgentIdleState({ status: "waiting" }), true);
   assert.equal(
@@ -1619,7 +1656,7 @@ function claudeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
-    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267"].includes(version)
       ? ["  Peer address:        unix:///private/tmp/claude.sock"]
       : []),
     "  cwd:                 /repo",
@@ -1629,8 +1666,11 @@ function claudeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         1 failed · /mcp",
     "  Setting sources:     User settings, Project local settings",
-    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267"].includes(version)
       ? ["  Managed settings (remote): connected"]
+      : []),
+    ...(["2.1.263", "2.1.266", "2.1.267"].includes(version)
+      ? ["  Organization policy: failed to load through proxy"]
       : []),
     "",
     "  Esc to cancel"

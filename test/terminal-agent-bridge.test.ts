@@ -419,7 +419,7 @@ function claudeNativeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
-    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267"].includes(version)
       ? ["  Peer address:        unix:///private/tmp/claude.sock"]
       : []),
     "  cwd:                 /repo",
@@ -428,8 +428,11 @@ function claudeNativeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         all connected",
     "  Setting sources:     User settings",
-    ...(["2.1.251", "2.1.259", "2.1.263"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267"].includes(version)
       ? ["  Managed settings (remote): connected"]
+      : []),
+    ...(["2.1.263", "2.1.266", "2.1.267"].includes(version)
+      ? ["  Organization policy: failed to load through proxy"]
       : []),
     "",
     "  Esc to cancel"
@@ -5877,7 +5880,10 @@ test("verified and unverified Claude versions use the closed stable composer and
     "2.1.259",
     "2.1.260",
     "2.1.263",
-    "2.1.264"
+    "2.1.264",
+    "2.1.266",
+    "2.1.267",
+    "2.1.268"
   ]) {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
     const idleScreen = [
@@ -6010,7 +6016,10 @@ test("verified and generic Claude native status profiles accept the closed 80-co
     "2.1.259",
     "2.1.260",
     "2.1.263",
-    "2.1.264"
+    "2.1.264",
+    "2.1.266",
+    "2.1.267",
+    "2.1.268"
   ]) {
     const adapter = createClaudeTerminalAgentAdapter();
     const provider = new NarrowClaudeProvider([PANE]);
@@ -6030,7 +6039,12 @@ test("verified and generic Claude native status profiles accept the closed 80-co
   }
 });
 
-for (const version of ["2.1.259", "2.1.263"] as const) {
+for (const version of [
+  "2.1.259",
+  "2.1.263",
+  "2.1.266",
+  "2.1.267"
+] as const) {
   test(`Claude ${version} native status rejects a non-prefix truncated popup`, async () => {
     const adapter = createClaudeTerminalAgentAdapter();
     class DriftedNarrowClaudeProvider extends RecordingTerminalProvider {

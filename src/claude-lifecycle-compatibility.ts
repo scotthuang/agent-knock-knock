@@ -50,6 +50,15 @@ const CLAUDE_STATUS_PANEL_FIELDS_2_1_251 = Object.freeze([
   "Managed settings (remote)"
 ]);
 
+// Claude Code 2.1.261 added a conditional Organization policy row when the
+// remote policy cannot be loaded. It is an allowed (not required) field: the
+// row is absent for healthy policy loads and its value remains redacted by the
+// native-status adapter.
+const CLAUDE_STATUS_PANEL_FIELDS_2_1_261 = Object.freeze([
+  ...CLAUDE_STATUS_PANEL_FIELDS_2_1_251,
+  "Organization policy"
+]);
+
 const CLAUDE_VERSION_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 
@@ -140,7 +149,7 @@ const CLAUDE_LIFECYCLE_PROFILES: Readonly<
       "claude-code-2.1.263-native-status",
     nativeInspectionComposerStableMs: 80,
     nativeInspectionComposerSettleTimeoutMs: 5_000,
-    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_251,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_261,
     nativeStatusPanelRequiredValues: Object.freeze({
       "Session kind": "interactive"
     }),
@@ -151,6 +160,47 @@ const CLAUDE_LIFECYCLE_PROFILES: Readonly<
       "2.1.251",
       "2.1.259",
       "2.1.263"
+    ])
+  }),
+  "2.1.266": Object.freeze({
+    lifecycleBehaviorProfile: "claude-code-2.1.266",
+    nativeInspectionBehaviorProfile:
+      "claude-code-2.1.266-native-status",
+    nativeInspectionComposerStableMs: 80,
+    nativeInspectionComposerSettleTimeoutMs: 5_000,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_261,
+    nativeStatusPanelRequiredValues: Object.freeze({
+      "Session kind": "interactive"
+    }),
+    resumableSourceVersions: Object.freeze([
+      "2.1.218",
+      "2.1.226",
+      "2.1.237",
+      "2.1.251",
+      "2.1.259",
+      "2.1.263",
+      "2.1.266"
+    ])
+  }),
+  "2.1.267": Object.freeze({
+    lifecycleBehaviorProfile: "claude-code-2.1.267",
+    nativeInspectionBehaviorProfile:
+      "claude-code-2.1.267-native-status",
+    nativeInspectionComposerStableMs: 80,
+    nativeInspectionComposerSettleTimeoutMs: 5_000,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_261,
+    nativeStatusPanelRequiredValues: Object.freeze({
+      "Session kind": "interactive"
+    }),
+    resumableSourceVersions: Object.freeze([
+      "2.1.218",
+      "2.1.226",
+      "2.1.237",
+      "2.1.251",
+      "2.1.259",
+      "2.1.263",
+      "2.1.266",
+      "2.1.267"
     ])
   })
 });
@@ -169,7 +219,7 @@ const CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE:
       CLAUDE_UNVERIFIED_NATIVE_INSPECTION_BEHAVIOR_PROFILE,
     nativeInspectionComposerStableMs: 80,
     nativeInspectionComposerSettleTimeoutMs: 5_000,
-    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_251,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_261,
     nativeStatusPanelRequiredValues: Object.freeze({
       "Session kind": "interactive"
     }),
