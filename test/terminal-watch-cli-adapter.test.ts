@@ -3646,6 +3646,34 @@ test("Watch response rejects controller mismatch and managed precedence before t
     true,
     "a managed claim without notified_at must fail closed"
   );
+  blockers = [managedConsumedInteractionTurn(
+    offered.surface_id,
+    offered.prompt_fingerprint,
+    controller
+  )];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    false,
+    "a consumed managed response must fence the still-visible native surface"
+  );
+  blockers = [];
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: controller
+  });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    true,
+    "removing the consumed surface owner restores exact Watch authority"
+  );
   blockers = [managedInteractionTurn(
     offered.surface_id,
     offered.prompt_fingerprint,
@@ -4320,6 +4348,25 @@ function managedInteractionTurn(
           }
         }
       }
+    }
+  };
+}
+
+function managedConsumedInteractionTurn(
+  surfaceId: string,
+  promptFingerprint: string,
+  openclawSession = "agent:main:main"
+): Conversation {
+  return {
+    ...managedTurn(),
+    openclaw_session: openclawSession,
+    status: "waiting_for_agent",
+    native_session_takeover: {
+      terminal_bridge_last_interaction_id:
+        "ti_managed_watch_consumed_fixture",
+      terminal_bridge_last_interaction_surface_id: surfaceId,
+      terminal_bridge_last_interaction_fingerprint: promptFingerprint,
+      terminal_bridge_last_interaction_at: "2026-08-21T01:00:02.500Z"
     }
   };
 }

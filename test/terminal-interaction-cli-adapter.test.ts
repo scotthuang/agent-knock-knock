@@ -17,6 +17,7 @@ import { createConversation, type Conversation } from "../src/protocol.js";
 const NOW = new Date("2026-09-07T12:00:00.000Z");
 const EXPIRES = "2026-09-07T12:10:00.000Z";
 const FINGERPRINT = "a".repeat(64);
+const SURFACE_ID = `tis_${"b".repeat(40)}`;
 const INTERACTION_ID = "interaction_1234567890abcdef";
 const QUESTION_ID = "question_1234567890abcdef";
 const OPTION_ID = "option_1234567890abcdef";
@@ -25,6 +26,7 @@ const INTERACTION_NOTIFICATION = {
   interaction_id: INTERACTION_ID,
   question_id: QUESTION_ID,
   prompt_fingerprint: FINGERPRINT,
+  surface_id: SURFACE_ID,
   callback_message_id: "callback-interaction",
   callback_message_ts: NOW.toISOString()
 };
@@ -232,6 +234,10 @@ test("semantic interaction response reserves once, audits without text, and resu
   assert.equal(
     takeover.terminal_bridge_last_interaction_fingerprint,
     FINGERPRINT
+  );
+  assert.equal(
+    takeover.terminal_bridge_last_interaction_surface_id,
+    SURFACE_ID
   );
   assert.equal(
     takeover.terminal_bridge_last_interaction_message_id,

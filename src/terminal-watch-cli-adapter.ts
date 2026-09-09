@@ -32,7 +32,11 @@ import {
   type TerminalAgentBridge,
   type TerminalInteractionResponseExecution
 } from "./terminal-agent-bridge.js";
-import { turnIdForConversation, type Conversation } from "./protocol.js";
+import {
+  executorForConversation,
+  turnIdForConversation,
+  type Conversation
+} from "./protocol.js";
 import { rolloutFileIdentityMatches } from "./terminal-binding-authority.js";
 import {
   type TerminalDispatchOwnership
@@ -2532,6 +2536,24 @@ function managedTerminalInteractionFence(
   promptFingerprint: string,
   agent: ExecutorKind
 ): { owner_session: string } | undefined {
+  const ownerSession = stringValue(turn.openclaw_session);
+  const takeover = isRecord(turn.native_session_takeover)
+    ? turn.native_session_takeover
+    : undefined;
+  if (
+    ownerSession &&
+    executorForConversation(turn).kind === agent &&
+    stringValue(takeover?.terminal_bridge_last_interaction_surface_id) ===
+      surfaceId &&
+    stringValue(takeover?.terminal_bridge_last_interaction_fingerprint) ===
+      promptFingerprint &&
+    stringValue(takeover?.terminal_bridge_last_interaction_id) !== undefined &&
+    canonicalTimestamp(
+      takeover?.terminal_bridge_last_interaction_at
+    ) !== undefined
+  ) {
+    return { owner_session: ownerSession };
+  }
   const evidence = managedTerminalInteractionEvidence(
     turn,
     surfaceId,
@@ -2553,6 +2575,15 @@ function managedTerminalInteractionFence(
       promptFingerprint;
   return evidence.projection.state === "response_uncertain" || dispatchMatches
     ? { owner_session: evidence.ownerSession }
+    : undefined;
+}
+
+function canonicalTimestamp(value: unknown): string | undefined {
+  const timestamp = stringValue(value);
+  return timestamp &&
+      Number.isFinite(Date.parse(timestamp)) &&
+      new Date(timestamp).toISOString() === timestamp
+    ? timestamp
     : undefined;
 }
 
