@@ -32,11 +32,13 @@ manifest `created_at` remain unchanged.
 Protocols 3 through 6 already have Session authority, so their upgrade is an
 atomic manifest-only writer fence with no data migration. Protocol 6 prevents
 older writers from rejecting or damaging schema-v2 Terminal Watch records.
-Protocol 7 keeps that schema at version 2 while fencing the new
-`interaction_manual_required` notification kind and its bounded callback
-metadata from protocol-6 writers that cannot interpret them. Downgrading to a
-protocol-6 reader after protocol 7 has written that notification is not
-supported; older strict Terminal Watch decoders may reject the record. Core
+Protocol 7 fences the `interaction_manual_required` notification kind from
+protocol-6 writers. Terminal Watch schema v3 separately adds interaction
+policy, subject-aware projection, one-shot reservation, and callback-outbox
+state; its version fence makes older strict Watch decoders reject the record
+instead of rewriting unknown authority. Legacy schema-v1/v2 Watches are
+normalized to `notify_only`; they never silently acquire terminal response
+authority. Downgrading after v3 records exist is not supported. Core
 Session/Turn data remains readable across a writer-protocol mismatch, while
 explicit reconciliation reports `skipped` and every mutation fails before
 terminal or Host side effects.

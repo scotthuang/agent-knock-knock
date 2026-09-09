@@ -1329,7 +1329,7 @@ function validatePublicContracts(value, {
     fail("Store format/writer/session-authority protocol contract changed");
   }
   if (store.terminal_watch_schema !== "agent-knock-knock/terminal-watch" ||
-      store.terminal_watch_version !== 2) {
+      store.terminal_watch_version !== 3) {
     fail("Terminal Watch schema contract changed");
   }
   assertExactArray(
@@ -1379,13 +1379,13 @@ function validatePublicContracts(value, {
     repoRoot,
     "src/terminal-watch-store.ts",
     /export const TERMINAL_WATCH_SCHEMA = "agent-knock-knock\/terminal-watch" as const;/u,
-    "Terminal Watch schema v2 name"
+    "Terminal Watch schema v3 name"
   );
   assertSourcePattern(
     repoRoot,
     "src/terminal-watch-store.ts",
-    /export const TERMINAL_WATCH_VERSION = 2 as const;/u,
-    "Terminal Watch schema v2 version"
+    /export const TERMINAL_WATCH_VERSION = 3 as const;/u,
+    "Terminal Watch schema v3 version"
   );
 }
 
