@@ -30,6 +30,7 @@ import {
   type TerminalWatchNotification,
   type TerminalWatchNotificationKind,
   type TerminalWatchManualInteractionSummary,
+  type TerminalWatchCurrentInteraction,
   type TerminalWatchObservationCheckpoint,
   type TerminalWatchStatus,
   type TerminalWatchStore,
@@ -37,6 +38,9 @@ import {
   type TerminalWatchTerminalStatus
 } from "./terminal-watch-store.js";
 import type { ExecutorKind } from "./executors.js";
+import {
+  reduceTerminalInteractionAggregate
+} from "./terminal-interaction-core.js";
 
 export {
   terminalWatchCallbackEnvelope,
@@ -94,6 +98,16 @@ export type TerminalWatchObservation =
       kind: "approval";
       evidence_fingerprint: string;
       reason_code?: string;
+    })
+  | (TerminalWatchObservationBase & {
+      kind: "interaction";
+      evidence_fingerprint: string;
+      reason_code?: string;
+      current_interaction: TerminalWatchCurrentInteraction;
+      /** Present only when the live surface cannot be executed safely. */
+      manual_interaction?: TerminalWatchManualInteractionSummary;
+      /** A higher-priority same-controller responder owns this live surface. */
+      suppress_notification?: boolean;
     })
   | (TerminalWatchObservationBase & {
       kind: "interaction_manual_required";
@@ -384,6 +398,15 @@ export function createTerminalWatchService(
         { expectedRevision: terminalWatchRevision(current) }
       );
     }
+    if (observation.kind === "interaction") {
+      return applyInteractionObservation(
+        current,
+        observation,
+        checkpoint,
+        activityAt,
+        now
+      );
+    }
     if (observation.kind === "interaction_manual_required") {
       const duplicate = current.notification_outbox.some((notification) =>
         notification.kind === "interaction_manual_required" &&
@@ -442,8 +465,123 @@ export function createTerminalWatchService(
     });
   }
 
+  function applyInteractionObservation(
+    original: TerminalWatch,
+    observation: Extract<TerminalWatchObservation, { kind: "interaction" }>,
+    checkpoint: TerminalWatchObservationCheckpoint,
+    activityAt: string,
+    now: string
+  ): TerminalWatch {
+    let current = original;
+    const prior = current.current_interaction;
+    const observed = observation.current_interaction;
+    if (
+      prior &&
+      prior.projection.interaction_id !== observed.projection.interaction_id &&
+      prior.aggregate.state === "pending"
+    ) {
+      const aggregate = reduceTerminalInteractionAggregate(prior.aggregate, {
+        type: "supersede",
+        at: now,
+        reason_code: "native_prompt_changed"
+      });
+      current = dependencies.repository.save({
+        ...current,
+        current_interaction: { projection: prior.projection, aggregate },
+        updated_at: now,
+        notification_outbox: supersedeUndeliveredAttentionNotifications(
+          current.notification_outbox,
+          now
+        )
+      }, { expectedRevision: terminalWatchRevision(current) });
+    }
+    let nextInteraction = observed;
+    if (
+      current.current_interaction?.projection.interaction_id ===
+        observed.projection.interaction_id
+    ) {
+      const existing = current.current_interaction;
+      if (existing.aggregate.state !== "pending") {
+        return current;
+      }
+      if (
+        existing.projection.surface_id !== observed.projection.surface_id
+      ) {
+        throw new Error(
+          "terminal Watch interaction surface changed without a new interaction id"
+        );
+      }
+      const expiresAt = Date.parse(observed.projection.expires_at) >=
+          Date.parse(existing.projection.expires_at)
+        ? observed.projection.expires_at
+        : existing.projection.expires_at;
+      nextInteraction = {
+        projection: {
+          ...observed.projection,
+          expires_at: expiresAt
+        },
+        aggregate: reduceTerminalInteractionAggregate(existing.aggregate, {
+          type: "refresh",
+          expires_at: expiresAt,
+          response_authority: observed.projection.response_authority
+        })
+      };
+    }
+    const notificationKind = nextInteraction.projection.capabilities.respond &&
+        nextInteraction.projection.response_authority === "executable"
+      ? "interaction_required" as const
+      : "interaction_manual_required" as const;
+    const duplicate = current.notification_outbox.some((notification) =>
+      notification.kind === notificationKind &&
+      notification.evidence_fingerprint === observation.evidence_fingerprint
+    );
+    const suppressNotification = observation.suppress_notification === true;
+    const notificationOutbox = suppressNotification
+      ? supersedeUndeliveredAttentionNotifications(
+          current.notification_outbox,
+          now
+        )
+      : current.notification_outbox;
+    let candidate: TerminalWatch = {
+      ...current,
+      current_interaction: nextInteraction,
+      observation_checkpoint: checkpoint,
+      last_activity_at: activityAt,
+      updated_at: now,
+      notification_outbox: notificationOutbox
+    };
+    if (!suppressNotification && !duplicate) {
+      const notification = pendingNotification(
+        current.watch_id,
+        notificationKind,
+        observation.evidence_fingerprint,
+        now,
+        observation.reason_code,
+        observation.manual_interaction
+      );
+      candidate = {
+        ...candidate,
+        notification_outbox: [
+          ...supersedeUndeliveredAttentionNotifications(
+            current.notification_outbox,
+            now
+          ),
+          notification
+        ]
+      };
+    }
+    if (
+      JSON.stringify(candidate) === JSON.stringify(current)
+    ) {
+      return current;
+    }
+    return dependencies.repository.save(candidate, {
+      expectedRevision: terminalWatchRevision(current)
+    });
+  }
+
   function saveSettlement(
-    current: TerminalWatch,
+    original: TerminalWatch,
     input: {
       kind: TerminalWatchTerminalStatus;
       evidenceFingerprint: string;
@@ -457,6 +595,26 @@ export function createTerminalWatchService(
       completionTimestamp?: string;
     }
   ): TerminalWatch {
+    let current = original;
+    if (current.current_interaction?.aggregate.state === "pending") {
+      const prior = current.current_interaction;
+      current = dependencies.repository.save({
+        ...current,
+        current_interaction: {
+          projection: prior.projection,
+          aggregate: reduceTerminalInteractionAggregate(prior.aggregate, {
+            type: "supersede",
+            at: input.updatedAt,
+            reason_code: "watch_settled"
+          })
+        },
+        updated_at: input.updatedAt,
+        notification_outbox: supersedeUndeliveredAttentionNotifications(
+          current.notification_outbox,
+          input.updatedAt
+        )
+      }, { expectedRevision: terminalWatchRevision(current) });
+    }
     const notification = pendingNotification(
       current.watch_id,
       input.kind,
@@ -1370,6 +1528,7 @@ function isAttentionNotification(
   notification: TerminalWatchNotification
 ): boolean {
   return notification.kind === "approval" ||
+    notification.kind === "interaction_required" ||
     notification.kind === "interaction_manual_required";
 }
 

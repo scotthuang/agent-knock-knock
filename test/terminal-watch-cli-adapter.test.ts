@@ -2857,6 +2857,7 @@ test("exact Watch Status projects an actionable questionnaire and cursor redraw 
   const printed: unknown[] = [];
   const deliveries: CallbackTransportDeliverInput[] = [];
   let terminal: Record<string, any> = fixture.terminal;
+  let blockers: Conversation[] = [];
   const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
     controllerSessionId: "agent:main:exact-questionnaire",
     openclawBin: "/opt/openclaw/bin/openclaw",
@@ -2872,7 +2873,7 @@ test("exact Watch Status projects an actionable questionnaire and cursor redraw 
     randomUUID: () => "00000000-0000-4000-8000-000000000271",
     storeDirFromOptions: () => fixture.storeDir,
     terminalDispatchOwnership: () => ({ state: "none" }),
-    terminalIncarnationBlockingTurns: () => [],
+    terminalIncarnationBlockingTurns: () => blockers,
     printJson: (value) => printed.push(value),
     callback: {
       deliver() {
@@ -2913,12 +2914,89 @@ test("exact Watch Status projects an actionable questionnaire and cursor redraw 
   assert.equal(record(projection.capabilities).respond, true);
   assert.equal(Object.hasOwn(projection, "turn_id"), false);
 
+  await facade.runWatchStatus({ storeDir: fixture.storeDir, watch: watchId });
+  const anonymousStatus = record(record(printed.at(-1)).watch);
+  assert.equal(record(anonymousStatus.capabilities).interaction_respond, false);
+  assert.equal(Object.hasOwn(anonymousStatus, "interaction_state"), false);
+  assert.equal(
+    Object.hasOwn(anonymousStatus, "interaction_prompt_fingerprint"),
+    false
+  );
+  assert.equal(
+    Object.hasOwn(record(anonymousStatus.available_actions), "respond_interaction"),
+    false
+  );
+  const listed = record(
+    facade.listPublicWatches(fixture.storeDir)
+      .find((candidate) => candidate.watch_id === watchId)
+  );
+  assert.equal(Object.hasOwn(listed, "interaction_state"), false);
+  assert.equal(Object.hasOwn(listed, "interaction_prompt_fingerprint"), false);
+  assert.equal(
+    Object.hasOwn(record(listed.available_actions), "respond_interaction"),
+    false
+  );
+  await assert.rejects(
+    () => facade.runWatchStatus({
+      storeDir: fixture.storeDir,
+      watch: watchId,
+      openclawSession: "agent:main:not-owner"
+    }),
+    /different controller session; executable interaction details were not disclosed/u
+  );
+
   await facade.runReconcileWatches({
     storeDir: fixture.storeDir,
     callbackRoute
   });
   assert.equal(deliveries.length, 1);
   assert.equal(deliveries[0].envelope.event.type, "interaction_required");
+  blockers = [{
+    ...managedTurn(),
+    openclaw_session: callbackRoute.controller_session_id
+  }];
+  fixture.setNow("2026-08-21T01:00:03.000Z");
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const suppressed = record(record(printed.at(-1)).watch);
+  assert.equal(record(suppressed.capabilities).interaction_respond, false);
+  assert.equal(
+    record(record(suppressed.interaction_state).capabilities).respond,
+    false
+  );
+  assert.equal(
+    record(suppressed.interaction_state).response_authority,
+    "notify_only"
+  );
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1, "managed precedence must not add a callback");
+
+  blockers = [];
+  fixture.setNow("2026-08-21T01:00:04.000Z");
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const restored = record(record(printed.at(-1)).watch);
+  assert.equal(record(restored.capabilities).interaction_respond, true);
+  assert.equal(
+    record(restored.interaction_state).response_authority,
+    "executable"
+  );
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1, "restoring one surface must not repeat callback");
   terminal = withTerminalWatchScreen(
     terminal,
     CODEX_FALLBACK_QUESTION_ONE
@@ -3144,13 +3222,19 @@ test("Watch response rejects controller mismatch and managed precedence before t
       ...responseOptions,
       openclawSession: controller
     }),
-    /higher-priority terminal interaction responder/u
+    /no matching executable interaction offer/u
   );
   assert.equal(terminalInputs, 0);
   assert.equal(
     loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.aggregate
       .state,
     "pending"
+  );
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.projection
+      .capabilities.respond,
+    false,
+    "managed precedence must revoke the stale executable offer"
   );
 });
 

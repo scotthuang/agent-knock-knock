@@ -173,10 +173,24 @@ test("durable reducer permits only reserved one-shot response transitions", () =
   assert.equal(aggregateMatchesProjection(pending, offer.projection), true);
   const refreshed = reduceTerminalInteractionAggregate(pending, {
     type: "refresh",
-    expires_at: "2026-09-09T00:02:00.000Z"
+    expires_at: "2026-09-09T00:02:00.000Z",
+    response_authority: "notify_only"
   });
+  const notifyProjection = {
+    ...offer.projection,
+    expires_at: refreshed.expires_at,
+    response_authority: "notify_only" as const,
+    capabilities: { ...offer.projection.capabilities, respond: false }
+  };
+  assert.equal(aggregateMatchesProjection(refreshed, notifyProjection), true);
+  const executable = reduceTerminalInteractionAggregate(refreshed, {
+    type: "refresh",
+    expires_at: refreshed.expires_at,
+    response_authority: "executable"
+  });
+  assert.equal(executable.response_authority, "executable");
   const responseHash = hashTerminalInteractionResponse({ confirm: true });
-  const reserved = reduceTerminalInteractionAggregate(refreshed, {
+  const reserved = reduceTerminalInteractionAggregate(executable, {
     type: "reserve",
     attempt_id: "attempt_1",
     response_hash: responseHash,

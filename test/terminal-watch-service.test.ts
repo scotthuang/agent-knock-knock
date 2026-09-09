@@ -32,6 +32,14 @@ import {
   type TerminalWatchService
 } from "../src/terminal-watch-service.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
+import { createTerminalInteractionAggregate } from
+  "../src/terminal-interaction-core.js";
+import {
+  TERMINAL_INTERACTION_SCHEMA,
+  TERMINAL_INTERACTION_SUBJECT_VERSION,
+  type TerminalInteractionResponseAuthority,
+  type TerminalInteractionSubjectProjection
+} from "../src/terminal-interaction-protocol.js";
 
 const THREAD_ID = "11111111-1111-4111-8111-111111111111";
 const TASK_ID = "22222222-2222-4222-8222-222222222222";
@@ -269,6 +277,52 @@ function observed(
   } as TerminalWatchObservation;
 }
 
+function watchInteraction(
+  watch: TerminalWatch,
+  authority: TerminalInteractionResponseAuthority,
+  expiresAt: string,
+  state: "pending" | "manual_required" = "pending"
+) {
+  const projection: TerminalInteractionSubjectProjection = {
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_SUBJECT_VERSION,
+    interaction_id: "ti_watch_service_same_surface",
+    subject: {
+      kind: "terminal_watch",
+      watch_id: watch.watch_id,
+      anchor_fingerprint: watch.anchor.anchor_fingerprint
+    },
+    agent: watch.agent,
+    kind: "questionnaire",
+    state,
+    step: { index: 1, total: 2 },
+    questions: [{
+      question_id: "question_watch_service_same_surface",
+      prompt: "Choose a framework",
+      required: true,
+      response_kind: "single_select",
+      options: [
+        { option_id: "option_react", label: "React" },
+        { option_id: "option_vue", label: "Vue" }
+      ]
+    }],
+    expires_at: expiresAt,
+    surface_id: "tis_watch_service_same_surface",
+    prompt_fingerprint: INTERACTION_FINGERPRINT,
+    response_authority: authority,
+    capabilities: {
+      respond: authority === "executable" && state === "pending",
+      batch_response: false,
+      free_text: false,
+      multi_select: false
+    }
+  };
+  return {
+    projection,
+    aggregate: createTerminalInteractionAggregate(projection, START)
+  };
+}
+
 test("service create/list survives restart and permits independent read-only subscriptions", async (t) => {
   const state = harness(t);
   const created = state.service.create(exactInput());
@@ -344,7 +398,7 @@ test("approval remains active and enqueues once per exact fingerprint", async (t
   );
   assert.deepEqual(state.deliveries[0].route.capabilities, {
     wake: true,
-    respond: false
+    respond: true
   });
   assert.equal(state.deliveries[0].envelope.source.kind, "terminal_watch");
   assert.equal(state.deliveries[0].envelope.event.type, "approval_required");
@@ -459,6 +513,96 @@ test("manual questionnaire notifications are bounded, response-disabled, and ide
     state.deliveries.map(({ kind }) => kind),
     ["interaction_manual_required", "interaction_manual_required"]
   );
+});
+
+test("same-surface interaction refreshes live authority and suppresses Watch callback under managed precedence", async (t) => {
+  const state = harness(t);
+  const created = state.service.create(exactInput());
+  state.advance(1_000);
+  state.observations.push((watch) => observed(
+    watch,
+    "interaction",
+    "2026-08-21T00:00:01.000Z",
+    {
+      evidence_fingerprint: INTERACTION_FINGERPRINT,
+      reason_code: "terminal_questionnaire_response_requested",
+      current_interaction: watchInteraction(
+        watch,
+        "executable",
+        "2026-08-21T00:01:01.000Z"
+      )
+    }
+  ));
+  const executable = await state.service.reconcile(created.watch_id);
+  assert.equal(
+    executable.current_interaction?.projection.response_authority,
+    "executable"
+  );
+  assert.equal(executable.notification_outbox.length, 1);
+  assert.equal(executable.notification_outbox[0].kind, "interaction_required");
+  assert.equal(executable.notification_outbox[0].status, "pending");
+
+  state.advance(1_000);
+  state.observations.push((watch) => observed(
+    watch,
+    "interaction",
+    "2026-08-21T00:00:02.000Z",
+    {
+      evidence_fingerprint: INTERACTION_FINGERPRINT,
+      reason_code: "terminal_questionnaire_managed_responder_precedence",
+      current_interaction: watchInteraction(
+        watch,
+        "notify_only",
+        "2026-08-21T00:01:02.000Z",
+        "manual_required"
+      ),
+      suppress_notification: true
+    }
+  ));
+  const suppressed = await state.service.reconcile(created.watch_id);
+  assert.equal(suppressed.current_interaction?.projection.state, "manual_required");
+  assert.equal(
+    suppressed.current_interaction?.projection.response_authority,
+    "notify_only"
+  );
+  assert.equal(
+    suppressed.current_interaction?.aggregate.response_authority,
+    "notify_only"
+  );
+  assert.equal(
+    suppressed.current_interaction?.projection.capabilities.respond,
+    false
+  );
+  assert.equal(suppressed.notification_outbox.length, 1);
+  assert.equal(suppressed.notification_outbox[0].status, "superseded");
+
+  state.advance(1_000);
+  state.observations.push((watch) => observed(
+    watch,
+    "interaction",
+    "2026-08-21T00:00:03.000Z",
+    {
+      evidence_fingerprint: INTERACTION_FINGERPRINT,
+      current_interaction: watchInteraction(
+        watch,
+        "executable",
+        "2026-08-21T00:01:03.000Z"
+      )
+    }
+  ));
+  const restored = await state.service.reconcile(created.watch_id);
+  assert.equal(restored.current_interaction?.projection.state, "pending");
+  assert.equal(
+    restored.current_interaction?.projection.response_authority,
+    "executable"
+  );
+  assert.equal(restored.current_interaction?.projection.capabilities.respond, true);
+  assert.equal(
+    restored.notification_outbox.length,
+    1,
+    "the same semantic surface must not emit a duplicate Watch callback"
+  );
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 0);
 });
 
 test("pending observations advance only the durable provider checkpoint", async (t) => {

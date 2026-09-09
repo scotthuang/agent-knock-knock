@@ -681,8 +681,15 @@ export function createTerminalWatchCliAdapter(
 
   async function runWatchStatus(options: TerminalWatchCliOptions): Promise<void> {
     const service = serviceFor(options);
-    const watch = await service.reconcile(requiredWatchId(options.watch));
-    dependencies.printJson({ watch: publicTerminalWatch(watch) });
+    const watchId = requiredWatchId(options.watch);
+    const interactionAccess = watchStatusInteractionAccess(
+      service.get(watchId),
+      options
+    );
+    const watch = await service.reconcile(watchId);
+    dependencies.printJson({
+      watch: publicTerminalWatch(watch, [], interactionAccess)
+    });
   }
   const runRespondInteraction =
     createTerminalWatchInteractionResponder(dependencies, serviceFor);
@@ -979,7 +986,7 @@ function createTerminalWatchInteractionResponder(
         }
         if (!execution.responded) {
           dependencies.printJson({
-            watch: publicTerminalWatch(current),
+            watch: publicTerminalWatch(current, [], true),
             interaction_id: interactionId,
             responded: false,
             blocked: execution.blocked,
@@ -1050,7 +1057,7 @@ function createTerminalWatchInteractionResponder(
             }, { expectedRevision: terminalWatchRevision(latest) });
           }));
         dependencies.printJson({
-          watch: publicTerminalWatch(current),
+          watch: publicTerminalWatch(current, [], true),
           interaction_id: interactionId,
           responded: true,
           blocked: false,
@@ -2020,7 +2027,6 @@ function terminalWatchQuestionnaireObservation(input: {
     input.options,
     input.dependencies
   );
-  if (responseDecision.suppress) return undefined;
   const runtime = terminalInteractionRuntimeForWatch({
     watch: input.watch,
     rawTerminal: input.rawTerminal,
@@ -2082,11 +2088,17 @@ function terminalWatchQuestionnaireObservation(input: {
       interaction_id: offer.projection.interaction_id,
       surface_id: offer.surfaceId
     }),
-    reason_code: currentInteraction.projection.capabilities.respond
-      ? "terminal_questionnaire_response_requested"
-      : "terminal_questionnaire_requires_manual_response",
+    reason_code: responseDecision.suppress
+      ? "terminal_questionnaire_managed_responder_precedence"
+      : currentInteraction.projection.capabilities.respond
+        ? "terminal_questionnaire_response_requested"
+        : "terminal_questionnaire_requires_manual_response",
     current_interaction: currentInteraction,
-    ...(!currentInteraction.projection.capabilities.respond
+    ...(responseDecision.suppress
+      ? { suppress_notification: true }
+      : {}),
+    ...(!responseDecision.suppress &&
+        !currentInteraction.projection.capabilities.respond
       ? { manual_interaction: manualInteraction }
       : {})
   };
@@ -2891,7 +2903,8 @@ function codexIdentityForWatch(
 
 function publicTerminalWatch(
   watch: TerminalWatch,
-  additionalWarnings: readonly string[] = []
+  additionalWarnings: readonly string[] = [],
+  exposeInteraction = false
 ): Record<string, unknown> {
   const pending = watch.notification_outbox.filter(({ status }) =>
     status === "pending" || status === "delivering" || status === "failed"
@@ -2912,7 +2925,7 @@ function publicTerminalWatch(
   const latestFailedCallback = [...watch.notification_outbox]
     .reverse()
     .find(({ status }) => status === "failed");
-  const currentInteraction = watch.status === "active" &&
+  const currentInteraction = exposeInteraction && watch.status === "active" &&
       watch.current_interaction &&
       ["pending", "reserved", "response_uncertain"].includes(
         watch.current_interaction.aggregate.state
@@ -3023,6 +3036,20 @@ function publicTerminalWatch(
         : {})
     }
   };
+}
+
+function watchStatusInteractionAccess(
+  watch: TerminalWatch,
+  options: TerminalWatchCliOptions
+): boolean {
+  if (!Object.hasOwn(options, "openclawSession")) return false;
+  const requested = stringValue(options.openclawSession);
+  if (!requested || requested !== watch.openclaw_session) {
+    throw new Error(
+      `terminal Watch ${watch.watch_id} belongs to a different controller session; executable interaction details were not disclosed`
+    );
+  }
+  return true;
 }
 
 function terminalWatchCapturedAgentVersion(

@@ -521,7 +521,11 @@ test("Watch interaction persistence supports refresh, uncertain, superseded, and
   });
   const refreshedAggregate = reduceTerminalInteractionAggregate(
     pending.current_interaction!.aggregate,
-    { type: "refresh", expires_at: "2026-08-21T00:20:00.000Z" }
+    {
+      type: "refresh",
+      expires_at: "2026-08-21T00:20:00.000Z",
+      response_authority: "notify_only"
+    }
   );
   const refreshed = saveTerminalWatch(storeDir, {
     ...pending,
@@ -529,39 +533,71 @@ test("Watch interaction persistence supports refresh, uncertain, superseded, and
     current_interaction: {
       projection: {
         ...pending.current_interaction!.projection,
-        expires_at: refreshedAggregate.expires_at
+        expires_at: refreshedAggregate.expires_at,
+        response_authority: "notify_only",
+        capabilities: {
+          ...pending.current_interaction!.projection.capabilities,
+          respond: false
+        }
       },
       aggregate: refreshedAggregate
     }
   }, { expectedRevision: terminalWatchRevision(pending) });
-  const reservedAggregate = reduceTerminalInteractionAggregate(
+  assert.equal(
+    refreshed.current_interaction?.projection.response_authority,
+    "notify_only"
+  );
+  const executableAggregate = reduceTerminalInteractionAggregate(
     refreshed.current_interaction!.aggregate,
+    {
+      type: "refresh",
+      expires_at: refreshedAggregate.expires_at,
+      response_authority: "executable"
+    }
+  );
+  const executable = saveTerminalWatch(storeDir, {
+    ...refreshed,
+    updated_at: "2026-08-21T00:00:02.000Z",
+    current_interaction: {
+      projection: {
+        ...refreshed.current_interaction!.projection,
+        response_authority: "executable",
+        capabilities: {
+          ...refreshed.current_interaction!.projection.capabilities,
+          respond: true
+        }
+      },
+      aggregate: executableAggregate
+    }
+  }, { expectedRevision: terminalWatchRevision(refreshed) });
+  const reservedAggregate = reduceTerminalInteractionAggregate(
+    executable.current_interaction!.aggregate,
     {
       type: "reserve",
       attempt_id: "interaction-attempt-uncertain",
       response_hash: "f".repeat(64),
-      at: "2026-08-21T00:00:02.000Z"
+      at: "2026-08-21T00:00:03.000Z"
     }
   );
   const reserved = saveTerminalWatch(storeDir, {
-    ...refreshed,
-    updated_at: "2026-08-21T00:00:02.000Z",
+    ...executable,
+    updated_at: "2026-08-21T00:00:03.000Z",
     current_interaction: {
-      projection: refreshed.current_interaction!.projection,
+      projection: executable.current_interaction!.projection,
       aggregate: reservedAggregate
     }
-  }, { expectedRevision: terminalWatchRevision(refreshed) });
+  }, { expectedRevision: terminalWatchRevision(executable) });
   const uncertainAggregate = reduceTerminalInteractionAggregate(
     reserved.current_interaction!.aggregate,
     {
       type: "response_uncertain",
-      at: "2026-08-21T00:00:03.000Z",
+      at: "2026-08-21T00:00:04.000Z",
       reason_code: "terminal_response_outcome_uncertain"
     }
   );
   const uncertain = saveTerminalWatch(storeDir, {
     ...reserved,
-    updated_at: "2026-08-21T00:00:03.000Z",
+    updated_at: "2026-08-21T00:00:04.000Z",
     current_interaction: {
       projection: {
         ...reserved.current_interaction!.projection,
@@ -587,12 +623,12 @@ test("Watch interaction persistence supports refresh, uncertain, superseded, and
   });
   const replaced = saveTerminalWatch(storeDir, {
     ...uncertain,
-    updated_at: "2026-08-21T00:00:04.000Z",
+    updated_at: "2026-08-21T00:00:05.000Z",
     current_interaction: {
       ...next,
       aggregate: {
         ...next.aggregate,
-        created_at: "2026-08-21T00:00:04.000Z"
+        created_at: "2026-08-21T00:00:05.000Z"
       }
     }
   }, { expectedRevision: terminalWatchRevision(uncertain) });
@@ -605,13 +641,13 @@ test("Watch interaction persistence supports refresh, uncertain, superseded, and
     replaced.current_interaction!.aggregate,
     {
       type: "supersede",
-      at: "2026-08-21T00:00:05.000Z",
+      at: "2026-08-21T00:00:06.000Z",
       reason_code: "higher_priority_responder_claimed_surface"
     }
   );
   const superseded = saveTerminalWatch(storeDir, {
     ...replaced,
-    updated_at: "2026-08-21T00:00:05.000Z",
+    updated_at: "2026-08-21T00:00:06.000Z",
     current_interaction: {
       projection: replaced.current_interaction!.projection,
       aggregate: supersededAggregate

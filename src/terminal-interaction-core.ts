@@ -67,6 +67,7 @@ export type TerminalInteractionAggregateEvent =
       /** Exact live recapture proved the same pending native surface. */
       readonly type: "refresh";
       readonly expires_at: string;
+      readonly response_authority: TerminalInteractionResponseAuthority;
     }
   | {
       readonly type: "reserve";
@@ -343,13 +344,17 @@ export function reduceTerminalInteractionAggregate(
       }
       if (
         !Number.isFinite(Date.parse(event.expires_at)) ||
-        Date.parse(event.expires_at) <= Date.parse(current.expires_at)
+        Date.parse(event.expires_at) < Date.parse(current.expires_at)
       ) {
         throw new TerminalInteractionTransitionError(
-          "terminal interaction refresh must extend expires_at"
+          "terminal interaction refresh cannot shorten expires_at"
         );
       }
-      next = { ...current, expires_at: event.expires_at };
+      next = {
+        ...current,
+        expires_at: event.expires_at,
+        response_authority: event.response_authority
+      };
       break;
     case "reserve":
       if (current.state !== "pending") {
