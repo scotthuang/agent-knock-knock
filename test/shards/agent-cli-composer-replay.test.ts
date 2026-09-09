@@ -169,7 +169,9 @@ test("CLI reports a multilingual multiline draft left in Codex after one Enter",
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.delivered, false);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.terminal_input_dispatched, true);
+    assert.equal(parsed.agent_acceptance, "unproven");
     assert.equal(parsed.status, "submission_not_accepted");
     assert.equal(parsed.submission_outcome, "not_accepted");
     assert.equal(parsed.do_not_retry, true);
@@ -911,7 +913,9 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
     );
     const transportOnlyReplayParsed = JSON.parse(transportOnlyReplay.stdout);
     assert.equal(transportOnlyReplayParsed.replayed, true);
-    assert.equal(transportOnlyReplayParsed.delivered, false);
+    assert.equal(transportOnlyReplayParsed.delivered, true);
+    assert.equal(transportOnlyReplayParsed.terminal_input_dispatched, true);
+    assert.equal(transportOnlyReplayParsed.agent_acceptance, "unproven");
     assert.equal(
       transportOnlyReplayParsed.submission_outcome,
       "pending_acceptance"
@@ -945,7 +949,9 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
     );
     const releasedLegacyParsed = JSON.parse(releasedLegacyReplay.stdout);
     assert.equal(releasedLegacyParsed.replayed, true);
-    assert.equal(releasedLegacyParsed.delivered, false);
+    assert.equal(releasedLegacyParsed.delivered, true);
+    assert.equal(releasedLegacyParsed.terminal_input_dispatched, true);
+    assert.equal(releasedLegacyParsed.agent_acceptance, "unproven");
     assert.equal(releasedLegacyParsed.delivery_receipt, "submitted");
     assert.equal(releasedLegacyParsed.do_not_retry, true);
     assert.equal(
@@ -1265,7 +1271,9 @@ test("default delegate retries route to the original active receipt before idle 
     assert.equal(first.status, 0, first.stderr || first.stdout);
     const firstParsed = JSON.parse(first.stdout);
     assert.equal(firstParsed.delivered, true);
-    assert.equal(firstParsed.message.id, stableMessageId);
+    assert.equal(firstParsed.terminal_input_dispatched, true);
+    assert.equal(firstParsed.agent_acceptance, "unproven");
+    assert.equal(firstParsed.message_id, stableMessageId);
     const delegateBindingDigest = createHash("sha256")
       .update(stableMessageId)
       .digest("hex");
@@ -1296,12 +1304,14 @@ test("default delegate retries route to the original active receipt before idle 
     assert.equal(replay.status, 0, replay.stderr || replay.stdout);
     const replayParsed = JSON.parse(replay.stdout);
     assert.equal(replayParsed.replayed, true);
-    assert.equal(replayParsed.delivered, false);
+    assert.equal(replayParsed.delivered, true);
+    assert.equal(replayParsed.terminal_input_dispatched, true);
+    assert.equal(replayParsed.agent_acceptance, "unproven");
     assert.equal(replayParsed.status, "submission_pending_acceptance");
     assert.equal(replayParsed.submission_outcome, "pending_acceptance");
     assert.equal(replayParsed.delivery_receipt, "enter_dispatched");
     assert.equal(replayParsed.do_not_retry, true);
-    assert.equal(replayParsed.management_mode, "managed");
+    assert.equal(replayParsed.management_mode, "unmanaged");
     assert.equal(replayParsed.scope, "terminal_user_explicit");
     assert.equal(replayParsed.message_id, stableMessageId);
     assert.equal(replayParsed.session_id, undefined);

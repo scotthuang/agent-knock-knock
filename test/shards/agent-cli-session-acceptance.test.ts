@@ -1036,7 +1036,9 @@ test("virgin terminal send is uncertain when no exact native session can be boun
     const elapsedMs = Date.now() - startedAt;
     assert.equal(sent.status, 0, sent.stderr || sent.stdout);
     const parsed = JSON.parse(sent.stdout);
-    assert.equal(parsed.delivered, false);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.terminal_input_dispatched, true);
+    assert.equal(parsed.agent_acceptance, "unproven");
     assert.equal(parsed.status, "submission_uncertain");
     assert.equal(parsed.do_not_retry, true);
     assert.equal(parsed.conversation.status, "stalled");
@@ -1057,7 +1059,7 @@ test("virgin terminal send is uncertain when no exact native session can be boun
   }
 });
 
-test("terminal transport never becomes delivered without native acceptance evidence", async (t) => {
+test("terminal transport is delivered without becoming native acceptance", async (t) => {
   for (const fixture of [
     {
       outcome: "pending",
@@ -1128,7 +1130,9 @@ test("terminal transport never becomes delivered without native acceptance evide
         });
         assert.equal(result.status, 0, result.stderr || result.stdout);
         const parsed = JSON.parse(result.stdout);
-        assert.equal(parsed.delivered, false);
+        assert.equal(parsed.delivered, true);
+        assert.equal(parsed.terminal_input_dispatched, true);
+        assert.equal(parsed.agent_acceptance, "unproven");
         assert.equal(parsed.status, fixture.status);
         assert.equal(parsed.do_not_retry, true);
         assert.equal(parsed.conversation.status, fixture.conversationStatus);
@@ -1362,7 +1366,9 @@ test("static terminal fixtures cannot synthesize native acceptance without expli
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.delivered, false);
+    assert.equal(parsed.delivered, true);
+    assert.equal(parsed.terminal_input_dispatched, true);
+    assert.equal(parsed.agent_acceptance, "unproven");
     assert.equal(parsed.status, "submission_pending_acceptance");
     assert.equal(parsed.delivery_receipt, "enter_dispatched");
     assert.equal(parsed.do_not_retry, true);

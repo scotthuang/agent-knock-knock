@@ -1632,10 +1632,11 @@ function codexNativeIdentityFixture(options: {
 }): Record<string, any> {
   const sessionId =
     `00000000-0000-4000-8000-${String(options.codexPid).padStart(12, "0")}`;
+  const processBirth = `fixture-process-birth-${options.codexPid}`;
   return {
     sessionId,
-    processUuid: `codex-process-${options.codexPid}`,
-    processBirth: `fixture-process-birth-${options.codexPid}`,
+    processUuid: `codex-pid:${options.codexPid}:birth:${processBirth}`,
+    processBirth,
     rollout: {
       fd: "17",
       device: `fixture-device-${options.codexPid}`,

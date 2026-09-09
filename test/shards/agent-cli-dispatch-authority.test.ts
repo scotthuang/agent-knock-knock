@@ -384,23 +384,7 @@ test("managed pre-submit setup failure restores the previous boundary and is ret
       `${JSON.stringify(secondState, null, 2)}\n`
     );
 
-    const retryArgs = [
-      "delegate",
-      "--request",
-      "Second managed task",
-      "--message-id",
-      stableRetryMessageId,
-      "--workspace",
-      workspace,
-      "--store-dir",
-      storeDir,
-      "--idle-timeout-minutes",
-      "0",
-      "--openclaw-bin",
-      "/usr/bin/true",
-      ...nativeIdentityArgs,
-      "--disable-terminal-bridge-monitor"
-    ];
+    const retryArgs = secondArgs;
     const retried = await runAgentCliInProcess(retryArgs, testEnv);
     assert.equal(retried.status, 0, retried.stderr || retried.stdout);
     const retriedParsed = JSON.parse(retried.stdout);

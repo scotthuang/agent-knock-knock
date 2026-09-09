@@ -5,6 +5,7 @@
 ### Added
 
 - Promote terminal-scoped Codex sends from a frozen open-rollout candidate set after exactly one rollout durably accepts the request, including the first task after `/clear` when the foreground rollout does not exist before Enter.
+- Add explicit `identify_foreground` and atomic `identify_and_send` operations for safely resolving an ambiguous foreground Codex rollout without weakening ordinary human-priority Send.
 - Notify the owning controller when an unmanaged fallback Watch observes a native questionnaire that requires manual TUI input, without granting that Watch response or key-dispatch authority.
 - Let newly created exact Terminal Watches notify and answer supported native Codex and Claude Code questionnaires through the same owner-bound `respond_interaction` contract used by managed Turns. Activity/best-effort Watches and migrated legacy records remain notification-only.
 
