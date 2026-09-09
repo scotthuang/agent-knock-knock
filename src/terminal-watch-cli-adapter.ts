@@ -22,8 +22,16 @@ import { codexRuntimeCompatibilityProfile } from
 import type { ExecutorKind } from "./executors.js";
 import type {
   TerminalCompletionEvidence,
-  TerminalDurableCompletionRequest
+  TerminalDurableCompletionRequest,
+  TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
+import {
+  captureTerminalInteractionRuntimeOffer,
+  TerminalInteractionDispatchReservedError,
+  TerminalInteractionInputNotStartedError,
+  type TerminalAgentBridge,
+  type TerminalInteractionResponseExecution
+} from "./terminal-agent-bridge.js";
 import type { Conversation } from "./protocol.js";
 import { rolloutFileIdentityMatches } from "./terminal-binding-authority.js";
 import {
@@ -42,9 +50,17 @@ import {
   type TerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-acceptance.js";
 import {
-  inspectNativeQuestionnaire,
   type NativeQuestionnaireInspection
 } from "./terminal-questionnaire-adapter.js";
+import {
+  createTerminalInteractionAggregate,
+  hashTerminalInteractionResponse,
+  reduceTerminalInteractionAggregate
+} from "./terminal-interaction-core.js";
+import {
+  validateTerminalInteractionSubjectResponse,
+  type TerminalInteractionSubjectResponse
+} from "./terminal-interaction-protocol.js";
 import type {
   TerminalControlEvidence,
   TerminalControlRef
@@ -75,6 +91,7 @@ import {
   isTerminalActivityWatch,
   isUserExplicitFallbackWatch,
   terminalWatchNotificationOnlyRoute,
+  terminalWatchRevision,
   terminalUserExplicitFallbackWatchId,
   type TerminalWatch,
   type TerminalWatchAnchor,
@@ -82,6 +99,7 @@ import {
   type CodexUserExplicitFallbackWatchObservationCheckpoint,
   type TerminalWatchObservationCheckpoint,
   type TerminalWatchManualInteractionSummary,
+  type TerminalWatchCurrentInteraction,
   type TerminalWatchTerminalIdentity,
   type TerminalActivityState,
   type TerminalActivityWatchObservationCheckpoint,
@@ -161,6 +179,11 @@ export interface TerminalWatchCliDependencies {
     storeDir: string,
     terminalControl: TerminalControlRef
   ): () => void;
+  createBridge?(options: TerminalWatchCliOptions): TerminalAgentBridge;
+  withStoreWriterLeaseAsync?<Result>(
+    storeDir: string,
+    operation: () => Promise<Result>
+  ): Promise<Result>;
   observeExactTerminal(request: {
     options: TerminalWatchCliOptions;
     terminalId: string;
@@ -201,7 +224,8 @@ export interface TerminalWatchCliFacade {
   }): UserExplicitFallbackWatchReceipt | undefined;
   runWatch(options: TerminalWatchCliOptions): Promise<void>;
   runUnwatch(options: TerminalWatchCliOptions): Promise<void>;
-  runWatchStatus(options: TerminalWatchCliOptions): void;
+  runWatchStatus(options: TerminalWatchCliOptions): Promise<void>;
+  runRespondInteraction(options: TerminalWatchCliOptions): Promise<void>;
   runReconcileWatches(options: TerminalWatchCliOptions): Promise<void>;
   listPublicWatches(
     storeDir: string,
@@ -226,7 +250,7 @@ export function createTerminalWatchCliAdapter(
     options: TerminalWatchCliOptions
   ): TerminalWatchService {
     const explicitRoute = Object.hasOwn(options, "callbackRoute")
-      ? terminalWatchNotificationOnlyRoute(options.callbackRoute)
+      ? parseCallbackRoute(options.callbackRoute)
       : undefined;
     const repository = createTerminalWatchStore(
       dependencies.storeDirFromOptions(options),
@@ -239,7 +263,9 @@ export function createTerminalWatchCliAdapter(
       observe: (watch) => observeTerminalWatch(watch, options, dependencies),
       resolveCallback: explicitRoute
         ? (watch) => ({
-            route: options.callbackRouteControllerScope === "route_bound_v1"
+            route: watch.interaction_policy === "notify_only"
+              ? terminalWatchNotificationOnlyRoute(explicitRoute)
+              : options.callbackRouteControllerScope === "route_bound_v1"
               ? routeBoundWatchCallbackRoute(explicitRoute, watch)
               : explicitRoute
           })
@@ -523,7 +549,7 @@ export function createTerminalWatchCliAdapter(
   async function runWatch(options: TerminalWatchCliOptions): Promise<void> {
     const terminalId = requiredString(options.terminal, "--terminal");
     const callbackRoute = Object.hasOwn(options, "callbackRoute")
-      ? terminalWatchNotificationOnlyRoute(options.callbackRoute)
+      ? parseCallbackRoute(options.callbackRoute)
       : undefined;
     const openclawSession = callbackRoute?.controller_session_id ??
       requiredString(options.openclawSession, "--openclaw-session");
@@ -653,11 +679,13 @@ export function createTerminalWatchCliAdapter(
     dependencies.printJson({ watch: publicTerminalWatch(watch) });
   }
 
-  function runWatchStatus(options: TerminalWatchCliOptions): void {
-    const watch = serviceFor(options).get(requiredWatchId(options.watch));
+  async function runWatchStatus(options: TerminalWatchCliOptions): Promise<void> {
+    const service = serviceFor(options);
+    const watch = await service.reconcile(requiredWatchId(options.watch));
     dependencies.printJson({ watch: publicTerminalWatch(watch) });
   }
-
+  const runRespondInteraction =
+    createTerminalWatchInteractionResponder(dependencies, serviceFor);
   async function runReconcileWatches(
     options: TerminalWatchCliOptions
   ): Promise<void> {
@@ -705,10 +733,336 @@ export function createTerminalWatchCliAdapter(
     runWatch,
     runUnwatch,
     runWatchStatus,
+    runRespondInteraction,
     runReconcileWatches,
     listPublicWatches,
     scanPublicWatchesForExactObservation
   });
+}
+
+function createTerminalWatchInteractionResponder(
+  dependencies: TerminalWatchCliDependencies,
+  serviceFor: (options: TerminalWatchCliOptions) => TerminalWatchService
+): (options: TerminalWatchCliOptions) => Promise<void> {
+  return async function runRespondInteraction(
+    options: TerminalWatchCliOptions
+  ): Promise<void> {
+    const watchId = requiredWatchId(options.watch);
+    const interactionId = requiredString(
+      options.interaction,
+      "--interaction is required"
+    );
+    const expectedFingerprint = requiredSha256(
+      options.expectedInteractionFingerprint,
+      "interaction prompt fingerprint"
+    );
+    const expectedExpiresAt = requiredTimestamp(
+      options.expectedInteractionExpiresAt,
+      "--expected-interaction-expires-at"
+    );
+    const responseValue = parseWatchInteractionResponse(options.responseJson);
+    const storeDir = dependencies.storeDirFromOptions(options);
+    const repository = createTerminalWatchStore(storeDir, {
+      acquire: dependencies.acquireFileLock
+    });
+    const service = serviceFor(options);
+    const displayed = await service.reconcile(watchId);
+    assertWatchControllerSession(displayed, options.openclawSession);
+    const displayedInteraction = requiredExecutableWatchInteraction(
+      displayed,
+      interactionId,
+      expectedFingerprint
+    );
+    const response = validateTerminalInteractionSubjectResponse(
+      responseValue,
+      displayedInteraction.projection,
+      { now: dependencies.now(), allowExpiredForLiveRecapture: true }
+    );
+    if (
+      response.subject.kind !== "terminal_watch" ||
+      response.subject.watch_id !== watchId
+    ) {
+      throw new Error("--response-json subject watch_id does not match --watch");
+    }
+    const exact = await exactTerminalForWatch(
+      displayed.terminal.terminal_id,
+      options,
+      dependencies
+    );
+    if (!terminalMatchesWatch(exact.rawTerminal, displayed)) {
+      throw new Error(
+        "terminal Watch identity changed before interaction response; refresh status"
+      );
+    }
+    const terminalControl = terminalControlForWatch(exact.rawTerminal);
+    const releaseTerminal = dependencies.acquireTerminalLock(
+      storeDir,
+      terminalControl
+    );
+    try {
+      const withWriterLease = dependencies.withStoreWriterLeaseAsync ??
+        (async <Result>(
+          _storeDir: string,
+          operation: () => Promise<Result>
+        ): Promise<Result> => operation());
+      await withWriterLease(storeDir, async () => {
+        let current = repository.load(watchId);
+        assertWatchControllerSession(current, options.openclawSession);
+        requiredExecutableWatchInteraction(
+          current,
+          interactionId,
+          expectedFingerprint
+        );
+        const decision = terminalWatchResponseDecision(
+          current,
+          exact.rawTerminal,
+          options,
+          dependencies
+        );
+        if (!decision.executable || decision.suppress) {
+          throw new Error(
+            "a higher-priority terminal interaction responder owns this live questionnaire; refresh status"
+          );
+        }
+        const version = terminalWatchCapturedAgentVersion(current) ??
+          requiredString(
+            exact.rawTerminal.agent_version,
+            "running coding-agent version"
+          );
+        const runtime = terminalInteractionRuntimeForWatch({
+          watch: current,
+          rawTerminal: exact.rawTerminal,
+          checkpoint: current.observation_checkpoint,
+          version,
+          responseAuthority: "executable"
+        });
+        const bridge = dependencies.createBridge?.(options);
+        if (!bridge) {
+          throw new Error("terminal interaction bridge is unavailable");
+        }
+        const attemptId = dependencies.randomUUID();
+        const responseHash = hashTerminalInteractionResponse(response);
+        let reserved = false;
+        let execution: TerminalInteractionResponseExecution;
+        try {
+          execution = await bridge.respondInteraction(
+            current.agent,
+            terminalControl,
+            response,
+            {
+              agentVersion: version,
+              expectedFingerprint,
+              expectedExpiresAt,
+              scrollbackLines: Number(options.scrollbackLines ?? 120),
+              runtime,
+              authorize: ({ projection, fingerprint }) => {
+                const latest = repository.load(watchId);
+                const interaction = requiredExecutableWatchInteraction(
+                  latest,
+                  interactionId,
+                  expectedFingerprint
+                );
+                const latestDecision = terminalWatchResponseDecision(
+                  latest,
+                  exact.rawTerminal,
+                  options,
+                  dependencies
+                );
+                return projection.interaction_id === interactionId &&
+                    fingerprint === expectedFingerprint &&
+                    interaction.projection.subject.kind === "terminal_watch" &&
+                    projection.version === 2 &&
+                    projection.subject.kind === "terminal_watch" &&
+                    projection.subject.watch_id === watchId &&
+                    latestDecision.executable && !latestDecision.suppress
+                  ? { approved: true }
+                  : {
+                      approved: false,
+                      reason: "terminal Watch interaction authority changed before response"
+                    };
+              },
+              beforeDispatch: ({ projection, fingerprint }) => {
+                if (reserved) {
+                  throw new Error(
+                    "terminal Watch interaction response was already reserved"
+                  );
+                }
+                current = repository.withWriterLease((scope) =>
+                  scope.withWatchLock(watchId, () => {
+                    const latest = scope.load(watchId);
+                    const interaction = requiredExecutableWatchInteraction(
+                      latest,
+                      interactionId,
+                      expectedFingerprint
+                    );
+                    if (
+                      projection.interaction_id !== interactionId ||
+                      fingerprint !== expectedFingerprint ||
+                      interaction.aggregate.state !== "pending"
+                    ) {
+                      throw new Error(
+                        "terminal Watch interaction authority changed before dispatch"
+                      );
+                    }
+                    const reservedAt = dependencies.now().toISOString();
+                    const aggregate = reduceTerminalInteractionAggregate(
+                      interaction.aggregate,
+                      {
+                        type: "reserve",
+                        attempt_id: attemptId,
+                        response_hash: responseHash,
+                        at: reservedAt
+                      }
+                    );
+                    const saved = scope.save({
+                      ...latest,
+                      current_interaction: {
+                        projection: interaction.projection,
+                        aggregate
+                      },
+                      updated_at: reservedAt
+                    }, { expectedRevision: terminalWatchRevision(latest) });
+                    reserved = true;
+                    return saved;
+                  }));
+              }
+            }
+          );
+        } catch (error) {
+          if (reserved) {
+            const state = error instanceof TerminalInteractionInputNotStartedError
+              ? "release"
+              : "response_uncertain";
+            current = repository.withWriterLease((scope) =>
+              scope.withWatchLock(watchId, () => {
+                const latest = scope.load(watchId);
+                const interaction = latest.current_interaction;
+                if (
+                  !interaction ||
+                  interaction.projection.interaction_id !== interactionId ||
+                  interaction.aggregate.state !== "reserved" ||
+                  interaction.aggregate.reservation?.attempt_id !== attemptId
+                ) {
+                  throw new Error(
+                    "terminal Watch interaction reservation changed while settling failure"
+                  );
+                }
+                const at = dependencies.now().toISOString();
+                const aggregate = reduceTerminalInteractionAggregate(
+                  interaction.aggregate,
+                  state === "release"
+                    ? { type: "release" }
+                    : {
+                        type: "response_uncertain",
+                        at,
+                        reason_code: "terminal_dispatch_uncertain"
+                      }
+                );
+                const projection = state === "release"
+                  ? interaction.projection
+                  : {
+                      ...interaction.projection,
+                      state: "response_uncertain" as const,
+                      capabilities: {
+                        ...interaction.projection.capabilities,
+                        respond: false
+                      }
+                    };
+                return scope.save({
+                  ...latest,
+                  current_interaction: { projection, aggregate },
+                  updated_at: at
+                }, { expectedRevision: terminalWatchRevision(latest) });
+              }));
+          }
+          throw error;
+        }
+        if (!execution.responded) {
+          dependencies.printJson({
+            watch: publicTerminalWatch(current),
+            interaction_id: interactionId,
+            responded: false,
+            blocked: execution.blocked,
+            reason: execution.reason
+          });
+          return;
+        }
+        if (!reserved) {
+          throw new TerminalInteractionDispatchReservedError(
+            "reservation_uncertain",
+            "terminal Watch response was dispatched without a durable reservation"
+          );
+        }
+        current = repository.withWriterLease((scope) =>
+          scope.withWatchLock(watchId, () => {
+            const latest = scope.load(watchId);
+            const interaction = latest.current_interaction;
+            if (
+              !interaction ||
+              interaction.projection.interaction_id !== interactionId ||
+              interaction.aggregate.state !== "reserved" ||
+              interaction.aggregate.reservation?.attempt_id !== attemptId
+            ) {
+              throw new Error(
+                "terminal Watch interaction reservation changed after dispatch"
+              );
+            }
+            const answeredAt = dependencies.now().toISOString();
+            const aggregate = reduceTerminalInteractionAggregate(
+              interaction.aggregate,
+              {
+                type: "consume",
+                at: answeredAt,
+                reason_code: "terminal_response_dispatched"
+              }
+            );
+            return scope.save({
+              ...latest,
+              current_interaction: {
+                projection: interaction.projection,
+                aggregate
+              },
+              updated_at: answeredAt,
+              last_activity_at: answeredAt,
+              notification_outbox: latest.notification_outbox.map(
+                (notification) =>
+                  notification.kind === "interaction_required" &&
+                  notification.evidence_fingerprint ===
+                    sha256({
+                      schema: "agent-knock-knock/terminal-watch-interaction-event",
+                      version: 1,
+                      watch_id: watchId,
+                      interaction_id: interactionId,
+                      surface_id: interaction.projection.surface_id
+                    }) &&
+                  (notification.status === "pending" ||
+                    notification.status === "failed")
+                    ? {
+                        ...notification,
+                        status: "superseded" as const,
+                        superseded_at: answeredAt,
+                        next_attempt_at: undefined,
+                        failed_at: undefined,
+                        last_error_code: undefined
+                      }
+                    : notification
+              )
+            }, { expectedRevision: terminalWatchRevision(latest) });
+          }));
+        dependencies.printJson({
+          watch: publicTerminalWatch(current),
+          interaction_id: interactionId,
+          responded: true,
+          blocked: false,
+          question_id: execution.questionId,
+          response_kind: execution.responseKind,
+          outcome: execution.outcome
+        });
+      });
+    } finally {
+      releaseTerminal();
+    }
+  }
 }
 
 function watchAnchorVersionWarnings(
@@ -749,7 +1103,7 @@ function routeBoundWatchCallbackRoute(
   watch: Pick<TerminalWatch, "openclaw_session">
 ): CallbackRouteV1 {
   return Object.freeze({
-    ...terminalWatchNotificationOnlyRoute(template),
+    ...parseCallbackRoute(template),
     controller_session_id: watch.openclaw_session
   });
 }
@@ -758,7 +1112,7 @@ function callbackRouteForUserExplicitFallback(
   options: TerminalWatchCliOptions
 ): CallbackRouteV1 | undefined {
   if (Object.hasOwn(options, "callbackRoute")) {
-    return terminalWatchNotificationOnlyRoute(options.callbackRoute);
+    return parseCallbackRoute(options.callbackRoute);
   }
   // gatewayMethod describes the managed Send callback protocol. Its presence
   // proves this invocation came from a legacy OpenClaw controller, but a
@@ -775,7 +1129,8 @@ function callbackRouteForUserExplicitFallback(
   if (!controllerSessionId) return undefined;
   return createTerminalWatchOpenClawCallbackRoute({
     controllerSessionId,
-    openclawBin: options.openclawBin
+    openclawBin: options.openclawBin,
+    respond: true
   });
 }
 
@@ -1051,9 +1406,12 @@ async function observeTerminalWatch(
     return observeTerminalActivityWatch({
       watch,
       exactTerminal,
+      rawTerminal,
       projectedTerminal,
       terminalIdentityMatch: activityTerminalIdentity ?? "mismatch",
-      observedAt
+      observedAt,
+      options,
+      dependencies
     });
   }
   const observation =
@@ -1157,6 +1515,17 @@ async function observeTerminalWatch(
       reason_code: "terminal_waiting_for_approval"
     };
   }
+  const interaction = terminalWatchQuestionnaireObservation({
+    watch,
+    rawTerminal,
+    projectedTerminal,
+    terminalMatches: true,
+    observedAt,
+    observationCheckpoint,
+    options,
+    dependencies
+  });
+  if (interaction) return interaction;
   return {
     ...fence,
     kind: "pending",
@@ -1169,14 +1538,18 @@ async function observeTerminalWatch(
 function observeTerminalActivityWatch(input: {
   watch: TerminalWatch;
   exactTerminal: ExactTerminalWatchObservation;
+  rawTerminal?: Record<string, unknown>;
   projectedTerminal?: Record<string, unknown>;
   terminalIdentityMatch: TerminalActivityWatchIdentityMatch;
   observedAt: string;
+  options: TerminalWatchCliOptions;
+  dependencies: TerminalWatchCliDependencies;
 }): TerminalWatchObservation {
   const {
     watch,
     exactTerminal,
     projectedTerminal,
+    rawTerminal,
     terminalIdentityMatch,
     observedAt
   } = input;
@@ -1218,6 +1591,19 @@ function observeTerminalActivityWatch(input: {
       observed_at: observedAt,
       reason_code: "terminal_activity_unavailable"
     };
+  }
+  if (rawTerminal) {
+    const interaction = terminalWatchQuestionnaireObservation({
+      watch,
+      rawTerminal,
+      projectedTerminal,
+      terminalMatches: true,
+      observedAt,
+      observationCheckpoint: terminalActivityObservationCheckpoint(watch),
+      options: input.options,
+      dependencies: input.dependencies
+    });
+    if (interaction) return interaction;
   }
   const state = terminalActivityState(projectedTerminal);
   const current = terminalActivityObservationCheckpoint(watch);
@@ -1476,7 +1862,9 @@ async function observeUserExplicitFallbackTerminalWatch(input: {
         watch,
         acceptance,
         currentIdentity
-      )
+      ),
+      options,
+      dependencies
     });
     if (interaction) return interaction;
     return fallbackPendingOrTerminalObservation({
@@ -1559,7 +1947,9 @@ async function observeUserExplicitFallbackTerminalWatch(input: {
     projectedTerminal,
     terminalMatches,
     observedAt,
-    observationCheckpoint: acceptedCheckpoint
+    observationCheckpoint: acceptedCheckpoint,
+    options,
+    dependencies
   });
   if (interaction) return interaction;
   return fallbackPendingOrTerminalObservation({
@@ -1581,6 +1971,8 @@ function fallbackQuestionnaireObservation(input: {
   terminalMatches: boolean;
   observedAt: string;
   observationCheckpoint: TerminalWatchObservationCheckpoint;
+  options: TerminalWatchCliOptions;
+  dependencies: TerminalWatchCliDependencies;
 }): TerminalWatchObservation | undefined {
   if (
     input.exactTerminal.state !== "available" ||
@@ -1590,48 +1982,107 @@ function fallbackQuestionnaireObservation(input: {
   ) {
     return undefined;
   }
+  return terminalWatchQuestionnaireObservation({
+    ...input,
+    rawTerminal: input.rawTerminal,
+    projectedTerminal: input.projectedTerminal
+  }, true);
+}
+
+function terminalWatchQuestionnaireObservation(input: {
+  watch: TerminalWatch;
+  rawTerminal?: Record<string, unknown>;
+  projectedTerminal: Record<string, unknown>;
+  terminalMatches: boolean;
+  observedAt: string;
+  observationCheckpoint?: TerminalWatchObservationCheckpoint;
+  options: TerminalWatchCliOptions;
+  dependencies: TerminalWatchCliDependencies;
+}, requireFallbackAttribution = false): TerminalWatchObservation | undefined {
+  if (!input.rawTerminal || !input.terminalMatches) return undefined;
   const screen = terminalWatchScreenExcerpt(
     input.rawTerminal,
     input.projectedTerminal
   );
-  const version = terminalWatchCapturedAgentVersion(input.watch);
+  const version = terminalWatchCapturedAgentVersion(input.watch) ??
+    stringValue(input.rawTerminal.agent_version);
   if (!screen || !version) return undefined;
 
-  const inspection = inspectNativeQuestionnaire({
-    agent: input.watch.agent,
-    version,
-    screen
-  });
-  if (inspection.status === "none") return undefined;
-  if (!fallbackQuestionnaireContextMatches(
+  const responseDecision = terminalWatchResponseDecision(
     input.watch,
     input.rawTerminal,
-    input.observationCheckpoint,
-    inspection
-  )) {
+    input.options,
+    input.dependencies
+  );
+  if (responseDecision.suppress) return undefined;
+  const runtime = terminalInteractionRuntimeForWatch({
+    watch: input.watch,
+    rawTerminal: input.rawTerminal,
+    checkpoint: input.observationCheckpoint ??
+      input.watch.observation_checkpoint,
+    version,
+    responseAuthority: responseDecision.executable
+      ? "executable"
+      : "notify_only"
+  });
+  const offer = captureTerminalInteractionRuntimeOffer({
+    agent: input.watch.agent,
+    terminalControl: terminalControlForWatch(input.rawTerminal),
+    screen,
+    runtime,
+    now: new Date(input.observedAt),
+    approvalBlocked: Boolean(approvalFingerprint(input.projectedTerminal)),
+    trustedTerminalEvidence: input.watch.terminal.terminal_endpoint
+  });
+  if (!offer) return undefined;
+  if (
+    requireFallbackAttribution &&
+    !fallbackQuestionnaireContextMatches(
+      input.watch,
+      input.rawTerminal,
+      input.observationCheckpoint ?? input.watch.observation_checkpoint,
+      offer.nativeInspection
+    )
+  ) {
     return undefined;
   }
-
-  const manualInteraction = terminalWatchManualInteractionSummary(inspection);
+  const currentInteraction: TerminalWatchCurrentInteraction = {
+    projection: offer.projection.version === 2 &&
+        offer.projection.subject.kind === "terminal_watch"
+      ? offer.projection
+      : (() => {
+          throw new Error("Watch interaction projection lost its Watch subject");
+        })(),
+    aggregate: createTerminalInteractionAggregate(
+      offer.projection,
+      input.observedAt
+    )
+  };
+  const manualInteraction = terminalWatchManualInteractionSummary(
+    offer.nativeInspection
+  );
   return {
     ...terminalWatchObservationFence(input.watch),
-    kind: "interaction_manual_required",
+    kind: "interaction",
     observed_at: input.observedAt,
     last_activity_at: input.observedAt,
-    observation_checkpoint: input.observationCheckpoint,
+    ...(input.observationCheckpoint
+      ? { observation_checkpoint: input.observationCheckpoint }
+      : {}),
     evidence_fingerprint: sha256({
-      schema:
-        "agent-knock-knock/terminal-watch-manual-interaction-fingerprint",
+      schema: "agent-knock-knock/terminal-watch-interaction-event",
       version: 1,
       watch_id: input.watch.watch_id,
-      anchor_fingerprint: input.watch.anchor.anchor_fingerprint,
-      profile: inspection.profile,
-      current_step: inspection.current_step,
-      total_steps: inspection.total_steps,
-      question: inspection.question
+      interaction_id: offer.projection.interaction_id,
+      surface_id: offer.surfaceId
     }),
-    reason_code: "terminal_questionnaire_requires_manual_response",
-    manual_interaction: manualInteraction
+    reason_code: currentInteraction.projection.capabilities.respond
+      ? "terminal_questionnaire_response_requested"
+      : "terminal_questionnaire_requires_manual_response",
+    current_interaction: currentInteraction,
+    ...(!currentInteraction.projection.capabilities.respond
+      ? { manual_interaction: manualInteraction }
+      : {})
   };
 }
 
@@ -1705,6 +2156,205 @@ function fallbackQuestionnaireContextMatches(
     }
   });
   return attribution.status === "matched";
+}
+
+function terminalWatchResponseDecision(
+  watch: TerminalWatch,
+  rawTerminal: Record<string, unknown>,
+  options: TerminalWatchCliOptions,
+  dependencies: TerminalWatchCliDependencies
+): { executable: boolean; suppress: boolean } {
+  if (
+    watch.status !== "active" ||
+    watch.interaction_policy !== "respond_when_exact" ||
+    isTerminalActivityWatch(watch) ||
+    (watch.callback_route !== undefined &&
+      watch.callback_route.capabilities?.respond !== true)
+  ) {
+    return { executable: false, suppress: false };
+  }
+  const terminalControl = terminalControlForWatch(rawTerminal);
+  let blockers: Conversation[];
+  try {
+    blockers = dependencies.terminalIncarnationBlockingTurns(
+      dependencies.storeDirFromOptions(options),
+      terminalControl
+    );
+  } catch {
+    return { executable: false, suppress: false };
+  }
+  if (blockers.length > 0) {
+    return {
+      executable: false,
+      suppress: blockers.some((turn) =>
+        turn.openclaw_session === watch.openclaw_session)
+    };
+  }
+  let candidates: TerminalWatch[];
+  try {
+    candidates = createTerminalWatchStore(
+      dependencies.storeDirFromOptions(options),
+      { acquire: dependencies.acquireFileLock }
+    ).list().filter((candidate) =>
+      candidate.status === "active" &&
+      candidate.interaction_policy === "respond_when_exact" &&
+      !isTerminalActivityWatch(candidate) &&
+      candidate.terminal.terminal_id === watch.terminal.terminal_id &&
+      terminalWatchCandidateMatchesLiveContext(candidate, rawTerminal)
+    );
+  } catch {
+    return { executable: false, suppress: false };
+  }
+  if (!candidates.some((candidate) => candidate.watch_id === watch.watch_id)) {
+    candidates.push(watch);
+  }
+  candidates.sort((left, right) => {
+    const priority = Number(isUserExplicitFallbackWatch(right)) -
+      Number(isUserExplicitFallbackWatch(left));
+    if (priority !== 0) return priority;
+    const recency = Date.parse(right.created_at) - Date.parse(left.created_at);
+    return recency !== 0 ? recency : left.watch_id.localeCompare(right.watch_id);
+  });
+  return {
+    executable: candidates[0]?.watch_id === watch.watch_id,
+    suppress: false
+  };
+}
+
+function terminalWatchCandidateMatchesLiveContext(
+  watch: TerminalWatch,
+  terminal: Record<string, unknown>
+): boolean {
+  if (!terminalMatchesWatch(terminal, watch)) return false;
+  const sessionId = stringValue(terminal.native_agent_session_id);
+  if (
+    watch.anchor.schema ===
+      "agent-knock-knock/codex-human-started-active-task-anchor"
+  ) {
+    return sessionId?.toLowerCase() === watch.anchor.native_thread_id &&
+      rolloutFileIdentityMatches(
+        terminal.native_agent_rollout,
+        watch.anchor.rollout
+      );
+  }
+  if (
+    watch.anchor.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+  ) {
+    const checkpoint = watch.observation_checkpoint;
+    return "schema" in checkpoint &&
+      checkpoint.schema ===
+        "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint" &&
+      checkpoint.accepted_identity !== undefined &&
+      sessionId?.toLowerCase() === checkpoint.accepted_identity.native_thread_id &&
+      rolloutFileIdentityMatches(
+        terminal.native_agent_rollout,
+        checkpoint.accepted_identity.rollout
+      );
+  }
+  if (
+    watch.anchor.schema ===
+      "agent-knock-knock/claude-human-started-active-task-anchor"
+  ) {
+    return sessionId === watch.anchor.session_id;
+  }
+  if (
+    watch.anchor.schema ===
+      "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+  ) {
+    return sessionId === watch.anchor.transcript_anchor.session_id;
+  }
+  return false;
+}
+
+function terminalInteractionRuntimeForWatch(input: {
+  watch: TerminalWatch;
+  rawTerminal: Record<string, unknown>;
+  checkpoint: TerminalWatchObservationCheckpoint;
+  version: string;
+  responseAuthority: "executable" | "notify_only";
+}): TerminalRuntimeIdentity {
+  const { watch, rawTerminal, checkpoint } = input;
+  let nativeSessionId = stringValue(rawTerminal.native_agent_session_id);
+  let nativeProcessUuid = stringValue(rawTerminal.native_agent_process_uuid);
+  let nativeProcessBirth = stringValue(rawTerminal.native_agent_process_birth);
+  let nativeRollout = isRecord(rawTerminal.native_agent_rollout)
+    ? rawTerminal.native_agent_rollout as unknown as NonNullable<
+        TerminalRuntimeIdentity["nativeRollout"]
+      >
+    : undefined;
+  if (
+    watch.anchor.schema ===
+      "agent-knock-knock/codex-human-started-active-task-anchor"
+  ) {
+    nativeSessionId = watch.anchor.native_thread_id;
+    nativeProcessUuid = watch.anchor.process_uuid;
+    nativeProcessBirth = watch.anchor.process_birth;
+    nativeRollout = watch.anchor.rollout;
+  } else if (
+    watch.anchor.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor" &&
+    "schema" in checkpoint &&
+    checkpoint.schema ===
+      "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint" &&
+    checkpoint.accepted_identity
+  ) {
+    nativeSessionId = checkpoint.accepted_identity.native_thread_id;
+    nativeProcessUuid = checkpoint.accepted_identity.process_uuid;
+    nativeProcessBirth = checkpoint.accepted_identity.process_birth;
+    nativeRollout = checkpoint.accepted_identity.rollout;
+  } else if (
+    watch.anchor.schema ===
+      "agent-knock-knock/claude-human-started-active-task-anchor"
+  ) {
+    nativeSessionId = watch.anchor.session_id;
+  } else if (
+    watch.anchor.schema ===
+      "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+  ) {
+    nativeSessionId = watch.anchor.transcript_anchor.session_id;
+  }
+  const inventory = isRecord(rawTerminal._codex_open_root_rollout_inventory)
+    ? rawTerminal._codex_open_root_rollout_inventory as unknown as
+      CodexOpenRootRolloutInventory
+    : undefined;
+  const allowedAdditionalNativeIdentities =
+    inventory && nativeRollout
+      ? inventory.roots.filter((root) =>
+          !rolloutFileIdentityMatches(root.rollout, nativeRollout))
+        .map((root) => ({
+          sessionId: root.sessionId,
+          processUuid: root.processUuid,
+          processBirth: root.processBirth,
+          rollout: root.rollout
+        }))
+      : [];
+  const startedAt = Number(rawTerminal.native_agent_process_started_at);
+  return {
+    pid: positiveInteger(rawTerminal.pid, "terminal agent PID"),
+    agentVersion: input.version,
+    interactionSubject: {
+      kind: "terminal_watch",
+      watch_id: watch.watch_id,
+      anchor_fingerprint: watch.anchor.anchor_fingerprint
+    },
+    interactionResponseAuthority: input.responseAuthority,
+    nativeSessionId,
+    nativeProcessUuid,
+    nativeProcessBirth,
+    nativeRollout,
+    requireNativeProcessUuid: watch.agent === "claude" &&
+      !isTerminalActivityWatch(watch),
+    requireNativeRolloutIdentity: watch.agent === "codex" &&
+      !isTerminalActivityWatch(watch),
+    allowedAdditionalNativeIdentities,
+    ...(Number.isSafeInteger(startedAt) && startedAt > 0
+      ? { nativeProcessStartedAt: startedAt }
+      : {}),
+    cwd: watch.terminal.workspace,
+    conversationId: watch.terminal.terminal_id,
+    terminalTarget: terminalControlForWatch(rawTerminal).target
+  };
 }
 
 function terminalWatchScreenExcerpt(
@@ -2253,6 +2903,24 @@ function publicTerminalWatch(
   const latestFailedCallback = [...watch.notification_outbox]
     .reverse()
     .find(({ status }) => status === "failed");
+  const currentInteraction = watch.status === "active" &&
+      watch.current_interaction &&
+      ["pending", "reserved", "response_uncertain"].includes(
+        watch.current_interaction.aggregate.state
+      )
+    ? watch.current_interaction
+    : undefined;
+  const interactionProjection = currentInteraction?.aggregate.state ===
+      "reserved"
+    ? {
+        ...currentInteraction.projection,
+        state: "response_uncertain" as const,
+        capabilities: {
+          ...currentInteraction.projection.capabilities,
+          respond: false
+        }
+      }
+    : currentInteraction?.projection;
   return {
     watch_id: watch.watch_id,
     source: userExplicitFallback
@@ -2262,6 +2930,14 @@ function publicTerminalWatch(
         : "user_selected_terminal_watch",
     watch_mode: terminalActivityFallback ? "terminal_activity" : "exact_task",
     confidence: terminalActivityFallback ? "best_effort" : "exact",
+    interaction_policy: watch.interaction_policy,
+    capabilities: {
+      interaction_notify: true,
+      interaction_respond: Boolean(
+        interactionProjection?.state === "pending" &&
+        interactionProjection.capabilities.respond
+      )
+    },
     agent: watch.agent,
     terminal_id: watch.terminal.terminal_id,
     native_thread_id: terminalWatchNativeThreadId(watch),
@@ -2293,6 +2969,13 @@ function publicTerminalWatch(
         ? { last_error_code: latestFailedCallback.last_error_code }
         : {})
     },
+    ...(interactionProjection
+      ? {
+          interaction_state: interactionProjection,
+          interaction_prompt_fingerprint:
+            interactionProjection.prompt_fingerprint
+        }
+      : {}),
     ...(watch.settlement
       ? {
           settlement: {
@@ -2314,6 +2997,16 @@ function publicTerminalWatch(
         ? {
             unwatch: {
               tool: "agent_knock_knock_unwatch",
+              arguments: { watch_id: watch.watch_id },
+              requires_user_intent: true
+            }
+          }
+        : {}),
+      ...(interactionProjection?.state === "pending" &&
+          interactionProjection.capabilities.respond
+        ? {
+            respond_interaction: {
+              tool: "agent_knock_knock_respond_interaction",
               arguments: { watch_id: watch.watch_id },
               requires_user_intent: true
             }
@@ -2431,6 +3124,66 @@ function requiredSha256(value: unknown, label: string): string {
     );
   }
   return result;
+}
+
+function requiredTimestamp(value: unknown, label: string): string {
+  const result = requiredString(value, label);
+  if (!Number.isFinite(Date.parse(result))) {
+    throw new Error(`${label} must be a valid timestamp`);
+  }
+  return result;
+}
+
+function parseWatchInteractionResponse(value: unknown): unknown {
+  const serialized = requiredString(value, "--response-json");
+  try {
+    const parsed: unknown = JSON.parse(serialized);
+    if (!isRecord(parsed)) {
+      throw new Error("response must be an object");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(
+      `--response-json is invalid: ${safeDiagnostic(error)}`
+    );
+  }
+}
+
+function assertWatchControllerSession(
+  watch: TerminalWatch,
+  requestedValue: unknown
+): void {
+  const requested = stringValue(requestedValue);
+  if (!requested || requested !== watch.openclaw_session) {
+    throw new Error(
+      `terminal Watch ${watch.watch_id} belongs to a different controller session; no terminal input was sent`
+    );
+  }
+}
+
+function requiredExecutableWatchInteraction(
+  watch: TerminalWatch,
+  interactionId: string,
+  expectedFingerprint: string
+): TerminalWatchCurrentInteraction {
+  if (watch.status !== "active") {
+    throw new Error(`terminal Watch ${watch.watch_id} is ${watch.status}`);
+  }
+  const interaction = watch.current_interaction;
+  if (
+    watch.interaction_policy !== "respond_when_exact" ||
+    !interaction ||
+    interaction.aggregate.state !== "pending" ||
+    interaction.projection.interaction_id !== interactionId ||
+    interaction.projection.prompt_fingerprint !== expectedFingerprint ||
+    interaction.projection.response_authority !== "executable" ||
+    !interaction.projection.capabilities.respond
+  ) {
+    throw new Error(
+      "terminal Watch has no matching executable interaction offer; refresh status"
+    );
+  }
+  return interaction;
 }
 
 function positiveInteger(value: unknown, label: string): number {
