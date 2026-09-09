@@ -34,6 +34,7 @@ import {
   appendEvent,
   logPathForStatePath,
   loadState,
+  pathsForConversation,
   pathsForConversationDir,
   saveState,
   withStoreWriterLease,
@@ -1186,7 +1187,10 @@ class TerminalDispatchRecoveryCliApplication {
 
   #assertLocalCompletion(
     context: LocalCompletionRecoveryContext
-  ): { ledgerResolved: boolean } {
+  ): {
+    ledgerResolved: boolean;
+    supersededByNewerDispatch?: boolean;
+  } {
     const scope = this.#activeScope(context.scope);
     this.#assertStateHeld(scope);
     const claim = required(scope.localClaim, "local completion claim is unavailable");
@@ -1206,6 +1210,18 @@ class TerminalDispatchRecoveryCliApplication {
     this.#assertLocalCompletionEvents(scope, context, claim);
     const ledger = this.#dependencies.repository.load(context.terminalControl);
     if (!this.#localCompletionLedgerExact(scope, context, ledger)) {
+      if (
+        this.#localCompletionSupersededByNewerDispatch(
+          scope,
+          context,
+          ledger
+        )
+      ) {
+        return {
+          ledgerResolved: false,
+          supersededByNewerDispatch: true
+        };
+      }
       throw new Error(
         `local terminal completion ${conversation.conversation_id} has ` +
           "no exact accepted terminal ledger"
@@ -1279,6 +1295,83 @@ class TerminalDispatchRecoveryCliApplication {
       path.resolve(nonBlankString(ledger.store_dir) ?? "") === path.resolve(scope.storeDir) &&
       sameCanonicalStatePath(ledger.state_path, scope.statePath)
     );
+  }
+
+  #localCompletionSupersededByNewerDispatch(
+    scope: ConcreteRecoveryScope,
+    context: LocalCompletionRecoveryContext,
+    ledger?: TerminalDispatchLedgerDocument
+  ): boolean {
+    const conversation = context.conversation;
+    const claim = scope.localClaim;
+    const currentConversationId = nonBlankString(ledger?.conversation_id);
+    const currentSessionId = nonBlankString(ledger?.session_id);
+    const currentTurnId = nonBlankString(ledger?.turn_id);
+    const currentMessageId = nonBlankString(ledger?.message_id);
+    const currentGenerationId = nonBlankString(ledger?.generation_id);
+    const currentStatePath = nonBlankString(ledger?.state_path);
+    const currentLogPath = nonBlankString(ledger?.event_log_path);
+    const currentPreparedAt = nonBlankString(ledger?.prepared_at);
+    const currentStoreDir = nonBlankString(ledger?.store_dir);
+    const currentStatus = nonBlankString(ledger?.status);
+    const currentProcessAnchor = ledger
+      ? this.#dependencies.repository.processAnchor(ledger)
+      : undefined;
+    const expectedProcessAnchor = terminalEndpointFromControlRef(
+      context.terminalControl
+    ).processAnchorPid;
+    const currentPaths = currentConversationId
+      ? pathsForConversation(currentConversationId, scope.storeDir)
+      : undefined;
+    if (
+      !ledger || terminalDispatchLedgerLooksLifecycle(ledger) || !claim ||
+      !currentConversationId || !currentSessionId || !currentTurnId ||
+      !currentMessageId || currentGenerationId !== currentMessageId ||
+      !currentStatePath || !currentLogPath || !currentPreparedAt ||
+      !currentStoreDir || !currentStatus ||
+      !(currentStatus === "resolved" ||
+        isRecoverableTerminalDispatchStatus(currentStatus)) ||
+      currentConversationId !== currentTurnId ||
+      currentConversationId === conversation.conversation_id ||
+      currentTurnId === turnIdForConversation(conversation) ||
+      currentMessageId === context.terminalMessageId ||
+      sameCanonicalStatePath(currentStatePath, scope.statePath) ||
+      path.resolve(currentStoreDir) !== path.resolve(scope.storeDir) ||
+      !currentPaths ||
+      !sameCanonicalStatePath(currentStatePath, currentPaths.statePath) ||
+      path.resolve(currentLogPath) !== path.resolve(currentPaths.logPath) ||
+      !validTimestamp(currentPreparedAt) ||
+      Date.parse(currentPreparedAt) <= Date.parse(claim.claimedAt) ||
+      !Number.isSafeInteger(expectedProcessAnchor) ||
+      Number(expectedProcessAnchor) <= 0 ||
+      currentProcessAnchor !== expectedProcessAnchor ||
+      !this.#dependencies.repository.matchesControl(
+        ledger,
+        context.terminalControl
+      )
+    ) {
+      return false;
+    }
+    const input: VerifiedDeadDispatchRequest = {
+      terminalControl: context.terminalControl,
+      conversation,
+      storeDir: scope.storeDir,
+      statePath: scope.statePath,
+      logPath: scope.logPath,
+      expectedMessageId: context.terminalMessageId
+    };
+    const submission = terminalBridgeSubmission(conversation);
+    const expected = acceptedDispatchExpectation(
+      input,
+      takeoverFor(conversation),
+      submission
+    );
+    return ledgerDispatchReceiptAuthority(
+      input,
+      ledger,
+      expected,
+      this.#dependencies.repository
+    ).exact;
   }
 
   #persistLocalCompletion(context: LocalCompletionRecoveryContext): void {

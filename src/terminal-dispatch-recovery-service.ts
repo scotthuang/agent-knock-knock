@@ -513,6 +513,7 @@ export interface TerminalDispatchRecoveryPorts<Prepared> {
     ): Promise<VerifiedDeadAgentCompletionObservation<TerminalCompletionEvidence>>;
     assertLocalCompletion(context: LocalCompletionRecoveryContext): {
       ledgerResolved: boolean;
+      supersededByNewerDispatch?: boolean;
     };
   };
   evidence: {
@@ -581,6 +582,13 @@ export class TerminalDispatchRecoveryService<Prepared> {
   }): LocalCompletionRecoveryResult {
     return this.#ports.transaction.localCompletion(request, (context) => {
       const authority = this.#ports.authority.assertLocalCompletion(context);
+      if (authority.supersededByNewerDispatch) {
+        return {
+          handled: true,
+          recovered: false,
+          reason: "local_terminal_completion_superseded_by_newer_dispatch"
+        };
+      }
       if (authority.ledgerResolved) {
         return {
           handled: true,

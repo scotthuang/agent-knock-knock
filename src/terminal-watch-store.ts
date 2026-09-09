@@ -697,6 +697,137 @@ export function terminalWatchCallbackMessage(
   ].join("\n");
 }
 
+/**
+ * v1 and early-v2 Watches persisted the complete callback envelope before the
+ * callback presentation gained `watch_origin`, `watch_mode`, and `confidence`.
+ * Keep the two exact predecessor presentations readable: the route, delivery
+ * identity, Watch/terminal source, event identity, and response bit remain
+ * validated separately and are never inferred or relaxed.
+ *
+ * Do not reuse `terminalWatchCallbackMessage` here. This is intentionally a
+ * frozen compatibility projection for envelopes already persisted by
+ * 8d0db82 (human-started Watch) and 23fe415 (user-explicit fallback Watch).
+ */
+function predecessorTerminalWatchCallbackEnvelope(
+  watch: TerminalWatch,
+  notification: TerminalWatchNotification,
+  route: CallbackRouteV1
+): CallbackEnvelopeV1 | undefined {
+  if (
+    notification.kind === "interaction_required" ||
+    notification.kind === "interaction_manual_required" ||
+    isTerminalActivityWatch(watch)
+  ) {
+    return undefined;
+  }
+  const humanStarted = watch.anchor.schema ===
+      "agent-knock-knock/codex-human-started-active-task-anchor" ||
+    watch.anchor.schema ===
+      "agent-knock-knock/claude-human-started-active-task-anchor";
+  const userExplicitFallback = isUserExplicitFallbackWatch(watch);
+  if (!humanStarted && !userExplicitFallback) return undefined;
+
+  const event: TerminalWatchCallbackEvent = notification.kind === "approval"
+    ? "approval_required"
+    : notification.kind;
+  const reasonCode = notification.kind === "approval"
+    ? notification.reason_code
+    : notification.reason_code ?? watch.settlement?.reason_code;
+  const eventInstruction = event === "approval_required"
+    ? "Tell the user that the observed TUI task is waiting for approval and ask the human to inspect and decide in the named live TUI. Do not call any AKK approval tool or action, do not send approval keys, and do not use autoApprove."
+    : event === "completed"
+      ? userExplicitFallback
+        ? "Tell the user that the request delivered through AKK's user-explicit unmanaged fallback completed and summarize only the bounded completion text below."
+        : "Tell the user that the human-started TUI task completed and summarize only the bounded completion text below."
+      : "Tell the user that Terminal Watch stopped without a verified successful completion and explain the exact reason below.";
+  const completionText = notification.kind === "completed" ||
+      notification.kind === "failed"
+    ? watch.settlement?.completion_text
+    : undefined;
+  const body = [
+    "Continue this controller conversation from the Agent Knock Knock Terminal Watch event below.",
+    userExplicitFallback
+      ? "AKK delivered this exact request through terminal_user_explicit unmanaged fallback and then attached Terminal Watch. It is not a managed AKK Turn."
+      : "This is an observation of a task started by the human directly in Codex or Claude Code. It is not an AKK Turn and AKK did not send terminal input.",
+    eventInstruction,
+    "Do not poll files, processes, terminal panes, stdout, or stderr. Use only this structured event.",
+    "",
+    `[AKK Terminal Watch: ${event}]`,
+    `Watch: ${watch.watch_id}`,
+    `Terminal: ${watch.terminal.terminal_id}`,
+    `Agent: ${watch.agent}`,
+    ...(reasonCode ? [`Detail: ${reasonCode}`] : []),
+    ...(completionText
+      ? ["", "Bounded completion text:", completionText]
+      : [])
+  ].join("\n");
+
+  return createCallbackEnvelope({
+    route,
+    deliveryId: notification.notification_id,
+    idempotencyKey: notification.idempotency_key,
+    source: {
+      kind: "terminal_watch",
+      watch_id: watch.watch_id,
+      terminal_id: watch.terminal.terminal_id
+    },
+    event: {
+      id: notification.notification_id,
+      type: event,
+      body,
+      requires_response: true,
+      metadata: {
+        agent: watch.agent,
+        ...(reasonCode ? { reason_code: reasonCode } : {}),
+        ...(completionText ? { completion_text: completionText } : {})
+      }
+    }
+  });
+}
+
+/**
+ * A predecessor file is validated against its exact historical presentation
+ * before this in-memory migration runs. Returning the current deterministic
+ * envelope keeps all public validation and every subsequently-saved v3 record
+ * strict; merely reading a legacy file does not rewrite Store history.
+ */
+function upgradePredecessorCallbackPresentations(
+  watch: TerminalWatch
+): TerminalWatch {
+  let changed = false;
+  const notificationOutbox = watch.notification_outbox.map((notification) => {
+    if (
+      notification.callback_route === undefined ||
+      notification.callback_envelope === undefined
+    ) {
+      return notification;
+    }
+    const route = parseCallbackRoute(notification.callback_route);
+    const predecessor = predecessorTerminalWatchCallbackEnvelope(
+      watch,
+      notification,
+      route
+    );
+    if (
+      predecessor === undefined ||
+      canonicalJson(notification.callback_envelope) !==
+        canonicalJson(predecessor)
+    ) {
+      return notification;
+    }
+    changed = true;
+    return {
+      ...notification,
+      callback_envelope: terminalWatchCallbackEnvelope(
+        watch,
+        notification,
+        route
+      )
+    };
+  });
+  return changed ? { ...watch, notification_outbox: notificationOutbox } : watch;
+}
+
 export interface TerminalWatchSaveOptions {
   /** `null` creates; a positive revision performs an exact CAS update. */
   expectedRevision: number | null;
@@ -1093,6 +1224,17 @@ export function assertTerminalWatch(
   expectedWatchId?: string,
   options: { allowMissingRevision?: boolean } = {}
 ): asserts value is TerminalWatch {
+  assertTerminalWatchRecord(value, expectedWatchId, options);
+}
+
+function assertTerminalWatchRecord(
+  value: unknown,
+  expectedWatchId: string | undefined,
+  options: {
+    allowMissingRevision?: boolean;
+    allowPredecessorCallbackPresentation?: boolean;
+  }
+): asserts value is TerminalWatch {
   assertStrictRecord(value, "terminal Watch", WATCH_FIELDS);
   if (expectedWatchId !== undefined && value.watch_id !== expectedWatchId) {
     throw new Error(
@@ -1200,7 +1342,10 @@ export function assertTerminalWatch(
   ) {
     throw new Error("terminal Watch settlement cannot be newer than its state");
   }
-  assertNotificationOutbox(watch);
+  assertNotificationOutbox(
+    watch,
+    options.allowPredecessorCallbackPresentation === true
+  );
 }
 
 export function saveTerminalWatch(
@@ -1367,11 +1512,18 @@ function decodeTerminalWatch(
 ): TerminalWatch {
   const sourceVersion = isRecord(value) ? value.version : undefined;
   const normalized = normalizeLegacyTerminalWatch(value);
-  assertTerminalWatch(normalized, expectedWatchId);
+  const predecessorPresentation = sourceVersion === 1 || sourceVersion === 2;
+  assertTerminalWatchRecord(normalized, expectedWatchId, {
+    allowPredecessorCallbackPresentation: predecessorPresentation
+  });
+  const presentationUpgraded = predecessorPresentation
+    ? upgradePredecessorCallbackPresentations(normalized)
+    : normalized;
+  assertTerminalWatch(presentationUpgraded, expectedWatchId);
   const repaired = sourceVersion === 2 ||
       sourceVersion === TERMINAL_WATCH_VERSION
-    ? repairMisroutedUserExplicitFallbackCallback(normalized)
-    : normalized;
+    ? repairMisroutedUserExplicitFallbackCallback(presentationUpgraded)
+    : presentationUpgraded;
   assertTerminalWatch(repaired, expectedWatchId);
   return repaired;
 }
@@ -1913,12 +2065,19 @@ function assertSettlement(
   }
 }
 
-function assertNotificationOutbox(watch: TerminalWatch): void {
+function assertNotificationOutbox(
+  watch: TerminalWatch,
+  allowPredecessorCallbackPresentation = false
+): void {
   const seenIds = new Set<string>();
   const seenEvidence = new Set<string>();
   let previousCreatedAt = Date.parse(watch.created_at);
   for (const notification of watch.notification_outbox) {
-    assertNotification(notification, watch);
+    assertNotification(
+      notification,
+      watch,
+      allowPredecessorCallbackPresentation
+    );
     if (seenIds.has(notification.notification_id)) {
       throw new Error("terminal Watch notification ids must be unique");
     }
@@ -1959,7 +2118,11 @@ function assertNotificationOutbox(watch: TerminalWatch): void {
   }
 }
 
-function assertNotification(value: unknown, watch: TerminalWatch): void {
+function assertNotification(
+  value: unknown,
+  watch: TerminalWatch,
+  allowPredecessorCallbackPresentation: boolean
+): void {
   assertStrictRecord(value, "terminal Watch notification", NOTIFICATION_FIELDS);
   const notification = value as unknown as TerminalWatchNotification;
   if (notification.kind === "interaction_manual_required") {
@@ -1986,7 +2149,11 @@ function assertNotification(value: unknown, watch: TerminalWatch): void {
   const [minimumAttempts, receiptFields] =
     NOTIFICATION_SHAPES[notification.status];
   assertNotificationShape(value, minimumAttempts, receiptFields);
-  terminalWatchNotificationCallbackSnapshot(watch, notification);
+  parseTerminalWatchNotificationCallbackSnapshot(
+    watch,
+    notification,
+    allowPredecessorCallbackPresentation
+  );
 }
 
 export function assertTerminalWatchManualInteractionSummary(
@@ -2210,6 +2377,18 @@ export function terminalWatchNotificationCallbackSnapshot(
   watch: TerminalWatch,
   notification: TerminalWatchNotification
 ): TerminalWatchNotificationCallbackSnapshot | undefined {
+  return parseTerminalWatchNotificationCallbackSnapshot(
+    watch,
+    notification,
+    false
+  );
+}
+
+function parseTerminalWatchNotificationCallbackSnapshot(
+  watch: TerminalWatch,
+  notification: TerminalWatchNotification,
+  allowPredecessorCallbackPresentation: boolean
+): TerminalWatchNotificationCallbackSnapshot | undefined {
   const hasRoute = Object.hasOwn(notification, "callback_route");
   const hasEnvelope = Object.hasOwn(notification, "callback_envelope");
   if (hasRoute !== hasEnvelope) {
@@ -2258,6 +2437,18 @@ export function terminalWatchNotificationCallbackSnapshot(
     notification,
     expectedRoute
   );
+  const predecessorEnvelope = predecessorTerminalWatchCallbackEnvelope(
+    watch,
+    notification,
+    expectedRoute
+  );
+  const hasKnownPresentation =
+    canonicalJson(envelope) === canonicalJson(expectedEnvelope) ||
+    (
+      allowPredecessorCallbackPresentation &&
+      predecessorEnvelope !== undefined &&
+      canonicalJson(envelope) === canonicalJson(predecessorEnvelope)
+    );
   const watchRoute = watch.callback_route === undefined
     ? undefined
     : parseCallbackRoute(watch.callback_route);
@@ -2281,7 +2472,7 @@ export function terminalWatchNotificationCallbackSnapshot(
     envelope.event.id !== notification.notification_id ||
     envelope.event.type !== expectedEvent ||
     envelope.event.requires_response !== true ||
-    canonicalJson(envelope) !== canonicalJson(expectedEnvelope)
+    !hasKnownPresentation
   ) {
     throw new Error(
       "terminal Watch notification callback snapshot does not match its immutable identity"
