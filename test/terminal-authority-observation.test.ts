@@ -12,6 +12,7 @@ import {
   deferredCandidateSourceTurnHistory,
   deferredCodexForegroundDispatchSnapshot,
   humanExplicitCallbackDebtDisposition,
+  humanExplicitCallbackDebtRetirementDisposition,
   humanExplicitCallbackDebtManagedTokenMatches,
   observeDeferredCodexAuthority,
   type DeferredForegroundAuthorityAdapterPorts
@@ -1054,6 +1055,53 @@ test("human-explicit callback supersede is exact, terminal, and fail-closed", ()
     humanExplicitCallbackDebtDisposition(callbackFreeHistory, source),
     "settled",
     "an exact accepted Turn with no callback route is settled history"
+  );
+  const callbackFreeSiblingShapes = [
+    {
+      ...callbackFreeHistory,
+      status: "closed" as const,
+      gateway_method: "sessions_send",
+      close_reason: "explicitly abandoned uncertain terminal submission",
+      native_session_takeover: {
+        ...(callbackFreeHistory.native_session_takeover as Record<string, unknown>),
+        terminal_bridge_submission: { status: "uncertain" }
+      }
+    },
+    {
+      ...callbackFreeHistory,
+      status: "closed" as const,
+      gateway_method: "sessions_send",
+      native_session_takeover: {
+        ...(callbackFreeHistory.native_session_takeover as Record<string, unknown>),
+        terminal_bridge_submission: { status: "aborted" }
+      }
+    }
+  ];
+  for (const callbackFreeTurn of [
+    callbackFreeHistory,
+    ...callbackFreeSiblingShapes
+  ]) {
+    assert.equal(
+      humanExplicitCallbackDebtRetirementDisposition(callbackFreeTurn, source),
+      "no_callback_debt",
+      "callback-free history cannot veto another Turn's callback retirement"
+    );
+  }
+  for (const malformedSibling of callbackFreeSiblingShapes) {
+    assert.equal(
+      deferredCandidateSourceTurnHistory(
+        deferredAuthorityPorts(undefined, { turns: [malformedSibling] }),
+        "/store",
+        source
+      ),
+      undefined,
+      "retirement classification cannot grant continuation to unsafe history"
+    );
+  }
+  assert.equal(
+    humanExplicitCallbackDebtRetirementDisposition(candidate, source),
+    "supersedable",
+    "the mixed history retains its independently proven callback candidate"
   );
 
   const superseded: Conversation = {

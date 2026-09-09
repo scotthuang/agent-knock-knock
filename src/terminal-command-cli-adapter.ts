@@ -45,6 +45,7 @@ import { isFinalDeferredForegroundTransferStatus } from
   "./deferred-foreground-transfer-policy.js";
 import {
   humanExplicitCallbackDebtDisposition,
+  humanExplicitCallbackDebtRetirementDisposition,
   humanExplicitCallbackDebtManagedTokenMatches
 } from
   "./deferred-foreground-authority-cli-adapter.js";
@@ -6357,7 +6358,7 @@ async function supersedeExactHumanExplicitCallbackDebt(input: {
     );
   const dispositions = bindingTurns.map((turn) => ({
     turn,
-    disposition: humanExplicitCallbackDebtDisposition(turn, session)
+    disposition: humanExplicitCallbackDebtRetirementDisposition(turn, session)
   }));
   const candidates = dispositions
     .filter(({ disposition }) => disposition === "supersedable")

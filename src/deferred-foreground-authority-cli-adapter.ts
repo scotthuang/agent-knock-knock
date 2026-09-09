@@ -350,6 +350,10 @@ export type HumanExplicitCallbackDebtDisposition =
   | "supersedable"
   | "settled";
 
+export type HumanExplicitCallbackDebtRetirementDisposition =
+  | HumanExplicitCallbackDebtDisposition
+  | "no_callback_debt";
+
 /**
  * A private managed token is an optional fast-path hint for human Send. It may
  * be omitted, but a supplied token must still name the exact current binding.
@@ -618,6 +622,21 @@ export function humanExplicitCallbackDebtDisposition(
   return callbackDeliveryMayBeSuperseded(turn, delivery)
     ? "supersedable"
     : undefined;
+}
+
+/**
+ * Classify only the lifecycle callback record retired by a new human Send.
+ * A Turn without that record is not proof of safe continuation: exact safe
+ * abort and explicit-abandonment evidence remain mandatory in
+ * deferredCandidateSourceTurnHistory. It merely cannot veto retirement of a
+ * different Turn's independently proven callback debt.
+ */
+export function humanExplicitCallbackDebtRetirementDisposition(
+  turn: Conversation,
+  session: ManagedSessionState
+): HumanExplicitCallbackDebtRetirementDisposition | undefined {
+  if (!isRecord(turn.callback_delivery)) return "no_callback_debt";
+  return humanExplicitCallbackDebtDisposition(turn, session);
 }
 
 export function deferredCandidateSourceTurnHistory(

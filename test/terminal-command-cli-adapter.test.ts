@@ -176,7 +176,7 @@ test("human-explicit callback debt is fenced under the Turn lock before deferred
     "humanExplicitCallbackDebtManagedTokenMatches",
     "exactBoundCodexSendSource",
     "sessionHasUnresolvedForegroundMutation",
-    "humanExplicitCallbackDebtDisposition",
+    "humanExplicitCallbackDebtRetirementDisposition",
     "withTerminalDispatchStateScope",
     "loadState",
     "JSON.stringify(current.callback_delivery) !== expectedDelivery",
