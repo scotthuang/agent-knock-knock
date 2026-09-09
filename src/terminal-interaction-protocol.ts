@@ -3,6 +3,12 @@ import { isRecord, type UnknownRecord } from "./value-guards.js";
 export const TERMINAL_INTERACTION_SCHEMA =
   "agent-knock-knock/terminal-interaction" as const;
 export const TERMINAL_INTERACTION_VERSION = 1 as const;
+/**
+ * Version 2 makes the interaction owner explicit. Version 1 remains readable
+ * for durable managed-Turn records written by releases before Watch response
+ * authority existed.
+ */
+export const TERMINAL_INTERACTION_SUBJECT_VERSION = 2 as const;
 
 export const TERMINAL_INTERACTION_KINDS = ["questionnaire"] as const;
 export const TERMINAL_INTERACTION_STATES = [
@@ -17,6 +23,14 @@ export const TERMINAL_INTERACTION_RESPONSE_KINDS = [
   "confirm"
 ] as const;
 export const TERMINAL_INTERACTION_AGENTS = ["codex", "claude"] as const;
+export const TERMINAL_INTERACTION_SUBJECT_KINDS = [
+  "managed_turn",
+  "terminal_watch"
+] as const;
+export const TERMINAL_INTERACTION_RESPONSE_AUTHORITIES = [
+  "executable",
+  "notify_only"
+] as const;
 
 export const TERMINAL_INTERACTION_LIMITS = Object.freeze({
   maxProjectionBytes: 32 * 1024,
@@ -43,6 +57,28 @@ export type TerminalInteractionResponseKind =
   typeof TERMINAL_INTERACTION_RESPONSE_KINDS[number];
 export type TerminalInteractionAgent =
   typeof TERMINAL_INTERACTION_AGENTS[number];
+export type TerminalInteractionSubjectKind =
+  typeof TERMINAL_INTERACTION_SUBJECT_KINDS[number];
+export type TerminalInteractionResponseAuthority =
+  typeof TERMINAL_INTERACTION_RESPONSE_AUTHORITIES[number];
+
+export interface TerminalInteractionManagedTurnSubject {
+  readonly kind: "managed_turn";
+  readonly turn_id: string;
+  /** The exact controller message that established managed ownership. */
+  readonly message_id: string;
+}
+
+export interface TerminalInteractionTerminalWatchSubject {
+  readonly kind: "terminal_watch";
+  readonly watch_id: string;
+  /** Hash of the exact task/acceptance anchor; never raw terminal content. */
+  readonly anchor_fingerprint: string;
+}
+
+export type TerminalInteractionSubject =
+  | TerminalInteractionManagedTurnSubject
+  | TerminalInteractionTerminalWatchSubject;
 
 export interface TerminalInteractionOption {
   readonly option_id: string;
@@ -109,6 +145,52 @@ export interface TerminalInteractionProjection {
   };
 }
 
+/**
+ * Subject-aware public projection. `subject` is authoritative. `turn_id` is a
+ * deprecated managed-Turn compatibility alias and is forbidden for Watch
+ * subjects, so Watch integrations never invent a fake Turn.
+ */
+export type TerminalInteractionSubjectProjection = {
+  readonly schema: typeof TERMINAL_INTERACTION_SCHEMA;
+  readonly version: typeof TERMINAL_INTERACTION_SUBJECT_VERSION;
+  readonly interaction_id: string;
+  readonly subject: TerminalInteractionSubject;
+  readonly agent: TerminalInteractionAgent;
+  readonly kind: TerminalInteractionKind;
+  readonly state: TerminalInteractionState;
+  readonly step: {
+    readonly index: number;
+    readonly total: number;
+  };
+  readonly questions: readonly TerminalInteractionQuestion[];
+  readonly expires_at: string;
+  /** Stable across monitor/Watch observation of the same native surface. */
+  readonly surface_id: string;
+  /** SHA-256 of the normalized native prompt, never raw terminal content. */
+  readonly prompt_fingerprint: string;
+  readonly response_authority: TerminalInteractionResponseAuthority;
+  readonly capabilities: {
+    readonly respond: boolean;
+    readonly batch_response: boolean;
+    readonly free_text: boolean;
+    readonly multi_select: boolean;
+  };
+} & (
+  | {
+      readonly subject: TerminalInteractionManagedTurnSubject;
+      /** @deprecated Read `subject.turn_id`; retained for managed v1 clients. */
+      readonly turn_id?: string;
+    }
+  | {
+      readonly subject: TerminalInteractionTerminalWatchSubject;
+      readonly turn_id?: never;
+    }
+);
+
+export type TerminalInteractionAnyProjection =
+  | TerminalInteractionProjection
+  | TerminalInteractionSubjectProjection;
+
 interface TerminalInteractionAnswerBase {
   readonly question_id: string;
 }
@@ -148,6 +230,26 @@ export interface TerminalInteractionResponse {
   readonly turn_id: string;
   readonly answers: readonly TerminalInteractionAnswer[];
 }
+
+export type TerminalInteractionSubjectResponse = {
+  readonly interaction_id: string;
+  readonly subject: TerminalInteractionSubject;
+  readonly answers: readonly TerminalInteractionAnswer[];
+} & (
+  | {
+      readonly subject: TerminalInteractionManagedTurnSubject;
+      /** @deprecated Optional compatibility assertion for managed clients. */
+      readonly turn_id?: string;
+    }
+  | {
+      readonly subject: TerminalInteractionTerminalWatchSubject;
+      readonly turn_id?: never;
+    }
+);
+
+export type TerminalInteractionAnyResponse =
+  | TerminalInteractionResponse
+  | TerminalInteractionSubjectResponse;
 
 export type TerminalInteractionValidationCode =
   | "invalid_type"
@@ -511,6 +613,78 @@ function parseExpiresAt(value: unknown): string {
   return expiresAt;
 }
 
+function parseSha256(value: unknown, path: string): string {
+  const fingerprint = parseBoundedString(value, path, 64);
+  if (!/^[0-9a-f]{64}$/u.test(fingerprint)) {
+    fail("invalid_value", path, "must be a lowercase SHA-256 fingerprint");
+  }
+  return fingerprint;
+}
+
+export function validateTerminalInteractionSubject(
+  value: unknown,
+  path = "$.subject"
+): TerminalInteractionSubject {
+  const candidate = parseRecord(value, path, [
+    "kind",
+    "turn_id",
+    "message_id",
+    "watch_id",
+    "anchor_fingerprint"
+  ]);
+  const kind = parseEnum(
+    candidate.kind,
+    `${path}.kind`,
+    TERMINAL_INTERACTION_SUBJECT_KINDS
+  );
+  if (kind === "managed_turn") {
+    const record = parseRecord(value, path, ["kind", "turn_id", "message_id"]);
+    return {
+      kind,
+      turn_id: parseIdentifier(record.turn_id, `${path}.turn_id`),
+      message_id: parseIdentifier(record.message_id, `${path}.message_id`)
+    };
+  }
+  const record = parseRecord(value, path, [
+    "kind",
+    "watch_id",
+    "anchor_fingerprint"
+  ]);
+  return {
+    kind,
+    watch_id: parseIdentifier(record.watch_id, `${path}.watch_id`),
+    anchor_fingerprint: parseSha256(
+      record.anchor_fingerprint,
+      `${path}.anchor_fingerprint`
+    )
+  };
+}
+
+export function terminalInteractionSubjectId(
+  subject: TerminalInteractionSubject
+): string {
+  return subject.kind === "managed_turn" ? subject.turn_id : subject.watch_id;
+}
+
+export function terminalInteractionSubjectKey(
+  subject: TerminalInteractionSubject
+): string {
+  return `${subject.kind}:${terminalInteractionSubjectId(subject)}`;
+}
+
+export function sameTerminalInteractionSubject(
+  left: TerminalInteractionSubject,
+  right: TerminalInteractionSubject
+): boolean {
+  return left.kind === right.kind &&
+    terminalInteractionSubjectId(left) === terminalInteractionSubjectId(right) &&
+    (left.kind === "managed_turn"
+      ? left.message_id ===
+        (right as TerminalInteractionManagedTurnSubject).message_id
+      : left.anchor_fingerprint ===
+        (right as TerminalInteractionTerminalWatchSubject).anchor_fingerprint);
+}
+
 export function validateTerminalInteractionProjection(
   value: unknown
 ): TerminalInteractionProjection {
@@ -551,6 +725,113 @@ export function validateTerminalInteractionProjection(
     expires_at: expiresAt,
     capabilities
   };
+}
+
+export function validateTerminalInteractionSubjectProjection(
+  value: unknown
+): TerminalInteractionSubjectProjection {
+  assertPayloadSize(value, "$projection");
+  const record = parseRecord(value, "$", [
+    "schema",
+    "version",
+    "interaction_id",
+    "subject",
+    "turn_id",
+    "agent",
+    "kind",
+    "state",
+    "step",
+    "questions",
+    "expires_at",
+    "surface_id",
+    "prompt_fingerprint",
+    "response_authority",
+    "capabilities"
+  ]);
+  if (record.schema !== TERMINAL_INTERACTION_SCHEMA) {
+    fail("invalid_value", "$.schema", `must equal ${TERMINAL_INTERACTION_SCHEMA}`);
+  }
+  if (record.version !== TERMINAL_INTERACTION_SUBJECT_VERSION) {
+    fail(
+      "invalid_value",
+      "$.version",
+      `must equal ${TERMINAL_INTERACTION_SUBJECT_VERSION}`
+    );
+  }
+  const subject = validateTerminalInteractionSubject(record.subject);
+  let legacyTurnId: string | undefined;
+  if (record.turn_id !== undefined) {
+    if (subject.kind !== "managed_turn") {
+      fail("unknown_field", "$.turn_id", "is forbidden for terminal_watch subjects");
+    }
+    legacyTurnId = parseIdentifier(record.turn_id, "$.turn_id");
+    if (legacyTurnId !== subject.turn_id) {
+      fail("interaction_mismatch", "$.turn_id", "must match subject.turn_id");
+    }
+  }
+  const questions = parseQuestions(record.questions);
+  const capabilities = parseCapabilities(record.capabilities);
+  assertCapabilitiesMatchQuestions(capabilities, questions);
+  const state = parseEnum(record.state, "$.state", TERMINAL_INTERACTION_STATES);
+  const responseAuthority = parseEnum(
+    record.response_authority,
+    "$.response_authority",
+    TERMINAL_INTERACTION_RESPONSE_AUTHORITIES
+  );
+  if (
+    capabilities.respond &&
+    (state !== "pending" || responseAuthority !== "executable")
+  ) {
+    fail(
+      "invalid_value",
+      "$.capabilities.respond",
+      "requires a pending interaction with executable response authority"
+    );
+  }
+  if (responseAuthority === "notify_only" && capabilities.respond) {
+    fail(
+      "invalid_value",
+      "$.capabilities.respond",
+      "must be false for notify-only response authority"
+    );
+  }
+  const common = {
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_SUBJECT_VERSION,
+    interaction_id: parseIdentifier(record.interaction_id, "$.interaction_id"),
+    subject,
+    agent: parseEnum(record.agent, "$.agent", TERMINAL_INTERACTION_AGENTS),
+    kind: parseEnum(record.kind, "$.kind", TERMINAL_INTERACTION_KINDS),
+    state,
+    step: parseStep(record.step),
+    questions,
+    expires_at: parseExpiresAt(record.expires_at),
+    surface_id: parseIdentifier(record.surface_id, "$.surface_id"),
+    prompt_fingerprint: parseSha256(
+      record.prompt_fingerprint,
+      "$.prompt_fingerprint"
+    ),
+    response_authority: responseAuthority,
+    capabilities
+  };
+  return subject.kind === "managed_turn"
+    ? {
+        ...common,
+        subject,
+        ...(legacyTurnId === undefined ? {} : { turn_id: legacyTurnId })
+      }
+    : { ...common, subject };
+}
+
+export function validateAnyTerminalInteractionProjection(
+  value: unknown
+): TerminalInteractionAnyProjection {
+  if (!isRecord(value)) {
+    fail("invalid_type", "$", "must be an object");
+  }
+  return value.version === TERMINAL_INTERACTION_SUBJECT_VERSION
+    ? validateTerminalInteractionSubjectProjection(value)
+    : validateTerminalInteractionProjection(value);
 }
 
 function answerAllowedKeys(
@@ -673,7 +954,7 @@ function assertAnswerMatchesQuestion(
 
 function parseAnswers(
   value: unknown,
-  projection: TerminalInteractionProjection
+  projection: Pick<TerminalInteractionProjection, "questions">
 ): TerminalInteractionAnswer[] {
   if (!Array.isArray(value)) {
     fail("invalid_type", "$.answers", "must be an array");
@@ -753,4 +1034,87 @@ export function validateTerminalInteractionResponse(
     turn_id: turnId,
     answers: parseAnswers(record.answers, projection)
   };
+}
+
+export function validateTerminalInteractionSubjectResponse(
+  value: unknown,
+  authoritativeStoredProjection: unknown,
+  options: {
+    now?: Date;
+    allowExpiredForLiveRecapture?: boolean;
+  } = {}
+): TerminalInteractionSubjectResponse {
+  assertPayloadSize(value, "$response");
+  const projection = validateTerminalInteractionSubjectProjection(
+    authoritativeStoredProjection
+  );
+  if (projection.state !== "pending") {
+    fail("response_not_allowed", "$.state", "interaction is not pending");
+  }
+  if (
+    !projection.capabilities.respond ||
+    projection.response_authority !== "executable"
+  ) {
+    fail(
+      "response_not_allowed",
+      "$.capabilities.respond",
+      "interaction is not executable"
+    );
+  }
+  const now = options.now ?? new Date();
+  if (
+    !options.allowExpiredForLiveRecapture &&
+    Date.parse(projection.expires_at) <= now.getTime()
+  ) {
+    fail("expired", "$.expires_at", "interaction offer has expired");
+  }
+  const record = parseRecord(value, "$", [
+    "interaction_id",
+    "subject",
+    "turn_id",
+    "answers"
+  ]);
+  const interactionId = parseIdentifier(record.interaction_id, "$.interaction_id");
+  if (interactionId !== projection.interaction_id) {
+    fail("interaction_mismatch", "$.interaction_id", "does not match projection");
+  }
+  const subject = validateTerminalInteractionSubject(record.subject);
+  if (!sameTerminalInteractionSubject(subject, projection.subject)) {
+    fail("interaction_mismatch", "$.subject", "does not match projection subject");
+  }
+  let legacyTurnId: string | undefined;
+  if (record.turn_id !== undefined) {
+    if (subject.kind !== "managed_turn") {
+      fail("unknown_field", "$.turn_id", "is forbidden for terminal_watch subjects");
+    }
+    legacyTurnId = parseIdentifier(record.turn_id, "$.turn_id");
+    if (legacyTurnId !== subject.turn_id) {
+      fail("interaction_mismatch", "$.turn_id", "must match subject.turn_id");
+    }
+  }
+  const answers = parseAnswers(record.answers, projection);
+  return subject.kind === "managed_turn"
+    ? {
+        interaction_id: interactionId,
+        subject,
+        ...(legacyTurnId === undefined ? {} : { turn_id: legacyTurnId }),
+        answers
+      }
+    : { interaction_id: interactionId, subject, answers };
+}
+
+export function validateAnyTerminalInteractionResponse(
+  value: unknown,
+  authoritativeStoredProjection: unknown,
+  options: {
+    now?: Date;
+    allowExpiredForLiveRecapture?: boolean;
+  } = {}
+): TerminalInteractionAnyResponse {
+  const projection = validateAnyTerminalInteractionProjection(
+    authoritativeStoredProjection
+  );
+  return projection.version === TERMINAL_INTERACTION_SUBJECT_VERSION
+    ? validateTerminalInteractionSubjectResponse(value, projection, options)
+    : validateTerminalInteractionResponse(value, projection, options);
 }
