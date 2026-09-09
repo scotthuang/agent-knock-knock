@@ -4232,9 +4232,7 @@ test("v3 acceptance monitor defers a contended writer without weakening durable 
         fs.unlinkSync(writerLockPath);
       }, 10250);
     `;
-    lockReleaser = spawn(process.execPath, ["-e", releaseScript], {
-      stdio: "ignore"
-    });
+    lockReleaser = spawnFixtureNodeEval(releaseScript);
 
     const monitored = await runCli([
       "monitor",
@@ -4856,6 +4854,276 @@ test("multi-root unavailable identity uses the exact inventory token and binds t
       false
     );
     assert.deepEqual(fixture.ttyViewportInspectionPids, []);
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("human terminal Send keeps managed ownership across transient writer contention", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Keep this explicit Send managed after the writer lease clears.";
+  const writerLockPath = path.join(fixture.storeDir, ".akk-writer.lock");
+  let lockReleaser: ReturnType<typeof spawn> | undefined;
+  try {
+    enableFixtureCandidateInventory(fixture, [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ]);
+    const terminal = await listFixtureTerminal(fixture);
+    const action = assertTerminalUserExplicitSendAction(terminal);
+    fs.writeFileSync(writerLockPath, `${JSON.stringify({
+      pid: process.pid,
+      token: "human-send-transient-writer-contention",
+      created_at: new Date().toISOString()
+    })}\n`, { mode: 0o600 });
+    lockReleaser = spawnFixtureNodeEval(`
+      const fs = require("node:fs");
+      const writerLockPath = ${JSON.stringify(writerLockPath)};
+      const terminalLockDir = ${JSON.stringify(path.join(
+        String(fixture.environment.AKK_RUNTIME_DIR),
+        "terminal-locks"
+      ))};
+      const deadline = Date.now() + 5000;
+      const releaseAfterTerminalLock = () => {
+        const locks = fs.existsSync(terminalLockDir)
+          ? fs.readdirSync(terminalLockDir).filter((name) =>
+              name.startsWith("terminal-bridge-send-") && name.endsWith(".lock")
+            )
+          : [];
+        if (locks.length >= 2) {
+          setTimeout(() => fs.unlinkSync(writerLockPath), 50);
+          return;
+        }
+        if (Date.now() >= deadline) process.exit(2);
+        setTimeout(releaseAfterTerminalLock, 5);
+      };
+      releaseAfterTerminalLock();
+    `);
+    fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
+
+    const sendArgs = userExplicitDeferredForegroundSendArgs(
+      fixture,
+      action,
+      message
+    );
+    sendArgs.push(
+      "--gateway-method",
+      "agent-knock-knock.callback",
+      "--gateway-session",
+      "agent:test:writer-grace",
+      "--openclaw-session",
+      "agent:test:writer-grace"
+    );
+    const sent = await runCli(
+      sendArgs,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+    assert.equal(output.management_mode, "managed", sent.stdout);
+    assert.equal(output.agent_acceptance, "proven", sent.stdout);
+    assert.equal(output.delivered_unmanaged, undefined);
+    assert.deepEqual(output.capabilities, {
+      callback: true,
+      interaction_notify: true,
+      interaction_respond: true
+    });
+    assert.equal(listManagedSessions(fixture.storeDir).length, 1);
+    assert.equal(listConversations(fixture.storeDir).length, 1);
+    assert.equal(
+      loadManagedSession(fixture.storeDir, String(output.session_id))
+        .binding?.native_thread_id,
+      NATIVE_THREAD_ID
+    );
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    if (lockReleaser && lockReleaser.exitCode === null) {
+      lockReleaser.kill("SIGKILL");
+    }
+    fs.rmSync(writerLockPath, { force: true });
+    fixture.cleanup();
+  }
+});
+
+for (const sourceLessCase of [
+  {
+    label: "ambiguous multi-root inventory",
+    roots: [NATIVE_THREAD_ID, EXTERNAL_THREAD_ID],
+    accepted: SECOND_EXTERNAL_THREAD_ID
+  },
+  {
+    label: "stale sole-root observation",
+    roots: [NATIVE_THREAD_ID],
+    accepted: EXTERNAL_THREAD_ID
+  }
+] as const) {
+  test(`human terminal Send binds without a claimed source from ${sourceLessCase.label}`, async () => {
+    const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+    const message = `Bind a source-less Send from ${sourceLessCase.label}.`;
+    try {
+      enableFixtureCandidateInventory(fixture, [...sourceLessCase.roots]);
+      const terminal = await listFixtureTerminal(fixture);
+      const action = assertTerminalUserExplicitSendAction(terminal);
+      assert.deepEqual(listManagedSessions(fixture.storeDir), []);
+      assert.deepEqual(listConversations(fixture.storeDir), []);
+
+      fixture.acceptanceNativeThreadIdsOnEnter = [sourceLessCase.accepted];
+      const sent = await runCli(
+        userExplicitDeferredForegroundSendArgs(
+          fixture,
+          action,
+          message
+        ),
+        codexNativeAcceptanceEnv(fixture.environment)
+      );
+      assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+      const output = JSON.parse(sent.stdout);
+      assert.equal(output.delivery_receipt, "agent_accepted", sent.stdout);
+      assert.equal(output.conversation.native_thread_id, sourceLessCase.accepted);
+      assert.equal(output.delivered_unmanaged, undefined);
+      assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+      assert.equal(listManagedSessions(fixture.storeDir).length, 1);
+      assert.equal(
+        loadManagedSession(fixture.storeDir, String(output.session_id))
+          .binding?.native_thread_id,
+        sourceLessCase.accepted
+      );
+      const anchor = persistedCodexV3AcceptanceAnchor(
+        fixture,
+        String(output.turn_id)
+      );
+      assert.deepEqual(
+        anchor.candidate_rollouts.map(
+          (candidate: Record<string, any>) => candidate.native_thread_id
+        ),
+        [...sourceLessCase.roots]
+      );
+      assertSingleTaskInput(fixture, message);
+      assert.equal(
+        readTmuxCalls(fixture.tmuxCallsPath).some((call) =>
+          call.args.includes("/status")
+        ),
+        false
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+}
+
+test("source-less human Send recovers a zero-match candidate without replay", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Recover this source-less candidate after its first poll.";
+  try {
+    enableFixtureCandidateInventory(fixture, [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ]);
+    const terminal = await listFixtureTerminal(fixture);
+    const action = assertTerminalUserExplicitSendAction(terminal);
+    fixture.acceptanceNativeThreadIdsOnEnter = [];
+    fixture.cliPid = process.pid + 500_000;
+
+    const pending = await runCli(
+      userExplicitDeferredForegroundSendArgs(fixture, action, message),
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(pending.status, 0, pending.stderr || pending.stdout);
+    const pendingOutput = JSON.parse(pending.stdout);
+    assert.equal(pendingOutput.status, "submission_pending_acceptance");
+    assert.equal(pendingOutput.submission_outcome, "pending_acceptance");
+    assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+    assert.equal(listManagedSessions(fixture.storeDir).length, 1);
+    assertSingleTaskInput(fixture, message);
+
+    appendNativeAcceptance(
+      fixture.rolloutPath,
+      message,
+      FIRST_NATIVE_TURN_ID,
+      {
+        nativeThreadId: NATIVE_THREAD_ID,
+        workspace: String(fixture.terminalControl.currentPath),
+        codexVersion: fixture.codexVersion,
+        timestamp: new Date().toISOString()
+      }
+    );
+    appendFixtureCompletion(fixture, NATIVE_THREAD_ID);
+    const pendingTurn = listConversations(fixture.storeDir).find((turn) =>
+      turn.turn_id === pendingOutput.turn_id
+    );
+    assert.ok(pendingTurn);
+    const monitored = await runCli([
+      "monitor",
+      "--terminal-bridge",
+      "--state",
+      String(pendingTurn.state_path),
+      "--log",
+      String(pendingTurn.event_log_path),
+      ...codexNoRolloutStoreArgs(fixture),
+      "--poll-interval-ms",
+      "50",
+      "--agent-timeout-minutes",
+      "1",
+      "--agent-hard-timeout-minutes",
+      "2"
+    ], codexNativeAcceptanceEnv(fixture.environment));
+    assert.equal(monitored.status, 0, monitored.stderr || monitored.stdout);
+    const finalTurn = listConversations(fixture.storeDir).find((turn) =>
+      turn.turn_id === pendingOutput.turn_id
+    );
+    assert.ok(finalTurn);
+    assert.equal(finalTurn.status, "idle");
+    assert.equal(finalTurn.native_thread_id, NATIVE_THREAD_ID);
+    assert.equal(
+      loadManagedSession(fixture.storeDir, String(pendingOutput.session_id))
+        .binding?.native_thread_id,
+      NATIVE_THREAD_ID
+    );
+    assertSingleTaskInput(fixture, message);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("source-less human Send makes multiple exact candidate matches uncertain without replay", async () => {
+  const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
+  const message = "Never guess between two source-less exact acceptors.";
+  try {
+    enableFixtureCandidateInventory(fixture, [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ]);
+    const terminal = await listFixtureTerminal(fixture);
+    const action = assertTerminalUserExplicitSendAction(terminal);
+    fixture.acceptanceNativeThreadIdsOnEnter = [
+      NATIVE_THREAD_ID,
+      EXTERNAL_THREAD_ID
+    ];
+    const args = userExplicitDeferredForegroundSendArgs(
+      fixture,
+      action,
+      message
+    );
+    const sent = await runCli(
+      args,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(sent.status, 0, sent.stderr || sent.stdout);
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.status, "submission_uncertain");
+    assert.equal(output.submission_outcome, "uncertain");
+    assert.equal(output.do_not_retry, true);
+    assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
+    assertSingleTaskInput(fixture, message);
+
+    const replay = await runCli(
+      args,
+      codexNativeAcceptanceEnv(fixture.environment)
+    );
+    assert.equal(replay.status, 1, replay.stdout);
+    assert.match(replay.stderr, /uncertain|do not retry|dispatch ledger/iu);
     assertSingleTaskInput(fixture, message);
   } finally {
     fixture.cleanup();
@@ -6103,7 +6371,12 @@ test("a non-companion bound candidate claim cannot hide or stale user-priority p
     const output = JSON.parse(sent.stdout);
     assert.equal(output.delivered, true, sent.stdout);
     assert.equal(output.delivered_unmanaged, true, sent.stdout);
-    assert.equal(output.management_mode, "unmanaged_fallback", sent.stdout);
+    assert.equal(output.management_mode, "unmanaged", sent.stdout);
+    assert.equal(
+      output.legacy_management_mode,
+      "unmanaged_fallback",
+      sent.stdout
+    );
     assertSingleTaskInput(fixture, message);
     assert.deepEqual(listDeferredForegroundTransfers(fixture.storeDir), []);
     assert.deepEqual(listConversations(fixture.storeDir), []);
@@ -8479,6 +8752,10 @@ function runCliSubprocess(args: string[], env: NodeJS.ProcessEnv) {
     env,
     timeout: 60_000
   });
+}
+
+function spawnFixtureNodeEval(source: string) {
+  return spawn(process.execPath, ["-e", source], { stdio: "ignore" });
 }
 
 const inProcessFixtures = new Map<string, NoRolloutFixture>();

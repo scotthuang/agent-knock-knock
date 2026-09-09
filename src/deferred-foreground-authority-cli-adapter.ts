@@ -5,6 +5,11 @@ import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
 import { callbackExpectedForPrimaryOutbox } from
   "./callback-route-authority.js";
+import {
+  callbackDeliveryAttemptOutcome,
+  callbackDeliveryHasAcceptedTransport
+} from
+  "./callback-outbox-policy.js";
 import { canonicalJson } from "./canonical-json.js";
 import type {
   DeferredForegroundTransfer,
@@ -28,6 +33,8 @@ import {
   isTerminalDispatchOwnerReleasedStatus,
   sessionIdForConversation,
   turnIdForConversation,
+  validateMessageForConversation,
+  type AgentMessage,
   type Conversation
 } from "./protocol.js";
 import {
@@ -38,11 +45,15 @@ import {
 import {
   candidateSourceRootAuthorityMatches,
   exactBoundCodexSendSource,
+  isCompleteNativeRollout,
   terminalControlsShareIncarnation,
   type CodexSendAuthorityContext
 } from "./terminal-authority-policy.js";
+import { rolloutFileIdentityMatches } from
+  "./terminal-binding-authority.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import {
+  sameTerminalControlEvidenceIncarnation,
   terminalControlEvidenceMatches,
   terminalEndpointFromControlRef
 } from "./terminal-control-ref.js";
@@ -335,6 +346,299 @@ function exactReleasedSafeAbortedCandidateTurn(
     canonicalJson(matchingReceipts[0]) === canonicalJson(submission);
 }
 
+export type HumanExplicitCallbackDebtDisposition =
+  | "supersedable"
+  | "settled";
+
+export type HumanExplicitCallbackDebtRetirementDisposition =
+  | HumanExplicitCallbackDebtDisposition
+  | "no_callback_debt";
+
+/**
+ * A private managed token is an optional fast-path hint for human Send. It may
+ * be omitted, but a supplied token must still name the exact current binding.
+ */
+export function humanExplicitCallbackDebtManagedTokenMatches(
+  expectedManagedToken: unknown,
+  session: ManagedSessionState
+): boolean {
+  const expected = stringValue(expectedManagedToken);
+  try {
+    return expected === undefined ||
+      expected === managedSessionBindingToken(session);
+  } catch {
+    return false;
+  }
+}
+
+interface HumanExplicitCallbackDebtEvidence {
+  callbackDelivery?: Record<string, any>;
+}
+
+function callbackDebtTerminalControlMatches(
+  takeover: Record<string, any>,
+  binding: ManagedTerminalBinding
+): boolean {
+  return Boolean(
+    takeover.terminal_control &&
+    sameTerminalControlEvidenceIncarnation(
+      takeover.terminal_control,
+      binding.terminal_control
+    ) &&
+    (
+      takeover.terminal_endpoint === undefined ||
+      sameTerminalControlEvidenceIncarnation(
+        takeover.terminal_endpoint,
+        binding.terminal_endpoint ?? binding.terminal_control
+      )
+    )
+  );
+}
+
+function callbackDebtStoreDirsMatch(
+  turn: Conversation,
+  submission: Record<string, any>
+): boolean {
+  const turnStoreDir = stringValue(turn.store_dir);
+  const submissionStoreDir = stringValue(submission.store_dir);
+  return turnStoreDir === undefined
+    ? submissionStoreDir === undefined
+    : submissionStoreDir !== undefined &&
+      path.resolve(submissionStoreDir) === path.resolve(turnStoreDir);
+}
+
+function callbackDebtSubmissionControlMatches(
+  submission: Record<string, any>,
+  binding: ManagedTerminalBinding
+): boolean {
+  return stringValue(submission.terminal_target) ===
+      binding.terminal_control.target &&
+    (submission.terminal_socket_path ?? undefined) ===
+      (binding.terminal_control.socketPath ?? undefined) &&
+    Number(submission.terminal_pane_pid) === binding.terminal_control.panePid &&
+    (
+      submission.terminal_endpoint === undefined ||
+      sameTerminalControlEvidenceIncarnation(
+        submission.terminal_endpoint,
+        binding.terminal_endpoint ?? binding.terminal_control
+      )
+    );
+}
+
+function callbackDebtSubmissionMatches(
+  turn: Conversation,
+  session: ManagedSessionState,
+  binding: ManagedTerminalBinding,
+  submission: Record<string, any> | undefined
+): boolean {
+  return Boolean(
+    submission?.status === "agent_accepted" &&
+    stringValue(submission.session_id) === session.session_id &&
+    stringValue(submission.turn_id) === turnIdForConversation(turn) &&
+    stringValue(submission.binding_id) === binding.binding_id &&
+    Number(submission.binding_generation) === binding.generation &&
+    stringValue(submission.native_thread_id) === binding.native_thread_id &&
+    stringValue(submission.executor_kind) === "codex" &&
+    stringValue(submission.openclaw_session) === turn.openclaw_session &&
+    callbackDebtSubmissionControlMatches(submission, binding) &&
+    path.resolve(turn.workspace) === path.resolve(session.workspace) &&
+    callbackDebtStoreDirsMatch(turn, submission)
+  );
+}
+
+function callbackDebtBindingMatches(
+  turn: Conversation,
+  session: ManagedSessionState,
+  binding: ManagedTerminalBinding,
+  takeover: Record<string, any>
+): boolean {
+  const rollout = isCompleteNativeRollout(takeover.terminal_agent_rollout)
+    ? takeover.terminal_agent_rollout
+    : undefined;
+  return session.agent === "codex" &&
+    session.status === "bound" &&
+    Boolean(binding.native_thread_id) &&
+    sessionIdForConversation(turn) === session.session_id &&
+    turn.terminal_binding_id === binding.binding_id &&
+    turn.terminal_binding_generation === binding.generation &&
+    turn.native_thread_id === binding.native_thread_id &&
+    takeover.terminal_binding_id === binding.binding_id &&
+    takeover.terminal_binding_generation === binding.generation &&
+    takeover.terminal_agent_session_id === binding.native_thread_id &&
+    Number(takeover.terminal_agent_pid) === binding.native_process.pid &&
+    takeover.terminal_agent_process_uuid ===
+      binding.native_process.process_uuid &&
+    takeover.terminal_agent_process_birth ===
+      binding.native_process.process_birth &&
+    rolloutFileIdentityMatches(binding.native_process.rollout, rollout) &&
+    callbackDebtTerminalControlMatches(takeover, binding);
+}
+
+function callbackNotificationDebtSettled(turn: Conversation): boolean {
+  const delivery = isRecord(turn.callback_notification_delivery)
+    ? turn.callback_notification_delivery
+    : undefined;
+  if (!delivery || delivery.status === "delivered") return true;
+  return delivery.status === "superseded" &&
+    stringValue(delivery.superseded_at) !== undefined &&
+    stringValue(delivery.superseded_reason) !== undefined &&
+    !callbackDeliveryHasAcceptedTransport(delivery);
+}
+
+function callbackInteractiveDebtSettled(
+  turn: Conversation,
+  takeover: Record<string, any>
+): boolean {
+  return takeover.terminal_bridge_interaction_notification === undefined &&
+    takeover.terminal_bridge_interaction_dispatch === undefined &&
+    takeover.terminal_bridge_approval === undefined &&
+    takeover.terminal_bridge_approval_dispatch === undefined &&
+    callbackNotificationDebtSettled(turn);
+}
+
+function exactHumanExplicitCallbackDebtEvidence(
+  turn: Conversation,
+  session: ManagedSessionState
+): HumanExplicitCallbackDebtEvidence | undefined {
+  const binding = session.binding;
+  const takeover = isRecord(turn.native_session_takeover)
+    ? turn.native_session_takeover
+    : undefined;
+  const submission = isRecord(takeover?.terminal_bridge_submission)
+    ? takeover.terminal_bridge_submission
+    : undefined;
+  if (
+    !binding ||
+    !takeover ||
+    !callbackDebtBindingMatches(turn, session, binding, takeover) ||
+    !callbackDebtSubmissionMatches(turn, session, binding, submission) ||
+    !isTerminalDispatchOwnerReleasedStatus(turn.status) ||
+    !callbackInteractiveDebtSettled(turn, takeover)
+  ) {
+    return undefined;
+  }
+  return {
+    callbackDelivery: isRecord(turn.callback_delivery)
+      ? turn.callback_delivery
+      : undefined
+  };
+}
+
+function callbackMessageMatchesTurn(
+  turn: Conversation,
+  message: unknown
+): message is AgentMessage {
+  if (!isRecord(message)) return false;
+  try {
+    validateMessageForConversation(turn, message as unknown as AgentMessage);
+    return true;
+  } catch {
+    // Corrupt or cross-Turn callback payloads are never superseded.
+    return false;
+  }
+}
+
+function callbackDeliveryIsSettled(
+  delivery: Record<string, any>
+): boolean {
+  if (delivery.status === "delivered") return true;
+  return delivery.status === "superseded" &&
+    delivery.superseded_reason === "superseded_by_user_explicit_send" &&
+    stringValue(delivery.superseded_at) !== undefined &&
+    !callbackDeliveryHasAcceptedTransport(delivery);
+}
+
+function callbackTransportNeverStarted(
+  delivery: Record<string, any>
+): boolean {
+  return stringValue(delivery.transport_started_at) === undefined &&
+    delivery.attempt_pid == null &&
+    stringValue(delivery.attempt_lease_expires_at) === undefined;
+}
+
+function callbackStatusMayBeOverridden(
+  delivery: Record<string, any>
+): boolean {
+  if (delivery.status === "pending") {
+    return !Object.hasOwn(delivery, "attempt_outcome") &&
+      callbackTransportNeverStarted(delivery);
+  }
+  if (delivery.status !== "failed") return false;
+  let outcome: ReturnType<typeof callbackDeliveryAttemptOutcome>;
+  try {
+    outcome = callbackDeliveryAttemptOutcome(delivery);
+  } catch {
+    return false;
+  }
+  // Human-priority Send deliberately retires a failed lifecycle callback with
+  // a valid non-accepted result, including `uncertain`. In that case the old
+  // callback may already have reached the controller: supersede means only
+  // "do not retry this obsolete completion", never "proven undelivered".
+  return outcome !== undefined && outcome.disposition !== "accepted";
+}
+
+function callbackDeliveryShapeMatchesTurn(
+  turn: Conversation,
+  delivery: Record<string, any>
+): boolean {
+  const message = delivery.message;
+  return callbackMessageMatchesTurn(turn, message) &&
+    ["done", "error"].includes(message.type) &&
+    message.requires_response === false &&
+    (
+      stringValue(delivery.kind) === undefined ||
+      delivery.kind === "lifecycle"
+    ) &&
+    (
+      stringValue(delivery.final_status) === undefined ||
+      delivery.final_status === turn.status
+    );
+}
+
+function callbackDeliveryMayBeSuperseded(
+  turn: Conversation,
+  delivery: Record<string, any>
+): boolean {
+  return callbackStatusMayBeOverridden(delivery) &&
+    !callbackDeliveryHasAcceptedTransport(delivery) &&
+    callbackDeliveryShapeMatchesTurn(turn, delivery);
+}
+
+/**
+ * Classify callback state only after the Turn has been proven to belong to the
+ * exact current binding generation. Undefined is deliberately fail-closed.
+ */
+export function humanExplicitCallbackDebtDisposition(
+  turn: Conversation,
+  session: ManagedSessionState
+): HumanExplicitCallbackDebtDisposition | undefined {
+  const evidence = exactHumanExplicitCallbackDebtEvidence(turn, session);
+  const delivery = evidence?.callbackDelivery;
+  if (!evidence) return undefined;
+  if (!delivery) {
+    return callbackExpectedForPrimaryOutbox(turn) ? undefined : "settled";
+  }
+  if (callbackDeliveryIsSettled(delivery)) return "settled";
+  return callbackDeliveryMayBeSuperseded(turn, delivery)
+    ? "supersedable"
+    : undefined;
+}
+
+/**
+ * Classify only the lifecycle callback record retired by a new human Send.
+ * A Turn without that record is not proof of safe continuation: exact safe
+ * abort and explicit-abandonment evidence remain mandatory in
+ * deferredCandidateSourceTurnHistory. It merely cannot veto retirement of a
+ * different Turn's independently proven callback debt.
+ */
+export function humanExplicitCallbackDebtRetirementDisposition(
+  turn: Conversation,
+  session: ManagedSessionState
+): HumanExplicitCallbackDebtRetirementDisposition | undefined {
+  if (!isRecord(turn.callback_delivery)) return "no_callback_debt";
+  return humanExplicitCallbackDebtDisposition(turn, session);
+}
+
 export function deferredCandidateSourceTurnHistory(
   ports: DeferredForegroundAuthorityAdapterPorts,
   storeDir: string,
@@ -349,9 +653,14 @@ export function deferredCandidateSourceTurnHistory(
     ports.turn.turnsForSession(storeDir, session.session_id)
   );
   if (!turns || turns.some((turn) => {
-    const callbackDelivered =
-      isRecord(turn.callback_delivery) &&
-      turn.callback_delivery.status === "delivered";
+    const callbackDelivery = isRecord(turn.callback_delivery)
+      ? turn.callback_delivery
+      : undefined;
+    const callbackSettled = callbackDelivery?.status === "delivered" ||
+      (
+        callbackDelivery?.status === "superseded" &&
+        humanExplicitCallbackDebtDisposition(turn, session) === "settled"
+      );
     const explicitlyAbandonedUncertain =
       exactExplicitlyAbandonedUncertainCandidateTurn(ports, {
         storeDir,
@@ -367,12 +676,12 @@ export function deferredCandidateSourceTurnHistory(
       !isTerminalDispatchOwnerReleasedStatus(turn.status) ||
       ports.turn.needsAttention(turn) ||
       (
-        isRecord(turn.callback_delivery) &&
-        !callbackDelivered
+        callbackDelivery !== undefined &&
+        !callbackSettled
       ) ||
       (
         callbackExpectedForPrimaryOutbox(turn) &&
-        !callbackDelivered &&
+        !callbackSettled &&
         !explicitlyAbandonedUncertain &&
         !safelyAbortedBeforeInput
       )

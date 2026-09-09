@@ -12,6 +12,7 @@ import {
   captureCodexCandidateSetRolloutAcceptanceAnchor,
   captureCodexHumanStartedActiveTaskAnchor,
   captureCodexRolloutAcceptanceAnchor,
+  detectCodexBoundQuestionnaireAttribution,
   detectCodexBoundRolloutCompletion,
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
@@ -26,6 +27,19 @@ import { terminalSubmissionReplayReceipt } from
 const SESSION_ID = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const REQUEST = "请检查第一行\nThen verify the second line.";
 const REQUEST_HASH = createHash("sha256").update(REQUEST).digest("hex");
+const QUESTIONNAIRE_PROMPT = "Choose a framework.";
+const QUESTIONNAIRE_OPTIONS = [
+  { label: "React", description: "Component model." },
+  { label: "Vue", description: "Progressive framework." }
+] as const;
+const QUESTIONNAIRE_SCREEN = {
+  currentStep: 1,
+  totalSteps: 1,
+  prompt: QUESTIONNAIRE_PROMPT,
+  responseKind: "single_select" as const,
+  options: QUESTIONNAIRE_OPTIONS,
+  exactShape: true
+};
 
 test("captures and completes one exact human-started Codex task without persisting its prompt", () => {
   const processBirth = "Tue Aug  4 14:15:13 2026";
@@ -816,6 +830,201 @@ test("observes an exact Codex turn_aborted as a bounded redacted failure", () =>
   }
 });
 
+test("attributes an exact accepted Codex questionnaire in a multi-root process", () => {
+  const fixture = codexQuestionnaireAttributionFixture();
+  try {
+    appendRecords(fixture.accepted.path, [
+      ...acceptedTurnRecords(REQUEST, 601),
+      requestUserInputRecord(turnId(601), "questionnaire-call-601")
+    ]);
+    appendRecords(fixture.other.path, [
+      ...acceptedTurnRecords("Unrelated active task", 602)
+    ]);
+
+    const result = detectCodexBoundQuestionnaireAttribution({
+      currentInventory: fixture.inventory(),
+      acceptedIdentity: fixture.acceptedIdentity(),
+      acceptanceId: turnId(601),
+      screen: QUESTIONNAIRE_SCREEN
+    });
+    assert.equal(result.status, "matched");
+    if (result.status === "matched") {
+      assert.match(result.evidenceFingerprint, /^[0-9a-f]{64}$/u);
+    }
+    assert.doesNotMatch(
+      JSON.stringify(result),
+      /Choose a framework|Component model|request_user_input/u,
+      "attribution results must not expose durable questionnaire arguments"
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("does not attribute a questionnaire whose screen matches another root", () => {
+  const fixture = codexQuestionnaireAttributionFixture();
+  try {
+    appendRecords(fixture.accepted.path, [
+      ...acceptedTurnRecords(REQUEST, 603),
+      requestUserInputRecord(
+        turnId(603),
+        "questionnaire-call-603",
+        "Choose a database."
+      )
+    ]);
+    appendRecords(fixture.other.path, [
+      ...acceptedTurnRecords("Unrelated questionnaire task", 604),
+      requestUserInputRecord(turnId(604), "questionnaire-call-604")
+    ]);
+
+    const result = detectCodexBoundQuestionnaireAttribution({
+      currentInventory: fixture.inventory(),
+      acceptedIdentity: fixture.acceptedIdentity(),
+      acceptanceId: turnId(603),
+      screen: QUESTIONNAIRE_SCREEN
+    });
+    assert.deepEqual(result, {
+      status: "not_matched",
+      code: "screen_signature_not_unique"
+    });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("fails closed when two roots expose the same questionnaire signature", () => {
+  const fixture = codexQuestionnaireAttributionFixture();
+  try {
+    appendRecords(fixture.accepted.path, [
+      ...acceptedTurnRecords(REQUEST, 605),
+      requestUserInputRecord(turnId(605), "questionnaire-call-605")
+    ]);
+    appendRecords(fixture.other.path, [
+      ...acceptedTurnRecords("Duplicate questionnaire task", 606),
+      requestUserInputRecord(turnId(606), "questionnaire-call-606")
+    ]);
+
+    const result = detectCodexBoundQuestionnaireAttribution({
+      currentInventory: fixture.inventory(),
+      acceptedIdentity: fixture.acceptedIdentity(),
+      acceptanceId: turnId(605),
+      screen: QUESTIONNAIRE_SCREEN
+    });
+    assert.deepEqual(result, {
+      status: "not_matched",
+      code: "screen_signature_not_unique"
+    });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("questionnaire attribution tolerates descriptor churn for one exact file", () => {
+  const fixture = codexQuestionnaireAttributionFixture();
+  try {
+    appendRecords(fixture.accepted.path, [
+      ...acceptedTurnRecords(REQUEST, 607),
+      requestUserInputRecord(turnId(607), "questionnaire-call-607")
+    ]);
+    const result = detectCodexBoundQuestionnaireAttribution({
+      currentInventory: fixture.inventory(),
+      acceptedIdentity: fixture.acceptedIdentity({ fd: "91r" }),
+      acceptanceId: turnId(607),
+      screen: QUESTIONNAIRE_SCREEN
+    });
+    assert.equal(result.status, "matched");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("questionnaire attribution requires the accepted root in the live inventory", () => {
+  const fixture = codexQuestionnaireAttributionFixture();
+  try {
+    appendRecords(fixture.accepted.path, [
+      ...acceptedTurnRecords(REQUEST, 608),
+      requestUserInputRecord(turnId(608), "questionnaire-call-608")
+    ]);
+    const result = detectCodexBoundQuestionnaireAttribution({
+      currentInventory: fixture.inventory([fixture.otherRoot]),
+      acceptedIdentity: fixture.acceptedIdentity(),
+      acceptanceId: turnId(608),
+      screen: QUESTIONNAIRE_SCREEN
+    });
+    assert.deepEqual(result, {
+      status: "not_matched",
+      code: "accepted_root_missing"
+    });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("questionnaire attribution rejects a request_user_input with paired output", () => {
+  const fixture = codexQuestionnaireAttributionFixture();
+  try {
+    appendRecords(fixture.accepted.path, [
+      ...acceptedTurnRecords(REQUEST, 609),
+      requestUserInputRecord(turnId(609), "questionnaire-call-609"),
+      requestUserInputOutputRecord("questionnaire-call-609")
+    ]);
+    const result = detectCodexBoundQuestionnaireAttribution({
+      currentInventory: fixture.inventory(),
+      acceptedIdentity: fixture.acceptedIdentity(),
+      acceptanceId: turnId(609),
+      screen: QUESTIONNAIRE_SCREEN
+    });
+    assert.deepEqual(result, {
+      status: "not_matched",
+      code: "accepted_call_not_unique"
+    });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("questionnaire attribution excludes aborted or overtaken accepted calls", () => {
+  const cases = [
+    {
+      suffix: 610,
+      trailing: turnAbortedRecord(610, "interrupted")
+    },
+    {
+      suffix: 611,
+      trailing: {
+        timestamp: "2026-08-07T01:00:01.700Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId(612) }
+      }
+    }
+  ];
+  for (const entry of cases) {
+    const fixture = codexQuestionnaireAttributionFixture();
+    try {
+      appendRecords(fixture.accepted.path, [
+        ...acceptedTurnRecords(REQUEST, entry.suffix),
+        requestUserInputRecord(
+          turnId(entry.suffix),
+          `questionnaire-call-${entry.suffix}`
+        ),
+        entry.trailing
+      ]);
+      const result = detectCodexBoundQuestionnaireAttribution({
+        currentInventory: fixture.inventory(),
+        acceptedIdentity: fixture.acceptedIdentity(),
+        acceptanceId: turnId(entry.suffix),
+        screen: QUESTIONNAIRE_SCREEN
+      });
+      assert.deepEqual(result, {
+        status: "not_matched",
+        code: "accepted_call_not_unique"
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
 test("candidate-set Codex acceptance uses the exact existing-root offset through completion", () => {
   const firstId = SESSION_ID;
   const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c451";
@@ -918,6 +1127,161 @@ test("candidate-set Codex acceptance admits a unique new PID-open root from offs
   }
 });
 
+test("candidate-set recovery scans a persisted post-anchor root after its descriptor closes", () => {
+  const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c456";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture([], nativeThreadId);
+  try {
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({ processUuid, processBirth, roots: [] }),
+      now: new Date("2026-08-07T00:59:58.000Z")
+    });
+    const recoveryCandidate = candidateIdentity(
+      nativeThreadId,
+      processUuid,
+      processBirth,
+      { ...fixture.identity, fd: "91r" }
+    );
+    const pending = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: []
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate
+    });
+    assert.equal(pending.status, "pending");
+    if (pending.status === "pending") {
+      assert.equal(pending.exact_matches, 0);
+    }
+
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 506));
+
+    const closed = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: []
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate
+    });
+    assert.equal(closed.status, "accepted");
+    if (closed.status === "accepted") {
+      assert.equal(closed.identity.sessionId, nativeThreadId);
+      assert.equal(closed.identity.rollout.fd, "91r");
+      assert.equal(closed.evidence.metadata?.anchor_offset_bytes, 0);
+    }
+
+    const reopened = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [candidateIdentity(
+          nativeThreadId,
+          processUuid,
+          processBirth,
+          fixture.identity
+        )]
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate
+    });
+    assert.equal(reopened.status, "accepted");
+    if (reopened.status === "accepted") {
+      assert.equal(reopened.identity.rollout.fd, fixture.identity.fd);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("candidate-set recovery fails closed when its persisted post-anchor root is replaced", () => {
+  const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c457";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture([], nativeThreadId);
+  try {
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({ processUuid, processBirth, roots: [] }),
+      now: new Date("2026-08-07T00:59:58.000Z")
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 507));
+    const recoveryCandidate = candidateIdentity(
+      nativeThreadId,
+      processUuid,
+      processBirth,
+      fixture.identity
+    );
+    fs.renameSync(fixture.path, `${fixture.path}.replaced`);
+    fs.writeFileSync(fixture.path, "", { mode: 0o600 });
+
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: []
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_scan_invalid");
+      assert.match(result.reason, /descriptor identity does not match/u);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("candidate-set recovery rejects a persisted candidate that conflicts with the current root", () => {
+  const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c458";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const persisted = codexFixture([], nativeThreadId);
+  const current = codexFixture([], nativeThreadId);
+  try {
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({ processUuid, processBirth, roots: [] })
+    });
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [candidateIdentity(
+          nativeThreadId,
+          processUuid,
+          processBirth,
+          current.identity
+        )]
+      }),
+      requestHash: REQUEST_HASH,
+      recoveryCandidate: candidateIdentity(
+        nativeThreadId,
+        processUuid,
+        processBirth,
+        persisted.identity
+      )
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_inventory_changed");
+      assert.match(result.reason, /conflicts with the current root inventory/u);
+    }
+  } finally {
+    persisted.cleanup();
+    current.cleanup();
+  }
+});
+
 test("candidate-set Codex acceptance rejects a newly opened historical rollout", () => {
   const nativeThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c455";
   const processBirth = "Tue Aug  4 14:15:13 2026";
@@ -953,7 +1317,7 @@ test("candidate-set Codex acceptance rejects a newly opened historical rollout",
   }
 });
 
-test("candidate-set Codex acceptance is uncertain for a missing anchor or multiple exact matches", () => {
+test("candidate-set Codex acceptance scans a frozen root after its process descriptor closes", () => {
   const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
   const first = codexFixture([], SESSION_ID);
   const second = codexFixture([], secondId);
@@ -979,20 +1343,279 @@ test("candidate-set Codex acceptance is uncertain for a missing anchor or multip
         roots: [firstIdentity, secondIdentity]
       })
     });
-    const missing = detectCodexCandidateSetRolloutAcceptance({
+
+    appendRecords(first.path, acceptedTurnRecords(REQUEST, 503));
+    const accepted = detectCodexCandidateSetRolloutAcceptance({
       anchor,
       currentInventory: candidateInventory({
         processUuid,
         processBirth,
-        roots: [firstIdentity]
+        roots: [secondIdentity]
       }),
       requestHash: REQUEST_HASH
     });
-    assert.equal(missing.status, "uncertain");
-    if (missing.status === "uncertain") {
-      assert.equal(missing.code, "candidate_inventory_changed");
+    assert.equal(accepted.status, "accepted");
+    if (accepted.status === "accepted") {
+      assert.equal(accepted.identity.sessionId, SESSION_ID);
+      assert.deepEqual(accepted.identity.rollout, first.identity);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance scans anchored and newly open roots as one set", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const thirdId = "019ee559-7bb8-7fd1-970c-0f7b6978c454";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const third = codexFixture([], thirdId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const thirdIdentity = candidateIdentity(
+      thirdId,
+      processUuid,
+      processBirth,
+      third.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      }),
+      now: new Date("2026-08-07T00:59:58.000Z")
+    });
+
+    appendRecords(third.path, acceptedTurnRecords(REQUEST, 504));
+    const accepted = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [secondIdentity, thirdIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(accepted.status, "accepted");
+    if (accepted.status === "accepted") {
+      assert.equal(accepted.identity.sessionId, thirdId);
+      assert.equal(accepted.evidence.metadata?.anchor_offset_bytes, 0);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+    third.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance tolerates descriptor churn for the same frozen file", () => {
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const fixture = codexFixture([], SESSION_ID);
+  try {
+    const initialIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      fixture.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [initialIdentity]
+      })
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 505));
+    const reopenedIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      { ...fixture.identity, fd: "91r" }
+    );
+
+    const accepted = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [reopenedIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(accepted.status, "accepted");
+    if (accepted.status === "accepted") {
+      assert.equal(accepted.identity.rollout.fd, "91r");
+      appendRecords(fixture.path, [
+        taskCompleteRecord(505, "Descriptor-churn exact result")
+      ]);
+      const completion = detectCodexBoundRolloutCompletion({
+        anchor,
+        acceptanceEvidence: accepted.evidence,
+        currentIdentity: accepted.identity,
+        requestHash: REQUEST_HASH
+      });
+      assert.equal(completion.status, "completed");
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance fails closed when a closed frozen root is replaced or deleted", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      })
+    });
+    fs.renameSync(first.path, `${first.path}.replaced`);
+    fs.writeFileSync(first.path, "", { mode: 0o600 });
+
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [secondIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_scan_invalid");
+      assert.match(result.reason, /descriptor identity does not match/u);
     }
 
+    fs.rmSync(first.path);
+    const deleted = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [secondIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(deleted.status, "uncertain");
+    if (deleted.status === "uncertain") {
+      assert.equal(deleted.code, "candidate_scan_invalid");
+      assert.match(deleted.reason, /ENOENT|no such file/u);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance fails closed for an incomplete closed root", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      })
+    });
+    fs.appendFileSync(first.path, '{"type":"event_msg"');
+
+    const result = detectCodexCandidateSetRolloutAcceptance({
+      anchor,
+      currentInventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [secondIdentity]
+      }),
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "uncertain");
+    if (result.status === "uncertain") {
+      assert.equal(result.code, "candidate_scan_invalid");
+      assert.match(result.reason, /closed with an incomplete rollout/u);
+    }
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test("candidate-set Codex acceptance detects multiple exact matches across its root union", () => {
+  const secondId = "019ee559-7bb8-7fd1-970c-0f7b6978c453";
+  const first = codexFixture([], SESSION_ID);
+  const second = codexFixture([], secondId);
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  try {
+    const firstIdentity = candidateIdentity(
+      SESSION_ID,
+      processUuid,
+      processBirth,
+      first.identity
+    );
+    const secondIdentity = candidateIdentity(
+      secondId,
+      processUuid,
+      processBirth,
+      second.identity
+    );
+    const anchor = captureCodexCandidateSetRolloutAcceptanceAnchor({
+      inventory: candidateInventory({
+        processUuid,
+        processBirth,
+        roots: [firstIdentity, secondIdentity]
+      })
+    });
     appendRecords(first.path, acceptedTurnRecords(REQUEST, 503));
     appendRecords(second.path, acceptedTurnRecords(REQUEST, 504));
     const duplicate = detectCodexCandidateSetRolloutAcceptance({
@@ -1000,7 +1623,7 @@ test("candidate-set Codex acceptance is uncertain for a missing anchor or multip
       currentInventory: candidateInventory({
         processUuid,
         processBirth,
-        roots: [firstIdentity, secondIdentity]
+        roots: [firstIdentity]
       }),
       requestHash: REQUEST_HASH
     });
@@ -1128,7 +1751,7 @@ test("durable replay preserves exact native proof and never upgrades legacy tran
         expected
       });
       assert.equal(transportReplay.replayed, true);
-      assert.equal(transportReplay.delivered, false);
+      assert.equal(transportReplay.delivered, true);
       assert.equal(transportReplay.submission_outcome, "pending_acceptance");
       assert.equal(transportReplay.delivery_receipt, proofLevel);
       assert.equal(transportReplay.do_not_retry, true);
@@ -1140,7 +1763,7 @@ test("durable replay preserves exact native proof and never upgrades legacy tran
       expected
     });
     assert.equal(invalidReplay.replayed, true);
-    assert.equal(invalidReplay.delivered, false);
+    assert.equal(invalidReplay.delivered, true);
     assert.equal(invalidReplay.submission_outcome, "uncertain");
   } finally {
     fixture.cleanup();
@@ -1598,6 +2221,108 @@ test("bound Codex completion remains pending when only other native turns comple
   }
 });
 
+test("bound Codex completion settles an exact abort as a redacted failure", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-abort-process";
+    const processBirth = "codex-abort-birth";
+    const targetSuffix = 250;
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, targetSuffix));
+    const currentIdentity = {
+      sessionId: SESSION_ID,
+      processUuid,
+      processBirth,
+      rollout: fixture.identity
+    };
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+    appendRecords(fixture.path, [
+      turnAbortedRecord(
+        targetSuffix,
+        "interrupted with sk-supersecret123456789"
+      )
+    ]);
+
+    const result = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "completed");
+    if (result.status !== "completed") return;
+    assert.equal(result.diagnostics.code, "abort_found");
+    assert.equal(result.completion.outcome, "failure");
+    assert.equal(result.completion.id, turnId(targetSuffix));
+    assert.equal(
+      result.completion.text,
+      "Codex task stopped: interrupted with sk-[REDACTED]"
+    );
+    assert.equal(
+      result.completion.metadata?.match,
+      "bound_rollout_turn_aborted"
+    );
+    assert.equal(result.diagnostics.observed_turn_aborted_records, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bound Codex completion invalidates an unsettled turn crossed by a later task", () => {
+  const fixture = codexFixture();
+  try {
+    const processUuid = "codex-later-turn-process";
+    const processBirth = "codex-later-turn-birth";
+    const targetSuffix = 260;
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, targetSuffix));
+    const currentIdentity = {
+      sessionId: SESSION_ID,
+      processUuid,
+      processBirth,
+      rollout: fixture.identity
+    };
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+    appendRecords(
+      fixture.path,
+      acceptedTurnRecords("a later native request", targetSuffix + 1)
+    );
+
+    const result = detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.equal(result.status, "failure");
+    assert.equal(result.diagnostics.code, "later_turn_started");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("bound Codex completion returns typed failures for identity drift and duplicate completion", () => {
   const fixture = codexFixture();
   try {
@@ -1753,6 +2478,86 @@ function codexFixture(
     path: rolloutPath,
     identity,
     cleanup: () => fs.rmSync(directory, { recursive: true, force: true })
+  };
+}
+
+function codexQuestionnaireAttributionFixture() {
+  const otherThreadId = "019ee559-7bb8-7fd1-970c-0f7b6978c44f";
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const accepted = codexFixture([], SESSION_ID);
+  const other = codexFixture([], otherThreadId);
+  const acceptedRoot = candidateIdentity(
+    SESSION_ID,
+    processUuid,
+    processBirth,
+    accepted.identity
+  );
+  const otherRoot = candidateIdentity(
+    otherThreadId,
+    processUuid,
+    processBirth,
+    other.identity
+  );
+  return {
+    accepted,
+    other,
+    acceptedRoot,
+    otherRoot,
+    inventory: (
+      roots: CodexOpenRootRolloutIdentity[] = [acceptedRoot, otherRoot]
+    ) => candidateInventory({ processUuid, processBirth, roots }),
+    acceptedIdentity: (
+      rolloutOverride: Partial<CodexRolloutIdentity> = {}
+    ) => ({
+      sessionId: SESSION_ID,
+      processUuid,
+      processBirth,
+      rollout: { ...accepted.identity, ...rolloutOverride }
+    }),
+    cleanup: () => {
+      accepted.cleanup();
+      other.cleanup();
+    }
+  };
+}
+
+function requestUserInputRecord(
+  nativeTurnId: string,
+  callId: string,
+  prompt = QUESTIONNAIRE_PROMPT
+): unknown {
+  return {
+    timestamp: "2026-08-07T01:00:01.500Z",
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "request_user_input",
+      call_id: callId,
+      arguments: JSON.stringify({
+        questions: [{
+          id: "framework",
+          header: "Framework",
+          question: prompt,
+          options: QUESTIONNAIRE_OPTIONS
+        }]
+      }),
+      internal_chat_message_metadata_passthrough: {
+        turn_id: nativeTurnId
+      }
+    }
+  };
+}
+
+function requestUserInputOutputRecord(callId: string): unknown {
+  return {
+    timestamp: "2026-08-07T01:00:01.600Z",
+    type: "response_item",
+    payload: {
+      type: "function_call_output",
+      call_id: callId,
+      output: "answers submitted"
+    }
   };
 }
 

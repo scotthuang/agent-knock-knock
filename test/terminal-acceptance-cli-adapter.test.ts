@@ -9,12 +9,18 @@ import {
   type TerminalAcceptanceBridge,
   type TerminalAcceptanceCliDependencies
 } from "../src/terminal-acceptance-cli-adapter.js";
-import type { CodingAgentSessionProvider } from
-  "../src/agent-session-provider.js";
+import {
+  CodexTransientDuplicateOpenRootDescriptorsError,
+  type CodingAgentSessionProvider
+} from "../src/agent-session-provider.js";
 import { callbackRouteFingerprintForConversation } from
   "../src/callback-route-authority.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
-import { terminalBindingFrom, type ManagedSessionState } from
+import {
+  managedSessionBindingToken,
+  terminalBindingFrom,
+  type ManagedSessionState
+} from
   "../src/managed-session.js";
 import {
   CALLBACK_ROUTE_SCHEMA,
@@ -22,6 +28,8 @@ import {
   type CallbackRouteV1
 } from "../src/callback-transport.js";
 import { createConversation, resolveExecutor } from "../src/protocol.js";
+import { loadManagedSession, saveManagedSession } from
+  "../src/session-store.js";
 import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
 import type { TerminalDispatchLedgerDocument } from
@@ -75,6 +83,166 @@ function assertOrdered(source: string, tokens: readonly string[]): void {
   }
 }
 
+const DETACHED_CLAIM_THREAD = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const DETACHED_CLAIM_NEW_THREAD = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const DETACHED_CLAIM_PROCESS_UUID = "codex-pid:42:birth:1";
+const DETACHED_CLAIM_PROCESS_BIRTH = "1";
+
+function detachedClaimFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-detached-claim-"));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const terminalControl: TerminalControlRef = {
+    kind: "tmux",
+    target: "claim:0.0",
+    session: "claim",
+    window: 0,
+    pane: 0,
+    panePid: 42,
+    currentPath: "/workspace/project",
+    capabilities: []
+  };
+  const sourceRollout = {
+    fd: "7r", device: "11", inode: "22", path: "/tmp/claim-rollout.jsonl"
+  };
+  const candidateRollout = { ...sourceRollout, fd: "91r" };
+  const acceptedIdentity = {
+    sessionId: DETACHED_CLAIM_THREAD,
+    processUuid: DETACHED_CLAIM_PROCESS_UUID,
+    processBirth: DETACHED_CLAIM_PROCESS_BIRTH,
+    rollout: { ...candidateRollout, fd: "92r" },
+    evidence: "codex_candidate_set_rollout_acceptance"
+  };
+  const now = "2026-09-09T00:00:00.000Z";
+  const source = saveManagedSession(storeDir, {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: "session-detached-source",
+    agent: "codex",
+    workspace: "/workspace/project",
+    status: "detached",
+    binding: terminalBindingFrom({
+      terminalId: "terminal:tmux:claim:0.0:42",
+      terminalControl,
+      pid: 42,
+      nativeThreadId: DETACHED_CLAIM_THREAD,
+      processUuid: DETACHED_CLAIM_PROCESS_UUID,
+      processBirth: DETACHED_CLAIM_PROCESS_BIRTH,
+      rollout: sourceRollout,
+      evidence: "codex_rollout_fd",
+      generation: 4,
+      now: new Date(now)
+    }),
+    lineage: { created_by: "attach" },
+    created_at: now,
+    updated_at: now,
+    detached_at: now
+  }, { expectedRevision: null });
+  const target = saveManagedSession(storeDir, {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: "session-provisional-target",
+    agent: "codex",
+    workspace: "/workspace/project",
+    status: "bound",
+    binding: terminalBindingFrom({
+      terminalId: "terminal:tmux:claim:0.0:42",
+      terminalControl,
+      pid: 42,
+      processUuid: DETACHED_CLAIM_PROCESS_UUID,
+      processBirth: DETACHED_CLAIM_PROCESS_BIRTH,
+      evidence: "codex_candidate_set_pre_submission",
+      generation: 1,
+      now: new Date(now)
+    }),
+    lineage: { created_by: "attach" },
+    created_at: now,
+    updated_at: now
+  }, { expectedRevision: null });
+  const anchorBase = {
+    schema: "agent-knock-knock/codex-rollout-acceptance-anchor" as const,
+    version: 3 as const,
+    process_uuid: DETACHED_CLAIM_PROCESS_UUID,
+    process_birth: DETACHED_CLAIM_PROCESS_BIRTH,
+    captured_at: now,
+    mode: "candidate_set" as const,
+    native_thread_binding: "post_submission" as const,
+    file_existed: false as const,
+    offset_bytes: 0 as const,
+    zero_file_baseline: false,
+    inventory_pid: 42,
+    inventory_cwd: "/workspace/project",
+    inventory_fingerprint: "c".repeat(64),
+    candidate_rollouts: [{
+      native_thread_id: DETACHED_CLAIM_THREAD,
+      rollout: candidateRollout,
+      offset_bytes: 0
+    }]
+  };
+  const anchor = { ...anchorBase, anchor_fingerprint: fingerprint(anchorBase) };
+  const claim = {
+    session_id: source.session_id,
+    session_revision: source.revision as number,
+    session_binding_token: managedSessionBindingToken(source),
+    binding_id: source.binding?.binding_id as string,
+    binding_generation: source.binding?.generation as number,
+    native_thread_id: DETACHED_CLAIM_THREAD,
+    process_uuid: DETACHED_CLAIM_PROCESS_UUID,
+    process_birth: DETACHED_CLAIM_PROCESS_BIRTH,
+    source_rollout: sourceRollout,
+    candidate_rollout: candidateRollout
+  };
+  const claimSetBase = {
+    schema: "agent-knock-knock/codex-detached-candidate-session-claims" as const,
+    version: 1 as const,
+    anchor_fingerprint: anchor.anchor_fingerprint,
+    claims: [claim]
+  };
+  const conversation = {
+    ...createConversation({
+      userRequest: "continue the detached candidate",
+      sessionId: target.session_id,
+      turnId: "turn-detached-claim",
+      executorKind: "codex",
+      workspace: "/workspace/project",
+      now: new Date(now)
+    }),
+    store_dir: path.resolve(storeDir),
+    terminal_binding_id: target.binding?.binding_id,
+    terminal_binding_generation: target.binding?.generation,
+    native_session_takeover: {
+      terminal_agent_pid: 42,
+      codex_rollout_acceptance_anchor: anchor,
+      codex_detached_candidate_session_claims: {
+        ...claimSetBase,
+        claims_fingerprint: fingerprint(claimSetBase)
+      }
+    }
+  };
+  const exclusiveCalls: Array<{
+    allowedManagedSessionIds?: string[];
+    excludedManagedSessionId: string;
+    nativeThreadId: string;
+  }> = [];
+  const facade = createTerminalAcceptanceCliFacade({
+    native: {
+      assertExclusive: async (request) => {
+        exclusiveCalls.push(request);
+      }
+    },
+    authority: {
+      isDiscoverableTurn: () => true,
+      workspaceMatches: (configured, observed) =>
+        path.resolve(String(configured)) === path.resolve(String(observed)),
+      hasUnresolvedTransition: () => false
+    }
+  } as unknown as TerminalAcceptanceCliDependencies);
+  return {
+    root, storeDir, terminalControl, source, target, conversation,
+    acceptedIdentity, exclusiveCalls, facade
+  };
+}
+
 test("acceptance adapter exposes one factory and keeps exact lock/write order", () => {
   const facade = createTerminalAcceptanceCliFacade(
     {} as unknown as TerminalAcceptanceCliDependencies
@@ -92,6 +260,7 @@ test("acceptance adapter exposes one factory and keeps exact lock/write order", 
     "storeDirForConversation",
     "refineSessionIdentity",
     "persistSessionIdentity",
+    "prepareSessionIdentityClaim",
     "quarantineSession",
     "turnsForSession",
     "assertSessionCanStartTurn",
@@ -275,6 +444,164 @@ test("managed Turn creation preserves storage and binding JSON keys", () => {
   assert.equal(created.message.id, "msg-1");
   assert.equal(created.message.session_id, "session-1");
   assert.equal(created.message.turn_id, created.conversation.turn_id);
+});
+
+test("accepted source-less Codex candidate transfers one unchanged detached claim", async () => {
+  const fixture = detachedClaimFixture();
+  try {
+    const prepare = () => fixture.facade.prepareSessionIdentityClaim({
+      options: { storeDir: fixture.storeDir },
+      conversation: fixture.conversation,
+      terminalControl: fixture.terminalControl,
+      identity: fixture.acceptedIdentity,
+      storeDir: fixture.storeDir
+    });
+    await assert.rejects(
+      runCliCommandExecution("detached-claim-source-scrub-crash", {}, {
+        env: {
+          ...process.env,
+          AKK_TEST_EXIT_AFTER_DETACHED_SOURCE_SCRUB: "1"
+        },
+        exit: (code) => {
+          throw new Error(`simulated exit ${code}`);
+        }
+      }, prepare),
+      /simulated exit 86/u
+    );
+    const scrubbed = loadManagedSession(
+      fixture.storeDir,
+      fixture.source.session_id
+    );
+    assert.equal(scrubbed.status, "detached");
+    assert.equal(scrubbed.revision, (fixture.source.revision as number) + 1);
+    assert.equal(scrubbed.binding?.native_thread_id, undefined);
+    assert.equal(scrubbed.binding?.native_process.rollout, undefined);
+    assert.match(
+      String(scrubbed.binding?.native_process.evidence),
+      /source_less_candidate_predecessor_binding_scrubbed:session-provisional-target/u
+    );
+    await prepare();
+    const target = fixture.facade.persistSessionIdentity({
+      conversation: fixture.conversation,
+      terminalControl: fixture.terminalControl,
+      identity: fixture.acceptedIdentity,
+      storeDir: fixture.storeDir
+    });
+    assert.equal(target?.binding?.native_thread_id, DETACHED_CLAIM_THREAD);
+    assert.deepEqual(target?.binding?.native_process.rollout, {
+      fd: "92r",
+      device: "11",
+      inode: "22",
+      path: "/tmp/claim-rollout.jsonl"
+    });
+    assert.deepEqual(
+      fixture.exclusiveCalls.map((call) => call.allowedManagedSessionIds),
+      [[fixture.source.session_id], undefined]
+    );
+    const owners = [
+      loadManagedSession(fixture.storeDir, fixture.source.session_id),
+      loadManagedSession(fixture.storeDir, fixture.target.session_id)
+    ].filter((session) =>
+      session.binding?.native_thread_id === DETACHED_CLAIM_THREAD
+    );
+    assert.deepEqual(owners.map((session) => session.session_id), [
+      fixture.target.session_id
+    ]);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("an accepted unclaimed Codex root leaves detached candidate owners unchanged", async () => {
+  const fixture = detachedClaimFixture();
+  try {
+    const unclaimedIdentity = {
+      ...fixture.acceptedIdentity,
+      sessionId: DETACHED_CLAIM_NEW_THREAD,
+      rollout: {
+        fd: "101r",
+        device: "33",
+        inode: "44",
+        path: "/tmp/unclaimed-rollout.jsonl"
+      }
+    };
+    await fixture.facade.prepareSessionIdentityClaim({
+      options: { storeDir: fixture.storeDir },
+      conversation: fixture.conversation,
+      terminalControl: fixture.terminalControl,
+      identity: unclaimedIdentity,
+      storeDir: fixture.storeDir
+    });
+    const target = fixture.facade.persistSessionIdentity({
+      conversation: fixture.conversation,
+      terminalControl: fixture.terminalControl,
+      identity: unclaimedIdentity,
+      storeDir: fixture.storeDir
+    });
+    assert.deepEqual(
+      loadManagedSession(fixture.storeDir, fixture.source.session_id),
+      fixture.source
+    );
+    assert.equal(target?.binding?.native_thread_id, DETACHED_CLAIM_NEW_THREAD);
+    assert.deepEqual(
+      fixture.exclusiveCalls.map((call) => call.allowedManagedSessionIds),
+      [undefined]
+    );
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("detached claim CAS drift rejects post-Enter ownership without target mutation", async () => {
+  const fixture = detachedClaimFixture();
+  try {
+    const drifted = saveManagedSession(fixture.storeDir, {
+      ...fixture.source,
+      updated_at: "2026-09-09T00:00:01.000Z"
+    }, { expectedRevision: fixture.source.revision as number });
+    await assert.rejects(
+      fixture.facade.prepareSessionIdentityClaim({
+        options: { storeDir: fixture.storeDir },
+        conversation: fixture.conversation,
+        terminalControl: fixture.terminalControl,
+        identity: fixture.acceptedIdentity,
+        storeDir: fixture.storeDir
+      }),
+      /changed after dispatch reservation/u
+    );
+    assert.deepEqual(
+      loadManagedSession(fixture.storeDir, fixture.source.session_id),
+      drifted
+    );
+    assert.equal(
+      loadManagedSession(fixture.storeDir, fixture.target.session_id)
+        .binding?.native_thread_id,
+      undefined
+    );
+    assert.deepEqual(fixture.exclusiveCalls, []);
+    const ownerCommit = fs.readFileSync(
+      new URL("../src/terminal-command-cli-adapter.js", import.meta.url),
+      "utf8"
+    );
+    const start = ownerCommit.indexOf(
+      "async function resolveTerminalDispatchSubmissionOwner"
+    );
+    const end = ownerCommit.indexOf(
+      "function deferredTerminalInputNotStartedAt",
+      start
+    );
+    const source = ownerCommit.slice(start, end);
+    assertOrdered(source, [
+      'rawPort("prepareManagedSessionNativeIdentityClaim")',
+      "persistManagedSessionNativeIdentity({",
+      "catch (error)",
+      "bindingError =",
+      "application.applyIdentityFailure("
+    ]);
+    assert.doesNotMatch(source, /retry_submission|sendUserExplicitCodex/u);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("managed Turn creation writes and inherits a generic callback route", () => {
@@ -520,6 +847,7 @@ test("monitor restart forwards exact Codex companion fences to the provider", as
   let resolverArguments:
     Parameters<CodingAgentSessionProvider["resolveActiveSessionIdentityForPid"]>
       | undefined;
+  let resolverCalls = 0;
   const provider = {
     agent: "codex",
     resolveActiveSessionIdentityForPid: async (
@@ -527,7 +855,11 @@ test("monitor restart forwards exact Codex companion fences to the provider", as
         CodingAgentSessionProvider["resolveActiveSessionIdentityForPid"]
       >
     ) => {
+      resolverCalls += 1;
       resolverArguments = args;
+      if (resolverCalls === 1) {
+        throw new CodexTransientDuplicateOpenRootDescriptorsError(42);
+      }
       return undefined;
     }
   } as unknown as CodingAgentSessionProvider;
@@ -552,7 +884,8 @@ test("monitor restart forwards exact Codex companion fences to the provider", as
       terminalControl: () => control
     }
   } as unknown as TerminalAcceptanceCliDependencies);
-  const result = await facade.reconcileMonitor({
+  let draftProofs = 0;
+  const reconcile = () => facade.reconcileMonitor({
     options: {},
     conversation,
     statePath: "/tmp/akk-monitor-restart/store/conversations/turn-1/state.json",
@@ -560,14 +893,26 @@ test("monitor restart forwards exact Codex companion fences to the provider", as
     terminalControl: control,
     executor: resolveExecutor({ kind: "codex" }),
     terminalBridge: {
-      proveExactDraftStillPresent: async () => false,
+      proveExactDraftStillPresent: async () => {
+        draftProofs += 1;
+        return false;
+      },
       resolveStoredTerminal: async () => {
         throw new Error("bound acceptance must not resolve a deferred terminal");
       }
     }
   });
 
-  assert.equal(result.outcome, "pending");
+  assert.equal((await reconcile()).outcome, "pending");
+  assert.equal(draftProofs, 0);
+  assert.equal((await reconcile()).outcome, "pending");
+  assert.equal(draftProofs, 1);
+  await assert.rejects(async () => {
+    provider.resolveActiveSessionIdentityForPid = async () => {
+      throw new Error("conflicting root identities");
+    };
+    await reconcile();
+  }, /conflicting root identities/u);
   assert.equal(runtimeIdentityCalls >= 1, true);
   assert.deepEqual(resolverArguments, [
     42,

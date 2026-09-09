@@ -111,6 +111,50 @@ test("Terminal Watch approval callback forbids automatic approval", () => {
   assert.doesNotMatch(message, /use only the terminal row's current AKK approval action/u);
 });
 
+test("Terminal Watch questionnaire callback requires manual TUI response", () => {
+  let message = "";
+  const adapter = createTerminalWatchCallbackCliAdapter({
+    spawnSync(_command, args) {
+      const params = JSON.parse(String(args[4]));
+      message = params.message;
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          runId: params.idempotencyKey,
+          status: "started"
+        }),
+        stderr: ""
+      };
+    }
+  });
+  adapter.deliver({
+    watchId: "watch:v1:00000000-0000-4000-8000-000000000022",
+    idempotencyKey:
+      "agent-knock-knock:terminal-watch:watch-22:interaction-1",
+    event: "interaction_manual_required",
+    agent: "codex",
+    terminalId: "terminal:v1:tmux:%22",
+    openclawSession: "agent:main:main",
+    manualInteraction: {
+      kind: "questionnaire",
+      response_kind: "single_select",
+      required: true,
+      current_step: 1,
+      total_steps: 2,
+      parser_status: "actionable",
+      prompt: "Choose a framework",
+      options: [{ label: "React" }, { label: "Vue" }]
+    }
+  });
+  assert.match(message, /manual TUI response required/u);
+  assert.match(message, /Terminal Watch has no response authority/u);
+  assert.match(message, /Choose a framework/u);
+  assert.match(message, /Option 1: React/u);
+  assert.match(message, /do not call AKK respond_interaction/u);
+  assert.match(message, /untrusted display data/u);
+  assert.doesNotMatch(message, /prompt_fingerprint|action_plan|ArrowDown/u);
+});
+
 test("Terminal Watch callback rejects malformed or mismatched acknowledgements", () => {
   const malformed = createTerminalWatchCallbackCliAdapter({
     spawnSync: () => ({ status: 0, stdout: "not-json", stderr: "" })

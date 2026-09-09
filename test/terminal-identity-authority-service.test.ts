@@ -23,6 +23,9 @@ import { createProductionTerminalAgentRegistry } from
 import { createConversation, type Conversation } from "../src/protocol.js";
 import { saveManagedSession } from "../src/session-store.js";
 import { terminalBindingFrom } from "../src/managed-session.js";
+import { fingerprint } from "../src/terminal-submission-facts.js";
+import { terminalBridgeRequestFingerprint } from
+  "../src/terminal-dispatch-receipt.js";
 import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
 import { associateTerminalEndpointEvidence, terminalControlEvidence } from
@@ -248,6 +251,432 @@ test("runtime identity requires the exact binding and adds committed companions 
     ...conversation, terminal_binding_generation: binding.generation + 1
   }, control);
   assert.equal("allowedAdditionalNativeIdentities" in stale, false);
+});
+
+test("active candidate-set Turn projects only its frozen baseline roots as monitor companions", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-candidate-runtime-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const control = terminalControl();
+  const processIdentity = {
+    pid: 101,
+    processUuid: "codex-process-101",
+    processBirth: "birth-101"
+  };
+  const acceptedThreadId = "22222222-2222-4222-8222-222222222222";
+  const acceptedRollout = {
+    fd: "8", device: "1", inode: "3", path: "/tmp/accepted-rollout"
+  };
+  const baselineThreadId = "11111111-1111-4111-8111-111111111111";
+  const baselineRollout = {
+    fd: "7", device: "1", inode: "2", path: "/tmp/baseline-rollout"
+  };
+  const binding = terminalBindingFrom({
+    terminalId: "terminal:v2:tmux:codex:%1:101",
+    terminalControl: control,
+    ...processIdentity,
+    rollout: acceptedRollout,
+    nativeThreadId: acceptedThreadId,
+    evidence: "test",
+    generation: 1,
+    now: new Date("2026-08-20T00:00:02.000Z")
+  });
+  saveManagedSession(root, {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: "managed-candidate",
+    agent: "codex",
+    workspace: "/workspace",
+    status: "bound",
+    binding,
+    lineage: { created_by: "attach" },
+    created_at: "2026-08-20T00:00:02.000Z",
+    updated_at: "2026-08-20T00:00:02.000Z"
+  }, { expectedRevision: null });
+  const anchorBase = {
+    schema: "agent-knock-knock/codex-rollout-acceptance-anchor" as const,
+    version: 3 as const,
+    process_uuid: processIdentity.processUuid,
+    process_birth: processIdentity.processBirth,
+    captured_at: "2026-08-20T00:00:01.000Z",
+    mode: "candidate_set" as const,
+    native_thread_binding: "post_submission" as const,
+    file_existed: false as const,
+    offset_bytes: 0 as const,
+    zero_file_baseline: false,
+    inventory_pid: processIdentity.pid,
+    inventory_cwd: "/workspace",
+    inventory_fingerprint: "a".repeat(64),
+    candidate_rollouts: [{
+      native_thread_id: baselineThreadId,
+      rollout: baselineRollout,
+      offset_bytes: 10
+    }, {
+      // A request may be accepted by a root that was already in the frozen
+      // inventory. The bound root itself is never also a companion.
+      native_thread_id: acceptedThreadId,
+      rollout: acceptedRollout,
+      offset_bytes: 20
+    }]
+  };
+  const requestText = "candidate request";
+  const anchor = {
+    ...anchorBase,
+    anchor_fingerprint: fingerprint(anchorBase)
+  };
+  const acceptanceBase = {
+    source: "codex_rollout" as const,
+    kind: "native_user_turn" as const,
+    nativeThreadId: acceptedThreadId,
+    requestHash: terminalBridgeRequestFingerprint(requestText),
+    acceptanceId: "33333333-3333-4333-8333-333333333333",
+    anchorFingerprint: anchor.anchor_fingerprint
+  };
+  const conversation = {
+    ...createConversation({
+      userRequest: requestText,
+      sessionId: "managed-candidate",
+      turnId: "turn-candidate",
+      executorKind: "codex",
+      now: new Date("2026-08-20T00:00:03.000Z")
+    }),
+    status: "waiting_for_agent" as const,
+    terminal_binding_id: binding.binding_id,
+    terminal_binding_generation: binding.generation,
+    native_thread_id: acceptedThreadId,
+    native_session_takeover: {
+      terminal_agent_identity_protocol: 1,
+      terminal_agent_pid: processIdentity.pid,
+      terminal_agent_session_id: acceptedThreadId,
+      terminal_agent_process_uuid: processIdentity.processUuid,
+      terminal_agent_process_birth: processIdentity.processBirth,
+      terminal_agent_rollout: acceptedRollout,
+      source_cwd: "/workspace",
+      terminal_bridge_message_id: "message-candidate",
+      terminal_bridge_request_text: requestText,
+      terminal_bridge_request_hash:
+        terminalBridgeRequestFingerprint(requestText),
+      terminal_bridge_submission: {
+        status: "agent_accepted",
+        message_id: "message-candidate",
+        request_hash: terminalBridgeRequestFingerprint(requestText),
+        binding_id: binding.binding_id,
+        binding_generation: binding.generation,
+        native_thread_id: acceptedThreadId,
+        acceptance_evidence: {
+          ...acceptanceBase,
+          evidenceFingerprint: fingerprint(acceptanceBase)
+        }
+      },
+      codex_rollout_acceptance_anchor: anchor
+    }
+  } satisfies Conversation;
+  const facade = adapter({}, (ports) => {
+    ports.store.storeDirForConversation = () => root;
+  });
+
+  const runtime = facade.terminalRuntimeIdentityForConversation(
+    conversation,
+    control
+  );
+  assert.deepEqual(runtime.allowedPreMaterializationNativeIdentity, {
+    sessionId: baselineThreadId,
+    processUuid: processIdentity.processUuid,
+    processBirth: processIdentity.processBirth,
+    rollout: baselineRollout
+  });
+  assert.deepEqual(runtime.allowedAdditionalNativeIdentities, []);
+  assert.equal(
+    runtime.allowedPreMaterializationNativeIdentity?.sessionId ===
+      acceptedThreadId,
+    false
+  );
+});
+
+test("candidate-set Turn companion projection rejects invalid or mismatched authority", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-candidate-fence-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const control = terminalControl();
+  const processIdentity = {
+    pid: 101,
+    processUuid: "codex-process-101",
+    processBirth: "birth-101",
+    rollout: {
+      fd: "8", device: "1", inode: "3", path: "/tmp/accepted-rollout"
+    }
+  };
+  const acceptedThreadId = "22222222-2222-4222-8222-222222222222";
+  const binding = terminalBindingFrom({
+    terminalId: "terminal:v2:tmux:codex:%1:101",
+    terminalControl: control,
+    ...processIdentity,
+    nativeThreadId: acceptedThreadId,
+    evidence: "test",
+    generation: 1,
+    now: new Date("2026-08-20T00:00:02.000Z")
+  });
+  saveManagedSession(root, {
+    schema: "agent-knock-knock/session",
+    version: 1,
+    session_id: "managed-candidate-fence",
+    agent: "codex",
+    workspace: "/workspace",
+    status: "bound",
+    binding,
+    lineage: { created_by: "attach" },
+    created_at: "2026-08-20T00:00:02.000Z",
+    updated_at: "2026-08-20T00:00:02.000Z"
+  }, { expectedRevision: null });
+  const validAnchorBase = {
+    schema: "agent-knock-knock/codex-rollout-acceptance-anchor" as const,
+    version: 3 as const,
+    process_uuid: processIdentity.processUuid,
+    process_birth: processIdentity.processBirth,
+    captured_at: "2026-08-20T00:00:01.000Z",
+    mode: "candidate_set" as const,
+    native_thread_binding: "post_submission" as const,
+    file_existed: false as const,
+    offset_bytes: 0 as const,
+    zero_file_baseline: false,
+    inventory_pid: processIdentity.pid,
+    inventory_cwd: "/workspace",
+    inventory_fingerprint: "a".repeat(64),
+    candidate_rollouts: [{
+      native_thread_id: "11111111-1111-4111-8111-111111111111",
+      rollout: {
+        fd: "7", device: "1", inode: "2", path: "/tmp/baseline-rollout"
+      },
+      offset_bytes: 10
+    }]
+  };
+  const requestText = "candidate request";
+  const conversationFor = (
+    anchorBase: typeof validAnchorBase,
+    options: {
+      status?: Conversation["status"];
+      identityProtocol?: number;
+      sourceCwd?: string;
+      anchorFingerprint?: string;
+      submissionStatus?: string;
+      takeoverMessageId?: string;
+      submissionMessageId?: string;
+      takeoverRequestHash?: string;
+      submissionRequestHash?: string;
+      submissionBindingId?: string;
+      submissionBindingGeneration?: number;
+      submissionNativeThreadId?: string;
+      evidenceAnchorFingerprint?: string;
+      evidenceNativeThreadId?: string;
+      evidenceFingerprint?: string;
+      runtimeRollout?: typeof processIdentity.rollout;
+    } = {}
+  ): Conversation => {
+    const anchor = {
+      ...anchorBase,
+      anchor_fingerprint:
+        options.anchorFingerprint ?? fingerprint(anchorBase)
+    };
+    const evidenceBase = {
+      source: "codex_rollout" as const,
+      kind: "native_user_turn" as const,
+      nativeThreadId:
+        options.evidenceNativeThreadId ?? acceptedThreadId,
+      requestHash: terminalBridgeRequestFingerprint(requestText),
+      acceptanceId: "33333333-3333-4333-8333-333333333333",
+      anchorFingerprint:
+        options.evidenceAnchorFingerprint ?? anchor.anchor_fingerprint
+    };
+    return {
+      ...createConversation({
+        userRequest: requestText,
+        sessionId: "managed-candidate-fence",
+        turnId: "turn-candidate-fence",
+        executorKind: "codex",
+        now: new Date("2026-08-20T00:00:03.000Z")
+      }),
+      status: options.status ?? "waiting_for_agent",
+      terminal_binding_id: binding.binding_id,
+      terminal_binding_generation: binding.generation,
+      native_thread_id: acceptedThreadId,
+      native_session_takeover: {
+        terminal_agent_identity_protocol: options.identityProtocol ?? 1,
+        terminal_agent_pid: processIdentity.pid,
+        terminal_agent_session_id: acceptedThreadId,
+        terminal_agent_process_uuid: processIdentity.processUuid,
+        terminal_agent_process_birth: processIdentity.processBirth,
+        terminal_agent_rollout:
+          options.runtimeRollout ?? processIdentity.rollout,
+        source_cwd: options.sourceCwd ?? "/workspace",
+        terminal_bridge_message_id:
+          options.takeoverMessageId ?? "message-candidate-fence",
+        terminal_bridge_request_text: requestText,
+        terminal_bridge_request_hash: options.takeoverRequestHash ??
+          terminalBridgeRequestFingerprint(requestText),
+        terminal_bridge_submission: {
+          status: options.submissionStatus ?? "agent_accepted",
+          message_id:
+            options.submissionMessageId ?? "message-candidate-fence",
+          request_hash: options.submissionRequestHash ??
+            terminalBridgeRequestFingerprint(requestText),
+          binding_id: options.submissionBindingId ?? binding.binding_id,
+          binding_generation:
+            options.submissionBindingGeneration ?? binding.generation,
+          native_thread_id:
+            options.submissionNativeThreadId ?? acceptedThreadId,
+          acceptance_evidence: {
+            ...evidenceBase,
+            evidenceFingerprint:
+              options.evidenceFingerprint ?? fingerprint(evidenceBase)
+          }
+        },
+        codex_rollout_acceptance_anchor: anchor
+      }
+    };
+  };
+  const facade = adapter({
+    workspaceMatches: (configured, candidate) =>
+      path.resolve(String(configured)) === path.resolve(String(candidate))
+  }, (ports) => {
+    ports.store.storeDirForConversation = () => root;
+  });
+  const mutations: Array<{
+    label: string;
+    anchor: typeof validAnchorBase;
+    options?: Parameters<typeof conversationFor>[1];
+    control?: TerminalControlRef;
+  }> = [
+    {
+      label: "pid",
+      anchor: { ...validAnchorBase, inventory_pid: processIdentity.pid + 1 }
+    },
+    {
+      label: "process UUID",
+      anchor: { ...validAnchorBase, process_uuid: "another-process" }
+    },
+    {
+      label: "process birth",
+      anchor: { ...validAnchorBase, process_birth: "another-birth" }
+    },
+    {
+      label: "cwd",
+      anchor: { ...validAnchorBase, inventory_cwd: "/another-workspace" }
+    },
+    {
+      label: "fingerprint",
+      anchor: validAnchorBase,
+      options: { anchorFingerprint: "f".repeat(64) }
+    },
+    {
+      label: "released Turn",
+      anchor: validAnchorBase,
+      options: { status: "idle" }
+    },
+    {
+      label: "pre-acceptance submission",
+      anchor: validAnchorBase,
+      options: { submissionStatus: "enter_dispatched" }
+    },
+    {
+      label: "non-strict identity protocol",
+      anchor: validAnchorBase,
+      options: { identityProtocol: 0 }
+    },
+    {
+      label: "message id",
+      anchor: validAnchorBase,
+      options: { submissionMessageId: "another-message" }
+    },
+    {
+      label: "request hash",
+      anchor: validAnchorBase,
+      options: { submissionRequestHash: "d".repeat(64) }
+    },
+    {
+      label: "takeover request hash",
+      anchor: validAnchorBase,
+      options: { takeoverRequestHash: "e".repeat(64) }
+    },
+    {
+      label: "binding id",
+      anchor: validAnchorBase,
+      options: { submissionBindingId: "another-binding" }
+    },
+    {
+      label: "binding generation",
+      anchor: validAnchorBase,
+      options: { submissionBindingGeneration: binding.generation + 1 }
+    },
+    {
+      label: "submission thread",
+      anchor: validAnchorBase,
+      options: {
+        submissionNativeThreadId: "44444444-4444-4444-8444-444444444444"
+      }
+    },
+    {
+      label: "runtime rollout",
+      anchor: validAnchorBase,
+      options: {
+        runtimeRollout: {
+          ...processIdentity.rollout,
+          path: "/tmp/another-accepted-rollout"
+        }
+      }
+    },
+    {
+      label: "bound rollout alias",
+      anchor: {
+        ...validAnchorBase,
+        candidate_rollouts: [{
+          native_thread_id: "11111111-1111-4111-8111-111111111111",
+          rollout: processIdentity.rollout,
+          offset_bytes: 10
+        }]
+      }
+    },
+    {
+      label: "acceptance anchor",
+      anchor: validAnchorBase,
+      options: { evidenceAnchorFingerprint: "b".repeat(64) }
+    },
+    {
+      label: "acceptance thread",
+      anchor: validAnchorBase,
+      options: {
+        evidenceNativeThreadId: "44444444-4444-4444-8444-444444444444"
+      }
+    },
+    {
+      label: "acceptance fingerprint",
+      anchor: validAnchorBase,
+      options: { evidenceFingerprint: "c".repeat(64) }
+    },
+    {
+      label: "Turn source cwd",
+      anchor: validAnchorBase,
+      options: { sourceCwd: "/another-workspace" }
+    },
+    {
+      label: "terminal cwd",
+      anchor: validAnchorBase,
+      control: { ...control, currentPath: "/another-workspace" }
+    }
+  ];
+  for (const candidate of mutations) {
+    const runtime = facade.terminalRuntimeIdentityForConversation(
+      conversationFor(candidate.anchor, candidate.options),
+      candidate.control ?? control
+    );
+    assert.equal(
+      runtime.allowedPreMaterializationNativeIdentity,
+      undefined,
+      candidate.label
+    );
+    assert.deepEqual(
+      runtime.allowedAdditionalNativeIdentities,
+      [],
+      candidate.label
+    );
+  }
 });
 
 test("endpoint refinement persists only matching canonical incarnation evidence", () => {

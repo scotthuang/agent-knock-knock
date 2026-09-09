@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   decideTerminalBindingMatch,
+  rolloutFileIdentityMatches,
   terminalObservationFromListEntry,
   terminalObservationFromResolvedIdentity,
   type TerminalBindingMatchEvidence,
@@ -29,6 +30,24 @@ const ROLLOUT = {
   inode: "42",
   path: "/safe/sessions/rollout.jsonl"
 };
+
+test("rollout file identity tolerates FD churn but not file drift", () => {
+  assert.equal(
+    rolloutFileIdentityMatches(ROLLOUT, { ...ROLLOUT, fd: "91r" }),
+    true
+  );
+  for (const changed of ["device", "inode", "path"] as const) {
+    assert.equal(
+      rolloutFileIdentityMatches(ROLLOUT, {
+        ...ROLLOUT,
+        fd: "91r",
+        [changed]: `${ROLLOUT[changed]}-different`
+      }),
+      false,
+      changed
+    );
+  }
+});
 
 function terminalControl(): TerminalControlRef {
   return {

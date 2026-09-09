@@ -1287,6 +1287,7 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   for (const privateCliFence of [
     "--expected-approval-fingerprint",
     "--expected-binding-token",
+    "--expected-managed-terminal-token",
     "--expected-terminal-token",
     "--candidate-token"
   ]) {
@@ -1296,6 +1297,11 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
       `${privateCliFence} remains an adapter-private CLI fence`
     );
   }
+  assert.match(
+    commandSource,
+    /expected_managed_terminal_token[\s\S]*?--expected-managed-terminal-token/u,
+    "the private managed fast-path offer must reach the CLI fence"
+  );
   assert.match(commandSource, /name: "agent_knock_knock_renew"/u);
   assert.match(commandSource, /name: "agent_knock_knock_watch"/u);
   assert.match(commandSource, /name: "agent_knock_knock_unwatch"/u);
@@ -2073,7 +2079,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
         `const result = args[0] === "list" ? { terminals: [{`,
         `  id: terminalId, available_actions: { send: {`,
         `    tool: "agent_knock_knock_send",`,
-        `    arguments: { selector: terminalId, expected_terminal_token: "terminal-token-current", request: "continue" }`,
+        `    arguments: { selector: terminalId, expected_terminal_token: "terminal-token-current", expected_managed_terminal_token: "managed-terminal-token-current", request: "continue" }`,
         `  } }`,
         `}] } : sendResult;`,
         "process.stdout.write(JSON.stringify(result));"
@@ -2182,7 +2188,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.match(
       sendTool?.description ?? "",
-      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*parsed working activity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*no managed callback Turn[\s\S]*Terminal Watch callback/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned non-blocked approval state[\s\S]*no active native questionnaire[\s\S]*parsed working activity[\s\S]*Codex rollout ambiguity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*source-less Codex terminal[\s\S]*provisional Session\/Turn[\s\S]*managed preparation fails[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*no interaction response authority/u
     );
     const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
     assert.match(
@@ -2356,6 +2362,10 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       "Discover the initial terminal"
     );
     assert.equal(
+      optionValue(calls[3] ?? [], "--expected-managed-terminal-token"),
+      "managed-terminal-token-current"
+    );
+    assert.equal(
       optionValue(calls[3] ?? [], "--message-id"),
       `msg-openclaw-${createHash("sha256").update(JSON.stringify([
         "agent:test:main",
@@ -2422,6 +2432,10 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     assert.equal(
       optionValue(calls[9] ?? [], "--message"),
       "Continue in the human-selected terminal context"
+    );
+    assert.equal(
+      optionValue(calls[9] ?? [], "--expected-managed-terminal-token"),
+      "managed-terminal-token-current"
     );
   } finally {
     await reconciliationService?.stop?.();
@@ -3588,16 +3602,25 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     const fallbackResult = {
       delivered: true,
       delivered_unmanaged: true,
+      terminal_input_dispatched: true,
+      agent_acceptance: "unproven",
       callback_expected: true,
       callback_mode: "terminal_watch",
       watch_id: "terminal-watch-user-send-fixture",
       terminal_id: terminalId,
       message_id: "message-user-priority-send",
       scope: "terminal_user_explicit",
-      management_mode: "unmanaged_fallback"
+      management_mode: "unmanaged",
+      observation_mode: "terminal_watch",
+      capabilities: {
+        callback: true,
+        interaction_notify: true,
+        interaction_respond: false
+      },
+      legacy_management_mode: "unmanaged_fallback"
     };
     const managedReplayResult = {
-      delivered: false,
+      delivered: true,
       replayed: true,
       status: "submission_pending_acceptance",
       submission_outcome: "pending_acceptance",
@@ -3608,6 +3631,18 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
       scope: "terminal_user_explicit",
       management_mode: "managed"
     };
+    const textOnlyResult = {
+      delivered: false,
+      status: "submission_uncertain",
+      submission_outcome: "uncertain",
+      delivery_receipt: "text_injected",
+      terminal_input_dispatched: true,
+      do_not_retry: true,
+      terminal_id: terminalId,
+      message_id: "message-text-only",
+      scope: "terminal_user_explicit",
+      management_mode: "managed"
+    };
     fs.writeFileSync(
       fakeCli,
       [
@@ -3615,13 +3650,15 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
         `const terminalId = ${JSON.stringify(terminalId)};`,
         `const fallback = ${JSON.stringify(fallbackResult)};`,
         `const managedReplay = ${JSON.stringify(managedReplayResult)};`,
+        `const textOnly = ${JSON.stringify(textOnlyResult)};`,
         `const result = args[0] === "list" ? { terminals: [{`,
         `  id: terminalId, available_actions: { send: {`,
         `    tool: "agent_knock_knock_send", arguments: {`,
         `      selector: terminalId, expected_terminal_token: "private-physical-token"`,
         `    }`,
         `  } }`,
-        `}] } : args.includes("pending-managed") ? managedReplay : fallback;`,
+        `}] } : args.includes("pending-managed") ? managedReplay : ` +
+          `args.includes("text-only") ? textOnly : fallback;`,
         "process.stdout.write(JSON.stringify(result));"
       ].join("\n"),
       "utf8"
@@ -3690,6 +3727,15 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     assert.notEqual(toolResult?.isError, true);
     assert.equal(toolResult?.details?.delivered, true);
     assert.equal(toolResult?.details?.delivered_unmanaged, true);
+    assert.equal(toolResult?.details?.terminal_input_dispatched, true);
+    assert.equal(toolResult?.details?.agent_acceptance, "unproven");
+    assert.equal(toolResult?.details?.management_mode, "unmanaged");
+    assert.equal(toolResult?.details?.observation_mode, "terminal_watch");
+    assert.deepEqual(toolResult?.details?.capabilities, {
+      callback: true,
+      interaction_notify: true,
+      interaction_respond: false
+    });
     assert.equal(toolResult?.details?.scope, "terminal_user_explicit");
     assert.equal(
       JSON.stringify(toolResult?.details).includes("private-physical-token"),
@@ -3704,6 +3750,10 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     assert.equal(delegatedToolResult?.details?.delivered, true);
     assert.equal(
       delegatedToolResult?.details?.management_mode,
+      "unmanaged"
+    );
+    assert.equal(
+      delegatedToolResult?.details?.legacy_management_mode,
       "unmanaged_fallback"
     );
     assert.equal(delegatedToolResult?.details?.scope, "terminal_user_explicit");
@@ -3712,10 +3762,10 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
       args: "only: pending-managed",
       sessionKey: "agent:test:user-priority-send"
     });
-    assert.equal(pendingCommand?.isError, true);
+    assert.notEqual(pendingCommand?.isError, true);
     assert.match(
       String(pendingCommand?.text ?? ""),
-      /already dispatched this managed terminal Send/u
+      /confirmed this managed terminal Send was already delivered/u
     );
     assert.match(String(pendingCommand?.text ?? ""), /do not resend/u);
 
@@ -3723,16 +3773,35 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
       terminal_id: terminalId,
       request: "pending-managed"
     });
-    assert.equal(pendingTool?.isError, true);
-    assert.equal(pendingTool?.details?.delivered, false);
+    assert.notEqual(pendingTool?.isError, true);
+    assert.equal(pendingTool?.details?.delivered, true);
     assert.equal(pendingTool?.details?.delivery_receipt, "enter_dispatched");
     assert.equal(pendingTool?.details?.do_not_retry, true);
+
+    const textOnlyCommand = await command?.handler?.({
+      args: "only: text-only",
+      sessionKey: "agent:test:user-priority-send"
+    });
+    assert.equal(textOnlyCommand?.isError, true);
+    assert.match(
+      String(textOnlyCommand?.text ?? ""),
+      /could not prove that Enter was dispatched/u
+    );
+
+    const textOnlyTool = await sendTool?.execute?.("tool-text-only", {
+      terminal_id: terminalId,
+      request: "text-only"
+    });
+    assert.equal(textOnlyTool?.isError, true);
+    assert.equal(textOnlyTool?.details?.terminal_input_dispatched, true);
+    assert.equal(textOnlyTool?.details?.agent_acceptance, "unproven");
+    assert.equal(textOnlyTool?.details?.do_not_retry, true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("OpenClaw surfaces delivered-but-unfenced sends as errors that must not be retried", async () => {
+test("OpenClaw reports delivered-but-unfenced sends as successful dispatches that must not be retried", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-plugin-unfenced-"));
   const fakeCli = path.join(tempDir, "unfenced.cjs");
   let command:
@@ -3793,7 +3862,7 @@ test("OpenClaw surfaces delivered-but-unfenced sends as errors that must not be 
         args,
         sessionKey: "agent:test:unfenced"
       });
-      assert.equal(result?.isError, true, args);
+      assert.notEqual(result?.isError, true, args);
       assert.match(result?.text ?? "", /could not bind|could not fence/u, args);
       assert.match(result?.text ?? "", /do not retry/u, args);
       assert.doesNotMatch(result?.text ?? "", /yield now/u, args);
@@ -3803,8 +3872,11 @@ test("OpenClaw surfaces delivered-but-unfenced sends as errors that must not be 
     const toolResponse = await sendTool?.execute?.("unfenced-send", {
       request: "Inspect the repository"
     });
-    assert.equal(toolResponse?.isError, true);
+    assert.notEqual(toolResponse?.isError, true);
     assert.equal(toolResponse?.details?.status, "submission_unfenced");
+    assert.equal(toolResponse?.details?.delivered, true);
+    assert.equal(toolResponse?.details?.terminal_input_dispatched, true);
+    assert.equal(toolResponse?.details?.agent_acceptance, "unproven");
     assert.equal(toolResponse?.details?.do_not_retry, true);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

@@ -35,6 +35,7 @@ export interface TerminalWatchCallbackInput {
   origin?: TerminalWatchCallbackMessageInput["origin"];
   detail?: string;
   completionText?: string;
+  manualInteraction?: TerminalWatchCallbackMessageInput["manualInteraction"];
 }
 
 export type TerminalWatchTransportDeliveryInput =

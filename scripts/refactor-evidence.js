@@ -1315,7 +1315,7 @@ function validatePublicContracts(value, {
     "witnesses"
   ], "Store protocol contract");
   if (store.format_version !== 1 ||
-      store.current_writer_protocol !== 6 ||
+      store.current_writer_protocol !== 7 ||
       store.session_authority_protocol !== 3) {
     fail("Store format/writer/session-authority protocol contract changed");
   }
@@ -1325,7 +1325,7 @@ function validatePublicContracts(value, {
   }
   assertExactArray(
     store.upgradeable_writer_protocols,
-    [1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5, 6],
     "Store upgradeable_writer_protocols"
   );
   validateAuthorityPaths(store.authority_paths, "Store authority_paths", repoRoot);
@@ -1336,14 +1336,14 @@ function validatePublicContracts(value, {
     usedWitnesses
   );
   if (!Array.isArray(store.protocol_witnesses) ||
-      store.protocol_witnesses.length !== 6) {
-    fail("Store protocol_witnesses must cover writer protocols 1 through 6");
+      store.protocol_witnesses.length !== 7) {
+    fail("Store protocol_witnesses must cover writer protocols 1 through 7");
   }
   for (const [index, valueEntry] of store.protocol_witnesses.entries()) {
     const entry = assertExactKeys(valueEntry, ["protocol", "witness"],
       `Store protocol witness ${index}`);
     if (entry.protocol !== index + 1) {
-      fail("Store protocol_witnesses must be ordered 1 through 6");
+      fail("Store protocol_witnesses must be ordered 1 through 7");
     }
     validateWitnessReferences(
       [entry.witness],
@@ -1355,14 +1355,14 @@ function validatePublicContracts(value, {
   const storeSource = readRepositoryFile(repoRoot, "src/store.ts");
   for (const [name, expected] of [
     ["STORE_FORMAT_VERSION", 1],
-    ["STORE_WRITER_PROTOCOL", 6],
+    ["STORE_WRITER_PROTOCOL", 7],
     ["STORE_SESSION_AUTHORITY_PROTOCOL", 3]
   ]) {
     if (!new RegExp(`export const ${name} = ${expected};`, "u").test(storeSource)) {
       fail(`${name}=${expected} is missing from src/store.ts`);
     }
   }
-  if (!/STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set\(\[1, 2, 3, 4, 5\]\)/u
+  if (!/STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set\(\[1, 2, 3, 4, 5, 6\]\)/u
     .test(storeSource)) {
     fail("Store upgradeable writer protocol set changed");
   }

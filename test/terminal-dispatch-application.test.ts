@@ -526,6 +526,21 @@ test("identity failure preserves quarantine then ledger/state/event/log order", 
     "event:terminal_agent_identity_binding_failed",
     "log:terminal_agent_identity_binding_failed"
   ]);
+  assert.deepEqual(
+    {
+      delivered: harness.events.at(-1)?.delivered,
+      terminal_input_dispatched:
+        harness.events.at(-1)?.terminal_input_dispatched,
+      agent_acceptance: harness.events.at(-1)?.agent_acceptance,
+      do_not_retry: harness.events.at(-1)?.do_not_retry
+    },
+    {
+      delivered: true,
+      terminal_input_dispatched: true,
+      agent_acceptance: "unproven",
+      do_not_retry: true
+    }
+  );
 });
 
 test("generic uncertainty preserves ledger/state/event order and error key bytes", async () => {

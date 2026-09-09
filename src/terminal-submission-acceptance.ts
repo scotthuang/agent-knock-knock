@@ -36,6 +36,7 @@ export type {
 
 export type CodexBoundRolloutCompletionCode =
   | "completion_found"
+  | "abort_found"
   | "exact_turn_not_complete"
   | "partial_rollout_record"
   | "rollout_changed_during_scan"
@@ -50,7 +51,11 @@ export type CodexBoundRolloutCompletionCode =
   | "scan_limit_exceeded"
   | "invalid_rollout_jsonl"
   | "duplicate_exact_completion"
-  | "invalid_exact_completion";
+  | "duplicate_exact_abort"
+  | "conflicting_exact_settlement"
+  | "later_turn_started"
+  | "invalid_exact_completion"
+  | "invalid_exact_abort";
 
 export interface CodexBoundRolloutCompletionDiagnostics {
   detector: "codex_exact_bound_rollout";
@@ -63,6 +68,7 @@ export interface CodexBoundRolloutCompletionDiagnostics {
   observed_end_offset_bytes?: number;
   scanned_records?: number;
   observed_task_complete_records?: number;
+  observed_turn_aborted_records?: number;
   detail?: string;
 }
 
@@ -143,6 +149,47 @@ const CODEX_ACCEPTANCE_MAX_BYTES = 16 * 1024 * 1024;
 const CODEX_COMPLETION_MAX_BYTES = 256 * 1024 * 1024;
 const CODEX_COMPLETION_MAX_TEXT_LENGTH = 4000;
 const CODEX_ACTIVE_TASK_SCAN_CHUNK_BYTES = 64 * 1024;
+const CODEX_QUESTIONNAIRE_TAIL_MAX_BYTES = 1024 * 1024;
+const CODEX_QUESTIONNAIRE_MAX_TEXT_LENGTH = 16 * 1024;
+const CODEX_QUESTIONNAIRE_MAX_OPTIONS = 8;
+const CODEX_QUESTIONNAIRE_MAX_QUESTIONS = 3;
+const CODEX_QUESTIONNAIRE_OTHER_LABEL = "None of the above";
+const CODEX_QUESTIONNAIRE_OTHER_DESCRIPTION =
+  "Optionally, add details in notes (tab).";
+const CODEX_QUESTIONNAIRE_CUSTOM_LABEL = "Type something.";
+const CODEX_QUESTIONNAIRE_CUSTOM_DESCRIPTION =
+  "Enter a free-form answer through Codex Notes.";
+
+export interface CodexQuestionnaireScreenEvidence {
+  currentStep: number;
+  totalSteps: number;
+  prompt: string;
+  responseKind: "single_select" | "multi_select" | "free_text" | "confirm";
+  options?: ReadonlyArray<{
+    label: string;
+    description?: string;
+  }>;
+  /** Changed/unsupported frames may only use unique pending-call attribution. */
+  exactShape: boolean;
+}
+
+export type CodexBoundQuestionnaireAttributionResult =
+  | {
+      status: "matched";
+      evidenceFingerprint: string;
+    }
+  | {
+      status: "not_matched";
+      code:
+        | "accepted_root_missing"
+        | "accepted_call_not_unique"
+        | "screen_signature_not_unique";
+    }
+  | {
+      status: "unavailable";
+      code: "invalid_inventory" | "invalid_screen" |
+        "rollout_scan_unavailable";
+    };
 const CODEX_ACTIVE_TASK_MAX_RECORD_BYTES = 16 * 1024 * 1024;
 const CODEX_ROLLOUT_HEADER_MAX_BYTES = 1024 * 1024;
 const CODEX_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
@@ -342,6 +389,11 @@ export function observeCodexHumanStartedActiveTask(
           observedEndOffsetBytes: before.size,
           safeResumeOffsetBytes
         };
+      }
+      if (completion.status === "aborted") {
+        throw new Error(
+          "Codex active-task abort evidence escaped its exact lifecycle fence"
+        );
       }
       return {
         status: "completed",
@@ -1151,7 +1203,8 @@ export function captureCodexCandidateSetRolloutAcceptanceAnchor({
 export function detectCodexCandidateSetRolloutAcceptance({
   anchor: anchorValue,
   currentInventory: inventoryValue,
-  requestHash: requestHashValue
+  requestHash: requestHashValue,
+  recoveryCandidate: recoveryCandidateValue
 }: CodexCandidateSetRolloutAcceptanceRequest):
 CodexCandidateSetRolloutAcceptanceResult {
   const anchor = validateCodexRolloutAcceptanceAnchor(anchorValue);
@@ -1181,20 +1234,53 @@ CodexCandidateSetRolloutAcceptanceResult {
     };
   }
 
+  let recoveryCandidate: CodexOpenRootRolloutIdentity | undefined;
+  if (recoveryCandidateValue) {
+    try {
+      recoveryCandidate = validateCodexRecoveryCandidateForAcceptance(
+        recoveryCandidateValue,
+        anchor
+      );
+    } catch (error) {
+      return {
+        status: "uncertain",
+        code: "candidate_inventory_changed",
+        reason: error instanceof Error ? error.message : String(error),
+        inspected_candidates: 0,
+        exact_matches: 0
+      };
+    }
+  }
+
   const anchoredByThread = new Map(
     anchor.candidate_rollouts.map((candidate) => [
       candidate.native_thread_id,
       candidate
     ])
   );
+  const anchoredByFile = new Map(
+    anchor.candidate_rollouts.map((candidate) => [
+      codexRolloutInodeKey(candidate.rollout),
+      candidate
+    ])
+  );
   const currentByThread = new Map(
     inventory.roots.map((identity) => [identity.sessionId, identity])
   );
-  for (const identity of inventory.roots) {
+  const currentByFile = new Map(
+    inventory.roots.map((identity) => [
+      codexRolloutInodeKey(identity.rollout),
+      identity
+    ])
+  );
+  for (const identity of [
+    ...inventory.roots,
+    ...(recoveryCandidate ? [recoveryCandidate] : [])
+  ]) {
     const anchored = anchoredByThread.get(identity.sessionId);
     if (
       anchored &&
-      !sameRolloutIdentity(anchored.rollout, identity.rollout)
+      !sameRolloutFileIdentity(anchored.rollout, identity.rollout)
     ) {
       return {
         status: "uncertain",
@@ -1205,32 +1291,91 @@ CodexCandidateSetRolloutAcceptanceResult {
         exact_matches: 0
       };
     }
-  }
-  for (const anchored of anchor.candidate_rollouts) {
-    if (!currentByThread.has(anchored.native_thread_id)) {
+    const anchoredFile = anchoredByFile.get(
+      codexRolloutInodeKey(identity.rollout)
+    );
+    if (
+      anchoredFile &&
+      anchoredFile.native_thread_id !== identity.sessionId
+    ) {
       return {
         status: "uncertain",
         code: "candidate_inventory_changed",
         reason:
-          `Codex candidate ${anchored.native_thread_id} is no longer open in the exact process inventory`,
+          `Codex candidate rollout changed native thread identity from ` +
+          `${anchoredFile.native_thread_id} to ${identity.sessionId} after capture`,
         inspected_candidates: 0,
         exact_matches: 0
       };
     }
   }
-
+  if (recoveryCandidate) {
+    const currentThread = currentByThread.get(recoveryCandidate.sessionId);
+    const currentFile = currentByFile.get(
+      codexRolloutInodeKey(recoveryCandidate.rollout)
+    );
+    if (
+      (currentThread && !sameRolloutFileIdentity(
+        currentThread.rollout,
+        recoveryCandidate.rollout
+      )) ||
+      (currentFile && currentFile.sessionId !== recoveryCandidate.sessionId)
+    ) {
+      return {
+        status: "uncertain",
+        code: "candidate_inventory_changed",
+        reason:
+          "persisted Codex recovery candidate conflicts with the current root inventory",
+        inspected_candidates: 0,
+        exact_matches: 0
+      };
+    }
+  }
+  // A Codex thread may close (or reopen) its process FD while the acceptance
+  // poll is running. The captured path/device/inode/offset remains the durable
+  // read authority in that case, so inspect the union rather than treating a
+  // missing lsof row as evidence that the candidate changed identity.
   const candidates: Array<{
     identity: CodexOpenRootRolloutIdentity;
     offsetBytes: number;
     requireFreshHeader: boolean;
-  }> = inventory.roots.map((identity) => {
-    const anchored = anchoredByThread.get(identity.sessionId);
-    return {
-      identity,
-      offsetBytes: anchored?.offset_bytes ?? 0,
-      requireFreshHeader: anchored === undefined
-    };
-  });
+    currentlyOpen: boolean;
+  }> = [
+    ...anchor.candidate_rollouts.map((anchored) => ({
+      identity:
+        currentByThread.get(anchored.native_thread_id) ??
+        (recoveryCandidate?.sessionId === anchored.native_thread_id
+          ? recoveryCandidate
+          : {
+              sessionId: anchored.native_thread_id,
+              processUuid: anchor.process_uuid,
+              processBirth: anchor.process_birth,
+              rollout: anchored.rollout,
+              evidence: "codex_open_root_rollout" as const
+            }),
+      offsetBytes: anchored.offset_bytes,
+      requireFreshHeader: false,
+      currentlyOpen: currentByThread.has(anchored.native_thread_id)
+    })),
+    ...inventory.roots
+      .filter((identity) => !anchoredByThread.has(identity.sessionId))
+      .map((identity) => ({
+        identity,
+        offsetBytes: 0,
+        requireFreshHeader: true,
+        currentlyOpen: true
+      })),
+    ...(recoveryCandidate &&
+      !anchoredByThread.has(recoveryCandidate.sessionId) &&
+      !currentByThread.has(recoveryCandidate.sessionId)
+      ? [{
+          identity: recoveryCandidate,
+          offsetBytes: 0,
+          requireFreshHeader: true,
+          currentlyOpen: false
+        }]
+      : [])
+  ];
 
   const matches: Array<{
     identity: CodexOpenRootRolloutIdentity;
@@ -1261,6 +1406,17 @@ CodexCandidateSetRolloutAcceptanceResult {
       };
     }
     if (scan.status === "incomplete") {
+      if (!candidate.currentlyOpen) {
+        return {
+          status: "uncertain",
+          code: "candidate_scan_invalid",
+          reason:
+            `Codex candidate ${candidate.identity.sessionId} closed with an ` +
+            "incomplete rollout record after capture",
+          inspected_candidates: candidates.indexOf(candidate) + 1,
+          exact_matches: matches.length
+        };
+      }
       incompleteCandidates += 1;
     } else if (scan.status === "accepted") {
       matches.push({
@@ -1293,6 +1449,124 @@ CodexCandidateSetRolloutAcceptanceResult {
     status: "accepted",
     identity: matches[0].identity,
     evidence: matches[0].evidence
+  };
+}
+
+/**
+ * Attributes a rendered questionnaire to one exact accepted Codex turn while
+ * the process has multiple open root rollouts. No prompt or tool arguments are
+ * returned: callers receive only a bounded fingerprint or a typed failure.
+ */
+export function detectCodexBoundQuestionnaireAttribution(options: {
+  currentInventory: CodexOpenRootRolloutInventory;
+  acceptedIdentity: CodexRolloutAcceptanceIdentity;
+  acceptanceId: string;
+  screen: CodexQuestionnaireScreenEvidence;
+  maxBytesPerRollout?: number;
+}): CodexBoundQuestionnaireAttributionResult {
+  let inventory: CodexOpenRootRolloutInventory;
+  let acceptedThreadId: string;
+  let acceptedRollout: CodexRolloutIdentity;
+  let acceptanceId: string;
+  try {
+    inventory = validateCodexOpenRootInventoryForAcceptance(
+      options.currentInventory
+    );
+    acceptedThreadId = exactNativeThreadId(options.acceptedIdentity.sessionId);
+    acceptanceId = exactNativeThreadId(options.acceptanceId);
+    if (!options.acceptedIdentity.rollout) {
+      throw new Error("accepted Codex rollout identity is unavailable");
+    }
+    acceptedRollout = normalizedRolloutIdentity(
+      options.acceptedIdentity.rollout
+    );
+    if (
+      requiredString(
+        options.acceptedIdentity.processUuid,
+        "accepted Codex process UUID"
+      ) !== inventory.processUuid ||
+      requiredString(
+        options.acceptedIdentity.processBirth,
+        "accepted Codex process birth"
+      ) !== inventory.processBirth
+    ) {
+      return { status: "not_matched", code: "accepted_root_missing" };
+    }
+  } catch {
+    return { status: "unavailable", code: "invalid_inventory" };
+  }
+
+  let normalizedScreen: ReturnType<typeof normalizedCodexQuestionnaireScreen>;
+  try {
+    normalizedScreen = normalizedCodexQuestionnaireScreen(options.screen);
+  } catch {
+    return { status: "unavailable", code: "invalid_screen" };
+  }
+
+  const acceptedRoots = inventory.roots.filter((root) =>
+    root.sessionId.toLowerCase() === acceptedThreadId &&
+    sameRolloutFileIdentity(root.rollout, acceptedRollout)
+  );
+  if (acceptedRoots.length !== 1) {
+    return { status: "not_matched", code: "accepted_root_missing" };
+  }
+
+  let maxBytes: number;
+  try {
+    maxBytes = positiveByteLimit(
+      options.maxBytesPerRollout,
+      CODEX_QUESTIONNAIRE_TAIL_MAX_BYTES,
+      "Codex questionnaire rollout scan limit"
+    );
+  } catch {
+    return { status: "unavailable", code: "rollout_scan_unavailable" };
+  }
+  const pending: CodexPendingRequestUserInput[] = [];
+  try {
+    for (const root of inventory.roots) {
+      pending.push(...readPendingCodexRequestUserInput({
+        rollout: root.rollout,
+        nativeThreadId: root.sessionId,
+        maxBytes
+      }));
+    }
+  } catch {
+    return { status: "unavailable", code: "rollout_scan_unavailable" };
+  }
+
+  const acceptedCalls = pending.filter((call) =>
+    call.nativeThreadId === acceptedThreadId &&
+    call.turnId === acceptanceId &&
+    sameRolloutFileIdentity(call.rollout, acceptedRollout)
+  );
+  if (acceptedCalls.length !== 1) {
+    return { status: "not_matched", code: "accepted_call_not_unique" };
+  }
+
+  const matching = options.screen.exactShape &&
+      normalizedScreen.responseKind !== "confirm" &&
+      normalizedScreen.responseKind !== "multi_select"
+    ? pending.filter((call) =>
+        codexPendingQuestionnaireMatchesScreen(call, normalizedScreen)
+      )
+    : pending;
+  if (matching.length !== 1 || matching[0] !== acceptedCalls[0]) {
+    return { status: "not_matched", code: "screen_signature_not_unique" };
+  }
+  return {
+    status: "matched",
+    evidenceFingerprint: fingerprint({
+      schema: "agent-knock-knock/codex-bound-questionnaire-attribution",
+      version: 1,
+      native_thread_id: acceptedThreadId,
+      turn_id: acceptanceId,
+      rollout: {
+        device: acceptedRollout.device,
+        inode: acceptedRollout.inode,
+        path: acceptedRollout.path
+      },
+      screen: normalizedScreen
+    })
   };
 }
 
@@ -1519,7 +1793,12 @@ export function detectCodexBoundRolloutCompletion(options: {
   const anchoredRollout = anchor.version === 3
     ? acceptedCandidate?.rollout
     : anchor.rollout;
-  if (anchoredRollout && !sameRolloutIdentity(anchoredRollout, rollout)) {
+  const anchoredRolloutMatches = !anchoredRollout || (
+    anchor.version === 3
+      ? sameRolloutFileIdentity(anchoredRollout, rollout)
+      : sameRolloutIdentity(anchoredRollout, rollout)
+  );
+  if (!anchoredRolloutMatches) {
     return codexCompletionFailure(
       "rollout_identity_mismatch",
       new Error("Codex rollout identity changed after terminal acceptance"),
@@ -1628,7 +1907,8 @@ export function detectCodexBoundRolloutCompletion(options: {
     const scanDiagnostics = {
       ...observedDiagnostics,
       scanned_records: scan.scannedRecords,
-      observed_task_complete_records: scan.observedTaskCompleteRecords
+      observed_task_complete_records: scan.observedTaskCompleteRecords,
+      observed_turn_aborted_records: scan.observedTurnAbortedRecords
     };
     if (scan.status === "failure") {
       return codexCompletionFailure(scan.code, scan.detail, scanDiagnostics);
@@ -1639,6 +1919,44 @@ export function detectCodexBoundRolloutCompletion(options: {
         scanDiagnostics,
         "the accepted Codex native turn has no durable task_complete record yet"
       );
+    }
+
+    if (scan.status === "aborted") {
+      const reason = truncateCompletionText(
+        redactString(scan.reason ?? "interrupted")
+      );
+      const completion: TerminalCompletionEvidence = {
+        source: "durable",
+        outcome: "failure",
+        text: truncateCompletionText(
+          redactString(`Codex task stopped: ${reason}`)
+        ),
+        ...(scan.timestamp ? { timestamp: scan.timestamp } : {}),
+        id: acceptanceId,
+        confidence: "high",
+        metadata: {
+          match: "bound_rollout_turn_aborted",
+          turn_id: acceptanceId,
+          native_thread_id: expectedNativeThreadId,
+          anchor_fingerprint: anchor.anchor_fingerprint,
+          rollout_identity_fingerprint:
+            rolloutDiagnostics.rollout_identity_fingerprint,
+          abort_reason: reason,
+          scan_start_offset_bytes: scanStartOffset,
+          observed_end_offset_bytes: before.size,
+          scanned_records: scan.scannedRecords,
+          observed_task_complete_records: scan.observedTaskCompleteRecords,
+          observed_turn_aborted_records: scan.observedTurnAbortedRecords
+        }
+      };
+      return {
+        status: "completed",
+        completion,
+        diagnostics: {
+          ...scanDiagnostics,
+          code: "abort_found"
+        }
+      };
     }
 
     const completion: TerminalCompletionEvidence = {
@@ -1658,7 +1976,8 @@ export function detectCodexBoundRolloutCompletion(options: {
         scan_start_offset_bytes: scanStartOffset,
         observed_end_offset_bytes: before.size,
         scanned_records: scan.scannedRecords,
-        observed_task_complete_records: scan.observedTaskCompleteRecords
+        observed_task_complete_records: scan.observedTaskCompleteRecords,
+        observed_turn_aborted_records: scan.observedTurnAbortedRecords
       }
     };
     return {
@@ -1693,21 +2012,36 @@ type ExactCodexTaskCompleteScan =
       timestamp?: string;
       scannedRecords: number;
       observedTaskCompleteRecords: number;
+      observedTurnAbortedRecords: number;
+    }
+  | {
+      status: "aborted";
+      reason?: string;
+      timestamp?: string;
+      scannedRecords: number;
+      observedTaskCompleteRecords: number;
+      observedTurnAbortedRecords: number;
     }
   | {
       status: "pending";
       scannedRecords: number;
       observedTaskCompleteRecords: number;
+      observedTurnAbortedRecords: number;
     }
   | {
       status: "failure";
       code:
         | "invalid_rollout_jsonl"
         | "duplicate_exact_completion"
-        | "invalid_exact_completion";
+        | "duplicate_exact_abort"
+        | "conflicting_exact_settlement"
+        | "later_turn_started"
+        | "invalid_exact_completion"
+        | "invalid_exact_abort";
       detail: string;
       scannedRecords: number;
       observedTaskCompleteRecords: number;
+      observedTurnAbortedRecords: number;
     };
 
 function scanExactCodexTaskComplete(
@@ -1716,7 +2050,17 @@ function scanExactCodexTaskComplete(
 ): ExactCodexTaskCompleteScan {
   let scannedRecords = 0;
   let observedTaskCompleteRecords = 0;
-  const exactMatches: Array<Record<string, any>> = [];
+  let observedTurnAbortedRecords = 0;
+  let exactTaskStartedIndex: number | undefined;
+  let laterTaskStartedIndex: number | undefined;
+  const exactMatches: Array<{
+    value: Record<string, any>;
+    index: number;
+  }> = [];
+  const exactAborts: Array<{
+    value: Record<string, any>;
+    index: number;
+  }> = [];
   for (const rawLine of text.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (!line) {
@@ -1731,10 +2075,42 @@ function scanExactCodexTaskComplete(
         code: "invalid_rollout_jsonl",
         detail: `Codex bound completion suffix contains invalid JSONL at record ${scannedRecords + 1}`,
         scannedRecords,
-        observedTaskCompleteRecords
+        observedTaskCompleteRecords,
+        observedTurnAbortedRecords
       };
     }
+    const recordIndex = scannedRecords;
     scannedRecords += 1;
+    if (
+      isRecord(value) &&
+      value.type === "event_msg" &&
+      isRecord(value.payload) &&
+      value.payload.type === "task_started"
+    ) {
+      const turnId = optionalString(value.payload.turn_id)?.toLowerCase();
+      if (turnId === acceptanceId) {
+        exactTaskStartedIndex ??= recordIndex;
+      } else if (
+        exactTaskStartedIndex !== undefined &&
+        laterTaskStartedIndex === undefined
+      ) {
+        laterTaskStartedIndex = recordIndex;
+      }
+      continue;
+    }
+    if (
+      isRecord(value) &&
+      value.type === "event_msg" &&
+      isRecord(value.payload) &&
+      value.payload.type === "turn_aborted"
+    ) {
+      observedTurnAbortedRecords += 1;
+      const turnId = optionalString(value.payload.turn_id)?.toLowerCase();
+      if (turnId === acceptanceId) {
+        exactAborts.push({ value, index: recordIndex });
+      }
+      continue;
+    }
     if (
       !isRecord(value) ||
       value.type !== "event_msg" ||
@@ -1746,28 +2122,94 @@ function scanExactCodexTaskComplete(
     observedTaskCompleteRecords += 1;
     const turnId = optionalString(value.payload.turn_id)?.toLowerCase();
     if (turnId === acceptanceId) {
-      exactMatches.push(value);
+      exactMatches.push({ value, index: recordIndex });
     }
   }
 
-  if (exactMatches.length === 0) {
-    return {
-      status: "pending",
-      scannedRecords,
-      observedTaskCompleteRecords
-    };
-  }
   if (exactMatches.length > 1) {
     return {
       status: "failure",
       code: "duplicate_exact_completion",
       detail: "the exact accepted Codex turn has duplicate task_complete records",
       scannedRecords,
-      observedTaskCompleteRecords
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+  if (exactAborts.length > 1) {
+    return {
+      status: "failure",
+      code: "duplicate_exact_abort",
+      detail: "the exact accepted Codex turn has duplicate turn_aborted records",
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+  if (exactMatches.length > 0 && exactAborts.length > 0) {
+    return {
+      status: "failure",
+      code: "conflicting_exact_settlement",
+      detail:
+        "the exact accepted Codex turn has conflicting completion and abort records",
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
     };
   }
 
-  const match = exactMatches[0];
+  const exactSettlementIndex = exactMatches[0]?.index ?? exactAborts[0]?.index;
+  if (
+    laterTaskStartedIndex !== undefined &&
+    (exactSettlementIndex === undefined ||
+      laterTaskStartedIndex < exactSettlementIndex)
+  ) {
+    return {
+      status: "failure",
+      code: "later_turn_started",
+      detail:
+        "a later Codex native turn started before the exact accepted turn settled",
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+
+  if (exactAborts.length === 1) {
+    const match = exactAborts[0].value;
+    if (match.timestamp !== undefined && !validTimestamp(match.timestamp)) {
+      return {
+        status: "failure",
+        code: "invalid_exact_abort",
+        detail: "the exact Codex turn_aborted record has an invalid timestamp",
+        scannedRecords,
+        observedTaskCompleteRecords,
+        observedTurnAbortedRecords
+      };
+    }
+    const payload = match.payload as Record<string, any>;
+    return {
+      status: "aborted",
+      reason: optionalString(payload.reason),
+      ...(match.timestamp !== undefined
+        ? { timestamp: String(match.timestamp) }
+        : {}),
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+
+  if (exactMatches.length === 0) {
+    return {
+      status: "pending",
+      scannedRecords,
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
+    };
+  }
+
+  const match = exactMatches[0].value;
   const payload = match.payload as Record<string, any>;
   const textValue = optionalString(payload.last_agent_message);
   if (!textValue) {
@@ -1776,7 +2218,8 @@ function scanExactCodexTaskComplete(
       code: "invalid_exact_completion",
       detail: "the exact Codex task_complete record has no final agent message",
       scannedRecords,
-      observedTaskCompleteRecords
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
     };
   }
   if (match.timestamp !== undefined && !validTimestamp(match.timestamp)) {
@@ -1785,7 +2228,8 @@ function scanExactCodexTaskComplete(
       code: "invalid_exact_completion",
       detail: "the exact Codex task_complete record has an invalid timestamp",
       scannedRecords,
-      observedTaskCompleteRecords
+      observedTaskCompleteRecords,
+      observedTurnAbortedRecords
     };
   }
   return {
@@ -1795,7 +2239,8 @@ function scanExactCodexTaskComplete(
       ? { timestamp: String(match.timestamp) }
       : {}),
     scannedRecords,
-    observedTaskCompleteRecords
+    observedTaskCompleteRecords,
+    observedTurnAbortedRecords
   };
 }
 
@@ -1823,6 +2268,7 @@ function codexCompletionFailure(
   code: Exclude<
     CodexBoundRolloutCompletionCode,
     | "completion_found"
+    | "abort_found"
     | "exact_turn_not_complete"
     | "partial_rollout_record"
     | "rollout_changed_during_scan"
@@ -2172,6 +2618,432 @@ function validateCodexOpenRootInventoryForAcceptance(
   return value;
 }
 
+interface CodexDurableQuestionnaireQuestion {
+  prompt: string;
+  options: ReadonlyArray<{
+    label: string;
+    description?: string;
+  }>;
+}
+
+interface CodexPendingRequestUserInput {
+  nativeThreadId: string;
+  rollout: CodexRolloutIdentity;
+  turnId: string;
+  questions: readonly CodexDurableQuestionnaireQuestion[];
+}
+
+function readPendingCodexRequestUserInput(input: {
+  rollout: CodexRolloutIdentity;
+  nativeThreadId: string;
+  maxBytes: number;
+}): CodexPendingRequestUserInput[] {
+  const rollout = normalizedRolloutIdentity(input.rollout);
+  const nativeThreadId = exactNativeThreadId(input.nativeThreadId);
+  const opened = openExactRollout(rollout);
+  try {
+    const before = opened.stat;
+    assertPrivateRegularFile(before);
+    const header = readCodexRolloutHeader(opened.fd, before.size);
+    assertExistingCodexRolloutHeader(header, nativeThreadId);
+    if (!fileEndsWithNewline(opened.fd, before.size)) {
+      throw new Error("Codex questionnaire rollout has a partial JSONL record");
+    }
+    const readStart = Math.max(0, before.size - input.maxBytes);
+    const length = before.size - readStart;
+    const buffer = Buffer.allocUnsafe(length);
+    if (
+      fs.readSync(opened.fd, buffer, 0, length, readStart) !== length
+    ) {
+      throw new Error("Codex questionnaire rollout changed while it was read");
+    }
+    const after = fs.fstatSync(opened.fd);
+    if (!sameStableFile(before, after)) {
+      throw new Error("Codex questionnaire rollout changed while it was scanned");
+    }
+    const atBoundary = readStart === 0 ||
+      byteAtOffset(opened.fd, readStart - 1) === 0x0a;
+    const firstComplete = atBoundary ? 0 : buffer.indexOf(0x0a) + 1;
+    if (firstComplete <= 0 && !atBoundary) {
+      throw new Error(
+        "Codex questionnaire rollout record exceeded its bounded tail scan"
+      );
+    }
+    const records = parseCodexJsonlRecords(
+      buffer.subarray(firstComplete),
+      "questionnaire tail"
+    );
+    return pendingCodexRequestUserInputFromRecords({
+      records,
+      nativeThreadId,
+      rollout,
+      prefixTruncated: readStart > 0
+    });
+  } finally {
+    fs.closeSync(opened.fd);
+  }
+}
+
+function pendingCodexRequestUserInputFromRecords(input: {
+  records: readonly CodexJsonlRecordAtOffset[];
+  nativeThreadId: string;
+  rollout: CodexRolloutIdentity;
+  prefixTruncated: boolean;
+}): CodexPendingRequestUserInput[] {
+  const calls: Array<{
+    index: number;
+    callId: string;
+    turnId: string;
+    questions: readonly CodexDurableQuestionnaireQuestion[];
+  }> = [];
+  const outputs = new Map<string, number[]>();
+  const terminalTurns = new Map<string, number[]>();
+  const unscopedTerminalIndexes: number[] = [];
+  const startedTurns: Array<{ index: number; turnId: string }> = [];
+  let sawLifecycle = false;
+
+  input.records.forEach(({ value }, index) => {
+    const payload = isRecord(value.payload) ? value.payload : undefined;
+    if (!payload) return;
+    if (
+      value.type === "event_msg" &&
+      payload.type === "task_started"
+    ) {
+      startedTurns.push({
+        index,
+        turnId: exactNativeThreadId(payload.turn_id)
+      });
+      sawLifecycle = true;
+      return;
+    }
+    if (
+      value.type === "event_msg" &&
+      (payload.type === "task_complete" || payload.type === "turn_aborted")
+    ) {
+      const rawTurnId = optionalString(payload.turn_id);
+      if (!rawTurnId) {
+        unscopedTerminalIndexes.push(index);
+        sawLifecycle = true;
+        return;
+      }
+      const turnId = exactNativeThreadId(rawTurnId);
+      const indexes = terminalTurns.get(turnId) ?? [];
+      indexes.push(index);
+      terminalTurns.set(turnId, indexes);
+      sawLifecycle = true;
+      return;
+    }
+    if (
+      value.type !== "response_item" ||
+      payload.type !== "function_call" ||
+      payload.name !== "request_user_input"
+    ) {
+      if (
+        value.type === "response_item" &&
+        payload.type === "function_call_output"
+      ) {
+        const callId = requiredString(
+          payload.call_id,
+          "Codex questionnaire output call id"
+        );
+        const indexes = outputs.get(callId) ?? [];
+        indexes.push(index);
+        outputs.set(callId, indexes);
+      }
+      return;
+    }
+    const metadata = isRecord(
+      payload.internal_chat_message_metadata_passthrough
+    )
+      ? payload.internal_chat_message_metadata_passthrough
+      : undefined;
+    const callId = requiredString(
+      payload.call_id,
+      "Codex questionnaire call id"
+    );
+    if (calls.some((call) => call.callId === callId)) {
+      throw new Error("Codex questionnaire call id is duplicated");
+    }
+    calls.push({
+      index,
+      callId,
+      turnId: exactNativeThreadId(metadata?.turn_id),
+      questions: parseCodexRequestUserInputArguments(payload.arguments)
+    });
+  });
+
+  const pending = calls.filter((call) => {
+    if (outputs.get(call.callId)?.some((index) => index > call.index)) {
+      return false;
+    }
+    if (terminalTurns.get(call.turnId)?.some((index) => index > call.index)) {
+      return false;
+    }
+    if (unscopedTerminalIndexes.some((index) => index > call.index)) {
+      return false;
+    }
+    const precedingStart = latestCodexTaskStartBefore(
+      startedTurns,
+      call.index
+    );
+    if (precedingStart && precedingStart.turnId !== call.turnId) {
+      return false;
+    }
+    return !startedTurns.some((started) => started.index > call.index);
+  });
+  if (
+    input.prefixTruncated &&
+    pending.length === 0 &&
+    !sawLifecycle
+  ) {
+    throw new Error(
+      "Codex questionnaire tail cannot exclude an omitted pending request"
+    );
+  }
+  return pending.map((call) => ({
+    nativeThreadId: input.nativeThreadId,
+    rollout: input.rollout,
+    turnId: call.turnId,
+    questions: call.questions
+  }));
+}
+
+function latestCodexTaskStartBefore(
+  starts: ReadonlyArray<{ index: number; turnId: string }>,
+  recordIndex: number
+): { index: number; turnId: string } | undefined {
+  let latest: { index: number; turnId: string } | undefined;
+  for (const start of starts) {
+    if (start.index >= recordIndex) break;
+    latest = start;
+  }
+  return latest;
+}
+
+function parseCodexRequestUserInputArguments(
+  value: unknown
+): readonly CodexDurableQuestionnaireQuestion[] {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > CODEX_QUESTIONNAIRE_TAIL_MAX_BYTES
+  ) {
+    throw new Error("Codex questionnaire arguments are invalid");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Codex questionnaire arguments are not valid JSON");
+  }
+  const questions = isRecord(parsed) ? parsed.questions : undefined;
+  if (
+    !Array.isArray(questions) ||
+    questions.length === 0 ||
+    questions.length > CODEX_QUESTIONNAIRE_MAX_QUESTIONS
+  ) {
+    throw new Error("Codex questionnaire question count is invalid");
+  }
+  return questions.map((question) => {
+    if (!isRecord(question)) {
+      throw new Error("Codex questionnaire question is invalid");
+    }
+    const rawOptions = question.options;
+    if (
+      rawOptions !== undefined &&
+      (!Array.isArray(rawOptions) ||
+        rawOptions.length > CODEX_QUESTIONNAIRE_MAX_OPTIONS)
+    ) {
+      throw new Error("Codex questionnaire option count is invalid");
+    }
+    return {
+      prompt: normalizedCodexQuestionnaireText(
+        question.question,
+        "Codex questionnaire prompt"
+      ),
+      options: (rawOptions ?? []).map((option) => {
+        if (!isRecord(option)) {
+          throw new Error("Codex questionnaire option is invalid");
+        }
+        return {
+          label: normalizedCodexQuestionnaireText(
+            option.label,
+            "Codex questionnaire option label"
+          ),
+          ...(option.description === undefined
+            ? {}
+            : {
+                description: normalizedCodexQuestionnaireText(
+                  option.description,
+                  "Codex questionnaire option description"
+                )
+              })
+        };
+      })
+    };
+  });
+}
+
+function codexPendingQuestionnaireMatchesScreen(
+  call: CodexPendingRequestUserInput,
+  screen: ReturnType<typeof normalizedCodexQuestionnaireScreen>
+): boolean {
+  if (
+    screen.currentStep < 1 ||
+    screen.currentStep > screen.totalSteps ||
+    call.questions.length !== screen.totalSteps
+  ) {
+    return false;
+  }
+  const question = call.questions[screen.currentStep - 1];
+  if (!question) return false;
+  if (question.prompt !== screen.prompt) return false;
+  if (screen.responseKind === "free_text") return true;
+  if (screen.responseKind !== "single_select") return false;
+  return codexRenderedOptionsMatch(
+    question.options,
+    screen.options ?? []
+  );
+}
+
+function normalizedCodexQuestionnaireScreen(
+  screen: CodexQuestionnaireScreenEvidence
+): {
+  currentStep: number;
+  totalSteps: number;
+  prompt: string;
+  responseKind: CodexQuestionnaireScreenEvidence["responseKind"];
+  options?: ReadonlyArray<{ label: string; description?: string }>;
+} {
+  if (
+    !Number.isSafeInteger(screen.currentStep) ||
+    !Number.isSafeInteger(screen.totalSteps) ||
+    screen.currentStep < 1 ||
+    screen.totalSteps < 1 ||
+    screen.currentStep > screen.totalSteps ||
+    screen.totalSteps > CODEX_QUESTIONNAIRE_MAX_QUESTIONS ||
+    !["single_select", "multi_select", "free_text", "confirm"].includes(
+      screen.responseKind
+    ) ||
+    (screen.options?.length ?? 0) > CODEX_QUESTIONNAIRE_MAX_OPTIONS
+  ) {
+    throw new Error("Codex questionnaire screen evidence is invalid");
+  }
+  return {
+    currentStep: screen.currentStep,
+    totalSteps: screen.totalSteps,
+    prompt: normalizedCodexQuestionnaireText(
+      screen.prompt,
+      "Codex questionnaire screen prompt"
+    ),
+    responseKind: screen.responseKind,
+    ...(screen.options === undefined
+      ? {}
+      : {
+          options: screen.options.map((option) => ({
+            label: normalizedCodexQuestionnaireText(
+              option.label,
+              "Codex questionnaire screen option label"
+            ),
+            ...(option.description === undefined
+              ? {}
+              : {
+                  description: normalizedCodexQuestionnaireText(
+                    option.description,
+                    "Codex questionnaire screen option description"
+                  )
+                })
+          }))
+        })
+  };
+}
+
+function normalizedCodexQuestionnaireText(
+  value: unknown,
+  label: string
+): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > CODEX_QUESTIONNAIRE_MAX_TEXT_LENGTH ||
+    value.includes("\0")
+  ) {
+    throw new Error(`${label} is invalid`);
+  }
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  if (!normalized) throw new Error(`${label} is empty`);
+  return normalized;
+}
+
+function codexRenderedOptionsMatch(
+  durable: ReadonlyArray<{ label: string; description?: string }>,
+  rendered: ReadonlyArray<{ label: string; description?: string }>
+): boolean {
+  if (sameCodexQuestionnaireOptions(durable, rendered)) return true;
+  const canonicalOther = {
+    label: CODEX_QUESTIONNAIRE_OTHER_LABEL,
+    description: CODEX_QUESTIONNAIRE_OTHER_DESCRIPTION
+  };
+  if (
+    sameCodexQuestionnaireOptions(
+      [...durable, canonicalOther],
+      rendered
+    )
+  ) {
+    return true;
+  }
+  return !durable.some((option) =>
+    option.label === CODEX_QUESTIONNAIRE_CUSTOM_LABEL
+  ) && sameCodexQuestionnaireOptions(
+    [
+      ...durable,
+      {
+        label: CODEX_QUESTIONNAIRE_CUSTOM_LABEL,
+        description: CODEX_QUESTIONNAIRE_CUSTOM_DESCRIPTION
+      },
+      canonicalOther
+    ],
+    rendered
+  );
+}
+
+function sameCodexQuestionnaireOptions(
+  left: ReadonlyArray<{ label: string; description?: string }>,
+  right: ReadonlyArray<{ label: string; description?: string }>
+): boolean {
+  return left.length === right.length && left.every((option, index) =>
+    option.label === right[index]?.label &&
+    option.description === right[index]?.description
+  );
+}
+
+function validateCodexRecoveryCandidateForAcceptance(
+  value: CodexOpenRootRolloutIdentity,
+  anchor: CodexCandidateSetRolloutAcceptanceAnchor
+): CodexOpenRootRolloutIdentity {
+  if (!isRecord(value)) {
+    throw new Error("persisted Codex recovery candidate is invalid");
+  }
+  const sessionId = exactNativeThreadId(value.sessionId);
+  const rollout = normalizedRolloutIdentity(value.rollout);
+  if (
+    value.processUuid !== anchor.process_uuid ||
+    value.processBirth !== anchor.process_birth ||
+    value.evidence !== "codex_open_root_rollout"
+  ) {
+    throw new Error(
+      "persisted Codex recovery candidate has different process authority"
+    );
+  }
+  return {
+    sessionId,
+    processUuid: anchor.process_uuid,
+    processBirth: anchor.process_birth,
+    rollout,
+    evidence: "codex_open_root_rollout"
+  };
+}
+
 function openExactRollout(rollout: CodexRolloutIdentity): {
   fd: number;
   stat: fs.Stats;
@@ -2256,9 +3128,20 @@ function sameRolloutIdentity(
   right: CodexRolloutIdentity
 ): boolean {
   return left.fd === right.fd &&
-    left.device === right.device &&
+    sameRolloutFileIdentity(left, right);
+}
+
+function sameRolloutFileIdentity(
+  left: CodexRolloutIdentity,
+  right: CodexRolloutIdentity
+): boolean {
+  return left.device === right.device &&
     left.inode === right.inode &&
     left.path === right.path;
+}
+
+function codexRolloutInodeKey(rollout: CodexRolloutIdentity): string {
+  return `${rollout.device}:${rollout.inode}`;
 }
 
 function optionalString(value: unknown): string | undefined {

@@ -18,6 +18,43 @@ import type { BoundTerminalDispatchRoute } from
 import type { CodexCandidateSetRolloutAcceptanceAnchor } from
   "./terminal-submission-facts.js";
 
+/**
+ * Store authority frozen before a source-less candidate Send.  The native
+ * rollout remains only a candidate until it accepts the exact request; this
+ * snapshot authorizes retiring one unchanged detached historical owner if
+ * that exact rollout wins.
+ */
+export interface CodexDetachedCandidateSessionClaim {
+  session_id: string;
+  session_revision: number;
+  session_binding_token: string;
+  binding_id: string;
+  binding_generation: number;
+  native_thread_id: string;
+  process_uuid: string;
+  process_birth: string;
+  source_rollout: {
+    fd: string;
+    device: string;
+    inode: string;
+    path: string;
+  };
+  candidate_rollout: {
+    fd: string;
+    device: string;
+    inode: string;
+    path: string;
+  };
+}
+
+export interface CodexDetachedCandidateSessionClaimSet {
+  schema: "agent-knock-knock/codex-detached-candidate-session-claims";
+  version: 1;
+  anchor_fingerprint: string;
+  claims: CodexDetachedCandidateSessionClaim[];
+  claims_fingerprint: string;
+}
+
 export interface DeferredCodexForegroundDispatchSnapshot {
   status: "none" | "resolved";
   fingerprint: string;
@@ -100,6 +137,15 @@ export interface TerminalControlSendRequest {
     transition: NativeThreadTransition;
   };
   verifiedEmptyCodexHandoff?: VerifiedEmptyCodexHandoffBoundary;
+  /**
+   * Physical-terminal human Send may have no authoritative predecessor
+   * Session while Codex exposes an ambiguous open-root set. Freeze that set
+   * before input and bind the provisional raw-attach Session only after one
+   * rollout durably accepts the exact request.
+   */
+  postSendCodexCandidateAnchor?: CodexCandidateSetRolloutAcceptanceAnchor;
+  postSendCodexDetachedSessionClaims?:
+    CodexDetachedCandidateSessionClaimSet;
   deferredCodexForegroundBinding?: DeferredCodexForegroundBindingBoundary;
   continuingTurnResponse?: boolean;
 }

@@ -148,7 +148,7 @@
     },
     "store_protocols": {
       "format_version": 1,
-      "current_writer_protocol": 6,
+      "current_writer_protocol": 7,
       "session_authority_protocol": 3,
       "terminal_watch_schema": "agent-knock-knock/terminal-watch",
       "terminal_watch_version": 2,
@@ -157,7 +157,8 @@
         2,
         3,
         4,
-        5
+        5,
+        6
       ],
       "authority_paths": [
         "src/session-store.ts",
@@ -188,6 +189,10 @@
         {
           "protocol": 6,
           "witness": "store-protocol-6-boundary"
+        },
+        {
+          "protocol": 7,
+          "witness": "store-protocol-7-boundary"
         }
       ],
       "witnesses": [
@@ -591,7 +596,13 @@
       "id": "store-protocol-6-boundary",
       "path": "test/store.test.ts",
       "tier": "integration",
-      "needle": "protocol 5 upgrades to protocol 6 as the Terminal Watch v2 writer fence"
+      "needle": "protocol 5 Terminal Watch v2 predecessor upgrades directly to the current writer fence"
+    },
+    {
+      "id": "store-protocol-7-boundary",
+      "path": "test/store.test.ts",
+      "tier": "integration",
+      "needle": "protocol 6 upgrades to protocol 7 as the manual-interaction Terminal Watch writer fence"
     },
     {
       "id": "store-protocol-cli-boundary",

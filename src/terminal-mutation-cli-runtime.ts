@@ -9,7 +9,6 @@ import {
   type CanonicalStateMutationResources,
   type CanonicalStateMutationScopes
 } from "./mutation-transaction.js";
-import { withStoreWriterLeaseAsync } from "./store.js";
 import type { TerminalControlRef } from "./terminal-agent-adapter.js";
 import {
   terminalDispatchStateLockPath,
@@ -28,7 +27,18 @@ export interface TerminalMutationCliRuntimePorts {
     options?: FileLockAcquisitionOptions
   ): () => void;
   terminalBridgeRuntimeKey(terminalControl: TerminalControlRef): string;
+  withStoreWriterLeaseAsync<Result>(
+    storeDir: string,
+    operation: () => Promise<Result>,
+    options?: Readonly<{ timeoutMs?: number }>
+  ): Promise<Result>;
 }
+
+export type TerminalWriterMutationLockOptions =
+  FileLockAcquisitionOptions & Readonly<{
+    terminalTimeoutMs?: number;
+    storeWriterTimeoutMs?: number;
+  }>;
 
 export function createTerminalMutationCliRuntime(
   ports: TerminalMutationCliRuntimePorts
@@ -36,7 +46,7 @@ export function createTerminalMutationCliRuntime(
   function terminalWriterMutationLocks(
     storeDir: string,
     terminalControl: TerminalControlRef,
-    options: FileLockAcquisitionOptions = {}
+    options: TerminalWriterMutationLockOptions = {}
   ) {
     const canonicalStoreDir = path.resolve(storeDir);
     return {
@@ -53,11 +63,15 @@ export function createTerminalMutationCliRuntime(
       acquireTerminal: () => ports.acquireTerminalBridgeSendLock(
         canonicalStoreDir,
         terminalControl,
-        { timeoutMs: options.timeoutMs ?? 30_000, retryMs: options.retryMs }
+        {
+          timeoutMs:
+            options.terminalTimeoutMs ?? options.timeoutMs ?? 30_000,
+          retryMs: options.retryMs
+        }
       ),
       withStoreWriter: <Result>(operation: () => Promise<Result>) =>
-        withStoreWriterLeaseAsync(canonicalStoreDir, operation, {
-          timeoutMs: options.timeoutMs
+        ports.withStoreWriterLeaseAsync(canonicalStoreDir, operation, {
+          timeoutMs: options.storeWriterTimeoutMs ?? options.timeoutMs
         })
     };
   }

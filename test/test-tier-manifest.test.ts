@@ -75,7 +75,7 @@ test("npm test remains full while targeted integration selection fails closed", 
   ));
   const validatedShardConfig =
     tierUtils.validateTestFileShardConfig(shardConfig);
-  assert.equal(shardConfig.expansions[0].declaration_shards.length, 97);
+  assert.equal(shardConfig.expansions[0].declaration_shards.length, 98);
   assert.throws(
     () => tierUtils.validateTestFileShardTierOwnership(
       validatedShardConfig,

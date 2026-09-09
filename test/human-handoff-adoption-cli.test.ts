@@ -2552,7 +2552,8 @@ test("a competing native owner cannot veto physical user Send", async () => {
     const output = JSON.parse(sent.stdout);
     assert.equal(output.delivered, true, fixture.debug(sent));
     assert.equal(output.delivered_unmanaged, true, fixture.debug(sent));
-    assert.equal(output.management_mode, "unmanaged_fallback");
+    assert.equal(output.management_mode, "unmanaged");
+    assert.equal(output.legacy_management_mode, "unmanaged_fallback");
     assert.equal(fixture.transitionCount(), 0);
     assert.equal(
       fixture.literalInputs().filter((input) => input === request).length,
@@ -2646,7 +2647,8 @@ test("Codex pre-text managed identity drift falls back to the same physical pane
     const output = JSON.parse(sent.stdout);
     assert.equal(output.delivered, true, fixture.debug(sent));
     assert.equal(output.delivered_unmanaged, true, fixture.debug(sent));
-    assert.equal(output.management_mode, "unmanaged_fallback");
+    assert.equal(output.management_mode, "unmanaged");
+    assert.equal(output.legacy_management_mode, "unmanaged_fallback");
     assert.equal(fixture.driftTriggered(), true);
     assert.equal(
       fixture.literalInputs().filter((input) => input === request).length,

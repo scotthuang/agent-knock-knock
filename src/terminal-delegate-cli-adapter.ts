@@ -166,6 +166,21 @@ function samePhysicalDelegateAuthority(
     candidate.expectedTerminalToken === expectedTerminalToken;
 }
 
+function samePhysicalDelegateObservation(
+  dependencies: TerminalDelegateCliDependencies,
+  terminal: DelegateTerminalCandidate,
+  terminalId: string,
+  terminalControl: TerminalControlRef
+): boolean {
+  const observedControl = isRecord(terminal.terminal_control)
+    ? terminal.terminal_control as unknown as TerminalControlRef
+    : undefined;
+  return stringValue(terminal.id) === terminalId &&
+    observedControl !== undefined &&
+    dependencies.runtime.terminalRuntimeKey(observedControl) ===
+      dependencies.runtime.terminalRuntimeKey(terminalControl);
+}
+
 async function discoverDelegatePhysicalRoute(
   dependencies: TerminalDelegateCliDependencies,
   input: {
@@ -223,16 +238,26 @@ async function discoverDelegatePhysicalRoute(
     const projectedAuthority = observed.state === "available"
       ? delegateUserExplicitSendCandidate(observed.terminal)
       : undefined;
-    if (
-      projectedAuthority &&
-      samePhysicalDelegateAuthority(
-        projectedAuthority,
-        selectedTerminalId,
-        selected.expectedTerminalToken
-      )
-    ) {
+    if (projectedAuthority && samePhysicalDelegateAuthority(
+      projectedAuthority,
+      selectedTerminalId,
+      selected.expectedTerminalToken
+    )) {
       expectedManagedTerminalToken =
         projectedAuthority.expectedManagedTerminalToken;
+    } else if (
+      observed.state === "available" &&
+      samePhysicalDelegateObservation(
+        dependencies,
+        observed.terminal,
+        selectedTerminalId,
+        terminalControl
+      )
+    ) {
+      // A conclusive observation of the same physical pane replaces the
+      // optional managed fast-path hint. If Send is no longer projected, clear
+      // the old hint; execution still revalidates the durable physical token.
+      expectedManagedTerminalToken = undefined;
     }
   } catch {
     // Managed fast-path discovery is optional. The raw physical action was
@@ -426,13 +451,12 @@ async function sendDelegatePhysicalRoute(
     workspace: route.workspace,
     background: true,
     expectedTerminalToken: route.expectedTerminalToken,
+    // Never let a caller-supplied private fast-path hint survive fresh route
+    // discovery. Undefined is meaningful: use physical authority and let Send
+    // recover or fall back without coupling it to a stale managed snapshot.
+    expectedManagedTerminalToken: route.expectedManagedTerminalToken,
     ...(route.routingWarning
       ? { terminalUserSendRoutingWarning: route.routingWarning }
-      : {}),
-    ...(route.expectedManagedTerminalToken
-      ? {
-          expectedManagedTerminalToken: route.expectedManagedTerminalToken
-        }
       : {})
   });
 }

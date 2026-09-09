@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import type { CodexOpenRootRolloutInventory } from
-  "./agent-session-provider.js";
+import {
+  CodexTransientDuplicateOpenRootDescriptorsError,
+  type CodexOpenRootRolloutInventory
+} from "./agent-session-provider.js";
 import { callbackExpectedForConversationWithLegacyFallback } from
   "./callback-route-authority.js";
 import type { ExecutorKind } from "./executors.js";
@@ -11,9 +13,10 @@ import {
   turnIdForConversation,
   type Conversation
 } from "./protocol.js";
-import type {
-  ManagedSessionState,
-  NativeThreadTransition
+import {
+  isExactNativeThreadId,
+  type ManagedSessionState,
+  type NativeThreadTransition
 } from "./managed-session.js";
 import type {
   TerminalControlRef,
@@ -1014,13 +1017,17 @@ export class TerminalDispatchExecutionService {
     const validated = validateCodexRolloutAcceptanceAnchor(anchor);
     const pid = Number(takeover?.terminal_agent_pid);
     if (validated.version === 3) {
+      const recoveryCandidate = durableCodexAcceptanceRecoveryCandidate(
+        request.conversation
+      );
       const result = this.#ports.acceptance.detectCodexCandidates({
         anchor: validated,
         currentInventory: await this.inspectCodexOpenRootInventory(
           pid,
           request.terminalControl.currentPath
         ),
-        requestHash
+        requestHash,
+        recoveryCandidate
       });
       if (result.status === "uncertain") {
         throw candidateAcceptanceError(result);
@@ -1049,6 +1056,7 @@ export class TerminalDispatchExecutionService {
     request: TerminalAcceptancePollRequest
   ): Promise<TerminalDispatchAcceptance> {
     const deadline = this.#ports.clock.nowMs() + request.timeoutMs;
+    let observedTransientCodexDescriptorOverlap = false;
     while (true) {
       try {
         const evidence = await this.detectAcceptance(request);
@@ -1056,12 +1064,20 @@ export class TerminalDispatchExecutionService {
           return { outcome: "agent_accepted", evidence };
         }
       } catch (error) {
-        return { outcome: "uncertain", reason: errorText(error) };
+        if (
+          !(error instanceof CodexTransientDuplicateOpenRootDescriptorsError)
+        ) {
+          return { outcome: "uncertain", reason: errorText(error) };
+        }
+        observedTransientCodexDescriptorOverlap = true;
       }
       if (this.#ports.clock.nowMs() >= deadline) {
         break;
       }
       await this.#ports.clock.sleep(request.pollIntervalMs);
+    }
+    if (observedTransientCodexDescriptorOverlap) {
+      return { outcome: "pending_acceptance" };
     }
     if (this.#syntheticAcceptanceOutcome === "not_accepted") {
       return draftNotAccepted();
@@ -1161,7 +1177,17 @@ export class TerminalDispatchExecutionService {
     const attempts = request.attempts ?? 40;
     const delayMs = request.delayMs ?? 50;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const identity = await this.#pollNativeIdentityAttempt(request);
+      let identity: TerminalNativeIdentity | "pending";
+      try {
+        identity = await this.#pollNativeIdentityAttempt(request);
+      } catch (error) {
+        if (
+          !(error instanceof CodexTransientDuplicateOpenRootDescriptorsError)
+        ) {
+          throw error;
+        }
+        identity = "pending";
+      }
       if (identity !== "pending") {
         return identity;
       }
@@ -1460,6 +1486,45 @@ function sameRollout(left: unknown, right: unknown): boolean {
     nonBlankString(left.device) === nonBlankString(right.device) &&
     nonBlankString(left.inode) === nonBlankString(right.inode) &&
     nonBlankString(left.path) === nonBlankString(right.path);
+}
+
+function durableCodexAcceptanceRecoveryCandidate(
+  conversation: Conversation
+): CodexCandidateSetRolloutAcceptanceRequest["recoveryCandidate"] {
+  const takeover = isRecord(conversation.native_session_takeover)
+    ? conversation.native_session_takeover
+    : undefined;
+  const turnThreadId = nonBlankString(conversation.native_thread_id);
+  const takeoverThreadId = nonBlankString(
+    takeover?.terminal_agent_session_id
+  );
+  const rawRollout = takeover?.terminal_agent_rollout;
+  if (!turnThreadId && !takeoverThreadId && rawRollout === undefined) {
+    return undefined;
+  }
+  const processUuid = nonBlankString(takeover?.terminal_agent_process_uuid);
+  const processBirth = nonBlankString(takeover?.terminal_agent_process_birth);
+  if (
+    !turnThreadId ||
+    !takeoverThreadId ||
+    !isExactNativeThreadId(turnThreadId) ||
+    !isExactNativeThreadId(takeoverThreadId) ||
+    turnThreadId.toLowerCase() !== takeoverThreadId.toLowerCase() ||
+    !processUuid ||
+    !processBirth ||
+    !isCompleteNativeRollout(rawRollout)
+  ) {
+    throw new Error(
+      "durable Codex Turn identity is incomplete or inconsistent during candidate-set acceptance"
+    );
+  }
+  return {
+    sessionId: turnThreadId.toLowerCase(),
+    processUuid,
+    processBirth,
+    rollout: rawRollout,
+    evidence: "codex_open_root_rollout"
+  };
 }
 
 function optionalValueMatches(

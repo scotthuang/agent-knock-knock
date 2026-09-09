@@ -19,7 +19,10 @@ import {
 } from "../src/cli-core.js";
 import { withCanonicalMutationLocks } from
   "../src/mutation-transaction.js";
-import { ensureStoreWritable } from "../src/store.js";
+import {
+  ensureStoreWritable,
+  withStoreWriterLeaseAsync
+} from "../src/store.js";
 import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
 import {
@@ -334,7 +337,8 @@ test("terminal mutation CLI wiring preserves canonical lock order", async () => 
     terminalBridgeRuntimeKey(observedTerminalControl) {
       assert.equal(observedTerminalControl, terminalControl);
       return "terminal:test:0.0";
-    }
+    },
+    withStoreWriterLeaseAsync
   });
 
   try {
@@ -364,6 +368,54 @@ test("terminal mutation CLI wiring preserves canonical lock order", async () => 
       "state-unlock",
       "terminal-unlock"
     ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal mutation CLI gives terminal and Store writer independent lock budgets", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cli-lock-budget-"));
+  const storeDir = path.join(root, "store");
+  const terminalControl = {
+    kind: "tmux",
+    target: "test:0.0"
+  } as TerminalControlRef;
+  const terminalTimeouts: Array<number | undefined> = [];
+  const writerTimeouts: Array<number | undefined> = [];
+  ensureStoreWritable(storeDir);
+
+  const runtime = createTerminalMutationCliRuntime({
+    acquireFileLock() {
+      return () => {};
+    },
+    acquireTerminalBridgeSendLock(_storeDir, _terminal, options) {
+      terminalTimeouts.push(options?.timeoutMs);
+      return () => {};
+    },
+    terminalBridgeRuntimeKey() {
+      return "terminal:test:0.0";
+    },
+    async withStoreWriterLeaseAsync(_storeDir, operation, options) {
+      writerTimeouts.push(options?.timeoutMs);
+      return operation();
+    }
+  });
+
+  try {
+    let operationRan = false;
+    await withCanonicalMutationLocks(
+      runtime.terminalWriterMutationLocks(storeDir, terminalControl, {
+        timeoutMs: 0,
+        terminalTimeoutMs: 123,
+        storeWriterTimeoutMs: 1_000
+      }),
+      async () => {
+        operationRan = true;
+      }
+    );
+    assert.equal(operationRan, true);
+    assert.deepEqual(terminalTimeouts, [123]);
+    assert.deepEqual(writerTimeouts, [1_000]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -77,6 +77,52 @@ export interface TerminalDispatchReplayAcceptance {
   readonly invalid: boolean;
 }
 
+export interface UserExplicitTerminalInputSafetyFacts {
+  readonly reachable: boolean;
+  readonly approvalScanned: boolean;
+  readonly approvalBlocked: boolean;
+  readonly approvalReason?: string;
+  readonly awaitingApproval: boolean;
+  readonly questionnaireActive: boolean;
+}
+
+export type UserExplicitTerminalInputSafety =
+  | { readonly action: "proceed" }
+  | { readonly action: "reject"; readonly reason: string };
+
+/**
+ * Human priority bypasses management uncertainty, never the live TUI's
+ * physical input mode. A questionnaire is as unsafe for task text as an
+ * approval menu because the same bytes would be interpreted as an answer.
+ */
+export function decideUserExplicitTerminalInputSafety(
+  facts: UserExplicitTerminalInputSafetyFacts
+): UserExplicitTerminalInputSafety {
+  if (!facts.reachable) {
+    return { action: "reject", reason: "the explicitly selected terminal is unreachable" };
+  }
+  if (!facts.approvalScanned) {
+    return {
+      action: "reject",
+      reason: "the explicitly selected terminal approval state could not be verified"
+    };
+  }
+  if (facts.approvalBlocked || facts.awaitingApproval) {
+    return {
+      action: "reject",
+      reason: facts.approvalReason ??
+        "the explicitly selected terminal is waiting at an approval prompt"
+    };
+  }
+  if (facts.questionnaireActive) {
+    return {
+      action: "reject",
+      reason: "the explicitly selected terminal is waiting at a native questionnaire"
+    };
+  }
+  return { action: "proceed" };
+}
+
 export type TerminalDispatchLedgerAuthority =
   | "absent"
   | "unreadable"
@@ -218,7 +264,9 @@ export function decideTerminalDispatchReplayAcceptance({
   submissionOutcome: string;
 }): TerminalDispatchReplayAcceptance {
   return {
-    accepted: delivered,
+    // `delivered` is physical Enter-dispatch proof in the 0.13 contract.
+    // Native acceptance remains a separate, stronger fact.
+    accepted: delivered && submissionOutcome === "agent_accepted",
     invalid: submissionOutcome === "uncertain"
   };
 }

@@ -82,7 +82,7 @@ export class TerminalAcceptanceApplicationService<Turn> {
 
     if (
       evidence &&
-      facts.codexAnchorVersion === 2 &&
+      [2, 3].includes(facts.codexAnchorVersion ?? 0) &&
       recovery.state === "not_applicable"
     ) {
       throw new Error(
@@ -91,7 +91,7 @@ export class TerminalAcceptanceApplicationService<Turn> {
     }
     if (
       evidence &&
-      facts.codexAnchorVersion === 2 &&
+      [2, 3].includes(facts.codexAnchorVersion ?? 0) &&
       recovery.state === "pending"
     ) {
       recovery = await this.#ports.binding.recover(turn);

@@ -12,6 +12,8 @@ import {
   terminalBridgeRequestFingerprint,
   terminalBridgeSubmission,
   terminalBridgeSubmissionReceipts,
+  terminalInputDispatchedForConversation,
+  terminalSubmissionIndicatesInputDispatched,
   unresolvedTerminalBridgeSubmission,
   withTerminalBridgeState
 } from "../src/terminal-dispatch-receipt.js";
@@ -87,6 +89,7 @@ test("terminal bridge state preserves exact keys and pretty JSON bytes", () => {
     monitorLockVersion: 3,
     preSendScreenFingerprint: "screen-a",
     codexRolloutAcceptanceAnchor: { version: 2 },
+    codexDetachedCandidateSessionClaims: { version: 1 },
     claudeTranscriptAnchor: undefined,
     claudeHome: undefined
   });
@@ -101,6 +104,7 @@ test("terminal bridge state preserves exact keys and pretty JSON bytes", () => {
       terminal_bridge_request_hash: sha256(REQUEST_TEXT),
       terminal_bridge_pre_send_screen_fingerprint: "screen-a",
       codex_rollout_acceptance_anchor: { version: 2 },
+      codex_detached_candidate_session_claims: { version: 1 },
       claude_transcript_anchor: undefined,
       claude_home: undefined,
       terminal_bridge_completion_claim: undefined,
@@ -159,6 +163,39 @@ test("prepared receipt preserves exact Object.keys and durable state bytes", () 
   assert.deepEqual(terminalBridgeSubmissionReceipts(preparedReceipt()), [expected]);
   assert.deepEqual(unresolvedTerminalBridgeSubmission(preparedReceipt()), expected);
   assert.equal(terminalBridgeRequestFingerprint(""), undefined);
+});
+
+test("Close audit facts preserve a durable terminal input stage", () => {
+  const prepared = preparedReceipt();
+  assert.equal(terminalInputDispatchedForConversation(prepared), false);
+  assert.equal(
+    terminalSubmissionIndicatesInputDispatched({
+      status: "uncertain",
+      last_proven_stage: "prepared"
+    }),
+    false
+  );
+
+  const injected = applyTerminalBridgeSubmission({
+    conversation: prepared,
+    messageId: "message-a",
+    requestText: REQUEST_TEXT,
+    status: "text_injected",
+    preparedAt: STARTED_AT,
+    textInjectedAt: "2026-08-14T12:00:01.000Z"
+  }, {
+    dispatcherPid: 4102,
+    storeDir: STORE_DIR,
+    terminalControl: TERMINAL_CONTROL
+  });
+  assert.equal(terminalInputDispatchedForConversation(injected), true);
+  assert.equal(
+    terminalSubmissionIndicatesInputDispatched({
+      status: "uncertain",
+      last_proven_stage: "text_injected"
+    }),
+    true
+  );
 });
 
 test("receipt history is append-only and immutable within one generation", () => {

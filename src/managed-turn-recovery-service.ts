@@ -60,16 +60,23 @@ export interface ManagedTurnRecoveryPorts {
       cwd?: string;
       preferredSessionId?: string;
     }): Promise<TerminalNativeIdentity | undefined>;
+    resolveCandidate(input: {
+      pid: number;
+      cwd?: string;
+      requestHash: string;
+      recoveryIdentity?: TerminalNativeIdentity;
+    }): Promise<TerminalNativeIdentity | undefined>;
   };
   acceptance: {
     detect(identity: TerminalNativeIdentity, requestHash: string): boolean;
   };
   authority: {
-    assertExclusive(input: {
+    prepareIdentityClaim(input: {
       pid: number;
       nativeThreadId: string;
       terminalControl: TerminalControlRef;
       sessionId: string;
+      identity: TerminalNativeIdentity;
     }): Promise<void>;
     assertTurn(identity?: TerminalNativeIdentity): void;
   };
@@ -95,7 +102,7 @@ export function isVirginCodexRecoveryCandidate(
   facts: VirginCodexRecoveryFacts
 ): boolean {
   return facts.agent === "codex" &&
-    facts.anchorVersion === 2 &&
+    [2, 3].includes(facts.anchorVersion ?? 0) &&
     facts.anchorNativeThreadBinding === "post_submission" &&
     facts.terminalControl !== undefined &&
     RECOVERABLE_SUBMISSION_STATUSES.has(facts.submissionStatus ?? "");
@@ -151,11 +158,22 @@ export class ManagedTurnRecoveryService {
     }
 
     const preferredSessionId = turnNativeThreadId ?? sessionNativeThreadId;
-    const identity = await this.#ports.identity.resolve({
-      pid: facts.pid as number,
-      cwd: terminalControl.currentPath,
-      preferredSessionId
-    });
+    const candidateSet = facts.anchorVersion === 3;
+    const recoveryIdentity = candidateSet
+      ? this.#durableIdentity(facts, binding as VirginCodexSessionBindingFacts)
+      : undefined;
+    const identity = candidateSet
+      ? await this.#ports.identity.resolveCandidate({
+          pid: facts.pid as number,
+          cwd: terminalControl.currentPath,
+          requestHash: facts.requestHash as string,
+          recoveryIdentity
+        })
+      : await this.#ports.identity.resolve({
+          pid: facts.pid as number,
+          cwd: terminalControl.currentPath,
+          preferredSessionId
+        });
     if (!identity) {
       return { state: "pending" };
     }
@@ -168,20 +186,22 @@ export class ManagedTurnRecoveryService {
     if (
       !turnNativeThreadId &&
       !sessionNativeThreadId &&
+      !candidateSet &&
       !this.#ports.acceptance.detect(identity, facts.requestHash as string)
     ) {
       return { state: "pending" };
     }
 
-    await this.#ports.authority.assertExclusive({
+    await this.#ports.authority.prepareIdentityClaim({
       pid: facts.pid as number,
       nativeThreadId: identity.sessionId,
       terminalControl,
-      sessionId: facts.sessionId as string
+      sessionId: facts.sessionId as string,
+      identity
     });
     if (!sessionNativeThreadId) {
       const proof = this.#ports.persistence.persistSessionIdentity(identity);
-      this.#assertPersistedSessionIdentity(proof, identity);
+      this.#assertPersistedSessionIdentity(facts, proof, identity);
     }
     if (!turnNativeThreadId) {
       this.#ports.persistence.persistTurnIdentity(identity);
@@ -255,6 +275,48 @@ export class ManagedTurnRecoveryService {
         "virgin Codex Session has a partial recovered native identity"
       );
     }
+    if (
+      facts.turnNativeThreadId &&
+      binding.nativeThreadId &&
+      !this.#rolloutMatches(facts, facts.turnRollout, binding.rollout)
+    ) {
+      throw new Error(
+        "virgin Codex Session and Turn rollout identities disagree before recovery"
+      );
+    }
+  }
+
+  #durableIdentity(
+    facts: VirginCodexRecoveryFacts,
+    binding: VirginCodexSessionBindingFacts
+  ): TerminalNativeIdentity | undefined {
+    const sessionId = facts.turnNativeThreadId ?? binding.nativeThreadId;
+    const rollout = facts.turnNativeThreadId
+      ? facts.turnRollout
+      : binding.rollout;
+    if (!sessionId || !isCompleteNativeRollout(rollout)) return undefined;
+    return {
+      sessionId,
+      processUuid: facts.anchorProcessUuid as string,
+      processBirth: facts.anchorProcessBirth as string,
+      rollout,
+      evidence: "codex_rollout_fd"
+    };
+  }
+
+  #rolloutMatches(
+    facts: VirginCodexRecoveryFacts,
+    left: unknown,
+    right: TerminalNativeIdentity["rollout"]
+  ): boolean {
+    if (facts.anchorVersion !== 3) return exactRolloutMatches(left, right);
+    return Boolean(
+      isCompleteNativeRollout(left) &&
+      isCompleteNativeRollout(right) &&
+      left.device === right.device &&
+      left.inode === right.inode &&
+      left.path === right.path
+    );
   }
 
   #assertResolvedIdentity(
@@ -270,9 +332,9 @@ export class ManagedTurnRecoveryService {
       !isCompleteNativeRollout(identity.rollout) ||
       (preferredSessionId && identity.sessionId !== preferredSessionId) ||
       (facts.turnNativeThreadId &&
-        !exactRolloutMatches(facts.turnRollout, identity.rollout)) ||
+        !this.#rolloutMatches(facts, facts.turnRollout, identity.rollout)) ||
       (binding.nativeThreadId &&
-        !exactRolloutMatches(binding.rollout, identity.rollout))
+        !this.#rolloutMatches(facts, binding.rollout, identity.rollout))
     ) {
       throw new Error(
         "virgin Codex native identity changed before binding recovery"
@@ -281,6 +343,7 @@ export class ManagedTurnRecoveryService {
   }
 
   #assertPersistedSessionIdentity(
+    facts: VirginCodexRecoveryFacts,
     proof: PersistedVirginIdentityProof | undefined,
     identity: TerminalNativeIdentity
   ): void {
@@ -288,7 +351,7 @@ export class ManagedTurnRecoveryService {
       proof?.nativeThreadId !== identity.sessionId ||
       proof.processUuid !== identity.processUuid ||
       proof.processBirth !== identity.processBirth ||
-      !exactRolloutMatches(proof.rollout, identity.rollout)
+      !this.#rolloutMatches(facts, proof.rollout, identity.rollout)
     ) {
       throw new Error(
         "virgin Codex Session identity was not durably committed during recovery"

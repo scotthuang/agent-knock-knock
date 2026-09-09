@@ -247,7 +247,7 @@ const {
 } = createTerminalMutationCliRuntime({
   acquireFileLock,
   acquireTerminalBridgeSendLock,
-  terminalBridgeRuntimeKey
+  terminalBridgeRuntimeKey, withStoreWriterLeaseAsync
 });
 const loadTerminalBridgeDispatchLedger = terminalDispatchRepository.load;
 const saveTerminalBridgeDispatchLedger = terminalDispatchRepository.save;
@@ -887,7 +887,12 @@ const terminalAcceptanceCliFacade = createTerminalAcceptanceCliFacade({
     assertTurnCurrent: assertTurnBindingCurrent,
     terminalControl: terminalControlFromTakeover,
     isDiscoverableTurn: isDiscoverableTmuxConversation,
-    workspaceMatches: matchesConfiguredWorkspace
+    workspaceMatches: matchesConfiguredWorkspace,
+    hasUnresolvedTransition: (storeDir, session) =>
+      terminalListCliFacade.managedSessionHasUnresolvedNativeTransition(
+        storeDir,
+        session
+      )
   },
   repository: {
     acquireStateLock: acquireFileLock,
@@ -1674,6 +1679,8 @@ const terminalCommandCliFacade = createTerminalCommandCliFacade({
     assertNativeAgentIdentityForTurn,
     assertNativeThreadHasExclusiveOwnership: (input) =>
       nativeThreadLifecycleFacade.assertExclusive(input),
+    prepareManagedSessionNativeIdentityClaim: (input) =>
+      terminalAcceptanceCliFacade.prepareSessionIdentityClaim(input),
     assertObservedHandoffTransportBoundary,
     assertSafeAbortedTerminalRetryBinding,
     assertSafeTerminalSend,

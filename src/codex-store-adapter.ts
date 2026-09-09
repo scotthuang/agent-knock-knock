@@ -4,10 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type {
-  ActiveAgentSessionIdentity,
-  CodexOpenRootRolloutIdentity,
-  CodexOpenRootRolloutInventory
+import {
+  CodexTransientDuplicateOpenRootDescriptorsError,
+  type ActiveAgentSessionIdentity,
+  type CodexOpenRootRolloutIdentity,
+  type CodexOpenRootRolloutInventory
 } from "./agent-session-provider.js";
 import {
   isValidCodexAgentVersion
@@ -1113,20 +1114,14 @@ export function inspectCodexOpenRootRolloutInventory({
     left.rollout.path.localeCompare(right.rollout.path) ||
     left.rollout.fd.localeCompare(right.rollout.fd)
   );
-  for (let index = 1; index < identities.length; index += 1) {
-    const previous = identities[index - 1];
-    const current = identities[index];
-    if (
-      previous.sessionId === current.sessionId ||
-      (
-        previous.rollout.device === current.rollout.device &&
-        previous.rollout.inode === current.rollout.inode
-      )
-    ) {
-      throw new Error(
-        `Codex process ${pid} has duplicate open root rollout identities`
-      );
-    }
+  const duplicateDisposition = classifyCodexOpenRootDuplicates(identities);
+  if (duplicateDisposition === "transient_exact_descriptor_duplicate") {
+    throw new CodexTransientDuplicateOpenRootDescriptorsError(pid);
+  }
+  if (duplicateDisposition === "conflicting_identity") {
+    throw new Error(
+      `Codex process ${pid} has duplicate open root rollout identities`
+    );
   }
   return codexOpenRootRolloutInventoryResult({
     pid,
@@ -1135,6 +1130,48 @@ export function inspectCodexOpenRootRolloutInventory({
     cwd: expectedCwd,
     roots: identities
   });
+}
+
+type CodexOpenRootDuplicateDisposition =
+  | "none"
+  | "transient_exact_descriptor_duplicate"
+  | "conflicting_identity";
+
+function classifyCodexOpenRootDuplicates(
+  identities: readonly CodexOpenRootRolloutIdentity[]
+): CodexOpenRootDuplicateDisposition {
+  let exactDescriptorDuplicate = false;
+  for (let leftIndex = 0; leftIndex < identities.length; leftIndex += 1) {
+    const left = identities[leftIndex];
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < identities.length;
+      rightIndex += 1
+    ) {
+      const right = identities[rightIndex];
+      const sameSession = left.sessionId === right.sessionId;
+      const sameFile =
+        left.rollout.device === right.rollout.device &&
+        left.rollout.inode === right.rollout.inode;
+      if (!sameSession && !sameFile) {
+        continue;
+      }
+      const exactRolloutWithDistinctDescriptors =
+        sameSession &&
+        sameFile &&
+        left.processUuid === right.processUuid &&
+        left.processBirth === right.processBirth &&
+        left.rollout.path === right.rollout.path &&
+        left.rollout.fd !== right.rollout.fd;
+      if (!exactRolloutWithDistinctDescriptors) {
+        return "conflicting_identity";
+      }
+      exactDescriptorDuplicate = true;
+    }
+  }
+  return exactDescriptorDuplicate
+    ? "transient_exact_descriptor_duplicate"
+    : "none";
 }
 
 function codexOpenRootRolloutInventoryResult({

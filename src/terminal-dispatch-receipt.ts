@@ -37,6 +37,7 @@ export interface TerminalBridgeStateInput {
   monitorLockVersion: number;
   preSendScreenFingerprint?: string;
   codexRolloutAcceptanceAnchor?: unknown;
+  codexDetachedCandidateSessionClaims?: unknown;
   claudeTranscriptAnchor?: unknown;
   claudeHome?: string;
 }
@@ -85,6 +86,7 @@ export function withTerminalBridgeState({
   monitorLockVersion,
   preSendScreenFingerprint,
   codexRolloutAcceptanceAnchor,
+  codexDetachedCandidateSessionClaims,
   claudeTranscriptAnchor,
   claudeHome
 }: TerminalBridgeStateInput): Conversation {
@@ -102,6 +104,8 @@ export function withTerminalBridgeState({
       terminal_bridge_request_hash: terminalBridgeRequestFingerprint(requestText),
       terminal_bridge_pre_send_screen_fingerprint: preSendScreenFingerprint,
       codex_rollout_acceptance_anchor: codexRolloutAcceptanceAnchor,
+      codex_detached_candidate_session_claims:
+        codexDetachedCandidateSessionClaims,
       claude_transcript_anchor: claudeTranscriptAnchor,
       claude_home: claudeHome,
       terminal_bridge_completion_claim: undefined,
@@ -372,7 +376,7 @@ export function terminalSubmissionReplayReceipt(options: {
   if (options.proofLevel !== "agent_accepted") {
     return {
       replayed: true,
-      delivered: false,
+      delivered: true,
       status: "submission_pending_acceptance",
       submission_outcome: "pending_acceptance",
       delivery_receipt: options.proofLevel,
@@ -394,7 +398,7 @@ export function terminalSubmissionReplayReceipt(options: {
   } catch (error) {
     return {
       replayed: true,
-      delivered: false,
+      delivered: true,
       status: "submission_uncertain",
       submission_outcome: "uncertain",
       delivery_receipt: "enter_dispatched",
@@ -545,6 +549,39 @@ export function terminalBridgeSubmissionReceipts(
   return current && currentId && !ids.has(currentId)
     ? [...receipts, current]
     : receipts;
+}
+
+export function terminalSubmissionIndicatesInputDispatched(
+  submission: unknown
+): boolean {
+  if (!isRecord(submission)) return false;
+  if (
+    nonBlankString(submission.text_injected_at) ||
+    nonBlankString(submission.enter_dispatched_at)
+  ) {
+    return true;
+  }
+  if ([
+    "text_injected",
+    "enter_dispatched",
+    "submitted",
+    "agent_accepted",
+    "not_accepted"
+  ].includes(String(submission.status ?? ""))) {
+    return true;
+  }
+  return ["text_injected", "enter_dispatched", "agent_accepted"].includes(
+    String(submission.last_proven_stage ?? "")
+  );
+}
+
+/** Return only durable per-Turn dispatch facts; Close prose is not evidence. */
+export function terminalInputDispatchedForConversation(
+  conversation: Conversation
+): boolean {
+  return terminalBridgeSubmissionReceipts(conversation).some(
+    terminalSubmissionIndicatesInputDispatched
+  );
 }
 
 export function unresolvedTerminalBridgeSubmission(

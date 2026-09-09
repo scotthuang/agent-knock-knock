@@ -1,10 +1,11 @@
 // CLI infrastructure for native acceptance and managed Turn persistence.
 import path from "node:path";
 
-import type {
-  ActiveAgentSessionIdentity,
-  CodexOpenRootRolloutInventory,
-  CodingAgentSessionProvider
+import {
+  CodexTransientDuplicateOpenRootDescriptorsError,
+  type ActiveAgentSessionIdentity,
+  type CodexOpenRootRolloutInventory,
+  type CodingAgentSessionProvider
 } from "./agent-session-provider.js";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
@@ -27,7 +28,9 @@ import {
 import type { ExecutorKind } from "./executors.js";
 import {
   isExactNativeThreadId,
+  managedSessionBindingToken,
   managedSessionRevision,
+  terminalBindingFrom,
   type ManagedSessionState
 } from "./managed-session.js";
 import {
@@ -58,6 +61,7 @@ import {
 import {
   exactRolloutMatches,
   isCompleteNativeRollout,
+  rolloutFileIdentityMatches,
   type TerminalNativeIdentityFence,
   type TerminalNativeIdentity
 } from "./terminal-binding-authority.js";
@@ -69,7 +73,11 @@ import type { TerminalDispatchLedgerDocument } from
 import {
   validTerminalMonitorTimestampMs
 } from "./terminal-monitor-decision-policy.js";
-import type { TerminalDispatchTerminal } from
+import type {
+  CodexDetachedCandidateSessionClaim,
+  CodexDetachedCandidateSessionClaimSet,
+  TerminalDispatchTerminal
+} from
   "./terminal-dispatch-composition.js";
 import {
   TerminalDispatchExecutionService,
@@ -87,9 +95,11 @@ import {
   captureCodexRolloutAcceptanceAnchor,
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
+  validateCodexRolloutAcceptanceAnchor,
   type CodexRolloutAcceptanceAnchor,
   type TerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-acceptance.js";
+import { fingerprint } from "./terminal-submission-facts.js";
 import {
   TerminalAcceptanceApplicationService,
   type TerminalAcceptanceResolution,
@@ -110,6 +120,7 @@ import { isFinalDeferredForegroundTransferStatus } from
 import {
   cliCwd,
   cliEnv,
+  cliExit,
   cliNow,
   cliNowMs,
   cliPid,
@@ -135,6 +146,157 @@ import {
 import type { CallbackRouteV1 } from "./callback-transport.js";
 import type { FileLockAcquisitionOptions } from
   "./file-lock-cli-adapter.js";
+
+const SOURCE_LESS_DETACHED_CLAIM_SCRUB_EVIDENCE_PREFIX =
+  "source_less_candidate_predecessor_binding_scrubbed";
+
+function detachedClaimScrubEvidence(targetSessionId: string): string {
+  return `${SOURCE_LESS_DETACHED_CLAIM_SCRUB_EVIDENCE_PREFIX}:` +
+    targetSessionId;
+}
+
+function detachedCandidateClaimSet(
+  conversation: Conversation
+): CodexDetachedCandidateSessionClaimSet | undefined {
+  const takeover = takeoverFor(conversation);
+  const value = takeover?.codex_detached_candidate_session_claims;
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    Object.keys(value).sort().join(",") !==
+      "anchor_fingerprint,claims,claims_fingerprint,schema,version" ||
+    value.schema !==
+      "agent-knock-knock/codex-detached-candidate-session-claims" ||
+    value.version !== 1 || !Array.isArray(value.claims) ||
+    value.claims.length > 128
+  ) {
+    throw new Error("detached Codex candidate Session claims are invalid");
+  }
+  const rawAnchor = takeover?.codex_rollout_acceptance_anchor;
+  const anchor = validateCodexRolloutAcceptanceAnchor(rawAnchor);
+  const terminalAgentPid = safeInteger(takeover?.terminal_agent_pid);
+  if (
+    anchor.version !== 3 ||
+    terminalAgentPid === undefined || terminalAgentPid <= 1 ||
+    anchor.inventory_pid !== terminalAgentPid ||
+    value.anchor_fingerprint !== anchor.anchor_fingerprint ||
+    !/^[0-9a-f]{64}$/u.test(String(value.claims_fingerprint))
+  ) {
+    throw new Error(
+      "detached Codex candidate Session claims lack their exact v3 anchor"
+    );
+  }
+  const {
+    claims_fingerprint: _claimsFingerprint,
+    ...claimSetBase
+  } = value;
+  if (fingerprint(claimSetBase) !== value.claims_fingerprint) {
+    throw new Error(
+      "detached Codex candidate Session claims fingerprint does not match"
+    );
+  }
+  const anchoredCandidates = new Map(anchor.candidate_rollouts.map((entry) => [
+    entry.native_thread_id.toLowerCase(),
+    entry
+  ]));
+  const seenSessions = new Set<string>();
+  for (const rawClaim of value.claims) {
+    const claim = isRecord(rawClaim) ? rawClaim : undefined;
+    const sourceRollout = claim &&
+        isCompleteNativeRollout(claim.source_rollout)
+      ? claim.source_rollout
+      : undefined;
+    const candidateRollout = claim &&
+        isCompleteNativeRollout(claim.candidate_rollout)
+      ? claim.candidate_rollout
+      : undefined;
+    if (
+      !claim || !sourceRollout || !candidateRollout ||
+      Object.keys(claim).sort().join(",") !==
+        "binding_generation,binding_id,candidate_rollout,native_thread_id," +
+        "process_birth,process_uuid,session_binding_token,session_id," +
+        "session_revision,source_rollout" ||
+      !nonBlankString(claim.session_id) ||
+      !Number.isSafeInteger(claim.session_revision) ||
+      Number(claim.session_revision) < 1 ||
+      !/^[0-9a-f]{64}$/u.test(String(claim.session_binding_token)) ||
+      !nonBlankString(claim.binding_id) ||
+      !Number.isSafeInteger(claim.binding_generation) ||
+      Number(claim.binding_generation) < 1 ||
+      !isExactNativeThreadId(nonBlankString(claim.native_thread_id)) ||
+      !nonBlankString(claim.process_uuid) ||
+      !nonBlankString(claim.process_birth) ||
+      claim.process_uuid !== anchor.process_uuid ||
+      claim.process_birth !== anchor.process_birth ||
+      !anchoredCandidates.has(String(claim.native_thread_id).toLowerCase()) ||
+      !rolloutFileIdentityMatches(
+        claim.candidate_rollout,
+        anchoredCandidates.get(String(claim.native_thread_id).toLowerCase())
+          ?.rollout
+      ) ||
+      seenSessions.has(String(claim.session_id))
+    ) {
+      throw new Error("detached Codex candidate Session claim is invalid");
+    }
+    seenSessions.add(String(claim.session_id));
+  }
+  return value as unknown as CodexDetachedCandidateSessionClaimSet;
+}
+
+function matchingDetachedCandidateClaims(
+  conversation: Conversation,
+  identity: TerminalNativeIdentity
+): CodexDetachedCandidateSessionClaim[] {
+  const claims = detachedCandidateClaimSet(conversation)?.claims ?? [];
+  return claims.filter((claim) =>
+    claim.native_thread_id.toLowerCase() === identity.sessionId.toLowerCase() &&
+    claim.process_uuid === identity.processUuid &&
+    claim.process_birth === identity.processBirth &&
+    rolloutFileIdentityMatches(claim.candidate_rollout, identity.rollout)
+  );
+}
+
+function isOriginalDetachedCandidateClaim(
+  session: ManagedSessionState,
+  claim: CodexDetachedCandidateSessionClaim
+): boolean {
+  const binding = session.binding;
+  return Boolean(
+    session.session_id === claim.session_id && session.status === "detached" &&
+    managedSessionRevision(session) === claim.session_revision && binding &&
+    managedSessionBindingToken(session) === claim.session_binding_token &&
+    binding.binding_id === claim.binding_id &&
+    binding.generation === claim.binding_generation &&
+    binding.native_thread_id?.toLowerCase() ===
+      claim.native_thread_id.toLowerCase() &&
+    binding.native_process.process_uuid === claim.process_uuid &&
+    binding.native_process.process_birth === claim.process_birth &&
+    exactRolloutMatches(
+      binding.native_process.rollout,
+      claim.source_rollout
+    )
+  );
+}
+
+function isScrubbedDetachedCandidateClaim(
+  session: ManagedSessionState,
+  claim: CodexDetachedCandidateSessionClaim,
+  targetSessionId: string
+): boolean {
+  const binding = session.binding;
+  return Boolean(
+    session.session_id === claim.session_id && session.status === "detached" &&
+    managedSessionRevision(session) === claim.session_revision + 1 && binding &&
+    binding.binding_id !== claim.binding_id &&
+    binding.generation === claim.binding_generation + 1 &&
+    binding.native_thread_id === undefined &&
+    binding.native_process.process_uuid === claim.process_uuid &&
+    binding.native_process.process_birth === claim.process_birth &&
+    binding.native_process.rollout === undefined &&
+    binding.native_process.evidence ===
+      detachedClaimScrubEvidence(targetSessionId)
+  );
+}
 
 export interface TerminalAcceptanceCliOptions {
   callbackRoute?: CallbackRouteV1;
@@ -226,6 +388,7 @@ export interface TerminalAcceptanceCliDependencies {
       storeDir: string;
       terminalControl: TerminalControlRef;
       excludedManagedSessionId: string;
+      allowedManagedSessionIds?: string[];
     }): Promise<void>;
   };
   terminal: {
@@ -249,6 +412,10 @@ export interface TerminalAcceptanceCliDependencies {
     terminalControl(value: unknown): TerminalControlRef | undefined;
     isDiscoverableTurn(conversation: Conversation): boolean;
     workspaceMatches(configured: unknown, observed: unknown): boolean;
+    hasUnresolvedTransition(
+      storeDir: string,
+      session: ManagedSessionState
+    ): boolean;
   };
   repository: TerminalAcceptanceRepositoryPorts;
   deferred: {
@@ -342,6 +509,14 @@ export interface TerminalAcceptanceCliFacade {
     identity: TerminalNativeIdentity;
     storeDir: string;
   }): ManagedSessionState | undefined;
+  /** Caller must hold terminal -> Store writer -> Turn-state mutation scope. */
+  prepareSessionIdentityClaim(input: {
+    options: TerminalAcceptanceCliOptions;
+    conversation: Conversation;
+    terminalControl: TerminalControlRef;
+    identity: TerminalNativeIdentity;
+    storeDir: string;
+  }): Promise<void>;
   quarantineSession(input: {
     conversation: Conversation;
     reason: string;
@@ -388,6 +563,8 @@ export function createTerminalAcceptanceCliFacade(
       application.storeDirForConversation(conversation),
     refineSessionIdentity: (input) => application.refineSessionIdentity(input),
     persistSessionIdentity: (input) => application.persistSessionIdentity(input),
+    prepareSessionIdentityClaim: (input) =>
+      application.prepareSessionIdentityClaim(input),
     quarantineSession: (input) => application.quarantineSession(input),
     turnsForSession: (storeDir, sessionId) =>
       application.turnsForSession(storeDir, sessionId),
@@ -620,7 +797,61 @@ class TerminalAcceptanceCliApplication {
           options: input.options,
           agent: "codex",
           ...request
-        })
+        }),
+        resolveCandidate: async ({
+          pid,
+          cwd,
+          requestHash,
+          recoveryIdentity
+        }) => {
+          const anchor = validateCodexRolloutAcceptanceAnchor(rawAnchor);
+          if (anchor.version !== 3) {
+            throw new Error(
+              "candidate-set Codex recovery requires a version 3 anchor"
+            );
+          }
+          if (
+            recoveryIdentity &&
+            (
+              !isExactNativeThreadId(recoveryIdentity.sessionId) ||
+              !recoveryIdentity.processUuid ||
+              !recoveryIdentity.processBirth ||
+              !isCompleteNativeRollout(recoveryIdentity.rollout)
+            )
+          ) {
+            throw new Error(
+              "candidate-set Codex recovery identity is incomplete"
+            );
+          }
+          const recoveryCandidate = recoveryIdentity
+            ? {
+                sessionId: recoveryIdentity.sessionId,
+                processUuid: recoveryIdentity.processUuid as string,
+                processBirth: recoveryIdentity.processBirth as string,
+                rollout: recoveryIdentity.rollout as NonNullable<
+                  TerminalNativeIdentity["rollout"]
+                >,
+                evidence: "codex_open_root_rollout" as const
+              }
+            : undefined;
+          const result = detectCodexCandidateSetRolloutAcceptance({
+            anchor,
+            currentInventory: await this.inspectCodexOpenRoots({
+              options: input.options,
+              pid,
+              cwd
+            }),
+            requestHash,
+            recoveryCandidate
+          });
+          if (result.status === "uncertain") {
+            throw new Error(
+              `Codex candidate-set recovery is uncertain (${result.code}): ` +
+              result.reason
+            );
+          }
+          return result.status === "accepted" ? result.identity : undefined;
+        }
       },
       acceptance: {
         detect: (identity, requestHash) => Boolean(detectCodexRolloutAcceptance({
@@ -630,16 +861,13 @@ class TerminalAcceptanceCliApplication {
         }))
       },
       authority: {
-        assertExclusive: (request) =>
-          this.#dependencies.native.assertExclusive({
-            options: input.options,
-            agent: "codex",
-            currentPid: request.pid,
-            nativeThreadId: request.nativeThreadId,
-            storeDir: input.storeDir,
-            terminalControl: request.terminalControl,
-            excludedManagedSessionId: request.sessionId
-          }),
+        prepareIdentityClaim: (request) => this.prepareSessionIdentityClaim({
+          options: input.options,
+          conversation: current,
+          terminalControl: request.terminalControl,
+          identity: request.identity,
+          storeDir: input.storeDir
+        }),
         assertTurn: (identity) => {
           if (!identity) {
             this.#dependencies.authority.assertTurnCurrent(
@@ -851,11 +1079,19 @@ class TerminalAcceptanceCliApplication {
         commit: (request) => this.#commitAcceptance(input, request)
       }
     });
-    const result = await service.reconcile({
-      executor: input.executor.kind,
-      turn: input.conversation,
-      project: acceptanceFacts
-    });
+    let result: Awaited<ReturnType<typeof service.reconcile>>;
+    try {
+      result = await service.reconcile({
+        executor: input.executor.kind,
+        turn: input.conversation,
+        project: acceptanceFacts
+      });
+    } catch (error) {
+      if (error instanceof CodexTransientDuplicateOpenRootDescriptorsError) {
+        return { outcome: "pending" };
+      }
+      throw error;
+    }
     return result.outcome === "pending"
       ? result
       : { outcome: result.outcome, conversation: result.turn };
@@ -1290,6 +1526,174 @@ class TerminalAcceptanceCliApplication {
       },
       updated_at: now
     }, { expectedRevision: managedSessionRevision(input.session) });
+  }
+
+  async prepareSessionIdentityClaim(input: {
+    options: TerminalAcceptanceCliOptions;
+    conversation: Conversation;
+    terminalControl: TerminalControlRef;
+    identity: TerminalNativeIdentity;
+    storeDir: string;
+  }): Promise<void> {
+    const targetBoundary = this.#managedSessionIdentityBoundary(
+      input.conversation,
+      input.storeDir,
+      "detached Codex identity claim escaped its exact Store writer"
+    );
+    if (!targetBoundary) {
+      throw new Error("detached Codex identity claim lacks a managed Session boundary");
+    }
+    const targetSessionId = targetBoundary.sessionId;
+    const target = tryLoadManagedSession(input.storeDir, targetSessionId);
+    assertSessionIdentityCommitAuthority(target, targetBoundary, input);
+    const currentPid = target?.binding?.native_process.pid;
+    const takeoverPid = safeInteger(
+      takeoverFor(input.conversation)?.terminal_agent_pid
+    );
+    if (
+      !Number.isSafeInteger(currentPid) || Number(currentPid) <= 1 ||
+      takeoverPid !== currentPid
+    ) {
+      throw new Error(
+        "detached Codex identity claim has inconsistent process authority"
+      );
+    }
+    const claims = matchingDetachedCandidateClaims(
+      input.conversation,
+      input.identity
+    );
+    if (claims.length > 1) {
+      throw new Error(
+        `accepted Codex native thread ${input.identity.sessionId} has ` +
+        "multiple frozen detached Session claims"
+      );
+    }
+    const claim = claims[0];
+    if (!claim) {
+      await this.#dependencies.native.assertExclusive({
+        options: input.options,
+        agent: "codex",
+        currentPid: currentPid as number,
+        nativeThreadId: input.identity.sessionId,
+        storeDir: input.storeDir,
+        terminalControl: input.terminalControl,
+        excludedManagedSessionId: targetSessionId
+      });
+      return;
+    }
+    if (claim.session_id === targetSessionId) {
+      throw new Error(
+        "detached Codex candidate claim unexpectedly names its provisional target"
+      );
+    }
+    const current = tryLoadManagedSession(input.storeDir, claim.session_id);
+    if (!current) {
+      throw new Error(
+        `detached Codex candidate Session ${claim.session_id} disappeared ` +
+        "after dispatch reservation"
+      );
+    }
+    if (
+      !current.binding ||
+      current.binding.native_process.pid !== currentPid ||
+      !terminalControlsShareIncarnation(
+        current.binding.terminal_control,
+        input.terminalControl
+      ) ||
+      !this.#dependencies.authority.workspaceMatches(
+        current.workspace,
+        input.terminalControl.currentPath
+      )
+    ) {
+      throw new Error(
+        `detached Codex candidate Session ${claim.session_id} changed ` +
+        "terminal or workspace after dispatch reservation"
+      );
+    }
+    const blocking = this.turnsForSession(input.storeDir, claim.session_id)
+      .find((turn) => isSessionSendBlockingStatus(turn.status));
+    if (blocking) {
+      throw new Error(
+        `detached Codex candidate Session ${claim.session_id} gained ` +
+        `blocking Turn ${blocking.turn_id ?? blocking.conversation_id} ` +
+        "after dispatch reservation"
+      );
+    }
+    if (
+      this.#dependencies.authority.hasUnresolvedTransition(
+        input.storeDir,
+        current
+      )
+    ) {
+      throw new Error(
+        `detached Codex candidate Session ${claim.session_id} gained an ` +
+        "unresolved native-thread transition after dispatch reservation"
+      );
+    }
+    if (isScrubbedDetachedCandidateClaim(current, claim, targetSessionId)) {
+      await this.#dependencies.native.assertExclusive({
+        options: input.options,
+        agent: "codex",
+        currentPid: currentPid as number,
+        nativeThreadId: input.identity.sessionId,
+        storeDir: input.storeDir,
+        terminalControl: input.terminalControl,
+        excludedManagedSessionId: targetSessionId
+      });
+      return;
+    }
+    if (
+      !isOriginalDetachedCandidateClaim(current, claim) ||
+      !current.binding
+    ) {
+      throw new Error(
+        `detached Codex candidate Session ${claim.session_id} changed ` +
+        "after dispatch reservation"
+      );
+    }
+    await this.#dependencies.native.assertExclusive({
+      options: input.options,
+      agent: "codex",
+      currentPid: currentPid as number,
+      nativeThreadId: input.identity.sessionId,
+      storeDir: input.storeDir,
+      terminalControl: input.terminalControl,
+      excludedManagedSessionId: targetSessionId,
+      allowedManagedSessionIds: [claim.session_id]
+    });
+    const scrubbedAt = cliNow();
+    saveManagedSession(input.storeDir, {
+      ...current,
+      binding: terminalBindingFrom({
+        terminalId: current.binding.terminal_id,
+        terminalControl: current.binding.terminal_control,
+        pid: current.binding.native_process.pid,
+        processUuid: claim.process_uuid,
+        processBirth: claim.process_birth,
+        evidence: detachedClaimScrubEvidence(targetSessionId),
+        generation: claim.binding_generation + 1,
+        now: scrubbedAt
+      }),
+      updated_at: scrubbedAt.toISOString()
+    }, { expectedRevision: claim.session_revision });
+    if (cliEnv().AKK_TEST_EXIT_AFTER_DETACHED_SOURCE_SCRUB === "1") {
+      cliExit(86);
+    }
+    await this.#dependencies.native.assertExclusive({
+      options: input.options,
+      agent: "codex",
+      currentPid: currentPid as number,
+      nativeThreadId: input.identity.sessionId,
+      storeDir: input.storeDir,
+      terminalControl: input.terminalControl,
+      excludedManagedSessionId: targetSessionId
+    });
+    cliRuntimeLog("info", "codex_detached_candidate_claim_source_scrubbed", {
+      conversation_id: input.conversation.conversation_id,
+      source_session_id: claim.session_id,
+      target_session_id: targetSessionId,
+      native_thread_id: input.identity.sessionId
+    });
   }
 
   persistSessionIdentity(input: {

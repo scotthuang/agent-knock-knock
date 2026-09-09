@@ -83,6 +83,7 @@ function sendReadyTerminal(options: {
   panePid?: number;
   activity?: string;
   physicalToken?: string;
+  managedToken?: string;
 } = {}) {
   const id = options.id ?? "terminal-delegate";
   return {
@@ -94,7 +95,8 @@ function sendReadyTerminal(options: {
     terminal_control: { ...terminalControl(options.target, options.panePid) },
     _terminal_user_explicit_send_action: userExplicitSendAction(
       id,
-      options.physicalToken
+      options.physicalToken,
+      options.managedToken
     )
   };
 }
@@ -561,9 +563,10 @@ test("discovery preserves options and refreshes only managed fast-path authority
     request: REQUEST,
     marker: "keep",
     conversation: "old",
-    message: "old"
+    message: "old",
+    expectedManagedTerminalToken: "managed-caller-stale"
   });
-  assert.equal(JSON.stringify(sent[0]), JSON.stringify({
+  assert.deepEqual(sent[0], {
     request: REQUEST,
     marker: "keep",
     conversation: "terminal-idle",
@@ -572,7 +575,49 @@ test("discovery preserves options and refreshes only managed fast-path authority
     background: true,
     expectedTerminalToken: "physical-current",
     expectedManagedTerminalToken: "managed-current"
-  }));
+  });
+
+  const staleManagedSent: TerminalDelegateCliOptions[] = [];
+  const staleManaged = terminalDelegateCliAdapter.createTerminalDelegateCliFacade(
+    dependencies({
+      terminalList: {
+        buildTerminalListGroup: async () => ({
+          terminalControlled: [sendReadyTerminal({
+            id: "terminal-stale-managed",
+            physicalToken: "physical-stable",
+            managedToken: "managed-stale"
+          })],
+          summary: {}
+        }),
+        observeExactTerminal: async () => ({
+          state: "available",
+          rawTerminal: {},
+          terminal: {
+            ...sendReadyTerminal({
+              id: "terminal-stale-managed",
+              physicalToken: "physical-stable"
+            }),
+            _terminal_user_explicit_send_action: undefined,
+            available_actions: {}
+          },
+          summary: {}
+        })
+      },
+      terminalCommand: {
+        runSend: async (options) => { staleManagedSent.push(options); }
+      }
+    })
+  );
+  await staleManaged.runDelegate({
+    request: REQUEST,
+    expectedManagedTerminalToken: "managed-caller-stale"
+  });
+  assert.equal(staleManagedSent.length, 1);
+  assert.equal(
+    staleManagedSent[0].expectedManagedTerminalToken,
+    undefined,
+    "fresh same-pane observation clears an obsolete managed fast-path token"
+  );
 
   const ambiguous = terminalDelegateCliAdapter.createTerminalDelegateCliFacade(
     dependencies({

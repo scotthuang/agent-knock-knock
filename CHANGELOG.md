@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.13.0 - 2026-09-09
+
+### Added
+
+- Promote terminal-scoped Codex sends from a frozen open-rollout candidate set after exactly one rollout durably accepts the request, including the first task after `/clear` when the foreground rollout does not exist before Enter.
+- Notify the owning controller when an unmanaged fallback Watch observes a native questionnaire that requires manual TUI input, without granting that Watch response or key-dispatch authority.
+
+### Changed
+
+- Make human-explicit Send results distinguish physical terminal dispatch, native agent acceptance, managed ownership, and observation mode. Legacy delivery fields remain available as compatibility aliases during the 0.13 transition.
+- Continue candidate acceptance across the frozen pre-send roots and the current root inventory, so a rollout whose original FD closes can still be proven by its unchanged path, device, inode, and byte boundary.
+
+### Fixed
+
+- Retry a short-lived duplicate Codex file descriptor for the same exact rollout only inside bounded post-send identity and acceptance polling, so native-thread creation can settle without stalling the managed Turn; conflicting identities remain immediately uncertain and no descriptor is selected while the overlap persists.
+- Give human-explicit Send a bounded one-second Store/state lock grace while keeping terminal acquisition non-blocking, so brief monitor-supervision writer leases do not unnecessarily downgrade an otherwise manageable questionnaire to a notification-only Watch.
+- Preserve the exact pre-send Codex rollout candidates as Turn-scoped monitor companions after one rollout accepts the request, so a still-open predecessor does not suppress questionnaire discovery or response authority after managed promotion.
+- Transfer one unchanged detached Session claim to the provisional managed Session when its exact source-less Codex candidate accepts the new Send, so a closed prior Turn cannot stall the next questionnaire on the same native thread.
+- Preserve managed Codex continuation after a released Turn leaves an obsolete completion callback pending or failed: an exact human-selected Send may fence only that unaccepted callback retry debt, then continue through the existing managed authority path with interaction response enabled.
+- Pass the private managed binding token from OpenClaw's freshly reconciled terminal action into the CLI, and report managed-authority conflicts separately from genuinely stale physical terminal authority.
+- Settle fallback Watches on their exact Codex `turn_aborted` record or invalidate them when a later native turn overtakes the accepted task, so an old Watch cannot repeatedly attribute new questionnaires to an abandoned Send.
+- Attribute questionnaire notifications during multi-rollout ambiguity only when the accepted rollout contains the unique pending `request_user_input` whose step, prompt, and options match the live TUI; paired outputs, changed rollouts, duplicate signatures, and unreadable evidence remain silent.
+
+### Security
+
+- Keep physical target, process incarnation, composer/interaction, and duplicate-dispatch checks fail-closed while preventing rollout, Session, Store, or callback uncertainty from vetoing an explicitly selected human Send. Replaced, deleted, ambiguous, multiply accepting, or unreadable rollout evidence remains uncertain and is never replayed automatically.
+- Bind detached-claim transfer to the frozen v3 acceptance anchor and CAS-fenced Session state. Claim drift, blocking work, ambiguous owners, or changed terminal/workspace authority remains post-dispatch uncertainty with no automatic resend.
+- Limit callback-debt supersession to the exact released binding generation with a validated terminal, native thread, rollout, submission receipt, and final lifecycle message. Active interactions, approvals, transitions, in-flight callbacks, accepted transports, stale managed tokens, and cross-Turn evidence remain fail-closed; an explicitly overridden uncertain callback is retained as audit evidence and is never retried.
+
 ## 0.12.37 - 2026-09-08
 
 ### Fixed
