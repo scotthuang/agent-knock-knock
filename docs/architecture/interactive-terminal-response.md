@@ -172,7 +172,7 @@ a recapture after every toggle and is intentionally deferred. `Tab to amend`,
 persistent Yes, auto mode, resized/wrapped variants, and any changed menu shape
 also remain manual.
 
-### Codex 0.153.4
+### Codex 0.153.4 and 0.154.0
 
 The installed client matches the current official TUI protocol:
 
@@ -200,6 +200,17 @@ The installed client matches the current official TUI protocol:
 Codex does not currently expose a native multi-select question in this
 protocol. Any future or unrecognized shape remains manual until a new profile
 and tests are added.
+
+Codex 0.154.0 preserves those blocking `request_user_input` frames under a
+separate version-bound profile. It also adds `request_user_input_async`, whose
+question editor is non-blocking with respect to the running agent turn and is
+therefore not projected into the blocking `interaction_state` contract. AKK
+recognizes its input ownership instead: an exact collapsed question summary
+leaves the main Composer sendable, while an expanded, clipped, or ambiguous
+async editor is a zero-input boundary so an explicit task cannot become a
+question answer. Automated async-question response remains unsupported. A
+0.154 active-writer `/resume` viewer is likewise read-only and receives no AKK
+terminal input.
 
 ## Delivery stages
 

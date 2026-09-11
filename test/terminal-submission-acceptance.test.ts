@@ -966,6 +966,7 @@ test("questionnaire attribution rejects a request_user_input with paired output"
     appendRecords(fixture.accepted.path, [
       ...acceptedTurnRecords(REQUEST, 609),
       requestUserInputRecord(turnId(609), "questionnaire-call-609"),
+      retainedContextRecord(turnId(609), "questionnaire-call-609"),
       requestUserInputOutputRecord("questionnaire-call-609")
     ]);
     const result = detectCodexBoundQuestionnaireAttribution({
@@ -2557,6 +2558,22 @@ function requestUserInputOutputRecord(callId: string): unknown {
       type: "function_call_output",
       call_id: callId,
       output: "answers submitted"
+    }
+  };
+}
+
+function retainedContextRecord(nativeTurnId: string, callId: string): unknown {
+  return {
+    timestamp: "2026-08-07T01:00:01.550Z",
+    type: "retained_context",
+    payload: {
+      type: "verified_answer",
+      turn_id: nativeTurnId,
+      call_id: callId,
+      questions: [{
+        question: "Choose a framework.",
+        answer: "React"
+      }]
     }
   };
 }

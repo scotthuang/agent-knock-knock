@@ -40,6 +40,10 @@ test("doctor recognizes exact native profiles without gating ordinary readiness"
     "codex-tui-0.153.4"
   );
   assert.equal(
+    doctorCodingAgentNativeProfile("codex", "0.154.0"),
+    "codex-tui-0.154.0"
+  );
+  assert.equal(
     doctorCodingAgentNativeProfile("claude", "2.1.259"),
     "claude-code-2.1.259-native-status"
   );
@@ -58,6 +62,7 @@ test("doctor recognizes exact native profiles without gating ordinary readiness"
   assert.equal(doctorCodingAgentNativeProfile("codex", "0.150.0"), undefined);
   assert.equal(doctorCodingAgentNativeProfile("codex", "0.153.1"), undefined);
   assert.equal(doctorCodingAgentNativeProfile("codex", "0.153.5"), undefined);
+  assert.equal(doctorCodingAgentNativeProfile("codex", "0.154.1"), undefined);
   assert.equal(doctorCodingAgentNativeProfile("claude", "2.1.260"), undefined);
   assert.equal(doctorCodingAgentNativeProfile("claude", "2.1.264"), undefined);
   assert.equal(doctorCodingAgentNativeProfile("claude", "2.1.265"), undefined);

@@ -321,7 +321,8 @@ test("Codex verification orders one probe before companion-bound observations", 
 
 for (const behaviorProfile of [
   "codex-tui-0.153.0",
-  "codex-tui-0.153.4"
+  "codex-tui-0.153.4",
+  "codex-tui-0.154.0"
 ] as const) {
   test(`${behaviorProfile} verification waits for a resumed composer to finish MCP startup`, async () => {
     let statusCount = 0;
