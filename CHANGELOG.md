@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.2 - 2026-09-12
+
+### Added
+
+- Add exact Codex CLI `0.154.0` lifecycle, native `/status`, transition-settlement, and legacy blocking `request_user_input` questionnaire profiles, backed by isolated tmux probes and the official tagged source and snapshots.
+
+### Changed
+
+- Keep human-priority Send available while Codex is working, showing ordinary queued messages, or presenting a collapsed asynchronous question summary. Refuse input before mutation when the asynchronous question editor is expanded, clipped, or otherwise owns terminal input.
+- Recognize the Codex `0.154.0` active-writer resume viewer, including narrow layouts and remapped or disabled transcript shortcuts, so AKK never injects input into its read-only surface.
+- Preserve legacy questionnaire settlement and bounded session excerpts around the new `retained_context` rollout record. Non-blocking `request_user_input_async` response automation remains explicitly unsupported until it has a separate lifecycle contract.
+
+### Security
+
+- Revalidate asynchronous-question input ownership both before and after the Send reservation. Expanded or ambiguous editors, approval surfaces, read-only viewers, and terminal identity drift remain zero-input failures; ordinary drafts and collapsed questions retain the explicit human Send guarantee.
+
 ## 0.13.1 - 2026-09-10
 
 ### Fixed
