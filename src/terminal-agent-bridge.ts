@@ -71,7 +71,7 @@ import type {
 } from
   "./terminal-questionnaire-adapter.js";
 
-// Verified Codex profiles through 0.153.4 keep Enter in paste/newline mode for
+// Verified Codex profiles through 0.154.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
 // also require observable composer stability instead of treating this delay
 // alone as acceptance.
@@ -130,6 +130,10 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
   ],
+  "codex-tui-0.154.0": [
+    "  /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
+  ],
   "codex-tui-generic-v1": [
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
@@ -152,6 +156,7 @@ const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
   "codex-tui-0.151.0": 80,
   "codex-tui-0.153.0": 80,
   "codex-tui-0.153.4": 80,
+  "codex-tui-0.154.0": 80,
   "codex-tui-generic-v1": 80
 };
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
@@ -1866,6 +1871,19 @@ export class TerminalAgentBridge {
             scrollbackLines: 0
           }
         );
+        const asyncQuestionInputMode = inspectCodexAsyncQuestionInputMode(
+          captured.screen
+        );
+        if (
+          asyncQuestionInputMode === "expanded" ||
+          asyncQuestionInputMode === "ambiguous"
+        ) {
+          throw new Error(
+            asyncQuestionInputMode === "expanded"
+              ? "the Codex async question editor currently owns terminal input; answer, skip, or return to the main prompt before retrying the explicit user Send"
+              : "Codex shows an async-question surface but AKK cannot prove that the main prompt owns terminal input; return to a complete main prompt before retrying the explicit user Send"
+          );
+        }
         if (
           captured.inspection.approval.blocked ||
           captured.inspection.activity.state === "awaiting_approval" ||
@@ -4916,7 +4934,284 @@ function codexBlockingModalVisible(screen: string): boolean {
     .join("\n");
   return /\b(?:press|use)\s+(?:esc|escape)\s+to\s+(?:cancel|close|dismiss)\b/iu
     .test(tail) ||
-    /\besc\s+to\s+cancel\b/iu.test(tail);
+    /\besc\s+to\s+cancel\b/iu.test(tail) ||
+    codexActiveWriterViewerVisible(tail) ||
+    ["expanded", "ambiguous"].includes(
+      inspectCodexAsyncQuestionInputMode(tail)
+    );
+}
+
+function codexActiveWriterViewerVisible(styledScreen: string): boolean {
+  const lines = stripTerminalEscapeSequences(styledScreen)
+    .replace(/\r\n?/gu, "\n")
+    .split("\n")
+    .slice(-80);
+  let titleIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (
+      /^ {2}🔒(?:\s|$)/u.test(lines[index]!)
+    ) {
+      titleIndex = index;
+      break;
+    }
+  }
+  if (titleIndex < 0) {
+    return false;
+  }
+  const laterMainComposer = lines.findIndex((line, index) =>
+    index > titleIndex && CODEX_COMPOSER_MARKER.test(line)
+  );
+  if (laterMainComposer >= 0) {
+    return false;
+  }
+  const frame = lines.slice(titleIndex, titleIndex + 12)
+    .map((line) => line.trim().replace(/\s+/gu, " "))
+    .filter((line) => line.length > 0)
+    .join(" ");
+  return /🔒\s+This conversation is open in another app\s+\S+ to Retry/iu
+      .test(frame) &&
+    /Close it there and press\s+\S+\s+to continue here\./iu.test(frame) &&
+    /\S+ retry\s+\S+ exit(?:\s+\S+ transcript)?/iu.test(frame);
+}
+
+export type CodexAsyncQuestionInputMode =
+  | "absent"
+  | "collapsed"
+  | "expanded"
+  | "ambiguous";
+
+const CODEX_ASYNC_QUESTION_FOOTER_LABEL =
+  /\s(submit|skip|main prompt|prev question|next question|queued messages)(?=\s{2,}|\s*$)/giu;
+
+function codexStructuredAsyncFooterEvidence(
+  lines: readonly string[],
+  evidenceFloor: number
+): { readonly index: number; readonly labelCount: number } {
+  let strongest = { index: -1, labelCount: 0 };
+  for (let start = evidenceFloor + 1; start < lines.length; start += 1) {
+    const labels = new Set<string>();
+    for (let end = start; end < Math.min(lines.length, start + 5); end += 1) {
+      const line = lines[end]!;
+      if (!/^ {2}(?![ ↳?])\S/u.test(line)) {
+        break;
+      }
+      for (const match of line.matchAll(CODEX_ASYNC_QUESTION_FOOTER_LABEL)) {
+        labels.add(match[1]!.toLowerCase());
+      }
+      if (labels.size > strongest.labelCount) {
+        strongest = { index: end, labelCount: labels.size };
+      }
+      if (labels.size >= 2) {
+        return strongest;
+      }
+    }
+  }
+  return strongest;
+}
+
+function codexMainComposerFooterIndex(
+  lines: readonly string[],
+  composerIndex: number
+): number {
+  for (let index = lines.length - 1; index > composerIndex; index -= 1) {
+    // A real statusline starts at column zero. Draft continuations are inset,
+    // even when their text happens to look exactly like a model statusline.
+    if (CODEX_COMPLETE_COMPOSER_FOOTER.test(lines[index]!.trimEnd())) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Classify Codex 0.154's non-blocking inline-question surface by current input
+ * ownership. The shared `Queued follow-up inputs` heading is not sufficient:
+ * ordinary queued messages use it too. An exact collapsed summary, after any
+ * ordinary queue preview is removed, proves Send-safe ownership even when the
+ * Composer is outside the viewport. Positive editor evidence without a
+ * complete shape remains fail-closed because paste plus Enter would otherwise
+ * submit the user's task as an answer.
+ */
+export function inspectCodexAsyncQuestionInputMode(
+  styledScreen: string
+): CodexAsyncQuestionInputMode {
+  const lines = stripTerminalEscapeSequences(styledScreen)
+    .replace(/\r\n?/gu, "\n")
+    .replace(/\u00a0/gu, " ")
+    .split("\n")
+    .slice(-80);
+  while (lines.length > 0 && lines.at(-1)?.trim().length === 0) {
+    lines.pop();
+  }
+  const normalized = lines.map((line) => line.trim().replace(/\s+/gu, " "));
+  let mainComposerIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    // The main Composer marker is column zero. Async option and inline-text
+    // markers are inset by the menu surface, even after ANSI is removed.
+    if (CODEX_COMPOSER_MARKER.test(lines[index]!)) {
+      mainComposerIndex = index;
+      break;
+    }
+  }
+
+  let headerIndex = -1;
+  let wrappedHeaderRows = 1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (
+      /^•\s+Queued follow-up inputs\s*$/u.test(lines[index]!) ||
+      /^•\s+Queued follow-up inpu…\s*$/u.test(lines[index]!) ||
+      (
+        /^•\s+Queued follow-up\s*$/u.test(lines[index]!) &&
+        /^ {2}inputs\s*$/u.test(lines[index + 1] ?? "")
+      )
+    ) {
+      headerIndex = index;
+      wrappedHeaderRows = /^•\s+Queued follow-up\s*$/u.test(lines[index]!)
+        ? 2
+        : 1;
+      break;
+    }
+  }
+  const headerBodyIndex = headerIndex < 0
+    ? -1
+    : headerIndex + wrappedHeaderRows;
+  let questionEvidenceStart = headerBodyIndex;
+  if (headerIndex >= 0) {
+    let cursor = headerBodyIndex;
+    while (cursor < lines.length && lines[cursor]!.trim().length === 0) {
+      cursor += 1;
+    }
+    let sawQueuedPreview = false;
+    while (cursor < lines.length) {
+      if (/^ {2}↳\s/u.test(lines[cursor]!)) {
+        sawQueuedPreview = true;
+        cursor += 1;
+        while (cursor < lines.length) {
+          if (
+            lines[cursor]!.trim().length === 0 ||
+            /^ {4,}\S/u.test(lines[cursor]!)
+          ) {
+            cursor += 1;
+            continue;
+          }
+          break;
+        }
+        continue;
+      }
+      break;
+    }
+    if (sawQueuedPreview) {
+      questionEvidenceStart = cursor;
+    }
+  }
+
+  const mainComposerFooterIndex = mainComposerIndex < 0
+    ? -1
+    : codexMainComposerFooterIndex(lines, mainComposerIndex);
+  const summaryBeforeMainComposer = headerIndex < 0 || mainComposerIndex < 0
+    ? -1
+    : normalized.findIndex((line, index) =>
+      index >= questionEvidenceStart && index < mainComposerIndex &&
+      /^\?\s+\d+\s+questions?(?:\s+·\s+\d+s)?$/iu.test(line)
+    );
+  if (mainComposerIndex >= 0 && mainComposerFooterIndex < 0) {
+    // A statusline-disabled Composer is the strongest available ownership
+    // anchor. Treat all following wrapped rows as its arbitrary draft instead
+    // of letting question-like user text veto a human-priority Send.
+    return summaryBeforeMainComposer >= 0 ? "collapsed" : "absent";
+  }
+
+  const evidenceFloor = Math.max(
+    mainComposerFooterIndex,
+    questionEvidenceStart - 1
+  );
+  const structuredFooter = codexStructuredAsyncFooterEvidence(
+    lines,
+    evidenceFloor
+  );
+  if (structuredFooter.labelCount >= 2) {
+    return "expanded";
+  }
+
+  const clippedFooterIndex = normalized.findIndex((line, index) =>
+    index > evidenceFloor && /^ente(?:r)?…$/iu.test(line) &&
+    /^ctrl…$/iu.test(normalized[index + 1] ?? "")
+  );
+  const clippedChoiceIndex = normalized.findIndex((line, index) =>
+    index > evidenceFloor &&
+    line === "Expand terminal to read the entire option"
+  );
+  if (clippedFooterIndex >= 0 || clippedChoiceIndex >= 0) {
+    return "ambiguous";
+  }
+
+  if (headerIndex < 0) {
+    const evidence = new Set<string>();
+    normalized.forEach((line, index) => {
+      if (index <= evidenceFloor) {
+        return;
+      }
+      if (/^\d+\s+of(?:\s+\d+)?$/iu.test(line)) {
+        evidence.add("progress");
+      }
+      if (/^›\s+\S/u.test(line)) {
+        evidence.add("selector");
+      }
+      if (/^Type your answer(?:\s*\(optional\))?$/iu.test(line)) {
+        evidence.add("free_text");
+      }
+    });
+    return evidence.size >= 2 ||
+        (evidence.size >= 1 && structuredFooter.labelCount >= 1)
+      ? "ambiguous"
+      : "absent";
+  }
+
+  const weakQuestionIndex = normalized.findIndex((line, index) =>
+    index > evidenceFloor && index >= questionEvidenceStart && (
+      /^\d+\s+of(?:\s+\d+)?$/iu.test(line) ||
+      /^›\s+\S/u.test(line) ||
+      /^Type your answer(?:\s*\(optional\))?$/iu.test(line)
+    )
+  );
+  if (mainComposerIndex > headerIndex && weakQuestionIndex > evidenceFloor) {
+    return "ambiguous";
+  }
+
+  const summaryIndex = normalized.findIndex((line, index) =>
+    index >= questionEvidenceStart &&
+    (mainComposerIndex < 0 || index < mainComposerIndex) &&
+    /^\?\s+\d+\s+questions?(?:\s+·\s+\d+s)?$/iu.test(line)
+  );
+  if (summaryIndex >= 0) {
+    return weakQuestionIndex >= 0 ? "ambiguous" : "collapsed";
+  }
+  if (mainComposerIndex > headerIndex) {
+    return "absent";
+  }
+  const afterHeader = normalized.slice(questionEvidenceStart)
+    .filter((line) => line.length > 0);
+  const positiveAfterHeader = afterHeader.some((line) =>
+      /^\d+\s+of(?:\s+\d+)?$/iu.test(line) ||
+      /^›\s+\d+\.(?:\s|$)/u.test(line) ||
+      /^Type your answer(?:\s*\(optional\))?$/iu.test(line)
+    );
+  if (positiveAfterHeader) {
+    return "ambiguous";
+  }
+
+  // A bare heading (optionally followed by ↳ queued-message previews) is not
+  // question authority. Preserve human-explicit Send in that ordinary state.
+  if (
+    afterHeader.length === 0
+  ) {
+    return "absent";
+  }
+
+  // An expanded editor can temporarily replace its footer with a flash. If
+  // there is question-like content under the shared heading and no proven main
+  // Composer, do not guess which input surface will receive the next paste.
+  return "ambiguous";
 }
 
 /**

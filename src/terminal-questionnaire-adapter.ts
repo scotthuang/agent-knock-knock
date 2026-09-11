@@ -8,12 +8,19 @@ export const CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
   "2.1.267": "claude-code/2.1.267/ask-user-question-v1"
 });
 
+export const CODEX_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
+  Record<string, string>
+> = Object.freeze({
+  "0.153.4": "codex/0.153.4/request-user-input-v3",
+  "0.154.0": "codex/0.154.0/request-user-input-v3"
+});
+
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
   // Compatibility export for the original questionnaire profile. New Claude
   // versions resolve through claudeNativeQuestionnaireProfile so their
   // fingerprints and durable interaction ids stay version-bound.
   claude: CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES["2.1.263"],
-  codex: "codex/0.153.4/request-user-input-v3"
+  codex: CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.153.4"]
 } as const);
 
 export function claudeNativeQuestionnaireProfile(
@@ -21,6 +28,14 @@ export function claudeNativeQuestionnaireProfile(
 ): string | undefined {
   return Object.hasOwn(CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES, version)
     ? CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES[version]
+    : undefined;
+}
+
+export function codexNativeQuestionnaireProfile(
+  version: string
+): string | undefined {
+  return Object.hasOwn(CODEX_NATIVE_QUESTIONNAIRE_PROFILES, version)
+    ? CODEX_NATIVE_QUESTIONNAIRE_PROFILES[version]
     : undefined;
 }
 
@@ -187,7 +202,6 @@ interface CodexProjectedChoice {
   readonly action: NativeQuestionnaireChoiceAction;
 }
 
-const CODEX_VERSION = "0.153.4";
 const MAX_CAPTURE_CHARACTERS = 128 * 1024;
 const MAX_CAPTURE_LINES = 240;
 const MAX_TEXT_ANSWER_CHARACTERS = 4_096;
@@ -855,7 +869,8 @@ function inspectCodexQuestionnaire(
     (line) => /^  Question \d+\/\d+ \(/u.test(line) ||
       line === "  Submit with unanswered questions?"
   );
-  if (options.version !== CODEX_VERSION) {
+  const profile = codexNativeQuestionnaireProfile(options.version);
+  if (!profile) {
     return manualCandidate(
       "codex",
       `codex/${options.version}/unsupported-questionnaire`,
@@ -867,13 +882,13 @@ function inspectCodexQuestionnaire(
   if (screen.hadUnsafeControl) {
     return manualCandidate(
       "codex",
-      NATIVE_QUESTIONNAIRE_PROFILES.codex,
+      profile,
       screen.lines,
       bounds,
       "changed_shape"
     );
   }
-  const unanswered = parseCodexUnansweredConfirmation(screen.lines);
+  const unanswered = parseCodexUnansweredConfirmation(screen.lines, profile);
   if (unanswered) {
     return options.secret
       ? { ...unanswered, status: "manual_required", reason: "secret_input", action_plan: { kind: "manual_only" } }
@@ -883,13 +898,18 @@ function inspectCodexQuestionnaire(
   if (!region) {
     return manualCandidate(
       "codex",
-      NATIVE_QUESTIONNAIRE_PROFILES.codex,
+      profile,
       screen.lines,
       bounds,
       "changed_shape"
     );
   }
-  return codexQuestionInspection(region, screen.lines, options.secret);
+  return codexQuestionInspection(
+    region,
+    screen.lines,
+    options.secret,
+    profile
+  );
 }
 
 function parseCodexHeader(line: string): CodexHeader | undefined {
@@ -1077,9 +1097,9 @@ function codexOpenCustomTextStages(
 
 function codexProjectedChoices(
   prompt: string,
-  options: readonly ParsedOptionRow[]
+  options: readonly ParsedOptionRow[],
+  profile: string
 ): readonly CodexProjectedChoice[] {
-  const profile = NATIVE_QUESTIONNAIRE_PROFILES.codex;
   const normalized = normalizedOptions(profile, prompt, options);
   const nativeChoices = normalized.map((option, index): CodexProjectedChoice => {
     const customText = isCodexCustomTextOption(options[index]!, index, options);
@@ -1258,24 +1278,25 @@ function parseCodexQuestionRegion(
 function codexQuestionInspection(
   region: CodexQuestionRegion,
   lines: readonly string[],
-  explicitSecret: boolean | undefined
+  explicitSecret: boolean | undefined,
+  profile: string
 ): NativeQuestionnaireInspection {
   const nativeNormalized = region.options
     ? normalizedOptions(
-      NATIVE_QUESTIONNAIRE_PROFILES.codex,
+      profile,
       region.prompt,
       region.options
     )
     : undefined;
   const projectedChoices = region.mode === "options" && region.options
-    ? codexProjectedChoices(region.prompt, region.options)
+    ? codexProjectedChoices(region.prompt, region.options, profile)
     : undefined;
   const publicOptions = projectedChoices?.map((choice) => choice.option);
   const textMode = region.mode !== "options";
   const question: NativeQuestionnaireQuestion = {
     question_id: semanticId(
       "question",
-      NATIVE_QUESTIONNAIRE_PROFILES.codex,
+      profile,
       region.prompt,
       region.header.currentStep,
       ...(region.mode === "custom_text"
@@ -1291,12 +1312,12 @@ function codexQuestionInspection(
   };
   const base = {
     agent: "codex" as const,
-    profile: NATIVE_QUESTIONNAIRE_PROFILES.codex,
+    profile,
     current_step: region.header.currentStep,
     total_steps: region.header.totalSteps,
     question,
     prompt_evidence: promptEvidence(
-      NATIVE_QUESTIONNAIRE_PROFILES.codex,
+      profile,
       lines,
       region.start,
       region.end,
@@ -1344,7 +1365,8 @@ function codexQuestionInspection(
 }
 
 function parseCodexUnansweredConfirmation(
-  lines: readonly string[]
+  lines: readonly string[],
+  profile: string
 ): Extract<
   NativeQuestionnaireInspection,
   { status: "actionable" }
@@ -1375,17 +1397,17 @@ function parseCodexUnansweredConfirmation(
   return {
     status: "actionable",
     agent: "codex",
-    profile: NATIVE_QUESTIONNAIRE_PROFILES.codex,
+    profile,
     current_step: 1,
     total_steps: 1,
     question: {
-      question_id: semanticId("question", NATIVE_QUESTIONNAIRE_PROFILES.codex, prompt, countMatch[1]),
+      question_id: semanticId("question", profile, prompt, countMatch[1]),
       prompt,
       response_kind: "confirm",
       required: true
     },
     prompt_evidence: promptEvidence(
-      NATIVE_QUESTIONNAIRE_PROFILES.codex,
+      profile,
       lines,
       start,
       end,

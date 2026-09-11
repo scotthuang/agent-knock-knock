@@ -250,6 +250,19 @@ test("Codex rollout parser extracts bounded user assistant and command context",
       }
     }),
     JSON.stringify({
+      timestamp: "2026-06-20T14:05:38.900Z",
+      type: "retained_context",
+      payload: {
+        type: "verified_answer",
+        turn_id: "turn-1",
+        call_id: "ask-1",
+        questions: [{
+          question: "private retained question marker",
+          answer: "private retained answer marker"
+        }]
+      }
+    }),
+    JSON.stringify({
       timestamp: "2026-06-20T14:05:39.000Z",
       type: "event_msg",
       payload: {
@@ -295,6 +308,7 @@ test("Codex rollout parser extracts bounded user assistant and command context",
     lastAssistantMessage: "已经拉取并总结完成"
   }]);
   assert.equal(excerpt.skippedLines, 1);
+  assert.doesNotMatch(JSON.stringify(excerpt), /private retained/u);
 });
 
 test("Codex rollout parser retains the latest bounded task-completion turns", () => {

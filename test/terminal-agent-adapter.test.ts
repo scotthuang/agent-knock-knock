@@ -941,7 +941,8 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
     "0.150.1",
     "0.151.0",
     "0.153.0",
-    "0.153.4"
+    "0.153.4",
+    "0.154.0"
   ]) {
     const profile = probeCodexThreadLifecycle(version);
     assert.equal(profile.status, "supported");
@@ -976,6 +977,10 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
   assert.equal(
     codexLifecycleBehaviorProfile("0.153.4"),
     "codex-tui-0.153.4"
+  );
+  assert.equal(
+    codexLifecycleBehaviorProfile("0.154.0"),
+    "codex-tui-0.154.0"
   );
   assert.equal(
     codexRuntimeCompatibilityProfile("0.152.0")?.behaviorProfile,
@@ -1044,7 +1049,8 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     "0.150.1",
     "0.151.0",
     "0.153.0",
-    "0.153.4"
+    "0.153.4",
+    "0.154.0"
   ]) {
     const capabilities = probeCodexNativeInspection(version);
     assert.equal(capabilities.status, "supported");
@@ -1328,7 +1334,7 @@ test("Codex 0.151.0 native inspection parses the current status card", () => {
   );
 });
 
-for (const version of ["0.153.0", "0.153.4"] as const) {
+for (const version of ["0.153.0", "0.153.4", "0.154.0"] as const) {
   test(`Codex ${version} native inspection parses the current status card`, () => {
     const nativeThreadId = "01a0688b-1d33-75a2-acf0-0a5ff11db738";
     const screen = [
@@ -1341,6 +1347,9 @@ for (const version of ["0.153.0", "0.153.4"] as const) {
       "│ information on rate limits and credits                               │",
       "│                                                                      │",
       "│  Model:                gpt-5.6-sol (reasoning high, summaries auto)  │",
+      ...(version === "0.154.0"
+        ? ["│  Model provider:       server-ollama                                │"]
+        : []),
       "│  Directory:            /private/tmp/akk-codex-0153-probe             │",
       "│  Permissions:          Workspace (Ask for approval)                  │",
       "│  Agents.md:            <none>                                        │",
@@ -1370,6 +1379,9 @@ for (const version of ["0.153.0", "0.153.4"] as const) {
         name: "Model",
         value: "gpt-5.6-sol (reasoning high, summaries auto)"
       },
+      ...(version === "0.154.0"
+        ? [{ name: "Model provider", value: "server-ollama" }]
+        : []),
       { name: "Directory", value: "/private/tmp/akk-codex-0153-probe" },
       { name: "Permissions", value: "Workspace (Ask for approval)" },
       { name: "Agents.md", value: "<none>" },

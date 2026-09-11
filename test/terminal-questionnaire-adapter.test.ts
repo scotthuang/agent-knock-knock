@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES,
+  CODEX_NATIVE_QUESTIONNAIRE_PROFILES,
   NATIVE_QUESTIONNAIRE_PROFILES,
   claudeNativeQuestionnaireProfile,
+  codexNativeQuestionnaireProfile,
   inspectNativeQuestionnaire,
   type NativeQuestionnaireInspection
 } from "../src/terminal-questionnaire-adapter.js";
@@ -266,6 +268,53 @@ test("Codex 0.153.4 exact option snapshot yields one semantic question", () => {
   assert.match(parsed.prompt_evidence.sha256, /^[0-9a-f]{64}$/u);
   assert.equal(parsed.prompt_evidence.footer,
     "  tab to add notes | enter to submit answer | esc to interrupt");
+});
+
+test("Codex 0.154.0 preserves the exact request_user_input shapes with version-bound authority", () => {
+  assert.equal(
+    codexNativeQuestionnaireProfile("0.154.0"),
+    "codex/0.154.0/request-user-input-v3"
+  );
+  assert.equal(codexNativeQuestionnaireProfile("0.154.1"), undefined);
+
+  for (const screen of [
+    CODEX_OPTIONS,
+    CODEX_FREEFORM,
+    CODEX_CUSTOM_OPTIONS,
+    CODEX_CUSTOM_TEXT_EDIT,
+    CODEX_UNANSWERED_CONFIRM
+  ]) {
+    const previous = actionable(inspectNativeQuestionnaire({
+      agent: "codex",
+      version: "0.153.4",
+      screen
+    }));
+    const current = actionable(inspectNativeQuestionnaire({
+      agent: "codex",
+      version: "0.154.0",
+      screen
+    }));
+
+    assert.equal(
+      current.profile,
+      CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.154.0"]
+    );
+    assert.equal(current.question.prompt, previous.question.prompt);
+    assert.equal(current.question.response_kind, previous.question.response_kind);
+    assert.deepEqual(
+      current.question.options?.map((option) => option.label),
+      previous.question.options?.map((option) => option.label)
+    );
+    assert.deepEqual(
+      current.action_plan.kind,
+      previous.action_plan.kind
+    );
+    assert.notEqual(current.question.question_id, previous.question.question_id);
+    assert.notEqual(
+      current.prompt_evidence.sha256,
+      previous.prompt_evidence.sha256
+    );
+  }
 });
 
 test("Codex official multi-question header preserves current step and total", () => {
@@ -637,7 +686,7 @@ test("Codex false positives remain absent and changed versions fail closed", () 
 
   assert.equal(manual(inspectNativeQuestionnaire({
     agent: "codex",
-    version: "0.154.0",
+    version: "0.154.1",
     screen: CODEX_OPTIONS
   })).reason, "unsupported_version");
 });

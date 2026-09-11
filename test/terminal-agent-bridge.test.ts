@@ -23,6 +23,7 @@ import {
 import {
   isExactClaudeIdleComposer,
   isExactClaudeNativeInspectionIdleComposer,
+  inspectCodexAsyncQuestionInputMode,
   NativeInspectionDismissalError,
   NativeInspectionSubmissionError,
   TerminalAgentBridge,
@@ -1312,6 +1313,474 @@ test("explicit Codex Send keeps approval as a zero-input boundary", async (t) =>
       false
     );
   });
+
+  await t.test("a 0.154 active-writer resume viewer blocks Send", async () => {
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: [
+        "  🔒   This conversation is open in another app  R to Retry",
+        "      Close it there and press R to continue here.",
+        "",
+        "   r retry   esc/ctrl+c/q exit   ctrl+t transcript"
+      ].join("\n")
+    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        "new explicit request",
+        { beforeMutationReservation() {} }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  await t.test("a narrow remapped active-writer viewer blocks Send", async () => {
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: [
+        "  🔒",
+        "  This conversation is open",
+        "  in another app",
+        "  R to Retry",
+        "      Close it there and press",
+        "      R to continue here.",
+        "",
+        "   r retry",
+        "   esc/ctrl+c/q exit",
+        "   ctrl+k transcript"
+      ].join("\n")
+    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        "new explicit request",
+        { beforeMutationReservation() {} }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  await t.test("an active-writer viewer without transcript binding blocks Send", async () => {
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: [
+        "  🔒   This conversation is open in another app  R to Retry",
+        "      Close it there and press R to continue here.",
+        "",
+        "   r retry   esc/ctrl+c/q exit"
+      ].join("\n")
+    });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        "new explicit request",
+        { beforeMutationReservation() {} }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  await t.test("quoted active-writer text does not hide a later live Composer", async () => {
+    let nowMs = 0;
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: [
+        "  🔒   This conversation is open in another app  R to Retry",
+        "      Close it there and press R to continue here.",
+        "",
+        "   r retry   esc/ctrl+c/q exit   ctrl+t transcript",
+        "",
+        "› Ask Codex to do anything",
+        "gpt-5.6-sol high · /repo"
+      ].join("\n")
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await bridge.sendUserExplicitCodex(
+      terminalControl(codexTerminalAgentAdapter),
+      "new explicit request",
+      { beforeMutationReservation() {} }
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["keys:C-u", "text", "keys:C-m"]
+    );
+  });
+});
+
+test("Codex 0.154 async questions preserve explicit Send input ownership", async (t) => {
+  const mainComposer = [
+    "› Summarize recent commits",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+  const collapsed = [
+    "• Working (7s • esc to interrupt)",
+    "",
+    "• Queued follow-up inputs",
+    "  ? 2 questions · 15s",
+    "    ⌥ + ↑ to answer",
+    mainComposer
+  ].join("\n");
+  const collapsedWithoutVisibleComposer = [
+    "• Working (7s • esc to interrupt)",
+    "",
+    "• Queued follow-up inputs",
+    "  ? 2 questions · 15s",
+    "    ⌥ + ↑ to answer"
+  ].join("\n");
+  const collapsedWithoutHintOrVisibleComposer = [
+    "• Working (7s • esc to interrupt)",
+    "",
+    "• Queued follow-up inputs",
+    "  ? 2 questions · 15s"
+  ].join("\n");
+  const ordinaryQueue = [
+    "• Working (7s • esc to interrupt)",
+    "",
+    "• Queued follow-up inputs",
+    "  ↳ queued follow-up",
+    mainComposer
+  ].join("\n");
+  const queueDescribingShortcuts = [
+    "• Working (7s • esc to interrupt)",
+    "",
+    "• Queued follow-up inputs",
+    "  ↳ document enter submit   ctrl + ] skip and main",
+    "    prompt while this long message wraps",
+    "    ⌥ + ↑ edit last queued message"
+  ].join("\n");
+  const queueContainingLiteralHeader = [
+    "• Working (7s • esc to interrupt)",
+    "",
+    "• Queued follow-up inputs",
+    "  ↳ quote this exact UI heading:",
+    "    • Queued follow-up inputs",
+    "     enter submit   ctrl + ] skip and main prompt",
+    "    ⌥ + ↑ edit last queued message"
+  ].join("\n");
+  const queueThenCollapsedQuestions = [
+    "• Working (7s • esc to interrupt)",
+    "",
+    "• Queued follow-up inputs",
+    "  ↳ document enter submit   ctrl + ] skip and main",
+    "    prompt while this queued message wraps",
+    "    ⌥ + ↑ edit last queued message",
+    "  ? 2 questions · 15s",
+    "    ⌥ + ↑ to answer",
+    mainComposer
+  ].join("\n");
+  const expandedOptions = [
+    "• Queued follow-up inputs",
+    "",
+    "  2 of 2",
+    "  Second?",
+    "",
+    "  › 1. Next",
+    "    2. Other",
+    "",
+    "  enter submit   ctrl + ] skip   ⌥ + ↓ prev question   ⌥ + ↑ queued messages"
+  ].join("\n");
+  const expandedFreeText = [
+    "• Queued follow-up inputs",
+    "",
+    "  1 of 2",
+    "  Which way?",
+    "",
+    "  Type your answer",
+    "",
+    "  enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   ⌥ + ↑ next question"
+  ].join("\n");
+  const narrowTruncated = [
+    "  2 of",
+    "  Secon",
+    "  d",
+    "  › x",
+    "  ente…",
+    "  ctrl…"
+  ].join("\n");
+  const clippedChoice = [
+    "  Second",
+    "",
+    "  › 2. A suggested answer that is long enough to",
+    "       wrap across multiple rows",
+    "",
+    "  Expand terminal to read the entire option"
+  ].join("\n");
+  const wrappedHeader = [
+    "• Queued follow-up",
+    "  inputs",
+    "",
+    "  1 of 2",
+    "  Which way?",
+    "",
+    "  Type your answer",
+    "",
+    "  enter submit   ctrl + ] skip",
+    "  ⌥ + ↓ main prompt"
+  ].join("\n");
+  const remappedSplitFooter = [
+    "  2 of 2",
+    "  Second?",
+    "",
+    "  › 1. Next",
+    "    2. Other",
+    "",
+    "  enter submit",
+    "  ctrl-alt-q skip"
+  ].join("\n");
+  const staleComposerThenExpanded = [
+    "• Queued follow-up inputs",
+    "",
+    "› stale main prompt repaint",
+    "gpt-5.6-sol high · /repo",
+    "",
+    "  1 of 2",
+    "  Which way?",
+    "",
+    "  Type your answer",
+    "",
+    "  enter submit   ctrl + ] skip   ⌥ + ↓ main prompt"
+  ].join("\n");
+  const missingSubmitFooter = [
+    "  Type your answer",
+    "  ctrl+] skip",
+    "  alt-down main prompt"
+  ].join("\n");
+  const singleBoundFooter = [
+    "  Type your answer",
+    "  ctrl+] skip"
+  ].join("\n");
+  const mainMultilineDraftUsingEditorVocabulary = [
+    "› document this exact sample",
+    "  gpt-5.6-sol high · /fake-draft-statusline",
+    "  Type your answer",
+    "  1 of 2",
+    "  enter submit",
+    "  ctrl-alt-q skip",
+    "  alt-down main prompt",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+  const staleCollapsedThenPartialEditor = [
+    "• Queued follow-up inputs",
+    "  ? 2 questions · 15s",
+    "    ⌥ + ↑ to answer",
+    "  1 of 2",
+    "  Type your answer"
+  ].join("\n");
+
+  assert.equal(inspectCodexAsyncQuestionInputMode(mainComposer), "absent");
+  assert.equal(inspectCodexAsyncQuestionInputMode(collapsed), "collapsed");
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(collapsedWithoutVisibleComposer),
+    "collapsed"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(collapsedWithoutHintOrVisibleComposer),
+    "collapsed"
+  );
+  assert.equal(inspectCodexAsyncQuestionInputMode(ordinaryQueue), "absent");
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(queueDescribingShortcuts),
+    "absent"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(queueContainingLiteralHeader),
+    "absent"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(queueThenCollapsedQuestions),
+    "collapsed"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(expandedOptions),
+    "expanded"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(expandedFreeText),
+    "expanded"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(narrowTruncated),
+    "ambiguous"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(clippedChoice),
+    "ambiguous"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(wrappedHeader),
+    "expanded"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(remappedSplitFooter),
+    "expanded"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(staleComposerThenExpanded),
+    "expanded"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(missingSubmitFooter),
+    "expanded"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(singleBoundFooter),
+    "ambiguous"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(mainMultilineDraftUsingEditorVocabulary),
+    "absent"
+  );
+  assert.equal(
+    inspectCodexAsyncQuestionInputMode(staleCollapsedThenPartialEditor),
+    "ambiguous"
+  );
+  for (const weakEvidence of [
+    "  1 of 2",
+    "  › 1. documentation example",
+    "  Type your answer"
+  ]) {
+    assert.equal(inspectCodexAsyncQuestionInputMode(weakEvidence), "absent");
+  }
+
+  for (const [name, screen] of [
+    ["expanded options", expandedOptions],
+    ["expanded free text", expandedFreeText],
+    ["narrow truncated editor", narrowTruncated],
+    ["clipped option editor", clippedChoice],
+    ["wrapped header and footer", wrappedHeader],
+    ["remapped split footer", remappedSplitFooter],
+    ["stale Composer before expanded editor", staleComposerThenExpanded],
+    ["collapsed summary before a partial editor", staleCollapsedThenPartialEditor],
+    ["editor footer without submit binding", missingSubmitFooter],
+    ["editor with one remaining footer binding", singleBoundFooter]
+  ] as const) {
+    await t.test(`${name} rejects before any terminal mutation`, async () => {
+      const provider = new RecordingTerminalProvider([PANE], {
+        [PANE.target]: screen
+      });
+      const bridge = createBridge(codexTerminalAgentAdapter, provider);
+      await assert.rejects(
+        bridge.sendUserExplicitCodex(
+          terminalControl(codexTerminalAgentAdapter),
+          "new explicit request",
+          { beforeMutationReservation() {} }
+        ),
+        TerminalInputNotStartedError
+      );
+      assert.equal(
+        provider.operations.some((operation) => operation.kind !== "capture"),
+        false
+      );
+    });
+  }
+
+  for (const [name, screen] of [
+    ["collapsed questions", collapsed],
+    ["collapsed questions without a visible Composer", collapsedWithoutVisibleComposer],
+    ["collapsed questions without an edit hint", collapsedWithoutHintOrVisibleComposer],
+    ["ordinary queued messages", ordinaryQueue],
+    ["queued shortcut prose without a statusline", queueDescribingShortcuts],
+    ["queued text containing the literal header", queueContainingLiteralHeader],
+    ["queued text followed by collapsed questions", queueThenCollapsedQuestions],
+    ["main multiline draft using editor vocabulary", mainMultilineDraftUsingEditorVocabulary]
+  ] as const) {
+    await t.test(`${name} keeps the main Composer sendable`, async () => {
+      let nowMs = 0;
+      const provider = new RecordingTerminalProvider([PANE], {
+        [PANE.target]: screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      await bridge.sendUserExplicitCodex(
+        terminalControl(codexTerminalAgentAdapter),
+        "new explicit request",
+        { beforeMutationReservation() {} }
+      );
+      assert.deepEqual(
+        provider.operations.flatMap((operation) =>
+          operation.kind === "capture"
+            ? []
+            : operation.kind === "text"
+              ? ["text"]
+              : [`keys:${operation.keys.join(",")}`]
+        ),
+        ["keys:C-u", "text", "keys:C-m"]
+      );
+    });
+  }
+
+  await t.test(
+    "collapsed-to-expanded reservation race rejects before mutation",
+    async () => {
+      const provider = new RecordingTerminalProvider([PANE], {
+        [PANE.target]: collapsed
+      });
+      const bridge = createBridge(codexTerminalAgentAdapter, provider);
+      let reservationCalls = 0;
+      let clearHookCalls = 0;
+      await assert.rejects(
+        bridge.sendUserExplicitCodex(
+          terminalControl(codexTerminalAgentAdapter),
+          "new explicit request",
+          {
+            beforeMutationReservation() {
+              reservationCalls += 1;
+              provider.setScreen(PANE.target, expandedOptions);
+            },
+            onComposerClearDispatched() {
+              clearHookCalls += 1;
+            }
+          }
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof TerminalInputNotStartedError);
+          assert.match(error.message, /async question editor.*owns terminal input/u);
+          return true;
+        }
+      );
+      assert.equal(reservationCalls, 1);
+      assert.equal(clearHookCalls, 0);
+      assert.equal(
+        provider.operations.filter((operation) => operation.kind === "capture")
+          .length,
+        2
+      );
+      assert.equal(
+        provider.operations.some((operation) => operation.kind !== "capture"),
+        false
+      );
+    }
+  );
 });
 
 test("managed user Send recaptures exact empty immediately before text", async (t) => {
@@ -6401,7 +6870,7 @@ test("native status inspection accepts an exact current slash popup only at a pr
   );
 });
 
-test("Codex 0.147.0 through 0.153.4 require their exact ordered two-row slash popup", async () => {
+test("Codex 0.147.0 through 0.154.0 require their exact ordered two-row slash popup", async () => {
   class CurrentPopupProvider extends RecordingTerminalProvider {
     override async sendText(
       target: TerminalEndpointRef | string,
@@ -6440,7 +6909,8 @@ test("Codex 0.147.0 through 0.153.4 require their exact ordered two-row slash po
     "0.150.1",
     "0.151.0",
     "0.153.0",
-    "0.153.4"
+    "0.153.4",
+    "0.154.0"
   ]) {
     const provider = new CurrentPopupProvider([PANE]);
     const bridge = new TerminalAgentBridge({
@@ -6459,7 +6929,7 @@ test("Codex 0.147.0 through 0.153.4 require their exact ordered two-row slash po
   }
 });
 
-for (const version of ["0.153.0", "0.153.4"] as const) {
+for (const version of ["0.153.0", "0.153.4", "0.154.0"] as const) {
   test(`Codex ${version} native status refuses an incomplete two-row popup`, async () => {
     class IncompleteCurrentPopupProvider extends RecordingTerminalProvider {
       private capturesAfterInjection = 0;
