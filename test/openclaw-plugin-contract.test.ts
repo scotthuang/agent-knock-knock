@@ -864,7 +864,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "3685cc5d01055b568492ce052873fd3bd7a9ac8672ff5cd109cdb645e5c4e8b2"
+    "f278c6cc5fed11899c5d02b940d8001597ea20dff69ebca4d0d44122b03102e2"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.equal(contractedTools.length, 19);
@@ -2505,7 +2505,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.match(
       sendTool?.description ?? "",
-      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned non-blocked approval state[\s\S]*no active native questionnaire[\s\S]*parsed working activity[\s\S]*Codex rollout ambiguity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*source-less Codex terminal[\s\S]*provisional Session\/Turn[\s\S]*managed preparation fails[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*exact request acceptance[\s\S]*owner-bound response authority[\s\S]*watch_id[\s\S]*manual_required interactions remain notification-only/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned non-blocked approval state[\s\S]*no input-owning native questionnaire\/editor or read-only viewer[\s\S]*parsed working activity[\s\S]*Codex rollout ambiguity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*source-less Codex terminal[\s\S]*provisional Session\/Turn[\s\S]*managed preparation fails[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*exact request acceptance[\s\S]*owner-bound response authority[\s\S]*watch_id[\s\S]*manual_required interactions remain notification-only/u
     );
     const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
     assert.match(
