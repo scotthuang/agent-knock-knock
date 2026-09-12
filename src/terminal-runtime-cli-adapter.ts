@@ -46,6 +46,10 @@ import {
 import { StaticTerminalProcessSource, SystemTerminalProcessSource,
   type TerminalProcessSource } from "./terminal-process-source.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
+import {
+  parseCodexNativeModelCatalog,
+  type CodexNativeModelCatalog
+} from "./terminal-model-control.js";
 
 const TERMINAL_CONTROL_CAPABILITIES = ["screen_status", "send_keys",
   "terminal_approval", "screen_completion", "durable_completion",
@@ -112,6 +116,11 @@ export interface TerminalRuntimeCliAdapter {
     terminalProvider?: TerminalControlProvider
   ): Promise<ActiveCodexProcess[]>;
   agentVersionForRunningProcess(agent: ExecutorKind, pid: number): string | undefined;
+  codexModelCatalogForRunningProcess(
+    pid: number,
+    expectedVersion: "0.154.0",
+    cwd?: string
+  ): CodexNativeModelCatalog;
 }
 
 /**
@@ -150,7 +159,10 @@ export function createTerminalRuntimeCliAdapter(
     createAgentSessionProvider, createThreadLifecycleCandidateProvider,
     listActiveSessionsWithTerminalControl,
     agentVersionForRunningProcess: (agent: ExecutorKind, pid: number) =>
-      runningAgentVersion(input, agent, pid)
+      runningAgentVersion(input, agent, pid),
+    codexModelCatalogForRunningProcess: (
+      pid: number, expectedVersion: "0.154.0", cwd?: string
+    ) => runningCodexModelCatalog(input, pid, expectedVersion, cwd)
   });
 }
 
@@ -625,27 +637,84 @@ function runningAgentVersion(
     // observation boundary instead of inspecting an unrelated host PID.
     return undefined;
   }
-  const lsof = resolveOptionalExecutable("lsof");
-  if (!lsof) {
-    return undefined;
+  const executables = runningAgentExecutables(agent, pid);
+  const versions = [...new Set(executables.map((entry) => entry.version))];
+  return versions.length === 1 ? versions[0] : undefined;
+}
+
+function runningCodexModelCatalog(
+  input: Pick<CreateTerminalRuntimeCliAdapterInput, "options" | "dependencies">,
+  pid: number,
+  expectedVersion: "0.154.0",
+  cwd?: string
+): CodexNativeModelCatalog {
+  if (
+    input.options.agentVersionsJson !== undefined ||
+    input.options.processesJson !== undefined ||
+    input.options.terminalsJson !== undefined ||
+    input.options.terminalScreensJson !== undefined
+  ) {
+    throw new Error(
+      "the exact running Codex model catalog is unavailable in a static terminal fixture"
+    );
   }
+  const matches = runningAgentExecutables("codex", pid).filter((entry) =>
+    entry.version === expectedVersion
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `Codex process ${pid} does not expose exactly one ${expectedVersion} executable`
+    );
+  }
+  const result = spawnSync(matches[0].path, ["debug", "models"], {
+    encoding: "utf8",
+    timeout: 15_000,
+    maxBuffer: 16 * 1024 * 1024,
+    ...(cwd ? { cwd } : {}),
+    ...(typeof input.options.codexHome === "string" && input.options.codexHome.trim()
+      ? {
+          env: {
+            ...process.env,
+            CODEX_HOME: expandHome(input.options.codexHome)
+          }
+        }
+      : {})
+  });
+  if (result.error || result.status !== 0 || result.signal) {
+    throw new Error(
+      `the exact running Codex ${expectedVersion} executable could not return its model catalog`
+    );
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(String(result.stdout ?? ""));
+  } catch {
+    throw new Error("the exact running Codex model catalog was not valid JSON");
+  }
+  return parseCodexNativeModelCatalog(decoded);
+}
+
+function runningAgentExecutables(
+  agent: ExecutorKind,
+  pid: number
+): readonly { path: string; version: string }[] {
+  const lsof = resolveOptionalExecutable("lsof");
+  if (!lsof) return [];
   const result = spawnSync(lsof, ["-a", "-p", String(pid), "-d", "txt", "-Fn"],
     { encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 }
   );
-  if (result.error || result.status !== 0) {
-    return undefined;
-  }
-  const paths = String(result.stdout ?? "").split(/\r?\n/u)
-    .filter((line) => line.startsWith("n")).map((line) => line.slice(1));
-  const pathVersions = paths.flatMap((executablePath): string[] => {
-    const pattern = agent === "codex"
-      ? /\/releases\/(\d+\.\d+\.\d+)(?:-[^/]*)?\/bin\/codex$/u
-      : /\/claude\/versions\/(\d+\.\d+\.\d+)$/u;
-    const match = pattern.exec(executablePath);
-    return match ? [match[1]] : [];
-  });
-  const versions = [...new Set(pathVersions)];
-  return versions.length === 1 ? versions[0] : undefined;
+  if (result.error || result.status !== 0) return [];
+  const pattern = agent === "codex"
+    ? /\/releases\/(\d+\.\d+\.\d+)(?:-[^/]*)?\/bin\/codex$/u
+    : /\/claude\/versions\/(\d+\.\d+\.\d+)$/u;
+  const entries = String(result.stdout ?? "").split(/\r?\n/u)
+    .filter((line) => line.startsWith("n"))
+    .flatMap((line) => {
+      const path = line.slice(1);
+      const match = pattern.exec(path);
+      return match ? [{ path, version: match[1] }] : [];
+    });
+  return [...new Map(entries.map((entry) => [entry.path, entry])).values()];
 }
 /** Decode the provider-owned terminal control payload without product policy. */
 export function terminalControlFromTakeover(nativeTakeover: unknown):

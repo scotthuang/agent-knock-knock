@@ -16,12 +16,14 @@ import {
   closeParameters,
   identifyAndSendParameters,
   identifyForegroundParameters,
+  modelOptionsParameters,
   nativeInspectParameters,
   newThreadParameters,
   reconcileBindingParameters,
   respondInteractionParameters,
   resumeThreadParameters,
   sendParameters,
+  setModelParameters,
   unwatchParameters,
   watchParameters
 } from "../src/openclaw-plugin-schemas.js";
@@ -177,6 +179,8 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   const mutationSchemas = {
     send: sendParameters,
     native_inspect: nativeInspectParameters,
+    model_options: modelOptionsParameters,
+    set_model: setModelParameters,
     identify_foreground: identifyForegroundParameters,
     identify_and_send: identifyAndSendParameters,
     new_thread: newThreadParameters,
@@ -195,6 +199,17 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   assert.deepEqual(nativeInspectParameters.required, [
     "terminal_id",
     "inspection"
+  ]);
+  assert.deepEqual(modelOptionsParameters.required, ["terminal_id"]);
+  assert.deepEqual(setModelParameters.required, [
+    "terminal_id",
+    "model",
+    "reasoning_effort"
+  ]);
+  assert.deepEqual(Object.keys(setModelParameters.properties), [
+    "terminal_id",
+    "model",
+    "reasoning_effort"
   ]);
   assert.deepEqual(identifyForegroundParameters.required, ["terminal_id"]);
   assert.deepEqual(identifyAndSendParameters.required, [
@@ -844,6 +859,8 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     "agent_knock_knock_unwatch",
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_native_inspect",
+    "agent_knock_knock_model_options",
+    "agent_knock_knock_set_model",
     "agent_knock_knock_identify_foreground",
     "agent_knock_knock_identify_and_send",
     "agent_knock_knock_new_thread",
@@ -864,10 +881,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "f278c6cc5fed11899c5d02b940d8001597ea20dff69ebca4d0d44122b03102e2"
+    "c8edae72bbe7a006ac19d72ab1d12276133727cb6d05116b3ad68b9ff76a1081"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
-  assert.equal(contractedTools.length, 19);
+  assert.equal(contractedTools.length, 21);
   assert.match(
     manifest.description ?? "",
     /closed native status inspection/u
@@ -920,6 +937,14 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     contractedTools.includes("agent_knock_knock_native_inspect"),
+    true
+  );
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_model_options"),
+    true
+  );
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_set_model"),
     true
   );
   assert.equal(
@@ -1434,7 +1459,7 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     manifest.toolMetadata.agent_knock_knock_respond_interaction.optional,
     true
   );
-  assert.equal(manifest.contracts.tools.length, 19);
+  assert.equal(manifest.contracts.tools.length, 21);
   for (const terminalWatchTool of [
     "agent_knock_knock_watch",
     "agent_knock_knock_unwatch"
@@ -1445,6 +1470,8 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   for (const lifecycleTool of [
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_native_inspect",
+    "agent_knock_knock_model_options",
+    "agent_knock_knock_set_model",
     "agent_knock_knock_identify_foreground",
     "agent_knock_knock_identify_and_send",
     "agent_knock_knock_new_thread",
@@ -1512,6 +1539,16 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.match(commandSource, /name: "agent_knock_knock_reconcile_binding"/u);
   assert.match(commandSource, /name: "agent_knock_knock_list_resumable_threads"/u);
   assert.match(commandSource, /name: "agent_knock_knock_native_inspect"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_model_options"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_set_model"/u);
+  assert.match(
+    commandSource,
+    /OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS = 15 \* 60_000[\s\S]*?name: "agent_knock_knock_model_options"[\s\S]*?timeoutMs: OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS/u
+  );
+  assert.match(
+    commandSource,
+    /OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS = 30 \* 60_000[\s\S]*?name: "agent_knock_knock_set_model"[\s\S]*?timeoutMs: OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS/u
+  );
   assert.match(commandSource, /name: "agent_knock_knock_identify_foreground"/u);
   assert.match(commandSource, /name: "agent_knock_knock_identify_and_send"/u);
   assert.match(commandSource, /name: "agent_knock_knock_resume_thread"/u);

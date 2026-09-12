@@ -70,6 +70,15 @@ import type {
   NativeQuestionnaireInspection
 } from
   "./terminal-questionnaire-adapter.js";
+import {
+  discoverTerminalModelOptions,
+  switchTerminalModel,
+  type TerminalModelCatalog,
+  type TerminalModelControlPlan,
+  type TerminalModelControlPorts,
+  type TerminalModelSwitchRequest,
+  type TerminalModelSwitchResult
+} from "./terminal-model-control.js";
 
 // Verified Codex profiles through 0.154.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
@@ -90,6 +99,13 @@ const CODEX_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
 const CODEX_COMPLETE_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s+\S+)?|[-\w.]+ default)\s+·\s+\S.*$/u;
+const CODEX_MODEL_CONTROL_SLASH_POPUP_BY_PROFILE: Readonly<
+  Record<string, readonly string[]>
+> = {
+  "codex-model-control-0.154.0": [
+    "  /model  choose what model and reasoning effort to use"
+  ]
+};
 // Keep every exact slash-completion shape closed per behavior profile so a
 // version adding another matching command cannot silently become an authorized
 // native command surface.
@@ -662,6 +678,23 @@ export interface TerminalSendOptions {
   onTransportStage?: (
     event: TerminalTransportStageEvent
   ) => void | Promise<void>;
+}
+
+export interface TerminalModelControlBridgeOptions {
+  runtime?: TerminalRuntimeIdentity;
+  /** Revalidate Store/Turn/current-snapshot authority before every UI step. */
+  beforeInput?: () => void | Promise<void>;
+  /** Read-only catalog from the exact executable bound to this Codex pane. */
+  loadCodexCatalog?: TerminalModelControlPorts["loadCodexCatalog"];
+}
+
+export interface TerminalModelOptionsBridgeResult {
+  terminalControl: TerminalControlRef;
+  catalog: TerminalModelCatalog;
+}
+
+export interface TerminalModelSwitchBridgeResult extends TerminalModelSwitchResult {
+  terminalControl: TerminalControlRef;
 }
 
 export interface TerminalSendResult {
@@ -1409,6 +1442,311 @@ export class TerminalAgentBridge {
         },
         screen: { error: message }
       };
+    }
+  }
+
+  async modelOptions(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    agentVersion: string,
+    plan: TerminalModelControlPlan,
+    options: TerminalModelControlBridgeOptions = {}
+  ): Promise<TerminalModelOptionsBridgeResult> {
+    const adapter = this.registry.require(agent);
+    assertTerminalModelControlPlan(adapter, terminalControl, agentVersion, plan);
+    assertTerminalMutationCapabilities({
+      provider: this.terminalProvider,
+      terminal: this.terminalProvider.endpoint(terminalControl),
+      semantic: ["send_keys", "screen_status"],
+      transport: [
+        "stable_resource_resolution",
+        "screen_capture",
+        "ansi_capture",
+        "text_delivery",
+        "key_delivery"
+      ]
+    });
+    const result = await discoverTerminalModelOptions({
+      agent,
+      agentVersion,
+      plan,
+      terminalControl,
+      ports: this.modelControlPorts(adapter, plan, options)
+    });
+    return {
+      terminalControl: result.terminalControl as TerminalControlRef,
+      catalog: result.catalog
+    };
+  }
+
+  async setModel(
+    agent: ExecutorKind,
+    terminalControl: TerminalControlRef,
+    agentVersion: string,
+    plan: TerminalModelControlPlan,
+    expectedCatalogFingerprint: string,
+    request: TerminalModelSwitchRequest,
+    options: TerminalModelControlBridgeOptions = {}
+  ): Promise<TerminalModelSwitchBridgeResult> {
+    const adapter = this.registry.require(agent);
+    assertTerminalModelControlPlan(adapter, terminalControl, agentVersion, plan);
+    assertTerminalMutationCapabilities({
+      provider: this.terminalProvider,
+      terminal: this.terminalProvider.endpoint(terminalControl),
+      semantic: ["send_keys", "screen_status"],
+      transport: [
+        "stable_resource_resolution",
+        "screen_capture",
+        "ansi_capture",
+        "text_delivery",
+        "key_delivery"
+      ]
+    });
+    const result = await switchTerminalModel({
+      agent,
+      agentVersion,
+      plan,
+      terminalControl,
+      expectedCatalogFingerprint,
+      request,
+      ports: this.modelControlPorts(adapter, plan, options)
+    });
+    return {
+      ...result,
+      terminalControl: result.terminalControl as TerminalControlRef
+    };
+  }
+
+  private modelControlPorts(
+    adapter: TerminalAgentAdapter,
+    plan: TerminalModelControlPlan,
+    options: TerminalModelControlBridgeOptions
+  ) {
+    if (!options.beforeInput) {
+      throw new Error(
+        "terminal model control requires current-snapshot authority before every input"
+      );
+    }
+    // `claude agents` deliberately reports the same interactive process as
+    // `waiting` / `dialog open` while Claude's native model picker is open.
+    // Keep that lifecycle relaxation private to this model-control operation:
+    // a capture may cross the state boundary read-only, but a terminal key is
+    // authorized only by the immediately preceding, exact profiled picker
+    // frame. The permit is one-shot so no later transport can inherit it.
+    let claudeModelDialogInputPermit: {
+      terminalControl: TerminalControlRef;
+      fingerprint: string;
+    } | undefined;
+    return {
+      beforeInput: options.beforeInput,
+      loadCodexCatalog: options.loadCodexCatalog,
+      capture: async (input: {
+        terminalControl: unknown;
+        expectedComposer?: string;
+      }) => {
+        claudeModelDialogInputPermit = undefined;
+        const original = input.terminalControl as TerminalControlRef;
+        const verified = await this.verifyModelControlTerminalIdentity(
+          adapter,
+          plan,
+          original,
+          options.runtime,
+          { claudeModelDialog: "allow" }
+        );
+        const styledScreen = await this.terminalProvider.capture(
+          this.terminalProvider.endpoint(verified),
+          { scrollbackLines: 160, preserveEscapes: true }
+        );
+        const screen = stripTerminalEscapeSequences(styledScreen);
+        const inspection = adapter.inspectScreen({
+          screen,
+          runtime: options.runtime
+        });
+        const modelObservation = adapter.observeModelControl?.(plan, screen);
+        const exactClaudeModelDialog = adapter.agent === "claude" &&
+          modelObservation?.state === "claude_model_picker";
+        const reverified = await this.verifyModelControlTerminalIdentity(
+          adapter,
+          plan,
+          verified,
+          options.runtime,
+          {
+            claudeModelDialog: exactClaudeModelDialog
+              ? "require"
+              : "forbid"
+          }
+        );
+        if (!sameTerminalControlIdentity(verified, reverified)) {
+          throw new Error(
+            "terminal control identity changed across model-control capture"
+          );
+        }
+        if (exactClaudeModelDialog) {
+          claudeModelDialogInputPermit = {
+            terminalControl: reverified,
+            fingerprint: modelObservation.fingerprint
+          };
+        }
+        const codexComposer = adapter.agent === "codex"
+          ? currentCodexComposerCapture(
+              styledScreen,
+              input.expectedComposer ?? "",
+              false,
+              false,
+              input.expectedComposer === plan.command
+                ? CODEX_MODEL_CONTROL_SLASH_POPUP_BY_PROFILE[
+                    plan.behaviorProfile
+                  ]
+                : undefined
+            )
+          : undefined;
+        const exactEmptyComposer = adapter.agent === "codex"
+          ? codexComposer?.state === "exact_empty"
+          : isExactClaudeIdleComposer(screen);
+        const claudeProfiledCommand = adapter.agent === "claude" &&
+          input.expectedComposer === plan.command &&
+          exactClaudeModelControlComposerCapture(
+            screen, plan, input.expectedComposer
+          ) !== undefined;
+        const claudeBareCommand = adapter.agent === "claude" &&
+          input.expectedComposer !== undefined &&
+          exactTerminalComposerCapture(
+            "claude", screen, input.expectedComposer
+          ) !== undefined;
+        const exactCommandComposer = input.expectedComposer !== undefined && (
+          adapter.agent === "codex"
+            ? codexComposer?.state === "exact_draft"
+            : claudeProfiledCommand || claudeBareCommand
+        );
+        const exactCommandReady = adapter.agent === "codex"
+          ? codexComposer?.state === "exact_draft" &&
+            codexComposer.profiledSlashPopup === true
+          : claudeProfiledCommand;
+        return {
+          terminalControl: reverified,
+          screen,
+          activityState: inspection.activity.state,
+          approvalBlocked: inspection.approval.blocked,
+          exactEmptyComposer,
+          exactCommandReady,
+          exactCommandComposer
+        };
+      },
+      sendText: async (control: unknown, text: "/model") => {
+        claudeModelDialogInputPermit = undefined;
+        const verified = await this.verifyTerminalIdentity(
+          adapter.agent,
+          control as TerminalControlRef,
+          options.runtime
+        );
+        await this.terminalProvider.sendText(
+          this.terminalProvider.endpoint(verified),
+          text
+        );
+      },
+      sendKeys: async (control: unknown, keys: readonly string[]) => {
+        const requestedControl = control as TerminalControlRef;
+        const permit = claudeModelDialogInputPermit;
+        claudeModelDialogInputPermit = undefined;
+        const requireClaudeModelDialog = permit !== undefined &&
+          sameTerminalControlIdentity(
+            permit.terminalControl,
+            requestedControl
+          );
+        const verified = await this.verifyModelControlTerminalIdentity(
+          adapter,
+          plan,
+          requestedControl,
+          options.runtime,
+          {
+            claudeModelDialog: requireClaudeModelDialog
+              ? "require"
+              : "forbid"
+          }
+        );
+        if (requireClaudeModelDialog) {
+          const styledScreen = await this.terminalProvider.capture(
+            this.terminalProvider.endpoint(verified),
+            { scrollbackLines: 160, preserveEscapes: true }
+          );
+          const screen = stripTerminalEscapeSequences(styledScreen);
+          const inspection = adapter.inspectScreen({
+            screen,
+            runtime: options.runtime
+          });
+          const observation = adapter.observeModelControl?.(plan, screen);
+          if (
+            inspection.approval.blocked ||
+            inspection.activity.state === "working" ||
+            observation?.state !== "claude_model_picker" ||
+            observation.fingerprint !== permit?.fingerprint
+          ) {
+            throw new Error(
+              "the exact Claude model picker changed before key dispatch"
+            );
+          }
+        }
+        await this.terminalProvider.sendKeys(
+          this.terminalProvider.endpoint(verified),
+          keys
+        );
+      },
+      sleep: this.sleep
+    };
+  }
+
+  private async verifyModelControlTerminalIdentity(
+    adapter: TerminalAgentAdapter,
+    plan: TerminalModelControlPlan,
+    terminalControl: TerminalControlRef,
+    runtime: TerminalRuntimeIdentity | undefined,
+    options: {
+      claudeModelDialog: "forbid" | "allow" | "require";
+    }
+  ): Promise<TerminalControlRef> {
+    const canUseClaudeModelDialog =
+      adapter.agent === "claude" &&
+      plan.behaviorProfile === "claude-model-control-2.1.266" &&
+      runtime?.requireExactClaudeAgentRow === true &&
+      runtime.exactClaudeAgentState === "idle";
+    if (options.claudeModelDialog === "require") {
+      if (!canUseClaudeModelDialog) {
+        throw new Error(
+          "Claude model-dialog identity cannot be required outside its exact profile"
+        );
+      }
+      return this.verifyTerminalIdentity(
+        adapter.agent,
+        terminalControl,
+        { ...runtime, exactClaudeAgentState: "status_dialog" }
+      );
+    }
+    try {
+      return await this.verifyTerminalIdentity(
+        adapter.agent,
+        terminalControl,
+        runtime
+      );
+    } catch (idleError) {
+      if (
+        options.claudeModelDialog !== "allow" ||
+        !canUseClaudeModelDialog
+      ) {
+        throw idleError;
+      }
+      try {
+        return await this.verifyTerminalIdentity(
+          adapter.agent,
+          terminalControl,
+          { ...runtime, exactClaudeAgentState: "status_dialog" }
+        );
+      } catch {
+        // Preserve the original current-snapshot failure. Both attempts use
+        // the same PID, process incarnation, native Session, cwd, and terminal
+        // control fence; the second changes only the exact allowed agents row
+        // state from idle to `waiting` / `dialog open`.
+        throw idleError;
+      }
     }
   }
 
@@ -4713,13 +5051,97 @@ function exactClaudeComposerFrame(screen: string): {
   };
 }
 
+function exactClaudeModelControlComposerCapture(
+  screen: string,
+  plan: TerminalModelControlPlan,
+  expectedText: string
+): { digest: string } | undefined {
+  if (
+    plan.behaviorProfile !== "claude-model-control-2.1.266" ||
+    expectedText !== plan.command ||
+    expectedText !== "/model"
+  ) return undefined;
+  const frame = exactClaudeComposerFrame(screen);
+  if (
+    !frame ||
+    frame.composerRows.length !== 1 ||
+    frame.composerRows[0].replace(/^\s*❯\s?/u, "").trimEnd() !== expectedText ||
+    frame.trailing.length > 2 ||
+    !claudeNativeInspectionTrailingIsFooter(frame.trailing)
+  ) return undefined;
+  const beforeComposer = frame.lines.slice(0, frame.openIndex);
+  while (beforeComposer.length > 0 &&
+         beforeComposer.at(-1)?.trim() === "") {
+    beforeComposer.pop();
+  }
+  let popupStart = beforeComposer.length;
+  while (popupStart > 0) {
+    const line = beforeComposer[popupStart - 1];
+    if (
+      /^\s*(?:(?:❯|›)\s*)?\/[a-z][a-z0-9-]*(?:\s{2,}|\s*$)/iu.test(line) ||
+      /^\s{2,}\S/u.test(line)
+    ) {
+      popupStart -= 1;
+      continue;
+    }
+    break;
+  }
+  const popupRows = beforeComposer.slice(popupStart);
+  if (popupRows.length === 0 || popupRows.length > 32) return undefined;
+  const suggestions: Array<{
+    lineIndex: number;
+    selected: boolean;
+    command: string;
+    normalized: string;
+  }> = [];
+  for (const [lineIndex, line] of popupRows.entries()) {
+    const match = /^\s*(?:(❯|›)\s*)?(\/[a-z][a-z0-9-]*)(?:\s{2,}|\s*$)(.*)$/iu
+      .exec(line);
+    if (match) {
+      suggestions.push({
+        lineIndex,
+        selected: Boolean(match[1]),
+        command: match[2],
+        normalized: `${match[2]} ${match[3]}`.trim().replace(/\s+/gu, " ")
+      });
+      continue;
+    }
+    if (suggestions.length === 0 || !/^\s{2,}\S/u.test(line)) {
+      return undefined;
+    }
+    const previous = suggestions.at(-1)!;
+    previous.normalized = `${previous.normalized} ${line.trim()}`
+      .replace(/\s+/gu, " ");
+  }
+  if (suggestions.length === 0 || suggestions[0].lineIndex !== 0) {
+    return undefined;
+  }
+  const selected = suggestions.filter((row) => row.selected);
+  if (
+    selected.length > 1 ||
+    selected.length === 1 && selected[0].lineIndex !== 0 ||
+    suggestions.slice(1).some((row) => row.command === "/model")
+  ) return undefined;
+  const first = suggestions[0].normalized;
+  if (!/^\/model Set the AI model for Claude Code \(currently [A-Za-z0-9][A-Za-z0-9._:/+\[\]\- ]{0,127}\)$/u.test(first)) {
+    return undefined;
+  }
+  return {
+    digest: createHash("sha256")
+      .update(frame.lines.slice(frame.openIndex).join("\n"))
+      .digest("hex")
+  };
+}
+
 function claudeNativeInspectionTrailingIsFooter(
   lines: readonly string[]
 ): boolean {
-  return lines.length <= 2 && lines.every((line) =>
-    /^\s*(?:[⏵⏴⏸]{1,2}|\?)\s*.*(?:manual mode|shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
-      .test(line)
-  );
+  return lines.length <= 2 && lines.every(isClaudeNativeComposerFooterLine);
+}
+
+function isClaudeNativeComposerFooterLine(line: string): boolean {
+  return /^\s*(?:[⏵⏴⏸]{1,2}|\?)\s*.*(?:manual mode|shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
+    .test(line);
 }
 
 function nativeInspectionScreenFingerprint(screen: string): string {
@@ -5222,10 +5644,12 @@ function currentCodexComposerCapture(
   styledScreen: string,
   expectedText: string,
   allowOpaqueLargePastePlaceholder = false,
-  classifyOpaqueLargePasteAsDifferent = false
+  classifyOpaqueLargePasteAsDifferent = false,
+  exactSlashPopupRows?: readonly string[]
 ): {
   state: "exact_draft" | "exact_empty" | "different_draft";
   digest: string;
+  profiledSlashPopup?: true;
 } | undefined {
   const screen = stripTerminalEscapeSequences(styledScreen);
   const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
@@ -5292,14 +5716,23 @@ function currentCodexComposerCapture(
     bodyRows,
     expectedComparable
   );
+  const exactProfiledSlashPopup =
+    exactSlashPopupRows !== undefined &&
+    composerComparableText(bodyRows[0] ?? "") === expectedComparable &&
+    JSON.stringify(region.slice(1).map((row) => row.trimEnd())) ===
+      JSON.stringify(exactSlashPopupRows);
   const exactLargePastePlaceholder =
     allowOpaqueLargePastePlaceholder &&
     expectedCharacterCount > CODEX_LARGE_PASTE_CHAR_THRESHOLD &&
     comparable === composerComparableText(
       `[Pasted Content ${expectedCharacterCount} chars]`
     );
-  if (exactVisibleDraft || exactLargePastePlaceholder) {
-    return { state: "exact_draft", digest };
+  if (exactVisibleDraft || exactLargePastePlaceholder || exactProfiledSlashPopup) {
+    return {
+      state: "exact_draft",
+      digest,
+      ...(exactProfiledSlashPopup ? { profiledSlashPopup: true as const } : {})
+    };
   }
   return comparable.length > 0
     ? { state: "different_draft", digest }
@@ -6576,4 +7009,47 @@ function unsupportedScreenStatus(
     screen: {},
     capability_limitation: reason
   };
+}
+
+function assertTerminalModelControlPlan(
+  adapter: TerminalAgentAdapter,
+  terminalControl: TerminalControlRef,
+  agentVersion: string,
+  plan: TerminalModelControlPlan
+): void {
+  if (!terminalControl.capabilities.includes("send_keys") ||
+      !terminalControl.capabilities.includes("screen_status")) {
+    throw new Error(
+      "terminal model control requires exact screen-status and key-delivery capabilities"
+    );
+  }
+  const capabilities = adapter.probeModelControl?.(agentVersion);
+  if (capabilities?.status !== "supported" ||
+      capabilities.modelSelection !== true ||
+      capabilities.reasoningEffortSelection !== true ||
+      capabilities.agentVersion !== agentVersion) {
+    throw new Error(
+      capabilities?.reason ??
+      `${adapter.displayName} has no verified model-control profile`
+    );
+  }
+  const expected = adapter.planModelControl?.(capabilities);
+  if (!expected ||
+      expected.command !== "/model" ||
+      expected.requiresIdle !== true ||
+      expected.requiresExactEmptyComposer !== true ||
+      JSON.stringify(expected) !== JSON.stringify(plan)) {
+    throw new Error(
+      "the terminal adapter did not produce the exact current model-control plan"
+    );
+  }
+  if (
+    adapter.agent === "codex"
+      ? plan.behaviorProfile !== "codex-model-control-0.154.0" ||
+        plan.scope !== "current_and_new_sessions"
+      : plan.behaviorProfile !== "claude-model-control-2.1.266" ||
+        plan.scope !== "current_session"
+  ) {
+    throw new Error("refusing an unprofiled terminal model-control plan");
+  }
 }

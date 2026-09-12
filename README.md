@@ -78,6 +78,7 @@ Suppose several Codex or Claude Code jobs are already running in tmux or Herdr:
 - **Watch without babysitting.** `/akk watch <terminal>` observes work already in progress and sends a callback when it finishes, needs approval, or becomes blocked. You can leave the terminal and continue from your phone or another chat client.
 - **Send without typing in a tiny remote console.** `/akk <selector>: <message>` sends your natural-language instruction to the selected live coding-agent terminal. An explicit user Send has priority over stale AKK management state.
 - **Identify an ambiguous Codex foreground explicitly.** When several rollout files or a recent `/clear` prevent durable attribution, an advertised foreground-identification action can inspect one exact idle pane without guessing which rollout is current.
+- **Switch models through the native catalog.** `/akk models <exact-terminal-id>` lists the choices currently offered by one verified idle Codex or Claude Code pane; `/akk set-model ...` consumes one exact advertised model/reasoning-effort tuple without accepting raw slash commands, keys, or menu indexes. Codex synchronizes the model and ordinary efforts through `max` to the current and future-session defaults; its `ultra` effort is current-session-only, and the native UI does not expose the exact non-Ultra effort chosen for future sessions, so AKK omits that unobservable field. Claude Code changes only the current session.
 - **Inspect and recover.** `/akk status <turn-or-watch>` shows current state when a callback is delayed. Durable callback records and Watches provide a recovery path after transient Host failures.
 - **Approve deliberately.** AKK can surface Codex or Claude Code permission requests and submit an explicit human decision. It preserves the coding agent's existing permission mode.
 - **Hand control back and forth.** Attach to the same tmux or Herdr pane whenever you want. AKK does not create a parallel hidden conversation.
@@ -87,11 +88,13 @@ The common workflow is:
 ```text
 /akk list
 /akk watch <exact-terminal-id>
+/akk models <exact-terminal-id>
+/akk set-model <exact-terminal-id> <advertised-model-id> <advertised-reasoning-effort>
 /akk codex: run the tests and explain any failures
 /akk status <turn-id-or-watch-id>
 ```
 
-Use identifiers and actions from a fresh `/akk list`; do not guess or cache terminal IDs.
+Use identifiers and actions from a fresh `/akk list`; do not guess or cache terminal IDs. Model switching is fail-closed: the same exact pane must still be idle, attributable, free of active work or an input-owning prompt, and have an empty Composer. If AKK cannot prove the final effective model and reports `uncertain`, inspect the pane and refresh `/akk models` instead of retrying automatically.
 
 ## How It Works
 

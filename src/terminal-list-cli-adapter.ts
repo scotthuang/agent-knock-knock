@@ -142,6 +142,7 @@ import {
   readOnlyManagedTurn,
   userReleaseListActions,
   userReleasableManagedTurn,
+  withoutInspectionActionsDuringNativeTransition,
   renderAvailableListActions,
   renderCurrentManagedTurn,
   renderHistoricalManagedTurn,
@@ -1351,6 +1352,14 @@ async function terminalControlledListEntry(
       statusInspection: false,
       reason: "native inspection is unavailable"
     };
+  const modelControlCapability = bridge.registry.require(session.agent)
+    .probeModelControl?.(agentVersion) ?? {
+      status: "unsupported" as const,
+      agentVersion,
+      modelSelection: false,
+      reasoningEffortSelection: false,
+      reason: "terminal model control is unavailable"
+    };
   const compatibilityWarnings = [...new Set([
     lifecycleCapability.compatibilityWarning,
     nativeInspectionCapability.compatibilityWarning
@@ -1430,6 +1439,7 @@ async function terminalControlledListEntry(
     terminalState: effectiveTerminalState,
     lifecycleCapability,
     nativeInspectionCapability,
+    modelControlCapability,
     nativeAgentIdentity: authorityNativeAgentIdentity,
     nativeProcessUuid,
     nativeProcessBirth,
@@ -1469,6 +1479,7 @@ async function terminalControlledListEntry(
     agent_version: agentVersion,
     native_thread_lifecycle: lifecycleCapability,
     native_inspection: nativeInspectionCapability,
+    model_control: modelControlCapability,
     ...(compatibilityWarnings.length > 0
       ? { compatibility_warnings: compatibilityWarnings }
       : {}),
@@ -1630,6 +1641,11 @@ function terminalListCommands(input: {
     status: string;
     statusInspection: boolean;
   };
+  modelControlCapability: {
+    status: string;
+    modelSelection: boolean;
+    reasoningEffortSelection: boolean;
+  };
   nativeAgentIdentity?: TerminalNativeIdentity;
   nativeProcessUuid?: string;
   nativeProcessBirth?: string;
@@ -1645,6 +1661,7 @@ function terminalListCommands(input: {
     terminalState,
     lifecycleCapability,
     nativeInspectionCapability,
+    modelControlCapability,
     nativeAgentIdentity,
     nativeProcessUuid,
     nativeProcessBirth,
@@ -1700,6 +1717,27 @@ function terminalListCommands(input: {
               nativeAgentIdentity.processUuid
             )
       ) &&
+      !hasOrphanedDispatch &&
+      !terminalHasBlockingTurn,
+    model_options:
+      modelControlCapability.status === "supported" &&
+      modelControlCapability.modelSelection === true &&
+      modelControlCapability.reasoningEffortSelection === true &&
+      terminalState.activity_state === "idle" &&
+      terminalState.approval_state.scanned === true &&
+      terminalState.approval_state.blocked !== true &&
+      automatedInputComposerReady &&
+      terminalControl.capabilities.includes("send_keys") &&
+      terminalControl.capabilities.includes("screen_status") &&
+      (
+        agent === "codex"
+          ? codexLifecycleIncarnationAvailable
+          : Boolean(
+              nativeAgentIdentity?.sessionId &&
+              nativeAgentIdentity.processUuid
+            )
+      ) &&
+      !terminalHasInteraction &&
       !hasOrphanedDispatch &&
       !terminalHasBlockingTurn,
     identify_foreground: foregroundIdentificationEligible,
@@ -2357,11 +2395,7 @@ function observeTerminalListBindingAuthority(
         storeDir,
         authoritativeSession
       )
-      ? Object.fromEntries(
-          Object.entries(bindingAwareRawActions).filter(
-            ([actionName]) => actionName !== "native_inspect"
-          )
-        )
+      ? withoutInspectionActionsDuringNativeTransition(bindingAwareRawActions)
       : bindingAwareRawActions;
   const sessionAwareRawActions = terminalHasNonterminalDeferredTransfer
     ? readOnlyListActions(sessionAwareRawActionsBase)

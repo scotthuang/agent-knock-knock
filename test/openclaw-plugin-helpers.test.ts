@@ -8,7 +8,9 @@ import {
   akkUsageText,
   buildAkkCommandCliArgs,
   formatAkkListCommandResult,
+  formatAkkModelOptionsCommandResult,
   formatAkkRespondCommandResult,
+  formatAkkSetModelCommandResult,
   formatAkkTerminalWatchHint,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
@@ -25,7 +27,9 @@ import {
   stripAkkLegacyApprovalInstructionTail
 } from "../src/openclaw-plugin-helpers.js";
 import {
+  modelOptionsParameters,
   respondInteractionParameters,
+  setModelParameters,
   statusParameters,
   unwatchParameters,
   watchParameters
@@ -219,6 +223,8 @@ test("/akk help lists the supported tmux executors", () => {
   assert.match(usage, /\/akk respond <turn-selector>: <answer>/);
   assert.match(usage, /\/akk approve <turn-selector>/);
   assert.match(usage, /\/akk threads <exact-terminal-id>/);
+  assert.match(usage, /\/akk models <exact-terminal-id>/);
+  assert.match(usage, /\/akk set-model <exact-terminal-id>/);
   assert.match(usage, /\/akk new-thread <exact-terminal-id>/);
   assert.match(usage, /\/akk clear-thread <exact-terminal-id>/);
   assert.match(usage, /\/akk resume-thread <exact-terminal-id>/);
@@ -227,6 +233,157 @@ test("/akk help lists the supported tmux executors", () => {
     /\/akk (?:status|respond|approve|cancel)[^\n]*session-selector/u
   );
   assert.doesNotMatch(usage, /\/akk (?:describe|send|renew|retry-callback|close)\b/u);
+});
+
+test("model-control schemas expose only semantic current-catalog inputs", () => {
+  assert.deepEqual(modelOptionsParameters.required, ["terminal_id"]);
+  assert.deepEqual(setModelParameters.required, [
+    "terminal_id",
+    "model",
+    "reasoning_effort"
+  ]);
+  for (const forbidden of [
+    "command",
+    "keys",
+    "menu_index",
+    "scope",
+    "expected_binding_token",
+    "expected_catalog_fingerprint"
+  ]) {
+    assert.equal(
+      Object.hasOwn(setModelParameters.properties, forbidden),
+      false
+    );
+  }
+  const validate = new AjvJsonSchemaValidator().getValidator(
+    setModelParameters
+  );
+  assert.equal(validate({
+    terminal_id: exactTerminalId,
+    model: "gpt-6-astra",
+    reasoning_effort: "ultra"
+  }).valid, true);
+  assert.equal(validate({
+    terminal_id: exactTerminalId,
+    model: "/model gpt-6-astra",
+    reasoning_effort: "ultra"
+  }).valid, false);
+  assert.equal(validate({
+    terminal_id: exactTerminalId,
+    model: "gpt-6-astra",
+    reasoning_effort: "ultra",
+    menu_index: 2
+  }).valid, false);
+  assert.equal(validate({
+    terminal_id: exactTerminalId,
+    model: "gpt-6-astra"
+  }).valid, false);
+});
+
+test("/akk model control accepts only exact semantic ids and private CLI authority", () => {
+  assert.deepEqual(parseAkkCommand(`models ${exactTerminalId}`), {
+    action: "model-options",
+    terminalId: exactTerminalId
+  });
+  assert.deepEqual(
+    parseAkkCommand(`set-model ${exactTerminalId} gpt-6-astra ultra`),
+    {
+      action: "set-model",
+      terminalId: exactTerminalId,
+      model: "gpt-6-astra",
+      reasoningEffort: "ultra"
+    }
+  );
+  assert.throws(
+    () => parseAkkCommand(`set-model ${exactTerminalId} /model ultra`),
+    /Usage: \/akk set-model/u
+  );
+  assert.throws(
+    () => parseAkkCommand(`set-model ${exactTerminalId} gpt-6-astra`),
+    /Usage: \/akk set-model/u
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`models ${exactTerminalId}`),
+      { storeDir: "/private/akk-store" },
+      { expectedBindingToken: "binding-authority" }
+    ),
+    [
+      "model-options",
+      "--terminal",
+      exactTerminalId,
+      "--expected-binding-token",
+      "binding-authority",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`set-model ${exactTerminalId} gpt-6-astra ultra`),
+      { storeDir: "/private/akk-store" },
+      {
+        expectedBindingToken: "binding-authority",
+        expectedCatalogFingerprint: "catalog-authority"
+      }
+    ),
+    [
+      "set-model",
+      "--terminal",
+      exactTerminalId,
+      "--expected-binding-token",
+      "binding-authority",
+      "--expected-catalog-fingerprint",
+      "catalog-authority",
+      "--model",
+      "gpt-6-astra",
+      "--reasoning-effort",
+      "ultra",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+});
+
+test("/akk model control explains Codex Ultra current/default split", () => {
+  const options = formatAkkModelOptionsCommandResult({
+    terminal_id: exactTerminalId,
+    agent: "codex",
+    scope: "current_and_new_sessions",
+    current: { model: "gpt-5.6-sol", reasoning_effort: "medium" },
+    models: [{
+      id: "gpt-6-astra",
+      label: "GPT-6 Astra",
+      reasoning_efforts: ["low", "ultra"]
+    }]
+  });
+  assert.match(options, /ordinary efforts \(including max\)/u);
+  assert.match(options, /ultra applies only now/u);
+
+  const changed = formatAkkSetModelCommandResult({
+    terminal_id: exactTerminalId,
+    scope: "current_and_new_sessions",
+    outcome: "changed",
+    requested: { model: "gpt-6-astra", reasoning_effort: "ultra" },
+    effective: { model: "gpt-6-astra", reasoning_effort: "ultra" },
+    new_session_defaults: { model: "gpt-6-astra" },
+    defaults_changed: true,
+    do_not_retry: false
+  });
+  assert.match(changed, /new-session default changed: yes/u);
+  assert.match(changed, /new-session default model: gpt-6-astra/u);
+  assert.match(changed, /native non-ultra fallback/u);
+
+  const uncertain = formatAkkSetModelCommandResult({
+    terminal_id: exactTerminalId,
+    scope: "current_and_new_sessions",
+    outcome: "uncertain",
+    requested: { model: "gpt-6-astra", reasoning_effort: "high" },
+    defaults_changed: null,
+    do_not_retry: true
+  });
+  assert.match(uncertain, /new-session default changed: unknown/u);
+  assert.match(uncertain, /do not retry automatically/u);
 });
 
 test("/akk watch and unwatch require authoritative exact identities", () => {

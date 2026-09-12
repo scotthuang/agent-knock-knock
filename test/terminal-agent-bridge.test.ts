@@ -44,6 +44,10 @@ import type {
   TerminalEndpointRef,
   TerminalProviderCapability
 } from "../src/terminal-control-ref.js";
+import {
+  planTerminalModelControl,
+  probeTerminalModelControl
+} from "../src/terminal-model-control.js";
 
 const PANE: TerminalPane = {
   kind: "tmux",
@@ -1124,6 +1128,474 @@ test("Codex composer observation returns every closed state without draft text",
       terminalControl(codexTerminalAgentAdapter),
       expected
     )).state, "unavailable");
+  });
+});
+
+test("Codex model control accepts only its exact 0.154 slash completion", async (t) => {
+  const plan = planTerminalModelControl(
+    probeTerminalModelControl("codex", "0.154.0")
+  );
+  const exactSuggestion =
+    "  /model  choose what model and reasoning effort to use";
+  const modelIdleScreen = () => {
+    const lines = codexPaddedStyledIdleScreen(80).split("\n");
+    lines[2] = `  ${lines[2].slice(0, -2)}`;
+    return lines.join("\n");
+  };
+  class ModelControlProvider extends RecordingTerminalProvider {
+    phase: "idle" | "draft" | "picker" = "idle";
+    draftCaptures = 0;
+    throwOnDraftCapture?: number;
+
+    constructor(readonly suggestions: readonly string[]) {
+      super([PANE], { [PANE.target]: modelIdleScreen() });
+    }
+
+    override async capture(
+      target: TerminalEndpointRef | string,
+      options: {
+        scrollbackLines?: number;
+        socketPath?: string;
+        preserveEscapes?: boolean;
+      } = {}
+    ): Promise<string> {
+      if (this.phase === "draft") {
+        this.draftCaptures += 1;
+        if (this.draftCaptures === this.throwOnDraftCapture) {
+          throw new Error("synthetic bounded capture stop");
+        }
+      }
+      return super.capture(target, options);
+    }
+
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      assert.equal(text, "/model");
+      this.phase = "draft";
+      this.setScreen(target, [
+        "Ready",
+        "› /model",
+        ...this.suggestions,
+        "gpt-5.6-sol high · /repo"
+      ].join("\n"));
+    }
+
+    override async sendKeys(
+      target: TerminalEndpointRef | string,
+      keys: readonly string[],
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendKeys(target, keys, options);
+      assert.equal(keys.length, 1);
+      if (keys[0] === "C-m" && this.phase === "draft") {
+        this.phase = "picker";
+        this.setScreen(target, [
+          "Select Model and Effort",
+          "› 1. gpt-5.6-sol (current)  Current model",
+          "  2. gpt-6-astra (default)  Frontier model",
+          "Press enter to confirm or esc to go back"
+        ].join("\n"));
+        return;
+      }
+      assert.equal(keys[0], "Escape");
+      this.phase = "idle";
+      this.setScreen(target, modelIdleScreen());
+    }
+  }
+  const catalog = async () => ({ models: [
+    {
+      id: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      reasoningEfforts: ["low", "high"] as const
+    },
+    {
+      id: "gpt-6-astra",
+      label: "GPT-6 Astra",
+      reasoningEfforts: ["high", "ultra"] as const
+    }
+  ] });
+  const createModelBridge = (provider: ModelControlProvider) =>
+    new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+      terminalProvider: provider,
+      async sleep() {}
+    });
+
+  await t.test("enters and dismisses from the unique exact suggestion", async () => {
+    const provider = new ModelControlProvider([exactSuggestion]);
+    let authorityChecks = 0;
+    const result = await createModelBridge(provider).modelOptions(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      "0.154.0",
+      plan,
+      {
+        beforeInput: () => { authorityChecks += 1; },
+        loadCodexCatalog: catalog
+      }
+    );
+    assert.equal(result.catalog.current.model, "gpt-5.6-sol");
+    assert.equal(provider.phase, "idle");
+    assert.equal(authorityChecks, 3);
+    assert.deepEqual(
+      provider.operations.filter((operation) => operation.kind === "keys")
+        .map((operation) => operation.kind === "keys" ? operation.keys : []),
+      [["C-m"], ["Escape"]]
+    );
+  });
+
+  await t.test("exact suggestion authorizes Escape cleanup after a pre-Enter failure", async () => {
+    const provider = new ModelControlProvider([exactSuggestion]);
+    let authorityChecks = 0;
+    await assert.rejects(createModelBridge(provider).modelOptions(
+      "codex",
+      terminalControl(codexTerminalAgentAdapter),
+      "0.154.0",
+      plan,
+      {
+        beforeInput: () => {
+          authorityChecks += 1;
+          if (authorityChecks === 2) {
+            throw new Error("synthetic authority failure before Enter");
+          }
+        },
+        loadCodexCatalog: catalog
+      }
+    ), /synthetic authority failure before Enter/u);
+    assert.equal(provider.phase, "idle");
+    assert.deepEqual(
+      provider.operations.filter((operation) => operation.kind === "keys")
+        .map((operation) => operation.kind === "keys" ? operation.keys : []),
+      [["Escape"]]
+    );
+  });
+
+  for (const [name, suggestions] of [
+    ["different suggestion", ["  /models  choose an unrelated command"]],
+    ["multiple suggestions", [
+      exactSuggestion,
+      "  /model-status  show a second matching command"
+    ]]
+  ] as const) {
+    await t.test(name, async () => {
+      const provider = new ModelControlProvider(suggestions);
+      provider.throwOnDraftCapture = 2;
+      let authorityChecks = 0;
+      await assert.rejects(createModelBridge(provider).modelOptions(
+        "codex",
+        terminalControl(codexTerminalAgentAdapter),
+        "0.154.0",
+        plan,
+        {
+          beforeInput: () => { authorityChecks += 1; },
+          loadCodexCatalog: catalog
+        }
+      ), /synthetic bounded capture stop/u);
+      assert.equal(authorityChecks, 1);
+      assert.equal(
+        provider.operations.some((operation) => operation.kind === "keys"),
+        false
+      );
+    });
+  }
+});
+
+test("Claude model control accepts only its selected 2.1.266 /model suggestion", async (t) => {
+  const plan = planTerminalModelControl(
+    probeTerminalModelControl("claude", "2.1.266")
+  );
+  const divider = "─".repeat(80);
+  const exactModelSuggestion =
+    "/model                        Set the AI model for Claude Code (currently deepseek-flash)";
+  const idleScreen = [divider, "❯ ", divider].join("\n");
+  class ClaudeModelControlProvider extends RecordingTerminalProvider {
+    phase: "idle" | "draft" | "bare" | "picker" = "idle";
+    nativeAgentState: "idle" | "status_dialog" = "idle";
+    effort: "high" | "low" = "high";
+    draftCaptures = 0;
+    throwOnDraftCapture?: number;
+    dropDialogAfterPickerCapture = false;
+    replacePickerAfterArmedDialogVerification = false;
+    armedDialogVerifications = 0;
+
+    constructor(readonly suggestions: readonly string[]) {
+      super([PANE], { [PANE.target]: idleScreen });
+    }
+
+    override async capture(
+      target: TerminalEndpointRef | string,
+      options: {
+        scrollbackLines?: number;
+        socketPath?: string;
+        preserveEscapes?: boolean;
+      } = {}
+    ): Promise<string> {
+      if (this.phase === "draft") {
+        this.draftCaptures += 1;
+        if (this.draftCaptures === this.throwOnDraftCapture) {
+          throw new Error("synthetic bounded Claude capture stop");
+        }
+      }
+      const screen = await super.capture(target, options);
+      if (this.phase === "picker" && this.dropDialogAfterPickerCapture) {
+        this.nativeAgentState = "idle";
+      }
+      return screen;
+    }
+
+    override async sendText(
+      target: TerminalEndpointRef | string,
+      text: string,
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendText(target, text, options);
+      assert.equal(text, "/model");
+      this.phase = "draft";
+      this.setScreen(target, [
+        ...this.suggestions,
+        divider,
+        "❯\u00a0/model",
+        divider,
+        "⏵⏵ plan mode on · shift+tab to cycle"
+      ].join("\n"));
+    }
+
+    override async sendKeys(
+      target: TerminalEndpointRef | string,
+      keys: readonly string[],
+      options: { socketPath?: string } = {}
+    ): Promise<void> {
+      await super.sendKeys(target, keys, options);
+      assert.equal(keys.length, 1);
+      if (keys[0] === "C-m" && this.phase === "draft") {
+        this.phase = "picker";
+        this.nativeAgentState = "status_dialog";
+        this.paintPicker(target);
+        return;
+      }
+      if (keys[0] === "Right" && this.phase === "picker") {
+        this.effort = this.effort === "high" ? "low" : "high";
+        this.paintPicker(target);
+        return;
+      }
+      if (keys[0] === "Escape" && this.phase === "draft") {
+        this.phase = "bare";
+        this.setScreen(target, [
+          divider,
+          "❯ /model",
+          divider,
+          "⏵⏵ plan mode on · shift+tab to cycle"
+        ].join("\n"));
+        return;
+      }
+      if (keys[0] === "C-u" && this.phase === "bare") {
+        this.phase = "idle";
+        this.setScreen(target, idleScreen);
+        return;
+      }
+      assert.equal(keys[0], "Escape");
+      this.phase = "idle";
+      this.nativeAgentState = "idle";
+      this.setScreen(target, idleScreen);
+    }
+
+    private paintPicker(target: TerminalEndpointRef | string): void {
+      this.setScreen(target, [
+        "▔".repeat(80),
+        "   Select model",
+        "   Switch between Claude models.",
+        "   ❯ 1. Claude Sonnet 4.6 ✔  Claude Sonnet 4.6 model",
+        `   ${this.effort === "high" ? "● High" : "○ Low"} effort ←/→ to adjust`,
+        "   Enter to set as default · s to use this session only · Esc to cancel"
+      ].join("\n"));
+    }
+
+    replacePickerWithPermissionDialog(): void {
+      this.setScreen(PANE.target, [
+        "Permission request",
+        "Allow this unrelated command?",
+        "❯ 1. Yes",
+        "  2. No"
+      ].join("\n"));
+    }
+  }
+  const runtime = {
+    pid: PANE.panePid,
+    nativeSessionId: "claude-model-control-session",
+    nativeProcessStartedAt: 1_789_000_000_000,
+    requireExactClaudeAgentRow: true,
+    exactClaudeAgentState: "idle" as const
+  };
+  const catalog = async () => ({ models: [] });
+  const createModelBridge = (provider: ClaudeModelControlProvider) =>
+    new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([
+        createClaudeTerminalAgentAdapter()
+      ]),
+      terminalProvider: provider,
+      async verifyIdentity(request) {
+        if (
+          request.runtime?.exactClaudeAgentState !== provider.nativeAgentState
+        ) {
+          throw new Error(
+            `synthetic Claude native state is ${provider.nativeAgentState}`
+          );
+        }
+        if (
+          provider.replacePickerAfterArmedDialogVerification &&
+          request.runtime?.exactClaudeAgentState === "status_dialog"
+        ) {
+          provider.armedDialogVerifications += 1;
+          if (provider.armedDialogVerifications === 3) {
+            provider.replacePickerWithPermissionDialog();
+          }
+        }
+        return { terminalControl: request.terminalControl };
+      },
+      async sleep() {}
+    });
+
+  await t.test("accepts the exact selected row and restores idle", async () => {
+    const provider = new ClaudeModelControlProvider([
+      exactModelSuggestion,
+      "/claude-api                  Configure a Claude API model",
+      "/loop                        Run a prompt repeatedly with the current model",
+      "/effort                      Adjust model usage"
+    ]);
+    const result = await createModelBridge(provider).modelOptions(
+      "claude",
+      terminalControl(createClaudeTerminalAgentAdapter()),
+      "2.1.266",
+      plan,
+      {
+        beforeInput: () => undefined,
+        loadCodexCatalog: catalog,
+        runtime
+      }
+    );
+    assert.deepEqual(result.catalog.current, {
+      model: "sonnet-4.6", reasoningEffort: "high"
+    });
+    assert.equal(provider.phase, "idle");
+    assert.ok(provider.operations.some((operation) =>
+      operation.kind === "keys" && operation.keys[0] === "C-m"
+    ));
+  });
+
+  await t.test("exact row authorizes Escape cleanup before Enter", async () => {
+    const provider = new ClaudeModelControlProvider([exactModelSuggestion]);
+    let authorityChecks = 0;
+    await assert.rejects(createModelBridge(provider).modelOptions(
+      "claude",
+      terminalControl(createClaudeTerminalAgentAdapter()),
+      "2.1.266",
+      plan,
+      {
+        runtime,
+        beforeInput: () => {
+          authorityChecks += 1;
+          if (authorityChecks === 2) {
+            throw new Error("synthetic Claude authority failure before Enter");
+          }
+        }
+      }
+    ), /synthetic Claude authority failure before Enter/u);
+    assert.equal(provider.phase, "idle");
+    assert.deepEqual(
+      provider.operations.filter((operation) => operation.kind === "keys")
+        .map((operation) => operation.kind === "keys" ? operation.keys : []),
+      [["Escape"], ["C-u"]]
+    );
+  });
+
+  for (const [name, suggestions] of [
+    ["wrong selected description", [
+      "/model  Replace this verified description"
+    ]],
+    ["missing selected model row", [
+      "/loop  Run a prompt repeatedly"
+    ]],
+    ["ambiguous selected row", [
+      `❯ ${exactModelSuggestion}`,
+      "❯ /loop  Run a prompt repeatedly"
+    ]]
+  ] as const) {
+    await t.test(name, async () => {
+      const provider = new ClaudeModelControlProvider(suggestions);
+      provider.throwOnDraftCapture = 2;
+      let authorityChecks = 0;
+      await assert.rejects(createModelBridge(provider).modelOptions(
+        "claude",
+        terminalControl(createClaudeTerminalAgentAdapter()),
+        "2.1.266",
+        plan,
+        {
+          beforeInput: () => { authorityChecks += 1; },
+          runtime
+        }
+      ), /synthetic bounded Claude capture stop/u);
+      assert.equal(authorityChecks, 3);
+      assert.equal(provider.phase, "idle");
+      assert.deepEqual(
+        provider.operations.filter((operation) => operation.kind === "keys")
+          .map((operation) => operation.kind === "keys" ? operation.keys : []),
+        [["Escape"], ["C-u"]]
+      );
+    });
+  }
+
+  await t.test("a stale picker screen cannot authorize a key after agents returns idle", async () => {
+    const provider = new ClaudeModelControlProvider([exactModelSuggestion]);
+    provider.dropDialogAfterPickerCapture = true;
+    await assert.rejects(
+      createModelBridge(provider).modelOptions(
+        "claude",
+        terminalControl(createClaudeTerminalAgentAdapter()),
+        "2.1.266",
+        plan,
+        { beforeInput: () => undefined, runtime }
+      ),
+      /synthetic Claude native state is idle/u
+    );
+    assert.deepEqual(
+      provider.operations.filter((operation) => operation.kind === "keys")
+        .map((operation) => operation.kind === "keys" ? operation.keys : []),
+      [["C-m"]],
+      "the command may open the picker, but no picker key may target an idle composer"
+    );
+  });
+
+  await t.test("a different dialog cannot consume a picker permit after final identity verification", async () => {
+    const provider = new ClaudeModelControlProvider([exactModelSuggestion]);
+    let authorityChecks = 0;
+    await assert.rejects(
+      createModelBridge(provider).modelOptions(
+        "claude",
+        terminalControl(createClaudeTerminalAgentAdapter()),
+        "2.1.266",
+        plan,
+        {
+          runtime,
+          beforeInput: () => {
+            authorityChecks += 1;
+            if (authorityChecks === 3) {
+              provider.replacePickerAfterArmedDialogVerification = true;
+            }
+          }
+        }
+      ),
+      /exact Claude model picker changed before key dispatch/u
+    );
+    assert.deepEqual(
+      provider.operations.filter((operation) => operation.kind === "keys")
+        .map((operation) => operation.kind === "keys" ? operation.keys : []),
+      [["C-m"]],
+      "no model-picker key may land in a replacement dialog"
+    );
   });
 });
 

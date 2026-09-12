@@ -271,6 +271,13 @@ export type AkkCommand =
   | { action: "watch"; terminalId: string }
   | { action: "unwatch"; watchId: string }
   | { action: "list-resumable-threads"; terminalId: string }
+  | { action: "model-options"; terminalId: string }
+  | {
+      action: "set-model";
+      terminalId: string;
+      model: string;
+      reasoningEffort: string;
+    }
   | { action: "new-thread"; terminalId: string }
   | {
       action: "resume-thread";
@@ -355,6 +362,46 @@ function parseAkkLifecycleCommand(
       throw new Error(usage);
     }
     return { action: "list-resumable-threads", terminalId };
+  }
+  if (action === "models" || action === "model-options") {
+    const usage = "Usage: /akk models <exact-terminal-id>";
+    const { token: terminalId, rest: extra } = takeRequiredToken(rest, usage);
+    assertExactTerminalId(terminalId, usage);
+    if (extra.trim()) {
+      throw new Error(usage);
+    }
+    return { action: "model-options", terminalId };
+  }
+  if (action === "set-model") {
+    const usage =
+      "Usage: /akk set-model <exact-terminal-id> <advertised-model-id> " +
+      "<advertised-reasoning-effort>";
+    const { token: terminalId, rest: modelInput } = takeRequiredToken(
+      rest,
+      usage
+    );
+    assertExactTerminalId(terminalId, usage);
+    const { token: model, rest: effortInput } = takeRequiredToken(
+      modelInput,
+      usage
+    );
+    const { token: reasoningEffort, rest: extra } = takeRequiredToken(
+      effortInput,
+      usage
+    );
+    if (
+      extra.trim() ||
+      !isAkkModelSemanticIdentifier(model, 160) ||
+      !/^[a-z][a-z0-9_-]{0,63}$/u.test(reasoningEffort)
+    ) {
+      throw new Error(usage);
+    }
+    return {
+      action: "set-model",
+      terminalId,
+      model,
+      reasoningEffort
+    };
   }
   if (action === "new-thread" || action === "clear-thread") {
     const usage = `Usage: /akk ${action} <exact-terminal-id>`;
@@ -536,6 +583,8 @@ export function akkUsageText(): string {
     "/akk watch <exact-terminal-id>",
     "/akk unwatch <watch-id>",
     "/akk threads <exact-terminal-id>",
+    "/akk models <exact-terminal-id>",
+    "/akk set-model <exact-terminal-id> <advertised-model-id> <advertised-reasoning-effort>",
     "/akk new-thread <exact-terminal-id>",
     "/akk clear-thread <exact-terminal-id>",
     "/akk resume-thread <exact-terminal-id> [uuid|previous|number|@short-id]",
@@ -928,6 +977,90 @@ export function formatAkkThreadsCommandResult(
   ].join("\n");
 }
 
+export function formatAkkModelOptionsCommandResult(
+  result: Record<string, unknown>
+): string {
+  const terminalId = nonEmptyString(result.terminal_id) ?? "unknown";
+  const scope = nonEmptyString(result.scope) ?? "unknown";
+  const current = recordValue(result.current) ?? {};
+  const models = arrayValue(result.models);
+  const modelLines = models.slice(0, 50).map((entry) => {
+    const id = nonEmptyString(entry.id) ?? "unknown";
+    const label = nonEmptyString(entry.label);
+    const efforts = stringArrayValue(entry.reasoning_efforts);
+    return `- ${id}${label && label !== id ? ` (${label})` : ""}` +
+      `${efforts.length > 0 ? ` | reasoning: ${efforts.join(", ")}` : ""}`;
+  });
+  return [
+    `AKK model options (${models.length} models):`,
+    `terminal: ${terminalId}`,
+    `agent: ${nonEmptyString(result.agent) ?? "unknown"}`,
+    `scope: ${scope}`,
+    `current model: ${nonEmptyString(current.model) ?? "unknown"}`,
+    `current reasoning: ${nonEmptyString(current.reasoning_effort) ?? "unobserved"}`,
+    ...compatibilityWarningLines(result),
+    ...(modelLines.length > 0 ? ["models:", ...modelLines] : ["models: none"]),
+    scope === "current_and_new_sessions"
+      ? "Codex applies this selection to the current session and persists the selected model and ordinary efforts (including max) for new sessions; ultra applies only now and uses a native non-ultra future fallback."
+      : "Claude Code applies this selection only to the current session; new-session defaults are unchanged.",
+    `next: /akk set-model ${terminalId} <advertised-model-id> <advertised-reasoning-effort>`,
+    "This catalog is current-controller authority and is consumed by one set-model attempt. Refresh /akk models after any terminal change or failed attempt."
+  ].join("\n");
+}
+
+export function formatAkkSetModelCommandResult(
+  result: Record<string, unknown>
+): string {
+  const outcome = nonEmptyString(result.outcome) ?? "uncertain";
+  const requested = recordValue(result.requested) ?? {};
+  const effective = recordValue(result.effective) ?? {};
+  const newSessionDefaults = recordValue(result.new_session_defaults) ?? {};
+  const uncertain = outcome === "uncertain" || result.do_not_retry === true;
+  const defaultsChanged = typeof result.defaults_changed === "boolean"
+    ? result.defaults_changed ? "yes" : "no"
+    : "unknown";
+  const requestedUltra = requested.reasoning_effort === "ultra";
+  return [
+    outcome === "changed"
+      ? "AKK changed and verified the coding-agent model."
+      : outcome === "already_effective"
+        ? "AKK verified that the requested model was already effective."
+        : "AKK could not prove the complete model-change postcondition.",
+    `terminal: ${nonEmptyString(result.terminal_id) ?? "unknown"}`,
+    `scope: ${nonEmptyString(result.scope) ?? "unknown"}`,
+    `requested model: ${nonEmptyString(requested.model) ?? "unknown"}`,
+    `requested reasoning: ${nonEmptyString(requested.reasoning_effort) ?? "unchanged/default"}`,
+    `effective model: ${nonEmptyString(effective.model) ?? "unproven"}`,
+    `effective reasoning: ${nonEmptyString(effective.reasoning_effort) ?? "unproven"}`,
+    `new-session default changed: ${defaultsChanged}`,
+    ...(nonEmptyString(newSessionDefaults.model)
+      ? [`new-session default model: ${nonEmptyString(newSessionDefaults.model)}`]
+      : []),
+    ...(nonEmptyString(newSessionDefaults.reasoning_effort)
+      ? [`new-session default reasoning: ${nonEmptyString(newSessionDefaults.reasoning_effort)}`]
+      : requestedUltra && result.scope === "current_and_new_sessions" && outcome === "changed"
+        ? ["new-session default reasoning: native non-ultra fallback (exact value is not exposed by this Codex TUI)"]
+        : []),
+    ...compatibilityWarningLines(result),
+    ...(nonEmptyString(result.reason)
+      ? [
+          `reason: ${sanitizeAkkModelFacingDiagnosticText(
+            nonEmptyString(result.reason) ?? ""
+          )}`
+        ]
+      : []),
+    uncertain
+      ? "Next: do not retry automatically; inspect the shared pane, then refresh /akk models before any deliberate new attempt."
+      : "No task, approval, questionnaire response, or AKK Turn was created."
+  ].join("\n");
+}
+
+export function isAkkSetModelSuccess(result: unknown): boolean {
+  const record = recordValue(result);
+  return record?.outcome === "changed" ||
+    record?.outcome === "already_effective";
+}
+
 export function formatAkkThreadTransitionCommandResult(
   result: Record<string, unknown>
 ): string {
@@ -994,6 +1127,7 @@ export function buildAkkCommandCliArgs(
     sessionKey?: unknown;
     expectedBindingToken?: unknown;
     candidateToken?: unknown;
+    expectedCatalogFingerprint?: unknown;
     messageId?: unknown;
     selectionScope?: unknown;
     selectionSnapshotId?: unknown;
@@ -1055,6 +1189,37 @@ export function buildAkkCommandCliArgs(
         ["--store-dir", storeDir],
         ["--codex-home", codexHome],
         ["--selection-scope", nonEmptyString(context.selectionScope)]
+      );
+    case "model-options":
+      return withOptionalArgs(
+        [
+          "model-options",
+          "--terminal",
+          command.terminalId,
+          "--expected-binding-token",
+          requiredExpectedBindingToken(context.expectedBindingToken)
+        ],
+        ["--store-dir", storeDir],
+        ["--codex-home", codexHome]
+      );
+    case "set-model":
+      return withOptionalArgs(
+        [
+          "set-model",
+          "--terminal",
+          command.terminalId,
+          "--expected-binding-token",
+          requiredExpectedBindingToken(context.expectedBindingToken),
+          "--expected-catalog-fingerprint",
+          requiredExpectedCatalogFingerprint(
+            context.expectedCatalogFingerprint
+          ),
+          "--model",
+          command.model
+        ],
+        ["--reasoning-effort", command.reasoningEffort],
+        ["--store-dir", storeDir],
+        ["--codex-home", codexHome]
       );
     case "new-thread":
       return withOptionalArgs(
@@ -1268,6 +1433,14 @@ function assertExactTerminalId(value: string, usage: string): void {
   }
 }
 
+function isAkkModelSemanticIdentifier(
+  value: string,
+  maxLength: number
+): boolean {
+  return value.length <= maxLength &&
+    /^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$/u.test(value);
+}
+
 function isExactNativeThreadId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
     value
@@ -1317,6 +1490,16 @@ function requiredCandidateToken(value: unknown): string {
     );
   }
   return token;
+}
+
+function requiredExpectedCatalogFingerprint(value: unknown): string {
+  const fingerprint = nonEmptyString(value);
+  if (!fingerprint) {
+    throw new Error(
+      "expected catalog fingerprint is required; refresh model options before switching the model"
+    );
+  }
+  return fingerprint;
 }
 
 function requiredSelectionScope(value: unknown): string {
@@ -1499,7 +1682,8 @@ function formatAvailableActions(
     "list_resumable_threads",
     "new_thread",
     "resume_thread",
-    "native_inspect"
+    "native_inspect",
+    "model_options"
   ]);
   const names = Object.keys(actions)
     .filter((name) => displayedActions.has(name))

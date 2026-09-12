@@ -36,6 +36,11 @@ import {
   terminalApprovalPromptEvidence
 } from "./terminal-agent-adapter.js";
 import { isExactNativeThreadId } from "./managed-session.js";
+import {
+  observeTerminalModelControl,
+  planTerminalModelControl,
+  probeTerminalModelControl
+} from "./terminal-model-control.js";
 
 export type ClaudeProcessKind = "claude_cli";
 
@@ -248,6 +253,10 @@ export function createClaudeTerminalAgentAdapter(
     probeNativeInspection: probeClaudeNativeInspection,
     planNativeInspection: planClaudeNativeInspection,
     observeNativeInspection: observeClaudeNativeInspection,
+    probeModelControl: (agentVersion) =>
+      probeTerminalModelControl("claude", agentVersion),
+    planModelControl: planTerminalModelControl,
+    observeModelControl: observeTerminalModelControl,
     ...(durableCompletion
       ? {
           async detectDurableCompletion(request: TerminalDurableCompletionRequest) {

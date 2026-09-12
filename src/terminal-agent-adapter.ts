@@ -8,6 +8,11 @@ import type {
   TerminalInteractionResponseAuthority,
   TerminalInteractionSubject
 } from "./terminal-interaction-protocol.js";
+import type {
+  TerminalModelControlCapabilities,
+  TerminalModelControlObservation,
+  TerminalModelControlPlan
+} from "./terminal-model-control.js";
 
 export type {
   TerminalControlCapability,
@@ -671,6 +676,19 @@ export interface TerminalAgentAdapter<ProcessKind extends string = string> {
     capabilities: TerminalNativeInspectionCapabilities
   ): TerminalNativeInspectionPlan;
   observeNativeInspection?: TerminalNativeInspectionObserver;
+  /** Closed, version-profiled native model-control capability. */
+  probeModelControl?(
+    agentVersion: string | undefined
+  ): TerminalModelControlCapabilities;
+  /** Caller supplies no slash command, key, menu index, or scope. */
+  planModelControl?(
+    capabilities: TerminalModelControlCapabilities
+  ): TerminalModelControlPlan;
+  /** Parse only a complete current native model-control frame. */
+  observeModelControl?(
+    plan: TerminalModelControlPlan,
+    screen: string
+  ): TerminalModelControlObservation;
   listThreadLifecycleCandidates?(
     request: TerminalThreadLifecycleCandidateRequest
   ): Promise<readonly TerminalThreadLifecycleCandidate[]>;
@@ -721,6 +739,16 @@ export class TerminalAgentAdapterRegistry {
     if (nativeInspectionMethodCount !== 0 && nativeInspectionMethodCount !== 3) {
       throw new Error(
         `terminal agent adapter ${adapter.agent} must implement native inspection probe, plan, and observer methods together`
+      );
+    }
+    const modelControlMethodCount = [
+      adapter.probeModelControl,
+      adapter.planModelControl,
+      adapter.observeModelControl
+    ].filter((method) => method !== undefined).length;
+    if (modelControlMethodCount !== 0 && modelControlMethodCount !== 3) {
+      throw new Error(
+        `terminal agent adapter ${adapter.agent} must implement model-control probe, plan, and observer methods together`
       );
     }
     if (

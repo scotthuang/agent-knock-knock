@@ -283,6 +283,52 @@ export const nativeInspectParameters = {
   }
 };
 
+export const modelOptionsParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id from the current model_options action. AKK performs a closed native catalog inspection and retains all binding and catalog authority privately."
+    }
+  }
+};
+
+export const setModelParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id", "model", "reasoning_effort"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id used in the immediately preceding agent_knock_knock_model_options call in this controller conversation."
+    },
+    model: {
+      type: "string",
+      minLength: 1,
+      maxLength: 160,
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:/+\\-]*$",
+      description:
+        "Exact semantic model id advertised by the current model-options catalog. Display labels, menu indexes, slash commands, keys, and constructed model names are not accepted."
+    },
+    reasoning_effort: {
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+      pattern: "^[a-z][a-z0-9_-]*$",
+      description:
+        "Exact reasoning-effort value advertised for this model. The full model/effort tuple is required so AKK can verify an unambiguous postcondition."
+    }
+  }
+};
+
 export const identifyForegroundParameters = {
   type: "object",
   additionalProperties: false,

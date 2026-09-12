@@ -56,7 +56,8 @@ import {
   NativeInspectionSubmissionError,
   type ResolvedTerminalConversation,
   type TerminalAgentBridge,
-  type TerminalBridgeStatus
+  type TerminalBridgeStatus,
+  type TerminalModelControlBridgeOptions
 } from "./terminal-agent-bridge.js";
 import {
   terminalControlAliasMatches,
@@ -70,6 +71,12 @@ import type { TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
 import type { TerminalRuntimeCliAdapter } from
   "./terminal-runtime-cli-adapter.js";
+import {
+  isTerminalModelReasoningEffort,
+  type TerminalModelCatalog,
+  type TerminalModelControlPlan,
+  type TerminalModelSwitchRequest
+} from "./terminal-model-control.js";
 import { nonBlankString } from "./value-guards.js";
 
 export type NativeLifecycleCliOptions = Readonly<Record<string, unknown>>;
@@ -257,6 +264,8 @@ export interface NativeThreadLifecycleCliFacade {
   ): TerminalAgentAdapter;
   runList(options: NativeLifecycleCliOptions): Promise<void>;
   runInspect(options: NativeLifecycleCliOptions): Promise<void>;
+  runModelOptions(options: NativeLifecycleCliOptions): Promise<void>;
+  runSetModel(options: NativeLifecycleCliOptions): Promise<void>;
   runIdentifyForeground(options: NativeLifecycleCliOptions): Promise<void>;
   identifyCodexForegroundWhileLocked(input: {
     options: NativeLifecycleCliOptions;
@@ -289,6 +298,8 @@ export function createNativeThreadLifecycleCliAdapter(
     agentAdapter: (options, agent) => app.agentAdapter(options, agent),
     runList: (options) => app.runList(options),
     runInspect: (options) => app.runInspect(options),
+    runModelOptions: (options) => app.runModelOptions(options),
+    runSetModel: (options) => app.runSetModel(options),
     runIdentifyForeground: (options) => app.runIdentifyForeground(options),
     identifyCodexForegroundWhileLocked: (input) =>
       app.identifyCodexForegroundWhileLocked(input),
@@ -1295,6 +1306,380 @@ class NativeThreadLifecycleCliApplication {
     }
   }
 
+  validateModelOptions(options: NativeLifecycleCliOptions): string {
+    if (options.command !== undefined || options.message !== undefined ||
+        options.model !== undefined || options.reasoningEffort !== undefined ||
+        options.expectedCatalogFingerprint !== undefined) {
+      throw new Error(
+        "model-options accepts only an exact terminal and current binding authority"
+      );
+    }
+    return required(
+      nonBlankString(options.expectedBindingToken),
+      "--expected-binding-token is required"
+    );
+  }
+
+  validateSetModel(options: NativeLifecycleCliOptions): {
+    expectedBindingToken: string;
+    expectedCatalogFingerprint: string;
+    request: TerminalModelSwitchRequest;
+  } {
+    if (options.command !== undefined || options.message !== undefined ||
+        options.scope !== undefined || options.keys !== undefined ||
+        options.index !== undefined) {
+      throw new Error(
+        "set-model accepts no command, key, menu index, or caller-selected scope"
+      );
+    }
+    const expectedBindingToken = required(
+      nonBlankString(options.expectedBindingToken),
+      "--expected-binding-token is required"
+    );
+    const expectedCatalogFingerprint = required(
+      nonBlankString(options.expectedCatalogFingerprint),
+      "--expected-catalog-fingerprint is required"
+    );
+    if (!/^[0-9a-f]{64}$/u.test(expectedCatalogFingerprint)) {
+      throw new Error(
+        "--expected-catalog-fingerprint must be the exact sha256 from model-options"
+      );
+    }
+    const model = required(
+      nonBlankString(options.model), "--model is required"
+    );
+    const reasoningEffort = options.reasoningEffort;
+    if (!isTerminalModelReasoningEffort(reasoningEffort)) {
+      throw new Error(
+        "--reasoning-effort must be one exact semantic value advertised by model-options"
+      );
+    }
+    return {
+      expectedBindingToken,
+      expectedCatalogFingerprint,
+      request: { model, reasoningEffort }
+    };
+  }
+
+  async runModelOptions(options: NativeLifecycleCliOptions): Promise<void> {
+    const expectedBindingToken = this.validateModelOptions(options);
+    const context = await this.withPreparedModelControl(
+      options,
+      expectedBindingToken,
+      async (prepared) => {
+        const result = await prepared.bridge.modelOptions(
+          prepared.terminal.agent,
+          prepared.terminal.terminalControl,
+          prepared.agentVersion,
+          prepared.plan,
+          {
+            runtime: prepared.runtime,
+            beforeInput: () => this.assertFreshModelControlBoundary(prepared),
+            loadCodexCatalog: prepared.loadCodexCatalog
+          }
+        );
+        return { prepared, catalog: result.catalog };
+      }
+    );
+    this.ports.output.print(this.modelOptionsResult(
+      context.prepared,
+      context.catalog
+    ));
+  }
+
+  async runSetModel(options: NativeLifecycleCliOptions): Promise<void> {
+    const validated = this.validateSetModel(options);
+    const output = await this.withPreparedModelControl(
+      options,
+      validated.expectedBindingToken,
+      async (prepared) => {
+        const result = await prepared.bridge.setModel(
+          prepared.terminal.agent,
+          prepared.terminal.terminalControl,
+          prepared.agentVersion,
+          prepared.plan,
+          validated.expectedCatalogFingerprint,
+          validated.request,
+          {
+            runtime: prepared.runtime,
+            beforeInput: () => this.assertFreshModelControlBoundary(prepared),
+            loadCodexCatalog: prepared.loadCodexCatalog
+          }
+        );
+        return { prepared, result };
+      }
+    );
+    const { result, prepared } = output;
+    this.ports.output.print({
+      terminal_id: prepared.terminal.conversationId,
+      agent: prepared.terminal.agent,
+      agent_version: prepared.agentVersion,
+      behavior_profile: prepared.plan.behaviorProfile,
+      outcome: result.outcome,
+      requested: modelValueOutput(result.requested),
+      ...(result.effective
+        ? { effective: modelValueOutput(result.effective) }
+        : {}),
+      ...(result.newSessionDefaults
+        ? { new_session_defaults: modelValueOutput(result.newSessionDefaults) }
+        : {}),
+      scope: result.scope,
+      defaults_changed: result.defaultsChanged,
+      do_not_retry: result.doNotRetry,
+      ...(result.reason ? { reason: result.reason } : {})
+    });
+  }
+
+  async withPreparedModelControl<T>(
+    options: NativeLifecycleCliOptions,
+    expectedBindingToken: string,
+    operation: (context: TerminalModelControlContext) => Promise<T>
+  ): Promise<T> {
+    const storeDir = this.ports.state.storeDir(options);
+    if (this.ports.state.inspectStore(storeDir).writable !== true) {
+      throw new Error(
+        "terminal model control requires a compatible AKK Store for current-snapshot authority"
+      );
+    }
+    const initiallyResolved = await this.resolveLifecycleTerminal(options);
+    const release = this.ports.state.acquireTerminal(
+      storeDir, initiallyResolved.terminalControl, { timeoutMs: 30_000 }
+    );
+    try {
+      const runtimeFacade = this.ports.runtime.forOptions(options);
+      const bridge = runtimeFacade.createBridge();
+      const terminal = await bridge.resolveStoredTerminal(
+        initiallyResolved.agent,
+        initiallyResolved.pid,
+        initiallyResolved.terminalControl,
+        { pid: initiallyResolved.pid }
+      );
+      this.assertSameInspectionTerminal(
+        initiallyResolved,
+        terminal,
+        "while waiting for model-control ownership"
+      );
+      const snapshot = await this.currentSnapshot(options, terminal);
+      if (!snapshot.bindingTokens.includes(expectedBindingToken)) {
+        throw new Error(
+          "terminal binding changed after it was listed; refresh AKK list and retry"
+        );
+      }
+      const agentVersion = required(
+        nonBlankString(snapshot.version),
+        "model control requires an exact running agent version"
+      );
+      const adapter = runtimeFacade.createAgentRegistry().require(terminal.agent);
+      const capability = adapter.probeModelControl?.(agentVersion);
+      if (capability?.status !== "supported" ||
+          capability.modelSelection !== true ||
+          capability.reasoningEffortSelection !== true) {
+        throw new Error(
+          capability?.reason ??
+          `${adapter.displayName} has no verified model-control profile`
+        );
+      }
+      const plan = adapter.planModelControl?.(capability);
+      if (!plan) {
+        throw new Error("the agent adapter did not produce a model-control plan");
+      }
+      await this.assertModelControlExclusive({ options, terminal, snapshot });
+      const runtime = await this.assertInitialInspectionReady(
+        options, terminal, snapshot, bridge
+      );
+      const modelStatus = await bridge.status(
+        terminal.agent, terminal.terminalControl, { runtime }
+      );
+      if (modelStatus.approval_state.scanned !== true ||
+          modelStatus.approval_state.blocked === true ||
+          modelStatus.interaction_state !== undefined) {
+        throw new Error(
+          "model control requires a freshly scanned terminal with no approval or questionnaire"
+        );
+      }
+      return await operation({
+        options,
+        terminal,
+        snapshot,
+        bridge,
+        runtime,
+        adapter,
+        agentVersion,
+        plan,
+        expectedBindingToken,
+        ...(terminal.agent === "codex" &&
+            plan.behaviorProfile === "codex-model-control-0.154.0"
+          ? {
+              loadCodexCatalog: async () =>
+                runtimeFacade.codexModelCatalogForRunningProcess(
+                  terminal.pid,
+                  "0.154.0",
+                  terminal.terminalControl.currentPath
+                )
+            }
+          : {})
+      });
+    } finally {
+      release();
+    }
+  }
+
+  async assertFreshModelControlBoundary(
+    context: TerminalModelControlContext
+  ): Promise<void> {
+    const terminal = await this.resolveModelControlBoundaryTerminal(context);
+    this.assertSameInspectionTerminal(
+      context.terminal,
+      terminal,
+      "immediately before model-control input"
+    );
+    const snapshot = await this.currentSnapshot(context.options, terminal);
+    if (!snapshot.bindingTokens.includes(context.expectedBindingToken) ||
+        snapshot.version !== context.agentVersion) {
+      throw new Error(
+        "terminal binding or coding-agent version changed during model control; refresh AKK list"
+      );
+    }
+    const capability = context.adapter.probeModelControl?.(snapshot.version);
+    const plan = capability?.status === "supported"
+      ? context.adapter.planModelControl?.(capability)
+      : undefined;
+    if (!plan || JSON.stringify(plan) !== JSON.stringify(context.plan)) {
+      throw new Error(
+        "the exact model-control profile changed during the operation"
+      );
+    }
+    await this.assertModelControlExclusive({
+      options: context.options,
+      terminal,
+      snapshot
+    });
+    this.assertInspectionReady({
+      options: context.options,
+      terminal,
+      session: snapshot.session
+    });
+    this.assertModelControlAgentIdentity({
+      options: context.options,
+      terminal,
+      snapshot
+    });
+  }
+
+  async resolveModelControlBoundaryTerminal(
+    context: TerminalModelControlContext
+  ): Promise<ResolvedTerminalConversation> {
+    try {
+      return await context.bridge.resolveStoredTerminal(
+        context.terminal.agent,
+        context.terminal.pid,
+        context.terminal.terminalControl,
+        context.runtime
+      );
+    } catch (idleError) {
+      if (
+        context.terminal.agent !== "claude" ||
+        context.plan.behaviorProfile !== "claude-model-control-2.1.266" ||
+        context.runtime.requireExactClaudeAgentRow !== true ||
+        context.runtime.exactClaudeAgentState !== "idle"
+      ) {
+        throw idleError;
+      }
+      try {
+        return await context.bridge.resolveStoredTerminal(
+          context.terminal.agent,
+          context.terminal.pid,
+          context.terminal.terminalControl,
+          { ...context.runtime, exactClaudeAgentState: "status_dialog" }
+        );
+      } catch {
+        // All immutable process, native Session, cwd, and terminal fences are
+        // identical in both attempts. Only the exact Claude agents UI state
+        // differs, and the bridge must still prove a fresh profiled model
+        // surface after this read-only boundary before any key is dispatched.
+        throw idleError;
+      }
+    }
+  }
+
+  assertModelControlAgentIdentity(input: {
+    options: NativeLifecycleCliOptions;
+    terminal: ResolvedTerminalConversation;
+    snapshot: NativeLifecycleSnapshot;
+  }): void {
+    if (input.terminal.agent !== "claude") return;
+    try {
+      this.assertInspectionAgentIdentity({
+        ...input,
+        stage: "during model control",
+        expectedClaudeState: "idle"
+      });
+    } catch (idleError) {
+      try {
+        this.assertInspectionAgentIdentity({
+          ...input,
+          stage: "during model control",
+          expectedClaudeState: "status_dialog"
+        });
+      } catch {
+        throw idleError;
+      }
+    }
+  }
+
+  async assertModelControlExclusive(input: {
+    options: NativeLifecycleCliOptions;
+    terminal: ResolvedTerminalConversation;
+    snapshot: NativeLifecycleSnapshot;
+  }): Promise<void> {
+    const nativeThreadId = input.snapshot.identity?.sessionId ??
+      input.snapshot.session?.binding?.native_thread_id;
+    if (!isExactNativeThreadId(nativeThreadId)) {
+      throw new Error(
+        "model control requires one exact current native Session identity"
+      );
+    }
+    await this.assertExclusive({
+      options: input.options,
+      agent: input.terminal.agent,
+      currentPid: input.terminal.pid,
+      nativeThreadId,
+      storeDir: this.ports.state.storeDir(input.options),
+      terminalControl: input.terminal.terminalControl,
+      excludedManagedSessionId: input.snapshot.session?.session_id
+    });
+  }
+
+  modelOptionsResult(
+    context: TerminalModelControlContext,
+    catalog: TerminalModelCatalog
+  ): unknown {
+    return {
+      terminal_id: context.terminal.conversationId,
+      agent: context.terminal.agent,
+      agent_version: context.agentVersion,
+      behavior_profile: catalog.behaviorProfile,
+      scope: catalog.scope,
+      current: modelValueOutput(catalog.current),
+      models: catalog.models.map((model) => ({
+        id: model.id,
+        label: model.label,
+        reasoning_efforts: [...model.reasoningEfforts]
+      })),
+      catalog_fingerprint: catalog.catalogFingerprint,
+      available_actions: {
+        set_model: {
+          tool: "agent_knock_knock_set_model",
+          arguments: {
+            terminal_id: context.terminal.conversationId,
+            expected_binding_token: context.expectedBindingToken,
+            expected_catalog_fingerprint: catalog.catalogFingerprint
+          }
+        }
+      }
+    };
+  }
+
   validateInspectionOptions(options: NativeLifecycleCliOptions): string {
     const inspection = required(
       nonBlankString(options.inspection), "--inspection is required"
@@ -1707,6 +2092,31 @@ interface NativeInspectionContext {
     realCwd: string;
     agentVersion: string;
     expectedTerminalToken: string;
+  };
+}
+
+interface TerminalModelControlContext {
+  options: NativeLifecycleCliOptions;
+  terminal: ResolvedTerminalConversation;
+  snapshot: NativeLifecycleSnapshot;
+  bridge: TerminalAgentBridge;
+  runtime: TerminalRuntimeIdentity;
+  adapter: TerminalAgentAdapter;
+  agentVersion: string;
+  plan: TerminalModelControlPlan;
+  expectedBindingToken: string;
+  loadCodexCatalog?: TerminalModelControlBridgeOptions["loadCodexCatalog"];
+}
+
+function modelValueOutput(value: {
+  model: string;
+  reasoningEffort?: string;
+}): Record<string, string> {
+  return {
+    model: value.model,
+    ...(value.reasoningEffort
+      ? { reasoning_effort: value.reasoningEffort }
+      : {})
   };
 }
 

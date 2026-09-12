@@ -171,6 +171,7 @@ function runtime(
     createThreadLifecycleCandidateProvider: () =>
       cliDependencies().codexThreadLifecycleProvider ?? unexpected(),
     listActiveSessionsWithTerminalControl: unexpected,
+    codexModelCatalogForRunningProcess: unexpected,
     agentVersionForRunningProcess: () => {
       events.push("runtime:version");
       return "1.2.3";

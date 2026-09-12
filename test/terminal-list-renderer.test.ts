@@ -14,7 +14,8 @@ import {
   safeUnavailableManagedTurnActions,
   sendActionForManagedSession,
   userReleasableManagedTurn,
-  withoutGenericHandoffSourceClose
+  withoutGenericHandoffSourceClose,
+  withoutInspectionActionsDuringNativeTransition
 } from "../src/terminal-list-renderer.js";
 import {
   managedSessionBindingToken,
@@ -38,6 +39,7 @@ test("raw terminal actions retain their public order and exact selectors", () =>
       new_thread: true,
       list_resumable_threads: true,
       native_inspect: true,
+      model_options: true,
       approve: true,
       close: true
     }
@@ -48,6 +50,7 @@ test("raw terminal actions retain their public order and exact selectors", () =>
     "new_thread",
     "list_resumable_threads",
     "native_inspect",
+    "model_options",
     "approve",
     "close"
   ]);
@@ -63,6 +66,13 @@ test("raw terminal actions retain their public order and exact selectors", () =>
       expected_binding_token: "binding-token"
     },
     requires_user_intent: true
+  });
+  assert.deepEqual(actions.model_options, {
+    tool: "agent_knock_knock_model_options",
+    arguments: {
+      terminal_id: "terminal:codex:42",
+      expected_binding_token: "binding-token"
+    }
   });
 });
 
@@ -104,9 +114,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v25 exposes semantic arguments only", () => {
+test("the public action contract v26 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 25);
+  assert.equal(contracts.version, 26);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -117,6 +127,7 @@ test("the public action contract v25 exposes semantic arguments only", () => {
       "new_thread",
       "list_resumable_threads",
       "native_inspect",
+      "model_options",
       "identify_foreground",
       "identify_and_send",
       "resume_thread",
@@ -227,6 +238,7 @@ test("the public action contract v25 exposes semantic arguments only", () => {
     "terminal_id",
     "inspection"
   ]);
+  assert.deepEqual(actions.model_options.required, ["terminal_id"]);
   assert.deepEqual(actions.resume_thread.required, [
     "terminal_id",
     "native_thread_id"
@@ -481,10 +493,13 @@ test("managed binding actions are retargeted without weakening snapshot authorit
     send: { arguments: { request: "task" } },
     new_thread: { arguments: { terminal_id: "terminal-1" } },
     resume_thread: { arguments: { terminal_id: "terminal-1" } },
-    native_inspect: { arguments: { terminal_id: "terminal-1" } }
+    native_inspect: { arguments: { terminal_id: "terminal-1" } },
+    model_options: { arguments: { terminal_id: "terminal-1" } }
   }, session);
   assert.deepEqual(bound.send, { arguments: { request: "task" } });
-  for (const name of ["new_thread", "resume_thread", "native_inspect"] as const) {
+  for (const name of [
+    "new_thread", "resume_thread", "native_inspect", "model_options"
+  ] as const) {
     assert.deepEqual(bound[name], {
       arguments: {
         terminal_id: "terminal-1",
@@ -499,6 +514,20 @@ test("managed binding actions are retargeted without weakening snapshot authorit
   }, "session-1"), {
     tool: "agent_knock_knock_send",
     arguments: { request: "task", session_id: "session-1" }
+  });
+});
+
+test("unresolved native transitions suppress every read operation that sends terminal input", () => {
+  assert.deepEqual(withoutInspectionActionsDuringNativeTransition({
+    status: { tool: "status" },
+    watch: { tool: "watch" },
+    native_inspect: { tool: "native-inspect" },
+    model_options: { tool: "model-options" },
+    close: { tool: "close" }
+  }), {
+    status: { tool: "status" },
+    watch: { tool: "watch" },
+    close: { tool: "close" }
   });
 });
 

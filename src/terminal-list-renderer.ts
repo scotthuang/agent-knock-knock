@@ -80,7 +80,7 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 25,
+    version: 26,
     instructions: [
       "Treat terminals[] as the primary resource and use only mutation actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Read-only Watch is the separate user-intent exception: one complete exact terminal_id may be watched even when available_actions.watch is absent. Either nested mutation action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "A complete but unverified Codex or Claude Code x.y.z version adds compatibility_warnings and action compatibility_warning diagnostics but never vetoes an otherwise eligible action. Execute the advertised action through the generic runtime protocol; actual UI, artifact, identity, and postcondition evidence decides success. Never automatically retry a result that says terminal input may already have occurred.",
@@ -280,6 +280,17 @@ export function listActionContracts(): JsonRecord {
         mutates_store: false,
         sends_terminal_input: true,
         candidate_source: "terminals[].available_actions.native_inspect"
+      },
+      model_options: {
+        tool: "agent_knock_knock_model_options",
+        target_argument: "terminal_id",
+        required: ["terminal_id"],
+        creates_turn: false,
+        creates_session: false,
+        mutates_store: false,
+        sends_terminal_input: true,
+        input_scope: "fixed /model discovery followed by exact Escape dismissal",
+        candidate_source: "terminals[].available_actions.model_options"
       },
       identify_foreground: {
         tool: "agent_knock_knock_identify_foreground",
@@ -588,7 +599,8 @@ function renderTerminalLifecycleActions(input: {
   }
   return {
     ...actions,
-    ...renderNativeInspectAction(input)
+    ...renderNativeInspectAction(input),
+    ...renderModelOptionsAction(input)
   };
 }
 
@@ -643,6 +655,28 @@ function renderNativeInspectAction(input: {
   };
 }
 
+function renderModelOptionsAction(input: {
+  commands: JsonRecord;
+  entry: JsonRecord;
+  id: string;
+  approvalState: JsonRecord;
+  lifecycleBindingToken?: string;
+  terminalControlled: boolean;
+}): JsonRecord {
+  if (!terminalIdleLifecycleActionEligible(input, "model_options")) {
+    return {};
+  }
+  return {
+    model_options: {
+      tool: "agent_knock_knock_model_options",
+      arguments: {
+        terminal_id: input.id,
+        expected_binding_token: input.lifecycleBindingToken
+      }
+    }
+  };
+}
+
 function actionCompatibilityWarning(
   entry: JsonRecord,
   capabilityName: "native_thread_lifecycle" | "native_inspection"
@@ -662,7 +696,7 @@ function terminalIdleLifecycleActionEligible(
     lifecycleBindingToken?: string;
     terminalControlled: boolean;
   },
-  command: "new_thread" | "native_inspect"
+  command: "new_thread" | "native_inspect" | "model_options"
 ): boolean {
   return input.terminalControlled &&
     input.commands[command] === true &&
@@ -921,7 +955,9 @@ export function actionsForManagedSessionBinding(
 ): JsonRecord {
   const token = managedSessionBindingToken(session);
   const next = { ...actions };
-  for (const actionName of ["new_thread", "resume_thread", "native_inspect"] as const) {
+  for (const actionName of [
+    "new_thread", "resume_thread", "native_inspect", "model_options"
+  ] as const) {
     const action = isRecord(next[actionName]) ? next[actionName] : undefined;
     if (!action) {
       continue;
@@ -945,6 +981,15 @@ export function safeUnavailableManagedTurnActions(actionsValue: JsonRecord): Jso
     }
   }
   return actions;
+}
+
+export function withoutInspectionActionsDuringNativeTransition(
+  actions: JsonRecord
+): JsonRecord {
+  return Object.fromEntries(Object.entries(actions).filter(
+    ([actionName]) =>
+      actionName !== "native_inspect" && actionName !== "model_options"
+  ));
 }
 
 export function renderHistoricalManagedTurn(

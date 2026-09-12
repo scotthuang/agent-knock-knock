@@ -16,6 +16,8 @@ const expectedToolNames = [
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
   "agent_knock_knock_native_inspect",
+  "agent_knock_knock_model_options",
+  "agent_knock_knock_set_model",
   "agent_knock_knock_identify_foreground",
   "agent_knock_knock_identify_and_send",
   "agent_knock_knock_new_thread",
@@ -42,7 +44,7 @@ test("host bridge captures the existing semantic tool contract once", () => {
   assert.ok(command.description.length > 0);
   assert.equal(registry.command(), command);
   assert.deepEqual(listed.map((tool) => tool.name), expectedToolNames);
-  assert.equal(new Set(listed.map((tool) => tool.name)).size, 19);
+  assert.equal(new Set(listed.map((tool) => tool.name)).size, 21);
   assert.equal(registry.list(), listed);
   for (const tool of listed) {
     assert.equal(registry.get(tool.name), tool);
@@ -148,6 +150,167 @@ process.stdout.write(JSON.stringify({
     "command_json_v1"
   );
   assert.match(rendered, /controller Host should yield/u);
+});
+
+test("model switching consumes one controller-scoped private catalog offer", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-host-model-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.mjs");
+  const callsPath = path.join(directory, "calls.ndjson");
+  const terminalId = "terminal:v2:tmux:codex:model:0.0:1234";
+  fs.writeFileSync(relayPath, `
+import fs from "node:fs";
+const argv = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(argv) + "\\n");
+if (argv[0] === "list") {
+  process.stdout.write(JSON.stringify({ terminals: [{
+    id: ${JSON.stringify(terminalId)},
+    available_actions: { model_options: {
+      tool: "agent_knock_knock_model_options",
+      arguments: {
+        terminal_id: ${JSON.stringify(terminalId)},
+        expected_binding_token: "binding-from-list"
+      }
+    }}
+  }] }));
+} else if (argv[0] === "model-options") {
+  process.stdout.write(JSON.stringify({
+    terminal_id: ${JSON.stringify(terminalId)},
+    agent: "codex",
+    scope: "current_and_new_sessions",
+    current: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+    models: [{
+      id: "gpt-6-astra",
+      label: "GPT-6 Astra",
+      reasoning_efforts: ["high", "ultra"]
+    }],
+    catalog_fingerprint: "catalog-private",
+    available_actions: { set_model: {
+      tool: "agent_knock_knock_set_model",
+      arguments: {
+        terminal_id: ${JSON.stringify(terminalId)},
+        expected_binding_token: "binding-private",
+        expected_catalog_fingerprint: "catalog-private"
+      }
+    }}
+  }));
+} else if (argv[0] === "set-model") {
+  process.stdout.write(JSON.stringify({
+    outcome: "changed",
+    terminal_id: ${JSON.stringify(terminalId)},
+    scope: "current_and_new_sessions",
+    defaults_changed: true,
+    requested: { model: "gpt-6-astra", reasoning_effort: "ultra" },
+    effective: { model: "gpt-6-astra", reasoning_effort: "ultra" }
+  }));
+}
+`, "utf8");
+  const registry = createRegistry("model-owner", "model-incarnation", relayPath);
+
+  await assert.rejects(
+    registry.execute("agent_knock_knock_set_model", "set-before-list", {
+      terminal_id: terminalId,
+      model: "gpt-6-astra",
+      reasoning_effort: "ultra"
+    }),
+    /requires current choices shown by agent_knock_knock_model_options/u
+  );
+  const options = await registry.execute(
+    "agent_knock_knock_model_options",
+    "model-options",
+    { terminal_id: terminalId }
+  );
+  assert.equal(
+    Object.hasOwn(options.details as object, "catalog_fingerprint"),
+    false
+  );
+  assert.deepEqual(
+    (options.details as {
+      available_actions: { set_model: { arguments: unknown } };
+    }).available_actions.set_model.arguments,
+    { terminal_id: terminalId }
+  );
+  assert.doesNotMatch(JSON.stringify(options), /binding-private|catalog-private/u);
+  await assert.rejects(
+    registry.execute("agent_knock_knock_set_model", "raw-scope", {
+      terminal_id: terminalId,
+      model: "gpt-6-astra",
+      reasoning_effort: "ultra",
+      scope: "current_session"
+    }),
+    /accepts only typed semantic fields/u
+  );
+  const otherController = createRegistry(
+    "model-owner",
+    "other-model-incarnation",
+    relayPath
+  );
+  await assert.rejects(
+    otherController.execute("agent_knock_knock_set_model", "other-owner", {
+      terminal_id: terminalId,
+      model: "gpt-6-astra",
+      reasoning_effort: "ultra"
+    }),
+    /requires current choices shown/u
+  );
+  await assert.rejects(
+    registry.execute("agent_knock_knock_set_model", "bad-effort", {
+      terminal_id: terminalId,
+      model: "gpt-6-astra",
+      reasoning_effort: "invented"
+    }),
+    /reasoning_effort was not advertised/u
+  );
+  await assert.rejects(
+    registry.execute("agent_knock_knock_set_model", "consumed", {
+      terminal_id: terminalId,
+      model: "gpt-6-astra",
+      reasoning_effort: "ultra"
+    }),
+    /requires current choices shown/u
+  );
+  await registry.execute("agent_knock_knock_model_options", "refresh", {
+    terminal_id: terminalId
+  });
+  const changed = await registry.execute(
+    "agent_knock_knock_set_model",
+    "valid-set",
+    {
+      terminal_id: terminalId,
+      model: "gpt-6-astra",
+      reasoning_effort: "ultra"
+    }
+  );
+  assert.equal(changed.isError, undefined);
+  const calls = fs.readFileSync(callsPath, "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line) as string[]);
+  const setCall = [...calls].reverse().find((argv) => argv[0] === "set-model");
+  assert.ok(setCall);
+  assert.equal(argumentValue(setCall, "--model"), "gpt-6-astra");
+  assert.equal(argumentValue(setCall, "--reasoning-effort"), "ultra");
+  assert.equal(argumentValue(setCall, "--expected-binding-token"), "binding-private");
+  assert.equal(
+    argumentValue(setCall, "--expected-catalog-fingerprint"),
+    "catalog-private"
+  );
+  assert.equal(setCall.includes("--scope"), false);
+
+  const slashRegistry = createRegistry(
+    "model-slash-owner",
+    "model-slash-incarnation",
+    relayPath
+  );
+  const listedBySlash = await slashRegistry.command().execute(
+    `models ${terminalId}`
+  );
+  assert.match(listedBySlash.text, /scope: current_and_new_sessions/u);
+  assert.match(listedBySlash.text, /applies this selection.*persists/u);
+  const changedBySlash = await slashRegistry.command().execute(
+    `set-model ${terminalId} gpt-6-astra ultra`
+  );
+  assert.equal(changedBySlash.isError, undefined);
+  assert.match(changedBySlash.text, /changed and verified/u);
+  assert.match(changedBySlash.text, /new-session default changed: yes/u);
 });
 
 test("host bridge rejects unknown tool names", async () => {

@@ -23,6 +23,7 @@ export type TerminalActionName =
   | "new_thread"
   | "list_resumable_threads"
   | "native_inspect"
+  | "model_options"
   | "identify_foreground"
   | "identify_and_send"
   | "resume_thread"
