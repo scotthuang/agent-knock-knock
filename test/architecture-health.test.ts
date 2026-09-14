@@ -69,10 +69,10 @@ test("architecture health dashboard stays within the 0.13.3 refactor baseline", 
 
   assert.equal(health.current.import_cycles, 0);
   assert.equal(health.current.hard_function_violations, 0);
-  assert.ok(health.current.default_function_violations <= 338);
+  assert.ok(health.current.default_function_violations <= 335);
   assert.ok(health.current.files_over_2000_physical_loc <= 19);
   assert.equal(health.policy.total_production_loc, "observed_only");
-  assert.equal(health.policy.default_function_violations_maximum, 338);
+  assert.equal(health.policy.default_function_violations_maximum, 335);
   assert.equal(health.policy.large_production_files_maximum, 19);
   assert.equal(health.hotspots.length, 8);
   assert.deepEqual(health.contract_sync.semantic_tools, {
@@ -162,7 +162,7 @@ test("architecture health rejects complexity, hotspot, tool, and skill drift", a
       },
       repoRoot
     }),
-    /production default function violations 339 exceed budget 338/u
+    /production default function violations 336 exceed budget 335/u
   );
 
   const realRead = (repositoryPath: string) =>

@@ -103,6 +103,7 @@
     "test/terminal-interaction-core.test.ts",
     "test/terminal-interaction-protocol.test.ts",
     "test/terminal-interaction-response-bridge.test.ts",
+    "test/terminal-list-action-policy.test.ts",
     "test/terminal-list-cli-adapter.test.ts",
     "test/terminal-list-facts.test.ts",
     "test/terminal-list-inventory.test.ts",

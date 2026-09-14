@@ -9,6 +9,7 @@ import {
   renderAvailableListActions,
   renderCurrentManagedTurn,
   renderManagedTurnListEntry,
+  renderTerminalModelControlActions,
   retargetConversationAction,
   safeTerminalActionsDuringConflict,
   safeUnavailableManagedTurnActions,
@@ -67,6 +68,63 @@ test("raw terminal actions leave model control to its safety decision", () => {
     requires_user_intent: true
   });
   assert.equal(actions.model_options, undefined);
+});
+
+test("model-control rendering preserves action order and token domains", () => {
+  const base = {
+    status: { tool: "status" },
+    new_thread: { tool: "new-thread" },
+    approve: { tool: "approve" },
+    close: { tool: "close" }
+  };
+  const native = renderTerminalModelControlActions({
+    renderedActions: base,
+    availability: {
+      availability: "open_from_empty",
+      authority: "native_session",
+      terminalId: "terminal-1",
+      expectedBindingToken: "ordinary-token"
+    },
+    mutationScope: "current_and_new_sessions"
+  });
+  assert.deepEqual(Object.keys(native), [
+    "status", "new_thread", "model_options", "approve", "close"
+  ]);
+  assert.deepEqual(native.model_options, {
+    tool: "agent_knock_knock_model_options",
+    arguments: {
+      terminal_id: "terminal-1",
+      expected_binding_token: "ordinary-token"
+    },
+    mutation_scope: "current_and_new_sessions",
+    requires_user_intent: true
+  });
+
+  const residual = renderTerminalModelControlActions({
+    renderedActions: base,
+    availability: {
+      availability: "residual_continuation",
+      terminalId: "terminal-1",
+      expectedBindingToken: "residual-entry-token",
+      repairBindingToken: "repair-token"
+    },
+    mutationScope: "current_and_new_sessions"
+  });
+  assert.deepEqual(Object.keys(residual), [
+    "status", "new_thread", "approve", "close",
+    "model_options", "repair_model_control"
+  ]);
+  assert.equal(
+    (residual.model_options as { arguments: { expected_binding_token: string } })
+      .arguments.expected_binding_token,
+    "residual-entry-token"
+  );
+  assert.equal(
+    (residual.repair_model_control as {
+      arguments: { expected_binding_token: string };
+    }).arguments.expected_binding_token,
+    "repair-token"
+  );
 });
 
 test("managed Turn rendering consumes only sampled list facts", () => {

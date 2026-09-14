@@ -11,6 +11,8 @@ import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
+import type { ModelControlAvailabilityDecision } from
+  "./terminal-model-control-availability.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -604,6 +606,96 @@ export function renderAvailableListActions(
   return actions;
 }
 
+/** Format an already-authorized model-control decision without policy reads. */
+export function renderTerminalModelControlActions(input: {
+  readonly renderedActions: JsonRecord;
+  readonly availability: ModelControlAvailabilityDecision;
+  readonly mutationScope?: unknown;
+}): JsonRecord {
+  let actions = { ...input.renderedActions };
+  delete actions.model_options;
+  delete actions.repair_model_control;
+  const { availability } = input;
+  if (availability.availability === "open_from_empty") {
+    const action = {
+      tool: "agent_knock_knock_model_options",
+      arguments: {
+        terminal_id: availability.terminalId,
+        expected_binding_token: availability.expectedBindingToken
+      },
+      ...(availability.authority === "zero_rollout_physical"
+        ? { authority_scope: "terminal_user_explicit_model_control" }
+        : {}),
+      mutation_scope: input.mutationScope,
+      requires_user_intent: true
+    };
+    if (availability.authority === "native_session") {
+      actions = modelControlActionBeforePostLifecycleActions(actions, action);
+    } else {
+      actions.model_options = action;
+    }
+  }
+  if (availability.availability === "residual_continuation") {
+    actions.model_options = {
+      tool: "agent_knock_knock_model_options",
+      arguments: {
+        terminal_id: availability.terminalId,
+        expected_binding_token: availability.expectedBindingToken
+      },
+      authority_scope: "terminal_user_explicit_model_control_residual_entry",
+      mutation_scope: input.mutationScope,
+      requires_user_intent: true
+    };
+    actions.repair_model_control = modelControlRepairAction(
+      availability.terminalId,
+      availability.repairBindingToken
+    );
+  } else if (availability.availability === "repair_only") {
+    actions.repair_model_control = modelControlRepairAction(
+      availability.terminalId,
+      availability.expectedBindingToken
+    );
+  }
+  return actions;
+}
+
+function modelControlRepairAction(
+  terminalId: string,
+  expectedBindingToken: string
+): JsonRecord {
+  return {
+    tool: "agent_knock_knock_repair_model_control",
+    arguments: {
+      terminal_id: terminalId,
+      expected_binding_token: expectedBindingToken
+    },
+    authority_scope: "terminal_user_explicit_model_control_repair",
+    mutation_scope: "exact_model_control_residual_only",
+    requires_user_intent: true
+  };
+}
+
+function modelControlActionBeforePostLifecycleActions(
+  actions: JsonRecord,
+  modelOptions: JsonRecord
+): JsonRecord {
+  const output: JsonRecord = {};
+  let inserted = false;
+  const postLifecycle = new Set([
+    "respond", "approve", "cancel", "renew", "retry_callback",
+    "retry_submission", "close"
+  ]);
+  for (const [name, action] of Object.entries(actions)) {
+    if (!inserted && postLifecycle.has(name)) {
+      output.model_options = modelOptions;
+      inserted = true;
+    }
+    output[name] = action;
+  }
+  if (!inserted) output.model_options = modelOptions;
+  return output;
+}
+
 function renderTerminalSendAction(input: {
   commands: JsonRecord;
   entry: JsonRecord;
@@ -613,9 +705,7 @@ function renderTerminalSendAction(input: {
 }): JsonRecord {
   if (
     !input.terminalControlled ||
-    input.commands.send !== true ||
-    input.entry.activity_state !== "idle" ||
-    input.approvalState.blocked === true
+    input.commands.send !== true
   ) {
     return {};
   }
@@ -729,8 +819,6 @@ function terminalIdleLifecycleActionEligible(
 ): boolean {
   return input.terminalControlled &&
     input.commands[command] === true &&
-    input.entry.activity_state === "idle" &&
-    input.approvalState.blocked !== true &&
     Boolean(input.lifecycleBindingToken);
 }
 
