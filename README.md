@@ -56,7 +56,8 @@ Pi should show `AKK ready`. With Codex or Claude Code already running in tmux or
 
 ## Install for DeepSeek Harness
 
-The connector supports DeepSeek Harness Web `0.1.1-rc.2` and `0.1.2-alpha.1`:
+The connector supports DeepSeek Harness Web `0.1.1-rc.2`, `0.1.2-alpha.1`, and
+`0.1.5-rc.2`:
 
 ```bash
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -134,7 +135,7 @@ AKK is local-first: there is no hosted control plane or telemetry. It stores onl
 | Coding agents | Codex and Claude Code; unknown complete versions are allowed with a compatibility warning and fail naturally if behavior changed |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
 | Pi connector | Pi `0.84.4` |
-| DeepSeek Harness connector | `0.1.1-rc.2` and `0.1.2-alpha.1` |
+| DeepSeek Harness connector | `0.1.1-rc.2`, `0.1.2-alpha.1`, and `0.1.5-rc.2` |
 | Runtime | Node.js `22.19.0`+ on macOS or Linux |
 
 The adjacent OpenClaw boundary `2026.5.10-beta.2` is intentionally unsupported. Herdr support is exact-version because its local control protocol is not yet a stable public API. See each connector guide for its tested release status and limitations.

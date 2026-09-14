@@ -76,7 +76,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   const cleanup = await applyWithDependencies(fakeContext, {}, {
     async loadSupportedDeepSeekHarnessRuntime() {
       return {
-        version: "0.1.2-alpha.1",
+        version: "0.1.5-rc.2",
         createUserMessage,
         assertSupportedJsonSchema,
       };
@@ -129,7 +129,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   });
 
   assert.equal(serverStarts, 1);
-  assert.equal(profileHarnessVersion, "0.1.2-alpha.1");
+  assert.equal(profileHarnessVersion, "0.1.5-rc.2");
   assert.equal(lifecycleStarts, 1);
   assert.equal(commands.length, 1);
   assert.equal(commands[0]?.name, "akk");
@@ -242,7 +242,7 @@ test("removes private resources when Host Adapter construction fails", async () 
     applyWithDependencies(fakeContext, {}, {
       async loadSupportedDeepSeekHarnessRuntime() {
         return {
-          version: "0.1.2-alpha.1",
+          version: "0.1.5-rc.2",
           createUserMessage,
           assertSupportedJsonSchema,
         };

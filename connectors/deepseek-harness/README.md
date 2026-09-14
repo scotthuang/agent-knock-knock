@@ -12,11 +12,11 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-This prerelease supports DeepSeek Harness `0.1.1-rc.2` and `0.1.2-alpha.1` on
-the resident Web Host and Node.js `>=22.19.0`. Activation locates the real
+This prerelease supports DeepSeek Harness `0.1.1-rc.2`, `0.1.2-alpha.1`, and
+`0.1.5-rc.2` on the resident Web Host and Node.js `>=22.19.0`. Activation locates the real
 `@deepseek-ai/dsh` launcher and requires that launcher plus its `dsh-base`,
 `dsh-agent`, `dsh-commands`, `dsh-llm`, and `dsh-tools` packages to form one
-coherent set at either reviewed version. An unsupported, missing, or split Host
+coherent set at one reviewed version. An unsupported, missing, or split Host
 fails before mounting. The detected launcher version is also projected into the
 private AKK Host Profile instead of being replaced with a connector build-time
 version. Runtime message and schema helpers are imported from that verified
@@ -32,7 +32,7 @@ processes or create terminal panes.
 
 ### 1. Check the prerequisites
 
-The Web Host must be one of the two supported DeepSeek Harness releases, Node
+The Web Host must be one of the supported DeepSeek Harness releases, Node
 must satisfy the engine above, and `pnpm` must be on `PATH` because `dsh plugin`
 forwards package operations to pnpm.
 
@@ -307,7 +307,7 @@ Update to the registry's current prerelease, or pin an exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.3
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.4
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -342,7 +342,7 @@ compatibility review rather than an implicit local link.
 
 ## Tests and release status
 
-The package manifest is currently `0.1.0-rc.3`, so this remains a prerelease and
+The package manifest is currently `0.1.0-rc.4`, so this remains a prerelease and
 is published under `next`; `latest` remains on the earlier `0.1.0-rc.1` tag.
 Registry state can change independently of this source file, so the `npm view`
 commands above remain authoritative.
@@ -358,11 +358,11 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.3` compatibility work was additionally typechecked and runtime-smoked
-against the official DeepSeek Harness `0.1.2-alpha.1` source release. Its npm
-artifacts were not present on the public registry at that validation point, so
-the reproducible development lock remains on `0.1.1-rc.2` while peer and runtime
-checks admit both reviewed Host versions.
+`0.1.0-rc.4` compatibility work is typechecked against the published DeepSeek
+Harness `0.1.5-rc.2` SDK packages and runtime-smoked against that exact official
+launcher package tree. The reproducible development lock therefore uses
+`0.1.5-rc.2`, while peer and runtime checks retain the two older reviewed Host
+versions for existing installations.
 
 ## Release safety
 
@@ -373,7 +373,7 @@ runtime `file:`, `link:`, or `workspace:` dependency.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.3
+npm run release:check -- --publish --confirm-version 0.1.0-rc.4
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags

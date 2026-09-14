@@ -10,7 +10,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import type { CommandDefinition } from "@deepseek-ai/dsh-commands";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
 import type { SkillRegistration } from "@deepseek-ai/dsh-skill";
-import type { JsonValue, ToolDefinition } from "@deepseek-ai/dsh-tools";
+import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
 import {
   createHostAdapter,
@@ -277,7 +277,7 @@ function toolDefinition(
     // canonical value. The connector returns one stable { text } projection.
     output: {
       schema: {},
-      render(_args: unknown, value: JsonValue): ContentBlock[] {
+      render(_args: unknown, value: unknown): ContentBlock[] {
         return [{ type: "text", text: canonicalToolText(value) }];
       },
     },
@@ -332,20 +332,20 @@ function hostToolResultText(result: {
   return "AKK command completed.";
 }
 
-function canonicalToolText(value: JsonValue): string {
+function canonicalToolText(value: unknown): string {
   if (
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value)
   ) {
-    const record = value as Record<string, JsonValue>;
+    const record = value as Record<string, unknown>;
     const content = record.content;
     if (Array.isArray(content)) {
       const text = content.flatMap((block) => {
         if (typeof block !== "object" || block === null || Array.isArray(block)) {
           return [];
         }
-        const candidate = (block as Record<string, JsonValue>).text;
+        const candidate = (block as Record<string, unknown>).text;
         return typeof candidate === "string" ? [candidate] : [];
       }).join("\n").trim();
       if (text) return text;
@@ -357,11 +357,11 @@ function canonicalToolText(value: JsonValue): string {
 function losslessToolResult(
   value: unknown,
   toolName: string,
-): JsonValue {
+): unknown {
   try {
     const encoded = JSON.stringify(value);
     if (encoded === undefined) throw new Error("no JSON representation");
-    return JSON.parse(encoded) as JsonValue;
+    return JSON.parse(encoded) as unknown;
   } catch {
     throw new Error(`${toolName} returned a non-lossless JSON result`);
   }
