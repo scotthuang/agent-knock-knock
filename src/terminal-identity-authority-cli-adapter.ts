@@ -1,11 +1,12 @@
-import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import { observeClaudeDeadProcessTranscriptCompletion } from
   "./claude-local-transcript-provider.js";
-import { expandHome, resolveOptionalExecutable } from "./cli-command-runtime.js";
-import { cliDependencies, cliRuntimeLog } from "./cli-runtime-context.js";
+import { expandHome } from "./cli-command-runtime.js";
+import { cliRuntimeLog } from "./cli-runtime-context.js";
+import { codexProcessBirthForLifecycle,
+  codexProcessIncarnationForPid } from "./codex-process-incarnation.js";
 import type { DeferredForegroundTransfer,
   DeferredForegroundTransferSourceRolloutAuthority,
   DeferredForegroundTransferSourceTurnAuthority } from
@@ -709,46 +710,6 @@ function exactLifecycleProcessIdentity(
     identity,
     codexIncarnation
   });
-}
-
-function codexProcessBirthForLifecycle(pid: number): string {
-  const injected = cliDependencies().codexProcessBirthForPid;
-  if (injected) {
-    return injected(pid);
-  }
-  const ps = resolveOptionalExecutable("ps");
-  if (!ps) {
-    throw new Error(
-      "cannot verify Codex process incarnation because ps is unavailable"
-    );
-  }
-  const result = spawnSync(ps, ["-o", "lstart=", "-p", String(pid)], {
-    encoding: "utf8",
-    timeout: 5000,
-    maxBuffer: 1024 * 1024
-  });
-  const processBirth = String(result.stdout ?? "").trim();
-  if (result.error || result.status !== 0 || !processBirth) {
-    throw new Error(
-      String(result.stderr ?? "").trim() ||
-      result.error?.message ||
-      `cannot verify Codex process incarnation for pid ${pid}`
-    );
-  }
-  return processBirth;
-}
-
-function codexProcessIncarnationForPid(pid: number): {
-  processUuid: string;
-  processBirth: string;
-  evidence: "codex_process_birth";
-} {
-  const processBirth = codexProcessBirthForLifecycle(pid);
-  return {
-    processUuid: `codex-pid:${pid}:birth:${processBirth}`,
-    processBirth,
-    evidence: "codex_process_birth"
-  };
 }
 
 type DurableCompletionBeforeDeadStallObservation =
