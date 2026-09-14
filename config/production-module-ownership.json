@@ -1085,6 +1085,10 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-managed-turn-list-action-policy.ts",
+      "owner": "terminal-list-application"
+    },
+    {
       "path": "src/terminal-model-control-action-policy.ts",
       "owner": "terminal-agent-core"
     },

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   actionsForManagedSessionBinding,
   currentTerminalActions,
@@ -18,10 +19,43 @@ import {
   withoutGenericHandoffSourceClose,
   withoutInspectionActionsDuringNativeTransition
 } from "../src/terminal-list-renderer.js";
+import { decideManagedTurnListActions } from
+  "../src/terminal-managed-turn-list-action-policy.js";
 import {
   managedSessionBindingToken,
   type ManagedSessionState
 } from "../src/managed-session.js";
+
+function renderManagedTurnFixture(
+  task: Record<string, unknown>,
+  options: {
+    terminalBridge?: boolean;
+    approvalState?: Record<string, unknown>;
+    actionFacts: {
+      terminalBridgeReady: boolean;
+      managedApprovalPending: boolean;
+      renewEligible: boolean;
+      retryCallbackEligible: boolean;
+      retrySubmissionCandidate: boolean;
+    };
+  }
+) {
+  return renderManagedTurnListEntry(task, {
+    approvalState: options.approvalState,
+    actionDecision: decideManagedTurnListActions({
+      status: task.status,
+      agent: task.agent,
+      terminalBridgeAdvertised: options.terminalBridge === true,
+      approvalState: options.approvalState,
+      orphanedTerminalDispatch:
+        typeof task.orphaned_terminal_dispatch === "object" &&
+          task.orphaned_terminal_dispatch !== null
+          ? task.orphaned_terminal_dispatch as Record<string, unknown>
+          : undefined,
+      ...options.actionFacts
+    })
+  });
+}
 
 test("raw terminal actions leave model control to its safety decision", () => {
   const actions = renderAvailableListActions({
@@ -128,7 +162,7 @@ test("model-control rendering preserves action order and token domains", () => {
 });
 
 test("managed Turn rendering consumes only sampled list facts", () => {
-  const entry = renderManagedTurnListEntry({
+  const entry = renderManagedTurnFixture({
     conversation_id: "turn-1",
     session_id: "session-1",
     status: "waiting_for_openclaw",
@@ -163,6 +197,126 @@ test("managed Turn rendering consumes only sampled list facts", () => {
       .respond.arguments,
     { turn_id: "turn-1" }
   );
+});
+
+test("managed Turn renderer formats a decision without rebuilding eligibility", () => {
+  const source = fs.readFileSync("src/terminal-list-renderer.ts", "utf8");
+  assert.doesNotMatch(source, /\bdecideManagedTurnListActions\b/u);
+  const start = source.indexOf("function renderManagedTurnAvailableActions");
+  const end = source.indexOf("function renderTerminalApprovalAction", start);
+  assert.ok(start >= 0 && end > start);
+  const managedRenderer = source.slice(start, end);
+  assert.doesNotMatch(
+    managedRenderer,
+    /entry\.status|approvalState|terminalBridgeReady|managedApprovalPending|Eligible/u
+  );
+});
+
+test("managed Turn action projection preserves exact JSON bytes across eligibility states", () => {
+  const fixtures = [
+    {
+      task: {
+        conversation_id: "turn-1",
+        session_id: "session-1",
+        status: "waiting_for_openclaw",
+        agent: "claude"
+      },
+      options: {
+        terminalBridge: true,
+        approvalState: {
+          blocked: false,
+          approvable: true,
+          fingerprint: "approval-fingerprint",
+          decision_mode: "keys",
+          choices: [
+            { decision: "approve_once", label: "Yes" },
+            { decision: "reject", label: "No" },
+            { decision: "always", label: "Never expose" }
+          ]
+        },
+        actionFacts: {
+          terminalBridgeReady: true,
+          managedApprovalPending: false,
+          renewEligible: false,
+          retryCallbackEligible: true,
+          retrySubmissionCandidate: false
+        }
+      },
+      expected:
+        '{"conversation_id":"turn-1","session_id":"session-1","status":"waiting_for_openclaw","agent":"claude","turn_id":"turn-1","id":"turn-1","short_ref":"@b9cf0ff1a5","source":"managed_turn","approval_state":{"blocked":false,"approvable":true,"fingerprint":"approval-fingerprint","decision_mode":"keys","choices":[{"decision":"approve_once","label":"Yes"},{"decision":"reject","label":"No"},{"decision":"always","label":"Never expose"}]},"available_actions":{"status":{"tool":"agent_knock_knock_status","arguments":{"turn_id":"turn-1"}},"respond":{"tool":"agent_knock_knock_respond","arguments":{"turn_id":"turn-1"},"missing_required":["request"]},"approve":{"tool":"agent_knock_knock_approve","arguments":{"turn_id":"turn-1"},"choices":[{"decision":"approve_once","label":"Yes"},{"decision":"reject","label":"No"}],"missing_required":["expected_approval_fingerprint"],"before_call":{"tool":"agent_knock_knock_status","arguments":{"turn_id":"turn-1"},"use":"After explicit user confirmation, copy the latest terminal_status.approval_state.fingerprint into expected_approval_fingerprint."},"requires_explicit_user_confirmation":true,"requires_fresh_status":true},"cancel":{"tool":"agent_knock_knock_cancel","arguments":{"turn_id":"turn-1"},"requires_user_intent":true},"retry_callback":{"tool":"agent_knock_knock_retry_callback","arguments":{"turn_id":"turn-1"}},"close":{"tool":"agent_knock_knock_close","arguments":{"turn_id":"turn-1"},"requires_explicit_user_confirmation":true}}}'
+    },
+    {
+      task: {
+        conversation_id: "turn-2",
+        session_id: "session-2",
+        status: "stalled",
+        agent: "codex",
+        orphaned_terminal_dispatch: {
+          message_id: "message-2",
+          transition_id: "transition-2"
+        }
+      },
+      options: {
+        terminalBridge: true,
+        approvalState: { blocked: false, approvable: false },
+        actionFacts: {
+          terminalBridgeReady: true,
+          managedApprovalPending: false,
+          renewEligible: true,
+          retryCallbackEligible: true,
+          retrySubmissionCandidate: true
+        }
+      },
+      expected:
+        '{"conversation_id":"turn-2","session_id":"session-2","status":"stalled","agent":"codex","orphaned_terminal_dispatch":{"message_id":"message-2","transition_id":"transition-2"},"turn_id":"turn-2","id":"turn-2","short_ref":"@39dccc8f29","source":"managed_turn","approval_state":{"blocked":false,"approvable":false},"available_actions":{"status":{"tool":"agent_knock_knock_status","arguments":{"turn_id":"turn-2"}},"renew":{"tool":"agent_knock_knock_renew","arguments":{"turn_id":"turn-2"}},"retry_callback":{"tool":"agent_knock_knock_retry_callback","arguments":{"turn_id":"turn-2"}},"retry_submission":{"tool":"agent_knock_knock_send","arguments":{"turn_id":"turn-2"},"requires_explicit_user_confirmation":true},"close":{"tool":"agent_knock_knock_close","arguments":{"turn_id":"turn-2","expected_message_id":"message-2","expected_transition_id":"transition-2"},"requires_explicit_user_confirmation":true}}}'
+    },
+    {
+      task: {
+        conversation_id: "turn-3",
+        status: "waiting_for_agent",
+        agent: "codex"
+      },
+      options: {
+        terminalBridge: true,
+        approvalState: { blocked: true, approvable: false },
+        actionFacts: {
+          terminalBridgeReady: true,
+          managedApprovalPending: true,
+          renewEligible: false,
+          retryCallbackEligible: false,
+          retrySubmissionCandidate: false
+        }
+      },
+      expected:
+        '{"conversation_id":"turn-3","status":"waiting_for_agent","agent":"codex","session_id":"turn-3","turn_id":"turn-3","id":"turn-3","short_ref":"@22ffb6e248","source":"managed_turn","approval_state":{"blocked":true,"approvable":false},"available_actions":{"status":{"tool":"agent_knock_knock_status","arguments":{"turn_id":"turn-3"}},"close":{"tool":"agent_knock_knock_close","arguments":{"turn_id":"turn-3"},"requires_explicit_user_confirmation":true}}}'
+    },
+    {
+      task: {
+        conversation_id: "turn-4",
+        status: "closed",
+        agent: "claude"
+      },
+      options: {
+        terminalBridge: true,
+        actionFacts: {
+          terminalBridgeReady: true,
+          managedApprovalPending: false,
+          renewEligible: false,
+          retryCallbackEligible: false,
+          retrySubmissionCandidate: false
+        }
+      },
+      expected:
+        '{"conversation_id":"turn-4","status":"closed","agent":"claude","session_id":"turn-4","turn_id":"turn-4","id":"turn-4","short_ref":"@7af8c102b0","source":"managed_turn","available_actions":{"status":{"tool":"agent_knock_knock_status","arguments":{"turn_id":"turn-4"}}}}'
+    }
+  ] as const;
+
+  for (const fixture of fixtures) {
+    assert.equal(
+      JSON.stringify(renderManagedTurnFixture(fixture.task, fixture.options)),
+      fixture.expected
+    );
+  }
 });
 
 test("the public action contract v28 exposes semantic arguments only", () => {
@@ -441,7 +595,7 @@ test("unverified agent versions warn without hiding eligible native actions", ()
 });
 
 test("submission retry is a confirmed exact-Turn form of the existing send tool", () => {
-  const entry = renderManagedTurnListEntry({
+  const entry = renderManagedTurnFixture({
     conversation_id: "turn-uncertain",
     session_id: "session-uncertain",
     status: "stalled",
@@ -470,7 +624,7 @@ test("submission retry is a confirmed exact-Turn form of the existing send tool"
     ).retry_submission,
     undefined
   );
-  const claude = renderManagedTurnListEntry({
+  const claude = renderManagedTurnFixture({
     conversation_id: "turn-claude-uncertain",
     status: "stalled",
     agent: "claude"
