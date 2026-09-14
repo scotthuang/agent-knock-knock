@@ -12,12 +12,101 @@ import {
 import {
   selectTerminalInteractionResponder
 } from "../src/terminal-interaction-authority.js";
+import { executeTerminalInteractionResponseTransaction } from
+  "../src/terminal-interaction-response-transaction.js";
 import type { NativeQuestionnaireInspection } from
   "../src/terminal-questionnaire-adapter.js";
 
 const PROMPT_SHA = "1".repeat(64);
 const ANCHOR_SHA = "2".repeat(64);
 const NOW = new Date("2026-09-09T00:00:00.000Z");
+
+type TransactionScenario =
+  | "success"
+  | "input_not_started"
+  | "input_uncertain"
+  | "reserve_failed";
+
+async function characterizeResponseTransaction(
+  subject: "managed" | "watch",
+  scenario: TransactionScenario
+): Promise<string[]> {
+  const calls: string[] = [];
+  const inputNotStarted = new Error("input not started");
+  await executeTerminalInteractionResponseTransaction<
+    string,
+    { approved: boolean },
+    string,
+    { responded: boolean }
+  >({
+    reservationFailureFence: subject === "managed"
+      ? "write_started"
+      : "confirmed",
+    dispatch: async (hooks) => {
+      calls.push("authorize");
+      await hooks.authorize("surface");
+      calls.push("reserve");
+      await hooks.beforeDispatch("surface");
+      if (scenario === "input_not_started") throw inputNotStarted;
+      calls.push("input");
+      if (scenario === "input_uncertain") throw new Error("uncertain");
+      return { responded: true };
+    },
+    authorize: () => ({ approved: true }),
+    createReservation: () => "receipt",
+    reserve: () => {
+      if (scenario === "reserve_failed") throw new Error("save failed");
+      calls.push("reserved");
+    },
+    release: () => {
+      calls.push("release");
+    },
+    releaseFailure: (_reservation, _error, releaseError) => releaseError,
+    markUncertain: () => {
+      calls.push("uncertain");
+    },
+    consume: () => {
+      calls.push("consume");
+    },
+    responded: (execution) => execution.responded,
+    isInputNotStarted: (error) => error === inputNotStarted,
+    duplicateReservationError: () => new Error("duplicate"),
+    inputNotStartedError: (error) => error,
+    missingReservationError: () => new Error("missing reservation")
+  }).catch(() => undefined);
+  return calls;
+}
+
+test("managed and Watch share the response transaction ordering", async () => {
+  for (const subject of ["managed", "watch"] as const) {
+    assert.deepEqual(
+      await characterizeResponseTransaction(subject, "success"),
+      ["authorize", "reserve", "reserved", "input", "consume"],
+      subject
+    );
+    assert.deepEqual(
+      await characterizeResponseTransaction(subject, "input_not_started"),
+      ["authorize", "reserve", "reserved", "release"],
+      subject
+    );
+    assert.deepEqual(
+      await characterizeResponseTransaction(subject, "input_uncertain"),
+      ["authorize", "reserve", "reserved", "input", "uncertain"],
+      subject
+    );
+  }
+});
+
+test("response transaction preserves each Store's save-failure fence", async () => {
+  assert.deepEqual(
+    await characterizeResponseTransaction("managed", "reserve_failed"),
+    ["authorize", "reserve", "uncertain"]
+  );
+  assert.deepEqual(
+    await characterizeResponseTransaction("watch", "reserve_failed"),
+    ["authorize", "reserve"]
+  );
+});
 
 function actionableInspection(): Extract<
   NativeQuestionnaireInspection,
