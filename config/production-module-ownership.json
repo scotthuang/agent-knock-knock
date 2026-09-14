@@ -897,6 +897,10 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-command-dispatch-preparation.ts",
+      "owner": "terminal-command-adapter"
+    },
+    {
       "path": "src/terminal-command-foreground-proof.ts",
       "owner": "terminal-command-adapter"
     },

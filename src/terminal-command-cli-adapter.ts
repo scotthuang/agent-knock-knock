@@ -20,11 +20,6 @@ import {
 } from
   "./callback-outbox-policy.js";
 import {
-  captureClaudeTranscriptAnchor,
-  defaultClaudeHome,
-  type ClaudeTranscriptAnchor
-} from "./claude-local-transcript-provider.js";
-import {
   captureCodexCandidateSetRolloutAcceptanceAnchor,
   type CodexCandidateSetRolloutAcceptanceAnchor,
   type CodexRolloutAcceptanceAnchor,
@@ -115,7 +110,6 @@ import {
   TerminalInputNotStartedError,
   type TerminalApprovalAuthorizationContext,
   type TerminalAgentBridge,
-  type TerminalBridgeStatus,
   type TerminalCodexComposerObservation
 } from "./terminal-agent-bridge.js";
 import {
@@ -170,7 +164,6 @@ import {
 import {
   claudeTranscriptApprovalIdentity,
   terminalMonitorDeadlineAt as deadlineAt,
-  terminalMonitorScreenFingerprint as terminalBridgeScreenFingerprint,
   validTerminalMonitorTimestampMs as validTimestampMs
 } from "./terminal-monitor-decision-policy.js";
 import * as monitorOwner from "./terminal-monitor-ownership-policy.js";
@@ -182,12 +175,13 @@ import {
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatchApplication from "./terminal-dispatch-application.js";
 import {
-  assertSafeUserExplicitTerminalSend,
-  assertTerminalNativeBindingBeforeSend,
-  assertTerminalPreSendStatus,
-  terminalPreSendRuntime,
-  terminalSendCandidateAcceptanceAnchor
+  assertSafeUserExplicitTerminalSend
 } from "./terminal-command-send-preflight.js";
+import {
+  prepareTerminalControlSend,
+  type PreparedTerminalControlSend,
+  type TerminalDispatchPreparationPorts
+} from "./terminal-command-dispatch-preparation.js";
 import type {
   CodexDetachedCandidateSessionClaimSet,
   DeferredCodexForegroundBindingBoundary,
@@ -8230,262 +8224,37 @@ async function runTerminalConversationApprove({
   }
 }
 
-async function prepareTerminalControlSend(
-  request: TerminalControlSendRequest
-) {
-  const {
-    transaction, options, conversation, executor, message,
-    recordRawAttachmentAfterSend = false,
-    allowedPreMaterializationIdentity,
-    allowedAdditionalIdentities = [],
-    deferredCodexForegroundBinding,
-    continuingTurnResponse = false
-  } = request;
-  const bridge = terminalBridgeEnabled(conversation);
-  const route = bindTerminalDispatchRoute(
-    transaction.scopes,
-    transaction.resources
-  );
-  const {
-    terminalControl,
-    storeDir: lockedStoreDir,
-    statePath,
-    logPath
-  } = route;
-  const terminalBridge = createTerminalAgentBridge(options);
-  const execution = terminalDispatchExecution(options, terminalBridge);
-  const bridgeStartedAt = cliNow().toISOString();
-  const submissionPreparedAt = deferredCodexForegroundBinding?.preparedAt ??
-    bridgeStartedAt;
-  const agentTimeoutMinutes = Number(options.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES);
-  const agentHardTimeoutMinutes = positiveMinutes(
-    options.agentHardTimeoutMinutes ?? DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
-    "--agent-hard-timeout-minutes"
-  );
-  const terminalPayload = terminalSubmissionPayload(String(message.body ?? ""));
-  const terminalRequestHash = required(
-    terminalBridgeRequestFingerprint(terminalPayload),
-    "terminal request hash is unavailable"
-  );
-  const presentationContext = { message, executor, terminalControl };
-  const presentationPorts = {
-    write: printJson,
-    budget: budgetAction,
-    nextAction: openClawYieldNextAction,
-    summarize: textSummary
-  };
-  let previousDispatchLedger =
-    resolveTerminalDispatchLedgerPaneIncarnation(
-      terminalControl,
-      loadTerminalBridgeDispatchLedger(terminalControl)
-    );
-  previousDispatchLedger = reconcilePreparedTerminalDispatchLedger(
-    terminalControl, previousDispatchLedger
-  );
-  const previousDispatchLifecycle =
-    terminalDispatchLedgerLooksLifecycle(previousDispatchLedger);
-  const previousDispatchOwner = execution.preflightRequiresOwner(
-    previousDispatchLedger, previousDispatchLifecycle
-  )
-    ? loadTerminalDispatchLedgerOwner(previousDispatchLedger!)
-    : undefined;
-  const dispatchPreflight = execution.evaluatePreflight({
-    ledger: previousDispatchLedger,
-    owner: previousDispatchOwner,
-    conversation,
-    requestHash: terminalRequestHash,
-    requestText: terminalPayload,
-    messageId: message.id,
-    terminalTarget: terminalControl.target,
-    ledgerLifecycle: previousDispatchLifecycle,
-    statePathMatches: Boolean(previousDispatchOwner &&
-      sameCanonicalStatePath(previousDispatchLedger!.state_path, statePath)),
-    continuingTurnResponse
-  });
-  if (dispatchPreflight.action === "replay") {
-    presentTerminalDispatchReplay(dispatchPreflight, presentationContext,
-      presentationPorts);
-    return;
-  }
-  if (bridge) {
-    assertNoUnresolvedTerminalBridgeSubmission(
-      lockedStoreDir,
-      terminalControl,
-      conversation.conversation_id,
-      terminalPayload
-    );
-  }
-  const sendTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const terminalAgentPid = Number(sendTakeover?.terminal_agent_pid);
-  const expectedManagedNativeThreadId = stringValue(
-    sendTakeover?.terminal_agent_expected_session_id
-  ) ?? stringValue(sendTakeover?.terminal_agent_session_id);
-  const candidateSetAnchor = terminalSendCandidateAcceptanceAnchor(request);
-  const currentNativeIdentity = candidateSetAnchor
-    ? undefined
-    : await execution.resolveCurrentNativeIdentity({
-        agent: executor.kind,
-        pid: terminalAgentPid,
-        cwd: terminalControl.currentPath,
-        preferredSessionId: allowedPreMaterializationIdentity
-          ? expectedManagedNativeThreadId
-          : undefined,
-        allowedCompanionIdentity: allowedPreMaterializationIdentity,
-        allowedAdditionalIdentities
-      });
-  const virginRawAttach = Boolean(
-    recordRawAttachmentAfterSend &&
-    !stringValue(sendTakeover?.terminal_agent_session_id)
-  );
-  const pendingManagedNativeBinding = Boolean(
-    !stringValue(sendTakeover?.terminal_agent_session_id) &&
-    stringValue(sendTakeover?.terminal_agent_expected_session_id)
-  );
-  const needsPostSendNativeBinding =
-    virginRawAttach || pendingManagedNativeBinding;
-  assertTerminalNativeBindingBeforeSend({
-    execution,
-    conversation,
-    currentNativeIdentity,
-    needsPostSendNativeBinding,
-    allowedPreMaterializationIdentity
-  });
-  const preSendRuntime = terminalPreSendRuntime({
-    request,
-    terminalControl,
-    terminalAgentPid
-  }, {
-    terminalRuntimeForLiveIdentity,
-    terminalRuntimeIdentityForConversation
-  });
-  let preSendScreenFingerprint: string | undefined;
-  let codexRolloutAcceptanceAnchor: CodexRolloutAcceptanceAnchor | undefined;
-  let claudeTranscriptAnchor: ClaudeTranscriptAnchor | undefined;
-  const claudeHome = executor.kind === "claude"
-    ? path.resolve(expandHome(options.claudeHome) ?? defaultClaudeHome())
-    : undefined;
-  try {
-    const status = await terminalBridge.status(executor.kind, terminalControl, {
-      scrollbackLines: options.identifyForeground === true
-        ? foregroundIdentificationAuthority.current(options)
-            ?.observationScrollbackLines ?? 240
-        : Number(options.scrollbackLines ?? 120),
-      runtime: preSendRuntime
-    });
-    foregroundIdentificationAuthority.assertCurrent({
-      options,
-      executor,
-      terminalControl,
-      terminalAgentPid,
-      status
-    });
-    assertTerminalPreSendStatus({ request, status }, {
-      assertSafeTerminalSend
-    });
-    const userExplicitManagedCodexAttempt = Boolean(
-      stringValue(options.expectedUserExplicitTerminalToken)
-    );
-    if (
-      executor.kind === "claude" &&
-      userExplicitManagedCodexAttempt &&
-      !isExactClaudeNativeInspectionIdleComposer(
-        status.screen.excerpt ?? ""
-      )
-    ) {
-      throw new Error(
-        "Claude composer is not exactly empty for managed user Send"
-      );
-    }
-    if (
-      executor.kind === "codex" &&
-      (needsPostSendNativeBinding || userExplicitManagedCodexAttempt)
-    ) {
-      if (
-        needsPostSendNativeBinding &&
-        (pendingManagedNativeBinding || allowedPreMaterializationIdentity)
-      ) {
-        const expectedForegroundId = stringValue(
-          sendTakeover?.terminal_agent_expected_session_id
-        );
-        const foreground = createRuntimeTerminalAgentRegistry(options)
-          .require("codex")
-          .observeThreadLifecycle?.({
-            operation: { kind: "new_thread" },
-            phase: "before",
-            screen: status.screen.excerpt ?? ""
-          });
-        if (
-          !expectedForegroundId ||
-          foreground?.status !== "observed" ||
-          foreground.nativeThreadId !== expectedForegroundId
-        ) {
-          throw new Error(
-            "Codex foreground thread changed after the managed /status proof; " +
-            "refresh list before sending"
-          );
-        }
-      }
-      await assertCodexComposerReadyForAutomatedInput({
-        options,
-        terminalControl
-      });
-    }
-    if (bridge) {
-      preSendScreenFingerprint = stringValue(status.screen.digest) ??
-        terminalBridgeScreenFingerprint(status.screen.excerpt);
-      if (executor.kind === "codex") {
-        codexRolloutAcceptanceAnchor = execution.captureCodexAcceptanceAnchor({
-          currentIdentity: currentNativeIdentity,
-          expectedNativeThreadId: expectedManagedNativeThreadId,
-          boundProcessUuid: stringValue(
-            sendTakeover?.terminal_agent_process_uuid
-          ),
-          boundProcessBirth: stringValue(
-            sendTakeover?.terminal_agent_process_birth
-          ),
-          allowedPreMaterializationIdentity,
-          needsPostSendNativeBinding,
-          candidateSetAnchor
-        });
-      } else {
-        claudeTranscriptAnchor = captureClaudeTranscriptAnchor({
-          sessionId: preSendRuntime.sessionId,
-          cwd: preSendRuntime.cwd,
-          pid: preSendRuntime.pid,
-          claudeHome,
-          agentRows: loadClaudeAgentRows(options)
-        });
-        if (!claudeTranscriptAnchor) {
-          throw new Error(
-            "the completion monitor could not bind an owner-private Claude transcript boundary"
-          );
-        }
-      }
-    }
-  } catch (error) {
-    throw new Error(
-      `refusing to send to ${executor.display_name} without a verified idle terminal: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
-  }
+function terminalDispatchPreparationPorts(): TerminalDispatchPreparationPorts {
   return {
-    route, bridge, terminalControl, lockedStoreDir, statePath, logPath,
-    terminalBridge, execution, bridgeStartedAt, submissionPreparedAt,
-    agentTimeoutMinutes, agentHardTimeoutMinutes,
-    terminalPayload, terminalRequestHash,
-    presentationContext, presentationPorts, previousDispatchLedger,
-    sendTakeover, terminalAgentPid, needsPostSendNativeBinding, preSendRuntime,
-    preSendScreenFingerprint, codexRolloutAcceptanceAnchor,
-    claudeTranscriptAnchor, claudeHome
+    assertCodexComposerReadyForAutomatedInput,
+    assertNoUnresolvedTerminalBridgeSubmission,
+    assertSafeTerminalSend,
+    createRegistry: createRuntimeTerminalAgentRegistry,
+    createTerminalBridge: createTerminalAgentBridge,
+    execution: terminalDispatchExecution,
+    foregroundProofs: foregroundIdentificationAuthority,
+    loadClaudeAgentRows,
+    loadDispatchLedger: loadTerminalBridgeDispatchLedger,
+    loadDispatchOwner: loadTerminalDispatchLedgerOwner,
+    now: cliNow,
+    positiveMinutes,
+    reconcilePreparedLedger: reconcilePreparedTerminalDispatchLedger,
+    requestFingerprint: terminalBridgeRequestFingerprint,
+    required,
+    resolveLedgerPaneIncarnation:
+      resolveTerminalDispatchLedgerPaneIncarnation,
+    terminalBridgeEnabled,
+    terminalRuntimeForLiveIdentity,
+    terminalRuntimeIdentityForConversation,
+    presentation: {
+      write: printJson,
+      budget: budgetAction,
+      nextAction: openClawYieldNextAction,
+      summarize: textSummary
+    }
   };
 }
 
-type PreparedTerminalControlSend = NonNullable<Awaited<
-  ReturnType<typeof prepareTerminalControlSend>
->>;
 async function resolveTerminalDispatchSubmissionOwner(
   prepared: PreparedTerminalControlSend,
   request: TerminalControlSendRequest,
@@ -9564,9 +9333,18 @@ async function runTerminalControlSend(
     deferredCodexForegroundBinding,
     deferZeroInputFailurePresentation = false
   } = request;
-  let prepared: Awaited<ReturnType<typeof prepareTerminalControlSend>>;
+  let prepared: PreparedTerminalControlSend | undefined;
   try {
-    prepared = await prepareTerminalControlSend(request);
+    prepared = await prepareTerminalControlSend(
+      request,
+      terminalDispatchPreparationPorts(),
+      {
+        agentTimeoutMinutes: DEFAULT_AGENT_TIMEOUT_MINUTES,
+        agentHardTimeoutMinutes: DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+        ordinaryScrollbackLines: 120,
+        foregroundScrollbackLines: 240
+      }
+    );
   } catch (error) {
     if (deferZeroInputFailurePresentation) {
       return { outcome: "zero_input", failure: error };
