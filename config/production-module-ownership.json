@@ -601,6 +601,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/codex-process-incarnation.ts",
+      "owner": "terminal-identity-authority"
+    },
+    {
       "path": "src/codex-session-provider.ts",
       "owner": "agent-session-core"
     },
