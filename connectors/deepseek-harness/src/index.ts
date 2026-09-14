@@ -3,13 +3,12 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Context } from "@deepseek-ai/cordis";
 import type { CommandDefinition } from "@deepseek-ai/dsh-commands";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
-import type { SkillRegistration } from "@deepseek-ai/dsh-skill";
 import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
 import {
@@ -38,21 +37,12 @@ import {
   compileAuthoritativeInputValidator,
   type AssertSupportedJsonSchema,
 } from "./schema-adapter.js";
+import { loadBundledAkkSkill } from "./bundled-skill.js";
 
 export const name = CONNECTOR_NAME;
 export const inject = ["agents", "commands", "tools", "skills"];
 
 const EXPECTED_TOOL_COUNT = 22;
-const BUNDLED_SKILL_NAME = "agent-knock-knock";
-const BUNDLED_SKILL_DESCRIPTION =
-  "Control local Codex and Claude Code through shared tmux or Herdr terminals with Agent Knock Knock.";
-const BUNDLED_SKILL_HEADER = [
-  "---",
-  `name: ${BUNDLED_SKILL_NAME}`,
-  `description: ${BUNDLED_SKILL_DESCRIPTION}`,
-  "---",
-  "",
-].join("\n");
 
 export interface Config {
   /** AKK reconciliation cadence for the one shared Host lifecycle service. */
@@ -191,47 +181,6 @@ export async function applyWithDependencies(
     resources.remove();
     throw error;
   }
-}
-
-function loadBundledAkkSkill(): SkillRegistration {
-  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.resolve(moduleDirectory, "..", "skills", BUNDLED_SKILL_NAME, "SKILL.md"),
-    path.resolve(moduleDirectory, "..", "..", "skills", BUNDLED_SKILL_NAME, "SKILL.md"),
-  ];
-  const skillPath = candidates.find((candidate) => fs.existsSync(candidate));
-  if (!skillPath) {
-    throw new Error(
-      "agent-knock-knock-deepseek-harness is missing its bundled agent-knock-knock skill",
-    );
-  }
-  const document = fs.readFileSync(skillPath, "utf8");
-  if (!document.startsWith(BUNDLED_SKILL_HEADER)) {
-    throw new Error(
-      "agent-knock-knock-deepseek-harness found an invalid bundled skill header",
-    );
-  }
-  const content = document.slice(BUNDLED_SKILL_HEADER.length).trim();
-  if (!content) {
-    throw new Error(
-      "agent-knock-knock-deepseek-harness found an empty bundled skill",
-    );
-  }
-  return Object.freeze({
-    name: BUNDLED_SKILL_NAME,
-    description: BUNDLED_SKILL_DESCRIPTION,
-    source: "bundled",
-    content,
-    path: skillPath,
-    resourceBase: {
-      kind: "directory" as const,
-      path: path.dirname(skillPath),
-    },
-    invocation: {
-      modelInvocable: true,
-      userInvocable: true,
-    },
-  });
 }
 
 function commandDefinition(

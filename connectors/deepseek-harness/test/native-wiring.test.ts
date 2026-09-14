@@ -136,6 +136,10 @@ test("mounts native command/tools and routes every call through the exact Agent"
   assert.equal(tools.length, 22);
   assert.equal(skills.length, 1);
   assert.equal(skills[0]?.name, "agent-knock-knock");
+  assert.equal(
+    skills[0]?.description,
+    "Control local Codex and Claude Code through shared tmux or Herdr terminals with Agent Knock Knock.",
+  );
   assert.equal(skills[0]?.source, "bundled");
   assert.deepEqual(skills[0]?.invocation, {
     modelInvocable: true,
