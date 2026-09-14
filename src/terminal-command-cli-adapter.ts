@@ -229,9 +229,11 @@ import type {
   TerminalDispatchExecutionService
 } from "./terminal-dispatch-execution.js";
 import {
-  CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES,
-  type CodexForegroundIdentificationProof
+  CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES
 } from "./native-thread-lifecycle-cli-adapter.js";
+import {
+  createCodexForegroundProofAuthority
+} from "./terminal-command-foreground-proof.js";
 import {
   presentTerminalCompleted,
   presentTerminalDispatchReplay,
@@ -280,12 +282,6 @@ export interface TerminalCommandCliFacade {
 
 const terminalCommandContext =
   new AsyncLocalStorage<TerminalCommandCliDependencies>();
-
-// An atomic identify-and-send proof is deliberately an in-process,
-// unforgeable side channel. It must never be accepted from CLI arguments or
-// persisted as Session authority.
-const foregroundIdentificationProofs =
-  new WeakMap<object, CodexForegroundIdentificationProof>();
 
 function terminalCommandRuntime(): TerminalCommandCliDependencies {
   const runtime = terminalCommandContext.getStore();
@@ -439,6 +435,14 @@ const withTerminalBridgeSubmission = rawPort("withTerminalBridgeSubmission");
 const withTerminalDispatchStateScope = rawPort("withTerminalDispatchStateScope");
 const userExplicitFallbackWatchReceipt =
   rawPort("userExplicitFallbackWatchReceipt");
+
+const foregroundIdentificationAuthority =
+  createCodexForegroundProofAuthority({
+    createRegistry: (options) =>
+      createRuntimeTerminalAgentRegistry(options),
+    nowMs: () => cliNowMs(),
+    processIncarnationForPid: (pid) => processIncarnationForPid(pid)
+  });
 
 const mutationDispatchLedger = new Proxy({}, {
   get: (_target, property) =>
@@ -6263,7 +6267,7 @@ async function runManagedRawTerminalSendAttempt(
   const rawStoreDir = storeDirFromOptions(options);
   let controlSendResult: TerminalControlSendResult | undefined;
   const atomicForegroundIdentification = options.identifyForeground === true;
-  foregroundIdentificationProofs.delete(options);
+  foregroundIdentificationAuthority.clear(options);
   const userExplicitLockOptions: TerminalWriterMutationLockOptions | undefined =
     deferZeroInputFailurePresentation
       ? {
@@ -6293,7 +6297,7 @@ async function runManagedRawTerminalSendAttempt(
                 "foreground identification returned evidence for a different terminal"
               );
             }
-            foregroundIdentificationProofs.set(options, proof);
+            foregroundIdentificationAuthority.remember(options, proof);
           }
         }
       : userExplicitLockOptions;
@@ -8226,81 +8230,6 @@ async function runTerminalConversationApprove({
   }
 }
 
-function assertAtomicForegroundIdentificationProof(input: {
-  options: Record<string, any>;
-  executor: Executor;
-  terminalControl: TerminalControlRef;
-  terminalAgentPid: number;
-  status: TerminalBridgeStatus;
-}): void {
-  if (input.options.identifyForeground !== true) return;
-  if (input.executor.kind !== "codex") {
-    throw new Error(
-      "atomic foreground identification currently supports only Codex terminals"
-    );
-  }
-  const proof = foregroundIdentificationProofs.get(input.options);
-  if (!proof) {
-    throw new Error(
-      "atomic foreground identification proof is unavailable; no task input was sent"
-    );
-  }
-  const expiresAtMs = Date.parse(proof.expiresAt);
-  if (!Number.isFinite(expiresAtMs) || cliNowMs() >= expiresAtMs) {
-    throw new Error(
-      "atomic foreground identification proof expired before task dispatch; no task input was sent"
-    );
-  }
-  const processIncarnation = processIncarnationForPid(input.terminalAgentPid);
-  if (
-    proof.pid !== input.terminalAgentPid ||
-    proof.processUuid !== processIncarnation.processUuid ||
-    proof.processBirth !== processIncarnation.processBirth
-  ) {
-    throw new Error(
-      "Codex process incarnation changed after foreground identification; no task input was sent"
-    );
-  }
-  const cwd = stringValue(input.terminalControl.currentPath);
-  let realCwd: string | undefined;
-  try {
-    realCwd = cwd ? fs.realpathSync(cwd) : undefined;
-  } catch {
-    realCwd = undefined;
-  }
-  if (!realCwd || realCwd !== proof.realCwd) {
-    throw new Error(
-      "Codex terminal cwd changed after foreground identification; no task input was sent"
-    );
-  }
-  if (
-    !stringValue(input.status.screen.digest) ||
-    input.status.screen.digest !== proof.postProbeScreenDigest
-  ) {
-    throw new Error(
-      "Codex screen generation changed after foreground identification; no task input was sent"
-    );
-  }
-  const observation = createRuntimeTerminalAgentRegistry(input.options)
-    .require("codex")
-    .observeNativeInspection?.({
-      operation: { kind: "status" },
-      screen: input.status.screen.excerpt ?? "",
-      expectedNativeThreadId: proof.nativeThreadId,
-      expectedAgentVersion: proof.agentVersion,
-      expectedCwd: proof.realCwd
-    });
-  if (
-    observation?.status !== "observed" ||
-    observation.nativeThreadId !== proof.nativeThreadId ||
-    observation.evidenceFingerprint !== proof.evidenceFingerprint
-  ) {
-    throw new Error(
-      "Codex /status identity changed after foreground identification; no task input was sent"
-    );
-  }
-}
-
 async function prepareTerminalControlSend(
   request: TerminalControlSendRequest
 ) {
@@ -8440,12 +8369,12 @@ async function prepareTerminalControlSend(
   try {
     const status = await terminalBridge.status(executor.kind, terminalControl, {
       scrollbackLines: options.identifyForeground === true
-        ? foregroundIdentificationProofs.get(options)
+        ? foregroundIdentificationAuthority.current(options)
             ?.observationScrollbackLines ?? 240
         : Number(options.scrollbackLines ?? 120),
       runtime: preSendRuntime
     });
-    assertAtomicForegroundIdentificationProof({
+    foregroundIdentificationAuthority.assertCurrent({
       options,
       executor,
       terminalControl,
@@ -9219,7 +9148,7 @@ function terminalDispatchTransportLifecycle({
         ...lifecycle,
         beforeText: async () => {
           await lifecycleBeforeText?.();
-          const proof = foregroundIdentificationProofs.get(options);
+          const proof = foregroundIdentificationAuthority.current(options);
           const status = await prepared.terminalBridge.status(
             request.executor.kind,
             prepared.terminalControl,
@@ -9230,7 +9159,7 @@ function terminalDispatchTransportLifecycle({
                 CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES
             }
           );
-          assertAtomicForegroundIdentificationProof({
+          foregroundIdentificationAuthority.assertCurrent({
             options,
             executor: request.executor,
             terminalControl: prepared.terminalControl,
