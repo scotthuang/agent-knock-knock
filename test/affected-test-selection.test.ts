@@ -765,7 +765,9 @@ test("unknown paths, Store/protocol, and shared authorities fail closed", async 
     "src/protocol.ts",
     "src/mutation-transaction.ts",
     "src/terminal-dispatch-ledger-codec.ts",
+    "scripts/architecture-health.js",
     "scripts/affected-test-selection.js",
+    "config/architecture-health-budget.json",
     "config/test-file-shards.json",
     "config/production-module-ownership.json",
     "tsconfig.json"

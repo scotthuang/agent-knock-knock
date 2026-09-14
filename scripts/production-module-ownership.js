@@ -28,7 +28,7 @@ import {
 
 export const PRODUCTION_OWNERSHIP_SCHEMA =
   "agent-knock-knock/production-module-ownership";
-export const PRODUCTION_OWNERSHIP_VERSION = 1;
+export const PRODUCTION_OWNERSHIP_VERSION = 2;
 export const DYNAMIC_IMPORT_POLICY = "literal-only-fail-closed";
 export const MAX_TARGETED_INTEGRATION_TESTS = 5;
 export const CLI_CORE_HARD_MAX_PHYSICAL_LOC = 8_000;
@@ -202,7 +202,6 @@ export function validateProductionModuleOwnershipManifest({
       manifest.architecture,
       [
         "cli_core_max_physical_loc",
-        "production_physical_loc",
         "cli_core_importers"
       ],
       "manifest architecture",
@@ -220,14 +219,6 @@ export function validateProductionModuleOwnershipManifest({
         "architecture cli_core_max_physical_loc must not exceed hard maximum " +
         CLI_CORE_HARD_MAX_PHYSICAL_LOC
       );
-    }
-    const productionPhysicalLoc =
-      manifest.architecture.production_physical_loc;
-    if (
-      !Number.isSafeInteger(productionPhysicalLoc) ||
-      productionPhysicalLoc < 1
-    ) {
-      errors.push("architecture production_physical_loc must be a positive integer");
     }
     const cliCoreImporters = manifest.architecture.cli_core_importers;
     if (!Array.isArray(cliCoreImporters)) {
@@ -255,7 +246,6 @@ export function validateProductionModuleOwnershipManifest({
       : [];
     architecture = Object.freeze({
       cliCoreMaxPhysicalLoc,
-      productionPhysicalLoc,
       cliCoreImporters: Object.freeze([...normalizedCliCoreImporters])
     });
   }
@@ -865,19 +855,13 @@ export function validateProductionArchitecture({
         `${CLI_CORE_HARD_MAX_PHYSICAL_LOC} (actual ${cliCorePhysicalLoc})`
       );
     }
-    if (cliCorePhysicalLoc !== ownership.architecture.cliCoreMaxPhysicalLoc) {
+    if (cliCorePhysicalLoc > ownership.architecture.cliCoreMaxPhysicalLoc) {
       errors.push(
-        `${cliCorePath} physical LOC does not match manifest ratchet ` +
+        `${cliCorePath} physical LOC exceeds manifest budget ` +
         `${ownership.architecture.cliCoreMaxPhysicalLoc} ` +
         `(actual ${cliCorePhysicalLoc})`
       );
     }
-  }
-  if (productionPhysicalLoc !== ownership.architecture.productionPhysicalLoc) {
-    errors.push(
-      `production physical LOC does not match manifest ratchet ` +
-      `${ownership.architecture.productionPhysicalLoc} (actual ${productionPhysicalLoc})`
-    );
   }
 
   const actualCliCoreImporters = [...graph]

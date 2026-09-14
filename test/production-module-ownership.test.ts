@@ -42,6 +42,7 @@ test("production ownership covers every source module and preserves architecture
     assert.equal(ownership.modules[mandatoryPath]?.selection, "full", mandatoryPath);
   }
   assert.equal(ownershipModule.MAX_TARGETED_INTEGRATION_TESTS, 5);
+  assert.equal(ownershipModule.PRODUCTION_OWNERSHIP_VERSION, 2);
   assert.equal(ownershipModule.CLI_CORE_HARD_MAX_PHYSICAL_LOC, 8_000);
   for (const [domainName, domain] of Object.entries(ownership.domains) as Array<[
     string,
@@ -75,14 +76,11 @@ test("production ownership covers every source module and preserves architecture
     approximateComplexityExclusive: 20
   });
   assert.ok(architecture.productionFunctionDefaultViolations.length > 0);
-  assert.equal(
-    architecture.cliCorePhysicalLoc,
-    loadManifest().architecture.cli_core_max_physical_loc
+  assert.ok(
+    architecture.cliCorePhysicalLoc <=
+      loadManifest().architecture.cli_core_max_physical_loc
   );
-  assert.equal(
-    architecture.productionPhysicalLoc,
-    loadManifest().architecture.production_physical_loc
-  );
+  assert.ok(architecture.productionPhysicalLoc > 0);
   assert.deepEqual(architecture.cliCoreImporters, ["src/cli.ts"]);
   assert.equal(
     ownershipModule.DYNAMIC_IMPORT_POLICY,
@@ -161,9 +159,7 @@ test("cli-core hard maximum rejects coordinated source and ratchet tampering", a
     ...ownership,
     architecture: Object.freeze({
       ...ownership.architecture,
-      cliCoreMaxPhysicalLoc: tamperedLoc,
-      productionPhysicalLoc:
-        ownership.architecture.productionPhysicalLoc + addedLoc
+      cliCoreMaxPhysicalLoc: tamperedLoc
     })
   };
 
@@ -206,20 +202,9 @@ test("canonical status policies reject duplicate definitions and inline tables",
       "];"
   ].join("\n") + "\n";
   const tampered = original + duplicate;
-  const addedLoc = ownershipModule.physicalLineCount(tampered) -
-    ownershipModule.physicalLineCount(original);
-  const tamperedOwnership = {
-    ...ownership,
-    architecture: Object.freeze({
-      ...ownership.architecture,
-      productionPhysicalLoc:
-        ownership.architecture.productionPhysicalLoc + addedLoc
-    })
-  };
-
   assert.throws(
     () => ownershipModule.validateProductionArchitecture({
-      ownership: tamperedOwnership,
+      ownership,
       repoRoot,
       readSource(modulePath: string) {
         return modulePath === target ? tampered : source(modulePath);
@@ -235,7 +220,6 @@ test("canonical status policies reject duplicate definitions and inline tables",
         error.message,
         /canonical status table deferred_foreground_final must occur exactly once/u
       );
-      assert.doesNotMatch(error.message, /production physical LOC does not match/u);
       return true;
     }
   );
@@ -290,6 +274,13 @@ test("production ownership rejects missing, duplicate, unknown, and stale entrie
     /cli_core_max_physical_loc must not exceed hard maximum 8000/u
   );
 
+  const legacyTotalLocRatchet = loadManifest();
+  legacyTotalLocRatchet.architecture.production_physical_loc = 144_726;
+  assert.throws(
+    () => validate(legacyTotalLocRatchet),
+    /unexpected keys: production_physical_loc/u
+  );
+
   const missingCore = loadManifest();
   missingCore.modules = missingCore.modules.filter(
     (entry: { path: string }) => entry.path !== "src/protocol.ts"
@@ -310,7 +301,7 @@ test("production ownership rejects missing, duplicate, unknown, and stale entrie
   assert.throws(() => validate(cycleEscapeHatch), /unexpected keys: allow_import_cycles/u);
 });
 
-test("architecture checks reject production LOC drift and unapproved reverse imports", async () => {
+test("architecture checks reject core growth and reverse imports without gating total LOC", async () => {
   const ownershipModule = await loadOwnershipModule();
   const ownership = ownershipModule.loadAndValidateProductionModuleOwnership({
     repoRoot,
@@ -319,7 +310,6 @@ test("architecture checks reject production LOC drift and unapproved reverse imp
   const source = (modulePath: string) =>
     fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
   const ratchet = loadManifest().architecture.cli_core_max_physical_loc;
-  const productionRatchet = loadManifest().architecture.production_physical_loc;
 
   assert.throws(
     () => ownershipModule.validateProductionArchitecture({
@@ -332,30 +322,23 @@ test("architecture checks reject production LOC drift and unapproved reverse imp
           : original;
       }
     }),
-    new RegExp(`manifest ratchet ${ratchet} \\(actual ${ratchet + 1}\\)`, "u")
+    new RegExp(`manifest budget ${ratchet} \\(actual ${ratchet + 1}\\)`, "u")
   );
 
-  assert.throws(
+  assert.doesNotThrow(
     () => ownershipModule.validateProductionArchitecture({
       ownership,
       repoRoot,
       readSource(modulePath: string) {
         const original = source(modulePath);
-        if (modulePath !== "src/cli-core.ts") {
-          return original;
-        }
-        const lines = original.split(/\r?\n/u);
-        if (lines.at(-1) === "") {
-          lines.pop();
-        }
-        lines.pop();
-        return `${lines.join("\n")}\n`;
+        return modulePath === "src/cli-core.ts"
+          ? original.replace("\n\n", "\n")
+          : original;
       }
-    }),
-    new RegExp(`manifest ratchet ${ratchet} \\(actual ${ratchet - 1}\\)`, "u")
+    })
   );
 
-  assert.throws(
+  assert.doesNotThrow(
     () => ownershipModule.validateProductionArchitecture({
       ownership,
       repoRoot,
@@ -365,36 +348,7 @@ test("architecture checks reject production LOC drift and unapproved reverse imp
           ? `${original}// unapproved production growth\n`
           : original;
       }
-    }),
-    new RegExp(
-      `production physical LOC does not match manifest ratchet ` +
-      `${productionRatchet} \\(actual ${productionRatchet + 1}\\)`,
-      "u"
-    )
-  );
-
-  assert.throws(
-    () => ownershipModule.validateProductionArchitecture({
-      ownership,
-      repoRoot,
-      readSource(modulePath: string) {
-        const original = source(modulePath);
-        if (modulePath !== "src/runtime-log.ts") {
-          return original;
-        }
-        const lines = original.split(/\r?\n/u);
-        if (lines.at(-1) === "") {
-          lines.pop();
-        }
-        lines.pop();
-        return `${lines.join("\n")}\n`;
-      }
-    }),
-    new RegExp(
-      `production physical LOC does not match manifest ratchet ` +
-      `${productionRatchet} \\(actual ${productionRatchet - 1}\\)`,
-      "u"
-    )
+    })
   );
 
   assert.throws(

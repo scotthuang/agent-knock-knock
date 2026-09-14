@@ -1,0 +1,51 @@
+{
+  "schema": "agent-knock-knock/architecture-health-budget",
+  "version": 1,
+  "snapshot": {
+    "git_commit": "0667537ac6efe116c5261fa33370a4190f2d2226",
+    "package_version": "0.13.3",
+    "measured_on": "2026-09-15",
+    "observations": {
+      "production_modules": 155,
+      "production_physical_loc": 144726,
+      "production_functions": 5926,
+      "import_edges": 1004,
+      "default_function_violations": 338,
+      "files_over_2000_physical_loc": 19
+    }
+  },
+  "budgets": {
+    "max_import_cycles": 0,
+    "max_hard_function_violations": 0,
+    "max_default_function_violations": 338,
+    "large_file_threshold_physical_loc": 2000,
+    "max_large_production_files": 19,
+    "hotspot_max_physical_loc": {
+      "src/claude-local-transcript-provider.ts": 3534,
+      "src/openclaw-plugin-command-adapter.ts": 3817,
+      "src/terminal-agent-bridge.ts": 7409,
+      "src/terminal-command-cli-adapter.ts": 10421,
+      "src/terminal-list-cli-adapter.ts": 5093,
+      "src/terminal-monitor-state-cli-adapter.ts": 3478,
+      "src/terminal-watch-cli-adapter.ts": 3683,
+      "src/terminal-watch-store.ts": 3191
+    }
+  },
+  "contract_sync": {
+    "connector_tool_count_sources": [
+      {
+        "path": "connectors/deepseek-harness/src/index.ts",
+        "constant": "EXPECTED_TOOL_COUNT"
+      },
+      {
+        "path": "connectors/pi/src/index.ts",
+        "constant": "EXPECTED_TOOL_COUNT"
+      }
+    ],
+    "canonical_skill": "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+    "skill_replicas": [
+      "connectors/deepseek-harness/skills/agent-knock-knock/SKILL.md",
+      "connectors/pi/skills/agent-knock-knock/SKILL.md"
+    ]
+  }
+}
