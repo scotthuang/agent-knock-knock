@@ -1005,6 +1005,10 @@
       "owner": "terminal-list-application"
     },
     {
+      "path": "src/terminal-list-inventory.ts",
+      "owner": "terminal-list-application"
+    },
+    {
       "path": "src/terminal-list-renderer.ts",
       "owner": "terminal-list-renderer"
     },

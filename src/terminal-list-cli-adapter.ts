@@ -57,7 +57,6 @@ import {
   STORE_SESSION_AUTHORITY_PROTOCOL
 } from "./store.js";
 import {
-  parseTerminalConversationId,
   type TerminalAgentAdapterRegistry,
   type ActiveTerminalProcess,
   type TerminalControlRef,
@@ -113,7 +112,6 @@ import {
   isCompleteNativeRollout,
   nativeAgentIdentityMatchesTurn,
   processIncarnationRelationship,
-  selectRootTerminalProcesses,
   terminalControlAliasMatches,
   terminalControlsShareIncarnation,
   verifiedEmptyCodexHandoffToken,
@@ -163,6 +161,11 @@ import {
   terminalControlEvidenceMatches
 } from "./terminal-control-ref.js";
 import type { TerminalControlProvider } from "./terminal-control-provider.js";
+import {
+  collectTerminalListInventory,
+  type TerminalListInventoryEntry,
+  type TerminalListInventoryScan
+} from "./terminal-list-inventory.js";
 import { validTerminalMonitorTimestampMs as validTimestampMs } from
   "./terminal-monitor-decision-policy.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
@@ -238,29 +241,8 @@ interface DeferredCodexAuthorityObservation {
   exactSource: boolean;
 }
 
-export interface TerminalListScanEntry {
-  agent?: string;
-  activity_state?: string;
-  durable_activity_reason?: string;
-  durable_activity_state?: string;
-  cwd?: string;
-  id?: string;
-  native_identity_state?: string;
-  screen_reason?: string;
-  screen_state?: string;
-  short_ref?: string;
-  terminal_control?: { target?: string; [field: string]: unknown };
-  workspace?: string;
-  [field: string]: unknown;
-}
-
-export interface TerminalListScan {
-  terminalControlled: TerminalListScanEntry[];
-  summary: {
-    error?: string;
-    [field: string]: unknown;
-  };
-}
+export type TerminalListScanEntry = TerminalListInventoryEntry;
+export type TerminalListScan = TerminalListInventoryScan;
 
 export type ExactTerminalListObservation =
   | {
@@ -981,7 +963,7 @@ async function reconcileStoreForList(storeDir, options) {
 async function buildTerminalListGroup({
   options,
   agentFilter,
-  statusFilter,
+  statusFilter: _statusFilter,
   terminalId
 }: {
   options: TerminalListCliOptions;
@@ -989,208 +971,30 @@ async function buildTerminalListGroup({
   statusFilter?: string;
   terminalId?: string;
 }): Promise<TerminalListScan> {
-  const empty = {
-    terminalControlled: [],
-    summary: {
-      enabled: false,
-      agents: [],
-      error: undefined
-    }
-  };
-  if (options.managedOnly) {
-    return empty;
-  }
-  const registry = terminalListRuntime().createRuntimeTerminalAgentRegistry(options);
-  const adapters = agentFilter
-    ? [registry.get(agentFilter)].filter((adapter) => adapter !== undefined)
-    : registry.list();
-  if (agentFilter && adapters.length === 0) {
-    return {
-      ...empty,
-      summary: {
-        enabled: true,
-        agents: [],
-        skipped: `terminal agent adapter is not registered for ${agentFilter}`
-      }
-    };
-  }
-
-  const terminalProvider = terminalListRuntime().createTerminalControlProvider(options);
-  const bridge: TerminalAgentBridge = terminalListRuntime().createTerminalAgentBridge(
+  const runtime = terminalListRuntime();
+  return collectTerminalListInventory({
     options,
-    terminalProvider,
-    registry
-  );
-  const terminalDiagnostics = options.terminalDebug
-    ? await terminalControlDiagnostics(terminalProvider)
-    : undefined;
-  const exactTarget = terminalId
-    ? exactTerminalTargetDiagnostic(terminalId)
-    : undefined;
-  if (terminalId) {
-    runtimeLog("info", "terminal_exact_scan", {
-      stage: "started",
-      terminal_id: terminalId,
-      target: exactTarget
-    });
-  }
-  const terminalControlled: Record<string, any>[] = [];
-  let activeCount = 0;
-  const errors: string[] = [];
-  try {
-    const processSource = terminalListRuntime().createTerminalProcessSource(options);
-    const snapshots = await processSource.listProcessSnapshots((snapshot) =>
-      adapters.some((adapter) =>
-        adapter.capabilities.processDiscovery && adapter.classifyProcess(snapshot) !== undefined
+    agentFilter,
+    terminalId,
+    ports: {
+      createRegistry: (currentOptions) =>
+        runtime.createRuntimeTerminalAgentRegistry(currentOptions),
+      createBridge: (currentOptions, provider, registry) =>
+        runtime.createTerminalAgentBridge(currentOptions, provider, registry),
+      createProvider: (currentOptions) =>
+        runtime.createTerminalControlProvider(currentOptions),
+      createProcessSource: (currentOptions) =>
+        runtime.createTerminalProcessSource(currentOptions),
+      projectTerminal: ({ session, activeSessions, options: currentOptions,
+        bridge }) => terminalControlledListEntry(
+        session,
+        activeSessions,
+        currentOptions,
+        bridge
       ),
-      { includeAncestors: true }
-    );
-    if (terminalId) {
-      const targetPid = exactTarget?.pid;
-      runtimeLog("info", "terminal_exact_scan", {
-        stage: "process_inventory",
-        terminal_id: terminalId,
-        target_pid: targetPid,
-        snapshot_count: snapshots.length,
-        target_process_found: targetPid === undefined
-          ? undefined
-          : snapshots.some((snapshot) => snapshot.pid === targetPid),
-        target_process_snapshots: targetPid === undefined
-          ? []
-          : snapshots
-            .filter((snapshot) => snapshot.pid === targetPid)
-            .map((snapshot) => ({ pid: snapshot.pid, ppid: snapshot.ppid }))
-      });
+      log: runtimeLog
     }
-    const activeSessions: ActiveTerminalProcess[] = await bridge.listProcesses(
-      snapshots,
-      adapters.map((adapter) => adapter.agent)
-    );
-    const rootSessions = selectRootTerminalProcesses(activeSessions, snapshots);
-    const controlledSessions = rootSessions.filter(
-      (session) => session.terminalControl !== undefined
-    );
-    if (terminalId) {
-      const targetPid = exactTarget?.pid;
-      const targetSessions = targetPid === undefined
-        ? []
-        : activeSessions.filter((session) => session.pid === targetPid);
-      runtimeLog("info", "terminal_exact_scan", {
-        stage: "process_classification_and_association",
-        terminal_id: terminalId,
-        target_pid: targetPid,
-        classified_process_count: activeSessions.length,
-        root_process_count: rootSessions.length,
-        controlled_process_count: controlledSessions.length,
-        target_classified_count: targetSessions.length,
-        target_controlled_count: targetSessions.filter(
-          (session) => session.terminalControl !== undefined
-        ).length,
-        target_sessions: targetSessions.map((session) => ({
-          agent: session.agent,
-          pid: session.pid,
-          ppid: session.ppid,
-          kind: session.kind,
-          confidence: session.confidence,
-          selected_as_root: rootSessions.includes(session),
-          terminal_conversation_id: session.terminalControl
-            ? bridge.terminalConversationId(session)
-            : undefined,
-          terminal_control: terminalControlScanDiagnostic(
-            session.terminalControl
-          )
-        }))
-      });
-    }
-    activeCount = controlledSessions.length;
-    const selectedSessions = terminalId
-      ? activeSessions.filter(
-          (session) => session.terminalControl !== undefined &&
-            bridge.terminalConversationId(session) === terminalId
-        )
-      : controlledSessions;
-    for (const session of selectedSessions) {
-      try {
-        terminalControlled.push(await terminalControlledListEntry(
-          session,
-          activeSessions,
-          options,
-          bridge
-        ));
-      } catch (error) {
-        errors.push(
-          `terminal process ${session.pid}: ` +
-            (error instanceof Error ? error.message : String(error))
-        );
-      }
-    }
-  } catch (error) {
-    errors.push(error instanceof Error ? error.message : String(error));
-  }
-
-  if (terminalId) {
-    runtimeLog("info", "terminal_exact_scan", {
-      stage: "complete",
-      terminal_id: terminalId,
-      controlled_process_count: activeCount,
-      terminal_row_count: terminalControlled.length,
-      terminal_row_ids: terminalControlled.map((terminal) => terminal.id),
-      errors
-    });
-  }
-
-  return {
-    terminalControlled,
-    summary: {
-      enabled: true,
-      agents: adapters.map((adapter) => adapter.agent),
-      active_count: activeCount,
-      terminal_count: terminalControlled.length,
-      approval_scan: options.noApprovalScan ? "disabled" : "enabled",
-      diagnostics: terminalDiagnostics,
-      error: errors.length > 0 ? errors.join("; ") : undefined
-    }
-  };
-}
-
-function exactTerminalTargetDiagnostic(
-  terminalId: string
-): Record<string, unknown> | undefined {
-  try {
-    const parsed = parseTerminalConversationId(terminalId);
-    return parsed ? {
-      provider: parsed.kind,
-      agent: parsed.agent,
-      route: parsed.target,
-      pid: parsed.pid
-    } : undefined;
-  } catch (error) {
-    return {
-      parse_error: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
-function terminalControlScanDiagnostic(
-  terminalControl: TerminalControlRef | undefined
-): Record<string, unknown> | undefined {
-  if (!terminalControl) {
-    return undefined;
-  }
-  const control = terminalControl as unknown as Record<string, unknown>;
-  return {
-    kind: terminalControl.kind,
-    target: terminalControl.target,
-    pane_pid: control.panePid,
-    process_anchor_pid: control.processAnchorPid,
-    endpoint_key: control.endpointKey,
-    resource_key: control.resourceKey,
-    terminal_id: control.terminalId
-  };
-}
-
-async function terminalControlDiagnostics(provider: TerminalControlProvider) {
-  return provider.diagnostics();
+  });
 }
 
 function managedTurnListEntry(
