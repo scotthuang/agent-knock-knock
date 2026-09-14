@@ -643,6 +643,43 @@ test("Codex 0.154 exact /model residual advertises typed continuation and repair
   assert.equal(unsafeActions.model_options, undefined);
 });
 
+test("one terminal row samples each observation source once", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-single-observation-facts-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    false,
+    "› /model\n\n/model  choose what model and reasoning effort to use",
+    {
+      agentVersion: "0.154.0",
+      nativeIdentityObservation: "verified_absent",
+      modelControlResidual: "popup"
+    }
+  );
+
+  assert.deepEqual(fixture.observationCounts, {
+    status: 1,
+    nativeIdentity: 1,
+    openRootInventory: 1,
+    agentVersion: 1,
+    lifecycleCapability: 1,
+    nativeInspectionCapability: 1,
+    modelControlCapability: 1,
+    styledComposer: 1,
+    physicalProcessIncarnation: 1,
+    modelControlResidual: 1
+  });
+});
+
 test("list reports the unique physical Codex root when a stale managed preference rejects it", async (t) => {
   const root = fs.mkdtempSync(path.join(
     os.tmpdir(),
@@ -2506,15 +2543,43 @@ async function createCodexRolloutListFixture(
         nestedSession
       ]
     : [];
-  const registry = new TerminalAgentAdapterRegistry([
-    createCodexTerminalAgentAdapter()
-  ]);
+  const observationCounts = {
+    status: 0,
+    nativeIdentity: 0,
+    openRootInventory: 0,
+    agentVersion: 0,
+    lifecycleCapability: 0,
+    nativeInspectionCapability: 0,
+    modelControlCapability: 0,
+    styledComposer: 0,
+    physicalProcessIncarnation: 0,
+    modelControlResidual: 0
+  };
+  const codexAdapter = createCodexTerminalAgentAdapter();
+  const registry = new TerminalAgentAdapterRegistry([{
+    ...codexAdapter,
+    probeThreadLifecycle: (agentVersion) => {
+      observationCounts.lifecycleCapability += 1;
+      return codexAdapter.probeThreadLifecycle!(agentVersion);
+    },
+    probeNativeInspection: (agentVersion) => {
+      observationCounts.nativeInspectionCapability += 1;
+      return codexAdapter.probeNativeInspection!(agentVersion);
+    },
+    probeModelControl: (agentVersion) => {
+      observationCounts.modelControlCapability += 1;
+      return codexAdapter.probeModelControl!(agentVersion);
+    }
+  }]);
   const provider = {
     diagnostics: async () => ({}),
     endpoint: (value: unknown) =>
       terminalEndpointFromControlRef(value as TerminalControlRef),
     resolve: async (value: unknown) => value,
-    capture: async () => composerScreen
+    capture: async () => {
+      observationCounts.styledComposer += 1;
+      return composerScreen;
+    }
   };
   const bridge = {
     registry,
@@ -2526,21 +2591,25 @@ async function createCodexRolloutListFixture(
     terminalConversationId: (value: { pid: number }) => value.pid === 4241
       ? "terminal:v2:tmux:codex:durable:0.1:4241"
       : `terminal:v2:tmux:codex:durable:0.0:${value.pid}`,
-    status: async () => ({
-      approval_state: {
-        scanned: true,
-        blocked: false,
-        approvable: false,
-        reason: "no approval prompt"
-      },
-      activity_state: fixtureOptions.screenActivityState ?? "idle",
-      activity_reason: fixtureOptions.screenActivityState === "working"
-        ? "working fixture screen"
-        : "idle-looking fixture screen",
-      screen: { excerpt: composerScreen }
-    }),
-    inspectModelControlResidual: async () =>
-      fixtureOptions.modelControlResidual === "popup"
+    status: async () => {
+      observationCounts.status += 1;
+      return {
+        approval_state: {
+          scanned: true,
+          blocked: false,
+          approvable: false,
+          reason: "no approval prompt"
+        },
+        activity_state: fixtureOptions.screenActivityState ?? "idle",
+        activity_reason: fixtureOptions.screenActivityState === "working"
+          ? "working fixture screen"
+          : "idle-looking fixture screen",
+        screen: { excerpt: composerScreen }
+      };
+    },
+    inspectModelControlResidual: async () => {
+      observationCounts.modelControlResidual += 1;
+      return fixtureOptions.modelControlResidual === "popup"
         ? {
             state: "recoverable" as const,
             kind: "profiled_command_popup" as const,
@@ -2565,7 +2634,8 @@ async function createCodexRolloutListFixture(
               state: "unsafe" as const,
               reason: "not an exact model-control residual",
               terminalControl
-            }
+            };
+    }
   };
   const unusedGate = deferredGate();
   unusedGate.release();
@@ -2580,8 +2650,10 @@ async function createCodexRolloutListFixture(
       createTerminalProcessSource: () => ({
         listProcessSnapshots: async () => processSnapshots
       }),
-      agentVersionForRunningProcess: () =>
-        fixtureOptions.agentVersion ?? "0.150.1",
+      agentVersionForRunningProcess: () => {
+        observationCounts.agentVersion += 1;
+        return fixtureOptions.agentVersion ?? "0.150.1";
+      },
       codexLatentClearResumeObservation: () => undefined,
       codexManagedIdentityResolutionContext: () => ({
         companions: { primary: undefined, additional: [] },
@@ -2592,18 +2664,24 @@ async function createCodexRolloutListFixture(
         processBirth,
         evidence: "codex_process_birth"
       }),
-      processIncarnationForPid: (pid: number) => ({
-        processUuid: `process-pid:${pid}:birth:${processBirth}`,
-        processBirth,
-        evidence: "process_birth"
-      }),
-      inspectCodexOpenRootRolloutInventory: async () =>
-        codexOpenRootRolloutInventory,
+      processIncarnationForPid: (pid: number) => {
+        observationCounts.physicalProcessIncarnation += 1;
+        return {
+          processUuid: `process-pid:${pid}:birth:${processBirth}`,
+          processBirth,
+          evidence: "process_birth"
+        };
+      },
+      inspectCodexOpenRootRolloutInventory: async () => {
+        observationCounts.openRootInventory += 1;
+        return codexOpenRootRolloutInventory;
+      },
       nativeInspectionComposerEmpty: () =>
         fixtureOptions.modelControlResidual === undefined,
       observeCurrentNativeAgentSessionIdentity: async (
         request: { pid: number; preferredSessionId?: string }
       ) => {
+        observationCounts.nativeIdentity += 1;
         if (request.pid === 4241) {
           throw new Error("broken sibling identity probe");
         }
@@ -2708,6 +2786,7 @@ async function createCodexRolloutListFixture(
     processBirth,
     rolloutPath,
     nativeTurnId,
+    observationCounts,
     rememberedExpectedTerminalSelectors
   };
 }
