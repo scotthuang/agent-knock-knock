@@ -16,12 +16,15 @@ import {
   closeParameters,
   identifyAndSendParameters,
   identifyForegroundParameters,
+  modelOptionsParameters,
   nativeInspectParameters,
   newThreadParameters,
   reconcileBindingParameters,
+  repairModelControlParameters,
   respondInteractionParameters,
   resumeThreadParameters,
   sendParameters,
+  setModelParameters,
   unwatchParameters,
   watchParameters
 } from "../src/openclaw-plugin-schemas.js";
@@ -177,6 +180,9 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   const mutationSchemas = {
     send: sendParameters,
     native_inspect: nativeInspectParameters,
+    model_options: modelOptionsParameters,
+    repair_model_control: repairModelControlParameters,
+    set_model: setModelParameters,
     identify_foreground: identifyForegroundParameters,
     identify_and_send: identifyAndSendParameters,
     new_thread: newThreadParameters,
@@ -195,6 +201,21 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   assert.deepEqual(nativeInspectParameters.required, [
     "terminal_id",
     "inspection"
+  ]);
+  assert.deepEqual(modelOptionsParameters.required, ["terminal_id"]);
+  assert.deepEqual(repairModelControlParameters.required, ["terminal_id"]);
+  assert.deepEqual(Object.keys(repairModelControlParameters.properties), [
+    "terminal_id"
+  ]);
+  assert.deepEqual(setModelParameters.required, [
+    "terminal_id",
+    "model",
+    "reasoning_effort"
+  ]);
+  assert.deepEqual(Object.keys(setModelParameters.properties), [
+    "terminal_id",
+    "model",
+    "reasoning_effort"
   ]);
   assert.deepEqual(identifyForegroundParameters.required, ["terminal_id"]);
   assert.deepEqual(identifyAndSendParameters.required, [
@@ -844,6 +865,9 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     "agent_knock_knock_unwatch",
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_native_inspect",
+    "agent_knock_knock_model_options",
+    "agent_knock_knock_repair_model_control",
+    "agent_knock_knock_set_model",
     "agent_knock_knock_identify_foreground",
     "agent_knock_knock_identify_and_send",
     "agent_knock_knock_new_thread",
@@ -864,10 +888,10 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "f278c6cc5fed11899c5d02b940d8001597ea20dff69ebca4d0d44122b03102e2"
+    "947fad778a37d8ce08f8b3f9dd04fee5be60e3c72a042c84f050ca6214d3c3a7"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
-  assert.equal(contractedTools.length, 19);
+  assert.equal(contractedTools.length, 22);
   assert.match(
     manifest.description ?? "",
     /closed native status inspection/u
@@ -879,19 +903,14 @@ test("OpenClaw runtime registrations match the published manifest", () => {
 
   const listTool = toolDefinitions.get("agent_knock_knock_list");
   assert.ok(listTool);
-  assert.match(listTool.description ?? "", /terminals\[\]/u);
-  assert.match(listTool.description ?? "", /terminal_watches\[\]/u);
-  assert.match(listTool.description ?? "", /semantic IDs/u);
-  assert.match(listTool.description ?? "", /session_exact.*session_id/u);
-  assert.match(listTool.description ?? "", /terminal_follow_current.*terminal_id/u);
-  assert.match(
-    listTool.description ?? "",
-    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*replace_current_composer_and_submit[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*failure never changes a successful Send/u
-  );
-  assert.match(listTool.description ?? "", /managed controls use turn_id/u);
-  assert.match(
-    listTool.description ?? "",
-    /opaque freshness authority stay private/u
+  assert.match(listTool.description ?? "", /compact projection/u);
+  assert.match(listTool.description ?? "", /available_actions/u);
+  assert.match(listTool.description ?? "", /action_inputs/u);
+  assert.match(listTool.description ?? "", /agent-knock-knock skill/u);
+  assert.match(listTool.description ?? "", /privately revalidates/u);
+  assert.ok(
+    (listTool.description ?? "").length < 500,
+    "static List semantics belong in the bundled skill"
   );
   assert.doesNotMatch(listTool.description ?? "", /follow_up/u);
   assert.doesNotMatch(
@@ -920,6 +939,18 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     contractedTools.includes("agent_knock_knock_native_inspect"),
+    true
+  );
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_model_options"),
+    true
+  );
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_repair_model_control"),
+    true
+  );
+  assert.equal(
+    contractedTools.includes("agent_knock_knock_set_model"),
     true
   );
   assert.equal(
@@ -1233,20 +1264,21 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
     const actions = isRecord(terminal.available_actions)
       ? terminal.available_actions
       : {};
-    const send = isRecord(actions.send) && isRecord(actions.send.arguments)
-      ? actions.send.arguments
+    const actionInputs = isRecord(terminal.action_inputs)
+      ? terminal.action_inputs
       : {};
-    const sendAction = isRecord(actions.send) ? actions.send : {};
-    const approve = isRecord(actions.approve) &&
-        isRecord(actions.approve.arguments)
-      ? actions.approve.arguments
+    const sendAction = isRecord(actionInputs.send) ? actionInputs.send : {};
+    const send = isRecord(sendAction.arguments)
+      ? sendAction.arguments
       : {};
-    assert.equal(send.terminal_id, terminalId);
+    assert.equal(actions.send, true);
+    assert.equal(actions.approve, true);
+    assert.equal(Object.keys(send).length, 0);
     assert.equal(Object.hasOwn(send, "selector"), false);
     assert.equal(sendAction.scope, "terminal_user_explicit");
     assert.equal(
-      sendAction.composer_policy,
-      "replace_current_composer_and_submit"
+      Object.hasOwn(sendAction, "composer_policy"),
+      false
     );
     assert.equal(
       Object.hasOwn(terminal, "_user_explicit_composer_ready"),
@@ -1254,15 +1286,14 @@ test("OpenClaw list, threads, and status results expose semantic ids only", asyn
     );
     assert.equal(Object.hasOwn(terminal, "composer_digest"), false);
     assert.equal(Object.hasOwn(terminal, "composer_draft"), false);
-    assert.equal(approve.terminal_id, terminalId);
-    assert.equal(Object.hasOwn(approve, "conversation_id"), false);
-    const approveBeforeCall = isRecord(actions.approve) &&
-        isRecord(actions.approve.before_call)
-      ? actions.approve.before_call
-      : {};
-    assert.deepEqual(approveBeforeCall.arguments, {
-      conversation_id: terminalId
-    });
+    assert.equal(Object.hasOwn(actionInputs, "approve"), false);
+    assert.equal(
+      isRecord(listDetails.projection)
+        ? listDetails.projection.skill
+        : undefined,
+      "agent-knock-knock"
+    );
+    assert.equal(Object.hasOwn(listDetails, "action_contracts"), false);
     assert.equal(Object.hasOwn(listDetails, "session_revisions"), false);
     assert.equal(Object.hasOwn(listDetails, "binding_ids"), false);
     assert.equal(Object.hasOwn(listDetails, "terminal_binding_id"), false);
@@ -1434,7 +1465,7 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     manifest.toolMetadata.agent_knock_knock_respond_interaction.optional,
     true
   );
-  assert.equal(manifest.contracts.tools.length, 19);
+  assert.equal(manifest.contracts.tools.length, 22);
   for (const terminalWatchTool of [
     "agent_knock_knock_watch",
     "agent_knock_knock_unwatch"
@@ -1445,6 +1476,9 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   for (const lifecycleTool of [
     "agent_knock_knock_list_resumable_threads",
     "agent_knock_knock_native_inspect",
+    "agent_knock_knock_model_options",
+    "agent_knock_knock_repair_model_control",
+    "agent_knock_knock_set_model",
     "agent_knock_knock_identify_foreground",
     "agent_knock_knock_identify_and_send",
     "agent_knock_knock_new_thread",
@@ -1512,6 +1546,21 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.match(commandSource, /name: "agent_knock_knock_reconcile_binding"/u);
   assert.match(commandSource, /name: "agent_knock_knock_list_resumable_threads"/u);
   assert.match(commandSource, /name: "agent_knock_knock_native_inspect"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_model_options"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_repair_model_control"/u);
+  assert.match(commandSource, /name: "agent_knock_knock_set_model"/u);
+  assert.match(
+    commandSource,
+    /OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS = 15 \* 60_000[\s\S]*?name: "agent_knock_knock_model_options"[\s\S]*?timeoutMs: OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS/u
+  );
+  assert.match(
+    commandSource,
+    /OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS = 30 \* 60_000[\s\S]*?name: "agent_knock_knock_set_model"[\s\S]*?timeoutMs: OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS/u
+  );
+  assert.match(
+    commandSource,
+    /OPENCLAW_REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS = 2 \* 60_000[\s\S]*?name: "agent_knock_knock_repair_model_control"[\s\S]*?timeoutMs: OPENCLAW_REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS/u
+  );
   assert.match(commandSource, /name: "agent_knock_knock_identify_foreground"/u);
   assert.match(commandSource, /name: "agent_knock_knock_identify_and_send"/u);
   assert.match(commandSource, /name: "agent_knock_knock_resume_thread"/u);
@@ -5165,6 +5214,123 @@ request.on("error", () => process.exit(4));
     });
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("OpenClaw set_model consumes exactly one catalog offer from model_options", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-model-offer-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.cjs");
+  const callsPath = path.join(directory, "calls.ndjson");
+  const terminalId = "terminal:v2:herdr:codex:default:w1:p4:48690";
+  const catalogFingerprint = "c".repeat(64);
+  fs.writeFileSync(relayPath, `
+const fs = require("node:fs");
+const argv = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(argv) + "\\n");
+const terminalId = ${JSON.stringify(terminalId)};
+const catalogFingerprint = ${JSON.stringify(catalogFingerprint)};
+if (argv[0] === "list") {
+  process.stdout.write(JSON.stringify({ terminals: [{
+    id: terminalId,
+    available_actions: { model_options: {
+      tool: "agent_knock_knock_model_options",
+      arguments: {
+        terminal_id: terminalId,
+        expected_binding_token: "private-list-authority"
+      }
+    }}
+  }] }));
+} else if (argv[0] === "model-options") {
+  process.stdout.write(JSON.stringify({
+    terminal_id: terminalId,
+    agent: "codex",
+    scope: "current_and_new_sessions",
+    current: { model: "gpt-5.6-terra", reasoning_effort: "high" },
+    models: [{
+      id: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      reasoning_efforts: ["low", "medium", "high", "xhigh"]
+    }],
+    catalog_fingerprint: catalogFingerprint,
+    available_actions: { set_model: {
+      tool: "agent_knock_knock_set_model",
+      arguments: {
+        terminal_id: terminalId,
+        expected_binding_token: "private-set-authority",
+        expected_catalog_fingerprint: catalogFingerprint
+      }
+    }}
+  }));
+} else if (argv[0] === "set-model") {
+  process.stdout.write(JSON.stringify({
+    terminal_id: terminalId,
+    outcome: "changed",
+    scope: "current_and_new_sessions",
+    effective: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+    new_session_defaults: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+    do_not_retry: false
+  }));
+} else {
+  process.stderr.write("unexpected command");
+  process.exitCode = 2;
+}
+`, "utf8");
+
+  const factories = new Map<string, InteractionToolFactory>();
+  const api = {
+    pluginConfig: {},
+    logger: { info() {}, warn() {} },
+    registerCommand() {},
+    registerTool(
+      tool: ToolDefinition | InteractionToolFactory,
+      registration?: { readonly name?: unknown }
+    ) {
+      assert.equal(typeof registration?.name, "string");
+      factories.set(
+        String(registration?.name),
+        typeof tool === "function" ? tool : () => tool
+      );
+    }
+  };
+  bindOpenClawRelayPath(api, relayPath);
+  registerOpenClawCommands(api, new Map());
+  const controller = {
+    sessionKey: "agent:test:model-control",
+    sessionId: "controller-model-control"
+  };
+  const options = requiredInteractionTool(
+    factories,
+    "agent_knock_knock_model_options",
+    controller
+  );
+  const setModel = requiredInteractionTool(
+    factories,
+    "agent_knock_knock_set_model",
+    controller
+  );
+
+  const displayed = await options.execute!("models", { terminal_id: terminalId });
+  assertModelToolResultHasNoOpaqueAuthority(displayed);
+  const changed = await setModel.execute!("set-once", {
+    terminal_id: terminalId,
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high"
+  });
+  assert.equal(changed.details?.outcome, "changed");
+  await assert.rejects(
+    () => setModel.execute!("replay", {
+      terminal_id: terminalId,
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high"
+    }),
+    /requires current choices shown/u
+  );
+
+  const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+  assert.deepEqual(calls.map((argv) => argv[0]), [
+    "list", "model-options", "set-model"
+  ]);
 });
 
 test("OpenClaw interaction response consumes one session-bound private offer after displayed expiry", async (t) => {

@@ -15,8 +15,12 @@ import {
   AKK_CALLBACK_METHOD,
   akkUsageText,
   buildAkkCommandCliArgs,
+  compactAkkListModelProjection,
   formatAkkListCommandResult,
+  formatAkkModelOptionsCommandResult,
+  formatAkkRepairModelControlCommandResult,
   formatAkkRespondCommandResult,
+  formatAkkSetModelCommandResult,
   formatAkkTerminalWatchHint,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
@@ -26,6 +30,8 @@ import {
   isAkkModelFacingDiagnosticField,
   isAkkModelFacingPrivateAuthorityField,
   isAkkNativeSubmissionAccepted,
+  isAkkRepairModelControlSuccess,
+  isAkkSetModelSuccess,
   isAkkThreadTransitionSuccess,
   normalizeAkkModelFacingFieldName,
   parseAkkCommand,
@@ -41,15 +47,18 @@ import {
   identifyForegroundParameters,
   listParameters,
   listResumableThreadsParameters,
+  modelOptionsParameters,
   nativeInspectParameters,
   newThreadParameters,
   reconcileBindingParameters,
+  repairModelControlParameters,
   renewParameters,
   respondInteractionParameters,
   respondParameters,
   resumeThreadParameters,
   retryCallbackParameters,
   sendParameters,
+  setModelParameters,
   statusParameters,
   unwatchParameters,
   watchParameters
@@ -81,7 +90,22 @@ import {
 const MAX_DISPLAYED_RESUME_SNAPSHOTS = 512;
 const OPENCLAW_HANDOFF_AUTHORITY_KIND = "handoff";
 const OPENCLAW_RECONCILE_BINDING_AUTHORITY_KIND = "reconcile_binding";
+const OPENCLAW_MODEL_OPTIONS_AUTHORITY_KIND = "model_options";
+// Model discovery intentionally revalidates every native menu transition.
+// Claude's live effort-ring walk can exceed the generic 90-second relay
+// budget, while set-model performs discovery both before and after its one
+// commit. Keep these operations bounded without killing the child midway
+// through a verified native picker. The Host abort signal still cancels them.
+const OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS = 15 * 60_000;
+const OPENCLAW_REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS = 2 * 60_000;
+const OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS = 30 * 60_000;
 const CALLBACK_METHOD = AKK_CALLBACK_METHOD;
+
+interface DisplayedModelOptionsOfferPayload
+  extends OpenClawPrivateAuthorityOfferPayload {
+  readonly scope?: unknown;
+  readonly models?: unknown;
+}
 export const defaultOpenClawRelayPath = fileURLToPath(
   new URL("./cli.js", import.meta.url)
 );
@@ -148,14 +172,15 @@ export function registerOpenClawCommands(
 ): void {
   api.registerCommand?.({
     name: "akk",
-    description: "Send coding work through existing Codex or Claude Code shared terminals, inspect managed Turns, observe a user-selected terminal with durable read-only Terminal Watch, and explicitly start, clear, list, or resume native threads.",
+    description: "Send coding work through existing Codex or Claude Code shared terminals, inspect managed Turns, observe a user-selected terminal with durable read-only Terminal Watch, manage native threads, and safely inspect or change an idle pane's native model selection.",
     acceptsArgs: true,
     requireAuth: true,
     nativeProgressMessages: {
       default: "AKK is handling the request..."
     },
     agentPromptGuidance: [
-      "Use /akk <task> when exactly one send-ready coding-agent terminal pane should receive new work. Send-ready means an exact live process and terminal plus a scanned, non-blocked approval state. Parsed working activity and ordinary Codex main-Composer visibility, stability, or exactness do not veto this user-priority path. A proven input-owning native approval, questionnaire/editor, or read-only viewer remains a zero-input boundary; Codex 0.154's exact collapsed async-question summary remains sendable, while its expanded, clipped, or ambiguous editor does not. Codex terminal_user_explicit physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once; after text injection, no Composer observation may veto Enter. Claude Code user-explicit Send remains exact-empty-only. Managed Send may still require exact empty before input, while native inspection and native lifecycle input remain exact-empty-only. Broken or stale AKK management activity records do not veto the user's physical Send. Structured tools use only semantic identifiers returned by AKK: session_id for an exact managed context, terminal_id for the currently verified pane, turn_id for one managed Turn, watch_id for one Terminal Watch, and native_thread_id for one resumable native thread. Draft text, composer digests, and opaque freshness authority stay private; AKK revalidates them under its locks. Once the Codex mutation sequence begins, an uncertain result must not be automatically retried. /akk watch is read-only and follows user intent: it prefers an exact task anchor, but version, artifact, managed ownership, and action-advertisement uncertainty degrade to a warning-bearing terminal-activity Watch instead of vetoing the request. New/clear/resume, approval, reconciliation, handoff, and recovery still require the documented user intent or explicit confirmation. AKK never starts a coding-agent process."
+      "Use /akk <task> when exactly one send-ready coding-agent terminal pane should receive new work. Send-ready means an exact live process and terminal plus a scanned, non-blocked approval state. Parsed working activity and ordinary Codex main-Composer visibility, stability, or exactness do not veto this user-priority path. A proven input-owning native approval, questionnaire/editor, or read-only viewer remains a zero-input boundary; Codex 0.154's exact collapsed async-question summary remains sendable, while its expanded, clipped, or ambiguous editor does not. Codex terminal_user_explicit physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once; after text injection, no Composer observation may veto Enter. Claude Code user-explicit Send remains exact-empty-only. Managed Send may still require exact empty before input, while native inspection and native lifecycle input remain exact-empty-only. Broken or stale AKK management activity records do not veto the user's physical Send. Structured tools use only semantic identifiers returned by AKK: session_id for an exact managed context, terminal_id for the currently verified pane, turn_id for one managed Turn, watch_id for one Terminal Watch, and native_thread_id for one resumable native thread. Draft text, composer digests, and opaque freshness authority stay private; AKK revalidates them under its locks. Once the Codex mutation sequence begins, an uncertain result must not be automatically retried. /akk watch is read-only and follows user intent: it prefers an exact task anchor, but version, artifact, managed ownership, and action-advertisement uncertainty degrade to a warning-bearing terminal-activity Watch instead of vetoing the request. New/clear/resume, approval, reconciliation, handoff, and recovery still require the documented user intent or explicit confirmation. AKK never starts a coding-agent process.",
+      "Use /akk models on one exact currently advertised physical pane before /akk set-model. Codex 0.154 may use either one exact current native Session or a verified-zero-rollout pane; identify_foreground is diagnostic and is never a prerequisite for that zero-rollout path. Claude Code still requires one exact current native Session. Both steps require no active Turn and no approval, questionnaire/editor, or read-only viewer. model_options normally requires an empty Composer; when List binds it to one exact stable Codex /model residual, it may continue only that residual into read-only catalog discovery. repair_model_control remains the separate clear-only alternative and never presses Enter or selects anything. Only ids and reasoning efforts from that current native catalog are valid. Codex changes the current session and persists the selected model for future sessions; ordinary efforts, including max, are also persisted, while ultra remains current-session-only and Codex chooses a non-ultra future fallback. Claude Code changes only the current session. Read effective and new_session_defaults separately. Model control never accepts slash text, raw keys, menu indexes, display labels, scope overrides, or private authority; an uncertain outcome must not be retried automatically."
     ],
     handler: async (ctx) => handleAkkCommand(
       api,
@@ -164,33 +189,7 @@ export function registerOpenClawCommands(
     )
   });
 
-  registerCliTool(api, {
-    name: "agent_knock_knock_list",
-    description: "List existing Codex and Claude Code tmux or Herdr panes as the primary terminals[] resources, plus durable terminal_watches[] records. Use only advertised mutation actions and their semantic IDs; read-only Watch may also use an exact user-selected terminal_id when its convenience action is absent. A terminal_user_explicit send is user-priority authority for one exact live physical terminal/process with a scanned, non-blocked approval state; parsed working activity and ordinary Codex main-Composer visibility, stability, or exactness do not veto it. A proven input-owning native approval, questionnaire/editor, or read-only viewer remains a zero-input boundary; Codex 0.154's exact collapsed async-question summary remains sendable, while its expanded, clipped, or ambiguous editor does not. Codex uses replace_current_composer_and_submit: physical fallback sends C-u once, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto. Claude Code remains exact-empty-only; managed Send may require exact empty before input, and native inspection and native lifecycle input remain exact-empty-only. Broken AKK Turn, Session, transfer, ledger, or Store state does not veto a new user Send. AKK tries the managed fast path first, then delivers once as unmanaged work and best-effort attaches an exact Terminal Watch callback before releasing stale management. Watch attachment failure never changes a successful Send and is reported as a warning. Existing or possibly existing same-message idempotency evidence rejects replay. If fresh durability is unavailable, AKK proceeds with a warning and the result must not be automatically retried. Once the Codex mutation sequence begins, an uncertain result must not be automatically retried. A session_exact send uses session_id; terminal_follow_current and terminal_user_explicit Send use terminal_id; Watch uses terminal_id; managed controls use turn_id; lifecycle resume additionally uses the complete native_thread_id. Draft text, composer digests, and opaque freshness authority stay private. AKK never starts a coding-agent process.",
-    parameters: listParameters,
-    buildArgs: (params) => {
-      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      const args = ["list", "--reconcile"];
-      pushOptional(
-        args,
-        "--store-dir",
-        resolvePluginStoreDir(config)
-      );
-      pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(api.pluginConfig?.idleTimeoutMinutes));
-      pushOptional(args, "--agent", stringValue(params.agent));
-      pushOptional(args, "--status", stringValue(params.status));
-      if (params.all === true) {
-        args.push("--all");
-      }
-      if (params.noApprovalScan === true) {
-        args.push("--no-approval-scan");
-      }
-      if (params.terminalDebug === true) {
-        args.push("--terminal-debug");
-      }
-      return args;
-    }
-  });
+  registerOpenClawListTool(api);
 
   registerCliTool(api, {
     name: "agent_knock_knock_watch",
@@ -293,6 +292,8 @@ export function registerOpenClawCommands(
       return args;
     }
   });
+
+  registerModelControlTools(api);
 
   registerForegroundIdentificationTools(api);
 
@@ -632,6 +633,135 @@ export function registerOpenClawCommands(
   });
 }
 
+function registerOpenClawListTool(api): void {
+  registerCliTool(api, {
+    name: "agent_knock_knock_list",
+    description:
+      "List live AKK terminal resources and Terminal Watches. The model-facing result is a compact projection: available_actions contains current semantic action names and action_inputs contains only their dynamic semantic inputs. Follow the installed agent-knock-knock skill for action meaning, target rules, safety boundaries, and recovery behavior; AKK privately revalidates every mutation.",
+    parameters: listParameters,
+    modelProjection: compactAkkListModelProjection,
+    compactText: true,
+    buildArgs: (params) => {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const args = ["list", "--reconcile"];
+      pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+      pushOptional(
+        args,
+        "--idle-timeout-minutes",
+        numberString(params.idleTimeoutMinutes) ??
+          numberString(api.pluginConfig?.idleTimeoutMinutes)
+      );
+      pushOptional(args, "--agent", stringValue(params.agent));
+      pushOptional(args, "--status", stringValue(params.status));
+      if (params.all === true) args.push("--all");
+      if (params.noApprovalScan === true) args.push("--no-approval-scan");
+      if (params.terminalDebug === true) args.push("--terminal-debug");
+      return args;
+    }
+  });
+}
+
+function registerModelControlTools(api): void {
+  registerCliTool(api, {
+    name: "agent_knock_knock_model_options",
+    description:
+      "Inspect the exact current native model catalog for one explicitly selected physical Codex or Claude Code pane. This is the required read-only first step before set_model. Codex 0.154 accepts one exact current native Session or a verified-zero-rollout pane without identify_foreground; Claude Code still requires one exact current native Session. AKK requires an exact live pane/process, no active Turn, and no approval, questionnaire/editor, or read-only viewer. The Composer must be empty unless current List privately binds this action to one exact stable Codex 0.154 /model residual, which AKK may continue into the native picker without retyping it. That residual-bound authority is consumed by discovery; after restoring an exact empty Composer, AKK retains only fresh ordinary terminal/catalog authority for one set_model attempt in this exact controller conversation. It obtains model ids and reasoning-effort values from the native UI/runtime and exposes only semantic choices. Codex advertises scope=current_and_new_sessions; Claude Code advertises scope=current_session. Arbitrary commands, keys, menu indexes, labels, and hidden authority are never accepted.",
+    parameters: modelOptionsParameters,
+    timeoutMs: OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS,
+    normalizeTurnIdentity: false,
+    buildArgs: async (params) => {
+      assertOnlyModelControlParameters(
+        params,
+        ["terminal_id"],
+        "model_options"
+      );
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const terminalId = requiredString(params.terminal_id, "terminal_id");
+      const action = await privateTerminalActionArguments(
+        api,
+        terminalId,
+        "agent_knock_knock_model_options"
+      );
+      const args = [
+        "model-options",
+        "--terminal",
+        terminalId,
+        "--expected-binding-token",
+        requiredString(
+          action.expected_binding_token,
+          "current internal model-options binding authority"
+        )
+      ];
+      pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+      pushOptional(args, "--codex-home", stringValue(config.codexHome));
+      return args;
+    },
+    rememberResult: (result, params, toolContext) =>
+      rememberDisplayedModelOptionsOffer(
+        api,
+        toolContext?.sessionKey,
+        toolContext?.sessionId,
+        params.terminal_id,
+        result
+      )
+  });
+
+  registerCliTool(api, {
+    name: "agent_knock_knock_repair_model_control",
+    description:
+      "Clear one exact stale Codex 0.154 /model completion surface, exact bare /model Composer, or exact open native model picker left by a failed native model-control attempt. This explicit one-shot repair is available only when the current AKK list proves the same exact pane/process, the closed profiled model-control residue, no active Turn, and no approval, questionnaire/editor, or read-only viewer. Pass only terminal_id; AKK privately derives and revalidates every physical, screen, and Composer fence before each reversible cleanup input. It never submits a task, selects a model, approves a prompt, accepts raw commands or keys, or automatically continues into model_options/set_model. An open picker receives dismissal authority only, never Enter authority. outcome=uncertain must never be retried automatically.",
+    parameters: repairModelControlParameters,
+    timeoutMs: OPENCLAW_REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS,
+    normalizeTurnIdentity: false,
+    isErrorResult: (result) => !isAkkRepairModelControlSuccess(result),
+    buildArgs: async (params) => {
+      assertOnlyModelControlParameters(
+        params,
+        ["terminal_id"],
+        "repair_model_control"
+      );
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const terminalId = requiredString(params.terminal_id, "terminal_id");
+      const action = await privateTerminalActionArguments(
+        api,
+        terminalId,
+        "agent_knock_knock_repair_model_control"
+      );
+      const args = [
+        "repair-model-control",
+        "--terminal",
+        terminalId,
+        "--expected-binding-token",
+        requiredString(
+          action.expected_binding_token,
+          "current internal model-control repair authority"
+        )
+      ];
+      pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+      pushOptional(args, "--codex-home", stringValue(config.codexHome));
+      return args;
+    }
+  });
+
+  registerCliTool(api, {
+    name: "agent_knock_knock_set_model",
+    description:
+      "Change exactly one already-open physical coding-agent pane to one semantic model and reasoning-effort tuple from the immediately preceding model_options result in this same controller conversation. AKK consumes the private current-snapshot offer, revalidates the exact pane/process plus idle and empty native UI under lock, rejects active Turns and every input-owning prompt/viewer, and verifies the effective postcondition. Codex 0.154 accepts one exact current native Session or a verified-zero-rollout pane without identify_foreground; Claude Code still requires one exact current native Session. Codex scope is current_and_new_sessions: the model and ordinary efforts (including max) are persisted, but ultra remains current-session-only; the future model is reported while the native TUI's unobservable fallback effort is omitted. Claude Code scope is current_session and leaves future defaults unchanged. Parameters never accept scope, raw commands, slash text, keys, menu indexes, display labels, fingerprints, or tokens. outcome=uncertain must never be retried automatically.",
+    parameters: setModelParameters,
+    timeoutMs: OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS,
+    normalizeTurnIdentity: false,
+    isErrorResult: (result) => !isAkkSetModelSuccess(result),
+    buildArgs: (params, toolContext) => buildPrivateSetModelArgs(
+      api,
+      params,
+      {
+        sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
+        sessionId: requiredOpenClawSessionId(toolContext?.sessionId)
+      }
+    )
+  });
+}
+
 function registerForegroundIdentificationTools(api): void {
   registerCliTool(api, {
     name: "agent_knock_knock_identify_foreground",
@@ -826,6 +956,13 @@ async function handleAkkCommand(
     }
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
     if (
+      parsed.action === "model-options" ||
+      parsed.action === "repair-model-control" ||
+      parsed.action === "set-model"
+    ) {
+      return await handleAkkModelCommand(api, ctx, parsed, config);
+    }
+    if (
       parsed.action === "list-resumable-threads" ||
       parsed.action === "new-thread" ||
       parsed.action === "resume-thread"
@@ -905,6 +1042,75 @@ async function handleAkkCommand(
       isError: true
     };
   }
+}
+
+async function handleAkkModelCommand(
+  api,
+  ctx,
+  parsed: Extract<
+    ReturnType<typeof parseAkkCommand>,
+    { action: "model-options" | "repair-model-control" | "set-model" }
+  >,
+  config: Record<string, unknown>
+) {
+  const sessionKey = requiredOpenClawSessionKey(ctx.sessionKey);
+  const sessionId = requiredOpenClawSessionId(ctx.sessionId);
+  if (parsed.action === "model-options") {
+    const action = await privateTerminalActionArguments(
+      api,
+      parsed.terminalId,
+      "agent_knock_knock_model_options"
+    );
+    const args = buildAkkCommandCliArgs(parsed, config, {
+      expectedBindingToken: action.expected_binding_token
+    });
+    if (!args) throw new Error("could not build model-options command");
+    const result = await runHostAwareCli(api, args, {
+      timeoutMs: OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS
+    });
+    rememberDisplayedModelOptionsOffer(
+      api,
+      sessionKey,
+      sessionId,
+      parsed.terminalId,
+      result
+    );
+    return { text: formatAkkModelOptionsCommandResult(result) };
+  }
+  if (parsed.action === "repair-model-control") {
+    const action = await privateTerminalActionArguments(
+      api,
+      parsed.terminalId,
+      "agent_knock_knock_repair_model_control"
+    );
+    const args = buildAkkCommandCliArgs(parsed, config, {
+      expectedBindingToken: action.expected_binding_token
+    });
+    if (!args) throw new Error("could not build repair-model-control command");
+    const result = await runHostAwareCli(api, args, {
+      timeoutMs: OPENCLAW_REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS
+    });
+    return {
+      text: formatAkkRepairModelControlCommandResult(result),
+      isError: !isAkkRepairModelControlSuccess(result)
+    };
+  }
+  const args = buildPrivateSetModelArgs(
+    api,
+    {
+      terminal_id: parsed.terminalId,
+      model: parsed.model,
+      reasoning_effort: parsed.reasoningEffort
+    },
+    { sessionKey, sessionId }
+  );
+  const result = await runHostAwareCli(api, args, {
+    timeoutMs: OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS
+  });
+  return {
+    text: formatAkkSetModelCommandResult(result),
+    isError: !isAkkSetModelSuccess(result)
+  };
 }
 
 function sendCommandResultIsError(result) {
@@ -1766,21 +1972,30 @@ function toolResult(
   {
     submissionErrors = false,
     normalizeTurnIdentity = true,
-    forceError = false
+    forceError = false,
+    modelProjection = undefined,
+    compactText = false
   }: {
     submissionErrors?: boolean;
     normalizeTurnIdentity?: boolean;
     forceError?: boolean;
+    modelProjection?: (value: unknown) => unknown;
+    compactText?: boolean;
   } = {}
 ) {
   const normalized = normalizeTurnIdentity ? withTurnIdentity(result) : result;
-  const modelFacing = sanitizeModelFacingValue(normalized);
+  const sanitized = sanitizeModelFacingValue(normalized);
+  const modelFacing = modelProjection
+    ? modelProjection(sanitized)
+    : sanitized;
   const submissionError = submissionErrors && isSubmissionError(normalized);
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(modelFacing, null, 2)
+        text: compactText
+          ? JSON.stringify(modelFacing)
+          : JSON.stringify(modelFacing, null, 2)
       }
     ],
     details: modelFacing,
@@ -1817,6 +2032,235 @@ async function privateThreadDiscovery(
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(args, "--codex-home", stringValue(config.codexHome));
   return runHostAwareCli(api, args);
+}
+
+function rememberDisplayedModelOptionsOffer(
+  api: object,
+  sessionKeyValue: unknown,
+  sessionIdValue: unknown,
+  requestedTerminalIdValue: unknown,
+  result: unknown
+): void {
+  const sessionKey = requiredOpenClawSessionKey(sessionKeyValue);
+  const sessionId = requiredOpenClawSessionId(sessionIdValue);
+  const requestedTerminalId = requiredString(
+    requestedTerminalIdValue,
+    "terminal_id"
+  );
+  if (!isRecord(result)) {
+    throw new Error("model-options returned an invalid result");
+  }
+  const terminalId = requiredString(result.terminal_id, "model-options terminal_id");
+  if (terminalId !== requestedTerminalId) {
+    throw new Error("model-options returned a different terminal");
+  }
+  const scope = requiredModelSwitchScope(result.agent, result.scope);
+  const models = modelOptionsCatalog(result.models);
+  const args = setModelActionArguments(result);
+  if (stringValue(args.terminal ?? args.terminal_id) !== terminalId) {
+    throw new Error("set-model action belongs to a different terminal");
+  }
+  const catalogFingerprint = requiredString(
+    args.expected_catalog_fingerprint,
+    "current internal model catalog authority"
+  );
+  if (catalogFingerprint !== stringValue(result.catalog_fingerprint)) {
+    throw new Error("set-model action does not match the displayed catalog");
+  }
+  const key = modelOptionsOfferKey(sessionKey, sessionId, terminalId);
+  consumeOpenClawPrivateAuthorityOffer(api, key);
+  rememberOpenClawPrivateAuthorityOffer(api, key, {
+    fingerprint: catalogFingerprint,
+    args,
+    scope,
+    models
+  });
+}
+
+function modelOptionsCatalog(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("model-options returned no semantic model choices");
+  }
+  const models = value.map((entry) => {
+    if (!isRecord(entry)) throw new Error("model-options returned an invalid model");
+    const id = requiredModelSemanticValue(entry.id, "model id", 160);
+    if (!Array.isArray(entry.reasoning_efforts)) {
+      throw new Error(`model ${id} has no reasoning-effort catalog`);
+    }
+    const reasoningEfforts = entry.reasoning_efforts.map((effort) =>
+      requiredReasoningEffort(effort, `reasoning effort for ${id}`)
+    );
+    if (new Set(reasoningEfforts).size !== reasoningEfforts.length) {
+      throw new Error(`model ${id} has duplicate reasoning efforts`);
+    }
+    return { id, reasoning_efforts: reasoningEfforts };
+  });
+  const ids = models.map((model) => String(model.id));
+  if (new Set(ids).size !== ids.length) {
+    throw new Error("model-options returned duplicate model ids");
+  }
+  return models;
+}
+
+function setModelActionArguments(
+  result: Record<string, unknown>
+): Record<string, unknown> {
+  const availableActions = isRecord(result.available_actions)
+    ? result.available_actions
+    : undefined;
+  const action = isRecord(availableActions?.set_model)
+    ? availableActions.set_model
+    : undefined;
+  if (
+    action?.tool !== "agent_knock_knock_set_model" ||
+    !isRecord(action.arguments)
+  ) {
+    throw new Error("model-options did not advertise a typed set-model action");
+  }
+  requiredString(
+    action.arguments.expected_binding_token,
+    "current internal set-model binding authority"
+  );
+  return action.arguments;
+}
+
+function requiredModelSwitchScope(agentValue: unknown, scopeValue: unknown): string {
+  const agent = requiredString(agentValue, "model-options agent");
+  const scope = requiredString(scopeValue, "model-options scope");
+  const expected = agent === "codex"
+    ? "current_and_new_sessions"
+    : agent === "claude"
+      ? "current_session"
+      : undefined;
+  if (!expected || scope !== expected) {
+    throw new Error("model-options returned an unsupported agent or mutation scope");
+  }
+  return scope;
+}
+
+function modelOptionsOfferKey(
+  sessionKey: string,
+  sessionId: string,
+  terminalId: string
+): OpenClawPrivateAuthorityOfferKey {
+  return privateAuthorityOfferKey(
+    sessionKey,
+    sessionId,
+    OPENCLAW_MODEL_OPTIONS_AUTHORITY_KIND,
+    { type: "terminal_id", id: terminalId }
+  );
+}
+
+function buildPrivateSetModelArgs(
+  api,
+  params: Record<string, unknown>,
+  context: { sessionKey: string; sessionId: string }
+): string[] {
+  assertOnlyModelControlParameters(
+    params,
+    ["terminal_id", "model", "reasoning_effort"],
+    "set_model"
+  );
+  const terminalId = requiredString(params.terminal_id, "terminal_id");
+  const model = requiredModelSemanticValue(params.model, "model", 160);
+  const reasoningEffort = requiredReasoningEffort(
+    params.reasoning_effort,
+    "reasoning_effort"
+  );
+  const offered = consumeOpenClawPrivateAuthorityOffer<
+    DisplayedModelOptionsOfferPayload
+  >(api, modelOptionsOfferKey(context.sessionKey, context.sessionId, terminalId));
+  if (!offered || !isRecord(offered.args) || !Array.isArray(offered.models)) {
+    throw new Error(
+      "set_model requires current choices shown by agent_knock_knock_model_options in this controller conversation; refresh model options and choose one exact semantic tuple"
+    );
+  }
+  assertOfferedModelTuple(offered.models, model, reasoningEffort);
+  const offeredTerminalId = stringValue(
+    offered.args.terminal ?? offered.args.terminal_id
+  );
+  if (offeredTerminalId !== terminalId) {
+    throw new Error("the displayed set-model action belongs to another terminal");
+  }
+  const fingerprint = requiredString(
+    offered.args.expected_catalog_fingerprint,
+    "current internal model catalog authority"
+  );
+  if (fingerprint !== offered.fingerprint) {
+    throw new Error("the displayed model catalog authority changed");
+  }
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  const args = buildAkkCommandCliArgs(
+    {
+      action: "set-model",
+      terminalId,
+      model,
+      reasoningEffort
+    },
+    config,
+    {
+      expectedBindingToken: offered.args.expected_binding_token,
+      expectedCatalogFingerprint: fingerprint
+    }
+  );
+  if (!args) throw new Error("could not build set-model command");
+  return args;
+}
+
+function assertOnlyModelControlParameters(
+  params: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string
+): void {
+  const unexpected = Object.keys(params).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) {
+    throw new Error(
+      `${label} accepts only typed semantic fields; raw commands, keys, menu indexes, scope, labels, tokens, and fingerprints are forbidden`
+    );
+  }
+}
+
+function assertOfferedModelTuple(
+  modelEntries: readonly unknown[],
+  model: string,
+  reasoningEffort: string
+): void {
+  const entry = modelEntries.find((candidate) =>
+    isRecord(candidate) && candidate.id === model
+  );
+  if (!isRecord(entry) || !Array.isArray(entry.reasoning_efforts)) {
+    throw new Error("model was not advertised by the current native catalog");
+  }
+  if (
+    !entry.reasoning_efforts.includes(reasoningEffort)
+  ) {
+    throw new Error(
+      "reasoning_effort was not advertised for this model by the current native catalog"
+    );
+  }
+}
+
+function requiredModelSemanticValue(
+  value: unknown,
+  label: string,
+  maxLength: number
+): string {
+  const text = requiredString(value, label);
+  if (
+    text.length > maxLength ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$/u.test(text)
+  ) {
+    throw new Error(`${label} must be one exact advertised semantic id`);
+  }
+  return text;
+}
+
+function requiredReasoningEffort(value: unknown, label: string): string {
+  const text = requiredString(value, label);
+  if (text.length > 64 || !/^[a-z][a-z0-9_-]*$/u.test(text)) {
+    throw new Error(`${label} must be one exact advertised semantic value`);
+  }
+  return text;
 }
 
 async function privateTerminalActionArguments(
@@ -2590,6 +3034,22 @@ function sanitizeModelFacingValue(
     };
     delete output.missing_required;
   }
+  if (
+    output.tool === "agent_knock_knock_set_model" &&
+    isRecord(output.arguments)
+  ) {
+    const terminalId = stringValue(
+      output.arguments.terminal_id ?? output.arguments.terminal
+    );
+    output.arguments = terminalId && /^terminal:v[0-9]+:\S+$/u.test(terminalId)
+      ? { terminal_id: terminalId }
+      : {};
+    if (Array.isArray(output.missing_required)) {
+      output.missing_required = output.missing_required.filter((field) =>
+        field === "model" || field === "reasoning_effort"
+      );
+    }
+  }
   return output;
 }
 
@@ -2962,8 +3422,31 @@ function registerCliTool(
     description,
     parameters,
     buildArgs,
+    rememberResult = undefined,
+    timeoutMs = undefined,
     normalizeTurnIdentity = true,
+    modelProjection = undefined,
+    compactText = false,
     isErrorResult = (_result: unknown) => false
+  }: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    buildArgs: (
+      params: Record<string, unknown>,
+      toolContext?: { sessionKey?: unknown; sessionId?: unknown },
+      toolCallId?: unknown
+    ) => string[] | Promise<string[]>;
+    rememberResult?: (
+      result: unknown,
+      params: Record<string, unknown>,
+      toolContext?: { sessionKey?: unknown; sessionId?: unknown }
+    ) => void;
+    timeoutMs?: number;
+    normalizeTurnIdentity?: boolean;
+    modelProjection?: (value: unknown) => unknown;
+    compactText?: boolean;
+    isErrorResult?: (result: unknown) => boolean;
   }
 ) {
   api.registerTool(
@@ -2981,16 +3464,16 @@ function registerCliTool(
                 isRecord(params) ? params : {},
                 toolContext,
                 toolCallId
-              )
+              ),
+              timeoutMs === undefined ? {} : { timeoutMs }
             );
-            const rendered = toolResult(result, {
-              submissionErrors:
-                name === "agent_knock_knock_respond" ||
-                name === "agent_knock_knock_identify_and_send",
-              normalizeTurnIdentity,
-              forceError:
-                typeof isErrorResult === "function" && isErrorResult(result) === true
-            });
+            if (typeof rememberResult === "function") {
+              rememberResult(
+                result,
+                isRecord(params) ? params : {},
+                toolContext
+              );
+            }
             if (name === "agent_knock_knock_list") {
               rememberDisplayedPrivateAuthorityOffers(
                 api,
@@ -2999,6 +3482,16 @@ function registerCliTool(
                 result
               );
             }
+            const rendered = toolResult(result, {
+              submissionErrors:
+                name === "agent_knock_knock_respond" ||
+                name === "agent_knock_knock_identify_and_send",
+              normalizeTurnIdentity,
+              modelProjection,
+              compactText,
+              forceError:
+                typeof isErrorResult === "function" && isErrorResult(result) === true
+            });
             return rendered;
           } catch (error) {
             throw modelFacingToolError(error);
@@ -3192,6 +3685,7 @@ async function runHostAwareCli(
   options: {
     cwd?: string;
     allowNonzeroJson?: boolean;
+    timeoutMs?: number;
   } = {}
 ): Promise<Record<string, unknown>> {
   if (hostBridgeAsyncRelayApis.has(api)) {

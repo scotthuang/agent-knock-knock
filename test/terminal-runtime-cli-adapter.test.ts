@@ -16,9 +16,17 @@ import {
 } from "../src/terminal-runtime-cli-adapter.js";
 import {
   createTerminalControlProviderRegistry,
-  StaticTerminalControlProvider
+  StaticTerminalControlProvider,
+  type TerminalControlProvider
 } from "../src/terminal-control-provider.js";
+import type { TerminalEndpointRef } from "../src/terminal-control-ref.js";
 import { StaticTerminalProcessSource } from "../src/terminal-process-source.js";
+import type { TerminalModelOptionsBridgeResult } from
+  "../src/terminal-agent-bridge.js";
+import {
+  planTerminalModelControl,
+  probeTerminalModelControl
+} from "../src/terminal-model-control.js";
 
 function runtime(
   options: TerminalRuntimeCliOptions = {},
@@ -311,6 +319,168 @@ test("Claude observation uses the exact command and keeps fail-closed errors", a
     ["claude_agents_list_failed", "claude_agents_list_failed"]);
 });
 
+test("Claude model control accepts only the same exact agents row across its native dialog", async (t) => {
+  const nativeSessionId = "11111111-1111-4111-8111-111111111111";
+  const cwd = "/workspace/project";
+  const startedAt = 1_725_000_000_000;
+  const divider = "─".repeat(80);
+  const idleScreen = [divider, "❯ ", divider].join("\n");
+  const draftScreen = [
+    "/model                        Set the AI model for Claude Code (currently claude-sonnet-4-6)",
+    divider,
+    "❯ /model",
+    divider,
+    "⏵⏵ plan mode on · shift+tab to cycle"
+  ].join("\n");
+  type Drift = "none" | "session" | "pid" | "cwd" | "waiting_reason" |
+    "busy" | "non_model_surface";
+  class ModelDialogProvider extends StaticTerminalControlProvider {
+    phase: "idle" | "draft" | "picker" = "idle";
+    effort: "high" | "low" = "high";
+
+    constructor(readonly drift: Drift) {
+      super({ panes: [{
+        kind: "tmux", target: "work:0.0", session: "work", window: 0,
+        pane: 0, panePid: 41, currentCommand: "claude", currentPath: cwd
+      }] });
+    }
+
+    override async capture(_terminal: TerminalEndpointRef): Promise<string> {
+      if (this.phase === "idle") return idleScreen;
+      if (this.phase === "draft") return draftScreen;
+      if (this.drift === "non_model_surface") {
+        return [
+          "Do you want to proceed?",
+          "❯ 1. Yes",
+          "  2. No",
+          "Enter to select · Esc to cancel"
+        ].join("\n");
+      }
+      return [
+        "▔".repeat(80),
+        "   Select model",
+        "   Switch between Claude models.",
+        "   ❯ 1. Claude Sonnet 4.6 ✔  Claude Sonnet 4.6 model",
+        `   ${this.effort === "high" ? "● High" : "○ Low"} effort ←/→ to adjust`,
+        "   Enter to set as default · s to use this session only · Esc to cancel"
+      ].join("\n");
+    }
+
+    override async sendText(
+      terminal: TerminalEndpointRef,
+      text: string
+    ): Promise<void> {
+      await super.sendText(terminal, text);
+      assert.equal(text, "/model");
+      this.phase = "draft";
+    }
+
+    override async sendKeys(
+      terminal: TerminalEndpointRef,
+      keys: readonly string[]
+    ): Promise<void> {
+      await super.sendKeys(terminal, keys);
+      assert.equal(keys.length, 1);
+      if (keys[0] === "C-m" && this.phase === "draft") {
+        this.phase = "picker";
+        return;
+      }
+      if (keys[0] === "Right" && this.phase === "picker") {
+        this.effort = this.effort === "high" ? "low" : "high";
+        return;
+      }
+      assert.equal(keys[0], "Escape");
+      this.phase = "idle";
+    }
+  }
+  const plan = planTerminalModelControl(
+    probeTerminalModelControl("claude", "2.1.266")
+  );
+  const processSource = new StaticTerminalProcessSource([
+    { pid: 41, ppid: 1, command: "tmux: server", cwd },
+    { pid: 42, ppid: 41, command: "claude", cwd }
+  ]);
+  const exactRuntime = {
+    pid: 42,
+    nativeSessionId,
+    requireExactClaudeAgentRow: true as const,
+    nativeProcessStartedAt: startedAt,
+    exactClaudeAgentState: "idle" as const,
+    cwd
+  };
+
+  async function exercise(drift: Drift): Promise<{
+    provider: ModelDialogProvider;
+    result?: TerminalModelOptionsBridgeResult;
+    error?: unknown;
+  }> {
+    const provider = new ModelDialogProvider(drift);
+    const registry = createTerminalControlProviderRegistry([provider]);
+    const dependencies: TerminalRuntimeCliDependencies = {
+      terminalControlProviderRegistry: registry,
+      terminalProcessSource: processSource,
+      loadClaudeAgentRows: () => {
+        const inDialog = provider.phase === "picker";
+        return [{
+          pid: inDialog && drift === "pid" ? 43 : 42,
+          cwd: inDialog && drift === "cwd" ? "/workspace/other" : cwd,
+          kind: "interactive",
+          sessionId: inDialog && drift === "session"
+            ? "22222222-2222-4222-8222-222222222222"
+            : nativeSessionId,
+          startedAt,
+          status: inDialog && drift === "busy" ? "working" :
+            inDialog ? "waiting" : "idle",
+          ...(inDialog
+            ? { waitingFor: drift === "waiting_reason"
+                ? "permission prompt"
+                : "dialog open" }
+            : {})
+        }];
+      }
+    };
+    const facade = runtime({}, dependencies);
+    const terminal = (await provider.listTerminals())[0];
+    assert.ok(terminal);
+    const control = provider.toControlRef(terminal);
+    try {
+      const result = await facade.createBridge(provider).modelOptions(
+        "claude", control, "2.1.266", plan,
+        { runtime: exactRuntime, beforeInput: () => undefined }
+      );
+      return { provider, result };
+    } catch (error) {
+      return { provider, error };
+    }
+  }
+
+  await t.test("same pid, incarnation, session, cwd, and dialog state", async () => {
+    const exercised = await exercise("none");
+    assert.ifError(exercised.error);
+    assert.equal(exercised.result?.catalog.current.model, "sonnet-4.6");
+    assert.equal(exercised.provider.phase, "idle");
+    assert.ok(exercised.provider.sentKeys.some(({ keys }) =>
+      keys.length === 1 && keys[0] === "Escape"
+    ));
+  });
+
+  for (const drift of [
+    "session", "pid", "cwd", "waiting_reason", "busy", "non_model_surface"
+  ] as const) {
+    await t.test(`${drift} drift remains fail-closed`, async () => {
+      const exercised = await exercise(drift);
+      assert.match(String(exercised.error),
+        /native Claude agents identity, cwd, or idle state changed/u);
+      assert.equal(exercised.provider.phase, "picker");
+      assert.deepEqual(
+        exercised.provider.sentKeys.filter(({ keys }) => keys[0] !== "-l")
+          .map(({ keys }) => keys),
+        [["C-m"]]
+      );
+    });
+  }
+});
+
 test("agent versions and provider-owned takeover facts stay data-only", async (t) => {
   const injected = runtime({ agentVersionsJson: "not-json" }, {
     agentVersionForRunningProcess: () => "9.8.7"
@@ -394,6 +564,94 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
     },
     terminal_endpoint: {}
   }), undefined);
+});
+
+test("running Codex catalog uses its exact executable and custom CODEX_HOME", async (t) => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-runtime-codex-catalog-")
+  );
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const releaseRoot = path.join(
+    directory, "standalone", "releases", "0.154.0-aarch64-apple-darwin"
+  );
+  const codexExecutable = path.join(releaseRoot, "bin", "codex");
+  const secondExecutable = path.join(
+    directory, "standalone", "releases", "0.154.0-second", "bin", "codex"
+  );
+  const lsofExecutable = path.join(directory, "lsof");
+  const argsPath = path.join(directory, "codex-args.txt");
+  const homePath = path.join(directory, "codex-home.txt");
+  const cwdPath = path.join(directory, "codex-cwd.txt");
+  const lsofArgsPath = path.join(directory, "lsof-args.txt");
+  const codexHome = path.join(directory, "isolated-codex-home");
+  const workingDirectory = path.join(directory, "workspace");
+  fs.mkdirSync(path.dirname(codexExecutable), { recursive: true });
+  fs.mkdirSync(path.dirname(secondExecutable), { recursive: true });
+  fs.mkdirSync(codexHome);
+  fs.mkdirSync(workingDirectory);
+  fs.writeFileSync(codexExecutable, [
+    "#!/bin/sh",
+    `printf '%s\\n' \"$@\" > \"${argsPath}\"`,
+    `printf '%s\\n' \"$CODEX_HOME\" > \"${homePath}\"`,
+    `pwd > \"${cwdPath}\"`,
+    "printf '%s\\n' '{\"models\":[{\"slug\":\"gpt-6-astra\",\"display_name\":\"GPT-6 Astra\",\"visibility\":\"list\",\"supported_reasoning_levels\":[{\"effort\":\"high\"},{\"effort\":\"ultra\"}]}]}'"
+  ].join("\n"));
+  fs.chmodSync(codexExecutable, 0o700);
+  const writeLsof = (paths: readonly string[]) => {
+    fs.writeFileSync(lsofExecutable, [
+      "#!/bin/sh",
+      `printf '%s\\n' \"$@\" > \"${lsofArgsPath}\"`,
+      ...paths.map((entry) => `printf '%s\\n' 'n${entry}'`)
+    ].join("\n"));
+    fs.chmodSync(lsofExecutable, 0o700);
+  };
+  writeLsof([codexExecutable]);
+
+  await runCliCommandExecution("runtime-model-catalog-test", {}, {
+    env: { PATH: directory, HOME: directory },
+    runtimeLog: () => undefined
+  }, async () => {
+    const catalog = runtime({ codexHome })
+      .codexModelCatalogForRunningProcess(
+        77, "0.154.0", workingDirectory
+      );
+    assert.deepEqual(catalog, { models: [{
+      id: "gpt-6-astra",
+      label: "GPT-6 Astra",
+      reasoningEfforts: ["high", "ultra"]
+    }] });
+    assert.deepEqual(
+      fs.readFileSync(lsofArgsPath, "utf8").trim().split("\n"),
+      ["-a", "-p", "77", "-d", "txt", "-Fn"]
+    );
+    assert.deepEqual(
+      fs.readFileSync(argsPath, "utf8").trim().split("\n"),
+      ["debug", "models"]
+    );
+    assert.equal(fs.readFileSync(homePath, "utf8").trim(), codexHome);
+    assert.equal(
+      fs.readFileSync(cwdPath, "utf8").trim(),
+      fs.realpathSync(workingDirectory)
+    );
+
+    writeLsof([codexExecutable, secondExecutable]);
+    assert.throws(
+      () => runtime({ codexHome }).codexModelCatalogForRunningProcess(
+        77, "0.154.0", workingDirectory
+      ),
+      /does not expose exactly one 0\.154\.0 executable/u
+    );
+
+    writeLsof([codexExecutable]);
+    fs.writeFileSync(codexExecutable, "#!/bin/sh\nexit 7\n");
+    fs.chmodSync(codexExecutable, 0o700);
+    assert.throws(
+      () => runtime({ codexHome }).codexModelCatalogForRunningProcess(
+        77, "0.154.0", workingDirectory
+      ),
+      /could not return its model catalog/u
+    );
+  });
 });
 
 test("static terminal observations never inspect host executable versions", async (t) => {

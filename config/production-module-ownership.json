@@ -2,8 +2,8 @@
   "schema": "agent-knock-knock/production-module-ownership",
   "version": 1,
   "architecture": {
-    "cli_core_max_physical_loc": 1827,
-    "production_physical_loc": 138288,
+    "cli_core_max_physical_loc": 1839,
+    "production_physical_loc": 144726,
     "cli_core_importers": [
       "src/cli.ts"
     ]
@@ -1008,6 +1008,10 @@
     {
       "path": "src/terminal-maintenance-cli-adapter.ts",
       "owner": "terminal-command-adapter"
+    },
+    {
+      "path": "src/terminal-model-control.ts",
+      "owner": "terminal-agent-core"
     },
     {
       "path": "src/terminal-monitor-application-service.ts",

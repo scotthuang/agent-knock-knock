@@ -52,7 +52,7 @@ pi install npm:@scotthuang/agent-knock-knock-pi@next
 pi
 ```
 
-Pi should show `AKK ready`. With Codex or Claude Code already running in tmux or Herdr, enter `/akk list`. The connector provides `/akk`, 16 structured tools, callbacks to the initiating Pi session, and native approval dialogs. See the [Pi connector guide](connectors/pi/README.md).
+Pi should show `AKK ready`. With Codex or Claude Code already running in tmux or Herdr, enter `/akk list`. The connector provides `/akk`, 22 structured tools, the bundled `agent-knock-knock` skill, callbacks to the initiating Pi session, and native approval dialogs. See the [Pi connector guide](connectors/pi/README.md).
 
 ## Install for DeepSeek Harness
 
@@ -63,7 +63,7 @@ dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
 dsh web
 ```
 
-Open a Web conversation and enter `/akk list`. The connector gives every conversation `/akk`, the same 16 structured tools, and callbacks to the exact Harness Agent that initiated the work. See the [DeepSeek Harness connector guide](connectors/deepseek-harness/README.md).
+Open a Web conversation and enter `/akk list`. The connector gives every conversation `/akk`, the same 22 structured tools, the bundled `agent-knock-knock` skill, and callbacks to the exact Harness Agent that initiated the work. See the [DeepSeek Harness connector guide](connectors/deepseek-harness/README.md).
 
 ## See It in Action
 
@@ -78,6 +78,8 @@ Suppose several Codex or Claude Code jobs are already running in tmux or Herdr:
 - **Watch without babysitting.** `/akk watch <terminal>` observes work already in progress and sends a callback when it finishes, needs approval, or becomes blocked. You can leave the terminal and continue from your phone or another chat client.
 - **Send without typing in a tiny remote console.** `/akk <selector>: <message>` sends your natural-language instruction to the selected live coding-agent terminal. An explicit user Send has priority over stale AKK management state.
 - **Identify an ambiguous Codex foreground explicitly.** When several rollout files or a recent `/clear` prevent durable attribution, an advertised foreground-identification action can inspect one exact idle pane without guessing which rollout is current.
+- **Switch models through the native catalog.** `/akk models <exact-terminal-id>` lists the choices currently offered by one exact physical Codex or Claude Code pane; a Codex rollout/native-thread attribution is not required, so this also works before the first rollout materializes. `/akk set-model ...` consumes one exact advertised model/reasoning-effort tuple without accepting raw slash commands, keys, or menu indexes. Codex synchronizes the model and ordinary efforts through `max` to the current and future-session defaults; its `ultra` effort is current-session-only, and the native UI does not expose the exact non-Ultra effort chosen for future sessions, so AKK omits that unobservable field. Claude Code changes only the current session.
+- **Continue or clear only a proven model-control residue.** If a failed Codex 0.154 model-control attempt leaves an exact `/model` completion surface or bare `/model` Composer, a fresh List may advertise both `/akk models <exact-terminal-id>` and `/akk repair-model-control <exact-terminal-id>`. Models uses a separate residual-bound authority to continue that exact native slash command into read-only catalog discovery without retyping it. If the exact native picker is already open, List marks the pane non-idle and advertises repair only. Repair remains the cleanup-only escape hatch, never presses Enter, and must prove an empty Composer.
 - **Inspect and recover.** `/akk status <turn-or-watch>` shows current state when a callback is delayed. Durable callback records and Watches provide a recovery path after transient Host failures.
 - **Approve deliberately.** AKK can surface Codex or Claude Code permission requests and submit an explicit human decision. It preserves the coding agent's existing permission mode.
 - **Hand control back and forth.** Attach to the same tmux or Herdr pane whenever you want. AKK does not create a parallel hidden conversation.
@@ -87,11 +89,22 @@ The common workflow is:
 ```text
 /akk list
 /akk watch <exact-terminal-id>
+/akk models <exact-terminal-id>
+/akk set-model <exact-terminal-id> <advertised-model-id> <advertised-reasoning-effort>
 /akk codex: run the tests and explain any failures
 /akk status <turn-id-or-watch-id>
 ```
 
-Use identifiers and actions from a fresh `/akk list`; do not guess or cache terminal IDs.
+If List advertises `repair-model-control`, it is an alternative cleanup flow:
+
+```text
+/akk repair-model-control <exact-terminal-id>
+/akk list
+/akk models <exact-terminal-id>
+/akk set-model <exact-terminal-id> <advertised-model-id> <advertised-reasoning-effort>
+```
+
+Use identifiers and actions from a fresh `/akk list`; do not guess or cache terminal IDs. Model switching is fail-closed: the same exact physical pane/process must still be free of an active Turn or any input-owning approval, questionnaire/editor, or read-only viewer, and must show either an exact idle empty Composer or one stable profiled Codex 0.154 `/model` residual. A Codex 0.154 zero-rollout pane does not require `identify_foreground` or a resolved native rollout identity; Claude Code still requires its exact current native Session. When List advertises both actions for a Composer residual, `model_options` may continue it into the catalog while `repair_model_control` only clears it. An open exact picker is non-idle and exposes repair only. If continuation, repair, or model switching reports `uncertain`, inspect the pane instead of retrying automatically.
 
 ## How It Works
 
@@ -134,7 +147,7 @@ Choose the guide that matches what you are trying to do:
 | --- | --- |
 | [tmux quick start](docs/quickstart-tmux.md) | First OpenClaw task, multiple panes, and selectors |
 | [Herdr quick start](docs/quickstart-herdr.md) | Local Herdr discovery and exact-version checks |
-| [Pi connector](connectors/pi/README.md) | Pi installation, 16 tools, native approval, callbacks, upgrade, and uninstall |
+| [Pi connector](connectors/pi/README.md) | Pi installation, 22 tools, bundled skill, native approval, callbacks, upgrade, and uninstall |
 | [DeepSeek Harness connector](connectors/deepseek-harness/README.md) | Harness installation, approval contract, callbacks, upgrade, and troubleshooting |
 | [Operator guide](docs/operator-guide.md) | Complete command reference, reliable Send, Watch, Status, approval, recovery, Sessions, and native threads |
 | [OpenClaw operations](docs/openclaw-operations.md) | npm alternative, configuration, auto-approval policy, supervisor behavior, and troubleshooting |

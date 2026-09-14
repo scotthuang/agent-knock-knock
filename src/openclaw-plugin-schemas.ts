@@ -283,6 +283,67 @@ export const nativeInspectParameters = {
   }
 };
 
+export const modelOptionsParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id from the current terminal row's advertised model_options action. This is explicit current-snapshot authority for one live physical pane/process, including a Codex pane with no materialized rollout or one exact stable Codex 0.154 /model residual. AKK consumes any residual-entry authority during this closed discovery; after exact dismissal it retains only a fresh ordinary terminal/catalog offer for one set_model attempt."
+    }
+  }
+};
+
+export const repairModelControlParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full terminal_id from the current terminal row's advertised repair_model_control action. AKK privately binds this one-shot repair to the exact Codex 0.154 pane/process and exact native /model Composer residue or open profiled model picker; no command, key, menu index, draft text, token, or fingerprint is accepted."
+    }
+  }
+};
+
+export const setModelParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id", "model", "reasoning_effort"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description:
+        "Exact full physical-pane terminal_id used in the immediately preceding agent_knock_knock_model_options call in this controller conversation. For a verified-zero-rollout Codex 0.154 pane, foreground attribution and identify_foreground are not prerequisites; Claude Code still requires its exact current native Session."
+    },
+    model: {
+      type: "string",
+      minLength: 1,
+      maxLength: 160,
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:/+\\-]*$",
+      description:
+        "Exact semantic model id advertised by the current model-options catalog. Display labels, menu indexes, slash commands, keys, and constructed model names are not accepted."
+    },
+    reasoning_effort: {
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+      pattern: "^[a-z][a-z0-9_-]*$",
+      description:
+        "Exact reasoning-effort value advertised for this model. The full model/effort tuple is required so AKK can verify an unambiguous postcondition."
+    }
+  }
+};
+
 export const identifyForegroundParameters = {
   type: "object",
   additionalProperties: false,

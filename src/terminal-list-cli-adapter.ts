@@ -84,6 +84,9 @@ import {
   decideLocalTerminalDispatchOwnership,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
+  decideTerminalUserExplicitModelControlAuthority,
+  decideTerminalUserExplicitModelControlResidualEntryAuthority,
+  decideTerminalUserExplicitModelControlRepairAuthority,
   decideTerminalUserExplicitSendAuthority,
   managedTurnNeedsAttention as terminalManagedTurnNeedsAttention,
   nonOwnerTerminalActions,
@@ -100,6 +103,8 @@ import {
   type TerminalActionSet,
   type TerminalDispatchOwnership
 } from "./terminal-action-projection.js";
+import type { TerminalModelControlResidualObservation } from
+  "./terminal-model-control.js";
 import {
   childProcessIdsForRoot,
   decideManagedBindingConflict,
@@ -142,6 +147,7 @@ import {
   readOnlyManagedTurn,
   userReleaseListActions,
   userReleasableManagedTurn,
+  withoutInspectionActionsDuringNativeTransition,
   renderAvailableListActions,
   renderCurrentManagedTurn,
   renderHistoricalManagedTurn,
@@ -1351,6 +1357,14 @@ async function terminalControlledListEntry(
       statusInspection: false,
       reason: "native inspection is unavailable"
     };
+  const modelControlCapability = bridge.registry.require(session.agent)
+    .probeModelControl?.(agentVersion) ?? {
+      status: "unsupported" as const,
+      agentVersion,
+      modelSelection: false,
+      reasoningEffortSelection: false,
+      reason: "terminal model control is unavailable"
+    };
   const compatibilityWarnings = [...new Set([
     lifecycleCapability.compatibilityWarning,
     nativeInspectionCapability.compatibilityWarning
@@ -1424,12 +1438,46 @@ async function terminalControlledListEntry(
       error: error instanceof Error ? error.message : String(error)
     });
   }
+  const zeroRolloutModelControlVerified =
+    session.agent === "codex" &&
+    nativeIdentityObservation.status === "verified_absent" &&
+    authorityNativeIdentityObservation.status === "verified_absent" &&
+    codexOpenRootRolloutInventory?.status === "verified_absent" &&
+    codexOpenRootRolloutInventory.pid === session.pid &&
+    codexOpenRootRolloutInventory.roots.length === 0 &&
+    codexOpenRootRolloutInventory.processBirth ===
+      physicalProcessIncarnation?.processBirth;
+  const exactModelControlNativeIdentity = session.agent === "codex" &&
+    isExactNativeThreadId(nativeAgentIdentity?.sessionId);
+  const modelControlResidual = await observeModelControlResidualForList({
+    bridge,
+    session,
+    terminalControl,
+    agentVersion,
+    modelControlCapability,
+    nativeAgentIdentity,
+    zeroRolloutVerified: zeroRolloutModelControlVerified,
+    nativeIdentityEligible:
+      exactModelControlNativeIdentity || zeroRolloutModelControlVerified,
+    effectiveTerminalState,
+    terminalHasInteraction:
+      terminalStatusSnapshot?.interaction_state !== undefined,
+    terminalHasBlockingTurn,
+    hasOrphanedDispatch: orphanedDispatch !== undefined
+  });
+  const modelControlSurfaceOpen =
+    modelControlResidual?.state === "recoverable" &&
+    modelControlResidual.kind === "model_surface";
+  const projectedTerminalState = modelControlSurfaceOpen
+    ? terminalListStateWithOpenModelControlSurface(effectiveTerminalState)
+    : effectiveTerminalState;
   const commands = terminalListCommands({
     agent: session.agent,
     terminalControl,
-    terminalState: effectiveTerminalState,
+    terminalState: projectedTerminalState,
     lifecycleCapability,
     nativeInspectionCapability,
+    modelControlCapability,
     nativeAgentIdentity: authorityNativeAgentIdentity,
     nativeProcessUuid,
     nativeProcessBirth,
@@ -1469,6 +1517,7 @@ async function terminalControlledListEntry(
     agent_version: agentVersion,
     native_thread_lifecycle: lifecycleCapability,
     native_inspection: nativeInspectionCapability,
+    model_control: modelControlCapability,
     ...(compatibilityWarnings.length > 0
       ? { compatibility_warnings: compatibilityWarnings }
       : {}),
@@ -1476,14 +1525,14 @@ async function terminalControlledListEntry(
     confidence: session.confidence,
     reason: session.reason,
     terminal_control: terminalControl,
-    approval_state: effectiveTerminalState.approval_state,
-    activity_state: effectiveTerminalState.activity_state,
-    activity_reason: effectiveTerminalState.activity_reason,
-    screen_state: effectiveTerminalState.screen_state,
-    screen_reason: effectiveTerminalState.screen_reason,
-    native_identity_state: effectiveTerminalState.native_identity_state,
-    durable_activity_state: effectiveTerminalState.durable_activity_state,
-    durable_activity_reason: effectiveTerminalState.durable_activity_reason,
+    approval_state: projectedTerminalState.approval_state,
+    activity_state: projectedTerminalState.activity_state,
+    activity_reason: projectedTerminalState.activity_reason,
+    screen_state: projectedTerminalState.screen_state,
+    screen_reason: projectedTerminalState.screen_reason,
+    native_identity_state: projectedTerminalState.native_identity_state,
+    durable_activity_state: projectedTerminalState.durable_activity_state,
+    durable_activity_reason: projectedTerminalState.durable_activity_reason,
     // Internal exact-observation evidence. The public projection strips this
     // object; raw terminal status reuses it so screen, approval, and activity
     // all describe the same capture.
@@ -1549,8 +1598,8 @@ async function terminalControlledListEntry(
       pid: session.pid,
       processUuid: physicalProcessIncarnation?.processUuid,
       processBirth: physicalProcessIncarnation?.processBirth,
-      approvalScanned: effectiveTerminalState.approval_state.scanned === true,
-      approvalBlocked: effectiveTerminalState.approval_state.blocked === true,
+      approvalScanned: projectedTerminalState.approval_state.scanned === true,
+      approvalBlocked: projectedTerminalState.approval_state.blocked === true,
       // Codex user-explicit Send treats this observation as advisory: an
       // off-screen or truncated composer must not hide the physical action.
       // Claude Code still consumes the exact-composer result in the shared
@@ -1576,6 +1625,27 @@ async function terminalControlledListEntry(
             : {})
         }
       : undefined;
+  const modelControlActions = projectTerminalModelControlActions({
+    renderedActions,
+    terminalId: entry.id,
+    processState: entry.process_state,
+    terminalControl,
+    session,
+    physicalProcessIncarnation,
+    agentVersion,
+    modelControlCapability,
+    nativeIdentityObservation,
+    authorityNativeIdentityObservation,
+    nativeAgentIdentity,
+    codexOpenRootRolloutInventory,
+    modelControlResidual,
+    effectiveTerminalState: projectedTerminalState,
+    automatedInputComposerReady,
+    terminalHasInteraction:
+      terminalStatusSnapshot?.interaction_state !== undefined,
+    terminalHasBlockingTurn,
+    hasOrphanedDispatch: orphanedDispatch !== undefined
+  });
   const foregroundIdentificationActions =
     terminalUserExplicitSendAuthority.eligible &&
       commands.identify_foreground === true
@@ -1611,10 +1681,308 @@ async function terminalControlledListEntry(
       ? { _terminal_user_explicit_send_action: terminalUserExplicitSendAction }
       : {}),
     available_actions: {
-      ...renderedActions,
+      ...modelControlActions,
       ...foregroundIdentificationActions
     }
   };
+}
+
+function projectTerminalModelControlActions(input: {
+  renderedActions: TerminalActionSet<Record<string, unknown>>;
+  terminalId: string;
+  processState: string;
+  terminalControl: TerminalControlRef;
+  session: ActiveTerminalProcess;
+  physicalProcessIncarnation?: {
+    processUuid: string;
+    processBirth: string;
+  };
+  agentVersion?: string;
+  modelControlCapability: {
+    status: string;
+    behaviorProfile?: string;
+    scope?: string;
+    modelSelection: boolean;
+    reasoningEffortSelection: boolean;
+  };
+  nativeIdentityObservation: TerminalNativeIdentityObservation;
+  authorityNativeIdentityObservation: TerminalNativeIdentityObservation;
+  nativeAgentIdentity?: TerminalNativeIdentity;
+  codexOpenRootRolloutInventory?: CodexOpenRootRolloutInventory;
+  modelControlResidual?: TerminalModelControlResidualObservation;
+  effectiveTerminalState: EffectiveTerminalListState;
+  automatedInputComposerReady: boolean;
+  terminalHasInteraction: boolean;
+  terminalHasBlockingTurn: boolean;
+  hasOrphanedDispatch: boolean;
+}): TerminalActionSet<Record<string, unknown>> {
+  const actions = { ...input.renderedActions };
+  const authority = decideTerminalUserExplicitModelControlAuthority({
+    exactTerminalRow: true,
+    terminalId: input.terminalId,
+    processState: input.processState,
+    terminalControl: input.terminalControl,
+    agent: input.session.agent,
+    pid: input.session.pid,
+    processUuid: input.physicalProcessIncarnation?.processUuid,
+    processBirth: input.physicalProcessIncarnation?.processBirth,
+    agentVersion: input.agentVersion,
+    behaviorProfile:
+      input.modelControlCapability.behaviorProfile ===
+        "codex-model-control-0.154.0"
+        ? input.modelControlCapability.behaviorProfile
+        : undefined,
+    zeroRolloutVerified:
+      input.session.agent === "codex" &&
+      input.nativeIdentityObservation.status === "verified_absent" &&
+      input.authorityNativeIdentityObservation.status === "verified_absent" &&
+      input.codexOpenRootRolloutInventory?.status === "verified_absent" &&
+      input.codexOpenRootRolloutInventory.pid === input.session.pid &&
+      input.codexOpenRootRolloutInventory.roots.length === 0 &&
+      input.codexOpenRootRolloutInventory.processBirth ===
+        input.physicalProcessIncarnation?.processBirth,
+    modelControlSupported:
+      input.modelControlCapability.status === "supported" &&
+      input.modelControlCapability.modelSelection === true &&
+      input.modelControlCapability.reasoningEffortSelection === true,
+    activityState: input.effectiveTerminalState.activity_state,
+    screenState: input.effectiveTerminalState.screen_state,
+    approvalScanned:
+      input.effectiveTerminalState.approval_state.scanned === true,
+    approvalBlocked:
+      input.effectiveTerminalState.approval_state.blocked === true,
+    automatedInputComposerReady: input.automatedInputComposerReady,
+    terminalHasInteraction: input.terminalHasInteraction,
+    terminalHasBlockingTurn: input.terminalHasBlockingTurn,
+    hasOrphanedDispatch: input.hasOrphanedDispatch
+  });
+  const hasExactCodexIdentity = input.session.agent === "codex" &&
+    isExactNativeThreadId(input.nativeAgentIdentity?.sessionId);
+  if (input.session.agent === "codex" && !hasExactCodexIdentity) {
+    delete actions.model_options;
+  }
+  if (authority.eligible) {
+    actions.model_options = {
+      tool: "agent_knock_knock_model_options",
+      arguments: {
+        terminal_id: authority.terminalId,
+        expected_binding_token: authority.expectedBindingToken
+      },
+      authority_scope: "terminal_user_explicit_model_control",
+      mutation_scope: input.modelControlCapability.scope,
+      requires_user_intent: true
+    };
+  }
+  const residual = input.modelControlResidual?.state === "recoverable"
+    ? input.modelControlResidual
+    : undefined;
+  const repairAuthority =
+    decideTerminalUserExplicitModelControlRepairAuthority({
+      exactTerminalRow: true,
+      terminalId: input.terminalId,
+      processState: input.processState,
+      terminalControl: input.terminalControl,
+      agent: input.session.agent,
+      pid: input.session.pid,
+      processUuid: input.physicalProcessIncarnation?.processUuid,
+      processBirth: input.physicalProcessIncarnation?.processBirth,
+      agentVersion: input.agentVersion,
+      behaviorProfile:
+        input.modelControlCapability.behaviorProfile ===
+          "codex-model-control-0.154.0"
+          ? input.modelControlCapability.behaviorProfile
+          : undefined,
+      nativeIdentityEligible:
+        hasExactCodexIdentity || authority.eligible ||
+        (
+          input.session.agent === "codex" &&
+          input.nativeIdentityObservation.status === "verified_absent" &&
+          input.authorityNativeIdentityObservation.status === "verified_absent" &&
+          input.codexOpenRootRolloutInventory?.status === "verified_absent" &&
+          input.codexOpenRootRolloutInventory.pid === input.session.pid &&
+          input.codexOpenRootRolloutInventory.roots.length === 0 &&
+          input.codexOpenRootRolloutInventory.processBirth ===
+            input.physicalProcessIncarnation?.processBirth
+        ),
+      modelControlSupported:
+        input.modelControlCapability.status === "supported" &&
+        input.modelControlCapability.modelSelection === true &&
+        input.modelControlCapability.reasoningEffortSelection === true,
+      activityState: input.effectiveTerminalState.activity_state,
+      approvalScanned:
+        input.effectiveTerminalState.approval_state.scanned === true,
+      approvalBlocked:
+        input.effectiveTerminalState.approval_state.blocked === true,
+      terminalHasInteraction: input.terminalHasInteraction,
+      terminalHasBlockingTurn: input.terminalHasBlockingTurn,
+      hasOrphanedDispatch: input.hasOrphanedDispatch,
+      residualKind: residual?.kind,
+      residualFingerprint: residual?.fingerprint
+    });
+  const residualEntryAuthority =
+    decideTerminalUserExplicitModelControlResidualEntryAuthority({
+      exactTerminalRow: true,
+      terminalId: input.terminalId,
+      processState: input.processState,
+      terminalControl: input.terminalControl,
+      agent: input.session.agent,
+      pid: input.session.pid,
+      processUuid: input.physicalProcessIncarnation?.processUuid,
+      processBirth: input.physicalProcessIncarnation?.processBirth,
+      agentVersion: input.agentVersion,
+      behaviorProfile:
+        input.modelControlCapability.behaviorProfile ===
+          "codex-model-control-0.154.0"
+          ? input.modelControlCapability.behaviorProfile
+          : undefined,
+      nativeIdentityEligible:
+        hasExactCodexIdentity || authority.eligible ||
+        (
+          input.session.agent === "codex" &&
+          input.nativeIdentityObservation.status === "verified_absent" &&
+          input.authorityNativeIdentityObservation.status === "verified_absent" &&
+          input.codexOpenRootRolloutInventory?.status === "verified_absent" &&
+          input.codexOpenRootRolloutInventory.pid === input.session.pid &&
+          input.codexOpenRootRolloutInventory.roots.length === 0 &&
+          input.codexOpenRootRolloutInventory.processBirth ===
+            input.physicalProcessIncarnation?.processBirth
+        ),
+      modelControlSupported:
+        input.modelControlCapability.status === "supported" &&
+        input.modelControlCapability.modelSelection === true &&
+        input.modelControlCapability.reasoningEffortSelection === true,
+      activityState: input.effectiveTerminalState.activity_state,
+      approvalScanned:
+        input.effectiveTerminalState.approval_state.scanned === true,
+      approvalBlocked:
+        input.effectiveTerminalState.approval_state.blocked === true,
+      terminalHasInteraction: input.terminalHasInteraction,
+      terminalHasBlockingTurn: input.terminalHasBlockingTurn,
+      hasOrphanedDispatch: input.hasOrphanedDispatch,
+      residualKind: residual?.kind,
+      residualFingerprint: residual?.fingerprint
+    });
+  if (residualEntryAuthority.eligible) {
+    actions.model_options = {
+      tool: "agent_knock_knock_model_options",
+      arguments: {
+        terminal_id: residualEntryAuthority.terminalId,
+        expected_binding_token: residualEntryAuthority.expectedBindingToken
+      },
+      authority_scope: "terminal_user_explicit_model_control_residual_entry",
+      mutation_scope: input.modelControlCapability.scope,
+      requires_user_intent: true
+    };
+  } else if (residual) {
+    delete actions.model_options;
+  }
+  if (repairAuthority.eligible) {
+    actions.repair_model_control = {
+      tool: "agent_knock_knock_repair_model_control",
+      arguments: {
+        terminal_id: repairAuthority.terminalId,
+        expected_binding_token: repairAuthority.expectedBindingToken
+      },
+      authority_scope: "terminal_user_explicit_model_control_repair",
+      mutation_scope: "exact_model_control_residual_only",
+      requires_user_intent: true
+    };
+  } else {
+    delete actions.repair_model_control;
+  }
+  return actions;
+}
+
+async function observeModelControlResidualForList(input: {
+  bridge: TerminalAgentBridge;
+  session: ActiveTerminalProcess;
+  terminalControl: TerminalControlRef;
+  agentVersion?: string;
+  modelControlCapability: {
+    status: string;
+    behaviorProfile?: string;
+    modelSelection: boolean;
+    reasoningEffortSelection: boolean;
+  };
+  nativeAgentIdentity?: TerminalNativeIdentity;
+  zeroRolloutVerified: boolean;
+  nativeIdentityEligible: boolean;
+  effectiveTerminalState: EffectiveTerminalListState;
+  terminalHasInteraction: boolean;
+  terminalHasBlockingTurn: boolean;
+  hasOrphanedDispatch: boolean;
+}): Promise<TerminalModelControlResidualObservation | undefined> {
+  const inspect = input.bridge.inspectModelControlResidual;
+  if (
+    typeof inspect !== "function" ||
+    input.session.agent !== "codex" ||
+    input.agentVersion !== "0.154.0" ||
+    input.modelControlCapability.status !== "supported" ||
+    input.modelControlCapability.behaviorProfile !==
+      "codex-model-control-0.154.0" ||
+    !input.nativeIdentityEligible ||
+    input.effectiveTerminalState.activity_state === "working" ||
+    input.effectiveTerminalState.activity_state === "awaiting_approval" ||
+    input.effectiveTerminalState.approval_state.scanned !== true ||
+    input.effectiveTerminalState.approval_state.blocked === true ||
+    input.terminalHasInteraction ||
+    input.terminalHasBlockingTurn ||
+    input.hasOrphanedDispatch
+  ) {
+    return undefined;
+  }
+  const adapter = input.bridge.registry.require("codex");
+  const capability = adapter.probeModelControl?.(input.agentVersion);
+  const plan = capability?.status === "supported"
+    ? adapter.planModelControl?.(capability)
+    : undefined;
+  if (!plan || plan.behaviorProfile !== "codex-model-control-0.154.0") {
+    return undefined;
+  }
+  const identity = input.nativeAgentIdentity;
+  const runtime: TerminalRuntimeIdentity = {
+    pid: input.session.pid,
+    agentVersion: input.agentVersion,
+    cwd: input.terminalControl.currentPath,
+    terminalTarget: input.terminalControl.target,
+    ...(input.zeroRolloutVerified
+      ? { expectedEmptyNativeSession: true }
+      : {}),
+    ...(identity?.sessionId
+      ? {
+          nativeSessionId: identity.sessionId,
+          expectedNativeSessionId: identity.sessionId
+        }
+      : {}),
+    ...(identity?.processUuid
+      ? { nativeProcessUuid: identity.processUuid }
+      : {}),
+    ...(identity?.processBirth
+      ? { nativeProcessBirth: identity.processBirth }
+      : {}),
+    ...(identity?.rollout
+      ? {
+          requireNativeRolloutIdentity: true,
+          nativeRollout: identity.rollout
+        }
+      : {})
+  };
+  try {
+    return await inspect.call(
+      input.bridge,
+      "codex",
+      input.terminalControl,
+      input.agentVersion,
+      plan,
+      { runtime, beforeInput: () => undefined }
+    );
+  } catch (error) {
+    runtimeLog("warn", "terminal_model_control_residual_probe_unavailable", {
+      terminal_target: input.terminalControl.target,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
 }
 
 function terminalListCommands(input: {
@@ -1629,6 +1997,11 @@ function terminalListCommands(input: {
   nativeInspectionCapability: {
     status: string;
     statusInspection: boolean;
+  };
+  modelControlCapability: {
+    status: string;
+    modelSelection: boolean;
+    reasoningEffortSelection: boolean;
   };
   nativeAgentIdentity?: TerminalNativeIdentity;
   nativeProcessUuid?: string;
@@ -1645,6 +2018,7 @@ function terminalListCommands(input: {
     terminalState,
     lifecycleCapability,
     nativeInspectionCapability,
+    modelControlCapability,
     nativeAgentIdentity,
     nativeProcessUuid,
     nativeProcessBirth,
@@ -1702,6 +2076,27 @@ function terminalListCommands(input: {
       ) &&
       !hasOrphanedDispatch &&
       !terminalHasBlockingTurn,
+    model_options:
+      modelControlCapability.status === "supported" &&
+      modelControlCapability.modelSelection === true &&
+      modelControlCapability.reasoningEffortSelection === true &&
+      terminalState.activity_state === "idle" &&
+      terminalState.approval_state.scanned === true &&
+      terminalState.approval_state.blocked !== true &&
+      automatedInputComposerReady &&
+      terminalControl.capabilities.includes("send_keys") &&
+      terminalControl.capabilities.includes("screen_status") &&
+      (
+        agent === "codex"
+          ? codexLifecycleIncarnationAvailable
+          : Boolean(
+              nativeAgentIdentity?.sessionId &&
+              nativeAgentIdentity.processUuid
+            )
+      ) &&
+      !terminalHasInteraction &&
+      !hasOrphanedDispatch &&
+      !terminalHasBlockingTurn,
     identify_foreground: foregroundIdentificationEligible,
     identify_and_send: foregroundIdentificationEligible,
     watch:
@@ -1731,6 +2126,19 @@ interface EffectiveTerminalListState extends TerminalListState {
   native_identity_state: TerminalNativeIdentityState;
   durable_activity_state: TerminalDurableActivityState;
   durable_activity_reason: string;
+}
+
+function terminalListStateWithOpenModelControlSurface(
+  state: EffectiveTerminalListState
+): EffectiveTerminalListState {
+  const reason = "an exact native model-control surface is open";
+  return {
+    ...state,
+    activity_state: "unknown",
+    activity_reason: reason,
+    screen_state: "unknown",
+    screen_reason: reason
+  };
 }
 
 function effectiveTerminalListState(input: {
@@ -2357,11 +2765,7 @@ function observeTerminalListBindingAuthority(
         storeDir,
         authoritativeSession
       )
-      ? Object.fromEntries(
-          Object.entries(bindingAwareRawActions).filter(
-            ([actionName]) => actionName !== "native_inspect"
-          )
-        )
+      ? withoutInspectionActionsDuringNativeTransition(bindingAwareRawActions)
       : bindingAwareRawActions;
   const sessionAwareRawActions = terminalHasNonterminalDeferredTransfer
     ? readOnlyListActions(sessionAwareRawActionsBase)

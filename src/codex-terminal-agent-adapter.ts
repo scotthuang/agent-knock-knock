@@ -35,6 +35,11 @@ import {
   terminalApprovalPromptEvidence
 } from "./terminal-agent-adapter.js";
 import { isExactNativeThreadId } from "./managed-session.js";
+import {
+  observeTerminalModelControl,
+  planTerminalModelControl,
+  probeTerminalModelControl
+} from "./terminal-model-control.js";
 
 export type CodexApprovalPromptDetection =
   | {
@@ -117,6 +122,10 @@ export function createCodexTerminalAgentAdapter(
     probeNativeInspection: probeCodexNativeInspection,
     planNativeInspection: planCodexNativeInspection,
     observeNativeInspection: observeCodexNativeInspection,
+    probeModelControl: (agentVersion) =>
+      probeTerminalModelControl("codex", agentVersion),
+    planModelControl: planTerminalModelControl,
+    observeModelControl: observeTerminalModelControl,
     detectDurableCompletion: options.detectDurableCompletion ?? (async (request) =>
       detectCodexDurableCompletion(request))
   };

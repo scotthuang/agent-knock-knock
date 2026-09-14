@@ -38,7 +38,7 @@ compatibility; it can be `unknown` while the screen is visibly idle because
 native identity or durable activity is ambiguous. These axes are diagnostic
 and never replace a current `available_actions` entry as mutation authority.
 
-Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v25 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `native_inspect({terminal_id,inspection})`, `identify_foreground({terminal_id})`, `identify_and_send({terminal_id,request})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, `respond_interaction({turn_id|watch_id,interaction_id,answers})` with exactly one subject target, managed `approve({turn_id,decision})` or approve-once-only terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Approval, questionnaire response, handoff takeover, and reconciliation require explicit user intent and fresh source state. The trusted plugin/CLI privately derives and revalidates terminal, binding, candidate, prompt, interaction, composer, handoff, revision, and compare-and-swap fences; the model never transports them. Store format remains 1 and writer protocol is 7; Terminal Watch schema is 3.
+Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v28 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `model_options({terminal_id})`, the separately advertised Codex-only `repair_model_control({terminal_id})`, followed by `set_model({terminal_id,model,reasoning_effort})`, `native_inspect({terminal_id,inspection})`, `identify_foreground({terminal_id})`, `identify_and_send({terminal_id,request})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, `respond_interaction({turn_id|watch_id,interaction_id,answers})` with exactly one subject target, managed `approve({turn_id,decision})` or approve-once-only terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Model selection, model-control residue repair, approval, questionnaire response, handoff takeover, and reconciliation require explicit user intent and fresh source state. The trusted plugin/CLI privately derives and revalidates terminal, catalog, binding, candidate, prompt, interaction, composer, handoff, revision, and compare-and-swap fences; the model never transports them. Store format remains 1 and writer protocol is 7; Terminal Watch schema is 3.
 
 ## Turn Flow
 
@@ -97,7 +97,7 @@ callback path. Existing OpenClaw Store fields remain readable and dual-written
 for compatibility; OpenClaw-specific `sessionKey`, Gateway calls, executable
 paths, and credentials stay inside the trusted OpenClaw adapter. No route,
 profile, controller-session identity, token, composer digest, draft text, or
-transport evidence is exposed through the v25 model-facing contract. A new
+transport evidence is exposed through the v28 model-facing contract. A new
 controller Host still needs a trusted session-context adapter and runtime
 integration; the protocol boundary is not a standalone supervisor.
 
@@ -119,7 +119,7 @@ A terminal-activity Watch makes no task-identity claim. Its checkpoint must firs
 
 An approval observation appends at most one notification per exact fingerprint and leaves either Watch mode active. It never sends approval keys and never enters automatic approval; a human must inspect and decide in the TUI. Exact-task completion/failure, best-effort stable idle, timeout, invalidation, or explicit `unwatch` settles once and enqueues one terminal notification. Deterministic notification IDs and idempotency keys, append-only receipts, claim leases, and retry timestamps make callback recovery crash-safe: transport is at-least-once, while the idempotency key makes the logical notification effectively at-most-once.
 
-The current core Host Adapter surface has 19 registered tools and emits list action-contract v25. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls. The v25 ordinary Send shape remains `send({session_id|terminal_id,request})`; the Codex composer policy is advertised as `replace_current_composer_and_submit`, not as another model-supplied argument. The interaction tool consumes only the current same-controller Status projection and never exposes its private prompt fingerprint or terminal-key plan. The two foreground-identification tools are separate, advertised Codex-only operations and are never implicit ordinary-Send preprocessing.
+The current core Host Adapter surface has 22 registered tools and emits list action-contract v28. Its Watch tools map to four internal CLI entries: `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`. These entries are an internal adapter boundary, not alternate raw terminal controls. The v28 ordinary Send shape remains `send({session_id|terminal_id,request})`; the Codex composer policy is advertised as `replace_current_composer_and_submit`, not as another model-supplied argument. The interaction tool consumes only the current same-controller Status projection and never exposes its private prompt fingerprint or terminal-key plan. The two foreground-identification tools are separate, advertised Codex-only operations and are never implicit ordinary-Send preprocessing.
 
 ## Native Thread Transitions
 
@@ -143,6 +143,34 @@ For the next ordinary send, refresh `agent_knock_knock_list` and use only the re
 `agent_knock_knock_status` is an AKK Turn/screen inspection. It does not execute a coding-agent slash command. Native inspection is a separate terminal action advertised when the adapter, terminal identity, private binding fence, idle composer, and ownership state are currently safe. An unverified semantic agent version adds a warning but does not hide the action.
 
 The `agent_knock_knock_native_inspect` contract accepts exactly two fields: the full `terminal_id` and `inspection="status"`. The adapter owns the closed command, and AKK derives the fresh binding fence internally; callers cannot supply a command string or opaque authority. Regression-tested profiles cover Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4/0.154.0 and Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267. Other complete `x.y.z` versions use the generic runtime profile with a compatibility warning; unchanged UI behavior succeeds, while incompatible behavior fails or is reported uncertain without automatic retry. Claude's modal Status panel must be freshly proven, parsed, dismissed once, and followed by the same idle empty composer. `/usage`, `/cost`, `/stats`, `/usage-credits`, `/model`, `/compact`, and arbitrary slash commands remain unavailable. Bare Codex `/usage` opens an interactive menu whose later Enter can select an account-side usage-limit reset, so it must not be treated as a read-only inspection.
+
+Native model control is a separate two-step mutation based on explicit authority
+for one exact physical pane/process. `model_options({terminal_id})` dynamically
+captures the native model/reasoning catalog; `set_model` accepts only one exact
+tuple from that same-controller offer. Codex 0.154 accepts either one exact
+current native Session or a verified-zero-rollout pane, where
+`identify_foreground` is not a prerequisite; Claude Code still requires one
+exact current native Session. Both steps require no active Turn, approval,
+questionnaire/editor, or read-only viewer. `model_options` normally requires
+an idle empty Composer, but current List may bind it to one exact stable Codex
+0.154 `/model` residual and authorize continuing only that slash command into
+read-only discovery. Every native frame is revalidated under lock. An unproven
+postcondition is `uncertain` and must not be retried automatically. Codex reports
+`current_and_new_sessions` with the existing current-only Ultra exception;
+Claude Code reports `current_session`.
+
+A failed Codex 0.154 model-control operation can expose both residual-bound
+`model_options({terminal_id})` and the distinct cleanup-only
+`repair_model_control({terminal_id})` action when List proves the same
+exact physical pane/process, an exact profiled `/model` popup or exact bare
+`/model` Composer, no active Turn, and no approval, questionnaire/editor, or
+viewer. The trusted adapter consumes the residual-entry authority at the
+`model_options` Enter boundary. After exact catalog discovery and dismissal to
+an empty Composer, AKK derives a fresh ordinary binding/catalog offer for one
+`set_model` attempt. Neither residual-entry nor repair authority is accepted by
+`set_model`. Repair never presses Enter or accepts raw text/keys; success
+requires an empty Composer. Refresh List and obtain a new model catalog
+afterward. An uncertain repair cannot be retried automatically.
 
 Foreground identification is a separate Codex-only capability for a physically
 exact but durably ambiguous pane. `agent_knock_knock_identify_foreground`

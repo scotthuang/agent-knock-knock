@@ -160,7 +160,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 25);
+    assert.equal(listed.action_contracts.version, 28);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -339,6 +339,9 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         "new_thread",
         "list_resumable_threads",
         "native_inspect",
+        "model_options",
+        "repair_model_control",
+        "set_model",
         "identify_foreground",
         "identify_and_send",
         "resume_thread",

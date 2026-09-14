@@ -11,6 +11,7 @@ import {
   terminalControlEvidence,
   terminalEndpointIdentityFromEvidence,
   terminalEndpointIdentityKey,
+  terminalPhysicalBindingToken,
   terminalRouteKeyFromEvidence,
   sameTerminalControlIncarnation,
   type TerminalControlEvidence
@@ -269,25 +270,7 @@ export function unmanagedTerminalBindingToken(value: {
   rollout?: NativeProcessIdentity["rollout"];
 }): string {
   if (hasCanonicalTerminalEndpoint(value.terminalControl)) {
-    const evidence = terminalControlEvidence(value.terminalControl);
-    return createHash("sha256")
-      .update(JSON.stringify({
-        version: 2,
-        state: "unmanaged",
-        terminal_id: value.terminalId,
-        terminal_identity: terminalEndpointIdentityKey(
-          terminalEndpointIdentityFromEvidence(evidence)!
-        ),
-        terminal_process_anchor_pid: evidence.process_anchor_pid,
-        agent: value.agent,
-        agent_pid: value.pid,
-        workspace: value.workspace,
-        native_thread_id: value.nativeThreadId ?? null,
-        process_uuid: value.processUuid ?? null,
-        process_birth: value.processBirth ?? null,
-        rollout: value.rollout ?? null
-      }))
-      .digest("hex");
+    return terminalPhysicalBindingToken(value);
   }
   return legacyUnmanagedTerminalBindingToken(value);
 }

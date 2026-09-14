@@ -988,6 +988,12 @@ const nativeThreadLifecycleQueryFacade = createNativeThreadLifecycleCliAdapter({
       terminalIdentityAuthority.codexAllowedCompanionSetForManagedSession(input),
     processIncarnation: (pid) =>
       terminalIdentityAuthority.codexProcessIncarnationForPid(pid),
+    physicalProcessIncarnation: (pid) =>
+      terminalProcessIncarnationForPid(
+        pid,
+        cliDependencies().processBirthForPid ??
+          cliDependencies().codexProcessBirthForPid
+      ),
     runtimeForLiveIdentity: (input) =>
       terminalIdentityAuthority.terminalRuntimeForLiveIdentity(input),
     ownerIsInactive: (input) =>
@@ -1122,7 +1128,10 @@ const nativeInspectionCommands: Readonly<Record<
 >> = Object.freeze({
   "native-inspect": nativeThreadLifecycleFacade.runInspect,
   "native-status": nativeThreadLifecycleFacade.runInspect,
-  "identify-foreground": nativeThreadLifecycleFacade.runIdentifyForeground
+  "identify-foreground": nativeThreadLifecycleFacade.runIdentifyForeground,
+  "model-options": nativeThreadLifecycleFacade.runModelOptions,
+  "repair-model-control": nativeThreadLifecycleFacade.runRepairModelControl,
+  "set-model": nativeThreadLifecycleFacade.runSetModel
 });
 const codexLatentClearResumeObservation =
   nativeThreadLifecycleFacade.codexLatentClearResumeObservation;
@@ -1802,6 +1811,9 @@ function usage() {
   agent-knock-knock clear-thread --terminal <exact-terminal-id> --expected-binding-token <token>
   agent-knock-knock list-resumable-threads --terminal <exact-terminal-id> [--selection-scope <opaque-scope>]
   agent-knock-knock native-inspect --terminal <exact-terminal-id> --inspection status --expected-binding-token <token>
+  agent-knock-knock model-options --terminal <exact-terminal-id> --expected-binding-token <token>
+  agent-knock-knock repair-model-control --terminal <exact-terminal-id> --expected-binding-token <token>
+  agent-knock-knock set-model --terminal <exact-terminal-id> --expected-binding-token <token> --expected-catalog-fingerprint <sha256> --model <semantic-id> --reasoning-effort <low|medium|high|xhigh|max|ultra>
   agent-knock-knock identify-foreground --terminal <exact-terminal-id> --expected-terminal-token <token>
   agent-knock-knock resume-thread --terminal <exact-terminal-id> --native-thread <uuid> --expected-binding-token <token> --candidate-token <token>
   agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>

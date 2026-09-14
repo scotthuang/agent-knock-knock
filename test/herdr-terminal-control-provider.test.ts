@@ -438,6 +438,37 @@ test("Herdr discovery uses socket plus terminal_id as stable identity", async ()
   assert.deepEqual(await harness.provider.listTerminals(), []);
 });
 
+test("Herdr control refs retain socket-incarnation evidence across capture and input", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal);
+  const control = harness.provider.toControlRef(terminal, [
+    "screen_status",
+    "send_keys"
+  ]);
+  harness.socketIdentity = {
+    ...SOCKET_IDENTITY,
+    inode: "7002",
+    ctimeNs: "2000000"
+  };
+
+  await assert.rejects(
+    harness.provider.capture(harness.provider.endpoint(control)),
+    /server socket changed/u
+  );
+  await assert.rejects(
+    harness.provider.sendKeys(harness.provider.endpoint(control), ["Escape"]),
+    /server socket changed/u
+  );
+  assert.equal(
+    harness.requests.some((entry) =>
+      entry.request.method === "pane.read" ||
+      entry.request.method === "pane.send_input"
+    ),
+    false
+  );
+});
+
 test("Herdr resolve refreshes a moved pane route without changing identity", async () => {
   const harness = createHarness();
   const [before] = await harness.provider.listTerminals();

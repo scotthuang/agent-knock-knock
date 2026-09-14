@@ -23,6 +23,9 @@ Direct slash commands are available in every first-party Host integration:
 | `/akk watch <terminal-id>` | Observe one exact terminal without changing it. |
 | `/akk unwatch <watch-id>` | Stop one read-only Watch. |
 | `/akk threads <terminal-id>` | List resumable native threads for one terminal. |
+| `/akk models <terminal-id>` | Inspect the current native model and reasoning choices for one exact idle terminal. |
+| `/akk repair-model-control <terminal-id>` | Clear only an exact advertised stale Codex 0.154 `/model` Composer surface or open native picker and prove an empty Composer. |
+| `/akk set-model <terminal-id> <model> <reasoning-effort>` | Select one exact tuple from the immediately preceding model catalog. |
 | `/akk new-thread <terminal-id>` | Start a clean native coding-agent thread. |
 | `/akk clear-thread <terminal-id>` | Alias for the same clean-thread lifecycle action. |
 | `/akk resume-thread <terminal-id> [thread]` | Resume one exact native thread. |
@@ -56,7 +59,7 @@ prefilled semantic IDs from a fresh list.
 
 ## Reliable Send
 
-The v25 `action_contracts` expose model-facing semantic IDs only. The trusted
+The v28 `action_contracts` expose model-facing semantic IDs only. The trusted
 adapter privately derives and revalidates terminal, process, binding, native
 thread, composer, approval, handoff, revision, and compare-and-swap evidence.
 Callers never supply those opaque fences.
@@ -212,6 +215,95 @@ the entire candidate snapshot before terminal input; candidate-set changes
 fail closed. A replaced or changed transcript/rollout cannot be resumed under
 stale metadata.
 
+## Safe model control
+
+Model control is a two-step, current-snapshot operation. Start from a fresh
+`/akk list`, copy one complete `terminal_id` whose row advertises
+`available_actions.model_options`, then run:
+
+```text
+/akk models <exact-terminal-id>
+/akk set-model <exact-terminal-id> <advertised-model-id> <advertised-reasoning-effort>
+```
+
+The first command opens and closes the agent's native model UI as one bounded
+inspection. It returns the effective model, the semantic model IDs currently
+available to that account and runtime, and each model's available reasoning
+efforts. This is dynamic authority, not a static AKK allowlist: copy one exact
+model ID and one exact reasoning value from that result. Both values are
+required; an omitted, invented, or unadvertised effort fails before native
+model-selection input. The structured postcondition remains authoritative
+about the effective tuple.
+
+The matching OpenClaw tools are
+`agent_knock_knock_model_options({terminal_id})` and
+`agent_knock_knock_set_model({terminal_id,model,reasoning_effort})`. The
+options result and its private physical-terminal/catalog authority belong to the
+same controller
+conversation and are consumed by one set-model attempt. Relist after any pane,
+process, catalog, or UI change, or after any failed attempt.
+Neither tool accepts a slash command, raw key, menu index, display label,
+scope override, token, or fingerprint.
+
+If a failed Codex 0.154 attempt leaves an exact profiled `/model` popup or an
+exact bare `/model` Composer, List may advertise both
+`model_options({terminal_id})` and `repair_model_control({terminal_id})`.
+The former uses separate residual-bound authority to continue that exact slash
+command into read-only catalog discovery without retyping it. The latter is the
+cleanup-only alternative; its equivalent human command is
+`/akk repair-model-control <exact-terminal-id>`. It accepts only the terminal
+ID and privately revalidates the pane, process, residue, approval state, and
+absence of an active Turn before every reversible cleanup input. It never
+presses Enter, selects a model, submits a task, or handles an approval or
+questionnaire. Success requires an exactly empty Composer. An uncertain
+continuation or repair is not retryable.
+
+If the exact native model picker is already open, List projects the terminal
+as non-idle and advertises only `repair_model_control`. That repair may dismiss
+the exact picker but never receives authority to press Enter.
+
+Both steps use explicit current-snapshot authority for the same exact physical
+terminal and coding-agent process. Codex 0.154 may use either one exact current
+native Session or a verified-zero-rollout pane, and the Codex-only
+`identify_foreground` diagnostic is not a prerequisite. Claude Code still
+requires one exact current native Session. The pane
+must remain safely idle with an exactly empty Composer, except for the exact
+Codex residual continuation described above. An active Turn, working
+agent, approval, questionnaire or editor, read-only viewer, non-empty Composer,
+ambiguous or multi-rollout Codex identity, stale physical snapshot, unsupported
+version, or changed catalog fails closed
+with no model-selection input. The private multi-step native sequence
+revalidates each frame and must return to the main Composer without submitting
+a task or answering a prompt.
+
+Provider scope is explicit in both results:
+
+- Codex reports `scope="current_and_new_sessions"`. Its native model flow
+  changes this session and persists the selected model as the default for
+  future Codex sessions. Ordinary reasoning efforts through `max` are also
+  persisted. Codex treats `ultra` specially: it is effective only in the
+  current session, while the future-session effort falls back to a non-Ultra
+  value. The scope label therefore does not claim that Ultra itself persists.
+  These are intentional, visible side effects of the approved native
+  operation; AKK does not edit `~/.codex/config.toml` directly or restore it
+  afterward.
+- Claude Code reports `scope="current_session"`. Its native session-only path
+  changes the open session and leaves new-session defaults unchanged.
+
+A successful result is `changed` or `already_effective` and reports the
+current session under `effective`, the future Codex defaults under
+`new_session_defaults`, and whether they changed under `defaults_changed`.
+For an Ultra request, expect `effective.reasoning_effort="ultra"` and only the
+persisted model in `new_session_defaults`. The native TUI does not expose the
+exact non-Ultra effort it chooses for new sessions, so AKK omits that field
+rather than guessing; never infer that Ultra became a future default from
+`scope="current_and_new_sessions"` alone.
+`outcome="uncertain"` means native input may have taken effect but AKK could
+not prove the final state. It carries `do_not_retry=true`: inspect the shared
+pane, then obtain a new model catalog before any deliberate new attempt. Model
+control creates no AKK Turn and never approves, answers, or submits coding
+work.
+
 ## AKK Status and native inspection
 
 `/akk status` reads AKK state and a bounded terminal screen. It does not run the
@@ -267,6 +359,9 @@ appear only when the matching state makes them meaningful:
 | Command | Use |
 | --- | --- |
 | `/akk doctor` | Diagnose installation, Host, terminal, and coding-agent readiness. |
+| `/akk models <terminal>` | Inspect one idle pane's exact native model and reasoning catalog. |
+| `/akk repair-model-control <terminal>` | Clear one exact List-advertised stale Codex `/model` surface; never submit it. |
+| `/akk set-model <terminal> <model> <effort>` | Consume that catalog once; Codex reports current and future defaults separately (Ultra stays current-only), while Claude Code is session-only. |
 | `/akk approve <turn-or-terminal>` | Approve one current prompt after explicit review. |
 | `/akk renew <turn> <minutes>` | Restart monitoring for one still-live stalled Turn without terminal input. |
 | `/akk retry-callback <turn>` | Retry one persisted failed callback with its original identity. |
@@ -283,12 +378,13 @@ Status, then use only the action currently advertised by AKK.
 
 ## Structured tool surface
 
-The current OpenClaw plugin and Host Adapter register 19 semantic tools: list,
-watch, unwatch, list resumable threads, native inspect, identify foreground,
-identify and send, new thread, reconcile binding, resume thread, status, send,
-respond, typed native interaction response, approve, renew, retry callback,
-cancel, and close. Model-facing mutations contain semantic IDs and user
-content only. Connector prereleases that pin an earlier AKK runtime retain the
+The current OpenClaw plugin and Host Adapter register 22 semantic tools: list,
+watch, unwatch, list resumable threads, native inspect, model options, repair
+model control, set model, identify foreground, identify and send, new thread, reconcile binding,
+resume thread, status, send, respond, typed native interaction response,
+approve, renew, retry callback, cancel, and close. Model-facing mutations
+contain semantic IDs and user content only. Connector prereleases that pin an
+earlier AKK runtime retain the
 tool surface documented by that connector release.
 Selectors, pane routes, draft text, fingerprints, tokens, revisions, candidate
 fences, and binding generations stay inside the trusted Host adapter.

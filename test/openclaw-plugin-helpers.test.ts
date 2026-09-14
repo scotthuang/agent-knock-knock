@@ -7,8 +7,12 @@ import {
   AKK_CALLBACK_METHOD,
   akkUsageText,
   buildAkkCommandCliArgs,
+  compactAkkListModelProjection,
   formatAkkListCommandResult,
+  formatAkkModelOptionsCommandResult,
+  formatAkkRepairModelControlCommandResult,
   formatAkkRespondCommandResult,
+  formatAkkSetModelCommandResult,
   formatAkkTerminalWatchHint,
   formatAkkThreadsCommandResult,
   formatAkkThreadTransitionCommandResult,
@@ -25,7 +29,10 @@ import {
   stripAkkLegacyApprovalInstructionTail
 } from "../src/openclaw-plugin-helpers.js";
 import {
+  modelOptionsParameters,
+  repairModelControlParameters,
   respondInteractionParameters,
+  setModelParameters,
   statusParameters,
   unwatchParameters,
   watchParameters
@@ -34,6 +41,164 @@ import {
 const exactTerminalId = "terminal:v2:tmux:codex:work:0.0:1234";
 const currentNativeThreadId = "11111111-1111-4111-8111-111111111111";
 const resumableNativeThreadId = "22222222-2222-4222-8222-222222222222";
+
+test("compact Host List keeps every terminal and moves static prose to the skill", () => {
+  const longText = "repeated operator explanation ".repeat(160);
+  const terminals = Array.from({ length: 5 }, (_, index) => {
+    const terminalId = `terminal:v2:herdr:codex:default:w1:p${index}:80${index}`;
+    return {
+      id: terminalId,
+      short_ref: `@terminal${index}`,
+      source: "terminal",
+      agent: "codex",
+      agent_version: "0.154.0",
+      pid: 800 + index,
+      cwd: `/Users/example/project-${index}`,
+      command: "codex --yolo",
+      process_state: "active",
+      screen_state: "idle",
+      screen_reason: longText,
+      activity_state: "idle",
+      activity_reason: longText,
+      durable_activity_state: "idle",
+      durable_activity_reason: longText,
+      native_identity_state: "verified_absent",
+      terminal_control: {
+        kind: "herdr",
+        target: `default:w1:p${index}`,
+        socketPath: "/private/herdr.sock",
+        capabilities: { sendKeys: true }
+      },
+      approval_state: {
+        scanned: true,
+        blocked: false,
+        approvable: false,
+        reason: longText
+      },
+      model_control: {
+        status: "supported",
+        scope: "current_and_new_sessions",
+        modelSelection: true,
+        reasoningEffortSelection: true,
+        reason: longText
+      },
+      managed: {
+        session_id: null,
+        session_short_ref: null,
+        current_turn: null,
+        recent_turn: {
+          id: `turn-${index}`,
+          turn_id: `turn-${index}`,
+          status: "done",
+          request: longText,
+          completion: longText,
+          terminal_screen: longText,
+          event_log_path: "/private/events.ndjson",
+          available_actions: {
+            status: {
+              tool: "agent_knock_knock_status",
+              arguments: { turn_id: `turn-${index}` },
+              use: longText
+            }
+          }
+        },
+        turn_count: 1,
+        hidden_turn_count: 0,
+        session_count: 0,
+        binding_token: "private-binding-token"
+      },
+      available_actions: {
+        status: {
+          tool: "agent_knock_knock_status",
+          arguments: { conversation_id: terminalId },
+          use: longText
+        },
+        send: {
+          tool: "agent_knock_knock_send",
+          scope: "terminal_user_explicit",
+          composer_policy: "replace_current_composer_and_submit",
+          arguments: {
+            selector: terminalId,
+            expected_terminal_token: "private-terminal-token"
+          },
+          missing_required: ["request", "expected_terminal_token"],
+          use: longText
+        },
+        model_options: {
+          tool: "agent_knock_knock_model_options",
+          arguments: {
+            terminal_id: terminalId,
+            expected_binding_token: "private-model-token"
+          },
+          reason: longText
+        }
+      }
+    };
+  });
+  const projected = compactAkkListModelProjection({
+    action_contracts: {
+      version: 28,
+      instructions: [longText],
+      field_semantics: { reason: longText },
+      actions: { send: { use: longText } }
+    },
+    terminals,
+    terminal_watches: [],
+    unavailable_managed_turns: [],
+    store: {
+      status: "compatible",
+      readable: true,
+      writable: true,
+      store_dir: "/private/store",
+      reason: longText
+    },
+    reconciliation: { status: "ok", reason: longText },
+    terminal_scan: {
+      enabled: true,
+      terminal_count: 5,
+      active_count: 5,
+      agents: ["codex"],
+      diagnostics: { raw: longText }
+    }
+  });
+
+  assert.deepEqual(projected.projection, {
+    schema: "agent-knock-knock/host-list-compact",
+    version: 1,
+    skill: "agent-knock-knock",
+    action_contract_version: 28
+  });
+  assert.equal(Object.hasOwn(projected, "action_contracts"), false);
+  const compactTerminals = projected.terminals as Record<string, unknown>[];
+  assert.equal(compactTerminals.length, 5);
+  assert.equal(compactTerminals[4]?.id, terminals[4]?.id);
+  const first = compactTerminals[0] ?? {};
+  assert.deepEqual(first.available_actions, {
+    status: true,
+    send: true,
+    model_options: true
+  });
+  assert.deepEqual(
+    (first.action_inputs as Record<string, unknown>).send,
+    {
+      missing_required: ["request"],
+      scope: "terminal_user_explicit"
+    }
+  );
+  assert.equal(Object.hasOwn(first, "screen_reason"), false);
+  assert.equal(Object.hasOwn(first, "activity_reason"), false);
+  const managed = first.managed as Record<string, unknown>;
+  const recent = managed.recent_turn as Record<string, unknown>;
+  assert.equal(Object.hasOwn(recent, "request"), false);
+  assert.equal(Object.hasOwn(recent, "completion"), false);
+  assert.equal(Object.hasOwn(recent, "terminal_screen"), false);
+  assert.equal(Object.hasOwn(recent, "event_log_path"), false);
+  const encoded = JSON.stringify(projected);
+  assert.ok(encoded.length < 8_000, `compact List was ${encoded.length} chars`);
+  assert.equal(encoded.includes("repeated operator explanation"), false);
+  assert.equal(encoded.includes("private-terminal-token"), false);
+  assert.equal(encoded.includes("/private/store"), false);
+});
 
 test("respond interaction schema exposes provider-portable free text", () => {
   const answerSchema = respondInteractionParameters.properties.answers.items;
@@ -219,6 +384,9 @@ test("/akk help lists the supported tmux executors", () => {
   assert.match(usage, /\/akk respond <turn-selector>: <answer>/);
   assert.match(usage, /\/akk approve <turn-selector>/);
   assert.match(usage, /\/akk threads <exact-terminal-id>/);
+  assert.match(usage, /\/akk models <exact-terminal-id>/);
+  assert.match(usage, /\/akk repair-model-control <exact-terminal-id>/);
+  assert.match(usage, /\/akk set-model <exact-terminal-id>/);
   assert.match(usage, /\/akk new-thread <exact-terminal-id>/);
   assert.match(usage, /\/akk clear-thread <exact-terminal-id>/);
   assert.match(usage, /\/akk resume-thread <exact-terminal-id>/);
@@ -227,6 +395,219 @@ test("/akk help lists the supported tmux executors", () => {
     /\/akk (?:status|respond|approve|cancel)[^\n]*session-selector/u
   );
   assert.doesNotMatch(usage, /\/akk (?:describe|send|renew|retry-callback|close)\b/u);
+});
+
+test("model-control schemas expose only semantic current-catalog inputs", () => {
+  assert.deepEqual(modelOptionsParameters.required, ["terminal_id"]);
+  assert.deepEqual(repairModelControlParameters.required, ["terminal_id"]);
+  assert.deepEqual(Object.keys(repairModelControlParameters.properties), [
+    "terminal_id"
+  ]);
+  assert.deepEqual(setModelParameters.required, [
+    "terminal_id",
+    "model",
+    "reasoning_effort"
+  ]);
+  for (const forbidden of [
+    "command",
+    "keys",
+    "menu_index",
+    "scope",
+    "expected_binding_token",
+    "expected_catalog_fingerprint"
+  ]) {
+    assert.equal(
+      Object.hasOwn(setModelParameters.properties, forbidden),
+      false
+    );
+  }
+  const validate = new AjvJsonSchemaValidator().getValidator(
+    setModelParameters
+  );
+  assert.equal(validate({
+    terminal_id: exactTerminalId,
+    model: "gpt-6-astra",
+    reasoning_effort: "ultra"
+  }).valid, true);
+  assert.equal(validate({
+    terminal_id: exactTerminalId,
+    model: "/model gpt-6-astra",
+    reasoning_effort: "ultra"
+  }).valid, false);
+  assert.equal(validate({
+    terminal_id: exactTerminalId,
+    model: "gpt-6-astra",
+    reasoning_effort: "ultra",
+    menu_index: 2
+  }).valid, false);
+  assert.equal(validate({
+    terminal_id: exactTerminalId,
+    model: "gpt-6-astra"
+  }).valid, false);
+  const validateRepair = new AjvJsonSchemaValidator().getValidator(
+    repairModelControlParameters
+  );
+  assert.equal(validateRepair({ terminal_id: exactTerminalId }).valid, true);
+  assert.equal(validateRepair({
+    terminal_id: exactTerminalId,
+    command: "/model"
+  }).valid, false);
+});
+
+test("/akk model control accepts only exact semantic ids and private CLI authority", () => {
+  assert.deepEqual(parseAkkCommand(`models ${exactTerminalId}`), {
+    action: "model-options",
+    terminalId: exactTerminalId
+  });
+  assert.deepEqual(
+    parseAkkCommand(`repair-model-control ${exactTerminalId}`),
+    {
+      action: "repair-model-control",
+      terminalId: exactTerminalId
+    }
+  );
+  assert.throws(
+    () => parseAkkCommand(`repair-model-control ${exactTerminalId} --force`),
+    /Usage: \/akk repair-model-control/u
+  );
+  assert.deepEqual(
+    parseAkkCommand(`set-model ${exactTerminalId} gpt-6-astra ultra`),
+    {
+      action: "set-model",
+      terminalId: exactTerminalId,
+      model: "gpt-6-astra",
+      reasoningEffort: "ultra"
+    }
+  );
+  assert.throws(
+    () => parseAkkCommand(`set-model ${exactTerminalId} /model ultra`),
+    /Usage: \/akk set-model/u
+  );
+  assert.throws(
+    () => parseAkkCommand(`set-model ${exactTerminalId} gpt-6-astra`),
+    /Usage: \/akk set-model/u
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`repair-model-control ${exactTerminalId}`),
+      { storeDir: "/private/akk-store" },
+      { expectedBindingToken: "repair-authority" }
+    ),
+    [
+      "repair-model-control",
+      "--terminal",
+      exactTerminalId,
+      "--expected-binding-token",
+      "repair-authority",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`models ${exactTerminalId}`),
+      { storeDir: "/private/akk-store" },
+      { expectedBindingToken: "binding-authority" }
+    ),
+    [
+      "model-options",
+      "--terminal",
+      exactTerminalId,
+      "--expected-binding-token",
+      "binding-authority",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+  assert.deepEqual(
+    buildAkkCommandCliArgs(
+      parseAkkCommand(`set-model ${exactTerminalId} gpt-6-astra ultra`),
+      { storeDir: "/private/akk-store" },
+      {
+        expectedBindingToken: "binding-authority",
+        expectedCatalogFingerprint: "catalog-authority"
+      }
+    ),
+    [
+      "set-model",
+      "--terminal",
+      exactTerminalId,
+      "--expected-binding-token",
+      "binding-authority",
+      "--expected-catalog-fingerprint",
+      "catalog-authority",
+      "--model",
+      "gpt-6-astra",
+      "--reasoning-effort",
+      "ultra",
+      "--store-dir",
+      "/private/akk-store"
+    ]
+  );
+});
+
+test("/akk formats model-control repair success and uncertainty", () => {
+  const repaired = formatAkkRepairModelControlCommandResult({
+    terminal_id: exactTerminalId,
+    outcome: "repaired",
+    terminal_input_attempted: true,
+    composer_postcondition: "empty",
+    do_not_retry: false
+  });
+  assert.match(repaired, /cleared and verified/u);
+  assert.match(repaired, /refresh \/akk list/u);
+  assert.match(repaired, /never submits a task/u);
+
+  const uncertain = formatAkkRepairModelControlCommandResult({
+    terminal_id: exactTerminalId,
+    outcome: "uncertain",
+    terminal_input_attempted: true,
+    composer_postcondition: "unproven",
+    do_not_retry: true
+  });
+  assert.match(uncertain, /could not prove/u);
+  assert.match(uncertain, /do not retry automatically/u);
+});
+
+test("/akk model control explains Codex Ultra current/default split", () => {
+  const options = formatAkkModelOptionsCommandResult({
+    terminal_id: exactTerminalId,
+    agent: "codex",
+    scope: "current_and_new_sessions",
+    current: { model: "gpt-5.6-sol", reasoning_effort: "medium" },
+    models: [{
+      id: "gpt-6-astra",
+      label: "GPT-6 Astra",
+      reasoning_efforts: ["low", "ultra"]
+    }]
+  });
+  assert.match(options, /ordinary efforts \(including max\)/u);
+  assert.match(options, /ultra applies only now/u);
+
+  const changed = formatAkkSetModelCommandResult({
+    terminal_id: exactTerminalId,
+    scope: "current_and_new_sessions",
+    outcome: "changed",
+    requested: { model: "gpt-6-astra", reasoning_effort: "ultra" },
+    effective: { model: "gpt-6-astra", reasoning_effort: "ultra" },
+    new_session_defaults: { model: "gpt-6-astra" },
+    defaults_changed: true,
+    do_not_retry: false
+  });
+  assert.match(changed, /new-session default changed: yes/u);
+  assert.match(changed, /new-session default model: gpt-6-astra/u);
+  assert.match(changed, /native non-ultra fallback/u);
+
+  const uncertain = formatAkkSetModelCommandResult({
+    terminal_id: exactTerminalId,
+    scope: "current_and_new_sessions",
+    outcome: "uncertain",
+    requested: { model: "gpt-6-astra", reasoning_effort: "high" },
+    defaults_changed: null,
+    do_not_retry: true
+  });
+  assert.match(uncertain, /new-session default changed: unknown/u);
+  assert.match(uncertain, /do not retry automatically/u);
 });
 
 test("/akk watch and unwatch require authoritative exact identities", () => {
@@ -1039,6 +1420,9 @@ test("/akk list renders each live terminal once with its managed-turn context", 
       terminal_control: { target: "work:0.0" },
       available_actions: {
         new_thread: { arguments: { terminal_id: exactTerminalId } },
+        repair_model_control: {
+          arguments: { terminal_id: exactTerminalId }
+        },
         list_resumable_threads: {
           arguments: { terminal_id: exactTerminalId }
         },
@@ -1071,7 +1455,7 @@ test("/akk list renders each live terminal once with its managed-turn context", 
   assert.match(text, new RegExp(`lifecycle terminal_id: ${exactTerminalId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
   assert.match(
     text,
-    /terminal actions: list_resumable_threads, new_thread, resume_thread/u
+    /terminal actions: list_resumable_threads, new_thread, repair_model_control, resume_thread/u
   );
   assert.match(text, /recent turn: @managed1 \| codex \| idle \| Review the repository/u);
   assert.match(text, /recent turn actions: status/u);

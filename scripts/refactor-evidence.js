@@ -59,6 +59,9 @@ const PUBLIC_COMMANDS = Object.freeze([
   "native-inspect",
   "native-status",
   "identify-foreground",
+  "model-options",
+  "repair-model-control",
+  "set-model",
   "resume-thread",
   "reconcile-binding",
   "respond",
@@ -86,6 +89,9 @@ const PUBLIC_ACTIONS = Object.freeze([
   "new_thread",
   "list_resumable_threads",
   "native_inspect",
+  "model_options",
+  "repair_model_control",
+  "set_model",
   "identify_foreground",
   "identify_and_send",
   "resume_thread",
@@ -105,6 +111,9 @@ const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
   "agent_knock_knock_native_inspect",
+  "agent_knock_knock_model_options",
+  "agent_knock_knock_repair_model_control",
+  "agent_knock_knock_set_model",
   "agent_knock_knock_identify_foreground",
   "agent_knock_knock_identify_and_send",
   "agent_knock_knock_new_thread",
@@ -975,6 +984,9 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "unwatchParameters",
       "listResumableThreadsParameters",
       "nativeInspectParameters",
+      "modelOptionsParameters",
+      "repairModelControlParameters",
+      "setModelParameters",
       "identifyForegroundParameters",
       "identifyAndSendParameters",
       "newThreadParameters",
@@ -1029,15 +1041,18 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "identifyForegroundParameters",
       "listParameters",
       "listResumableThreadsParameters",
+      "modelOptionsParameters",
       "nativeInspectParameters",
       "newThreadParameters",
       "reconcileBindingParameters",
+      "repairModelControlParameters",
       "renewParameters",
       "respondParameters",
       "respondInteractionParameters",
       "resumeThreadParameters",
       "retryCallbackParameters",
       "sendParameters",
+      "setModelParameters",
       "statusParameters",
       "unwatchParameters",
       "watchParameters"
@@ -1260,8 +1275,8 @@ function validatePublicContracts(value, {
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 25) {
-    fail("list action contract version must remain 25");
+  if (actions.version !== 28) {
+    fail("list action contract version must remain 28");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -1278,8 +1293,8 @@ function validatePublicContracts(value, {
   assertSourcePattern(
     repoRoot,
     "src/terminal-list-renderer.ts",
-    /version:\s*25\b/u,
-    "list action contract version 25"
+    /version:\s*28\b/u,
+    "list action contract version 28"
   );
 
   const openclaw = assertExactKeys(contracts.openclaw_tools, [

@@ -559,13 +559,18 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     capabilities: readonly TerminalControlCapability[] = terminal.capabilities
   ): TerminalControlRef {
     const control = herdrControlFromEndpoint(terminal);
-    return terminalControlWithCapabilities(
+    const next = terminalControlWithCapabilities(
       control,
       intersectCapabilities(
         intersectCapabilities(capabilities, terminal.capabilities),
         this.supportedCapabilities
       )
     );
+    const socketIdentity = this.endpointSocketIdentities.get(terminal);
+    if (socketIdentity) {
+      this.endpointSocketIdentities.set(this.endpoint(next), socketIdentity);
+    }
+    return next;
   }
 
   async resolve(terminal: TerminalEndpointRef): Promise<TerminalEndpointRef> {

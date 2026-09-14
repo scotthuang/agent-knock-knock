@@ -24,6 +24,9 @@
         "native-inspect",
         "native-status",
         "identify-foreground",
+        "model-options",
+        "repair-model-control",
+        "set-model",
         "resume-thread",
         "reconcile-binding",
         "respond",
@@ -60,7 +63,7 @@
       "version": 1,
       "transport": "mcp_stdio",
       "callback_driver": "command_json_v1",
-      "tool_count": 19,
+      "tool_count": 22,
       "authority_paths": [
         "schemas/host-profile-v1.schema.json",
         "src/command-json-callback-transport.ts",
@@ -83,7 +86,7 @@
       ]
     },
     "list_action": {
-      "version": 25,
+      "version": 28,
       "actions": [
         "send",
         "retry_submission",
@@ -92,6 +95,9 @@
         "new_thread",
         "list_resumable_threads",
         "native_inspect",
+        "model_options",
+        "repair_model_control",
+        "set_model",
         "identify_foreground",
         "identify_and_send",
         "resume_thread",
@@ -109,7 +115,7 @@
         "src/terminal-list-renderer.ts"
       ],
       "witnesses": [
-        "action-v25-unit",
+        "action-v28-unit",
         "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
@@ -123,6 +129,9 @@
         "agent_knock_knock_unwatch",
         "agent_knock_knock_list_resumable_threads",
         "agent_knock_knock_native_inspect",
+        "agent_knock_knock_model_options",
+        "agent_knock_knock_repair_model_control",
+        "agent_knock_knock_set_model",
         "agent_knock_knock_identify_foreground",
         "agent_knock_knock_identify_and_send",
         "agent_knock_knock_new_thread",
@@ -208,10 +217,10 @@
   },
   "witnesses": [
     {
-      "id": "action-v25-unit",
+      "id": "action-v28-unit",
       "path": "test/terminal-list-renderer.test.ts",
       "tier": "fast",
-      "needle": "the public action contract v25 exposes semantic arguments only"
+      "needle": "the public action contract v28 exposes semantic arguments only"
     },
     {
       "id": "callback-cli-boundary",
@@ -379,7 +388,7 @@
       "id": "host-bridge-stdio-unit",
       "path": "test/host-bridge-stdio.test.ts",
       "tier": "fast",
-      "needle": "real Host Bridge stdio advertises 19 tools and exits on Host EOF"
+      "needle": "real Host Bridge stdio advertises 22 tools and exits on Host EOF"
     },
     {
       "id": "host-bridge-tools-unit",
@@ -848,13 +857,13 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The imported command service and pure renderer preserve action-contract v25 ordering, semantic model-facing arguments including status-bound interactive responses and explicit foreground identification, version compatibility warnings without version-based action vetoes, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, best-effort exact fallback Watch callbacks that never revoke Send, independent screen/native-identity/durable-activity evidence, Claude exact-empty and managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v28 ordering, semantic model-facing arguments including status-bound interactive responses, exact model-option discovery, exact one-shot Codex model-control residue repair, and set-model offers, explicit foreground identification, version compatibility warnings without version-based action vetoes, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, best-effort exact fallback Watch callbacks that never revoke Send, independent screen/native-identity/durable-activity evidence, Claude exact-empty and managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
         "management-list-in-process",
         "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
-        "action-v25-unit"
+        "action-v28-unit"
       ],
       "retained_boundary_witnesses": [
         "codex-binding-boundary",
