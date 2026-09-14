@@ -40,9 +40,12 @@ import {
   renderManagedTurnListEntry,
   safeUnavailableManagedTurnActions,
   sendActionForManagedSession,
-  withoutGenericHandoffSourceClose,
-  type AvailableListActionFacts
+  withoutGenericHandoffSourceClose
 } from "./terminal-list-renderer.js";
+import {
+  decideManagedTurnListActions,
+  type ManagedTurnListRuntimeActionFacts
+} from "./terminal-managed-turn-list-action-policy.js";
 import {
   type TerminalListOwnershipContext,
   type TerminalListOwnershipService
@@ -119,7 +122,7 @@ function managedTurnListActionFacts(
   ports: TerminalListProjectionPorts,
   task: Record<string, any>,
   conversation?: Record<string, any>
-): AvailableListActionFacts {
+): ManagedTurnListRuntimeActionFacts {
   const nativeTakeover = isRecord(conversation?.native_session_takeover)
     ? conversation.native_session_takeover
     : undefined;
@@ -217,12 +220,29 @@ function managedTurnListEntry(
     conversation
   }: ManagedTurnListEntryOptions = {}
 ): Record<string, any> {
+  const projectedApprovalState = approvalState ?? (conversation
+    ? managedListApprovalState(ports, conversation)
+    : undefined);
+  const runtimeFacts = managedTurnListActionFacts(
+    ports,
+    task,
+    conversation
+  );
+  const orphanedTerminalDispatch = isRecord(
+    task.orphaned_terminal_dispatch
+  )
+    ? task.orphaned_terminal_dispatch
+    : undefined;
   return renderManagedTurnListEntry(task, {
-    terminalBridge,
-    approvalState: approvalState ?? (conversation
-      ? managedListApprovalState(ports, conversation)
-      : undefined),
-    actionFacts: managedTurnListActionFacts(ports, task, conversation)
+    approvalState: projectedApprovalState,
+    actionDecision: decideManagedTurnListActions({
+      status: task.status,
+      agent: task.agent,
+      terminalBridgeAdvertised: terminalBridge,
+      approvalState: projectedApprovalState,
+      orphanedTerminalDispatch,
+      ...runtimeFacts
+    })
   });
 }
 

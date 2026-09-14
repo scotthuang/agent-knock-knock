@@ -4,15 +4,13 @@ import {
   type ManagedSessionState
 } from "./managed-session.js";
 import {
-  isActiveConversationStatus,
-  isWaitingForAgentStatus
-} from "./protocol.js";
-import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
 import type { ModelControlAvailabilityDecision } from
   "./terminal-model-control-availability.js";
+import type { ManagedTurnListActionDecision } from
+  "./terminal-managed-turn-list-action-policy.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -23,34 +21,14 @@ const TERMINAL_WATCH_ACTION_USE =
   "version, ownership, and artifact uncertainty are warnings rather than " +
   "Watch vetoes.";
 
-export interface AvailableListActionFacts {
-  terminalBridgeReady: boolean;
-  managedApprovalPending: boolean;
-  renewEligible: boolean;
-  retryCallbackEligible: boolean;
-  retrySubmissionCandidate: boolean;
-}
-
-const NO_AVAILABLE_LIST_ACTION_FACTS: AvailableListActionFacts = {
-  terminalBridgeReady: false,
-  managedApprovalPending: false,
-  renewEligible: false,
-  retryCallbackEligible: false,
-  retrySubmissionCandidate: false
-};
-
 export function renderManagedTurnListEntry(
   task: JsonRecord,
-  {
-    terminalBridge = false,
-    approvalState,
-    actionFacts = NO_AVAILABLE_LIST_ACTION_FACTS
-  }: {
-    terminalBridge?: boolean;
+  options: {
     approvalState?: JsonRecord;
-    actionFacts?: AvailableListActionFacts;
-  } = {}
+    actionDecision: ManagedTurnListActionDecision;
+  }
 ): JsonRecord {
+  const { approvalState, actionDecision } = options;
   const sessionId = stringValue(task.session_id) ??
     stringValue(task.conversation_id);
   const turnId = stringValue(task.turn_id) ??
@@ -63,20 +41,11 @@ export function renderManagedTurnListEntry(
     id: turnId,
     short_ref: sessionShortRef(turnId),
     source: "managed_turn",
-    ...(approvalState ? { approval_state: approvalState } : {}),
-    commands: {
-      respond: task.status === "waiting_for_openclaw",
-      cancel: isWaitingForAgentStatus(task.status),
-      close: task.status !== "closed",
-      status: true,
-      approve: terminalBridge && isActiveConversationStatus(task.status)
-    }
+    ...(approvalState ? { approval_state: approvalState } : {})
   };
-  const availableActions = renderAvailableListActions(entry, actionFacts);
-  const { commands: _commands, ...publicEntry } = entry;
   return {
-    ...publicEntry,
-    available_actions: availableActions
+    ...entry,
+    available_actions: renderManagedTurnAvailableActions(turnId, actionDecision)
   };
 }
 
@@ -512,18 +481,14 @@ export function listActionContracts(): JsonRecord {
 }
 
 export function renderAvailableListActions(
-  entry: JsonRecord,
-  facts: AvailableListActionFacts = NO_AVAILABLE_LIST_ACTION_FACTS
+  entry: JsonRecord
 ): JsonRecord {
   const id = stringValue(entry.id ?? entry.conversation_id);
   if (!id) {
     return {};
   }
   const commands = isRecord(entry.commands) ? entry.commands : {};
-  const managed = entry.source === "managed_turn";
-  const targetArguments = managed
-    ? { turn_id: id }
-    : { conversation_id: id };
+  const targetArguments = { conversation_id: id };
   const actions: JsonRecord = {
     status: {
       tool: "agent_knock_knock_status",
@@ -534,8 +499,6 @@ export function renderAvailableListActions(
   const approvalState = isRecord(entry.approval_state)
     ? entry.approval_state
     : {};
-  const managedApprovalPending = facts.managedApprovalPending;
-  const terminalBridgeReady = managed && facts.terminalBridgeReady;
 
   Object.assign(actions, renderTerminalSendAction({
     commands,
@@ -561,48 +524,25 @@ export function renderAvailableListActions(
     lifecycleBindingToken,
     terminalControlled
   }));
-  Object.assign(actions, renderManagedRespondAction({
-    commands,
-    entry,
-    id,
-    approvalState,
-    managed,
-    managedApprovalPending,
-    terminalBridgeReady
-  }));
-
   const approvalFingerprint = stringValue(approvalState.fingerprint);
-  const managedApprovalEligible =
-    terminalBridgeReady &&
-    entry.status === "waiting_for_openclaw" &&
-    (
-      entry.agent !== "claude" ||
-      approvalState.decision_mode === "keys"
-    );
-  Object.assign(actions, renderApprovalAction({
+  Object.assign(actions, renderTerminalApprovalAction({
     commands,
     entry,
     approvalState,
     approvalFingerprint,
-    managedApprovalEligible,
     targetArguments,
     terminalControlled
   }));
 
-  const cancelAction = renderCancelListAction(
+  const cancelAction = renderTerminalCancelListAction(
     entry,
-    facts,
     targetArguments,
     approvalState
   );
   if (cancelAction) {
     actions.cancel = cancelAction;
   }
-  Object.assign(
-    actions,
-    renderManagedRecoveryActions({ entry, facts, id, managed, targetArguments })
-  );
-  Object.assign(actions, renderCloseAction({ commands, entry, id, managed }));
+  Object.assign(actions, renderTerminalCloseAction({ commands, entry, id }));
   return actions;
 }
 
@@ -822,40 +762,90 @@ function terminalIdleLifecycleActionEligible(
     Boolean(input.lifecycleBindingToken);
 }
 
-function renderManagedRespondAction(input: {
-  commands: JsonRecord;
-  entry: JsonRecord;
-  id: string;
-  approvalState: JsonRecord;
-  managed: boolean;
-  managedApprovalPending: boolean;
-  terminalBridgeReady: boolean;
-}): JsonRecord {
-  if (
-    !input.managed ||
-    input.commands.respond !== true ||
-    !input.terminalBridgeReady ||
-    input.entry.status !== "waiting_for_openclaw" ||
-    input.managedApprovalPending ||
-    input.approvalState.blocked === true
-  ) {
-    return {};
-  }
-  return {
-    respond: {
-      tool: "agent_knock_knock_respond",
-      arguments: { turn_id: input.id },
-      missing_required: ["request"]
+function renderManagedTurnAvailableActions(
+  turnId: string,
+  decision: ManagedTurnListActionDecision
+): JsonRecord {
+  if (!turnId) return {};
+  const targetArguments = { turn_id: turnId };
+  const actions: JsonRecord = {
+    status: {
+      tool: "agent_knock_knock_status",
+      arguments: targetArguments
     }
   };
+  if (decision.respond) {
+    actions.respond = {
+      tool: "agent_knock_knock_respond",
+      arguments: targetArguments,
+      missing_required: ["request"]
+    };
+  }
+  if (decision.approval.available) {
+    actions.approve = {
+      tool: "agent_knock_knock_approve",
+      arguments: targetArguments,
+      choices: decision.approval.choices.map((choice) => ({ ...choice })),
+      missing_required: ["expected_approval_fingerprint"],
+      before_call: {
+        tool: "agent_knock_knock_status",
+        arguments: targetArguments,
+        use:
+          "After explicit user confirmation, copy the latest terminal_status.approval_state.fingerprint into expected_approval_fingerprint."
+      },
+      requires_explicit_user_confirmation: true,
+      requires_fresh_status: true
+    };
+  }
+  if (decision.cancel) {
+    actions.cancel = {
+      tool: "agent_knock_knock_cancel",
+      arguments: targetArguments,
+      requires_user_intent: true
+    };
+  }
+  if (decision.renew) {
+    actions.renew = {
+      tool: "agent_knock_knock_renew",
+      arguments: targetArguments
+    };
+  }
+  if (decision.retryCallback) {
+    actions.retry_callback = {
+      tool: "agent_knock_knock_retry_callback",
+      arguments: targetArguments
+    };
+  }
+  if (decision.retrySubmission) {
+    actions.retry_submission = {
+      tool: "agent_knock_knock_send",
+      arguments: targetArguments,
+      requires_explicit_user_confirmation: true
+    };
+  }
+  if (decision.close.available) {
+    actions.close = {
+      tool: "agent_knock_knock_close",
+      arguments: {
+        ...targetArguments,
+        ...(decision.close.expectedMessageId
+          ? { expected_message_id: decision.close.expectedMessageId }
+          : {}),
+        ...(decision.close.expectedTransitionId
+          ? { expected_transition_id: decision.close.expectedTransitionId }
+          : {})
+      },
+      requires_explicit_user_confirmation: true
+    };
+  }
+  return actions;
 }
 
-function renderApprovalAction(input: {
+function renderTerminalApprovalAction(input: {
   commands: JsonRecord;
   entry: JsonRecord;
   approvalState: JsonRecord;
   approvalFingerprint?: string;
-  managedApprovalEligible: boolean;
   targetArguments: JsonRecord;
   terminalControlled: boolean;
 }): JsonRecord {
@@ -863,10 +853,8 @@ function renderApprovalAction(input: {
     input.commands.approve !== true ||
     input.approvalState.approvable !== true ||
     !input.approvalFingerprint ||
-    !(
-      input.terminalControlled && input.entry.agent === "codex" ||
-      input.managedApprovalEligible
-    )
+    !input.terminalControlled ||
+    input.entry.agent !== "codex"
   ) {
     return {};
   }
@@ -878,7 +866,7 @@ function renderApprovalAction(input: {
         ? input.approvalState.choices.flatMap((choice) =>
             isRecord(choice) &&
               (choice.decision === "approve_once" || choice.decision === "reject") &&
-              (input.managedApprovalEligible || choice.decision !== "reject")
+              choice.decision !== "reject"
               ? [{
                   decision: choice.decision,
                   label: stringValue(choice.label)
@@ -902,45 +890,10 @@ function renderApprovalAction(input: {
   };
 }
 
-function renderManagedRecoveryActions(input: {
-  entry: JsonRecord;
-  facts: AvailableListActionFacts;
-  id: string;
-  managed: boolean;
-  targetArguments: JsonRecord;
-}): JsonRecord {
-  const actions: JsonRecord = {};
-  if (input.managed && input.facts.renewEligible) {
-    actions.renew = {
-      tool: "agent_knock_knock_renew",
-      arguments: input.targetArguments
-    };
-  }
-  if (input.managed && input.facts.retryCallbackEligible) {
-    actions.retry_callback = {
-      tool: "agent_knock_knock_retry_callback",
-      arguments: input.targetArguments
-    };
-  }
-  if (
-    input.managed &&
-    input.entry.agent === "codex" &&
-    input.facts.retrySubmissionCandidate
-  ) {
-    actions.retry_submission = {
-      tool: "agent_knock_knock_send",
-      arguments: { turn_id: input.id },
-      requires_explicit_user_confirmation: true
-    };
-  }
-  return actions;
-}
-
-function renderCloseAction(input: {
+function renderTerminalCloseAction(input: {
   commands: JsonRecord;
   entry: JsonRecord;
   id: string;
-  managed: boolean;
 }): JsonRecord {
   if (input.commands.close !== true) {
     return {};
@@ -954,7 +907,7 @@ function renderCloseAction(input: {
     close: {
       tool: "agent_knock_knock_close",
       arguments: {
-        ...(input.managed ? { turn_id: input.id } : { conversation_id: input.id }),
+        conversation_id: input.id,
         ...(expectedMessageId ? { expected_message_id: expectedMessageId } : {}),
         ...(expectedTransitionId
           ? { expected_transition_id: expectedTransitionId }
@@ -1253,9 +1206,8 @@ export function retargetConversationAction(
   };
 }
 
-function renderCancelListAction(
+function renderTerminalCancelListAction(
   entry: JsonRecord,
-  facts: AvailableListActionFacts,
   targetArguments: JsonRecord,
   approvalState: JsonRecord
 ): JsonRecord | undefined {
@@ -1270,17 +1222,7 @@ function renderCancelListAction(
         approvalState.approvable === true
       )
     );
-  const managedCancellable =
-    entry.source === "managed_turn" &&
-    facts.terminalBridgeReady &&
-    ["waiting_for_agent", "waiting_for_openclaw"].includes(
-      String(entry.status)
-    ) &&
-    !(
-      facts.managedApprovalPending &&
-      approvalState.approvable !== true
-    );
-  if (!rawCancellable && !managedCancellable) {
+  if (!rawCancellable) {
     return undefined;
   }
   return {
