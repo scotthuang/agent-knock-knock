@@ -330,9 +330,10 @@ test("atomic foreground identification failure sends no task and never falls bac
 });
 
 test("atomic foreground proof cannot authorize persistence and is rechecked at text boundary", () => {
-  const authority = compiledFunctionSource(
+  const authority = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
     "prepareRawTerminalDispatchAuthority",
-    "runManagedRawTerminalSendAttempt"
+    "runManagedRawTerminalSendAttemptInContext"
   );
   assertOrdered(authority, [
     "const atomicForegroundIdentification = options.identifyForeground === true",
@@ -346,7 +347,8 @@ test("atomic foreground proof cannot authorize persistence and is rechecked at t
     "captureCodexCandidateSetRolloutAcceptanceAnchor",
     "assertAtomicForegroundAcceptanceBoundary"
   ]);
-  const identityPolicy = compiledFunctionSource(
+  const identityPolicy = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
     "rawTerminalObservedIdentityForPreparation",
     "maybePrepareVerifiedEmptyCodexHandoff"
   );
@@ -355,7 +357,8 @@ test("atomic foreground proof cannot authorize persistence and is rechecked at t
     /input\.atomicForegroundIdentification[\s\S]*?return undefined[\s\S]*?return input\.observation\.identity/u,
     "diagnostic /status identity must remain unavailable to persistence"
   );
-  const verifiedEmptyPolicy = compiledFunctionSource(
+  const verifiedEmptyPolicy = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
     "maybePrepareVerifiedEmptyCodexHandoff",
     "assertAtomicForegroundCandidateInventory"
   );
@@ -364,7 +367,8 @@ test("atomic foreground proof cannot authorize persistence and is rechecked at t
     /input\.implicitCandidateAuthority \|\|\s*input\.atomicForegroundIdentification[\s\S]*?return undefined/u,
     "atomic mode must not detach a Session using the diagnostic proof"
   );
-  const acceptancePolicy = compiledFunctionSource(
+  const acceptancePolicy = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
     "assertAtomicForegroundAcceptanceBoundary",
     "prepareRawTerminalDispatchAuthority"
   );
@@ -374,9 +378,10 @@ test("atomic foreground proof cannot authorize persistence and is rechecked at t
     "atomic mode must require exact task-acceptance authority before persistence"
   );
 
-  const managed = compiledFunctionSource(
-    "runManagedRawTerminalSendAttempt",
-    "runManagedSessionSend"
+  const managed = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
+    "runManagedRawTerminalSendAttemptInContext",
+    "runManagedSessionSendInContext"
   );
   assert.match(
     managed,
@@ -400,7 +405,8 @@ test("atomic foreground proof cannot authorize persistence and is rechecked at t
 });
 
 test("human-explicit callback debt is fenced under the Turn lock before deferred authority", () => {
-  const supersede = compiledFunctionSource(
+  const supersede = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
     "supersedeExactHumanExplicitCallbackDebt",
     "prepareRawTerminalDispatchAuthority"
   );
@@ -418,9 +424,10 @@ test("human-explicit callback debt is fenced under the Turn lock before deferred
     "callback_delivery_superseded_by_user_explicit_send",
     "human_override_of_uncertain_callback"
   ]);
-  const authority = compiledFunctionSource(
+  const authority = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
     "prepareRawTerminalDispatchAuthority",
-    "runManagedRawTerminalSendAttempt"
+    "runManagedRawTerminalSendAttemptInContext"
   );
   assertOrdered(authority, [
     "inspectCodexOpenRootRolloutInventory",
@@ -1336,9 +1343,10 @@ test("facade wiring preserves replay validation and presentation priority", () =
     "return true"
   ]);
 
-  const rawManagedSend = compiledFunctionSource(
-    "runManagedRawTerminalSendAttempt",
-    "runManagedSessionSend"
+  const rawManagedSend = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
+    "runManagedRawTerminalSendAttemptInContext",
+    "runManagedSessionSendInContext"
   );
   assertOrdered(rawManagedSend, [
     "replayExactActiveTerminalSubmission({",
@@ -1346,9 +1354,10 @@ test("facade wiring preserves replay validation and presentation priority", () =
     "userExplicitTerminalId: terminalConversation.conversationId"
   ]);
 
-  const managedSend = compiledFunctionSource(
-    "runManagedSessionSend",
-    "runRespond"
+  const managedSend = compiledModuleFunctionSource(
+    "terminal-managed-send-cli-adapter",
+    "runManagedSessionSendInContext",
+    "runManagedRawTerminalSendAttempt"
   );
   assertOrdered(managedSend, [
     "await withCanonicalMutationLocks(",
