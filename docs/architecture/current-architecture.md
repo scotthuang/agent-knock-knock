@@ -113,6 +113,12 @@ the canonical SHA-256. Connector builds regenerate only their allowlisted copy,
 and build/prepack checks keep the packaged Skill byte-identical. The dashboard
 continues to report the canonical SHA-256 and every generated replica result.
 
+Connector release policy also has one engine. `npm run connectors:verify`
+runs its deterministic offline mode for Pi and DeepSeek Harness independently;
+the connector-local `release:check` wrappers add clean-main, upstream, unused
+npm version/tag, and explicit publish-confirmation checks. Ordinary root
+validation never queries published registry state.
+
 ## Refactor boundaries
 
 The Issue #320 sequence uses narrow strangler changes:

@@ -366,9 +366,21 @@ versions for existing installations.
 
 ## Release safety
 
-`npm run release:check` is check-only. The script rejects a dirty tree, a
-non-`main` branch, an unsynchronized upstream, an existing npm version, and any
-runtime `file:`, `link:`, or `workspace:` dependency.
+`npm run release:check` is check-only. The shared connector gate first proves
+the generated Skill hash, package manifest/constants/lock/dependency parity,
+then runs typecheck, fast tests, and inspection of the real package tarball. In
+release mode it additionally rejects a dirty tree, a non-`main` branch, an
+unsynchronized upstream, an existing npm version or connector repository tag,
+and any runtime `file:`, `link:`, or `workspace:` dependency.
+
+For deterministic local verification without a registry or git-remote query:
+
+```sh
+npm run release:check -- --offline
+```
+
+From the repository root, `npm run connectors:verify` applies that same offline
+gate to both connectors. Their package versions are validated independently.
 
 Publishing additionally requires both explicit flags:
 

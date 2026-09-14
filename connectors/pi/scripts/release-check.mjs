@@ -5,5 +5,5 @@ import process from "node:process";
 import { runConnectorReleaseCheckCli } from "../../../scripts/connector-release-check.js";
 
 process.exitCode = runConnectorReleaseCheckCli({
-  connector: "deepseek-harness",
+  connector: "pi",
 });
