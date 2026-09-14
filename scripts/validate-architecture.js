@@ -11,6 +11,9 @@ import {
 import {
   loadAndValidateRefactorEvidence
 } from "./refactor-evidence.js";
+import {
+  validateArchitectureHealth
+} from "./architecture-health.js";
 
 try {
   const tiers = loadAndValidateTestTiers();
@@ -23,12 +26,23 @@ try {
     repoRoot
   });
   const evidence = loadAndValidateRefactorEvidence({ repoRoot, tiers });
+  const architectureHealth = validateArchitectureHealth({
+    architecture,
+    publicContracts: evidence.publicContracts,
+    repoRoot
+  });
+  const {
+    productionFunctionDefaultViolations,
+    ...architectureDashboard
+  } = architecture;
   process.stdout.write(`${JSON.stringify({
     ok: true,
     ownership_schema: ownership.schema,
     ownership_version: ownership.version,
     production_domains: Object.keys(ownership.domains).length,
-    ...architecture,
+    ...architectureDashboard,
+    productionFunctionDefaultViolationCount:
+      productionFunctionDefaultViolations.length,
     refactor_evidence: {
       subprocess_current_sites:
         evidence.testEvidence.subprocess.currentIncluded,
@@ -39,7 +53,8 @@ try {
       affected_replay_full_count:
         evidence.testEvidence.affectedReplay.full_count,
       public_contract_witnesses: evidence.publicContracts.witnessCount
-    }
+    },
+    architecture_health: architectureHealth
   }, null, 2)}\n`);
 } catch (error) {
   process.stderr.write(

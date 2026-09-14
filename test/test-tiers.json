@@ -1,6 +1,7 @@
 {
   "fast": [
     "test/affected-test-selection.test.ts",
+    "test/architecture-health.test.ts",
     "test/approval-policy.test.ts",
     "test/canonical-json.test.ts",
     "test/callback-outbox-policy.test.ts",

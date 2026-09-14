@@ -1,5 +1,9 @@
 # Orchestration refactor architecture baseline
 
+> Historical note: this document records the v0.12.11 / Issue #126 plan and
+> baseline. See [current-architecture.md](./current-architecture.md) for the
+> authoritative 0.13 architecture, budgets, and refactor workflow.
+
 Status: architecture implementation and enforceable static gates are complete
 at the current closeout;
 [issue #126](https://github.com/scotthuang/agent-knock-knock/issues/126)

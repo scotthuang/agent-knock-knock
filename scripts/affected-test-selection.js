@@ -62,8 +62,10 @@ export const testSupportImpactByPath = Object.freeze({
 
 const alwaysFullSharedPaths = new Set([
   "tsconfig.json",
+  "config/architecture-health-budget.json",
   "config/test-file-shards.json",
   "config/production-module-ownership.json",
+  "scripts/architecture-health.js",
   "scripts/production-module-ownership.js",
   "scripts/validate-architecture.js",
   "scripts/affected-test-selection.js",

@@ -1,0 +1,151 @@
+# Current architecture and health budget
+
+Status: authoritative current architecture for the Issue #320 refactor cycle.
+
+Snapshot: `main@0667537ac6efe116c5261fa33370a4190f2d2226`, package
+`0.13.3`, measured 2026-09-15. The machine-readable baseline and budgets are
+in [`config/architecture-health-budget.json`](../../config/architecture-health-budget.json).
+Run `npm run architecture:dashboard` to validate the budgets and print the
+current JSON dashboard.
+
+The older [orchestration refactor document](./orchestration-refactor.md) and
+[Issue #126 closeout report](./issue-126-final-report.md) remain historical
+evidence. They do not describe the current module sizes or current health
+budget.
+
+## Shape of the system
+
+Production dependencies flow inward:
+
+```text
+CLI / OpenClaw / Host connectors
+  -> typed command facades and composition
+  -> dispatch / lifecycle / callback / monitor / watch application services
+  -> pure authority, policy, and state-transition modules
+  -> domain records and ports
+
+tmux / Herdr / Codex / Claude / Store / Gateway adapters implement ports
+and point back toward the application boundary.
+```
+
+`src/cli.ts` is the sole production importer of `src/cli-core.ts`. The core is
+a compatibility command facade, not an owner of terminal, lifecycle, monitor,
+Watch, callback, or persistence state machines. Every production module has one
+domain owner in `config/production-module-ownership.json`; the compiler-AST
+architecture gate rejects missing ownership, computed production imports,
+dependency cycles, duplicated canonical status policies, and unapproved reverse
+imports into `cli-core.ts`.
+
+The canonical mutation lock order remains:
+
+```text
+terminal dispatch lock -> Store writer lease -> conversation state lock
+```
+
+Refactoring must preserve durable reservation before terminal input, exact
+terminal/process/cwd authority, execution-time revalidation, reverse-order lock
+release, and `uncertain + do_not_retry` after possible input with an unproven
+postcondition.
+
+## 0.13.3 health snapshot
+
+| Metric | Snapshot | Gate |
+| --- | ---: | --- |
+| Production modules | 155 | observed |
+| Production physical LOC | 144,726 | observed only |
+| Production functions | 5,926 | observed |
+| Production import edges | 1,004 | observed |
+| Production import cycles | 0 | must remain 0 |
+| Hard function violations (`>=500` LOC or `>=50` approximate complexity) | 0 | must remain 0 |
+| Default function violations (`>=100` LOC or `>=20` approximate complexity) | 338 | must not increase |
+| Production files over 2,000 LOC | 19 | must not increase |
+| OpenClaw / Host Bridge / Pi / DSH semantic tools | 22 each | must stay synchronized |
+| Canonical / Pi / DSH Skill documents | byte-identical | must stay synchronized |
+
+Total production LOC is deliberately not a pass/fail budget. Typed safety
+checks, compatibility profiles, and evidence may legitimately add source. It is
+still reported with a delta from this snapshot so growth remains visible. The
+gate instead targets concentration, complexity, cycles, and duplicated public
+artifacts.
+
+The `cli-core.ts` ceiling is 1,839 LOC and can move downward without editing a
+manifest. Eight current concentration hotspots have individual non-growth
+budgets:
+
+| Path | Maximum physical LOC |
+| --- | ---: |
+| `src/terminal-command-cli-adapter.ts` | 10,421 |
+| `src/terminal-agent-bridge.ts` | 7,409 |
+| `src/terminal-list-cli-adapter.ts` | 5,093 |
+| `src/openclaw-plugin-command-adapter.ts` | 3,817 |
+| `src/terminal-watch-cli-adapter.ts` | 3,683 |
+| `src/claude-local-transcript-provider.ts` | 3,534 |
+| `src/terminal-monitor-state-cli-adapter.ts` | 3,478 |
+| `src/terminal-watch-store.ts` | 3,191 |
+
+These are ceilings, not desired final sizes. Removing or splitting a hotspot is
+allowed without changing its historical budget; the dashboard reports a removed
+path as `retired: true` with zero current LOC. Reusing that same path later still
+subjects it to its historical ceiling. Raising a baseline ceiling is rejected
+by the validator rather than normalized away in a routine feature PR.
+
+## Contract synchronization
+
+The canonical semantic tool contract remains
+`config/public-contract-witnesses.json`. Existing contract validation proves
+the exact OpenClaw list and the Host Bridge count. The health gate additionally
+checks that the Pi and DeepSeek Harness connector guards declare the same count.
+This is an interim drift detector; Issue #320 P2 should replace the repeated
+count declarations with one generated semantic catalog.
+
+The only editable Skill source is:
+
+```text
+templates/openclaw-skills/agent-knock-knock/SKILL.md
+```
+
+The Pi and DeepSeek Harness package copies must be byte-identical. The dashboard
+reports the canonical SHA-256 and every replica result. Until P2 introduces the
+single-source generation step, any Skill change must synchronize both replicas
+in the same change.
+
+## Refactor boundaries
+
+The Issue #320 sequence uses narrow strangler changes:
+
+1. P0 makes model-control availability and execution consume one decision and
+   makes managed Turn and Watch questionnaire responses consume one transaction
+   kernel.
+2. P1 decomposes the terminal command, List, and Bridge adapters along existing
+   use-case boundaries while retaining their public facades and single input
+   ledger boundary.
+3. P2 extracts reusable callback/Store kernels, makes the Host tool and Skill
+   catalogs single-source, and splits oversized tests and historical documents.
+
+Monitor and Watch share terminal observation and questionnaire execution, but
+they do not share task-completion semantics or persistence ownership. Model
+control ordinary, residual-continuation, and repair authorities remain separate
+domains. Refactoring must not use file movement to collapse those distinctions.
+
+## Updating the dashboard
+
+Use the gate during each small refactor PR:
+
+```bash
+npm run test:fast
+npm run typecheck
+npm run build
+npm run validate:architecture
+npm run validate:refactor-evidence
+git diff --check
+```
+
+The architecture command exits nonzero before printing a successful dashboard
+when a budget or synchronization invariant fails. Normal P0/P1/P2 development
+uses only the fast test tier. Full/release tests follow repository policy and
+are not implied by updating this dashboard.
+
+Snapshot observation values are historical and are not rewritten after every
+feature. A hotspot or soft-complexity ceiling may be lowered after a completed
+refactor milestone. It must not be raised to make a regression green. New
+production modules still require an explicit owner and affected-test mapping.

@@ -94,6 +94,7 @@
     "build": "npm run clean && tsc -p tsconfig.json",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "architecture:dashboard": "node scripts/validate-architecture.js",
     "validate:architecture": "node scripts/validate-architecture.js",
     "validate:refactor-evidence": "node scripts/validate-refactor-evidence.js",
     "test": "npm run test:full",
