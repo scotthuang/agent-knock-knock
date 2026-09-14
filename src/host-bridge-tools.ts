@@ -3,7 +3,7 @@ import {
   bindHostBridgeToolPresentation,
   bindOpenClawRelayEnvironment,
   bindOpenClawRelayPath,
-  registerOpenClawCommands
+  createAkkSemanticToolCatalog
 } from "./openclaw-plugin-command-adapter.js";
 
 export interface HostBridgeToolContext {
@@ -75,148 +75,86 @@ export interface CreateHostBridgeToolsOptions {
   readonly context: HostBridgeToolContext;
 }
 
-interface CapturedToolDefinition {
-  readonly name?: unknown;
-  readonly description?: unknown;
-  readonly parameters?: unknown;
-  execute?(toolCallId: string, args: unknown): Promise<unknown> | unknown;
-}
-
-interface CapturedCommandDefinition {
-  readonly name?: unknown;
-  readonly description?: unknown;
-  readonly acceptsArgs?: unknown;
-  handler?(context: HostBridgeToolContext & { readonly args: string }):
-    Promise<unknown> | unknown;
-}
-
-type CapturedToolFactory = (
-  context: HostBridgeToolContext
-) => CapturedToolDefinition;
-
 /**
- * Capture the established AKK semantic tools behind a host-neutral registry.
+ * Adapt the established host-neutral AKK catalog to a Host Bridge registry.
  *
- * Tool factories are instantiated exactly once with the trusted controller
- * context. Keeping the same API object and definitions alive also preserves
- * the private-authority state owned by the OpenClaw-compatible implementation.
+ * One private runtime owner is retained for the registry lifetime so approval,
+ * action-offer, resume-snapshot, and idempotency state cannot cross owners.
  */
 export function createHostBridgeToolRegistry(
   options: CreateHostBridgeToolsOptions
 ): HostBridgeCommandToolRegistry {
-  const descriptors: HostBridgeToolDescriptor[] = [];
-  const descriptorsByName = new Map<string, HostBridgeToolDescriptor>();
-  let commandDescriptor: HostBridgeCommandDescriptor | undefined;
   const trustedContext = Object.freeze({
     sessionKey: requiredString(options.context.sessionKey, "context.sessionKey"),
     sessionId: requiredString(options.context.sessionId, "context.sessionId")
   });
-
-  const api = {
+  const runtime = {
     pluginConfig: options.pluginConfig,
-    logger: options.logger,
-    registerCommand(command: CapturedCommandDefinition): void {
-      if (commandDescriptor) {
-        throw new Error("host bridge registered more than one command");
-      }
-      const name = requiredString(command.name, "command name");
-      if (name !== "akk") {
-        throw new Error(`host bridge expected command akk, received ${name}`);
-      }
-      if (typeof command.description !== "string") {
-        throw new Error(`host bridge command ${name} has no description`);
-      }
-      if (typeof command.handler !== "function") {
-        throw new Error(`host bridge command ${name} has no handler`);
-      }
-      const handler = command.handler.bind(command);
-      commandDescriptor = Object.freeze({
-        name,
-        description: command.description,
-        acceptsArgs: command.acceptsArgs === true,
-        async execute(args: string): Promise<HostBridgeCommandResult> {
-          const result = await handler({
-            ...trustedContext,
-            args: typeof args === "string" ? args : ""
-          });
-          if (!isRecord(result) || typeof result.text !== "string") {
-            throw new Error(`host bridge command ${name} returned an invalid result`);
-          }
-          return {
-            text: result.text,
-            ...(result.isError === true ? { isError: true } : {})
-          };
-        }
-      });
-    },
-    registerTool(
-      tool: CapturedToolDefinition | CapturedToolFactory,
-      registration?: { readonly name?: unknown }
-    ): void {
-      const definition = typeof tool === "function"
-        ? tool(trustedContext)
-        : tool;
-      const name = requiredString(definition.name, "tool name");
-      const registeredName = requiredString(
-        registration?.name,
-        `registration name for ${name}`
-      );
-      if (registeredName !== name) {
-        throw new Error(
-          `host bridge tool registration name ${registeredName} does not match ${name}`
-        );
-      }
-      if (descriptorsByName.has(name)) {
-        throw new Error(`duplicate host bridge tool ${name}`);
-      }
-      if (typeof definition.description !== "string") {
-        throw new Error(`host bridge tool ${name} has no description`);
-      }
-      if (!isRecord(definition.parameters)) {
-        throw new Error(`host bridge tool ${name} has no input schema`);
-      }
-      if (typeof definition.execute !== "function") {
-        throw new Error(`host bridge tool ${name} has no execute function`);
-      }
-
-      const execute = definition.execute.bind(definition);
-      const descriptor: HostBridgeToolDescriptor = Object.freeze({
-        name,
-        description: definition.description,
-        inputSchema: definition.parameters,
-        async execute(toolCallId, args) {
-          const result = await execute(toolCallId, args);
-          if (!isRecord(result)) {
-            throw new Error(`host bridge tool ${name} returned an invalid result`);
-          }
-          return result as HostBridgeToolResult;
-        }
-      });
-      descriptors.push(descriptor);
-      descriptorsByName.set(name, descriptor);
-    }
+    logger: options.logger
   };
+  bindOpenClawRelayPath(runtime, requiredString(options.relayPath, "relayPath"));
+  bindOpenClawRelayEnvironment(runtime, options.relayEnvironment);
+  bindHostBridgeToolPresentation(runtime);
+  bindHostBridgeAsyncRelay(runtime);
+  const catalog = createAkkSemanticToolCatalog(runtime, new Map());
 
-  bindOpenClawRelayPath(api, requiredString(options.relayPath, "relayPath"));
-  bindOpenClawRelayEnvironment(api, options.relayEnvironment);
-  bindHostBridgeToolPresentation(api);
-  bindHostBridgeAsyncRelay(api);
-  registerOpenClawCommands(api, new Map());
-
-  if (!commandDescriptor) {
-    throw new Error("host bridge did not capture the akk command");
-  }
-
-  if (descriptors.length !== 22) {
+  if (catalog.tools.length !== 22) {
     throw new Error(
-      `host bridge expected 22 semantic tools, received ${descriptors.length}`
+      `host bridge expected 22 semantic tools, received ${catalog.tools.length}`
     );
   }
+  const commandName = requiredString(catalog.command.name, "command name");
+  if (commandName !== "akk") {
+    throw new Error(`host bridge expected command akk, received ${commandName}`);
+  }
+  const commandDescriptor: HostBridgeCommandDescriptor = Object.freeze({
+    name: commandName,
+    description: catalog.command.description,
+    acceptsArgs: catalog.command.acceptsArgs,
+    async execute(args: string): Promise<HostBridgeCommandResult> {
+      const result = await catalog.command.execute({
+        ...trustedContext,
+        args: typeof args === "string" ? args : ""
+      });
+      if (!isRecord(result) || typeof result.text !== "string") {
+        throw new Error(
+          `host bridge command ${commandName} returned an invalid result`
+        );
+      }
+      return {
+        text: result.text,
+        ...(result.isError === true ? { isError: true } : {})
+      };
+    }
+  });
+  const descriptors = catalog.tools.map((tool) => {
+    const descriptor: HostBridgeToolDescriptor = Object.freeze({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      async execute(toolCallId, args) {
+        const result = await tool.execute(
+          trustedContext,
+          toolCallId,
+          args
+        );
+        if (!isRecord(result)) {
+          throw new Error(
+            `host bridge tool ${tool.name} returned an invalid result`
+          );
+        }
+        return result as HostBridgeToolResult;
+      }
+    });
+    return descriptor;
+  });
+  const descriptorsByName = new Map(
+    descriptors.map((descriptor) => [descriptor.name, descriptor])
+  );
 
   const listed = Object.freeze([...descriptors]);
-  const capturedCommand = commandDescriptor;
   return Object.freeze({
-    command: () => capturedCommand,
+    command: () => commandDescriptor,
     list: () => listed,
     get: (name: string) => descriptorsByName.get(name),
     execute: async (

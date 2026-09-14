@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -20,6 +21,10 @@ test("all 22 real AKK schemas pass the shared supported DSH validator", async ()
   });
   try {
     assert.equal(adapter.tools.length, 22);
+    assert.equal(
+      catalogDigest(adapter),
+      "f469d4e7320c789a48ca106e3a89a5f81815d4da7c14920bfd11d25fdf598a98"
+    );
     for (const tool of adapter.tools) {
       const discovery = adaptHostToolInputSchema(
         tool.inputSchema,
@@ -35,6 +40,21 @@ test("all 22 real AKK schemas pass the shared supported DSH validator", async ()
     await adapter.lifecycle.stop();
   }
 });
+
+function catalogDigest(adapter: ReturnType<typeof createHostAdapter>): string {
+  return createHash("sha256").update(JSON.stringify({
+    command: [
+      adapter.command.name,
+      adapter.command.description,
+      adapter.command.acceptsArgs
+    ],
+    tools: adapter.tools.map((tool) => [
+      tool.name,
+      tool.description,
+      tool.inputSchema
+    ])
+  })).digest("hex");
+}
 
 test("discovery projection may omit unsupported conditions but execution does not", async () => {
   const adapter = createHostAdapter({

@@ -75,6 +75,14 @@ import {
   type OpenClawPrivateAuthorityTarget
 } from "./openclaw-private-authority-offers.js";
 import {
+  beginSemanticToolCatalog,
+  defineSemanticCatalogTool,
+  finishSemanticToolCatalog,
+  registerSemanticToolCatalog,
+  semanticToolLabel,
+  type SemanticToolCatalog
+} from "./semantic-tool-catalog.js";
+import {
   TERMINAL_INTERACTION_LIMITS,
   TERMINAL_INTERACTION_SUBJECT_VERSION,
   terminalInteractionSubjectId,
@@ -106,6 +114,7 @@ interface DisplayedModelOptionsOfferPayload
   readonly scope?: unknown;
   readonly models?: unknown;
 }
+type DisplayedResumeSnapshotMap = Map<string, { snapshotId: string; expiresAtMs: number }>;
 export const defaultOpenClawRelayPath = fileURLToPath(
   new URL("./cli.js", import.meta.url)
 );
@@ -165,29 +174,29 @@ export function withHostBridgeInvocationSignal<T>(
 
 export function registerOpenClawCommands(
   api,
-  displayedResumeSnapshots: Map<
-    string,
-    { snapshotId: string; expiresAtMs: number }
-  >
+  displayedResumeSnapshots: DisplayedResumeSnapshotMap
 ): void {
-  api.registerCommand?.({
+  registerSemanticToolCatalog(api,
+    createAkkSemanticToolCatalog(api, displayedResumeSnapshots));
+}
+/** Build the one host-neutral AKK command/tool catalog for a runtime owner. */
+export function createAkkSemanticToolCatalog(
+  api: object & Record<string, any>,
+  displayedResumeSnapshots: DisplayedResumeSnapshotMap
+): SemanticToolCatalog {
+  beginSemanticToolCatalog(api);
+  const command = {
     name: "akk",
     description: "Send coding work through existing Codex or Claude Code shared terminals, inspect managed Turns, observe a user-selected terminal with durable read-only Terminal Watch, manage native threads, and safely inspect or change an idle pane's native model selection.",
     acceptsArgs: true,
-    requireAuth: true,
-    nativeProgressMessages: {
-      default: "AKK is handling the request..."
-    },
-    agentPromptGuidance: [
+    requiresAuthentication: true,
+    progressMessage: "AKK is handling the request...",
+    promptGuidance: [
       "Use /akk <task> when exactly one send-ready coding-agent terminal pane should receive new work. Send-ready means an exact live process and terminal plus a scanned, non-blocked approval state. Parsed working activity and ordinary Codex main-Composer visibility, stability, or exactness do not veto this user-priority path. A proven input-owning native approval, questionnaire/editor, or read-only viewer remains a zero-input boundary; Codex 0.154's exact collapsed async-question summary remains sendable, while its expanded, clipped, or ambiguous editor does not. Codex terminal_user_explicit physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once; after text injection, no Composer observation may veto Enter. Claude Code user-explicit Send remains exact-empty-only. Managed Send may still require exact empty before input, while native inspection and native lifecycle input remain exact-empty-only. Broken or stale AKK management activity records do not veto the user's physical Send. Structured tools use only semantic identifiers returned by AKK: session_id for an exact managed context, terminal_id for the currently verified pane, turn_id for one managed Turn, watch_id for one Terminal Watch, and native_thread_id for one resumable native thread. Draft text, composer digests, and opaque freshness authority stay private; AKK revalidates them under its locks. Once the Codex mutation sequence begins, an uncertain result must not be automatically retried. /akk watch is read-only and follows user intent: it prefers an exact task anchor, but version, artifact, managed ownership, and action-advertisement uncertainty degrade to a warning-bearing terminal-activity Watch instead of vetoing the request. New/clear/resume, approval, reconciliation, handoff, and recovery still require the documented user intent or explicit confirmation. AKK never starts a coding-agent process.",
       "Use /akk models on one exact currently advertised physical pane before /akk set-model. Codex 0.154 may use either one exact current native Session or a verified-zero-rollout pane; identify_foreground is diagnostic and is never a prerequisite for that zero-rollout path. Claude Code still requires one exact current native Session. Both steps require no active Turn and no approval, questionnaire/editor, or read-only viewer. model_options normally requires an empty Composer; when List binds it to one exact stable Codex /model residual, it may continue only that residual into read-only catalog discovery. repair_model_control remains the separate clear-only alternative and never presses Enter or selects anything. Only ids and reasoning efforts from that current native catalog are valid. Codex changes the current session and persists the selected model for future sessions; ordinary efforts, including max, are also persisted, while ultra remains current-session-only and Codex chooses a non-ultra future fallback. Claude Code changes only the current session. Read effective and new_session_defaults separately. Model control never accepts slash text, raw keys, menu indexes, display labels, scope overrides, or private authority; an uncertain outcome must not be retried automatically."
     ],
-    handler: async (ctx) => handleAkkCommand(
-      api,
-      ctx,
-      displayedResumeSnapshots
-    )
-  });
+    execute: async (ctx) => handleAkkCommand(api, ctx, displayedResumeSnapshots)
+  };
 
   registerOpenClawListTool(api);
 
@@ -437,70 +446,64 @@ export function registerOpenClawCommands(
     }
   });
 
-  api.registerTool(
-    (toolContext) => ({
-      label: "AKK Status",
-      name: "agent_knock_knock_status",
-      description:
-        "Inspect one exact AKK-managed Turn by its authoritative turn_id, one durable Terminal Watch by its authoritative watch_id, or use only a raw terminal row's own prefilled compatibility selector. These targets are mutually exclusive. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. User-selected Watch status reports whether it uses an exact task anchor or best-effort terminal activity without implying Watch sent or adopted the task; that task may independently be managed. Automatic terminal_user_explicit fallback Watch status describes the exact request AKK physically sent without claiming a managed Turn. AKK never starts a coding agent.",
-      parameters: statusParameters,
-      async execute(_toolCallId, params, signal) {
-        return withHostBridgeInvocationSignal(signal, async () => {
-          try {
-            const result = await runStatusRequest(api, params, toolContext);
-            const rendered = toolResult(result);
-            rememberDisplayedApprovalOffer(
-              api,
-              toolContext?.sessionKey,
-              toolContext?.sessionId,
-              result
-            );
-            rememberDisplayedInteractionOffer(
-              api,
-              toolContext?.sessionKey,
-              toolContext?.sessionId,
-              result
-            );
-            return rendered;
-          } catch (error) {
-            throw modelFacingToolError(error);
-          }
-        });
-      }
-    }),
-    { name: "agent_knock_knock_status", optional: true }
-  );
+  defineSemanticCatalogTool(api, {
+    label: "AKK Status",
+    name: "agent_knock_knock_status",
+    description:
+      "Inspect one exact AKK-managed Turn by its authoritative turn_id, one durable Terminal Watch by its authoritative watch_id, or use only a raw terminal row's own prefilled compatibility selector. These targets are mutually exclusive. The deprecated conversation_id remains a legacy Turn alias and the list-prefilled raw-terminal input; never construct it. User-selected Watch status reports whether it uses an exact task anchor or best-effort terminal activity without implying Watch sent or adopted the task; that task may independently be managed. Automatic terminal_user_explicit fallback Watch status describes the exact request AKK physically sent without claiming a managed Turn. AKK never starts a coding agent.",
+    inputSchema: statusParameters,
+    async execute(toolContext, _toolCallId, params, signal) {
+      return withHostBridgeInvocationSignal(signal, async () => {
+        try {
+          const result = await runStatusRequest(api, params, toolContext);
+          const rendered = toolResult(result);
+          rememberDisplayedApprovalOffer(
+            api,
+            toolContext?.sessionKey,
+            toolContext?.sessionId,
+            result
+          );
+          rememberDisplayedInteractionOffer(
+            api,
+            toolContext?.sessionKey,
+            toolContext?.sessionId,
+            result
+          );
+          return rendered;
+        } catch (error) {
+          throw modelFacingToolError(error);
+        }
+      });
+    }
+  });
 
-  api.registerTool(
-    (toolContext) => ({
-      label: "AKK Send",
-      name: "agent_knock_knock_send",
-      description:
-        "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process, a scanned non-blocked approval state, and no input-owning native questionnaire/editor or read-only viewer; parsed working activity, Codex rollout ambiguity, AKK management state, and ordinary Codex main-Composer visibility, stability, or exactness do not veto physical delivery. Codex 0.154's exact collapsed async-question summary remains sendable, while its expanded, clipped, or ambiguous editor receives zero input. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. A source-less Codex terminal freezes all current rollout roots before input, then promotes a provisional Session/Turn only when exactly one anchored or newly opened rollout durably accepts the exact request hash; zero matches remain pending and ambiguity becomes uncertain without replay. If managed preparation fails before input, AKK still delivers once as unmanaged work, then best-effort attaches an exact Terminal Watch callback. After exact request acceptance and terminal attribution, a supported questionnaire on that Watch may expose owner-bound response authority through Status and its watch_id; terminal-activity observations and manual_required interactions remain notification-only. Read terminal_input_dispatched, agent_acceptance, management_mode, observation_mode, and capabilities independently. Watch attachment failure never changes a successful Send. Once the mutation sequence begins, an uncertain result must not be automatically retried. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
-      parameters: sendParameters,
-      async execute(toolCallId, params, signal) {
-        return withHostBridgeInvocationSignal(signal, async () => {
-          try {
-            const result = await runSendRequest(
-              api,
-              isRecord(params) ? params : {},
-              toolContext,
-              terminalMessageIdForToolCall({
-                toolCallId,
-                sessionKey: toolContext?.sessionKey,
-                sessionId: toolContext?.sessionId,
-                toolName: "agent_knock_knock_send"
-              })
-            );
-            return toolResult(result, { submissionErrors: true });
-          } catch (error) {
-            throw modelFacingToolError(error);
-          }
-        });
-      }
-    }),
-    { name: "agent_knock_knock_send", optional: true }
-  );
+  defineSemanticCatalogTool(api, {
+    label: "AKK Send",
+    name: "agent_knock_knock_send",
+    description:
+      "Start a new AKK Turn, use one advertised terminal_user_explicit user-priority send, or explicitly recover one current uncertain submission only through its advertised retry_submission action. Ordinary send requires request and may use session_id or terminal_id exactly as advertised. terminal_user_explicit requires one exact live physical terminal/process, a scanned non-blocked approval state, and no input-owning native questionnaire/editor or read-only viewer; parsed working activity, Codex rollout ambiguity, AKK management state, and ordinary Codex main-Composer visibility, stability, or exactness do not veto physical delivery. Codex 0.154's exact collapsed async-question summary remains sendable, while its expanded, clipped, or ambiguous editor receives zero input. Codex physical fallback sends C-u once to replace the current Composer, injects the request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto; Claude Code remains exact-empty-only. A source-less Codex terminal freezes all current rollout roots before input, then promotes a provisional Session/Turn only when exactly one anchored or newly opened rollout durably accepts the exact request hash; zero matches remain pending and ambiguity becomes uncertain without replay. If managed preparation fails before input, AKK still delivers once as unmanaged work, then best-effort attaches an exact Terminal Watch callback. After exact request acceptance and terminal attribution, a supported questionnaire on that Watch may expose owner-bound response authority through Status and its watch_id; terminal-activity observations and manual_required interactions remain notification-only. Read terminal_input_dispatched, agent_acceptance, management_mode, observation_mode, and capabilities independently. Watch attachment failure never changes a successful Send. Once the mutation sequence begins, an uncertain result must not be automatically retried. Retry submission is the mutually exclusive exact {turn_id} form and cannot change request text or routing. Draft text, composer digests, and opaque freshness authority stay private. A Turn id is never an ordinary-send destination. Managed acceptance is asynchronous: yield and wait for its callback or an explicit status request.",
+    inputSchema: sendParameters,
+    async execute(toolContext, toolCallId, params, signal) {
+      return withHostBridgeInvocationSignal(signal, async () => {
+        try {
+          const result = await runSendRequest(
+            api,
+            isRecord(params) ? params : {},
+            toolContext,
+            terminalMessageIdForToolCall({
+              toolCallId,
+              sessionKey: toolContext?.sessionKey,
+              sessionId: toolContext?.sessionId,
+              toolName: "agent_knock_knock_send"
+            })
+          );
+          return toolResult(result, { submissionErrors: true });
+        } catch (error) {
+          throw modelFacingToolError(error);
+        }
+      });
+    }
+  });
 
   registerCliTool(api, {
     name: "agent_knock_knock_respond",
@@ -631,6 +634,7 @@ export function registerOpenClawCommands(
       return args;
     }
   });
+  return finishSemanticToolCatalog(api, command, 22);
 }
 
 function registerOpenClawListTool(api): void {
@@ -3449,68 +3453,55 @@ function registerCliTool(
     isErrorResult?: (result: unknown) => boolean;
   }
 ) {
-  api.registerTool(
-    (toolContext) => ({
-      label: toolLabel(name),
-      name,
-      description,
-      parameters,
-      async execute(toolCallId, params, signal) {
-        return withHostBridgeInvocationSignal(signal, async () => {
-          try {
-            const result = await runHostAwareCli(
-              api,
-              await buildArgs(
-                isRecord(params) ? params : {},
-                toolContext,
-                toolCallId
-              ),
-              timeoutMs === undefined ? {} : { timeoutMs }
+  defineSemanticCatalogTool(api, {
+    label: semanticToolLabel(name),
+    name,
+    description,
+    inputSchema: parameters,
+    async execute(toolContext, toolCallId, params, signal) {
+      return withHostBridgeInvocationSignal(signal, async () => {
+        try {
+          const result = await runHostAwareCli(
+            api,
+            await buildArgs(
+              isRecord(params) ? params : {},
+              toolContext,
+              toolCallId
+            ),
+            timeoutMs === undefined ? {} : { timeoutMs }
+          );
+          if (typeof rememberResult === "function") {
+            rememberResult(
+              result,
+              isRecord(params) ? params : {},
+              toolContext
             );
-            if (typeof rememberResult === "function") {
-              rememberResult(
-                result,
-                isRecord(params) ? params : {},
-                toolContext
-              );
-            }
-            if (name === "agent_knock_knock_list") {
-              rememberDisplayedPrivateAuthorityOffers(
-                api,
-                toolContext?.sessionKey,
-                toolContext?.sessionId,
-                result
-              );
-            }
-            const rendered = toolResult(result, {
-              submissionErrors:
-                name === "agent_knock_knock_respond" ||
-                name === "agent_knock_knock_identify_and_send",
-              normalizeTurnIdentity,
-              modelProjection,
-              compactText,
-              forceError:
-                typeof isErrorResult === "function" && isErrorResult(result) === true
-            });
-            return rendered;
-          } catch (error) {
-            throw modelFacingToolError(error);
           }
-        });
-      }
-    }),
-    { name, optional: true }
-  );
-}
-
-function toolLabel(name) {
-  const action = String(name)
-    .replace(/^agent_knock_knock_/, "")
-    .split("_")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-  return `AKK ${action || "Tool"}`;
+          if (name === "agent_knock_knock_list") {
+            rememberDisplayedPrivateAuthorityOffers(
+              api,
+              toolContext?.sessionKey,
+              toolContext?.sessionId,
+              result
+            );
+          }
+          const rendered = toolResult(result, {
+            submissionErrors:
+              name === "agent_knock_knock_respond" ||
+              name === "agent_knock_knock_identify_and_send",
+            normalizeTurnIdentity,
+            modelProjection,
+            compactText,
+            forceError:
+              typeof isErrorResult === "function" && isErrorResult(result) === true
+          });
+          return rendered;
+        } catch (error) {
+          throw modelFacingToolError(error);
+        }
+      });
+    }
+  });
 }
 
 export function runCli(
