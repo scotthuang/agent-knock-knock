@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -84,12 +86,40 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
     "utf8",
   );
   assert.equal(bundledSkill, canonicalSkill);
+  assert.equal(sha256(bundledSkill), sha256(canonicalSkill));
   assert.match(bundledSkill, /^---\nname: agent-knock-knock\n/u);
+  assert.equal(
+    manifest.scripts["skill:sync"],
+    "node ../../scripts/sync-connector-skills.js --connector deepseek-harness",
+  );
+  assert.equal(
+    manifest.scripts["skill:check"],
+    "node ../../scripts/sync-connector-skills.js --check --connector deepseek-harness",
+  );
+
+  const packed = spawnSync(
+    process.execPath,
+    [
+      path.resolve(packageDirectory, "..", "..", "scripts", "verify-connector-skill-pack.js"),
+      "--connector",
+      "deepseek-harness",
+    ],
+    { cwd: packageDirectory, encoding: "utf8" },
+  );
+  assert.equal(packed.status, 0, packed.stderr || packed.stdout);
+  assert.match(
+    packed.stdout,
+    /Verified deepseek-harness packaged Skill: sha256=[0-9a-f]{64}/u,
+  );
 
   const patch = fs.readFileSync(path.join(packageDirectory, "cordis.patch.yml"), "utf8");
   assert.match(patch, /@scotthuang\/agent-knock-knock-deepseek-harness/u);
   assert.doesNotMatch(patch, /akk-bind/u);
 });
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 for (const version of SUPPORTED_DSH_VERSIONS) {
   test(`accepts one exact launcher-owned DeepSeek Harness ${version} package set`, () => {

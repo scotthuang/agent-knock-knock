@@ -91,7 +91,9 @@
   },
   "scripts": {
     "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "skill:sync": "node scripts/sync-connector-skills.js",
+    "skill:check": "node scripts/sync-connector-skills.js --check",
+    "build": "npm run skill:check && npm run clean && tsc -p tsconfig.json",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "architecture:dashboard": "node scripts/validate-architecture.js",
