@@ -1057,6 +1057,10 @@
       "owner": "terminal-list-application"
     },
     {
+      "path": "src/terminal-list-ownership-service.ts",
+      "owner": "terminal-list-application"
+    },
+    {
       "path": "src/terminal-list-renderer.ts",
       "owner": "terminal-list-renderer"
     },
