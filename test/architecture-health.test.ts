@@ -173,9 +173,15 @@ test("architecture health rejects complexity, hotspot, tool, and skill drift", a
       repoRoot,
       readRepositoryFile(repositoryPath: string) {
         const source = realRead(repositoryPath);
-        return repositoryPath === "src/terminal-command-cli-adapter.ts"
-          ? `${source}// hotspot growth\n`
-          : source;
+        if (repositoryPath !== "src/terminal-command-cli-adapter.ts") {
+          return source;
+        }
+        const currentPhysicalLoc = source.split(/\r?\n/u).at(-1) === ""
+          ? source.split(/\r?\n/u).length - 1
+          : source.split(/\r?\n/u).length;
+        return source + "// hotspot growth\n".repeat(
+          10_422 - currentPhysicalLoc
+        );
       }
     }),
     /terminal-command-cli-adapter\.ts has 10422 LOC; budget is 10421/u

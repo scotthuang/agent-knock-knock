@@ -893,6 +893,10 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-command-cli-ports.ts",
+      "owner": "terminal-command-adapter"
+    },
+    {
       "path": "src/terminal-control-provider.ts",
       "owner": "terminal-control"
     },

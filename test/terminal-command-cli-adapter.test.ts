@@ -122,6 +122,32 @@ function facadeDependencies(
   };
 }
 
+test("terminal command ports are a type-only extraction seam", () => {
+  const facadeSource = fs.readFileSync(
+    new URL("../../src/terminal-command-cli-adapter.ts", import.meta.url),
+    "utf8"
+  );
+  const portsSource = fs.readFileSync(
+    new URL("../../src/terminal-command-cli-ports.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(
+    facadeSource,
+    /export type \{[\s\S]*TerminalCommandCliDependencies,[\s\S]*TerminalCommandCliOptions[\s\S]*\} from "\.\/terminal-command-cli-ports\.js"/u
+  );
+  assert.doesNotMatch(facadeSource, /interface TerminalCommandCliRawPorts/u);
+  assert.match(portsSource, /export interface TerminalCommandCliPorts/u);
+  assert.match(
+    portsSource,
+    /export type TerminalSubmissionRetryCliPorts = TerminalCommandPortView/u
+  );
+  assert.doesNotMatch(
+    portsSource,
+    /from "\.\/terminal-command-cli-adapter\.js"/u,
+    "the extracted service seam must not import its facade"
+  );
+});
+
 test("terminal command facade preserves fake-port order and isolates async runtimes", async (t) => {
   assert.deepEqual(
     Object.keys(terminalCommandCliAdapter),
