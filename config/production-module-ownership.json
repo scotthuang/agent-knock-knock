@@ -98,6 +98,14 @@
     "durable-json-file": {
       "selection": "full"
     },
+    "durable-notification": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/callback-cli.test.ts",
+        "test/management-cli.test.ts",
+        "test/openclaw-plugin-contract.test.ts"
+      ]
+    },
     "file-lock-infrastructure": {
       "selection": "targeted",
       "integration_tests": [
@@ -663,6 +671,10 @@
     {
       "path": "src/durable-json-file.ts",
       "owner": "durable-json-file"
+    },
+    {
+      "path": "src/durable-notification-kernel.ts",
+      "owner": "durable-notification"
     },
     {
       "path": "src/executors.ts",

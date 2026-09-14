@@ -39,6 +39,8 @@ import {
   createCallbackOutboxSettlement,
   type CallbackOutboxLane
 } from "./callback-outbox-settlement.js";
+import { createDurableNotificationLease } from
+  "./durable-notification-kernel.js";
 import type { TranscriptEvent } from "./transcript.js";
 import { canonicalJson } from "./canonical-json.js";
 import { callbackRouteFingerprint } from
@@ -659,8 +661,9 @@ export function createCallbackOutboxService(
       const closeTerminalBridgeOnDone = message.type === "done" &&
         options.closeTerminalBridgeOnDone === true;
       const requiresDelivery = options.recordOnly !== true;
-      const deliveryAttempt = Number(inheritedDelivery?.attempts ?? 0) + 1;
       const deliveryAttemptId = randomUUID();
+      const previousDeliveryAttempts = Number(inheritedDelivery?.attempts ?? 0);
+      const deliveryAttempt = previousDeliveryAttempts + 1;
       let nextConversation: Conversation = retryingPending
         ? conversation
         : callbackOutboxLane === "notification"
@@ -715,19 +718,20 @@ export function createCallbackOutboxService(
       }
       if (requiresDelivery) {
         const now = ports.runtime.now().toISOString();
+        const claim = callbackDeliveryLease(
+          ports, previousDeliveryAttempts, deliveryAttemptId, now
+        );
         nextConversation = {
           ...nextConversation,
           [callbackOutbox]: {
             status: "pending",
             message,
-            attempts: deliveryAttempt,
-            attempt_id: deliveryAttemptId,
+            attempts: claim.attempt,
+            attempt_id: claim.attemptId,
             attempt_pid: ports.runtime.pid(),
-            attempt_lease_expires_at: new Date(
-              ports.runtime.nowMs() + ports.retry.attemptLeaseMs
-            ).toISOString(),
+            attempt_lease_expires_at: claim.leaseExpiresAt,
             created_at: stringValue(inheritedDelivery?.created_at) ?? now,
-            last_attempt_at: now,
+            last_attempt_at: claim.attemptedAt,
             updated_at: now,
             gateway_method: deliveryOptions.gatewayMethod,
             gateway_session: deliveryOptions.gatewaySession ??
@@ -974,6 +978,21 @@ export function createCallbackOutboxService(
     prepareTerminalCompletion: (input: TerminalCompletionPreparationInput) =>
       prepareTerminalCompletion(ports, prepare, input)
   };
+}
+
+function callbackDeliveryLease(
+  ports: CallbackOutboxServicePorts,
+  previousAttempts: number,
+  attemptId: string,
+  attemptedAt: string
+) {
+  return createDurableNotificationLease({
+    previousAttempts,
+    attemptId,
+    attemptedAt,
+    leaseBaseMs: ports.runtime.nowMs(),
+    leaseMs: ports.retry.attemptLeaseMs
+  });
 }
 
 function beginPreparedCallbackTransport(

@@ -41,6 +41,11 @@ import type { ExecutorKind } from "./executors.js";
 import {
   reduceTerminalInteractionAggregate
 } from "./terminal-interaction-core.js";
+import {
+  createDurableNotificationLease,
+  decideDurableNotificationRetry,
+  reduceDurableNotificationSettlement
+} from "./durable-notification-kernel.js";
 
 export {
   terminalWatchCallbackEnvelope,
@@ -742,14 +747,19 @@ function createTerminalWatchNotificationDelivery(input: {
         }
       }
       const attemptId = dependencies.randomUUID();
+      const claim = createDurableNotificationLease({
+        previousAttempts: selected.attempts,
+        attemptId,
+        attemptedAt: now,
+        leaseBaseMs: Date.parse(now),
+        leaseMs: notificationLeaseMs
+      });
       const claimed = withNotificationReceipt(snapshotted, {
         status: "delivering",
-        attempts: selected.attempts + 1,
-        last_attempt_at: now,
-        attempt_id: attemptId,
-        attempt_lease_expires_at: new Date(
-          Date.parse(now) + notificationLeaseMs
-        ).toISOString()
+        attempts: claim.attempt,
+        last_attempt_at: claim.attemptedAt,
+        attempt_id: claim.attemptId,
+        attempt_lease_expires_at: claim.leaseExpiresAt
       });
       const saved = dependencies.repository.save({
         ...current,
@@ -773,15 +783,7 @@ function createTerminalWatchNotificationDelivery(input: {
     watchId: string,
     notificationId: string,
     attemptId: string,
-    outcome:
-      | { disposition: "accepted" }
-      | {
-          disposition:
-            | "retryable_failure"
-            | "permanent_failure"
-            | "uncertain";
-          error_code: string;
-        }
+    outcome: CallbackAttemptOutcome
   ) {
     return dependencies.repository.withWatchLock(watchId, () => {
       const current = dependencies.repository.load(watchId);
@@ -799,15 +801,22 @@ function createTerminalWatchNotificationDelivery(input: {
         return { settled: false, watch: current };
       }
       const now = canonicalNow(dependencies.now());
+      const decision = reduceDurableNotificationSettlement({
+        attempt: selected.attempts,
+        outcome,
+        retryEnabled: true,
+        supersede: isAttentionNotification(selected) &&
+          current.status !== "active"
+      });
       const settled: TerminalWatchNotification =
-        outcome.disposition === "accepted"
+        decision.state === "accepted"
         ? withNotificationReceipt(selected, {
             status: "delivered",
             attempts: selected.attempts,
             last_attempt_at: selected.last_attempt_at,
             delivered_at: now
           })
-        : isAttentionNotification(selected) && current.status !== "active"
+        : decision.state === "superseded"
           ? supersededAttentionNotification(selected, now)
           : withNotificationReceipt(selected, {
             status: "failed",
@@ -817,7 +826,7 @@ function createTerminalWatchNotificationDelivery(input: {
             next_attempt_at: new Date(
               Date.parse(now) + retryDelay(selected.attempts)
             ).toISOString(),
-            last_error_code: callbackOutcomeErrorCode(outcome)
+            last_error_code: callbackOutcomeErrorCode(decision.outcome)
           });
       const saved = dependencies.repository.save({
         ...current,
@@ -867,7 +876,7 @@ function createTerminalWatchNotificationDelivery(input: {
               watchId,
               notificationId,
               claim.attempt_id,
-              { disposition: "accepted" }
+              checkpoint
             );
           }
         } catch {
@@ -940,12 +949,7 @@ function createTerminalWatchNotificationDelivery(input: {
       watchId,
       notificationId,
       claim.attempt_id,
-      outcome.disposition === "accepted"
-        ? { disposition: "accepted" }
-        : {
-            disposition: outcome.disposition,
-            error_code: outcome.error_code
-          }
+      outcome
     );
     if (!finished.settled) {
       return {
@@ -1536,20 +1540,33 @@ function notificationIsClaimable(
   notification: TerminalWatchNotification,
   now: string
 ): boolean {
-  if (notification.status === "pending") {
-    return true;
-  }
-  if (notification.status === "failed") {
-    if (isNonRetryableCallbackError(notification.last_error_code)) {
-      return false;
-    }
-    return Date.parse(notification.next_attempt_at ?? "") <= Date.parse(now);
-  }
-  if (notification.status === "delivering") {
-    return Date.parse(notification.attempt_lease_expires_at ?? "") <=
-      Date.parse(now);
-  }
-  return false;
+  const facts = notification.status === "pending"
+    ? {
+        phase: "ready" as const,
+        attempt: notification.attempts
+      }
+    : notification.status === "failed"
+      ? {
+          phase: "retry_wait" as const,
+          attempt: notification.attempts,
+          nowMs: Date.parse(now),
+          retryAt: notification.next_attempt_at,
+          retryAuthorized: !isNonRetryableCallbackError(
+            notification.last_error_code
+          )
+        }
+      : notification.status === "delivering"
+        ? {
+            phase: "leased" as const,
+            attempt: notification.attempts,
+            nowMs: Date.parse(now),
+            leaseExpiresAt: notification.attempt_lease_expires_at
+          }
+        : {
+            phase: "settled" as const,
+            attempt: notification.attempts
+          };
+  return decideDurableNotificationRetry(facts).state === "retryable";
 }
 
 function callbackOutcomeErrorCode(

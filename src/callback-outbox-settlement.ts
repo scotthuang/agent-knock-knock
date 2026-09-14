@@ -16,6 +16,8 @@ import {
   nonBlankString as stringValue,
   recordValue
 } from "./value-guards.js";
+import { reduceDurableNotificationSettlement } from
+  "./durable-notification-kernel.js";
 
 export type CallbackOutboxLane = "lifecycle" | "notification";
 export type CallbackOutboxField =
@@ -195,13 +197,20 @@ export function createCallbackOutboxSettlement({
         now: clock.now(),
         recoveredFromAcceptedEvidence
       });
-      if (outcome.disposition === "accepted") {
+      const decision = reduceDurableNotificationSettlement({
+        attempt: prepared.deliveryAttempt,
+        outcome,
+        retryEnabled: prepared.options.retryPending !== true &&
+          prepared.options.disableCallbackRetry !== true,
+        maxRetryAttempts: retryDelaysMs.length
+      });
+      if (decision.state === "accepted") {
         return persistDelivered({
           current,
           currentDelivery,
           prepared,
           result,
-          outcome,
+          outcome: decision.outcome,
           recoveredFromAcceptedEvidence
         });
       }
@@ -210,7 +219,8 @@ export function createCallbackOutboxSettlement({
         currentDelivery,
         prepared,
         result.error,
-        outcome
+        decision.outcome,
+        decision.state === "failed" && decision.retryAuthorized
       );
     });
   }
@@ -379,17 +389,15 @@ export function createCallbackOutboxSettlement({
     currentDelivery: Record<string, unknown>,
     prepared: PreparedCallbackDeliveryClaim,
     error: unknown,
-    outcome: Exclude<CallbackAttemptOutcome, { disposition: "accepted" }>
+    outcome: Exclude<CallbackAttemptOutcome, { disposition: "accepted" }>,
+    retryAuthorized: boolean
   ): Conversation {
     const failedAt = clock.now().toISOString();
     const lastError = error === undefined
       ? outcome.error_code
       : error instanceof Error ? error.message : String(error);
     const normalizedCurrent = normalizeLegacyCallbackStatus(current);
-    const shouldLaunchRetry = outcome.disposition === "retryable_failure" &&
-      prepared.options.retryPending !== true &&
-      prepared.options.disableCallbackRetry !== true &&
-      prepared.deliveryAttempt <= retryDelaysMs.length;
+    const shouldLaunchRetry = retryAuthorized;
     const retryDelayMs = retryDelaysMs[
       Math.max(0, prepared.deliveryAttempt - 1)
     ];
