@@ -1116,9 +1116,10 @@ test("callback auto approval rejects a different Turn before migration or termin
 });
 
 test("callback auto approval rechecks the persisted outbox under the state lock", () => {
-  const runApprove = compiledFunctionSource(
-    "runApprove",
-    "runManagedApprovalDispatch"
+  const runApprove = compiledModuleFunctionSource(
+    "terminal-approval-cli-adapter",
+    "runApproveInContext",
+    "terminalApprovalDecisionFromOptions"
   );
   assertOrdered(runApprove, [
     "loadConversationFromOptions(options)",
@@ -1126,7 +1127,8 @@ test("callback auto approval rechecks the persisted outbox under the state lock"
     "migrateLegacyTerminalAgentIdentity({"
   ]);
 
-  const dispatch = compiledFunctionSource(
+  const dispatch = compiledModuleFunctionSource(
+    "terminal-approval-cli-adapter",
     "runManagedApprovalDispatch",
     "assertAutoApprovalCallbackAuthority"
   );
@@ -1137,7 +1139,8 @@ test("callback auto approval rechecks the persisted outbox under the state lock"
     "createTerminalAgentBridge(options).approve("
   ]);
 
-  const authority = compiledFunctionSource(
+  const authority = compiledModuleFunctionSource(
+    "terminal-approval-cli-adapter",
     "assertAutoApprovalCallbackAuthority",
     "autoApprovalCallbackAuthorityFromOptions"
   );
@@ -1440,9 +1443,10 @@ test("facade delegates possible-input and approval uncertainty without releasing
     "presentTerminalUncertain({"
   ]);
 
-  const approval = compiledFunctionSource(
+  const approval = compiledModuleFunctionSource(
+    "terminal-approval-cli-adapter",
     "runManagedApprovalDispatch",
-    "runTerminalConversationApprove"
+    "assertAutoApprovalCallbackAuthority"
   );
   assertOrdered(approval, [
     "acquireTerminalBridgeSendLock(",

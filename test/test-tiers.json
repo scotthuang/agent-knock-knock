@@ -72,6 +72,7 @@
     "test/terminal-agent-adapter.test.ts",
     "test/terminal-agent-bridge.test.ts",
     "test/terminal-agent-bridge-interaction.test.ts",
+    "test/terminal-approval-cli-adapter.test.ts",
     "test/terminal-authority-observation.test.ts",
     "test/terminal-action-projection.test.ts",
     "test/terminal-acceptance-application-service.test.ts",
