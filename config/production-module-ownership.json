@@ -685,6 +685,10 @@
       "owner": "file-lock-infrastructure"
     },
     {
+      "path": "src/herdr-socket-transport.ts",
+      "owner": "terminal-control"
+    },
+    {
       "path": "src/herdr-terminal-control-provider.ts",
       "owner": "terminal-control"
     },
