@@ -66,7 +66,6 @@ import {
   exactCodexReadyStyledComposerCapture,
   TerminalAgentBridge,
   type ResolvedTerminalConversation,
-  type TerminalActivityState,
   type TerminalBridgeStatus,
   type TerminalDurableActivityState,
   type TerminalNativeIdentityState
@@ -101,7 +100,9 @@ import {
 } from "./terminal-action-projection.js";
 import { decideModelControlAvailability } from
   "./terminal-model-control-availability.js";
-import { terminalModelControlPlanConforms, terminalModelControlProfileFor,
+import { terminalModelControlPlanConforms,
+  type TerminalModelControlCapabilities,
+  type TerminalModelControlProfile,
   type TerminalModelControlResidualObservation } from
   "./terminal-model-control.js";
 import {
@@ -166,6 +167,14 @@ import {
   type TerminalListInventoryEntry,
   type TerminalListInventoryScan
 } from "./terminal-list-inventory.js";
+import {
+  collectTerminalListTerminalFacts,
+  type EffectiveTerminalListState,
+  type TerminalListPhysicalProcessIncarnation,
+  type TerminalListState,
+  type TerminalListTerminalFactPorts,
+  type TerminalNativeListIdentityFacts
+} from "./terminal-list-facts.js";
 import { validTerminalMonitorTimestampMs as validTimestampMs } from
   "./terminal-monitor-decision-policy.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
@@ -1076,23 +1085,12 @@ async function terminalControlledListEntry(
   if (!terminalControl) {
     throw new Error(`process ${session.pid} is not terminal-controlled`);
   }
-  const terminalState = await listStateForTerminal(
-    session.agent,
-    terminalControl,
+  const facts = await collectTerminalFactsForList(
+    session,
+    activeSessions,
     options,
     bridge,
-    {
-      pid: session.pid,
-      cwd: session.cwd,
-      // Raw Codex status and approval use the exact full terminal selector as
-      // their runtime conversation identity. Use the same identity while
-      // projecting list actions so a prompt-bound terminal token can be
-      // revalidated by the later status/approve calls.
-      ...(session.agent === "codex"
-        ? { conversationId: bridge.terminalConversationId(session) }
-        : { sessionId: session.sessionId }),
-      terminalTarget: terminalControl.target
-    }
+    terminalControl
   );
   const {
     orphanedDispatch,
@@ -1104,85 +1102,43 @@ async function terminalControlledListEntry(
     nativeProcessUuid,
     nativeProcessBirth,
     nativeProcessEvidence
-  } = await observeTerminalNativeListIdentity(
-    session,
-    terminalControl,
-    options,
-    bridge
-  );
-  const effectiveTerminalState = effectiveTerminalListState({
-    session,
-    terminalState,
-    nativeIdentityObservation,
-    nativeAgentIdentity,
-    nativeIdentityAuthorityObservation: authorityNativeIdentityObservation,
-    codexOpenRootRolloutInventory,
-    nativeProcessUuid,
-    nativeProcessBirth
-  });
-  const terminalStatusSnapshot = effectiveTerminalState._terminal_status_snapshot
-    ? terminalBridgeStatusWithProjection(
-        effectiveTerminalState._terminal_status_snapshot,
-        effectiveTerminalState
-      )
-    : undefined;
-  const statusCardObservation = session.agent === "codex" &&
-      typeof effectiveTerminalState.screen_excerpt === "string"
-    ? bridge.registry.require("codex").observeThreadLifecycle?.({
-        operation: { kind: "new_thread" },
-        phase: "before",
-        screen: effectiveTerminalState.screen_excerpt
-      })
-    : undefined;
-  const statusCardNativeThreadId =
-    statusCardObservation?.status === "observed" &&
-      effectiveTerminalState.activity_state === "idle" &&
-      effectiveTerminalState.approval_state.blocked !== true &&
-      isExactNativeThreadId(statusCardObservation.nativeThreadId)
-      ? statusCardObservation.nativeThreadId
-      : undefined;
-  const agentVersion = terminalListRuntime().agentVersionForRunningProcess(
-    session.agent,
-    session.pid,
-    options
-  );
-  const lifecycleCapability = bridge.registry.require(session.agent)
-    .probeThreadLifecycle?.(agentVersion) ?? {
-      status: "unsupported" as const,
-      agentVersion,
-      newThread: false,
-      resumeExact: false,
-      reason: "native thread lifecycle is unavailable"
-    };
-  const nativeInspectionCapability = bridge.registry.require(session.agent)
-    .probeNativeInspection?.(agentVersion) ?? {
-      status: "unsupported" as const,
-      agentVersion,
-      statusInspection: false,
-      reason: "native inspection is unavailable"
-    };
-  const modelControlCapability = bridge.registry.require(session.agent)
-    .probeModelControl?.(agentVersion) ?? {
-      status: "unsupported" as const,
-      agentVersion,
-      modelSelection: false,
-      reasoningEffortSelection: false,
-      reason: "terminal model control is unavailable"
-    };
-  const compatibilityWarnings = [...new Set([
-    lifecycleCapability.compatibilityWarning,
-    nativeInspectionCapability.compatibilityWarning
-  ].filter((warning): warning is string =>
-    typeof warning === "string" && warning.trim().length > 0
-  ))];
-  const codexLatentClearResumeObservationValue = session.agent === "codex"
-    ? terminalListRuntime().codexLatentClearResumeObservation({
-        screen: effectiveTerminalState.screen_excerpt,
-        agentVersion
-      })
-    : undefined;
+  } = facts.native;
+  const {
+    observed: _observedTerminalState,
+    effective: effectiveTerminalState,
+    projected: projectedTerminalState,
+    snapshot: terminalStatusSnapshot,
+    statusCardNativeThreadId,
+    hasInteraction: terminalHasInteraction
+  } = facts.status;
+  const {
+    agentVersion,
+    lifecycleCapability,
+    nativeInspectionCapability,
+    modelControlCapability,
+    modelControlProfile,
+    compatibilityWarnings
+  } = facts.runtime;
+  const {
+    automatedInputComposerReady,
+    userExplicitComposerReady
+  } = facts.composer;
+  const {
+    terminalId,
+    childPids,
+    processIncarnation: physicalProcessIncarnation
+  } = facts.physical;
+  const {
+    terminalHasBlockingTurn,
+    hasOrphanedDispatch
+  } = facts.store;
+  const {
+    latentClearResume: codexLatentClearResumeObservationValue,
+    zeroRolloutModelControlVerified
+  } = facts.codex;
+  const modelControlResidual = facts.modelControlResidual;
   const lifecycleBindingToken = unmanagedTerminalBindingToken({
-    terminalId: bridge.terminalConversationId(session),
+    terminalId,
     terminalControl,
     agent: session.agent,
     pid: session.pid,
@@ -1193,7 +1149,7 @@ async function terminalControlledListEntry(
     rollout: nativeAgentIdentity?.rollout
   });
   const authorityLifecycleBindingToken = unmanagedTerminalBindingToken({
-    terminalId: bridge.terminalConversationId(session),
+    terminalId,
     terminalControl,
     agent: session.agent,
     pid: session.pid,
@@ -1206,75 +1162,6 @@ async function terminalControlledListEntry(
   const codexLifecycleIncarnationAvailable =
     session.agent !== "codex" ||
     Boolean(nativeProcessUuid && nativeProcessBirth);
-  let terminalHasBlockingTurn = true;
-  try {
-    terminalHasBlockingTurn = terminalIncarnationBlockingTurns(
-      terminalListRuntime().storeDirFromOptions(options),
-      terminalControl
-    ).length > 0;
-  } catch (error) {
-    runtimeLog("warn", "terminal_managed_turn_inventory_unavailable", {
-      terminal_target: terminalControl.target,
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
-  const composerAuthority = await observeAutomatedInputComposerReady({
-    session,
-    terminalControl,
-    terminalState: effectiveTerminalState,
-    options
-  });
-  const automatedInputComposerReady =
-    composerAuthority.automatedInputComposerReady;
-  const userExplicitComposerReady =
-    composerAuthority.userExplicitComposerReady;
-  let physicalProcessIncarnation:
-    | ReturnType<TerminalListDiscoveryPorts["processIncarnationForPid"]>
-    | undefined;
-  try {
-    physicalProcessIncarnation =
-      terminalListRuntime().processIncarnationForPid(session.pid);
-  } catch (error) {
-    runtimeLog("warn", "terminal_physical_process_incarnation_unavailable", {
-      agent: session.agent,
-      terminal_target: terminalControl.target,
-      pid: session.pid,
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
-  const zeroRolloutModelControlVerified =
-    session.agent === "codex" &&
-    nativeIdentityObservation.status === "verified_absent" &&
-    authorityNativeIdentityObservation.status === "verified_absent" &&
-    codexOpenRootRolloutInventory?.status === "verified_absent" &&
-    codexOpenRootRolloutInventory.pid === session.pid &&
-    codexOpenRootRolloutInventory.roots.length === 0 &&
-    codexOpenRootRolloutInventory.processBirth ===
-      physicalProcessIncarnation?.processBirth;
-  const exactModelControlNativeIdentity = session.agent === "codex" &&
-    isExactNativeThreadId(nativeAgentIdentity?.sessionId);
-  const modelControlResidual = await observeModelControlResidualForList({
-    bridge,
-    session,
-    terminalControl,
-    agentVersion,
-    modelControlCapability,
-    nativeAgentIdentity,
-    zeroRolloutVerified: zeroRolloutModelControlVerified,
-    nativeIdentityEligible:
-      exactModelControlNativeIdentity || zeroRolloutModelControlVerified,
-    effectiveTerminalState,
-    terminalHasInteraction:
-      terminalStatusSnapshot?.interaction_state !== undefined,
-    terminalHasBlockingTurn,
-    hasOrphanedDispatch: orphanedDispatch !== undefined
-  });
-  const modelControlSurfaceOpen =
-    modelControlResidual?.state === "recoverable" &&
-    modelControlResidual.kind === "model_surface";
-  const projectedTerminalState = modelControlSurfaceOpen
-    ? terminalListStateWithOpenModelControlSurface(effectiveTerminalState)
-    : effectiveTerminalState;
   const commands = terminalListCommands({
     agent: session.agent,
     terminalControl,
@@ -1286,19 +1173,18 @@ async function terminalControlledListEntry(
     nativeProcessBirth,
     codexLifecycleIncarnationAvailable,
     automatedInputComposerReady,
-    hasOrphanedDispatch: orphanedDispatch !== undefined,
+    hasOrphanedDispatch,
     terminalHasBlockingTurn,
-    terminalHasInteraction:
-      terminalStatusSnapshot?.interaction_state !== undefined
+    terminalHasInteraction
   });
   const entry = {
-    id: bridge.terminalConversationId(session),
-    short_ref: sessionShortRef(bridge.terminalConversationId(session)),
+    id: terminalId,
+    short_ref: sessionShortRef(terminalId),
     source: "terminal",
     agent: session.agent,
     process_state: "active",
     pid: session.pid,
-    child_pids: childProcessIdsForRoot(session, activeSessions),
+    child_pids: childPids,
     command: session.command,
     cwd: session.cwd,
     workspace: session.cwd,
@@ -1377,7 +1263,7 @@ async function terminalControlledListEntry(
             message_id: stringValue(orphanedDispatch.message_id),
             transition_id: stringValue(orphanedDispatch.transition_id),
             recovery:
-              `/akk close ${bridge.terminalConversationId(session)} ` +
+              `/akk close ${terminalId} ` +
               (orphanedDispatch.kind === "lifecycle"
                 ? `--expected-transition-id ${String(
                     orphanedDispatch.transition_id
@@ -1436,20 +1322,18 @@ async function terminalControlledListEntry(
     session,
     physicalProcessIncarnation,
     agentVersion,
+    modelControlProfile,
     ordinaryBindingToken: lifecycleBindingToken,
     modelControlCapability,
-    nativeIdentityObservation,
-    authorityNativeIdentityObservation,
     nativeAgentIdentity,
     authorityNativeAgentIdentity,
-    codexOpenRootRolloutInventory,
     modelControlResidual,
+    zeroRolloutVerified: zeroRolloutModelControlVerified,
     effectiveTerminalState: projectedTerminalState,
     automatedInputComposerReady,
-    terminalHasInteraction:
-      terminalStatusSnapshot?.interaction_state !== undefined,
+    terminalHasInteraction,
     terminalHasBlockingTurn,
-    hasOrphanedDispatch: orphanedDispatch !== undefined
+    hasOrphanedDispatch
   });
   const foregroundIdentificationActions =
     terminalUserExplicitSendAuthority.eligible &&
@@ -1492,6 +1376,160 @@ async function terminalControlledListEntry(
   };
 }
 
+async function collectTerminalFactsForList(
+  session: ActiveTerminalProcess,
+  activeSessions: ActiveTerminalProcess[],
+  options: TerminalListCliOptions,
+  bridge: TerminalAgentBridge,
+  terminalControl: TerminalControlRef
+) {
+  const terminalId = bridge.terminalConversationId(session);
+  const adapter = bridge.registry.require(session.agent);
+  return collectTerminalListTerminalFacts({
+    session,
+    terminalControl,
+    terminalId,
+    childPids: childProcessIdsForRoot(session, activeSessions),
+    adapter,
+    ports: terminalListFactPortsFor({
+      session,
+      terminalControl,
+      terminalId,
+      options,
+      bridge
+    })
+  });
+}
+
+function terminalListFactPortsFor(input: {
+  session: ActiveTerminalProcess;
+  terminalControl: TerminalControlRef;
+  terminalId: string;
+  options: TerminalListCliOptions;
+  bridge: TerminalAgentBridge;
+}): TerminalListTerminalFactPorts {
+  const { session, terminalControl, terminalId, options, bridge } = input;
+  return {
+    observeStatus: () => listStateForTerminal(
+      session.agent,
+      terminalControl,
+      options,
+      bridge,
+      {
+        pid: session.pid,
+        cwd: session.cwd,
+        // Status and approval share this exact full terminal identity.
+        ...(session.agent === "codex"
+          ? { conversationId: terminalId }
+          : { sessionId: session.sessionId }),
+        terminalTarget: terminalControl.target
+      }
+    ),
+    observeNativeIdentity: (observedTerminalId) =>
+      observeTerminalNativeListIdentity(
+        session,
+        terminalControl,
+        options,
+        bridge,
+        observedTerminalId
+      ),
+    projectEffectiveState: ({ terminalState, native }) =>
+      effectiveTerminalListState({
+        session,
+        terminalState,
+        nativeIdentityObservation: native.nativeIdentityObservation,
+        nativeAgentIdentity: native.nativeAgentIdentity,
+        nativeIdentityAuthorityObservation:
+          native.authorityNativeIdentityObservation,
+        codexOpenRootRolloutInventory: native.codexOpenRootRolloutInventory,
+        nativeProcessUuid: native.nativeProcessUuid,
+        nativeProcessBirth: native.nativeProcessBirth
+      }),
+    observeAgentVersion: () =>
+      terminalListRuntime().agentVersionForRunningProcess(
+        session.agent,
+        session.pid,
+        options
+      ),
+    observeTerminalHasBlockingTurn: () =>
+      observeTerminalHasBlockingTurnForList(options, terminalControl),
+    observeComposer: (terminalState) => observeAutomatedInputComposerReady({
+      session,
+      terminalControl,
+      terminalState,
+      options
+    }),
+    observePhysicalProcessIncarnation: () =>
+      observePhysicalProcessIncarnationForList(session, terminalControl),
+    observeLatentClearResume: (request) =>
+      terminalListRuntime().codexLatentClearResumeObservation(request),
+    observeModelControlResidual: ({
+        agentVersion,
+        modelControlCapability,
+        modelControlProfile,
+        native,
+        zeroRolloutVerified,
+        effectiveTerminalState,
+        terminalHasInteraction,
+        terminalHasBlockingTurn,
+        hasOrphanedDispatch
+      }) => observeModelControlResidualForList({
+      bridge,
+      session,
+      terminalControl,
+      agentVersion,
+      modelControlCapability,
+      modelControlProfile,
+      nativeAgentIdentity: native.nativeAgentIdentity,
+      zeroRolloutVerified,
+      nativeIdentityEligible:
+        (session.agent === "codex" &&
+          isExactNativeThreadId(native.nativeAgentIdentity?.sessionId)) ||
+        zeroRolloutVerified,
+      effectiveTerminalState,
+      terminalHasInteraction,
+      terminalHasBlockingTurn,
+      hasOrphanedDispatch
+    }),
+    projectStatusSnapshot: terminalBridgeStatusWithProjection
+  };
+}
+
+function observeTerminalHasBlockingTurnForList(
+  options: TerminalListCliOptions,
+  terminalControl: TerminalControlRef
+): boolean {
+  try {
+    return terminalIncarnationBlockingTurns(
+      terminalListRuntime().storeDirFromOptions(options),
+      terminalControl
+    ).length > 0;
+  } catch (error) {
+    runtimeLog("warn", "terminal_managed_turn_inventory_unavailable", {
+      terminal_target: terminalControl.target,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return true;
+  }
+}
+
+function observePhysicalProcessIncarnationForList(
+  session: ActiveTerminalProcess,
+  terminalControl: TerminalControlRef
+): TerminalListPhysicalProcessIncarnation | undefined {
+  try {
+    return terminalListRuntime().processIncarnationForPid(session.pid);
+  } catch (error) {
+    runtimeLog("warn", "terminal_physical_process_incarnation_unavailable", {
+      agent: session.agent,
+      terminal_target: terminalControl.target,
+      pid: session.pid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
+}
+
 function projectTerminalModelControlActions(input: {
   renderedActions: TerminalActionSet<Record<string, unknown>>;
   terminalId: string;
@@ -1503,20 +1541,13 @@ function projectTerminalModelControlActions(input: {
     processBirth: string;
   };
   agentVersion?: string;
+  modelControlProfile?: TerminalModelControlProfile;
   ordinaryBindingToken?: string;
-  modelControlCapability: {
-    status: string;
-    behaviorProfile?: string;
-    scope?: string;
-    modelSelection: boolean;
-    reasoningEffortSelection: boolean;
-  };
-  nativeIdentityObservation: TerminalNativeIdentityObservation;
-  authorityNativeIdentityObservation: TerminalNativeIdentityObservation;
+  modelControlCapability: TerminalModelControlCapabilities;
   nativeAgentIdentity?: TerminalNativeIdentity;
   authorityNativeAgentIdentity?: TerminalNativeIdentity;
-  codexOpenRootRolloutInventory?: CodexOpenRootRolloutInventory;
   modelControlResidual?: TerminalModelControlResidualObservation;
+  zeroRolloutVerified: boolean;
   effectiveTerminalState: EffectiveTerminalListState;
   automatedInputComposerReady: boolean;
   terminalHasInteraction: boolean;
@@ -1524,12 +1555,10 @@ function projectTerminalModelControlActions(input: {
   hasOrphanedDispatch: boolean;
 }): TerminalActionSet<Record<string, unknown>> {
   let actions = { ...input.renderedActions };
-  const modelControlProfile = terminalModelControlProfileFor(
-    input.session.agent, input.agentVersion);
-  const behaviorProfile = modelControlProfile &&
+  const behaviorProfile = input.modelControlProfile &&
     input.modelControlCapability.behaviorProfile ===
-      modelControlProfile.behaviorProfile
-    ? modelControlProfile.behaviorProfile : undefined;
+      input.modelControlProfile.behaviorProfile
+    ? input.modelControlProfile.behaviorProfile : undefined;
   const modelControlNativeIdentity = input.session.agent === "codex"
     ? input.nativeAgentIdentity
     : input.authorityNativeAgentIdentity;
@@ -1537,15 +1566,6 @@ function projectTerminalModelControlActions(input: {
     isExactNativeThreadId(modelControlNativeIdentity?.sessionId) &&
     (input.session.agent === "codex" ||
       Boolean(modelControlNativeIdentity?.processUuid));
-  const zeroRolloutVerified =
-    input.session.agent === "codex" &&
-    input.nativeIdentityObservation.status === "verified_absent" &&
-    input.authorityNativeIdentityObservation.status === "verified_absent" &&
-    input.codexOpenRootRolloutInventory?.status === "verified_absent" &&
-    input.codexOpenRootRolloutInventory.pid === input.session.pid &&
-    input.codexOpenRootRolloutInventory.roots.length === 0 &&
-    input.codexOpenRootRolloutInventory.processBirth ===
-      input.physicalProcessIncarnation?.processBirth;
   const residual = input.modelControlResidual?.state === "recoverable"
     ? input.modelControlResidual
     : undefined;
@@ -1565,7 +1585,7 @@ function projectTerminalModelControlActions(input: {
           kind: "exact_session",
           ordinaryBindingToken: input.ordinaryBindingToken
         }
-      : zeroRolloutVerified
+      : input.zeroRolloutVerified
         ? { kind: "verified_zero_rollout" }
         : { kind: "unavailable" },
     modelControlSupported:
@@ -1679,12 +1699,8 @@ async function observeModelControlResidualForList(input: {
   session: ActiveTerminalProcess;
   terminalControl: TerminalControlRef;
   agentVersion?: string;
-  modelControlCapability: {
-    status: string;
-    behaviorProfile?: string;
-    modelSelection: boolean;
-    reasoningEffortSelection: boolean;
-  };
+  modelControlCapability: TerminalModelControlCapabilities;
+  modelControlProfile?: TerminalModelControlProfile;
   nativeAgentIdentity?: TerminalNativeIdentity;
   zeroRolloutVerified: boolean;
   nativeIdentityEligible: boolean;
@@ -1694,7 +1710,7 @@ async function observeModelControlResidualForList(input: {
   hasOrphanedDispatch: boolean;
 }): Promise<TerminalModelControlResidualObservation | undefined> {
   const inspect = input.bridge.inspectModelControlResidual;
-  const profile = terminalModelControlProfileFor(input.session.agent, input.agentVersion);
+  const profile = input.modelControlProfile;
   if (
     typeof inspect !== "function" ||
     input.session.agent !== "codex" ||
@@ -1714,9 +1730,8 @@ async function observeModelControlResidualForList(input: {
     return undefined;
   }
   const adapter = input.bridge.registry.require("codex");
-  const capability = adapter.probeModelControl?.(input.agentVersion);
-  const plan = capability?.status === "supported"
-    ? adapter.planModelControl?.(capability)
+  const plan = input.modelControlCapability.status === "supported"
+    ? adapter.planModelControl?.(input.modelControlCapability)
     : undefined;
   if (!plan || !terminalModelControlPlanConforms({
     agent: input.session.agent,
@@ -1864,39 +1879,6 @@ function terminalListCommands(input: {
         nativeAgentIdentity?.sessionId &&
         (agent !== "codex" || nativeAgentIdentity.rollout)
       )
-  };
-}
-
-interface TerminalListState {
-  approval_state: TerminalBridgeStatus["approval_state"] & {
-    screen_excerpt?: string;
-    error?: string;
-  };
-  activity_state: TerminalBridgeStatus["activity_state"];
-  activity_reason: string;
-  screen_state: TerminalActivityState;
-  screen_reason: string;
-  capability_limitation?: string;
-  screen_excerpt?: string;
-  _terminal_status_snapshot?: TerminalBridgeStatus;
-}
-
-interface EffectiveTerminalListState extends TerminalListState {
-  native_identity_state: TerminalNativeIdentityState;
-  durable_activity_state: TerminalDurableActivityState;
-  durable_activity_reason: string;
-}
-
-function terminalListStateWithOpenModelControlSurface(
-  state: EffectiveTerminalListState
-): EffectiveTerminalListState {
-  const reason = "an exact native model-control surface is open";
-  return {
-    ...state,
-    activity_state: "unknown",
-    activity_reason: reason,
-    screen_state: "unknown",
-    screen_reason: reason
   };
 }
 
@@ -2120,24 +2102,13 @@ function terminalBridgeStatusWithProjection(
   ) as TerminalBridgeStatus;
 }
 
-interface TerminalNativeListIdentityObservation {
-  orphanedDispatch?: TerminalDispatchLedgerDocument;
-  nativeIdentityObservation: TerminalNativeIdentityObservation;
-  nativeAgentIdentity?: TerminalNativeIdentity;
-  authorityNativeIdentityObservation: TerminalNativeIdentityObservation;
-  authorityNativeAgentIdentity?: TerminalNativeIdentity;
-  codexOpenRootRolloutInventory?: CodexOpenRootRolloutInventory;
-  nativeProcessUuid?: string;
-  nativeProcessBirth?: string;
-  nativeProcessEvidence?: string;
-}
-
 async function observeTerminalNativeListIdentity(
   session: ActiveTerminalProcess,
   terminalControl: TerminalControlRef,
   options: TerminalListCliOptions,
-  bridge: TerminalAgentBridge
-): Promise<TerminalNativeListIdentityObservation> {
+  bridge: TerminalAgentBridge,
+  terminalId: string
+): Promise<TerminalNativeListIdentityFacts> {
   let orphanedDispatch: TerminalDispatchLedgerDocument | undefined;
   try {
     orphanedDispatch =
@@ -2156,7 +2127,7 @@ async function observeTerminalNativeListIdentity(
       codexIdentityContext = terminalListRuntime().codexManagedIdentityResolutionContext({
         storeDir: terminalListRuntime().storeDirFromOptions(options),
         terminal: {
-          conversationId: bridge.terminalConversationId(session),
+          conversationId: terminalId,
           agent: session.agent,
           pid: session.pid,
           terminalControl
