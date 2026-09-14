@@ -861,6 +861,10 @@
       "owner": "state-store"
     },
     {
+      "path": "src/store-event-presentation.ts",
+      "owner": "store-protocol"
+    },
+    {
       "path": "src/store.ts",
       "owner": "store-protocol"
     },
