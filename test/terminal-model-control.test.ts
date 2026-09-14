@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  classifyTerminalModelControlSurface,
   discoverTerminalModelOptions,
   inspectTerminalModelControlResidual,
   observeTerminalModelControl,
@@ -45,6 +46,167 @@ test("model control is closed to exact regression-tested agent versions", () => 
     ),
     /could not be verified/u
   );
+});
+
+test("model-control capture facts reduce to one mutually exclusive surface", () => {
+  const capture = (overrides: Partial<{
+    screen: string;
+    activityState: "awaiting_approval" | "working" | "idle" | "unknown";
+    approvalBlocked: boolean;
+    exactEmptyComposer: boolean;
+    exactCommandReady: boolean;
+    exactCommandComposer: boolean;
+    exactBareCommand: boolean;
+    exactCommandFingerprint: string;
+    inputBlocked: boolean;
+  }> = {}) => ({
+    terminalControl: "control",
+    screen: "> Ask Codex to do anything",
+    activityState: "idle" as const,
+    approvalBlocked: false,
+    exactEmptyComposer: false,
+    exactCommandReady: false,
+    exactCommandComposer: false,
+    exactBareCommand: false,
+    ...overrides
+  });
+
+  assert.deepEqual(
+    classifyTerminalModelControlSurface(CODEX_PLAN, capture({
+      exactEmptyComposer: true
+    })),
+    { state: "idle_empty" }
+  );
+  assert.deepEqual(
+    classifyTerminalModelControlSurface(CODEX_PLAN, capture({
+      exactCommandComposer: true,
+      exactCommandReady: true,
+      exactCommandFingerprint: "popup"
+    })),
+    { state: "command_popup", fingerprint: "popup" }
+  );
+  assert.deepEqual(
+    classifyTerminalModelControlSurface(CODEX_PLAN, capture({
+      exactCommandComposer: true,
+      exactBareCommand: true,
+      exactCommandFingerprint: "bare"
+    })),
+    { state: "bare_command", fingerprint: "bare" }
+  );
+  assert.deepEqual(
+    classifyTerminalModelControlSurface(CODEX_PLAN, capture({
+      exactCommandComposer: true,
+      exactCommandFingerprint: "draft"
+    })),
+    { state: "command_draft", fingerprint: "draft" }
+  );
+  assert.deepEqual(
+    classifyTerminalModelControlSurface(CODEX_PLAN, capture({
+      exactCommandComposer: true,
+      exactCommandReady: true,
+      exactBareCommand: true,
+      exactCommandFingerprint: "conflict"
+    })),
+    { state: "unknown", reason: "model-control Composer proofs conflict" }
+  );
+});
+
+test("only an exact picker outranks generic busy while hard input owners remain blocked", () => {
+  const picker = [
+    "Select Model and Effort",
+    "  1. gpt-6-astra (default)",
+    "› 2. gpt-5.6-sol (current)",
+    "  3. gpt-5.6-terra",
+    "Press enter to confirm or esc to go back"
+  ].join("\n");
+  const capture = {
+    terminalControl: "control",
+    screen: picker,
+    activityState: "working" as const,
+    approvalBlocked: false,
+    exactEmptyComposer: false,
+    exactCommandReady: false,
+    exactCommandComposer: false,
+    exactBareCommand: false
+  };
+
+  const exactPicker = classifyTerminalModelControlSurface(CODEX_PLAN, capture);
+  assert.equal(exactPicker.state, "picker");
+  if (exactPicker.state === "picker") {
+    assert.equal(exactPicker.pickerKind, "model");
+    assert.equal(exactPicker.observation.state, "codex_model_picker");
+  }
+  assert.deepEqual(
+    classifyTerminalModelControlSurface(CODEX_PLAN, {
+      ...capture,
+      approvalBlocked: true
+    }),
+    { state: "blocked", owner: "approval" }
+  );
+  assert.deepEqual(
+    classifyTerminalModelControlSurface(CODEX_PLAN, {
+      ...capture,
+      inputBlocked: true
+    }),
+    { state: "blocked", owner: "input" }
+  );
+  assert.deepEqual(
+    classifyTerminalModelControlSurface(CODEX_PLAN, {
+      ...capture,
+      screen: "› /model",
+      exactCommandComposer: true,
+      exactCommandReady: true,
+      exactCommandFingerprint: "popup"
+    }),
+    { state: "blocked", owner: "agent" }
+  );
+});
+
+test("narrow More reasoning picker stays exact while truncated picker is unknown", () => {
+  const narrow = [
+    "Select Reasoning Level for gpt-6-astra",
+    "  1. Low (default)",
+    "     Fast responses",
+    "  2. Medium",
+    "  3. High",
+    "  4. Extra high",
+    "  5. Persistent",
+    "› 6. More reasoning… (current)",
+    "     Max and Ultra choices",
+    "Press enter to confirm or esc to go back"
+  ].join("\n");
+  const base = {
+    terminalControl: "control",
+    activityState: "working" as const,
+    approvalBlocked: false,
+    exactEmptyComposer: false,
+    exactCommandReady: false,
+    exactCommandComposer: false,
+    exactBareCommand: false
+  };
+  const exact = classifyTerminalModelControlSurface(CODEX_PLAN, {
+    ...base,
+    screen: narrow
+  });
+  assert.equal(exact.state, "picker");
+  if (exact.state === "picker") {
+    assert.equal(exact.pickerKind, "effort");
+    assert.equal(exact.observation.state, "codex_reasoning_picker");
+    if (exact.observation.state === "codex_reasoning_picker") {
+      assert.equal(exact.observation.currentEffort, undefined);
+      assert.equal(exact.observation.rows.at(-1)?.kind, "advanced");
+    }
+  }
+
+  const truncated = classifyTerminalModelControlSurface(CODEX_PLAN, {
+    ...base,
+    activityState: "unknown",
+    screen: narrow.replace("Press enter to confirm or esc to go back", "")
+  });
+  assert.equal(truncated.state, "unknown");
+  if (truncated.state === "unknown") {
+    assert.match(truncated.reason, /incomplete|trailing|exact/u);
+  }
 });
 
 test("Codex 0.154 parser preserves live positions and catalog preset markers", () => {
@@ -394,6 +556,47 @@ test("an exact Codex model picker is a repairable input-owner surface", async ()
   });
   assert.equal(repaired.outcome, "repaired");
   assert.equal(repaired.composerPostcondition, "empty");
+  assert.equal(native.phase, "idle");
+  assert.deepEqual(native.sentKeys, [["Escape"]]);
+});
+
+test("exact picker repair ignores only its generic busy misclassification", async () => {
+  const native = new FakeModelTerminal("codex", {
+    currentModel: "gpt-5.2",
+    currentEffort: "high",
+    defaultModel: "gpt-5.2",
+    defaultEffort: "high"
+  });
+  native.phase = "codex_model";
+  native.selectedModelIndex = 1;
+  const ports: TerminalModelControlPorts = {
+    ...native.ports,
+    capture: async (input) => {
+      const captured = await native.ports.capture(input);
+      return {
+        ...captured,
+        activityState: native.phase === "codex_model"
+          ? "working" as const
+          : captured.activityState
+      };
+    }
+  };
+
+  const residual = await inspectTerminalModelControlResidual({
+    plan: CODEX_PLAN,
+    terminalControl: "control",
+    ports
+  });
+  assert.equal(residual.state, "recoverable");
+  if (residual.state !== "recoverable") return;
+
+  const repaired = await repairTerminalModelControlResidual({
+    plan: CODEX_PLAN,
+    terminalControl: residual.terminalControl,
+    expectedResidualFingerprint: residual.fingerprint,
+    ports
+  });
+  assert.equal(repaired.outcome, "repaired");
   assert.equal(native.phase, "idle");
   assert.deepEqual(native.sentKeys, [["Escape"]]);
 });
