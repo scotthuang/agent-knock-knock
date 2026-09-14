@@ -1025,6 +1025,10 @@
       "owner": "terminal-agent-core"
     },
     {
+      "path": "src/terminal-model-control-transaction.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
       "path": "src/terminal-model-control.ts",
       "owner": "terminal-agent-core"
     },

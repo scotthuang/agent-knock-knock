@@ -758,6 +758,52 @@ test("an irreversible Codex persistence failure reports unknown default mutation
   assert.equal(result.doNotRetry, true);
 });
 
+test("Codex commit receipt uncertainty is never retried after the native commit", async () => {
+  const native = new FakeModelTerminal("codex", {
+    currentModel: "gpt-5.2",
+    currentEffort: "low",
+    defaultModel: "gpt-5.2",
+    defaultEffort: "low"
+  });
+  const offer = await discoverTerminalModelOptions({
+    agent: "codex", agentVersion: "0.154.0", plan: CODEX_PLAN,
+    terminalControl: "control", ports: native.ports
+  });
+  let commitAttempts = 0;
+  let commitReceiptRejected = false;
+  let postCommitCleanupCaptures = 0;
+  const ports: TerminalModelControlPorts = {
+    ...native.ports,
+    capture: async (input) => {
+      if (commitReceiptRejected) postCommitCleanupCaptures += 1;
+      return native.ports.capture(input);
+    },
+    sendKeys: async (control, keys) => {
+      const commit = native.phase === "codex_reasoning" && keys[0] === "C-m";
+      await native.ports.sendKeys(control, keys);
+      if (commit) {
+        commitAttempts += 1;
+        commitReceiptRejected = true;
+        throw new Error("synthetic commit receipt uncertainty");
+      }
+    }
+  };
+  const result = await switchTerminalModel({
+    agent: "codex", agentVersion: "0.154.0", plan: CODEX_PLAN,
+    terminalControl: "control", ports,
+    expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
+    request: { model: "gpt-6-astra", reasoningEffort: "high" }
+  });
+
+  assert.equal(result.outcome, "uncertain");
+  assert.equal(result.doNotRetry, true);
+  assert.equal(result.defaultsChanged, null);
+  assert.equal(result.reason, "synthetic commit receipt uncertainty");
+  assert.equal(commitAttempts, 1);
+  assert.ok(postCommitCleanupCaptures > 0);
+  assert.equal(native.phase, "idle");
+});
+
 test("Claude switch uses literal session-only s and never mutates defaults", async () => {
   const native = new FakeModelTerminal("claude", {
     currentModel: "opus",
@@ -819,16 +865,102 @@ test("reversible discovery failure unwinds only exact frames back to idle", asyn
     defaultEffort: "high",
     throwOnceInPhase: "codex_model"
   });
-  await assert.rejects(
-    discoverTerminalModelOptions({
-      agent: "codex", agentVersion: "0.154.0", plan: CODEX_PLAN,
-      terminalControl: "control", ports: native.ports
-    }),
-    /synthetic capture failure/u
-  );
+  await assert.rejects(discoverTerminalModelOptions({
+    agent: "codex", agentVersion: "0.154.0", plan: CODEX_PLAN,
+    terminalControl: "control", ports: native.ports
+  }), (error: unknown) => {
+    assert.equal(
+      error instanceof Error ? error.message : String(error),
+      "synthetic capture failure"
+    );
+    return true;
+  });
   assert.equal(native.phase, "idle");
   assert.ok(native.sentKeys.some((keys) => keys[0] === "Escape"));
   assert.ok(native.sentKeys.every((keys) => keys.length === 1));
+});
+
+test("reversible switch failure exits exactly and preserves the original error", async () => {
+  const native = new FakeModelTerminal("codex", {
+    currentModel: "gpt-5.2",
+    currentEffort: "high",
+    defaultModel: "gpt-5.2",
+    defaultEffort: "high"
+  });
+  const offer = await discoverTerminalModelOptions({
+    agent: "codex", agentVersion: "0.154.0", plan: CODEX_PLAN,
+    terminalControl: "control", ports: native.ports
+  });
+  let failedNavigation = false;
+  const ports: TerminalModelControlPorts = {
+    ...native.ports,
+    sendKeys: async (control, keys) => {
+      if (!failedNavigation && native.phase === "codex_model" &&
+          keys[0] === "Up") {
+        failedNavigation = true;
+        await native.ports.sendKeys(control, keys);
+        throw new Error("synthetic reversible navigation failure");
+      }
+      await native.ports.sendKeys(control, keys);
+    }
+  };
+  await assert.rejects(switchTerminalModel({
+    agent: "codex", agentVersion: "0.154.0", plan: CODEX_PLAN,
+    terminalControl: "control", ports,
+    expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
+    request: { model: "gpt-6-astra", reasoningEffort: "high" }
+  }), (error: unknown) => {
+    assert.equal(
+      error instanceof Error ? error.message : String(error),
+      "synthetic reversible navigation failure"
+    );
+    return true;
+  });
+  assert.equal(failedNavigation, true);
+  assert.equal(native.phase, "idle");
+});
+
+test("cleanup failure keeps its exact error and requires a fresh residual scan", async () => {
+  const native = new FakeModelTerminal("codex", {
+    currentModel: "gpt-5.2",
+    currentEffort: "high",
+    defaultModel: "gpt-5.2",
+    defaultEffort: "high",
+    throwOnceInPhase: "codex_model"
+  });
+  let failedCleanup = false;
+  const ports: TerminalModelControlPorts = {
+    ...native.ports,
+    sendKeys: async (control, keys) => {
+      if (!failedCleanup && native.phase === "codex_model" &&
+          keys[0] === "Escape") {
+        failedCleanup = true;
+        throw new Error("synthetic cleanup transport failure");
+      }
+      await native.ports.sendKeys(control, keys);
+    }
+  };
+  await assert.rejects(discoverTerminalModelOptions({
+    agent: "codex", agentVersion: "0.154.0", plan: CODEX_PLAN,
+    terminalControl: "control", ports
+  }), (error: unknown) => {
+    assert.equal(
+      error instanceof Error ? error.message : String(error),
+      "synthetic capture failure; exact native model-control cleanup failed: " +
+      "synthetic cleanup transport failure"
+    );
+    return true;
+  });
+  assert.equal(failedCleanup, true);
+  const residual = await inspectTerminalModelControlResidual({
+    plan: CODEX_PLAN,
+    terminalControl: "control",
+    ports: native.ports
+  });
+  assert.equal(residual.state, "recoverable");
+  if (residual.state === "recoverable") {
+    assert.equal(residual.kind, "model_surface");
+  }
 });
 
 type FakePhase = "idle" | "composer" | "codex_entry" | "codex_model" |
