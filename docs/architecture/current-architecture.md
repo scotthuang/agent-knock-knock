@@ -8,10 +8,12 @@ in [`config/architecture-health-budget.json`](../../config/architecture-health-b
 Run `npm run architecture:dashboard` to validate the budgets and print the
 current JSON dashboard.
 
-The older [orchestration refactor document](./orchestration-refactor.md) and
-[Issue #126 closeout report](./issue-126-final-report.md) remain historical
-evidence. They do not describe the current module sizes or current health
-budget.
+The stable [orchestration architecture index](./orchestration-refactor.md)
+routes readers to this current document or the immutable
+[Issue #126 historical ledger](./orchestration-refactor-history.md). That
+ledger and the [Issue #126 closeout report](./issue-126-final-report.md) are
+historical evidence; they do not describe current module sizes, protocols, or
+the current health budget.
 
 ## Shape of the system
 
