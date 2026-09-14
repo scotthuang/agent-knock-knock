@@ -137,7 +137,8 @@ const OPENCLAW_AUTHORITY_ROLES = Object.freeze({
   tool_schemas: "src/openclaw-plugin-schemas.ts",
   monitor_supervisor: "src/openclaw-plugin-supervisor.ts",
   plugin_entry: "src/openclaw-plugin.ts",
-  semantic_catalog: "src/semantic-tool-catalog.ts"
+  semantic_catalog: "src/semantic-tool-catalog.ts",
+  semantic_runtime: "src/semantic-tool-runtime.ts"
 });
 const OPENCLAW_AUTHORITY_PATHS = Object.freeze(
   Object.values(OPENCLAW_AUTHORITY_ROLES).sort()
@@ -156,7 +157,8 @@ const HOST_BRIDGE_AUTHORITY_PATHS = Object.freeze([
   "src/host-profile-callback-transport.ts",
   "src/host-profile-runtime.ts",
   "src/host-profile.ts",
-  "src/semantic-tool-catalog.ts"
+  "src/semantic-tool-catalog.ts",
+  "src/semantic-tool-runtime.ts"
 ]);
 const MIGRATION_IDS = Object.freeze([
   "callback-outbox",
@@ -1028,12 +1030,33 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
   assertSourcePattern(
     repoRoot,
     roles.command_adapter,
-    /const relayPathByApi = new WeakMap[\s\S]*?export function registerOpenClawCommands\s*\([\s\S]*?export function runCli\s*\([\s\S]*?export function runCliAsync\s*\(/u,
+    /registerSemanticToolCatalog[\s\S]*?export function registerOpenClawCommands\s*\([\s\S]*?createAkkSemanticToolCatalog/u,
     "OpenClaw command-adapter role"
   );
   assertDirectNamedImport(
     repoRoot,
     roles.command_adapter,
+    "./semantic-tool-catalog.js",
+    ["registerSemanticToolCatalog"],
+    "OpenClaw command-adapter role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.command_adapter,
+    "./semantic-tool-runtime.js",
+    ["createAkkSemanticToolCatalog"],
+    "OpenClaw command-adapter role"
+  );
+
+  assertSourcePattern(
+    repoRoot,
+    roles.semantic_runtime,
+    /const relayPathByApi = new WeakMap[\s\S]*?export function createAkkSemanticToolCatalog\s*\([\s\S]*?export function runCli\s*\([\s\S]*?export function runCliAsync\s*\(/u,
+    "semantic tool-runtime role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_runtime,
     "./openclaw-plugin-schemas.js",
     [
       "approveParameters",
@@ -1059,14 +1082,14 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "unwatchParameters",
       "watchParameters"
     ],
-    "OpenClaw command-adapter role"
+    "semantic tool-runtime role"
   );
   assertDirectNamedImport(
     repoRoot,
-    roles.command_adapter,
+    roles.semantic_runtime,
     "./openclaw-plugin-helpers.js",
     ["AKK_CALLBACK_METHOD", "parseAkkCommand", "resolvePluginStoreDir"],
-    "OpenClaw command-adapter role"
+    "semantic tool-runtime role"
   );
 
   assertSourcePattern(

@@ -869,6 +869,10 @@
       "owner": "host-bridge"
     },
     {
+      "path": "src/semantic-tool-runtime.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/session-selector.ts",
       "owner": "session-selector"
     },
