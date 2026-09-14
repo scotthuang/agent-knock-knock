@@ -393,7 +393,7 @@ test("atomic foreground proof cannot authorize persistence and is rechecked at t
     "options.identifyForeground === true",
     "await lifecycleBeforeText?.()",
     "prepared.terminalBridge.status",
-    "assertAtomicForegroundIdentificationProof",
+    "foregroundIdentificationAuthority.assertCurrent",
     "requireExactEmptyComposerBeforeText: true"
   ]);
 });
