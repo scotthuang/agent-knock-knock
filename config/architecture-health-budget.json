@@ -17,7 +17,7 @@
   "budgets": {
     "max_import_cycles": 0,
     "max_hard_function_violations": 0,
-    "max_default_function_violations": 338,
+    "max_default_function_violations": 335,
     "large_file_threshold_physical_loc": 2000,
     "max_large_production_files": 19,
     "hotspot_max_physical_loc": {

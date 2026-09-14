@@ -1021,6 +1021,10 @@
       "owner": "terminal-action-projection"
     },
     {
+      "path": "src/terminal-list-action-policy.ts",
+      "owner": "terminal-list-application"
+    },
+    {
       "path": "src/terminal-list-cli-adapter.ts",
       "owner": "terminal-list-application"
     },
@@ -1039,6 +1043,10 @@
     {
       "path": "src/terminal-maintenance-cli-adapter.ts",
       "owner": "terminal-command-adapter"
+    },
+    {
+      "path": "src/terminal-model-control-action-policy.ts",
+      "owner": "terminal-agent-core"
     },
     {
       "path": "src/terminal-model-control-availability.ts",
@@ -1163,6 +1171,10 @@
     {
       "path": "src/terminal-turn-binding-authority-cli-adapter.ts",
       "owner": "terminal-identity-authority"
+    },
+    {
+      "path": "src/terminal-user-explicit-send-policy.ts",
+      "owner": "terminal-action-projection"
     },
     {
       "path": "src/terminal-user-send-intent.ts",

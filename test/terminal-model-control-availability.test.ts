@@ -3,8 +3,11 @@ import test from "node:test";
 
 import {
   decideModelControlAvailability,
+  materializeModelControlAvailability,
   type ModelControlSafetyFacts
 } from "../src/terminal-model-control-availability.js";
+import { decideModelControlActionPolicy } from
+  "../src/terminal-model-control-action-policy.js";
 import {
   TERMINAL_MODEL_CONTROL_PROFILE_IDS
 } from "../src/terminal-model-control.js";
@@ -231,4 +234,33 @@ test("continuation and repair tokens remain surface-bound and separated", () => 
   if (changed.availability !== "residual_continuation") return;
   assert.notEqual(first.expectedBindingToken, changed.expectedBindingToken);
   assert.notEqual(first.repairBindingToken, changed.repairBindingToken);
+});
+
+test("semantic policy carries no token and materialization rejects stale policy", () => {
+  const safetyFacts = facts();
+  const policy = decideModelControlActionPolicy({
+    ...safetyFacts,
+    nativeAuthority: { kind: "verified_zero_rollout" }
+  });
+  assert.deepEqual(policy, {
+    availability: "open_from_empty",
+    authority: "zero_rollout_physical",
+    terminalId: "terminal:v2:herdr:codex:default:w1:p4:42"
+  });
+  assert.doesNotMatch(JSON.stringify(policy), /token/iu);
+
+  assert.deepEqual(
+    materializeModelControlAvailability(
+      facts({ approvalBlocked: true }),
+      policy
+    ),
+    { availability: "unavailable", reason: "blocked" }
+  );
+  assert.deepEqual(
+    materializeModelControlAvailability(
+      facts({ nativeAuthority: { kind: "unavailable" } }),
+      policy
+    ),
+    { availability: "unavailable", reason: "native_identity_unavailable" }
+  );
 });

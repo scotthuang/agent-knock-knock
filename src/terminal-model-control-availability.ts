@@ -9,6 +9,10 @@ import {
   terminalModelControlProfileFor,
   type TerminalModelControlBehaviorProfile
 } from "./terminal-model-control-profile.js";
+import {
+  decideModelControlActionPolicy,
+  type ModelControlActionPolicyDecision
+} from "./terminal-model-control-action-policy.js";
 import { canonicalModelControlSubject } from
   "./terminal-model-control-subject.js";
 import type { TerminalControlRef } from "./terminal-control-ref.js";
@@ -88,6 +92,22 @@ export type ModelControlAvailabilityDecision =
 export function decideModelControlAvailability(
   facts: ModelControlSafetyFacts
 ): ModelControlAvailabilityDecision {
+  const policy = decideModelControlActionPolicy(policyFacts(facts));
+  return materializeModelControlAvailability(facts, policy);
+}
+
+/** Bind one already-decided semantic action to its current private authority. */
+export function materializeModelControlAvailability(
+  facts: ModelControlSafetyFacts,
+  policy: ModelControlActionPolicyDecision
+): ModelControlAvailabilityDecision {
+  if (policy.availability === "unavailable") return policy;
+  const currentPolicy = decideModelControlActionPolicy(policyFacts(facts));
+  if (!samePolicyDecision(currentPolicy, policy)) {
+    return currentPolicy.availability === "unavailable"
+      ? currentPolicy
+      : { availability: "unavailable", reason: "surface_unavailable" };
+  }
   const subject = canonicalModelControlSubject({
     terminalId: facts.terminalId,
     terminalControl: facts.terminalControl,
@@ -102,126 +122,38 @@ export function decideModelControlAvailability(
   const profile = subject
     ? terminalModelControlProfileFor(subject.agent, subject.agentVersion)
     : undefined;
-  if (
-    !facts.exactTerminalRow ||
-    facts.processState !== "active" ||
-    !subject ||
-    !profile
-  ) {
+  if (!subject || !profile || subject.terminalId !== policy.terminalId) {
     return { availability: "unavailable", reason: "invalid_subject" };
   }
-  if (
-    !subject.terminalControl.capabilities.includes("send_keys") ||
-    !subject.terminalControl.capabilities.includes("screen_status")
-  ) {
-    return { availability: "unavailable", reason: "transport_unavailable" };
+  if (policy.availability === "open_from_empty") {
+    return materializeOpenFromEmpty(facts, policy, subject);
   }
-  if (!facts.modelControlSupported) {
-    return { availability: "unavailable", reason: "unsupported_profile" };
-  }
-  if (
-    !facts.approvalScanned ||
-    facts.approvalBlocked ||
-    facts.terminalHasInteraction ||
-    facts.terminalHasBlockingTurn ||
-    facts.hasOrphanedDispatch
-  ) {
-    return { availability: "unavailable", reason: "blocked" };
-  }
+  return materializeResidualAvailability(facts, policy, subject);
+}
 
+function materializeOpenFromEmpty(
+  facts: ModelControlSafetyFacts,
+  policy: Extract<
+    ModelControlActionPolicyDecision,
+    { availability: "open_from_empty" }
+  >,
+  subject: NonNullable<ReturnType<typeof canonicalModelControlSubject>>
+): ModelControlAvailabilityDecision {
   const ordinaryBindingToken = facts.nativeAuthority.kind === "exact_session"
     ? nonBlank(facts.nativeAuthority.ordinaryBindingToken)
     : undefined;
-  const exactIdentity = facts.nativeAuthority.kind === "exact_session" &&
-    ordinaryBindingToken !== undefined;
-  const zeroRollout = facts.nativeAuthority.kind ===
-      "verified_zero_rollout" &&
-    subject.agent === "codex" &&
-    profile.supportsZeroRolloutPhysicalAuthority;
-  if (!exactIdentity && !zeroRollout) {
-    return {
-      availability: "unavailable",
-      reason: "native_identity_unavailable"
-    };
-  }
-
-  if (facts.surface.kind === "residual") {
-    const residualFingerprint = nonBlank(facts.surface.residualFingerprint);
-    const residualKind = facts.surface.residualKind;
-    if (
-      subject.agent !== "codex" ||
-      !profile.supportsResidualRepair ||
-      (
-        residualKind !== "model_surface" &&
-        (
-          facts.surface.activityState === "working" ||
-          facts.surface.activityState === "awaiting_approval"
-        )
-      ) ||
-      !residualFingerprint ||
-      (residualKind !== "profiled_command_popup" &&
-        residualKind !== "bare_command" &&
-        residualKind !== "model_surface")
-    ) {
-      return { availability: "unavailable", reason: "surface_unavailable" };
-    }
-    const repairBindingToken =
-      terminalUserExplicitModelControlRepairBindingToken({
-        terminalId: subject.terminalId,
-        terminalControl: subject.terminalControl,
-        pid: subject.pid,
-        workspace: subject.workspace,
-        processUuid: subject.processUuid,
-        processBirth: subject.processBirth,
-        agentVersion: subject.agentVersion,
-        behaviorProfile: subject.behaviorProfile,
-        residualKind,
-        residualFingerprint
-      });
-    if (
-      profile.supportsResidualContinuation &&
-      (residualKind === "profiled_command_popup" ||
-        residualKind === "bare_command")
-    ) {
-      return {
-        availability: "residual_continuation",
-        terminalId: subject.terminalId,
-        expectedBindingToken:
-          terminalUserExplicitModelControlResidualEntryBindingToken({
-            terminalId: subject.terminalId,
-            terminalControl: subject.terminalControl,
-            pid: subject.pid,
-            workspace: subject.workspace,
-            processUuid: subject.processUuid,
-            processBirth: subject.processBirth,
-            agentVersion: subject.agentVersion,
-            behaviorProfile: subject.behaviorProfile,
-            residualKind,
-            residualFingerprint
-          }),
-        repairBindingToken
-      };
-    }
-    return {
-      availability: "repair_only",
-      terminalId: subject.terminalId,
-      expectedBindingToken: repairBindingToken
-    };
-  }
-
-  if (
-    facts.surface.kind !== "idle_empty" ||
-    facts.surface.screenState !== "idle"
-  ) {
-    return { availability: "unavailable", reason: "surface_unavailable" };
-  }
-  if (exactIdentity && ordinaryBindingToken) {
-    return {
-      availability: "open_from_empty",
-      authority: "native_session",
-      terminalId: subject.terminalId,
-      expectedBindingToken: ordinaryBindingToken
-    };
+  if (policy.authority === "native_session") {
+    return ordinaryBindingToken
+      ? {
+          availability: "open_from_empty",
+          authority: "native_session",
+          terminalId: subject.terminalId,
+          expectedBindingToken: ordinaryBindingToken
+        }
+      : {
+          availability: "unavailable",
+          reason: "native_identity_unavailable"
+        };
   }
   return {
     availability: "open_from_empty",
@@ -238,6 +170,96 @@ export function decideModelControlAvailability(
       behaviorProfile: subject.behaviorProfile
     })
   };
+}
+
+function materializeResidualAvailability(
+  facts: ModelControlSafetyFacts,
+  policy: Extract<
+    ModelControlActionPolicyDecision,
+    { availability: "residual_continuation" | "repair_only" }
+  >,
+  subject: NonNullable<ReturnType<typeof canonicalModelControlSubject>>
+): ModelControlAvailabilityDecision {
+  if (facts.surface.kind !== "residual") {
+    return {
+      availability: "unavailable",
+      reason: "surface_unavailable"
+    };
+  }
+  const residualFingerprint = nonBlank(facts.surface.residualFingerprint);
+  if (!residualFingerprint) {
+    return { availability: "unavailable", reason: "surface_unavailable" };
+  }
+  const residualKind = facts.surface.residualKind;
+  const repairBindingToken =
+    terminalUserExplicitModelControlRepairBindingToken({
+      terminalId: subject.terminalId,
+      terminalControl: subject.terminalControl,
+      pid: subject.pid,
+      workspace: subject.workspace,
+      processUuid: subject.processUuid,
+      processBirth: subject.processBirth,
+      agentVersion: subject.agentVersion,
+      behaviorProfile: subject.behaviorProfile,
+      residualKind,
+      residualFingerprint
+    });
+  if (policy.availability === "residual_continuation") {
+    return {
+      availability: "residual_continuation",
+      terminalId: subject.terminalId,
+      expectedBindingToken:
+        terminalUserExplicitModelControlResidualEntryBindingToken({
+          terminalId: subject.terminalId,
+          terminalControl: subject.terminalControl,
+          pid: subject.pid,
+          workspace: subject.workspace,
+          processUuid: subject.processUuid,
+          processBirth: subject.processBirth,
+          agentVersion: subject.agentVersion,
+          behaviorProfile: subject.behaviorProfile,
+          residualKind,
+          residualFingerprint
+        }),
+      repairBindingToken
+    };
+  }
+  return {
+    availability: "repair_only",
+    terminalId: subject.terminalId,
+    expectedBindingToken: repairBindingToken
+  };
+}
+
+function policyFacts(facts: ModelControlSafetyFacts) {
+  const ordinaryBindingToken = facts.nativeAuthority.kind === "exact_session"
+    ? nonBlank(facts.nativeAuthority.ordinaryBindingToken)
+    : undefined;
+  return {
+    ...facts,
+    nativeAuthority: facts.nativeAuthority.kind === "exact_session" &&
+        ordinaryBindingToken
+      ? { kind: "exact_session" as const }
+      : facts.nativeAuthority.kind === "verified_zero_rollout"
+        ? { kind: "verified_zero_rollout" as const }
+        : { kind: "unavailable" as const }
+  };
+}
+
+function samePolicyDecision(
+  left: ModelControlActionPolicyDecision,
+  right: ModelControlActionPolicyDecision
+): boolean {
+  return left.availability === right.availability &&
+    (left.availability === "unavailable"
+      ? right.availability === "unavailable" && left.reason === right.reason
+      : right.availability !== "unavailable" &&
+        left.terminalId === right.terminalId &&
+        (
+          left.availability !== "open_from_empty" ||
+          right.availability === "open_from_empty" &&
+            left.authority === right.authority
+        ));
 }
 
 function nonBlank(value: unknown): string | undefined {

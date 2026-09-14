@@ -3,7 +3,6 @@ import {
   unmanagedTerminalBindingToken,
   type ManagedSessionState
 } from "./managed-session.js";
-import type { ExecutorKind } from "./executors.js";
 import {
   isSessionSendBlockingStatus,
   sessionIdForConversation,
@@ -12,10 +11,14 @@ import {
 import type { ManagedBindingConflictKind } from
   "./terminal-authority-policy.js";
 import {
-  hasCanonicalTerminalEndpoint,
-  terminalEndpointFromControlRef,
-  type TerminalControlRef
-} from "./terminal-control-ref.js";
+  decideTerminalUserExplicitSendEligibility,
+  type TerminalUserExplicitSendFacts
+} from "./terminal-user-explicit-send-policy.js";
+export {
+  decideTerminalUserExplicitSendEligibility,
+  type TerminalUserExplicitSendEligibility,
+  type TerminalUserExplicitSendFacts
+} from "./terminal-user-explicit-send-policy.js";
 
 export type TerminalActionName =
   | "status"
@@ -62,20 +65,6 @@ export type TerminalSendAuthority =
   | { mode: "raw" }
   | { mode: "conflict" };
 
-export interface TerminalUserExplicitSendFacts {
-  readonly exactTerminalRow: boolean;
-  readonly terminalId?: string;
-  readonly processState?: string;
-  readonly terminalControl?: TerminalControlRef;
-  readonly agent?: ExecutorKind;
-  readonly pid?: number;
-  readonly processUuid?: string;
-  readonly processBirth?: string;
-  readonly approvalScanned: boolean;
-  readonly approvalBlocked: boolean;
-  readonly userExplicitComposerReady: boolean;
-}
-
 export type TerminalUserExplicitSendAuthority =
   | { eligible: false }
   | {
@@ -92,56 +81,21 @@ export type TerminalUserExplicitSendAuthority =
 export function decideTerminalUserExplicitSendAuthority(
   facts: TerminalUserExplicitSendFacts
 ): TerminalUserExplicitSendAuthority {
-  const terminalId = nonBlank(facts.terminalId);
-  const control = facts.terminalControl;
-  const workspace = control?.currentPath ?? "";
-  const processUuid = nonBlank(facts.processUuid);
-  const processBirth = nonBlank(facts.processBirth);
-  if (
-    !facts.exactTerminalRow ||
-    !terminalId ||
-    facts.processState !== "active" ||
-    !control ||
-    !hasCanonicalTerminalEndpoint(control) ||
-    !control.capabilities.includes("send_keys") ||
-    !control.capabilities.includes("screen_status") ||
-    !facts.approvalScanned ||
-    facts.approvalBlocked ||
-    !facts.agent ||
-    (facts.agent !== "codex" && !facts.userExplicitComposerReady) ||
-    !Number.isSafeInteger(facts.pid) ||
-    Number(facts.pid) <= 1 ||
-    !processUuid ||
-    !processBirth
-  ) {
-    return { eligible: false };
-  }
-  const endpoint = terminalEndpointFromControlRef(control);
-  if (
-    !Number.isSafeInteger(endpoint.processAnchorPid) ||
-    Number(endpoint.processAnchorPid) <= 1
-  ) {
-    return { eligible: false };
-  }
+  const eligibility = decideTerminalUserExplicitSendEligibility(facts);
+  if (!eligibility.eligible) return eligibility;
   return {
     eligible: true,
-    terminalId,
+    terminalId: eligibility.terminalId,
     expectedTerminalToken: unmanagedTerminalBindingToken({
-      terminalId,
-      terminalControl: control,
-      agent: facts.agent,
-      pid: Number(facts.pid),
-      workspace,
-      processUuid,
-      processBirth
+      terminalId: eligibility.terminalId,
+      terminalControl: eligibility.terminalControl,
+      agent: eligibility.agent,
+      pid: eligibility.pid,
+      workspace: eligibility.workspace,
+      processUuid: eligibility.processUuid,
+      processBirth: eligibility.processBirth
     })
   };
-}
-
-function nonBlank(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : undefined;
 }
 
 /** Canonical send authority used by list projection and fresh mutation prep. */
