@@ -181,8 +181,13 @@ import {
   type TerminalDispatchLedgerDocument
 } from "./terminal-dispatch-ledger-codec.js";
 import * as dispatchApplication from "./terminal-dispatch-application.js";
-import { decideUserExplicitTerminalInputSafety } from
-  "./terminal-dispatch-policy.js";
+import {
+  assertSafeUserExplicitTerminalSend,
+  assertTerminalNativeBindingBeforeSend,
+  assertTerminalPreSendStatus,
+  terminalPreSendRuntime,
+  terminalSendCandidateAcceptanceAnchor
+} from "./terminal-command-send-preflight.js";
 import type {
   CodexDetachedCandidateSessionClaimSet,
   DeferredCodexForegroundBindingBoundary,
@@ -5020,25 +5025,6 @@ function explicitTerminalSendIntentRuntimeDir(): string {
     : path.join(path.dirname(defaultStoreDir()), "runtime-v2");
 }
 
-function assertSafeUserExplicitTerminalSend(
-  status: TerminalBridgeStatus | undefined
-): void {
-  const approval = status && isRecord(status.approval_state)
-    ? status.approval_state
-    : undefined;
-  const decision = decideUserExplicitTerminalInputSafety({
-    reachable: status?.reachable === true,
-    approvalScanned: approval?.scanned === true,
-    approvalBlocked: approval?.blocked === true,
-    approvalReason: stringValue(approval?.reason),
-    awaitingApproval: status?.activity_state === "awaiting_approval",
-    questionnaireActive: status?.interaction_state !== undefined
-  });
-  if (decision.action === "reject") {
-    throw new Error(decision.reason);
-  }
-}
-
 function terminalUserSendIntentContext(
   options: Record<string, any>,
   messageBody: string,
@@ -8240,113 +8226,6 @@ async function runTerminalConversationApprove({
   }
 }
 
-function terminalSendCandidateAcceptanceAnchor(
-  request: TerminalControlSendRequest
-) {
-  return request.deferredCodexForegroundBinding?.candidateAcceptanceAnchor ??
-    request.postSendCodexCandidateAnchor;
-}
-
-function assertTerminalNativeBindingBeforeSend(input: {
-  execution: TerminalDispatchExecutionService;
-  conversation: Conversation;
-  currentNativeIdentity?: NativeAgentSessionIdentity;
-  needsPostSendNativeBinding: boolean;
-  allowedPreMaterializationIdentity?: CodexPreMaterializationIdentity;
-}): void {
-  if (!input.needsPostSendNativeBinding) {
-    input.execution.assertTurnIdentity({
-      conversation: input.conversation,
-      currentIdentity: input.currentNativeIdentity,
-      operation: "send to"
-    });
-    return;
-  }
-  if (
-    input.currentNativeIdentity &&
-    !nativeIdentityMatchesCodexPreMaterialization(
-      input.currentNativeIdentity,
-      input.allowedPreMaterializationIdentity
-    )
-  ) {
-    throw new Error(
-      "native agent session appeared while preparing an unmaterialized terminal binding; refresh list and retry"
-    );
-  }
-}
-
-function terminalPreSendRuntime(input: {
-  request: TerminalControlSendRequest;
-  terminalControl: TerminalControlRef;
-  terminalAgentPid: number;
-}): TerminalRuntimeIdentity {
-  const { request, terminalControl, terminalAgentPid } = input;
-  const {
-    conversation,
-    nextConversation,
-    executor,
-    message,
-    allowedPreMaterializationIdentity,
-    allowedAdditionalIdentities = [],
-    deferredCodexForegroundBinding
-  } = request;
-  const candidateAnchor = terminalSendCandidateAcceptanceAnchor(request);
-  return {
-    ...(candidateAnchor
-      ? terminalRuntimeForLiveIdentity({
-          terminal: deferredCodexForegroundBinding?.terminal ?? {
-            conversationId: conversation.conversation_id,
-            agent: executor.kind,
-            pid: terminalAgentPid,
-            terminalControl
-          },
-          physicalOnly: true
-        })
-      : terminalRuntimeIdentityForConversation(
-          nextConversation,
-          terminalControl
-        )),
-    allowedPreMaterializationNativeIdentity:
-      allowedPreMaterializationIdentity,
-    allowedAdditionalNativeIdentities: allowedAdditionalIdentities,
-    messageId: message.id
-  };
-}
-
-function assertTerminalPreSendStatus(input: {
-  request: TerminalControlSendRequest;
-  status: TerminalBridgeStatus;
-}): void {
-  const { request, status } = input;
-  if (stringValue(request.options.expectedUserExplicitTerminalToken)) {
-    // Managed promotion is only a sidecar for a human-priority Send. It may
-    // relax lifecycle/activity attribution, never the shared physical gate
-    // that proves this TUI is not an approval or questionnaire input mode.
-    assertSafeUserExplicitTerminalSend(status);
-  }
-  const deferredCodexPrompt = Boolean(
-    request.verifiedEmptyCodexHandoff ||
-    request.deferredCodexForegroundBinding ||
-    request.postSendCodexCandidateAnchor
-  );
-  if (!deferredCodexPrompt) {
-    assertSafeTerminalSend(request.executor.kind, status);
-    return;
-  }
-  if (
-    request.executor.kind !== "codex" ||
-    status.reachable !== true ||
-    status.approval_state.blocked === true ||
-    status.interaction_state !== undefined ||
-    !["idle", "unknown"].includes(status.activity_state)
-  ) {
-    throw new Error(
-      `Codex deferred foreground send is not at a safe prompt ` +
-      `(${status.activity_state}: ${status.activity_reason})`
-    );
-  }
-}
-
 function assertAtomicForegroundIdentificationProof(input: {
   options: Record<string, any>;
   executor: Executor;
@@ -8548,6 +8427,9 @@ async function prepareTerminalControlSend(
     request,
     terminalControl,
     terminalAgentPid
+  }, {
+    terminalRuntimeForLiveIdentity,
+    terminalRuntimeIdentityForConversation
   });
   let preSendScreenFingerprint: string | undefined;
   let codexRolloutAcceptanceAnchor: CodexRolloutAcceptanceAnchor | undefined;
@@ -8570,7 +8452,9 @@ async function prepareTerminalControlSend(
       terminalAgentPid,
       status
     });
-    assertTerminalPreSendStatus({ request, status });
+    assertTerminalPreSendStatus({ request, status }, {
+      assertSafeTerminalSend
+    });
     const userExplicitManagedCodexAttempt = Boolean(
       stringValue(options.expectedUserExplicitTerminalToken)
     );
