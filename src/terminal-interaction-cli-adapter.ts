@@ -15,10 +15,14 @@ import {
   TerminalInteractionDispatchReservedError,
   TerminalInteractionInputNotStartedError,
   type TerminalAgentBridge,
+  type TerminalInteractionAuthorizationContext,
+  type TerminalInteractionAuthorizationDecision,
   type TerminalInteractionResponseExecution
 } from "./terminal-agent-bridge.js";
 import type { TerminalInteractionResponse } from
   "./terminal-interaction-protocol.js";
+import { executeTerminalInteractionResponseTransaction } from
+  "./terminal-interaction-response-transaction.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 
 type InteractionCliOptions = Record<string, unknown>;
@@ -27,6 +31,16 @@ interface LoadedInteractionTurn {
   readonly conversation: Conversation;
   readonly statePath: string;
   readonly logPath: string;
+}
+
+interface ManagedInteractionResponseReservation {
+  readonly attemptId: string;
+  readonly interactionId: string;
+  readonly expectedFingerprint: string;
+  readonly responseSha256: string;
+  readonly terminalTarget: string;
+  readonly terminalBridgeMessageId: unknown;
+  readonly conversation: Conversation;
 }
 
 export interface TerminalInteractionCliDependencies {
@@ -239,188 +253,147 @@ async function runRespondInteraction(
           `cannot prove the running ${agent} version for terminal interaction`
         );
       }
+      const agentVersion = runtime.agentVersion;
       const responseSha256 = createHash("sha256")
         .update(JSON.stringify(response), "utf8")
         .digest("hex");
-      let reservationWriteStarted = false;
-      let reservationConfirmed = false;
-      let reservationAttemptId: string | undefined;
-      let execution: TerminalInteractionResponseExecution;
-      try {
-        execution = await bridge.respondInteraction(
+      let monitorPid: number | undefined;
+      const result = await executeTerminalInteractionResponseTransaction<
+        TerminalInteractionAuthorizationContext,
+        TerminalInteractionAuthorizationDecision,
+        ManagedInteractionResponseReservation,
+        TerminalInteractionResponseExecution
+      >({
+        reservationFailureFence: "write_started",
+        dispatch: (hooks) => bridge.respondInteraction(
           agent,
           currentControl,
           response,
           {
-            agentVersion: runtime.agentVersion,
+            agentVersion,
             expectedFingerprint,
             expectedExpiresAt,
             scrollbackLines: Number(options.scrollbackLines ?? 120),
             runtime,
-            authorize: ({ projection, fingerprint, terminalControl }) => {
-              const latest = dependencies.repository.loadState(loaded.statePath);
-              const latestTakeover = takeoverFor(latest);
-              const latestControl =
-                dependencies.selection.terminalControlFromTakeover(
-                  latestTakeover
-                );
-              if (
-                turnIdForConversation(latest) !== turnSelector ||
-                !latestControl ||
-                !dependencies.authority.sameTerminalIncarnation(
-                  latestControl,
-                  terminalControl
-                ) ||
-                projection.interaction_id !== interactionId ||
-                fingerprint !== expectedFingerprint ||
-                latestTakeover?.terminal_bridge_message_id !==
-                  currentTakeover?.terminal_bridge_message_id
-              ) {
-                return {
-                  approved: false,
-                  reason:
-                    "terminal interaction authority changed before response"
-                };
-              }
-              return { approved: true };
-            },
-            beforeDispatch: ({ projection, fingerprint, terminalControl }) => {
-              if (reservationWriteStarted) {
-                throw new Error(
-                  "terminal interaction response dispatch was already reserved"
-                );
-              }
-              const latest = dependencies.repository.loadState(loaded.statePath);
-              current = latest;
-              const latestTakeover = takeoverFor(latest);
-              const latestControl =
-                dependencies.selection.terminalControlFromTakeover(
-                  latestTakeover
-                );
-              if (
-                turnIdForConversation(latest) !== turnSelector ||
-                !latestControl ||
-                !dependencies.authority.sameTerminalIncarnation(
-                  latestControl,
-                  terminalControl
-                ) ||
-                projection.interaction_id !== interactionId ||
-                fingerprint !== expectedFingerprint ||
-                latestTakeover?.terminal_bridge_message_id !==
-                  currentTakeover?.terminal_bridge_message_id
-              ) {
-                throw new Error(
-                  "terminal interaction authority changed before dispatch; refresh status"
-                );
-              }
-              dependencies.authority.assertManagedTerminalDispatchOwner({
-                storeDir,
-                conversation: latest,
-                terminalControl: latestControl,
-                action: "respond-interaction"
-              });
-              // The displayed expiry is an offer freshness boundary, not a
-              // native terminal deadline. The bridge has just recaptured the
-              // same exact questionnaire under this Turn/terminal lock; that
-              // live projection, fingerprint, identity, and owner proof are
-              // the dispatch authority.
-              const reservationTime = dependencies.runtime.now();
-              const reservedAt = reservationTime.toISOString();
-              const attemptId = randomUUID();
-              reservationAttemptId = attemptId;
-              current = {
-                ...latest,
-                native_session_takeover: {
-                  ...latestTakeover,
-                  terminal_bridge_interaction_dispatch: {
-                    state: "reserved",
-                    attempt_id: attemptId,
-                    interaction_id: interactionId,
-                    interaction_prompt_fingerprint: fingerprint,
-                    response_sha256: responseSha256,
-                    terminal_target: terminalControl.target,
-                    terminal_bridge_message_id:
-                      latestTakeover?.terminal_bridge_message_id,
-                    reserved_at: reservedAt
-                  }
-                },
-                updated_at: reservedAt
-              };
-              // A save failure may have committed the one-shot receipt. From
-              // this point on, only an exact compensating clear can make the
-              // attempt safely retryable.
-              reservationWriteStarted = true;
-              dependencies.repository.saveState(loaded.statePath, current);
-              reservationConfirmed = true;
-            }
+            authorize: hooks.authorize,
+            beforeDispatch: hooks.beforeDispatch
           }
-        );
-      } catch (error) {
-        if (
-          error instanceof TerminalInteractionInputNotStartedError &&
-          reservationConfirmed &&
-          reservationAttemptId
-        ) {
-          try {
-            releaseInteractionResponseReservation(dependencies, {
-              loaded,
-              attemptId: reservationAttemptId,
-              interactionId,
-              expectedFingerprint,
-              responseSha256,
-              terminalTarget: currentControl.target,
-              terminalBridgeMessageId:
-                currentTakeover?.terminal_bridge_message_id,
-              error
-            });
-          } catch (releaseError) {
-            const uncertain = new TerminalInteractionDispatchReservedError(
-              "reservation_uncertain",
-              "terminal interaction input did not start, but its dispatch reservation could not be safely released",
-              { cause: releaseError }
+        ),
+        authorize: ({ projection, fingerprint, terminalControl }) => {
+          const latest = dependencies.repository.loadState(loaded.statePath);
+          const latestTakeover = takeoverFor(latest);
+          const latestControl =
+            dependencies.selection.terminalControlFromTakeover(latestTakeover);
+          if (
+            turnIdForConversation(latest) !== turnSelector ||
+            !latestControl ||
+            !dependencies.authority.sameTerminalIncarnation(
+              latestControl,
+              terminalControl
+            ) ||
+            projection.interaction_id !== interactionId ||
+            fingerprint !== expectedFingerprint ||
+            latestTakeover?.terminal_bridge_message_id !==
+              currentTakeover?.terminal_bridge_message_id
+          ) {
+            return {
+              approved: false,
+              reason: "terminal interaction authority changed before response"
+            };
+          }
+          return { approved: true };
+        },
+        createReservation: ({
+          projection,
+          fingerprint,
+          terminalControl
+        }) => {
+          const latest = dependencies.repository.loadState(loaded.statePath);
+          current = latest;
+          const latestTakeover = takeoverFor(latest);
+          const latestControl =
+            dependencies.selection.terminalControlFromTakeover(latestTakeover);
+          if (
+            turnIdForConversation(latest) !== turnSelector ||
+            !latestControl ||
+            !dependencies.authority.sameTerminalIncarnation(
+              latestControl,
+              terminalControl
+            ) ||
+            projection.interaction_id !== interactionId ||
+            fingerprint !== expectedFingerprint ||
+            latestTakeover?.terminal_bridge_message_id !==
+              currentTakeover?.terminal_bridge_message_id
+          ) {
+            throw new Error(
+              "terminal interaction authority changed before dispatch; refresh status"
             );
-            // Never restore the stale pre-cleanup snapshot over a newer state.
-            // Only the still-current exact receipt may be promoted to
-            // uncertain; a missing or different receipt is left untouched.
-            let latest: Conversation | undefined;
-            try {
-              latest = dependencies.repository.loadState(loaded.statePath);
-            } catch {
-              // The existing durable receipt remains the fail-closed fence.
-            }
-            const latestDispatch = latest
-              ? interactionDispatchFor(latest)
-              : undefined;
-            if (
-              latest &&
-              latestDispatch &&
-              terminalInteractionDispatchMatchesReservation(latestDispatch, {
-                attemptId: reservationAttemptId,
-                interactionId,
-                expectedFingerprint,
-                responseSha256,
-                terminalTarget: currentControl.target,
-                terminalBridgeMessageId:
-                  currentTakeover?.terminal_bridge_message_id
-              })
-            ) {
-              markInteractionResponseUncertain(dependencies, {
-                loaded,
-                conversation: latest,
-                interactionId,
-                expectedFingerprint,
-                responseSha256,
-                error: uncertain
-              });
-            }
-            throw uncertain;
           }
-          throw new TerminalInteractionInputNotStartedError(
-            `${error.message}; no terminal input was sent, refresh status before responding again`,
-            { cause: error }
+          dependencies.authority.assertManagedTerminalDispatchOwner({
+            storeDir,
+            conversation: latest,
+            terminalControl: latestControl,
+            action: "respond-interaction"
+          });
+          const reservedAt = dependencies.runtime.now().toISOString();
+          const attemptId = randomUUID();
+          current = {
+            ...latest,
+            native_session_takeover: {
+              ...latestTakeover,
+              terminal_bridge_interaction_dispatch: {
+                state: "reserved",
+                attempt_id: attemptId,
+                interaction_id: interactionId,
+                interaction_prompt_fingerprint: fingerprint,
+                response_sha256: responseSha256,
+                terminal_target: terminalControl.target,
+                terminal_bridge_message_id:
+                  latestTakeover?.terminal_bridge_message_id,
+                reserved_at: reservedAt
+              }
+            },
+            updated_at: reservedAt
+          };
+          return {
+            attemptId,
+            interactionId,
+            expectedFingerprint,
+            responseSha256,
+            terminalTarget: terminalControl.target,
+            terminalBridgeMessageId:
+              latestTakeover?.terminal_bridge_message_id,
+            conversation: current
+          };
+        },
+        reserve: (_context, reservation) => {
+          // A save failure may have committed the one-shot receipt. The
+          // transaction therefore fences from write start for managed v1.
+          dependencies.repository.saveState(
+            loaded.statePath,
+            reservation.conversation
           );
-        }
-        if (reservationWriteStarted) {
+        },
+        release: (reservation, error) =>
+          releaseInteractionResponseReservation(dependencies, {
+            loaded,
+            ...reservation,
+            error: error as TerminalInteractionInputNotStartedError
+          }),
+        releaseFailure: (reservation, _error, releaseError) => {
+          const uncertain = new TerminalInteractionDispatchReservedError(
+            "reservation_uncertain",
+            "terminal interaction input did not start, but its dispatch reservation could not be safely released",
+            { cause: releaseError }
+          );
+          markManagedReleaseFailureUncertain(dependencies, {
+            loaded,
+            reservation,
+            uncertain
+          });
+          return uncertain;
+        },
+        markUncertain: (_reservation, error) =>
           markInteractionResponseUncertain(dependencies, {
             loaded,
             conversation: current,
@@ -428,12 +401,40 @@ async function runRespondInteraction(
             expectedFingerprint,
             responseSha256,
             error
+          }),
+        consume: (_reservation, execution) => {
+          const consumed = consumeManagedInteractionResponse(dependencies, {
+            loaded,
+            conversation: current,
+            currentControl,
+            options,
+            interactionId,
+            expectedFingerprint,
+            responseSha256,
+            execution
           });
-        }
-        throw error;
-      }
-
-      if (!execution.responded) {
+          current = consumed.conversation;
+          monitorPid = consumed.monitorPid;
+        },
+        responded: (execution) => execution.responded,
+        isInputNotStarted: (error) =>
+          error instanceof TerminalInteractionInputNotStartedError,
+        duplicateReservationError: () => new Error(
+          "terminal interaction response dispatch was already reserved"
+        ),
+        inputNotStartedError: (error) =>
+          new TerminalInteractionInputNotStartedError(
+            `${(error as Error).message}; no terminal input was sent, refresh status before responding again`,
+            { cause: error }
+          ),
+        missingReservationError: () =>
+          new TerminalInteractionDispatchReservedError(
+            "reservation_uncertain",
+            "terminal interaction response was dispatched without a durable reservation"
+          )
+      });
+      const execution = result.execution;
+      if (result.state === "blocked") {
         dependencies.runtime.printJson({
           conversation: current,
           interaction_id: interactionId,
@@ -444,85 +445,8 @@ async function runRespondInteraction(
         });
         return;
       }
-      if (!reservationConfirmed) {
-        throw new TerminalInteractionDispatchReservedError(
-          "reservation_uncertain",
-          "terminal interaction response was dispatched without a durable reservation"
-        );
-      }
-      const answeredAt = dependencies.runtime.now().toISOString();
-      const callbackSafeConversation =
-        supersedeMatchingInteractionCallbackDelivery(current, {
-          at: answeredAt,
-          interactionId,
-          fingerprint: expectedFingerprint
-        });
-      const latestTakeover = takeoverFor(callbackSafeConversation);
-      const interactionNotification = isRecord(
-        latestTakeover?.terminal_bridge_interaction_notification
-      )
-        ? latestTakeover.terminal_bridge_interaction_notification
-        : undefined;
-      const consumedSurfaceId = nonBlankString(
-        interactionNotification?.surface_id
-      );
-      const nextTakeover: Record<string, unknown> = {
-        ...latestTakeover,
-        terminal_bridge_last_interaction_id: interactionId,
-        terminal_bridge_last_interaction_fingerprint: expectedFingerprint,
-        terminal_bridge_last_interaction_message_id:
-          latestTakeover?.terminal_bridge_message_id,
-        terminal_bridge_last_interaction_response_sha256: responseSha256,
-        terminal_bridge_last_interaction_at: answeredAt,
-        terminal_bridge_last_activity_at: answeredAt,
-        terminal_bridge_last_activity_reason:
-          "interactive response dispatched"
-      };
-      delete nextTakeover.terminal_bridge_last_interaction_surface_id;
-      if (consumedSurfaceId) {
-        nextTakeover.terminal_bridge_last_interaction_surface_id =
-          consumedSurfaceId;
-      }
-      delete nextTakeover.terminal_bridge_interaction_dispatch;
-      delete nextTakeover.terminal_bridge_interaction_notification;
-      const nextConversation: Conversation = {
-        ...callbackSafeConversation,
-        status: "waiting_for_agent",
-        native_session_takeover: nextTakeover,
-        updated_at: answeredAt
-      };
-      dependencies.repository.saveState(loaded.statePath, nextConversation);
-      dependencies.repository.appendEvent(loaded.logPath, {
-        ts: answeredAt,
-        conversation_id: nextConversation.conversation_id,
-        event: "terminal_interaction_response_send",
-        interaction_id: interactionId,
-        question_id: execution.questionId,
-        response_kind: execution.responseKind,
-        outcome: execution.outcome,
-        response_sha256: responseSha256,
-        interaction_prompt_fingerprint: expectedFingerprint,
-        terminal_control: currentControl
-      });
-      dependencies.runtime.log("info", "terminal_interaction_response_send", {
-        conversation_id: nextConversation.conversation_id,
-        interaction_id: interactionId,
-        question_id: execution.questionId,
-        response_kind: execution.responseKind,
-        outcome: execution.outcome,
-        response_sha256: responseSha256,
-        terminal_target: currentControl.target
-      });
-      const monitor = dependencies.monitor.ensureAfterResponse({
-        conversation: nextConversation,
-        statePath: loaded.statePath,
-        logPath: loaded.logPath,
-        terminalControl: currentControl,
-        options,
-        reason: "interaction_response"
-      });
       dependencies.runtime.printJson({
-        conversation: nextConversation,
+        conversation: current,
         interaction_id: interactionId,
         responded: true,
         blocked: false,
@@ -530,10 +454,131 @@ async function runRespondInteraction(
         response_kind: execution.responseKind,
         outcome: execution.outcome,
         terminal_control: currentControl,
-        monitor_pid: monitor.monitorPid ?? null
+        monitor_pid: monitorPid ?? null
       });
     }
   });
+}
+
+function markManagedReleaseFailureUncertain(
+  dependencies: TerminalInteractionCliDependencies,
+  input: {
+    loaded: LoadedInteractionTurn;
+    reservation: ManagedInteractionResponseReservation;
+    uncertain: TerminalInteractionDispatchReservedError;
+  }
+): void {
+  // Never restore a stale pre-cleanup snapshot over a newer state. Only the
+  // still-current exact receipt may be promoted to uncertain.
+  let latest: Conversation | undefined;
+  try {
+    latest = dependencies.repository.loadState(input.loaded.statePath);
+  } catch {
+    return;
+  }
+  const latestDispatch = interactionDispatchFor(latest);
+  if (
+    !latestDispatch ||
+    !terminalInteractionDispatchMatchesReservation(
+      latestDispatch,
+      input.reservation
+    )
+  ) {
+    return;
+  }
+  markInteractionResponseUncertain(dependencies, {
+    loaded: input.loaded,
+    conversation: latest,
+    interactionId: input.reservation.interactionId,
+    expectedFingerprint: input.reservation.expectedFingerprint,
+    responseSha256: input.reservation.responseSha256,
+    error: input.uncertain
+  });
+}
+
+function consumeManagedInteractionResponse(
+  dependencies: TerminalInteractionCliDependencies,
+  input: {
+    loaded: LoadedInteractionTurn;
+    conversation: Conversation;
+    currentControl: TerminalControlRef;
+    options: InteractionCliOptions;
+    interactionId: string;
+    expectedFingerprint: string;
+    responseSha256: string;
+    execution: TerminalInteractionResponseExecution;
+  }
+): { conversation: Conversation; monitorPid?: number } {
+  const answeredAt = dependencies.runtime.now().toISOString();
+  const callbackSafeConversation = supersedeMatchingInteractionCallbackDelivery(
+    input.conversation,
+    {
+      at: answeredAt,
+      interactionId: input.interactionId,
+      fingerprint: input.expectedFingerprint
+    }
+  );
+  const latestTakeover = takeoverFor(callbackSafeConversation);
+  const interactionNotification = isRecord(
+    latestTakeover?.terminal_bridge_interaction_notification
+  )
+    ? latestTakeover.terminal_bridge_interaction_notification
+    : undefined;
+  const consumedSurfaceId = nonBlankString(interactionNotification?.surface_id);
+  const nextTakeover: Record<string, unknown> = {
+    ...latestTakeover,
+    terminal_bridge_last_interaction_id: input.interactionId,
+    terminal_bridge_last_interaction_fingerprint: input.expectedFingerprint,
+    terminal_bridge_last_interaction_message_id:
+      latestTakeover?.terminal_bridge_message_id,
+    terminal_bridge_last_interaction_response_sha256: input.responseSha256,
+    terminal_bridge_last_interaction_at: answeredAt,
+    terminal_bridge_last_activity_at: answeredAt,
+    terminal_bridge_last_activity_reason: "interactive response dispatched"
+  };
+  delete nextTakeover.terminal_bridge_last_interaction_surface_id;
+  if (consumedSurfaceId) {
+    nextTakeover.terminal_bridge_last_interaction_surface_id = consumedSurfaceId;
+  }
+  delete nextTakeover.terminal_bridge_interaction_dispatch;
+  delete nextTakeover.terminal_bridge_interaction_notification;
+  const nextConversation: Conversation = {
+    ...callbackSafeConversation,
+    status: "waiting_for_agent",
+    native_session_takeover: nextTakeover,
+    updated_at: answeredAt
+  };
+  dependencies.repository.saveState(input.loaded.statePath, nextConversation);
+  dependencies.repository.appendEvent(input.loaded.logPath, {
+    ts: answeredAt,
+    conversation_id: nextConversation.conversation_id,
+    event: "terminal_interaction_response_send",
+    interaction_id: input.interactionId,
+    question_id: input.execution.questionId,
+    response_kind: input.execution.responseKind,
+    outcome: input.execution.outcome,
+    response_sha256: input.responseSha256,
+    interaction_prompt_fingerprint: input.expectedFingerprint,
+    terminal_control: input.currentControl
+  });
+  dependencies.runtime.log("info", "terminal_interaction_response_send", {
+    conversation_id: nextConversation.conversation_id,
+    interaction_id: input.interactionId,
+    question_id: input.execution.questionId,
+    response_kind: input.execution.responseKind,
+    outcome: input.execution.outcome,
+    response_sha256: input.responseSha256,
+    terminal_target: input.currentControl.target
+  });
+  const monitor = dependencies.monitor.ensureAfterResponse({
+    conversation: nextConversation,
+    statePath: input.loaded.statePath,
+    logPath: input.loaded.logPath,
+    terminalControl: input.currentControl,
+    options: input.options,
+    reason: "interaction_response"
+  });
+  return { conversation: nextConversation, monitorPid: monitor.monitorPid };
 }
 
 function releaseInteractionResponseReservation(

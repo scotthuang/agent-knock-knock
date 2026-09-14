@@ -997,6 +997,10 @@
       "owner": "terminal-action-projection"
     },
     {
+      "path": "src/terminal-interaction-response-transaction.ts",
+      "owner": "terminal-action-projection"
+    },
+    {
       "path": "src/terminal-list-cli-adapter.ts",
       "owner": "terminal-list-application"
     },
@@ -1114,6 +1118,10 @@
     },
     {
       "path": "src/terminal-watch-cli-adapter.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-interaction-response-store.ts",
       "owner": "terminal-watch"
     },
     {

@@ -30,6 +30,8 @@ import {
   TerminalInteractionDispatchReservedError,
   TerminalInteractionInputNotStartedError,
   type TerminalAgentBridge,
+  type TerminalInteractionAuthorizationContext,
+  type TerminalInteractionAuthorizationDecision,
   type TerminalInteractionResponseExecution
 } from "./terminal-agent-bridge.js";
 import {
@@ -70,6 +72,13 @@ import {
   validateTerminalInteractionSubjectResponse,
   type TerminalInteractionSubjectResponse
 } from "./terminal-interaction-protocol.js";
+import { executeTerminalInteractionResponseTransaction } from
+  "./terminal-interaction-response-transaction.js";
+import {
+  consumeWatchInteractionResponse,
+  settleWatchInteractionResponseFailure,
+  type WatchInteractionResponseReservation
+} from "./terminal-watch-interaction-response-store.js";
 import type {
   TerminalControlEvidence,
   TerminalControlRef
@@ -867,10 +876,15 @@ function createTerminalWatchInteractionResponder(
         }
         const attemptId = dependencies.randomUUID();
         const responseHash = hashTerminalInteractionResponse(response);
-        let reserved = false;
-        let execution: TerminalInteractionResponseExecution;
-        try {
-          execution = await bridge.respondInteraction(
+        const reservation = { attemptId, responseHash };
+        const result = await executeTerminalInteractionResponseTransaction<
+          TerminalInteractionAuthorizationContext,
+          TerminalInteractionAuthorizationDecision,
+          WatchInteractionResponseReservation,
+          TerminalInteractionResponseExecution
+        >({
+          reservationFailureFence: "confirmed",
+          dispatch: (hooks) => bridge.respondInteraction(
             current.agent,
             terminalControl,
             response,
@@ -880,14 +894,59 @@ function createTerminalWatchInteractionResponder(
               expectedExpiresAt,
               scrollbackLines: Number(options.scrollbackLines ?? 120),
               runtime,
-              authorize: ({ projection, fingerprint }) => {
-                const latest = repository.load(watchId);
+              authorize: hooks.authorize,
+              beforeDispatch: hooks.beforeDispatch
+            }
+          ),
+          authorize: ({ projection, fingerprint }) => {
+            const latest = repository.load(watchId);
+            const interaction = requiredExecutableWatchInteraction(
+              latest,
+              interactionId,
+              expectedFingerprint
+            );
+            const latestDecision = terminalWatchResponseDecision(
+              latest,
+              exact.rawTerminal,
+              interaction.projection.surface_id,
+              interaction.projection.prompt_fingerprint,
+              options,
+              dependencies
+            );
+            return projection.interaction_id === interactionId &&
+                fingerprint === expectedFingerprint &&
+                interaction.projection.subject.kind === "terminal_watch" &&
+                projection.version === 2 &&
+                projection.subject.kind === "terminal_watch" &&
+                projection.subject.watch_id === watchId &&
+                latestDecision.executable && !latestDecision.suppress
+              ? { approved: true }
+              : {
+                  approved: false,
+                  reason:
+                    "terminal Watch interaction authority changed before response"
+                };
+          },
+          createReservation: () => reservation,
+          reserve: ({ projection, fingerprint }, receipt, confirm) => {
+            current = repository.withWriterLease((scope) =>
+              scope.withWatchLock(watchId, () => {
+                const latest = scope.load(watchId);
                 const interaction = requiredExecutableWatchInteraction(
                   latest,
                   interactionId,
                   expectedFingerprint
                 );
-                const latestDecision = terminalWatchResponseDecision(
+                if (
+                  projection.interaction_id !== interactionId ||
+                  fingerprint !== expectedFingerprint ||
+                  interaction.aggregate.state !== "pending"
+                ) {
+                  throw new Error(
+                    "terminal Watch interaction authority changed before dispatch"
+                  );
+                }
+                const dispatchDecision = terminalWatchResponseDecision(
                   latest,
                   exact.rawTerminal,
                   interaction.projection.surface_id,
@@ -895,132 +954,87 @@ function createTerminalWatchInteractionResponder(
                   options,
                   dependencies
                 );
-                return projection.interaction_id === interactionId &&
-                    fingerprint === expectedFingerprint &&
-                    interaction.projection.subject.kind === "terminal_watch" &&
-                    projection.version === 2 &&
-                    projection.subject.kind === "terminal_watch" &&
-                    projection.subject.watch_id === watchId &&
-                    latestDecision.executable && !latestDecision.suppress
-                  ? { approved: true }
-                  : {
-                      approved: false,
-                      reason: "terminal Watch interaction authority changed before response"
-                    };
-              },
-              beforeDispatch: ({ projection, fingerprint }) => {
-                if (reserved) {
-                  throw new Error(
-                    "terminal Watch interaction response was already reserved"
+                if (!dispatchDecision.executable || dispatchDecision.suppress) {
+                  throw new TerminalInteractionInputNotStartedError(
+                    "terminal Watch interaction ownership changed before dispatch"
                   );
                 }
-                current = repository.withWriterLease((scope) =>
-                  scope.withWatchLock(watchId, () => {
-                    const latest = scope.load(watchId);
-                    const interaction = requiredExecutableWatchInteraction(
-                      latest,
-                      interactionId,
-                      expectedFingerprint
-                    );
-                    if (
-                      projection.interaction_id !== interactionId ||
-                      fingerprint !== expectedFingerprint ||
-                      interaction.aggregate.state !== "pending"
-                    ) {
-                      throw new Error(
-                        "terminal Watch interaction authority changed before dispatch"
-                      );
-                    }
-                    const dispatchDecision = terminalWatchResponseDecision(
-                      latest,
-                      exact.rawTerminal,
-                      interaction.projection.surface_id,
-                      interaction.projection.prompt_fingerprint,
-                      options,
-                      dependencies
-                    );
-                    if (
-                      !dispatchDecision.executable ||
-                      dispatchDecision.suppress
-                    ) {
-                      throw new TerminalInteractionInputNotStartedError(
-                        "terminal Watch interaction ownership changed before dispatch"
-                      );
-                    }
-                    const reservedAt = dependencies.now().toISOString();
-                    const aggregate = reduceTerminalInteractionAggregate(
-                      interaction.aggregate,
-                      {
-                        type: "reserve",
-                        attempt_id: attemptId,
-                        response_hash: responseHash,
-                        at: reservedAt
-                      }
-                    );
-                    const saved = scope.save({
-                      ...latest,
-                      current_interaction: {
-                        projection: interaction.projection,
-                        aggregate
-                      },
-                      updated_at: reservedAt
-                    }, { expectedRevision: terminalWatchRevision(latest) });
-                    reserved = true;
-                    return saved;
-                  }));
-              }
-            }
-          );
-        } catch (error) {
-          if (reserved) {
-            const state = error instanceof TerminalInteractionInputNotStartedError
-              ? "release"
-              : "response_uncertain";
-            current = repository.withWriterLease((scope) =>
-              scope.withWatchLock(watchId, () => {
-                const latest = scope.load(watchId);
-                const interaction = latest.current_interaction;
-                if (
-                  !interaction ||
-                  interaction.projection.interaction_id !== interactionId ||
-                  interaction.aggregate.state !== "reserved" ||
-                  interaction.aggregate.reservation?.attempt_id !== attemptId
-                ) {
-                  throw new Error(
-                    "terminal Watch interaction reservation changed while settling failure"
-                  );
-                }
-                const at = dependencies.now().toISOString();
+                const reservedAt = dependencies.now().toISOString();
                 const aggregate = reduceTerminalInteractionAggregate(
                   interaction.aggregate,
-                  state === "release"
-                    ? { type: "release" }
-                    : {
-                        type: "response_uncertain",
-                        at,
-                        reason_code: "terminal_dispatch_uncertain"
-                      }
+                  {
+                    type: "reserve",
+                    attempt_id: receipt.attemptId,
+                    response_hash: receipt.responseHash,
+                    at: reservedAt
+                  }
                 );
-                const projection = state === "release"
-                  ? interaction.projection
-                  : {
-                      ...interaction.projection,
-                      state: "response_uncertain" as const,
-                      capabilities: {
-                        ...interaction.projection.capabilities,
-                        respond: false
-                      }
-                    };
-                return scope.save({
+                const saved = scope.save({
                   ...latest,
-                  current_interaction: { projection, aggregate },
-                  updated_at: at
+                  current_interaction: {
+                    projection: interaction.projection,
+                    aggregate
+                  },
+                  updated_at: reservedAt
                 }, { expectedRevision: terminalWatchRevision(latest) });
+                // Match the predecessor's commit boundary: a later lock
+                // release failure must still settle this durable receipt.
+                confirm();
+                return saved;
               }));
-          }
-          throw error;
-        }
-        if (!execution.responded) {
+          },
+          release: (receipt) => {
+            current = settleWatchInteractionResponseFailure(
+              repository,
+              {
+                watchId,
+                interactionId,
+                reservation: receipt,
+                state: "release",
+                now: dependencies.now
+              }
+            );
+          },
+          releaseFailure: (_receipt, _error, releaseError) => releaseError,
+          markUncertain: (receipt) => {
+            current = settleWatchInteractionResponseFailure(
+              repository,
+              {
+                watchId,
+                interactionId,
+                reservation: receipt,
+                state: "response_uncertain",
+                now: dependencies.now
+              }
+            );
+          },
+          consume: (receipt) => {
+            current = consumeWatchInteractionResponse(
+              repository,
+              {
+                watchId,
+                interactionId,
+                reservation: receipt,
+                now: dependencies.now,
+                notificationFingerprint: sha256
+              }
+            );
+          },
+          responded: (execution) => execution.responded,
+          isInputNotStarted: (error) =>
+            error instanceof TerminalInteractionInputNotStartedError,
+          duplicateReservationError: () => new Error(
+            "terminal Watch interaction response was already reserved"
+          ),
+          inputNotStartedError: (error) => error,
+          missingReservationError: () =>
+            new TerminalInteractionDispatchReservedError(
+              "reservation_uncertain",
+              "terminal Watch response was dispatched without a durable reservation"
+            )
+        });
+        const execution = result.execution;
+        if (result.state === "blocked") {
           dependencies.printJson({
             watch: publicTerminalWatch(current, [], true),
             interaction_id: interactionId,
@@ -1030,68 +1044,6 @@ function createTerminalWatchInteractionResponder(
           });
           return;
         }
-        if (!reserved) {
-          throw new TerminalInteractionDispatchReservedError(
-            "reservation_uncertain",
-            "terminal Watch response was dispatched without a durable reservation"
-          );
-        }
-        current = repository.withWriterLease((scope) =>
-          scope.withWatchLock(watchId, () => {
-            const latest = scope.load(watchId);
-            const interaction = latest.current_interaction;
-            if (
-              !interaction ||
-              interaction.projection.interaction_id !== interactionId ||
-              interaction.aggregate.state !== "reserved" ||
-              interaction.aggregate.reservation?.attempt_id !== attemptId
-            ) {
-              throw new Error(
-                "terminal Watch interaction reservation changed after dispatch"
-              );
-            }
-            const answeredAt = dependencies.now().toISOString();
-            const aggregate = reduceTerminalInteractionAggregate(
-              interaction.aggregate,
-              {
-                type: "consume",
-                at: answeredAt,
-                reason_code: "terminal_response_dispatched"
-              }
-            );
-            return scope.save({
-              ...latest,
-              current_interaction: {
-                projection: interaction.projection,
-                aggregate
-              },
-              updated_at: answeredAt,
-              last_activity_at: answeredAt,
-              notification_outbox: latest.notification_outbox.map(
-                (notification) =>
-                  notification.kind === "interaction_required" &&
-                  notification.evidence_fingerprint ===
-                    sha256({
-                      schema: "agent-knock-knock/terminal-watch-interaction-event",
-                      version: 1,
-                      watch_id: watchId,
-                      interaction_id: interactionId,
-                      surface_id: interaction.projection.surface_id
-                    }) &&
-                  (notification.status === "pending" ||
-                    notification.status === "failed")
-                    ? {
-                        ...notification,
-                        status: "superseded" as const,
-                        superseded_at: answeredAt,
-                        next_attempt_at: undefined,
-                        failed_at: undefined,
-                        last_error_code: undefined
-                      }
-                    : notification
-              )
-            }, { expectedRevision: terminalWatchRevision(latest) });
-          }));
         dependencies.printJson({
           watch: publicTerminalWatch(current, [], true),
           interaction_id: interactionId,
