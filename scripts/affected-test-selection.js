@@ -49,6 +49,7 @@ export const testSupportImpactByPath = Object.freeze({
     "test/human-handoff-adoption-cli.test.ts",
     "test/install-openclaw-cli.test.ts",
     "test/management-cli.test.ts",
+    "test/model-control-cli-closed-loop.test.ts",
     "test/native-lifecycle-command-guard-cli.test.ts",
     "test/native-thread-lifecycle-recovery-cli.test.ts",
     "test/native-thread-ownership-cli.test.ts",
@@ -57,6 +58,10 @@ export const testSupportImpactByPath = Object.freeze({
     "test/shards/agent-cli-session-acceptance.test.ts",
     "test/store-protocol-cli.test.ts",
     "test/turn-session-binding-cli.test.ts"
+  ],
+  "test/support/terminal-ui-golden-frames.ts": [
+    "test/model-control-cli-closed-loop.test.ts",
+    "test/terminal-ui-golden-frames.test.ts"
   ]
 });
 
