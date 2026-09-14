@@ -1005,6 +1005,10 @@
       "owner": "terminal-handoff-application"
     },
     {
+      "path": "src/terminal-human-explicit-send-cli-adapter.ts",
+      "owner": "terminal-command-adapter"
+    },
+    {
       "path": "src/terminal-identity-authority-cli-adapter.ts",
       "owner": "terminal-identity-authority"
     },
