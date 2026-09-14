@@ -124,6 +124,7 @@
     "test/terminal-status-cli-adapter.test.ts",
     "test/terminal-submission-acceptance.test.ts",
     "test/terminal-submission-retry-service.test.ts",
+    "test/terminal-text-submission-bridge.test.ts",
     "test/terminal-user-send-intent.test.ts",
     "test/terminal-watch-callback-cli-adapter.test.ts",
     "test/terminal-watch-cli-adapter.test.ts",

@@ -44,12 +44,7 @@ import {
   type TerminalProviderCapability
 } from "./terminal-control-ref.js";
 import {
-  CLAUDE_INJECTED_PASTE_FRAME_PROFILE,
-  claudeInjectedPasteProofEligible,
-  revalidateClaudeComposerProof,
-  settleClaudeInjectedPasteComposer,
-  type ClaudeComposerBeforeEnterProof,
-  type ClaudeInjectedPasteProofPorts
+  CLAUDE_INJECTED_PASTE_FRAME_PROFILE
 } from "./claude-injected-paste-proof.js";
 import {
   normalizeTerminalInteractionResponseV2,
@@ -88,21 +83,32 @@ import {
 } from "./terminal-model-control.js";
 import { createTerminalModelControlPorts } from
   "./terminal-model-control-bridge.js";
+import {
+  CODEX_EXACT_CANDIDATE_GRACE_CAPTURES,
+  CODEX_MULTILINE_SETTLE_POLL_MS,
+  CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES,
+  CODEX_MULTILINE_STABLE_CAPTURES,
+  CODEX_PASTE_ENTER_SETTLE_MS,
+  TerminalEnterDispatchNotAttemptedError,
+  TerminalEnterDispatchReservedError,
+  TerminalInputNotStartedError,
+  TerminalTextSubmissionBridge,
+  type TerminalCodexComposerObservation,
+  type TerminalSendOptions,
+  type TerminalSendResult
+} from "./terminal-text-submission-bridge.js";
 
-// Verified Codex profiles through 0.154.0 keep Enter in paste/newline mode for
-// 120ms after burst input. Cross that boundary rather than landing on it, and
-// also require observable composer stability instead of treating this delay
-// alone as acceptance.
-const CODEX_PASTE_ENTER_SETTLE_MS = 121;
-const CODEX_MULTILINE_SETTLE_POLL_MS = 30;
-// A capture can itself take longer than the old two-second deadline on a busy
-// tmux server. Give repaint discovery a bounded five-second window and, once
-// an exact frame has been observed, always allow the required stable/final
-// captures to complete instead of letting the first I/O consume their budget.
-const CODEX_MULTILINE_SETTLE_TIMEOUT_MS = 5_000;
-const CODEX_MULTILINE_STABLE_CAPTURES = 2;
-const CODEX_EXACT_CANDIDATE_GRACE_CAPTURES = 8;
-const CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES = 240;
+export {
+  TerminalEnterDispatchNotAttemptedError,
+  TerminalEnterDispatchReservedError,
+  TerminalInputNotStartedError,
+  type TerminalCodexComposerObservation,
+  type TerminalSendBoundaryContext,
+  type TerminalSendOptions,
+  type TerminalSendResult,
+  type TerminalTransportStage,
+  type TerminalTransportStageEvent
+} from "./terminal-text-submission-bridge.js";
 const CODEX_COMPOSER_MARKER = /^[›»](?:\s|$)/u;
 const CODEX_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
@@ -280,49 +286,6 @@ const TERMINAL_INTERACTION_TTL_MS = 10 * 60 * 1_000;
 const TERMINAL_INTERACTION_IDENTIFIER_PATTERN =
   /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const TERMINAL_INTERACTION_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/u;
-
-/** A terminal send failed at a boundary that proves input never started. */
-export class TerminalInputNotStartedError extends Error {
-  readonly code = "AKK_TERMINAL_INPUT_NOT_STARTED";
-
-  constructor(message: string, options: { cause?: unknown } = {}) {
-    super(message, options);
-    this.name = "TerminalInputNotStartedError";
-  }
-}
-
-/**
- * Text is already in the terminal composer, but this bridge invocation proved
- * that it never called the Enter transport boundary.
- *
- * Callers may persist this as narrow recovery evidence. It says nothing about
- * whether the draft remains exact or whether a later human action submitted
- * it; those facts must be re-observed under the terminal lock.
- */
-export class TerminalEnterDispatchNotAttemptedError extends Error {
-  readonly code = "AKK_TERMINAL_ENTER_DISPATCH_NOT_ATTEMPTED";
-  readonly stage = "enter_not_attempted";
-
-  constructor(message: string, options: { cause?: unknown } = {}) {
-    super(message, options);
-    this.name = "TerminalEnterDispatchNotAttemptedError";
-  }
-}
-
-/**
- * The caller's one-shot Enter reservation was invoked, so this recovery
- * attempt is permanently consumed even though C-m was not proven dispatched.
- */
-export class TerminalEnterDispatchReservedError extends Error {
-  readonly code = "AKK_TERMINAL_ENTER_DISPATCH_RESERVED";
-  readonly stage = "enter_reserved";
-  readonly doNotRetry = true;
-
-  constructor(message: string, options: { cause?: unknown } = {}) {
-    super(message, options);
-    this.name = "TerminalEnterDispatchReservedError";
-  }
-}
 
 export type NativeInspectionSubmissionStage =
   | "not_started"
@@ -623,65 +586,6 @@ export type TerminalIdentityVerifier = (
   request: TerminalIdentityVerificationRequest
 ) => Promise<TerminalIdentityVerificationResult | void>;
 
-export type TerminalTransportStage = "text_injected" | "enter_dispatched";
-
-export interface TerminalTransportStageEvent {
-  stage: TerminalTransportStage;
-  agent: ExecutorKind;
-  terminalControl: TerminalControlRef;
-  multiline: boolean;
-}
-
-export interface TerminalSendBoundaryContext {
-  agent: ExecutorKind;
-  terminalControl: TerminalControlRef;
-  multiline: boolean;
-  text: string;
-}
-
-export interface TerminalSendOptions {
-  runtime?: TerminalRuntimeIdentity;
-  /** Runs after identity verification and immediately before text injection. */
-  beforeText?: (
-    context: TerminalSendBoundaryContext
-  ) => void | Promise<void>;
-  /** Runs after exact composer/identity proof and immediately before Enter. */
-  beforeEnter?: (
-    context: TerminalSendBoundaryContext
-  ) => void | Promise<void>;
-  /** Require Codex's exact stable composer proof even for a single-line send. */
-  requireExactComposerBeforeEnter?: boolean;
-  /**
-   * User-explicit managed-path guard. Recapture an exactly empty composer
-   * immediately before the first text-delivery call so a stale list/preflight
-   * observation can fall back without appending to a human draft.
-   */
-  requireExactEmptyComposerBeforeText?: boolean;
-  /** User-explicit physical Send may steer a mutable working composer. */
-  allowWorkingComposerForUserExplicit?: boolean;
-  /**
-   * Codex user-explicit managed Send only: after an exactly empty pre-text
-   * boundary has accepted the request, cross Codex's paste-suppression window
-   * and dispatch Enter without using a rendered Composer proof as a veto.
-   */
-  userExplicitEnterAfterTextWithoutComposerVeto?: boolean;
-  /**
-   * Retry-only authority from a preliminary exact-empty observation. After
-   * `beforeText` reserves the attempt, the bridge independently recaptures the
-   * same empty composer and then immediately makes its sole text-delivery call.
-   */
-  requireExactEmptyComposerAfterBeforeText?: {
-    preliminaryComposerDigest: string;
-  };
-  /**
-   * Awaited immediately after each irreversible transport boundary so the
-   * caller can durably persist the exact proof level before continuing.
-   */
-  onTransportStage?: (
-    event: TerminalTransportStageEvent
-  ) => void | Promise<void>;
-}
-
 export interface TerminalModelControlBridgeOptions {
   runtime?: TerminalRuntimeIdentity;
   /** Revalidate Store/Turn/current-snapshot authority before every UI step. */
@@ -711,37 +615,6 @@ export interface TerminalModelControlRepairBridgeResult
   extends Omit<TerminalModelControlRepairResult, "terminalControl"> {
   terminalControl: TerminalControlRef;
 }
-
-export interface TerminalSendResult {
-  stage: "enter_dispatched";
-  agent: ExecutorKind;
-  terminalControl: TerminalControlRef;
-  multiline: boolean;
-}
-
-interface TerminalCodexStableComposerObservationBase {
-  terminalControl: TerminalControlRef;
-  digest: string;
-  stableCaptures: number;
-}
-
-type TerminalCodexObservedComposerState =
-  | "exact_draft"
-  | "exact_empty"
-  | "different_draft"
-  | "working"
-  | "approval_or_modal";
-
-/** Closed, content-redacting observation of the current Codex composer. */
-export type TerminalCodexComposerObservation =
-  | {
-      [State in TerminalCodexObservedComposerState]:
-        TerminalCodexStableComposerObservationBase & { state: State };
-    }[TerminalCodexObservedComposerState]
-  | {
-      state: "identity_drift" | "unavailable";
-      reason: string;
-    };
 
 export interface TerminalCodexDraftSubmissionContext {
   terminalControl: TerminalControlRef;
@@ -797,143 +670,6 @@ export interface TerminalCodexUserExplicitSendResult {
   textInjectionCount: 1;
   enterCount: 1;
 }
-
-function terminalSendComposerRequirements(
-  agent: ExecutorKind,
-  multiline: boolean,
-  options: TerminalSendOptions
-): {
-  exactEmptyRetryAuthority?: {
-    preliminaryComposerDigest: string;
-  };
-  requireExactEmptyComposerBeforeText: boolean;
-  requireExactComposer: boolean;
-} {
-  const exactEmptyRetryAuthority =
-    options.requireExactEmptyComposerAfterBeforeText;
-  const requireExactEmptyComposerBeforeText =
-    options.requireExactEmptyComposerBeforeText === true;
-  const userExplicitEnterAfterTextWithoutComposerVeto =
-    options.userExplicitEnterAfterTextWithoutComposerVeto === true;
-  if (
-    userExplicitEnterAfterTextWithoutComposerVeto &&
-    (agent !== "codex" || !requireExactEmptyComposerBeforeText)
-  ) {
-    throw new TerminalInputNotStartedError(
-      "composer-veto-free Enter requires Codex and an exact-empty pre-text user-explicit boundary"
-    );
-  }
-  const requireExactComposer =
-    !userExplicitEnterAfterTextWithoutComposerVeto &&
-    (
-      (agent === "codex" && multiline) ||
-      options.requireExactComposerBeforeEnter === true ||
-      requireExactEmptyComposerBeforeText ||
-      exactEmptyRetryAuthority !== undefined
-    );
-  if (
-    exactEmptyRetryAuthority !== undefined &&
-    (
-      agent !== "codex" ||
-      options.beforeText === undefined ||
-      !/^[0-9a-f]{64}$/u.test(
-        exactEmptyRetryAuthority.preliminaryComposerDigest
-      )
-    )
-  ) {
-    throw new TerminalInputNotStartedError(
-      "exact-empty replacement requires Codex, a reservation hook, and a preliminary composer digest"
-    );
-  }
-  return {
-    exactEmptyRetryAuthority,
-    requireExactEmptyComposerBeforeText,
-    requireExactComposer
-  };
-}
-
-async function recordTerminalSendStage(
-  options: TerminalSendOptions,
-  event: TerminalTransportStageEvent,
-  preserveUserInput: boolean,
-  previousError?: unknown
-): Promise<unknown> {
-  try {
-    await options.onTransportStage?.(event);
-    return previousError;
-  } catch (error) {
-    if (!preserveUserInput) throw error;
-    return previousError ?? error;
-  }
-}
-
-async function runTerminalSendBeforeEnter(
-  options: TerminalSendOptions,
-  context: TerminalSendBoundaryContext,
-  preserveUserInput: boolean,
-  previousError?: unknown
-): Promise<unknown> {
-  try {
-    await options.beforeEnter?.(context);
-    return previousError;
-  } catch (error) {
-    if (!preserveUserInput) throw error;
-    return previousError ?? error;
-  }
-}
-
-async function waitForUserExplicitCodexEnter(input: {
-  enabled: boolean;
-  textInjectedAt: number;
-  nowMs: () => number;
-  sleep: (milliseconds: number) => Promise<void>;
-}): Promise<void> {
-  if (!input.enabled) return;
-  await input.sleep(Math.max(
-    0,
-    CODEX_PASTE_ENTER_SETTLE_MS -
-      (input.nowMs() - input.textInjectedAt)
-  ));
-}
-
-function throwPostTextHookFailureAfterUserEnter(
-  enabled: boolean,
-  error: unknown
-): void {
-  if (!enabled || error === undefined) return;
-  throw new TerminalEnterDispatchReservedError(
-    "user-explicit Codex Enter was dispatched but post-text bookkeeping failed; do not retry",
-    { cause: error }
-  );
-}
-
-type TerminalCodexCapturedComposerState = TerminalCodexObservedComposerState;
-
-type TerminalCodexComposerSnapshot =
-  | {
-      [State in TerminalCodexCapturedComposerState]: {
-        state: State;
-        terminalControl: TerminalControlRef;
-        digest: string;
-      };
-    }[TerminalCodexCapturedComposerState]
-  | {
-      state: "identity_drift";
-      reason: string;
-    }
-  | {
-      state: "unavailable";
-      reason: string;
-      /** A repaint may still materialize a classifiable live composer. */
-      retryable?: false;
-    }
-  | {
-      state: "unavailable";
-      reason: string;
-      retryable: true;
-      terminalControl: TerminalControlRef;
-      digest: string;
-    };
 
 export type TerminalNativeInspectionMaterializationKind =
   | "exact_slash_composer"
@@ -1635,6 +1371,82 @@ export class TerminalAgentBridge {
     });
   }
 
+  private textSubmissionBridge(): TerminalTextSubmissionBridge {
+    return new TerminalTextSubmissionBridge({
+      runtime: {
+        preflight: (terminalControl, operation) => {
+          const terminal = this.terminalProvider.endpoint(terminalControl);
+          switch (operation) {
+            case "send":
+              assertTerminalMutationCapabilities({
+                provider: this.terminalProvider,
+                terminal,
+                semantic: ["send_keys"],
+                transport: [
+                  "stable_resource_resolution",
+                  "text_delivery",
+                  "key_delivery"
+                ]
+              });
+              return;
+            case "send_with_composer":
+              assertTerminalMutationCapabilities({
+                provider: this.terminalProvider,
+                terminal,
+                semantic: ["send_keys", "screen_status"],
+                transport: [
+                  "stable_resource_resolution",
+                  "text_delivery",
+                  "key_delivery",
+                  "screen_capture"
+                ]
+              });
+              return;
+            case "observe_composer":
+              assertTerminalMutationCapabilities({
+                provider: this.terminalProvider,
+                terminal,
+                semantic: ["screen_status"],
+                transport: ["stable_resource_resolution", "screen_capture"]
+              });
+          }
+        },
+        verifyIdentity: (agent, control, runtime) =>
+          this.verifyTerminalIdentity(agent, control, runtime),
+        captureInspection: (adapter, control, options) =>
+          this.captureInspection(adapter, control, options),
+        captureStyled: (control) => this.terminalProvider.capture(
+          this.terminalProvider.endpoint(control),
+          {
+            scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES,
+            preserveEscapes: true
+          }
+        ),
+        deliverText: (control, text) => this.terminalProvider.sendText(
+          this.terminalProvider.endpoint(control),
+          text
+        ),
+        dispatchEnter: (control) => this.terminalProvider.sendKeys(
+          this.terminalProvider.endpoint(control),
+          ["C-m"]
+        ),
+        nowMs: () => this.nowMs(),
+        sleep: (milliseconds) => this.sleep(milliseconds)
+      },
+      classifiers: {
+        sameIdentity: sameTerminalControlIdentity,
+        stripEscapes: stripTerminalEscapeSequences,
+        codexBlockingModalVisible,
+        inspectCodexAsyncQuestionInputMode,
+        currentCodexComposer: currentCodexComposerCapture,
+        exactTerminalComposer: exactTerminalComposerCapture,
+        exactClaudeComposer: exactClaudeComposerCapture,
+        exactClaudeInjectedPastePlaceholder:
+          exactClaudeInjectedPastePlaceholderCapture
+      }
+    });
+  }
+
   async send(
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
@@ -1642,356 +1454,12 @@ export class TerminalAgentBridge {
     options: TerminalSendOptions = {}
   ): Promise<TerminalSendResult> {
     const adapter = this.registry.require(agent);
-    const multiline = /[\r\n]/u.test(text.trimEnd());
-    const {
-      exactEmptyRetryAuthority,
-      requireExactEmptyComposerBeforeText,
-      requireExactComposer
-    } = terminalSendComposerRequirements(adapter.agent, multiline, options);
-    try {
-      assertTerminalMutationCapabilities({
-        provider: this.terminalProvider,
-        terminal: this.terminalProvider.endpoint(terminalControl),
-        semantic: [
-          "send_keys",
-          ...(requireExactComposer || exactEmptyRetryAuthority
-            ? ["screen_status" as const]
-            : [])
-        ],
-        transport: [
-          "stable_resource_resolution",
-          "text_delivery",
-          "key_delivery",
-          ...(requireExactComposer || exactEmptyRetryAuthority
-            ? ["screen_capture" as const]
-            : [])
-        ]
-      });
-    } catch (error) {
-      throw new TerminalInputNotStartedError(
-        error instanceof Error ? error.message : String(error),
-        { cause: error }
-      );
-    }
-    const normalized = text.trimEnd();
-    if (!normalized) {
-      throw new TerminalInputNotStartedError("terminal message is empty");
-    }
-    let verifiedForText: TerminalControlRef;
-    try {
-      verifiedForText = await this.verifyTerminalIdentity(
-        adapter.agent,
-        terminalControl,
-        options.runtime
-      );
-    } catch (error) {
-      throw new TerminalInputNotStartedError(
-        error instanceof Error ? error.message : String(error),
-        { cause: error }
-      );
-    }
-    if (!verifiedForText.capabilities.includes("send_keys")) {
-      throw new TerminalInputNotStartedError(
-        `${adapter.displayName} terminal input capability changed before injection`
-      );
-    }
-    let composerVerifiedImmediatelyBeforeText = false;
-    if (exactEmptyRetryAuthority) {
-      try {
-        // Invoking this retry-only hook consumes the durable attempt. The
-        // independently identity-fenced recapture closes the human-edit race
-        // before any physical text delivery.
-        await options.beforeText?.({
-          agent: adapter.agent,
-          terminalControl: verifiedForText,
-          multiline,
-          text: normalized
-        });
-        const finalEmpty = await this.captureCodexComposerSnapshot(
-          adapter,
-          verifiedForText,
-          normalized,
-          options.runtime
-        );
-        if (
-          finalEmpty.state !== "exact_empty" ||
-          finalEmpty.digest !==
-            exactEmptyRetryAuthority.preliminaryComposerDigest ||
-          !sameTerminalControlIdentity(
-            verifiedForText,
-            finalEmpty.terminalControl
-          )
-        ) {
-          const reason = "reason" in finalEmpty
-            ? finalEmpty.reason
-            : `Codex composer is ${finalEmpty.state}`;
-          throw new Error(
-            `reserved Codex replacement lost its exact-empty composer: ${reason}`
-          );
-        }
-        verifiedForText = finalEmpty.terminalControl;
-      } catch (error) {
-        throw new TerminalEnterDispatchReservedError(
-          error instanceof Error ? error.message : String(error),
-          { cause: error }
-        );
-      }
-    } else {
-      try {
-        await options.beforeText?.({
-          agent: adapter.agent,
-          terminalControl: verifiedForText,
-          multiline,
-          text: normalized
-        });
-      } catch (error) {
-        throw new TerminalInputNotStartedError(
-          error instanceof Error ? error.message : String(error),
-          { cause: error }
-        );
-      }
-      if (requireExactEmptyComposerBeforeText) {
-        try {
-          verifiedForText = await this.verifyExactEmptyComposerBeforeText(
-            adapter,
-            verifiedForText,
-            normalized,
-            options.runtime,
-            options.allowWorkingComposerForUserExplicit === true
-          );
-          composerVerifiedImmediatelyBeforeText = true;
-        } catch (error) {
-          throw new TerminalInputNotStartedError(
-            error instanceof Error ? error.message : String(error),
-            { cause: error }
-          );
-        }
-      }
-    }
-    if (!composerVerifiedImmediatelyBeforeText) {
-      try {
-        const reverifiedForText = await this.verifyTerminalIdentity(
-          adapter.agent,
-          verifiedForText,
-          options.runtime
-        );
-        if (!sameTerminalControlIdentity(verifiedForText, reverifiedForText)) {
-          throw new Error(
-            "terminal identity changed after the final pre-text check"
-          );
-        }
-        verifiedForText = reverifiedForText;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (exactEmptyRetryAuthority) {
-          throw new TerminalEnterDispatchReservedError(message, {
-            cause: error
-          });
-        }
-        throw new TerminalInputNotStartedError(message, { cause: error });
-      }
-    }
-    try {
-      await this.terminalProvider.sendText(
-        this.terminalProvider.endpoint(verifiedForText),
-        normalized
-      );
-    } catch (error) {
-      if (exactEmptyRetryAuthority) {
-        throw new TerminalEnterDispatchReservedError(
-          "reserved Codex replacement text delivery outcome is uncertain; do not retry",
-          { cause: error }
-        );
-      }
-      if (error instanceof TerminalControlInputNotSentError) {
-        throw new TerminalInputNotStartedError(error.message, {
-          cause: error
-        });
-      }
-      throw error;
-    }
-    const textInjectedAt = this.nowMs();
-    const preserveUserInput =
-      options.userExplicitEnterAfterTextWithoutComposerVeto === true;
-    const allowClaudeInjectedPastePlaceholder =
-      claudeInjectedPasteProofEligible({
-        agent: adapter.agent,
-        multiline,
-        composerVerifiedImmediatelyBeforeText,
-        terminalControl: verifiedForText
-      });
-    let postTextHookError: unknown;
-    let verifiedForEnter: TerminalControlRef;
-    let claudeComposerProof: ClaudeComposerBeforeEnterProof | undefined;
-    try {
-      postTextHookError = await recordTerminalSendStage(
-        options,
-        {
-          stage: "text_injected",
-          agent: adapter.agent,
-          terminalControl: verifiedForText,
-          multiline
-        },
-        preserveUserInput
-      );
-      // Text and Enter are separate transport operations. Autonomous sends
-      // retain their exact Composer proof. A user-explicit managed Codex Send
-      // crosses only the native paste-suppression window, then keeps terminal
-      // identity as its final physical boundary.
-      if (adapter.agent === "codex" && requireExactComposer) {
-        verifiedForEnter = await this.settleCodexMultilineComposer(
-          adapter,
-          terminalControl,
-          normalized,
-          options.runtime,
-          {
-            allowOpaqueLargePastePlaceholder:
-              exactEmptyRetryAuthority === undefined,
-            allowWorkingComposer:
-              options.allowWorkingComposerForUserExplicit === true
-          }
-        );
-      } else if (allowClaudeInjectedPastePlaceholder) {
-        claudeComposerProof = await settleClaudeInjectedPasteComposer({
-          terminalControl: verifiedForText,
-          expectedText: normalized,
-          runtime: options.runtime,
-          allowWorkingComposer:
-            options.allowWorkingComposerForUserExplicit === true,
-          ports: this.claudeInjectedPasteProofPorts(adapter)
-        });
-        verifiedForEnter = claudeComposerProof.terminalControl;
-      } else if (requireExactComposer) {
-        verifiedForEnter = await this.verifyExactComposerBeforeEnter(
-          adapter,
-          terminalControl,
-          normalized,
-          options.runtime,
-          options.allowWorkingComposerForUserExplicit === true
-        );
-      } else {
-        await waitForUserExplicitCodexEnter({
-          enabled: preserveUserInput,
-          textInjectedAt,
-          nowMs: this.nowMs,
-          sleep: this.sleep
-        });
-        verifiedForEnter = await this.verifyTerminalIdentity(
-          adapter.agent,
-          terminalControl,
-          options.runtime
-        );
-      }
-      postTextHookError = await runTerminalSendBeforeEnter(
-        options,
-        {
-          agent: adapter.agent,
-          terminalControl: verifiedForEnter,
-          multiline,
-          text: normalized
-        },
-        preserveUserInput,
-        postTextHookError
-      );
-      // `beforeEnter` may await Store and terminal identity fences. The human
-      // can still edit the composer or change the native thread while that
-      // callback is pending, so recapture before attempting Enter.
-      if (requireExactComposer) {
-        if (adapter.agent === "codex") {
-          verifiedForEnter = await this.settleCodexMultilineComposer(
-            adapter,
-            terminalControl,
-            normalized,
-            options.runtime,
-            {
-              allowOpaqueLargePastePlaceholder:
-                exactEmptyRetryAuthority === undefined,
-              allowWorkingComposer:
-                options.allowWorkingComposerForUserExplicit === true
-            }
-          );
-        } else if (
-          allowClaudeInjectedPastePlaceholder && claudeComposerProof
-        ) {
-          verifiedForEnter = await revalidateClaudeComposerProof({
-            proof: claudeComposerProof,
-            expectedText: normalized,
-            runtime: options.runtime,
-            allowWorkingComposer:
-              options.allowWorkingComposerForUserExplicit === true,
-            ports: this.claudeInjectedPasteProofPorts(adapter)
-          });
-        } else {
-          verifiedForEnter = await this.verifyExactComposerBeforeEnter(
-            adapter,
-            terminalControl,
-            normalized,
-            options.runtime,
-            options.allowWorkingComposerForUserExplicit === true
-          );
-        }
-      } else if (options.beforeEnter) {
-        verifiedForEnter = await this.verifyTerminalIdentity(
-          adapter.agent,
-          terminalControl,
-          options.runtime
-        );
-      }
-    } catch (error) {
-      if (exactEmptyRetryAuthority) {
-        if (error instanceof TerminalEnterDispatchReservedError) {
-          throw error;
-        }
-        throw new TerminalEnterDispatchReservedError(
-          error instanceof Error ? error.message : String(error),
-          { cause: error }
-        );
-      }
-      if (error instanceof TerminalEnterDispatchNotAttemptedError) {
-        throw error;
-      }
-      throw new TerminalEnterDispatchNotAttemptedError(
-        error instanceof Error ? error.message : String(error),
-        { cause: error }
-      );
-    }
-    // Do not include this transport call (or anything after it) in the typed
-    // pre-Enter proof: a thrown key-delivery error may still have emitted C-m.
-    try {
-      await this.terminalProvider.sendKeys(
-        this.terminalProvider.endpoint(verifiedForEnter),
-        ["C-m"]
-      );
-      postTextHookError = await recordTerminalSendStage(
-        options,
-        {
-          stage: "enter_dispatched",
-          agent: adapter.agent,
-          terminalControl: verifiedForEnter,
-          multiline
-        },
-        preserveUserInput,
-        postTextHookError
-      );
-      throwPostTextHookFailureAfterUserEnter(
-        preserveUserInput,
-        postTextHookError
-      );
-    } catch (error) {
-      if (exactEmptyRetryAuthority) {
-        throw new TerminalEnterDispatchReservedError(
-          "reserved Codex Enter dispatch outcome is uncertain; do not retry",
-          { cause: error }
-        );
-      }
-      throw error;
-    }
-    return {
-      stage: "enter_dispatched",
-      agent: adapter.agent,
-      terminalControl: verifiedForEnter,
-      multiline
-    };
+    return this.textSubmissionBridge().send(
+      adapter,
+      terminalControl,
+      text,
+      options
+    );
   }
 
   /** Observe only the current, live Codex composer without exposing its text. */
@@ -2001,32 +1469,11 @@ export class TerminalAgentBridge {
     options: { runtime?: TerminalRuntimeIdentity } = {}
   ): Promise<TerminalCodexComposerObservation> {
     const adapter = this.registry.require("codex");
-    const normalized = expectedText.trimEnd();
-    if (!normalized) {
-      return {
-        state: "unavailable",
-        reason: "expected Codex draft is empty"
-      };
-    }
-    try {
-      assertTerminalMutationCapabilities({
-        provider: this.terminalProvider,
-        terminal: this.terminalProvider.endpoint(terminalControl),
-        semantic: ["screen_status"],
-        transport: ["stable_resource_resolution", "screen_capture"]
-      });
-    } catch (error) {
-      return {
-        state: "unavailable",
-        reason: error instanceof Error ? error.message : String(error)
-      };
-    }
-    return this.settleCodexComposerObservation(
+    return this.textSubmissionBridge().observeCodexComposer(
       adapter,
       terminalControl,
-      normalized,
-      options.runtime,
-      { minimumStableMs: CODEX_MULTILINE_SETTLE_POLL_MS }
+      expectedText,
+      options.runtime
     );
   }
 
@@ -2288,6 +1735,7 @@ export class TerminalAgentBridge {
     options: TerminalCodexDraftSubmissionOptions
   ): Promise<TerminalCodexDraftSubmissionResult> {
     const adapter = this.registry.require("codex");
+    const textSubmission = this.textSubmissionBridge();
     const normalized = expectedText.trimEnd();
     if (!normalized) {
       throw new TerminalEnterDispatchNotAttemptedError(
@@ -2309,7 +1757,7 @@ export class TerminalAgentBridge {
           "key_delivery"
         ]
       });
-      const observation = await this.settleCodexComposerObservation(
+      const observation = await textSubmission.settleCodexComposerObservation(
         adapter,
         terminalControl,
         normalized,
@@ -2338,10 +1786,11 @@ export class TerminalAgentBridge {
       );
     }
 
-    let finalObservation: Extract<
-      TerminalCodexComposerSnapshot,
-      { state: "exact_draft" }
-    >;
+    let finalObservation: {
+      state: "exact_draft";
+      terminalControl: TerminalControlRef;
+      digest: string;
+    };
     try {
       // Calling this hook is itself the one-shot boundary. A throw may occur
       // after durable storage committed, so every failure from here onward
@@ -2351,7 +1800,7 @@ export class TerminalAgentBridge {
         text: normalized,
         composerDigest: preliminaryObservation.digest
       });
-      const recaptured = await this.captureCodexComposerSnapshot(
+      const recaptured = await textSubmission.captureCodexComposerSnapshot(
         adapter,
         preliminaryObservation.terminalControl,
         normalized,
@@ -2398,130 +1847,6 @@ export class TerminalAgentBridge {
       terminalControl: finalObservation.terminalControl,
       enterCount: 1
     };
-  }
-
-  private async verifyExactComposerBeforeEnter(
-    adapter: TerminalAgentAdapter,
-    terminalControl: TerminalControlRef,
-    expectedText: string,
-    runtime?: TerminalRuntimeIdentity,
-    allowWorkingComposer = false
-  ): Promise<TerminalControlRef> {
-    const captured = await this.captureInspection(adapter, terminalControl, {
-      runtime,
-      scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
-    });
-    const exactComposer = exactTerminalComposerCapture(
-      adapter.agent,
-      captured.screen,
-      expectedText
-    );
-    if (
-      captured.inspection.approval.blocked ||
-      !(
-        ["idle", "unknown"].includes(captured.inspection.activity.state) ||
-        (
-          allowWorkingComposer &&
-          captured.inspection.activity.state === "working"
-        )
-      ) ||
-      !exactComposer
-    ) {
-      throw new Error(
-        `${adapter.displayName} composer was not exact and idle immediately before Enter`
-      );
-    }
-    const verifiedImmediatelyBeforeEnter = await this.verifyTerminalIdentity(
-      adapter.agent,
-      captured.terminalControl,
-      runtime
-    );
-    if (
-      !sameTerminalControlIdentity(
-        captured.terminalControl,
-        verifiedImmediatelyBeforeEnter
-      )
-    ) {
-      throw new Error(
-        "terminal control identity changed after the final exact composer capture"
-      );
-    }
-    return verifiedImmediatelyBeforeEnter;
-  }
-
-  private claudeInjectedPasteProofPorts(
-    adapter: TerminalAgentAdapter
-  ): ClaudeInjectedPasteProofPorts {
-    return {
-      nowMs: this.nowMs,
-      sleep: this.sleep,
-      capture: (terminalControl, runtime) =>
-        this.captureInspection(adapter, terminalControl, {
-          runtime,
-          scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
-        }),
-      verifyIdentity: (terminalControl, runtime) =>
-        this.verifyTerminalIdentity(adapter.agent, terminalControl, runtime),
-      exactDraft: exactClaudeComposerCapture,
-      exactInjectedPastePlaceholder:
-        exactClaudeInjectedPastePlaceholderCapture
-    };
-  }
-
-  private async verifyExactEmptyComposerBeforeText(
-    adapter: TerminalAgentAdapter,
-    terminalControl: TerminalControlRef,
-    expectedText: string,
-    runtime?: TerminalRuntimeIdentity,
-    allowWorkingComposer = false
-  ): Promise<TerminalControlRef> {
-    if (adapter.agent === "codex") {
-      const snapshot = await this.captureCodexComposerSnapshot(
-        adapter,
-        terminalControl,
-        expectedText,
-        runtime
-      );
-      if (snapshot.state !== "exact_empty") {
-        const reason = "reason" in snapshot
-          ? snapshot.reason
-          : `Codex composer is ${snapshot.state}`;
-        throw new Error(
-          `Codex composer was not exactly empty immediately before text: ${reason}`
-        );
-      }
-      return snapshot.terminalControl;
-    }
-    const captured = await this.captureInspection(adapter, terminalControl, {
-      runtime,
-      scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES
-    });
-    if (
-      captured.inspection.approval.blocked ||
-      !(
-        ["idle", "unknown"].includes(captured.inspection.activity.state) ||
-        (
-          allowWorkingComposer &&
-          captured.inspection.activity.state === "working"
-        )
-      ) ||
-      !exactTerminalComposerCapture(adapter.agent, captured.screen, "")
-    ) {
-      throw new Error(
-        `${adapter.displayName} composer was not exactly empty immediately before text`
-      );
-    }
-    const verified = await this.verifyTerminalIdentity(
-      adapter.agent,
-      captured.terminalControl,
-      runtime
-    );
-    if (!sameTerminalControlIdentity(captured.terminalControl, verified)) {
-      throw new Error(
-        "terminal control identity changed after the final empty composer capture"
-      );
-    }
-    return verified;
   }
 
   /**
@@ -3334,346 +2659,6 @@ export class TerminalAgentBridge {
       screenDigest: nativeInspectionScreenFingerprint(captured.screen),
       evidenceInventory: baseline.evidenceInventory,
       materialization: expected
-    };
-  }
-
-  private async settleCodexMultilineComposer(
-    adapter: TerminalAgentAdapter,
-    terminalControl: TerminalControlRef,
-    expectedText: string,
-    runtime?: TerminalRuntimeIdentity,
-    options: {
-      allowOpaqueLargePastePlaceholder?: boolean;
-      allowWorkingComposer?: boolean;
-    } = {}
-  ): Promise<TerminalControlRef> {
-    const observation = await this.settleCodexComposerObservation(
-      adapter,
-      terminalControl,
-      expectedText,
-      runtime,
-      {
-        minimumStableMs: CODEX_PASTE_ENTER_SETTLE_MS,
-        requiredState: "exact_draft",
-        allowOpaqueLargePastePlaceholder:
-          options.allowOpaqueLargePastePlaceholder === true,
-        allowWorkingComposer: options.allowWorkingComposer === true
-      }
-    );
-    if (observation.state === "exact_draft") {
-      return observation.terminalControl;
-    }
-    if (
-      observation.state === "working" ||
-      observation.state === "approval_or_modal"
-    ) {
-      throw new Error(
-        "Codex became busy or blocked while its multiline composer was settling"
-      );
-    }
-    if (observation.state === "identity_drift") {
-      throw new Error(observation.reason);
-    }
-    throw new Error(
-      "Codex multiline composer did not become exact, idle, and stable before the bounded submit deadline"
-    );
-  }
-
-  private async settleCodexComposerObservation(
-    adapter: TerminalAgentAdapter,
-    terminalControl: TerminalControlRef,
-    expectedText: string,
-    runtime: TerminalRuntimeIdentity | undefined,
-    options: {
-      minimumStableMs: number;
-      requiredState?: TerminalCodexCapturedComposerState;
-      allowOpaqueLargePastePlaceholder?: boolean;
-      classifyOpaqueLargePasteAsDifferent?: boolean;
-      allowWorkingComposer?: boolean;
-    }
-  ): Promise<TerminalCodexComposerObservation> {
-    const startedAt = this.nowMs();
-    let candidate: Extract<
-      TerminalCodexComposerSnapshot,
-      { terminalControl: TerminalControlRef }
-    > | undefined;
-    let stableSince: number | undefined;
-    let stableCaptures = 0;
-    let finishObservedExactCandidate = false;
-    let capturesBeyondDeadline = 0;
-    let control = terminalControl;
-
-    while (true) {
-      const snapshot = await this.captureCodexComposerSnapshot(
-        adapter,
-        control,
-        expectedText,
-        runtime,
-        {
-          allowOpaqueLargePastePlaceholder:
-            options.allowOpaqueLargePastePlaceholder === true,
-          classifyOpaqueLargePasteAsDifferent:
-            options.classifyOpaqueLargePasteAsDifferent === true,
-          allowWorkingComposer: options.allowWorkingComposer === true
-        }
-      );
-      if (
-        snapshot.state === "identity_drift" ||
-        (snapshot.state === "unavailable" && snapshot.retryable !== true)
-      ) {
-        return snapshot;
-      }
-      if (this.nowMs() - startedAt > CODEX_MULTILINE_SETTLE_TIMEOUT_MS) {
-        capturesBeyondDeadline += 1;
-        if (
-          capturesBeyondDeadline > CODEX_EXACT_CANDIDATE_GRACE_CAPTURES
-        ) {
-          return {
-            state: "unavailable",
-            reason: "Codex exact composer did not stabilize within its bounded capture grace"
-          };
-        }
-      }
-      control = snapshot.terminalControl;
-      const sameCandidate = candidate !== undefined &&
-        candidate.state === snapshot.state &&
-        candidate.digest === snapshot.digest &&
-        sameTerminalControlIdentity(
-          candidate.terminalControl,
-          snapshot.terminalControl
-        );
-      if (sameCandidate) {
-        stableCaptures += 1;
-      } else {
-        candidate = snapshot;
-        stableSince = this.nowMs();
-        stableCaptures = 1;
-        finishObservedExactCandidate = snapshot.state === "exact_draft";
-      }
-
-      const stableForMs = stableSince === undefined
-        ? 0
-        : this.nowMs() - stableSince;
-      if (
-        stableCaptures >= CODEX_MULTILINE_STABLE_CAPTURES &&
-        stableForMs >= options.minimumStableMs &&
-        snapshot.state !== "unavailable" &&
-        (
-          options.requiredState === undefined ||
-          snapshot.state === options.requiredState ||
-          snapshot.state === "working" ||
-          snapshot.state === "approval_or_modal"
-        )
-      ) {
-        // The caller's authorization hook must see evidence from a final,
-        // independently identity-fenced recapture, not the polling capture.
-        const finalSnapshot = await this.captureCodexComposerSnapshot(
-          adapter,
-          snapshot.terminalControl,
-          expectedText,
-          runtime,
-          {
-            allowOpaqueLargePastePlaceholder:
-              options.allowOpaqueLargePastePlaceholder === true,
-            classifyOpaqueLargePasteAsDifferent:
-              options.classifyOpaqueLargePasteAsDifferent === true,
-            allowWorkingComposer: options.allowWorkingComposer === true
-          }
-        );
-        if (
-          finalSnapshot.state === snapshot.state &&
-          "digest" in finalSnapshot &&
-          finalSnapshot.digest === snapshot.digest &&
-          sameTerminalControlIdentity(
-            snapshot.terminalControl,
-            finalSnapshot.terminalControl
-          )
-        ) {
-          return {
-            ...finalSnapshot,
-            stableCaptures: stableCaptures + 1
-          };
-        }
-        if (
-          finalSnapshot.state === "identity_drift" ||
-          (
-            finalSnapshot.state === "unavailable" &&
-            finalSnapshot.retryable !== true
-          )
-        ) {
-          return finalSnapshot;
-        }
-        if (
-          options.requiredState !== undefined &&
-          snapshot.state === options.requiredState
-        ) {
-          return {
-            state: "unavailable",
-            reason: "Codex composer changed after its stable final recapture"
-          };
-        }
-        candidate = finalSnapshot;
-        control = finalSnapshot.terminalControl;
-        stableSince = this.nowMs();
-        stableCaptures = 1;
-        finishObservedExactCandidate = finalSnapshot.state === "exact_draft";
-      }
-
-      const elapsed = this.nowMs() - startedAt;
-      if (
-        elapsed > CODEX_MULTILINE_SETTLE_TIMEOUT_MS &&
-        !finishObservedExactCandidate
-      ) {
-        return {
-          state: "unavailable",
-          reason: options.requiredState
-            ? `Codex composer did not become ${options.requiredState} before the bounded observation deadline`
-            : "Codex composer did not become stable before the bounded observation deadline"
-        };
-      }
-      if (
-        elapsed > CODEX_MULTILINE_SETTLE_TIMEOUT_MS &&
-        options.requiredState !== undefined &&
-        snapshot.state !== options.requiredState
-      ) {
-        if (snapshot.state !== "unavailable") {
-          return {
-            ...snapshot,
-            stableCaptures
-          };
-        }
-        return {
-          state: "unavailable",
-          reason: snapshot.reason
-        };
-      }
-
-      const remainingStableMs = options.minimumStableMs - stableForMs;
-      await this.sleep(Math.max(
-        1,
-        Math.min(
-          CODEX_MULTILINE_SETTLE_POLL_MS,
-          remainingStableMs > 0
-            ? remainingStableMs
-            : CODEX_MULTILINE_SETTLE_POLL_MS
-        )
-      ));
-    }
-  }
-
-  private async captureCodexComposerSnapshot(
-    adapter: TerminalAgentAdapter,
-    terminalControl: TerminalControlRef,
-    expectedText: string,
-    runtime?: TerminalRuntimeIdentity,
-    options: {
-      allowOpaqueLargePastePlaceholder?: boolean;
-      classifyOpaqueLargePasteAsDifferent?: boolean;
-      allowWorkingComposer?: boolean;
-    } = {}
-  ): Promise<TerminalCodexComposerSnapshot> {
-    let verifiedBefore: TerminalControlRef;
-    try {
-      verifiedBefore = await this.verifyTerminalIdentity(
-        adapter.agent,
-        terminalControl,
-        runtime
-      );
-    } catch (error) {
-      return {
-        state: "identity_drift",
-        reason: error instanceof Error ? error.message : String(error)
-      };
-    }
-
-    let styledScreen: string;
-    try {
-      styledScreen = await this.terminalProvider.capture(
-        this.terminalProvider.endpoint(verifiedBefore),
-        {
-          scrollbackLines: CODEX_MULTILINE_SETTLE_SCROLLBACK_LINES,
-          preserveEscapes: true
-        }
-      );
-    } catch (error) {
-      return {
-        state: "unavailable",
-        reason: error instanceof Error ? error.message : String(error)
-      };
-    }
-    const screen = stripTerminalEscapeSequences(styledScreen);
-    let inspection: TerminalScreenInspection;
-    try {
-      inspection = adapter.inspectScreen({ screen, runtime });
-    } catch (error) {
-      return {
-        state: "unavailable",
-        reason: error instanceof Error ? error.message : String(error)
-      };
-    }
-
-    let verifiedAfter: TerminalControlRef;
-    try {
-      verifiedAfter = await this.verifyTerminalIdentity(
-        adapter.agent,
-        verifiedBefore,
-        runtime
-      );
-    } catch (error) {
-      return {
-        state: "identity_drift",
-        reason: error instanceof Error ? error.message : String(error)
-      };
-    }
-    if (!sameTerminalControlIdentity(verifiedBefore, verifiedAfter)) {
-      return {
-        state: "identity_drift",
-        reason: "terminal control identity changed across the Codex composer capture"
-      };
-    }
-
-    const screenDigest = createHash("sha256").update(styledScreen).digest("hex");
-    if (
-      inspection.approval.blocked ||
-      inspection.activity.state === "awaiting_approval" ||
-      codexBlockingModalVisible(screen)
-    ) {
-      return {
-        state: "approval_or_modal",
-        terminalControl: verifiedAfter,
-        digest: screenDigest
-      };
-    }
-    if (
-      inspection.activity.state === "working" &&
-      options.allowWorkingComposer !== true
-    ) {
-      return {
-        state: "working",
-        terminalControl: verifiedAfter,
-        digest: screenDigest
-      };
-    }
-
-    const composer = currentCodexComposerCapture(
-      styledScreen,
-      expectedText,
-      options.allowOpaqueLargePastePlaceholder === true,
-      options.classifyOpaqueLargePasteAsDifferent === true
-    );
-    if (!composer) {
-      return {
-        state: "unavailable",
-        reason: "the current live Codex composer could not be proven",
-        retryable: true,
-        terminalControl: verifiedAfter,
-        digest: screenDigest
-      };
-    }
-    return {
-      state: composer.state,
-      terminalControl: verifiedAfter,
-      digest: composer.digest
     };
   }
 

@@ -1137,6 +1137,10 @@
       "owner": "terminal-dispatch-core"
     },
     {
+      "path": "src/terminal-text-submission-bridge.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-turn-binding-authority-cli-adapter.ts",
       "owner": "terminal-identity-authority"
     },
