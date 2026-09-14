@@ -73,7 +73,8 @@
         "src/host-bridge.ts",
         "src/host-profile-callback-transport.ts",
         "src/host-profile-runtime.ts",
-        "src/host-profile.ts"
+        "src/host-profile.ts",
+        "src/semantic-tool-catalog.ts"
       ],
       "witnesses": [
         "command-json-callback-unit",
@@ -154,7 +155,8 @@
         "src/openclaw-plugin-helpers.ts",
         "src/openclaw-plugin-schemas.ts",
         "src/openclaw-plugin-supervisor.ts",
-        "src/openclaw-plugin.ts"
+        "src/openclaw-plugin.ts",
+        "src/semantic-tool-catalog.ts"
       ],
       "witnesses": [
         "openclaw-plugin-boundary"
@@ -394,7 +396,7 @@
       "id": "host-bridge-tools-unit",
       "path": "test/host-bridge-tools.test.ts",
       "tier": "fast",
-      "needle": "host bridge captures the existing semantic tool contract once"
+      "needle": "host bridge adapts the shared semantic tool catalog once"
     },
     {
       "id": "host-profile-unit",

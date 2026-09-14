@@ -857,6 +857,10 @@
       "owner": "runtime-log"
     },
     {
+      "path": "src/semantic-tool-catalog.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/session-selector.ts",
       "owner": "session-selector"
     },

@@ -136,7 +136,8 @@ const OPENCLAW_AUTHORITY_ROLES = Object.freeze({
   command_helpers: "src/openclaw-plugin-helpers.ts",
   tool_schemas: "src/openclaw-plugin-schemas.ts",
   monitor_supervisor: "src/openclaw-plugin-supervisor.ts",
-  plugin_entry: "src/openclaw-plugin.ts"
+  plugin_entry: "src/openclaw-plugin.ts",
+  semantic_catalog: "src/semantic-tool-catalog.ts"
 });
 const OPENCLAW_AUTHORITY_PATHS = Object.freeze(
   Object.values(OPENCLAW_AUTHORITY_ROLES).sort()
@@ -154,7 +155,8 @@ const HOST_BRIDGE_AUTHORITY_PATHS = Object.freeze([
   "src/host-bridge.ts",
   "src/host-profile-callback-transport.ts",
   "src/host-profile-runtime.ts",
-  "src/host-profile.ts"
+  "src/host-profile.ts",
+  "src/semantic-tool-catalog.ts"
 ]);
 const MIGRATION_IDS = Object.freeze([
   "callback-outbox",

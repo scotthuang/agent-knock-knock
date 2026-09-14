@@ -35,7 +35,7 @@ const expectedToolNames = [
   "agent_knock_knock_close"
 ] as const;
 
-test("host bridge captures the existing semantic tool contract once", () => {
+test("host bridge adapts the shared semantic tool catalog once", () => {
   const registry = createRegistry("session-key", "session-incarnation");
   const listed = registry.list();
   const command = registry.command();
@@ -54,7 +54,7 @@ test("host bridge captures the existing semantic tool contract once", () => {
   }
 });
 
-test("host bridge executes the captured akk slash command", async () => {
+test("host bridge executes the shared-catalog akk slash command", async () => {
   const result = await createRegistry(
     "command-session",
     "command-incarnation"
