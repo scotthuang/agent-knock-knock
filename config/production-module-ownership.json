@@ -889,6 +889,10 @@
       "owner": "terminal-agent-core"
     },
     {
+      "path": "src/terminal-approval-cli-adapter.ts",
+      "owner": "terminal-command-adapter"
+    },
+    {
       "path": "src/terminal-authority-policy.ts",
       "owner": "terminal-authority-policy"
     },
