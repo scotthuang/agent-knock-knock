@@ -1013,6 +1013,14 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-model-control-profile.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/terminal-model-control-subject.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
       "path": "src/terminal-model-control.ts",
       "owner": "terminal-agent-core"
     },

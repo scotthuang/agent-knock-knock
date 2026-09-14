@@ -1,9 +1,45 @@
 import { createHash } from "node:crypto";
 import type { ExecutorKind } from "./executors.js";
 import {
+  CODEX_MODEL_CONTROL_AGENT_VERSION,
+  isTerminalModelControlPlanForAgent,
+  planTerminalModelControlProfile,
+  probeTerminalModelControlProfile,
+  terminalModelControlProfileForPlan,
+  type TerminalModelControlCapabilities,
+  type TerminalModelControlPlan,
+  type TerminalModelControlScope
+} from "./terminal-model-control-profile.js";
+import {
+  canonicalModelControlSubject,
+  type TerminalModelControlSubjectInput
+} from "./terminal-model-control-subject.js";
+import {
   terminalPhysicalBindingToken,
   type TerminalControlRef
 } from "./terminal-control-ref.js";
+
+export {
+  CLAUDE_MODEL_CONTROL_AGENT_VERSION,
+  CODEX_MODEL_CONTROL_AGENT_VERSION,
+  TERMINAL_MODEL_CONTROL_PROFILE_IDS,
+  isTerminalModelControlPlanForAgent,
+  terminalModelControlPlanConforms,
+  terminalModelControlProfileFor,
+  terminalModelControlProfileForPlan,
+  terminalModelControlProfiles,
+  terminalModelControlSlashCompletionRows,
+  type TerminalModelControlBehaviorProfile,
+  type TerminalModelControlCapabilities,
+  type TerminalModelControlPlan,
+  type TerminalModelControlProfile,
+  type TerminalModelControlScope
+} from "./terminal-model-control-profile.js";
+export {
+  canonicalModelControlSubject,
+  type CanonicalTerminalModelControlSubject,
+  type TerminalModelControlSubjectInput
+} from "./terminal-model-control-subject.js";
 
 /** Caller-visible reasoning values. Native labels and menu positions stay private. */
 export const TERMINAL_MODEL_REASONING_EFFORTS = [
@@ -18,30 +54,6 @@ export const TERMINAL_MODEL_REASONING_EFFORTS = [
 export type TerminalModelReasoningEffort =
   typeof TERMINAL_MODEL_REASONING_EFFORTS[number];
 type TerminalModelNativeEffort = TerminalModelReasoningEffort | "ultracode";
-
-export type TerminalModelControlScope =
-  | "current_session"
-  | "current_and_new_sessions";
-
-export interface TerminalModelControlCapabilities {
-  readonly status: "supported" | "unsupported" | "unknown";
-  readonly agentVersion?: string;
-  readonly behaviorProfile?: string;
-  readonly scope?: TerminalModelControlScope;
-  readonly modelSelection: boolean;
-  readonly reasoningEffortSelection: boolean;
-  readonly reason: string;
-}
-
-export interface TerminalModelControlPlan {
-  readonly behaviorProfile:
-    | "codex-model-control-0.154.0"
-    | "claude-model-control-2.1.266";
-  readonly command: "/model";
-  readonly scope: TerminalModelControlScope;
-  readonly requiresIdle: true;
-  readonly requiresExactEmptyComposer: true;
-}
 
 export interface TerminalModelChoice {
   readonly id: string;
@@ -123,24 +135,40 @@ export function terminalUserExplicitModelControlBindingToken(value: {
   agentVersion: string;
   behaviorProfile: TerminalModelControlPlan["behaviorProfile"];
 }): string {
+  const subject = requiredModelControlSubject({
+    ...value,
+    agent: "codex"
+  });
   const physicalTerminalToken = terminalPhysicalBindingToken({
-    terminalId: value.terminalId,
-    terminalControl: value.terminalControl,
+    terminalId: subject.terminalId,
+    terminalControl: subject.terminalControl,
     agent: "codex",
-    pid: value.pid,
-    workspace: value.workspace,
-    processUuid: value.processUuid,
-    processBirth: value.processBirth
+    pid: subject.pid,
+    workspace: subject.workspace,
+    processUuid: subject.processUuid,
+    processBirth: subject.processBirth
   });
   return createHash("sha256")
     .update(JSON.stringify({
       version: 1,
       authority: "terminal_user_explicit_model_control",
       physical_terminal_token: physicalTerminalToken,
-      agent_version: value.agentVersion,
-      behavior_profile: value.behaviorProfile
+      agent_version: subject.agentVersion,
+      behavior_profile: subject.behaviorProfile
     }))
     .digest("hex");
+}
+
+function requiredModelControlSubject(
+  input: TerminalModelControlSubjectInput
+): NonNullable<ReturnType<typeof canonicalModelControlSubject>> {
+  const subject = canonicalModelControlSubject(input);
+  if (!subject) {
+    throw new Error(
+      "model-control authority requires one canonical supported terminal subject"
+    );
+  }
+  return subject;
 }
 
 /**
@@ -413,73 +441,13 @@ export function probeTerminalModelControl(
   agent: ExecutorKind,
   agentVersion: string | undefined
 ): TerminalModelControlCapabilities {
-  if (!agentVersion) {
-    return {
-      status: "unknown",
-      modelSelection: false,
-      reasoningEffortSelection: false,
-      reason: `the running ${agent === "codex" ? "Codex" : "Claude Code"} version could not be verified`
-    };
-  }
-  if (agent === "codex" && agentVersion === "0.154.0") {
-    return {
-      status: "supported",
-      agentVersion,
-      behaviorProfile: "codex-model-control-0.154.0",
-      scope: "current_and_new_sessions",
-      modelSelection: true,
-      reasoningEffortSelection: true,
-      reason:
-        "Codex 0.154.0 /model control changes the current session and persisted defaults"
-    };
-  }
-  if (agent === "claude" && agentVersion === "2.1.266") {
-    return {
-      status: "supported",
-      agentVersion,
-      behaviorProfile: "claude-model-control-2.1.266",
-      scope: "current_session",
-      modelSelection: true,
-      reasoningEffortSelection: true,
-      reason:
-        "Claude Code 2.1.266 /model supports the explicit session-only selection path"
-    };
-  }
-  return {
-    status: "unsupported",
-    agentVersion,
-    modelSelection: false,
-    reasoningEffortSelection: false,
-    reason:
-      `${agent === "codex" ? "Codex" : "Claude Code"} ${agentVersion} has no verified model-control profile`
-  };
+  return probeTerminalModelControlProfile(agent, agentVersion);
 }
 
 export function planTerminalModelControl(
   capabilities: TerminalModelControlCapabilities
 ): TerminalModelControlPlan {
-  if (
-    capabilities.status !== "supported" ||
-    capabilities.modelSelection !== true ||
-    capabilities.reasoningEffortSelection !== true ||
-    !capabilities.behaviorProfile ||
-    !capabilities.scope
-  ) {
-    throw new Error(capabilities.reason);
-  }
-  if (
-    capabilities.behaviorProfile !== "codex-model-control-0.154.0" &&
-    capabilities.behaviorProfile !== "claude-model-control-2.1.266"
-  ) {
-    throw new Error("refusing an unprofiled terminal model-control plan");
-  }
-  return {
-    behaviorProfile: capabilities.behaviorProfile,
-    command: "/model",
-    scope: capabilities.scope,
-    requiresIdle: true,
-    requiresExactEmptyComposer: true
-  };
+  return planTerminalModelControlProfile(capabilities);
 }
 
 /**
@@ -491,7 +459,7 @@ export function observeTerminalModelControl(
   screen: string
 ): TerminalModelControlObservation {
   const normalized = stripAnsi(screen).replace(/\r\n?/gu, "\n");
-  return plan.behaviorProfile === "codex-model-control-0.154.0"
+  return isTerminalModelControlPlanForAgent(plan, "codex")
     ? observeCodexModelControl(normalized)
     : observeClaudeModelControl(normalized);
 }
@@ -624,7 +592,7 @@ export function claudeModelControlCommitKeys(
   plan: TerminalModelControlPlan
 ): readonly ["s"] {
   if (
-    plan.behaviorProfile !== "claude-model-control-2.1.266" ||
+    !isTerminalModelControlPlanForAgent(plan, "claude") ||
     plan.scope !== "current_session"
   ) {
     throw new Error("Claude model control cannot commit outside session-only scope");
@@ -684,7 +652,7 @@ function modelCommandReadyForEnter(
   capture: TerminalModelControlCapture
 ): boolean {
   return capture.exactCommandReady ||
-    plan.behaviorProfile === "codex-model-control-0.154.0" &&
+    isTerminalModelControlPlanForAgent(plan, "codex") &&
       capture.exactBareCommand === true;
 }
 
@@ -692,10 +660,13 @@ function residualFromCapture(
   plan: TerminalModelControlPlan,
   capture: TerminalModelControlCapture
 ): TerminalModelControlResidualObservation {
-  if (plan.behaviorProfile !== "codex-model-control-0.154.0") {
+  const profile = terminalModelControlProfileForPlan(plan);
+  if (!profile?.supportsResidualRepair) {
     return {
       state: "unsafe",
-      reason: "model-control residual repair is profiled only for Codex 0.154.0",
+      reason:
+        "model-control residual repair is profiled only for Codex " +
+        CODEX_MODEL_CONTROL_AGENT_VERSION,
       terminalControl: capture.terminalControl
     };
   }
@@ -1343,9 +1314,11 @@ async function openModelPicker(input: {
   let idleCapture: TerminalModelControlCapture;
   let revalidatedCommand: TerminalModelControlCapture;
   if (input.initialResidual) {
-    if (input.plan.behaviorProfile !== "codex-model-control-0.154.0") {
+    const profile = terminalModelControlProfileForPlan(input.plan);
+    if (!profile?.supportsResidualContinuation) {
       throw new Error(
-        "native model-control continuation is profiled only for Codex 0.154.0"
+        "native model-control continuation is profiled only for Codex " +
+        CODEX_MODEL_CONTROL_AGENT_VERSION
       );
     }
     const observed = await inspectTerminalModelControlResidual({
@@ -1540,7 +1513,7 @@ async function unwindModelControl(input: {
       control = finalCommand.terminalControl;
       if (
         finalCommand.exactCommandReady ||
-        input.plan.behaviorProfile === "claude-model-control-2.1.266" ||
+        isTerminalModelControlPlanForAgent(input.plan, "claude") ||
         finalCommand.exactBareCommand !== true
       ) {
         await input.ports.sendKeys(control, ["Escape"]);
@@ -1620,7 +1593,7 @@ async function waitForModelCommandCleanupState(input: {
     });
     const exactState = captured.exactEmptyComposer ||
       captured.exactCommandComposer && !captured.exactCommandReady &&
-        (input.plan.behaviorProfile === "claude-model-control-2.1.266" ||
+        (isTerminalModelControlPlanForAgent(input.plan, "claude") ||
           captured.exactBareCommand === true);
     if (!modelControlCaptureBlocked(captured) &&
         captured.activityState !== "working" && exactState) {
@@ -1628,7 +1601,7 @@ async function waitForModelCommandCleanupState(input: {
         ? "empty"
         : captured.exactCommandFingerprint
           ? `bare:${captured.exactCommandFingerprint}`
-          : input.plan.behaviorProfile === "claude-model-control-2.1.266"
+          : isTerminalModelControlPlanForAgent(input.plan, "claude")
             ? "bare:claude-profiled-composer"
             : undefined;
       if (!semanticState) {

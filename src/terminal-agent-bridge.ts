@@ -74,13 +74,17 @@ import type {
 import { inspectNativeQuestionnaire } from
   "./terminal-questionnaire-adapter.js";
 import {
+  CODEX_MODEL_CONTROL_AGENT_VERSION,
   discoverTerminalModelOptions,
   inspectTerminalModelControlResidual,
   observeTerminalModelControl,
+  isTerminalModelControlPlanForAgent,
   planTerminalModelControl,
   probeTerminalModelControl,
   repairTerminalModelControlResidual,
   switchTerminalModel,
+  terminalModelControlPlanConforms,
+  terminalModelControlSlashCompletionRows,
   type TerminalModelCatalog,
   type TerminalModelControlPlan,
   type TerminalModelControlPorts,
@@ -109,13 +113,6 @@ const CODEX_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
 const CODEX_COMPLETE_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s+\S+)?|[-\w.]+ default)\s+·\s+\S.*$/u;
-const CODEX_MODEL_CONTROL_SLASH_POPUP_BY_PROFILE: Readonly<
-  Record<string, readonly string[]>
-> = {
-  "codex-model-control-0.154.0": [
-    "  /model  choose what model and reasoning effort to use"
-  ]
-};
 // Keep every exact slash-completion shape closed per behavior profile so a
 // version adding another matching command cannot silently become an authorized
 // native command surface.
@@ -1688,9 +1685,7 @@ export class TerminalAgentBridge {
               false,
               false,
               input.expectedComposer === plan.command
-                ? CODEX_MODEL_CONTROL_SLASH_POPUP_BY_PROFILE[
-                    plan.behaviorProfile
-                  ]
+                ? terminalModelControlSlashCompletionRows(plan)
                 : undefined
             )
           : undefined;
@@ -1699,7 +1694,7 @@ export class TerminalAgentBridge {
           try {
             const questionnaire = inspectNativeQuestionnaire({
               agent: "codex",
-              version: "0.154.0",
+              version: CODEX_MODEL_CONTROL_AGENT_VERSION,
               screen: styledScreen
             });
             const asyncQuestionMode = inspectCodexAsyncQuestionInputMode(
@@ -1947,7 +1942,7 @@ export class TerminalAgentBridge {
   ): Promise<TerminalControlRef> {
     const canUseClaudeModelDialog =
       adapter.agent === "claude" &&
-      plan.behaviorProfile === "claude-model-control-2.1.266" &&
+      isTerminalModelControlPlanForAgent(plan, "claude") &&
       runtime?.requireExactClaudeAgentRow === true &&
       runtime.exactClaudeAgentState === "idle";
     if (options.claudeModelDialog === "require") {
@@ -5298,7 +5293,7 @@ function exactClaudeModelControlComposerCapture(
   expectedText: string
 ): { digest: string } | undefined {
   if (
-    plan.behaviorProfile !== "claude-model-control-2.1.266" ||
+    !isTerminalModelControlPlanForAgent(plan, "claude") ||
     expectedText !== plan.command ||
     expectedText !== "/model"
   ) return undefined;
@@ -7397,13 +7392,11 @@ function assertTerminalModelControlPlan(
       "the terminal adapter did not produce the exact current model-control plan"
     );
   }
-  if (
-    adapter.agent === "codex"
-      ? plan.behaviorProfile !== "codex-model-control-0.154.0" ||
-        plan.scope !== "current_and_new_sessions"
-      : plan.behaviorProfile !== "claude-model-control-2.1.266" ||
-        plan.scope !== "current_session"
-  ) {
+  if (!terminalModelControlPlanConforms({
+    agent: adapter.agent,
+    agentVersion,
+    plan
+  })) {
     throw new Error("refusing an unprofiled terminal model-control plan");
   }
 }

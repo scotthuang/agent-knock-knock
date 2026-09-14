@@ -109,6 +109,7 @@
     "test/terminal-monitor-poll-policy.test.ts",
     "test/terminal-monitor-seams.test.ts",
     "test/terminal-monitor-supervision-cli-adapter.test.ts",
+    "test/terminal-model-control-profile.test.ts",
     "test/terminal-model-control.test.ts",
     "test/terminal-process-source.test.ts",
     "test/terminal-questionnaire-adapter.test.ts",

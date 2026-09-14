@@ -72,7 +72,11 @@ import type { TerminalDispatchLedgerDocument } from
 import type { TerminalRuntimeCliAdapter } from
   "./terminal-runtime-cli-adapter.js";
 import {
+  CODEX_MODEL_CONTROL_AGENT_VERSION,
+  isTerminalModelControlPlanForAgent,
   isTerminalModelReasoningEffort,
+  terminalModelControlPlanConforms,
+  terminalModelControlProfileForPlan,
   terminalUserExplicitModelControlBindingToken,
   terminalUserExplicitModelControlResidualEntryBindingToken,
   terminalUserExplicitModelControlRepairBindingToken,
@@ -581,11 +585,11 @@ class NativeThreadLifecycleCliApplication {
       return snapshot;
     }
     const adapter = this.agentAdapter(options, terminal.agent);
-    const capability = adapter.probeModelControl?.(snapshot.version);
-    const plan = capability?.status === "supported"
-      ? adapter.planModelControl?.(capability)
-      : undefined;
-    if (!plan || plan.behaviorProfile !== "codex-model-control-0.154.0") {
+    const { capability, plan, profile } = modelControlProfileObservation(
+      adapter, snapshot.version
+    );
+    if (!plan || profile?.agent !== "codex" ||
+        !profile.supportsZeroRolloutPhysicalAuthority) {
       throw new Error(
         capability?.reason ?? "Codex has no verified physical model-control profile"
       );
@@ -1616,7 +1620,8 @@ class NativeThreadLifecycleCliApplication {
       );
       if (terminal.agent !== "codex") {
         throw new Error(
-          "model-control residual repair currently supports only Codex 0.154.0"
+          "model-control residual repair currently supports only Codex " +
+          CODEX_MODEL_CONTROL_AGENT_VERSION
         );
       }
       const snapshot = await this.modelControlSnapshot(options, terminal);
@@ -1625,11 +1630,11 @@ class NativeThreadLifecycleCliApplication {
         "model-control repair requires an exact running agent version"
       );
       const adapter = runtimeFacade.createAgentRegistry().require(terminal.agent);
-      const capability = adapter.probeModelControl?.(agentVersion);
-      const plan = capability?.status === "supported"
-        ? adapter.planModelControl?.(capability)
-        : undefined;
-      if (!plan || plan.behaviorProfile !== "codex-model-control-0.154.0") {
+      const { capability, plan, profile } = modelControlProfileObservation(
+        adapter, agentVersion
+      );
+      if (!plan || profile?.agent !== "codex" ||
+          !profile.supportsResidualRepair) {
         throw new Error(
           capability?.reason ??
           "the running Codex version has no verified model-control repair profile"
@@ -1706,10 +1711,9 @@ class NativeThreadLifecycleCliApplication {
         "the current native Session changed during model-control repair"
       );
     }
-    const capability = context.adapter.probeModelControl?.(snapshot.version);
-    const plan = capability?.status === "supported"
-      ? context.adapter.planModelControl?.(capability)
-      : undefined;
+    const { plan } = modelControlProfileObservation(
+      context.adapter, snapshot.version
+    );
     if (!plan || JSON.stringify(plan) !== JSON.stringify(context.plan)) {
       throw new Error(
         "the exact model-control repair profile changed during the operation"
@@ -1890,7 +1894,9 @@ class NativeThreadLifecycleCliApplication {
         "model control requires an exact running agent version"
       );
       const adapter = runtimeFacade.createAgentRegistry().require(terminal.agent);
-      const capability = adapter.probeModelControl?.(agentVersion);
+      const { capability, plan } = modelControlProfileObservation(
+        adapter, agentVersion
+      );
       if (capability?.status !== "supported" ||
           capability.modelSelection !== true ||
           capability.reasoningEffortSelection !== true) {
@@ -1899,7 +1905,6 @@ class NativeThreadLifecycleCliApplication {
           `${adapter.displayName} has no verified model-control profile`
         );
       }
-      const plan = adapter.planModelControl?.(capability);
       if (!plan) {
         throw new Error("the agent adapter did not produce a model-control plan");
       }
@@ -1926,7 +1931,8 @@ class NativeThreadLifecycleCliApplication {
       } else {
         if (
           terminal.agent !== "codex" ||
-          plan.behaviorProfile !== "codex-model-control-0.154.0"
+          terminalModelControlProfileForPlan(plan)
+            ?.supportsResidualContinuation !== true
         ) {
           throw new Error(
             "terminal binding changed after it was listed; refresh AKK list and retry"
@@ -1976,12 +1982,12 @@ class NativeThreadLifecycleCliApplication {
         ordinaryBindingToken,
         initialResidual,
         ...(terminal.agent === "codex" &&
-            plan.behaviorProfile === "codex-model-control-0.154.0"
+            isTerminalModelControlPlanForAgent(plan, "codex")
           ? {
               loadCodexCatalog: async () =>
                 runtimeFacade.codexModelCatalogForRunningProcess(
                   terminal.pid,
-                  "0.154.0",
+                  CODEX_MODEL_CONTROL_AGENT_VERSION,
                   terminal.terminalControl.currentPath
                 )
             }
@@ -2017,10 +2023,9 @@ class NativeThreadLifecycleCliApplication {
         "the current native Session changed during model control; inspect the pane before retrying"
       );
     }
-    const capability = context.adapter.probeModelControl?.(snapshot.version);
-    const plan = capability?.status === "supported"
-      ? context.adapter.planModelControl?.(capability)
-      : undefined;
+    const { plan } = modelControlProfileObservation(
+      context.adapter, snapshot.version
+    );
     if (!plan || JSON.stringify(plan) !== JSON.stringify(context.plan)) {
       throw new Error(
         "the exact model-control profile changed during the operation"
@@ -2056,7 +2061,11 @@ class NativeThreadLifecycleCliApplication {
     } catch (idleError) {
       if (
         context.terminal.agent !== "claude" ||
-        context.plan.behaviorProfile !== "claude-model-control-2.1.266" ||
+        !terminalModelControlPlanConforms({
+          agent: context.terminal.agent,
+          agentVersion: context.agentVersion,
+          plan: context.plan
+        }) ||
         context.runtime.requireExactClaudeAgentRow !== true ||
         context.runtime.exactClaudeAgentState !== "idle"
       ) {
@@ -2741,6 +2750,21 @@ function nativeInspectionComposerEmpty(
   return agent === "codex"
     ? codexComposerEmpty(screen)
     : isExactClaudeNativeInspectionIdleComposer(String(screen ?? ""));
+}
+
+function modelControlProfileObservation(
+  adapter: TerminalAgentAdapter,
+  agentVersion: string | undefined
+) {
+  const capability = adapter.probeModelControl?.(agentVersion);
+  const plan = capability?.status === "supported"
+    ? adapter.planModelControl?.(capability)
+    : undefined;
+  return {
+    capability,
+    plan,
+    profile: plan ? terminalModelControlProfileForPlan(plan) : undefined
+  };
 }
 
 function required<T>(value: T | undefined, message: string): T {

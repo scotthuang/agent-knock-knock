@@ -103,7 +103,8 @@ import {
   type TerminalActionSet,
   type TerminalDispatchOwnership
 } from "./terminal-action-projection.js";
-import type { TerminalModelControlResidualObservation } from
+import { terminalModelControlPlanConforms, terminalModelControlProfileFor,
+  type TerminalModelControlResidualObservation } from
   "./terminal-model-control.js";
 import {
   childProcessIdsForRoot,
@@ -1717,6 +1718,12 @@ function projectTerminalModelControlActions(input: {
   hasOrphanedDispatch: boolean;
 }): TerminalActionSet<Record<string, unknown>> {
   const actions = { ...input.renderedActions };
+  const modelControlProfile = terminalModelControlProfileFor(
+    input.session.agent, input.agentVersion);
+  const behaviorProfile = modelControlProfile &&
+    input.modelControlCapability.behaviorProfile ===
+      modelControlProfile.behaviorProfile
+    ? modelControlProfile.behaviorProfile : undefined;
   const authority = decideTerminalUserExplicitModelControlAuthority({
     exactTerminalRow: true,
     terminalId: input.terminalId,
@@ -1727,11 +1734,7 @@ function projectTerminalModelControlActions(input: {
     processUuid: input.physicalProcessIncarnation?.processUuid,
     processBirth: input.physicalProcessIncarnation?.processBirth,
     agentVersion: input.agentVersion,
-    behaviorProfile:
-      input.modelControlCapability.behaviorProfile ===
-        "codex-model-control-0.154.0"
-        ? input.modelControlCapability.behaviorProfile
-        : undefined,
+    behaviorProfile,
     zeroRolloutVerified:
       input.session.agent === "codex" &&
       input.nativeIdentityObservation.status === "verified_absent" &&
@@ -1787,11 +1790,7 @@ function projectTerminalModelControlActions(input: {
       processUuid: input.physicalProcessIncarnation?.processUuid,
       processBirth: input.physicalProcessIncarnation?.processBirth,
       agentVersion: input.agentVersion,
-      behaviorProfile:
-        input.modelControlCapability.behaviorProfile ===
-          "codex-model-control-0.154.0"
-          ? input.modelControlCapability.behaviorProfile
-          : undefined,
+      behaviorProfile,
       nativeIdentityEligible:
         hasExactCodexIdentity || authority.eligible ||
         (
@@ -1830,11 +1829,7 @@ function projectTerminalModelControlActions(input: {
       processUuid: input.physicalProcessIncarnation?.processUuid,
       processBirth: input.physicalProcessIncarnation?.processBirth,
       agentVersion: input.agentVersion,
-      behaviorProfile:
-        input.modelControlCapability.behaviorProfile ===
-          "codex-model-control-0.154.0"
-          ? input.modelControlCapability.behaviorProfile
-          : undefined,
+      behaviorProfile,
       nativeIdentityEligible:
         hasExactCodexIdentity || authority.eligible ||
         (
@@ -1913,13 +1908,14 @@ async function observeModelControlResidualForList(input: {
   hasOrphanedDispatch: boolean;
 }): Promise<TerminalModelControlResidualObservation | undefined> {
   const inspect = input.bridge.inspectModelControlResidual;
+  const profile = terminalModelControlProfileFor(input.session.agent, input.agentVersion);
   if (
     typeof inspect !== "function" ||
     input.session.agent !== "codex" ||
-    input.agentVersion !== "0.154.0" ||
+    !profile?.supportsResidualRepair ||
     input.modelControlCapability.status !== "supported" ||
     input.modelControlCapability.behaviorProfile !==
-      "codex-model-control-0.154.0" ||
+      profile.behaviorProfile ||
     !input.nativeIdentityEligible ||
     input.effectiveTerminalState.activity_state === "working" ||
     input.effectiveTerminalState.activity_state === "awaiting_approval" ||
@@ -1936,7 +1932,11 @@ async function observeModelControlResidualForList(input: {
   const plan = capability?.status === "supported"
     ? adapter.planModelControl?.(capability)
     : undefined;
-  if (!plan || plan.behaviorProfile !== "codex-model-control-0.154.0") {
+  if (!plan || !terminalModelControlPlanConforms({
+    agent: input.session.agent,
+    agentVersion: input.agentVersion,
+    plan
+  })) {
     return undefined;
   }
   const identity = input.nativeAgentIdentity;
@@ -1972,7 +1972,7 @@ async function observeModelControlResidualForList(input: {
       input.bridge,
       "codex",
       input.terminalControl,
-      input.agentVersion,
+      profile.agentVersion,
       plan,
       { runtime, beforeInput: () => undefined }
     );

@@ -12,6 +12,8 @@ import {
 import type { ManagedBindingConflictKind } from
   "./terminal-authority-policy.js";
 import {
+  canonicalModelControlSubject,
+  terminalModelControlProfileFor,
   terminalUserExplicitModelControlBindingToken,
   terminalUserExplicitModelControlResidualEntryBindingToken,
   terminalUserExplicitModelControlRepairBindingToken,
@@ -222,21 +224,28 @@ export function decideTerminalUserExplicitSendAuthority(
 export function decideTerminalUserExplicitModelControlAuthority(
   facts: TerminalUserExplicitModelControlFacts
 ): TerminalUserExplicitModelControlAuthority {
-  const terminalId = nonBlank(facts.terminalId);
   const control = facts.terminalControl;
-  const workspace = nonBlank(control?.currentPath);
-  const processUuid = nonBlank(facts.processUuid);
-  const processBirth = nonBlank(facts.processBirth);
-  const agentVersion = nonBlank(facts.agentVersion);
-  const behaviorProfile = facts.behaviorProfile;
+  const subject = canonicalModelControlSubject({
+    terminalId: facts.terminalId,
+    terminalControl: control,
+    agent: facts.agent,
+    pid: facts.pid,
+    workspace: control?.currentPath,
+    processUuid: facts.processUuid,
+    processBirth: facts.processBirth,
+    agentVersion: facts.agentVersion,
+    behaviorProfile: facts.behaviorProfile
+  });
+  const profile = subject
+    ? terminalModelControlProfileFor(subject.agent, subject.agentVersion)
+    : undefined;
   if (
     !facts.exactTerminalRow ||
-    !terminalId ||
     facts.processState !== "active" ||
-    facts.agent !== "codex" ||
     !control ||
-    !workspace ||
-    !hasCanonicalTerminalEndpoint(control) ||
+    !subject ||
+    subject.agent !== "codex" ||
+    profile?.supportsZeroRolloutPhysicalAuthority !== true ||
     !control.capabilities.includes("send_keys") ||
     !control.capabilities.includes("screen_status") ||
     !facts.modelControlSupported ||
@@ -248,35 +257,22 @@ export function decideTerminalUserExplicitModelControlAuthority(
     facts.terminalHasInteraction ||
     facts.terminalHasBlockingTurn ||
     facts.hasOrphanedDispatch ||
-    !Number.isSafeInteger(facts.pid) ||
-    Number(facts.pid) <= 1 ||
-    !processUuid ||
-    !processBirth ||
-    agentVersion !== "0.154.0" ||
-    behaviorProfile !== "codex-model-control-0.154.0" ||
     !facts.zeroRolloutVerified
-  ) {
-    return { eligible: false };
-  }
-  const endpoint = terminalEndpointFromControlRef(control);
-  if (
-    !Number.isSafeInteger(endpoint.processAnchorPid) ||
-    Number(endpoint.processAnchorPid) <= 1
   ) {
     return { eligible: false };
   }
   return {
     eligible: true,
-    terminalId,
+    terminalId: subject.terminalId,
     expectedBindingToken: terminalUserExplicitModelControlBindingToken({
-      terminalId,
-      terminalControl: control,
-      pid: Number(facts.pid),
-      workspace,
-      processUuid,
-      processBirth,
-      agentVersion,
-      behaviorProfile
+      terminalId: subject.terminalId,
+      terminalControl: subject.terminalControl,
+      pid: subject.pid,
+      workspace: subject.workspace,
+      processUuid: subject.processUuid,
+      processBirth: subject.processBirth,
+      agentVersion: subject.agentVersion,
+      behaviorProfile: subject.behaviorProfile
     })
   };
 }
@@ -291,23 +287,30 @@ export function decideTerminalUserExplicitModelControlAuthority(
 export function decideTerminalUserExplicitModelControlRepairAuthority(
   facts: TerminalUserExplicitModelControlRepairFacts
 ): TerminalUserExplicitModelControlRepairAuthority {
-  const terminalId = nonBlank(facts.terminalId);
   const control = facts.terminalControl;
-  const workspace = nonBlank(control?.currentPath);
-  const processUuid = nonBlank(facts.processUuid);
-  const processBirth = nonBlank(facts.processBirth);
-  const agentVersion = nonBlank(facts.agentVersion);
-  const behaviorProfile = facts.behaviorProfile;
+  const subject = canonicalModelControlSubject({
+    terminalId: facts.terminalId,
+    terminalControl: control,
+    agent: facts.agent,
+    pid: facts.pid,
+    workspace: control?.currentPath,
+    processUuid: facts.processUuid,
+    processBirth: facts.processBirth,
+    agentVersion: facts.agentVersion,
+    behaviorProfile: facts.behaviorProfile
+  });
+  const profile = subject
+    ? terminalModelControlProfileFor(subject.agent, subject.agentVersion)
+    : undefined;
   const residualFingerprint = nonBlank(facts.residualFingerprint);
   const residualKind = facts.residualKind;
   if (
     !facts.exactTerminalRow ||
-    !terminalId ||
     facts.processState !== "active" ||
-    facts.agent !== "codex" ||
     !control ||
-    !workspace ||
-    !hasCanonicalTerminalEndpoint(control) ||
+    !subject ||
+    subject.agent !== "codex" ||
+    profile?.supportsResidualRepair !== true ||
     !control.capabilities.includes("send_keys") ||
     !control.capabilities.includes("screen_status") ||
     !facts.modelControlSupported ||
@@ -319,12 +322,6 @@ export function decideTerminalUserExplicitModelControlRepairAuthority(
     facts.terminalHasBlockingTurn ||
     facts.hasOrphanedDispatch ||
     !facts.nativeIdentityEligible ||
-    !Number.isSafeInteger(facts.pid) ||
-    Number(facts.pid) <= 1 ||
-    !processUuid ||
-    !processBirth ||
-    agentVersion !== "0.154.0" ||
-    behaviorProfile !== "codex-model-control-0.154.0" ||
     (residualKind !== "profiled_command_popup" &&
       residualKind !== "bare_command" &&
       residualKind !== "model_surface") ||
@@ -332,26 +329,19 @@ export function decideTerminalUserExplicitModelControlRepairAuthority(
   ) {
     return { eligible: false };
   }
-  const endpoint = terminalEndpointFromControlRef(control);
-  if (
-    !Number.isSafeInteger(endpoint.processAnchorPid) ||
-    Number(endpoint.processAnchorPid) <= 1
-  ) {
-    return { eligible: false };
-  }
   return {
     eligible: true,
-    terminalId,
+    terminalId: subject.terminalId,
     expectedBindingToken:
       terminalUserExplicitModelControlRepairBindingToken({
-        terminalId,
-        terminalControl: control,
-        pid: Number(facts.pid),
-        workspace,
-        processUuid,
-        processBirth,
-        agentVersion,
-        behaviorProfile,
+        terminalId: subject.terminalId,
+        terminalControl: subject.terminalControl,
+        pid: subject.pid,
+        workspace: subject.workspace,
+        processUuid: subject.processUuid,
+        processBirth: subject.processBirth,
+        agentVersion: subject.agentVersion,
+        behaviorProfile: subject.behaviorProfile,
         residualKind,
         residualFingerprint
       })
@@ -369,19 +359,24 @@ export function decideTerminalUserExplicitModelControlResidualEntryAuthority(
   if (!decideTerminalUserExplicitModelControlRepairAuthority(facts).eligible) {
     return { eligible: false };
   }
-  const terminalId = nonBlank(facts.terminalId);
-  const terminalControl = facts.terminalControl;
-  const workspace = nonBlank(terminalControl?.currentPath);
-  const processUuid = nonBlank(facts.processUuid);
-  const processBirth = nonBlank(facts.processBirth);
-  const agentVersion = nonBlank(facts.agentVersion);
-  const behaviorProfile = facts.behaviorProfile;
+  const subject = canonicalModelControlSubject({
+    terminalId: facts.terminalId,
+    terminalControl: facts.terminalControl,
+    agent: facts.agent,
+    pid: facts.pid,
+    workspace: facts.terminalControl?.currentPath,
+    processUuid: facts.processUuid,
+    processBirth: facts.processBirth,
+    agentVersion: facts.agentVersion,
+    behaviorProfile: facts.behaviorProfile
+  });
+  const profile = subject
+    ? terminalModelControlProfileFor(subject.agent, subject.agentVersion)
+    : undefined;
   const residualKind = facts.residualKind;
   const residualFingerprint = nonBlank(facts.residualFingerprint);
   if (
-    !terminalId || !terminalControl || !workspace || !processUuid ||
-    !processBirth || !agentVersion ||
-    behaviorProfile !== "codex-model-control-0.154.0" ||
+    !subject || profile?.supportsResidualContinuation !== true ||
     (residualKind !== "profiled_command_popup" &&
       residualKind !== "bare_command") ||
     !residualFingerprint
@@ -390,17 +385,17 @@ export function decideTerminalUserExplicitModelControlResidualEntryAuthority(
   }
   return {
     eligible: true,
-    terminalId,
+    terminalId: subject.terminalId,
     expectedBindingToken:
       terminalUserExplicitModelControlResidualEntryBindingToken({
-        terminalId,
-        terminalControl,
-        pid: Number(facts.pid),
-        workspace,
-        processUuid,
-        processBirth,
-        agentVersion,
-        behaviorProfile,
+        terminalId: subject.terminalId,
+        terminalControl: subject.terminalControl,
+        pid: subject.pid,
+        workspace: subject.workspace,
+        processUuid: subject.processUuid,
+        processBirth: subject.processBirth,
+        agentVersion: subject.agentVersion,
+        behaviorProfile: subject.behaviorProfile,
         residualKind,
         residualFingerprint
       })
