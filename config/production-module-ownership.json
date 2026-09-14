@@ -1193,7 +1193,15 @@
       "owner": "terminal-watch"
     },
     {
+      "path": "src/terminal-watch-codec.ts",
+      "owner": "terminal-watch"
+    },
+    {
       "path": "src/terminal-watch-interaction-response-store.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-record.ts",
       "owner": "terminal-watch"
     },
     {
