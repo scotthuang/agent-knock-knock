@@ -14,6 +14,8 @@ import {
   type CallbackRouteV1,
   type CallbackTransportAttemptV1
 } from "./callback-transport.js";
+import { decideDurableNotificationRetry } from
+  "./durable-notification-kernel.js";
 
 export type {
   CallbackAttemptOutcome,
@@ -383,13 +385,17 @@ export function beginCallbackRetryPolicy(
       reason: "callback outbox has invalid attempt metadata"
     });
   }
-  if (attemptValue > limits.retryDelayCount) {
+  if (decideDurableNotificationRetry({
+    phase: "ready",
+    attempt,
+    maxAttempts: limits.retryDelayCount
+  }).state === "exhausted") {
     return decided({ state: "exhausted", attempt });
   }
   if (delivery.status === "failed") {
     return transportStartedWithoutOutcome
       ? uncertainTransportStart(attempt)
-      : decided({ state: "retryable", attempt });
+      : decided(retryableCallbackDisposition(attempt));
   }
 
   const attemptPidValue = Number(delivery.attempt_pid);
@@ -399,7 +405,7 @@ export function beginCallbackRetryPolicy(
   if (attemptPid === undefined) {
     return transportStartedWithoutOutcome
       ? uncertainTransportStart(attempt)
-      : decided({ state: "retryable", attempt });
+      : decided(retryableCallbackDisposition(attempt));
   }
 
   const persistedLeaseExpiresAt = stringValue(
@@ -442,7 +448,7 @@ export function reduceCallbackRetryPolicy(
     if (!observation.alive || state.effective_lease_expires_at_ms === undefined) {
       return state.transport_started_without_outcome
         ? uncertainTransportStart(state.attempt)
-        : decided({ state: "retryable", attempt: state.attempt });
+        : decided(retryableCallbackDisposition(state.attempt));
     }
     return {
       phase: "observe_clock",
@@ -459,7 +465,15 @@ export function reduceCallbackRetryPolicy(
   if (observation.kind !== "clock") {
     throw new Error("callback retry policy requires a clock observation");
   }
-  if (state.effective_lease_expires_at_ms > observation.now_ms) {
+  const leaseDecision = decideDurableNotificationRetry({
+    phase: "leased",
+    attempt: state.attempt,
+    nowMs: observation.now_ms,
+    leaseExpiresAt: new Date(
+      state.effective_lease_expires_at_ms
+    ).toISOString()
+  });
+  if (leaseDecision.state === "in_flight") {
     return decided({
       state: "in_flight",
       attempt: state.attempt,
@@ -471,7 +485,20 @@ export function reduceCallbackRetryPolicy(
   }
   return state.transport_started_without_outcome
     ? uncertainTransportStart(state.attempt)
-    : decided({ state: "retryable", attempt: state.attempt });
+    : decided(retryableCallbackDisposition(state.attempt));
+}
+
+function retryableCallbackDisposition(
+  attempt: number
+): Extract<CallbackRetryDisposition, { state: "retryable" }> {
+  const decision = decideDurableNotificationRetry({
+    phase: "ready",
+    attempt
+  });
+  if (decision.state !== "retryable") {
+    throw new Error("durable notification retry policy rejected a ready attempt");
+  }
+  return decision;
 }
 
 function uncertainTransportStart(attempt: number): CallbackRetryPolicyState {

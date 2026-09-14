@@ -26,6 +26,7 @@
     "test/deferred-foreground-recovery-service.test.ts",
     "test/deferred-foreground-transfer.test.ts",
     "test/durable-json-file.test.ts",
+    "test/durable-notification-kernel.test.ts",
     "test/doctor-capabilities.test.ts",
     "test/executors.test.ts",
     "test/file-lock-cli-adapter.test.ts",
