@@ -36,6 +36,11 @@ import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
+import {
+  normalizeTerminalInteractionProjectionV2,
+  terminalInteractionPublicCompatibilityProjection,
+  type TerminalInteractionSubjectProjection
+} from "./terminal-interaction-protocol.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1091,7 +1096,7 @@ async function handleObservedPoll(
 function handleInteractionObservation(
   input: SampledPollInput
 ): "proceed" | "continue" | "finished" {
-  const projection = input.terminalStatus.interaction_state;
+  const publicProjection = input.terminalStatus.interaction_state;
   const fingerprint = stringValue(
     input.terminalStatus.interaction_prompt_fingerprint
   );
@@ -1100,43 +1105,52 @@ function handleInteractionObservation(
   );
   const observationMatches = interactionObservationMatchesMonitor(
     input,
-    projection
+    publicProjection
   );
   const takeover = takeoverFor(input.state.conversation) ?? input.takeover;
-  if (!projection) {
+  if (!publicProjection) {
     return "proceed";
   }
-  const question = projection.questions[0];
+  const projection = normalizeManagedMonitorInteraction(
+    input,
+    publicProjection,
+    fingerprint,
+    surfaceId
+  );
+  const question = publicProjection.questions[0];
   const screenChangedSinceSend =
     input.state.preSendScreenFingerprint !== undefined &&
     input.currentScreenFingerprint !== undefined &&
     input.currentScreenFingerprint !== input.state.preSendScreenFingerprint;
-  if (projection.questions.length !== 1 || !question) {
+  if (publicProjection.questions.length !== 1 || !question) {
     return "proceed";
   }
-  const executable = projection.state === "pending" &&
-    projection.capabilities.respond === true &&
+  const executable = publicProjection.state === "pending" &&
+    publicProjection.capabilities.respond === true &&
     question.response_kind !== "multi_select";
-  const manualRequired = projection.state === "manual_required" ||
-    !projection.capabilities.respond ||
+  const manualRequired = publicProjection.state === "manual_required" ||
+    !publicProjection.capabilities.respond ||
     question.response_kind === "multi_select";
   if (!executable && !manualRequired) {
     return "proceed";
   }
   const attributable =
+    projection !== undefined &&
     observationMatches &&
     input.state.conversation.status === "waiting_for_agent" &&
-    projection.turn_id === turnIdForConversation(input.state.conversation) &&
+    projection.subject.kind === "managed_turn" &&
+    projection.subject.turn_id === turnIdForConversation(input.state.conversation) &&
+    projection.subject.message_id === input.currentMessageId &&
     typeof fingerprint === "string" &&
     /^[0-9a-f]{64}$/u.test(fingerprint) &&
     surfaceId !== undefined &&
     screenChangedSinceSend;
-  if (!attributable || !fingerprint || !surfaceId) {
+  if (!attributable || !projection || !fingerprint || !surfaceId) {
     input.ports.runtime.log("warn", "terminal_bridge_interaction_not_actionable", {
       conversation_id: input.state.conversation.conversation_id,
       terminal_target: input.terminalControl.target,
-      interaction_id: projection.interaction_id,
-      interaction_state: projection.state,
+      interaction_id: publicProjection.interaction_id,
+      interaction_state: publicProjection.state,
       response_kind: question?.response_kind,
       screen_changed_since_send: screenChangedSinceSend,
       reason: manualRequired
@@ -1145,6 +1159,13 @@ function handleInteractionObservation(
     });
     return "proceed";
   }
+  const compatibilityProjection = terminalInteractionPublicCompatibilityProjection(
+    projection
+  );
+  const compatibilityStatus: TerminalBridgeStatus = {
+    ...input.terminalStatus,
+    interaction_state: compatibilityProjection
+  };
   if (
     stringValue(takeover?.terminal_bridge_last_interaction_message_id) ===
       input.currentMessageId &&
@@ -1192,7 +1213,7 @@ function handleInteractionObservation(
     conversation: input.state.conversation,
     executor: input.state.executor,
     terminalControl: input.terminalControl,
-    terminalStatus: input.terminalStatus,
+    terminalStatus: compatibilityStatus,
     currentMessageId: input.currentMessageId,
     interactionId: projection.interaction_id,
     questionId: question.question_id,
@@ -1221,7 +1242,7 @@ function handleInteractionObservation(
       kind: "interaction_duplicate",
       conversation: notification.conversation,
       terminalControl: input.terminalControl,
-      interactionState: projection
+      interactionState: compatibilityProjection
     });
     return "finished";
   }
@@ -1243,7 +1264,7 @@ function handleInteractionObservation(
       conversation: notification.conversation,
       callbackMessage: notification.recorded?.callbackMessage,
       terminalControl: input.terminalControl,
-      interactionState: projection
+      interactionState: compatibilityProjection
     });
     return "finished";
   }
@@ -1308,6 +1329,34 @@ function handleInteractionObservation(
   });
   input.ports.runtime.sleep(input.configuration.pollIntervalMs);
   return "continue";
+}
+
+function normalizeManagedMonitorInteraction(
+  input: SampledPollInput,
+  projection: NonNullable<TerminalBridgeStatus["interaction_state"]>,
+  fingerprint: string | undefined,
+  surfaceId: string | undefined
+): TerminalInteractionSubjectProjection | undefined {
+  if (!input.currentMessageId || !fingerprint || !surfaceId) {
+    return undefined;
+  }
+  try {
+    return normalizeTerminalInteractionProjectionV2(projection, {
+      subject: {
+        kind: "managed_turn",
+        turn_id: turnIdForConversation(input.state.conversation),
+        message_id: input.currentMessageId
+      },
+      surfaceId,
+      promptFingerprint: fingerprint,
+      responseAuthority: projection.state === "pending" &&
+          projection.capabilities.respond
+        ? "executable"
+        : "notify_only"
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function terminalInteractionSurfaceId(value: unknown): string | undefined {

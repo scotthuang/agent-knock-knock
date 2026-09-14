@@ -17,6 +17,7 @@ import type {
 } from "../src/terminal-agent-bridge.js";
 import {
   TERMINAL_INTERACTION_SCHEMA,
+  TERMINAL_INTERACTION_SUBJECT_VERSION,
   TERMINAL_INTERACTION_VERSION
 } from "../src/terminal-interaction-protocol.js";
 import {
@@ -161,6 +162,34 @@ function interactionStatus(input: {
         free_text: false,
         multi_select: false
       }
+    }
+  };
+}
+
+function subjectAwareInteractionStatus(): TerminalBridgeStatus {
+  const legacy = interactionStatus();
+  const projection = legacy.interaction_state!;
+  return {
+    ...legacy,
+    interaction_state: {
+      schema: TERMINAL_INTERACTION_SCHEMA,
+      version: TERMINAL_INTERACTION_SUBJECT_VERSION,
+      interaction_id: projection.interaction_id,
+      subject: {
+        kind: "managed_turn",
+        turn_id: "turn-1",
+        message_id: "message-1"
+      },
+      agent: projection.agent,
+      kind: projection.kind,
+      state: projection.state,
+      step: projection.step,
+      questions: projection.questions,
+      expires_at: projection.expires_at,
+      surface_id: INTERACTION_SURFACE_ID,
+      prompt_fingerprint: INTERACTION_FINGERPRINT,
+      response_authority: "executable",
+      capabilities: projection.capabilities
     }
   };
 }
@@ -803,6 +832,40 @@ test("native questionnaire callback runs before completion and uses its own noti
   assert.doesNotMatch(JSON.stringify(emitted), /prompt_fingerprint/u);
 });
 
+test("monitor consumes v2 ownership internally and persists managed compatibility v1", async () => {
+  const trace: string[] = [];
+  const owner = conversation({
+    terminal_bridge_pre_send_screen_fingerprint: "screen-before"
+  });
+  const ports = fakePorts(trace, owner);
+  ports.state.recordInteractionNotification = (input) => {
+    trace.push("interaction.record");
+    assert.equal(input.terminalStatus.interaction_state?.version, 1);
+    assert.equal(input.terminalStatus.interaction_state?.turn_id, "turn-1");
+    return {
+      conversation: owner,
+      duplicate: false,
+      stale: false,
+      recorded: { prepared: fakePrepared(owner) }
+    };
+  };
+  ports.authority.poll = async () => ({
+    kind: "observed",
+    poll: { status: subjectAwareInteractionStatus() }
+  });
+
+  await runTerminalMonitor({
+    initialConversation: owner,
+    expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION,
+    lifecycle: { startedRecorded: true },
+    ports
+  });
+
+  assert.ok(trace.includes("interaction.record"));
+  assert.ok(trace.includes("callback.run"));
+});
+
 test("a consumed native questionnaire fingerprint is never replayed", async () => {
   const trace: string[] = [];
   const owner = conversation({
@@ -1105,6 +1168,7 @@ test("interaction outbox recovery reuses the persisted immutable projection", ()
 
   const preparedProjection = preparedMetadata?.interaction_state as
     Record<string, unknown>;
+  assert.equal(preparedProjection.version, 1);
   assert.equal(preparedProjection.expires_at, storedProjection.expires_at);
   assert.notEqual(
     preparedProjection.expires_at,

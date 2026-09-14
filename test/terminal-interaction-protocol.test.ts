@@ -6,7 +6,10 @@ import {
   TERMINAL_INTERACTION_SUBJECT_VERSION,
   TERMINAL_INTERACTION_VERSION,
   TerminalInteractionValidationError,
+  normalizeTerminalInteractionProjectionV2,
+  normalizeTerminalInteractionResponseV2,
   sameTerminalInteractionSubject,
+  terminalInteractionPublicCompatibilityProjection,
   terminalInteractionSubjectId,
   terminalInteractionSubjectKey,
   validateAnyTerminalInteractionProjection,
@@ -714,6 +717,89 @@ test("subject-aware response is fenced to full Watch subject evidence", () => {
       subject: { ...subject, anchor_fingerprint: "b".repeat(64) }
     }, inputProjection),
     "interaction_mismatch",
+    "$.subject"
+  );
+});
+
+test("legacy managed projection and response normalize to alias-free v2", () => {
+  const subject = {
+    kind: "managed_turn",
+    turn_id: "turn_123",
+    message_id: "msg_123"
+  } as const;
+  const legacyProjection = validateTerminalInteractionProjection(projection());
+  const normalizedProjection = normalizeTerminalInteractionProjectionV2(
+    legacyProjection,
+    {
+      subject,
+      surfaceId: "tis_surface",
+      promptFingerprint: SHA,
+      responseAuthority: "executable"
+    }
+  );
+
+  assert.equal(normalizedProjection.version, 2);
+  assert.deepEqual(normalizedProjection.subject, subject);
+  assert.equal("turn_id" in normalizedProjection, false);
+  assert.deepEqual(
+    terminalInteractionPublicCompatibilityProjection(normalizedProjection),
+    legacyProjection
+  );
+
+  const selectAnswer = {
+    question_id: "q1",
+    response_kind: "single_select" as const,
+    selected_option_ids: ["local"]
+  };
+  const normalizedResponse = normalizeTerminalInteractionResponseV2(
+    response([selectAnswer]),
+    normalizedProjection
+  );
+  assert.deepEqual(normalizedResponse, {
+    interaction_id: "ti_123",
+    subject,
+    answers: [selectAnswer]
+  });
+  assert.equal("turn_id" in normalizedResponse, false);
+});
+
+test("v2 normalization strips managed aliases and never invents Watch ownership", () => {
+  const managedSubject = {
+    kind: "managed_turn",
+    turn_id: "turn_123",
+    message_id: "msg_123"
+  } as const;
+  const normalizedManaged = normalizeTerminalInteractionProjectionV2(
+    subjectProjection(managedSubject, { turn_id: "turn_123" })
+  );
+  assert.equal("turn_id" in normalizedManaged, false);
+
+  const watchSubject = {
+    kind: "terminal_watch",
+    watch_id: "terminal-watch-123",
+    anchor_fingerprint: SHA
+  } as const;
+  const watchProjection = validateTerminalInteractionSubjectProjection(
+    subjectProjection(watchSubject)
+  );
+  assert.deepEqual(
+    terminalInteractionPublicCompatibilityProjection(watchProjection),
+    watchProjection
+  );
+  expectValidationError(
+    () => normalizeTerminalInteractionResponseV2(
+      {
+        interaction_id: "ti_subject",
+        turn_id: "turn_123",
+        answers: [{
+          question_id: "q1",
+          response_kind: "confirm",
+          confirm: true
+        }]
+      },
+      watchProjection
+    ),
+    "invalid_type",
     "$.subject"
   );
 });

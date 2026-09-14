@@ -12,6 +12,8 @@ import {
 } from "../src/terminal-agent-bridge.js";
 import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
+import type { TerminalInteractionSubjectResponse } from
+  "../src/terminal-interaction-protocol.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
 
 const NOW = new Date("2026-09-07T12:00:00.000Z");
@@ -89,6 +91,20 @@ function responseJson(): string {
       selected_option_ids: [OPTION_ID]
     }]
   });
+}
+
+function managedRuntimeResponse(
+  response: Parameters<TerminalAgentBridge["respondInteraction"]>[2]
+): TerminalInteractionSubjectResponse {
+  return {
+    interaction_id: response.interaction_id,
+    subject: {
+      kind: "managed_turn",
+      turn_id: "turn-interaction",
+      message_id: "message-interaction"
+    },
+    answers: response.answers
+  };
 }
 
 function harness(input: {
@@ -200,7 +216,7 @@ function successfulBridge() {
         terminalControl,
         fingerprint: FINGERPRINT,
         projection,
-        response,
+        response: managedRuntimeResponse(response),
         runtime: executionOptions.runtime
       };
       const authorized = await executionOptions.authorize?.(context);
@@ -339,7 +355,7 @@ test("post-reservation uncertainty stalls the Turn and preserves one-shot receip
           terminalControl: control,
           fingerprint: FINGERPRINT,
           projection,
-          response,
+          response: managedRuntimeResponse(response),
           runtime: executionOptions.runtime
         };
         await executionOptions.beforeDispatch?.(context);
@@ -394,7 +410,7 @@ test("proven zero-input abort clears the exact reservation without stalling", as
           terminalControl: control,
           fingerprint: FINGERPRINT,
           projection,
-          response,
+          response: managedRuntimeResponse(response),
           runtime: executionOptions.runtime
         };
         const authorized = await executionOptions.authorize?.(context);
@@ -485,7 +501,7 @@ test("zero-input cleanup never overwrites a different durable reservation", asyn
           terminalControl: control,
           fingerprint: FINGERPRINT,
           projection,
-          response,
+          response: managedRuntimeResponse(response),
           runtime: executionOptions.runtime
         };
         const authorized = await executionOptions.authorize?.(context);
