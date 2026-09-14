@@ -1,5 +1,6 @@
 {
   "fast": [
+    "test/architecture-document-routing.test.ts",
     "test/affected-test-selection.test.ts",
     "test/architecture-health.test.ts",
     "test/approval-policy.test.ts",
