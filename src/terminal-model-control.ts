@@ -15,6 +15,13 @@ import {
   type TerminalModelControlSubjectInput
 } from "./terminal-model-control-subject.js";
 import {
+  decideTerminalModelControlFailure,
+  reduceTerminalModelControlTransactionPhase,
+  type TerminalModelControlFailureDecision,
+  type TerminalModelControlTransactionEvent,
+  type TerminalModelControlTransactionPhase
+} from "./terminal-model-control-transaction.js";
+import {
   terminalPhysicalBindingToken,
   type TerminalControlRef
 } from "./terminal-control-ref.js";
@@ -806,6 +813,84 @@ export interface TerminalModelOptionsExecution {
 const MODEL_CONTROL_SETTLE_TIMEOUT_MS = 5_000;
 const MODEL_CONTROL_POLL_MS = 40;
 
+interface TerminalModelControlTransaction {
+  phase: TerminalModelControlTransactionPhase;
+}
+
+type TerminalModelControlOperationInput<T extends {
+  ports: TerminalModelControlPorts;
+}> = T & {
+  readonly transaction: TerminalModelControlTransaction;
+};
+
+function advanceTerminalModelControlTransaction(
+  transaction: TerminalModelControlTransaction,
+  event: TerminalModelControlTransactionEvent
+): void {
+  transaction.phase = reduceTerminalModelControlTransactionPhase(
+    transaction.phase,
+    event
+  );
+}
+
+/** Track every nested native write even when its transport receipt rejects. */
+function beginTerminalModelControlTransaction<T extends {
+  ports: TerminalModelControlPorts;
+}>(input: T): TerminalModelControlOperationInput<T> {
+  const transaction: TerminalModelControlTransaction = { phase: "no_input" };
+  return {
+    ...input,
+    transaction,
+    ports: {
+      ...input.ports,
+      sendText: async (terminalControl, text) => {
+        advanceTerminalModelControlTransaction(
+          transaction,
+          "reversible_input_attempted"
+        );
+        await input.ports.sendText(terminalControl, text);
+      },
+      sendKeys: async (terminalControl, keys) => {
+        advanceTerminalModelControlTransaction(
+          transaction,
+          "reversible_input_attempted"
+        );
+        await input.ports.sendKeys(terminalControl, keys);
+      }
+    }
+  };
+}
+
+function terminalModelControlInputAttempted(
+  transaction: TerminalModelControlTransaction
+): boolean {
+  return transaction.phase === "reversible_input" ||
+    transaction.phase === "commit_attempted";
+}
+
+async function settleTerminalModelControlFailure(input: {
+  plan: TerminalModelControlPlan;
+  ports: TerminalModelControlPorts;
+  transaction: TerminalModelControlTransaction;
+}, terminalControl: unknown): Promise<{
+  readonly decision: TerminalModelControlFailureDecision;
+  readonly cleanupError?: string;
+}> {
+  const pending = decideTerminalModelControlFailure(
+    input.transaction.phase,
+    "not_attempted"
+  );
+  if (!pending.unwind) return { decision: pending };
+  const cleanupError = await tryUnwindModelControl(input, terminalControl);
+  return {
+    decision: decideTerminalModelControlFailure(
+      input.transaction.phase,
+      cleanupError ? "failed" : "proven"
+    ),
+    ...(cleanupError ? { cleanupError } : {})
+  };
+}
+
 function modelControlCaptureBlocked(
   capture: TerminalModelControlCapture
 ): boolean {
@@ -940,23 +1025,23 @@ export async function repairTerminalModelControlResidual(input: {
       "the exact /model residual changed after authorization; refresh AKK list"
     );
   }
-  let terminalInputAttempted = false;
-  const ports: TerminalModelControlPorts = {
-    ...input.ports,
-    sendKeys: async (terminalControl, keys) => {
-      terminalInputAttempted = true;
-      await input.ports.sendKeys(terminalControl, keys);
-    }
-  };
+  const operation = beginTerminalModelControlTransaction(input);
   try {
     const cleared = await unwindModelControl(
-      { plan: input.plan, ports },
+      operation,
       observed.terminalControl
     );
     if (classifyTerminalModelControlSurface(input.plan, cleared).state !==
         "idle_empty") {
       throw new Error("cleanup did not prove an exact idle empty Composer");
     }
+    const terminalInputAttempted = terminalModelControlInputAttempted(
+      operation.transaction
+    );
+    advanceTerminalModelControlTransaction(
+      operation.transaction,
+      "postcondition_proven"
+    );
     return {
       outcome: "repaired",
       terminalControl: cleared.terminalControl,
@@ -965,13 +1050,17 @@ export async function repairTerminalModelControlResidual(input: {
       doNotRetry: false
     };
   } catch (error) {
-    if (!terminalInputAttempted) throw error;
+    const decision = decideTerminalModelControlFailure(
+      operation.transaction.phase,
+      "failed"
+    );
+    if (decision.outcome === "throw") throw error;
     return {
       outcome: "uncertain",
       terminalControl: observed.terminalControl,
       terminalInputAttempted: true,
       composerPostcondition: "unproven",
-      doNotRetry: true,
+      doNotRetry: decision.doNotRetry,
       reason: error instanceof Error ? error.message : String(error)
     };
   }
@@ -991,16 +1080,17 @@ export async function discoverTerminalModelOptions(input: {
     { state: "recoverable" }
   >;
 }): Promise<TerminalModelOptionsExecution> {
-  const codexNativeCatalog = input.agent === "codex"
-    ? await input.ports.loadCodexCatalog?.()
+  const operation = beginTerminalModelControlTransaction(input);
+  const codexNativeCatalog = operation.agent === "codex"
+    ? await operation.ports.loadCodexCatalog?.()
     : undefined;
-  if (input.agent === "codex" && !codexNativeCatalog) {
+  if (operation.agent === "codex" && !codexNativeCatalog) {
     throw new Error(
       "Codex model discovery requires the exact running executable's validated model catalog"
     );
   }
-  let control = input.terminalControl;
-  const opened = await openModelPicker(input, control);
+  let control = operation.terminalControl;
+  const opened = await openModelPicker(operation, control);
   control = opened.capture.terminalControl;
   const picker = opened.observation;
   try {
@@ -1032,7 +1122,7 @@ export async function discoverTerminalModelOptions(input: {
         : [];
     });
     const dismissed = await exactDismiss(
-      input,
+      operation,
       control,
       picker
     );
@@ -1056,7 +1146,7 @@ export async function discoverTerminalModelOptions(input: {
     models = [];
     for (const row of picker.rows) {
       const inspected = await inspectClaudeModelEfforts(
-        input, control, livePicker, row.id
+        operation, control, livePicker, row.id
       );
       control = inspected.capture.terminalControl;
       livePicker = inspected.observation;
@@ -1069,7 +1159,7 @@ export async function discoverTerminalModelOptions(input: {
       }
     }
     control = (await exactDismiss(
-      input,
+      operation,
       control,
       livePicker
     )).terminalControl;
@@ -1082,22 +1172,30 @@ export async function discoverTerminalModelOptions(input: {
     reasoningEffort: currentEffort
   } satisfies TerminalModelValue;
   const fingerprintInput = {
-    agent: input.agent,
-    agentVersion: input.agentVersion,
-    behaviorProfile: input.plan.behaviorProfile,
-    scope: input.plan.scope,
+    agent: operation.agent,
+    agentVersion: operation.agentVersion,
+    behaviorProfile: operation.plan.behaviorProfile,
+    scope: operation.plan.scope,
     current,
     models
   };
-  return {
+  const result = {
     terminalControl: control,
     catalog: {
       ...fingerprintInput,
       catalogFingerprint: terminalModelCatalogFingerprint(fingerprintInput)
     }
   };
+  advanceTerminalModelControlTransaction(
+    operation.transaction,
+    "postcondition_proven"
+  );
+  return result;
   } catch (error) {
-    const cleanupError = await tryUnwindModelControl(input, control);
+    const { cleanupError } = await settleTerminalModelControlFailure(
+      operation,
+      control
+    );
     const detail = error instanceof Error ? error.message : String(error);
     if (cleanupError) {
       throw new Error(
@@ -1156,28 +1254,31 @@ export async function switchTerminalModel(input: {
     };
   }
 
-  let irreversible = false;
+  const operation = beginTerminalModelControlTransaction(input);
   let control = discovery.terminalControl;
   let codexPersistenceBaseline: string | undefined;
   let codexPersistenceScreen: string | undefined;
   try {
-    const opened = await openModelPicker(input, control);
+    const opened = await openModelPicker(operation, control);
     control = opened.capture.terminalControl;
     const picker = opened.observation;
     if (picker.state === "codex_model_picker") {
       codexPersistenceBaseline = opened.idleCapture.screen;
       const committed = await applyCodexModelSelection(
-        input,
+        operation,
         control,
         picker,
         input.request,
-        () => { irreversible = true; }
+        () => advanceTerminalModelControlTransaction(
+          operation.transaction,
+          "commit_attempted"
+        )
       );
       control = committed.capture.terminalControl;
       codexPersistenceScreen = committed.capture.screen;
     } else if (picker.state === "claude_model_picker") {
       const selected = await transitionModelControl(
-        input,
+        operation,
         control,
         picker,
         modelControlSelectModelKeys(picker, input.request.model),
@@ -1201,7 +1302,7 @@ export async function switchTerminalModel(input: {
         }
         seen.add(displayed);
         const next = await transitionModelControl(
-          input,
+          operation,
           control,
           effortPicker,
           claudeModelControlEffortKey("higher"),
@@ -1222,14 +1323,17 @@ export async function switchTerminalModel(input: {
       if (selectedClaudeModelId(effortPicker) !== input.request.model) {
         throw new Error("Claude changed the highlighted model before session-only commit");
       }
-      irreversible = true;
+      advanceTerminalModelControlTransaction(
+        operation.transaction,
+        "commit_attempted"
+      );
       await exactDispatchKeys(
-        input,
+        operation,
         control,
         effortPicker,
         claudeModelControlCommitKeys(input.plan)
       );
-      const closed = await waitForObservation(input, control, ["none"], {
+      const closed = await waitForObservation(operation, control, ["none"], {
         allowImmediateNone: true
       });
       control = closed.capture.terminalControl;
@@ -1239,7 +1343,7 @@ export async function switchTerminalModel(input: {
 
     let persistence = input.agent === "codex"
       ? await waitForCodexPersistencePostcondition(
-          input,
+          operation,
           control,
           codexPersistenceBaseline ?? "",
           input.request,
@@ -1260,21 +1364,24 @@ export async function switchTerminalModel(input: {
       effective.reasoningEffort === discovery.catalog.current.reasoningEffort &&
       effective.reasoningEffort !== requestedEffort
     ) {
-      const reopened = await openModelPicker(input, control);
+      const reopened = await openModelPicker(operation, control);
       if (reopened.observation.state !== "codex_model_picker") {
         throw new Error("Codex Plan-mode reconciliation did not open its model picker");
       }
       const secondBaseline = reopened.idleCapture.screen;
       const reconciled = await applyCodexModelSelection(
-        input,
+        operation,
         reopened.capture.terminalControl,
         reopened.observation,
         input.request,
-        () => { irreversible = true; }
+        () => advanceTerminalModelControlTransaction(
+          operation.transaction,
+          "commit_attempted"
+        )
       );
       control = reconciled.capture.terminalControl;
       persistence = await waitForCodexPersistencePostcondition(
-        input,
+        operation,
         control,
         secondBaseline,
         input.request,
@@ -1321,6 +1428,10 @@ export async function switchTerminalModel(input: {
             : { reasoningEffort: requestedEffort })
         }
       : undefined;
+    advanceTerminalModelControlTransaction(
+      operation.transaction,
+      "postcondition_proven"
+    );
     return {
       terminalControl: control,
       outcome: "changed",
@@ -1332,8 +1443,9 @@ export async function switchTerminalModel(input: {
       doNotRetry: false
     };
   } catch (error) {
-    const cleanupError = await tryUnwindModelControl(input, control);
-    if (!irreversible && !cleanupError) throw error;
+    const { decision, cleanupError } =
+      await settleTerminalModelControlFailure(operation, control);
+    if (decision.outcome === "throw") throw error;
     const detail = error instanceof Error ? error.message : String(error);
     return {
       terminalControl: control,
@@ -1341,7 +1453,7 @@ export async function switchTerminalModel(input: {
       scope: input.plan.scope,
       defaultsChanged: null,
       requested: input.request,
-      doNotRetry: true,
+      doNotRetry: decision.doNotRetry,
       reason: cleanupError
         ? `${detail}; exact native model-control cleanup failed: ${cleanupError}`
         : detail
@@ -1355,7 +1467,7 @@ async function applyCodexModelSelection(input: {
 }, terminalControl: unknown,
 picker: Extract<TerminalModelControlObservation, { state: "codex_model_picker" }>,
 request: TerminalModelSwitchRequest,
-beforeIrreversible: () => void): Promise<{
+beforeCommitAttempt: () => void): Promise<{
   capture: TerminalModelControlCapture;
   observation: TerminalModelControlObservation;
 }> {
@@ -1381,7 +1493,7 @@ beforeIrreversible: () => void): Promise<{
   }
   // A remotely refreshed model can become single-effort after discovery; in
   // that case Enter may commit immediately instead of opening a submenu.
-  beforeIrreversible();
+  beforeCommitAttempt();
   const reasoning = await transitionModelControl(
     input,
     moved.capture.terminalControl,
@@ -1402,7 +1514,7 @@ beforeIrreversible: () => void): Promise<{
   );
   const advanced = request.reasoningEffort === "max" ||
     request.reasoningEffort === "ultra";
-  if (!advanced) beforeIrreversible();
+  if (!advanced) beforeCommitAttempt();
   let selected = await transitionModelControl(
     input,
     reasoning.capture.terminalControl,
@@ -1421,7 +1533,7 @@ beforeIrreversible: () => void): Promise<{
     keys = codexModelControlSelectEffortKeys(
       selection, request.reasoningEffort
     );
-    beforeIrreversible();
+    beforeCommitAttempt();
     selected = await transitionModelControl(
       input,
       selected.capture.terminalControl,
@@ -1434,7 +1546,7 @@ beforeIrreversible: () => void): Promise<{
   if (selected.observation.state !== "codex_plan_scope_picker") {
     return selected;
   }
-  beforeIrreversible();
+  beforeCommitAttempt();
   return transitionModelControl(
     input,
     selected.capture.terminalControl,
@@ -1449,6 +1561,7 @@ async function openModelPicker(input: {
   plan: TerminalModelControlPlan;
   terminalControl: unknown;
   ports: TerminalModelControlPorts;
+  transaction: TerminalModelControlTransaction;
   initialResidual?: Extract<
     TerminalModelControlResidualObservation,
     { state: "recoverable" }
@@ -1459,7 +1572,6 @@ async function openModelPicker(input: {
   observation: TerminalModelControlObservation;
 }> {
   let cleanupControl = terminalControl;
-  let terminalInputAttempted = false;
   try {
   let idleCapture: TerminalModelControlCapture;
   let revalidatedCommand: TerminalModelControlCapture;
@@ -1522,7 +1634,6 @@ async function openModelPicker(input: {
         "idle_empty") {
       throw new Error("the exact idle composer changed before /model input");
     }
-    terminalInputAttempted = true;
     await input.ports.sendText(finalEmpty.terminalControl, input.plan.command);
     let commandCapture: TerminalModelControlCapture | undefined;
     const startedAt = Date.now();
@@ -1560,7 +1671,6 @@ async function openModelPicker(input: {
     idleCapture = finalEmpty;
   }
   cleanupControl = revalidatedCommand.terminalControl;
-  terminalInputAttempted = true;
   await input.ports.sendKeys(revalidatedCommand.terminalControl, ["C-m"]);
   let opened = await waitForObservation(
     input,
@@ -1602,9 +1712,9 @@ async function openModelPicker(input: {
   // the catalog tuple, Plan mode, or a persistence-message baseline.
   return { ...opened, idleCapture };
   } catch (error) {
-    if (!terminalInputAttempted) throw error;
-    const cleanupError = await tryUnwindModelControl(
-      input, cleanupControl
+    const { cleanupError } = await settleTerminalModelControlFailure(
+      input,
+      cleanupControl
     );
     if (!cleanupError) throw error;
     const detail = error instanceof Error ? error.message : String(error);
