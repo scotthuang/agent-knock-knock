@@ -1017,6 +1017,10 @@
       "owner": "terminal-agent-core"
     },
     {
+      "path": "src/terminal-model-control-bridge.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-model-control-profile.ts",
       "owner": "terminal-agent-core"
     },

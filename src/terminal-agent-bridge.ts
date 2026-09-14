@@ -68,10 +68,7 @@ import type {
   NativeQuestionnaireInspection
 } from
   "./terminal-questionnaire-adapter.js";
-import { inspectNativeQuestionnaire } from
-  "./terminal-questionnaire-adapter.js";
 import {
-  CODEX_MODEL_CONTROL_AGENT_VERSION,
   discoverTerminalModelOptions,
   inspectTerminalModelControlResidual,
   observeTerminalModelControl,
@@ -81,7 +78,6 @@ import {
   repairTerminalModelControlResidual,
   switchTerminalModel,
   terminalModelControlPlanConforms,
-  terminalModelControlSlashCompletionRows,
   type TerminalModelCatalog,
   type TerminalModelControlPlan,
   type TerminalModelControlPorts,
@@ -90,6 +86,8 @@ import {
   type TerminalModelSwitchRequest,
   type TerminalModelSwitchResult
 } from "./terminal-model-control.js";
+import { createTerminalModelControlPorts } from
+  "./terminal-model-control-bridge.js";
 
 // Verified Codex profiles through 0.154.0 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
@@ -1594,393 +1592,47 @@ export class TerminalAgentBridge {
     adapter: TerminalAgentAdapter,
     plan: TerminalModelControlPlan,
     options: TerminalModelControlBridgeOptions
-  ) {
+  ): TerminalModelControlPorts {
     if (!options.beforeInput) {
       throw new Error(
         "terminal model control requires current-snapshot authority before every input"
       );
     }
-    // `claude agents` deliberately reports the same interactive process as
-    // `waiting` / `dialog open` while Claude's native model picker is open.
-    // Keep that lifecycle relaxation private to this model-control operation:
-    // a capture may cross the state boundary read-only, but a terminal key is
-    // authorized only by the immediately preceding, exact profiled picker
-    // frame. The permit is one-shot so no later transport can inherit it.
-    let claudeModelDialogInputPermit: {
-      terminalControl: TerminalControlRef;
-      fingerprint: string;
-    } | undefined;
-    type CodexModelInputPermit = {
-      terminalControl: TerminalControlRef;
-      expectedComposer?: string;
-      kind: "composer_empty" | "composer_command" | "model_surface";
-      fingerprint: string;
-    };
-    let codexModelInputPermit: CodexModelInputPermit | undefined;
-    const consumeCodexModelInputPermit =
-      (): CodexModelInputPermit | undefined => {
-        const permit = codexModelInputPermit;
-        codexModelInputPermit = undefined;
-        return permit;
-      };
-    const capture = async (input: {
-        terminalControl: unknown;
-        expectedComposer?: string;
-      }) => {
-        claudeModelDialogInputPermit = undefined;
-        codexModelInputPermit = undefined;
-        const original = input.terminalControl as TerminalControlRef;
-        const verified = await this.verifyModelControlTerminalIdentity(
-          adapter,
-          plan,
-          original,
-          options.runtime,
-          { claudeModelDialog: "allow" }
-        );
-        const styledScreen = await this.terminalProvider.capture(
-          this.terminalProvider.endpoint(verified),
-          { scrollbackLines: 160, preserveEscapes: true }
-        );
-        const screen = stripTerminalEscapeSequences(styledScreen);
-        const inspection = adapter.inspectScreen({
-          screen,
-          runtime: options.runtime
-        });
-        const modelObservation = adapter.observeModelControl?.(plan, screen);
-        const exactCodexModelSurface = adapter.agent === "codex" &&
-          modelObservation !== undefined &&
-          modelObservation.state !== "none" &&
-          modelObservation.state !== "ambiguous";
-        const exactClaudeModelDialog = adapter.agent === "claude" &&
-          modelObservation?.state === "claude_model_picker";
-        const reverified = await this.verifyModelControlTerminalIdentity(
-          adapter,
-          plan,
-          verified,
-          options.runtime,
-          {
-            claudeModelDialog: exactClaudeModelDialog
-              ? "require"
-              : "forbid"
-          }
-        );
-        if (!sameTerminalControlIdentity(verified, reverified)) {
-          throw new Error(
-            "terminal control identity changed across model-control capture"
-          );
-        }
-        if (exactClaudeModelDialog) {
-          claudeModelDialogInputPermit = {
-            terminalControl: reverified,
-            fingerprint: modelObservation.fingerprint
-          };
-        }
-        const codexComposer = adapter.agent === "codex"
-          ? currentCodexComposerCapture(
-              styledScreen,
-              input.expectedComposer ?? "",
-              false,
-              false,
-              input.expectedComposer === plan.command
-                ? terminalModelControlSlashCompletionRows(plan)
-                : undefined
-            )
-          : undefined;
-        let codexInputBlocked = false;
-        if (adapter.agent === "codex") {
-          try {
-            const questionnaire = inspectNativeQuestionnaire({
-              agent: "codex",
-              version: CODEX_MODEL_CONTROL_AGENT_VERSION,
-              screen: styledScreen
-            });
-            const asyncQuestionMode = inspectCodexAsyncQuestionInputMode(
-              styledScreen
-            );
-            codexInputBlocked = !exactCodexModelSurface && (
-              questionnaire.status !== "none" ||
-              codexActiveWriterViewerVisible(styledScreen) ||
-              asyncQuestionMode === "expanded" ||
-              asyncQuestionMode === "ambiguous"
-            );
-          } catch {
-            codexInputBlocked = !exactCodexModelSurface;
-          }
-        }
-        const exactEmptyComposer = adapter.agent === "codex"
-          ? codexComposer?.state === "exact_empty"
-          : isExactClaudeIdleComposer(screen);
-        const claudeProfiledCommand = adapter.agent === "claude" &&
-          input.expectedComposer === plan.command &&
-          exactClaudeModelControlComposerCapture(
-            screen, plan, input.expectedComposer
-          ) !== undefined;
-        const claudeBareCommand = adapter.agent === "claude" &&
-          input.expectedComposer !== undefined &&
-          exactTerminalComposerCapture(
-            "claude", screen, input.expectedComposer
-          ) !== undefined;
-        const exactCommandComposer = input.expectedComposer !== undefined && (
-          adapter.agent === "codex"
-            ? codexComposer?.state === "exact_draft"
-            : claudeProfiledCommand || claudeBareCommand
-        );
-        const exactCommandReady = adapter.agent === "codex"
-          ? codexComposer?.state === "exact_draft" &&
-            codexComposer.profiledSlashPopup === true
-          : claudeProfiledCommand;
-        const exactBareCommand = adapter.agent === "codex"
-          ? codexComposer?.state === "exact_draft" &&
-            codexComposer.bareCommand === true
-          : claudeBareCommand && !claudeProfiledCommand;
-        if (adapter.agent === "codex") {
-          const exactModelSurface = modelObservation &&
-            modelObservation.state !== "none" &&
-            modelObservation.state !== "ambiguous"
-            ? {
-                kind: "model_surface" as const,
-                fingerprint: modelObservation.fingerprint
-              }
-            : undefined;
-          const exactComposerSurface = codexComposer?.state === "exact_empty"
-            ? {
-                kind: "composer_empty" as const,
-                fingerprint: codexComposer.digest
-              }
-            : codexComposer?.state === "exact_draft"
-              ? {
-                  kind: "composer_command" as const,
-                  fingerprint: codexComposer.digest
-                }
-              : undefined;
-          const proof = exactModelSurface ?? exactComposerSurface;
-          if (proof) {
-            codexModelInputPermit = {
-              terminalControl: reverified,
-              expectedComposer: input.expectedComposer,
-              ...proof
-            };
-          }
-        }
-        return {
-          terminalControl: reverified,
-          screen,
-          // The exact profiled picker is the current input owner. Generic
-          // lifecycle/questionnaire detectors may still see stale transcript
-          // markers behind that overlay, so keep their result from vetoing the
-          // model-control state machine. Unknown or partial pickers receive no
-          // such override and remain fail-closed.
-          activityState: exactCodexModelSurface
-            ? "unknown"
-            : inspection.activity.state,
-          approvalBlocked: exactCodexModelSurface
-            ? false
-            : inspection.approval.blocked,
-          exactEmptyComposer,
-          exactCommandReady,
-          exactCommandComposer,
-          exactBareCommand,
-          ...(codexComposer?.state === "exact_draft"
-            ? { exactCommandFingerprint: codexComposer.digest }
-            : {}),
-          inputBlocked: codexInputBlocked
-        };
-      };
-    return {
+    return createTerminalModelControlPorts({
+      adapter,
+      plan,
+      runtime: options.runtime,
       beforeInput: options.beforeInput,
       loadCodexCatalog: options.loadCodexCatalog,
-      capture,
-      sendText: async (control: unknown, text: "/model") => {
-        claudeModelDialogInputPermit = undefined;
-        if (adapter.agent === "codex") {
-          const permit = consumeCodexModelInputPermit();
-          if (!permit || permit.kind !== "composer_empty") {
-            throw new Error(
-              "Codex /model text requires one fresh exact empty-composer permit"
-            );
-          }
-          const fresh = await capture({
-            terminalControl: control,
-            expectedComposer: permit.expectedComposer
-          });
-          const freshPermit = consumeCodexModelInputPermit();
-          if (
-            !freshPermit ||
-            freshPermit.kind !== permit.kind ||
-            freshPermit.fingerprint !== permit.fingerprint ||
-            !sameTerminalControlIdentity(
-              permit.terminalControl,
-              freshPermit.terminalControl
-            ) ||
-            fresh.inputBlocked === true ||
-            fresh.approvalBlocked ||
-            fresh.activityState === "working" ||
-            fresh.activityState === "awaiting_approval" ||
-            !fresh.exactEmptyComposer
-          ) {
-            throw new Error(
-              "the exact Codex empty composer changed before /model text delivery"
-            );
-          }
-          await this.terminalProvider.sendText(
-            this.terminalProvider.endpoint(freshPermit.terminalControl),
-            text
-          );
-          return;
-        }
-        const verified = await this.verifyTerminalIdentity(
-          adapter.agent,
-          control as TerminalControlRef,
-          options.runtime
-        );
-        await this.terminalProvider.sendText(
-          this.terminalProvider.endpoint(verified),
+      runtimePorts: {
+        verifyTerminalIdentity: (agent, control, runtime) =>
+          this.verifyTerminalIdentity(agent, control, runtime),
+        captureStyled: (control) => this.terminalProvider.capture(
+          this.terminalProvider.endpoint(control),
+          { scrollbackLines: 160, preserveEscapes: true }
+        ),
+        sendText: (control, text) => this.terminalProvider.sendText(
+          this.terminalProvider.endpoint(control),
           text
-        );
-      },
-      sendKeys: async (control: unknown, keys: readonly string[]) => {
-        const requestedControl = control as TerminalControlRef;
-        if (adapter.agent === "codex") {
-          const permit = consumeCodexModelInputPermit();
-          claudeModelDialogInputPermit = undefined;
-          if (!permit || !sameTerminalControlIdentity(
-            permit.terminalControl,
-            requestedControl
-          )) {
-            throw new Error(
-              "Codex model-control key requires one fresh exact input-surface permit"
-            );
-          }
-          const fresh = await capture({
-            terminalControl: requestedControl,
-            expectedComposer: permit.expectedComposer
-          });
-          const freshPermit = consumeCodexModelInputPermit();
-          if (
-            !freshPermit ||
-            freshPermit.kind !== permit.kind ||
-            freshPermit.fingerprint !== permit.fingerprint ||
-            !sameTerminalControlIdentity(
-              permit.terminalControl,
-              freshPermit.terminalControl
-            ) ||
-            fresh.inputBlocked === true ||
-            fresh.approvalBlocked ||
-            fresh.activityState === "working" ||
-            fresh.activityState === "awaiting_approval"
-          ) {
-            throw new Error(
-              "the exact Codex model-control input surface changed before key dispatch"
-            );
-          }
-          await this.terminalProvider.sendKeys(
-            this.terminalProvider.endpoint(freshPermit.terminalControl),
-            keys
-          );
-          return;
-        }
-        const permit = claudeModelDialogInputPermit;
-        claudeModelDialogInputPermit = undefined;
-        const requireClaudeModelDialog = permit !== undefined &&
-          sameTerminalControlIdentity(
-            permit.terminalControl,
-            requestedControl
-          );
-        const verified = await this.verifyModelControlTerminalIdentity(
-          adapter,
-          plan,
-          requestedControl,
-          options.runtime,
-          {
-            claudeModelDialog: requireClaudeModelDialog
-              ? "require"
-              : "forbid"
-          }
-        );
-        if (requireClaudeModelDialog) {
-          const styledScreen = await this.terminalProvider.capture(
-            this.terminalProvider.endpoint(verified),
-            { scrollbackLines: 160, preserveEscapes: true }
-          );
-          const screen = stripTerminalEscapeSequences(styledScreen);
-          const inspection = adapter.inspectScreen({
-            screen,
-            runtime: options.runtime
-          });
-          const observation = adapter.observeModelControl?.(plan, screen);
-          if (
-            inspection.approval.blocked ||
-            inspection.activity.state === "working" ||
-            observation?.state !== "claude_model_picker" ||
-            observation.fingerprint !== permit?.fingerprint
-          ) {
-            throw new Error(
-              "the exact Claude model picker changed before key dispatch"
-            );
-          }
-        }
-        await this.terminalProvider.sendKeys(
-          this.terminalProvider.endpoint(verified),
+        ),
+        sendKeys: (control, keys) => this.terminalProvider.sendKeys(
+          this.terminalProvider.endpoint(control),
           keys
-        );
+        ),
+        sleep: this.sleep
       },
-      sleep: this.sleep
-    };
-  }
-
-  private async verifyModelControlTerminalIdentity(
-    adapter: TerminalAgentAdapter,
-    plan: TerminalModelControlPlan,
-    terminalControl: TerminalControlRef,
-    runtime: TerminalRuntimeIdentity | undefined,
-    options: {
-      claudeModelDialog: "forbid" | "allow" | "require";
-    }
-  ): Promise<TerminalControlRef> {
-    const canUseClaudeModelDialog =
-      adapter.agent === "claude" &&
-      isTerminalModelControlPlanForAgent(plan, "claude") &&
-      runtime?.requireExactClaudeAgentRow === true &&
-      runtime.exactClaudeAgentState === "idle";
-    if (options.claudeModelDialog === "require") {
-      if (!canUseClaudeModelDialog) {
-        throw new Error(
-          "Claude model-dialog identity cannot be required outside its exact profile"
-        );
+      classifiers: {
+        stripEscapes: stripTerminalEscapeSequences,
+        sameIdentity: sameTerminalControlIdentity,
+        currentCodexComposer: currentCodexComposerCapture,
+        inspectCodexAsyncQuestionInputMode,
+        codexActiveWriterViewerVisible,
+        isExactClaudeIdleComposer,
+        exactClaudeModelControlComposer:
+          exactClaudeModelControlComposerCapture,
+        exactTerminalComposer: exactTerminalComposerCapture
       }
-      return this.verifyTerminalIdentity(
-        adapter.agent,
-        terminalControl,
-        { ...runtime, exactClaudeAgentState: "status_dialog" }
-      );
-    }
-    try {
-      return await this.verifyTerminalIdentity(
-        adapter.agent,
-        terminalControl,
-        runtime
-      );
-    } catch (idleError) {
-      if (
-        options.claudeModelDialog !== "allow" ||
-        !canUseClaudeModelDialog
-      ) {
-        throw idleError;
-      }
-      try {
-        return await this.verifyTerminalIdentity(
-          adapter.agent,
-          terminalControl,
-          { ...runtime, exactClaudeAgentState: "status_dialog" }
-        );
-      } catch {
-        // Preserve the original current-snapshot failure. Both attempts use
-        // the same PID, process incarnation, native Session, cwd, and terminal
-        // control fence; the second changes only the exact allowed agents row
-        // state from idle to `waiting` / `dialog open`.
-        throw idleError;
-      }
-    }
+    });
   }
 
   async send(
