@@ -9,8 +9,6 @@ import {
   normalizeLegacyCallbackStatus,
   sessionIdForConversation,
   turnIdForConversation,
-  validateMessage,
-  type AgentMessage,
   type Conversation
 } from "./protocol.js";
 import {
@@ -19,6 +17,12 @@ import {
   managedSessionStorageKey,
   type ManagedSessionState
 } from "./managed-session.js";
+import type { EventRecord } from "./store-event-presentation.js";
+export {
+  messageEvent,
+  rawExchangeEvent,
+  type EventRecord
+} from "./store-event-presentation.js";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -395,11 +399,6 @@ export async function withStoreWriterLeaseAsync<T>(
     }
     releaseConversationLock(lockPath, token);
   }
-}
-
-export interface EventRecord {
-  event: string;
-  [key: string]: unknown;
 }
 
 export function pathsForConversation(conversationId: string, storeDir = defaultStoreDir()): ConversationPaths {
@@ -1974,51 +1973,4 @@ function fsyncDirectory(directory: string): void {
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && (error as NodeJS.ErrnoException).code === code;
-}
-
-export function messageEvent(message: AgentMessage): EventRecord {
-  validateMessage(message);
-  return {
-    ts: message.ts,
-    conversation_id: message.conversation_id,
-    session_id: message.session_id ?? message.conversation_id,
-    turn_id: message.turn_id ?? message.conversation_id,
-    event: "message",
-    from: message.from,
-    to: message.to,
-    type: message.type,
-    requires_response: message.requires_response,
-    round: message.round,
-    body: message.body,
-    message
-  };
-}
-
-export function rawExchangeEvent({
-  conversationId,
-  from,
-  to,
-  prompt,
-  response,
-  round,
-  type = "raw_exchange"
-}: {
-  conversationId: string;
-  from: string;
-  to: string;
-  prompt: string;
-  response: string;
-  round: number;
-  type?: string;
-}): EventRecord {
-  return {
-    ts: new Date().toISOString(),
-    conversation_id: conversationId,
-    event: type,
-    from,
-    to,
-    round,
-    prompt,
-    response
-  };
 }
