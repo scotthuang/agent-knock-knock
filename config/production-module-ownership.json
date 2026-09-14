@@ -1069,6 +1069,10 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-managed-send-cli-adapter.ts",
+      "owner": "terminal-command-adapter"
+    },
+    {
       "path": "src/terminal-model-control-action-policy.ts",
       "owner": "terminal-agent-core"
     },
