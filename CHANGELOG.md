@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.13.3 - 2026-09-14
+
+### Added
+
+- Add typed, catalog-bound model control for supported idle Codex and Claude Code panes. Callers can inspect native model/reasoning choices, select only an advertised semantic tuple, and receive separate effective-current-session and future-session-default postconditions without exposing raw slash commands, keys, menu indexes, or private authority.
+- Add a narrowly scoped Codex model-control repair action for an exactly recognized stale `/model` completion surface, bare Composer command, or native picker. The cleanup action never selects a model or submits work and must prove the main Composer empty before returning success.
+
+### Changed
+
+- Replace the structured List response's repeated action contract and verbose diagnostics with a compact terminal-first projection shared by OpenClaw, Pi, and DeepSeek Harness. It retains live resource identities, current state, action names, and dynamic semantic inputs; static action meanings and safety rules live in the bundled `agent-knock-knock` skill.
+- Bundle that same canonical skill with the OpenClaw plugin and export one Host-neutral List projection contract so native controller connectors do not maintain separate field-pruning logic.
+
+### Fixed
+
+- Let exact, idle Codex `0.154.0` zero-rollout panes discover and change native model settings without first fabricating a Session identity, while preserving exact pane/process/cwd, empty-Composer, interaction, active-Turn, and postcondition checks.
+- Recognize the standard and narrow Codex `Select Model and Effort` picker, including the nested `More reasoning…` flow, as a model-control surface instead of generic busy activity. List no longer advertises ordinary idle mutations while that picker owns input.
+- Normalize terminal/process incarnation authority across List and typed model-control execution, preserve a safe continuation action for exact residual `/model` state, and keep uncertain input outcomes non-retryable.
+
+### Security
+
+- Revalidate the exact terminal, process birth, screen generation, native catalog, Composer/input-owning surface, and current action offer under one mutation lock. Approval, questionnaire, editor, viewer, active Turn, unknown content, and identity drift remain zero-input failures; any post-input uncertainty remains `do_not_retry`.
+
 ## 0.13.2 - 2026-09-12
 
 ### Added

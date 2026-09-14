@@ -5,6 +5,9 @@ import {
   applySessionAuthorityToDispatch,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
+  decideTerminalUserExplicitModelControlAuthority,
+  decideTerminalUserExplicitModelControlResidualEntryAuthority,
+  decideTerminalUserExplicitModelControlRepairAuthority,
   decideTerminalUserExplicitSendAuthority,
   managedTurnNeedsAttention,
   projectHandoffDecision,
@@ -445,6 +448,217 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
   ]) {
     assert.deepEqual(
       decideTerminalUserExplicitSendAuthority({
+        ...common,
+        ...unavailable
+      }),
+      { eligible: false }
+    );
+  }
+});
+
+test("terminal-user-explicit model control is zero-rollout physical authority with its own token domain", () => {
+  const terminalControl: TerminalControlRef = {
+    ...control,
+    target: "user-model:0.0",
+    session: "user-model"
+  };
+  const endpointKey = "socket:/private/tmp/tmux-501/user-model";
+  createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: "pane-id:%92"
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(
+        endpointKey,
+        terminalControl.target,
+        terminalControl.socketPath
+      ),
+      label: terminalControl.target,
+      currentCommand: terminalControl.currentCommand,
+      currentPath: terminalControl.currentPath
+    },
+    processAnchorPid: terminalControl.panePid,
+    capabilities: terminalControl.capabilities,
+    providerRef: terminalControl
+  });
+  const terminalId = "terminal:v2:tmux:codex:user-model:0.0:4200";
+  const common = {
+    exactTerminalRow: true,
+    terminalId,
+    processState: "active",
+    terminalControl,
+    agent: "codex" as const,
+    pid: 4_200,
+    processUuid: "process-pid:4200:birth:model-birth",
+    processBirth: "model-birth",
+    agentVersion: "0.154.0",
+    behaviorProfile: "codex-model-control-0.154.0" as const,
+    zeroRolloutVerified: true,
+    modelControlSupported: true,
+    activityState: "idle",
+    screenState: "idle",
+    approvalScanned: true,
+    approvalBlocked: false,
+    automatedInputComposerReady: true,
+    terminalHasInteraction: false,
+    terminalHasBlockingTurn: false,
+    hasOrphanedDispatch: false
+  };
+  const authority = decideTerminalUserExplicitModelControlAuthority(common);
+  assert.equal(authority.eligible, true);
+  if (!authority.eligible) return;
+  const sendToken = unmanagedTerminalBindingToken({
+    terminalId,
+    terminalControl,
+    agent: "codex",
+    pid: 4_200,
+    workspace: terminalControl.currentPath ?? "",
+    processUuid: common.processUuid,
+    processBirth: common.processBirth
+  });
+  assert.notEqual(authority.expectedBindingToken, sendToken);
+  for (const unavailable of [
+    { zeroRolloutVerified: false },
+    { agentVersion: "0.153.4" },
+    { activityState: "working" },
+    { screenState: "working" },
+    { approvalScanned: false },
+    { approvalBlocked: true },
+    { automatedInputComposerReady: false },
+    { terminalHasInteraction: true },
+    { terminalHasBlockingTurn: true },
+    { hasOrphanedDispatch: true },
+    { processBirth: undefined }
+  ]) {
+    assert.deepEqual(
+      decideTerminalUserExplicitModelControlAuthority({
+        ...common,
+        ...unavailable
+      }),
+      { eligible: false }
+    );
+  }
+});
+
+test("model-control repair and continuation use distinct exact residual authority", () => {
+  const terminalControl: TerminalControlRef = {
+    ...control,
+    target: "repair-model:0.0",
+    session: "repair-model"
+  };
+  const endpointKey = "socket:/private/tmp/tmux-501/repair-model";
+  createTerminalEndpointRef({
+    identity: {
+      providerKind: "tmux",
+      endpointKey,
+      resourceKey: "pane-id:%93"
+    },
+    route: {
+      routeKey: tmuxTerminalRouteKey(
+        endpointKey,
+        terminalControl.target,
+        terminalControl.socketPath
+      ),
+      label: terminalControl.target,
+      currentCommand: terminalControl.currentCommand,
+      currentPath: terminalControl.currentPath
+    },
+    processAnchorPid: terminalControl.panePid,
+    capabilities: terminalControl.capabilities,
+    providerRef: terminalControl
+  });
+  const common = {
+    exactTerminalRow: true,
+    terminalId: "terminal:v2:tmux:codex:repair-model:0.0:4200",
+    processState: "active",
+    terminalControl,
+    agent: "codex" as const,
+    pid: 4_200,
+    processUuid: "process-pid:4200:birth:repair-birth",
+    processBirth: "repair-birth",
+    agentVersion: "0.154.0",
+    behaviorProfile: "codex-model-control-0.154.0" as const,
+    nativeIdentityEligible: true,
+    modelControlSupported: true,
+    activityState: "unknown",
+    approvalScanned: true,
+    approvalBlocked: false,
+    terminalHasInteraction: false,
+    terminalHasBlockingTurn: false,
+    hasOrphanedDispatch: false,
+    residualKind: "profiled_command_popup" as const,
+    residualFingerprint: "a".repeat(64)
+  };
+  const authority = decideTerminalUserExplicitModelControlRepairAuthority(common);
+  const entry =
+    decideTerminalUserExplicitModelControlResidualEntryAuthority(common);
+  assert.equal(authority.eligible, true);
+  assert.equal(entry.eligible, true);
+  if (!authority.eligible || !entry.eligible) return;
+  assert.notEqual(
+    authority.expectedBindingToken,
+    entry.expectedBindingToken,
+    "cleanup-only authority must never authorize Enter"
+  );
+  const changedSurface = decideTerminalUserExplicitModelControlRepairAuthority({
+    ...common,
+    residualFingerprint: "b".repeat(64)
+  });
+  assert.equal(changedSurface.eligible, true);
+  if (!changedSurface.eligible) return;
+  assert.notEqual(
+    authority.expectedBindingToken,
+    changedSurface.expectedBindingToken
+  );
+  const changedEntry =
+    decideTerminalUserExplicitModelControlResidualEntryAuthority({
+      ...common,
+      residualFingerprint: "b".repeat(64)
+    });
+  assert.equal(changedEntry.eligible, true);
+  if (!changedEntry.eligible) return;
+  assert.notEqual(entry.expectedBindingToken, changedEntry.expectedBindingToken);
+  const pickerRepair = decideTerminalUserExplicitModelControlRepairAuthority({
+    ...common,
+    residualKind: "model_surface",
+    residualFingerprint: "c".repeat(64)
+  });
+  const pickerContinuation =
+    decideTerminalUserExplicitModelControlResidualEntryAuthority({
+      ...common,
+      residualKind: "model_surface",
+      residualFingerprint: "c".repeat(64)
+    });
+  assert.equal(pickerRepair.eligible, true);
+  assert.deepEqual(
+    pickerContinuation,
+    { eligible: false },
+    "an open picker may be dismissed but must never inherit Enter authority"
+  );
+  for (const unavailable of [
+    { nativeIdentityEligible: false },
+    { agentVersion: "0.153.4" },
+    { activityState: "working" },
+    { approvalScanned: false },
+    { approvalBlocked: true },
+    { terminalHasInteraction: true },
+    { terminalHasBlockingTurn: true },
+    { hasOrphanedDispatch: true },
+    { residualKind: undefined },
+    { residualFingerprint: undefined },
+    { processBirth: undefined }
+  ]) {
+    assert.deepEqual(
+      decideTerminalUserExplicitModelControlRepairAuthority({
+        ...common,
+        ...unavailable
+      }),
+      { eligible: false }
+    );
+    assert.deepEqual(
+      decideTerminalUserExplicitModelControlResidualEntryAuthority({
         ...common,
         ...unavailable
       }),

@@ -64,6 +64,23 @@ export type TerminalControlRef =
   | TmuxTerminalControlRef
   | HerdrTerminalControlRef;
 
+export interface TerminalPhysicalBindingTokenInput {
+  readonly terminalId: string;
+  readonly terminalControl: TerminalControlRef;
+  readonly agent: "codex" | "claude";
+  readonly pid: number;
+  readonly workspace: string;
+  readonly nativeThreadId?: string;
+  readonly processUuid?: string;
+  readonly processBirth?: string;
+  readonly rollout?: {
+    readonly fd: string;
+    readonly device: string;
+    readonly inode: string;
+    readonly path: string;
+  };
+}
+
 export interface TerminalEndpointIdentity {
   providerKind: string;
   endpointKey: string;
@@ -236,6 +253,43 @@ export function terminalEndpointIdentityKey(
     endpoint_key: identity.endpointKey,
     resource_key: identity.resourceKey
   });
+}
+
+/**
+ * Stable authority for one exact provider-owned terminal resource and coding
+ * agent process incarnation. Screen generations and route labels are excluded
+ * deliberately: a read-only native dialog may redraw either without changing
+ * the physical pane selected by the user.
+ */
+export function terminalPhysicalBindingToken(
+  value: TerminalPhysicalBindingTokenInput
+): string {
+  if (!hasCanonicalTerminalEndpoint(value.terminalControl)) {
+    throw new Error(
+      "physical terminal authority requires a canonical provider endpoint"
+    );
+  }
+  const evidence = terminalControlEvidence(value.terminalControl);
+  const identity = terminalEndpointIdentityFromEvidence(evidence);
+  if (!identity) {
+    throw new Error("physical terminal endpoint identity is invalid");
+  }
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: 2,
+      state: "unmanaged",
+      terminal_id: value.terminalId,
+      terminal_identity: terminalEndpointIdentityKey(identity),
+      terminal_process_anchor_pid: evidence.process_anchor_pid,
+      agent: value.agent,
+      agent_pid: value.pid,
+      workspace: value.workspace,
+      native_thread_id: value.nativeThreadId ?? null,
+      process_uuid: value.processUuid ?? null,
+      process_birth: value.processBirth ?? null,
+      rollout: value.rollout ?? null
+    }))
+    .digest("hex");
 }
 
 export function sameTerminalEndpointIdentity(

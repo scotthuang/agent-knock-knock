@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import type { ExecutorKind } from "./executors.js";
+import {
+  terminalPhysicalBindingToken,
+  type TerminalControlRef
+} from "./terminal-control-ref.js";
 
 /** Caller-visible reasoning values. Native labels and menu positions stay private. */
 export const TERMINAL_MODEL_REASONING_EFFORTS = [
@@ -75,6 +79,127 @@ export interface TerminalModelSwitchResult {
   readonly newSessionDefaults?: TerminalModelValue;
   readonly doNotRetry: boolean;
   readonly reason?: string;
+}
+
+export type TerminalModelControlResidualKind =
+  | "profiled_command_popup"
+  | "bare_command"
+  | "model_surface";
+
+export type TerminalModelControlResidualObservation =
+  | {
+      readonly state: "recoverable";
+      readonly kind: TerminalModelControlResidualKind;
+      readonly fingerprint: string;
+      readonly terminalControl: unknown;
+    }
+  | {
+      readonly state: "absent" | "unsafe";
+      readonly reason: string;
+      readonly terminalControl: unknown;
+    };
+
+export interface TerminalModelControlRepairResult {
+  readonly outcome: "repaired" | "uncertain";
+  readonly terminalControl: unknown;
+  readonly terminalInputAttempted: boolean;
+  readonly composerPostcondition: "empty" | "unproven";
+  readonly doNotRetry: boolean;
+  readonly reason?: string;
+}
+
+/**
+ * One action-specific physical authority token for fresh Codex model control.
+ * The domain separator and exact profile keep this authority from being reused
+ * as Send or native-lifecycle authority even though all bind the same pane.
+ */
+export function terminalUserExplicitModelControlBindingToken(value: {
+  terminalId: string;
+  terminalControl: TerminalControlRef;
+  pid: number;
+  workspace: string;
+  processUuid: string;
+  processBirth: string;
+  agentVersion: string;
+  behaviorProfile: TerminalModelControlPlan["behaviorProfile"];
+}): string {
+  const physicalTerminalToken = terminalPhysicalBindingToken({
+    terminalId: value.terminalId,
+    terminalControl: value.terminalControl,
+    agent: "codex",
+    pid: value.pid,
+    workspace: value.workspace,
+    processUuid: value.processUuid,
+    processBirth: value.processBirth
+  });
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: 1,
+      authority: "terminal_user_explicit_model_control",
+      physical_terminal_token: physicalTerminalToken,
+      agent_version: value.agentVersion,
+      behavior_profile: value.behaviorProfile
+    }))
+    .digest("hex");
+}
+
+/**
+ * Snapshot authority for adopting and cleaning one exact native `/model`
+ * residual. The residual kind and normalized surface digest prevent a token
+ * for one popup, pane generation, or bare Composer from authorizing another.
+ */
+export function terminalUserExplicitModelControlRepairBindingToken(value: {
+  terminalId: string;
+  terminalControl: TerminalControlRef;
+  pid: number;
+  workspace: string;
+  processUuid: string;
+  processBirth: string;
+  agentVersion: string;
+  behaviorProfile: TerminalModelControlPlan["behaviorProfile"];
+  residualKind: TerminalModelControlResidualKind;
+  residualFingerprint: string;
+}): string {
+  const modelControlToken = terminalUserExplicitModelControlBindingToken(value);
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: 1,
+      authority: "terminal_user_explicit_model_control_repair",
+      model_control_token: modelControlToken,
+      residual_kind: value.residualKind,
+      residual_fingerprint: value.residualFingerprint
+    }))
+    .digest("hex");
+}
+
+/**
+ * Snapshot authority for continuing one exact native `/model` residual into
+ * the read-only catalog picker. This is deliberately domain-separated from
+ * cleanup-only repair: a repair offer never authorizes Enter, while this
+ * offer authorizes exactly one profiled slash-command dispatch.
+ */
+export function terminalUserExplicitModelControlResidualEntryBindingToken(value: {
+  terminalId: string;
+  terminalControl: TerminalControlRef;
+  pid: number;
+  workspace: string;
+  processUuid: string;
+  processBirth: string;
+  agentVersion: string;
+  behaviorProfile: TerminalModelControlPlan["behaviorProfile"];
+  residualKind: TerminalModelControlResidualKind;
+  residualFingerprint: string;
+}): string {
+  const modelControlToken = terminalUserExplicitModelControlBindingToken(value);
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: 1,
+      authority: "terminal_user_explicit_model_control_residual_entry",
+      model_control_token: modelControlToken,
+      residual_kind: value.residualKind,
+      residual_fingerprint: value.residualFingerprint
+    }))
+    .digest("hex");
 }
 
 /** Read-only catalog returned by the exact running Codex executable. */
@@ -517,6 +642,12 @@ export interface TerminalModelControlCapture {
   readonly exactCommandReady: boolean;
   /** Exact `/model` text, including the post-Escape bare cleanup state. */
   readonly exactCommandComposer: boolean;
+  /** Exact command text in the ordinary Composer with its complete footer. */
+  readonly exactBareCommand?: boolean;
+  /** Digest of only the exact current `/model` Composer and popup region. */
+  readonly exactCommandFingerprint?: string;
+  /** A questionnaire, editor, viewer, or other non-model input owner exists. */
+  readonly inputBlocked?: boolean;
 }
 
 /** Runtime ports are implemented only by TerminalAgentBridge. */
@@ -541,6 +672,189 @@ export interface TerminalModelOptionsExecution {
 
 const MODEL_CONTROL_SETTLE_TIMEOUT_MS = 5_000;
 const MODEL_CONTROL_POLL_MS = 40;
+
+function modelControlCaptureBlocked(
+  capture: TerminalModelControlCapture
+): boolean {
+  return capture.approvalBlocked || capture.inputBlocked === true;
+}
+
+function modelCommandReadyForEnter(
+  plan: TerminalModelControlPlan,
+  capture: TerminalModelControlCapture
+): boolean {
+  return capture.exactCommandReady ||
+    plan.behaviorProfile === "codex-model-control-0.154.0" &&
+      capture.exactBareCommand === true;
+}
+
+function residualFromCapture(
+  plan: TerminalModelControlPlan,
+  capture: TerminalModelControlCapture
+): TerminalModelControlResidualObservation {
+  if (plan.behaviorProfile !== "codex-model-control-0.154.0") {
+    return {
+      state: "unsafe",
+      reason: "model-control residual repair is profiled only for Codex 0.154.0",
+      terminalControl: capture.terminalControl
+    };
+  }
+  const modelObservation = observeTerminalModelControl(plan, capture.screen);
+  const exactModelSurface = modelObservation.state !== "none" &&
+    modelObservation.state !== "ambiguous";
+  if (
+    capture.approvalBlocked ||
+    capture.inputBlocked === true && !exactModelSurface ||
+    (capture.activityState === "working" ||
+      capture.activityState === "awaiting_approval") && !exactModelSurface
+  ) {
+    return {
+      state: "unsafe",
+      reason: "another prompt or active agent state owns terminal input",
+      terminalControl: capture.terminalControl
+    };
+  }
+  if (exactModelSurface) {
+    return {
+      state: "recoverable",
+      kind: "model_surface",
+      fingerprint: createHash("sha256")
+        .update(JSON.stringify({
+          version: 1,
+          behavior_profile: plan.behaviorProfile,
+          kind: "model_surface",
+          surface_state: modelObservation.state,
+          surface_fingerprint: modelObservation.fingerprint
+        }))
+        .digest("hex"),
+      terminalControl: capture.terminalControl
+    };
+  }
+  if (
+    !capture.exactCommandComposer ||
+    !capture.exactCommandFingerprint ||
+    (!capture.exactCommandReady && capture.exactBareCommand !== true)
+  ) {
+    return {
+      state: "absent",
+      reason: capture.exactEmptyComposer
+        ? "the Composer is already empty"
+        : "the current Composer is not one exact profiled /model residual",
+      terminalControl: capture.terminalControl
+    };
+  }
+  const kind = capture.exactCommandReady
+    ? "profiled_command_popup"
+    : "bare_command";
+  return {
+    state: "recoverable",
+    kind,
+    fingerprint: createHash("sha256")
+      .update(JSON.stringify({
+        version: 1,
+        behavior_profile: plan.behaviorProfile,
+        kind,
+        exact_command_fingerprint: capture.exactCommandFingerprint
+      }))
+      .digest("hex"),
+    terminalControl: capture.terminalControl
+  };
+}
+
+/**
+ * Read-only, two-frame proof for one exact Codex `/model` residual or exact
+ * native model-control surface. It never treats arbitrary Composer text,
+ * transcript text, or an incomplete/unknown picker as recoverable authority.
+ */
+export async function inspectTerminalModelControlResidual(input: {
+  plan: TerminalModelControlPlan;
+  terminalControl: unknown;
+  ports: TerminalModelControlPorts;
+}): Promise<TerminalModelControlResidualObservation> {
+  const firstCapture = await input.ports.capture({
+    terminalControl: input.terminalControl,
+    expectedComposer: input.plan.command
+  });
+  const first = residualFromCapture(input.plan, firstCapture);
+  if (first.state !== "recoverable") return first;
+  await input.ports.sleep(MODEL_CONTROL_POLL_MS);
+  const secondCapture = await input.ports.capture({
+    terminalControl: first.terminalControl,
+    expectedComposer: input.plan.command
+  });
+  const second = residualFromCapture(input.plan, secondCapture);
+  if (
+    second.state !== "recoverable" ||
+    second.kind !== first.kind ||
+    second.fingerprint !== first.fingerprint
+  ) {
+    return {
+      state: "unsafe",
+      reason: "the exact /model residual changed across the stable snapshot",
+      terminalControl: second.terminalControl
+    };
+  }
+  return second;
+}
+
+/**
+ * Consume one current residual offer. Once any cleanup key is attempted, all
+ * failures are response-uncertain and callers must not retry automatically.
+ */
+export async function repairTerminalModelControlResidual(input: {
+  plan: TerminalModelControlPlan;
+  terminalControl: unknown;
+  expectedResidualFingerprint: string;
+  ports: TerminalModelControlPorts;
+}): Promise<TerminalModelControlRepairResult> {
+  const observed = await inspectTerminalModelControlResidual(input);
+  if (observed.state !== "recoverable") {
+    throw new Error(observed.reason);
+  }
+  if (observed.fingerprint !== input.expectedResidualFingerprint) {
+    throw new Error(
+      "the exact /model residual changed after authorization; refresh AKK list"
+    );
+  }
+  let terminalInputAttempted = false;
+  const ports: TerminalModelControlPorts = {
+    ...input.ports,
+    sendKeys: async (terminalControl, keys) => {
+      terminalInputAttempted = true;
+      await input.ports.sendKeys(terminalControl, keys);
+    }
+  };
+  try {
+    const cleared = await unwindModelControl(
+      { plan: input.plan, ports },
+      observed.terminalControl
+    );
+    if (
+      modelControlCaptureBlocked(cleared) ||
+      cleared.activityState !== "idle" ||
+      !cleared.exactEmptyComposer
+    ) {
+      throw new Error("cleanup did not prove an exact idle empty Composer");
+    }
+    return {
+      outcome: "repaired",
+      terminalControl: cleared.terminalControl,
+      terminalInputAttempted,
+      composerPostcondition: "empty",
+      doNotRetry: false
+    };
+  } catch (error) {
+    if (!terminalInputAttempted) throw error;
+    return {
+      outcome: "uncertain",
+      terminalControl: observed.terminalControl,
+      terminalInputAttempted: true,
+      composerPostcondition: "unproven",
+      doNotRetry: true,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
 /**
  * Run one bounded, reversible native catalog inspection. It enters only the
  * adapter-owned `/model` surface and always returns through exact Escape paths.
@@ -551,6 +865,10 @@ export async function discoverTerminalModelOptions(input: {
   plan: TerminalModelControlPlan;
   terminalControl: unknown;
   ports: TerminalModelControlPorts;
+  initialResidual?: Extract<
+    TerminalModelControlResidualObservation,
+    { state: "recoverable" }
+  >;
 }): Promise<TerminalModelOptionsExecution> {
   const codexNativeCatalog = input.agent === "codex"
     ? await input.ports.loadCodexCatalog?.()
@@ -579,17 +897,7 @@ export async function discoverTerminalModelOptions(input: {
       codexNativeCatalog?.models.map((model) => [model.id, model]) ?? []
     );
     const currentChoice = nativeById.get(picker.currentModel);
-    const idleCurrent = observeCodexIdleModel(opened.idleCapture.screen);
-    if (!currentChoice || !idleCurrent ||
-        idleCurrent.model !== picker.currentModel ||
-        !idleCurrent.reasoningEffort ||
-        !currentChoice.reasoningEfforts.includes(idleCurrent.reasoningEffort)) {
-      await exactDismiss(input, control, picker);
-      throw new Error(
-        "the current Codex model and effort are not exact across its idle footer and live catalog"
-      );
-    }
-    currentEffort = idleCurrent.reasoningEffort;
+    let idleCurrent = observeCodexIdleModel(opened.idleCapture.screen);
     models = picker.rows.flatMap((row) => {
       const native = nativeById.get(row.id);
       // A single-effort row commits on Enter instead of opening the profiled
@@ -602,11 +910,25 @@ export async function discoverTerminalModelOptions(input: {
           }]
         : [];
     });
-    control = (await exactDismiss(
+    const dismissed = await exactDismiss(
       input,
       control,
       picker
-    )).terminalControl;
+    );
+    control = dismissed.terminalControl;
+    // An adopted profiled slash popup temporarily replaces the ordinary
+    // footer. Once the read-only picker is dismissed, the exact idle footer
+    // is visible again and can complete the same catalog cross-check.
+    idleCurrent ??= observeCodexIdleModel(dismissed.screen);
+    if (!currentChoice || !idleCurrent ||
+        idleCurrent.model !== picker.currentModel ||
+        !idleCurrent.reasoningEffort ||
+        !currentChoice.reasoningEfforts.includes(idleCurrent.reasoningEffort)) {
+      throw new Error(
+        "the current Codex model and effort are not exact across its idle footer and live catalog"
+      );
+    }
+    currentEffort = idleCurrent.reasoningEffort;
   } else {
     currentEffort = picker.currentEffort;
     let livePicker = picker;
@@ -1006,66 +1328,121 @@ async function openModelPicker(input: {
   plan: TerminalModelControlPlan;
   terminalControl: unknown;
   ports: TerminalModelControlPorts;
+  initialResidual?: Extract<
+    TerminalModelControlResidualObservation,
+    { state: "recoverable" }
+  >;
 }, terminalControl: unknown): Promise<{
   idleCapture: TerminalModelControlCapture;
   capture: TerminalModelControlCapture;
   observation: TerminalModelControlObservation;
 }> {
-  const before = await input.ports.capture({ terminalControl });
-  if (
-    before.activityState !== "idle" ||
-    before.approvalBlocked ||
-    !before.exactEmptyComposer
-  ) {
-    throw new Error(
-      "model control requires an exact verified idle pane with an empty composer and no blocking interaction"
-    );
-  }
-  await input.ports.beforeInput();
+  let cleanupControl = terminalControl;
+  let terminalInputAttempted = false;
   try {
-  const finalEmpty = await input.ports.capture({
-    terminalControl: before.terminalControl
-  });
-  if (
-    finalEmpty.activityState !== "idle" ||
-    finalEmpty.approvalBlocked ||
-    !finalEmpty.exactEmptyComposer
-  ) {
-    throw new Error("the exact idle composer changed before /model input");
-  }
-  await input.ports.sendText(finalEmpty.terminalControl, input.plan.command);
-  let commandCapture: TerminalModelControlCapture | undefined;
-  const startedAt = Date.now();
-  while (Date.now() - startedAt <= MODEL_CONTROL_SETTLE_TIMEOUT_MS) {
-    const captured = await input.ports.capture({
-      terminalControl: before.terminalControl,
+  let idleCapture: TerminalModelControlCapture;
+  let revalidatedCommand: TerminalModelControlCapture;
+  if (input.initialResidual) {
+    if (input.plan.behaviorProfile !== "codex-model-control-0.154.0") {
+      throw new Error(
+        "native model-control continuation is profiled only for Codex 0.154.0"
+      );
+    }
+    const observed = await inspectTerminalModelControlResidual({
+      plan: input.plan,
+      terminalControl,
+      ports: input.ports
+    });
+    if (
+      observed.state !== "recoverable" ||
+      observed.kind !== input.initialResidual.kind ||
+      observed.fingerprint !== input.initialResidual.fingerprint
+    ) {
+      throw new Error(
+        "the exact /model residual changed before native catalog discovery"
+      );
+    }
+    cleanupControl = observed.terminalControl;
+    await input.ports.beforeInput();
+    revalidatedCommand = await input.ports.capture({
+      terminalControl: observed.terminalControl,
+      expectedComposer: input.plan.command
+    });
+    const revalidatedResidual = residualFromCapture(
+      input.plan,
+      revalidatedCommand
+    );
+    if (
+      revalidatedResidual.state !== "recoverable" ||
+      revalidatedResidual.kind !== input.initialResidual.kind ||
+      revalidatedResidual.fingerprint !== input.initialResidual.fingerprint
+    ) {
+      throw new Error(
+        "the exact /model residual changed immediately before Enter"
+      );
+    }
+    idleCapture = revalidatedCommand;
+  } else {
+    const before = await input.ports.capture({ terminalControl });
+    cleanupControl = before.terminalControl;
+    if (
+      before.activityState !== "idle" ||
+      modelControlCaptureBlocked(before) ||
+      !before.exactEmptyComposer
+    ) {
+      throw new Error(
+        "model control requires an exact verified idle pane with an empty composer and no blocking interaction"
+      );
+    }
+    await input.ports.beforeInput();
+    const finalEmpty = await input.ports.capture({
+      terminalControl: before.terminalControl
+    });
+    if (
+      finalEmpty.activityState !== "idle" ||
+      modelControlCaptureBlocked(finalEmpty) ||
+      !finalEmpty.exactEmptyComposer
+    ) {
+      throw new Error("the exact idle composer changed before /model input");
+    }
+    terminalInputAttempted = true;
+    await input.ports.sendText(finalEmpty.terminalControl, input.plan.command);
+    let commandCapture: TerminalModelControlCapture | undefined;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt <= MODEL_CONTROL_SETTLE_TIMEOUT_MS) {
+      const captured = await input.ports.capture({
+        terminalControl: before.terminalControl,
+        expectedComposer: input.plan.command
+      });
+      if (
+        !modelControlCaptureBlocked(captured) &&
+        captured.activityState !== "working" &&
+        modelCommandReadyForEnter(input.plan, captured)
+      ) {
+        commandCapture = captured;
+        break;
+      }
+      await input.ports.sleep(MODEL_CONTROL_POLL_MS);
+    }
+    if (!commandCapture) {
+      throw new Error("the exact /model composer did not materialize before Enter");
+    }
+    await input.ports.beforeInput();
+    revalidatedCommand = await input.ports.capture({
+      terminalControl: commandCapture.terminalControl,
       expectedComposer: input.plan.command
     });
     if (
-      !captured.approvalBlocked &&
-      captured.activityState !== "working" &&
-      captured.exactCommandReady
+      modelControlCaptureBlocked(revalidatedCommand) ||
+      revalidatedCommand.activityState === "working" ||
+      !modelCommandReadyForEnter(input.plan, revalidatedCommand)
     ) {
-      commandCapture = captured;
-      break;
+      throw new Error("the exact /model composer changed before Enter");
     }
-    await input.ports.sleep(MODEL_CONTROL_POLL_MS);
+    idleCapture = finalEmpty;
   }
-  if (!commandCapture) {
-    throw new Error("the exact /model composer did not materialize before Enter");
-  }
-  await input.ports.beforeInput();
-  const revalidatedCommand = await input.ports.capture({
-    terminalControl: commandCapture.terminalControl,
-    expectedComposer: input.plan.command
-  });
-  if (
-    revalidatedCommand.approvalBlocked ||
-    revalidatedCommand.activityState === "working" ||
-    !revalidatedCommand.exactCommandReady
-  ) {
-    throw new Error("the exact /model composer changed before Enter");
-  }
+  cleanupControl = revalidatedCommand.terminalControl;
+  terminalInputAttempted = true;
   await input.ports.sendKeys(revalidatedCommand.terminalControl, ["C-m"]);
   let opened = await waitForObservation(
     input,
@@ -1105,10 +1482,11 @@ async function openModelPicker(input: {
   // This is the exact idle frame revalidated after current-snapshot authority
   // and immediately before `/model` input. Earlier idle captures cannot prove
   // the catalog tuple, Plan mode, or a persistence-message baseline.
-  return { ...opened, idleCapture: finalEmpty };
+  return { ...opened, idleCapture };
   } catch (error) {
+    if (!terminalInputAttempted) throw error;
     const cleanupError = await tryUnwindModelControl(
-      input, before.terminalControl
+      input, cleanupControl
     );
     if (!cleanupError) throw error;
     const detail = error instanceof Error ? error.message : String(error);
@@ -1141,7 +1519,8 @@ async function unwindModelControl(input: {
       expectedComposer: input.plan.command
     });
     control = captured.terminalControl;
-    if (captured.approvalBlocked || captured.activityState === "working") {
+    if (modelControlCaptureBlocked(captured) ||
+        captured.activityState === "working") {
       throw new Error("the terminal became busy or blocked during cleanup");
     }
     if (captured.exactEmptyComposer && captured.activityState === "idle") {
@@ -1153,46 +1532,47 @@ async function unwindModelControl(input: {
         terminalControl: control,
         expectedComposer: input.plan.command
       });
-      if (finalCommand.approvalBlocked ||
+      if (modelControlCaptureBlocked(finalCommand) ||
           finalCommand.activityState === "working" ||
           !finalCommand.exactCommandComposer) {
         throw new Error("the exact /model composer changed during cleanup");
       }
       control = finalCommand.terminalControl;
-      await input.ports.sendKeys(control, ["Escape"]);
-      if (input.plan.behaviorProfile === "claude-model-control-2.1.266") {
-        const afterEscape = await waitForClaudeModelCommandCleanupState(
+      if (
+        finalCommand.exactCommandReady ||
+        input.plan.behaviorProfile === "claude-model-control-2.1.266" ||
+        finalCommand.exactBareCommand !== true
+      ) {
+        await input.ports.sendKeys(control, ["Escape"]);
+        const afterEscape = await waitForModelCommandCleanupState(
           input, control
         );
         control = afterEscape.terminalControl;
         if (afterEscape.exactEmptyComposer) return afterEscape;
-        await input.ports.beforeInput();
-        const finalBareCommand = await input.ports.capture({
-          terminalControl: control,
-          expectedComposer: input.plan.command
-        });
-        if (
-          finalBareCommand.approvalBlocked ||
-          finalBareCommand.activityState === "working" ||
-          !finalBareCommand.exactCommandComposer ||
-          finalBareCommand.exactCommandReady
-        ) {
-          throw new Error(
-            "the exact bare Claude /model composer changed during cleanup"
-          );
-        }
-        control = finalBareCommand.terminalControl;
-        await input.ports.sendKeys(control, ["C-u"]);
-        const cleared = await waitForObservation(input, control, ["none"], {
-          allowImmediateNone: true
-        });
-        control = cleared.capture.terminalControl;
-        continue;
       }
-      const closed = await waitForObservation(input, control, ["none"], {
+      await input.ports.beforeInput();
+      const finalBareCommand = await input.ports.capture({
+        terminalControl: control,
+        expectedComposer: input.plan.command
+      });
+      if (
+        modelControlCaptureBlocked(finalBareCommand) ||
+        finalBareCommand.activityState === "working" ||
+        !finalBareCommand.exactCommandComposer ||
+        finalBareCommand.exactCommandReady
+      ) {
+        throw new Error(
+          `the exact bare ${input.plan.behaviorProfile.startsWith("codex-")
+            ? "Codex"
+            : "Claude"} /model composer changed during cleanup`
+        );
+      }
+      control = finalBareCommand.terminalControl;
+      await input.ports.sendKeys(control, ["C-u"]);
+      const cleared = await waitForObservation(input, control, ["none"], {
         allowImmediateNone: true
       });
-      control = closed.capture.terminalControl;
+      control = cleared.capture.terminalControl;
       continue;
     }
     const observation = observeTerminalModelControl(input.plan, captured.screen);
@@ -1217,6 +1597,7 @@ async function unwindModelControl(input: {
       ],
       {
         allowImmediateNone: true,
+        allowExactCommandComposer: true,
         excludeFingerprint: observation.fingerprint
       }
     );
@@ -1225,12 +1606,12 @@ async function unwindModelControl(input: {
   throw new Error("the native model-control surface exceeded its cleanup depth");
 }
 
-async function waitForClaudeModelCommandCleanupState(input: {
+async function waitForModelCommandCleanupState(input: {
   plan: TerminalModelControlPlan;
   ports: TerminalModelControlPorts;
 }, terminalControl: unknown): Promise<TerminalModelControlCapture> {
   const startedAt = Date.now();
-  let stableScreen: string | undefined;
+  let stableState: string | undefined;
   let stableCaptures = 0;
   while (Date.now() - startedAt <= MODEL_CONTROL_SETTLE_TIMEOUT_MS) {
     const captured = await input.ports.capture({
@@ -1238,23 +1619,38 @@ async function waitForClaudeModelCommandCleanupState(input: {
       expectedComposer: input.plan.command
     });
     const exactState = captured.exactEmptyComposer ||
-      captured.exactCommandComposer && !captured.exactCommandReady;
-    if (!captured.approvalBlocked &&
+      captured.exactCommandComposer && !captured.exactCommandReady &&
+        (input.plan.behaviorProfile === "claude-model-control-2.1.266" ||
+          captured.exactBareCommand === true);
+    if (!modelControlCaptureBlocked(captured) &&
         captured.activityState !== "working" && exactState) {
-      if (captured.screen === stableScreen) stableCaptures += 1;
+      const semanticState = captured.exactEmptyComposer
+        ? "empty"
+        : captured.exactCommandFingerprint
+          ? `bare:${captured.exactCommandFingerprint}`
+          : input.plan.behaviorProfile === "claude-model-control-2.1.266"
+            ? "bare:claude-profiled-composer"
+            : undefined;
+      if (!semanticState) {
+        stableState = undefined;
+        stableCaptures = 0;
+        await input.ports.sleep(MODEL_CONTROL_POLL_MS);
+        continue;
+      }
+      if (semanticState === stableState) stableCaptures += 1;
       else {
-        stableScreen = captured.screen;
+        stableState = semanticState;
         stableCaptures = 1;
       }
       if (stableCaptures >= 2) return captured;
     } else {
-      stableScreen = undefined;
+      stableState = undefined;
       stableCaptures = 0;
     }
     await input.ports.sleep(MODEL_CONTROL_POLL_MS);
   }
   throw new Error(
-    "Claude /model suggestions did not close to an exact bare or empty composer"
+    "/model suggestions did not close to an exact bare or empty composer"
   );
 }
 
@@ -1306,7 +1702,7 @@ async function exactDispatchKeys(input: {
   const captured = await input.ports.capture({ terminalControl });
   const current = observeTerminalModelControl(input.plan, captured.screen);
   if (
-    captured.approvalBlocked ||
+    modelControlCaptureBlocked(captured) ||
     captured.activityState === "working" ||
     current.state !== observation.state ||
     current.fingerprint !== observation.fingerprint
@@ -1324,6 +1720,7 @@ async function waitForObservation(input: {
 expectedStates: readonly TerminalModelControlObservation["state"][],
 options: {
   allowImmediateNone?: boolean;
+  allowExactCommandComposer?: boolean;
   excludeFingerprint?: string;
 } = {}): Promise<{
   capture: TerminalModelControlCapture;
@@ -1334,14 +1731,19 @@ options: {
   let stableCaptures = 0;
   while (Date.now() - startedAt <= MODEL_CONTROL_SETTLE_TIMEOUT_MS) {
     const captured = await input.ports.capture({ terminalControl });
-    if (captured.approvalBlocked || captured.activityState === "working") {
+    if (modelControlCaptureBlocked(captured) ||
+        captured.activityState === "working") {
       throw new Error("the terminal became busy or blocked during model control");
     }
     const observation = observeTerminalModelControl(input.plan, captured.screen);
+    const expectedNone = observation.state === "none" && (
+      options.allowImmediateNone === true && captured.exactEmptyComposer ||
+      options.allowExactCommandComposer === true &&
+        captured.exactCommandComposer
+    );
     const expected = observation.fingerprint !== options.excludeFingerprint &&
       expectedStates.includes(observation.state) &&
-      (observation.state !== "none" ||
-        options.allowImmediateNone === true && captured.exactEmptyComposer);
+      (observation.state !== "none" || expectedNone);
     if (expected) {
       if (observation.fingerprint === stableFingerprint) stableCaptures += 1;
       else {
@@ -1370,12 +1772,18 @@ Promise<TerminalModelControlCapture> {
     ["Escape"]
   );
   const closed = await waitForObservation(input, control, ["none"], {
-    allowImmediateNone: true
+    allowImmediateNone: true,
+    allowExactCommandComposer: true,
+    excludeFingerprint: observation.fingerprint
   });
-  if (!closed.capture.exactEmptyComposer || closed.capture.activityState !== "idle") {
-    throw new Error("native model-control dismissal did not return to exact idle");
+  if (closed.capture.exactEmptyComposer &&
+      closed.capture.activityState === "idle") {
+    return closed.capture;
   }
-  return closed.capture;
+  if (closed.capture.exactCommandComposer) {
+    return unwindModelControl(input, closed.capture.terminalControl);
+  }
+  throw new Error("native model-control dismissal did not return to exact idle");
 }
 
 function observeCodexModelControl(
@@ -1933,7 +2341,8 @@ initialScreen?: string): Promise<
       if (evidence.proven || evidence.final) return evidence;
     }
     const captured = await input.ports.capture({ terminalControl });
-    if (captured.approvalBlocked || captured.activityState !== "idle" ||
+    if (modelControlCaptureBlocked(captured) ||
+        captured.activityState !== "idle" ||
         !captured.exactEmptyComposer) {
       return {
         proven: false,

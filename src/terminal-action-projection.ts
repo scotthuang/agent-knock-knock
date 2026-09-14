@@ -12,6 +12,13 @@ import {
 import type { ManagedBindingConflictKind } from
   "./terminal-authority-policy.js";
 import {
+  terminalUserExplicitModelControlBindingToken,
+  terminalUserExplicitModelControlResidualEntryBindingToken,
+  terminalUserExplicitModelControlRepairBindingToken,
+  type TerminalModelControlResidualKind,
+  type TerminalModelControlPlan
+} from "./terminal-model-control.js";
+import {
   hasCanonicalTerminalEndpoint,
   terminalEndpointFromControlRef,
   type TerminalControlRef
@@ -24,6 +31,7 @@ export type TerminalActionName =
   | "list_resumable_threads"
   | "native_inspect"
   | "model_options"
+  | "repair_model_control"
   | "identify_foreground"
   | "identify_and_send"
   | "resume_thread"
@@ -83,6 +91,74 @@ export type TerminalUserExplicitSendAuthority =
       expectedTerminalToken: string;
     };
 
+export interface TerminalUserExplicitModelControlFacts {
+  readonly exactTerminalRow: boolean;
+  readonly terminalId?: string;
+  readonly processState?: string;
+  readonly terminalControl?: TerminalControlRef;
+  readonly agent?: ExecutorKind;
+  readonly pid?: number;
+  readonly processUuid?: string;
+  readonly processBirth?: string;
+  readonly agentVersion?: string;
+  readonly behaviorProfile?: TerminalModelControlPlan["behaviorProfile"];
+  readonly zeroRolloutVerified: boolean;
+  readonly modelControlSupported: boolean;
+  readonly activityState?: string;
+  readonly screenState?: string;
+  readonly approvalScanned: boolean;
+  readonly approvalBlocked: boolean;
+  readonly automatedInputComposerReady: boolean;
+  readonly terminalHasInteraction: boolean;
+  readonly terminalHasBlockingTurn: boolean;
+  readonly hasOrphanedDispatch: boolean;
+}
+
+export type TerminalUserExplicitModelControlAuthority =
+  | { eligible: false }
+  | {
+      eligible: true;
+      terminalId: string;
+      expectedBindingToken: string;
+    };
+
+export interface TerminalUserExplicitModelControlRepairFacts {
+  readonly exactTerminalRow: boolean;
+  readonly terminalId?: string;
+  readonly processState?: string;
+  readonly terminalControl?: TerminalControlRef;
+  readonly agent?: ExecutorKind;
+  readonly pid?: number;
+  readonly processUuid?: string;
+  readonly processBirth?: string;
+  readonly agentVersion?: string;
+  readonly behaviorProfile?: TerminalModelControlPlan["behaviorProfile"];
+  readonly nativeIdentityEligible: boolean;
+  readonly modelControlSupported: boolean;
+  readonly activityState?: string;
+  readonly approvalScanned: boolean;
+  readonly approvalBlocked: boolean;
+  readonly terminalHasInteraction: boolean;
+  readonly terminalHasBlockingTurn: boolean;
+  readonly hasOrphanedDispatch: boolean;
+  readonly residualKind?: TerminalModelControlResidualKind;
+  readonly residualFingerprint?: string;
+}
+
+export type TerminalUserExplicitModelControlRepairAuthority =
+  | { eligible: false }
+  | {
+      eligible: true;
+      terminalId: string;
+      expectedBindingToken: string;
+    };
+
+export type TerminalUserExplicitModelControlResidualEntryFacts =
+  TerminalUserExplicitModelControlRepairFacts;
+
+export type TerminalUserExplicitModelControlResidualEntryAuthority =
+  TerminalUserExplicitModelControlRepairAuthority;
+
 /**
  * User-explicit terminal Send is physical terminal authority, not AKK Store
  * authority. Turn, Session, transfer, transition, ledger, ownership, and Store
@@ -134,6 +210,200 @@ export function decideTerminalUserExplicitSendAuthority(
       processUuid,
       processBirth
     })
+  };
+}
+
+/**
+ * A human-selected Codex pane may control its model without first inventing a
+ * durable native Session. This authority is intentionally narrower than Send:
+ * it requires an exact idle frame and empty Composer, while its token binds the
+ * provider-owned terminal resource, foreground process incarnation, and cwd.
+ */
+export function decideTerminalUserExplicitModelControlAuthority(
+  facts: TerminalUserExplicitModelControlFacts
+): TerminalUserExplicitModelControlAuthority {
+  const terminalId = nonBlank(facts.terminalId);
+  const control = facts.terminalControl;
+  const workspace = nonBlank(control?.currentPath);
+  const processUuid = nonBlank(facts.processUuid);
+  const processBirth = nonBlank(facts.processBirth);
+  const agentVersion = nonBlank(facts.agentVersion);
+  const behaviorProfile = facts.behaviorProfile;
+  if (
+    !facts.exactTerminalRow ||
+    !terminalId ||
+    facts.processState !== "active" ||
+    facts.agent !== "codex" ||
+    !control ||
+    !workspace ||
+    !hasCanonicalTerminalEndpoint(control) ||
+    !control.capabilities.includes("send_keys") ||
+    !control.capabilities.includes("screen_status") ||
+    !facts.modelControlSupported ||
+    facts.activityState !== "idle" ||
+    facts.screenState !== "idle" ||
+    !facts.approvalScanned ||
+    facts.approvalBlocked ||
+    !facts.automatedInputComposerReady ||
+    facts.terminalHasInteraction ||
+    facts.terminalHasBlockingTurn ||
+    facts.hasOrphanedDispatch ||
+    !Number.isSafeInteger(facts.pid) ||
+    Number(facts.pid) <= 1 ||
+    !processUuid ||
+    !processBirth ||
+    agentVersion !== "0.154.0" ||
+    behaviorProfile !== "codex-model-control-0.154.0" ||
+    !facts.zeroRolloutVerified
+  ) {
+    return { eligible: false };
+  }
+  const endpoint = terminalEndpointFromControlRef(control);
+  if (
+    !Number.isSafeInteger(endpoint.processAnchorPid) ||
+    Number(endpoint.processAnchorPid) <= 1
+  ) {
+    return { eligible: false };
+  }
+  return {
+    eligible: true,
+    terminalId,
+    expectedBindingToken: terminalUserExplicitModelControlBindingToken({
+      terminalId,
+      terminalControl: control,
+      pid: Number(facts.pid),
+      workspace,
+      processUuid,
+      processBirth,
+      agentVersion,
+      behaviorProfile
+    })
+  };
+}
+
+/**
+ * User-authorized adoption of one exact, already-open Codex `/model`
+ * residual or native picker. Unlike ordinary model control, this deliberately
+ * does not require the normal idle/empty screen classification: the profiled
+ * surface itself is the input-owner proof, while every physical and Store
+ * fence remains.
+ */
+export function decideTerminalUserExplicitModelControlRepairAuthority(
+  facts: TerminalUserExplicitModelControlRepairFacts
+): TerminalUserExplicitModelControlRepairAuthority {
+  const terminalId = nonBlank(facts.terminalId);
+  const control = facts.terminalControl;
+  const workspace = nonBlank(control?.currentPath);
+  const processUuid = nonBlank(facts.processUuid);
+  const processBirth = nonBlank(facts.processBirth);
+  const agentVersion = nonBlank(facts.agentVersion);
+  const behaviorProfile = facts.behaviorProfile;
+  const residualFingerprint = nonBlank(facts.residualFingerprint);
+  const residualKind = facts.residualKind;
+  if (
+    !facts.exactTerminalRow ||
+    !terminalId ||
+    facts.processState !== "active" ||
+    facts.agent !== "codex" ||
+    !control ||
+    !workspace ||
+    !hasCanonicalTerminalEndpoint(control) ||
+    !control.capabilities.includes("send_keys") ||
+    !control.capabilities.includes("screen_status") ||
+    !facts.modelControlSupported ||
+    facts.activityState === "working" ||
+    facts.activityState === "awaiting_approval" ||
+    !facts.approvalScanned ||
+    facts.approvalBlocked ||
+    facts.terminalHasInteraction ||
+    facts.terminalHasBlockingTurn ||
+    facts.hasOrphanedDispatch ||
+    !facts.nativeIdentityEligible ||
+    !Number.isSafeInteger(facts.pid) ||
+    Number(facts.pid) <= 1 ||
+    !processUuid ||
+    !processBirth ||
+    agentVersion !== "0.154.0" ||
+    behaviorProfile !== "codex-model-control-0.154.0" ||
+    (residualKind !== "profiled_command_popup" &&
+      residualKind !== "bare_command" &&
+      residualKind !== "model_surface") ||
+    !residualFingerprint
+  ) {
+    return { eligible: false };
+  }
+  const endpoint = terminalEndpointFromControlRef(control);
+  if (
+    !Number.isSafeInteger(endpoint.processAnchorPid) ||
+    Number(endpoint.processAnchorPid) <= 1
+  ) {
+    return { eligible: false };
+  }
+  return {
+    eligible: true,
+    terminalId,
+    expectedBindingToken:
+      terminalUserExplicitModelControlRepairBindingToken({
+        terminalId,
+        terminalControl: control,
+        pid: Number(facts.pid),
+        workspace,
+        processUuid,
+        processBirth,
+        agentVersion,
+        behaviorProfile,
+        residualKind,
+        residualFingerprint
+      })
+  };
+}
+
+/**
+ * The same exact residual facts may authorize read-only catalog discovery,
+ * but never through the cleanup token. Domain separation keeps an existing
+ * repair-only offer from being upgraded into permission to dispatch Enter.
+ */
+export function decideTerminalUserExplicitModelControlResidualEntryAuthority(
+  facts: TerminalUserExplicitModelControlResidualEntryFacts
+): TerminalUserExplicitModelControlResidualEntryAuthority {
+  if (!decideTerminalUserExplicitModelControlRepairAuthority(facts).eligible) {
+    return { eligible: false };
+  }
+  const terminalId = nonBlank(facts.terminalId);
+  const terminalControl = facts.terminalControl;
+  const workspace = nonBlank(terminalControl?.currentPath);
+  const processUuid = nonBlank(facts.processUuid);
+  const processBirth = nonBlank(facts.processBirth);
+  const agentVersion = nonBlank(facts.agentVersion);
+  const behaviorProfile = facts.behaviorProfile;
+  const residualKind = facts.residualKind;
+  const residualFingerprint = nonBlank(facts.residualFingerprint);
+  if (
+    !terminalId || !terminalControl || !workspace || !processUuid ||
+    !processBirth || !agentVersion ||
+    behaviorProfile !== "codex-model-control-0.154.0" ||
+    (residualKind !== "profiled_command_popup" &&
+      residualKind !== "bare_command") ||
+    !residualFingerprint
+  ) {
+    return { eligible: false };
+  }
+  return {
+    eligible: true,
+    terminalId,
+    expectedBindingToken:
+      terminalUserExplicitModelControlResidualEntryBindingToken({
+        terminalId,
+        terminalControl,
+        pid: Number(facts.pid),
+        workspace,
+        processUuid,
+        processBirth,
+        agentVersion,
+        behaviorProfile,
+        residualKind,
+        residualFingerprint
+      })
   };
 }
 

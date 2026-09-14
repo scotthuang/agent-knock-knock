@@ -18,6 +18,7 @@ const expectedToolNames = [
   "agent_knock_knock_list_resumable_threads",
   "agent_knock_knock_native_inspect",
   "agent_knock_knock_model_options",
+  "agent_knock_knock_repair_model_control",
   "agent_knock_knock_set_model",
   "agent_knock_knock_identify_foreground",
   "agent_knock_knock_identify_and_send",
@@ -182,9 +183,9 @@ process.stdout.write(JSON.stringify({
   suppliedEnvironment.AKK_TEST_VALUE = "owner-mutated";
   const result = await adapter.executeTool(
     context,
-    "agent_knock_knock_list",
+    "agent_knock_knock_respond",
     "environment-call",
-    {}
+    { turn_id: "turn-environment", request: "continue" }
   );
 
   assert.equal(

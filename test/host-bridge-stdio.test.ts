@@ -48,6 +48,7 @@ const EXPECTED_TOOLS = [
   "agent_knock_knock_new_thread",
   "agent_knock_knock_reconcile_binding",
   "agent_knock_knock_renew",
+  "agent_knock_knock_repair_model_control",
   "agent_knock_knock_respond",
   "agent_knock_knock_respond_interaction",
   "agent_knock_knock_resume_thread",
@@ -60,7 +61,7 @@ const EXPECTED_TOOLS = [
 ] as const;
 
 test(
-  "real Host Bridge stdio advertises 21 tools and exits on Host EOF; " +
+  "real Host Bridge stdio advertises 22 tools and exits on Host EOF; " +
   "fixture Host settles a command_json_v1 callback through a real MCP tool",
   async (t) => {
   const root = fs.mkdtempSync(
@@ -159,7 +160,7 @@ test(
   const listed = await readResponse(iterator, observed, 2, stderrValue);
   const tools = listed.result?.tools;
   assert.ok(Array.isArray(tools));
-  assert.equal(tools.length, 21);
+  assert.equal(tools.length, 22);
   assert.deepEqual(
     tools.map((tool: { name: string }) => tool.name).sort(),
     [...EXPECTED_TOOLS]

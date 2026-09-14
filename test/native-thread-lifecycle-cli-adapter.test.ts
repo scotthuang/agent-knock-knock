@@ -18,6 +18,15 @@ import {
   createNativeThreadLifecycleCliAdapter,
   type CreateNativeThreadLifecycleCliAdapterInput
 } from "../src/native-thread-lifecycle-cli-adapter.js";
+import type { TerminalNativeIdentity } from
+  "../src/terminal-binding-authority.js";
+import type { LifecycleTerminalObservation } from
+  "../src/native-thread-lifecycle-query-service.js";
+import {
+  terminalUserExplicitModelControlBindingToken,
+  terminalUserExplicitModelControlResidualEntryBindingToken,
+  terminalUserExplicitModelControlRepairBindingToken
+} from "../src/terminal-model-control.js";
 import type {
   TerminalAgentAdapter,
   TerminalControlRef,
@@ -150,7 +159,8 @@ function supportedAdapter(): TerminalAgentAdapter {
 function runtime(
   adapter: TerminalAgentAdapter,
   bridge?: TerminalAgentBridge,
-  events: string[] = []
+  events: string[] = [],
+  agentVersion = "1.2.3"
 ): TerminalRuntimeCliAdapter {
   const unexpected = (): never => {
     throw new Error("unexpected lifecycle runtime call");
@@ -174,7 +184,7 @@ function runtime(
     codexModelCatalogForRunningProcess: unexpected,
     agentVersionForRunningProcess: () => {
       events.push("runtime:version");
-      return "1.2.3";
+      return agentVersion;
     }
   };
 }
@@ -186,6 +196,19 @@ function facade(input: {
   currentSession?: ManagedSessionState;
   print?: (value: unknown) => void;
   processIncarnation?: () => { processUuid: string; processBirth: string };
+  physicalProcessIncarnation?: () => {
+    processUuid: string;
+    processBirth: string;
+  };
+  agentVersion?: string;
+  storeDir?: string;
+  resolveCurrent?: () => Promise<TerminalNativeIdentity | undefined>;
+  runtimeForLiveIdentity?: (input: {
+    terminal: LifecycleTerminalObservation;
+    identity?: TerminalNativeIdentity;
+    expectedEmptyNativeSession?: boolean;
+    physicalOnly?: boolean;
+  }) => Record<string, unknown>;
 } = {}) {
   const events = input.events ?? [];
   const unexpected = (): never => {
@@ -194,12 +217,18 @@ function facade(input: {
   const adapter = input.adapter ?? supportedAdapter();
   const ports: CreateNativeThreadLifecycleCliAdapterInput = {
     runtime: {
-      forOptions: () => runtime(adapter, input.bridge, events),
+      forOptions: () => runtime(
+        adapter,
+        input.bridge,
+        events,
+        input.agentVersion
+      ),
       sleep: async () => undefined
     },
     identity: {
       resolveCurrent: async () => {
         events.push("identity:resolve");
+        if (input.resolveCurrent) return input.resolveCurrent();
         return {
           sessionId: NATIVE_ID,
           processUuid: "codex-process-42",
@@ -232,7 +261,16 @@ function facade(input: {
           processBirth: "fixed"
         })))();
       },
-      runtimeForLiveIdentity: () => ({ pid: 42 }),
+      physicalProcessIncarnation: () => {
+        events.push("identity:physical-incarnation");
+        return (input.physicalProcessIncarnation ??
+          input.processIncarnation ?? (() => ({
+            processUuid: "process-pid:42:birth:fixed",
+            processBirth: "fixed"
+          })))();
+      },
+      runtimeForLiveIdentity: (value) =>
+        input.runtimeForLiveIdentity?.(value) ?? ({ pid: 42 }),
       ownerIsInactive: () => true,
       assertCodexComposerReady: async () => {
         events.push("composer:ready");
@@ -241,7 +279,7 @@ function facade(input: {
     state: {
       storeDir: () => {
         events.push("store:dir");
-        return "/tmp/native-lifecycle-store";
+        return input.storeDir ?? "/tmp/native-lifecycle-store";
       },
       inspectStore: () => ({ writable: true }),
       runtimeDir: () => "/tmp/native-lifecycle-runtime",
@@ -424,7 +462,7 @@ test("Codex foreground identification bypasses ambiguous native resolution and e
     const foregroundTerminal = terminal("codex", control);
     const adapter = supportedAdapter();
     const processIncarnation = {
-      processUuid: "codex-pid:42:birth:foreground",
+      processUuid: "process-pid:42:birth:foreground",
       processBirth: "foreground"
     };
     const postProbeScreenDigest = "b".repeat(64);
@@ -547,7 +585,11 @@ test("Codex foreground identification bypasses ambiguous native resolution and e
       events,
       adapter,
       bridge,
-      processIncarnation: () => processIncarnation,
+      processIncarnation: () => ({
+        processUuid: "codex-pid:42:birth:foreground",
+        processBirth: "foreground"
+      }),
+      physicalProcessIncarnation: () => processIncarnation,
       print: (value) => {
         events.push("output:print");
         output = value as Record<string, unknown>;
@@ -684,6 +726,360 @@ test("Codex foreground identification rejects a questionnaire or stale physical 
       /physical terminal token is stale/u
     );
     assert.equal(inputCount, 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex 0.154 zero-rollout model options consume the dedicated physical authority", async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "akk-zero-rollout-model-control-")
+  );
+  try {
+    const events: string[] = [];
+    const control: TerminalControlRef = {
+      ...HERDR_CONTROL,
+      currentPath: fs.realpathSync(tempDir),
+      capabilities: ["send_keys", "screen_status"]
+    };
+    const foregroundTerminal = terminal("codex", control);
+    const modelAdapter: TerminalAgentAdapter = {
+      ...supportedAdapter(),
+      probeModelControl: (version) => ({
+        status: version === "0.154.0" ? "supported" : "unsupported",
+        agentVersion: version,
+        behaviorProfile: version === "0.154.0"
+          ? "codex-model-control-0.154.0"
+          : undefined,
+        scope: version === "0.154.0"
+          ? "current_and_new_sessions"
+          : undefined,
+        modelSelection: version === "0.154.0",
+        reasoningEffortSelection: version === "0.154.0",
+        reason: version === "0.154.0" ? "verified" : "unsupported"
+      }),
+      planModelControl: (capability) => {
+        assert.equal(capability.behaviorProfile, "codex-model-control-0.154.0");
+        return {
+          behaviorProfile: "codex-model-control-0.154.0",
+          command: "/model",
+          scope: "current_and_new_sessions",
+          requiresIdle: true,
+          requiresExactEmptyComposer: true
+        };
+      }
+    };
+    const catalog = {
+      agent: "codex" as const,
+      agentVersion: "0.154.0",
+      behaviorProfile: "codex-model-control-0.154.0" as const,
+      scope: "current_and_new_sessions" as const,
+      current: { model: "gpt-6-astra", reasoningEffort: "ultra" as const },
+      models: [{
+        id: "gpt-5.6-terra",
+        label: "GPT-5.6 Terra",
+        reasoningEfforts: ["low", "medium", "high"] as const
+      }],
+      catalogFingerprint: "f".repeat(64)
+    };
+    let modelOptionsCalls = 0;
+    let residualContinuationCalls = 0;
+    let setModelCalls = 0;
+    let repairModelControlCalls = 0;
+    let irreversibleInputSteps = 0;
+    const bridge = {
+      resolveConversationId: async () => foregroundTerminal,
+      resolveStoredTerminal: async () => foregroundTerminal,
+      status: async () => ({
+        provider: "tmux",
+        target: control.target,
+        agent: "codex",
+        reachable: true,
+        capabilities: modelAdapter.capabilities,
+        activity_state: "idle",
+        activity_reason: "exact empty prompt",
+        screen_state: "idle",
+        screen_reason: "exact empty prompt",
+        approval_state: {
+          scanned: true,
+          blocked: false,
+          approvable: false
+        },
+        screen: { excerpt: "›", digest: "idle-screen" }
+      }),
+      modelOptions: async (
+        _agent: unknown,
+        _terminalControl: unknown,
+        _agentVersion: unknown,
+        _plan: unknown,
+        options: {
+          beforeInput?: () => void | Promise<void>;
+          initialResidual?: {
+            state: "recoverable";
+            kind: "profiled_command_popup" | "bare_command";
+            fingerprint: string;
+          };
+        }
+      ) => {
+        modelOptionsCalls += 1;
+        if (options.initialResidual) {
+          residualContinuationCalls += 1;
+          assert.equal(options.initialResidual.fingerprint, "e".repeat(64));
+        }
+        await options.beforeInput?.();
+        irreversibleInputSteps += 1;
+        events.push("bridge:model-options");
+        return { terminalControl: control, catalog };
+      },
+      setModel: async (
+        _agent: unknown,
+        _terminalControl: unknown,
+        _agentVersion: unknown,
+        _plan: unknown,
+        expectedCatalogFingerprint: string,
+        request: { model: string; reasoningEffort: "high" },
+        options: { beforeInput?: () => void | Promise<void> }
+      ) => {
+        setModelCalls += 1;
+        assert.equal(expectedCatalogFingerprint, catalog.catalogFingerprint);
+        await options.beforeInput?.();
+        irreversibleInputSteps += 1;
+        events.push("bridge:set-model");
+        return {
+          terminalControl: control,
+          outcome: "changed" as const,
+          scope: "current_and_new_sessions" as const,
+          defaultsChanged: true,
+          requested: request,
+          effective: request,
+          newSessionDefaults: request,
+          doNotRetry: false
+        };
+      },
+      inspectModelControlResidual: async () => ({
+        state: "recoverable" as const,
+        kind: "profiled_command_popup" as const,
+        fingerprint: "e".repeat(64),
+        terminalControl: control
+      }),
+      repairModelControlResidual: async (
+        _agent: unknown,
+        _terminalControl: unknown,
+        _agentVersion: unknown,
+        _plan: unknown,
+        expectedResidualFingerprint: string,
+        options: { beforeInput?: () => void | Promise<void> }
+      ) => {
+        repairModelControlCalls += 1;
+        assert.equal(expectedResidualFingerprint, "e".repeat(64));
+        await options.beforeInput?.();
+        return {
+          terminalControl: control,
+          outcome: "repaired" as const,
+          terminalInputAttempted: true,
+          composerPostcondition: "empty" as const,
+          doNotRetry: false
+        };
+      }
+    } as unknown as TerminalAgentBridge;
+    const incarnation = {
+      processUuid: "process-pid:42:birth:model-control",
+      processBirth: "model-control"
+    };
+    const runtimeRequests: Array<{
+      expectedEmptyNativeSession?: boolean;
+      physicalOnly?: boolean;
+    }> = [];
+    const outputs: Record<string, unknown>[] = [];
+    const lifecycle = facade({
+      events,
+      adapter: modelAdapter,
+      bridge,
+      agentVersion: "0.154.0",
+      storeDir: tempDir,
+      resolveCurrent: async () => undefined,
+      processIncarnation: () => ({
+        processUuid: "codex-pid:42:birth:model-control",
+        processBirth: "model-control"
+      }),
+      physicalProcessIncarnation: () => incarnation,
+      runtimeForLiveIdentity: (request) => {
+        runtimeRequests.push(request);
+        return { pid: foregroundTerminal.pid };
+      },
+      print: (value) => {
+        outputs.push(value as Record<string, unknown>);
+      }
+    });
+    const expectedBindingToken =
+      terminalUserExplicitModelControlBindingToken({
+        terminalId: foregroundTerminal.conversationId,
+        terminalControl: control,
+        pid: foregroundTerminal.pid,
+        workspace: control.currentPath ?? "",
+        ...incarnation,
+        agentVersion: "0.154.0",
+        behaviorProfile: "codex-model-control-0.154.0"
+      });
+
+    await lifecycle.runModelOptions({
+      terminal: foregroundTerminal.conversationId,
+      expectedBindingToken
+    });
+    const optionsOutput = outputs[0];
+
+    const expectedResidualEntryToken =
+      terminalUserExplicitModelControlResidualEntryBindingToken({
+        terminalId: foregroundTerminal.conversationId,
+        terminalControl: control,
+        pid: foregroundTerminal.pid,
+        workspace: control.currentPath ?? "",
+        ...incarnation,
+        agentVersion: "0.154.0",
+        behaviorProfile: "codex-model-control-0.154.0",
+        residualKind: "profiled_command_popup",
+        residualFingerprint: "e".repeat(64)
+      });
+    await lifecycle.runModelOptions({
+      terminal: foregroundTerminal.conversationId,
+      expectedBindingToken: expectedResidualEntryToken
+    });
+    const residualOptionsOutput = outputs[1];
+    await assert.rejects(
+      lifecycle.runModelOptions({
+        terminal: foregroundTerminal.conversationId,
+        expectedBindingToken: "stale-token"
+      }),
+      /residual changed after it was listed/u
+    );
+    assert.equal(
+      modelOptionsCalls,
+      2,
+      "stale residual-entry authority must cause zero terminal input"
+    );
+
+    await lifecycle.runSetModel({
+      terminal: foregroundTerminal.conversationId,
+      expectedBindingToken,
+      expectedCatalogFingerprint: catalog.catalogFingerprint,
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high"
+    });
+    const setOutput = outputs[2];
+
+    const expectedRepairToken =
+      terminalUserExplicitModelControlRepairBindingToken({
+        terminalId: foregroundTerminal.conversationId,
+        terminalControl: control,
+        pid: foregroundTerminal.pid,
+        workspace: control.currentPath ?? "",
+        ...incarnation,
+        agentVersion: "0.154.0",
+        behaviorProfile: "codex-model-control-0.154.0",
+        residualKind: "profiled_command_popup",
+        residualFingerprint: "e".repeat(64)
+      });
+    await lifecycle.runRepairModelControl({
+      terminal: foregroundTerminal.conversationId,
+      expectedBindingToken: expectedRepairToken
+    });
+    const repairOutput = outputs[3];
+    assert.equal(repairModelControlCalls, 1);
+    assert.equal(repairOutput?.outcome, "repaired");
+    assert.equal(repairOutput?.composer_postcondition, "empty");
+    assert.equal(repairOutput?.do_not_retry, false);
+    await assert.rejects(
+      lifecycle.runRepairModelControl({
+        terminal: foregroundTerminal.conversationId,
+        expectedBindingToken: "stale-token"
+      }),
+      /residual changed after it was listed/u
+    );
+    assert.equal(
+      repairModelControlCalls,
+      1,
+      "stale repair authority must cause zero additional input"
+    );
+
+    let driftResolveCount = 0;
+    const driftLifecycle = facade({
+      events,
+      adapter: modelAdapter,
+      bridge,
+      agentVersion: "0.154.0",
+      storeDir: tempDir,
+      resolveCurrent: async () => {
+        driftResolveCount += 1;
+        return driftResolveCount === 1
+          ? undefined
+          : {
+              sessionId: NATIVE_ID,
+              processUuid: "codex-pid:42:birth:model-control",
+              processBirth: "model-control",
+              evidence: "new rollout appeared"
+            };
+      },
+      processIncarnation: () => ({
+        processUuid: "codex-pid:42:birth:model-control",
+        processBirth: "model-control"
+      }),
+      physicalProcessIncarnation: () => incarnation,
+      runtimeForLiveIdentity: () => ({ pid: foregroundTerminal.pid })
+    });
+    await assert.rejects(
+      driftLifecycle.runModelOptions({
+        terminal: foregroundTerminal.conversationId,
+        expectedBindingToken
+      }),
+      /binding or coding-agent version changed|current native Session changed/u
+    );
+
+    assert.equal(modelOptionsCalls, 3);
+    assert.equal(residualContinuationCalls, 1);
+    assert.equal(setModelCalls, 1);
+    assert.equal(
+      irreversibleInputSteps,
+      3,
+      "a rollout appearing at the final fence must cause zero additional input"
+    );
+    assert.equal(
+      runtimeRequests.every((request) =>
+        request.expectedEmptyNativeSession === true &&
+        request.physicalOnly !== true
+      ),
+      true,
+      "zero-rollout execution must retain the exact-empty native Session fence"
+    );
+    assert.equal(optionsOutput?.terminal_id, foregroundTerminal.conversationId);
+    assert.equal(optionsOutput?.catalog_fingerprint, catalog.catalogFingerprint);
+    const actions = optionsOutput?.available_actions as Record<string, unknown>;
+    const setModel = actions.set_model as Record<string, unknown>;
+    const args = setModel.arguments as Record<string, unknown>;
+    assert.equal(args.expected_binding_token, expectedBindingToken);
+    const residualActions = residualOptionsOutput?.available_actions as
+      Record<string, unknown>;
+    const residualSetModel = residualActions.set_model as
+      Record<string, unknown>;
+    const residualArgs = residualSetModel.arguments as Record<string, unknown>;
+    assert.equal(
+      residualArgs.expected_binding_token,
+      expectedBindingToken,
+      "successful continuation must mint the ordinary set-model boundary"
+    );
+    assert.notEqual(
+      residualArgs.expected_binding_token,
+      expectedResidualEntryToken
+    );
+    assert.equal(setOutput?.outcome, "changed");
+    assert.deepEqual(setOutput?.effective, {
+      model: "gpt-5.6-terra",
+      reasoning_effort: "high"
+    });
+    assert.deepEqual(setOutput?.new_session_defaults, {
+      model: "gpt-5.6-terra",
+      reasoning_effort: "high"
+    });
+    assert.equal(events.at(-1), "lock:release");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

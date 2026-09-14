@@ -47,7 +47,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v26 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v28 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -284,7 +284,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(operatorContract, /v26 `action_contracts`/u);
+  assert.match(operatorContract, /v28 `action_contracts`/u);
   assert.match(
     operatorContract,
     /`terminal_user_explicit`[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state/u
@@ -298,8 +298,19 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     operatorContract,
     /unmanaged work[\s\S]*best-effort attaches a Terminal Watch[\s\S]*completion callback[\s\S]*failure[^.]*never vetoes/u
   );
-  assert.match(skill, /v26 `action_contracts`/u);
-  assert.match(skill, /registers 21 OpenClaw tools/u);
+  assert.match(
+    skill,
+    /compact projection v1[\s\S]*CLI keeps the complete operator\/debug action contract/u
+  );
+  assert.match(
+    skill,
+    /agent-knock-knock\/host-list-compact[\s\S]*available_actions[\s\S]*action_inputs/u
+  );
+  assert.match(skill, /register 22 semantic AKK tools/u);
+  assert.match(
+    skill,
+    /repair_model_control[\s\S]*agent_knock_knock_repair_model_control\(\{terminal_id\}\)[\s\S]*never presses Enter[\s\S]*never retry an uncertain repair/u
+  );
   assert.match(
     skill,
     /same controller conversation[\s\S]*agent_knock_knock_status[\s\S]*turn_id[\s\S]*managed Turn[\s\S]*watch_id[\s\S]*response-capable exact Watch[\s\S]*interaction_state[\s\S]*agent_knock_knock_respond_interaction[\s\S]*same exact subject id[\s\S]*one call answers only the current step[\s\S]*call Status again/iu

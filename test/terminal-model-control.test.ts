@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   discoverTerminalModelOptions,
+  inspectTerminalModelControlResidual,
   observeTerminalModelControl,
   parseCodexNativeModelCatalog,
   planTerminalModelControl,
   probeTerminalModelControl,
+  repairTerminalModelControlResidual,
   switchTerminalModel,
   type TerminalModelControlPorts,
   type TerminalModelReasoningEffort,
@@ -304,6 +306,98 @@ test("Codex discovery intersects its picker with debug models without entering a
   assert.equal(native.authorityChecks, native.transportCalls);
 });
 
+test("Codex discovery accepts an exact bare /model materialization without the historical timeout", async () => {
+  const native = new FakeModelTerminal("codex", {
+    currentModel: "gpt-5.2",
+    currentEffort: "high",
+    defaultModel: "gpt-5.2",
+    defaultEffort: "high",
+    materializeBareCommand: true
+  });
+
+  const result = await discoverTerminalModelOptions({
+    agent: "codex",
+    agentVersion: "0.154.0",
+    plan: CODEX_PLAN,
+    terminalControl: "control",
+    ports: native.ports
+  });
+
+  assert.equal(result.catalog.current.model, "gpt-5.2");
+  assert.equal(native.sentText.length, 1);
+  assert.equal(native.sentKeys[0]?.[0], "C-m");
+  assert.equal(native.phase, "idle");
+});
+
+test("Codex discovery continues one exact residual /model without retyping it", async () => {
+  for (const initialResidual of [
+    "profiled_command_popup",
+    "bare_command"
+  ] as const) {
+    const native = new FakeModelTerminal("codex", {
+      currentModel: "gpt-5.2",
+      currentEffort: "high",
+      defaultModel: "gpt-5.2",
+      defaultEffort: "high",
+      initialResidual
+    });
+    const residual = await inspectTerminalModelControlResidual({
+      plan: CODEX_PLAN,
+      terminalControl: "control",
+      ports: native.ports
+    });
+    assert.equal(residual.state, "recoverable");
+    if (residual.state !== "recoverable") continue;
+    assert.equal(residual.kind, initialResidual);
+
+    const result = await discoverTerminalModelOptions({
+      agent: "codex",
+      agentVersion: "0.154.0",
+      plan: CODEX_PLAN,
+      terminalControl: "control",
+      ports: native.ports,
+      initialResidual: residual
+    });
+
+    assert.equal(result.catalog.current.model, "gpt-5.2");
+    assert.equal(result.catalog.current.reasoningEffort, "high");
+    assert.deepEqual(native.sentText, []);
+    assert.equal(native.sentKeys[0]?.[0], "C-m");
+    assert.equal(native.phase, "idle");
+  }
+});
+
+test("an exact Codex model picker is a repairable input-owner surface", async () => {
+  const native = new FakeModelTerminal("codex", {
+    currentModel: "gpt-5.2",
+    currentEffort: "high",
+    defaultModel: "gpt-5.2",
+    defaultEffort: "high"
+  });
+  native.phase = "codex_model";
+  native.selectedModelIndex = 1;
+
+  const residual = await inspectTerminalModelControlResidual({
+    plan: CODEX_PLAN,
+    terminalControl: "control",
+    ports: native.ports
+  });
+  assert.equal(residual.state, "recoverable");
+  if (residual.state !== "recoverable") return;
+  assert.equal(residual.kind, "model_surface");
+
+  const repaired = await repairTerminalModelControlResidual({
+    plan: CODEX_PLAN,
+    terminalControl: residual.terminalControl,
+    expectedResidualFingerprint: residual.fingerprint,
+    ports: native.ports
+  });
+  assert.equal(repaired.outcome, "repaired");
+  assert.equal(repaired.composerPostcondition, "empty");
+  assert.equal(native.phase, "idle");
+  assert.deepEqual(native.sentKeys, [["Escape"]]);
+});
+
 test("Codex discovery uses the final authority-revalidated idle tuple", async () => {
   const native = new FakeModelTerminal("codex", {
     currentModel: "gpt-5.2",
@@ -547,6 +641,8 @@ class FakeModelTerminal {
   readonly codexEntryMode?:
     "quick_auto_regular" | "quick_auto_current" | "luna_reserve";
   readonly mutateEffortBeforeFirstInput?: TerminalModelReasoningEffort;
+  readonly initialResidual?: "profiled_command_popup" | "bare_command";
+  readonly materializeBareCommand: boolean;
   readonly claudeEffortsByModel: Readonly<Record<
     string, readonly TerminalModelReasoningEffort[]
   >>;
@@ -581,6 +677,8 @@ class FakeModelTerminal {
       codexEntryMode?:
         "quick_auto_regular" | "quick_auto_current" | "luna_reserve";
       mutateEffortBeforeFirstInput?: TerminalModelReasoningEffort;
+      initialResidual?: "profiled_command_popup" | "bare_command";
+      materializeBareCommand?: boolean;
       claudeEffortsByModel?: Readonly<Record<
         string, readonly TerminalModelReasoningEffort[]
       >>;
@@ -595,13 +693,21 @@ class FakeModelTerminal {
     this.planPersistenceFailure = options.planPersistenceFailure ?? false;
     this.codexEntryMode = options.codexEntryMode;
     this.mutateEffortBeforeFirstInput = options.mutateEffortBeforeFirstInput;
+    this.initialResidual = options.initialResidual;
+    this.materializeBareCommand = options.materializeBareCommand ?? false;
     this.claudeEffortsByModel = options.claudeEffortsByModel ?? {
       opus: ["low", "medium", "high", "xhigh", "max"],
       sonnet: ["low", "medium", "high", "xhigh", "max"],
       haiku: ["low", "medium", "high", "xhigh", "max"]
     };
     this.throwOnceInPhase = options.throwOnceInPhase;
+    if (this.initialResidual) {
+      this.phase = "composer";
+      this.composerReady = this.initialResidual === "profiled_command_popup";
+    }
   }
+
+  private composerReady = true;
 
   readonly ports: TerminalModelControlPorts = {
     beforeInput: async () => {
@@ -635,9 +741,16 @@ class FakeModelTerminal {
         approvalBlocked: false,
         exactEmptyComposer: this.phase === "idle",
         exactCommandReady:
-          this.phase === "composer" && expectedComposer === "/model",
+          this.phase === "composer" && expectedComposer === "/model" &&
+          this.composerReady,
         exactCommandComposer:
-          this.phase === "composer" && expectedComposer === "/model"
+          this.phase === "composer" && expectedComposer === "/model",
+        exactBareCommand:
+          this.phase === "composer" && expectedComposer === "/model" &&
+          !this.composerReady,
+        ...(this.phase === "composer" && expectedComposer === "/model"
+          ? { exactCommandFingerprint: `model:${this.composerReady}` }
+          : {})
       };
     },
     sendText: async (_control, text) => {
@@ -645,6 +758,7 @@ class FakeModelTerminal {
       assert.equal(this.phase, "idle");
       this.sentText.push(text);
       this.phase = "composer";
+      this.composerReady = !this.materializeBareCommand;
     },
     sendKeys: async (_control, keys) => {
       this.assertAuthorizedTransport();
@@ -663,7 +777,12 @@ class FakeModelTerminal {
 
   private key(key: string): void {
     if (this.phase === "composer") {
-      if (key === "Escape") this.phase = "idle";
+      if (key === "Escape") {
+        if (this.composerReady) this.composerReady = false;
+        else this.phase = "idle";
+      } else if (key === "C-u" && !this.composerReady) {
+        this.phase = "idle";
+      }
       else {
         assert.equal(key, "C-m");
         this.phase = this.agent === "codex"
@@ -825,7 +944,13 @@ class FakeModelTerminal {
       ? [...prefix, "> Ask Codex to do anything",
           `  ${this.currentModel} ${this.currentEffort}${this.planMode ? " · Plan mode" : ""}`].join("\n")
       : [...prefix, "> Ask Claude"].join("\n");
-    if (this.phase === "composer") return [...prefix, "› /model"].join("\n");
+    if (this.phase === "composer") return [
+      ...prefix,
+      "› /model",
+      ...(this.composerReady ? [] : [
+        `  ${this.currentModel} ${this.currentEffort}`
+      ])
+    ].join("\n");
     if (this.phase === "codex_entry") {
       if (this.codexEntryMode === "luna_reserve") {
         return [...prefix, "Select Model",

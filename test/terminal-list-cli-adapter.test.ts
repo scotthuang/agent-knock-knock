@@ -359,7 +359,7 @@ test("list separates an idle Codex screen from ambiguous native identity", async
     true,
     true,
     "› ",
-    { ambiguousOpenRoots: true }
+    { ambiguousOpenRoots: true, agentVersion: "0.154.0" }
   );
   const [terminal] = fixture.scan.terminalControlled;
 
@@ -398,6 +398,11 @@ test("list separates an idle Codex screen from ambiguous native identity", async
     actions.identify_foreground?.arguments?.expected_terminal_token,
     actions.identify_and_send?.arguments?.expected_terminal_token
   );
+  assert.equal(
+    actions.model_options,
+    undefined,
+    "ambiguous live rollouts must not be upgraded to model-control authority"
+  );
 
   const workingFixture = await createCodexRolloutListFixture(
     path.join(root, "working"),
@@ -428,6 +433,214 @@ test("list separates an idle Codex screen from ambiguous native identity", async
     undefined,
     "a working screen must never advertise a /status probe"
   );
+});
+
+test("Codex 0.154 zero-rollout list advertises domain-separated physical model control", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-zero-rollout-model-control-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    false,
+    "› ",
+    {
+      agentVersion: "0.154.0",
+      nativeIdentityObservation: "verified_absent"
+    }
+  );
+  const [terminal] = fixture.scan.terminalControlled;
+  assert.equal(terminal.native_identity_state, "verified_absent");
+  assert.equal(terminal.screen_state, "idle");
+  const actions = terminal.available_actions as Record<string, any>;
+  assert.equal(
+    actions.model_options?.tool,
+    "agent_knock_knock_model_options"
+  );
+  assert.equal(
+    actions.model_options?.authority_scope,
+    "terminal_user_explicit_model_control"
+  );
+  assert.equal(
+    actions.model_options?.mutation_scope,
+    "current_and_new_sessions"
+  );
+  assert.equal(actions.model_options?.requires_user_intent, true);
+  assert.equal(typeof actions.model_options?.arguments?.expected_binding_token, "string");
+  assert.notEqual(
+    actions.model_options?.arguments?.expected_binding_token,
+    actions.identify_foreground?.arguments?.expected_terminal_token,
+    "model control and foreground diagnostics must not share authority bytes"
+  );
+
+  const exactFixture = await createCodexRolloutListFixture(
+    path.join(root, "exact"),
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    true,
+    "› ",
+    { agentVersion: "0.154.0" }
+  );
+  const [exact] = exactFixture.scan.terminalControlled;
+  const exactAction = (exact.available_actions as Record<string, any>)
+    .model_options;
+  assert.equal(exact.native_identity_state, "resolved");
+  assert.equal(exactAction?.tool, "agent_knock_knock_model_options");
+  assert.equal(exactAction?.authority_scope, undefined);
+});
+
+test("Codex 0.154 exact /model residual advertises typed continuation and repair", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-model-control-repair-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    false,
+    "› /model\n\n/model  choose what model and reasoning effort to use",
+    {
+      agentVersion: "0.154.0",
+      nativeIdentityObservation: "verified_absent",
+      modelControlResidual: "popup"
+    }
+  );
+  const [terminal] = fixture.scan.terminalControlled;
+  const actions = terminal.available_actions as Record<string, any>;
+  assert.equal(
+    actions.repair_model_control?.tool,
+    "agent_knock_knock_repair_model_control"
+  );
+  assert.equal(
+    actions.repair_model_control?.authority_scope,
+    "terminal_user_explicit_model_control_repair"
+  );
+  assert.equal(
+    actions.repair_model_control?.mutation_scope,
+    "exact_model_control_residual_only"
+  );
+  assert.deepEqual(
+    Object.keys(actions.repair_model_control?.arguments ?? {}).sort(),
+    ["expected_binding_token", "terminal_id"]
+  );
+  assert.equal(
+    actions.model_options?.tool,
+    "agent_knock_knock_model_options"
+  );
+  assert.equal(
+    actions.model_options?.authority_scope,
+    "terminal_user_explicit_model_control_residual_entry"
+  );
+  assert.notEqual(
+    actions.model_options?.arguments?.expected_binding_token,
+    actions.repair_model_control?.arguments?.expected_binding_token,
+    "continuation and cleanup-only authority must be domain-separated"
+  );
+
+  const bareFixture = await createCodexRolloutListFixture(
+    path.join(root, "bare"),
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    false,
+    "› /model\n  gpt-5.6-sol high · /repo",
+    {
+      agentVersion: "0.154.0",
+      nativeIdentityObservation: "verified_absent",
+      modelControlResidual: "bare"
+    }
+  );
+  const bareActions = bareFixture.scan.terminalControlled[0]
+    .available_actions as Record<string, any>;
+  assert.equal(
+    bareActions.model_options?.authority_scope,
+    "terminal_user_explicit_model_control_residual_entry"
+  );
+  assert.equal(
+    bareActions.repair_model_control?.authority_scope,
+    "terminal_user_explicit_model_control_repair"
+  );
+  assert.notEqual(
+    bareActions.model_options?.arguments?.expected_binding_token,
+    bareActions.repair_model_control?.arguments?.expected_binding_token
+  );
+
+  const pickerFixture = await createCodexRolloutListFixture(
+    path.join(root, "picker"),
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    false,
+    [
+      "  Select Model and Effort",
+      "  1. gpt-6-astra (default)",
+      "› 2. gpt-5.6-sol (current)",
+      "  3. gpt-5.6-terra",
+      "  4. gpt-5.6-luna",
+      "  5. gpt-5.5",
+      "  6. gpt-5.3-codex-spark",
+      "  Press enter to confirm or esc to go back"
+    ].join("\n"),
+    {
+      agentVersion: "0.154.0",
+      nativeIdentityObservation: "verified_absent",
+      modelControlResidual: "surface"
+    }
+  );
+  const [picker] = pickerFixture.scan.terminalControlled;
+  const pickerActions = picker.available_actions as Record<string, any>;
+  assert.equal(picker.activity_state, "unknown");
+  assert.equal(picker.screen_state, "unknown");
+  assert.match(String(picker.activity_reason), /model-control surface is open/u);
+  assert.equal(
+    pickerActions.model_options,
+    undefined,
+    "an open picker must not advertise an action that would dispatch Enter"
+  );
+  assert.equal(
+    pickerActions.repair_model_control?.authority_scope,
+    "terminal_user_explicit_model_control_repair"
+  );
+
+  const unsafeFixture = await createCodexRolloutListFixture(
+    path.join(root, "unsafe"),
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    false,
+    "› user draft",
+    {
+      agentVersion: "0.154.0",
+      nativeIdentityObservation: "verified_absent",
+      modelControlResidual: "unsafe"
+    }
+  );
+  const [unsafe] = unsafeFixture.scan.terminalControlled;
+  const unsafeActions = unsafe.available_actions as Record<string, unknown>;
+  assert.equal(unsafeActions.repair_model_control, undefined);
+  assert.equal(unsafeActions.model_options, undefined);
 });
 
 test("list reports the unique physical Codex root when a stale managed preference rejects it", async (t) => {
@@ -2070,6 +2283,9 @@ async function createCodexRolloutListFixture(
     nestedCodexDescendant?: boolean;
     rejectedPreferredSessionId?: string;
     screenActivityState?: "working" | "idle";
+    agentVersion?: string;
+    nativeIdentityObservation?: "resolved" | "verified_absent";
+    modelControlResidual?: "popup" | "bare" | "surface" | "unsafe";
   } = {}
 ) {
   const nativeThreadId = "019f0000-0000-7000-8000-000000000777";
@@ -2131,7 +2347,7 @@ async function createCodexRolloutListFixture(
         cwd: workspace,
         originator: "codex-tui",
         source: "cli",
-        cli_version: "0.150.1"
+        cli_version: fixtureOptions.agentVersion ?? "0.150.1"
       }
     },
     {
@@ -2322,7 +2538,34 @@ async function createCodexRolloutListFixture(
         ? "working fixture screen"
         : "idle-looking fixture screen",
       screen: { excerpt: composerScreen }
-    })
+    }),
+    inspectModelControlResidual: async () =>
+      fixtureOptions.modelControlResidual === "popup"
+        ? {
+            state: "recoverable" as const,
+            kind: "profiled_command_popup" as const,
+            fingerprint: "a".repeat(64),
+            terminalControl
+          }
+        : fixtureOptions.modelControlResidual === "bare"
+          ? {
+              state: "recoverable" as const,
+              kind: "bare_command" as const,
+              fingerprint: "b".repeat(64),
+              terminalControl
+            }
+          : fixtureOptions.modelControlResidual === "surface"
+            ? {
+                state: "recoverable" as const,
+                kind: "model_surface" as const,
+                fingerprint: "c".repeat(64),
+                terminalControl
+              }
+          : {
+              state: "unsafe" as const,
+              reason: "not an exact model-control residual",
+              terminalControl
+            }
   };
   const unusedGate = deferredGate();
   unusedGate.release();
@@ -2337,7 +2580,8 @@ async function createCodexRolloutListFixture(
       createTerminalProcessSource: () => ({
         listProcessSnapshots: async () => processSnapshots
       }),
-      agentVersionForRunningProcess: () => "0.150.1",
+      agentVersionForRunningProcess: () =>
+        fixtureOptions.agentVersion ?? "0.150.1",
       codexLatentClearResumeObservation: () => undefined,
       codexManagedIdentityResolutionContext: () => ({
         companions: { primary: undefined, additional: [] },
@@ -2355,12 +2599,19 @@ async function createCodexRolloutListFixture(
       }),
       inspectCodexOpenRootRolloutInventory: async () =>
         codexOpenRootRolloutInventory,
-      nativeInspectionComposerEmpty: () => true,
+      nativeInspectionComposerEmpty: () =>
+        fixtureOptions.modelControlResidual === undefined,
       observeCurrentNativeAgentSessionIdentity: async (
         request: { pid: number; preferredSessionId?: string }
       ) => {
         if (request.pid === 4241) {
           throw new Error("broken sibling identity probe");
+        }
+        if (fixtureOptions.nativeIdentityObservation === "verified_absent") {
+          return {
+            status: "verified_absent" as const,
+            evidence: "native_identity_resolver_verified_absent"
+          };
         }
         if (fixtureOptions.ambiguousOpenRoots) {
           throw new Error(

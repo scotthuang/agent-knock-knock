@@ -114,9 +114,9 @@ test("managed Turn rendering consumes only sampled list facts", () => {
   );
 });
 
-test("the public action contract v26 exposes semantic arguments only", () => {
+test("the public action contract v28 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 26);
+  assert.equal(contracts.version, 28);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -128,6 +128,8 @@ test("the public action contract v26 exposes semantic arguments only", () => {
       "list_resumable_threads",
       "native_inspect",
       "model_options",
+      "repair_model_control",
+      "set_model",
       "identify_foreground",
       "identify_and_send",
       "resume_thread",
@@ -165,6 +167,15 @@ test("the public action contract v26 exposes semantic arguments only", () => {
     assert.equal(encoded.includes(forbidden), false, forbidden);
   }
   const actions = contracts.actions as Record<string, any>;
+  assert.deepEqual(actions.repair_model_control.required, ["terminal_id"]);
+  assert.equal(
+    actions.repair_model_control.authority_scope,
+    "terminal_user_explicit_model_control_repair"
+  );
+  assert.equal(
+    actions.repair_model_control.uncertain_retry_allowed,
+    false
+  );
   assert.equal(actions.identify_foreground.proof_ttl_ms, 30000);
   assert.equal(actions.identify_foreground.proof_grants_authority, false);
   assert.equal(actions.identify_and_send.unmanaged_fallback, false);

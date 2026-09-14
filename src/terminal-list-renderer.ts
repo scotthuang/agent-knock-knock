@@ -80,7 +80,7 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 26,
+    version: 28,
     instructions: [
       "Treat terminals[] as the primary resource and use only mutation actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Read-only Watch is the separate user-intent exception: one complete exact terminal_id may be watched even when available_actions.watch is absent. Either nested mutation action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "A complete but unverified Codex or Claude Code x.y.z version adds compatibility_warnings and action compatibility_warning diagnostics but never vetoes an otherwise eligible action. Execute the advertised action through the generic runtime protocol; actual UI, artifact, identity, and postcondition evidence decides success. Never automatically retry a result that says terminal input may already have occurred.",
@@ -89,6 +89,7 @@ export function listActionContracts(): JsonRecord {
       "A user-explicit raw terminal selector, or a uniquely delegated raw send with no selector, is only a discovery choice. If that terminal already has one rollout-backed managed Codex source, the managed fast path captures fresh candidate authority under the terminal and Store locks and still uses the same v3 follow-current transfer; it never degrades to sole-root strict continuation. If that managed path proves zero input and fails, the separate terminal_user_explicit path may deliver once as unmanaged work.",
       "Read-only native-thread listing targets an exact terminal_id. Native-thread new/resume mutations use terminal_id and, for resume, one complete native_thread_id; AKK resolves and revalidates current lifecycle authority internally. They never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed inspection enum and current exact terminal_id. AKK resolves current lifecycle authority internally, and AKK status does not execute a native slash command.",
+      "Native model control is a separate explicit exact-physical-pane action. model_options requires one currently advertised terminal_id, an exact live pane/process, no approval, questionnaire/editor, read-only viewer, or active Turn, and either an idle empty Composer or one stable profiled Codex 0.154 /model Composer residual. It obtains choices dynamically from the native catalog. Codex requires either one exact current native Session or a verified-zero-rollout 0.154 pane; Claude still requires one exact current native Session. identify_foreground is diagnostic rather than a prerequisite. For an exact Composer residual, model_options uses separate residual-bound authority to continue that same native slash command into read-only discovery. Whether entered from empty or a residual, model_options must dismiss to exact empty, consume any residual-entry authority, and return a fresh ordinary one-shot set_model offer. An already-open exact native picker is never advertised as model_options: List marks it non-idle and advertises repair_model_control only. repair_model_control is cleanup-only: it never presses Enter, never offers or continues into set_model, and requires refresh List then model_options after restoring empty. set_model consumes one exact model/reasoning-effort tuple from that same-controller catalog offer, revalidates every physical and UI boundary under lock, and reports uncertain without automatic retry when its postcondition cannot be proven.",
       "Foreground identification is an explicit Codex-only diagnostic for an exact empty idle Composer whose native identity is unresolved. identify_foreground sends exactly one closed /status under the terminal lock, mutates no Store state, and returns a 30-second pane/process/cwd/screen-bound observation that grants no later authority. identify_and_send keeps that same terminal lock, revalidates the observation, and sends one task; it never falls back to unmanaged delivery. Final Session identity still comes only from the rollout that uniquely accepts the exact task. Ordinary list, status, and send never invoke this probe.",
       "Terminal Watch is a read-only user-directed observation of one exact live terminal. AKK prefers an exact durable task anchor and otherwise degrades to best-effort terminal-activity observation; version, artifact, managed ownership, and stale action-advertisement uncertainty produce warnings rather than vetoing Watch. It sends no terminal input and creates no AKK Session or Turn. Pass the exact terminal_id and use watch_id for later status or unwatch operations.",
       "A verified, idle human native-thread switch may expose a terminal-scoped send; that action atomically adopts the live context before creating its Turn. A conclusively ended Codex rollout may expose the same snapshot-bound operation only after AKK proves zero current rollout and an exact empty composer; it detaches the ended Session and creates an isolated virgin Session. A status-card-only zero-rollout source or any otherwise eligible quiescent rollout-backed source with a complete nonempty pinned open-rollout inventory may also expose this exact action. One materialized rollout does not prove the current Codex TUI foreground thread, and a /clear resume hint is diagnostic only. AKK freezes any released predecessor Turn history, submits the ordinary task once, and binds a separate provisional Session only after one post-anchor rollout uniquely accepts that exact request. The accepted UUID may equal or differ from the predecessor without merging their Session lineages, and narrow panes do not require /status. Until that promotion commits, strict session_id send, respond, approve, cancel, native lifecycle, and native_inspect remain unavailable, and the provisional binding has no callback authority. If dispatch, acceptance, or post-submit binding is uncertain, do not retry automatically. Explicit Close always honors the user's decision to release AKK management of the selected Turn; it sends no terminal input, never stops the coding agent or pane, and reports best-effort cleanup warnings without vetoing the Close. Refresh list afterward and use Watch when the coding agent is still working. Other input-producing binding actions remain fail-closed.",
@@ -289,8 +290,59 @@ export function listActionContracts(): JsonRecord {
         creates_session: false,
         mutates_store: false,
         sends_terminal_input: true,
-        input_scope: "fixed /model discovery followed by exact Escape dismissal",
+        input_scope:
+          "Fixed /model discovery, or one residual-bound continuation of that exact command, followed by exact Escape dismissal",
+        authority_scopes: [
+          "native_session",
+          "terminal_user_explicit_model_control",
+          "terminal_user_explicit_model_control_residual_entry"
+        ],
+        native_identity_requirement: {
+          codex: "exact_current_session_or_verified_zero_rollout_0.154",
+          claude: "exact_current_session"
+        },
+        zero_rollout_codex_supported: true,
+        safety_boundary:
+          "Exact live pane/process, no approval, questionnaire/editor, read-only viewer, or active Turn, plus either an idle empty Composer or one exact stable Codex 0.154 /model Composer residual.",
         candidate_source: "terminals[].available_actions.model_options"
+      },
+      repair_model_control: {
+        tool: "agent_knock_knock_repair_model_control",
+        target_argument: "terminal_id",
+        required: ["terminal_id"],
+        creates_turn: false,
+        creates_session: false,
+        mutates_store: false,
+        sends_terminal_input: true,
+        input_scope:
+          "Reversible dismissal and clearing of one exact profiled Codex 0.154 /model Composer residue or open native picker; never Enter, task submission, approval, or model selection.",
+        authority_scope: "terminal_user_explicit_model_control_repair",
+        accepts_raw_command_or_keys: false,
+        empty_composer_postcondition_required: true,
+        uncertain_retry_allowed: false,
+        after_success:
+          "Refresh list, then run model_options before a deliberate set_model attempt.",
+        candidate_source: "terminals[].available_actions.repair_model_control"
+      },
+      set_model: {
+        tool: "agent_knock_knock_set_model",
+        target_argument: "terminal_id",
+        required: ["terminal_id", "model", "reasoning_effort"],
+        semantic_tuple_source:
+          "The immediately preceding model_options result in the same controller conversation.",
+        authority_scopes: [
+          "native_session",
+          "terminal_user_explicit_model_control"
+        ],
+        native_identity_requirement: {
+          codex: "exact_current_session_or_verified_zero_rollout_0.154",
+          claude: "exact_current_session"
+        },
+        identify_foreground_required: false,
+        accepts_raw_command_or_keys: false,
+        postcondition_required: true,
+        uncertain_retry_allowed: false,
+        candidate_source: "model_options.available_actions.set_model"
       },
       identify_foreground: {
         tool: "agent_knock_knock_identify_foreground",
@@ -962,6 +1014,12 @@ export function actionsForManagedSessionBinding(
     if (!action) {
       continue;
     }
+    if (
+      actionName === "model_options" &&
+      action.authority_scope === "terminal_user_explicit_model_control"
+    ) {
+      continue;
+    }
     next[actionName] = {
       ...action,
       arguments: {
@@ -988,7 +1046,9 @@ export function withoutInspectionActionsDuringNativeTransition(
 ): JsonRecord {
   return Object.fromEntries(Object.entries(actions).filter(
     ([actionName]) =>
-      actionName !== "native_inspect" && actionName !== "model_options"
+      actionName !== "native_inspect" &&
+      actionName !== "model_options" &&
+      actionName !== "repair_model_control"
   ));
 }
 
