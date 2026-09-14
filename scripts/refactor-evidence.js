@@ -1392,13 +1392,13 @@ function validatePublicContracts(value, {
   }
   assertSourcePattern(
     repoRoot,
-    "src/terminal-watch-store.ts",
+    "src/terminal-watch-record.ts",
     /export const TERMINAL_WATCH_SCHEMA = "agent-knock-knock\/terminal-watch" as const;/u,
     "Terminal Watch schema v3 name"
   );
   assertSourcePattern(
     repoRoot,
-    "src/terminal-watch-store.ts",
+    "src/terminal-watch-record.ts",
     /export const TERMINAL_WATCH_VERSION = 3 as const;/u,
     "Terminal Watch schema v3 version"
   );

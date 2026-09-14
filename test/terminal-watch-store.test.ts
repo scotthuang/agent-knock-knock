@@ -40,6 +40,13 @@ import {
   type TerminalWatchWriterScope
 } from "../src/terminal-watch-store.js";
 import {
+  assertTerminalWatch as assertTerminalWatchRecord,
+  decodeTerminalWatch
+} from "../src/terminal-watch-codec.js";
+import {
+  terminalWatchRevision as terminalWatchRecordRevision
+} from "../src/terminal-watch-record.js";
+import {
   TERMINAL_INTERACTION_SCHEMA,
   TERMINAL_INTERACTION_SUBJECT_VERSION,
   type TerminalInteractionSubjectProjection
@@ -146,6 +153,19 @@ function watch(watchId = "terminal-watch-store-fixture"): TerminalWatch {
     notification_outbox: []
   };
 }
+
+test("Watch Store facade preserves the extracted record and codec behavior", () => {
+  assert.equal(assertTerminalWatch, assertTerminalWatchRecord);
+  assert.equal(terminalWatchRevision, terminalWatchRecordRevision);
+  const candidate = { ...watch(), revision: 1 };
+  const encoded = JSON.stringify(candidate);
+
+  assert.deepEqual(
+    decodeTerminalWatch(JSON.parse(encoded), candidate.watch_id),
+    candidate
+  );
+  assert.equal(JSON.stringify(candidate), encoded);
+});
 
 function currentInteraction(
   owner: TerminalWatch,
