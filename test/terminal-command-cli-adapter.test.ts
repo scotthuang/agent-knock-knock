@@ -58,6 +58,24 @@ function compiledFunctionSource(
   return source.slice(start, end);
 }
 
+function compiledModuleFunctionSource(
+  moduleName: string,
+  name: string,
+  nextName?: string
+): string {
+  const source = fs.readFileSync(
+    new URL(`../src/${moduleName}.js`, import.meta.url),
+    "utf8"
+  );
+  const start = source.indexOf(`function ${name}`);
+  const end = nextName
+    ? source.indexOf(`function ${nextName}`, start + 1)
+    : source.length;
+  assert.notEqual(start, -1, `${name} must remain in ${moduleName}`);
+  assert.notEqual(end, -1, `${nextName} must follow ${name}`);
+  return source.slice(start, end);
+}
+
 function assertOrdered(source: string, tokens: readonly string[]): void {
   let cursor = 0;
   for (const token of tokens) {
@@ -874,9 +892,10 @@ test("deferred dispatch keeps one prepared authority and a separate bridge clock
 });
 
 test("user-explicit fallback cancels only bridge-proven pre-mutation failure", () => {
-  const liveSafety = compiledFunctionSource(
+  const liveSafety = compiledModuleFunctionSource(
+    "terminal-command-send-preflight",
     "assertSafeUserExplicitTerminalSend",
-    "terminalUserSendIntentContext"
+    "terminalSendCandidateAcceptanceAnchor"
   );
   assertOrdered(liveSafety, [
     "const decision = decideUserExplicitTerminalInputSafety({",
@@ -889,9 +908,10 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
     "throw new Error(decision.reason)"
   ]);
 
-  const managedSafety = compiledFunctionSource(
+  const managedSafety = compiledModuleFunctionSource(
+    "terminal-command-send-preflight",
     "assertTerminalPreSendStatus",
-    "prepareTerminalControlSend"
+    undefined
   );
   assertOrdered(managedSafety, [
     "request.options.expectedUserExplicitTerminalToken",
