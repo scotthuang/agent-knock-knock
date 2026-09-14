@@ -928,6 +928,47 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
     });
     const optionsOutput = outputs[0];
 
+    const screenDriftBridge = {
+      ...bridge,
+      status: async () => ({
+        provider: "tmux",
+        target: control.target,
+        agent: "codex",
+        reachable: true,
+        capabilities: modelAdapter.capabilities,
+        activity_state: "idle",
+        activity_reason: "stale idle classification",
+        screen_state: "working",
+        screen_reason: "fresh screen drift",
+        approval_state: {
+          scanned: true,
+          blocked: false,
+          approvable: false
+        },
+        screen: { excerpt: "Working", digest: "working-screen" }
+      })
+    } as unknown as TerminalAgentBridge;
+    await assert.rejects(
+      facade({
+        adapter: modelAdapter,
+        bridge: screenDriftBridge,
+        agentVersion: "0.154.0",
+        storeDir: tempDir,
+        resolveCurrent: async () => undefined,
+        physicalProcessIncarnation: () => incarnation,
+        runtimeForLiveIdentity: () => ({ pid: foregroundTerminal.pid })
+      }).runModelOptions({
+        terminal: foregroundTerminal.conversationId,
+        expectedBindingToken
+      }),
+      /exact verified idle pane with an empty composer/u
+    );
+    assert.equal(
+      modelOptionsCalls,
+      1,
+      "a fresh locked screen drift must stop before terminal input"
+    );
+
     const expectedResidualEntryToken =
       terminalUserExplicitModelControlResidualEntryBindingToken({
         terminalId: foregroundTerminal.conversationId,

@@ -651,8 +651,7 @@ function renderTerminalLifecycleActions(input: {
   }
   return {
     ...actions,
-    ...renderNativeInspectAction(input),
-    ...renderModelOptionsAction(input)
+    ...renderNativeInspectAction(input)
   };
 }
 
@@ -707,28 +706,6 @@ function renderNativeInspectAction(input: {
   };
 }
 
-function renderModelOptionsAction(input: {
-  commands: JsonRecord;
-  entry: JsonRecord;
-  id: string;
-  approvalState: JsonRecord;
-  lifecycleBindingToken?: string;
-  terminalControlled: boolean;
-}): JsonRecord {
-  if (!terminalIdleLifecycleActionEligible(input, "model_options")) {
-    return {};
-  }
-  return {
-    model_options: {
-      tool: "agent_knock_knock_model_options",
-      arguments: {
-        terminal_id: input.id,
-        expected_binding_token: input.lifecycleBindingToken
-      }
-    }
-  };
-}
-
 function actionCompatibilityWarning(
   entry: JsonRecord,
   capabilityName: "native_thread_lifecycle" | "native_inspection"
@@ -748,7 +725,7 @@ function terminalIdleLifecycleActionEligible(
     lifecycleBindingToken?: string;
     terminalControlled: boolean;
   },
-  command: "new_thread" | "native_inspect" | "model_options"
+  command: "new_thread" | "native_inspect"
 ): boolean {
   return input.terminalControlled &&
     input.commands[command] === true &&
@@ -1016,7 +993,11 @@ export function actionsForManagedSessionBinding(
     }
     if (
       actionName === "model_options" &&
-      action.authority_scope === "terminal_user_explicit_model_control"
+      (
+        action.authority_scope === "terminal_user_explicit_model_control" ||
+        action.authority_scope ===
+          "terminal_user_explicit_model_control_residual_entry"
+      )
     ) {
       continue;
     }
