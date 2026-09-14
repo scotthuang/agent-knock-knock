@@ -40,9 +40,9 @@ import {
   terminalWatchesDir
 } from "../src/terminal-watch-store.js";
 import {
+  normalizeTerminalInteractionResponseV2,
   validateTerminalInteractionSubjectProjection,
-  type
-  TerminalInteractionSubjectProjection
+  type TerminalInteractionSubjectProjection
 } from "../src/terminal-interaction-protocol.js";
 import {
   STORE_WRITER_PROTOCOL,
@@ -4417,7 +4417,11 @@ function watchInteractionBridge(input: {
         terminalControl,
         fingerprint: projection.prompt_fingerprint,
         projection,
-        response,
+        response: normalizeTerminalInteractionResponseV2(
+          response,
+          projection,
+          { allowExpiredForLiveRecapture: true }
+        ),
         runtime: options.runtime
       };
       const authorization = await options.authorize?.(context) ?? {

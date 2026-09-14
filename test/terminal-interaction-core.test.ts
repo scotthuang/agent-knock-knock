@@ -176,7 +176,14 @@ test("subject-neutral builder gives monitor and Watch the same surface identity"
     managed.projection.interaction_id,
     watch.projection.interaction_id
   );
-  assert.equal(managed.projection.turn_id, "turn_123");
+  assert.equal(managed.projection.version, 2);
+  assert.deepEqual(managed.projection.subject, {
+    kind: "managed_turn",
+    turn_id: "turn_123",
+    message_id: "message_123"
+  });
+  assert.equal("turn_id" in managed.projection, false);
+  assert.equal(watch.projection.version, 2);
   assert.equal("turn_id" in watch.projection, false);
   assert.match(watch.projection.prompt_fingerprint, /^[0-9a-f]{64}$/u);
   assert.equal(

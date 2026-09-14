@@ -116,8 +116,6 @@ export interface BuildTerminalInteractionOfferInput {
   readonly ttlMs?: number;
   readonly responseUncertain?: boolean;
   readonly responseAuthority: TerminalInteractionResponseAuthority;
-  /** Managed v1 clients may temporarily require the legacy top-level alias. */
-  readonly includeLegacyTurnId?: boolean;
 }
 
 export interface TerminalInteractionCoreOffer {
@@ -273,11 +271,10 @@ export function buildTerminalInteractionOffer(
       multi_select: question.response_kind === "multi_select"
     }
   };
-  const projection = validateTerminalInteractionSubjectProjection(
-    subject.kind === "managed_turn" && input.includeLegacyTurnId !== false
-      ? { ...common, subject, turn_id: subject.turn_id }
-      : { ...common, subject }
-  );
+  const projection = validateTerminalInteractionSubjectProjection({
+    ...common,
+    subject
+  });
   return {
     projection,
     promptFingerprint,

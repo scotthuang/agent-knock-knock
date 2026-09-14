@@ -52,16 +52,13 @@ import {
   type ClaudeInjectedPasteProofPorts
 } from "./claude-injected-paste-proof.js";
 import {
-  TERMINAL_INTERACTION_SCHEMA,
-  TERMINAL_INTERACTION_VERSION,
-  validateAnyTerminalInteractionResponse,
-  validateTerminalInteractionProjection,
+  normalizeTerminalInteractionResponseV2,
+  terminalInteractionPublicCompatibilityProjection,
   type TerminalInteractionAnyProjection,
-  type TerminalInteractionAnyResponse,
   type TerminalInteractionAnswer,
-  type TerminalInteractionProjection,
   type TerminalInteractionSubject,
-  type TerminalInteractionSubjectProjection
+  type TerminalInteractionSubjectProjection,
+  type TerminalInteractionSubjectResponse
 } from "./terminal-interaction-protocol.js";
 import {
   captureTerminalInteraction
@@ -523,8 +520,8 @@ export interface TerminalInteractionAuthorizationContext {
   agent: ExecutorKind;
   terminalControl: TerminalControlRef;
   fingerprint: string;
-  projection: TerminalInteractionAnyProjection;
-  response: TerminalInteractionResponseInput;
+  projection: TerminalInteractionSubjectProjection;
+  response: TerminalInteractionSubjectResponse;
   runtime?: TerminalRuntimeIdentity;
 }
 
@@ -537,8 +534,8 @@ export interface TerminalInteractionBeforeDispatchContext {
   agent: ExecutorKind;
   terminalControl: TerminalControlRef;
   fingerprint: string;
-  projection: TerminalInteractionAnyProjection;
-  response: TerminalInteractionResponseInput;
+  projection: TerminalInteractionSubjectProjection;
+  response: TerminalInteractionSubjectResponse;
   runtime?: TerminalRuntimeIdentity;
 }
 
@@ -565,7 +562,7 @@ type TerminalInteractionResponseInput = {
 };
 
 export interface TerminalInteractionRuntimeOffer {
-  readonly projection: TerminalInteractionAnyProjection;
+  readonly projection: TerminalInteractionSubjectProjection;
   readonly promptFingerprint: string;
   readonly surfaceId: string;
   readonly actionPlan: NativeQuestionnaireActionPlan;
@@ -4554,7 +4551,7 @@ export class TerminalAgentBridge {
         first.offer
       );
     }
-    const validatedResponse = validateAnyTerminalInteractionResponse(
+    const validatedResponse = normalizeTerminalInteractionResponseV2(
       response,
       first.offer.projection,
       {
@@ -6549,27 +6546,6 @@ function terminalInteractionNativeTaskIdentity(
   };
 }
 
-function legacyManagedInteractionProjection(
-  projection: TerminalInteractionSubjectProjection
-): TerminalInteractionProjection {
-  if (projection.subject.kind !== "managed_turn") {
-    throw new TypeError("only managed interaction subjects have a v1 projection");
-  }
-  return validateTerminalInteractionProjection({
-    schema: TERMINAL_INTERACTION_SCHEMA,
-    version: TERMINAL_INTERACTION_VERSION,
-    interaction_id: projection.interaction_id,
-    turn_id: projection.subject.turn_id,
-    agent: projection.agent,
-    kind: projection.kind,
-    state: projection.state,
-    step: projection.step,
-    questions: projection.questions,
-    expires_at: projection.expires_at,
-    capabilities: projection.capabilities
-  });
-}
-
 export function captureTerminalInteractionRuntimeOffer(input: {
   agent: ExecutorKind;
   terminalControl: TerminalControlRef;
@@ -6621,16 +6597,13 @@ export function captureTerminalInteractionRuntimeOffer(input: {
       input.runtime?.interactionDispatchState === "reserved" ||
       input.runtime?.interactionDispatchState === "uncertain",
     responseAuthority:
-      input.runtime?.interactionResponseAuthority ?? "executable",
-    includeLegacyTurnId: subject.kind === "managed_turn"
+      input.runtime?.interactionResponseAuthority ?? "executable"
   });
   if (!coreOffer) {
     return undefined;
   }
   return {
-    projection: subject.kind === "managed_turn"
-      ? legacyManagedInteractionProjection(coreOffer.projection)
-      : coreOffer.projection,
+    projection: coreOffer.projection,
     promptFingerprint: coreOffer.promptFingerprint,
     surfaceId: coreOffer.surfaceId,
     actionPlan: coreOffer.actionPlan,
@@ -6818,7 +6791,7 @@ function interactionHookContext(
   agent: ExecutorKind,
   terminalControl: TerminalControlRef,
   offer: TerminalInteractionBridgeOffer,
-  response: TerminalInteractionResponseInput,
+  response: TerminalInteractionSubjectResponse,
   runtime: TerminalRuntimeIdentity
 ): TerminalInteractionAuthorizationContext {
   return {
@@ -6886,8 +6859,8 @@ function sameTerminalInteractionOffer(
 }
 
 function terminalInteractionProjectionWithoutExpiry(
-  projection: TerminalInteractionAnyProjection
-): Omit<TerminalInteractionAnyProjection, "expires_at"> {
+  projection: TerminalInteractionSubjectProjection
+): Omit<TerminalInteractionSubjectProjection, "expires_at"> {
   const { expires_at: _expiresAt, ...semanticProjection } = projection;
   return semanticProjection;
 }
@@ -7236,7 +7209,9 @@ function statusFromInspection(
       approval: approvalOutput(approval)
     },
     ...(interaction === undefined ? {} : {
-      interaction_state: interaction.projection,
+      interaction_state: terminalInteractionPublicCompatibilityProjection(
+        interaction.projection
+      ),
       interaction_prompt_fingerprint: interaction.promptFingerprint,
       interaction_surface_id: interaction.surfaceId
     })

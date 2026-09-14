@@ -344,7 +344,9 @@ function selectResponse(
   }
   return {
     interaction_id: projection.interaction_id,
-    turn_id: projection.turn_id,
+    ...(projection.version === 2
+      ? { subject: projection.subject }
+      : { turn_id: projection.turn_id }),
     answers: [{
       question_id: question.question_id,
       response_kind: "single_select" as const,
@@ -359,6 +361,7 @@ test("status and monitor project only safe semantics with a stable exact offer",
   const second = await bridge.status("codex", control, { runtime: RUNTIME });
 
   assert.ok(first.interaction_state);
+  assert.equal(first.interaction_state?.version, 1);
   assert.equal(first.interaction_state?.state, "pending");
   assert.equal(first.interaction_state?.expires_at, EXPECTED_EXPIRY);
   assert.equal(first.interaction_state?.interaction_id,
@@ -458,6 +461,12 @@ test("managed and Watch runtimes share one native surface identity", async () =>
       managed.projection.interaction_id,
       watch.projection.interaction_id
     );
+    assert.equal(managed.projection.version, 2, scenario.agent);
+    assert.equal(managed.projection.subject.kind, "managed_turn", scenario.agent);
+    assert.equal("turn_id" in managed.projection, false, scenario.agent);
+    assert.equal(watch.projection.version, 2, scenario.agent);
+    assert.equal(watch.projection.subject.kind, "terminal_watch", scenario.agent);
+    assert.equal("turn_id" in watch.projection, false, scenario.agent);
   }
 });
 
@@ -526,6 +535,10 @@ test("respondInteraction recaptures around hooks and dispatches one semantic key
       timeline.push("authorize");
       assert.equal(context.fingerprint, fingerprint);
       assert.equal(context.projection.interaction_id, response.interaction_id);
+      assert.equal(context.projection.version, 2);
+      assert.equal(context.projection.subject.kind, "managed_turn");
+      assert.equal(context.response.subject.kind, "managed_turn");
+      assert.equal("turn_id" in context.response, false);
       return { approved: true };
     },
     beforeDispatch(context) {

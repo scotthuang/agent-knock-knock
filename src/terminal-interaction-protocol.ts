@@ -834,6 +834,77 @@ export function validateAnyTerminalInteractionProjection(
     : validateTerminalInteractionProjection(value);
 }
 
+export interface TerminalInteractionV1NormalizationContext {
+  readonly subject: TerminalInteractionManagedTurnSubject;
+  readonly surfaceId: string;
+  readonly promptFingerprint: string;
+  readonly responseAuthority: TerminalInteractionResponseAuthority;
+}
+
+/**
+ * Decode either public/durable v1 or subject-aware v2 into the sole runtime
+ * representation. Legacy aliases are deliberately removed after validation.
+ */
+export function normalizeTerminalInteractionProjectionV2(
+  value: unknown,
+  legacy?: TerminalInteractionV1NormalizationContext
+): TerminalInteractionSubjectProjection {
+  const parsed = validateAnyTerminalInteractionProjection(value);
+  if (parsed.version === TERMINAL_INTERACTION_SUBJECT_VERSION) {
+    const { turn_id: _legacyTurnId, ...normalized } = parsed;
+    return validateTerminalInteractionSubjectProjection(normalized);
+  }
+  if (!legacy) {
+    fail(
+      "invalid_value",
+      "$.version",
+      "version 1 requires an explicit managed-Turn compatibility context"
+    );
+  }
+  if (parsed.turn_id !== legacy.subject.turn_id) {
+    fail("interaction_mismatch", "$.turn_id", "does not match subject.turn_id");
+  }
+  return validateTerminalInteractionSubjectProjection({
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_SUBJECT_VERSION,
+    interaction_id: parsed.interaction_id,
+    subject: legacy.subject,
+    agent: parsed.agent,
+    kind: parsed.kind,
+    state: parsed.state,
+    step: parsed.step,
+    questions: parsed.questions,
+    expires_at: parsed.expires_at,
+    surface_id: legacy.surfaceId,
+    prompt_fingerprint: legacy.promptFingerprint,
+    response_authority: legacy.responseAuthority,
+    capabilities: parsed.capabilities
+  });
+}
+
+/** Explicit public/Store v1 encoder; Watch subjects remain subject-aware v2. */
+export function terminalInteractionPublicCompatibilityProjection(
+  value: TerminalInteractionSubjectProjection
+): TerminalInteractionAnyProjection {
+  const projection = normalizeTerminalInteractionProjectionV2(value);
+  if (projection.subject.kind === "terminal_watch") {
+    return projection;
+  }
+  return validateTerminalInteractionProjection({
+    schema: TERMINAL_INTERACTION_SCHEMA,
+    version: TERMINAL_INTERACTION_VERSION,
+    interaction_id: projection.interaction_id,
+    turn_id: projection.subject.turn_id,
+    agent: projection.agent,
+    kind: projection.kind,
+    state: projection.state,
+    step: projection.step,
+    questions: projection.questions,
+    expires_at: projection.expires_at,
+    capabilities: projection.capabilities
+  });
+}
+
 function answerAllowedKeys(
   responseKind: TerminalInteractionResponseKind
 ): readonly string[] {
@@ -1117,4 +1188,43 @@ export function validateAnyTerminalInteractionResponse(
   return projection.version === TERMINAL_INTERACTION_SUBJECT_VERSION
     ? validateTerminalInteractionSubjectResponse(value, projection, options)
     : validateTerminalInteractionResponse(value, projection, options);
+}
+
+/**
+ * Decode a legacy managed response or a v2 subject response into v2 before
+ * any authorization, reservation, or terminal dispatch logic observes it.
+ */
+export function normalizeTerminalInteractionResponseV2(
+  value: unknown,
+  authoritativeProjection: TerminalInteractionSubjectProjection,
+  options: {
+    now?: Date;
+    allowExpiredForLiveRecapture?: boolean;
+  } = {}
+): TerminalInteractionSubjectResponse {
+  const projection = normalizeTerminalInteractionProjectionV2(
+    authoritativeProjection
+  );
+  if (isRecord(value) && value.subject !== undefined) {
+    const parsed = validateTerminalInteractionSubjectResponse(
+      value,
+      projection,
+      options
+    );
+    const { turn_id: _legacyTurnId, ...normalized } = parsed;
+    return normalized;
+  }
+  if (projection.subject.kind !== "managed_turn") {
+    return validateTerminalInteractionSubjectResponse(value, projection, options);
+  }
+  const legacy = validateTerminalInteractionResponse(
+    value,
+    terminalInteractionPublicCompatibilityProjection(projection),
+    options
+  );
+  return {
+    interaction_id: legacy.interaction_id,
+    subject: projection.subject,
+    answers: legacy.answers
+  };
 }
