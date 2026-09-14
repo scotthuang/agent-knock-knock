@@ -901,6 +901,10 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-command-dispatch-transport.ts",
+      "owner": "terminal-command-adapter"
+    },
+    {
       "path": "src/terminal-command-foreground-proof.ts",
       "owner": "terminal-command-adapter"
     },

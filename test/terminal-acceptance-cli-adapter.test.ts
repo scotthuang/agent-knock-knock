@@ -580,7 +580,7 @@ test("detached claim CAS drift rejects post-Enter ownership without target mutat
     );
     assert.deepEqual(fixture.exclusiveCalls, []);
     const ownerCommit = fs.readFileSync(
-      new URL("../src/terminal-command-cli-adapter.js", import.meta.url),
+      new URL("../src/terminal-command-dispatch-transport.js", import.meta.url),
       "utf8"
     );
     const start = ownerCommit.indexOf(
