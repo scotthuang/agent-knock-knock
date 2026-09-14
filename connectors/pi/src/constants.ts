@@ -1,6 +1,6 @@
 export const CONNECTOR_NAME = "agent-knock-knock-pi";
 export const CONNECTOR_PACKAGE = "@scotthuang/agent-knock-knock-pi";
-export const CONNECTOR_VERSION = "0.1.0-poc.1";
+export const CONNECTOR_VERSION = "0.1.0-poc.2";
 
 export const PI_HOST_ID = "pi-coding-agent";
 export const SUPPORTED_PI_VERSION = "0.84.4";

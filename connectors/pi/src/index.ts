@@ -44,7 +44,7 @@ const COMMAND_CUSTOM_TYPE = "agent-knock-knock-command";
 const APPROVE_TOOL = "agent_knock_knock_approve";
 const CANCEL_TOOL = "agent_knock_knock_cancel";
 const STATUS_TOOL = "agent_knock_knock_status";
-const EXPECTED_TOOL_COUNT = 16;
+const EXPECTED_TOOL_COUNT = 22;
 const MAX_APPROVAL_DISPLAY_CHARS = 8_000;
 
 interface LiveConnector {

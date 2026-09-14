@@ -12,14 +12,14 @@ import {
   compileAuthoritativeInputValidator,
 } from "../src/schema-adapter.js";
 
-test("all 16 real AKK schemas pass the shared supported DSH validator", async () => {
+test("all 22 real AKK schemas pass the shared supported DSH validator", async () => {
   const adapter = createHostAdapter({
     environmentForContext: () => ({}),
     lifecycleEnvironment: {},
     logger: { info() {}, warn() {} },
   });
   try {
-    assert.equal(adapter.tools.length, 16);
+    assert.equal(adapter.tools.length, 22);
     for (const tool of adapter.tools) {
       const discovery = adaptHostToolInputSchema(
         tool.inputSchema,

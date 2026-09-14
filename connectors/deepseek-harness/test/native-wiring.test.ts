@@ -5,6 +5,7 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Context } from "@deepseek-ai/cordis";
 import type { CommandDefinition } from "@deepseek-ai/dsh-commands";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import type { SkillRegistration } from "@deepseek-ai/dsh-skill";
 import {
   assertSupportedJsonSchema,
   type ToolDefinition,
@@ -23,6 +24,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   const live = new Map<Agent["id"], Agent>();
   const commands: CommandDefinition[] = [];
   const tools: ToolDefinition[] = [];
+  const skills: SkillRegistration[] = [];
   const disposeEvents: Array<(payload: { agent: Agent }) => void> = [];
   const contexts: HostAdapterControllerContext[] = [];
   const environments: NodeJS.ProcessEnv[] = [];
@@ -49,6 +51,12 @@ test("mounts native command/tools and routes every call through the exact Agent"
     tools: {
       register(definition: ToolDefinition) {
         tools.push(definition);
+        return () => { registrationDisposals += 1; };
+      },
+    },
+    skills: {
+      register(skill: SkillRegistration) {
+        skills.push(skill);
         return () => { registrationDisposals += 1; };
       },
     },
@@ -125,7 +133,15 @@ test("mounts native command/tools and routes every call through the exact Agent"
   assert.equal(lifecycleStarts, 1);
   assert.equal(commands.length, 1);
   assert.equal(commands[0]?.name, "akk");
-  assert.equal(tools.length, 16);
+  assert.equal(tools.length, 22);
+  assert.equal(skills.length, 1);
+  assert.equal(skills[0]?.name, "agent-knock-knock");
+  assert.equal(skills[0]?.source, "bundled");
+  assert.deepEqual(skills[0]?.invocation, {
+    modelInvocable: true,
+    userInvocable: true,
+  });
+  assert.match(skills[0]?.content ?? "", /agent-knock-knock\/host-list-compact/u);
 
   const active = fakeAgent("active-session", "idle");
   live.set(active.agent.id, active.agent);
@@ -203,7 +219,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   assert.equal(lifecycleStops, 1);
   assert.equal(serverStops, 1);
   assert.equal(profileRemovals, 1);
-  assert.equal(registrationDisposals, 18);
+  assert.equal(registrationDisposals, 25);
   assert.equal(drainStatus, "accepted");
   assert.equal(draining.followed.length, 1);
 });
@@ -273,7 +289,7 @@ function fakeAdapter(
     lifecycle: { start(): void; stop(): Promise<void> };
   },
 ): HostAdapter {
-  const metadata = Array.from({ length: 16 }, (_, index) => ({
+  const metadata = Array.from({ length: 22 }, (_, index) => ({
     name: `agent_knock_knock_tool_${index + 1}`,
     description: `tool ${index + 1}`,
     inputSchema: { type: "object", additionalProperties: true },
