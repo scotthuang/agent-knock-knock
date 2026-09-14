@@ -1189,7 +1189,23 @@
       "owner": "terminal-submission-facts"
     },
     {
+      "path": "src/terminal-submission-retry-application.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-submission-retry-ports.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-submission-retry-reconciliation.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-submission-retry-service.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-submission-retry-transport.ts",
       "owner": "terminal-dispatch-core"
     },
     {

@@ -76,6 +76,29 @@ function compiledModuleFunctionSource(
   return source.slice(start, end);
 }
 
+function compiledClassMethodSource(
+  moduleName: string,
+  className: string,
+  name: string,
+  nextName?: string
+): string {
+  const source = fs.readFileSync(
+    new URL(`../src/${moduleName}.js`, import.meta.url),
+    "utf8"
+  );
+  const classStart = source.indexOf(`class ${className}`);
+  assert.notEqual(classStart, -1, `${className} must remain in ${moduleName}`);
+  const methodPattern = new RegExp(`\\n\\s+(?:async )?${name}\\(`, "u");
+  const relativeStart = source.slice(classStart).search(methodPattern);
+  assert.notEqual(relativeStart, -1, `${name} must remain in ${className}`);
+  const start = classStart + relativeStart;
+  if (!nextName) return source.slice(start);
+  const nextPattern = new RegExp(`\\n\\s+(?:async )?${nextName}\\(`, "u");
+  const relativeEnd = source.slice(start + 1).search(nextPattern);
+  assert.notEqual(relativeEnd, -1, `${nextName} must follow ${name}`);
+  return source.slice(start, start + 1 + relativeEnd);
+}
+
 function assertOrdered(source: string, tokens: readonly string[]): void {
   let cursor = 0;
   for (const token of tokens) {
@@ -694,9 +717,21 @@ test("closed Turn fences new and resumed submission retry before I/O or sidecar 
 });
 
 test("exact Turn retry wires durable authority before composer input", () => {
-  const command = compiledFunctionSource(
+  const facade = compiledFunctionSource(
     "runTerminalSubmissionRetry",
-    "runTerminalSubmissionExactDraftEnter"
+    "runSend"
+  );
+  assertOrdered(facade, [
+    "terminalSubmissionRetryPorts",
+    "TerminalSubmissionRetryReconciliation",
+    "TerminalSubmissionRetryTransport",
+    "TerminalSubmissionRetryApplication",
+    "runTerminalSubmissionRetry"
+  ]);
+  const command = compiledClassMethodSource(
+    "terminal-submission-retry-application",
+    "TerminalSubmissionRetryApplication",
+    "runTerminalSubmissionRetry"
   );
   assertOrdered(command, [
     "resolveStoredTerminal",
@@ -705,7 +740,9 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "withTerminalDispatchStateScope",
     "runTerminalSubmissionRetryLocked"
   ]);
-  const authority = compiledFunctionSource(
+  const authority = compiledClassMethodSource(
+    "terminal-submission-retry-reconciliation",
+    "TerminalSubmissionRetryReconciliation",
     "loadTerminalSubmissionRetryLockedAuthority",
     "assertTerminalSubmissionRetryLedgerAuthority"
   );
@@ -719,7 +756,9 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "assertTerminalSubmissionRetryAttemptIdentity",
     "assertTerminalSubmissionRetryGeneration"
   ]);
-  const deferred = compiledFunctionSource(
+  const deferred = compiledClassMethodSource(
+    "terminal-submission-retry-reconciliation",
+    "TerminalSubmissionRetryReconciliation",
     "prepareTerminalSubmissionRetryDeferredContext",
     "assertTerminalSubmissionRetryDeferredTransferAuthority"
   );
@@ -731,7 +770,9 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "assertTransferAuthority",
     "assertTerminalSubmissionRetryDeferredMirror"
   ]);
-  const noInput = compiledFunctionSource(
+  const noInput = compiledClassMethodSource(
+    "terminal-submission-retry-application",
+    "TerminalSubmissionRetryApplication",
     "runTerminalSubmissionRetryNoInputRecovery",
     "runTerminalSubmissionRetryDecision"
   );
@@ -743,7 +784,9 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "finishPendingTerminalSubmissionRetry",
     "terminalSubmissionRetryHasInputAuthority"
   ]);
-  const decision = compiledFunctionSource(
+  const decision = compiledClassMethodSource(
+    "terminal-submission-retry-application",
+    "TerminalSubmissionRetryApplication",
     "runTerminalSubmissionRetryDecision",
     "runTerminalSubmissionRetryLocked"
   );
@@ -754,7 +797,9 @@ test("exact Turn retry wires durable authority before composer input", () => {
     "runTerminalSubmissionReplacement",
     "runTerminalSubmissionExactDraftEnter"
   ]);
-  const locked = compiledFunctionSource(
+  const locked = compiledClassMethodSource(
+    "terminal-submission-retry-application",
+    "TerminalSubmissionRetryApplication",
     "runTerminalSubmissionRetryLocked",
     "runTerminalSubmissionRetry"
   );
@@ -775,11 +820,14 @@ test("exact Turn retry wires durable authority before composer input", () => {
     false,
     "a reserved replacement must not bypass acceptance-first recovery"
   );
-  const replacement = compiledFunctionSource(
-    "runTerminalSubmissionReplacement",
-    "runSend"
+  const replacement = compiledClassMethodSource(
+    "terminal-submission-retry-transport",
+    "TerminalSubmissionRetryTransport",
+    "runTerminalSubmissionReplacement"
   );
-  const closedFence = compiledFunctionSource(
+  const closedFence = compiledClassMethodSource(
+    "terminal-submission-retry-reconciliation",
+    "TerminalSubmissionRetryReconciliation",
     "assertTerminalSubmissionRetryTurnOpen",
     "saveTerminalSubmissionRetryForOpenTurn"
   );
@@ -788,7 +836,9 @@ test("exact Turn retry wires durable authority before composer input", () => {
     'conversation.status === "closed"',
     "retry state was changed"
   ]);
-  const sidecarFence = compiledFunctionSource(
+  const sidecarFence = compiledClassMethodSource(
+    "terminal-submission-retry-reconciliation",
+    "TerminalSubmissionRetryReconciliation",
     "saveTerminalSubmissionRetryForOpenTurn",
     "loadTerminalSubmissionRetryLockedAuthority"
   );
@@ -810,27 +860,35 @@ test("exact Turn retry wires durable authority before composer input", () => {
     'saveAttempt("enter_dispatched"'
   ]);
   assert.match(
-    compiledFunctionSource(
+    compiledClassMethodSource(
+      "terminal-submission-retry-reconciliation",
+      "TerminalSubmissionRetryReconciliation",
       "terminalSubmissionRetryAccepted",
       "terminalSubmissionRetryTerminalOutcome"
     ),
     /terminal_input_sent: input\.terminalInputSent/u
   );
-  const terminalOutcome = compiledFunctionSource(
+  const terminalOutcome = compiledClassMethodSource(
+    "terminal-submission-retry-reconciliation",
+    "TerminalSubmissionRetryReconciliation",
     "terminalSubmissionRetryTerminalOutcome",
     "finalizeDeferredTerminalSubmissionRetryAccepted"
   );
   assert.match(terminalOutcome, /safeToRetry: false/u);
   assert.match(terminalOutcome, /safe_to_retry: false/u);
   assert.match(terminalOutcome, /terminal_input_sent: true/u);
-  const retryPresentation = compiledFunctionSource(
+  const retryPresentation = compiledClassMethodSource(
+    "terminal-submission-retry-reconciliation",
+    "TerminalSubmissionRetryReconciliation",
     "printTerminalSubmissionRetryOutcome",
     "loadExactTerminalSubmissionRetryTurn"
   );
   assert.match(retryPresentation, /terminalSendResultContract/u);
   assert.match(retryPresentation, /durableTerminalInputDispatched/u);
   assert.match(retryPresentation, /delivered: enterDispatched/u);
-  const exactDraft = compiledFunctionSource(
+  const exactDraft = compiledClassMethodSource(
+    "terminal-submission-retry-transport",
+    "TerminalSubmissionRetryTransport",
     "runTerminalSubmissionExactDraftEnter",
     "runTerminalSubmissionReplacement"
   );
