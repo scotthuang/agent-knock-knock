@@ -384,7 +384,8 @@ test("atomic foreground proof cannot authorize persistence and is rechecked at t
     "atomic mode must not run the status-card-only second /status probe"
   );
 
-  const transport = compiledFunctionSource(
+  const transport = compiledModuleFunctionSource(
+    "terminal-command-dispatch-transport",
     "terminalDispatchTransportLifecycle",
     "terminalDispatchAcceptance"
   );
@@ -865,7 +866,8 @@ test("deferred dispatch keeps one prepared authority and a separate bridge clock
     "bridgeStartedAt,\n        submissionPreparedAt"
   ]);
 
-  const runtime = compiledFunctionSource(
+  const runtime = compiledModuleFunctionSource(
+    "terminal-command-dispatch-transport",
     "createTerminalDispatchRuntime",
     "terminalDispatchTransportLifecycle"
   );
@@ -951,7 +953,8 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
     "needsPostSendNativeBinding || userExplicitManagedCodexAttempt",
     "assertCodexComposerReadyForAutomatedInput({"
   ]);
-  const managedTransport = compiledFunctionSource(
+  const managedTransport = compiledModuleFunctionSource(
+    "terminal-command-dispatch-transport",
     "terminalDispatchTransportLifecycle",
     "terminalDispatchAcceptance"
   );
@@ -1352,7 +1355,8 @@ test("facade wiring preserves replay validation and presentation priority", () =
 });
 
 test("facade delegates possible-input and approval uncertainty without releasing presentation locks", () => {
-  const transportFailure = compiledFunctionSource(
+  const transportFailure = compiledModuleFunctionSource(
+    "terminal-command-dispatch-transport",
     "presentTerminalDispatchTransportFailure",
     "runTerminalDispatchTransport"
   );
