@@ -1013,6 +1013,10 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-model-control-availability.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
       "path": "src/terminal-model-control-profile.ts",
       "owner": "terminal-agent-core"
     },

@@ -69,6 +69,11 @@ import type { TerminalNativeIdentity } from
   "./terminal-binding-authority.js";
 import type { TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
+import {
+  decideModelControlAvailability,
+  type ModelControlAvailabilityDecision,
+  type ModelControlSafetyFacts
+} from "./terminal-model-control-availability.js";
 import type { TerminalRuntimeCliAdapter } from
   "./terminal-runtime-cli-adapter.js";
 import {
@@ -78,8 +83,6 @@ import {
   terminalModelControlPlanConforms,
   terminalModelControlProfileForPlan,
   terminalUserExplicitModelControlBindingToken,
-  terminalUserExplicitModelControlResidualEntryBindingToken,
-  terminalUserExplicitModelControlRepairBindingToken,
   type TerminalModelCatalog,
   type TerminalModelControlPlan,
   type TerminalModelControlResidualObservation,
@@ -1642,7 +1645,7 @@ class NativeThreadLifecycleCliApplication {
       }
       await this.assertModelControlExclusive({ options, terminal, snapshot });
       const runtime = this.inspectionRuntime(terminal, snapshot);
-      await this.assertModelControlRepairReady({
+      const status = await this.assertModelControlRepairReady({
         options,
         terminal,
         snapshot,
@@ -1659,13 +1662,27 @@ class NativeThreadLifecycleCliApplication {
       if (residual.state !== "recoverable") {
         throw new Error(residual.reason);
       }
-      const actualBindingToken = this.modelControlRepairBindingToken({
+      const availability = this.modelControlAvailability({
+        options,
         terminal,
+        snapshot,
         agentVersion,
         plan,
-        residual
+        status,
+        surface: {
+          kind: "residual",
+          residualKind: residual.kind,
+          residualFingerprint: residual.fingerprint,
+          activityState: status.activity_state
+        }
       });
-      if (actualBindingToken !== expectedBindingToken) {
+      const repairBindingToken =
+        availability.availability === "residual_continuation"
+          ? availability.repairBindingToken
+          : availability.availability === "repair_only"
+            ? availability.expectedBindingToken
+            : undefined;
+      if (repairBindingToken !== expectedBindingToken) {
         throw new Error(
           "the exact model-control residual changed after it was listed; refresh AKK list"
         );
@@ -1739,7 +1756,7 @@ class NativeThreadLifecycleCliApplication {
     snapshot: NativeLifecycleSnapshot;
     bridge: TerminalAgentBridge;
     runtime: TerminalRuntimeIdentity;
-  }): Promise<void> {
+  }): Promise<TerminalBridgeStatus> {
     const status = await input.bridge.status(
       input.terminal.agent,
       input.terminal.terminalControl,
@@ -1787,63 +1804,59 @@ class NativeThreadLifecycleCliApplication {
         "the terminal has unresolved input ownership during model-control repair"
       );
     }
+    return status;
   }
 
-  modelControlRepairBindingToken(input: {
+  modelControlAvailability(input: {
+    options: NativeLifecycleCliOptions;
     terminal: ResolvedTerminalConversation;
+    snapshot: NativeLifecycleSnapshot;
     agentVersion: string;
     plan: TerminalModelControlPlan;
-    residual: Extract<
-      TerminalModelControlResidualObservation,
-      { state: "recoverable" }
-    >;
-  }): string {
+    status: TerminalBridgeStatus;
+    surface: ModelControlSafetyFacts["surface"];
+  }): ModelControlAvailabilityDecision {
+    const nativeThreadId = input.snapshot.identity?.sessionId ??
+      input.snapshot.session?.binding?.native_thread_id;
+    const zeroRolloutVerified = input.terminal.agent === "codex" &&
+      !input.snapshot.identity && !input.snapshot.session;
     const incarnation = this.ports.identity.physicalProcessIncarnation(
       input.terminal.pid
     );
-    return terminalUserExplicitModelControlRepairBindingToken({
+    const storeDir = this.ports.state.storeDir(input.options);
+    return decideModelControlAvailability({
+      exactTerminalRow: true,
       terminalId: input.terminal.conversationId,
+      processState: "active",
       terminalControl: input.terminal.terminalControl,
+      agent: input.terminal.agent,
       pid: input.terminal.pid,
-      workspace: required(
-        nonBlankString(input.terminal.terminalControl.currentPath),
-        "model-control repair requires an exact terminal cwd"
-      ),
       processUuid: incarnation.processUuid,
       processBirth: incarnation.processBirth,
       agentVersion: input.agentVersion,
       behaviorProfile: input.plan.behaviorProfile,
-      residualKind: input.residual.kind,
-      residualFingerprint: input.residual.fingerprint
-    });
-  }
-
-  modelControlResidualEntryBindingToken(input: {
-    terminal: ResolvedTerminalConversation;
-    agentVersion: string;
-    plan: TerminalModelControlPlan;
-    residual: Extract<
-      TerminalModelControlResidualObservation,
-      { state: "recoverable" }
-    >;
-  }): string {
-    const incarnation = this.ports.identity.physicalProcessIncarnation(
-      input.terminal.pid
-    );
-    return terminalUserExplicitModelControlResidualEntryBindingToken({
-      terminalId: input.terminal.conversationId,
-      terminalControl: input.terminal.terminalControl,
-      pid: input.terminal.pid,
-      workspace: required(
-        nonBlankString(input.terminal.terminalControl.currentPath),
-        "model-control continuation requires an exact terminal cwd"
-      ),
-      processUuid: incarnation.processUuid,
-      processBirth: incarnation.processBirth,
-      agentVersion: input.agentVersion,
-      behaviorProfile: input.plan.behaviorProfile,
-      residualKind: input.residual.kind,
-      residualFingerprint: input.residual.fingerprint
+      nativeAuthority: isExactNativeThreadId(nativeThreadId)
+        ? {
+            kind: "exact_session",
+            ordinaryBindingToken: input.snapshot.bindingToken
+          }
+        : zeroRolloutVerified
+          ? { kind: "verified_zero_rollout" }
+          : { kind: "unavailable" },
+      modelControlSupported: true,
+      approvalScanned: input.status.approval_state.scanned === true,
+      approvalBlocked: input.status.approval_state.blocked === true,
+      terminalHasInteraction: input.status.interaction_state !== undefined,
+      terminalHasBlockingTurn: this.ports.state.terminalBlockingTurns(
+        storeDir, input.terminal.terminalControl
+      ).length > 0,
+      hasOrphanedDispatch:
+        this.ports.state.dispatchOwnership(input.terminal.terminalControl)
+          .state !== "none" ||
+        this.ports.state.orphanedForRecovery(
+          input.terminal.terminalControl
+        ) !== undefined,
+      surface: input.surface
     });
   }
 
@@ -1915,17 +1928,33 @@ class NativeThreadLifecycleCliApplication {
       > | undefined;
       let runtime: TerminalRuntimeIdentity;
       if (hasOrdinaryAuthority) {
-        runtime = await this.assertInitialInspectionReady(
+        const ready = await this.observeInitialInspectionReady(
           options, terminal, snapshot, bridge
         );
-        const modelStatus = await bridge.status(
-          terminal.agent, terminal.terminalControl, { runtime }
-        );
-        if (modelStatus.approval_state.scanned !== true ||
-            modelStatus.approval_state.blocked === true ||
-            modelStatus.interaction_state !== undefined) {
+        runtime = ready.runtime;
+        if (ready.status.approval_state.scanned !== true ||
+            ready.status.approval_state.blocked === true ||
+            ready.status.interaction_state !== undefined) {
           throw new Error(
             "model control requires a freshly scanned terminal with no approval or questionnaire"
+          );
+        }
+        const availability = this.modelControlAvailability({
+          options,
+          terminal,
+          snapshot,
+          agentVersion,
+          plan,
+          status: ready.status,
+          surface: {
+            kind: "idle_empty",
+            screenState: ready.status.screen_state
+          }
+        });
+        if (availability.availability !== "open_from_empty" ||
+            availability.expectedBindingToken !== ordinaryBindingToken) {
+          throw new Error(
+            "model control requires an exact verified idle pane with an empty composer and no blocking interaction"
           );
         }
       } else {
@@ -1939,7 +1968,7 @@ class NativeThreadLifecycleCliApplication {
           );
         }
         runtime = this.inspectionRuntime(terminal, snapshot);
-        await this.assertModelControlRepairReady({
+        const status = await this.assertModelControlRepairReady({
           options,
           terminal,
           snapshot,
@@ -1956,13 +1985,22 @@ class NativeThreadLifecycleCliApplication {
         if (observed.state !== "recoverable") {
           throw new Error(observed.reason);
         }
-        const residualEntryToken = this.modelControlResidualEntryBindingToken({
+        const availability = this.modelControlAvailability({
+          options,
           terminal,
+          snapshot,
           agentVersion,
           plan,
-          residual: observed
+          status,
+          surface: {
+            kind: "residual",
+            residualKind: observed.kind,
+            residualFingerprint: observed.fingerprint,
+            activityState: status.activity_state
+          }
         });
-        if (residualEntryToken !== expectedBindingToken) {
+        if (availability.availability !== "residual_continuation" ||
+            availability.expectedBindingToken !== expectedBindingToken) {
           throw new Error(
             "the exact model-control residual changed after it was listed; refresh AKK list"
           );
@@ -2300,6 +2338,20 @@ class NativeThreadLifecycleCliApplication {
     snapshot: NativeLifecycleSnapshot,
     bridge: TerminalAgentBridge
   ): Promise<TerminalRuntimeIdentity> {
+    return (await this.observeInitialInspectionReady(
+      options, terminal, snapshot, bridge
+    )).runtime;
+  }
+
+  async observeInitialInspectionReady(
+    options: NativeLifecycleCliOptions,
+    terminal: ResolvedTerminalConversation,
+    snapshot: NativeLifecycleSnapshot,
+    bridge: TerminalAgentBridge
+  ): Promise<{
+    runtime: TerminalRuntimeIdentity;
+    status: TerminalBridgeStatus;
+  }> {
     this.assertInspectionAgentIdentity({
       options, terminal, snapshot, stage: "before native status inspection"
     });
@@ -2312,7 +2364,7 @@ class NativeThreadLifecycleCliApplication {
       options, terminal, terminalStatus: status, session: snapshot.session
     });
     await this.assertInspectionComposerReady({ options, terminal });
-    return runtime;
+    return { runtime, status };
   }
 
   async submitInspection(

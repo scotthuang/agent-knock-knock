@@ -22,7 +22,7 @@ import {
   type ManagedSessionState
 } from "../src/managed-session.js";
 
-test("raw terminal actions retain their public order and exact selectors", () => {
+test("raw terminal actions leave model control to its safety decision", () => {
   const actions = renderAvailableListActions({
     id: "terminal:codex:42",
     source: "terminal",
@@ -50,7 +50,6 @@ test("raw terminal actions retain their public order and exact selectors", () =>
     "new_thread",
     "list_resumable_threads",
     "native_inspect",
-    "model_options",
     "approve",
     "close"
   ]);
@@ -67,13 +66,7 @@ test("raw terminal actions retain their public order and exact selectors", () =>
     },
     requires_user_intent: true
   });
-  assert.deepEqual(actions.model_options, {
-    tool: "agent_knock_knock_model_options",
-    arguments: {
-      terminal_id: "terminal:codex:42",
-      expected_binding_token: "binding-token"
-    }
-  });
+  assert.equal(actions.model_options, undefined);
 });
 
 test("managed Turn rendering consumes only sampled list facts", () => {
@@ -518,6 +511,25 @@ test("managed binding actions are retargeted without weakening snapshot authorit
       }
     });
   }
+  const residualToken = "residual-entry-token";
+  const residualBound = actionsForManagedSessionBinding({
+    model_options: {
+      arguments: {
+        terminal_id: "terminal-1",
+        expected_binding_token: residualToken
+      },
+      authority_scope:
+        "terminal_user_explicit_model_control_residual_entry"
+    }
+  }, session);
+  assert.deepEqual(residualBound.model_options, {
+    arguments: {
+      terminal_id: "terminal-1",
+      expected_binding_token: residualToken
+    },
+    authority_scope:
+      "terminal_user_explicit_model_control_residual_entry"
+  });
 
   assert.deepEqual(sendActionForManagedSession({
     tool: "agent_knock_knock_send",

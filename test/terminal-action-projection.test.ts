@@ -5,9 +5,6 @@ import {
   applySessionAuthorityToDispatch,
   decideTerminalSendAuthority,
   decideTerminalSessionAuthorityConflict,
-  decideTerminalUserExplicitModelControlAuthority,
-  decideTerminalUserExplicitModelControlResidualEntryAuthority,
-  decideTerminalUserExplicitModelControlRepairAuthority,
   decideTerminalUserExplicitSendAuthority,
   managedTurnNeedsAttention,
   projectHandoffDecision,
@@ -49,6 +46,8 @@ import {
   tmuxTerminalRouteKey,
   type TerminalControlRef
 } from "../src/terminal-control-ref.js";
+import { decideModelControlAvailability } from
+  "../src/terminal-model-control-availability.js";
 import {
   createConversation,
   executorForConversation,
@@ -86,6 +85,116 @@ const control: TerminalControlRef = {
   currentPath: "/repo",
   capabilities: ["screen_status", "send_keys"]
 };
+
+function legacyModelControlFacts(
+  facts: Record<string, unknown>,
+  surface: Parameters<typeof decideModelControlAvailability>[0]["surface"],
+  nativeAuthority: Parameters<
+    typeof decideModelControlAvailability
+  >[0]["nativeAuthority"]
+): Parameters<typeof decideModelControlAvailability>[0] {
+  return {
+    exactTerminalRow: facts.exactTerminalRow === true,
+    terminalId: typeof facts.terminalId === "string"
+      ? facts.terminalId : undefined,
+    processState: typeof facts.processState === "string"
+      ? facts.processState : undefined,
+    terminalControl: facts.terminalControl as TerminalControlRef | undefined,
+    agent: facts.agent === "codex" || facts.agent === "claude"
+      ? facts.agent : undefined,
+    pid: typeof facts.pid === "number" ? facts.pid : undefined,
+    processUuid: typeof facts.processUuid === "string"
+      ? facts.processUuid : undefined,
+    processBirth: typeof facts.processBirth === "string"
+      ? facts.processBirth : undefined,
+    agentVersion: typeof facts.agentVersion === "string"
+      ? facts.agentVersion : undefined,
+    behaviorProfile: facts.behaviorProfile ===
+        "codex-model-control-0.154.0" ||
+        facts.behaviorProfile === "claude-model-control-2.1.266"
+      ? facts.behaviorProfile : undefined,
+    nativeAuthority,
+    modelControlSupported: facts.modelControlSupported === true,
+    approvalScanned: facts.approvalScanned === true,
+    approvalBlocked: facts.approvalBlocked === true,
+    terminalHasInteraction: facts.terminalHasInteraction === true,
+    terminalHasBlockingTurn: facts.terminalHasBlockingTurn === true,
+    hasOrphanedDispatch: facts.hasOrphanedDispatch === true,
+    surface
+  };
+}
+
+function decideTerminalUserExplicitModelControlAuthority(
+  facts: Record<string, unknown>
+): { eligible: false } | {
+  eligible: true;
+  expectedBindingToken: string;
+} {
+  const decision = decideModelControlAvailability(legacyModelControlFacts(
+    facts,
+    facts.activityState === "idle" &&
+        facts.automatedInputComposerReady === true
+      ? {
+          kind: "idle_empty",
+          screenState: typeof facts.screenState === "string"
+            ? facts.screenState : undefined
+        }
+      : { kind: "unavailable" },
+    facts.zeroRolloutVerified === true
+      ? { kind: "verified_zero_rollout" }
+      : { kind: "unavailable" }
+  ));
+  return decision.availability === "open_from_empty"
+    ? { eligible: true, expectedBindingToken: decision.expectedBindingToken }
+    : { eligible: false };
+}
+
+function residualDecision(facts: Record<string, unknown>) {
+  return decideModelControlAvailability(legacyModelControlFacts(
+    facts,
+    typeof facts.residualKind === "string" &&
+        typeof facts.residualFingerprint === "string"
+      ? {
+          kind: "residual",
+          residualKind: facts.residualKind as
+            "profiled_command_popup" | "bare_command" | "model_surface",
+          residualFingerprint: facts.residualFingerprint,
+          activityState: typeof facts.activityState === "string"
+            ? facts.activityState : undefined
+        }
+      : { kind: "unavailable" },
+    facts.nativeIdentityEligible === true
+      ? { kind: "exact_session", ordinaryBindingToken: "native-token" }
+      : { kind: "unavailable" }
+  ));
+}
+
+function decideTerminalUserExplicitModelControlRepairAuthority(
+  facts: Record<string, unknown>
+): { eligible: false } | {
+  eligible: true;
+  expectedBindingToken: string;
+} {
+  const decision = residualDecision(facts);
+  if (decision.availability === "residual_continuation") {
+    return { eligible: true, expectedBindingToken: decision.repairBindingToken };
+  }
+  return decision.availability === "repair_only"
+    ? { eligible: true, expectedBindingToken: decision.expectedBindingToken }
+    : { eligible: false };
+}
+
+function decideTerminalUserExplicitModelControlResidualEntryAuthority(
+  facts: Record<string, unknown>
+): { eligible: false } | {
+  eligible: true;
+  expectedBindingToken: string;
+} {
+  const decision = residualDecision(facts);
+  return decision.availability === "residual_continuation"
+    ? { eligible: true, expectedBindingToken: decision.expectedBindingToken }
+    : { eligible: false };
+}
 
 const rollout = {
   fd: "21",
