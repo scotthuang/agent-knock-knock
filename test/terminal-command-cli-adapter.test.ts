@@ -853,15 +853,16 @@ test("exact Turn retry wires durable authority before composer input", () => {
 });
 
 test("deferred dispatch keeps one prepared authority and a separate bridge clock", () => {
-  const preparation = compiledFunctionSource(
+  const preparation = compiledModuleFunctionSource(
+    "terminal-command-dispatch-preparation",
     "prepareTerminalControlSend",
-    "resolveTerminalDispatchSubmissionOwner"
+    undefined
   );
   assertOrdered(preparation, [
-    "const bridgeStartedAt = cliNow().toISOString()",
+    "const bridgeStartedAt = ports.now().toISOString()",
     "const submissionPreparedAt = deferredCodexForegroundBinding?.preparedAt",
     "bridgeStartedAt",
-    "bridgeStartedAt, submissionPreparedAt"
+    "bridgeStartedAt,\n        submissionPreparedAt"
   ]);
 
   const runtime = compiledFunctionSource(
@@ -940,9 +941,10 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
     "text, clear, and Enter-stage uncertainty must retain the same-id intent"
   );
 
-  const managedPreflight = compiledFunctionSource(
+  const managedPreflight = compiledModuleFunctionSource(
+    "terminal-command-dispatch-preparation",
     "prepareTerminalControlSend",
-    "resolveTerminalDispatchSubmissionOwner"
+    undefined
   );
   assertOrdered(managedPreflight, [
     "options.expectedUserExplicitTerminalToken",
