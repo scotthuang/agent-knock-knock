@@ -12,11 +12,12 @@ import { DeferredForegroundApplicationService } from "./deferred-foreground-appl
 import { TerminalHandoffApplicationService } from "./terminal-handoff-application-service.js";
 import { bindDeferredForegroundApplicationScope,
   bindDeferredForegroundWriterScope } from "./deferred-foreground-capability.js";
-import { createDeferredForegroundTransferId, listDeferredForegroundTransfers,
+import { assertConversationHasNoNonterminalDeferredForegroundTransfer,
+  assertTerminalHasNoNonterminalDeferredForegroundTransfer } from
+  "./deferred-foreground-conflict-policy.js";
+import { createDeferredForegroundTransferId,
   loadDeferredForegroundTransfer, type DeferredForegroundTransfer } from
   "./deferred-foreground-transfer.js";
-import { isFinalDeferredForegroundTransferStatus } from
-  "./deferred-foreground-transfer-policy.js";
 import { DeferredForegroundRecoveryService } from "./deferred-foreground-recovery-service.js";
 import * as deferredRecoveryAdapter from "./deferred-foreground-recovery-cli-adapter.js";
 import { prepareDeferredForegroundBinding } from "./deferred-foreground-preparation-service.js";
@@ -1713,80 +1714,6 @@ async function assertObservedHandoffTransportBoundary({
       });
     }
   }
-}
-
-function assertConversationHasNoNonterminalDeferredForegroundTransfer({
-  storeDir,
-  conversation,
-  action
-}: {
-  storeDir: string;
-  conversation: Conversation;
-  action: string;
-}): void {
-  const turnId = turnIdForConversation(conversation);
-  const sourceTransfer = listDeferredForegroundTransfers(storeDir).find(
-    (candidate) =>
-      candidate.version === 2 &&
-      candidate.source_kind === "candidate_rollout_quiescent" &&
-      !isFinalDeferredForegroundTransferStatus(candidate.status) &&
-      (candidate.source_turn_history ?? []).some(
-        (sourceTurn) => sourceTurn.turn_id === turnId
-      )
-  );
-  if (sourceTransfer) {
-    throw new Error(
-      `cannot ${action} Turn ${turnId} while deferred foreground transfer ` +
-      `${sourceTransfer.transfer_id} reserves it as immutable source ` +
-      `history in ${sourceTransfer.status}; dedicated transfer recovery ` +
-      "must finish first"
-    );
-  }
-  const takeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const transferId = stringValue(takeover?.deferred_foreground_transfer_id);
-  if (!transferId) {
-    return;
-  }
-  const transfer = loadDeferredForegroundTransfer(storeDir, transferId);
-  if (!isFinalDeferredForegroundTransferStatus(transfer.status)) {
-    throw new Error(
-      `cannot ${action} Turn ${turnIdForConversation(conversation)} while ` +
-      `deferred foreground transfer ${transfer.transfer_id} is ` +
-      `${transfer.status}; dedicated transfer recovery must finish first`
-    );
-  }
-}
-
-function assertTerminalHasNoNonterminalDeferredForegroundTransfer({
-  storeDir,
-  pid,
-  terminalControl,
-  action
-}: {
-  storeDir: string;
-  pid: number;
-  terminalControl: TerminalControlRef;
-  action: string;
-}): void {
-  const transfer = listDeferredForegroundTransfers(storeDir).find(
-    (candidate) =>
-      !isFinalDeferredForegroundTransferStatus(candidate.status) &&
-      candidate.process_pid === pid &&
-      terminalControlEvidenceMatches(
-        candidate.terminal_endpoint,
-        terminalControl
-      )
-  );
-  if (!transfer) {
-    return;
-  }
-  throw new Error(
-    `cannot ${action} terminal ${terminalControl.target} while deferred ` +
-    `foreground transfer ${transfer.transfer_id} is ${transfer.status}; ` +
-    "dedicated transfer recovery must finish first"
-  );
 }
 
 async function recoverDeferredCodexForegroundTransferBeforeMutation({
