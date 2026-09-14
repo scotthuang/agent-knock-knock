@@ -4,8 +4,6 @@ import path from "node:path";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import { listDeferredForegroundTransfers } from
   "./deferred-foreground-transfer.js";
-import { isFinalDeferredForegroundTransferStatus } from
-  "./deferred-foreground-transfer-policy.js";
 import {
   type ExecutorKind
 } from "./executors.js";
@@ -63,19 +61,7 @@ import {
   type CodexRolloutAcceptanceIdentity
 } from "./terminal-submission-acceptance.js";
 import {
-  authoritativeTerminalIdentity,
-  compareManagedConversationRecency,
-  decideManagedTerminalAssociation,
-  decideTerminalSendAuthority,
   decideTerminalUserExplicitSendAuthority,
-  nonOwnerTerminalActions,
-  projectBlockingTurn,
-  projectHandoffPresentation,
-  projectPublicManagementConflict,
-  projectTerminalManagement,
-  selectManagedTerminalHistory,
-  selectTerminalAvailableActions,
-  type TerminalActionSet,
   type TerminalDispatchOwnership
 } from "./terminal-action-projection.js";
 import { materializeModelControlAvailability } from
@@ -103,21 +89,9 @@ import {
 import type { TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
 import {
-  currentTerminalActions,
   listActionContracts,
-  readOnlyListActions,
-  readOnlyManagedTurn,
-  userReleaseListActions,
-  userReleasableManagedTurn,
   renderAvailableListActions,
-  renderTerminalModelControlActions,
-  renderCurrentManagedTurn,
-  renderHistoricalManagedTurn,
-  renderManagedTurnListEntry,
-  safeUnavailableManagedTurnActions,
-  sendActionForManagedSession,
-  withoutGenericHandoffSourceClose,
-  type AvailableListActionFacts
+  renderTerminalModelControlActions
 } from "./terminal-list-renderer.js";
 import type { TerminalProcessSource } from "./terminal-process-source.js";
 import type { TerminalControlProvider } from "./terminal-control-provider.js";
@@ -141,11 +115,13 @@ import {
 } from "./terminal-list-action-policy.js";
 import {
   createTerminalListOwnershipService,
-  type TerminalListOwnershipContext,
   type TerminalListOwnershipService
 } from "./terminal-list-ownership-service.js";
-import { validTerminalMonitorTimestampMs as validTimestampMs } from
-  "./terminal-monitor-decision-policy.js";
+import {
+  createTerminalListProjectionService,
+  type TerminalFirstListProjection,
+  type TerminalListProjectionService
+} from "./terminal-list-projection-service.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
 import {
   expandHome,
@@ -481,7 +457,10 @@ type TerminalListRuntime =
   & TerminalListStoreObservationPorts
   & TerminalListAuthorityPorts
   & TerminalListPolicyConfiguration
-  & { ownershipService: TerminalListOwnershipService };
+  & {
+      ownershipService: TerminalListOwnershipService;
+      projectionService: TerminalListProjectionService;
+    };
 
 const terminalListRuntimeContext = new AsyncLocalStorage<TerminalListRuntime>();
 
@@ -495,6 +474,10 @@ function terminalListRuntime(): TerminalListRuntime {
 
 function terminalListOwnershipService(): TerminalListOwnershipService {
   return terminalListRuntime().ownershipService;
+}
+
+function terminalListProjectionService(): TerminalListProjectionService {
+  return terminalListRuntime().projectionService;
 }
 
 function withTerminalListRuntime<Result>(
@@ -515,13 +498,28 @@ export function createTerminalListCliFacade(
     currentWorkingDirectory: cliCwd,
     runtimeLog
   });
+  const projectionService = createTerminalListProjectionService({
+    approvalTtlMs: dependencies.policy.approvalTtlMs,
+    callbackRetryDisposition: dependencies.store.callbackRetryDisposition,
+    isVerifiedDeadTerminalAgentProcess:
+      dependencies.store.isVerifiedDeadTerminalAgentProcess,
+    listDeferredForegroundTransfers,
+    nowMs: cliNowMs,
+    ownershipService,
+    summarizeConversation: dependencies.store.summarizeConversation,
+    terminalBridgeEnabled: dependencies.store.terminalBridgeEnabled,
+    terminalBridgeSubmission: dependencies.store.terminalBridgeSubmission,
+    terminalControlFromTakeover:
+      dependencies.store.terminalControlFromTakeover
+  });
   const runtime: TerminalListRuntime = {
     ...dependencies.reconciliation,
     ...dependencies.discovery,
     ...dependencies.store,
     ...dependencies.authority,
     ...dependencies.policy,
-    ownershipService
+    ownershipService,
+    projectionService
   };
   const call = <Result>(operation: () => Result): Result =>
     withTerminalListRuntime(runtime, operation);
@@ -651,7 +649,7 @@ function inspectStoreCompatibilityForTerminalList(
 function physicalOnlyTerminalProjection(
   terminals: TerminalListScanEntry[],
   reason: string
-): ReturnType<typeof terminalFirstListProjection> {
+): TerminalFirstListProjection {
   return {
     terminals: terminals.map((terminal) => {
       const {
@@ -764,10 +762,10 @@ function projectTerminalListScan(input: {
       entry.workspace ?? entry.cwd
     )
   );
-  let projection: ReturnType<typeof terminalFirstListProjection>;
+  let projection: TerminalFirstListProjection;
   if (managementErrors.length === 0) {
     try {
-      projection = terminalFirstListProjection({
+      projection = terminalListProjectionService().projectTerminalFirstList({
         storeDir,
         terminals: physicalTerminals,
         managedSessions,
@@ -982,75 +980,6 @@ async function buildTerminalListGroup({
   });
 }
 
-function managedTurnListEntry(
-  task: Record<string, any>,
-  {
-    terminalBridge = false,
-    approvalState,
-    conversation
-  }: {
-    terminalBridge?: boolean;
-    approvalState?: Record<string, any>;
-    conversation?: Record<string, any>;
-  } = {}
-): Record<string, any> {
-  return renderManagedTurnListEntry(task, {
-    terminalBridge,
-    approvalState,
-    actionFacts: managedTurnListActionFacts(task, conversation)
-  });
-}
-
-function managedTurnListActionFacts(
-  task: Record<string, any>,
-  conversation?: Record<string, any>
-): AvailableListActionFacts {
-  const nativeTakeover = isRecord(conversation?.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  const managedApprovalPending = isRecord(
-    nativeTakeover?.terminal_bridge_approval
-  );
-  const terminalBridgeReady = Boolean(
-    conversation &&
-    terminalListRuntime().terminalBridgeEnabled(conversation) &&
-    terminalListRuntime().terminalControlFromTakeover(nativeTakeover) !== undefined
-  );
-  const submission = terminalListRuntime().terminalBridgeSubmission(
-    conversation
-  );
-  const renewEligible = Boolean(
-    terminalBridgeReady &&
-    task.status === "stalled" &&
-    submission?.status !== "uncertain" &&
-    !terminalListRuntime().isVerifiedDeadTerminalAgentProcess(conversation ?? {})
-  );
-  const callbackDelivery = isRecord(conversation?.callback_delivery)
-    ? conversation.callback_delivery
-    : undefined;
-  const retryCallbackEligible = Boolean(
-    conversation &&
-    conversation.legacy_callback_status_error === undefined &&
-    terminalListRuntime().callbackRetryDisposition(callbackDelivery).state ===
-      "retryable"
-  );
-  const retrySubmissionCandidate = Boolean(
-    conversation &&
-    executorForConversation(conversation as Conversation).kind === "codex" &&
-    terminalBridgeReady &&
-    task.status === "stalled" &&
-    submission?.status === "uncertain" &&
-    stringValue(submission.last_proven_stage) === "text_injected"
-  );
-  return {
-    terminalBridgeReady,
-    managedApprovalPending,
-    renewEligible,
-    retryCallbackEligible,
-    retrySubmissionCandidate
-  };
-}
-
 async function terminalControlledListEntry(
   session: ActiveTerminalProcess,
   activeSessions: ActiveTerminalProcess[],
@@ -1190,9 +1119,9 @@ async function terminalControlledListEntry(
     ...(terminalStatusSnapshot
       ? { _terminal_status_snapshot: terminalStatusSnapshot }
       : {}),
-    // Internal action-projection evidence. terminalFirstListProjection strips
-    // this field after gating every automated-input action that can follow a
-    // human native-thread switch.
+    // Internal action-projection evidence. The terminal-first projection
+    // service strips this field after gating every automated-input action that
+    // can follow a human native-thread switch.
     _automated_input_composer_ready: automatedInputComposerReady,
     _user_explicit_composer_ready: userExplicitComposerReady,
     _native_identity_authority: {
@@ -2037,443 +1966,6 @@ async function observeAutomatedInputComposerReady({
   };
 }
 
-type TerminalFirstListContext = TerminalListOwnershipContext & {
-  sessionAuthorityRequired: boolean;
-  includeAll: boolean;
-};
-
-function renderTerminalFirstListEntry(
-  terminal: Record<string, any>,
-  context: TerminalFirstListContext,
-  observation: ReturnType<TerminalListOwnershipService["observeActionAuthority"]>
-): Record<string, any> {
-  const {
-    sessionAuthorityRequired,
-    includeAll,
-    mutationsAllowed,
-    conversationHasNonterminalDeferredTransfer
-  } = context;
-  const {
-    automatedInputComposerReady,
-    terminalUserExplicitSendAction,
-    publicTerminal,
-    terminalControl,
-    allRelated,
-    displayedRelated,
-    relatedSessions,
-    authoritativeSession,
-    ownership,
-    rawSendAction,
-    sessionAwareRawActions,
-    externalHandoffDetected,
-    externalHandoffSnapshotToken,
-    handoffSourceBlockingTurns,
-    verifiedEmptyRawSendAction,
-    verifiedEmptyCodexSnapshotToken,
-    deferredCodexSourceRolloutAuthority,
-    deferredCodexForegroundToken,
-    reconcileBindingAction,
-    externalHandoffAdoptable,
-    handoffDecision,
-    blockingHandoffTurnIds,
-    terminalRecoveryBlockingTurns,
-    terminalScopedCodexApprovalAction,
-    rolloutBackedCodexSession
-  } = observation;
-  const association = decideManagedTerminalAssociation({
-    allRelated,
-    displayedRelated,
-    authoritativeSession,
-    sessionAuthorityRequired,
-    currentOwner: ownership.state === "current"
-      ? ownership.conversation
-      : undefined
-  });
-  const { managedSessionId, sessionIds, sessionAllRelated,
-    sessionDisplayedRelated } = association;
-  // History remains useful when a pane has restarted and therefore no
-  // first-class Session is authoritative for the new process incarnation.
-  // Keep that display-only association separate from the send target: under
-  // protocol 3, only authoritativeSession may populate managedSessionId.
-  const sessionBindingMatchesLiveTerminal = authoritativeSession
-    ? true
-    : Boolean(
-        !sessionAuthorityRequired &&
-        sessionAllRelated.some((turn) =>
-          managedTurnMatchesLiveTerminal(turn, terminal)
-        )
-      );
-
-  const currentTurnValue = ownership.state === "current"
-    ? currentManagedTurnForTerminal(
-        ownership.conversation,
-        terminal,
-        sessionAwareRawActions
-      )
-    : undefined;
-  const currentTurnProjection = currentTurnValue
-    ? !mutationsAllowed
-      ? readOnlyManagedTurn(currentTurnValue)
-      : ownership.state === "current" &&
-          conversationHasNonterminalDeferredTransfer(ownership.conversation)
-        ? userReleasableManagedTurn(currentTurnValue)
-        : currentTurnValue
-    : undefined;
-  const currentTurn = currentTurnProjection
-    ? withoutGenericHandoffSourceClose(
-        currentTurnProjection,
-        blockingHandoffTurnIds
-      )
-    : undefined;
-  const nonOwnerRawActions = nonOwnerTerminalActions(
-    sessionAwareRawActions as TerminalActionSet<Record<string, any>>,
-    {
-      hasAuthoritativeSession: Boolean(authoritativeSession),
-      rolloutBackedCodexSession
-    }
-  );
-  const { recentConversation, historyConversations } =
-    selectManagedTerminalHistory({
-      displayedRelated: sessionDisplayedRelated,
-      currentConversationId: stringValue(currentTurn?.conversation_id),
-      hasCurrentTurn: Boolean(currentTurn),
-      includeAll
-    });
-  const recentTurnValue = recentConversation
-    ? historicalManagedTurnForTerminal(recentConversation)
-    : undefined;
-  const recentTurnProjection = recentTurnValue
-    ? !mutationsAllowed
-      ? readOnlyManagedTurn(recentTurnValue)
-      : recentConversation &&
-          conversationHasNonterminalDeferredTransfer(recentConversation)
-        ? userReleasableManagedTurn(recentTurnValue)
-        : recentTurnValue
-    : undefined;
-  const recentTurn = recentTurnProjection
-    ? withoutGenericHandoffSourceClose(
-        recentTurnProjection,
-        blockingHandoffTurnIds
-      )
-    : undefined;
-  const history = historyConversations.map((conversation) => {
-    const turn = historicalManagedTurnForTerminal(conversation);
-    return withoutGenericHandoffSourceClose(
-      !mutationsAllowed
-        ? readOnlyManagedTurn(turn)
-        : conversationHasNonterminalDeferredTransfer(conversation)
-          ? userReleasableManagedTurn(turn)
-          : turn,
-      blockingHandoffTurnIds
-    );
-  });
-  const visibleTurnIds = new Set(
-    [currentTurn, recentTurn, ...history]
-      .map((turn) => stringValue(turn?.conversation_id))
-      .filter((id): id is string => id !== undefined)
-  );
-  const managedSessionShortReference = managedSessionId
-    ? sessionShortRef(managedSessionId)
-    : null;
-  const management = projectTerminalManagement({
-    managedSessionId,
-    managedSessionShortRef: managedSessionShortReference,
-    currentTurn,
-    recentTurn,
-    sessionAllRelatedCount: sessionAllRelated.length,
-    hiddenTurnCount: sessionAllRelated.filter((conversation) =>
-      !visibleTurnIds.has(conversation.conversation_id)
-    ).length,
-    sessionCount: new Set([
-      ...sessionIds,
-      ...relatedSessions.map((session) => session.session_id)
-    ]).size,
-    authoritativeSession,
-    history: includeAll ? history : undefined
-  });
-  const sendAuthority = decideTerminalSendAuthority({
-    ownership: ownership.state,
-    verifiedEmptyToken: verifiedEmptyCodexSnapshotToken,
-    externalToken: externalHandoffAdoptable
-      ? externalHandoffSnapshotToken
-      : undefined,
-    deferredToken: ownership.state !== "conflict" ||
-        deferredCodexSourceRolloutAuthority ===
-          "explicitly_abandoned_predecessor"
-      ? deferredCodexForegroundToken
-      : undefined,
-    managedSendSessionId:
-      managedSessionId &&
-        !rolloutBackedCodexSession &&
-        sessionBindingMatchesLiveTerminal &&
-        isRecord(sessionAwareRawActions.send)
-        ? managedSessionId
-        : undefined
-  });
-  const tokenSendAction = sendAuthority.mode === "external_handoff"
-    ? rawSendAction
-    : sendAuthority.mode === "verified_empty" ||
-        sendAuthority.mode === "deferred"
-      ? verifiedEmptyRawSendAction
-      : undefined;
-  const authoritativeSendAction =
-    sendAuthority.mode === "managed" && isRecord(sessionAwareRawActions.send)
-      ? sendActionForManagedSession(
-          sessionAwareRawActions.send,
-          sendAuthority.sessionId
-        )
-      : tokenSendAction &&
-          "token" in sendAuthority &&
-          sendAuthority.token
-        ? {
-            ...tokenSendAction,
-            arguments: {
-              ...(isRecord(tokenSendAction.arguments)
-                ? tokenSendAction.arguments
-                : {}),
-              expected_terminal_token: sendAuthority.token
-            }
-        }
-        : undefined;
-  const managedFastPathToken = "token" in sendAuthority
-    ? sendAuthority.token
-    : undefined;
-  const prioritizedTerminalUserExplicitSendAction =
-    terminalUserExplicitSendAction && managedFastPathToken
-      ? {
-          ...terminalUserExplicitSendAction,
-          arguments: {
-            ...(isRecord(terminalUserExplicitSendAction.arguments)
-              ? terminalUserExplicitSendAction.arguments
-              : {}),
-            expected_managed_terminal_token: managedFastPathToken
-          }
-        }
-      : terminalUserExplicitSendAction;
-  const availableActions = selectTerminalAvailableActions({
-    ownership: ownership.state,
-    currentActions: ownership.state === "current"
-      ? currentTerminalActions(currentTurn)
-      : {},
-    sessionAwareRawActions:
-      sessionAwareRawActions as TerminalActionSet<Record<string, any>>,
-    nonOwnerRawActions,
-    authoritativeSendAction,
-    terminalUserExplicitSendAction:
-      prioritizedTerminalUserExplicitSendAction,
-    reconcileBindingAction,
-    terminalScopedApprovalAction: terminalScopedCodexApprovalAction,
-    isAction: isRecord
-  });
-  // An explicit undefined rollout prevents a lingering resolver rollout from
-  // being presented as the authoritative status-card thread.
-  const authoritativeIdentity = authoritativeTerminalIdentity(
-    authoritativeSession
-  );
-  const publicManagementConflict = ownership.state === "conflict"
-    ? projectPublicManagementConflict({
-        conflict: ownership.conflict,
-        verifiedEmptyToken: verifiedEmptyCodexSnapshotToken,
-        deferredToken: deferredCodexForegroundToken,
-        explicitlyAbandonedPredecessor:
-          deferredCodexSourceRolloutAuthority ===
-            "explicitly_abandoned_predecessor"
-      })
-    : undefined;
-  const handoffPresentation = projectHandoffPresentation({
-    externalHandoffDetected,
-    externalHandoffAdoptable,
-    recoveryBlockingTurnCount: terminalRecoveryBlockingTurns.length,
-    hasHandoffDecision: Boolean(handoffDecision),
-    sourceBlockingTurnCount: handoffSourceBlockingTurns.length,
-    automatedInputComposerReady: automatedInputComposerReady === true,
-    verifiedEmptyToken: verifiedEmptyCodexSnapshotToken
-  });
-  return {
-    ...publicTerminal,
-    ...authoritativeIdentity,
-    management_state: ownership.state === "conflict"
-      ? "conflict"
-      : ownership.state === "current" || Boolean(authoritativeSession)
-        ? "managed"
-        : "unmanaged",
-    ...(ownership.state === "conflict"
-      ? { management_conflict: publicManagementConflict }
-      : {}),
-    ...handoffPresentation,
-    ...(handoffDecision ? { handoff_decision: handoffDecision } : {}),
-    ...(terminalRecoveryBlockingTurns.length > 0
-      ? {
-          blocking_turns: terminalRecoveryBlockingTurns.map((turn) =>
-            projectBlockingTurn({
-              sessionId: sessionIdForConversation(turn),
-              turnId: turnIdForConversation(turn),
-              status: turn.status,
-              recoveryTurnId: turnIdForConversation(turn)
-            })
-          )
-        }
-      : {}),
-    managed: management,
-    available_actions: availableActions
-  };
-}
-
-function terminalFirstListProjection({
-  storeDir,
-  terminals,
-  managedSessions,
-  sessionAuthorityRequired,
-  allConversations,
-  displayedConversations,
-  includeAll,
-  managedOnly,
-  statusFilter,
-  mutationsAllowed
-}: {
-  storeDir: string;
-  terminals: Record<string, any>[];
-  managedSessions: ManagedSessionState[];
-  sessionAuthorityRequired: boolean;
-  allConversations: Conversation[];
-  displayedConversations: Conversation[];
-  includeAll: boolean;
-  managedOnly: boolean;
-  statusFilter?: string;
-  mutationsAllowed: boolean;
-}): {
-  terminals: Record<string, any>[];
-  unavailableManagedTurns: Record<string, any>[];
-} {
-  const nonterminalDeferredTransfers = listDeferredForegroundTransfers(
-    storeDir
-  ).filter((transfer) =>
-    !isFinalDeferredForegroundTransferStatus(transfer.status)
-  );
-  const nonterminalDeferredTransferIds = new Set(
-    nonterminalDeferredTransfers.map((transfer) => transfer.transfer_id)
-  );
-  const nonterminalDeferredSourceTurnIds = new Set(
-    nonterminalDeferredTransfers.flatMap((transfer) =>
-      transfer.version === 2 &&
-        transfer.source_kind === "candidate_rollout_quiescent"
-        ? (transfer.source_turn_history ?? []).map((turn) => turn.turn_id)
-        : []
-    )
-  );
-  const conversationHasNonterminalDeferredTransfer = (
-    conversation: Conversation
-  ): boolean => {
-    if (
-      nonterminalDeferredSourceTurnIds.has(
-        turnIdForConversation(conversation)
-      )
-    ) {
-      return true;
-    }
-    const takeover = isRecord(conversation.native_session_takeover)
-      ? conversation.native_session_takeover
-      : undefined;
-    const transferId = stringValue(takeover?.deferred_foreground_transfer_id);
-    return Boolean(
-      transferId && nonterminalDeferredTransferIds.has(transferId)
-    );
-  };
-  const discoveredTerminalControls = terminals.flatMap((terminal) => {
-    const control = isRecord(terminal.terminal_control)
-      ? terminal.terminal_control as unknown as TerminalControlRef
-      : undefined;
-    return control ? [control] : [];
-  });
-
-  const projectionContext: TerminalFirstListContext = {
-    storeDir,
-    terminals,
-    managedSessions,
-    sessionAuthorityRequired,
-    allConversations,
-    displayedConversations,
-    includeAll,
-    mutationsAllowed,
-    nonterminalDeferredTransfers,
-    conversationHasNonterminalDeferredTransfer
-  };
-  const projectedTerminals = terminals.map((terminal) => {
-    const binding = terminalListOwnershipService().observeBindingAuthority(
-      terminal,
-      projectionContext
-    );
-    return renderTerminalFirstListEntry(
-      binding.authorityTerminal,
-      projectionContext,
-      terminalListOwnershipService().observeActionAuthority(
-        binding.authorityTerminal,
-        projectionContext,
-        binding
-      )
-    );
-  });
-
-  const unavailableManagedTurns = displayedConversations
-    .filter((conversation) => {
-      const managedControl = terminalControlForManagedConversation(conversation);
-      if (discoveredTerminalControls.some((control) =>
-        terminalControlsShareIncarnation(managedControl, control)
-      )) {
-        return false;
-      }
-      return (
-        includeAll ||
-        managedOnly ||
-        statusFilter !== undefined ||
-        managedTurnNeedsAttention(conversation)
-      );
-    })
-    .sort(compareManagedConversationRecency)
-    .map((conversation) => {
-      const managedTurn = managedTurnListEntry(
-        terminalListRuntime().summarizeConversation(conversation),
-        {
-          terminalBridge: terminalListRuntime().terminalBridgeEnabled(conversation),
-          approvalState: managedListApprovalState(conversation),
-          conversation
-        }
-      );
-      return {
-        ...managedTurn,
-        available_actions: !mutationsAllowed
-          ? readOnlyListActions(
-              isRecord(managedTurn.available_actions)
-                ? managedTurn.available_actions
-                : {}
-            )
-          : conversationHasNonterminalDeferredTransfer(conversation)
-            ? userReleaseListActions(
-                isRecord(managedTurn.available_actions)
-                  ? managedTurn.available_actions
-                  : {},
-                turnIdForConversation(conversation)
-              )
-            : safeUnavailableManagedTurnActions(
-                isRecord(managedTurn.available_actions)
-                  ? managedTurn.available_actions
-                  : {}
-              ),
-        terminal_availability: {
-          available: false,
-          reason: managedOnly
-            ? "terminal discovery was disabled by --managed-only"
-            : "the referenced terminal pane is not currently available"
-        }
-      };
-    });
-
-  return {
-    terminals: projectedTerminals,
-    unavailableManagedTurns
-  };
-}
-
 function managedSessionMatchesLiveTerminalEntry(
   session: ManagedSessionState,
   terminal: Record<string, any>,
@@ -2798,58 +2290,6 @@ async function resolveTerminalScopedCodexApproval({
   }
 }
 
-function historicalManagedTurnForTerminal(
-  conversation: Conversation
-): Record<string, any> {
-  return renderHistoricalManagedTurn(managedTurnListEntry(
-    terminalListRuntime().summarizeConversation(conversation),
-    {
-      terminalBridge: terminalListRuntime().terminalBridgeEnabled(conversation),
-      approvalState: managedListApprovalState(conversation),
-      conversation
-    }
-  ));
-}
-
-function managedTurnMatchesLiveTerminal(
-  conversation: Conversation,
-  terminal: Record<string, any>
-): boolean {
-  return terminalListOwnershipService().managedTurnMatchesLiveTerminal(
-    conversation,
-    terminal
-  );
-}
-
-function currentManagedTurnForTerminal(
-  conversation: Conversation,
-  terminal: Record<string, any>,
-  rawTerminalActions: Record<string, any>
-): Record<string, any> {
-  const managedTurn = managedTurnListEntry(
-    terminalListRuntime().summarizeConversation(conversation),
-    {
-      terminalBridge: terminalListRuntime().terminalBridgeEnabled(conversation),
-      approvalState: managedListApprovalState(conversation),
-      conversation
-    }
-  );
-  const rawApproval = isRecord(rawTerminalActions.approve)
-    ? rawTerminalActions.approve
-    : undefined;
-  if (!rawApproval || executorForConversation(conversation).kind !== "codex") {
-    return managedTurn;
-  }
-  return renderCurrentManagedTurn(managedTurn, {
-    isCodex: true,
-    ownerId: conversation.conversation_id,
-    rawApproval,
-    terminalApprovalState: () => isRecord(terminal.approval_state)
-      ? terminal.approval_state
-      : undefined
-  });
-}
-
 async function listStateForTerminal(
   agent: ExecutorKind,
   terminalControl: TerminalControlRef,
@@ -2905,50 +2345,6 @@ async function listStateForTerminal(
       screen_reason: error instanceof Error ? error.message : String(error)
     };
   }
-}
-
-function managedListApprovalState(
-  conversation
-): Record<string, any> | undefined {
-  if (
-    !terminalListRuntime().terminalBridgeEnabled(conversation) ||
-    !["waiting_for_agent", "waiting_for_openclaw"].includes(
-      String(conversation.status)
-    )
-  ) {
-    return undefined;
-  }
-  const nativeTakeover = isRecord(conversation.native_session_takeover)
-    ? conversation.native_session_takeover
-    : undefined;
-  if (
-    !terminalListRuntime().terminalControlFromTakeover(nativeTakeover) ||
-    !stringValue(nativeTakeover?.terminal_bridge_message_id)
-  ) {
-    return undefined;
-  }
-  const approval = isRecord(nativeTakeover?.terminal_bridge_approval)
-    ? nativeTakeover.terminal_bridge_approval
-    : undefined;
-  const approvalState = isRecord(approval?.approval_state)
-    ? approval.approval_state
-    : undefined;
-  const fingerprint = stringValue(approval?.fingerprint);
-  const notifiedAt = stringValue(approval?.notified_at);
-  const notifiedAtMs = validTimestampMs(notifiedAt);
-  if (
-    !approvalState ||
-    !fingerprint ||
-    notifiedAtMs === undefined ||
-    cliNowMs() - notifiedAtMs > terminalListRuntime().approvalTtlMs
-  ) {
-    return undefined;
-  }
-  return {
-    ...approvalState,
-    fingerprint,
-    notified_at: notifiedAt
-  };
 }
 
 async function resolveConversationSelectorOption(commandName, options): Promise<void> {
@@ -3173,16 +2569,16 @@ async function sessionSelectorCandidates(
   const discoverableWorkspaceConversations = workspaceConversations
     .filter(terminalListRuntime().isDiscoverableTmuxConversation);
   const managed = discoverableWorkspaceConversations.map((conversation) =>
-      managedTurnListEntry(
+      terminalListProjectionService().managedTurnListEntry(
         terminalListRuntime().summarizeConversation(conversation),
         {
           terminalBridge: terminalListRuntime().terminalBridgeEnabled(conversation),
-          approvalState: managedListApprovalState(conversation),
           conversation
         }
       )
   );
-  const terminalProjection = terminalFirstListProjection({
+  const terminalProjection =
+    terminalListProjectionService().projectTerminalFirstList({
     storeDir,
     terminals: terminalScan.terminalControlled.filter((entry) =>
       terminalListRuntime().matchesConfiguredWorkspace(

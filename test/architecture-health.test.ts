@@ -149,6 +149,16 @@ test("architecture health rejects complexity, hotspot, tool, and skill drift", a
   const inputs = await currentInputs();
   const defaultViolation =
     inputs.architecture.productionFunctionDefaultViolations[0];
+  const defaultViolationBudget = loadJson(
+    "config/architecture-health-budget.json"
+  ).budgets.max_default_function_violations;
+  const addedDefaultViolations = Array.from(
+    {
+      length: defaultViolationBudget -
+        inputs.architecture.productionFunctionDefaultViolations.length + 1
+    },
+    () => defaultViolation
+  );
 
   assert.throws(
     () => healthModule.validateArchitectureHealth({
@@ -157,12 +167,16 @@ test("architecture health rejects complexity, hotspot, tool, and skill drift", a
         ...inputs.architecture,
         productionFunctionDefaultViolations: [
           ...inputs.architecture.productionFunctionDefaultViolations,
-          defaultViolation
+          ...addedDefaultViolations
         ]
       },
       repoRoot
     }),
-    /production default function violations 336 exceed budget 335/u
+    new RegExp(
+      `production default function violations ${defaultViolationBudget + 1} ` +
+      `exceed budget ${defaultViolationBudget}`,
+      "u"
+    )
   );
 
   const realRead = (repositoryPath: string) =>
