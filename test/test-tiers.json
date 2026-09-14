@@ -100,6 +100,7 @@
     "test/terminal-dispatch-recovery-service.test.ts",
     "test/terminal-dispatch-repository-cli-adapter.test.ts",
     "test/terminal-handoff-cli-adapter.test.ts",
+    "test/terminal-human-explicit-send-cli-adapter.test.ts",
     "test/terminal-identity-authority-service.test.ts",
     "test/terminal-interaction-cli-adapter.test.ts",
     "test/terminal-interaction-core.test.ts",

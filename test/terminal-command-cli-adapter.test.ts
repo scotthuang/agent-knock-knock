@@ -922,7 +922,8 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
     "const deferredCodexPrompt"
   ]);
 
-  const fallback = compiledFunctionSource(
+  const fallback = compiledModuleFunctionSource(
+    "terminal-human-explicit-send-cli-adapter",
     "runUserExplicitTerminalFallback",
     "runRawTerminalSend"
   );
@@ -965,7 +966,8 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
 });
 
 test("same-ID replay presentation cannot degrade into a fresh Send", () => {
-  const replayPresentation = compiledFunctionSource(
+  const replayPresentation = compiledModuleFunctionSource(
+    "terminal-human-explicit-send-cli-adapter",
     "printReplayedUserExplicitSend",
     "reserveUserExplicitSendIntent"
   );
@@ -975,7 +977,8 @@ test("same-ID replay presentation cannot degrade into a fresh Send", () => {
     'observationMode: "none"',
     "callbackAvailable: false"
   ]);
-  const reservation = compiledFunctionSource(
+  const reservation = compiledModuleFunctionSource(
+    "terminal-human-explicit-send-cli-adapter",
     "reserveUserExplicitSendIntent",
     "cancelProvenZeroInputUserExplicitSendIntent"
   );
