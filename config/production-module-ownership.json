@@ -1009,6 +1009,10 @@
       "owner": "terminal-action-projection"
     },
     {
+      "path": "src/terminal-interaction-response-bridge.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-interaction-response-transaction.ts",
       "owner": "terminal-action-projection"
     },
