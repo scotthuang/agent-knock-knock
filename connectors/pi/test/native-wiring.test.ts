@@ -35,12 +35,18 @@ const TOOL_NAMES = [
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
   "agent_knock_knock_native_inspect",
+  "agent_knock_knock_model_options",
+  "agent_knock_knock_repair_model_control",
+  "agent_knock_knock_set_model",
+  "agent_knock_knock_identify_foreground",
+  "agent_knock_knock_identify_and_send",
   "agent_knock_knock_new_thread",
   "agent_knock_knock_reconcile_binding",
   "agent_knock_knock_resume_thread",
   "agent_knock_knock_status",
   "agent_knock_knock_send",
   "agent_knock_knock_respond",
+  "agent_knock_knock_respond_interaction",
   "agent_knock_knock_approve",
   "agent_knock_knock_renew",
   "agent_knock_knock_retry_callback",
@@ -48,7 +54,7 @@ const TOOL_NAMES = [
   "agent_knock_knock_close",
 ] as const;
 
-test("Pi 0.84.4 registers /akk and all 16 tools and preserves command/tool calls", async () => {
+test("Pi 0.84.4 registers /akk and all 22 tools and preserves command/tool calls", async () => {
   const fixture = nativeFixture();
   await fixture.start();
 

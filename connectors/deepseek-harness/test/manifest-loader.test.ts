@@ -28,7 +28,7 @@ const packageDirectory = path.resolve(
 
 test("exports the DSH plugin contract", () => {
   assert.equal(name, "agent-knock-knock-deepseek-harness");
-  assert.deepEqual(inject, ["agents", "commands", "tools"]);
+  assert.deepEqual(inject, ["agents", "commands", "tools", "skills"]);
   assert.equal(typeof Config, "function");
   assert.equal(typeof apply, "function");
 });
@@ -50,8 +50,29 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-agent"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-commands"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-llm"], supportedRange);
+  assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-skill"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-tools"], supportedRange);
-  assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.12.22");
+  assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.13.3");
+  assert.ok(manifest.files.includes("skills/**/*.md"));
+
+  const bundledSkill = fs.readFileSync(
+    path.join(packageDirectory, "skills", "agent-knock-knock", "SKILL.md"),
+    "utf8",
+  );
+  const canonicalSkill = fs.readFileSync(
+    path.resolve(
+      packageDirectory,
+      "..",
+      "..",
+      "templates",
+      "openclaw-skills",
+      "agent-knock-knock",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  assert.equal(bundledSkill, canonicalSkill);
+  assert.match(bundledSkill, /^---\nname: agent-knock-knock\n/u);
 
   const patch = fs.readFileSync(path.join(packageDirectory, "cordis.patch.yml"), "utf8");
   assert.match(patch, /@scotthuang\/agent-knock-knock-deepseek-harness/u);
@@ -138,6 +159,7 @@ test("launcher resolution is not masked by connector checkout devDependencies", 
       "@deepseek-ai/dsh-agent",
       "@deepseek-ai/dsh-commands",
       "@deepseek-ai/dsh-llm",
+      "@deepseek-ai/dsh-skill",
       "@deepseek-ai/dsh-tools",
     ]) {
       const hostVersion = packageName === "@deepseek-ai/dsh-llm"
@@ -198,6 +220,7 @@ test("loads runtime helpers from the launcher-owned set instead of connector dev
       "@deepseek-ai/dsh-agent",
       "@deepseek-ai/dsh-commands",
       "@deepseek-ai/dsh-llm",
+      "@deepseek-ai/dsh-skill",
       "@deepseek-ai/dsh-tools",
     ]) {
       const hostBody = packageName === "@deepseek-ai/dsh-llm"

@@ -1,7 +1,7 @@
 # Agent Knock Knock for Pi — POC
 
 This Pi Extension makes Pi an Agent Knock Knock (AKK) orchestration Host. Pi
-can use `/akk` and AKK's 16 semantic tools to control Codex and Claude Code
+can use `/akk` and AKK's 22 semantic tools to control Codex and Claude Code
 terminals that are already running in tmux or Herdr.
 
 The connector does not modify Pi, launch or authenticate a coding agent, or
@@ -23,7 +23,7 @@ The current compatibility contract is intentionally exact:
 - Pi `0.84.4`, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.12.23`, pinned by this connector's package and lockfile. Running
+- AKK `0.13.3`, pinned by this connector's package and lockfile. Running
   `npm ci` in `connectors/pi` installs that exact AKK runtime; a different
   version at the repository root is not substituted automatically.
 - macOS or Linux. The POC requires a POSIX Unix socket and does not support
@@ -72,7 +72,7 @@ pi list
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
 build instead, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.1`; exact versions are pinned
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.2`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -81,8 +81,11 @@ and are not advanced by Pi's bulk update command.
 pi
 ```
 
-Pi should show `AKK ready`. The package manifest registers the Extension, so
-no `-e` path or repository checkout is required.
+Pi should show `AKK ready`. The package manifest registers both the Extension
+and its bundled `agent-knock-knock` skill, so no separate skill copy, `-e`
+path, or repository checkout is required. The structured List result stays
+small by returning current action names and dynamic inputs; Pi loads the skill
+when it needs the static action meanings and safety rules.
 
 ### 5. Complete the first round trip
 
@@ -144,7 +147,7 @@ The usual product loop is:
 6. Use **Cancel**, **Close**, **Renew**, or **Retry Callback** only when the
    current list/status output advertises that exact action.
 
-The `/akk` command is the direct human surface. The following 16 tools are also
+The `/akk` command is the direct human surface. The following 22 tools are also
 registered for model-driven orchestration:
 
 | Tool | Purpose |
@@ -154,12 +157,18 @@ registered for model-driven orchestration:
 | `agent_knock_knock_unwatch` | Stop observation by exact `watch_id`; it does not interrupt the coding agent. |
 | `agent_knock_knock_list_resumable_threads` | List structurally verified native threads that can be resumed in one terminal. |
 | `agent_knock_knock_native_inspect` | Run the closed native `status` inspection for one exact terminal. Arbitrary slash commands are not accepted. |
+| `agent_knock_knock_model_options` | Read one exact idle terminal's native model and reasoning catalog and create a single-use typed offer. |
+| `agent_knock_knock_repair_model_control` | Dismiss only an exactly recognized stale model-control surface; it never selects a model or submits a task. |
+| `agent_knock_knock_set_model` | Consume the current catalog offer to select one advertised semantic model and reasoning effort. |
+| `agent_knock_knock_identify_foreground` | Run a bounded diagnostic native identity probe without creating durable model-control authority. |
+| `agent_knock_knock_identify_and_send` | Keep one terminal lock across identity observation and one explicit Send when the normal foreground identity is ambiguous. |
 | `agent_knock_knock_new_thread` | Start and verify a clean native coding-agent thread after explicit user intent. |
 | `agent_knock_knock_reconcile_binding` | Detach one exact conflicting AKK Session binding after explicit confirmation, without adopting another thread. |
 | `agent_knock_knock_resume_thread` | Resume one exact complete `native_thread_id` returned by the current discovery result. |
 | `agent_knock_knock_status` | Inspect one exact managed Turn or Terminal Watch. |
 | `agent_knock_knock_send` | Send a new task through the exact currently advertised Session or terminal action. |
 | `agent_knock_knock_respond` | Answer a question or blocked callback in one existing Turn; it does not start a new Turn. |
+| `agent_knock_knock_respond_interaction` | Answer the current typed native questionnaire step for one exact response-capable Turn or Watch. |
 | `agent_knock_knock_approve` | Approve one current permission request after Pi presents a native user-decision gate. |
 | `agent_knock_knock_renew` | Renew monitoring for one stalled but still-live Turn without terminal input. |
 | `agent_knock_knock_retry_callback` | Retry one persisted managed callback with its original message identity. |
@@ -384,7 +393,7 @@ acceptance record on 2026-08-30 included:
 
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.1` is the first npm prerelease and is distributed through the
+`0.1.0-poc.2` is an npm prerelease and is distributed through the
 `next` dist-tag; it does not change the AKK main package or ClawHub artifact.
 
 ## Deliberate POC limits

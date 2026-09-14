@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock-pi",
-  "version": "0.1.0-poc.1",
+  "version": "0.1.0-poc.2",
   "description": "Pi-as-orchestrator connector for Agent Knock Knock",
   "license": "MIT",
   "type": "module",
@@ -17,6 +17,7 @@
     "lib/**/*.js",
     "lib/**/*.js.map",
     "lib/**/*.d.ts",
+    "skills/**/*.md",
     "README.md",
     "LICENSE"
   ],
@@ -43,6 +44,9 @@
   "pi": {
     "extensions": [
       "./lib/index.js"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "engines": {
@@ -61,7 +65,7 @@
     "typebox": "*"
   },
   "dependencies": {
-    "@scotthuang/agent-knock-knock": "0.12.23",
+    "@scotthuang/agent-knock-knock": "0.13.3",
     "ajv": "8.20.0"
   },
   "devDependencies": {

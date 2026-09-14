@@ -1,9 +1,10 @@
 # Agent Knock Knock for DeepSeek Harness
 
 This package is the native DeepSeek Harness Web connector for Agent Knock
-Knock (AKK). When the Web Host mounts the bundle, it adds `/akk` and the 16 AKK
-semantic tools to every live Agent. There is no `/akk-bind` step and no session
-id for the user to copy.
+Knock (AKK). When the Web Host mounts the bundle, it adds `/akk`, the 22 AKK
+semantic tools, and the bundled `agent-knock-knock` skill to every live Agent.
+There is no `/akk-bind` step, separate skill installation, or session id for
+the user to copy.
 
 The connector is developed in the AKK repository but is an independent npm
 package. It does not modify DeepSeek Harness and has its own version, build,
@@ -72,8 +73,10 @@ tmux or Herdr pane, then enter:
 /akk list
 ```
 
-The result should contain that live terminal and the actions currently safe for
-it. AKK never asks callers to invent identifiers: copy only the complete
+The compact result contains that live terminal, current action names, and only
+the dynamic inputs needed for those actions. Static action meanings and safety
+rules come from the automatically registered `agent-knock-knock` skill. AKK
+never asks callers to invent identifiers: copy only the complete
 `terminal_id`, `session_id`, `turn_id`, `watch_id`, or `native_thread_id`
 returned by AKK.
 
@@ -120,7 +123,7 @@ one uniquely identified task produced the final output.
 ## Tool workflow
 
 The slash command is the human-facing shortcut. Agents receive the same
-behavior as 16 structured tools:
+behavior as 22 structured tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -129,12 +132,18 @@ behavior as 16 structured tools:
 | `agent_knock_knock_unwatch` | Stop one exact `watch_id` without sending terminal input. |
 | `agent_knock_knock_list_resumable_threads` | List structurally verified native threads for one terminal. |
 | `agent_knock_knock_native_inspect` | Run only the adapter-owned native `status` inspection advertised for an idle terminal. |
+| `agent_knock_knock_model_options` | Read one exact idle terminal's native model and reasoning catalog and create a single-use typed offer. |
+| `agent_knock_knock_repair_model_control` | Dismiss only an exactly recognized stale model-control surface; it never selects a model or submits work. |
+| `agent_knock_knock_set_model` | Consume the current catalog offer to choose one advertised semantic model and reasoning effort. |
+| `agent_knock_knock_identify_foreground` | Run a bounded diagnostic native identity probe without creating durable authority. |
+| `agent_knock_knock_identify_and_send` | Keep one terminal lock across identity observation and one explicit Send when foreground identity is ambiguous. |
 | `agent_knock_knock_new_thread` | Start and verify a clean native coding-agent thread after explicit user intent. |
 | `agent_knock_knock_reconcile_binding` | Detach one proven stale conflicting binding after explicit confirmation; it neither sends work nor adopts a thread. |
 | `agent_knock_knock_resume_thread` | Resume one complete `native_thread_id` from a fresh resumable-thread listing. |
 | `agent_knock_knock_status` | Inspect one AKK `turn_id` or Terminal Watch `watch_id` plus a bounded current screen. |
 | `agent_knock_knock_send` | Send a new task through the exact action advertised by `list`. |
 | `agent_knock_knock_respond` | Answer a question or unblock one existing managed Turn; it does not create a new Turn. |
+| `agent_knock_knock_respond_interaction` | Answer the current typed native questionnaire step for one exact response-capable Turn or Watch. |
 | `agent_knock_knock_approve` | Approve the current exact permission request once, only after human review and confirmation. |
 | `agent_knock_knock_renew` | Renew monitoring for a still-live stalled Turn without typing into the terminal. |
 | `agent_knock_knock_retry_callback` | Retry one persisted failed callback with its original message and delivery identity. |
@@ -298,7 +307,7 @@ Update to the registry's current prerelease, or pin an exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.2
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.3
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -326,17 +335,17 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned published AKK runtime `0.12.22`; building the current
+tests against its pinned published AKK runtime `0.13.3`; building the current
 repository root does not silently replace that dependency. Testing connector
 changes against another AKK runtime requires an explicit dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
 
-The package manifest is currently `0.1.0-rc.2`, so this remains a prerelease. As
-of 2026-08-30, npm has published `0.1.0-rc.2` under `next`; `latest` still points
-to `0.1.0-rc.1`. Registry state can change independently of this source file, so
-the `npm view` commands above remain authoritative.
+The package manifest is currently `0.1.0-rc.3`, so this remains a prerelease and
+is published under `next`; `latest` remains on the earlier `0.1.0-rc.1` tag.
+Registry state can change independently of this source file, so the `npm view`
+commands above remain authoritative.
 
 From `connectors/deepseek-harness`, the normal development gate is:
 
@@ -349,7 +358,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.2` compatibility work was additionally typechecked and runtime-smoked
+`0.1.0-rc.3` compatibility work was additionally typechecked and runtime-smoked
 against the official DeepSeek Harness `0.1.2-alpha.1` source release. Its npm
 artifacts were not present on the public registry at that validation point, so
 the reproducible development lock remains on `0.1.1-rc.2` while peer and runtime
@@ -364,7 +373,7 @@ runtime `file:`, `link:`, or `workspace:` dependency.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.2
+npm run release:check -- --publish --confirm-version 0.1.0-rc.3
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
