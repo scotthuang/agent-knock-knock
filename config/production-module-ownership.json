@@ -641,6 +641,10 @@
       "owner": "deferred-foreground-application"
     },
     {
+      "path": "src/deferred-foreground-conflict-policy.ts",
+      "owner": "terminal-handoff-application"
+    },
+    {
       "path": "src/deferred-foreground-preparation-cli-adapter.ts",
       "owner": "deferred-foreground-application"
     },
