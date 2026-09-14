@@ -1109,6 +1109,10 @@
       "owner": "cli-runtime"
     },
     {
+      "path": "src/terminal-native-inspection-bridge.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-process-facts.ts",
       "owner": "terminal-control"
     },
