@@ -1,7 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { executorDefinitionForKind } from "./executors.js";
 import {
   isTerminalApprovalDecision,
@@ -93,6 +90,26 @@ import {
   normalizedTerminalSendResultContract,
   terminalSendEnterDispatched
 } from "./terminal-dispatch-presenter.js";
+import {
+  bindSemanticToolAsyncRelay,
+  bindSemanticToolRelayEnvironment,
+  bindSemanticToolRelayPath,
+  defaultSemanticToolRelayPath,
+  runCli,
+  runCliAsync,
+  runHostAwareCli,
+  withHostBridgeInvocationSignal
+} from "./semantic-tool-relay.js";
+
+export {
+  bindSemanticToolAsyncRelay,
+  bindSemanticToolRelayEnvironment,
+  bindSemanticToolRelayPath,
+  defaultSemanticToolRelayPath,
+  runCli,
+  runCliAsync,
+  withHostBridgeInvocationSignal
+} from "./semantic-tool-relay.js";
 
 const MAX_DISPLAYED_RESUME_SNAPSHOTS = 512;
 const HANDOFF_AUTHORITY_KIND = "handoff";
@@ -117,64 +134,11 @@ export type DisplayedResumeSnapshotMap = Map<
   string,
   { snapshotId: string; expiresAtMs: number }
 >;
-export const defaultSemanticToolRelayPath = fileURLToPath(
-  new URL("./cli.js", import.meta.url)
-);
-const relayPathByApi = new WeakMap<object, string>();
-const relayEnvironmentByApi = new WeakMap<object, NodeJS.ProcessEnv>();
 const hostBridgePresentationApis = new WeakSet<object>();
-const hostBridgeAsyncRelayApis = new WeakSet<object>();
-const hostBridgeInvocationStorage = new AsyncLocalStorage<{
-  readonly signal?: AbortSignal;
-}>();
-
-export function bindSemanticToolRelayPath(
-  api: object,
-  relayPath: string
-): void {
-  relayPathByApi.set(api, relayPath);
-}
-
-/** Bind a private child-process environment for a Host adapter instance. */
-export function bindSemanticToolRelayEnvironment(
-  api: object,
-  environment: NodeJS.ProcessEnv
-): void {
-  relayEnvironmentByApi.set(
-    api,
-    Object.freeze({ ...environment }) as NodeJS.ProcessEnv
-  );
-}
 
 /** Keep one shared tool implementation while selecting Host-neutral output. */
 export function bindHostBridgeToolPresentation(api: object): void {
   hostBridgePresentationApis.add(api);
-}
-
-/**
- * Keep an embedding Host's event loop responsive while AKK CLI work runs.
- *
- * Every in-process Host, including the OpenClaw Gateway plugin, must opt into
- * the asynchronous child-process runner before registering AKK tools.
- */
-export function bindSemanticToolAsyncRelay(api: object): void {
-  hostBridgeAsyncRelayApis.add(api);
-}
-
-/** Scope one Host invocation's cancellation without sharing mutable state. */
-export function withHostBridgeInvocationSignal<T>(
-  signal: AbortSignal | undefined,
-  operation: () => Promise<T>
-): Promise<T> {
-  const effectiveSignal = signal ??
-    hostBridgeInvocationStorage.getStore()?.signal;
-  if (effectiveSignal?.aborted) {
-    return Promise.reject(hostBridgeAbortError());
-  }
-  return hostBridgeInvocationStorage.run(
-    { signal: effectiveSignal },
-    async () => operation()
-  );
 }
 
 /** Build the one host-neutral AKK command/tool catalog for a runtime owner. */
@@ -3502,195 +3466,6 @@ function registerCliTool(
   });
 }
 
-export function runCli(
-  api,
-  cliArgs,
-  {
-    cwd = process.cwd(),
-    allowNonzeroJson = false
-  }: {
-    cwd?: string;
-    allowNonzeroJson?: boolean;
-  } = {}
-) {
-  const binPath = relayPathForApi(api);
-  const spawned = spawnSync(process.execPath, [binPath, ...cliArgs], {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-    cwd,
-    env: relayEnvironmentForApi(api)
-  });
-
-  if (spawned.error) {
-    throw new Error(`agent-knock-knock ${cliArgs[0]} failed to start: ${spawned.error.message}`);
-  }
-  if (spawned.status !== 0) {
-    if (allowNonzeroJson && spawned.stdout.trim()) {
-      return parseJson(spawned.stdout);
-    }
-    throw new Error(cleanError(spawned.stderr || spawned.stdout || `agent-knock-knock ${cliArgs[0]} exited with status ${spawned.status}`));
-  }
-
-  return parseJson(spawned.stdout);
-}
-
-export function runCliAsync(
-  api,
-  cliArgs,
-  {
-    cwd = process.cwd(),
-    allowNonzeroJson = false,
-    timeoutMs = 90_000
-  }: {
-    cwd?: string;
-    allowNonzeroJson?: boolean;
-    timeoutMs?: number;
-  } = {}
-): Promise<Record<string, unknown>> {
-  const binPath = relayPathForApi(api);
-  const maxBuffer = 10 * 1024 * 1024;
-  const signal = hostBridgeInvocationStorage.getStore()?.signal;
-
-  if (signal?.aborted) {
-    return Promise.reject(hostBridgeAbortError());
-  }
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [binPath, ...cliArgs], {
-      cwd,
-      env: relayEnvironmentForApi(api),
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true
-    });
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-
-    let stdout = "";
-    let stderr = "";
-    let overflow = false;
-    let timedOut = false;
-    let aborted = false;
-    const onAbort = (): void => {
-      aborted = true;
-      child.kill("SIGKILL");
-    };
-    const cleanup = (): void => {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onAbort);
-    };
-    const append = (current: string, chunk: string): string => {
-      const next = current + chunk;
-      if (Buffer.byteLength(next, "utf8") > maxBuffer) {
-        overflow = true;
-        child.kill("SIGKILL");
-      }
-      return next;
-    };
-    child.stdout.on("data", (chunk: string) => {
-      stdout = append(stdout, chunk);
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr = append(stderr, chunk);
-    });
-
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, timeoutMs);
-    timeout.unref();
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) {
-      onAbort();
-    }
-
-    child.once("error", (error) => {
-      cleanup();
-      if (aborted) {
-        reject(hostBridgeAbortError());
-        return;
-      }
-      reject(
-        new Error(
-          `agent-knock-knock ${cliArgs[0]} failed to start: ${error.message}`
-        )
-      );
-    });
-    child.once("close", (status) => {
-      cleanup();
-      if (aborted) {
-        reject(hostBridgeAbortError());
-        return;
-      }
-      if (timedOut) {
-        reject(
-          new Error(`agent-knock-knock ${cliArgs[0]} timed out`)
-        );
-        return;
-      }
-      if (overflow) {
-        reject(
-          new Error(`agent-knock-knock ${cliArgs[0]} output exceeded 10 MiB`)
-        );
-        return;
-      }
-      if (status !== 0) {
-        if (allowNonzeroJson && stdout.trim()) {
-          try {
-            resolve(parseJson(stdout));
-          } catch (error) {
-            reject(error);
-          }
-          return;
-        }
-        reject(
-          new Error(
-            cleanError(
-              stderr ||
-                stdout ||
-                `agent-knock-knock ${cliArgs[0]} exited with status ${status}`
-            )
-          )
-        );
-        return;
-      }
-      try {
-        resolve(parseJson(stdout));
-      } catch (error) {
-        reject(error);
-      }
-    });
-  });
-}
-
-function hostBridgeAbortError(): Error {
-  const error = new Error("agent-knock-knock Host invocation was aborted");
-  error.name = "AbortError";
-  return error;
-}
-
-async function runHostAwareCli(
-  api,
-  cliArgs,
-  options: {
-    cwd?: string;
-    allowNonzeroJson?: boolean;
-    timeoutMs?: number;
-  } = {}
-): Promise<Record<string, unknown>> {
-  if (hostBridgeAsyncRelayApis.has(api)) {
-    return runCliAsync(api, cliArgs, options);
-  }
-  return runCli(api, cliArgs, options);
-}
-
-function relayPathForApi(api): string {
-  return relayPathByApi.get(api) ?? defaultSemanticToolRelayPath;
-}
-
-function relayEnvironmentForApi(api): NodeJS.ProcessEnv {
-  return relayEnvironmentByApi.get(api) ?? process.env;
-}
-
 function pushTurnTarget(args, params) {
   if (Object.hasOwn(params, "turn_id") && Object.hasOwn(params, "conversation_id")) {
     throw new Error("turn-target tools accept only one of turn_id or conversation_id");
@@ -3791,16 +3566,4 @@ function requiredTerminalInteractionIdentifier(
     throw new Error(`${name} must be an exact safe interaction identifier`);
   }
   return identifier;
-}
-
-function parseJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw new Error(`agent-knock-knock CLI returned invalid JSON: ${error.message}`);
-  }
-}
-
-function cleanError(text) {
-  return String(text).trim().slice(0, 2000);
 }

@@ -72,6 +72,7 @@
     "test/quickstart-docs.test.ts",
     "test/refactor-evidence.test.ts",
     "test/semantic-tool-catalog.test.ts",
+    "test/semantic-tool-relay.test.ts",
     "test/session-selector.test.ts",
     "test/session-store.test.ts",
     "test/terminal-agent-adapter.test.ts",

@@ -138,6 +138,7 @@ const OPENCLAW_AUTHORITY_ROLES = Object.freeze({
   monitor_supervisor: "src/openclaw-plugin-supervisor.ts",
   plugin_entry: "src/openclaw-plugin.ts",
   semantic_catalog: "src/semantic-tool-catalog.ts",
+  semantic_relay: "src/semantic-tool-relay.ts",
   semantic_runtime: "src/semantic-tool-runtime.ts"
 });
 const OPENCLAW_AUTHORITY_PATHS = Object.freeze(
@@ -158,6 +159,7 @@ const HOST_BRIDGE_AUTHORITY_PATHS = Object.freeze([
   "src/host-profile-runtime.ts",
   "src/host-profile.ts",
   "src/semantic-tool-catalog.ts",
+  "src/semantic-tool-relay.ts",
   "src/semantic-tool-runtime.ts"
 ]);
 const MIGRATION_IDS = Object.freeze([
@@ -1051,8 +1053,21 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
   assertSourcePattern(
     repoRoot,
     roles.semantic_runtime,
-    /const relayPathByApi = new WeakMap[\s\S]*?export function createAkkSemanticToolCatalog\s*\([\s\S]*?export function runCli\s*\([\s\S]*?export function runCliAsync\s*\(/u,
+    /export function createAkkSemanticToolCatalog\s*\([\s\S]*?function registerCliTool\s*\([\s\S]*?runHostAwareCli/u,
     "semantic tool-runtime role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_runtime,
+    "./semantic-tool-relay.js",
+    ["runHostAwareCli", "withHostBridgeInvocationSignal"],
+    "semantic tool-runtime role"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.semantic_relay,
+    /const relayPathByOwner = new WeakMap[\s\S]*?export function bindSemanticToolRelayPath\s*\([\s\S]*?export function runCli\s*\([\s\S]*?export function runCliAsync\s*\([\s\S]*?export async function runHostAwareCli\s*\(/u,
+    "semantic tool-relay role"
   );
   assertDirectNamedImport(
     repoRoot,

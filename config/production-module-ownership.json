@@ -873,6 +873,10 @@
       "owner": "host-bridge"
     },
     {
+      "path": "src/semantic-tool-relay.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/semantic-tool-runtime.ts",
       "owner": "host-bridge"
     },
