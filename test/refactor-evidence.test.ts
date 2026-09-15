@@ -107,7 +107,7 @@ test("final refactor evidence reproduces startup counts and historical selection
 
   assert.deepEqual(evidence.publicContracts, {
     contractCount: 5,
-    witnessCount: 75,
+    witnessCount: 76,
     migrationCount: 11,
     hostBridgeToolCount: 22,
     openclawToolCount: 22,

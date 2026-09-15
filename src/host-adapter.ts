@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import { packageRootDir } from "./cli-command-runtime.js";
 import {
   createHostBridgeToolRegistry,
   type HostBridgeCommandResult,
@@ -5,12 +9,11 @@ import {
   type HostBridgeToolLogger,
   type HostBridgeToolResult
 } from "./host-bridge-tools.js";
-export type {
-  HostBridgeCommandResult,
-  HostBridgeToolContext,
-  HostBridgeToolLogger,
-  HostBridgeToolResult
-} from "./host-bridge-tools.js";
+import {
+  createHostAdapterCapabilityHandshake,
+  verifyHostAdapterCapabilityHandshake,
+  type HostAdapterCapabilityHandshakeV1
+} from "./host-adapter-capabilities.js";
 import {
   bindOpenClawRelayEnvironment,
   bindOpenClawRelayPath,
@@ -21,6 +24,24 @@ import {
   createMonitorReconciliationService,
   MONITOR_SUPERVISOR_INTERVAL_MS
 } from "./openclaw-plugin-supervisor.js";
+
+export {
+  HOST_ADAPTER_CAPABILITY_CONTRACT,
+  HOST_ADAPTER_CAPABILITY_VERSION,
+  HOST_ADAPTER_SKILL_NAME,
+  createHostAdapterCapabilityHandshake,
+  verifyHostAdapterCapabilityHandshake
+} from "./host-adapter-capabilities.js";
+export type {
+  HostAdapterCapabilityHandshakeV1,
+  HostAdapterCapabilitySource
+} from "./host-adapter-capabilities.js";
+export type {
+  HostBridgeCommandResult,
+  HostBridgeToolContext,
+  HostBridgeToolLogger,
+  HostBridgeToolResult
+} from "./host-bridge-tools.js";
 
 export {
   createTrustedHostProfileRuntime,
@@ -74,7 +95,12 @@ export interface CreateHostAdapterOptions {
 export interface HostAdapter {
   readonly command: HostAdapterCommandMetadata;
   readonly tools: readonly HostAdapterToolMetadata[];
+  readonly capabilityHandshake: HostAdapterCapabilityHandshakeV1;
   readonly lifecycle: HostAdapterLifecycle;
+  verifyCapabilityHandshake(
+    skillDocument: string,
+    registeredToolNames?: readonly string[]
+  ): HostAdapterCapabilityHandshakeV1;
   executeCommand(
     context: HostAdapterControllerContext,
     args: string,
@@ -102,7 +128,7 @@ const METADATA_CONTEXT = Object.freeze({
 });
 
 /**
- * Adapt AKK's established slash command and 22 semantic tools to a native Host.
+ * Adapt AKK's established slash command and ordered semantic tools to a Host.
  *
  * Public metadata is read from the shared catalog exactly once. Executable
  * registries are created lazily per exact Host authority object so private
@@ -134,6 +160,17 @@ export function createHostAdapter(options: CreateHostAdapterOptions): HostAdapte
       inputSchema: tool.inputSchema
     }))
   );
+  const skillDocument = fs.readFileSync(path.join(
+    packageRootDir(),
+    "templates",
+    "openclaw-skills",
+    "agent-knock-knock",
+    "SKILL.md"
+  ), "utf8");
+  const capabilityHandshake = createHostAdapterCapabilityHandshake({
+    command: commandMetadata,
+    tools: toolMetadata
+  }, skillDocument);
   const registries = new WeakMap<object, CachedRegistry>();
 
   const lifecycleApi = {
@@ -177,6 +214,11 @@ export function createHostAdapter(options: CreateHostAdapterOptions): HostAdapte
       logger: options.logger,
       context: trusted
     });
+    verifyHostAdapterCapabilityHandshake({
+      command: registry.command(),
+      tools: registry.list(),
+      capabilityHandshake
+    }, skillDocument);
     registries.set(context.authority, { context: trusted, registry });
     return registry;
   };
@@ -184,7 +226,15 @@ export function createHostAdapter(options: CreateHostAdapterOptions): HostAdapte
   return Object.freeze({
     command: commandMetadata,
     tools: toolMetadata,
+    capabilityHandshake,
     lifecycle,
+    verifyCapabilityHandshake(connectorSkillDocument, registeredToolNames) {
+      return verifyHostAdapterCapabilityHandshake({
+        command: commandMetadata,
+        tools: toolMetadata,
+        capabilityHandshake
+      }, connectorSkillDocument, registeredToolNames);
+    },
     executeCommand(context, args, signal) {
       return withHostBridgeInvocationSignal(signal, () =>
         registryFor(context).command().execute(args)

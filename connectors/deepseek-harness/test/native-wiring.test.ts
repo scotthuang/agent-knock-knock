@@ -29,6 +29,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   const contexts: HostAdapterControllerContext[] = [];
   const environments: NodeJS.ProcessEnv[] = [];
   const disposedAuthorities: object[] = [];
+  const capabilityVerifications: Array<readonly string[] | undefined> = [];
   let capturedRoutes: AgentRouteTable | undefined;
   let lifecycleStarts = 0;
   let lifecycleStops = 0;
@@ -109,6 +110,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
         contexts,
         environments,
         disposedAuthorities,
+        capabilityVerifications,
         lifecycle: {
           start: () => { lifecycleStarts += 1; },
           stop: async () => {
@@ -134,6 +136,10 @@ test("mounts native command/tools and routes every call through the exact Agent"
   assert.equal(commands.length, 1);
   assert.equal(commands[0]?.name, "akk");
   assert.equal(tools.length, 22);
+  assert.deepEqual(capabilityVerifications, [
+    undefined,
+    tools.map((tool) => tool.name),
+  ]);
   assert.equal(skills.length, 1);
   assert.equal(skills[0]?.name, "agent-knock-knock");
   assert.equal(
@@ -290,6 +296,7 @@ function fakeAdapter(
     contexts: HostAdapterControllerContext[];
     environments: NodeJS.ProcessEnv[];
     disposedAuthorities: object[];
+    capabilityVerifications: Array<readonly string[] | undefined>;
     lifecycle: { start(): void; stop(): Promise<void> };
   },
 ): HostAdapter {
@@ -302,12 +309,21 @@ function fakeAdapter(
     command: { name: "akk", description: "AKK", acceptsArgs: true },
     tools: metadata,
     lifecycle: { id: "fake", ...state.lifecycle },
-    async executeCommand(context, args) {
+    verifyCapabilityHandshake(
+      _skillDocument: string,
+      registeredToolNames?: readonly string[],
+    ) {
+      state.capabilityVerifications.push(
+        registeredToolNames ? [...registeredToolNames] : undefined,
+      );
+      return {};
+    },
+    async executeCommand(context: HostAdapterControllerContext, args: string) {
       state.contexts.push(context);
       state.environments.push(options.environmentForContext(context));
       return { text: `command:${args}`, isError: false };
     },
-    async executeTool(context, name) {
+    async executeTool(context: HostAdapterControllerContext, name: string) {
       state.contexts.push(context);
       state.environments.push(options.environmentForContext(context));
       return {
@@ -315,10 +331,10 @@ function fakeAdapter(
         details: { exact: true },
       };
     },
-    disposeContext(authority) {
+    disposeContext(authority: object) {
       state.disposedAuthorities.push(authority);
     },
-  };
+  } as unknown as HostAdapter;
 }
 
 function fakeAgent(id: string, status: "idle" | "running") {

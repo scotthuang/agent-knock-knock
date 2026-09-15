@@ -24,6 +24,7 @@ import {
   SUPPORTED_PI_VERSION,
 } from "./constants.js";
 import { CallbackInbox } from "./callback-inbox.js";
+import { loadBundledAkkSkillDocument } from "./bundled-skill.js";
 import { createCallbackIpcServer, type CallbackIpcServer } from "./ipc.js";
 import {
   createConnectorProfileResources,
@@ -44,7 +45,6 @@ const COMMAND_CUSTOM_TYPE = "agent-knock-knock-command";
 const APPROVE_TOOL = "agent_knock_knock_approve";
 const CANCEL_TOOL = "agent_knock_knock_cancel";
 const STATUS_TOOL = "agent_knock_knock_status";
-const EXPECTED_TOOL_COUNT = 22;
 const MAX_APPROVAL_DISPLAY_CHARS = 8_000;
 
 interface LiveConnector {
@@ -53,6 +53,7 @@ interface LiveConnector {
   readonly routes: PiRouteTable;
   readonly server: CallbackIpcServer;
   readonly adapter: HostAdapter;
+  readonly skillDocument: string;
   target: PiCallbackTarget;
   branchEpoch: number;
   running: boolean;
@@ -137,6 +138,7 @@ async function startConnector(
   ctx: ExtensionContext,
   dependencies: ConnectorDependencies,
 ): Promise<LiveConnector> {
+  const skillDocument = loadBundledAkkSkillDocument();
   const resources = dependencies.createConnectorProfileResources(
     relayEnvironment(process.env),
   );
@@ -176,6 +178,10 @@ async function startConnector(
         error: () => undefined,
       },
     });
+    verifyCapabilityHandshake(
+      adapter,
+      skillDocument,
+    );
     let current = {} as LiveConnector;
     const target = createTarget(pi, ctx, resources, 0, () => current);
     connector = {
@@ -184,6 +190,7 @@ async function startConnector(
       routes,
       server,
       adapter,
+      skillDocument,
       target,
       branchEpoch: 0,
       running: true,
@@ -228,15 +235,38 @@ function registerPiSurface(
     },
   });
 
-  if (initial.adapter.tools.length !== EXPECTED_TOOL_COUNT) {
-    throw new Error(
-      `agent-knock-knock-pi expected ${EXPECTED_TOOL_COUNT} AKK tools, ` +
-      `received ${initial.adapter.tools.length}`,
-    );
-  }
+  const registeredToolNames: string[] = [];
   for (const metadata of initial.adapter.tools) {
     pi.registerTool(toolDefinition(metadata, current));
+    registeredToolNames.push(metadata.name);
   }
+  verifyCapabilityHandshake(
+    initial.adapter,
+    initial.skillDocument,
+    registeredToolNames,
+  );
+}
+
+function verifyCapabilityHandshake(
+  adapter: HostAdapter,
+  skillDocument: string,
+  registeredToolNames?: readonly string[],
+): unknown {
+  const candidate = (adapter as unknown as {
+    readonly verifyCapabilityHandshake?: unknown;
+  }).verifyCapabilityHandshake;
+  if (typeof candidate !== "function") {
+    throw new Error("Host adapter capability handshake verifier is missing");
+  }
+  return (candidate as (
+    this: HostAdapter,
+    skillDocument: string,
+    registeredToolNames?: readonly string[],
+  ) => unknown).call(
+    adapter,
+    skillDocument,
+    registeredToolNames,
+  );
 }
 
 function toolDefinition(

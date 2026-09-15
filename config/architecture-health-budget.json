@@ -32,16 +32,6 @@
     }
   },
   "contract_sync": {
-    "connector_tool_count_sources": [
-      {
-        "path": "connectors/deepseek-harness/src/index.ts",
-        "constant": "EXPECTED_TOOL_COUNT"
-      },
-      {
-        "path": "connectors/pi/src/index.ts",
-        "constant": "EXPECTED_TOOL_COUNT"
-      }
-    ],
     "canonical_skill": "templates/openclaw-skills/agent-knock-knock/SKILL.md",
     "skill_replicas": [
       "connectors/deepseek-harness/skills/agent-knock-knock/SKILL.md",

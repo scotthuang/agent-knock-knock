@@ -373,6 +373,13 @@ release mode it additionally rejects a dirty tree, a non-`main` branch, an
 unsynchronized upstream, an existing npm version or connector repository tag,
 and any runtime `file:`, `link:`, or `workspace:` dependency.
 
+Activation separately verifies the pinned AKK HostAdapter's versioned,
+secretless capability handshake. The authoritative catalog digest, ordered
+tool names and derived count, and Skill digest must match the generated Skill
+and the tools registered with DeepSeek Harness. A missing/unknown handshake,
+forged digest, or partial registration fails closed; the connector has no
+independent hard-coded tool count.
+
 For deterministic local verification without a registry or git-remote query:
 
 ```sh

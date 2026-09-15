@@ -705,6 +705,10 @@
       "owner": "terminal-control"
     },
     {
+      "path": "src/host-adapter-capabilities.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/host-adapter.ts",
       "owner": "host-bridge"
     },

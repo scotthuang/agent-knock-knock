@@ -37,12 +37,10 @@ import {
   compileAuthoritativeInputValidator,
   type AssertSupportedJsonSchema,
 } from "./schema-adapter.js";
-import { loadBundledAkkSkill } from "./bundled-skill.js";
+import { loadBundledAkkSkillBundle } from "./bundled-skill.js";
 
 export const name = CONNECTOR_NAME;
 export const inject = ["agents", "commands", "tools", "skills"];
-
-const EXPECTED_TOOL_COUNT = 22;
 
 export interface Config {
   /** AKK reconciliation cadence for the one shared Host lifecycle service. */
@@ -57,10 +55,10 @@ export const Config: z<Config> = z.object({
 });
 
 /**
- * Mount `/akk`, all 22 semantic AKK tools, the canonical AKK skill, one
- * callback route table, and one Host-owned lifecycle service. No explicit bind
- * command or per-session setup exists: the exact command/tool Agent becomes the
- * callback owner lazily.
+ * Mount `/akk`, the ordered semantic AKK tool catalog, the canonical AKK skill,
+ * one callback route table, and one Host-owned lifecycle service. No explicit
+ * bind command or per-session setup exists: the exact command/tool Agent becomes
+ * the callback owner lazily.
  */
 export async function apply(
   ctx: Context,
@@ -104,6 +102,7 @@ export async function applyWithDependencies(
   let lifecycleStarted = false;
 
   try {
+    const bundledSkill = loadBundledAkkSkillBundle();
     const builtRoutes = new AgentRouteTable(
       ctx.agents,
       harnessRuntime.createUserMessage,
@@ -135,6 +134,10 @@ export async function applyWithDependencies(
       },
     });
     adapter = builtAdapter;
+    verifyCapabilityHandshake(
+      builtAdapter,
+      bundledSkill.document,
+    );
 
     await builtServer.start();
     builtAdapter.lifecycle.start();
@@ -144,11 +147,12 @@ export async function applyWithDependencies(
       builtRoutes.disposeAgent(agent);
       builtAdapter.disposeContext(agent);
     }));
-    disposers.push(ctx.skills.register(loadBundledAkkSkill()));
+    disposers.push(ctx.skills.register(bundledSkill.registration));
     disposers.push(ctx.commands.register(commandDefinition(
       builtAdapter,
       builtRoutes,
     )));
+    const registeredToolNames: string[] = [];
     for (const tool of builtAdapter.tools) {
       disposers.push(ctx.tools.register(toolDefinition(
         builtAdapter,
@@ -156,12 +160,13 @@ export async function applyWithDependencies(
         tool,
         harnessRuntime.assertSupportedJsonSchema,
       )));
+      registeredToolNames.push(tool.name);
     }
-    if (builtAdapter.tools.length !== EXPECTED_TOOL_COUNT) {
-      throw new Error(
-        `agent-knock-knock-deepseek-harness expected ${EXPECTED_TOOL_COUNT} AKK tools, received ${builtAdapter.tools.length}`,
-      );
-    }
+    verifyCapabilityHandshake(
+      builtAdapter,
+      bundledSkill.document,
+      registeredToolNames,
+    );
 
     let disposed = false;
     return async () => {
@@ -181,6 +186,28 @@ export async function applyWithDependencies(
     resources.remove();
     throw error;
   }
+}
+
+function verifyCapabilityHandshake(
+  adapter: HostAdapter,
+  skillDocument: string,
+  registeredToolNames?: readonly string[],
+): unknown {
+  const candidate = (adapter as unknown as {
+    readonly verifyCapabilityHandshake?: unknown;
+  }).verifyCapabilityHandshake;
+  if (typeof candidate !== "function") {
+    throw new Error("Host adapter capability handshake verifier is missing");
+  }
+  return (candidate as (
+    this: HostAdapter,
+    skillDocument: string,
+    registeredToolNames?: readonly string[],
+  ) => unknown).call(
+    adapter,
+    skillDocument,
+    registeredToolNames,
+  );
 }
 
 function commandDefinition(

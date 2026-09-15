@@ -2967,3 +2967,21 @@ Future Hosts such as Hermes compose their own adapter around the same lifecycle
 and callback ports. AKK deliberately does not add multi-Host ownership,
 Host-switch recovery, PID/heartbeat fencing, or no-Host continuity because
 those are outside the supported product behavior.
+
+## Issue #320 P2 addendum — Host connector capability handshake
+
+The Host-neutral catalog now derives one immutable capability handshake for Pi
+and DeepSeek Harness. Version 1 contains only public catalog identity: the
+ordered tool names and derived count, a canonical metadata/schema SHA-256, and
+the canonical Skill name/SHA-256. It contains no controller route, environment,
+token, filesystem path, or other authority. Each connector validates the
+handshake before starting its Host lifecycle and validates the exact names it
+registered before reporting ready. Unknown versions, missing metadata, catalog
+drift, generated-Skill drift, and partial registration fail closed.
+
+This replaces connector-local `EXPECTED_TOOL_COUNT` literals and removes the
+architecture dashboard's regex extraction of those constants. The checked-in
+public-contract witness still records the current 22-tool OpenClaw/Host Bridge
+surface; adding or removing a catalog entry intentionally changes that public
+witness, while connector counts and registration expectations derive from the
+same handshake without another manual edit.

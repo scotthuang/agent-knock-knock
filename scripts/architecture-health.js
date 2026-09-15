@@ -36,17 +36,6 @@ export const ARCHITECTURE_HEALTH_SKILL_REPLICAS = Object.freeze([
   "connectors/deepseek-harness/skills/agent-knock-knock/SKILL.md",
   "connectors/pi/skills/agent-knock-knock/SKILL.md"
 ]);
-export const ARCHITECTURE_HEALTH_CONNECTOR_TOOL_SOURCES = Object.freeze([
-  Object.freeze({
-    path: "connectors/deepseek-harness/src/index.ts",
-    constant: "EXPECTED_TOOL_COUNT"
-  }),
-  Object.freeze({
-    path: "connectors/pi/src/index.ts",
-    constant: "EXPECTED_TOOL_COUNT"
-  })
-]);
-
 const defaultRepoRoot = fileURLToPath(new URL("../", import.meta.url));
 
 function isRecord(value) {
@@ -258,7 +247,7 @@ function validateContractSync(contractSync) {
   }
   exactKeys(
     contractSync,
-    ["canonical_skill", "connector_tool_count_sources", "skill_replicas"],
+    ["canonical_skill", "skill_replicas"],
     "architecture health contract_sync"
   );
   exactString(
@@ -271,48 +260,9 @@ function validateContractSync(contractSync) {
     ARCHITECTURE_HEALTH_SKILL_REPLICAS,
     "architecture health skill_replicas"
   );
-  if (!Array.isArray(contractSync.connector_tool_count_sources)) {
-    throw new Error(
-      "architecture health connector_tool_count_sources must be an array"
-    );
-  }
-  const connectorSources = contractSync.connector_tool_count_sources.map(
-    (entry, index) => {
-      if (!isRecord(entry)) {
-        throw new Error(
-          `architecture health connector tool source ${index} must be an object`
-        );
-      }
-      exactKeys(
-        entry,
-        ["constant", "path"],
-        `architecture health connector tool source ${index}`
-      );
-      return Object.freeze({
-        path: normalizedRepositoryPath(
-          entry.path,
-          `architecture health connector tool source ${index} path`
-        ),
-        constant: typeof entry.constant === "string" ? entry.constant : ""
-      });
-    }
-  );
-  const expected = ARCHITECTURE_HEALTH_CONNECTOR_TOOL_SOURCES;
-  if (
-    connectorSources.length !== expected.length ||
-    connectorSources.some((entry, index) =>
-      entry.path !== expected[index].path ||
-      entry.constant !== expected[index].constant
-    )
-  ) {
-    throw new Error(
-      "architecture health connector tool sources must remain the canonical Host connectors"
-    );
-  }
   return Object.freeze({
     canonicalSkill: contractSync.canonical_skill,
-    skillReplicas: Object.freeze([...contractSync.skill_replicas]),
-    connectorToolCountSources: Object.freeze(connectorSources)
+    skillReplicas: Object.freeze([...contractSync.skill_replicas])
   });
 }
 
@@ -358,21 +308,6 @@ export function readArchitectureHealthBudget({
     );
   }
   return validateArchitectureHealthBudgetManifest(manifest);
-}
-
-function readConnectorToolCount(source, constant, repositoryPath) {
-  const escaped = constant.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const matches = [
-    ...source.matchAll(
-      new RegExp(`\\bconst\\s+${escaped}\\s*=\\s*(\\d+)\\s*;`, "gu")
-    )
-  ];
-  if (matches.length !== 1) {
-    throw new Error(
-      `${repositoryPath} must declare ${constant} exactly once as an integer literal`
-    );
-  }
-  return Number(matches[0][1]);
 }
 
 function sha256(content) {
@@ -447,21 +382,6 @@ function architectureHealthErrors({
       `OpenClaw tool count ${openClawToolCount}`
     );
   }
-  const connectorToolCounts = [];
-  for (const source of budget.contractSync.connectorToolCountSources) {
-    const count = readConnectorToolCount(
-      readRepositoryFile(source.path),
-      source.constant,
-      source.path
-    );
-    connectorToolCounts.push(Object.freeze({ path: source.path, count }));
-    if (count !== openClawToolCount) {
-      errors.push(
-        `${source.path} tool count ${count} does not match public tool count ` +
-        openClawToolCount
-      );
-    }
-  }
   const canonicalSkill = readRepositoryFile(budget.contractSync.canonicalSkill);
   const canonicalSkillSha256 = sha256(canonicalSkill);
   const skillReplicas = [];
@@ -487,7 +407,6 @@ function architectureHealthErrors({
     softViolations,
     hostBridgeToolCount,
     openClawToolCount,
-    connectorToolCounts,
     canonicalSkillSha256,
     skillReplicas
   };
@@ -579,8 +498,7 @@ export function validateArchitectureHealth({
     contract_sync: Object.freeze({
       semantic_tools: Object.freeze({
         openclaw: result.openClawToolCount,
-        host_bridge: result.hostBridgeToolCount,
-        connectors: Object.freeze(result.connectorToolCounts)
+        host_bridge: result.hostBridgeToolCount
       }),
       canonical_skill: budget.contractSync.canonicalSkill,
       canonical_skill_sha256: result.canonicalSkillSha256,

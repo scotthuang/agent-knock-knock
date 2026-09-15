@@ -600,7 +600,7 @@ export function createAkkSemanticToolCatalog(
       return args;
     }
   });
-  return finishSemanticToolCatalog(api, command, 22);
+  return finishSemanticToolCatalog(api, command);
 }
 
 function registerOpenClawListTool(api): void {

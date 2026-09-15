@@ -81,19 +81,13 @@ export function semanticToolLabel(name: string): string {
 
 export function finishSemanticToolCatalog(
   runtime: object,
-  command: SemanticCommandCatalogEntry,
-  expectedToolCount: number
+  command: SemanticCommandCatalogEntry
 ): SemanticToolCatalog {
   const tools = pendingToolsByRuntime.get(runtime);
   if (!tools) {
     throw new Error("semantic tool catalog construction is not active");
   }
   pendingToolsByRuntime.delete(runtime);
-  if (tools.length !== expectedToolCount) {
-    throw new Error(
-      `AKK semantic catalog expected ${expectedToolCount} tools, received ${tools.length}`
-    );
-  }
   return defineSemanticToolCatalog(command, tools);
 }
 
