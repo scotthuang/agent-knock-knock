@@ -829,8 +829,16 @@
       "owner": "openclaw-doctor"
     },
     {
+      "path": "src/openclaw-list-projection.ts",
+      "owner": "openclaw-plugin"
+    },
+    {
       "path": "src/openclaw-managed-callback-cli-adapter.ts",
       "owner": "callback-transport"
+    },
+    {
+      "path": "src/openclaw-model-facing-field-policy.ts",
+      "owner": "openclaw-plugin"
     },
     {
       "path": "src/openclaw-plugin-callback-adapter.ts",
@@ -851,6 +859,10 @@
     {
       "path": "src/openclaw-plugin-supervisor.ts",
       "owner": "host-lifecycle"
+    },
+    {
+      "path": "src/openclaw-plugin-value-helpers.ts",
+      "owner": "openclaw-plugin"
     },
     {
       "path": "src/openclaw-plugin.ts",
