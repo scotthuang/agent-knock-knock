@@ -72,15 +72,22 @@
         "src/host-bridge-mcp.ts",
         "src/host-bridge-tools.ts",
         "src/host-bridge.ts",
+        "src/host-monitor-reconciliation.ts",
         "src/host-profile-callback-transport.ts",
         "src/host-profile-runtime.ts",
         "src/host-profile.ts",
+        "src/semantic-private-authority-offers.ts",
         "src/semantic-tool-arguments.ts",
         "src/semantic-tool-catalog.ts",
+        "src/semantic-tool-command-helpers.ts",
+        "src/semantic-tool-list-projection.ts",
+        "src/semantic-tool-model-facing-field-policy.ts",
         "src/semantic-tool-presentation.ts",
         "src/semantic-tool-private-authority.ts",
         "src/semantic-tool-relay.ts",
-        "src/semantic-tool-runtime.ts"
+        "src/semantic-tool-runtime.ts",
+        "src/semantic-tool-schemas.ts",
+        "src/semantic-tool-value-helpers.ts"
       ],
       "witnesses": [
         "command-json-callback-unit",
@@ -157,18 +164,26 @@
       ],
       "authority_paths": [
         "openclaw.plugin.json",
+        "src/host-monitor-reconciliation.ts",
         "src/openclaw-plugin-callback-adapter.ts",
         "src/openclaw-plugin-command-adapter.ts",
         "src/openclaw-plugin-helpers.ts",
         "src/openclaw-plugin-schemas.ts",
         "src/openclaw-plugin-supervisor.ts",
         "src/openclaw-plugin.ts",
+        "src/openclaw-private-authority-offers.ts",
+        "src/semantic-private-authority-offers.ts",
         "src/semantic-tool-arguments.ts",
         "src/semantic-tool-catalog.ts",
+        "src/semantic-tool-command-helpers.ts",
+        "src/semantic-tool-list-projection.ts",
+        "src/semantic-tool-model-facing-field-policy.ts",
         "src/semantic-tool-presentation.ts",
         "src/semantic-tool-private-authority.ts",
         "src/semantic-tool-relay.ts",
-        "src/semantic-tool-runtime.ts"
+        "src/semantic-tool-runtime.ts",
+        "src/semantic-tool-schemas.ts",
+        "src/semantic-tool-value-helpers.ts"
       ],
       "witnesses": [
         "openclaw-plugin-boundary"

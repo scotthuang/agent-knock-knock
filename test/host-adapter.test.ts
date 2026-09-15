@@ -9,7 +9,7 @@ import {
   createHostAdapter,
   type HostAdapterControllerContext
 } from "../src/host-adapter.js";
-import { listParameters } from "../src/openclaw-plugin-schemas.js";
+import { listParameters } from "../src/semantic-tool-schemas.js";
 
 const expectedToolNames = [
   "agent_knock_knock_list",

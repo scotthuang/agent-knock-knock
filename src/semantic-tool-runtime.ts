@@ -22,7 +22,7 @@ import {
   isAkkThreadTransitionSuccess,
   parseAkkCommand,
   resolvePluginStoreDir
-} from "./openclaw-plugin-helpers.js";
+} from "./semantic-tool-command-helpers.js";
 import {
   approveParameters,
   cancelParameters,
@@ -46,7 +46,7 @@ import {
   statusParameters,
   unwatchParameters,
   watchParameters
-} from "./openclaw-plugin-schemas.js";
+} from "./semantic-tool-schemas.js";
 import {
   beginSemanticToolCatalog,
   defineSemanticCatalogTool,
@@ -94,8 +94,8 @@ import {
   numberString,
   pushOptional,
   pushTurnTarget,
-  requiredOpenClawSessionId,
-  requiredOpenClawSessionKey,
+  requiredControllerSessionId,
+  requiredControllerSessionKey,
   requiredString,
   requiredTerminalInteractionIdentifier
 } from "./semantic-tool-arguments.js";
@@ -164,7 +164,7 @@ export function createAkkSemanticToolCatalog(
     execute: async (ctx) => handleAkkCommand(api, ctx, displayedResumeSnapshots)
   };
 
-  registerOpenClawListTool(api);
+  registerSemanticListTool(api);
 
   registerCliTool(api, {
     name: "agent_knock_knock_watch",
@@ -317,8 +317,8 @@ export function createAkkSemanticToolCatalog(
         "conflicting_session_id"
       );
       const action = await consumeDisplayedPrivateAction(api, {
-        sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
-        sessionId: requiredOpenClawSessionId(toolContext?.sessionId),
+        sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
+        sessionId: requiredControllerSessionId(toolContext?.sessionId),
         kind: RECONCILE_BINDING_AUTHORITY_KIND,
         target: { type: "terminal_id", id: terminalId },
         tool: "agent_knock_knock_reconcile_binding",
@@ -512,8 +512,8 @@ export function createAkkSemanticToolCatalog(
       api,
       params,
       {
-        sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
-        sessionId: requiredOpenClawSessionId(toolContext?.sessionId)
+        sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
+        sessionId: requiredControllerSessionId(toolContext?.sessionId)
       }
     )
   });
@@ -524,8 +524,8 @@ export function createAkkSemanticToolCatalog(
       "Dispatch one closed semantic decision for the current exact permission request only after the user reviews and explicitly chooses it. decision defaults to approve_once for compatibility; reject is available only on a managed Turn when the adapter proves a safe native reject choice. Use turn_id for a managed Turn or terminal_id for a separately advertised approve_once-only terminal action. AKK privately refreshes the prompt and authority, then recaptures it under lock. Raw keys, indexes, and labels are not accepted. Never retry an interrupted decision blindly.",
     parameters: approveParameters,
     buildArgs: (params, toolContext) => buildPrivateApprovalArgs(api, params, {
-      sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
-      sessionId: requiredOpenClawSessionId(toolContext?.sessionId)
+      sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
+      sessionId: requiredControllerSessionId(toolContext?.sessionId)
     })
   });
 
@@ -603,7 +603,7 @@ export function createAkkSemanticToolCatalog(
   return finishSemanticToolCatalog(api, command);
 }
 
-function registerOpenClawListTool(api): void {
+function registerSemanticListTool(api): void {
   registerCliTool(api, {
     name: "agent_knock_knock_list",
     description:
@@ -725,8 +725,8 @@ function registerModelControlTools(api): void {
       api,
       params,
       {
-        sessionKey: requiredOpenClawSessionKey(toolContext?.sessionKey),
-        sessionId: requiredOpenClawSessionId(toolContext?.sessionId)
+        sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
+        sessionId: requiredControllerSessionId(toolContext?.sessionId)
       }
     )
   });
@@ -950,8 +950,8 @@ async function handleAkkCommand(
           turn_id: parsed.turnId,
           decision: parsed.decision
         }, {
-          sessionKey: requiredOpenClawSessionKey(ctx.sessionKey),
-          sessionId: requiredOpenClawSessionId(ctx.sessionId)
+          sessionKey: requiredControllerSessionKey(ctx.sessionKey),
+          sessionId: requiredControllerSessionId(ctx.sessionId)
         })
       : buildAkkCommandCliArgs(parsed, config, {
           sessionKey: ctx.sessionKey,
@@ -1023,8 +1023,8 @@ async function handleAkkModelCommand(
   >,
   config: Record<string, unknown>
 ) {
-  const sessionKey = requiredOpenClawSessionKey(ctx.sessionKey);
-  const sessionId = requiredOpenClawSessionId(ctx.sessionId);
+  const sessionKey = requiredControllerSessionKey(ctx.sessionKey);
+  const sessionId = requiredControllerSessionId(ctx.sessionId);
   if (parsed.action === "model-options") {
     const action = await privateTerminalActionArguments(
       api,
@@ -1269,7 +1269,7 @@ function buildStatusCliArgs(api, params, toolContext) {
       "--watch",
       watchId,
       "--openclaw-session",
-      requiredOpenClawSessionKey(toolContext?.sessionKey)
+      requiredControllerSessionKey(toolContext?.sessionKey)
     ];
     pushOptional(
       watchArgs,
@@ -1666,7 +1666,7 @@ function terminalMessageIdForToolCall({
     return undefined;
   }
   const sessionKey = stringValue(sessionKeyValue) ?? "agent:main:main";
-  // sessionId is the OpenClaw conversation incarnation. It changes across
+  // sessionId is the controller conversation incarnation. It changes across
   // /new and /reset even when sessionKey remains stable. Keep a literal null
   // fallback so retries with the same legacy context remain deterministic.
   const sessionId = stringValue(sessionIdValue) ?? null;

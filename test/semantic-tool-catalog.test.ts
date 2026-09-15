@@ -139,6 +139,49 @@ test("OpenClaw and Host Bridge consume the same host-neutral runtime factory", (
   }
 });
 
+test("Host and semantic core have no reverse dependency on OpenClaw adapters", () => {
+  const corePaths = [
+    "src/host-adapter.ts",
+    "src/host-bridge-tools.ts",
+    "src/host-bridge.ts",
+    "src/host-monitor-reconciliation.ts",
+    "src/semantic-private-authority-offers.ts",
+    "src/semantic-tool-arguments.ts",
+    "src/semantic-tool-catalog.ts",
+    "src/semantic-tool-command-helpers.ts",
+    "src/semantic-tool-list-projection.ts",
+    "src/semantic-tool-model-facing-field-policy.ts",
+    "src/semantic-tool-presentation.ts",
+    "src/semantic-tool-private-authority.ts",
+    "src/semantic-tool-relay.ts",
+    "src/semantic-tool-runtime.ts",
+    "src/semantic-tool-schemas.ts",
+    "src/semantic-tool-value-helpers.ts"
+  ];
+  for (const sourcePath of corePaths) {
+    const source = fs.readFileSync(sourcePath, "utf8");
+    assert.doesNotMatch(
+      source,
+      /(?:from\s+|export\s+\*\s+from\s+)"\.\/openclaw-[^"]+"/u,
+      sourcePath
+    );
+  }
+
+  const adapterFacades = new Map([
+    ["src/openclaw-plugin-helpers.ts", "semantic-tool-command-helpers"],
+    ["src/openclaw-plugin-schemas.ts", "semantic-tool-schemas"],
+    ["src/openclaw-plugin-supervisor.ts", "host-monitor-reconciliation"],
+    ["src/openclaw-private-authority-offers.ts", "semantic-private-authority-offers"]
+  ]);
+  for (const [sourcePath, neutralModule] of adapterFacades) {
+    assert.match(
+      fs.readFileSync(sourcePath, "utf8"),
+      new RegExp(`from "\\./${neutralModule}\\.js"`, "u"),
+      sourcePath
+    );
+  }
+});
+
 function publicMetadataDigest(
   command: {
     readonly name: string;

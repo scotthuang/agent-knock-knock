@@ -12,7 +12,7 @@ import {
   normalizeAkkModelFacingFieldName,
   sanitizeAkkModelFacingDiagnosticText,
   sanitizeAkkModelFacingLegacyAuthorityInstructionText
-} from "./openclaw-plugin-helpers.js";
+} from "./semantic-tool-command-helpers.js";
 import {
   validateAnyTerminalInteractionProjection
 } from "./terminal-interaction-protocol.js";

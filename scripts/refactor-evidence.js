@@ -133,16 +133,26 @@ const OPENCLAW_AUTHORITY_ROLES = Object.freeze({
   manifest: "openclaw.plugin.json",
   callback_adapter: "src/openclaw-plugin-callback-adapter.ts",
   command_adapter: "src/openclaw-plugin-command-adapter.ts",
-  command_helpers: "src/openclaw-plugin-helpers.ts",
-  tool_schemas: "src/openclaw-plugin-schemas.ts",
-  monitor_supervisor: "src/openclaw-plugin-supervisor.ts",
+  command_helpers_adapter: "src/openclaw-plugin-helpers.ts",
+  tool_schemas_adapter: "src/openclaw-plugin-schemas.ts",
+  monitor_supervisor_adapter: "src/openclaw-plugin-supervisor.ts",
+  private_authority_adapter: "src/openclaw-private-authority-offers.ts",
   plugin_entry: "src/openclaw-plugin.ts",
+  host_monitor_reconciliation: "src/host-monitor-reconciliation.ts",
   semantic_arguments: "src/semantic-tool-arguments.ts",
   semantic_catalog: "src/semantic-tool-catalog.ts",
+  semantic_command_helpers: "src/semantic-tool-command-helpers.ts",
+  semantic_list_projection: "src/semantic-tool-list-projection.ts",
+  semantic_model_facing_policy:
+    "src/semantic-tool-model-facing-field-policy.ts",
   semantic_presentation: "src/semantic-tool-presentation.ts",
   semantic_private_authority: "src/semantic-tool-private-authority.ts",
+  semantic_private_authority_offers:
+    "src/semantic-private-authority-offers.ts",
   semantic_relay: "src/semantic-tool-relay.ts",
-  semantic_runtime: "src/semantic-tool-runtime.ts"
+  semantic_runtime: "src/semantic-tool-runtime.ts",
+  semantic_schemas: "src/semantic-tool-schemas.ts",
+  semantic_value_helpers: "src/semantic-tool-value-helpers.ts"
 });
 const OPENCLAW_AUTHORITY_PATHS = Object.freeze(
   Object.values(OPENCLAW_AUTHORITY_ROLES).sort()
@@ -159,15 +169,22 @@ const HOST_BRIDGE_AUTHORITY_PATHS = Object.freeze([
   "src/host-bridge-mcp.ts",
   "src/host-bridge-tools.ts",
   "src/host-bridge.ts",
+  "src/host-monitor-reconciliation.ts",
   "src/host-profile-callback-transport.ts",
   "src/host-profile-runtime.ts",
   "src/host-profile.ts",
+  "src/semantic-private-authority-offers.ts",
   "src/semantic-tool-arguments.ts",
   "src/semantic-tool-catalog.ts",
+  "src/semantic-tool-command-helpers.ts",
+  "src/semantic-tool-list-projection.ts",
+  "src/semantic-tool-model-facing-field-policy.ts",
   "src/semantic-tool-presentation.ts",
   "src/semantic-tool-private-authority.ts",
   "src/semantic-tool-relay.ts",
-  "src/semantic-tool-runtime.ts"
+  "src/semantic-tool-runtime.ts",
+  "src/semantic-tool-schemas.ts",
+  "src/semantic-tool-value-helpers.ts"
 ]);
 const MIGRATION_IDS = Object.freeze([
   "callback-outbox",
@@ -984,7 +1001,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
   );
 
   const roles = OPENCLAW_AUTHORITY_ROLES;
-  const schemas = readRepositoryFile(repoRoot, roles.tool_schemas);
+  const schemas = readRepositoryFile(repoRoot, roles.semantic_schemas);
   assertExactArray(
     [...schemas.matchAll(/^export const ([A-Za-z]+Parameters) =/gmu)]
       .map((match) => match[1]),
@@ -1012,28 +1029,40 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "closeParameters",
       "approveParameters"
     ],
-    "OpenClaw schema role exports"
+    "semantic tool-schema role exports"
   );
   assertDirectNamedImport(
     repoRoot,
-    roles.tool_schemas,
+    roles.semantic_schemas,
     "./executors.js",
     ["EXECUTOR_KINDS"],
-    "OpenClaw schema role"
+    "semantic tool-schema role"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.tool_schemas_adapter,
+    /export \* from "\.\/semantic-tool-schemas\.js";/u,
+    "OpenClaw tool-schema adapter role"
   );
 
   assertSourcePattern(
     repoRoot,
-    roles.command_helpers,
+    roles.semantic_command_helpers,
     /export const AKK_CALLBACK_METHOD[\s\S]*?export function parseAkkCommand\s*\([\s\S]*?export function buildAkkCommandCliArgs\s*\([\s\S]*?export function resolvePluginStoreDir\s*\(/u,
-    "OpenClaw command-helper role"
+    "semantic command-helper role"
   );
   assertDirectNamedImport(
     repoRoot,
-    roles.command_helpers,
+    roles.semantic_command_helpers,
     "./value-guards.js",
     ["recordValue"],
-    "OpenClaw command-helper role"
+    "semantic command-helper role"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.command_helpers_adapter,
+    /export \* from "\.\/semantic-tool-command-helpers\.js";/u,
+    "OpenClaw command-helper adapter role"
   );
 
   assertSourcePattern(
@@ -1113,6 +1142,22 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
   assertDirectNamedImport(
     repoRoot,
     roles.semantic_private_authority,
+    "./semantic-private-authority-offers.js",
+    [
+      "consumeSemanticPrivateAuthorityOffer",
+      "rememberSemanticPrivateAuthorityOffer"
+    ],
+    "semantic tool-private-authority offer-store boundary"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.private_authority_adapter,
+    /from "\.\/semantic-private-authority-offers\.js";/u,
+    "OpenClaw private-authority adapter role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_private_authority,
     "./semantic-tool-arguments.js",
     ["pushOptional", "requiredString"],
     "semantic tool-private-authority role"
@@ -1132,7 +1177,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
   assertDirectNamedImport(
     repoRoot,
     roles.semantic_runtime,
-    "./openclaw-plugin-schemas.js",
+    "./semantic-tool-schemas.js",
     [
       "approveParameters",
       "cancelParameters",
@@ -1162,7 +1207,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
   assertDirectNamedImport(
     repoRoot,
     roles.semantic_runtime,
-    "./openclaw-plugin-helpers.js",
+    "./semantic-tool-command-helpers.js",
     ["AKK_CALLBACK_METHOD", "parseAkkCommand", "resolvePluginStoreDir"],
     "semantic tool-runtime role"
   );
@@ -1197,31 +1242,70 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
 
   assertSourcePattern(
     repoRoot,
-    roles.monitor_supervisor,
-    /export const MONITOR_SUPERVISOR_INTERVAL_MS[\s\S]*?export function createMonitorReconciliationService\s*\([\s\S]*?agent-knock-knock-monitor-reconciliation/u,
-    "OpenClaw monitor-supervisor role"
+    roles.host_monitor_reconciliation,
+    /export const HOST_MONITOR_RECONCILIATION_INTERVAL_MS[\s\S]*?export function createHostMonitorReconciliationService\s*\([\s\S]*?agent-knock-knock-monitor-reconciliation/u,
+    "Host monitor-reconciliation role"
   );
   assertDirectNamedImport(
     repoRoot,
-    roles.monitor_supervisor,
+    roles.host_monitor_reconciliation,
     "./host-lifecycle-service.js",
     ["createHostLifecycleService", "HOST_LIFECYCLE_INTERVAL_MS"],
-    "OpenClaw monitor-supervisor role"
+    "Host monitor-reconciliation role"
   );
   assertDirectNamedImport(
     repoRoot,
-    roles.monitor_supervisor,
-    "./openclaw-plugin-command-adapter.js",
-    ["pushOptional", "runCliAsync"],
-    "OpenClaw monitor-supervisor role"
+    roles.host_monitor_reconciliation,
+    "./semantic-tool-relay.js",
+    ["runCliAsync"],
+    "Host monitor-reconciliation role"
   );
   assertDirectNamedImport(
     repoRoot,
-    roles.monitor_supervisor,
-    "./openclaw-plugin-helpers.js",
+    roles.host_monitor_reconciliation,
+    "./semantic-tool-command-helpers.js",
     ["resolvePluginStoreDir"],
-    "OpenClaw monitor-supervisor role"
+    "Host monitor-reconciliation role"
   );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.monitor_supervisor_adapter,
+    "./host-monitor-reconciliation.js",
+    [
+      "createHostMonitorReconciliationService",
+      "HOST_MONITOR_RECONCILIATION_INTERVAL_MS"
+    ],
+    "OpenClaw monitor-supervisor adapter role"
+  );
+
+  for (const repositoryPath of [
+    "src/host-adapter.ts",
+    "src/host-bridge-tools.ts",
+    "src/host-bridge.ts",
+    roles.host_monitor_reconciliation,
+    roles.semantic_arguments,
+    roles.semantic_catalog,
+    roles.semantic_command_helpers,
+    roles.semantic_list_projection,
+    roles.semantic_model_facing_policy,
+    roles.semantic_presentation,
+    roles.semantic_private_authority,
+    roles.semantic_private_authority_offers,
+    roles.semantic_relay,
+    roles.semantic_runtime,
+    roles.semantic_schemas,
+    roles.semantic_value_helpers
+  ]) {
+    const source = readRepositoryFile(repoRoot, repositoryPath);
+    if (
+      /(?:from\s+|export\s+\*\s+from\s+)"\.\/openclaw-[^"]+"/u.test(source)
+    ) {
+      fail(
+        `Host-neutral authority must not import an OpenClaw adapter: ` +
+        repositoryPath
+      );
+    }
+  }
 
   assertSourcePattern(
     repoRoot,
