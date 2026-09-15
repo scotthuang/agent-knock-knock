@@ -138,6 +138,33 @@ export const testSupportImpactByPath = Object.freeze({
   ],
   "test/terminal-agent-bridge/transport-failures.ts": [
     "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/support/codex-no-rollout-binding-cli-support.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/codex-no-rollout-binding-cli/zero-rollout-binding.ts",
+    "test/codex-no-rollout-binding-cli/deferred-recovery.ts",
+    "test/codex-no-rollout-binding-cli/approval-authority.ts",
+    "test/codex-no-rollout-binding-cli/candidate-inventory-acceptance.ts",
+    "test/codex-no-rollout-binding-cli/managed-user-explicit-send.ts",
+    "test/codex-no-rollout-binding-cli/lifecycle-identity-inspection.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/zero-rollout-binding.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/deferred-recovery.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/approval-authority.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/candidate-inventory-acceptance.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/managed-user-explicit-send.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/lifecycle-identity-inspection.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
   ]
 });
 
