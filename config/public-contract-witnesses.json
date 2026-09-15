@@ -74,8 +74,10 @@
         "src/host-profile-callback-transport.ts",
         "src/host-profile-runtime.ts",
         "src/host-profile.ts",
+        "src/semantic-tool-arguments.ts",
         "src/semantic-tool-catalog.ts",
         "src/semantic-tool-presentation.ts",
+        "src/semantic-tool-private-authority.ts",
         "src/semantic-tool-relay.ts",
         "src/semantic-tool-runtime.ts"
       ],
@@ -159,8 +161,10 @@
         "src/openclaw-plugin-schemas.ts",
         "src/openclaw-plugin-supervisor.ts",
         "src/openclaw-plugin.ts",
+        "src/semantic-tool-arguments.ts",
         "src/semantic-tool-catalog.ts",
         "src/semantic-tool-presentation.ts",
+        "src/semantic-tool-private-authority.ts",
         "src/semantic-tool-relay.ts",
         "src/semantic-tool-runtime.ts"
       ],

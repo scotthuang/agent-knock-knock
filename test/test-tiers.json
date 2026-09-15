@@ -74,6 +74,7 @@
     "test/semantic-tool-catalog.test.ts",
     "test/semantic-tool-relay.test.ts",
     "test/semantic-tool-presentation.test.ts",
+    "test/semantic-tool-private-authority.test.ts",
     "test/session-selector.test.ts",
     "test/session-store.test.ts",
     "test/terminal-agent-adapter.test.ts",

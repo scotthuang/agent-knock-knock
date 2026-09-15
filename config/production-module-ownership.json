@@ -881,11 +881,19 @@
       "owner": "runtime-log"
     },
     {
+      "path": "src/semantic-tool-arguments.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/semantic-tool-catalog.ts",
       "owner": "host-bridge"
     },
     {
       "path": "src/semantic-tool-presentation.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/semantic-tool-private-authority.ts",
       "owner": "host-bridge"
     },
     {
