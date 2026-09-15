@@ -10,7 +10,7 @@ import {
 
 export const ARCHITECTURE_HEALTH_SCHEMA =
   "agent-knock-knock/architecture-health-budget";
-export const ARCHITECTURE_HEALTH_VERSION = 1;
+export const ARCHITECTURE_HEALTH_VERSION = 2;
 export const ARCHITECTURE_HEALTH_BUDGET_PATH =
   "config/architecture-health-budget.json";
 export const ARCHITECTURE_HEALTH_BASELINE_LIMITS = Object.freeze({
@@ -19,6 +19,7 @@ export const ARCHITECTURE_HEALTH_BASELINE_LIMITS = Object.freeze({
   maxDefaultFunctionViolations: 338,
   largeFileThresholdPhysicalLoc: 2_000,
   maxLargeProductionFiles: 19,
+  maxProductionFilePhysicalLoc: 4_999,
   hotspotMaxPhysicalLoc: Object.freeze({
     "src/claude-local-transcript-provider.ts": 3_534,
     "src/openclaw-plugin-command-adapter.ts": 3_817,
@@ -168,7 +169,8 @@ function validateBudgets(budgets) {
       "max_default_function_violations",
       "max_hard_function_violations",
       "max_import_cycles",
-      "max_large_production_files"
+      "max_large_production_files",
+      "max_production_file_physical_loc"
     ],
     "architecture health budgets"
   );
@@ -192,6 +194,10 @@ function validateBudgets(budgets) {
     maxLargeProductionFiles: nonNegativeInteger(
       budgets.max_large_production_files,
       "architecture health max_large_production_files"
+    ),
+    maxProductionFilePhysicalLoc: positiveInteger(
+      budgets.max_production_file_physical_loc,
+      "architecture health max_production_file_physical_loc"
     )
   };
   for (const [key, ceiling] of Object.entries(
@@ -328,6 +334,9 @@ function architectureHealthErrors({
       physicalLoc > budget.budgets.largeFileThresholdPhysicalLoc
     )
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  const largestProductionFile = [...filePhysicalLoc]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .at(0);
   if (architecture.importCycles > budget.budgets.maxImportCycles) {
     errors.push(
       `production import cycles ${architecture.importCycles} exceed budget ` +
@@ -354,6 +363,16 @@ function architectureHealthErrors({
     errors.push(
       `production files over ${budget.budgets.largeFileThresholdPhysicalLoc} LOC ` +
       `${largeFiles.length} exceed budget ${budget.budgets.maxLargeProductionFiles}`
+    );
+  }
+  if (
+    largestProductionFile !== undefined &&
+    largestProductionFile[1] > budget.budgets.maxProductionFilePhysicalLoc
+  ) {
+    errors.push(
+      `largest production file ${largestProductionFile[0]} has ` +
+      `${largestProductionFile[1]} LOC; budget is ` +
+      budget.budgets.maxProductionFilePhysicalLoc
     );
   }
   const hotspotResults = [];
@@ -403,6 +422,7 @@ function architectureHealthErrors({
   return {
     errors,
     largeFiles,
+    largestProductionFile,
     hotspotResults,
     softViolations,
     hostBridgeToolCount,
@@ -461,7 +481,9 @@ export function validateArchitectureHealth({
       import_cycles: architecture.importCycles,
       hard_function_violations: architecture.productionFunctionHardViolations,
       default_function_violations: result.softViolations,
-      files_over_2000_physical_loc: result.largeFiles.length
+      files_over_2000_physical_loc: result.largeFiles.length,
+      maximum_production_file_physical_loc:
+        result.largestProductionFile?.[1] ?? 0
     }),
     baseline_delta: Object.freeze({
       production_modules:
@@ -486,7 +508,9 @@ export function validateArchitectureHealth({
       large_file_threshold_physical_loc:
         budget.budgets.largeFileThresholdPhysicalLoc,
       large_production_files_maximum:
-        budget.budgets.maxLargeProductionFiles
+        budget.budgets.maxLargeProductionFiles,
+      production_file_physical_loc_maximum:
+        budget.budgets.maxProductionFilePhysicalLoc
     }),
     hotspots: Object.freeze(result.hotspotResults),
     largest_production_files: Object.freeze(
