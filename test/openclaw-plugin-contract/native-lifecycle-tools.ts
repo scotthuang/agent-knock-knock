@@ -538,6 +538,10 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     path.join(packageRoot, "src", "semantic-tool-runtime.ts"),
     "utf8"
   );
+  const semanticCommandHelpersSource = fs.readFileSync(
+    path.join(packageRoot, "src", "semantic-tool-command-helpers.ts"),
+    "utf8"
+  );
   const semanticPrivateAuthoritySource = fs.readFileSync(
     path.join(packageRoot, "src", "semantic-tool-private-authority.ts"),
     "utf8"
@@ -574,6 +578,11 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     schemaAdapterSource,
     /export \* from "\.\/semantic-tool-schemas\.js";/u
   );
+  const semanticPrivateExecutionSources = [
+    semanticRuntimeSource,
+    semanticCommandHelpersSource,
+    semanticPrivateAuthoritySource
+  ].join("\n");
   for (const privateCliFence of [
     "--expected-approval-fingerprint",
     "--expected-binding-token",
@@ -582,9 +591,9 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     "--candidate-token"
   ]) {
     assert.match(
-      semanticRuntimeSource,
+      semanticPrivateExecutionSources,
       new RegExp(privateCliFence, "u"),
-      `${privateCliFence} remains a runtime-private CLI fence`
+      `${privateCliFence} remains a semantic-runtime-private CLI fence`
     );
   }
   assert.match(
@@ -618,24 +627,29 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.match(semanticRuntimeSource, /name: "agent_knock_knock_identify_and_send"/u);
   assert.match(semanticRuntimeSource, /name: "agent_knock_knock_resume_thread"/u);
   assert.match(
-    semanticRuntimeSource,
+    semanticPrivateAuthoritySource,
     /rememberDisplayedPrivateAuthorityOffers[\s\S]*?rememberDisplayedHandoffActions[\s\S]*?rememberDisplayedReconcileActions/u
   );
   assert.match(
     semanticRuntimeSource,
+    /name === "agent_knock_knock_list"[\s\S]*?rememberDisplayedPrivateAuthorityOffers\([\s\S]*?toolContext\?\.sessionKey[\s\S]*?toolContext\?\.sessionId[\s\S]*?result/u,
+    "the List runtime must pass every displayed private offer to the authority owner"
+  );
+  assert.match(
+    semanticPrivateAuthoritySource,
     /authoritativeHandoffActionArguments[\s\S]*?handoff_decision[\s\S]*?take_over_current/u
   );
   assert.match(
-    semanticRuntimeSource,
+    semanticPrivateAuthoritySource,
     /authoritativeTerminalActionArguments[\s\S]*?available_actions/u
   );
   assert.doesNotMatch(
-    semanticRuntimeSource,
+    semanticPrivateExecutionSources,
     /collectToolActionArguments|collectApprovalFingerprints/u
   );
   assert.match(
-    semanticRuntimeSource,
-    /consumeDisplayedPrivateAction[\s\S]*?authority changed after it was shown/u
+    semanticPrivateAuthoritySource,
+    /consumeDisplayedPrivateAction[\s\S]*?consumeSemanticPrivateAuthorityOffer[\s\S]*?privateActionArguments[\s\S]*?JSON\.stringify\(current\) !== JSON\.stringify\(offered\.args\)[\s\S]*?authority changed after it was shown/u
   );
   assert.match(
     semanticPrivateAuthoritySource,
