@@ -110,14 +110,23 @@ test("OpenClaw and Host Bridge consume the same host-neutral runtime factory", (
     "src/semantic-tool-runtime.ts",
     "utf8"
   );
+  const relaySource = fs.readFileSync(
+    "src/semantic-tool-relay.ts",
+    "utf8"
+  );
   assert.doesNotMatch(hostSource, /registerOpenClawCommands/u);
   assert.doesNotMatch(hostSource, /openclaw-plugin-command-adapter/u);
   assert.doesNotMatch(hostSource, /\bregister(?:Command|Tool)\s*\(/u);
   assert.match(hostSource, /createAkkSemanticToolCatalog/u);
+  assert.match(hostSource, /from "\.\/semantic-tool-relay\.js"/u);
   assert.match(openClawSource, /createAkkSemanticToolCatalog/u);
   assert.match(openClawSource, /registerSemanticToolCatalog/u);
   assert.doesNotMatch(runtimeSource, /registerOpenClawCommands/u);
   assert.doesNotMatch(runtimeSource, /registerSemanticToolCatalog/u);
+  assert.doesNotMatch(runtimeSource, /node:(?:async_hooks|child_process)/u);
+  assert.match(runtimeSource, /from "\.\/semantic-tool-relay\.js"/u);
+  assert.doesNotMatch(relaySource, /openclaw-plugin-command-adapter/u);
+  assert.doesNotMatch(relaySource, /openclaw-plugin-(?:helpers|schemas)/u);
 
   for (const sourcePath of [
     "connectors/pi/src/index.ts",

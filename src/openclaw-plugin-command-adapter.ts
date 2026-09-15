@@ -7,16 +7,18 @@ import {
 } from "./semantic-tool-runtime.js";
 
 export {
+  bindHostBridgeToolPresentation
+} from "./semantic-tool-runtime.js";
+export {
   bindSemanticToolAsyncRelay as bindHostBridgeAsyncRelay,
-  bindHostBridgeToolPresentation,
   bindSemanticToolRelayEnvironment as bindOpenClawRelayEnvironment,
   bindSemanticToolRelayPath as bindOpenClawRelayPath,
   defaultSemanticToolRelayPath as defaultOpenClawRelayPath,
-  pushOptional,
   runCli,
   runCliAsync,
   withHostBridgeInvocationSignal
-} from "./semantic-tool-runtime.js";
+} from "./semantic-tool-relay.js";
+export { pushOptional } from "./semantic-tool-runtime.js";
 
 /** Adapt the host-neutral AKK catalog to OpenClaw's registration API. */
 export function registerOpenClawCommands(

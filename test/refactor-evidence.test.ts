@@ -1132,6 +1132,7 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
     "src/openclaw-plugin-command-adapter.ts",
     "src/openclaw-plugin-schemas.ts",
     "src/semantic-tool-catalog.ts",
+    "src/semantic-tool-relay.ts",
     "src/semantic-tool-runtime.ts"
   ]) {
     const missingRole = loadJson("config/public-contract-witnesses.json");

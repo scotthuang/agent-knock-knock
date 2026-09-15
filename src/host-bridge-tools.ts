@@ -1,10 +1,12 @@
 import {
   bindHostBridgeToolPresentation,
-  bindSemanticToolAsyncRelay,
-  bindSemanticToolRelayEnvironment,
-  bindSemanticToolRelayPath,
   createAkkSemanticToolCatalog
 } from "./semantic-tool-runtime.js";
+import {
+  bindSemanticToolAsyncRelay,
+  bindSemanticToolRelayEnvironment,
+  bindSemanticToolRelayPath
+} from "./semantic-tool-relay.js";
 
 export interface HostBridgeToolContext {
   readonly sessionKey: string;
