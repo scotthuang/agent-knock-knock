@@ -74,7 +74,8 @@
         "src/host-profile-callback-transport.ts",
         "src/host-profile-runtime.ts",
         "src/host-profile.ts",
-        "src/semantic-tool-catalog.ts"
+        "src/semantic-tool-catalog.ts",
+        "src/semantic-tool-runtime.ts"
       ],
       "witnesses": [
         "command-json-callback-unit",
@@ -156,7 +157,8 @@
         "src/openclaw-plugin-schemas.ts",
         "src/openclaw-plugin-supervisor.ts",
         "src/openclaw-plugin.ts",
-        "src/semantic-tool-catalog.ts"
+        "src/semantic-tool-catalog.ts",
+        "src/semantic-tool-runtime.ts"
       ],
       "witnesses": [
         "openclaw-plugin-boundary"

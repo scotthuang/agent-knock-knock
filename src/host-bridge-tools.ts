@@ -1,10 +1,10 @@
 import {
-  bindHostBridgeAsyncRelay,
   bindHostBridgeToolPresentation,
-  bindOpenClawRelayEnvironment,
-  bindOpenClawRelayPath,
+  bindSemanticToolAsyncRelay,
+  bindSemanticToolRelayEnvironment,
+  bindSemanticToolRelayPath,
   createAkkSemanticToolCatalog
-} from "./openclaw-plugin-command-adapter.js";
+} from "./semantic-tool-runtime.js";
 
 export interface HostBridgeToolContext {
   readonly sessionKey: string;
@@ -92,10 +92,13 @@ export function createHostBridgeToolRegistry(
     pluginConfig: options.pluginConfig,
     logger: options.logger
   };
-  bindOpenClawRelayPath(runtime, requiredString(options.relayPath, "relayPath"));
-  bindOpenClawRelayEnvironment(runtime, options.relayEnvironment);
+  bindSemanticToolRelayPath(
+    runtime,
+    requiredString(options.relayPath, "relayPath")
+  );
+  bindSemanticToolRelayEnvironment(runtime, options.relayEnvironment);
   bindHostBridgeToolPresentation(runtime);
-  bindHostBridgeAsyncRelay(runtime);
+  bindSemanticToolAsyncRelay(runtime);
   const catalog = createAkkSemanticToolCatalog(runtime, new Map());
 
   if (catalog.tools.length !== 22) {

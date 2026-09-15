@@ -1493,8 +1493,8 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     path.join(packageRoot, "src", "openclaw-plugin-schemas.ts"),
     "utf8"
   );
-  const commandSource = fs.readFileSync(
-    path.join(packageRoot, "src", "openclaw-plugin-command-adapter.ts"),
+  const semanticRuntimeSource = fs.readFileSync(
+    path.join(packageRoot, "src", "semantic-tool-runtime.ts"),
     "utf8"
   );
   const supervisorSource = fs.readFileSync(
@@ -1529,70 +1529,70 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     "--candidate-token"
   ]) {
     assert.match(
-      commandSource,
+      semanticRuntimeSource,
       new RegExp(privateCliFence, "u"),
-      `${privateCliFence} remains an adapter-private CLI fence`
+      `${privateCliFence} remains a runtime-private CLI fence`
     );
   }
   assert.match(
-    commandSource,
+    semanticRuntimeSource,
     /expected_managed_terminal_token[\s\S]*?--expected-managed-terminal-token/u,
     "the private managed fast-path offer must reach the CLI fence"
   );
-  assert.match(commandSource, /name: "agent_knock_knock_renew"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_watch"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_unwatch"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_new_thread"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_reconcile_binding"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_list_resumable_threads"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_native_inspect"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_model_options"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_repair_model_control"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_set_model"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_renew"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_watch"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_unwatch"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_new_thread"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_reconcile_binding"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_list_resumable_threads"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_native_inspect"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_model_options"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_repair_model_control"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_set_model"/u);
   assert.match(
-    commandSource,
-    /OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS = 15 \* 60_000[\s\S]*?name: "agent_knock_knock_model_options"[\s\S]*?timeoutMs: OPENCLAW_MODEL_OPTIONS_CLI_TIMEOUT_MS/u
+    semanticRuntimeSource,
+    /MODEL_OPTIONS_CLI_TIMEOUT_MS = 15 \* 60_000[\s\S]*?name: "agent_knock_knock_model_options"[\s\S]*?timeoutMs: MODEL_OPTIONS_CLI_TIMEOUT_MS/u
   );
   assert.match(
-    commandSource,
-    /OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS = 30 \* 60_000[\s\S]*?name: "agent_knock_knock_set_model"[\s\S]*?timeoutMs: OPENCLAW_SET_MODEL_CLI_TIMEOUT_MS/u
+    semanticRuntimeSource,
+    /SET_MODEL_CLI_TIMEOUT_MS = 30 \* 60_000[\s\S]*?name: "agent_knock_knock_set_model"[\s\S]*?timeoutMs: SET_MODEL_CLI_TIMEOUT_MS/u
   );
   assert.match(
-    commandSource,
-    /OPENCLAW_REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS = 2 \* 60_000[\s\S]*?name: "agent_knock_knock_repair_model_control"[\s\S]*?timeoutMs: OPENCLAW_REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS/u
+    semanticRuntimeSource,
+    /REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS = 2 \* 60_000[\s\S]*?name: "agent_knock_knock_repair_model_control"[\s\S]*?timeoutMs: REPAIR_MODEL_CONTROL_CLI_TIMEOUT_MS/u
   );
-  assert.match(commandSource, /name: "agent_knock_knock_identify_foreground"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_identify_and_send"/u);
-  assert.match(commandSource, /name: "agent_knock_knock_resume_thread"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_identify_foreground"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_identify_and_send"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_resume_thread"/u);
   assert.match(
-    commandSource,
+    semanticRuntimeSource,
     /rememberDisplayedPrivateAuthorityOffers[\s\S]*?rememberDisplayedHandoffActions[\s\S]*?rememberDisplayedReconcileActions/u
   );
   assert.match(
-    commandSource,
+    semanticRuntimeSource,
     /authoritativeHandoffActionArguments[\s\S]*?handoff_decision[\s\S]*?take_over_current/u
   );
   assert.match(
-    commandSource,
+    semanticRuntimeSource,
     /authoritativeTerminalActionArguments[\s\S]*?available_actions/u
   );
   assert.doesNotMatch(
-    commandSource,
+    semanticRuntimeSource,
     /collectToolActionArguments|collectApprovalFingerprints/u
   );
   assert.match(
-    commandSource,
+    semanticRuntimeSource,
     /consumeDisplayedPrivateAction[\s\S]*?authority changed after it was shown/u
   );
   assert.match(
-    commandSource,
+    semanticRuntimeSource,
     /buildPrivateApprovalArgs[\s\S]*?consumeOpenClawPrivateAuthorityOffer[\s\S]*?currentFingerprint !== offeredFingerprint/u
   );
   assert.doesNotMatch(
-    commandSource,
+    semanticRuntimeSource,
     /structured one-time Hook|pending structured permission/u
   );
-  assert.doesNotMatch(commandSource, /install-claude-hooks/u);
+  assert.doesNotMatch(semanticRuntimeSource, /install-claude-hooks/u);
   assert.match(
     supervisorSource,
     /createMonitorReconciliationService[\s\S]*?agent-knock-knock-monitor-reconciliation/u

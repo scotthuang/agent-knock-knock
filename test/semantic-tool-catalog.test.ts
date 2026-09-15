@@ -7,9 +7,11 @@ import {
   createHostBridgeToolRegistry
 } from "../src/host-bridge-tools.js";
 import {
-  createAkkSemanticToolCatalog,
   registerOpenClawCommands
 } from "../src/openclaw-plugin-command-adapter.js";
+import {
+  createAkkSemanticToolCatalog
+} from "../src/semantic-tool-runtime.js";
 
 type ToolMetadata = {
   name: string;
@@ -98,10 +100,24 @@ test("OpenClaw registration and Host Bridge consume one catalog byte-for-byte", 
   );
 });
 
-test("Host Bridge and connector sources do not recreate an OpenClaw registry", () => {
+test("OpenClaw and Host Bridge consume the same host-neutral runtime factory", () => {
   const hostSource = fs.readFileSync("src/host-bridge-tools.ts", "utf8");
+  const openClawSource = fs.readFileSync(
+    "src/openclaw-plugin-command-adapter.ts",
+    "utf8"
+  );
+  const runtimeSource = fs.readFileSync(
+    "src/semantic-tool-runtime.ts",
+    "utf8"
+  );
   assert.doesNotMatch(hostSource, /registerOpenClawCommands/u);
+  assert.doesNotMatch(hostSource, /openclaw-plugin-command-adapter/u);
   assert.doesNotMatch(hostSource, /\bregister(?:Command|Tool)\s*\(/u);
+  assert.match(hostSource, /createAkkSemanticToolCatalog/u);
+  assert.match(openClawSource, /createAkkSemanticToolCatalog/u);
+  assert.match(openClawSource, /registerSemanticToolCatalog/u);
+  assert.doesNotMatch(runtimeSource, /registerOpenClawCommands/u);
+  assert.doesNotMatch(runtimeSource, /registerSemanticToolCatalog/u);
 
   for (const sourcePath of [
     "connectors/pi/src/index.ts",
