@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.13.4 - 2026-09-15
+
+### Changed
+
+- Make typed model control use one shared source of truth for native profile support, terminal subject normalization, input-owning surface classification, action availability, private authority, and transaction phase. List and execution now make the same fail-closed decision for ordinary, residual-continuation, and repair flows.
+- Run managed Monitor and Terminal Watch questionnaire responses through the same reservation, live-revalidation, dispatch, settlement, and `response_uncertain` transaction semantics while preserving their distinct ownership and task-completion models.
+- Keep OpenClaw, Pi, and DeepSeek Harness integrations aligned through one Host-neutral 22-tool semantic catalog, one canonical bundled Skill, a versioned capability handshake, and shared connector package verification.
+- Restructure terminal discovery into immutable facts, centralized action policy, and compact public projection. Split terminal Send, approval, retry, native inspection, model control, Watch storage, callback routing, and Herdr transport into focused modules behind compatibility facades.
+- Add typed model-control UI goldens, an in-process List-to-catalog-to-set-model contract, architecture-health ratchets, focused contract suites, and separate current-architecture and historical design records.
+
+### Security
+
+- Preserve exact pane, process-birth, cwd, agent, version, mutation-lock, and durable pre-input reservation checks across the new module boundaries. Private authority remains isolated, historical Store formats remain readable, and any possible input with an unproven postcondition remains non-retryable.
+
 ## 0.13.3 - 2026-09-14
 
 ### Added
