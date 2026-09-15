@@ -54,7 +54,7 @@ const TOOL_NAMES = [
   "agent_knock_knock_close",
 ] as const;
 
-test("Pi 0.84.4 registers /akk and all 22 tools and preserves command/tool calls", async () => {
+test("Pi 0.84.4 registers /akk and the complete semantic catalog", async () => {
   const fixture = nativeFixture();
   await fixture.start();
 

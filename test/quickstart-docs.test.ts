@@ -306,7 +306,10 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     skill,
     /agent-knock-knock\/host-list-compact[\s\S]*available_actions[\s\S]*action_inputs/u
   );
-  assert.match(skill, /register 22 semantic AKK tools/u);
+  assert.match(
+    skill,
+    /register the complete capability-handshake-verified semantic AKK tool catalog/u
+  );
   assert.match(
     skill,
     /repair_model_control[\s\S]*agent_knock_knock_repair_model_control\(\{terminal_id\}\)[\s\S]*never presses Enter[\s\S]*never retry an uncertain repair/u
