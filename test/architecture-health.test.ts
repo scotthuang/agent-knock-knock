@@ -69,11 +69,13 @@ test("architecture health dashboard stays within the 0.13.3 refactor baseline", 
 
   assert.equal(health.current.import_cycles, 0);
   assert.equal(health.current.hard_function_violations, 0);
-  assert.ok(health.current.default_function_violations <= 335);
-  assert.ok(health.current.files_over_2000_physical_loc <= 19);
+  assert.ok(health.current.default_function_violations <= 332);
+  assert.ok(health.current.files_over_2000_physical_loc <= 9);
+  assert.ok(health.current.maximum_production_file_physical_loc < 5_000);
   assert.equal(health.policy.total_production_loc, "observed_only");
-  assert.equal(health.policy.default_function_violations_maximum, 335);
-  assert.equal(health.policy.large_production_files_maximum, 19);
+  assert.equal(health.policy.default_function_violations_maximum, 332);
+  assert.equal(health.policy.large_production_files_maximum, 9);
+  assert.equal(health.policy.production_file_physical_loc_maximum, 4_999);
   assert.equal(health.hotspots.length, 8);
   assert.deepEqual(health.contract_sync.semantic_tools, {
     openclaw: 22,
@@ -125,6 +127,15 @@ test("architecture health budgets cannot be raised above the checked-in baseline
   assert.throws(
     () => healthModule.validateArchitectureHealthBudgetManifest(moreLargeFiles),
     /maxLargeProductionFiles cannot exceed baseline 19/u
+  );
+
+  const oversizedProductionFile = structuredClone(manifest);
+  oversizedProductionFile.budgets.max_production_file_physical_loc = 5_000;
+  assert.throws(
+    () => healthModule.validateArchitectureHealthBudgetManifest(
+      oversizedProductionFile
+    ),
+    /maxProductionFilePhysicalLoc cannot exceed baseline 4999/u
   );
 
   const grownHotspot = structuredClone(manifest);
@@ -186,12 +197,10 @@ test("architecture health rejects complexity, hotspot, tool, and skill drift", a
         const currentPhysicalLoc = source.split(/\r?\n/u).at(-1) === ""
           ? source.split(/\r?\n/u).length - 1
           : source.split(/\r?\n/u).length;
-        return source + "// hotspot growth\n".repeat(
-          10_422 - currentPhysicalLoc
-        );
+        return source + "// hotspot growth\n".repeat(1_916 - currentPhysicalLoc);
       }
     }),
-    /terminal-command-cli-adapter\.ts has 10422 LOC; budget is 10421/u
+    /terminal-command-cli-adapter\.ts has 1916 LOC; budget is 1915/u
   );
 
   assert.throws(
@@ -219,6 +228,32 @@ test("architecture health rejects complexity, hotspot, tool, and skill drift", a
       }
     }),
     /bundled skill connectors\/pi\/skills\/agent-knock-knock\/SKILL\.md does not match/u
+  );
+});
+
+test("architecture health rejects any production file at 5000 physical LOC", async () => {
+  const healthModule = await loadHealthModule();
+  const inputs = await currentInputs();
+  const oversizedPath = "src/semantic-tool-runtime.ts";
+  const realRead = (repositoryPath: string) =>
+    fs.readFileSync(path.join(repoRoot, repositoryPath), "utf8");
+
+  assert.throws(
+    () => healthModule.validateArchitectureHealth({
+      ...inputs,
+      repoRoot,
+      readRepositoryFile(repositoryPath: string) {
+        const source = realRead(repositoryPath);
+        if (repositoryPath !== oversizedPath) return source;
+        const currentPhysicalLoc = source.split(/\r?\n/u).at(-1) === ""
+          ? source.split(/\r?\n/u).length - 1
+          : source.split(/\r?\n/u).length;
+        return source + "// global production-file growth\n".repeat(
+          5_000 - currentPhysicalLoc
+        );
+      }
+    }),
+    /largest production file src\/semantic-tool-runtime\.ts has 5000 LOC; budget is 4999/u
   );
 });
 
@@ -260,7 +295,7 @@ test("a removed hotspot is retired without deleting its historical ceiling", asy
   assert.deepEqual(retired, {
     path: retiredPath,
     physical_loc: 0,
-    maximum_physical_loc: 10_421,
+    maximum_physical_loc: 1_915,
     retired: true
   });
 });

@@ -1,6 +1,6 @@
 {
   "schema": "agent-knock-knock/architecture-health-budget",
-  "version": 1,
+  "version": 2,
   "snapshot": {
     "git_commit": "0667537ac6efe116c5261fa33370a4190f2d2226",
     "package_version": "0.13.3",
@@ -17,18 +17,19 @@
   "budgets": {
     "max_import_cycles": 0,
     "max_hard_function_violations": 0,
-    "max_default_function_violations": 335,
+    "max_default_function_violations": 332,
     "large_file_threshold_physical_loc": 2000,
-    "max_large_production_files": 19,
+    "max_large_production_files": 9,
+    "max_production_file_physical_loc": 4999,
     "hotspot_max_physical_loc": {
       "src/claude-local-transcript-provider.ts": 3534,
-      "src/openclaw-plugin-command-adapter.ts": 3817,
-      "src/terminal-agent-bridge.ts": 7409,
-      "src/terminal-command-cli-adapter.ts": 10421,
-      "src/terminal-list-cli-adapter.ts": 5093,
+      "src/openclaw-plugin-command-adapter.ts": 32,
+      "src/terminal-agent-bridge.ts": 2641,
+      "src/terminal-command-cli-adapter.ts": 1915,
+      "src/terminal-list-cli-adapter.ts": 2617,
       "src/terminal-monitor-state-cli-adapter.ts": 3478,
-      "src/terminal-watch-cli-adapter.ts": 3683,
-      "src/terminal-watch-store.ts": 3191
+      "src/terminal-watch-cli-adapter.ts": 3635,
+      "src/terminal-watch-store.ts": 495
     }
   },
   "contract_sync": {

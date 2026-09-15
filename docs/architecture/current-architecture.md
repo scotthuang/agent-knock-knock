@@ -49,7 +49,7 @@ terminal/process/cwd authority, execution-time revalidation, reverse-order lock
 release, and `uncertain + do_not_retry` after possible input with an unproven
 postcondition.
 
-## 0.13.3 health snapshot
+## Issue #320 opening snapshot
 
 | Metric | Snapshot | Gate |
 | --- | ---: | --- |
@@ -72,8 +72,7 @@ gate instead targets concentration, complexity, cycles, and duplicated public
 artifacts.
 
 The `cli-core.ts` ceiling is 1,839 LOC and can move downward without editing a
-manifest. Eight current concentration hotspots have individual non-growth
-budgets:
+manifest. Eight opening concentration paths have individual ratcheting budgets:
 
 | Path | Maximum physical LOC |
 | --- | ---: |
@@ -91,6 +90,40 @@ allowed without changing its historical budget; the dashboard reports a removed
 path as `retired: true` with zero current LOC. Reusing that same path later still
 subjects it to its historical ceiling. Raising a baseline ceiling is rejected
 by the validator rather than normalized away in a routine feature PR.
+
+## P2 closeout ratchets
+
+Measured on 2026-09-15 at `main@9b4b007` before the closeout-budget commit:
+
+| Metric | P2 closeout | Opening delta |
+| --- | ---: | ---: |
+| Production modules | 212 | +57 responsibility-focused modules |
+| Production physical LOC | 150,684 | +5,958 observed-only LOC |
+| Production functions | 6,210 | +284 |
+| Production import edges | 1,382 | +378 |
+| Import cycles / hard function violations | 0 / 0 | unchanged |
+| Default function violations | 332 | -6 |
+| Production files over 2,000 LOC | 9 | -10 |
+| Largest production file | 3,635 LOC | below the new 5,000-LOC gate |
+
+The P2 closeout converts the achieved concentration reductions into executable
+non-regression gates. The checked-in budget permits no more than nine production
+files over 2,000 physical LOC, rejects every production file at 5,000 LOC or
+larger, and lowers each tracked hotspot ceiling to its post-refactor size. The
+default function-violation ceiling is likewise lowered from the opening 338 to
+the measured closeout value; it is not raised to absorb later feature growth.
+
+The separate 90-day goal of at most 250 default-threshold violations is not a
+claim about this P2 milestone. Reaching it requires function-level decomposition
+across callback, Watch, identity, transcript, and terminal-input policies rather
+than mechanical file movement. It remains visible follow-up work; the current
+ratchet neither weakens the `>=100` LOC / `>=20` approximate-complexity
+definition nor labels that longer-horizon target complete.
+
+Two other 90-day measures are longitudinal rather than static source gates:
+the typical production-file touch count for a new agent/version profile and
+`test:fast` p50/p95. They require evidence across multiple future changes or
+runs and are not inferred from a single P2 checkout.
 
 ## Contract synchronization
 
