@@ -52,7 +52,7 @@ pi install npm:@scotthuang/agent-knock-knock-pi@next
 pi
 ```
 
-Pi should show `AKK ready`. With Codex or Claude Code already running in tmux or Herdr, enter `/akk list`. The connector provides `/akk`, 22 structured tools, the bundled `agent-knock-knock` skill, callbacks to the initiating Pi session, and native approval dialogs. See the [Pi connector guide](connectors/pi/README.md).
+Pi should show `AKK ready`. With Codex or Claude Code already running in tmux or Herdr, enter `/akk list`. The connector provides `/akk`, the complete capability-handshake-verified semantic tool catalog, the bundled `agent-knock-knock` skill, callbacks to the initiating Pi session, and native approval dialogs. See the [Pi connector guide](connectors/pi/README.md).
 
 ## Install for DeepSeek Harness
 
@@ -64,7 +64,7 @@ dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
 dsh web
 ```
 
-Open a Web conversation and enter `/akk list`. The connector gives every conversation `/akk`, the same 22 structured tools, the bundled `agent-knock-knock` skill, and callbacks to the exact Harness Agent that initiated the work. See the [DeepSeek Harness connector guide](connectors/deepseek-harness/README.md).
+Open a Web conversation and enter `/akk list`. The connector gives every conversation `/akk`, the same capability-handshake-verified semantic tool catalog, the bundled `agent-knock-knock` skill, and callbacks to the exact Harness Agent that initiated the work. See the [DeepSeek Harness connector guide](connectors/deepseek-harness/README.md).
 
 ## See It in Action
 
@@ -155,7 +155,7 @@ Choose the guide that matches what you are trying to do:
 | --- | --- |
 | [tmux quick start](docs/quickstart-tmux.md) | First OpenClaw task, multiple panes, and selectors |
 | [Herdr quick start](docs/quickstart-herdr.md) | Local Herdr discovery and exact-version checks |
-| [Pi connector](connectors/pi/README.md) | Pi installation, 22 tools, bundled skill, native approval, callbacks, upgrade, and uninstall |
+| [Pi connector](connectors/pi/README.md) | Pi installation, semantic tool catalog, bundled skill, native approval, callbacks, upgrade, and uninstall |
 | [DeepSeek Harness connector](connectors/deepseek-harness/README.md) | Harness installation, approval contract, callbacks, upgrade, and troubleshooting |
 | [Operator guide](docs/operator-guide.md) | Complete command reference, reliable Send, Watch, Status, approval, recovery, Sessions, and native threads |
 | [OpenClaw operations](docs/openclaw-operations.md) | npm alternative, configuration, auto-approval policy, supervisor behavior, and troubleshooting |

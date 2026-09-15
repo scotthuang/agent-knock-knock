@@ -123,7 +123,7 @@ one uniquely identified task produced the final output.
 ## Tool workflow
 
 The slash command is the human-facing shortcut. Agents receive the same
-behavior as 22 structured tools:
+behavior through the complete capability-handshake-verified tool catalog:
 
 | Tool | Purpose |
 | --- | --- |

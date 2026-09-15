@@ -1,7 +1,7 @@
 # Agent Knock Knock for Pi — POC
 
 This Pi Extension makes Pi an Agent Knock Knock (AKK) orchestration Host. Pi
-can use `/akk` and AKK's 22 semantic tools to control Codex and Claude Code
+can use `/akk` and AKK's capability-handshake-verified semantic tools to control Codex and Claude Code
 terminals that are already running in tmux or Herdr.
 
 The connector does not modify Pi, launch or authenticate a coding agent, or
@@ -147,8 +147,8 @@ The usual product loop is:
 6. Use **Cancel**, **Close**, **Renew**, or **Retry Callback** only when the
    current list/status output advertises that exact action.
 
-The `/akk` command is the direct human surface. The following 22 tools are also
-registered for model-driven orchestration:
+The `/akk` command is the direct human surface. The complete semantic catalog is
+also registered for model-driven orchestration:
 
 | Tool | Purpose |
 | --- | --- |
