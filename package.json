@@ -111,6 +111,7 @@
     "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --topics tmux,codex,claude-code,agent-orchestration,terminal-handoff --dry-run",
     "compat:openclaw": "npm run build && node scripts/verify-openclaw-compatibility.js",
     "compat:openclaw:current": "npm run build && node scripts/verify-openclaw-compatibility.js --target current",
+    "connectors:verify": "node scripts/connector-release-check.js --offline --all",
     "deepseek:build": "npm --prefix connectors/deepseek-harness run build",
     "deepseek:typecheck": "npm --prefix connectors/deepseek-harness run typecheck",
     "deepseek:test:fast": "npm --prefix connectors/deepseek-harness run test:fast",
@@ -120,6 +121,7 @@
     "pi:typecheck": "npm --prefix connectors/pi run typecheck",
     "pi:test:fast": "npm --prefix connectors/pi run test:fast",
     "pi:pack:check": "npm --prefix connectors/pi run pack:check",
+    "pi:release:check": "npm --prefix connectors/pi run release:check",
     "smoke:lifecycle": "npm run build && node scripts/smoke-lifecycle-tmux.js",
     "smoke:lifecycle:attest": "npm run build && node scripts/verify-lifecycle-smoke-evidence.js",
     "transcript": "node dist/src/cli.js transcript"

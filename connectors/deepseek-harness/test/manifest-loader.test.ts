@@ -9,6 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  CONNECTOR_PACKAGE,
   CONNECTOR_VERSION,
   SUPPORTED_DSH_VERSIONS,
 } from "../src/constants.js";
@@ -43,6 +44,7 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
     fs.readFileSync(path.join(packageDirectory, "package-lock.json"), "utf8"),
   );
   const supportedRange = SUPPORTED_DSH_VERSIONS.join(" || ");
+  assert.equal(manifest.name, CONNECTOR_PACKAGE);
   assert.equal(manifest.version, CONNECTOR_VERSION);
   assert.equal(lock.version, CONNECTOR_VERSION);
   assert.equal(lock.packages[""].version, CONNECTOR_VERSION);
@@ -96,6 +98,7 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
     manifest.scripts["skill:check"],
     "node ../../scripts/sync-connector-skills.js --check --connector deepseek-harness",
   );
+  assert.equal(manifest.scripts["release:check"], "node scripts/release-check.mjs");
 
   const packed = spawnSync(
     process.execPath,

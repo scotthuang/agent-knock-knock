@@ -378,6 +378,33 @@ npm run test:fast
 npm run pack:check
 ```
 
+## Release safety
+
+`npm run release:check` is check-only. The shared connector gate proves the
+generated Skill hash, package manifest/constants/lock/dependency parity, then
+runs typecheck, fast tests, and inspection of the real package tarball. In
+release mode it also requires a clean synchronized `main`, verifies that the
+exact npm version and `pi-v<version>` repository tag are unused, and rejects
+non-publishable runtime dependency specifiers.
+
+The deterministic local form performs the same package checks without reading
+registry or git-remote release state:
+
+```sh
+npm run release:check -- --offline
+```
+
+From the repository root, `npm run connectors:verify` checks Pi and DeepSeek
+Harness independently; it does not require their package versions to match.
+Publishing Pi additionally requires explicit version confirmation:
+
+```sh
+npm run release:check -- --publish --confirm-version 0.1.0-poc.2
+```
+
+Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
+Releases use `pi-v<version>` and are created separately after npm verification.
+
 The [PR #266](https://github.com/scotthuang/agent-knock-knock/pull/266)
 acceptance record on 2026-08-30 included:
 

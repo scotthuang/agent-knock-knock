@@ -12,6 +12,7 @@
     "test/callback-route-authority.test.ts",
     "test/command-json-callback-transport.test.ts",
     "test/connector-skill-sync.test.ts",
+    "test/connector-release-check.test.ts",
     "test/claude-local-transcript-provider.test.ts",
     "test/claude-terminal-agent-adapter.test.ts",
     "test/cli-core.test.ts",

@@ -61,7 +61,8 @@
     "test:fast": "npm run build && tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
     "prepublishOnly": "npm run skill:check",
     "prepack": "npm run build && npm run skill:check",
-    "pack:check": "npm run build && npm run skill:check && node ../../scripts/verify-connector-skill-pack.js --connector pi"
+    "pack:check": "npm run build && npm run skill:check && node ../../scripts/verify-connector-skill-pack.js --connector pi",
+    "release:check": "node scripts/release-check.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
