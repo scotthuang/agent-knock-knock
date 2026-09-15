@@ -92,6 +92,52 @@ export const testSupportImpactByPath = Object.freeze({
   ],
   "test/openclaw-plugin-contract/schema-authority.ts": [
     "test/openclaw-plugin-contract.test.ts"
+  ],
+  "test/support/terminal-agent-bridge-contract-support.ts": [
+    "test/terminal-agent-bridge/approval-core.ts",
+    "test/terminal-agent-bridge/claude-native-inspection.ts",
+    "test/terminal-agent-bridge/codex-native-inspection.ts",
+    "test/terminal-agent-bridge/composer-retry.ts",
+    "test/terminal-agent-bridge/discovery-submission.ts",
+    "test/terminal-agent-bridge/explicit-send.ts",
+    "test/terminal-agent-bridge/hookless-approval.ts",
+    "test/terminal-agent-bridge/model-control.ts",
+    "test/terminal-agent-bridge/monitor-capabilities.ts",
+    "test/terminal-agent-bridge/native-inspection-validation.ts",
+    "test/terminal-agent-bridge/transport-failures.ts"
+  ],
+  "test/terminal-agent-bridge/approval-core.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/claude-native-inspection.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/codex-native-inspection.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/composer-retry.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/discovery-submission.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/explicit-send.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/hookless-approval.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/model-control.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/monitor-capabilities.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/native-inspection-validation.ts": [
+    "test/terminal-agent-bridge.test.ts"
+  ],
+  "test/terminal-agent-bridge/transport-failures.ts": [
+    "test/terminal-agent-bridge.test.ts"
   ]
 });
 
