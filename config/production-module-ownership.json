@@ -1017,6 +1017,10 @@
       "owner": "terminal-dispatch-application"
     },
     {
+      "path": "src/terminal-dispatch-recovery-authority.ts",
+      "owner": "terminal-dispatch-recovery"
+    },
+    {
       "path": "src/terminal-dispatch-recovery-cli-adapter.ts",
       "owner": "terminal-dispatch-recovery"
     },
