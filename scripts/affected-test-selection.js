@@ -62,6 +62,36 @@ export const testSupportImpactByPath = Object.freeze({
   "test/support/terminal-ui-golden-frames.ts": [
     "test/model-control-cli-closed-loop.test.ts",
     "test/terminal-ui-golden-frames.test.ts"
+  ],
+  "test/support/openclaw-plugin-contract-support.ts": [
+    "test/openclaw-plugin-contract/callback-relay.ts",
+    "test/openclaw-plugin-contract/command-results.ts",
+    "test/openclaw-plugin-contract/manifest-registration.ts",
+    "test/openclaw-plugin-contract/model-interaction.ts",
+    "test/openclaw-plugin-contract/native-lifecycle-tools.ts",
+    "test/openclaw-plugin-contract/routing-supervision.ts",
+    "test/openclaw-plugin-contract/schema-authority.ts"
+  ],
+  "test/openclaw-plugin-contract/callback-relay.ts": [
+    "test/openclaw-plugin-contract.test.ts"
+  ],
+  "test/openclaw-plugin-contract/command-results.ts": [
+    "test/openclaw-plugin-contract.test.ts"
+  ],
+  "test/openclaw-plugin-contract/manifest-registration.ts": [
+    "test/openclaw-plugin-contract.test.ts"
+  ],
+  "test/openclaw-plugin-contract/model-interaction.ts": [
+    "test/openclaw-plugin-contract.test.ts"
+  ],
+  "test/openclaw-plugin-contract/native-lifecycle-tools.ts": [
+    "test/openclaw-plugin-contract.test.ts"
+  ],
+  "test/openclaw-plugin-contract/routing-supervision.ts": [
+    "test/openclaw-plugin-contract.test.ts"
+  ],
+  "test/openclaw-plugin-contract/schema-authority.ts": [
+    "test/openclaw-plugin-contract.test.ts"
   ]
 });
 
