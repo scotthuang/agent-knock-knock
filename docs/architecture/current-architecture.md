@@ -125,6 +125,15 @@ the connector-local `release:check` wrappers add clean-main, upstream, unused
 npm version/tag, and explicit publish-confirmation checks. Ordinary root
 validation never queries published registry state.
 
+Host connectors and the shared semantic runtime depend only on the neutral
+`semantic-tool-*`, `semantic-private-authority-offers`, and
+`host-monitor-reconciliation` modules. OpenClaw's command, schema, helper,
+private-offer, and supervisor filenames are compatibility adapters over those
+owners; no Host or semantic-core module imports an `openclaw-*` implementation.
+This keeps the 22-tool schema/order/digest, owner-local offers, asynchronous
+relay, and one Host-owned lifecycle byte-compatible while making dependency
+direction executable in the fast contract tests and architecture evidence.
+
 ## Refactor boundaries
 
 The Issue #320 sequence uses narrow strangler changes:

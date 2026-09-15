@@ -15,15 +15,15 @@ import {
   type HostAdapterCapabilityHandshakeV1
 } from "./host-adapter-capabilities.js";
 import {
-  bindOpenClawRelayEnvironment,
-  bindOpenClawRelayPath,
-  defaultOpenClawRelayPath,
+  bindSemanticToolRelayEnvironment,
+  bindSemanticToolRelayPath,
+  defaultSemanticToolRelayPath,
   withHostBridgeInvocationSignal
-} from "./openclaw-plugin-command-adapter.js";
+} from "./semantic-tool-relay.js";
 import {
-  createMonitorReconciliationService,
-  MONITOR_SUPERVISOR_INTERVAL_MS
-} from "./openclaw-plugin-supervisor.js";
+  createHostMonitorReconciliationService,
+  HOST_MONITOR_RECONCILIATION_INTERVAL_MS
+} from "./host-monitor-reconciliation.js";
 
 export {
   HOST_ADAPTER_CAPABILITY_CONTRACT,
@@ -53,7 +53,7 @@ export type {
 } from "./host-profile-runtime.js";
 
 /** Stable relay entrypoint for native Host connector packages. */
-export const defaultHostAdapterRelayPath = defaultOpenClawRelayPath;
+export const defaultHostAdapterRelayPath = defaultSemanticToolRelayPath;
 
 export interface HostAdapterControllerContext extends HostBridgeToolContext {
   /** Exact Host-owned controller incarnation; never derive this from text. */
@@ -177,14 +177,14 @@ export function createHostAdapter(options: CreateHostAdapterOptions): HostAdapte
     pluginConfig,
     logger: options.logger
   };
-  bindOpenClawRelayPath(lifecycleApi, relayPath);
-  bindOpenClawRelayEnvironment(
+  bindSemanticToolRelayPath(lifecycleApi, relayPath);
+  bindSemanticToolRelayEnvironment(
     lifecycleApi,
     options.lifecycleEnvironment ?? process.env
   );
-  const lifecycle = createMonitorReconciliationService(
+  const lifecycle = createHostMonitorReconciliationService(
     lifecycleApi,
-    options.lifecycleIntervalMs ?? MONITOR_SUPERVISOR_INTERVAL_MS
+    options.lifecycleIntervalMs ?? HOST_MONITOR_RECONCILIATION_INTERVAL_MS
   );
 
   const registryFor = (

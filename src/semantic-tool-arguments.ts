@@ -72,14 +72,14 @@ export function requiredString(value, name) {
   return value;
 }
 
-export function requiredOpenClawSessionKey(value: unknown): string {
+export function requiredControllerSessionKey(value: unknown): string {
   return requiredString(
     value,
     "Controller session identity for this confirmed action"
   );
 }
 
-export function requiredOpenClawSessionId(value: unknown): string {
+export function requiredControllerSessionId(value: unknown): string {
   return requiredString(
     value,
     "Controller conversation incarnation for this confirmed action"

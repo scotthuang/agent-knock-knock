@@ -527,6 +527,10 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   }
 
   const schemasSource = fs.readFileSync(
+    path.join(packageRoot, "src", "semantic-tool-schemas.ts"),
+    "utf8"
+  );
+  const schemaAdapterSource = fs.readFileSync(
     path.join(packageRoot, "src", "openclaw-plugin-schemas.ts"),
     "utf8"
   );
@@ -534,7 +538,15 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     path.join(packageRoot, "src", "semantic-tool-runtime.ts"),
     "utf8"
   );
+  const semanticPrivateAuthoritySource = fs.readFileSync(
+    path.join(packageRoot, "src", "semantic-tool-private-authority.ts"),
+    "utf8"
+  );
   const supervisorSource = fs.readFileSync(
+    path.join(packageRoot, "src", "host-monitor-reconciliation.ts"),
+    "utf8"
+  );
+  const supervisorAdapterSource = fs.readFileSync(
     path.join(packageRoot, "src", "openclaw-plugin-supervisor.ts"),
     "utf8"
   );
@@ -557,6 +569,10 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.match(
     schemasSource,
     /export const approveParameters =[\s\S]*?not: \{ required: \["turn_id", "terminal_id"\] \}[\s\S]*?anyOf: \[[\s\S]*?required: \["turn_id"\][\s\S]*?required: \["terminal_id"\]/u
+  );
+  assert.match(
+    schemaAdapterSource,
+    /export \* from "\.\/semantic-tool-schemas\.js";/u
   );
   for (const privateCliFence of [
     "--expected-approval-fingerprint",
@@ -622,8 +638,8 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     /consumeDisplayedPrivateAction[\s\S]*?authority changed after it was shown/u
   );
   assert.match(
-    semanticRuntimeSource,
-    /buildPrivateApprovalArgs[\s\S]*?consumeOpenClawPrivateAuthorityOffer[\s\S]*?currentFingerprint !== offeredFingerprint/u
+    semanticPrivateAuthoritySource,
+    /buildPrivateApprovalArgs[\s\S]*?consumeSemanticPrivateAuthorityOffer[\s\S]*?currentFingerprint !== offeredFingerprint/u
   );
   assert.doesNotMatch(
     semanticRuntimeSource,
@@ -632,7 +648,7 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.doesNotMatch(semanticRuntimeSource, /install-claude-hooks/u);
   assert.match(
     supervisorSource,
-    /createMonitorReconciliationService[\s\S]*?agent-knock-knock-monitor-reconciliation/u
+    /createHostMonitorReconciliationService[\s\S]*?agent-knock-knock-monitor-reconciliation/u
   );
   assert.match(
     supervisorSource,
@@ -649,6 +665,10 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.match(
     supervisorSource,
     /createHostLifecycleService\(\{[\s\S]*?name: MANAGED_MONITOR_PHASE[\s\S]*?reconciliationArgs\(reconciliationReason\)[\s\S]*?name: TERMINAL_WATCH_PHASE[\s\S]*?watchReconciliationArgs\(\)/u
+  );
+  assert.match(
+    supervisorAdapterSource,
+    /from "\.\/host-monitor-reconciliation\.js";[\s\S]*?createMonitorReconciliationService =\s*createHostMonitorReconciliationService/u
   );
   assert.match(
     hostLifecycleSource,

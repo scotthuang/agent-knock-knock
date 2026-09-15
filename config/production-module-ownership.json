@@ -729,6 +729,10 @@
       "owner": "host-lifecycle"
     },
     {
+      "path": "src/host-monitor-reconciliation.ts",
+      "owner": "host-lifecycle"
+    },
+    {
       "path": "src/host-profile-callback-transport.ts",
       "owner": "host-bridge"
     },
@@ -885,11 +889,27 @@
       "owner": "runtime-log"
     },
     {
+      "path": "src/semantic-private-authority-offers.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/semantic-tool-arguments.ts",
       "owner": "host-bridge"
     },
     {
       "path": "src/semantic-tool-catalog.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/semantic-tool-command-helpers.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/semantic-tool-list-projection.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/semantic-tool-model-facing-field-policy.ts",
       "owner": "host-bridge"
     },
     {
@@ -906,6 +926,14 @@
     },
     {
       "path": "src/semantic-tool-runtime.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/semantic-tool-schemas.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/semantic-tool-value-helpers.ts",
       "owner": "host-bridge"
     },
     {

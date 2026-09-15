@@ -1129,9 +1129,11 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
   assert.throws(() => validate(duplicateTool), /OpenClaw tools must equal/u);
 
   for (const missingAuthority of [
+    "src/host-monitor-reconciliation.ts",
     "src/openclaw-plugin-command-adapter.ts",
     "src/openclaw-plugin-schemas.ts",
     "src/semantic-tool-catalog.ts",
+    "src/semantic-tool-schemas.ts",
     "src/semantic-tool-relay.ts",
     "src/semantic-tool-runtime.ts"
   ]) {

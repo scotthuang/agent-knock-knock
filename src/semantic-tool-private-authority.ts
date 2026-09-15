@@ -9,18 +9,18 @@ import {
 import {
   buildAkkCommandCliArgs,
   resolvePluginStoreDir
-} from "./openclaw-plugin-helpers.js";
+} from "./semantic-tool-command-helpers.js";
 import {
-  consumeOpenClawPrivateAuthorityOffer,
-  invalidateOpenClawInteractionAuthorityOffersForSubject,
-  openClawApprovalAuthorityOfferKey,
-  openClawInteractionAuthorityOfferKey,
-  rememberOpenClawPrivateAuthorityOffer,
-  type OpenClawInteractionAuthoritySubjectKind,
-  type OpenClawPrivateAuthorityOfferKey,
-  type OpenClawPrivateAuthorityOfferPayload,
-  type OpenClawPrivateAuthorityTarget
-} from "./openclaw-private-authority-offers.js";
+  consumeSemanticPrivateAuthorityOffer,
+  invalidateSemanticInteractionAuthorityOffersForSubject,
+  rememberSemanticPrivateAuthorityOffer,
+  semanticApprovalAuthorityOfferKey,
+  semanticInteractionAuthorityOfferKey,
+  type SemanticInteractionAuthoritySubjectKind,
+  type SemanticPrivateAuthorityOfferKey,
+  type SemanticPrivateAuthorityOfferPayload,
+  type SemanticPrivateAuthorityTarget
+} from "./semantic-private-authority-offers.js";
 import {
   TERMINAL_INTERACTION_SUBJECT_VERSION,
   terminalInteractionSubjectId,
@@ -37,8 +37,8 @@ import {
 import {
   numberString,
   pushOptional,
-  requiredOpenClawSessionId,
-  requiredOpenClawSessionKey,
+  requiredControllerSessionId,
+  requiredControllerSessionKey,
   requiredString,
   requiredTerminalInteractionIdentifier
 } from "./semantic-tool-arguments.js";
@@ -48,7 +48,7 @@ export const RECONCILE_BINDING_AUTHORITY_KIND = "reconcile_binding";
 const MODEL_OPTIONS_AUTHORITY_KIND = "model_options";
 
 interface DisplayedModelOptionsOfferPayload
-  extends OpenClawPrivateAuthorityOfferPayload {
+  extends SemanticPrivateAuthorityOfferPayload {
   readonly scope?: unknown;
   readonly models?: unknown;
 }
@@ -91,8 +91,8 @@ export function rememberDisplayedModelOptionsOffer(
   requestedTerminalIdValue: unknown,
   result: unknown
 ): void {
-  const sessionKey = requiredOpenClawSessionKey(sessionKeyValue);
-  const sessionId = requiredOpenClawSessionId(sessionIdValue);
+  const sessionKey = requiredControllerSessionKey(sessionKeyValue);
+  const sessionId = requiredControllerSessionId(sessionIdValue);
   const requestedTerminalId = requiredString(
     requestedTerminalIdValue,
     "terminal_id"
@@ -118,8 +118,8 @@ export function rememberDisplayedModelOptionsOffer(
     throw new Error("set-model action does not match the displayed catalog");
   }
   const key = modelOptionsOfferKey(sessionKey, sessionId, terminalId);
-  consumeOpenClawPrivateAuthorityOffer(api, key);
-  rememberOpenClawPrivateAuthorityOffer(api, key, {
+  consumeSemanticPrivateAuthorityOffer(api, key);
+  rememberSemanticPrivateAuthorityOffer(api, key, {
     fingerprint: catalogFingerprint,
     args,
     scope,
@@ -192,7 +192,7 @@ function modelOptionsOfferKey(
   sessionKey: string,
   sessionId: string,
   terminalId: string
-): OpenClawPrivateAuthorityOfferKey {
+): SemanticPrivateAuthorityOfferKey {
   return privateAuthorityOfferKey(
     sessionKey,
     sessionId,
@@ -217,7 +217,7 @@ export function buildPrivateSetModelArgs(
     params.reasoning_effort,
     "reasoning_effort"
   );
-  const offered = consumeOpenClawPrivateAuthorityOffer<
+  const offered = consumeSemanticPrivateAuthorityOffer<
     DisplayedModelOptionsOfferPayload
   >(api, modelOptionsOfferKey(context.sessionKey, context.sessionId, terminalId));
   if (!offered || !isRecord(offered.args) || !Array.isArray(offered.models)) {
@@ -397,7 +397,7 @@ function rememberDisplayedHandoffActions(
     ) {
       continue;
     }
-    rememberOpenClawPrivateAuthorityOffer(
+    rememberSemanticPrivateAuthorityOffer(
       api,
       privateAuthorityOfferKey(
         sessionKey,
@@ -427,7 +427,7 @@ function rememberDisplayedReconcileActions(
     const terminalId = stringValue(args.terminal_id);
     const conflictingSessionId = stringValue(args.conflicting_session_id);
     if (!terminalId || !conflictingSessionId) continue;
-    rememberOpenClawPrivateAuthorityOffer(
+    rememberSemanticPrivateAuthorityOffer(
       api,
       privateAuthorityOfferKey(
         sessionKey,
@@ -454,9 +454,9 @@ export function rememberDisplayedApprovalOffer(
   if (!fingerprint) return;
   const target = approvalTargetFromStatus(result);
   if (!target) return;
-  rememberOpenClawPrivateAuthorityOffer(
+  rememberSemanticPrivateAuthorityOffer(
     api,
-    openClawApprovalAuthorityOfferKey(sessionKey, sessionId, target),
+    semanticApprovalAuthorityOfferKey(sessionKey, sessionId, target),
     {
       fingerprint,
       decision_fingerprints: decisionFingerprints
@@ -465,18 +465,18 @@ export function rememberDisplayedApprovalOffer(
 }
 
 interface DisplayedInteractionOfferPayload
-  extends OpenClawPrivateAuthorityOfferPayload {
+  extends SemanticPrivateAuthorityOfferPayload {
   readonly interaction_state?: unknown;
 }
 
 interface DisplayedInteractionStatus {
   readonly fields: Record<string, unknown>;
-  readonly expectedSubjectKind: OpenClawInteractionAuthoritySubjectKind;
+  readonly expectedSubjectKind: SemanticInteractionAuthoritySubjectKind;
   readonly expectedSubjectId?: string;
 }
 
-interface OpenClawInteractionSubjectTarget {
-  readonly kind: OpenClawInteractionAuthoritySubjectKind;
+interface SemanticInteractionSubjectTarget {
+  readonly kind: SemanticInteractionAuthoritySubjectKind;
   readonly id: string;
   readonly cliOption: "--turn" | "--watch";
 }
@@ -494,7 +494,7 @@ export function rememberDisplayedInteractionOffer(
   if (!displayed) return;
   const expectedSubjectId = stringValue(displayed.expectedSubjectId);
   if (!expectedSubjectId || expectedSubjectId === "unknown") return;
-  invalidateOpenClawInteractionAuthorityOffersForSubject(
+  invalidateSemanticInteractionAuthorityOffersForSubject(
     api,
     sessionKey,
     sessionId,
@@ -529,9 +529,9 @@ export function rememberDisplayedInteractionOffer(
   ) {
     return;
   }
-  rememberOpenClawPrivateAuthorityOffer(
+  rememberSemanticPrivateAuthorityOffer(
     api,
-    openClawInteractionAuthorityOfferKey(
+    semanticInteractionAuthorityOfferKey(
       sessionKey,
       sessionId,
       subject.kind,
@@ -556,7 +556,7 @@ export function invalidateRequestedInteractionOffers(
   if (!sessionKey || !sessionId) return;
   const watchId = stringValue(params.watch_id);
   if (watchId) {
-    invalidateOpenClawInteractionAuthorityOffersForSubject(
+    invalidateSemanticInteractionAuthorityOffersForSubject(
       api,
       sessionKey,
       sessionId,
@@ -567,7 +567,7 @@ export function invalidateRequestedInteractionOffers(
   }
   const turnId = stringValue(params.turn_id);
   if (!turnId) return;
-  invalidateOpenClawInteractionAuthorityOffersForSubject(
+  invalidateSemanticInteractionAuthorityOffersForSubject(
     api,
     sessionKey,
     sessionId,
@@ -608,7 +608,7 @@ function displayedInteractionStatus(
 
 function interactionProjectionSubject(
   projection: TerminalInteractionAnyProjection
-): Pick<OpenClawInteractionSubjectTarget, "kind" | "id"> {
+): Pick<SemanticInteractionSubjectTarget, "kind" | "id"> {
   if (projection.version === TERMINAL_INTERACTION_SUBJECT_VERSION) {
     return {
       kind: projection.subject.kind,
@@ -620,7 +620,7 @@ function interactionProjectionSubject(
 
 function approvalTargetFromStatus(
   result: Record<string, unknown>
-): OpenClawPrivateAuthorityTarget | undefined {
+): SemanticPrivateAuthorityTarget | undefined {
   const conversationId = stringValue(result.conversation_id);
   if (
     stringValue(result.source) === "terminal_control" ||
@@ -651,8 +651,8 @@ function privateAuthorityOfferKey(
   sessionKey: string,
   sessionId: string,
   kind: string,
-  target: OpenClawPrivateAuthorityTarget
-): OpenClawPrivateAuthorityOfferKey {
+  target: SemanticPrivateAuthorityTarget
+): SemanticPrivateAuthorityOfferKey {
   return { sessionKey, sessionId, kind, target };
 }
 
@@ -662,13 +662,13 @@ export async function consumeDisplayedPrivateAction(
     sessionKey: string;
     sessionId: string;
     kind: string;
-    target: OpenClawPrivateAuthorityTarget;
+    target: SemanticPrivateAuthorityTarget;
     tool: string;
     terminalId?: string;
     matches: (argumentsValue: Record<string, unknown>) => boolean;
   }
 ): Promise<Record<string, unknown>> {
-  const offered = consumeOpenClawPrivateAuthorityOffer(api, {
+  const offered = consumeSemanticPrivateAuthorityOffer(api, {
     sessionKey: input.sessionKey,
     sessionId: input.sessionId,
     kind: input.kind,
@@ -766,12 +766,12 @@ export async function buildPrivateApprovalArgs(
       "terminal-scoped approval supports approve_once only; reject requires an exact managed Turn"
     );
   }
-  const target: OpenClawPrivateAuthorityTarget = terminalId
+  const target: SemanticPrivateAuthorityTarget = terminalId
     ? { type: "terminal_id", id: terminalId }
     : { type: "turn_id", id: requiredString(turnId, "turn_id") };
-  const offered = consumeOpenClawPrivateAuthorityOffer<
-    OpenClawPrivateAuthorityOfferPayload
-  >(api, openClawApprovalAuthorityOfferKey(sessionKey, sessionId, target));
+  const offered = consumeSemanticPrivateAuthorityOffer<
+    SemanticPrivateAuthorityOfferPayload
+  >(api, semanticApprovalAuthorityOfferKey(sessionKey, sessionId, target));
   const offeredDecisions = isRecord(offered?.decision_fingerprints)
     ? offered.decision_fingerprints
     : undefined;
@@ -844,11 +844,11 @@ export function buildPrivateInteractionResponseArgs(
     params.interaction_id,
     "interaction_id"
   );
-  const offered = consumeOpenClawPrivateAuthorityOffer<
+  const offered = consumeSemanticPrivateAuthorityOffer<
     DisplayedInteractionOfferPayload
   >(
     api,
-    openClawInteractionAuthorityOfferKey(
+    semanticInteractionAuthorityOfferKey(
       sessionKey,
       sessionId,
       requestedSubject.kind,
@@ -902,7 +902,7 @@ export function buildPrivateInteractionResponseArgs(
 
 function requestedInteractionSubject(
   params: Record<string, unknown>
-): OpenClawInteractionSubjectTarget {
+): SemanticInteractionSubjectTarget {
   const hasTurn = Object.hasOwn(params, "turn_id");
   const hasWatch = Object.hasOwn(params, "watch_id");
   if (hasTurn === hasWatch) {
@@ -924,7 +924,7 @@ function requestedInteractionSubject(
 }
 
 function assertInteractionSubjectMatchesProjection(
-  requested: OpenClawInteractionSubjectTarget,
+  requested: SemanticInteractionSubjectTarget,
   projection: TerminalInteractionAnyProjection
 ): void {
   const projected = interactionProjectionSubject(projection);

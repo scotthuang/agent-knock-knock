@@ -12,11 +12,11 @@ import {
 } from "./host-bridge-mcp.js";
 import { createHostBridgeToolRegistry } from "./host-bridge-tools.js";
 import {
-  bindOpenClawRelayEnvironment,
-  bindOpenClawRelayPath
-} from "./openclaw-plugin-command-adapter.js";
-import { createMonitorReconciliationService } from
-  "./openclaw-plugin-supervisor.js";
+  bindSemanticToolRelayEnvironment,
+  bindSemanticToolRelayPath
+} from "./semantic-tool-relay.js";
+import { createHostMonitorReconciliationService } from
+  "./host-monitor-reconciliation.js";
 import { assertHostProfileCallbackExecutableReady } from "./host-profile.js";
 import {
   createTrustedHostProfileRuntime,
@@ -112,9 +112,9 @@ export async function runHostBridge(
   });
 
   const lifecycleApi = { pluginConfig, logger };
-  bindOpenClawRelayPath(lifecycleApi, relayPath);
-  bindOpenClawRelayEnvironment(lifecycleApi, relayEnvironment);
-  const lifecycle = createMonitorReconciliationService(
+  bindSemanticToolRelayPath(lifecycleApi, relayPath);
+  bindSemanticToolRelayEnvironment(lifecycleApi, relayEnvironment);
+  const lifecycle = createHostMonitorReconciliationService(
     lifecycleApi,
     options.lifecycleIntervalMs ?? 5_000
   );
