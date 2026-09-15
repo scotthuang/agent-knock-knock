@@ -378,14 +378,17 @@ Status, then use only the action currently advertised by AKK.
 
 ## Structured tool surface
 
-The current OpenClaw plugin and Host Adapter register 22 semantic tools: list,
-watch, unwatch, list resumable threads, native inspect, model options, repair
-model control, set model, identify foreground, identify and send, new thread, reconcile binding,
-resume thread, status, send, respond, typed native interaction response,
-approve, renew, retry callback, cancel, and close. Model-facing mutations
-contain semantic IDs and user content only. Connector prereleases that pin an
-earlier AKK runtime retain the
-tool surface documented by that connector release.
+The OpenClaw plugin and Host Adapter register the ordered semantic tool catalog.
+Pi and DeepSeek Harness verify the Host Adapter capability handshake against
+their actual registrations, so the tool count and names are derived from that
+catalog rather than maintained as connector constants. The current catalog
+includes list, watch, unwatch, list resumable threads, native inspect, model
+options, repair model control, set model, identify foreground, identify and
+send, new thread, reconcile binding, resume thread, status, send, respond,
+typed native interaction response, approve, renew, retry callback, cancel, and
+close. Model-facing mutations contain semantic IDs and user content only.
+Connector prereleases that pin an earlier AKK runtime retain the tool surface
+documented by that connector release.
 Selectors, pane routes, draft text, fingerprints, tokens, revisions, candidate
 fences, and binding generations stay inside the trusted Host adapter.
 

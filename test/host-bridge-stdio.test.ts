@@ -61,7 +61,7 @@ const EXPECTED_TOOLS = [
 ] as const;
 
 test(
-  "real Host Bridge stdio advertises 22 tools and exits on Host EOF; " +
+  "real Host Bridge stdio advertises the exact catalog tools and exits on Host EOF; " +
   "fixture Host settles a command_json_v1 callback through a real MCP tool",
   async (t) => {
   const root = fs.mkdtempSync(
@@ -160,7 +160,7 @@ test(
   const listed = await readResponse(iterator, observed, 2, stderrValue);
   const tools = listed.result?.tools;
   assert.ok(Array.isArray(tools));
-  assert.equal(tools.length, 22);
+  assert.equal(tools.length, EXPECTED_TOOLS.length);
   assert.deepEqual(
     tools.map((tool: { name: string }) => tool.name).sort(),
     [...EXPECTED_TOOLS]

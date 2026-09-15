@@ -34,6 +34,7 @@
     "test/executors.test.ts",
     "test/file-lock-cli-adapter.test.ts",
     "test/herdr-terminal-control-provider.test.ts",
+    "test/host-adapter-capabilities.test.ts",
     "test/host-adapter.test.ts",
     "test/host-bridge-mcp.test.ts",
     "test/host-bridge-stdio.test.ts",

@@ -9,8 +9,18 @@ const BUNDLED_SKILL_HEADER =
   /^---\nname: ([^\n]+)\ndescription: ([^\n]+)\n---\n\n/u;
 const UNSAFE_METADATA = /[\u0000-\u001f\u007f]/u;
 
+export interface BundledAkkSkill {
+  readonly document: string;
+  readonly registration: SkillRegistration;
+}
+
 /** Load the generated package artifact and register its canonical metadata. */
 export function loadBundledAkkSkill(): SkillRegistration {
+  return loadBundledAkkSkillBundle().registration;
+}
+
+/** Load one byte-identical document for handshake and native registration. */
+export function loadBundledAkkSkillBundle(): BundledAkkSkill {
   const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
     path.resolve(moduleDirectory, "..", "skills", BUNDLED_SKILL_NAME, "SKILL.md"),
@@ -29,7 +39,11 @@ export function loadBundledAkkSkill(): SkillRegistration {
       "agent-knock-knock-deepseek-harness is missing its bundled agent-knock-knock skill",
     );
   }
-  return parseBundledAkkSkill(fs.readFileSync(skillPath, "utf8"), skillPath);
+  const document = fs.readFileSync(skillPath, "utf8");
+  return Object.freeze({
+    document,
+    registration: parseBundledAkkSkill(document, skillPath),
+  });
 }
 
 /** @internal Strict parser for the two-field canonical Skill frontmatter. */

@@ -67,6 +67,7 @@
       "authority_paths": [
         "schemas/host-profile-v1.schema.json",
         "src/command-json-callback-transport.ts",
+        "src/host-adapter-capabilities.ts",
         "src/host-adapter.ts",
         "src/host-bridge-mcp.ts",
         "src/host-bridge-tools.ts",
@@ -83,6 +84,7 @@
       ],
       "witnesses": [
         "command-json-callback-unit",
+        "host-adapter-capability-handshake-unit",
         "host-adapter-unit",
         "host-bridge-conformance-unit",
         "host-bridge-mcp-unit",
@@ -379,6 +381,12 @@
       "needle": "a terminal-scoped Codex send adopts an exact unknown human-switched thread"
     },
     {
+      "id": "host-adapter-capability-handshake-unit",
+      "path": "test/host-adapter-capabilities.test.ts",
+      "tier": "fast",
+      "needle": "Host adapter capability handshake is stable, versioned, and secretless"
+    },
+    {
       "id": "host-adapter-unit",
       "path": "test/host-adapter.test.ts",
       "tier": "fast",
@@ -400,7 +408,7 @@
       "id": "host-bridge-stdio-unit",
       "path": "test/host-bridge-stdio.test.ts",
       "tier": "fast",
-      "needle": "real Host Bridge stdio advertises 22 tools and exits on Host EOF"
+      "needle": "real Host Bridge stdio advertises the exact catalog tools and exits on Host EOF"
     },
     {
       "id": "host-bridge-tools-unit",

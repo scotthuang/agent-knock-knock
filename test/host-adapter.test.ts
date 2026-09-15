@@ -63,6 +63,20 @@ process.stdout.write(JSON.stringify({
   assert.equal(adapter.command.name, "akk");
   assert.equal(adapter.command.acceptsArgs, true);
   assert.deepEqual(adapter.tools.map((tool) => tool.name), expectedToolNames);
+  assert.deepEqual(adapter.capabilityHandshake.toolNames, expectedToolNames);
+  assert.equal(adapter.capabilityHandshake.toolCount, expectedToolNames.length);
+  assert.equal(adapter.capabilityHandshake.version, 1);
+  assert.equal(Object.isFrozen(adapter.capabilityHandshake), true);
+  assert.equal(
+    adapter.verifyCapabilityHandshake(
+      fs.readFileSync(
+        "templates/openclaw-skills/agent-knock-knock/SKILL.md",
+        "utf8"
+      ),
+      expectedToolNames
+    ),
+    adapter.capabilityHandshake
+  );
   assert.equal(environmentCalls.length, 0, "metadata must not resolve a route");
 
   const [resultA, resultB] = await Promise.all([
@@ -279,6 +293,10 @@ test("the packed public subpath resolves to the stable Host adapter facade", asy
   const facade = await import(packageName) as Record<string, unknown>;
 
   assert.equal(typeof facade.createHostAdapter, "function");
+  assert.equal(
+    typeof facade.verifyHostAdapterCapabilityHandshake,
+    "function"
+  );
   assert.equal(typeof facade.createTrustedHostProfileRuntime, "function");
   assert.equal(typeof facade.hostProfileRelayEnvironment, "function");
   assert.equal(typeof facade.defaultHostAdapterRelayPath, "string");

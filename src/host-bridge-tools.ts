@@ -103,11 +103,6 @@ export function createHostBridgeToolRegistry(
   bindSemanticToolAsyncRelay(runtime);
   const catalog = createAkkSemanticToolCatalog(runtime, new Map());
 
-  if (catalog.tools.length !== 22) {
-    throw new Error(
-      `host bridge expected 22 semantic tools, received ${catalog.tools.length}`
-    );
-  }
   const commandName = requiredString(catalog.command.name, "command name");
   if (commandName !== "akk") {
     throw new Error(`host bridge expected command akk, received ${commandName}`);

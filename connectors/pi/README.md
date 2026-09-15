@@ -387,6 +387,14 @@ release mode it also requires a clean synchronized `main`, verifies that the
 exact npm version and `pi-v<version>` repository tag are unused, and rejects
 non-publishable runtime dependency specifiers.
 
+Activation also performs a runtime compatibility gate. The pinned AKK
+HostAdapter must expose capability handshake v1, whose catalog digest, ordered
+tool names and derived count, and canonical Skill digest must match both this
+package's generated Skill and the tools Pi just registered. Missing or forged
+metadata, an unknown handshake version, or partial registration prevents the
+connector from reporting `AKK ready`; no connector-local tool-count literal is
+used.
+
 The deterministic local form performs the same package checks without reading
 registry or git-remote release state:
 

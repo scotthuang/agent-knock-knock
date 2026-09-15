@@ -77,14 +77,7 @@ test("architecture health dashboard stays within the 0.13.3 refactor baseline", 
   assert.equal(health.hotspots.length, 8);
   assert.deepEqual(health.contract_sync.semantic_tools, {
     openclaw: 22,
-    host_bridge: 22,
-    connectors: [
-      {
-        path: "connectors/deepseek-harness/src/index.ts",
-        count: 22
-      },
-      { path: "connectors/pi/src/index.ts", count: 22 }
-    ]
+    host_bridge: 22
   });
   assert.equal(health.contract_sync.canonical_skill_sha256.length, 64);
   assert.equal(

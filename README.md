@@ -123,6 +123,13 @@ OpenClaw / Pi / DeepSeek Harness
 
 For a managed Send, AKK verifies the selected terminal and coding-agent process, writes one user request, monitors that exact Turn, and returns completion or attention callbacks to the initiating Host session. If stale AKK bookkeeping blocks an explicit Codex Send before terminal input, AKK can fall back to a verified one-time physical Send and attach a read-only Watch for callback and Status recovery.
 
+Native Pi and DeepSeek Harness connectors accept the shared catalog through a
+versioned, secretless Host Adapter capability handshake. Startup verifies the
+ordered semantic tool registration and the bundled Skill against catalog and
+Skill SHA-256 digests; an older, missing, or drifted handshake fails closed
+instead of mounting a partial tool surface. Connector package versions remain
+independent of one another.
+
 In the current OpenClaw plugin and core Host Adapter, an idle Codex pane with ambiguous foreground rollout identity may advertise `identify_foreground`. That action issues one closed `/status` command to the exact pane. It does not mutate the AKK Store, but it does type into the visible terminal. Its 30-second result is diagnostic only and grants no later authority. The separate `identify_and_send` action keeps one terminal lock across the probe and one requested task, then relies on exact request acceptance—not the status card—for durable Session and Turn identity. Ordinary Send, List, and Status never run this probe.
 
 AKK is local-first: there is no hosted control plane or telemetry. It stores only the local state needed for routing, lifecycle recovery, callback delivery, and idempotency.

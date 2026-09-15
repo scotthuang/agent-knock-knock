@@ -61,6 +61,10 @@ test("Pi 0.84.4 registers /akk and all 22 tools and preserves command/tool calls
   assert.deepEqual([...fixture.pi.tools.keys()], TOOL_NAMES);
   assert.deepEqual([...fixture.pi.commands.keys()], ["akk"]);
   assert.equal(fixture.hostAdapterOptions?.lifecycleIntervalMs, 5_000);
+  assert.deepEqual(fixture.state.capabilityVerifications, [
+    undefined,
+    [...TOOL_NAMES],
+  ]);
 
   const commandSignal = new AbortController().signal;
   await fixture.pi.command("akk").handler(
@@ -100,6 +104,32 @@ test("Pi 0.84.4 registers /akk and all 22 tools and preserves command/tool calls
   assert.match(textResult(response), /agent_knock_knock_respond/u);
 
   await fixture.shutdown();
+});
+
+test("tool registration count follows the verified catalog without a literal", async () => {
+  const toolNames = TOOL_NAMES.slice(0, 3);
+  const fixture = nativeFixture({ toolNames });
+  await fixture.start();
+
+  assert.deepEqual([...fixture.pi.tools.keys()], toolNames);
+  assert.deepEqual(fixture.state.capabilityVerifications, [
+    undefined,
+    [...toolNames],
+  ]);
+  await fixture.shutdown();
+});
+
+test("missing or forged capability handshake fails before Host startup", async () => {
+  const fixture = nativeFixture({ capabilityVerificationFailure: true });
+
+  await assert.rejects(
+    fixture.start(),
+    /synthetic capability handshake mismatch/u,
+  );
+  assert.equal(fixture.state.serverStarts, 0);
+  assert.equal(fixture.state.lifecycleStarts, 0);
+  assert.equal(fixture.state.resourceRemoves, 1);
+  assert.equal(fixture.pi.tools.size, 0);
 });
 
 test("active approve refreshes Status before Pi UI and then approves once", async () => {
@@ -385,6 +415,8 @@ interface NativeFixtureOptions {
   readonly selectChoices?: readonly string[];
   readonly confirmChoices?: readonly boolean[];
   readonly failToolRegistrationAt?: number;
+  readonly toolNames?: readonly string[];
+  readonly capabilityVerificationFailure?: boolean;
   readonly lifecycleStop?: (
     state: NativeFixtureState,
   ) => Promise<void>;
@@ -408,6 +440,7 @@ interface NativeFixtureState {
     readonly signal: AbortSignal | undefined;
   }>;
   readonly disposedAuthorities: object[];
+  readonly capabilityVerifications: Array<readonly string[] | undefined>;
   profileCreates: number;
   resourceRemoves: number;
   serverStarts: number;
@@ -426,6 +459,7 @@ function nativeFixture(options: NativeFixtureOptions = {}) {
     toolCalls: [],
     commandCalls: [],
     disposedAuthorities: [],
+    capabilityVerifications: [],
     profileCreates: 0,
     resourceRemoves: 0,
     serverStarts: 0,
@@ -541,7 +575,7 @@ function fakeHostAdapter(
       description: "Control coding-agent terminals with AKK",
       acceptsArgs: true,
     },
-    tools: TOOL_NAMES.map((name) => ({
+    tools: (options.toolNames ?? TOOL_NAMES).map((name) => ({
       name,
       description: `Description for ${name}`,
       inputSchema: {
@@ -561,16 +595,32 @@ function fakeHostAdapter(
         await options.lifecycleStop?.(state);
       },
     },
-    async executeCommand(context, args, signal): Promise<HostBridgeCommandResult> {
+    verifyCapabilityHandshake(
+      _skillDocument: string,
+      registeredToolNames?: readonly string[],
+    ) {
+      state.capabilityVerifications.push(
+        registeredToolNames ? [...registeredToolNames] : undefined,
+      );
+      if (options.capabilityVerificationFailure) {
+        throw new Error("synthetic capability handshake mismatch");
+      }
+      return {};
+    },
+    async executeCommand(
+      context: HostAdapterControllerContext,
+      args: string,
+      signal?: AbortSignal,
+    ): Promise<HostBridgeCommandResult> {
       state.commandCalls.push({ context, args, signal });
       return { text: `command:${args}` };
     },
     async executeTool(
-      context,
-      name,
-      toolCallId,
-      args,
-      signal,
+      context: HostAdapterControllerContext,
+      name: string,
+      toolCallId: string,
+      args: Readonly<Record<string, unknown>>,
+      signal?: AbortSignal,
     ): Promise<HostBridgeToolResult> {
       state.timeline.push(`tool:${name}`);
       state.toolCalls.push({ context, name, toolCallId, args, signal });
@@ -593,10 +643,10 @@ function fakeHostAdapter(
         details: { name, args },
       };
     },
-    disposeContext(authority) {
+    disposeContext(authority: object) {
       state.disposedAuthorities.push(authority);
     },
-  };
+  } as unknown as HostAdapter;
 }
 
 class FakeRouteTable {
