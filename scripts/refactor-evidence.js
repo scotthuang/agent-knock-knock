@@ -137,8 +137,10 @@ const OPENCLAW_AUTHORITY_ROLES = Object.freeze({
   tool_schemas: "src/openclaw-plugin-schemas.ts",
   monitor_supervisor: "src/openclaw-plugin-supervisor.ts",
   plugin_entry: "src/openclaw-plugin.ts",
+  semantic_arguments: "src/semantic-tool-arguments.ts",
   semantic_catalog: "src/semantic-tool-catalog.ts",
   semantic_presentation: "src/semantic-tool-presentation.ts",
+  semantic_private_authority: "src/semantic-tool-private-authority.ts",
   semantic_relay: "src/semantic-tool-relay.ts",
   semantic_runtime: "src/semantic-tool-runtime.ts"
 });
@@ -159,8 +161,10 @@ const HOST_BRIDGE_AUTHORITY_PATHS = Object.freeze([
   "src/host-profile-callback-transport.ts",
   "src/host-profile-runtime.ts",
   "src/host-profile.ts",
+  "src/semantic-tool-arguments.ts",
   "src/semantic-tool-catalog.ts",
   "src/semantic-tool-presentation.ts",
+  "src/semantic-tool-private-authority.ts",
   "src/semantic-tool-relay.ts",
   "src/semantic-tool-runtime.ts"
 ]);
@@ -1068,6 +1072,20 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
   assertDirectNamedImport(
     repoRoot,
     roles.semantic_runtime,
+    "./semantic-tool-arguments.js",
+    ["pushOptional", "requiredString"],
+    "semantic tool-runtime role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_runtime,
+    "./semantic-tool-private-authority.js",
+    ["privateActionArguments", "rememberDisplayedPrivateAuthorityOffers"],
+    "semantic tool-runtime role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_runtime,
     "./semantic-tool-presentation.js",
     ["toolResult", "usesHostBridgeToolPresentation"],
     "semantic tool-runtime role"
@@ -1077,6 +1095,32 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
     roles.semantic_presentation,
     /export function bindHostBridgeToolPresentation[\s\S]*?export function toolResult[\s\S]*?export function modelFacingToolError/u,
     "semantic tool-presentation role"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.semantic_private_authority,
+    /export function rememberDisplayedModelOptionsOffer[\s\S]*?export async function consumeDisplayedPrivateAction[\s\S]*?export function buildPrivateInteractionResponseArgs/u,
+    "semantic tool-private-authority role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_private_authority,
+    "./semantic-tool-relay.js",
+    ["runHostAwareCli"],
+    "semantic tool-private-authority role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_private_authority,
+    "./semantic-tool-arguments.js",
+    ["pushOptional", "requiredString"],
+    "semantic tool-private-authority role"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.semantic_arguments,
+    /export function pushTurnTarget[\s\S]*?export function pushOptional[\s\S]*?export function requiredTerminalInteractionIdentifier/u,
+    "semantic tool-arguments role"
   );
   assertSourcePattern(
     repoRoot,
