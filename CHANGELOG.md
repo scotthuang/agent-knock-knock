@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.5 - 2026-09-17
+
+### Fixed
+
+- Recognize Codex 0.154.0 GPT-6 Astra's animated Braille sparkle empty-Composer frame as diagnostic idle when the exact placeholder and a complete supported footer remain visible.
+- Reuse the same observed coding-agent version for terminal status parsing and List capability projection, preventing versionless screen-classification drift.
+
+### Security
+
+- Keep animated idle classification separate from exact empty-Composer authority. Unsupported versions, unknown glyphs, clipped or changed footers, real drafts, working, approval, questionnaire, and model-picker surfaces remain fail-closed; native lifecycle, new-thread, and model-control actions still require independent exact-Composer proof.
+
 ## 0.13.4 - 2026-09-15
 
 ### Changed
