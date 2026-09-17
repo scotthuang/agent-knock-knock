@@ -5,6 +5,12 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { inspectCodexScreen } from
+  "../src/codex-terminal-agent-adapter.js";
+import { codexComposerEmpty } from
+  "../src/native-thread-lifecycle-recovery-adapter.js";
+import { exactCodexReadyStyledComposerCapture } from
+  "../src/terminal-native-inspection-bridge.js";
 import {
   classifyTerminalModelControlSurface,
   observeTerminalModelControl,
@@ -50,6 +56,14 @@ test("terminal UI goldens remain typed, redacted, and parser-independent", () =>
       ]
     )),
     {
+      codexAstraSparkleIdlePhaseA:
+        "b3bac88c7413efd9bb2d1af651461cb736e7a228deb3e7878cf94bbc423ab359",
+      codexAstraSparkleIdlePhaseB:
+        "3bec8b4d0fba626508fc865e90e72b04a60f5e2c449e8bfa148fc6158151ad2c",
+      codexAstraSparkleIdleAnsiPhaseA:
+        "1e995e3ec004c8a7fb5e5d9ac29c0fa4f79d6958507d49e9383f751be1d3a3c9",
+      codexAstraSparkleIdleAnsiPhaseB:
+        "9370b5b4de56f463f966f025c74c70cd20efd1170ff358d79fdde2423a2b6c04",
       codexWidePicker:
         "cbce04388d2aa9d33a019de9d667bd59e44afc74faf7bc6b1dc107b21141551b",
       codexAnsiPicker:
@@ -70,6 +84,140 @@ test("terminal UI goldens remain typed, redacted, and parser-independent", () =>
         "ddf1d9f0f95ab4d388407acf16f169e89ca4d6f9ec4bf015866a1a338c53d028"
     }
   );
+});
+
+test("Codex 0.154 Astra sparkle idle goldens remain diagnostic-only idle", () => {
+  for (const fixture of [
+    TERMINAL_UI_GOLDENS.codexAstraSparkleIdlePhaseA,
+    TERMINAL_UI_GOLDENS.codexAstraSparkleIdlePhaseB
+  ]) {
+    const inspection = inspectCodexScreen({
+      screen: fixture.screen,
+      runtime: { agentVersion: fixture.version }
+    });
+    assert.equal(inspection.activity.state, "idle", fixture.screen);
+    assert.equal(inspection.approval.blocked, false, fixture.screen);
+    assert.equal(
+      codexComposerEmpty(fixture.screen),
+      false,
+      "diagnostic sparkle idle must not become exact-empty authority"
+    );
+  }
+  for (const fixture of [
+    TERMINAL_UI_GOLDENS.codexAstraSparkleIdleAnsiPhaseA,
+    TERMINAL_UI_GOLDENS.codexAstraSparkleIdleAnsiPhaseB
+  ]) {
+    assert.equal(
+      exactCodexReadyStyledComposerCapture(fixture.screen),
+      undefined,
+      "animated diagnostic idle must not prove an exact empty Composer"
+    );
+  }
+});
+
+test("Codex Astra sparkle idle grammar rejects incomplete and input-owning frames", () => {
+  const base = TERMINAL_UI_GOLDENS.codexAstraSparkleIdlePhaseB.screen;
+  const lines = base.split("\n");
+  const composerIndex = lines.findIndex((line) => line.startsWith("»"));
+  const composer = lines[composerIndex];
+  const footer = lines.at(-1) as string;
+  const cases = new Map<string, string>([
+    ["missing footer", base.split("\n").slice(0, -1).join("\n")],
+    ["truncated footer", base.replace(
+      /gpt-6-astra high .*$/u,
+      "gpt-6-astra high ·"
+    )],
+    ["ellipsis-truncated footer", base.replace(/Main \[default\]$/u, "Mai…")],
+    ["silently clipped footer", base.replace(
+      /~\/workspace .*$/u,
+      "~/workspace"
+    )],
+    ["ASCII-ellipsis footer", base.replace(/Main \[default\]$/u, "Mai...")],
+    ["unknown decoration", base.replace("⠈            ⠁", "⠈ unsafe ⠁")],
+    ["too many decoration rows", [
+      composer,
+      " ⠁ ",
+      " ⠂ ",
+      " ⠄ ",
+      footer
+    ].join("\n")],
+    ["zero marker separator", [
+      "»Ask Codex to do anything⠁",
+      footer
+    ].join("\n")],
+    ["unsupported marker whitespace", [
+      "»\u00a0Ask Codex to do anything⠁",
+      footer
+    ].join("\n")],
+    ["soft-wrapped placeholder", [
+      "» ⠁Ask Codex to do",
+      "  anything⠂",
+      footer
+    ].join("\n")],
+    ["content after complete footer", [base, "unexpected new surface"].join("\n")],
+    ["unknown Braille glyph", [
+      "» Ask Codex to do anything⣿",
+      "  gpt-6-astra high · ~/workspace · Main [default]"
+    ].join("\n")],
+    ["real sparkling draft", [
+      "» Review the production database ⠁",
+      "  gpt-6-astra high · ~/workspace · Main [default]"
+    ].join("\n")],
+    ["non-Astra footer", base.replace("gpt-6-astra", "gpt-5.6-sol")],
+    ["questionnaire", [
+      "☐ Framework",
+      "Which framework should be used?",
+      "❯ 1. React",
+      "  2. Vue",
+      "  3. Type something.",
+      "  4. None of the above",
+      "Press enter to submit answer · tab to add notes"
+    ].join("\n")],
+    ["model picker", TERMINAL_UI_GOLDENS.codexWidePicker.screen]
+  ]);
+  for (const [name, screen] of cases) {
+    assert.equal(
+      inspectCodexScreen({
+        screen,
+        runtime: { agentVersion: "0.154.0" }
+      }).activity.state,
+      "unknown",
+      name
+    );
+  }
+
+  for (const agentVersion of [undefined, "0.153.4", "0.155.0"]) {
+    assert.equal(
+      inspectCodexScreen({
+        screen: base,
+        runtime: agentVersion === undefined ? undefined : { agentVersion }
+      }).activity.state,
+      "unknown",
+      `sparkle grammar is not authorized for ${agentVersion ?? "a missing version"}`
+    );
+  }
+
+  const approval = inspectCodexScreen({
+    screen: [
+      composer,
+      "Would you like to run the following command?",
+      "  $ npm test",
+      "» 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)",
+      "  Press enter to confirm or esc to cancel"
+    ].join("\n"),
+    runtime: { agentVersion: "0.154.0" }
+  });
+  assert.equal(approval.activity.state, "awaiting_approval");
+
+  const working = inspectCodexScreen({
+    screen: [
+      composer,
+      "• Working (12s • esc to interrupt)"
+    ].join("\n"),
+    runtime: { agentVersion: "0.154.0" }
+  });
+  assert.equal(working.activity.state, "working");
 });
 
 test("Codex 0.154 wide and ANSI model-picker goldens preserve exact rows", () => {

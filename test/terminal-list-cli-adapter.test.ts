@@ -62,6 +62,8 @@ import type {
   TerminalListDiscoveryPorts,
   TerminalListStoreObservationPorts
 } from "../src/terminal-list-cli-adapter.js";
+import { TERMINAL_UI_GOLDENS } from
+  "./support/terminal-ui-golden-frames.js";
 
 interface DeferredGate {
   promise: Promise<void>;
@@ -1905,6 +1907,49 @@ test("stable nonempty Codex composer advertises only user-explicit replacement S
     Object.hasOwn(observed.terminal, "_user_explicit_composer_ready"),
     false
   );
+});
+
+test("Astra sparkle diagnostic idle does not advertise exact-empty actions", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-astra-sparkle-idle-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    true,
+    TERMINAL_UI_GOLDENS.codexAstraSparkleIdleAnsiPhaseA.screen,
+    { agentVersion: "0.154.0" }
+  );
+  const observed = await fixture.facade.observeExactTerminal({
+    options: { storeDir: fixture.storeDir },
+    terminalId: fixture.terminalId
+  });
+  assert.equal(observed.state, "available");
+  if (observed.state !== "available") return;
+  const actions = observed.terminal.available_actions as Record<string, any>;
+  assert.equal(observed.terminal.screen_state, "idle");
+  assert.equal(actions.send?.scope, "terminal_user_explicit");
+  assert.equal(
+    actions.send?.composer_policy,
+    "replace_current_composer_and_submit"
+  );
+  assert.ok(actions.status);
+  assert.ok(actions.watch);
+  for (const action of [
+    "native_inspect",
+    "new_thread",
+    "model_options",
+    "identify_foreground",
+    "identify_and_send"
+  ]) {
+    assert.equal(actions[action], undefined, action);
+  }
 });
 
 test("off-screen Codex composer still advertises user-explicit Send", async (t) => {

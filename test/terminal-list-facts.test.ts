@@ -172,8 +172,9 @@ test("per-terminal facts sample every observation once and reuse model capabilit
     childPids: [405],
     adapter,
     ports: {
-      observeStatus: async () => {
+      observeStatus: async (agentVersion) => {
         count("status");
+        assert.equal(agentVersion, "0.154.0");
         return observedState;
       },
       observeNativeIdentity: async (terminalId) => {

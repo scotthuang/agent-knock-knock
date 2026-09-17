@@ -61,6 +61,7 @@ export const testSupportImpactByPath = Object.freeze({
   ],
   "test/support/terminal-ui-golden-frames.ts": [
     "test/model-control-cli-closed-loop.test.ts",
+    "test/terminal-list-cli-adapter.test.ts",
     "test/terminal-ui-golden-frames.test.ts"
   ],
   "test/support/openclaw-plugin-contract-support.ts": [

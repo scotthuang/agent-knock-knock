@@ -77,6 +77,29 @@ const CODEX_TRANSCRIPT_PROMPT_LINE = /^[›»](?:\s|$).*$/gmu;
 const CODEX_SKILLS_HINT = /^[›»]\s+Use \/skills\b/u;
 const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
+// Codex 0.154 can animate the otherwise empty Astra Composer by replacing
+// blank cells with this closed glyph inventory. Keep this status-only grammar
+// separate from CODEX_COMPOSER_LINE: diagnostic idle classification must not
+// become exact Composer authority for native lifecycle or model control.
+const CODEX_ASTRA_SPARKLE_AGENT_VERSION = "0.154.0";
+const CODEX_ASTRA_SPARKLE_GLYPHS = "⠁⠂⠄⠈⠐⠠⡀⢀";
+const CODEX_ASTRA_SPARKLE_GLYPH = new RegExp(
+  `[${CODEX_ASTRA_SPARKLE_GLYPHS}]`,
+  "u"
+);
+const CODEX_BRAILLE_CHARACTER = /[\u2800-\u28ff]/u;
+const CODEX_ASTRA_SPARKLE_ONLY_LINE = new RegExp(
+  `^[ \\t${CODEX_ASTRA_SPARKLE_GLYPHS}]+$`,
+  "u"
+);
+const CODEX_ASTRA_SPARKLE_IDLE_COMPOSER = new RegExp(
+  `^[›»][ \\t${CODEX_ASTRA_SPARKLE_GLYPHS}]+` +
+    "Ask Codex to do anything" +
+    `[ \\t${CODEX_ASTRA_SPARKLE_GLYPHS}]*$`,
+  "u"
+);
+const CODEX_ASTRA_COMPLETE_FOOTER =
+  /^gpt-6-astra\s+(?:low|medium|high|xhigh|max|ultra)\s+·\s+(?:~\/|\/)[^·\r\n]+(?:\s+·\s+[^·\r\n]+)*\s+·\s+Main \[default\]$/u;
 const CODEX_SESSION_STATUS_PATTERN =
   /\bSession:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/giu;
 const CODEX_STATUS_HEADER_PATTERN =
@@ -829,7 +852,11 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
         promptKind: detectedApproval.promptKind,
         command: detectedApproval.command
       };
-  const activity = detectCodexActivityState(options.screen, detectedApproval);
+  const activity = detectCodexActivityState(
+    options.screen,
+    detectedApproval,
+    options.runtime?.agentVersion
+  );
   const screenExcerpt = codexScreenExcerpt(options.screen, options.maxExcerptLength ?? 4000);
   const completion = activity.state === "idle"
     ? detectCodexScreenCompletion({
@@ -921,7 +948,8 @@ export function isCodexApprovalPromptVisible(screen: string): boolean {
 
 export function detectCodexActivityState(
   screen: string,
-  approval = detectCodexApprovalPrompt(screen)
+  approval = detectCodexApprovalPrompt(screen),
+  agentVersion?: string
 ): { state: "awaiting_approval" | "working" | "idle" | "unknown"; reason: string } {
   if (approval.approvable || isCodexApprovalPromptVisible(screen)) {
     return {
@@ -939,7 +967,7 @@ export function detectCodexActivityState(
     };
   }
 
-  const idleLine = codexIdlePromptLine(tailLines.slice(-6));
+  const idleLine = codexIdlePromptLine(tailLines.slice(-6), agentVersion);
   if (idleLine) {
     return {
       state: "idle",
@@ -1282,7 +1310,17 @@ function isCodexWorkingLine(line: string): boolean {
   return /^\d+\s+background terminals? running\b/u.test(trimmed) && /\/(?:ps|stop)\b/u.test(trimmed);
 }
 
-function codexIdlePromptLine(lines: readonly string[]): string | undefined {
+function codexIdlePromptLine(
+  lines: readonly string[],
+  agentVersion?: string
+): string | undefined {
+  if (agentVersion === CODEX_ASTRA_SPARKLE_AGENT_VERSION) {
+    const sparkleIdle = codexAstraSparkleIdlePromptLine(lines);
+    if (sparkleIdle !== undefined) {
+      return sparkleIdle;
+    }
+  }
+
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index].trimEnd();
     if (
@@ -1301,9 +1339,54 @@ function codexIdlePromptLine(lines: readonly string[]): string | undefined {
       .slice(index + 1)
       .map((candidate) => candidate.trim())
       .filter(Boolean);
+    // The dedicated closed grammar above is the only Braille-bearing idle
+    // frame we recognize. A draft, unknown glyph, or partial animation must
+    // not fall through to the legacy broad prompt-plus-footer heuristic.
+    if (
+      CODEX_BRAILLE_CHARACTER.test(line) ||
+      trailingContent.some((candidate) => CODEX_BRAILLE_CHARACTER.test(candidate))
+    ) {
+      continue;
+    }
     if (
       trailingContent.length > 0 &&
       trailingContent.every((candidate) => CODEX_FOOTER_LINE.test(candidate))
+    ) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+function codexAstraSparkleIdlePromptLine(
+  lines: readonly string[]
+): string | undefined {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trimEnd();
+    if (!CODEX_ASTRA_SPARKLE_IDLE_COMPOSER.test(line)) {
+      continue;
+    }
+
+    const trailingContent = lines
+      .slice(index + 1)
+      .map((candidate) => candidate.trim())
+      .filter(Boolean);
+    const footer = trailingContent.at(-1);
+    const decoration = trailingContent.slice(0, -1);
+    if (
+      footer !== undefined &&
+      !footer.includes("…") &&
+      !footer.endsWith("...") &&
+      CODEX_ASTRA_COMPLETE_FOOTER.test(footer) &&
+      decoration.length <= 2 &&
+      decoration.every((candidate) =>
+        CODEX_ASTRA_SPARKLE_ONLY_LINE.test(candidate) &&
+        CODEX_ASTRA_SPARKLE_GLYPH.test(candidate)
+      ) &&
+      (
+        CODEX_ASTRA_SPARKLE_GLYPH.test(line) ||
+        decoration.some((candidate) => CODEX_ASTRA_SPARKLE_GLYPH.test(candidate))
+      )
     ) {
       return line;
     }
