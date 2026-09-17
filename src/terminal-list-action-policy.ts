@@ -122,7 +122,8 @@ function decideTerminalListCommands(input: {
       lifecycle.newThread === true &&
       input.codexLifecycleIncarnationAvailable &&
       !facts.store.terminalHasBlockingTurn &&
-      idleAndNotBlocked,
+      idleAndNotBlocked &&
+      facts.composer.automatedInputComposerReady,
     list_resumable_threads: lifecycle.status === "supported" &&
       lifecycle.resumeExact === true &&
       input.codexLifecycleIncarnationAvailable,

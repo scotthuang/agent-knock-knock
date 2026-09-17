@@ -320,6 +320,11 @@ test("transport and Composer boundaries preserve agent-specific Send policy", ()
   });
   assert.equal(codexUnknownComposer.terminalUserExplicitSend.eligible, true);
   assert.equal(codexUnknownComposer.commands.native_inspect, false);
+  assert.equal(codexUnknownComposer.commands.new_thread, false);
+  assert.deepEqual(codexUnknownComposer.modelControl, {
+    availability: "unavailable",
+    reason: "surface_unavailable"
+  });
 
   const claudeUnknownComposer = decideTerminalListActions({
     subject: subject({
@@ -329,6 +334,55 @@ test("transport and Composer boundaries preserve agent-specific Send policy", ()
     facts: facts({ userExplicitComposerReady: false })
   });
   assert.equal(claudeUnknownComposer.terminalUserExplicitSend.eligible, false);
+});
+
+test("diagnostic sparkle idle never grants exact-empty input actions", () => {
+  const decision = decideTerminalListActions({
+    subject: subject(),
+    facts: facts({
+      state: {
+        activity_state: "idle",
+        screen_state: "idle",
+        durable_activity_state: "idle"
+      },
+      automatedInputComposerReady: false,
+      userExplicitComposerReady: true
+    })
+  });
+
+  assert.equal(decision.commands.status, true);
+  assert.equal(decision.commands.watch, true);
+  assert.equal(decision.terminalUserExplicitSend.eligible, true);
+  assert.equal(decision.commands.native_inspect, false);
+  assert.equal(decision.commands.new_thread, false);
+  assert.equal(decision.commands.identify_foreground, false);
+  assert.equal(decision.commands.identify_and_send, false);
+  assert.deepEqual(decision.modelControl, {
+    availability: "unavailable",
+    reason: "surface_unavailable"
+  });
+});
+
+test("durable idle never upgrades an unknown screen to input authority", () => {
+  const decision = decideTerminalListActions({
+    subject: subject(),
+    facts: facts({
+      state: {
+        activity_state: "unknown",
+        screen_state: "unknown",
+        durable_activity_state: "idle"
+      },
+      automatedInputComposerReady: false,
+      userExplicitComposerReady: true
+    })
+  });
+
+  assert.equal(decision.commands.status, true);
+  assert.equal(decision.commands.watch, true);
+  assert.equal(decision.terminalUserExplicitSend.eligible, true);
+  assert.equal(decision.commands.native_inspect, false);
+  assert.equal(decision.commands.new_thread, false);
+  assert.equal(decision.modelControl.availability, "unavailable");
 });
 
 test("residual policy distinguishes continuation from cleanup without authority", () => {

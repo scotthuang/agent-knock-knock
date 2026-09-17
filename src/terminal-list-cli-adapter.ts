@@ -1303,13 +1303,13 @@ function terminalListFactPortsFor(input: {
 }): TerminalListTerminalFactPorts {
   const { session, terminalControl, terminalId, options, bridge } = input;
   return {
-    observeStatus: () => listStateForTerminal(
+    observeStatus: (agentVersion) => listStateForTerminal(
       session.agent,
       terminalControl,
       options,
       bridge,
       {
-        pid: session.pid,
+        pid: session.pid, agentVersion,
         cwd: session.cwd,
         // Status and approval share this exact full terminal identity.
         ...(session.agent === "codex"

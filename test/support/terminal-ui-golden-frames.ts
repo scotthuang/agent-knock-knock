@@ -194,6 +194,73 @@ const defaultCodexRows = Object.freeze([
 
 /** Immutable independent goldens; malformed variants stay explicitly marked. */
 export const TERMINAL_UI_GOLDENS = Object.freeze({
+  codexAstraSparkleIdlePhaseA: Object.freeze({
+    agent: "codex",
+    version: "0.154.0",
+    surface: "idle_composer",
+    viewport: "wide",
+    ansi: false,
+    complete: true,
+    screen: [
+      "Completed task summary.",
+      "",
+      "    ⠈                    ⢀                       ⠐ ⠐    ⡀⠐              ⠄          ⠄  ⠄",
+      "» Ask Codex to do anything⡀  ⠈     ⠈ ⠂  ⠁ ⠁                  ⠈        ⠄                ⠁",
+      "      ⠠⢀            ⠠                        ⢀       ⡀⠄                             ⠂",
+      "  gpt-6-astra ultra · ~/workspace · Redacted task · Main [default]"
+    ].join("\n")
+  }),
+  codexAstraSparkleIdlePhaseB: Object.freeze({
+    agent: "codex",
+    version: "0.154.0",
+    surface: "idle_composer",
+    viewport: "wide",
+    ansi: false,
+    complete: true,
+    screen: [
+      "Completed task summary.",
+      "",
+      "  ⠁              ⠐              ⠠                       ⠈",
+      "»⠂Ask Codex to do anything    ⡀       ⢀               ⠄",
+      "       ⠈            ⠁                         ⠐          ⠠",
+      "  gpt-6-astra high · ~/workspace · Redacted task · Main [default]"
+    ].join("\n")
+  }),
+  codexAstraSparkleIdleAnsiPhaseA: Object.freeze({
+    agent: "codex",
+    version: "0.154.0",
+    surface: "idle_composer",
+    viewport: "wide",
+    ansi: true,
+    complete: true,
+    screen: [
+      "Completed task summary.",
+      "",
+      "    \u001b[38;2;143;132;159m⠈                    ⢀                       ⠐\u001b[0m",
+      "» \u001b[2mAsk Codex to do anything\u001b[22m" +
+        "\u001b[38;2;143;132;159m⡀  ⠈     ⠂  ⠁\u001b[0m",
+      "      \u001b[38;2;122;111;138m⠠⢀            ⡀⠄                 ⠂\u001b[0m",
+      "  gpt-6-astra ultra · ~/workspace · Redacted task · Main [default]"
+    ].join("\n")
+  }),
+  codexAstraSparkleIdleAnsiPhaseB: Object.freeze({
+    agent: "codex",
+    version: "0.154.0",
+    surface: "idle_composer",
+    viewport: "wide",
+    ansi: true,
+    complete: true,
+    screen: [
+      "Completed task summary.",
+      "",
+      "  \u001b[38;2;129;118;145m⠁              ⠐              ⠠\u001b[0m",
+      "»\u001b[38;2;129;118;145m⠂\u001b[0m" +
+        "\u001b[2mAsk Codex to do anything\u001b[22m" +
+        "\u001b[38;2;129;118;145m    ⡀       ⢀\u001b[0m",
+      "       \u001b[38;2;151;140;167m⠈            ⠁                 ⠐\u001b[0m",
+      "  gpt-6-astra high · ~/workspace · Redacted task · Main [default]"
+    ].join("\n")
+  }),
   codexWidePicker: Object.freeze({
     agent: "codex",
     version: "0.154.0",

@@ -115,7 +115,7 @@ export interface TerminalListTerminalFacts {
 }
 
 export interface TerminalListTerminalFactPorts {
-  observeStatus(): Promise<TerminalListState>;
+  observeStatus(agentVersion?: string): Promise<TerminalListState>;
   observeNativeIdentity(
     terminalId: string
   ): Promise<TerminalNativeListIdentityFacts>;
@@ -170,7 +170,8 @@ export async function collectTerminalListTerminalFacts(input: {
 }): Promise<TerminalListTerminalFacts> {
   const { session, terminalControl, terminalId, childPids, adapter, ports } =
     input;
-  const observedState = await ports.observeStatus();
+  const agentVersion = ports.observeAgentVersion();
+  const observedState = await ports.observeStatus(agentVersion);
   const native = await ports.observeNativeIdentity(terminalId);
   const effectiveState = ports.projectEffectiveState({
     terminalState: observedState,
@@ -185,7 +186,11 @@ export async function collectTerminalListTerminalFacts(input: {
     adapter,
     effectiveState
   );
-  const runtime = observeTerminalListRuntimeFacts(session, adapter, ports);
+  const runtime = observeTerminalListRuntimeFacts(
+    session,
+    adapter,
+    agentVersion
+  );
   const latentClearResume = session.agent === "codex"
     ? ports.observeLatentClearResume({
         screen: effectiveState.screen_excerpt,
@@ -265,9 +270,8 @@ function observeStatusCardNativeThreadId(
 function observeTerminalListRuntimeFacts(
   session: ActiveTerminalProcess,
   adapter: TerminalAgentAdapter,
-  ports: TerminalListTerminalFactPorts
+  agentVersion: string | undefined
 ): TerminalListTerminalFacts["runtime"] {
-  const agentVersion = ports.observeAgentVersion();
   const lifecycleCapability = adapter.probeThreadLifecycle?.(agentVersion) ?? {
     status: "unsupported" as const,
     agentVersion,
