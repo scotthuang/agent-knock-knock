@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.6 - 2026-09-20
 
 ### Changed
 
@@ -10,6 +10,7 @@
 ### Security
 
 - Preserve zero-input, fail-closed boundaries for blocked approvals, input-owning questionnaires, editors or menus, read-only viewers, and terminal/process drift. Once Claude Code clear or request input may have occurred, an uncertain outcome is never retried automatically.
+- Return structured `submission_uncertain` and `do_not_retry` evidence through Host tools after any possible replacement input, and retain the durable message intent so the same request cannot be replayed blindly.
 
 ## 0.13.5 - 2026-09-17
 
