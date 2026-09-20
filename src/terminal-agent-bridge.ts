@@ -1228,6 +1228,7 @@ export class TerminalAgentBridge {
         agent: adapter.agent, terminalControl: verifiedForClear,
         provider: this.terminalProvider, sleep: this.sleep,
         verifyIdentity: () => this.verifyTerminalIdentity(adapter.agent, verifiedForClear, options.runtime),
+        terminalInputOwnerBlocked: terminalUserExplicitTerminalInputOwnerBlocked,
         verifyClaudeComposerCleared: () => captureSafePrompt(
           verifiedForClear, true
         )

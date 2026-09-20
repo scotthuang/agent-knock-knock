@@ -41,6 +41,8 @@ import {
   type TerminalControlRef
 } from "../src/terminal-agent-adapter.js";
 import { TerminalAgentBridge } from "../src/terminal-agent-bridge.js";
+import { CLAUDE_DRAFT_REPLACEMENT_SENTINEL } from
+  "../src/terminal-user-explicit-send-clear.js";
 import {
   captureCodexRolloutAcceptanceAnchor,
   detectCodexRolloutAcceptance
@@ -305,9 +307,71 @@ test("an explicit Claude Send replaces a nonempty draft and submits once", async
     assert.equal(output.management_mode, "unmanaged");
     assert.equal(output.composer_disposition, "replaced_current_composer");
     assert.equal(output.composer_cleared_before_send, true);
-    assert.deepEqual(fixture.literalInputs(), [request]);
-    assert.deepEqual(fixture.keyDispatches(), [["C-c"], ["C-m"]]);
+    assert.deepEqual(fixture.literalInputs(), [
+      CLAUDE_DRAFT_REPLACEMENT_SENTINEL,
+      request
+    ]);
+    assert.deepEqual(fixture.keyDispatches(), [["C-s"], ["C-m"]]);
     assert.equal(fixture.enterCount(), 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("an uncertain Claude stash-clear returns structured do-not-retry evidence", async () => {
+  const fixture = createHandoffFixture({ agent: "claude" });
+  const request = "Do not replay this request after an uncertain draft clear.";
+  const messageId = "message-claude-clear-uncertain";
+  try {
+    fixture.persistSession({
+      sessionId: "session-claude-clear-uncertain-source",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    fixture.setComposerText("A prior draft that must not be mixed in.");
+    fixture.setClaudeClearUncertain(true);
+    const listed = await fixture.listTerminal();
+    const action = assertTerminalUserExplicitSendAction(listed);
+    const expectedTerminalToken = String(
+      action.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken);
+
+    const sent = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken,
+      messageId
+    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, false);
+    assert.equal(output.status, "submission_uncertain");
+    assert.equal(output.submission_outcome, "uncertain");
+    assert.equal(output.delivery_receipt, "terminal_input_uncertain");
+    assert.equal(output.terminal_input_dispatched, true);
+    assert.equal(output.safe_to_retry, false);
+    assert.equal(output.do_not_retry, true);
+    assert.equal(output.stage, "composer_clear_uncertain");
+    assert.equal(output.message_id, messageId);
+    assert.deepEqual(fixture.literalInputs(), [
+      CLAUDE_DRAFT_REPLACEMENT_SENTINEL
+    ]);
+    assert.deepEqual(fixture.keyDispatches(), [["C-s"]]);
+
+    const inputsBeforeReplay = fixture.literalInputs().length;
+    const keysBeforeReplay = fixture.keyDispatches().length;
+    const replay = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken,
+      messageId
+    );
+    assert.equal(replay.status, 1, fixture.debug(replay));
+    assert.match(replay.stderr, /uncertain|must be resolved/iu);
+    assert.equal(fixture.literalInputs().length, inputsBeforeReplay);
+    assert.equal(fixture.keyDispatches().length, keysBeforeReplay);
   } finally {
     fixture.cleanup();
   }
@@ -446,7 +510,7 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
             screen = claudeComposerScreen(pendingText);
           } else if (
             Array.isArray(wireRequest.params.keys) &&
-            wireRequest.params.keys.includes("ctrl+c")
+            wireRequest.params.keys.includes("ctrl+s")
           ) {
             pendingText = "";
             screen = claudeComposerScreen();
@@ -673,7 +737,8 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
         Array.isArray(entry.request.params.keys) &&
         entry.request.params.keys.some((key) =>
           [
-            "Escape", "escape", "C-u", "C-c", "ctrl+u", "ctrl+c"
+            "Escape", "escape", "C-u", "C-c", "C-s",
+            "ctrl+u", "ctrl+c", "ctrl+s"
           ].includes(String(key))
         )
       ),
@@ -740,7 +805,8 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
         entry.request.method === "pane.send_input"
       ).map((entry) => entry.request.params),
       [
-        { pane_id: paneId, keys: ["ctrl+c"] },
+        { pane_id: paneId, text: CLAUDE_DRAFT_REPLACEMENT_SENTINEL },
+        { pane_id: paneId, keys: ["ctrl+s"] },
         { pane_id: paneId, text: replacementRequest },
         { pane_id: paneId, keys: ["enter"] }
       ]
@@ -1080,7 +1146,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     );
     assert.equal(
       fixture.keyDispatches().flat().some((key) =>
-        key === "C-c" || key === "Escape"
+        key === "C-c" || key === "C-s" || key === "Escape"
       ),
       false
     );
@@ -1106,7 +1172,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     assert.equal(fixture.enterCount(), 1);
     assert.equal(
       fixture.keyDispatches().flat().some((key) =>
-        key === "C-c" || key === "Escape"
+        key === "C-c" || key === "C-s" || key === "Escape"
       ),
       false
     );
@@ -3047,6 +3113,7 @@ interface HandoffFixture {
   setAgentProcessIntegrityDrift(): void;
   setProcessProbeFailure(error: Error | undefined): void;
   setComposerText(text: string): void;
+  setClaudeClearUncertain(value: boolean): void;
   literalInputs(): string[];
   keyDispatches(): string[][];
   enterCount(): number;
@@ -3216,6 +3283,7 @@ function createHandoffFixture({
   let statusProbeCount = 0;
   let driftTriggered = false;
   let operationIndexAtDrift: number | undefined;
+  let claudeClearUncertain = false;
   const codexStatusScreen = (nativeThreadId: string, marker: string) =>
     `/status\n╭────────────────────────────────────────────╮\n` +
     `│ OpenAI Codex (v${version})                 │\n` +
@@ -3287,8 +3355,9 @@ function createHandoffFixture({
       sendKeys(operation, mutable) {
         if (
           operation.keys.includes("C-u") ||
-          (agent === "claude" && operation.keys.includes("C-c"))
+          (agent === "claude" && operation.keys.includes("C-s"))
         ) {
+          if (agent === "claude" && claudeClearUncertain) return;
           pendingText = "";
           mutable.setScreen(
             target,
@@ -3845,6 +3914,9 @@ function createHandoffFixture({
           ? codexComposerScreen(text)
           : claudeComposerScreen(text)
       );
+    },
+    setClaudeClearUncertain(value) {
+      claudeClearUncertain = value;
     },
     literalInputs: () => provider.literalInputs(),
     keyDispatches: () => provider.keyDispatches(),

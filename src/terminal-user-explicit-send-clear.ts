@@ -49,6 +49,9 @@ export async function dispatchTerminalUserExplicitComposerClear(input: {
   readonly terminalControl: TerminalControlRef;
   readonly provider: TerminalControlProvider;
   readonly verifyIdentity: () => Promise<TerminalControlRef>;
+  readonly terminalInputOwnerBlocked: (
+    terminalControl: TerminalControlRef
+  ) => boolean;
   readonly verifyClaudeComposerCleared: () => Promise<TerminalControlRef>;
   readonly sleep: (milliseconds: number) => Promise<void>;
 }): Promise<TerminalControlRef> {
@@ -70,6 +73,11 @@ export async function dispatchTerminalUserExplicitComposerClear(input: {
       const verified = await input.verifyIdentity();
       if (!sameTerminalControlIncarnation(input.terminalControl, verified)) {
         throw new Error("terminal identity changed during Claude draft replacement");
+      }
+      if (input.terminalInputOwnerBlocked(verified)) {
+        throw new Error(
+          "terminal foreground changed to an editor or viewer during Claude draft replacement"
+        );
       }
     } catch (error) {
       if (error instanceof TerminalControlInputNotSentError &&

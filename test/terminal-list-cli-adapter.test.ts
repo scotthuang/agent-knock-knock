@@ -1098,7 +1098,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
         terminalControl: control,
         text
       });
-      const clearKey = agent === "claude" ? "C-c" : "C-u";
+      const clearKey = agent === "claude" ? "C-s" : "C-u";
       transportCalls.push(["clear", clearKey]);
       fallbackOperations.push(`clear:${clearKey}`);
       await options.onComposerClearDispatched?.({

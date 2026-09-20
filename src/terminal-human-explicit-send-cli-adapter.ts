@@ -1157,7 +1157,38 @@ async function runUserExplicitTerminalFallback(
         intent_warnings: intentWarnings
         }
       );
-      throw error;
+      if (zeroInput) throw error;
+      const errorRecord = isRecord(error) ? error : {};
+      const reason = textSummary(
+        error instanceof Error ? error.message : String(error)
+      );
+      printJson({
+        delivered: false,
+        status: "submission_uncertain",
+        submission_outcome: "uncertain",
+        delivery_receipt: "terminal_input_uncertain",
+        terminal_id: fresh.conversationId,
+        message_id: messageId,
+        scope: "terminal_user_explicit",
+        ...terminalSendResultContract({
+          terminalInputDispatched: true,
+          agentAcceptance: "unproven",
+          managementMode: "unmanaged",
+          observationMode: "none",
+          callbackAvailable: false
+        }),
+        safe_to_retry: false,
+        do_not_retry: true,
+        mutation_started: true,
+        error_code: stringValue(errorRecord.code),
+        stage: stringValue(errorRecord.stage) ?? "terminal_input_uncertain",
+        reason,
+        note:
+          "AKK may have changed the selected terminal while replacing its Composer, but did not prove request submission. Do not retry automatically; inspect the exact shared pane first.",
+        next_action:
+          "inspect the exact shared pane and explicitly resolve the uncertain Send before issuing another request"
+      });
+      return;
     }
     let callbackReceipt: UserExplicitFallbackWatchReceipt | undefined;
     if (preparedCallbackWatch) {

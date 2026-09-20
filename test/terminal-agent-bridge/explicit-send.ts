@@ -401,6 +401,59 @@ test("explicit Claude Send replaces empty and nonempty Composer drafts", async (
     );
   });
 
+  await t.test("foreground editor drift after the sentinel never receives the stash key", async () => {
+    class PreClearOwnerDriftProvider extends RecordingTerminalProvider {
+      private sentinelInjected = false;
+      override async resolve(
+        terminal: TerminalEndpointRef
+      ): Promise<TerminalEndpointRef> {
+        const resolved = await super.resolve(terminal);
+        return this.sentinelInjected
+          ? {
+              ...resolved,
+              route: { ...resolved.route, currentCommand: "nvim task.md" },
+              providerRef: {
+                ...(resolved.providerRef as Record<string, unknown>),
+                currentCommand: "nvim task.md"
+              }
+            }
+          : resolved;
+      }
+      override async sendText(
+        terminal: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendText(terminal, text, options);
+        if (text === CLAUDE_DRAFT_REPLACEMENT_SENTINEL) {
+          this.sentinelInjected = true;
+        }
+      }
+    }
+    const provider = new PreClearOwnerDriftProvider([PANE], {
+      [PANE.target]: idleFrame("an older unrelated draft")
+    });
+    await assert.rejects(
+      createBridge(adapter, provider).sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalUserExplicitClearUncertainError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? [operation.text]
+            : [operation.keys.join(",")]
+      ),
+      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL]
+    );
+  });
+
   await t.test("an unconsumed stash key never injects the request", async () => {
     const provider = new RecordingTerminalProvider([PANE], {
       [PANE.target]: idleFrame("an older unrelated draft")
