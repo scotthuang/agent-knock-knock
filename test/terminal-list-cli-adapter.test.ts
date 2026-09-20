@@ -620,6 +620,11 @@ test("Codex 0.154 exact /model residual advertises typed continuation and repair
     "an open picker must not advertise an action that would dispatch Enter"
   );
   assert.equal(
+    pickerActions.send,
+    undefined,
+    "an open picker must not advertise a user Send action"
+  );
+  assert.equal(
     pickerActions.repair_model_control?.authority_scope,
     "terminal_user_explicit_model_control_repair"
   );
@@ -643,6 +648,34 @@ test("Codex 0.154 exact /model residual advertises typed continuation and repair
   const unsafeActions = unsafe.available_actions as Record<string, unknown>;
   assert.equal(unsafeActions.repair_model_control, undefined);
   assert.equal(unsafeActions.model_options, undefined);
+});
+
+test("a proven input-owning viewer suppresses every terminal Send action", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-input-owner-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    true,
+    [
+      "  Settings  Status   Config   Usage   Stats",
+      "  Version: 0.154.0",
+      "  Esc to cancel"
+    ].join("\n"),
+    { agentVersion: "0.154.0" }
+  );
+  const [terminal] = fixture.scan.terminalControlled;
+  const actions = terminal.available_actions as Record<string, unknown>;
+  assert.equal(actions.send, undefined);
+  assert.equal(terminal._terminal_user_explicit_send_action, undefined);
 });
 
 test("one terminal row samples each observation source once", async (t) => {
@@ -1060,13 +1093,14 @@ test("list token falls back to one unmanaged send and replays by message id", as
         multiline
       };
     },
-    async sendUserExplicitCodex(control, text, options) {
+    async sendUserExplicit(agent, control, text, options) {
       await options.beforeMutationReservation({
         terminalControl: control,
         text
       });
-      transportCalls.push(["clear", "C-u"]);
-      fallbackOperations.push("clear:C-u");
+      const clearKey = agent === "claude" ? "C-s" : "C-u";
+      transportCalls.push(["clear", clearKey]);
+      fallbackOperations.push(`clear:${clearKey}`);
       await options.onComposerClearDispatched?.({
         terminalControl: control,
         text
@@ -1075,7 +1109,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
       fallbackOperations.push("text");
       await options.onTransportStage?.({
         stage: "text_injected",
-        agent: "codex",
+        agent,
         terminalControl: control,
         multiline: false
       });
@@ -1083,7 +1117,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
       fallbackOperations.push("enter:C-m");
       await options.onTransportStage?.({
         stage: "enter_dispatched",
-        agent: "codex",
+        agent,
         terminalControl: control,
         multiline: false
       });

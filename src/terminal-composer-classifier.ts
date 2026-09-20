@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { CLAUDE_INJECTED_PASTE_FRAME_PROFILE } from
   "./claude-injected-paste-proof.js";
 import type { ExecutorKind } from "./executors.js";
+import type { TerminalControlRef } from "./terminal-control-ref.js";
 import {
   isTerminalModelControlPlanForAgent,
   type TerminalModelControlPlan
@@ -114,6 +115,117 @@ function codexBlockingModalVisible(screen: string): boolean {
     ["expanded", "ambiguous"].includes(
       inspectCodexAsyncQuestionInputMode(tail)
     );
+}
+
+/**
+ * Detect only a positively identified surface that owns terminal input.
+ * Ordinary Composer visibility, emptiness, and draft contents deliberately do
+ * not participate: a human-explicit Send replaces those contents. Unknown or
+ * clipped captures therefore remain advisory, while a known modal/editor/
+ * viewer/history-search surface suppresses the advertised Send action.
+ */
+function terminalUserExplicitInputOwnerBlocked(
+  screen: string | undefined
+): boolean {
+  if (typeof screen !== "string" || screen.length === 0) return false;
+  const tail = stripTerminalEscapeSequences(screen)
+    .replace(/\r\n?/gu, "\n")
+    .split("\n")
+    .slice(-80)
+    .join("\n");
+  const lines = tail.split("\n");
+  let modalFooterIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (
+      /\b(?:press|use)\s+(?:esc|escape)\s+to\s+(?:cancel|close|dismiss|go back)\b/iu
+        .test(lines[index]!) ||
+      /\besc\s+to\s+cancel\b/iu.test(lines[index]!)
+    ) {
+      modalFooterIndex = index;
+      break;
+    }
+  }
+  const laterMainComposer = modalFooterIndex >= 0 && lines.some(
+    (line, index) => index > modalFooterIndex &&
+      (CODEX_COMPOSER_MARKER.test(line) || /^\s*❯(?:\s|\u00a0|$)/u.test(line))
+  );
+  return modalFooterIndex >= 0 && !laterMainComposer ||
+    codexActiveWriterViewerVisible(screen) ||
+    ["expanded", "ambiguous"].includes(
+      inspectCodexAsyncQuestionInputMode(screen)
+    ) ||
+    /(?:\breverse-i-search\b|\bhistory search\b|\bsearch(?:ing)? (?:prompt )?history\b|^\s*search prompts:\s+)/imu
+      .test(tail);
+}
+
+const TERMINAL_INPUT_OWNER_COMMANDS = new Set([
+  "emacs", "emacsclient", "helix", "hx", "kak", "kakoune", "less",
+  "man", "micro", "more", "most", "nano", "nvim", "nvimdiff", "pico",
+  "vi", "view", "vim", "vimdiff"
+]);
+
+/** Reject a foreground editor/viewer process even when its TUI is unfamiliar. */
+function terminalUserExplicitTerminalInputOwnerBlocked(
+  terminalControl: TerminalControlRef
+): boolean {
+  const executable = terminalControl.currentCommand?.trim().split(/\s+/u)[0]
+    ?.replace(/^["']|["']$/gu, "")
+    .split("/").at(-1)?.toLowerCase();
+  return executable !== undefined &&
+    TERMINAL_INPUT_OWNER_COMMANDS.has(executable);
+}
+
+function terminalUserExplicitInputSafetyFailure(input: {
+  readonly agent: ExecutorKind;
+  readonly displayName: string;
+  readonly screen: string;
+  readonly terminalControl: TerminalControlRef;
+  readonly approvalBlocked: boolean;
+  readonly awaitingApproval: boolean;
+  readonly interactionActive: boolean;
+  readonly modelControlSurface: boolean;
+  readonly requireExactEmptyClaudeComposer: boolean;
+}): string | undefined {
+  if (
+    input.approvalBlocked || input.awaitingApproval || input.interactionActive ||
+    input.modelControlSurface ||
+    terminalUserExplicitTerminalInputOwnerBlocked(input.terminalControl) ||
+    terminalUserExplicitInputOwnerBlocked(input.screen) ||
+    codexBlockingModalVisible(input.screen)
+  ) {
+    return `the explicit user Send is blocked by a ${input.displayName} approval, interaction, or modal prompt`;
+  }
+  if (input.agent === "claude" && input.requireExactEmptyClaudeComposer) {
+    const frame = exactClaudeComposerFrame(
+      stripTerminalEscapeSequences(input.screen)
+    );
+    if (!frame || frame.composerRows.length !== 1 ||
+        !/^\s*❯\s*$/u.test(frame.composerRows[0]!) ||
+        !claudeUserExplicitPostClearTrailingIsKnown(frame.trailing)) {
+      return "Claude native stash action did not prove an empty main Composer";
+    }
+  }
+  return undefined;
+}
+
+function claudeUserExplicitPostClearTrailingIsKnown(
+  lines: readonly string[]
+): boolean {
+  if (lines.length === 0) return true;
+  const auxiliary = (line: string) =>
+    /^\s*(?:Draft restored\s*·\s*)?› stashed\s*$/u.test(line) ||
+    /^\s*[●○◐◉]\s+(?:low|medium|high|xhigh|max|ultracode)\s*·\s*\/effort\s*$/iu
+      .test(line);
+  if (lines.every(auxiliary)) return true;
+  let auxiliaryStart = lines.length;
+  while (auxiliaryStart > 0 && auxiliary(lines[auxiliaryStart - 1]!)) {
+    auxiliaryStart -= 1;
+  }
+  const footerRows = lines.slice(0, auxiliaryStart);
+  if (footerRows.length === 0 || footerRows.length > 2) return false;
+  const footer = footerRows.map((line) => line.trim()).join(" ");
+  return /^\s*(?:[⏵⏴⏸]{1,2}|\?)\s+.*(?:manual mode|auto mode|accept edits|bypass permissions|for shortcuts).*(?:←\s+for\s+ag(?:ents|…)|\(shift\+tab\s+to\s+cycle\))(?:\s+(?:Draft restored\s*·\s*)?› stashed)?\s*$/iu
+    .test(footer);
 }
 
 function codexActiveWriterViewerVisible(styledScreen: string): boolean {
@@ -847,5 +959,8 @@ export {
   exactClaudeInjectedPastePlaceholderCapture,
   exactClaudeModelControlComposerCapture,
   exactTerminalComposerCapture,
+  terminalUserExplicitInputSafetyFailure,
+  terminalUserExplicitTerminalInputOwnerBlocked,
+  terminalUserExplicitInputOwnerBlocked,
   terminalComposerRowsMatchExpected
 };

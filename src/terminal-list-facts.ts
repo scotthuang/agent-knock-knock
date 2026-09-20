@@ -64,6 +64,8 @@ export interface TerminalNativeListIdentityFacts {
 export interface TerminalListComposerFacts {
   readonly automatedInputComposerReady: boolean;
   readonly userExplicitComposerReady: boolean;
+  /** Positive evidence that a non-Composer UI surface owns terminal input. */
+  readonly inputOwnerBlocked: boolean;
 }
 
 export interface TerminalListPhysicalProcessIncarnation {

@@ -19,6 +19,11 @@ import {
   type TerminalPane,
   type TerminalEndpointRef
 } from "../support/terminal-agent-bridge-contract-support.js";
+import {
+  CLAUDE_DRAFT_REPLACEMENT_SENTINEL,
+  TerminalUserExplicitClearUncertainError
+} from
+  "../../src/terminal-user-explicit-send-clear.js";
 
 test("explicit Codex Send replaces even when the Composer is off-screen", async (t) => {
   const request = Array.from(
@@ -154,6 +159,521 @@ test("explicit Codex Send replaces even when the Composer is off-screen", async 
       );
     });
   }
+});
+
+test("explicit Claude Send replaces empty and nonempty Composer drafts", async (t) => {
+  const adapter = createTestClaudeAdapter();
+  const request = "the user's newest explicit Claude request";
+  const idleFrame = (draft: string) => [
+    "────────────────────────────────────────────────",
+    `❯ ${draft}`,
+    "────────────────────────────────────────────────",
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+  ].join("\n");
+  const cases = [
+    { name: "empty composer", screen: idleFrame("") },
+    { name: "same visible draft", screen: idleFrame(request) },
+    { name: "different visible draft", screen: idleFrame("an older unrelated draft") },
+    { name: "off-screen composer", screen: "recent Claude output" },
+    {
+      name: "narrow wrapped working footer",
+      screen: [
+        "✻ Working… (8s · thinking)",
+        "────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────",
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to",
+        "  interrupt · ← for agents"
+      ].join("\n"),
+    }
+  ] as const;
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      let replacementTextInjected = false;
+      class BlindReplacementProvider extends RecordingTerminalProvider {
+        override async capture(
+          terminal: TerminalEndpointRef | string,
+          options: {
+            scrollbackLines?: number;
+            socketPath?: string;
+            preserveEscapes?: boolean;
+          } = {}
+        ): Promise<string> {
+          if (replacementTextInjected) {
+            throw new Error("post-request Composer capture is forbidden");
+          }
+          return super.capture(terminal, options);
+        }
+
+        override async sendText(
+          terminal: TerminalEndpointRef | string,
+          text: string,
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          if (text === request) replacementTextInjected = true;
+          await super.sendText(terminal, text, options);
+        }
+
+        override async sendKeys(
+          terminal: TerminalEndpointRef | string,
+          keys: readonly string[],
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          await super.sendKeys(terminal, keys, options);
+          if (keys.includes("C-s")) this.setScreen(terminal, idleFrame(""));
+        }
+      }
+      const provider = new BlindReplacementProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([adapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      const reservations: Array<{ target: string; text: string }> = [];
+
+      const result = await bridge.sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        {
+          beforeMutationReservation: ({ terminalControl, text }) => {
+            reservations.push({ target: terminalControl.target, text });
+          }
+        }
+      );
+
+      assert.deepEqual(reservations, [{ target: PANE.target, text: request }]);
+      assert.deepEqual(result, {
+        stage: "enter_dispatched",
+        terminalControl: result.terminalControl,
+        disposition: "replaced_current_composer",
+        clearCount: 1,
+        textInjectionCount: 1,
+        enterCount: 1
+      });
+      assert.deepEqual(
+        provider.operations.flatMap((operation) =>
+          operation.kind === "capture"
+            ? []
+            : operation.kind === "text"
+              ? [operation.text === CLAUDE_DRAFT_REPLACEMENT_SENTINEL
+                ? "sentinel"
+                : "text"]
+              : [`keys:${operation.keys.join(",")}`]
+        ),
+        ["sentinel", "keys:C-s", "text", "keys:C-m"]
+      );
+      assert.equal(
+        provider.operations.filter((operation) => operation.kind === "capture")
+          .length,
+        3,
+        "two pre-mutation scans plus the stash-clear proof are allowed"
+      );
+    });
+  }
+
+  await t.test("working Claude uses a cursor-independent native stash clear", async () => {
+    let nowMs = 0;
+    class SettlingStashProvider extends RecordingTerminalProvider {
+      override async sendKeys(
+        terminal: TerminalEndpointRef | string,
+        keys: readonly string[],
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendKeys(terminal, keys, options);
+        if (keys.includes("C-s")) this.setScreen(terminal, idleFrame(""));
+      }
+    }
+    const provider = new SettlingStashProvider([PANE], {
+      [PANE.target]: [
+        "❯ an existing request",
+        "✻ Working… (8s · thinking)",
+        "────────────────────────────────────────────────",
+        "❯ an older queued draft",
+        "────────────────────────────────────────────────",
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents"
+      ].join("\n")
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([adapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await bridge.sendUserExplicit(
+      "claude",
+      terminalControl(adapter),
+      request,
+      { beforeMutationReservation() {} }
+    );
+    const keyOperations = provider.operations.filter(
+      (operation) => operation.kind === "keys"
+    );
+    assert.equal(keyOperations.length, 2);
+    assert.deepEqual(
+      keyOperations[0]?.kind === "keys" ? keyOperations[0].keys : [],
+      ["C-s"]
+    );
+    assert.deepEqual(
+      keyOperations[1]?.kind === "keys" ? keyOperations[1].keys : [],
+      ["C-m"]
+    );
+    assert.deepEqual(
+      provider.operations.filter((operation) => operation.kind === "text")
+        .map((operation) => operation.kind === "text" ? operation.text : ""),
+      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, request]
+    );
+  });
+
+  await t.test("a proven unsent stash sentinel remains retry-safe", async () => {
+    class SentinelNotSentProvider extends RecordingTerminalProvider {
+      override async sendText(
+        _terminal: TerminalEndpointRef | string,
+        text: string
+      ): Promise<void> {
+        assert.equal(text, CLAUDE_DRAFT_REPLACEMENT_SENTINEL);
+        throw new TerminalControlInputNotSentError("sentinel was not delivered");
+      }
+    }
+    const provider = new SentinelNotSentProvider([PANE], {
+      [PANE.target]: "Claude Composer is outside the captured viewport"
+    });
+    const bridge = createBridge(adapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalInputNotStartedError
+    );
+    assert.equal(
+      provider.operations.some((operation) => operation.kind !== "capture"),
+      false
+    );
+  });
+
+  await t.test("a failed stash key after its sentinel is uncertain", async () => {
+    class StashNotSentProvider extends RecordingTerminalProvider {
+      override async sendKeys(
+        terminal: TerminalEndpointRef | string,
+        keys: readonly string[],
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendKeys(terminal, keys, options);
+        if (keys.includes("C-s")) {
+          throw new TerminalControlInputNotSentError("stash key was not delivered");
+        }
+      }
+    }
+    const provider = new StashNotSentProvider([PANE], {
+      [PANE.target]: "Claude Composer is outside the captured viewport"
+    });
+    const bridge = createBridge(adapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalUserExplicitClearUncertainError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? [operation.text]
+            : [operation.keys.join(",")]
+      ),
+      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, "C-s"]
+    );
+  });
+
+  await t.test("foreground editor drift after the sentinel never receives the stash key", async () => {
+    class PreClearOwnerDriftProvider extends RecordingTerminalProvider {
+      private sentinelInjected = false;
+      override async resolve(
+        terminal: TerminalEndpointRef
+      ): Promise<TerminalEndpointRef> {
+        const resolved = await super.resolve(terminal);
+        return this.sentinelInjected
+          ? {
+              ...resolved,
+              route: { ...resolved.route, currentCommand: "nvim task.md" },
+              providerRef: {
+                ...(resolved.providerRef as Record<string, unknown>),
+                currentCommand: "nvim task.md"
+              }
+            }
+          : resolved;
+      }
+      override async sendText(
+        terminal: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendText(terminal, text, options);
+        if (text === CLAUDE_DRAFT_REPLACEMENT_SENTINEL) {
+          this.sentinelInjected = true;
+        }
+      }
+    }
+    const provider = new PreClearOwnerDriftProvider([PANE], {
+      [PANE.target]: idleFrame("an older unrelated draft")
+    });
+    await assert.rejects(
+      createBridge(adapter, provider).sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalUserExplicitClearUncertainError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? [operation.text]
+            : [operation.keys.join(",")]
+      ),
+      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL]
+    );
+  });
+
+  await t.test("an unconsumed stash key never injects the request", async () => {
+    const provider = new RecordingTerminalProvider([PANE], {
+      [PANE.target]: idleFrame("an older unrelated draft")
+    });
+    const bridge = createBridge(adapter, provider);
+    await assert.rejects(
+      bridge.sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalUserExplicitClearUncertainError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? [operation.text]
+            : [operation.keys.join(",")]
+      ),
+      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, "C-s"]
+    );
+  });
+
+  await t.test("foreground editor drift after clear never injects the request", async () => {
+    class PostClearOwnerDriftProvider extends RecordingTerminalProvider {
+      private afterClear = false;
+      private postClearResolutions = 0;
+      override async resolve(
+        terminal: TerminalEndpointRef
+      ): Promise<TerminalEndpointRef> {
+        const resolved = await super.resolve(terminal);
+        if (!this.afterClear) return resolved;
+        this.postClearResolutions += 1;
+        return this.postClearResolutions < 3
+          ? resolved
+          : {
+              ...resolved,
+              route: { ...resolved.route, currentCommand: "nvim task.md" },
+              providerRef: {
+                ...(resolved.providerRef as Record<string, unknown>),
+                currentCommand: "nvim task.md"
+              }
+            };
+      }
+      override async sendKeys(
+        terminal: TerminalEndpointRef | string,
+        keys: readonly string[],
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendKeys(terminal, keys, options);
+        if (keys.includes("C-s")) {
+          this.afterClear = true;
+          this.setScreen(terminal, idleFrame(""));
+        }
+      }
+    }
+    const provider = new PostClearOwnerDriftProvider([PANE], {
+      [PANE.target]: idleFrame("an older unrelated draft")
+    });
+    await assert.rejects(
+      createBridge(adapter, provider).sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalUserExplicitClearUncertainError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? [operation.text]
+            : [operation.keys.join(",")]
+      ),
+      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, "C-s"]
+    );
+  });
+});
+
+test("explicit Claude Send keeps input-owning surfaces as zero-input boundaries", async () => {
+  const adapter = createTestClaudeAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "approval:npm test"
+  });
+  const bridge = createBridge(adapter, provider);
+
+  await assert.rejects(
+    bridge.sendUserExplicit(
+      "claude",
+      terminalControl(adapter),
+      "new explicit request",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind !== "capture"),
+    false
+  );
+
+  const editorPane = { ...PANE, currentCommand: "nvim /tmp/claude-edit.md" };
+  const editorProvider = new RecordingTerminalProvider([editorPane], {
+    [editorPane.target]: "~  NORMAL  claude-edit.md"
+  });
+  const editorBridge = createBridge(adapter, editorProvider);
+  await assert.rejects(
+    editorBridge.sendUserExplicit(
+      "claude",
+      { ...terminalControl(adapter), currentCommand: editorPane.currentCommand },
+      "do not write this request into the external editor",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    editorProvider.operations.some((operation) =>
+      operation.kind !== "capture"
+    ),
+    false
+  );
+
+  class DriftingOwnerProvider extends RecordingTerminalProvider {
+    private resolutions = 0;
+    override async resolve(
+      terminal: TerminalEndpointRef
+    ): Promise<TerminalEndpointRef> {
+      const resolved = await super.resolve(terminal);
+      this.resolutions += 1;
+      return this.resolutions < 2
+        ? resolved
+        : {
+            ...resolved,
+            route: { ...resolved.route, currentCommand: "nvim task.md" },
+            providerRef: {
+              ...(resolved.providerRef as Record<string, unknown>),
+              currentCommand: "nvim task.md"
+            }
+          };
+    }
+  }
+  const driftingProvider = new DriftingOwnerProvider([PANE], {
+    [PANE.target]: [
+      "────────────────────────────────",
+      "❯ ",
+      "────────────────────────────────",
+      "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+    ].join("\n")
+  });
+  await assert.rejects(
+    createBridge(adapter, driftingProvider).sendUserExplicit(
+      "claude",
+      terminalControl(adapter),
+      "do not cross the foreground-owner race",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    driftingProvider.operations.some((operation) =>
+      operation.kind !== "capture"
+    ),
+    false
+  );
+
+  provider.operations.length = 0;
+  provider.setScreen(PANE.target, [
+    "old conversation output",
+    " ☐ Color",
+    "",
+    "Which color do you prefer?",
+    "",
+    "❯ 1. Red",
+    "     The color red",
+    "  2. Blue",
+    "     The color blue",
+    "  3. Type something.",
+    "────────────────────────────────",
+    "  4. Chat about this",
+    "",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel"
+  ].join("\n"));
+  await assert.rejects(
+    bridge.sendUserExplicit(
+      "claude",
+      terminalControl(adapter),
+      "do not overwrite the native questionnaire",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind !== "capture"),
+    false
+  );
+
+  provider.operations.length = 0;
+  provider.setScreen(PANE.target, [
+    "────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────",
+    "  search prompts:   ⏵⏵ auto mode on (shift+tab to cycle)"
+  ].join("\n"));
+  await assert.rejects(
+    bridge.sendUserExplicit(
+      "claude",
+      terminalControl(adapter),
+      "do not accept or append to a history-search result",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind !== "capture"),
+    false
+  );
 });
 
 test("explicit Codex Send keeps approval as a zero-input boundary", async (t) => {
@@ -779,6 +1299,90 @@ test("managed user Send recaptures exact empty immediately before text", async (
       terminalControl(codexTerminalAgentAdapter),
       request,
       {
+        requireExactEmptyComposerBeforeText: true,
+        requireExactComposerBeforeEnter: true,
+        userExplicitEnterAfterTextWithoutComposerVeto: true
+      }
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? ["text"]
+            : [`keys:${operation.keys.join(",")}`]
+      ),
+      ["text", "keys:C-m"]
+    );
+  });
+
+  await t.test("user-explicit managed Claude multiline never waits for a paste placeholder", async () => {
+    const adapter = createTestClaudeAdapter();
+    const multilineRequest = Array.from(
+      { length: 6 },
+      (_, index) => `line ${index + 1}: explicit managed Claude request`
+    ).join("\n");
+    let nowMs = 0;
+    let textInjected = false;
+    let injectedAt = 0;
+    class ManagedClaudeProvider extends RecordingTerminalProvider {
+      override async capture(
+        terminal: TerminalEndpointRef | string,
+        options: {
+          scrollbackLines?: number;
+          socketPath?: string;
+          preserveEscapes?: boolean;
+        } = {}
+      ): Promise<string> {
+        if (textInjected) {
+          throw new Error("post-text Claude Composer capture must not run");
+        }
+        return super.capture(terminal, options);
+      }
+
+      override async sendText(
+        terminal: TerminalEndpointRef | string,
+        text: string,
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        textInjected = true;
+        injectedAt = nowMs;
+        await super.sendText(terminal, text, options);
+      }
+
+      override async sendKeys(
+        terminal: TerminalEndpointRef | string,
+        keys: readonly string[],
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        if (keys.includes("C-m")) {
+          assert.ok(nowMs - injectedAt >= 121);
+        }
+        await super.sendKeys(terminal, keys, options);
+      }
+    }
+    const provider = new ManagedClaudeProvider([PANE], {
+      [PANE.target]: [
+        "────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────",
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+      ].join("\n")
+    });
+    const bridge = new TerminalAgentBridge({
+      registry: createTerminalAgentAdapterRegistry([adapter]),
+      terminalProvider: provider,
+      nowMs: () => nowMs,
+      async sleep(milliseconds) {
+        nowMs += milliseconds;
+      }
+    });
+    await bridge.send(
+      "claude",
+      terminalControl(adapter),
+      multilineRequest,
+      {
+        runtime: MANAGED_CLAUDE_RUNTIME,
         requireExactEmptyComposerBeforeText: true,
         requireExactComposerBeforeEnter: true,
         userExplicitEnterAfterTextWithoutComposerVeto: true
@@ -1451,7 +2055,7 @@ test("explicit Codex Send classifies transport failures around its one-shot sequ
         request,
         { beforeMutationReservation() {} }
       ),
-      TerminalEnterDispatchReservedError
+      TerminalUserExplicitClearUncertainError
     );
     assert.equal(clearAttempts, 1);
     assert.equal(

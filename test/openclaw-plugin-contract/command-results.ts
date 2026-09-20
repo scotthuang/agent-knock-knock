@@ -905,6 +905,28 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
       scope: "terminal_user_explicit",
       management_mode: "managed"
     };
+    const clearUncertainResult = {
+      delivered: false,
+      status: "submission_uncertain",
+      submission_outcome: "uncertain",
+      delivery_receipt: "terminal_input_uncertain",
+      terminal_input_dispatched: true,
+      agent_acceptance: "unproven",
+      do_not_retry: true,
+      safe_to_retry: false,
+      terminal_id: terminalId,
+      message_id: "message-clear-uncertain",
+      scope: "terminal_user_explicit",
+      management_mode: "unmanaged",
+      observation_mode: "none",
+      capabilities: {
+        callback: false,
+        interaction_notify: false,
+        interaction_respond: false
+      },
+      stage: "composer_clear_uncertain",
+      error_code: "AKK_TERMINAL_USER_EXPLICIT_CLEAR_UNCERTAIN"
+    };
     fs.writeFileSync(
       fakeCli,
       [
@@ -913,6 +935,7 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
         `const fallback = ${JSON.stringify(fallbackResult)};`,
         `const managedReplay = ${JSON.stringify(managedReplayResult)};`,
         `const textOnly = ${JSON.stringify(textOnlyResult)};`,
+        `const clearUncertain = ${JSON.stringify(clearUncertainResult)};`,
         `const result = args[0] === "list" ? { terminals: [{`,
         `  id: terminalId, available_actions: { send: {`,
         `    tool: "agent_knock_knock_send", arguments: {`,
@@ -920,7 +943,8 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
         `    }`,
         `  } }`,
         `}] } : args.includes("pending-managed") ? managedReplay : ` +
-          `args.includes("text-only") ? textOnly : fallback;`,
+          `args.includes("text-only") ? textOnly : ` +
+          `args.includes("clear-uncertain") ? clearUncertain : fallback;`,
         "process.stdout.write(JSON.stringify(result));"
       ].join("\n"),
       "utf8"
@@ -1058,6 +1082,34 @@ test("OpenClaw reports user-priority unmanaged Send without inventing a Turn", a
     assert.equal(textOnlyTool?.details?.terminal_input_dispatched, true);
     assert.equal(textOnlyTool?.details?.agent_acceptance, "unproven");
     assert.equal(textOnlyTool?.details?.do_not_retry, true);
+
+    const clearUncertainCommand = await command?.handler?.({
+      args: "only: clear-uncertain",
+      sessionKey: "agent:test:user-priority-send"
+    });
+    assert.equal(clearUncertainCommand?.isError, true);
+    assert.match(
+      String(clearUncertainCommand?.text ?? ""),
+      /do not resend this message id/u
+    );
+
+    const clearUncertainTool = await sendTool?.execute?.(
+      "tool-clear-uncertain",
+      { terminal_id: terminalId, request: "clear-uncertain" }
+    );
+    assert.equal(clearUncertainTool?.isError, true);
+    assert.equal(clearUncertainTool?.details?.delivered, false);
+    assert.equal(
+      clearUncertainTool?.details?.delivery_receipt,
+      "terminal_input_uncertain"
+    );
+    assert.equal(clearUncertainTool?.details?.terminal_input_dispatched, true);
+    assert.equal(clearUncertainTool?.details?.safe_to_retry, false);
+    assert.equal(clearUncertainTool?.details?.do_not_retry, true);
+    assert.equal(
+      clearUncertainTool?.details?.stage,
+      "composer_clear_uncertain"
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

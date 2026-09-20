@@ -467,6 +467,13 @@ export function selectTerminalAvailableActions<Action>({
   terminalScopedApprovalAction?: Action;
   isAction?: (value: unknown) => value is Action;
 }): TerminalActionSet<Action> {
+  const {
+    // A selector-only raw Send is discovery metadata, not mutation authority.
+    // Never leave it callable for an unmanaged terminal when neither an
+    // authoritative managed action nor a current-snapshot user action exists.
+    send: _nonAuthoritativeSend,
+    ...safeNonOwnerRawActions
+  } = nonOwnerRawActions;
   const base = ownership === "current"
     ? currentActions
     : ownership === "conflict"
@@ -478,7 +485,7 @@ export function selectTerminalAvailableActions<Action>({
             : {})
         }
       : {
-          ...nonOwnerRawActions,
+          ...safeNonOwnerRawActions,
           ...(authoritativeSendAction ? { send: authoritativeSendAction } : {})
         };
   const userSendFirst = terminalUserExplicitSendAction

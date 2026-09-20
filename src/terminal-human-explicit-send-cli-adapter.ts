@@ -36,7 +36,6 @@ import type {
   TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
 import {
-  isExactClaudeNativeInspectionIdleComposer,
   TerminalInputNotStartedError,
   type TerminalAgentBridge
 } from "./terminal-agent-bridge.js";
@@ -1109,50 +1108,25 @@ async function runUserExplicitTerminalFallback(
           }
         );
         assertSafeUserExplicitTerminalSend(currentStatus);
-        if (
-          fresh.agent !== "codex" &&
-          !isExactClaudeNativeInspectionIdleComposer(
-            currentStatus.screen.excerpt ?? ""
-          )
-        ) {
-          throw new Error(
-            "the explicitly selected Claude composer is no longer empty"
-          );
-        }
       };
-      if (fresh.agent === "codex") {
-        const result = await bridge.sendUserExplicitCodex(
-          fresh.terminalControl,
-          payload,
-          {
-            runtime,
-            beforeMutationReservation: ({ terminalControl }) =>
-              revalidatePhysicalMutation(terminalControl),
-            onComposerClearDispatched: () => {
-              runtimeLog("info", "terminal_user_explicit_composer_cleared", {
-                terminal_id: fresh.conversationId,
-                terminal_target: fresh.terminalControl.target,
-                message_id: messageId
-              });
-            }
+      const result = await bridge.sendUserExplicit(
+        fresh.agent,
+        fresh.terminalControl,
+        payload,
+        {
+          runtime,
+          beforeMutationReservation: ({ terminalControl }) =>
+            revalidatePhysicalMutation(terminalControl),
+          onComposerClearDispatched: () => {
+            runtimeLog("info", "terminal_user_explicit_composer_cleared", {
+              terminal_id: fresh.conversationId,
+              terminal_target: fresh.terminalControl.target,
+              message_id: messageId
+            });
           }
-        );
-        composerDisposition = result.disposition;
-      } else {
-        await bridge.send(
-          fresh.agent,
-          fresh.terminalControl,
-          payload,
-          {
-            runtime,
-            requireExactComposerBeforeEnter: true,
-            requireExactEmptyComposerBeforeText: true,
-            allowWorkingComposerForUserExplicit: true,
-            beforeText: ({ terminalControl }) =>
-              revalidatePhysicalMutation(terminalControl)
-          }
-        );
-      }
+        }
+      );
+      composerDisposition = result.disposition;
       completeUserExplicitSendIntentWhileLocked(intentLease, "unmanaged");
       releaseTerminalLockOnce();
     } catch (error) {
@@ -1183,7 +1157,38 @@ async function runUserExplicitTerminalFallback(
         intent_warnings: intentWarnings
         }
       );
-      throw error;
+      if (zeroInput) throw error;
+      const errorRecord = isRecord(error) ? error : {};
+      const reason = textSummary(
+        error instanceof Error ? error.message : String(error)
+      );
+      printJson({
+        delivered: false,
+        status: "submission_uncertain",
+        submission_outcome: "uncertain",
+        delivery_receipt: "terminal_input_uncertain",
+        terminal_id: fresh.conversationId,
+        message_id: messageId,
+        scope: "terminal_user_explicit",
+        ...terminalSendResultContract({
+          terminalInputDispatched: true,
+          agentAcceptance: "unproven",
+          managementMode: "unmanaged",
+          observationMode: "none",
+          callbackAvailable: false
+        }),
+        safe_to_retry: false,
+        do_not_retry: true,
+        mutation_started: true,
+        error_code: stringValue(errorRecord.code),
+        stage: stringValue(errorRecord.stage) ?? "terminal_input_uncertain",
+        reason,
+        note:
+          "AKK may have changed the selected terminal while replacing its Composer, but did not prove request submission. Do not retry automatically; inspect the exact shared pane first.",
+        next_action:
+          "inspect the exact shared pane and explicitly resolve the uncertain Send before issuing another request"
+      });
+      return;
     }
     let callbackReceipt: UserExplicitFallbackWatchReceipt | undefined;
     if (preparedCallbackWatch) {

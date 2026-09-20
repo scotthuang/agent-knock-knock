@@ -993,16 +993,20 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
     "runRawTerminalSend"
   );
   assertOrdered(fallback, [
-    "bridge.sendUserExplicitCodex(",
+    "bridge.sendUserExplicit(",
+    "fresh.agent,",
     "beforeMutationReservation:",
     "composerDisposition = result.disposition",
-    "requireExactEmptyComposerBeforeText: true",
-    "allowWorkingComposerForUserExplicit: true",
     "const zeroInput = error instanceof TerminalInputNotStartedError",
     "cancelProvenZeroInputUserExplicitSendIntent(",
     'composer_disposition: composerDisposition',
     "composer_cleared_before_send: true"
   ]);
+  assert.doesNotMatch(
+    fallback,
+    /isExactClaudeNativeInspectionIdleComposer|requireExactEmptyComposerBeforeText/u,
+    "human-explicit Claude Send must replace instead of exact-empty gating"
+  );
   assert.doesNotMatch(
     fallback.match(/const zeroInput[\s\S]*?if \(zeroInput\)/u)?.[0] ?? "",
     /TerminalEnterDispatchNotAttemptedError/u,
@@ -1016,7 +1020,7 @@ test("user-explicit fallback cancels only bridge-proven pre-mutation failure", (
   );
   assertOrdered(managedPreflight, [
     "options.expectedUserExplicitTerminalToken",
-    "needsPostSendNativeBinding || userExplicitManagedCodexAttempt",
+    "needsPostSendNativeBinding || userExplicitManagedAttempt",
     "assertCodexComposerReadyForAutomatedInput({"
   ]);
   const managedTransport = compiledModuleFunctionSource(

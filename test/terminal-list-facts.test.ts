@@ -204,7 +204,8 @@ test("per-terminal facts sample every observation once and reuse model capabilit
         assert.equal(state, effectiveState);
         return {
           automatedInputComposerReady: true,
-          userExplicitComposerReady: true
+          userExplicitComposerReady: true,
+          inputOwnerBlocked: false
         };
       },
       observePhysicalProcessIncarnation: () => {
@@ -296,7 +297,8 @@ test("facts preserve an ordinary effective state when no model surface is observ
       observeTerminalHasBlockingTurn: () => false,
       observeComposer: async () => ({
         automatedInputComposerReady: true,
-        userExplicitComposerReady: true
+        userExplicitComposerReady: true,
+        inputOwnerBlocked: false
       }),
       observePhysicalProcessIncarnation: () => ({
         processUuid: "process-pid:404:birth:birth-404",

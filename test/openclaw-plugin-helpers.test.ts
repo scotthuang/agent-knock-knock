@@ -137,7 +137,7 @@ test("compact Host List keeps every terminal and moves static prose to the skill
   });
   const projected = compactAkkListModelProjection({
     action_contracts: {
-      version: 28,
+      version: 29,
       instructions: [longText],
       field_semantics: { reason: longText },
       actions: { send: { use: longText } }
@@ -166,7 +166,7 @@ test("compact Host List keeps every terminal and moves static prose to the skill
     schema: "agent-knock-knock/host-list-compact",
     version: 1,
     skill: "agent-knock-knock",
-    action_contract_version: 28
+    action_contract_version: 29
   });
   assert.equal(Object.hasOwn(projected, "action_contracts"), false);
   const compactTerminals = projected.terminals as Record<string, unknown>[];

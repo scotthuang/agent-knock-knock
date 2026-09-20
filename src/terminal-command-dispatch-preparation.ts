@@ -317,12 +317,12 @@ export async function prepareTerminalControlSend(
     assertTerminalPreSendStatus({ request, status }, {
       assertSafeTerminalSend: ports.assertSafeTerminalSend
     });
-    const userExplicitManagedCodexAttempt = Boolean(
+    const userExplicitManagedAttempt = Boolean(
       nonBlankString(options.expectedUserExplicitTerminalToken)
     );
     if (
       executor.kind === "claude" &&
-      userExplicitManagedCodexAttempt &&
+      userExplicitManagedAttempt &&
       !isExactClaudeNativeInspectionIdleComposer(
         status.screen.excerpt ?? ""
       )
@@ -333,7 +333,7 @@ export async function prepareTerminalControlSend(
     }
     if (
       executor.kind === "codex" &&
-      (needsPostSendNativeBinding || userExplicitManagedCodexAttempt)
+      (needsPostSendNativeBinding || userExplicitManagedAttempt)
     ) {
       if (
         needsPostSendNativeBinding &&

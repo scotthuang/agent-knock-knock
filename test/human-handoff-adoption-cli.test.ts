@@ -41,6 +41,8 @@ import {
   type TerminalControlRef
 } from "../src/terminal-agent-adapter.js";
 import { TerminalAgentBridge } from "../src/terminal-agent-bridge.js";
+import { CLAUDE_DRAFT_REPLACEMENT_SENTINEL } from
+  "../src/terminal-user-explicit-send-clear.js";
 import {
   captureCodexRolloutAcceptanceAnchor,
   detectCodexRolloutAcceptance
@@ -116,6 +118,10 @@ function assertTerminalUserExplicitSendAction(
   const action = terminal.available_actions?.send;
   assert.ok(action, JSON.stringify(terminal, null, 2));
   assert.equal(action.scope, "terminal_user_explicit");
+  assert.equal(
+    action.composer_policy,
+    "replace_current_composer_and_submit"
+  );
   assert.equal(action.arguments?.selector, terminal.id);
   assert.equal(typeof action.arguments?.expected_terminal_token, "string");
   return action;
@@ -269,7 +275,109 @@ test("a no-token exact terminal-scoped Claude send freshly adopts an unknown hum
   }
 });
 
-test("Herdr Claude handoff uses the exact listed token and only one task input plus Enter", async () => {
+test("an explicit Claude Send replaces a nonempty draft and submits once", async () => {
+  const fixture = createHandoffFixture({ agent: "claude" });
+  const request = "Replace the old Claude draft with this explicit request.";
+  try {
+    fixture.persistSession({
+      sessionId: "session-claude-nonempty-draft-source",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    fixture.setComposerText("Preserve this only until the user explicitly sends.");
+
+    const listed = await fixture.listTerminal();
+    assert.equal(listed.handoff_state, "external_handoff_blocked");
+    const action = assertTerminalUserExplicitSendAction(listed);
+    const expectedTerminalToken = String(
+      action.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken);
+
+    const sent = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken
+    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, true, fixture.debug(sent));
+    assert.equal(output.delivered_unmanaged, true, fixture.debug(sent));
+    assert.equal(output.management_mode, "unmanaged");
+    assert.equal(output.composer_disposition, "replaced_current_composer");
+    assert.equal(output.composer_cleared_before_send, true);
+    assert.deepEqual(fixture.literalInputs(), [
+      CLAUDE_DRAFT_REPLACEMENT_SENTINEL,
+      request
+    ]);
+    assert.deepEqual(fixture.keyDispatches(), [["C-s"], ["C-m"]]);
+    assert.equal(fixture.enterCount(), 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("an uncertain Claude stash-clear returns structured do-not-retry evidence", async () => {
+  const fixture = createHandoffFixture({ agent: "claude" });
+  const request = "Do not replay this request after an uncertain draft clear.";
+  const messageId = "message-claude-clear-uncertain";
+  try {
+    fixture.persistSession({
+      sessionId: "session-claude-clear-uncertain-source",
+      nativeThreadId: NATIVE_A,
+      status: "bound",
+      generation: 1
+    });
+    fixture.setComposerText("A prior draft that must not be mixed in.");
+    fixture.setClaudeClearUncertain(true);
+    const listed = await fixture.listTerminal();
+    const action = assertTerminalUserExplicitSendAction(listed);
+    const expectedTerminalToken = String(
+      action.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(expectedTerminalToken);
+
+    const sent = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken,
+      messageId
+    );
+    assert.equal(sent.status, 0, fixture.debug(sent));
+    const output = JSON.parse(sent.stdout);
+    assert.equal(output.delivered, false);
+    assert.equal(output.status, "submission_uncertain");
+    assert.equal(output.submission_outcome, "uncertain");
+    assert.equal(output.delivery_receipt, "terminal_input_uncertain");
+    assert.equal(output.terminal_input_dispatched, true);
+    assert.equal(output.safe_to_retry, false);
+    assert.equal(output.do_not_retry, true);
+    assert.equal(output.stage, "composer_clear_uncertain");
+    assert.equal(output.message_id, messageId);
+    assert.deepEqual(fixture.literalInputs(), [
+      CLAUDE_DRAFT_REPLACEMENT_SENTINEL
+    ]);
+    assert.deepEqual(fixture.keyDispatches(), [["C-s"]]);
+
+    const inputsBeforeReplay = fixture.literalInputs().length;
+    const keysBeforeReplay = fixture.keyDispatches().length;
+    const replay = await fixture.sendToTerminal(
+      request,
+      {},
+      expectedTerminalToken,
+      messageId
+    );
+    assert.equal(replay.status, 1, fixture.debug(replay));
+    assert.match(replay.stderr, /uncertain|must be resolved/iu);
+    assert.equal(fixture.literalInputs().length, inputsBeforeReplay);
+    assert.equal(fixture.keyDispatches().length, keysBeforeReplay);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("Herdr Claude explicit Send replaces a draft while exact-empty handoff preserves input", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-human-herdr-claude-"));
   const storeDir = path.join(root, "store");
   const runtimeDir = path.join(root, "runtime");
@@ -402,6 +510,12 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
             screen = claudeComposerScreen(pendingText);
           } else if (
             Array.isArray(wireRequest.params.keys) &&
+            wireRequest.params.keys.includes("ctrl+s")
+          ) {
+            pendingText = "";
+            screen = claudeComposerScreen();
+          } else if (
+            Array.isArray(wireRequest.params.keys) &&
             wireRequest.params.keys.includes("enter")
           ) {
             pendingText = "";
@@ -506,7 +620,11 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
       claudeHome
     ];
 
-    screen = claudeComposerScreen("Preserve this human-authored draft.");
+    const oldDraft = "Preserve this human-authored draft.";
+    const replacementRequest =
+      "Replace the human-authored draft with this explicit request.";
+    pendingText = oldDraft;
+    screen = claudeComposerScreen(oldDraft);
     const draftListedResult = await runInProcessCli(
       ["list", ...storeArgs],
       dependencies
@@ -517,12 +635,13 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
     );
     assert.ok(draftListed, draftListedResult.stdout);
     assert.equal(draftListed.handoff_state, "external_handoff_blocked");
-    assert.equal(draftListed.available_actions?.send, undefined);
+    assertTerminalUserExplicitSendAction(draftListed);
     assert.match(
       String(draftListed.handoff_blocked_reason),
       /composer is not an exact empty idle frame/iu
     );
 
+    pendingText = "";
     screen = ["Ready", "❯\u00a0"].join("\n");
     const unframedListedResult = await runInProcessCli(
       ["list", ...storeArgs],
@@ -537,7 +656,7 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
     assert.ok(unframedListed, unframedListedResult.stdout);
     assert.equal(unframedListed.activity_state, "idle");
     assert.equal(unframedListed.handoff_state, "external_handoff_blocked");
-    assert.equal(unframedListed.available_actions?.send, undefined);
+    assertTerminalUserExplicitSendAction(unframedListed);
 
     screen = claudeHerdrClearedComposerScreen();
     const listedResult = await runInProcessCli(
@@ -617,11 +736,80 @@ test("Herdr Claude handoff uses the exact listed token and only one task input p
       inputs.some((entry) =>
         Array.isArray(entry.request.params.keys) &&
         entry.request.params.keys.some((key) =>
-          ["Escape", "escape", "C-u"].includes(String(key))
+          [
+            "Escape", "escape", "C-u", "C-c", "C-s",
+            "ctrl+u", "ctrl+c", "ctrl+s"
+          ].includes(String(key))
         )
       ),
       false,
       "handoff must preserve human input instead of clearing the composer"
+    );
+
+    pendingText = oldDraft;
+    screen = claudeComposerScreen(oldDraft);
+    const replacementListedResult = await runInProcessCli(
+      ["list", ...storeArgs],
+      dependencies
+    );
+    assert.equal(
+      replacementListedResult.status,
+      0,
+      replacementListedResult.stderr
+    );
+    const replacementListed = JSON.parse(
+      replacementListedResult.stdout
+    ).terminals?.find(
+      (entry: Record<string, unknown>) => entry.id === terminalId
+    );
+    assert.ok(replacementListed, replacementListedResult.stdout);
+    const replacementAction = assertTerminalUserExplicitSendAction(
+      replacementListed
+    );
+    const replacementTerminalToken = String(
+      replacementAction.arguments?.expected_terminal_token ?? ""
+    );
+    assert.ok(replacementTerminalToken);
+
+    wireRequests.length = 0;
+    const replacedDraft = await runInProcessCli([
+      "send",
+      "--conversation",
+      terminalId,
+      "--message",
+      replacementRequest,
+      "--expected-terminal-token",
+      replacementTerminalToken,
+      "--background",
+      ...storeArgs,
+      "--openclaw-bin",
+      "/usr/bin/true",
+      "--disable-terminal-bridge-monitor"
+    ], dependencies);
+    assert.equal(
+      replacedDraft.status,
+      0,
+      replacedDraft.stderr || replacedDraft.stdout
+    );
+    const replacementOutput = JSON.parse(replacedDraft.stdout);
+    assert.equal(replacementOutput.delivered, true);
+    assert.equal(replacementOutput.delivered_unmanaged, true);
+    assert.equal(replacementOutput.management_mode, "unmanaged");
+    assert.equal(
+      replacementOutput.composer_disposition,
+      "replaced_current_composer"
+    );
+    assert.equal(replacementOutput.composer_cleared_before_send, true);
+    assert.deepEqual(
+      wireRequests.filter((entry) =>
+        entry.request.method === "pane.send_input"
+      ).map((entry) => entry.request.params),
+      [
+        { pane_id: paneId, text: CLAUDE_DRAFT_REPLACEMENT_SENTINEL },
+        { pane_id: paneId, keys: ["ctrl+s"] },
+        { pane_id: paneId, text: replacementRequest },
+        { pane_id: paneId, keys: ["enter"] }
+      ]
     );
     assert.deepEqual(
       [...new Set(processBirthProbePids)],
@@ -958,7 +1146,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     );
     assert.equal(
       fixture.keyDispatches().flat().some((key) =>
-        key === "C-c" || key === "Escape"
+        key === "C-c" || key === "C-s" || key === "Escape"
       ),
       false
     );
@@ -984,7 +1172,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     assert.equal(fixture.enterCount(), 1);
     assert.equal(
       fixture.keyDispatches().flat().some((key) =>
-        key === "C-c" || key === "Escape"
+        key === "C-c" || key === "C-s" || key === "Escape"
       ),
       false
     );
@@ -2924,6 +3112,8 @@ interface HandoffFixture {
   setAgentProcessAbsent(): void;
   setAgentProcessIntegrityDrift(): void;
   setProcessProbeFailure(error: Error | undefined): void;
+  setComposerText(text: string): void;
+  setClaudeClearUncertain(value: boolean): void;
   literalInputs(): string[];
   keyDispatches(): string[][];
   enterCount(): number;
@@ -3093,6 +3283,7 @@ function createHandoffFixture({
   let statusProbeCount = 0;
   let driftTriggered = false;
   let operationIndexAtDrift: number | undefined;
+  let claudeClearUncertain = false;
   const codexStatusScreen = (nativeThreadId: string, marker: string) =>
     `/status\n╭────────────────────────────────────────────╮\n` +
     `│ OpenAI Codex (v${version})                 │\n` +
@@ -3162,9 +3353,16 @@ function createHandoffFixture({
         }
       },
       sendKeys(operation, mutable) {
-        if (operation.keys.includes("C-u")) {
+        if (
+          operation.keys.includes("C-u") ||
+          (agent === "claude" && operation.keys.includes("C-s"))
+        ) {
+          if (agent === "claude" && claudeClearUncertain) return;
           pendingText = "";
-          mutable.setScreen(target, codexComposerScreen());
+          mutable.setScreen(
+            target,
+            agent === "codex" ? codexComposerScreen() : claudeComposerScreen()
+          );
           return;
         }
         if (operation.keys.includes("C-m")) {
@@ -3707,6 +3905,18 @@ function createHandoffFixture({
     },
     setProcessProbeFailure(error) {
       processProbeFailure = error;
+    },
+    setComposerText(text) {
+      pendingText = text;
+      provider.setScreen(
+        target,
+        agent === "codex"
+          ? codexComposerScreen(text)
+          : claudeComposerScreen(text)
+      );
+    },
+    setClaudeClearUncertain(value) {
+      claudeClearUncertain = value;
     },
     literalInputs: () => provider.literalInputs(),
     keyDispatches: () => provider.keyDispatches(),

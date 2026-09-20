@@ -883,9 +883,7 @@ function terminalDispatchTransportLifecycle({
     ? {
         ...guardedLifecycle,
         requireExactEmptyComposerBeforeText: true,
-        ...(request.executor.kind === "codex"
-          ? { userExplicitEnterAfterTextWithoutComposerVeto: true }
-          : {})
+        userExplicitEnterAfterTextWithoutComposerVeto: true
       }
     : guardedLifecycle;
 }
