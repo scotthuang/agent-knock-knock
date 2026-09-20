@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.7 - 2026-09-20
+
+### Added
+
+- Add exact Codex CLI `0.155.1` lifecycle, native `/status`, transition-settlement, blocking questionnaire, and typed model-control profiles based on the installed client and official tagged source.
+- Recognize the native user-verification surface as an input-owning, non-approvable prompt that requires direct user handling.
+
+### Fixed
+
+- Recognize Codex `0.155.1`'s exact styled `/model` completion surface without relying on the viewport-wide background paint used by `0.154.0`, so typed model discovery can open, parse, and safely dismiss the native picker.
+- Resolve the native model catalog from the exact running profiled Codex executable, while retaining complete `0.154.0` compatibility and rejecting adjacent unverified versions.
+
+### Security
+
+- Bind the new footerless model-control surface to the exact `0.155.1` profile and exact terminal styles. Plain transcript lookalikes, missing or displaced styles, unknown rows, active approvals or questionnaires, and terminal/process drift remain zero-input failures; any post-input uncertainty remains non-retryable.
+
 ## 0.13.6 - 2026-09-20
 
 ### Changed
