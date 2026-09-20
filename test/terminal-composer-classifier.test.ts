@@ -10,6 +10,7 @@ import {
   exactClaudeInjectedPastePlaceholderCapture,
   exactTerminalComposerCapture,
   inspectCodexAsyncQuestionInputMode,
+  terminalUserExplicitInputSafetyFailure,
   terminalUserExplicitInputOwnerBlocked,
   terminalComposerRowsMatchExpected
 } from "../src/terminal-composer-classifier.js";
@@ -231,4 +232,47 @@ test("user-explicit input-owner detection blocks proven UI owners, not drafts", 
     false
   );
   assert.equal(terminalUserExplicitInputOwnerBlocked(undefined), false);
+});
+
+test("Claude stash-clear proof accepts known footers and rejects unknown overlays", () => {
+  const control = {
+    kind: "tmux" as const,
+    target: "claude:0.0",
+    session: "claude",
+    window: 0,
+    pane: 0,
+    panePid: 100,
+    currentCommand: "claude",
+    currentPath: "/repo",
+    capabilities: ["screen_status" as const, "send_keys" as const]
+  };
+  const failure = (trailing: readonly string[]) =>
+    terminalUserExplicitInputSafetyFailure({
+      agent: "claude",
+      displayName: "Claude Code",
+      screen: [
+        "────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────",
+        ...trailing
+      ].join("\n"),
+      terminalControl: control,
+      approvalBlocked: false,
+      awaitingApproval: false,
+      interactionActive: false,
+      modelControlSurface: false,
+      requireExactEmptyClaudeComposer: true
+    });
+  assert.equal(failure([
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+    "  › stashed"
+  ]), undefined);
+  assert.equal(failure([
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to",
+    "  interrupt · ← for ag…"
+  ]), undefined);
+  assert.match(
+    failure(["  Unknown overlay still owns input"]) ?? "",
+    /did not prove/u
+  );
 });

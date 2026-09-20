@@ -41,10 +41,10 @@ void [
 ];
 
 const expectedTopLevelTestCount = 107;
-const expectedSubtestCount = 59;
+const expectedSubtestCount = 60;
 const expectedAssertionMinimum = 809;
 const expectedDeclarationNameSha256 =
-  "6e6d63a7c3b076b6c5e265f4ef650c46e16f2a91d1f607ceb641b059898da162";
+  "405ae1e808775a459db50024c2de3703ff16351d1c0bcade29a61d092dfdb396";
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../.."

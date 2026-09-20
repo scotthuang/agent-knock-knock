@@ -426,6 +426,63 @@ test("explicit Claude Send replaces empty and nonempty Composer drafts", async (
       [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, "C-s"]
     );
   });
+
+  await t.test("foreground editor drift after clear never injects the request", async () => {
+    class PostClearOwnerDriftProvider extends RecordingTerminalProvider {
+      private afterClear = false;
+      private postClearResolutions = 0;
+      override async resolve(
+        terminal: TerminalEndpointRef
+      ): Promise<TerminalEndpointRef> {
+        const resolved = await super.resolve(terminal);
+        if (!this.afterClear) return resolved;
+        this.postClearResolutions += 1;
+        return this.postClearResolutions < 3
+          ? resolved
+          : {
+              ...resolved,
+              route: { ...resolved.route, currentCommand: "nvim task.md" },
+              providerRef: {
+                ...(resolved.providerRef as Record<string, unknown>),
+                currentCommand: "nvim task.md"
+              }
+            };
+      }
+      override async sendKeys(
+        terminal: TerminalEndpointRef | string,
+        keys: readonly string[],
+        options: { socketPath?: string } = {}
+      ): Promise<void> {
+        await super.sendKeys(terminal, keys, options);
+        if (keys.includes("C-s")) {
+          this.afterClear = true;
+          this.setScreen(terminal, idleFrame(""));
+        }
+      }
+    }
+    const provider = new PostClearOwnerDriftProvider([PANE], {
+      [PANE.target]: idleFrame("an older unrelated draft")
+    });
+    await assert.rejects(
+      createBridge(adapter, provider).sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        { beforeMutationReservation() {} }
+      ),
+      TerminalUserExplicitClearUncertainError
+    );
+    assert.deepEqual(
+      provider.operations.flatMap((operation) =>
+        operation.kind === "capture"
+          ? []
+          : operation.kind === "text"
+            ? [operation.text]
+            : [operation.keys.join(",")]
+      ),
+      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, "C-s"]
+    );
+  });
 });
 
 test("explicit Claude Send keeps input-owning surfaces as zero-input boundaries", async () => {
@@ -465,6 +522,49 @@ test("explicit Claude Send keeps input-owning surfaces as zero-input boundaries"
   );
   assert.equal(
     editorProvider.operations.some((operation) =>
+      operation.kind !== "capture"
+    ),
+    false
+  );
+
+  class DriftingOwnerProvider extends RecordingTerminalProvider {
+    private resolutions = 0;
+    override async resolve(
+      terminal: TerminalEndpointRef
+    ): Promise<TerminalEndpointRef> {
+      const resolved = await super.resolve(terminal);
+      this.resolutions += 1;
+      return this.resolutions < 2
+        ? resolved
+        : {
+            ...resolved,
+            route: { ...resolved.route, currentCommand: "nvim task.md" },
+            providerRef: {
+              ...(resolved.providerRef as Record<string, unknown>),
+              currentCommand: "nvim task.md"
+            }
+          };
+    }
+  }
+  const driftingProvider = new DriftingOwnerProvider([PANE], {
+    [PANE.target]: [
+      "────────────────────────────────",
+      "❯ ",
+      "────────────────────────────────",
+      "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+    ].join("\n")
+  });
+  await assert.rejects(
+    createBridge(adapter, driftingProvider).sendUserExplicit(
+      "claude",
+      terminalControl(adapter),
+      "do not cross the foreground-owner race",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    driftingProvider.operations.some((operation) =>
       operation.kind !== "capture"
     ),
     false

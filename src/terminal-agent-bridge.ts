@@ -74,7 +74,7 @@ import {
   exactClaudeModelControlComposerCapture,
   exactTerminalComposerCapture,
   inspectCodexAsyncQuestionInputMode,
-  terminalUserExplicitInputSafetyFailure
+  terminalUserExplicitInputSafetyFailure, terminalUserExplicitTerminalInputOwnerBlocked
 } from "./terminal-composer-classifier.js";
 import {
   assertTerminalMutationCapabilities,
@@ -1193,15 +1193,15 @@ export class TerminalAgentBridge {
         });
         if (safetyFailure) throw new Error(safetyFailure);
         const verified = await this.verifyTerminalIdentity(
-          adapter.agent,
-          captured.terminalControl,
-          options.runtime
-        );
+          adapter.agent, captured.terminalControl, options.runtime);
         if (!sameTerminalControlIdentity(captured.terminalControl, verified)) {
           throw new Error(
             "terminal identity changed across the explicit Send approval scan"
           );
         }
+        if (terminalUserExplicitTerminalInputOwnerBlocked(verified)) throw new Error(
+          "terminal foreground changed to an editor or viewer during the explicit Send safety scan"
+        );
         return verified;
       } catch (error) {
         throw notStarted(error);
@@ -1256,18 +1256,19 @@ export class TerminalAgentBridge {
     let verifiedForText: TerminalControlRef;
     try {
       verifiedForText = await this.verifyTerminalIdentity(
-        adapter.agent,
-        clearedForText,
-        options.runtime
-      );
+        adapter.agent, clearedForText, options.runtime);
       if (!sameTerminalControlIdentity(clearedForText, verifiedForText)) {
         throw new Error("terminal identity changed after clearing the Composer");
       }
+      if (terminalUserExplicitTerminalInputOwnerBlocked(verifiedForText))
+        throw new TerminalUserExplicitClearUncertainError(
+          "terminal foreground changed to an editor or viewer after clearing the Composer");
       await this.terminalProvider.sendText(
         this.terminalProvider.endpoint(verifiedForText),
         normalized
       );
     } catch (error) {
+      if (error instanceof TerminalUserExplicitClearUncertainError) throw error;
       throw uncertain(
         `explicit ${adapter.displayName} replacement text outcome is uncertain after clearing the prior draft; do not retry automatically`,
         error

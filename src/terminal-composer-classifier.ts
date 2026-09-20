@@ -200,11 +200,32 @@ function terminalUserExplicitInputSafetyFailure(input: {
       stripTerminalEscapeSequences(input.screen)
     );
     if (!frame || frame.composerRows.length !== 1 ||
-        !/^\s*❯\s*$/u.test(frame.composerRows[0]!)) {
+        !/^\s*❯\s*$/u.test(frame.composerRows[0]!) ||
+        !claudeUserExplicitPostClearTrailingIsKnown(frame.trailing)) {
       return "Claude native stash action did not prove an empty main Composer";
     }
   }
   return undefined;
+}
+
+function claudeUserExplicitPostClearTrailingIsKnown(
+  lines: readonly string[]
+): boolean {
+  if (lines.length === 0) return true;
+  const auxiliary = (line: string) =>
+    /^\s*(?:Draft restored\s*·\s*)?› stashed\s*$/u.test(line) ||
+    /^\s*[●○◐◉]\s+(?:low|medium|high|xhigh|max|ultracode)\s*·\s*\/effort\s*$/iu
+      .test(line);
+  if (lines.every(auxiliary)) return true;
+  let auxiliaryStart = lines.length;
+  while (auxiliaryStart > 0 && auxiliary(lines[auxiliaryStart - 1]!)) {
+    auxiliaryStart -= 1;
+  }
+  const footerRows = lines.slice(0, auxiliaryStart);
+  if (footerRows.length === 0 || footerRows.length > 2) return false;
+  const footer = footerRows.map((line) => line.trim()).join(" ");
+  return /^\s*(?:[⏵⏴⏸]{1,2}|\?)\s+.*(?:manual mode|auto mode|accept edits|bypass permissions|for shortcuts).*(?:←\s+for\s+ag(?:ents|…)|\(shift\+tab\s+to\s+cycle\))(?:\s+(?:Draft restored\s*·\s*)?› stashed)?\s*$/iu
+    .test(footer);
 }
 
 function codexActiveWriterViewerVisible(styledScreen: string): boolean {
