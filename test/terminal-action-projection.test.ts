@@ -539,14 +539,27 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
       agent: "claude",
       userExplicitComposerReady: false
     }),
-    { eligible: false },
-    "Claude user-explicit Send remains exact-composer gated"
+    {
+      eligible: true,
+      terminalId,
+      expectedTerminalToken: unmanagedTerminalBindingToken({
+        terminalId,
+        terminalControl,
+        agent: "claude",
+        pid: 4_100,
+        workspace: terminalControl.currentPath ?? "",
+        processUuid: "process-pid:4100:birth:fixture-birth",
+        processBirth: "fixture-birth"
+      })
+    },
+    "Claude user-explicit Send must not depend on visible composer proof"
   );
   for (const unavailable of [
     { exactTerminalRow: false },
     { processState: "exited" },
     { approvalScanned: false },
     { approvalBlocked: true },
+    { interactionActive: true },
     { processBirth: undefined },
     {
       terminalControl: {

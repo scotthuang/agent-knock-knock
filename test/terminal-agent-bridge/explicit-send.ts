@@ -156,6 +156,151 @@ test("explicit Codex Send replaces even when the Composer is off-screen", async 
   }
 });
 
+test("explicit Claude Send replaces empty and nonempty Composer drafts", async (t) => {
+  const adapter = createTestClaudeAdapter();
+  const request = "the user's newest explicit Claude request";
+  const cases = [
+    { name: "empty composer", screen: "Claude idle prompt" },
+    { name: "same visible draft", screen: request },
+    { name: "different visible draft", screen: "an older unrelated draft" }
+  ] as const;
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      let nowMs = 0;
+      let mutationStarted = false;
+      class BlindReplacementProvider extends RecordingTerminalProvider {
+        override async capture(
+          terminal: TerminalEndpointRef | string,
+          options: {
+            scrollbackLines?: number;
+            socketPath?: string;
+            preserveEscapes?: boolean;
+          } = {}
+        ): Promise<string> {
+          if (mutationStarted) {
+            throw new Error("post-mutation Composer capture is forbidden");
+          }
+          return super.capture(terminal, options);
+        }
+
+        override async sendKeys(
+          terminal: TerminalEndpointRef | string,
+          keys: readonly string[],
+          options: { socketPath?: string } = {}
+        ): Promise<void> {
+          if (keys.includes("C-c")) {
+            mutationStarted = true;
+          }
+          await super.sendKeys(terminal, keys, options);
+        }
+      }
+      const provider = new BlindReplacementProvider([PANE], {
+        [PANE.target]: testCase.screen
+      });
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([adapter]),
+        terminalProvider: provider,
+        nowMs: () => nowMs,
+        async sleep(milliseconds) {
+          nowMs += milliseconds;
+        }
+      });
+      const reservations: Array<{ target: string; text: string }> = [];
+
+      const result = await bridge.sendUserExplicit(
+        "claude",
+        terminalControl(adapter),
+        request,
+        {
+          beforeMutationReservation: ({ terminalControl, text }) => {
+            reservations.push({ target: terminalControl.target, text });
+          }
+        }
+      );
+
+      assert.deepEqual(reservations, [{ target: PANE.target, text: request }]);
+      assert.deepEqual(result, {
+        stage: "enter_dispatched",
+        terminalControl: result.terminalControl,
+        disposition: "replaced_current_composer",
+        clearCount: 1,
+        textInjectionCount: 1,
+        enterCount: 1
+      });
+      assert.deepEqual(
+        provider.operations.flatMap((operation) =>
+          operation.kind === "capture"
+            ? []
+            : operation.kind === "text"
+              ? ["text"]
+              : [`keys:${operation.keys.join(",")}`]
+        ),
+        ["keys:C-c", "text", "keys:C-m"]
+      );
+      assert.equal(
+        provider.operations.filter((operation) => operation.kind === "capture")
+          .length,
+        2,
+        "only the two pre-mutation approval/identity scans are allowed"
+      );
+    });
+  }
+});
+
+test("explicit Claude Send keeps input-owning surfaces as zero-input boundaries", async () => {
+  const adapter = createTestClaudeAdapter();
+  const provider = new RecordingTerminalProvider([PANE], {
+    [PANE.target]: "approval:npm test"
+  });
+  const bridge = createBridge(adapter, provider);
+
+  await assert.rejects(
+    bridge.sendUserExplicit(
+      "claude",
+      terminalControl(adapter),
+      "new explicit request",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind !== "capture"),
+    false
+  );
+
+  provider.operations.length = 0;
+  provider.setScreen(PANE.target, [
+    "old conversation output",
+    " ☐ Color",
+    "",
+    "Which color do you prefer?",
+    "",
+    "❯ 1. Red",
+    "     The color red",
+    "  2. Blue",
+    "     The color blue",
+    "  3. Type something.",
+    "────────────────────────────────",
+    "  4. Chat about this",
+    "",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel"
+  ].join("\n"));
+  await assert.rejects(
+    bridge.sendUserExplicit(
+      "claude",
+      terminalControl(adapter),
+      "do not overwrite the native questionnaire",
+      { beforeMutationReservation() {} }
+    ),
+    TerminalInputNotStartedError
+  );
+  assert.equal(
+    provider.operations.some((operation) => operation.kind !== "capture"),
+    false
+  );
+});
+
 test("explicit Codex Send keeps approval as a zero-input boundary", async (t) => {
   await t.test("an existing approval blocks Send", async () => {
     let nowMs = 0;

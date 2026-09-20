@@ -240,6 +240,7 @@ test("interaction, blocking Turn, and orphan ownership fail closed by action", (
   });
   assert.equal(questionnaire.commands.watch, true);
   assert.equal(questionnaire.commands.native_inspect, true);
+  assert.equal(questionnaire.terminalUserExplicitSend.eligible, false);
   assert.equal(questionnaire.modelControl.availability, "unavailable");
 
   const blocking = decideTerminalListActions({
@@ -296,7 +297,7 @@ test("busy and approval states suppress input actions but retain user-priority S
   assert.equal(approval.modelControl.availability, "unavailable");
 });
 
-test("transport and Composer boundaries preserve agent-specific Send policy", () => {
+test("transport and Composer boundaries preserve user-explicit Send policy", () => {
   const noTransport = decideTerminalListActions({
     subject: subject({
       terminalControl: { ...control, capabilities: ["screen_status"] }
@@ -331,9 +332,14 @@ test("transport and Composer boundaries preserve agent-specific Send policy", ()
       agent: "claude",
       terminalControl: { ...control, currentCommand: "claude" }
     }),
-    facts: facts({ userExplicitComposerReady: false })
+    facts: facts({
+      automatedInputComposerReady: false,
+      userExplicitComposerReady: false
+    })
   });
-  assert.equal(claudeUnknownComposer.terminalUserExplicitSend.eligible, false);
+  assert.equal(claudeUnknownComposer.terminalUserExplicitSend.eligible, true);
+  assert.equal(claudeUnknownComposer.commands.native_inspect, false);
+  assert.equal(claudeUnknownComposer.commands.new_thread, false);
 });
 
 test("diagnostic sparkle idle never grants exact-empty input actions", () => {
@@ -418,4 +424,9 @@ test("residual policy distinguishes continuation from cleanup without authority"
     availability: "repair_only",
     terminalId: "terminal:v2:herdr:codex:default:w1:p4:42"
   });
+  assert.equal(
+    repair.terminalUserExplicitSend.eligible,
+    false,
+    "an open model picker owns input and must not advertise Send"
+  );
 });

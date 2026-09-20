@@ -1181,10 +1181,11 @@ async function terminalControlledListEntry(
       processBirth: physicalProcessIncarnation?.processBirth,
       approvalScanned: projectedTerminalState.approval_state.scanned === true,
       approvalBlocked: projectedTerminalState.approval_state.blocked === true,
-      // Codex user-explicit Send treats this observation as advisory: an
-      // off-screen or truncated composer must not hide the physical action.
-      // Claude Code still consumes the exact-composer result in the shared
-      // authority decision below.
+      interactionActive: facts.status.hasInteraction ||
+        (facts.modelControlResidual?.state === "recoverable" &&
+          facts.modelControlResidual.kind === "model_surface"),
+      // Human-explicit Send treats this observation as advisory: an off-screen,
+      // non-empty, or truncated composer must not hide the physical action.
       userExplicitComposerReady
       })
       : { eligible: false as const };
@@ -1199,12 +1200,7 @@ async function terminalControlledListEntry(
           },
           missing_required: ["request"],
           scope: "terminal_user_explicit",
-          ...(session.agent === "codex"
-            ? {
-                composer_policy:
-                  "replace_current_composer_and_submit"
-              }
-            : {})
+          composer_policy: "replace_current_composer_and_submit"
         }
       : undefined;
   const modelControlFacts = modelControlPolicyFacts({

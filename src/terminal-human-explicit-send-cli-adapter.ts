@@ -36,7 +36,6 @@ import type {
   TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
 import {
-  isExactClaudeNativeInspectionIdleComposer,
   TerminalInputNotStartedError,
   type TerminalAgentBridge
 } from "./terminal-agent-bridge.js";
@@ -1109,50 +1108,25 @@ async function runUserExplicitTerminalFallback(
           }
         );
         assertSafeUserExplicitTerminalSend(currentStatus);
-        if (
-          fresh.agent !== "codex" &&
-          !isExactClaudeNativeInspectionIdleComposer(
-            currentStatus.screen.excerpt ?? ""
-          )
-        ) {
-          throw new Error(
-            "the explicitly selected Claude composer is no longer empty"
-          );
-        }
       };
-      if (fresh.agent === "codex") {
-        const result = await bridge.sendUserExplicitCodex(
-          fresh.terminalControl,
-          payload,
-          {
-            runtime,
-            beforeMutationReservation: ({ terminalControl }) =>
-              revalidatePhysicalMutation(terminalControl),
-            onComposerClearDispatched: () => {
-              runtimeLog("info", "terminal_user_explicit_composer_cleared", {
-                terminal_id: fresh.conversationId,
-                terminal_target: fresh.terminalControl.target,
-                message_id: messageId
-              });
-            }
+      const result = await bridge.sendUserExplicit(
+        fresh.agent,
+        fresh.terminalControl,
+        payload,
+        {
+          runtime,
+          beforeMutationReservation: ({ terminalControl }) =>
+            revalidatePhysicalMutation(terminalControl),
+          onComposerClearDispatched: () => {
+            runtimeLog("info", "terminal_user_explicit_composer_cleared", {
+              terminal_id: fresh.conversationId,
+              terminal_target: fresh.terminalControl.target,
+              message_id: messageId
+            });
           }
-        );
-        composerDisposition = result.disposition;
-      } else {
-        await bridge.send(
-          fresh.agent,
-          fresh.terminalControl,
-          payload,
-          {
-            runtime,
-            requireExactComposerBeforeEnter: true,
-            requireExactEmptyComposerBeforeText: true,
-            allowWorkingComposerForUserExplicit: true,
-            beforeText: ({ terminalControl }) =>
-              revalidatePhysicalMutation(terminalControl)
-          }
-        );
-      }
+        }
+      );
+      composerDisposition = result.disposition;
       completeUserExplicitSendIntentWhileLocked(intentLease, "unmanaged");
       releaseTerminalLockOnce();
     } catch (error) {

@@ -175,7 +175,7 @@ The fast tier owns the deterministic Terminal Watch contract:
 | `test/durable-notification-kernel.test.ts` | Store-neutral callback/Watch lease, retry timing, exhaustion, and settlement authorization policy |
 | `test/terminal-submission-acceptance.test.ts`, `test/claude-local-transcript-provider.test.ts` | Preferred exact Codex rollout and Claude current-turn transcript anchors; source-less Codex candidate-set acceptance over anchored plus current roots, including closed-FD frozen-file scans and fail-closed replacement/deletion/multiple-acceptor evidence; drift invalidates an already exact-anchored Watch, while absence or structural incompatibility at manual-Watch creation can be downgraded to a warning and terminal-activity fallback |
 | `test/terminal-watch-cli-adapter.test.ts`, `test/terminal-watch-callback-cli-adapter.test.ts` | Exact-task capture when available; best-effort `terminal_activity` fallback after observed activity and consecutive stable-idle sweeps; `watch_mode`/`confidence`/warning projection; no Session/Turn ownership; exact-Watch same-controller Status and one-shot `respond_interaction({watch_id})`; managed-first responder arbitration; zero-input release versus uncertain dispatch; activity/manual notification-only behavior; hard failure only for an absent/unobservable exact terminal or unwritable Store; privacy-safe callbacks that never present stable idle as exact task completion; and restart-safe exact fallback anchors |
-| `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Broad read-only Watch discovery, direct user-explicit Watch by exact `terminal_id` even without advertisement, Watch status/unwatch routing and formatting, action-contract v28 semantic-ID-only projection including same-controller status-bound questionnaire response, exact Codex model-control residue repair, and explicit foreground identification, three-axis terminal status, Codex user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, automatic fallback Watch callback semantics, Claude empty-only isolation, and the documented terminal selection → exact-task-or-activity Watch workflow |
+| `test/terminal-agent-bridge.test.ts`, `test/terminal-list-action-policy.test.ts`, `test/terminal-action-projection.test.ts`, `test/terminal-list-renderer.test.ts`, `test/openclaw-plugin-helpers.test.ts`, `test/quickstart-docs.test.ts` | Broad read-only Watch discovery, direct user-explicit Watch by exact `terminal_id` even without advertisement, Watch status/unwatch routing and formatting, action-contract v28 semantic-ID-only projection including same-controller status-bound questionnaire response, exact Codex model-control residue repair, and explicit foreground identification, three-axis terminal status, Codex and Claude Code user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, automatic fallback Watch callback semantics, and the documented terminal selection → exact-task-or-activity Watch workflow |
 
 The current public surface has 22 OpenClaw tools. Terminal Watch adds the
 `watch-terminal`, `watch-status`, `unwatch-terminal`, and `reconcile-watches`
@@ -201,11 +201,14 @@ IDs/generations, composer digests, draft text, or handoff-only live-native-UUID
 fences. Questionnaire response uses a fresh same-controller Status projection,
 one opaque interaction ID, semantic answer IDs or bounded text, and a durable
 one-shot reservation; changed, manual-required, secret, or uncertain state stays
-fail-closed. Codex `terminal_user_explicit` proves one clear/inject/paste-wait/Enter
-sequence even when the Composer is invisible, truncated, unstable, or nonempty,
-with no post-text Composer veto. Claude user-explicit Send, native inspection,
-and lifecycle input remain exact-empty-only; managed delivery may require exact
-empty before input, but its user-explicit Codex Enter is not post-text gated.
+fail-closed. Codex and Claude Code `terminal_user_explicit` each prove one
+clear/inject/paste-wait/Enter sequence even when the Composer is invisible,
+truncated, unstable, or nonempty, with no post-text Composer veto. Codex uses
+`C-u`; Claude Code uses its native whole-draft clear. Native inspection and
+lifecycle input remain exact-empty-only; managed delivery may require exact
+empty before input, but either agent's user-explicit Enter is not post-text
+gated. Once clear or request input may have occurred, uncertainty forbids an
+automatic retry.
 The Send result contract independently proves physical dispatch, native
 acceptance, management mode, observation mode, and callback/interaction
 capabilities. Durable close audit facts come from dispatch receipts rather than

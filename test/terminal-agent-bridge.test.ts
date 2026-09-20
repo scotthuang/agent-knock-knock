@@ -40,11 +40,11 @@ void [
   nativeInspectionValidationContracts
 ];
 
-const expectedTopLevelTestCount = 105;
+const expectedTopLevelTestCount = 107;
 const expectedSubtestCount = 54;
-const expectedAssertionMinimum = 801;
+const expectedAssertionMinimum = 809;
 const expectedDeclarationNameSha256 =
-  "698d90b37a333a674719f30231d694240056be75c2af8c71a077630133928dd3";
+  "806a397eac9cfb4df2dbe72794f5defe6719dc08fd55588109d47fe4298ee69b";
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../.."

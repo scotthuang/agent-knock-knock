@@ -16,6 +16,7 @@ export interface TerminalUserExplicitSendFacts {
   readonly processBirth?: string;
   readonly approvalScanned: boolean;
   readonly approvalBlocked: boolean;
+  readonly interactionActive?: boolean;
   readonly userExplicitComposerReady: boolean;
 }
 
@@ -50,8 +51,8 @@ export function decideTerminalUserExplicitSendEligibility(
     !control.capabilities.includes("screen_status") ||
     !facts.approvalScanned ||
     facts.approvalBlocked ||
+    facts.interactionActive === true ||
     !facts.agent ||
-    (facts.agent !== "codex" && !facts.userExplicitComposerReady) ||
     !Number.isSafeInteger(facts.pid) ||
     Number(facts.pid) <= 1 ||
     !processUuid ||

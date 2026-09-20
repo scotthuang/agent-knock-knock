@@ -87,6 +87,9 @@ export function decideTerminalListActions(input: {
     processBirth: facts.physical.processIncarnation?.processBirth,
     approvalScanned: state.approval_state.scanned === true,
     approvalBlocked: state.approval_state.blocked === true,
+    interactionActive: facts.status.hasInteraction ||
+      (facts.modelControlResidual?.state === "recoverable" &&
+        facts.modelControlResidual.kind === "model_surface"),
     userExplicitComposerReady: facts.composer.userExplicitComposerReady
   };
   return Object.freeze({

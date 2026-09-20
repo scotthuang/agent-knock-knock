@@ -103,6 +103,7 @@ import {
   type TerminalSendOptions,
   type TerminalSendResult
 } from "./terminal-text-submission-bridge.js";
+import type * as UserExplicitSendContract from "./terminal-user-explicit-send-contract.js";
 
 export {
   TerminalEnterDispatchNotAttemptedError,
@@ -115,6 +116,7 @@ export {
   type TerminalTransportStage,
   type TerminalTransportStageEvent
 } from "./terminal-text-submission-bridge.js";
+export type * from "./terminal-user-explicit-send-contract.js";
 export {
   captureTerminalInteractionRuntimeOffer,
   TerminalInteractionDispatchReservedError,
@@ -325,36 +327,6 @@ export interface TerminalCodexDraftSubmissionOptions {
 export interface TerminalCodexDraftSubmissionResult {
   stage: "enter_dispatched";
   terminalControl: TerminalControlRef;
-  enterCount: 1;
-}
-
-export type TerminalCodexUserExplicitSendDisposition =
-  | "replaced_current_composer";
-
-export interface TerminalCodexUserExplicitSendReservationContext {
-  terminalControl: TerminalControlRef;
-  text: string;
-}
-
-export interface TerminalCodexUserExplicitSendOptions {
-  runtime?: TerminalRuntimeIdentity;
-  /** Revalidate caller authority before the first physical mutation. */
-  beforeMutationReservation: (
-    context: TerminalCodexUserExplicitSendReservationContext
-  ) => void | Promise<void>;
-  /** Called after the replace path has attempted its sole clear-line key. */
-  onComposerClearDispatched?: (
-    context: TerminalCodexUserExplicitSendReservationContext
-  ) => void | Promise<void>;
-  onTransportStage?: TerminalSendOptions["onTransportStage"];
-}
-
-export interface TerminalCodexUserExplicitSendResult {
-  stage: "enter_dispatched";
-  terminalControl: TerminalControlRef;
-  disposition: TerminalCodexUserExplicitSendDisposition;
-  clearCount: 1;
-  textInjectionCount: 1;
   enterCount: 1;
 }
 
@@ -1120,18 +1092,16 @@ export class TerminalAgentBridge {
   }
 
   /**
-   * Honor one explicit user Send against the current Codex terminal. The
-   * rendered Composer is not authority: clear the current draft once, inject
-   * the user's request, cross Codex's paste-suppression window, and press Enter
-   * once. Approval/modal and terminal identity remain hard pre-mutation gates.
-   * This primitive is intentionally not used by autonomous managed sends.
+   * Replace one selected agent's Composer for an explicit user Send. Approval,
+   * interaction, modal, and identity gates remain; autonomous sends never use it.
    */
-  async sendUserExplicitCodex(
+  async sendUserExplicit(
+    agent: ExecutorKind,
     terminalControl: TerminalControlRef,
     text: string,
-    options: TerminalCodexUserExplicitSendOptions
-  ): Promise<TerminalCodexUserExplicitSendResult> {
-    const adapter = this.registry.require("codex");
+    options: UserExplicitSendContract.TerminalUserExplicitSendOptions
+  ): Promise<UserExplicitSendContract.TerminalUserExplicitSendResult> {
+    const adapter = this.registry.require(agent);
     const normalized = text.trimEnd();
     const multiline = /[\r\n]/u.test(normalized);
     if (!normalized) {
@@ -1183,9 +1153,9 @@ export class TerminalAgentBridge {
             scrollbackLines: 0
           }
         );
-        const asyncQuestionInputMode = inspectCodexAsyncQuestionInputMode(
-          captured.screen
-        );
+        const asyncQuestionInputMode = adapter.agent === "codex"
+          ? inspectCodexAsyncQuestionInputMode(captured.screen)
+          : "absent";
         if (
           asyncQuestionInputMode === "expanded" ||
           asyncQuestionInputMode === "ambiguous"
@@ -1196,13 +1166,30 @@ export class TerminalAgentBridge {
               : "Codex shows an async-question surface but AKK cannot prove that the main prompt owns terminal input; return to a complete main prompt before retrying the explicit user Send"
           );
         }
+        const status = statusFromInspection(
+          adapter,
+          captured.terminalControl,
+          captured.inspection,
+          {
+            screen: captured.screen,
+            runtime: options.runtime,
+            now: this.now()
+          }
+        );
         if (
           captured.inspection.approval.blocked ||
           captured.inspection.activity.state === "awaiting_approval" ||
+          (adapter.agent === "claude" &&
+            status.interaction_state !== undefined) ||
+          exactCurrentModelControlSurface(
+            adapter.agent,
+            options.runtime?.agentVersion,
+            captured.screen
+          ) ||
           codexBlockingModalVisible(captured.screen)
         ) {
           throw new Error(
-            "the explicit user Send is blocked by a Codex approval or modal prompt"
+            `the explicit user Send is blocked by a ${adapter.displayName} approval, interaction, or modal prompt`
           );
         }
         const verified = await this.verifyTerminalIdentity(
@@ -1222,7 +1209,8 @@ export class TerminalAgentBridge {
     };
 
     const initiallySafe = await captureSafePrompt(terminalControl);
-    const reservationContext: TerminalCodexUserExplicitSendReservationContext = {
+    const reservationContext:
+      UserExplicitSendContract.TerminalUserExplicitSendReservationContext = {
       terminalControl: initiallySafe,
       text: normalized
     };
@@ -1243,13 +1231,16 @@ export class TerminalAgentBridge {
       throw notStarted(error);
     }
     try {
-      await this.terminalProvider.sendKeys(clearEndpoint, ["C-u"]);
+      await this.terminalProvider.sendKeys(
+        clearEndpoint,
+        [adapter.agent === "claude" ? "C-c" : "C-u"]
+      );
     } catch (error) {
       if (error instanceof TerminalControlInputNotSentError) {
         throw notStarted(error);
       }
       throw uncertain(
-        "explicit Codex draft-clear outcome is uncertain; do not retry automatically",
+        `explicit ${adapter.displayName} draft-clear outcome is uncertain; do not retry automatically`,
         error
       );
     }
@@ -1280,7 +1271,7 @@ export class TerminalAgentBridge {
       );
     } catch (error) {
       throw uncertain(
-        "explicit Codex replacement text outcome is uncertain after clearing the prior draft; do not retry automatically",
+        `explicit ${adapter.displayName} replacement text outcome is uncertain after clearing the prior draft; do not retry automatically`,
         error
       );
     }
@@ -1303,7 +1294,7 @@ export class TerminalAgentBridge {
       ));
     } catch (error) {
       throw uncertain(
-        "explicit Codex text was injected but its Enter outcome is unresolved; do not retry automatically",
+        `explicit ${adapter.displayName} text was injected but its Enter outcome is unresolved; do not retry automatically`,
         error
       );
     }
@@ -1320,7 +1311,7 @@ export class TerminalAgentBridge {
       }
     } catch (error) {
       throw uncertain(
-        "explicit Codex Enter endpoint is unresolved after terminal input; do not retry automatically",
+        `explicit ${adapter.displayName} Enter endpoint is unresolved after terminal input; do not retry automatically`,
         error
       );
     }
@@ -1332,7 +1323,7 @@ export class TerminalAgentBridge {
       );
     } catch (error) {
       throw uncertain(
-        "explicit Codex Send Enter outcome is uncertain; do not retry automatically",
+        `explicit ${adapter.displayName} Send Enter outcome is uncertain; do not retry automatically`,
         error
       );
     }
@@ -1352,7 +1343,7 @@ export class TerminalAgentBridge {
       }
     } catch (error) {
       throw uncertain(
-        "explicit Codex Send Enter was dispatched but its post-mutation acknowledgement failed; do not retry automatically",
+        `explicit ${adapter.displayName} Send Enter was dispatched but its post-mutation acknowledgement failed; do not retry automatically`,
         error
       );
     }
@@ -1365,6 +1356,15 @@ export class TerminalAgentBridge {
       textInjectionCount: 1,
       enterCount: 1
     };
+  }
+
+  /** Compatibility wrapper for callers that still name the Codex primitive. */
+  async sendUserExplicitCodex(
+    terminalControl: TerminalControlRef,
+    text: string,
+    options: UserExplicitSendContract.TerminalCodexUserExplicitSendOptions
+  ): Promise<UserExplicitSendContract.TerminalCodexUserExplicitSendResult> {
+    return this.sendUserExplicit("codex", terminalControl, text, options);
   }
 
   /**

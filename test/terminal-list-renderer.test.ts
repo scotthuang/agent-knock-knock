@@ -415,7 +415,7 @@ test("the public action contract v28 exposes semantic arguments only", () => {
   });
   assert.match(
     (contracts.instructions as string[]).join("\n"),
-    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*no Composer observation may veto Enter[\s\S]*Terminal Watch callback[\s\S]*no managed callback Turn[\s\S]*failure is reported/u
+    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, exactness, or existing draft contents do not veto[\s\S]*C-u[\s\S]*Claude Code[\s\S]*whole-draft clear[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*no Composer observation may veto Enter[\s\S]*Terminal Watch callback[\s\S]*no managed callback Turn[\s\S]*failure is reported/u
   );
   assert.match(
     (contracts.instructions as string[]).join("\n"),
@@ -423,7 +423,7 @@ test("the public action contract v28 exposes semantic arguments only", () => {
   );
   assert.match(
     actions.send.initial_attach_scope,
-    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*Terminal Watch callback/u
+    /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*C-u[\s\S]*Claude Code[\s\S]*whole-draft clear[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*managed fast path[\s\S]*unmanaged work[\s\S]*Terminal Watch callback/u
   );
   assert.equal(
     actions.send.codex_terminal_user_explicit_composer_policy,

@@ -82,21 +82,23 @@ when it appears. Status remains the manual refresh fallback. Never respond to
 `manual_required`, expired, changed, secret-bearing, or uncertain state.
 
 The user-priority `terminal_user_explicit` path requires one exact live
-physical terminal/process and a scanned, non-blocked approval state. Broken
-AKK Turn, Session, transfer, transition, ledger, or Store state cannot veto the
-user's explicit Send. Codex physical fallback does not depend on Composer
-visibility, stability, or exactness: it sends `C-u` once, injects the new
-request, waits through the paste window, and dispatches Enter exactly once.
-After text injection, Composer observation cannot veto Enter. Claude Code
-fallback remains exact-empty-only.
+physical terminal/process, a scanned non-blocked approval state, and no proven
+input-owning questionnaire, editor, menu, or read-only viewer. Broken AKK Turn,
+Session, transfer, transition, ledger, or Store state cannot veto the user's
+explicit Send. Neither can parsed working activity, an existing draft, or
+ordinary Composer visibility, stability, or exactness. Codex physical fallback
+sends `C-u` once; Claude Code physical fallback invokes its native whole-draft
+clear once. Each then injects the new request, waits through the paste window,
+and dispatches Enter exactly once. After text injection, Composer observation
+cannot veto Enter.
 
 AKK first takes the managed path where its stronger pre-input requirements
 hold. Otherwise it may deliver unmanaged work once and best-effort attaches a
 Terminal Watch that provides the completion callback. Watch preparation or
 persistence failure is reported but never vetoes, revokes, or retries the
-successful Send. If terminal delivery or native acceptance is uncertain, AKK
-does not retry automatically; inspect Status, the exact pane, or the returned
-Watch instead.
+successful Send. If clear or request input may have occurred and terminal
+delivery or native acceptance is uncertain, AKK does not retry automatically;
+inspect Status, the exact pane, or the returned Watch instead.
 
 On first attach, the target terminal must be explicitly named by the user. AKK
 never guesses which already-running pane should receive the task. An omitted

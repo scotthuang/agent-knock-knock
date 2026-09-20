@@ -169,14 +169,14 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.match(
       sendTool?.description ?? "",
-      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned non-blocked approval state[\s\S]*no input-owning native questionnaire\/editor or read-only viewer[\s\S]*parsed working activity[\s\S]*Codex rollout ambiguity[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code remains exact-empty-only[\s\S]*source-less Codex terminal[\s\S]*provisional Session\/Turn[\s\S]*managed preparation fails[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*exact request acceptance[\s\S]*owner-bound response authority[\s\S]*watch_id[\s\S]*manual_required interactions remain notification-only/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned non-blocked approval state[\s\S]*no input-owning native questionnaire\/editor(?:, menu,)? or read-only viewer[\s\S]*parsed working activity[\s\S]*Codex rollout ambiguity[\s\S]*Composer visibility, stability,(?: or)? exactness[\s\S]*existing draft contents[\s\S]*do not veto[\s\S]*C-u[\s\S]*Claude Code[\s\S]*whole-draft clear[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*source-less Codex terminal[\s\S]*provisional Session\/Turn[\s\S]*managed preparation fails[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*exact request acceptance[\s\S]*owner-bound response authority[\s\S]*watch_id[\s\S]*manual_required interactions remain notification-only/u
     );
     const terminalIdSchema = sendTool?.parameters?.properties?.terminal_id;
     assert.match(
       isRecord(terminalIdSchema)
         ? String(terminalIdSchema.description ?? "")
         : "",
-      /Codex terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, exactness[\s\S]*not eligibility vetoes[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Claude Code terminal_user_explicit remains exact-empty-only[\s\S]*Broken AKK state cannot veto[\s\S]*no managed callback Turn[\s\S]*Terminal Watch callback/u
+      /Codex and Claude Code terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, exactness[\s\S]*not eligibility vetoes[\s\S]*C-u[\s\S]*Claude Code[\s\S]*whole-draft clear[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto[\s\S]*Broken AKK state cannot veto[\s\S]*no managed callback Turn[\s\S]*Terminal Watch callback/u
     );
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {

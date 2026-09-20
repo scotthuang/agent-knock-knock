@@ -1325,6 +1325,10 @@
       "owner": "terminal-identity-authority"
     },
     {
+      "path": "src/terminal-user-explicit-send-contract.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-user-explicit-send-policy.ts",
       "owner": "terminal-action-projection"
     },

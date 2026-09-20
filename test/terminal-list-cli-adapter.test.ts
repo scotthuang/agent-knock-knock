@@ -620,6 +620,11 @@ test("Codex 0.154 exact /model residual advertises typed continuation and repair
     "an open picker must not advertise an action that would dispatch Enter"
   );
   assert.equal(
+    pickerActions.send,
+    undefined,
+    "an open picker must not advertise a user Send action"
+  );
+  assert.equal(
     pickerActions.repair_model_control?.authority_scope,
     "terminal_user_explicit_model_control_repair"
   );
@@ -1060,13 +1065,14 @@ test("list token falls back to one unmanaged send and replays by message id", as
         multiline
       };
     },
-    async sendUserExplicitCodex(control, text, options) {
+    async sendUserExplicit(agent, control, text, options) {
       await options.beforeMutationReservation({
         terminalControl: control,
         text
       });
-      transportCalls.push(["clear", "C-u"]);
-      fallbackOperations.push("clear:C-u");
+      const clearKey = agent === "claude" ? "C-c" : "C-u";
+      transportCalls.push(["clear", clearKey]);
+      fallbackOperations.push(`clear:${clearKey}`);
       await options.onComposerClearDispatched?.({
         terminalControl: control,
         text
@@ -1075,7 +1081,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
       fallbackOperations.push("text");
       await options.onTransportStage?.({
         stage: "text_injected",
-        agent: "codex",
+        agent,
         terminalControl: control,
         multiline: false
       });
@@ -1083,7 +1089,7 @@ test("list token falls back to one unmanaged send and replays by message id", as
       fallbackOperations.push("enter:C-m");
       await options.onTransportStage?.({
         stage: "enter_dispatched",
-        agent: "codex",
+        agent,
         terminalControl: control,
         multiline: false
       });
