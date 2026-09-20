@@ -731,7 +731,17 @@ test("Codex foreground identification rejects a questionnaire or stale physical 
   }
 });
 
-test("Codex 0.154 zero-rollout model options consume the dedicated physical authority", async () => {
+for (const { version, behaviorProfile } of [
+  {
+    version: "0.154.0",
+    behaviorProfile: "codex-model-control-0.154.0"
+  },
+  {
+    version: "0.155.1",
+    behaviorProfile: "codex-model-control-0.155.1"
+  }
+] as const) {
+test(`Codex ${version} zero-rollout model options consume the dedicated physical authority`, async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-zero-rollout-model-control-")
   );
@@ -745,23 +755,23 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
     const foregroundTerminal = terminal("codex", control);
     const modelAdapter: TerminalAgentAdapter = {
       ...supportedAdapter(),
-      probeModelControl: (version) => ({
-        status: version === "0.154.0" ? "supported" : "unsupported",
-        agentVersion: version,
-        behaviorProfile: version === "0.154.0"
-          ? "codex-model-control-0.154.0"
+      probeModelControl: (observedVersion) => ({
+        status: observedVersion === version ? "supported" : "unsupported",
+        agentVersion: observedVersion,
+        behaviorProfile: observedVersion === version
+          ? behaviorProfile
           : undefined,
-        scope: version === "0.154.0"
+        scope: observedVersion === version
           ? "current_and_new_sessions"
           : undefined,
-        modelSelection: version === "0.154.0",
-        reasoningEffortSelection: version === "0.154.0",
-        reason: version === "0.154.0" ? "verified" : "unsupported"
+        modelSelection: observedVersion === version,
+        reasoningEffortSelection: observedVersion === version,
+        reason: observedVersion === version ? "verified" : "unsupported"
       }),
       planModelControl: (capability) => {
-        assert.equal(capability.behaviorProfile, "codex-model-control-0.154.0");
+        assert.equal(capability.behaviorProfile, behaviorProfile);
         return {
-          behaviorProfile: "codex-model-control-0.154.0",
+          behaviorProfile,
           command: "/model",
           scope: "current_and_new_sessions",
           requiresIdle: true,
@@ -771,8 +781,8 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
     };
     const catalog = {
       agent: "codex" as const,
-      agentVersion: "0.154.0",
-      behaviorProfile: "codex-model-control-0.154.0" as const,
+      agentVersion: version,
+      behaviorProfile,
       scope: "current_and_new_sessions" as const,
       current: { model: "gpt-6-astra", reasoningEffort: "ultra" as const },
       models: [{
@@ -895,7 +905,7 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
       events,
       adapter: modelAdapter,
       bridge,
-      agentVersion: "0.154.0",
+      agentVersion: version,
       storeDir: tempDir,
       resolveCurrent: async () => undefined,
       processIncarnation: () => ({
@@ -918,8 +928,8 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
         pid: foregroundTerminal.pid,
         workspace: control.currentPath ?? "",
         ...incarnation,
-        agentVersion: "0.154.0",
-        behaviorProfile: "codex-model-control-0.154.0"
+        agentVersion: version,
+        behaviorProfile
       });
 
     await lifecycle.runModelOptions({
@@ -952,7 +962,7 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
       facade({
         adapter: modelAdapter,
         bridge: screenDriftBridge,
-        agentVersion: "0.154.0",
+        agentVersion: version,
         storeDir: tempDir,
         resolveCurrent: async () => undefined,
         physicalProcessIncarnation: () => incarnation,
@@ -976,8 +986,8 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
         pid: foregroundTerminal.pid,
         workspace: control.currentPath ?? "",
         ...incarnation,
-        agentVersion: "0.154.0",
-        behaviorProfile: "codex-model-control-0.154.0",
+        agentVersion: version,
+        behaviorProfile,
         residualKind: "profiled_command_popup",
         residualFingerprint: "e".repeat(64)
       });
@@ -1015,8 +1025,8 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
         pid: foregroundTerminal.pid,
         workspace: control.currentPath ?? "",
         ...incarnation,
-        agentVersion: "0.154.0",
-        behaviorProfile: "codex-model-control-0.154.0",
+        agentVersion: version,
+        behaviorProfile,
         residualKind: "profiled_command_popup",
         residualFingerprint: "e".repeat(64)
       });
@@ -1047,7 +1057,7 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
       events,
       adapter: modelAdapter,
       bridge,
-      agentVersion: "0.154.0",
+      agentVersion: version,
       storeDir: tempDir,
       resolveCurrent: async () => {
         driftResolveCount += 1;
@@ -1125,6 +1135,7 @@ test("Codex 0.154 zero-rollout model options consume the dedicated physical auth
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+}
 
 test("Codex candidate providers stay lazy and async-execution isolated", async () => {
   const lifecycle = facade();

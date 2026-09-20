@@ -111,6 +111,7 @@ function legacyModelControlFacts(
       ? facts.agentVersion : undefined,
     behaviorProfile: facts.behaviorProfile ===
         "codex-model-control-0.154.0" ||
+        facts.behaviorProfile === "codex-model-control-0.155.1" ||
         facts.behaviorProfile === "claude-model-control-2.1.266"
       ? facts.behaviorProfile : undefined,
     nativeAuthority,
@@ -581,13 +582,23 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
   }
 });
 
-test("terminal-user-explicit model control is zero-rollout physical authority with its own token domain", () => {
+for (const { version, behaviorProfile } of [
+  {
+    version: "0.154.0",
+    behaviorProfile: "codex-model-control-0.154.0"
+  },
+  {
+    version: "0.155.1",
+    behaviorProfile: "codex-model-control-0.155.1"
+  }
+] as const) {
+test(`Codex ${version} terminal-user-explicit model control is zero-rollout physical authority with its own token domain`, () => {
   const terminalControl: TerminalControlRef = {
     ...control,
-    target: "user-model:0.0",
-    session: "user-model"
+    target: `user-model-${version}:0.0`,
+    session: `user-model-${version}`
   };
-  const endpointKey = "socket:/private/tmp/tmux-501/user-model";
+  const endpointKey = `socket:/private/tmp/tmux-501/user-model-${version}`;
   createTerminalEndpointRef({
     identity: {
       providerKind: "tmux",
@@ -608,7 +619,8 @@ test("terminal-user-explicit model control is zero-rollout physical authority wi
     capabilities: terminalControl.capabilities,
     providerRef: terminalControl
   });
-  const terminalId = "terminal:v2:tmux:codex:user-model:0.0:4200";
+  const terminalId =
+    `terminal:v2:tmux:codex:user-model-${version}:0.0:4200`;
   const common = {
     exactTerminalRow: true,
     terminalId,
@@ -618,8 +630,8 @@ test("terminal-user-explicit model control is zero-rollout physical authority wi
     pid: 4_200,
     processUuid: "process-pid:4200:birth:model-birth",
     processBirth: "model-birth",
-    agentVersion: "0.154.0",
-    behaviorProfile: "codex-model-control-0.154.0" as const,
+    agentVersion: version,
+    behaviorProfile,
     zeroRolloutVerified: true,
     modelControlSupported: true,
     activityState: "idle",
@@ -666,6 +678,7 @@ test("terminal-user-explicit model control is zero-rollout physical authority wi
     );
   }
 });
+}
 
 test("model-control repair and continuation use distinct exact residual authority", () => {
   const terminalControl: TerminalControlRef = {

@@ -17,7 +17,7 @@ import {
 import { TerminalControlInputNotSentError } from
   "./terminal-control-provider.js";
 
-// Verified Codex profiles through 0.154.0 keep Enter in paste/newline mode for
+// Verified Codex profiles through 0.155.1 keep Enter in paste/newline mode for
 // 120ms after burst input. Cross that boundary rather than landing on it, and
 // also require observable composer stability instead of treating this delay
 // alone as acceptance.

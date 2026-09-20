@@ -7,8 +7,9 @@ import type {
 import { inspectNativeQuestionnaire } from
   "./terminal-questionnaire-adapter.js";
 import {
-  CODEX_MODEL_CONTROL_AGENT_VERSION,
   isTerminalModelControlPlanForAgent,
+  terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint,
+  terminalModelControlProfileForPlan,
   terminalModelControlSlashCompletionRows,
   type TerminalModelControlPlan,
   type TerminalModelControlPorts
@@ -47,7 +48,8 @@ export interface TerminalModelControlClassifierPorts {
     expectedText: string,
     allowOpaqueLargePastePlaceholder: boolean,
     classifyOpaqueLargePasteAsDifferent: boolean,
-    exactSlashPopupRows?: readonly string[]
+    exactSlashPopupRows?: readonly string[],
+    allowStyledSlashPopupWithoutViewportPaint?: boolean
   ): CodexComposerCapture | undefined;
   inspectCodexAsyncQuestionInputMode(
     styledScreen: string
@@ -95,6 +97,12 @@ export function createTerminalModelControlPorts(
     runtimePorts,
     classifiers
   } = input;
+  const modelControlProfile = terminalModelControlProfileForPlan(plan);
+  if (!modelControlProfile || modelControlProfile.agent !== adapter.agent) {
+    throw new Error(
+      "terminal model-control ports require an exact verified behavior profile"
+    );
+  }
   let claudeModelDialogInputPermit: {
     terminalControl: TerminalControlRef;
     fingerprint: string;
@@ -204,7 +212,9 @@ export function createTerminalModelControlPorts(
           false,
           captureInput.expectedComposer === plan.command
             ? terminalModelControlSlashCompletionRows(plan)
-            : undefined
+            : undefined,
+          captureInput.expectedComposer === plan.command &&
+            terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(plan)
         )
       : undefined;
     let codexInputBlocked = false;
@@ -212,7 +222,7 @@ export function createTerminalModelControlPorts(
       try {
         const questionnaire = inspectNativeQuestionnaire({
           agent: "codex",
-          version: CODEX_MODEL_CONTROL_AGENT_VERSION,
+          version: modelControlProfile.agentVersion,
           screen: styledScreen
         });
         const asyncQuestionMode =

@@ -78,6 +78,10 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
   ],
+  "codex-tui-0.155.1": [
+    "  /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
+  ],
   "codex-tui-generic-v1": [
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
@@ -101,6 +105,7 @@ const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
   "codex-tui-0.153.0": 80,
   "codex-tui-0.153.4": 80,
   "codex-tui-0.154.0": 80,
+  "codex-tui-0.155.1": 80,
   "codex-tui-generic-v1": 80
 };
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<

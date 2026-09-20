@@ -12,7 +12,8 @@ export const CODEX_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
   Record<string, string>
 > = Object.freeze({
   "0.153.4": "codex/0.153.4/request-user-input-v3",
-  "0.154.0": "codex/0.154.0/request-user-input-v3"
+  "0.154.0": "codex/0.154.0/request-user-input-v3",
+  "0.155.1": "codex/0.155.1/request-user-input-v3"
 });
 
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({

@@ -24,7 +24,7 @@ Direct slash commands are available in every first-party Host integration:
 | `/akk unwatch <watch-id>` | Stop one read-only Watch. |
 | `/akk threads <terminal-id>` | List resumable native threads for one terminal. |
 | `/akk models <terminal-id>` | Inspect the current native model and reasoning choices for one exact idle terminal. |
-| `/akk repair-model-control <terminal-id>` | Clear only an exact advertised stale Codex 0.154 `/model` Composer surface or open native picker and prove an empty Composer. |
+| `/akk repair-model-control <terminal-id>` | Clear only an exact advertised stale profiled Codex 0.154.0/0.155.1 `/model` Composer surface or open native picker and prove an empty Composer. |
 | `/akk set-model <terminal-id> <model> <reasoning-effort>` | Select one exact tuple from the immediately preceding model catalog. |
 | `/akk new-thread <terminal-id>` | Start a clean native coding-agent thread. |
 | `/akk clear-thread <terminal-id>` | Alias for the same clean-thread lifecycle action. |
@@ -249,7 +249,7 @@ process, catalog, or UI change, or after any failed attempt.
 Neither tool accepts a slash command, raw key, menu index, display label,
 scope override, token, or fingerprint.
 
-If a failed Codex 0.154 attempt leaves an exact profiled `/model` popup or an
+If a failed profiled Codex 0.154.0/0.155.1 attempt leaves an exact `/model` popup or an
 exact bare `/model` Composer, List may advertise both
 `model_options({terminal_id})` and `repair_model_control({terminal_id})`.
 The former uses separate residual-bound authority to continue that exact slash
@@ -267,7 +267,7 @@ as non-idle and advertises only `repair_model_control`. That repair may dismiss
 the exact picker but never receives authority to press Enter.
 
 Both steps use explicit current-snapshot authority for the same exact physical
-terminal and coding-agent process. Codex 0.154 may use either one exact current
+terminal and coding-agent process. Profiled Codex 0.154.0/0.155.1 may use either one exact current
 native Session or a verified-zero-rollout pane, and the Codex-only
 `identify_foreground` diagnostic is not a prerequisite. Claude Code still
 requires one exact current native Session. The pane

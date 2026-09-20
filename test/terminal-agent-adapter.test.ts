@@ -215,6 +215,132 @@ test("Codex adapter preserves approval detection with an ordered key action", ()
   assert.doesNotMatch(inspection.screenExcerpt, /ark-test-secret-value/);
 });
 
+test("Codex 0.155 user verification is blocked but never exposed as approvable", () => {
+  const prompt = [
+    "Production deployment needs your approval.",
+    "",
+    "Server: deployments",
+    "",
+    "Approve deploying the reviewed release?",
+    "",
+    "› 1. Verify and approve (y)",
+    "  2. Cancel this request (c)",
+    "",
+    "Press enter to confirm or esc to cancel"
+  ].join("\n");
+  const narrowPrompt = [
+    "Production",
+    "deployment needs",
+    "your approval.",
+    "",
+    "Server:",
+    "deployments",
+    "",
+    "Approve",
+    "deploying the",
+    "reviewed",
+    "release?",
+    "",
+    "› 1. Verify and",
+    "     approve (y)",
+    "  2. Cancel this",
+    "     request (c)",
+    "",
+    "Press enter to",
+    "confirm or esc to",
+    "cancel"
+  ].join("\n");
+  const waiting = [
+    "Waiting for verification…",
+    "",
+    "Server: deployments",
+    "",
+    "Approve deploying the reviewed release?",
+    "",
+    "Press esc to cancel this request"
+  ].join("\n");
+
+  const promptWithCancelSelected = prompt
+    .replace("› 1. Verify and approve (y)", "  1. Verify and approve (y)")
+    .replace("  2. Cancel this request (c)", "› 2. Cancel this request (c)");
+  const ansiPrompt = prompt
+    .replace(
+      "Production deployment needs your approval.",
+      "\u001b[1mProduction deployment needs your approval.\u001b[0m"
+    )
+    .replace(
+      "› 1. Verify and approve (y)",
+      "\u001b[36m› 1. Verify and approve (y)\u001b[0m"
+    );
+
+  for (const screen of [
+    prompt,
+    promptWithCancelSelected,
+    narrowPrompt,
+    ansiPrompt,
+    waiting
+  ]) {
+    const detected = detectCodexApprovalPrompt(screen);
+    const inspection = inspectCodexScreen({
+      screen,
+      runtime: { agentVersion: "0.155.1" }
+    });
+    assert.equal(detected.approvable, false, screen);
+    assert.equal(detected.promptKind, "user_verification", screen);
+    assert.equal(inspection.activity.state, "awaiting_approval", screen);
+    assert.equal(inspection.approval.blocked, true, screen);
+    assert.equal(inspection.approval.approvable, false, screen);
+    assert.equal(inspection.approval.action, undefined, screen);
+  }
+});
+
+test("clipped Codex 0.155 user-verification owner remains blocked", () => {
+  const clippedPrompt = [
+    "› 1. Verify and approve (y)",
+    "  2. Cancel this request (c)",
+    "",
+    "Press enter to confirm or esc to cancel"
+  ].join("\n");
+  const clippedWaiting = [
+    "Waiting for verification…",
+    "",
+    "Press esc to cancel this request"
+  ].join("\n");
+
+  for (const screen of [clippedPrompt, clippedWaiting]) {
+    const detected = detectCodexApprovalPrompt(screen);
+    const inspection = inspectCodexScreen({
+      screen,
+      runtime: { agentVersion: "0.155.1" }
+    });
+    assert.equal(detected.approvable, false, screen);
+    assert.equal(detected.promptKind, "user_verification", screen);
+    assert.equal(inspection.activity.state, "awaiting_approval", screen);
+    assert.equal(inspection.approval.blocked, true, screen);
+    assert.equal(inspection.approval.approvable, false, screen);
+    assert.equal(inspection.approval.action, undefined, screen);
+  }
+});
+
+test("stale Codex user-verification text does not become a current blocker", () => {
+  const screen = [
+    "Waiting for verification…",
+    "Server: deployments",
+    "Approve deploying the reviewed release?",
+    "Press esc to cancel this request",
+    "Verification completed.",
+    "›",
+    "gpt-5.6-sol high · /repo"
+  ].join("\n");
+  const inspection = inspectCodexScreen({
+    screen,
+    runtime: { agentVersion: "0.155.1" }
+  });
+  assert.equal(inspection.activity.state, "idle");
+  assert.equal(inspection.approval.blocked, false);
+  assert.equal(inspection.approval.approvable, false);
+});
+
 test("approval prompt evidence normalizes transport bytes but preserves semantic whitespace", () => {
   const profile = "test-approval-prompt-v1";
   const plain = terminalApprovalPromptEvidence(
@@ -942,7 +1068,8 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
     "0.151.0",
     "0.153.0",
     "0.153.4",
-    "0.154.0"
+    "0.154.0",
+    "0.155.1"
   ]) {
     const profile = probeCodexThreadLifecycle(version);
     assert.equal(profile.status, "supported");
@@ -981,6 +1108,10 @@ test("verified Codex lifecycle profiles use closed status-clear-status steps", (
   assert.equal(
     codexLifecycleBehaviorProfile("0.154.0"),
     "codex-tui-0.154.0"
+  );
+  assert.equal(
+    codexLifecycleBehaviorProfile("0.155.1"),
+    "codex-tui-0.155.1"
   );
   assert.equal(
     codexRuntimeCompatibilityProfile("0.152.0")?.behaviorProfile,
@@ -1050,7 +1181,8 @@ test("verified Codex native inspection profiles expose one closed read-only stat
     "0.151.0",
     "0.153.0",
     "0.153.4",
-    "0.154.0"
+    "0.154.0",
+    "0.155.1"
   ]) {
     const capabilities = probeCodexNativeInspection(version);
     assert.equal(capabilities.status, "supported");
@@ -1334,7 +1466,7 @@ test("Codex 0.151.0 native inspection parses the current status card", () => {
   );
 });
 
-for (const version of ["0.153.0", "0.153.4", "0.154.0"] as const) {
+for (const version of ["0.153.0", "0.153.4", "0.154.0", "0.155.1"] as const) {
   test(`Codex ${version} native inspection parses the current status card`, () => {
     const nativeThreadId = "01a0688b-1d33-75a2-acf0-0a5ff11db738";
     const screen = [

@@ -176,7 +176,17 @@ class Codex0154ClosedLoopTui {
   }
 }
 
-test("in-process CLI closes List to one-shot Codex model control with exact postconditions", async (t) => {
+for (const { version, behaviorProfile } of [
+  {
+    version: "0.154.0",
+    behaviorProfile: "codex-model-control-0.154.0"
+  },
+  {
+    version: "0.155.1",
+    behaviorProfile: "codex-model-control-0.155.1"
+  }
+] as const) {
+test(`in-process CLI closes Codex ${version} List to one-shot model control with exact postconditions`, async (t) => {
   const root = fs.mkdtempSync(path.join(
     os.tmpdir(),
     "akk-model-control-cli-closed-loop-"
@@ -195,7 +205,7 @@ test("in-process CLI closes List to one-shot Codex model control with exact post
     root,
     "standalone",
     "releases",
-    "0.154.0-aarch64-apple-darwin",
+    `${version}-aarch64-apple-darwin`,
     "bin",
     "codex"
   );
@@ -310,7 +320,7 @@ test("in-process CLI closes List to one-shot Codex model control with exact post
     },
     overrides: {
       codexLocalSessionAdapter: codexAdapter,
-      agentVersionForRunningProcess: () => "0.154.0",
+      agentVersionForRunningProcess: () => version,
       codexProcessBirthForPid: () => processBirth,
       processBirthForPid: () => processBirth,
       pid: 600_042
@@ -330,6 +340,10 @@ test("in-process CLI closes List to one-shot Codex model control with exact post
   assert.ok(terminal, listed.stdout);
   assert.equal(terminal.native_identity_state, "verified_absent");
   assert.equal(terminal.screen_state, "idle");
+  assert.equal(
+    terminal.model_control.behaviorProfile,
+    behaviorProfile
+  );
   const listAction = terminal.available_actions.model_options;
   assert.equal(listAction.tool, "agent_knock_knock_model_options");
   assert.equal(listAction.authority_scope, "terminal_user_explicit_model_control");
@@ -403,3 +417,4 @@ test("in-process CLI closes List to one-shot Codex model control with exact post
   assert.equal(terminalProvider.literalInputs().every((text) => text === "/model"), true);
   assert.equal(terminalProvider.keyDispatches().every((keys) => keys.length === 1), true);
 });
+}

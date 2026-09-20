@@ -19,11 +19,26 @@ import {
 const CODEX_PLAN = planTerminalModelControl(
   probeTerminalModelControl("codex", "0.154.0")
 );
+const CODEX_01551_PLAN = planTerminalModelControl(
+  probeTerminalModelControl("codex", "0.155.1")
+);
 const CLAUDE_PLAN = planTerminalModelControl(
   probeTerminalModelControl("claude", "2.1.266")
 );
 
 test("model control is closed to exact regression-tested agent versions", () => {
+  assert.deepEqual(
+    {
+      status: probeTerminalModelControl("codex", "0.155.1").status,
+      scope: probeTerminalModelControl("codex", "0.155.1").scope
+    },
+    { status: "supported", scope: "current_and_new_sessions" }
+  );
+  assert.notEqual(
+    CODEX_01551_PLAN.behaviorProfile,
+    CODEX_PLAN.behaviorProfile,
+    "each verified Codex version keeps an exact behavior profile"
+  );
   assert.deepEqual(
     {
       status: probeTerminalModelControl("codex", "0.154.0").status,
@@ -39,6 +54,8 @@ test("model control is closed to exact regression-tested agent versions", () => 
     { status: "supported", scope: "current_session" }
   );
   assert.equal(probeTerminalModelControl("codex", "0.154.1").status, "unsupported");
+  assert.equal(probeTerminalModelControl("codex", "0.155.0").status, "unsupported");
+  assert.equal(probeTerminalModelControl("codex", "0.155.2").status, "unsupported");
   assert.equal(probeTerminalModelControl("claude", "2.1.267").status, "unsupported");
   assert.throws(
     () => planTerminalModelControl(
@@ -46,6 +63,47 @@ test("model control is closed to exact regression-tested agent versions", () => 
     ),
     /could not be verified/u
   );
+});
+
+test("Codex 0.155.1 model options and set-model use its exact profile", async () => {
+  const native = new FakeModelTerminal("codex", {
+    currentModel: "gpt-5.2",
+    currentEffort: "high",
+    defaultModel: "gpt-5.2",
+    defaultEffort: "high"
+  });
+  const offer = await discoverTerminalModelOptions({
+    agent: "codex",
+    agentVersion: "0.155.1",
+    plan: CODEX_01551_PLAN,
+    terminalControl: "control",
+    ports: native.ports
+  });
+
+  assert.equal(offer.catalog.agentVersion, "0.155.1");
+  assert.equal(
+    offer.catalog.behaviorProfile,
+    CODEX_01551_PLAN.behaviorProfile
+  );
+  assert.equal(offer.catalog.current.model, "gpt-5.2");
+
+  const result = await switchTerminalModel({
+    agent: "codex",
+    agentVersion: "0.155.1",
+    plan: CODEX_01551_PLAN,
+    terminalControl: "control",
+    ports: native.ports,
+    expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
+    request: { model: "gpt-6-astra", reasoningEffort: "high" }
+  });
+  assert.equal(result.outcome, "changed");
+  assert.deepEqual(result.effective, {
+    model: "gpt-6-astra",
+    reasoningEffort: "high"
+  });
+  assert.deepEqual(result.newSessionDefaults, result.effective);
+  assert.equal(result.defaultsChanged, true);
+  assert.equal(native.phase, "idle");
 });
 
 test("model-control capture facts reduce to one mutually exclusive surface", () => {

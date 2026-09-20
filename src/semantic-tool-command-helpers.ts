@@ -548,7 +548,7 @@ export function akkUsageText(): string {
     "/akk cancel <turn-selector>",
     "Model control targets one exact physical pane; Codex rollout attribution and identify-foreground are not prerequisites.",
     "Repair-model-control is advertised only for an exact stale Codex /model Composer surface or open native picker; it clears no other draft, never presses Enter, and never submits or selects anything.",
-    "Models normally requires an idle, empty, prompt-free UI with no active Turn; for an exactly advertised Codex 0.154 /model residue it may continue that residue into read-only catalog discovery. Successful discovery consumes any residual-entry authority, restores the exact empty UI, and issues a fresh ordinary one-shot set-model offer; set-model accepts only that offer. If the result is uncertain, inspect the pane and do not retry automatically."
+    "Models normally requires an idle, empty, prompt-free UI with no active Turn; for an exactly advertised profiled Codex 0.154.0/0.155.1 /model residue it may continue that residue into read-only catalog discovery. Successful discovery consumes any residual-entry authority, restores the exact empty UI, and issues a fresh ordinary one-shot set-model offer; set-model accepts only that offer. If the result is uncertain, inspect the pane and do not retry automatically."
   ].join("\n");
 }
 

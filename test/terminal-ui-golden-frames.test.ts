@@ -9,20 +9,27 @@ import { inspectCodexScreen } from
   "../src/codex-terminal-agent-adapter.js";
 import { codexComposerEmpty } from
   "../src/native-thread-lifecycle-recovery-adapter.js";
+import { currentCodexComposerCapture } from
+  "../src/terminal-composer-classifier.js";
 import { exactCodexReadyStyledComposerCapture } from
   "../src/terminal-native-inspection-bridge.js";
 import {
   classifyTerminalModelControlSurface,
   observeTerminalModelControl,
   planTerminalModelControl,
-  probeTerminalModelControl
+  probeTerminalModelControl,
+  terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint,
+  terminalModelControlSlashCompletionRows
 } from "../src/terminal-model-control.js";
-import { TERMINAL_UI_GOLDENS } from
+import { codex0154IdleFrame, TERMINAL_UI_GOLDENS } from
   "./support/terminal-ui-golden-frames.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const codexPlan = planTerminalModelControl(
   probeTerminalModelControl("codex", "0.154.0")
+);
+const codex01551Plan = planTerminalModelControl(
+  probeTerminalModelControl("codex", "0.155.1")
 );
 const claudePlan = planTerminalModelControl(
   probeTerminalModelControl("claude", "2.1.266")
@@ -72,6 +79,8 @@ test("terminal UI goldens remain typed, redacted, and parser-independent", () =>
         "4e94e80bab8511e45334cd8f43f23a24ea01308a687a1202ed4de4566ba962a0",
       codexPopup:
         "d766f18e92e8b446330cd35862e504d41d62720bf8953c54d8f71bf7cbccebc2",
+      codex01551PlainPopup:
+        "3ee105a34d099b65f52996e6449db462facfb5a7d0952b3f9a609257554669c8",
       codexPartialPicker:
         "c3c4b856457b5d608c09f0d8d0867231371993ffd7993834424efcb3ba9b262b",
       codexTruncatedReasoning:
@@ -86,22 +95,24 @@ test("terminal UI goldens remain typed, redacted, and parser-independent", () =>
   );
 });
 
-test("Codex 0.154 Astra sparkle idle goldens remain diagnostic-only idle", () => {
-  for (const fixture of [
-    TERMINAL_UI_GOLDENS.codexAstraSparkleIdlePhaseA,
-    TERMINAL_UI_GOLDENS.codexAstraSparkleIdlePhaseB
-  ]) {
-    const inspection = inspectCodexScreen({
-      screen: fixture.screen,
-      runtime: { agentVersion: fixture.version }
-    });
-    assert.equal(inspection.activity.state, "idle", fixture.screen);
-    assert.equal(inspection.approval.blocked, false, fixture.screen);
-    assert.equal(
-      codexComposerEmpty(fixture.screen),
-      false,
-      "diagnostic sparkle idle must not become exact-empty authority"
-    );
+test("verified Codex Astra sparkle idle goldens remain diagnostic-only idle", () => {
+  for (const agentVersion of ["0.154.0", "0.155.1"]) {
+    for (const fixture of [
+      TERMINAL_UI_GOLDENS.codexAstraSparkleIdlePhaseA,
+      TERMINAL_UI_GOLDENS.codexAstraSparkleIdlePhaseB
+    ]) {
+      const inspection = inspectCodexScreen({
+        screen: fixture.screen,
+        runtime: { agentVersion }
+      });
+      assert.equal(inspection.activity.state, "idle", `${agentVersion}: ${fixture.screen}`);
+      assert.equal(inspection.approval.blocked, false, fixture.screen);
+      assert.equal(
+        codexComposerEmpty(fixture.screen),
+        false,
+        "diagnostic sparkle idle must not become exact-empty authority"
+      );
+    }
   }
   for (const fixture of [
     TERMINAL_UI_GOLDENS.codexAstraSparkleIdleAnsiPhaseA,
@@ -186,7 +197,7 @@ test("Codex Astra sparkle idle grammar rejects incomplete and input-owning frame
     );
   }
 
-  for (const agentVersion of [undefined, "0.153.4", "0.155.0"]) {
+  for (const agentVersion of [undefined, "0.153.4", "0.155.0", "0.155.2"]) {
     assert.equal(
       inspectCodexScreen({
         screen: base,
@@ -273,6 +284,101 @@ test("the profiled Codex command popup is reversible authority, not a picker", (
     state: "command_popup",
     fingerprint: "fixture-popup"
   });
+});
+
+test("Codex 0.155.1 exact command popup does not require legacy full-row paint", () => {
+  const capture = currentCodexComposerCapture(
+    TERMINAL_UI_GOLDENS.codex01551PlainPopup.screen,
+    "/model",
+    false,
+    false,
+    terminalModelControlSlashCompletionRows(codex01551Plan),
+    terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(
+      codex01551Plan
+    )
+  );
+  assert.equal(capture?.state, "exact_draft");
+  assert.equal(capture?.profiledSlashPopup, true);
+  assert.equal(capture?.bareCommand, undefined);
+  const classified = classifyTerminalModelControlSurface(codex01551Plan, {
+    terminalControl: "control",
+    screen: TERMINAL_UI_GOLDENS.codex01551PlainPopup.screen,
+    activityState: "idle",
+    approvalBlocked: false,
+    exactEmptyComposer: false,
+    exactCommandReady: capture?.profiledSlashPopup === true,
+    exactCommandComposer: capture?.state === "exact_draft",
+    exactBareCommand: capture?.bareCommand === true,
+    ...(capture ? { exactCommandFingerprint: capture.digest } : {})
+  });
+  assert.equal(classified.state, "command_popup");
+
+  assert.equal(
+    currentCodexComposerCapture(
+      TERMINAL_UI_GOLDENS.codex01551PlainPopup.screen,
+      "/model",
+      false,
+      false,
+      terminalModelControlSlashCompletionRows(codexPlan),
+      terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(codexPlan)
+    ),
+    undefined,
+    "the 0.155.1 transport shape must not widen the 0.154.0 profile"
+  );
+
+  const plainPopup = TERMINAL_UI_GOLDENS.codex01551PlainPopup.screen
+    .replace(/\u001b\[[0-9;]*m/gu, "");
+  const misplacedAnsi = TERMINAL_UI_GOLDENS.codex01551PlainPopup.screen
+    .replace("\u001b[1m›\u001b[0m /model", "› \u001b[1m/model\u001b[0m")
+    .replace(
+      "  \u001b[1m\u001b[38;5;6m/model  choose what model and reasoning effort to use\u001b[0m",
+      "  \u001b[1m/model\u001b[0m  \u001b[38;5;6mchoose what model and reasoning effort to use\u001b[0m"
+    );
+  const historicalPopupWithCurrentComposer = [
+    TERMINAL_UI_GOLDENS.codex01551PlainPopup.screen,
+    codex0154IdleFrame({
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/workspace"
+    })
+  ].join("\n");
+
+  for (const changed of [
+    plainPopup,
+    misplacedAnsi,
+    TERMINAL_UI_GOLDENS.codex01551PlainPopup.screen.replace(
+      "choose what model and reasoning effort to use",
+      "unknown completion"
+    ),
+    `${TERMINAL_UI_GOLDENS.codex01551PlainPopup.screen}\n  unexpected row`
+  ]) {
+    assert.equal(
+      currentCodexComposerCapture(
+        changed,
+        "/model",
+        false,
+        false,
+        terminalModelControlSlashCompletionRows(codex01551Plan),
+        terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(
+          codex01551Plan
+        )
+      ),
+      undefined
+    );
+  }
+
+  const current = currentCodexComposerCapture(
+    historicalPopupWithCurrentComposer,
+    "/model",
+    false,
+    false,
+    terminalModelControlSlashCompletionRows(codex01551Plan),
+    terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(
+      codex01551Plan
+    )
+  );
+  assert.equal(current?.state, "exact_empty");
+  assert.equal(current?.profiledSlashPopup, undefined);
 });
 
 test("Claude 2.1.266 wide and ANSI goldens retain semantic families", () => {

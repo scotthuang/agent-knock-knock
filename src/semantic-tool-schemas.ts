@@ -278,7 +278,7 @@ export const nativeInspectParameters = {
       type: "string",
       enum: ["status"],
       description:
-        "Closed adapter-owned inspection kind. Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4/0.154.0 and Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267 are regression-tested; another complete x.y.z version remains callable through the generic runtime profile with a compatibility warning. This is never an arbitrary native command string."
+        "Closed adapter-owned inspection kind. Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4/0.154.0/0.155.1 and Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267 are regression-tested; another complete x.y.z version remains callable through the generic runtime profile with a compatibility warning. This is never an arbitrary native command string."
     }
   }
 };
@@ -293,7 +293,7 @@ export const modelOptionsParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal row's advertised model_options action. This is explicit current-snapshot authority for one live physical pane/process, including a Codex pane with no materialized rollout or one exact stable Codex 0.154 /model residual. AKK consumes any residual-entry authority during this closed discovery; after exact dismissal it retains only a fresh ordinary terminal/catalog offer for one set_model attempt."
+        "Exact full terminal_id from the current terminal row's advertised model_options action. This is explicit current-snapshot authority for one live physical pane/process, including a profiled Codex 0.154.0/0.155.1 pane with no materialized rollout or one exact stable /model residual. AKK consumes any residual-entry authority during this closed discovery; after exact dismissal it retains only a fresh ordinary terminal/catalog offer for one set_model attempt."
     }
   }
 };
@@ -308,7 +308,7 @@ export const repairModelControlParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal row's advertised repair_model_control action. AKK privately binds this one-shot repair to the exact Codex 0.154 pane/process and exact native /model Composer residue or open profiled model picker; no command, key, menu index, draft text, token, or fingerprint is accepted."
+        "Exact full terminal_id from the current terminal row's advertised repair_model_control action. AKK privately binds this one-shot repair to the exact profiled Codex 0.154.0/0.155.1 pane/process and exact native /model Composer residue or open model picker; no command, key, menu index, draft text, token, or fingerprint is accepted."
     }
   }
 };
@@ -323,7 +323,7 @@ export const setModelParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full physical-pane terminal_id used in the immediately preceding agent_knock_knock_model_options call in this controller conversation. For a verified-zero-rollout Codex 0.154 pane, foreground attribution and identify_foreground are not prerequisites; Claude Code still requires its exact current native Session."
+        "Exact full physical-pane terminal_id used in the immediately preceding agent_knock_knock_model_options call in this controller conversation. For a verified-zero-rollout profiled Codex 0.154.0/0.155.1 pane, foreground attribution and identify_foreground are not prerequisites; Claude Code still requires its exact current native Session."
     },
     model: {
       type: "string",

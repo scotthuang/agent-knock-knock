@@ -27,11 +27,11 @@ test("semantic catalog freezes the exact ordered tool metadata digest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "aba14300ca0819effc00b5cc37074e9dfe78a614f9898e3f6676f5be62e9c48b"
+    "66da37e054b5d323c652e01cdda8358eaa7f7381bb3248af8be41138eb6cbd50"
   );
   assert.equal(
     publicMetadataDigest(catalog.command, catalog.tools),
-    "a348fd145ec71f46d66e9ea05e1cddda079a065d8310d1fcb71ca5bea22803c6"
+    "aeff729be6011e91837e3ca8bd355f2b5e8ba086b83b64c0d420db39bbb42ac9"
   );
   assert.equal(Object.isFrozen(catalog), true);
   assert.equal(Object.isFrozen(catalog.command), true);
