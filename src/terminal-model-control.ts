@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ExecutorKind } from "./executors.js";
 import {
-  CODEX_MODEL_CONTROL_AGENT_VERSION,
   isTerminalModelControlPlanForAgent,
   planTerminalModelControlProfile,
   probeTerminalModelControlProfile,
@@ -29,14 +28,18 @@ import {
 export {
   CLAUDE_MODEL_CONTROL_AGENT_VERSION,
   CODEX_MODEL_CONTROL_AGENT_VERSION,
+  CODEX_MODEL_CONTROL_AGENT_VERSIONS,
   TERMINAL_MODEL_CONTROL_PROFILE_IDS,
+  isCodexModelControlAgentVersion,
   isTerminalModelControlPlanForAgent,
   terminalModelControlPlanConforms,
   terminalModelControlProfileFor,
   terminalModelControlProfileForPlan,
   terminalModelControlProfiles,
+  terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint,
   terminalModelControlSlashCompletionRows,
   type TerminalModelControlBehaviorProfile,
+  type CodexModelControlAgentVersion,
   type TerminalModelControlCapabilities,
   type TerminalModelControlPlan,
   type TerminalModelControlProfile,
@@ -800,7 +803,7 @@ export interface TerminalModelControlPorts {
   }): Promise<TerminalModelControlCapture>;
   sendText(terminalControl: unknown, text: "/model"): Promise<void>;
   sendKeys(terminalControl: unknown, keys: readonly string[]): Promise<void>;
-  /** Exact running Codex 0.154.0 `debug models` output, already validated. */
+  /** Exact running profiled Codex `debug models` output, already validated. */
   loadCodexCatalog?(): Promise<CodexNativeModelCatalog>;
   sleep(milliseconds: number): Promise<void>;
 }
@@ -906,8 +909,7 @@ function residualFromCapture(
     return {
       state: "unsafe",
       reason:
-        "model-control residual repair is profiled only for Codex " +
-        CODEX_MODEL_CONTROL_AGENT_VERSION,
+        "model-control residual repair requires a verified Codex profile",
       terminalControl: capture.terminalControl
     };
   }
@@ -1579,8 +1581,7 @@ async function openModelPicker(input: {
     const profile = terminalModelControlProfileForPlan(input.plan);
     if (!profile?.supportsResidualContinuation) {
       throw new Error(
-        "native model-control continuation is profiled only for Codex " +
-        CODEX_MODEL_CONTROL_AGENT_VERSION
+        "native model-control continuation requires a verified Codex profile"
       );
     }
     const observed = await inspectTerminalModelControlResidual({

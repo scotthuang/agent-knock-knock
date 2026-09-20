@@ -81,6 +81,15 @@ export function codex0154CommandPopupFrame(command = "/model"): string {
   ].join("\n");
 }
 
+/** Codex 0.155.1 tmux capture: exact popup without 0.154 full-row paint. */
+export function codex01551CommandPopupFrame(command = "/model"): string {
+  return [
+    `\u001b[1m›\u001b[0m ${command}`,
+    "",
+    "  \u001b[1m\u001b[38;5;6m/model  choose what model and reasoning effort to use\u001b[0m"
+  ].join("\n");
+}
+
 export function codex0154ModelPickerFrame(input: Readonly<{
   rows: readonly Codex0154ModelRow[];
   selectedIndex: number;
@@ -308,6 +317,15 @@ export const TERMINAL_UI_GOLDENS = Object.freeze({
     ansi: true,
     complete: true,
     screen: codex0154CommandPopupFrame()
+  }),
+  codex01551PlainPopup: Object.freeze({
+    agent: "codex",
+    version: "0.155.1",
+    surface: "command_popup",
+    viewport: "wide",
+    ansi: true,
+    complete: true,
+    screen: codex01551CommandPopupFrame()
   }),
   codexPartialPicker: Object.freeze({
     agent: "codex",

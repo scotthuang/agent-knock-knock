@@ -71,17 +71,25 @@ const CODEX_EXACT_APPROVAL_OPTION =
 const CODEX_APPROVAL_FOOTER =
   /^\s*Press enter to confirm or esc to cancel(?: or o to open thread)?\s*$/iu;
 const CODEX_APPROVAL_DECORATION = /^[─━═╌╍┄┅┈┉\s]+$/u;
+const CODEX_USER_VERIFICATION_PROMPT_SUFFIX =
+  /(?:^| )(?:[›»] )?1\. Verify and approve \(y\) (?:[›»] )?2\. Cancel this request \(c\) Press enter to confirm or esc to cancel$/u;
+const CODEX_USER_VERIFICATION_WAITING_MARKER = "Waiting for verification…";
+const CODEX_USER_VERIFICATION_WAITING_FOOTER =
+  "Press esc to cancel this request";
 const CODEX_PROMPT_ACTIVITY = /^[›»]\s+(?!\d+\.)\S/u;
 const CODEX_COMPOSER_LINE = /^[›»](?:\s|$)/u;
 const CODEX_TRANSCRIPT_PROMPT_LINE = /^[›»](?:\s|$).*$/gmu;
 const CODEX_SKILLS_HINT = /^[›»]\s+Use \/skills\b/u;
 const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
-// Codex 0.154 can animate the otherwise empty Astra Composer by replacing
+// Verified Codex releases can animate the otherwise empty Astra Composer by replacing
 // blank cells with this closed glyph inventory. Keep this status-only grammar
 // separate from CODEX_COMPOSER_LINE: diagnostic idle classification must not
 // become exact Composer authority for native lifecycle or model control.
-const CODEX_ASTRA_SPARKLE_AGENT_VERSION = "0.154.0";
+const CODEX_ASTRA_SPARKLE_AGENT_VERSIONS = new Set([
+  "0.154.0",
+  "0.155.1"
+]);
 const CODEX_ASTRA_SPARKLE_GLYPHS = "⠁⠂⠄⠈⠐⠠⡀⢀";
 const CODEX_ASTRA_SPARKLE_GLYPH = new RegExp(
   `[${CODEX_ASTRA_SPARKLE_GLYPHS}]`,
@@ -875,6 +883,16 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
 }
 
 export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDetection {
+  const userVerification = codexUserVerificationSurface(screen);
+  if (userVerification !== undefined) {
+    return {
+      approvable: false,
+      reason: userVerification === "waiting"
+        ? "Codex is waiting for native user verification"
+        : "Codex native user verification requires direct user presence",
+      promptKind: "user_verification"
+    };
+  }
   const prompt = codexApprovalPromptRegion(screen);
   if (!prompt.visible) {
     return {
@@ -943,7 +961,8 @@ export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDe
 }
 
 export function isCodexApprovalPromptVisible(screen: string): boolean {
-  return codexApprovalPromptRegion(screen).visible;
+  return codexUserVerificationSurface(screen) !== undefined ||
+    codexApprovalPromptRegion(screen).visible;
 }
 
 export function detectCodexActivityState(
@@ -1121,6 +1140,43 @@ function codexApprovalPromptRegion(screen: string):
     region: candidateLines.slice(0, parsed.evidenceEndIndex + 1).join("\n"),
     marker: matchedMarker
   };
+}
+
+/**
+ * Codex 0.155 user verification is intentionally distinct from the ordinary
+ * approval state machine. Recognize only its closed prompt/waiting shapes so
+ * AKK can report the terminal as blocked without ever exposing approval keys.
+ * Line wrapping is normalized because Ratatui wraps the fixed labels and
+ * footer at narrow viewport widths. The exact option/footer or waiting/footer
+ * suffix remains sufficient when a short viewport clips the title and Server
+ * rows; arbitrary prompt content remains ignored.
+ */
+function codexUserVerificationSurface(
+  screen: string
+): "prompt" | "waiting" | undefined {
+  const lines = normalizeTerminalApprovalPromptRegion(screen)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return undefined;
+  }
+
+  const waitingIndex = lines.lastIndexOf(
+    CODEX_USER_VERIFICATION_WAITING_MARKER
+  );
+  if (waitingIndex >= 0) {
+    const waiting = lines.slice(waitingIndex).join(" ").replace(/\s+/gu, " ");
+    if (waiting.endsWith(` ${CODEX_USER_VERIFICATION_WAITING_FOOTER}`)) {
+      return "waiting";
+    }
+  }
+
+  const normalized = lines.join(" ").replace(/\s+/gu, " ");
+  if (CODEX_USER_VERIFICATION_PROMPT_SUFFIX.test(normalized)) {
+    return "prompt";
+  }
+  return undefined;
 }
 
 interface CodexApprovalOptionRow {
@@ -1314,7 +1370,10 @@ function codexIdlePromptLine(
   lines: readonly string[],
   agentVersion?: string
 ): string | undefined {
-  if (agentVersion === CODEX_ASTRA_SPARKLE_AGENT_VERSION) {
+  if (
+    agentVersion !== undefined &&
+    CODEX_ASTRA_SPARKLE_AGENT_VERSIONS.has(agentVersion)
+  ) {
     const sparkleIdle = codexAstraSparkleIdlePromptLine(lines);
     if (sparkleIdle !== undefined) {
       return sparkleIdle;

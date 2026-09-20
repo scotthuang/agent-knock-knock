@@ -8,6 +8,7 @@ import type { ExecutorKind } from "./executors.js";
  */
 export const TERMINAL_MODEL_CONTROL_PROFILE_IDS = Object.freeze({
   codex: "codex-model-control-0.154.0",
+  codex01551: "codex-model-control-0.155.1",
   claude: "claude-model-control-2.1.266"
 } as const);
 
@@ -47,11 +48,29 @@ export interface TerminalModelControlProfile {
   readonly supportsResidualRepair: boolean;
   /** Exact native slash-completion rows accepted before dispatching Enter. */
   readonly slashCompletionRows: readonly string[];
+  /**
+   * Whether an exact styled Composer/popup may prove the slash surface without
+   * the legacy viewport-wide background paint. Keep this version-profiled:
+   * identical visible completion text does not imply identical TUI authority.
+   */
+  readonly allowsStyledSlashPopupWithoutViewportPaint: boolean;
   readonly reason: string;
 }
 
 export const CODEX_MODEL_CONTROL_AGENT_VERSION = "0.154.0";
+export const CODEX_MODEL_CONTROL_AGENT_VERSIONS = Object.freeze([
+  CODEX_MODEL_CONTROL_AGENT_VERSION,
+  "0.155.1"
+] as const);
+export type CodexModelControlAgentVersion =
+  typeof CODEX_MODEL_CONTROL_AGENT_VERSIONS[number];
 export const CLAUDE_MODEL_CONTROL_AGENT_VERSION = "2.1.266";
+
+export function isCodexModelControlAgentVersion(
+  value: string
+): value is CodexModelControlAgentVersion {
+  return (CODEX_MODEL_CONTROL_AGENT_VERSIONS as readonly string[]).includes(value);
+}
 
 const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
   Object.freeze([
@@ -72,8 +91,31 @@ const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
       slashCompletionRows: Object.freeze([
         "  /model  choose what model and reasoning effort to use"
       ]),
+      allowsStyledSlashPopupWithoutViewportPaint: false,
       reason:
         `Codex ${CODEX_MODEL_CONTROL_AGENT_VERSION} /model control changes the ` +
+        "current session and persisted defaults"
+    }),
+    Object.freeze({
+      agent: "codex",
+      agentVersion: CODEX_MODEL_CONTROL_AGENT_VERSIONS[1],
+      behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01551,
+      plan: Object.freeze({
+        behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01551,
+        command: "/model",
+        scope: "current_and_new_sessions",
+        requiresIdle: true,
+        requiresExactEmptyComposer: true
+      }),
+      supportsZeroRolloutPhysicalAuthority: true,
+      supportsResidualContinuation: true,
+      supportsResidualRepair: true,
+      slashCompletionRows: Object.freeze([
+        "  /model  choose what model and reasoning effort to use"
+      ]),
+      allowsStyledSlashPopupWithoutViewportPaint: true,
+      reason:
+        `Codex ${CODEX_MODEL_CONTROL_AGENT_VERSIONS[1]} /model control changes the ` +
         "current session and persisted defaults"
     }),
     Object.freeze({
@@ -91,6 +133,7 @@ const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
       supportsResidualContinuation: false,
       supportsResidualRepair: false,
       slashCompletionRows: Object.freeze([]),
+      allowsStyledSlashPopupWithoutViewportPaint: false,
       reason:
         `Claude Code ${CLAUDE_MODEL_CONTROL_AGENT_VERSION} /model supports the ` +
         "explicit session-only selection path"
@@ -145,6 +188,13 @@ export function terminalModelControlSlashCompletionRows(
   plan: TerminalModelControlPlan
 ): readonly string[] {
   return terminalModelControlProfileForPlan(plan)?.slashCompletionRows ?? [];
+}
+
+export function terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(
+  plan: TerminalModelControlPlan
+): boolean {
+  return terminalModelControlProfileForPlan(plan)
+    ?.allowsStyledSlashPopupWithoutViewportPaint === true;
 }
 
 export function probeTerminalModelControlProfile(

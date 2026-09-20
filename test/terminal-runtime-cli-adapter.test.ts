@@ -566,17 +566,17 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
   }), undefined);
 });
 
-test("running Codex catalog uses its exact executable and custom CODEX_HOME", async (t) => {
+test("running Codex 0.155.1 catalog uses its exact executable and custom CODEX_HOME", async (t) => {
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-runtime-codex-catalog-")
   );
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const releaseRoot = path.join(
-    directory, "standalone", "releases", "0.154.0-aarch64-apple-darwin"
+    directory, "standalone", "releases", "0.155.1-aarch64-apple-darwin"
   );
   const codexExecutable = path.join(releaseRoot, "bin", "codex");
   const secondExecutable = path.join(
-    directory, "standalone", "releases", "0.154.0-second", "bin", "codex"
+    directory, "standalone", "releases", "0.155.1-second", "bin", "codex"
   );
   const lsofExecutable = path.join(directory, "lsof");
   const argsPath = path.join(directory, "codex-args.txt");
@@ -613,7 +613,7 @@ test("running Codex catalog uses its exact executable and custom CODEX_HOME", as
   }, async () => {
     const catalog = runtime({ codexHome })
       .codexModelCatalogForRunningProcess(
-        77, "0.154.0", workingDirectory
+        77, "0.155.1", workingDirectory
       );
     assert.deepEqual(catalog, { models: [{
       id: "gpt-6-astra",
@@ -634,7 +634,6 @@ test("running Codex catalog uses its exact executable and custom CODEX_HOME", as
       fs.realpathSync(workingDirectory)
     );
 
-    writeLsof([codexExecutable, secondExecutable]);
     assert.throws(
       () => runtime({ codexHome }).codexModelCatalogForRunningProcess(
         77, "0.154.0", workingDirectory
@@ -642,12 +641,20 @@ test("running Codex catalog uses its exact executable and custom CODEX_HOME", as
       /does not expose exactly one 0\.154\.0 executable/u
     );
 
+    writeLsof([codexExecutable, secondExecutable]);
+    assert.throws(
+      () => runtime({ codexHome }).codexModelCatalogForRunningProcess(
+        77, "0.155.1", workingDirectory
+      ),
+      /does not expose exactly one 0\.155\.1 executable/u
+    );
+
     writeLsof([codexExecutable]);
     fs.writeFileSync(codexExecutable, "#!/bin/sh\nexit 7\n");
     fs.chmodSync(codexExecutable, 0o700);
     assert.throws(
       () => runtime({ codexHome }).codexModelCatalogForRunningProcess(
-        77, "0.154.0", workingDirectory
+        77, "0.155.1", workingDirectory
       ),
       /could not return its model catalog/u
     );

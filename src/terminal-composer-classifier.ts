@@ -510,7 +510,8 @@ function currentCodexComposerCapture(
   expectedText: string,
   allowOpaqueLargePastePlaceholder = false,
   classifyOpaqueLargePasteAsDifferent = false,
-  exactSlashPopupRows?: readonly string[]
+  exactSlashPopupRows?: readonly string[],
+  allowStyledSlashPopupWithoutViewportPaint = false
 ): {
   state: "exact_draft" | "exact_empty" | "different_draft";
   digest: string;
@@ -572,7 +573,15 @@ function currentCodexComposerCapture(
     ) !== undefined;
   const exactFooterlessProfiledCommand = footerIndex < 0 &&
     exactStyledProfiledCommand;
-  // Codex 0.154 replaces the ordinary model/cwd footer with its slash
+  const exactStyledProfiledPopup =
+    allowStyledSlashPopupWithoutViewportPaint &&
+    exactSlashPopupRows !== undefined &&
+    exactCodexStyledSlashPopupCapture(
+      styledScreen,
+      expectedText,
+      exactSlashPopupRows
+    );
+  // Profiled Codex releases replace the ordinary model/cwd footer with their slash
   // completion surface. Real terminal renderers may retain one or more blank
   // layout rows between the Composer and that surface. The exact styled
   // command is sufficient only for reversible cleanup; Enter additionally
@@ -588,10 +597,15 @@ function currentCodexComposerCapture(
     );
   const exactProfiledSlashPopup =
     exactSlashPopupRows !== undefined &&
+    (exactStyledProfiledCommand || exactStyledProfiledPopup) &&
     composerComparableText(bodyRows[0] ?? "").trimEnd() ===
       expectedComparable &&
     exactPopupLayout;
-  if (footerIndex < 0 && !exactFooterlessProfiledCommand) {
+  if (
+    footerIndex < 0 &&
+    !exactFooterlessProfiledCommand &&
+    !exactProfiledSlashPopup
+  ) {
     return undefined;
   }
 
@@ -606,7 +620,7 @@ function currentCodexComposerCapture(
   }
   // Herdr's ANSI visible buffer preserves Codex's fixed-width Composer paint:
   // the typed command is followed by layout padding through the viewport edge.
-  // Accept that padding only when the closed 0.154 profile, full-row
+  // Accept that padding only when a closed profile, full-row
   // background paint, exact command text, and complete model/cwd footer all
   // agree. Plain padded text remains untrusted.
   const exactVisibleDraft = footerIndex >= 0 && (
@@ -640,8 +654,63 @@ function currentCodexComposerCapture(
 }
 
 /**
+ * Prove the Codex 0.155.1 tmux slash popup without requiring the legacy
+ * viewport-wide background paint. The active Composer marker and the single
+ * native completion row must retain their exact, distinct TUI styles; plain
+ * transcript text with the same words remains non-authoritative.
+ */
+function exactCodexStyledSlashPopupCapture(
+  styledScreen: string,
+  expectedText: string,
+  exactSlashPopupRows: readonly string[]
+): boolean {
+  const rows = styledScreen.replace(/\r\n?/gu, "\n").split("\n");
+  while (
+    rows.length > 0 &&
+    stripTerminalEscapeSequences(rows.at(-1) ?? "").trim().length === 0
+  ) {
+    rows.pop();
+  }
+  let composerIndex = -1;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (CODEX_COMPOSER_MARKER.test(stripTerminalEscapeSequences(rows[index]))) {
+      composerIndex = index;
+      break;
+    }
+  }
+  if (composerIndex < 0) return false;
+  const composerRow = rows[composerIndex] ?? "";
+  const plainComposer = stripTerminalEscapeSequences(composerRow).trimEnd();
+  const marker = plainComposer.match(/^([›»])\s/u)?.[1];
+  if (
+    !marker ||
+    plainComposer.replace(/^[›»]\s?/u, "") !== expectedText ||
+    composerRow !== `\x1b[1m${marker}\x1b[0m ${expectedText}`
+  ) {
+    return false;
+  }
+  const popupRows = rows.slice(composerIndex + 1).filter((row) =>
+    stripTerminalEscapeSequences(row).trim().length > 0
+  );
+  if (
+    JSON.stringify(popupRows.map((row) =>
+      stripTerminalEscapeSequences(row).trimEnd()
+    )) !== JSON.stringify(exactSlashPopupRows)
+  ) {
+    return false;
+  }
+  return popupRows.every((row, index) => {
+    const expected = exactSlashPopupRows[index] ?? "";
+    const leading = expected.match(/^(\s*)/u)?.[1] ?? "";
+    const content = expected.slice(leading.length);
+    return row ===
+      `${leading}\x1b[1m\x1b[38;5;6m${content}\x1b[0m`;
+  });
+}
+
+/**
  * Prove the live footerless Codex slash Composer without trusting transcript
- * text alone. The 0.154 TUI paints this row across the current viewport while
+ * text alone. Profiled Codex TUI builds can paint this row across the current viewport while
  * its completion popup replaces the ordinary model/cwd footer.
  */
 function exactCodexStyledCommandComposerCapture(

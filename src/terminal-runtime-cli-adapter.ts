@@ -47,8 +47,8 @@ import { StaticTerminalProcessSource, SystemTerminalProcessSource,
   type TerminalProcessSource } from "./terminal-process-source.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 import {
-  CODEX_MODEL_CONTROL_AGENT_VERSION,
   parseCodexNativeModelCatalog,
+  type CodexModelControlAgentVersion,
   type CodexNativeModelCatalog
 } from "./terminal-model-control.js";
 
@@ -119,7 +119,7 @@ export interface TerminalRuntimeCliAdapter {
   agentVersionForRunningProcess(agent: ExecutorKind, pid: number): string | undefined;
   codexModelCatalogForRunningProcess(
     pid: number,
-    expectedVersion: typeof CODEX_MODEL_CONTROL_AGENT_VERSION,
+    expectedVersion: CodexModelControlAgentVersion,
     cwd?: string
   ): CodexNativeModelCatalog;
 }
@@ -163,7 +163,7 @@ export function createTerminalRuntimeCliAdapter(
       runningAgentVersion(input, agent, pid),
     codexModelCatalogForRunningProcess: (
       pid: number,
-      expectedVersion: typeof CODEX_MODEL_CONTROL_AGENT_VERSION,
+      expectedVersion: CodexModelControlAgentVersion,
       cwd?: string
     ) => runningCodexModelCatalog(input, pid, expectedVersion, cwd)
   });
@@ -648,7 +648,7 @@ function runningAgentVersion(
 function runningCodexModelCatalog(
   input: Pick<CreateTerminalRuntimeCliAdapterInput, "options" | "dependencies">,
   pid: number,
-  expectedVersion: typeof CODEX_MODEL_CONTROL_AGENT_VERSION,
+  expectedVersion: CodexModelControlAgentVersion,
   cwd?: string
 ): CodexNativeModelCatalog {
   if (

@@ -11,6 +11,7 @@ import {
   probeTerminalModelControl,
   terminalModelControlPlanConforms,
   terminalModelControlProfiles,
+  terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint,
   terminalModelControlSlashCompletionRows,
   terminalUserExplicitModelControlBindingToken,
   terminalUserExplicitModelControlRepairBindingToken,
@@ -46,7 +47,9 @@ test("model-control registry is the canonical verified profile catalog", () => {
       zeroRollout: profile.supportsZeroRolloutPhysicalAuthority,
       residualContinuation: profile.supportsResidualContinuation,
       residualRepair: profile.supportsResidualRepair,
-      slashCompletionRows: profile.slashCompletionRows
+      slashCompletionRows: profile.slashCompletionRows,
+      styledPopupWithoutViewportPaint:
+        profile.allowsStyledSlashPopupWithoutViewportPaint
     })),
     [
       {
@@ -65,7 +68,27 @@ test("model-control registry is the canonical verified profile catalog", () => {
         residualRepair: true,
         slashCompletionRows: [
           "  /model  choose what model and reasoning effort to use"
-        ]
+        ],
+        styledPopupWithoutViewportPaint: false
+      },
+      {
+        agent: "codex",
+        agentVersion: "0.155.1",
+        behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01551,
+        plan: {
+          behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01551,
+          command: "/model",
+          scope: "current_and_new_sessions",
+          requiresIdle: true,
+          requiresExactEmptyComposer: true
+        },
+        zeroRollout: true,
+        residualContinuation: true,
+        residualRepair: true,
+        slashCompletionRows: [
+          "  /model  choose what model and reasoning effort to use"
+        ],
+        styledPopupWithoutViewportPaint: true
       },
       {
         agent: "claude",
@@ -81,7 +104,8 @@ test("model-control registry is the canonical verified profile catalog", () => {
         zeroRollout: false,
         residualContinuation: false,
         residualRepair: false,
-        slashCompletionRows: []
+        slashCompletionRows: [],
+        styledPopupWithoutViewportPaint: false
       }
     ]
   );
@@ -105,9 +129,17 @@ test("probe, planning, slash conformance, and execution conformance share the re
       terminalModelControlSlashCompletionRows(plan),
       profile.slashCompletionRows
     );
+    assert.equal(
+      terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(plan),
+      profile.allowsStyledSlashPopupWithoutViewportPaint
+    );
   }
 
   assert.equal(probeTerminalModelControl("codex", "0.154.1").status,
+    "unsupported");
+  assert.equal(probeTerminalModelControl("codex", "0.155.0").status,
+    "unsupported");
+  assert.equal(probeTerminalModelControl("codex", "0.155.2").status,
     "unsupported");
   assert.equal(probeTerminalModelControl("claude", "2.1.267").status,
     "unsupported");

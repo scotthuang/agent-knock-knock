@@ -77,7 +77,7 @@ import {
 import type { TerminalRuntimeCliAdapter } from
   "./terminal-runtime-cli-adapter.js";
 import {
-  CODEX_MODEL_CONTROL_AGENT_VERSION,
+  isCodexModelControlAgentVersion,
   isTerminalModelControlPlanForAgent,
   isTerminalModelReasoningEffort,
   terminalModelControlPlanConforms,
@@ -1623,8 +1623,7 @@ class NativeThreadLifecycleCliApplication {
       );
       if (terminal.agent !== "codex") {
         throw new Error(
-          "model-control residual repair currently supports only Codex " +
-          CODEX_MODEL_CONTROL_AGENT_VERSION
+          "model-control residual repair currently supports only verified Codex profiles"
         );
       }
       const snapshot = await this.modelControlSnapshot(options, terminal);
@@ -1907,7 +1906,7 @@ class NativeThreadLifecycleCliApplication {
         "model control requires an exact running agent version"
       );
       const adapter = runtimeFacade.createAgentRegistry().require(terminal.agent);
-      const { capability, plan } = modelControlProfileObservation(
+      const { capability, plan, profile } = modelControlProfileObservation(
         adapter, agentVersion
       );
       if (capability?.status !== "supported" ||
@@ -1918,7 +1917,7 @@ class NativeThreadLifecycleCliApplication {
           `${adapter.displayName} has no verified model-control profile`
         );
       }
-      if (!plan) {
+      if (!plan || !profile) {
         throw new Error("the agent adapter did not produce a model-control plan");
       }
       await this.assertModelControlExclusive({ options, terminal, snapshot });
@@ -2007,6 +2006,10 @@ class NativeThreadLifecycleCliApplication {
         }
         initialResidual = observed;
       }
+      const codexCatalogVersion = profile.agent === "codex" &&
+          isCodexModelControlAgentVersion(profile.agentVersion)
+        ? profile.agentVersion
+        : undefined;
       return await operation({
         options,
         terminal,
@@ -2020,12 +2023,13 @@ class NativeThreadLifecycleCliApplication {
         ordinaryBindingToken,
         initialResidual,
         ...(terminal.agent === "codex" &&
-            isTerminalModelControlPlanForAgent(plan, "codex")
+            isTerminalModelControlPlanForAgent(plan, "codex") &&
+            codexCatalogVersion !== undefined
           ? {
               loadCodexCatalog: async () =>
                 runtimeFacade.codexModelCatalogForRunningProcess(
                   terminal.pid,
-                  CODEX_MODEL_CONTROL_AGENT_VERSION,
+                  codexCatalogVersion,
                   terminal.terminalControl.currentPath
                 )
             }

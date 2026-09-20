@@ -67,7 +67,7 @@ test("native status inspection accepts an exact current slash popup only at a pr
   );
 });
 
-test("Codex 0.147.0 through 0.154.0 require their exact ordered two-row slash popup", async () => {
+test("verified modern Codex releases require their exact ordered two-row slash popup", async () => {
   class CurrentPopupProvider extends RecordingTerminalProvider {
     override async sendText(
       target: TerminalEndpointRef | string,
@@ -107,7 +107,8 @@ test("Codex 0.147.0 through 0.154.0 require their exact ordered two-row slash po
     "0.151.0",
     "0.153.0",
     "0.153.4",
-    "0.154.0"
+    "0.154.0",
+    "0.155.1"
   ]) {
     const provider = new CurrentPopupProvider([PANE]);
     const bridge = new TerminalAgentBridge({
@@ -126,7 +127,7 @@ test("Codex 0.147.0 through 0.154.0 require their exact ordered two-row slash po
   }
 });
 
-for (const version of ["0.153.0", "0.153.4", "0.154.0"] as const) {
+for (const version of ["0.153.0", "0.153.4", "0.154.0", "0.155.1"] as const) {
   test(`Codex ${version} native status refuses an incomplete two-row popup`, async () => {
     class IncompleteCurrentPopupProvider extends RecordingTerminalProvider {
       private capturesAfterInjection = 0;
