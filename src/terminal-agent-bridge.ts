@@ -73,7 +73,8 @@ import {
   exactClaudeInjectedPastePlaceholderCapture,
   exactClaudeModelControlComposerCapture,
   exactTerminalComposerCapture,
-  inspectCodexAsyncQuestionInputMode
+  inspectCodexAsyncQuestionInputMode,
+  terminalUserExplicitInputSafetyFailure
 } from "./terminal-composer-classifier.js";
 import {
   assertTerminalMutationCapabilities,
@@ -104,6 +105,11 @@ import {
   type TerminalSendResult
 } from "./terminal-text-submission-bridge.js";
 import type * as UserExplicitSendContract from "./terminal-user-explicit-send-contract.js";
+import {
+  dispatchTerminalUserExplicitComposerClear,
+  TerminalUserExplicitClearNotStartedError,
+  TerminalUserExplicitClearUncertainError
+} from "./terminal-user-explicit-send-clear.js";
 
 export {
   TerminalEnterDispatchNotAttemptedError,
@@ -150,11 +156,7 @@ export {
   type TerminalNativeInspectionOptions,
   type TerminalNativeInspectionResult
 } from "./terminal-native-inspection-bridge.js";
-export type TerminalActivityState =
-  | "awaiting_approval"
-  | "working"
-  | "idle"
-  | "unknown";
+export type TerminalActivityState = "awaiting_approval" | "working" | "idle" | "unknown";
 
 export type TerminalNativeIdentityState =
   | "resolved"
@@ -1138,9 +1140,9 @@ export class TerminalAgentBridge {
       error instanceof TerminalEnterDispatchReservedError
         ? error
         : new TerminalEnterDispatchReservedError(message, { cause: error });
-
     const captureSafePrompt = async (
-      control: TerminalControlRef
+      control: TerminalControlRef,
+      requireExactEmptyClaudeComposer = false
     ): Promise<TerminalControlRef> => {
       try {
         const captured = await this.captureInspection(
@@ -1176,22 +1178,20 @@ export class TerminalAgentBridge {
             now: this.now()
           }
         );
-        if (
-          captured.inspection.approval.blocked ||
-          captured.inspection.activity.state === "awaiting_approval" ||
-          (adapter.agent === "claude" &&
-            status.interaction_state !== undefined) ||
-          exactCurrentModelControlSurface(
-            adapter.agent,
-            options.runtime?.agentVersion,
-            captured.screen
-          ) ||
-          codexBlockingModalVisible(captured.screen)
-        ) {
-          throw new Error(
-            `the explicit user Send is blocked by a ${adapter.displayName} approval, interaction, or modal prompt`
-          );
-        }
+        const safetyFailure = terminalUserExplicitInputSafetyFailure({
+          agent: adapter.agent, displayName: adapter.displayName,
+          screen: captured.screen, terminalControl: captured.terminalControl,
+          approvalBlocked: captured.inspection.approval.blocked,
+          awaitingApproval:
+            captured.inspection.activity.state === "awaiting_approval",
+          interactionActive: adapter.agent === "claude" &&
+            status.interaction_state !== undefined,
+          modelControlSurface: Boolean(exactCurrentModelControlSurface(
+            adapter.agent, options.runtime?.agentVersion, captured.screen
+          )),
+          requireExactEmptyClaudeComposer
+        });
+        if (safetyFailure) throw new Error(safetyFailure);
         const verified = await this.verifyTerminalIdentity(
           adapter.agent,
           captured.terminalControl,
@@ -1220,25 +1220,23 @@ export class TerminalAgentBridge {
       throw notStarted(error);
     }
 
-    // The reservation callback may await Store or terminal locks. Recapture
-    // only approval/modal and identity authority immediately before the first
-    // physical mutation; Composer visibility and contents are never a veto.
+    // Recapture approval/modal and identity authority before mutation.
     const verifiedForClear = await captureSafePrompt(initiallySafe);
-    let clearEndpoint: TerminalEndpointRef;
+    let clearedForText: TerminalControlRef;
     try {
-      clearEndpoint = this.terminalProvider.endpoint(verifiedForClear);
+      clearedForText = await dispatchTerminalUserExplicitComposerClear({
+        agent: adapter.agent, terminalControl: verifiedForClear,
+        provider: this.terminalProvider, sleep: this.sleep,
+        verifyIdentity: () => this.verifyTerminalIdentity(adapter.agent, verifiedForClear, options.runtime),
+        verifyClaudeComposerCleared: () => captureSafePrompt(
+          verifiedForClear, true
+        )
+      });
     } catch (error) {
-      throw notStarted(error);
-    }
-    try {
-      await this.terminalProvider.sendKeys(
-        clearEndpoint,
-        [adapter.agent === "claude" ? "C-c" : "C-u"]
-      );
-    } catch (error) {
-      if (error instanceof TerminalControlInputNotSentError) {
+      if (error instanceof TerminalUserExplicitClearNotStartedError) {
         throw notStarted(error);
       }
+      if (error instanceof TerminalUserExplicitClearUncertainError) throw error;
       throw uncertain(
         `explicit ${adapter.displayName} draft-clear outcome is uncertain; do not retry automatically`,
         error
@@ -1248,7 +1246,7 @@ export class TerminalAgentBridge {
     let postMutationHookError: unknown;
     try {
       await options.onComposerClearDispatched?.({
-        terminalControl: verifiedForClear,
+        terminalControl: clearedForText,
         text: normalized
       });
     } catch (error) {
@@ -1259,10 +1257,10 @@ export class TerminalAgentBridge {
     try {
       verifiedForText = await this.verifyTerminalIdentity(
         adapter.agent,
-        verifiedForClear,
+        clearedForText,
         options.runtime
       );
-      if (!sameTerminalControlIdentity(verifiedForClear, verifiedForText)) {
+      if (!sameTerminalControlIdentity(clearedForText, verifiedForText)) {
         throw new Error("terminal identity changed after clearing the Composer");
       }
       await this.terminalProvider.sendText(

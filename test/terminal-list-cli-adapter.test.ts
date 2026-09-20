@@ -650,6 +650,34 @@ test("Codex 0.154 exact /model residual advertises typed continuation and repair
   assert.equal(unsafeActions.model_options, undefined);
 });
 
+test("a proven input-owning viewer suppresses every terminal Send action", async (t) => {
+  const root = fs.mkdtempSync(path.join(
+    os.tmpdir(),
+    "akk-list-input-owner-"
+  ));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const fixture = await createCodexRolloutListFixture(
+    root,
+    "completed",
+    false,
+    {},
+    "human-only",
+    true,
+    true,
+    [
+      "  Settings  Status   Config   Usage   Stats",
+      "  Version: 0.154.0",
+      "  Esc to cancel"
+    ].join("\n"),
+    { agentVersion: "0.154.0" }
+  );
+  const [terminal] = fixture.scan.terminalControlled;
+  const actions = terminal.available_actions as Record<string, unknown>;
+  assert.equal(actions.send, undefined);
+  assert.equal(terminal._terminal_user_explicit_send_action, undefined);
+});
+
 test("one terminal row samples each observation source once", async (t) => {
   const root = fs.mkdtempSync(path.join(
     os.tmpdir(),

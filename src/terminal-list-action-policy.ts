@@ -1,4 +1,6 @@
 import type { ExecutorKind } from "./executors.js";
+import { terminalUserExplicitTerminalInputOwnerBlocked } from
+  "./terminal-composer-classifier.js";
 import {
   decideTerminalUserExplicitSendEligibility,
   type TerminalUserExplicitSendEligibility
@@ -87,7 +89,9 @@ export function decideTerminalListActions(input: {
     processBirth: facts.physical.processIncarnation?.processBirth,
     approvalScanned: state.approval_state.scanned === true,
     approvalBlocked: state.approval_state.blocked === true,
-    interactionActive: facts.status.hasInteraction ||
+    interactionActive: facts.status.hasInteraction,
+    inputOwnerBlocked: facts.composer.inputOwnerBlocked ||
+      terminalUserExplicitTerminalInputOwnerBlocked(control) ||
       (facts.modelControlResidual?.state === "recoverable" &&
         facts.modelControlResidual.kind === "model_surface"),
     userExplicitComposerReady: facts.composer.userExplicitComposerReady
@@ -112,8 +116,14 @@ function decideTerminalListCommands(input: {
   const control = subject.terminalControl;
   const lifecycle = facts.runtime.lifecycleCapability;
   const state = facts.status.projected;
+  const inputOwnerBlocked = facts.status.hasInteraction ||
+    facts.composer.inputOwnerBlocked ||
+    terminalUserExplicitTerminalInputOwnerBlocked(control) ||
+    (facts.modelControlResidual?.state === "recoverable" &&
+      facts.modelControlResidual.kind === "model_surface");
   const idleAndNotBlocked = state.activity_state === "idle" &&
-    state.approval_state.blocked !== true;
+    state.approval_state.blocked !== true &&
+    !inputOwnerBlocked;
   return Object.freeze({
     send: !facts.store.terminalHasBlockingTurn && idleAndNotBlocked,
     approve: control.capabilities.includes("terminal_approval") &&

@@ -10,6 +10,7 @@ import {
   exactClaudeInjectedPastePlaceholderCapture,
   exactTerminalComposerCapture,
   inspectCodexAsyncQuestionInputMode,
+  terminalUserExplicitInputOwnerBlocked,
   terminalComposerRowsMatchExpected
 } from "../src/terminal-composer-classifier.js";
 import {
@@ -195,4 +196,39 @@ test("Codex writer and modal evidence yields to a later exact main Composer", ()
   ].join("\n");
   assert.equal(codexActiveWriterViewerVisible(repaintedMainComposer), false);
   assert.equal(codexBlockingModalVisible(repaintedMainComposer), false);
+});
+
+test("user-explicit input-owner detection blocks proven UI owners, not drafts", () => {
+  const claudeStatus = [
+    "────────────────────────────────────────────────",
+    "  Settings  Status   Config   Usage   Stats",
+    "",
+    "  Version:             2.1.266",
+    "  Session ID:          40ce9ddb-6de3-45d1-be57-7684808712a0",
+    "  cwd:                 /repo",
+    "  Model:               claude-sonnet",
+    "",
+    "  Esc to cancel"
+  ].join("\n");
+  assert.equal(terminalUserExplicitInputOwnerBlocked(claudeStatus), true);
+  assert.equal(
+    terminalUserExplicitInputOwnerBlocked(
+      `${claudeStatus}\n────────────────────────────────\n❯ ordinary draft`
+    ),
+    false,
+    "a later main Composer makes an old modal footer historical"
+  );
+  assert.equal(
+    terminalUserExplicitInputOwnerBlocked(
+      "❯ reverse-i-search: previous task\nEsc to cancel search"
+    ),
+    true
+  );
+  assert.equal(
+    terminalUserExplicitInputOwnerBlocked(
+      "❯ existing ordinary draft\n● high · /effort"
+    ),
+    false
+  );
+  assert.equal(terminalUserExplicitInputOwnerBlocked(undefined), false);
 });

@@ -47,7 +47,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v28 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v29 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -284,20 +284,28 @@ test("operator guide and bundled skill keep advanced commands in their workflows
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(operatorContract, /v28 `action_contracts`/u);
+  assert.match(operatorContract, /v29 `action_contracts`/u);
+  assert.match(
+    quickstart,
+    /terminal_user_explicit_composer_policy=replace_current_composer_and_submit[\s\S]*Codex-named field remains a compatibility alias/u
+  );
+  assert.match(
+    skill,
+    /terminal_user_explicit_composer_policy[\s\S]*Codex-named field is a v28 compatibility alias/u
+  );
   assert.match(
     operatorContract,
     /`terminal_user_explicit`[\s\S]*exact live physical terminal\/process[\s\S]*scanned,? non-blocked approval state/u
   );
   assert.match(
     operatorContract,
-    /Composer visibility, stability, or exactness[\s\S]*Codex physical fallback[\s\S]*`C-u`[\s\S]*Claude Code physical fallback[\s\S]*whole-draft clear[\s\S]*paste window[\s\S]*Enter exactly once/u
+    /Composer visibility, stability, or exactness[\s\S]*Codex physical fallback[\s\S]*`C-u`[\s\S]*Claude Code physical fallback[\s\S]*sentinel-backed native `C-s`[\s\S]*cursor position[\s\S]*proves? the main Composer empty[\s\S]*paste window[\s\S]*Enter exactly once/u
   );
   assert.match(operatorContract, /Composer observation cannot veto Enter/u);
   for (const document of [quickstart, skill]) {
     assert.match(
       document,
-      /Codex and Claude Code `terminal_user_explicit`[\s\S]*`replace_current_composer_and_submit`/u
+      /Codex and Claude Code `terminal_user_explicit`[\s\S]*(?:`replace_current_composer_and_submit`|terminal_user_explicit_composer_policy=replace_current_composer_and_submit)/u
     );
     assert.match(
       document,
@@ -305,7 +313,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     );
     assert.match(
       document,
-      /(?:Claude Code[^.\n]*whole-draft clear|whole-draft clear[^.\n]*Claude Code)/u
+      /Claude Code[^.\n]*sentinel-backed native `C-s`[^.\n]*main Composer empty/u
     );
     assert.match(document, /Enter exactly once/u);
   }

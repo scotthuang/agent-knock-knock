@@ -354,7 +354,7 @@ async function runTerminalSendBeforeEnter(
   }
 }
 
-async function waitForUserExplicitCodexEnter(input: {
+async function waitForUserExplicitEnter(input: {
   enabled: boolean;
   textInjectedAt: number;
   nowMs: () => number;
@@ -374,7 +374,7 @@ function throwPostTextHookFailureAfterUserEnter(
 ): void {
   if (!enabled || error === undefined) return;
   throw new TerminalEnterDispatchReservedError(
-    "user-explicit Codex Enter was dispatched but post-text bookkeeping failed; do not retry",
+    "user-explicit terminal Enter was dispatched but post-text bookkeeping failed; do not retry",
     { cause: error }
   );
 }
@@ -571,7 +571,19 @@ export class TerminalTextSubmissionBridge {
         },
         preserveUserInput
       );
-      if (adapter.agent === "codex" && requireExactComposer) {
+      if (preserveUserInput) {
+        await waitForUserExplicitEnter({
+          enabled: true,
+          textInjectedAt,
+          nowMs: this.runtime.nowMs,
+          sleep: this.runtime.sleep
+        });
+        verifiedForEnter = await this.runtime.verifyIdentity(
+          adapter.agent,
+          terminalControl,
+          options.runtime
+        );
+      } else if (adapter.agent === "codex" && requireExactComposer) {
         verifiedForEnter = await this.settleCodexMultilineComposer(
           adapter,
           terminalControl,
@@ -603,12 +615,6 @@ export class TerminalTextSubmissionBridge {
           options.allowWorkingComposerForUserExplicit === true
         );
       } else {
-        await waitForUserExplicitCodexEnter({
-          enabled: preserveUserInput,
-          textInjectedAt,
-          nowMs: this.runtime.nowMs,
-          sleep: this.runtime.sleep
-        });
         verifiedForEnter = await this.runtime.verifyIdentity(
           adapter.agent,
           terminalControl,

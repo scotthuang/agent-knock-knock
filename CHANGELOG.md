@@ -4,7 +4,8 @@
 
 ### Changed
 
-- Extend the advertised `terminal_user_explicit` `replace_current_composer_and_submit` policy to Claude Code. After the live input-safety checks pass, Claude Code physical fallback invokes its native whole-draft clear once, injects the new request, waits through the paste window, and dispatches Enter exactly once. An existing draft, parsed working activity, or ordinary Composer visibility, stability, or exactness does not veto the human's explicit Send.
+- Extend the advertised `terminal_user_explicit` `replace_current_composer_and_submit` policy to Claude Code. After the live input-safety checks pass, Claude Code uses a sentinel-backed native `C-s` stash-clear transaction that is independent of the cursor position and does not interrupt an active turn, proves the main Composer empty, then injects the new request, waits through the paste window, and dispatches Enter exactly once. An existing draft, parsed working activity, or ordinary Composer visibility, stability, or exactness does not veto the human's explicit Send.
+- Advance the structured List action contract to v29 with the agent-neutral `terminal_user_explicit_composer_policy`; retain `codex_terminal_user_explicit_composer_policy` as a v28 compatibility alias.
 
 ### Security
 

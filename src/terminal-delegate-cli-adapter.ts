@@ -97,7 +97,7 @@ function assertSingleDelegateCandidate(
     const workspaceDetail = workspace ? ` in ${workspace}` : "";
     throw new Error(
       `No send-ready ${requestedExecutor?.displayName ?? "Codex or Claude Code"} pane is available${workspaceDetail}.${observed} ` +
-      `Start ${requestedAgent ?? "codex or claude"} inside tmux or Herdr${workspaceDetail}, ensure its exact process and terminal are live with a scanned, non-blocked approval state${requestedAgent === "codex" ? "" : "; Claude additionally requires an exact empty Composer"}, then retry.`
+      `Start ${requestedAgent ?? "codex or claude"} inside tmux or Herdr${workspaceDetail}, ensure its exact process and terminal are live with a scanned, non-blocked approval state and no native questionnaire, editor, menu, history search, or read-only viewer owning input, then retry.`
     );
   }
   if (candidates.length > 1) {
@@ -330,7 +330,8 @@ async function routeForDelegateBinding(
   } catch {
     // The immutable physical binding remains authoritative. runSend performs
     // the fresh process, terminal-identity, and approval checks before any
-    // Codex input. Claude additionally retains its exact-empty check.
+    // terminal input. Both agents retain the approval and proven input-owner
+    // boundaries while ordinary Composer contents remain replaceable.
   }
   return {
     terminalId: binding.terminalId,

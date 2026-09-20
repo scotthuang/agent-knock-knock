@@ -160,14 +160,14 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 28);
+    assert.equal(listed.action_contracts.version, 29);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, or exactness do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*no Composer observation may veto Enter[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*failure is reported/u
+      /terminal_user_explicit[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*Composer visibility, stability, exactness, or existing draft contents do not veto[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*no Composer observation may veto Enter[\s\S]*unmanaged work[\s\S]*Terminal Watch callback[\s\S]*failure is reported/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -413,6 +413,11 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.match(
       listed.action_contracts.actions.send.initial_attach_scope,
       /terminal_user_explicit[\s\S]*terminal_id prefilled by an exact live terminal row[\s\S]*selector explicitly named by the user[\s\S]*exact live physical terminal\/process[\s\S]*scanned, non-blocked approval state[\s\S]*C-u[\s\S]*paste window[\s\S]*Enter exactly once[\s\S]*without a post-text Composer veto/u
+    );
+    assert.equal(
+      listed.action_contracts.actions.send
+        .terminal_user_explicit_composer_policy,
+      "replace_current_composer_and_submit"
     );
     assert.equal(
       listed.action_contracts.actions.send
@@ -1024,9 +1029,9 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     );
     assert.equal(
       typeof claude.available_actions.send.arguments.expected_terminal_token,
-      "undefined"
+      "string"
     );
-    assert.equal(claude.available_actions.send.scope, undefined);
+    assert.equal(claude.available_actions.send.scope, "terminal_user_explicit");
     assert.equal(claude.available_actions.cancel, undefined);
     assert.equal(claude.terminal_control.capabilities.includes("durable_completion"), true);
     assert.equal(claude.terminal_control.capabilities.includes("screen_completion"), false);

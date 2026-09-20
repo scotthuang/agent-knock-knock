@@ -56,6 +56,7 @@ import {
   type TerminalDurableActivityState,
   type TerminalNativeIdentityState
 } from "./terminal-agent-bridge.js";
+import { terminalUserExplicitInputOwnerBlocked } from "./terminal-composer-classifier.js";
 import {
   captureCodexHumanStartedActiveTaskAnchor,
   type CodexRolloutAcceptanceIdentity
@@ -1022,10 +1023,8 @@ async function terminalControlledListEntry(
     modelControlCapability,
     compatibilityWarnings
   } = facts.runtime;
-  const {
-    automatedInputComposerReady,
-    userExplicitComposerReady
-  } = facts.composer;
+  const { automatedInputComposerReady, userExplicitComposerReady,
+    inputOwnerBlocked } = facts.composer;
   const {
     terminalId,
     childPids,
@@ -1181,7 +1180,8 @@ async function terminalControlledListEntry(
       processBirth: physicalProcessIncarnation?.processBirth,
       approvalScanned: projectedTerminalState.approval_state.scanned === true,
       approvalBlocked: projectedTerminalState.approval_state.blocked === true,
-      interactionActive: facts.status.hasInteraction ||
+      interactionActive: facts.status.hasInteraction,
+      inputOwnerBlocked: inputOwnerBlocked ||
         (facts.modelControlResidual?.state === "recoverable" &&
           facts.modelControlResidual.kind === "model_surface"),
       // Human-explicit Send treats this observation as advisory: an off-screen,
@@ -1915,6 +1915,7 @@ async function observeAutomatedInputComposerReady({
 }): Promise<{
   automatedInputComposerReady: boolean;
   userExplicitComposerReady: boolean;
+  inputOwnerBlocked: boolean;
 }> {
   let ready = terminalListRuntime().nativeInspectionComposerEmpty(
     session.agent,
@@ -1926,6 +1927,7 @@ async function observeAutomatedInputComposerReady({
   let userExplicitReady = session.agent === "codex"
     ? userExplicitPromptSafe
     : ready && userExplicitPromptSafe;
+  const inputOwnerBlocked = terminalUserExplicitInputOwnerBlocked(terminalState.screen_excerpt);
   if (
     session.agent !== "codex" ||
     terminalState.approval_state.blocked === true ||
@@ -1934,7 +1936,8 @@ async function observeAutomatedInputComposerReady({
   ) {
     return {
       automatedInputComposerReady: ready,
-      userExplicitComposerReady: userExplicitReady
+      userExplicitComposerReady: userExplicitReady,
+      inputOwnerBlocked
     };
   }
   try {
@@ -1958,7 +1961,8 @@ async function observeAutomatedInputComposerReady({
   }
   return {
     automatedInputComposerReady: ready,
-    userExplicitComposerReady: userExplicitReady
+    userExplicitComposerReady: userExplicitReady,
+    inputOwnerBlocked
   };
 }
 

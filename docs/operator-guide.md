@@ -59,7 +59,7 @@ prefilled semantic IDs from a fresh list.
 
 ## Reliable Send
 
-The v28 `action_contracts` expose model-facing semantic IDs only. The trusted
+The v29 `action_contracts` expose model-facing semantic IDs only. The trusted
 adapter privately derives and revalidates terminal, process, binding, native
 thread, composer, approval, handoff, revision, and compare-and-swap evidence.
 Callers never supply those opaque fences.
@@ -87,10 +87,12 @@ input-owning questionnaire, editor, menu, or read-only viewer. Broken AKK Turn,
 Session, transfer, transition, ledger, or Store state cannot veto the user's
 explicit Send. Neither can parsed working activity, an existing draft, or
 ordinary Composer visibility, stability, or exactness. Codex physical fallback
-sends `C-u` once; Claude Code physical fallback invokes its native whole-draft
-clear once. Each then injects the new request, waits through the paste window,
-and dispatches Enter exactly once. After text injection, Composer observation
-cannot veto Enter.
+sends `C-u` once. Claude Code physical fallback uses a sentinel-backed native
+`C-s` stash-clear transaction that is independent of the cursor position and
+does not interrupt an active turn, then proves the main Composer empty. Each
+then injects the new request,
+waits through the paste window, and dispatches Enter exactly once. After text
+injection, Composer observation cannot veto Enter.
 
 AKK first takes the managed path where its stronger pre-input requirements
 hold. Otherwise it may deliver unmanaged work once and best-effort attaches a

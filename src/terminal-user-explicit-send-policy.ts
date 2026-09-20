@@ -16,7 +16,10 @@ export interface TerminalUserExplicitSendFacts {
   readonly processBirth?: string;
   readonly approvalScanned: boolean;
   readonly approvalBlocked: boolean;
-  readonly interactionActive?: boolean;
+  /** A native questionnaire currently owns terminal input. */
+  readonly interactionActive: boolean;
+  /** A proven menu, editor, viewer, or history-search surface owns input. */
+  readonly inputOwnerBlocked: boolean;
   readonly userExplicitComposerReady: boolean;
 }
 
@@ -51,7 +54,8 @@ export function decideTerminalUserExplicitSendEligibility(
     !control.capabilities.includes("screen_status") ||
     !facts.approvalScanned ||
     facts.approvalBlocked ||
-    facts.interactionActive === true ||
+    facts.interactionActive ||
+    facts.inputOwnerBlocked ||
     !facts.agent ||
     !Number.isSafeInteger(facts.pid) ||
     Number(facts.pid) <= 1 ||
