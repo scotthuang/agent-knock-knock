@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.13.8 - 2026-09-21
+
+### Added
+
+- Add typed Codex `0.154.0` and `0.155.1` support for running `request_user_input_async` questions across managed Monitor and exact Terminal Watch, while the coding task remains working.
+- Project single-select and bounded free-text steps through the existing semantic interaction contract, with explicit `steer_current_turn` and `queue_next_turn` delivery modes and no public raw-key or menu-index surface.
+
+### Fixed
+
+- Recognize the exact styled GPT-6 Astra animated empty Composer during managed Send, including the candidate-acceptance path that previously dropped the running Codex version and unnecessarily downgraded delivery to an unmanaged Watch.
+- Keep Host-profile callback notifications pending for their matching runtime instead of allowing an unrelated background worker to claim and permanently fail them.
+- Treat only the independently parsed countdown repaint digest as non-semantic when reopening the same collapsed asynchronous question; question, task, terminal, pending-count, and key-binding drift still reject before input.
+
+### Security
+
+- Bind every asynchronous answer to the exact terminal incarnation, native task, current question, semantic option, callback owner, and versioned TUI profile. Unknown or clipped surfaces, competing responders, state drift, and uncertain input remain fail-closed and are never retried automatically.
+
 ## 0.13.7 - 2026-09-20
 
 ### Added
