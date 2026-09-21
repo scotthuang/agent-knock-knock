@@ -546,6 +546,8 @@ export function akkUsageText(): string {
     "/akk respond <turn-selector>: <answer>",
     "/akk approve <turn-selector> [approve_once|reject]",
     "/akk cancel <turn-selector>",
+    "Native interactions are answered through Status plus the typed respond_interaction tool; there is no raw-key or menu-index /akk command.",
+    "Codex async_question stays parallel to a working task; delivery_mode defaults to advertised steer_current_turn, or explicitly choose advertised queue_next_turn. A blocking questionnaire omits delivery_mode.",
     "Model control targets one exact physical pane; Codex rollout attribution and identify-foreground are not prerequisites.",
     "Repair-model-control is advertised only for an exact stale Codex /model Composer surface or open native picker; it clears no other draft, never presses Enter, and never submits or selects anything.",
     "Models normally requires an idle, empty, prompt-free UI with no active Turn; for an exactly advertised profiled Codex 0.154.0/0.155.1 /model residue it may continue that residue into read-only catalog discovery. Successful discovery consumes any residual-entry authority, restores the exact empty UI, and issues a fresh ordinary one-shot set-model offer; set-model accepts only that offer. If the result is uncertain, inspect the pane and do not retry automatically."

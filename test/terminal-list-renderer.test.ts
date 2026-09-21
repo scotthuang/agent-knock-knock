@@ -319,9 +319,9 @@ test("managed Turn action projection preserves exact JSON bytes across eligibili
   }
 });
 
-test("the public action contract v29 exposes semantic arguments only", () => {
+test("the public action contract v30 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 29);
+  assert.equal(contracts.version, 30);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -390,7 +390,7 @@ test("the public action contract v29 exposes semantic arguments only", () => {
   );
   assert.match(
     (contracts.instructions as string[]).join("\n"),
-    /native questionnaire response[\s\S]*same controller conversation[\s\S]*managed Turn or response-capable exact Watch[\s\S]*current pending interaction_state[\s\S]*turn_id or watch_id[\s\S]*one call resolves only the current step[\s\S]*refresh status[\s\S]*manual_required interactions are notification-only[\s\S]*retry/iu
+    /native interaction response[\s\S]*same controller conversation[\s\S]*managed Turn or response-capable exact Watch[\s\S]*current pending interaction_state[\s\S]*turn_id or watch_id[\s\S]*async_question[\s\S]*delivery_mode[\s\S]*one call resolves only the current step[\s\S]*refresh status[\s\S]*manual_required interactions are notification-only[\s\S]*retry/iu
   );
   assert.deepEqual(actions.respond_interaction, {
     tool: "agent_knock_knock_respond_interaction",
@@ -401,12 +401,13 @@ test("the public action contract v29 exposes semantic arguments only", () => {
     watch_target_argument: "watch_id",
     interaction_argument: "interaction_id",
     required: ["interaction_id", "answers"],
+    optional: ["delivery_mode"],
     candidate_source:
       "terminal_status.interaction_state for a managed Turn or watch.interaction_state for a response-capable exact Watch, returned by agent_knock_knock_status in the same controller conversation",
     watch_scope:
       "Only an exact current Watch interaction whose Status projection advertises capabilities.respond=true may use watch_id. Terminal-activity and manual_required Watch interactions remain notification-only.",
     answer_contract:
-      "Use only the current projection's opaque question_id and option_id values, or its bounded typed free_text answer. Raw terminal keys, menu indexes, rendered labels, prompt fingerprints, versions, and terminal commands are not accepted.",
+      "Use only the current projection's opaque question_id and option_id values, or its bounded typed free_text answer. An async_question defaults to advertised steer_current_turn or accepts explicit advertised queue_next_turn as delivery_mode; questionnaire forbids delivery_mode. Raw terminal keys, menu indexes, rendered labels, prompt fingerprints, versions, and terminal commands are not accepted.",
     one_step_per_call: true,
     requires_fresh_status: true,
     requires_same_controller_conversation: true,

@@ -997,7 +997,7 @@ export function assertTerminalWatchManualInteractionSummary(
   value: unknown
 ): asserts value is TerminalWatchManualInteractionSummary {
   assertStrictRecord(value, "terminal Watch manual interaction", {
-    kind: literalGuard("questionnaire"),
+    kind: oneOfGuard(["questionnaire", "async_question"]),
     response_kind: oneOfGuard(
       TERMINAL_WATCH_MANUAL_INTERACTION_RESPONSE_KINDS
     ),

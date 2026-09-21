@@ -391,7 +391,7 @@ function manualCandidate(
   };
 }
 
-function isSecretQuestion(
+export function isSecretQuestion(
   explicitSecret: boolean | undefined,
   question: NativeQuestionnaireQuestion
 ): boolean {

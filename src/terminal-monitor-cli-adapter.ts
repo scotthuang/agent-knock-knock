@@ -757,18 +757,23 @@ export function recordMonitorInteractionNotification(input: {
       const executable = interactionState.state === "pending" &&
         interactionState.capabilities.respond === true &&
         interactionState.questions[0]?.response_kind !== "multi_select";
+      const asynchronous = interactionState.kind === "async_question";
       return input.ports.prepare({
         conversation,
         actor: input.executor.actor,
         body: executable
           ? [
-              `${input.executor.display_name} is waiting for a native questionnaire response.`,
+              asynchronous
+                ? `${input.executor.display_name} has an optional async question and continues working.`
+                : `${input.executor.display_name} is waiting for a native questionnaire response.`,
               `Turn: ${conversation.turn_id}`,
               `Terminal: ${input.terminalControl.target}`,
               "Refresh this Turn with agent_knock_knock_status in the owning controller conversation, present the current interaction_state to the user, and answer exactly one advertised step with agent_knock_knock_respond_interaction."
             ].join("\n")
           : [
-              `${input.executor.display_name} is waiting at a native questionnaire that AKK cannot answer safely.`,
+              asynchronous
+                ? `${input.executor.display_name} continues working with an async question that AKK cannot answer safely.`
+                : `${input.executor.display_name} is waiting at a native questionnaire that AKK cannot answer safely.`,
               `Turn: ${conversation.turn_id}`,
               `Terminal: ${input.terminalControl.target}`,
               "Review and answer this questionnaire directly in the terminal. AKK intentionally sends no terminal input for this interaction shape."
@@ -785,11 +790,21 @@ export function recordMonitorInteractionNotification(input: {
           },
           interaction_state: interactionState
         },
-        requiresResponse: executable,
+        requiresResponse: executable && !asynchronous,
         recoverMissingOutbox: context?.recoverMissingOutbox === true
       });
     }
   });
+}
+
+export function validMonitorInteractionProjection(
+  value: unknown
+): TerminalInteractionProjection | undefined {
+  try {
+    return validateTerminalInteractionProjection(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function persistedInteractionNotificationProjection(input: {

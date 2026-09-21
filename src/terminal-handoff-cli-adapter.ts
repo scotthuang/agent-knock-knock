@@ -705,7 +705,10 @@ function deferredForegroundBoundaryAdapterPorts(
     assertComposerReady: (boundary) =>
       assertCodexComposerReadyForAutomatedInput({
         options,
-        terminalControl: boundary.terminal.terminalControl
+        terminalControl: boundary.terminal.terminalControl,
+        runtime: boundary.candidateAcceptanceAnchor ? {
+          agentVersion: agentVersionForRunningProcess("codex", boundary.terminal.pid, options)
+        } : undefined
       }),
     valuesMatch: (left, right) =>
       JSON.stringify(left) === JSON.stringify(right)

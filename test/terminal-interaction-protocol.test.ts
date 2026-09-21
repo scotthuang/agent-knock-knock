@@ -137,6 +137,71 @@ test("projection validator rebuilds a closed public projection", () => {
   assert.equal(parsed.questions[0]?.response_kind, "single_select");
 });
 
+test("async-question projections require closed delivery modes", () => {
+  const inputProjection = projection({
+    kind: "async_question",
+    delivery_modes: ["steer_current_turn", "queue_next_turn"]
+  });
+  const parsed = validateTerminalInteractionProjection(inputProjection);
+  assert.deepEqual(parsed.delivery_modes, [
+    "steer_current_turn",
+    "queue_next_turn"
+  ]);
+
+  expectValidationError(
+    () => validateTerminalInteractionProjection(projection({
+      kind: "async_question"
+    })),
+    "invalid_type",
+    "$.delivery_modes"
+  );
+  expectValidationError(
+    () => validateTerminalInteractionProjection(projection({
+      delivery_modes: ["steer_current_turn"]
+    })),
+    "unknown_field",
+    "$.delivery_modes"
+  );
+});
+
+test("async-question responses default to advertised steer and reject other modes", () => {
+  const inputProjection = projection({
+    kind: "async_question",
+    delivery_modes: ["steer_current_turn", "queue_next_turn"]
+  });
+  const answer = [{
+    question_id: "q1",
+    response_kind: "single_select",
+    selected_option_ids: ["local"]
+  }];
+  const parsed = validateTerminalInteractionResponse(
+    response(answer, { delivery_mode: "steer_current_turn" }),
+    inputProjection
+  );
+  assert.equal(parsed.delivery_mode, "steer_current_turn");
+  assert.equal(
+    validateTerminalInteractionResponse(response(answer), inputProjection)
+      .delivery_mode,
+    "steer_current_turn"
+  );
+  expectValidationError(
+    () => validateTerminalInteractionResponse(
+      response(answer),
+      projection({ kind: "async_question", delivery_modes: ["queue_next_turn"] })
+    ),
+    "response_not_allowed",
+    "$.delivery_mode"
+  );
+  expectValidationError(
+    () => validateTerminalInteractionResponse(
+      response(answer, { delivery_mode: "queue_next_turn" }),
+      projection()
+    ),
+    "unknown_field",
+    "$.delivery_mode"
+  );
+});
+
 test("projection validator accepts each explicitly supported response kind", () => {
   const cases = [
     {

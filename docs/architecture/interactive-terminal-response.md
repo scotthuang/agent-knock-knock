@@ -203,15 +203,42 @@ and tests are added.
 
 Codex 0.154.0 and 0.155.1 preserve those blocking `request_user_input` frames
 under separate version-bound profiles. Codex 0.154.0 also adds
-`request_user_input_async`, whose question editor is non-blocking with respect
-to the running agent turn and is
-therefore not projected into the blocking `interaction_state` contract. AKK
-recognizes its input ownership instead: an exact collapsed question summary
-leaves the main Composer sendable, while an expanded, clipped, or ambiguous
-async editor is a zero-input boundary so an explicit task cannot become a
-question answer. Automated async-question response remains unsupported. The
-0.154/0.155 active-writer `/resume` viewer is likewise read-only and
-receives no AKK terminal input.
+`request_user_input_async`; unlike a blocking `questionnaire`, its question is
+projected as `kind="async_question"` while the agent Turn remains `working`.
+The projection advertises semantic `delivery_modes`. A typed response defaults
+to advertised `steer_current_turn` or explicitly selects advertised `queue_next_turn`: `steer_current_turn` delivers the answer to
+the running turn, while `queue_next_turn` queues it for the next turn. Blocking
+questionnaires do not advertise and must reject that field.
+
+For async questions, the advertised native Other option opens a separate
+`free_text` step; it is not the blocking questionnaire's Notes workflow.
+An answer queued for the next turn uses the same exact question editor and
+must verify the injected answer before the final submit/queue key. If that
+editor closes or changes, input stops with an uncertain result and no retry.
+
+Collapsed async countdown redraws are not question changes: dispatch compares
+the independently parsed question, pending count, opening binding, subject and
+terminal identity, while retaining the rendered digest for evidence. A different
+question, count, input mode or binding still rejects before input.
+
+For managed user Send on profiled Codex 0.154.0/0.155.1 using Astra, animated
+empty Composer proof requires the full dim placeholder, styled marker and shared painted
+background, only the known decorated cells, and a complete supported footer.
+Activity, approval and input-owner checks run first. This proof does not grant
+native lifecycle or model-control authority. After the managed pre-text proof,
+user-explicit Send retains its one-paste/one-Enter contract without a post-text
+Composer veto.
+
+AKK still treats input ownership independently: an exact collapsed question
+summary leaves the main Composer sendable, while an expanded, clipped, or
+ambiguous async editor is a zero-input boundary so an explicit task cannot
+become a question answer. Response execution uses only semantic question and
+option identities; raw shortcut keys and menu indexes never cross the public
+contract. Codex 0.154.0 and 0.155.1 rely on exact version-bound TUI and durable
+task evidence. Notification and stable-question-identity response wrappers
+added on Codex main after 0.155.1 must not be assumed to exist in either
+release. The 0.154/0.155 active-writer `/resume` viewer is likewise read-only
+and receives no AKK terminal input.
 
 Codex 0.155.1 can also display native user-verification prompts for MCP
 requests. AKK classifies the exact prompt and waiting surfaces as blocked but

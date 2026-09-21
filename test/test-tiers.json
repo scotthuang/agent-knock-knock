@@ -18,6 +18,7 @@
     "test/cli-core.test.ts",
     "test/cli-command-runtime.test.ts",
     "test/cli-runtime-context.test.ts",
+    "test/codex-async-question-adapter.test.ts",
     "test/codex-local-session-provider.test.ts",
     "test/codex-session-provider.test.ts",
     "test/codex-sticky-rollout-lifecycle-core.test.ts",

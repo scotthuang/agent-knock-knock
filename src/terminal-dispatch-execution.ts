@@ -493,6 +493,16 @@ export function terminalRuntimeIdentityBase(
       interactionDispatch?.state === "uncertain"
       ? interactionDispatch.state
       : undefined;
+  const submission = isRecord(takeover?.terminal_bridge_submission)
+    ? takeover.terminal_bridge_submission
+    : undefined;
+  const acceptanceEvidence = isRecord(submission?.acceptance_evidence)
+    ? submission.acceptance_evidence
+    : undefined;
+  const nativeTaskId = submission?.status === "agent_accepted" &&
+      acceptanceEvidence?.source === "codex_rollout"
+    ? nonBlankString(acceptanceEvidence.acceptanceId)
+    : undefined;
   const strict =
     Number(takeover?.terminal_agent_identity_protocol) === 1;
   const expectedSessionId = nonBlankString(
@@ -528,6 +538,7 @@ export function terminalRuntimeIdentityBase(
     cwd: nonBlankString(takeover?.source_cwd) ?? terminalControl.currentPath,
     conversationId: conversation.conversation_id,
     turnId: turnIdForConversation(conversation),
+    nativeTaskId,
     ...(interactionDispatchState
       ? {
           interactionDispatchState,

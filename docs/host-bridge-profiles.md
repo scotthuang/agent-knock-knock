@@ -203,6 +203,15 @@ rebuild it from the lifecycle process's current Profile. After a native Host
 restart, a new Profile revision therefore fails closed instead of adopting an
 old Watch or routing it to a replacement Agent.
 
+When multiple Hosts share a Store, a Watch lifecycle worker only claims callback
+notifications for routes its current trusted runtime can deliver. Missing or
+mismatched Profile identity, revision, or startup session leaves that notification
+pending without consuming an attempt; it must not permanently fail another
+Host's outbox. An OpenClaw-only worker cannot deliver a `command_json_v1` route.
+The owning Host must keep its lifecycle worker running with the same trusted
+relay environment. Reading Watch status observes state and prepares notifications;
+it is not a substitute for the owner's `reconcile-watches` delivery sweep.
+
 ### `command_json_v1`
 
 `command_json_v1` starts `callback.executable` directly with an argv array and

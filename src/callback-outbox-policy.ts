@@ -114,7 +114,7 @@ export function supersedeUnacceptedCallbackDeliveries(
 }
 
 /**
- * Fence only the lifecycle callback for the exact native questionnaire step
+ * Fence only the matching callback lane for the exact native interaction step
  * that has just been answered. An accepted host transport is immutable
  * evidence and must be allowed to settle; an unaccepted wake-up must never be
  * retried after the terminal has already moved on.
@@ -131,7 +131,11 @@ export function supersedeMatchingInteractionCallbackDelivery(
   const notification = recordValue(
     takeover?.terminal_bridge_interaction_notification
   );
-  const delivery = recordValue(conversation.callback_delivery);
+  const projection = recordValue(notification?.interaction_state);
+  const field = projection?.kind === "async_question"
+    ? "callback_notification_delivery"
+    : "callback_delivery";
+  const delivery = recordValue(conversation[field]);
   const message = recordValue(delivery?.message);
   const metadata = recordValue(message?.metadata);
   const interactionState = recordValue(metadata?.interaction_state);
@@ -161,7 +165,7 @@ export function supersedeMatchingInteractionCallbackDelivery(
   }
   return {
     ...conversation,
-    callback_delivery: {
+    [field]: {
       ...delivery,
       status: "superseded",
       superseded_at: input.at,

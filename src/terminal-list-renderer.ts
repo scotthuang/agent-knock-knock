@@ -51,7 +51,7 @@ export function renderManagedTurnListEntry(
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 29,
+    version: 30,
     instructions: [
       "Treat terminals[] as the primary resource and use only mutation actions present in available_actions, except the snapshot-bound terminals[].handoff_decision.choices.take_over_current.action and an exact terminals[].blocking_turns[].recovery_action. Read-only Watch is the separate user-intent exception: one complete exact terminal_id may be watched even when available_actions.watch is absent. Either nested mutation action requires explicit user confirmation; after it succeeds, refresh list before any follow-current send.",
       "A complete but unverified Codex or Claude Code x.y.z version adds compatibility_warnings and action compatibility_warning diagnostics but never vetoes an otherwise eligible action. Execute the advertised action through the generic runtime protocol; actual UI, artifact, identity, and postcondition evidence decides success. Never automatically retry a result that says terminal input may already have occurred.",
@@ -67,7 +67,7 @@ export function listActionContracts(): JsonRecord {
       "List resumable threads before resume; use only a complete native_thread_id and the action returned for that candidate.",
       "Structured follow-current actions use only the exact terminal_id prefilled by that terminal row. Human slash commands may use an explicitly named discovery selector. AKK resolves and revalidates current action authority internally; never infer or guess a target.",
       "Use respond only for an in-flight turn that is explicitly waiting for OpenClaw.",
-      "A native questionnaire response is a separate status-bound mutation. In the same controller conversation, call agent_knock_knock_status for the exact managed Turn or response-capable exact Watch, review its current pending interaction_state, and then call agent_knock_knock_respond_interaction with exactly one matching subject id (turn_id or watch_id), plus only that projection's interaction_id, question_id, and option_id values or bounded typed text. One call resolves only the current step; refresh status before every later question or final confirmation. Terminal-activity Watch observations and manual_required interactions are notification-only. Never invent semantic ids, expose private prompt authority, or retry a response whose terminal input may have occurred.",
+      "A native interaction response is a separate status-bound mutation. In the same controller conversation, call agent_knock_knock_status for the exact managed Turn or response-capable exact Watch, review its current pending interaction_state, and then call agent_knock_knock_respond_interaction with exactly one matching subject id (turn_id or watch_id), plus only that projection's interaction_id, question_id, and option_id values or bounded typed text. A Codex async_question defaults to advertised steer_current_turn and optionally accepts advertised queue_next_turn as delivery_mode; a blocking questionnaire forbids it. One call resolves only the current step; refresh status before every later question or final confirmation. Terminal-activity Watch observations and manual_required interactions are notification-only. Never invent semantic ids, expose private prompt authority, raw keys, or menu indexes, or retry a response whose terminal input may have occurred.",
       "Retry submission is never automatic. Only when the current exact Turn exposes available_actions.retry_submission, ask for explicit user confirmation and call its prefilled agent_knock_knock_send {turn_id} form unchanged. It never accepts replacement text or caller-selected terminal, Session, timeout, or callback route data, and execution revalidates the durable submission and live terminal under lock before any input.",
       "Manual approval binds the exact prompt the user reviewed. After explicit confirmation, call only the currently advertised approve action; AKK keeps the prompt authority private and recaptures the exact terminal, process, request, and prompt before sending a decision key. A prompt without complete exact evidence is not approvable.",
       "Managed controls target turn_id. A raw terminal may be controlled only through its own list-prefilled conversation_id action. When a Codex managed prompt has no usable AKK Turn owner, list may expose one manual terminal-scoped approve action after exact observation. It does not mutate the Turn or Session binding, has no durable dispatch receipt, and is never eligible for automatic approval. If its result is interrupted, refresh status and inspect the live prompt instead of retrying blindly.",
@@ -385,12 +385,13 @@ export function listActionContracts(): JsonRecord {
         watch_target_argument: "watch_id",
         interaction_argument: "interaction_id",
         required: ["interaction_id", "answers"],
+        optional: ["delivery_mode"],
         candidate_source:
           "terminal_status.interaction_state for a managed Turn or watch.interaction_state for a response-capable exact Watch, returned by agent_knock_knock_status in the same controller conversation",
         watch_scope:
           "Only an exact current Watch interaction whose Status projection advertises capabilities.respond=true may use watch_id. Terminal-activity and manual_required Watch interactions remain notification-only.",
         answer_contract:
-          "Use only the current projection's opaque question_id and option_id values, or its bounded typed free_text answer. Raw terminal keys, menu indexes, rendered labels, prompt fingerprints, versions, and terminal commands are not accepted.",
+          "Use only the current projection's opaque question_id and option_id values, or its bounded typed free_text answer. An async_question defaults to advertised steer_current_turn or accepts explicit advertised queue_next_turn as delivery_mode; questionnaire forbids delivery_mode. Raw terminal keys, menu indexes, rendered labels, prompt fingerprints, versions, and terminal commands are not accepted.",
         one_step_per_call: true,
         requires_fresh_status: true,
         requires_same_controller_conversation: true,

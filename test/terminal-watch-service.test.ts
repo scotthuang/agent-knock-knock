@@ -29,7 +29,8 @@ import {
   type CreateTerminalWatchInput,
   type TerminalWatchCallbackResolution,
   type TerminalWatchObservation,
-  type TerminalWatchService
+  type TerminalWatchService,
+  type TerminalWatchServiceDependencies
 } from "../src/terminal-watch-service.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
 import { createTerminalInteractionAggregate } from
@@ -150,6 +151,7 @@ function harness(
     notificationMaxRetryDelayMs?: number;
     resolveCallback?: (watch: TerminalWatch) =>
       TerminalWatchCallbackResolution;
+    canDeliverCallback?: TerminalWatchServiceDependencies["canDeliverCallback"];
   } = {}
 ): Harness {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-watch-service-"));
@@ -181,6 +183,7 @@ function harness(
     },
     resolveCallback:
       policy.resolveCallback ?? resolveTerminalWatchOpenClawCallback,
+    canDeliverCallback: policy.canDeliverCallback,
     deliver: async ({
       route,
       envelope,
@@ -281,7 +284,8 @@ function watchInteraction(
   watch: TerminalWatch,
   authority: TerminalInteractionResponseAuthority,
   expiresAt: string,
-  state: "pending" | "manual_required" = "pending"
+  state: "pending" | "manual_required" = "pending",
+  kind: "questionnaire" | "async_question" = "questionnaire"
 ) {
   const projection: TerminalInteractionSubjectProjection = {
     schema: TERMINAL_INTERACTION_SCHEMA,
@@ -293,7 +297,10 @@ function watchInteraction(
       anchor_fingerprint: watch.anchor.anchor_fingerprint
     },
     agent: watch.agent,
-    kind: "questionnaire",
+    kind,
+    ...(kind === "async_question"
+      ? { delivery_modes: ["steer_current_turn", "queue_next_turn"] as const }
+      : {}),
     state,
     step: { index: 1, total: 2 },
     questions: [{
@@ -322,6 +329,73 @@ function watchInteraction(
     aggregate: createTerminalInteractionAggregate(projection, START)
   };
 }
+
+test("exact async absence invalidates only its pending offer and undelivered notification", async (t) => {
+  const state = harness(t);
+  const created = state.service.create(exactInput());
+  const at = "2026-08-21T00:00:01.000Z";
+  state.advance(1_000);
+  state.observations.push((watch) => {
+    const current = watchInteraction(watch, "executable", at, "pending", "async_question");
+    return observed(watch, "interaction", at, {
+      evidence_fingerprint: digest({
+        schema: "agent-knock-knock/terminal-watch-interaction-event",
+        version: 1,
+        watch_id: watch.watch_id,
+        interaction_id: current.projection.interaction_id,
+        surface_id: current.projection.surface_id
+      }),
+      current_interaction: current
+    });
+  });
+  const offered = await state.service.reconcile(created.watch_id);
+  const prior = offered.current_interaction!;
+  const absence = {
+    interaction_id: prior.projection.interaction_id,
+    prompt_fingerprint: prior.projection.prompt_fingerprint
+  };
+  for (const [kind, detail] of [
+    ["unavailable", {}],
+    ["pending", {}],
+    ["pending", { async_interaction_absent: { ...absence, interaction_id: "ti_stale" } }]
+  ] as const) {
+    state.observations.push((watch) => observed(watch, kind, at, detail));
+    const retained = await state.service.reconcile(created.watch_id);
+    assert.equal(retained.current_interaction?.aggregate.state, "pending");
+    assert.equal(retained.notification_outbox[0]?.status, "pending");
+  }
+  state.observations.push((watch) => observed(watch, "pending", at, {
+    async_interaction_absent: absence
+  }));
+  const cleared = await state.service.reconcile(created.watch_id);
+  assert.equal(cleared.status, "active");
+  assert.equal(cleared.current_interaction?.aggregate.state, "superseded");
+  assert.equal(cleared.notification_outbox[0]?.status, "superseded");
+  assert.equal((await state.service.reconcileAll()).callbacks_delivered, 0);
+  assert.equal(state.deliveries.length, 0);
+});
+
+test("async absence does not revoke a blocking questionnaire", async (t) => {
+  const state = harness(t);
+  const created = state.service.create(exactInput());
+  const at = "2026-08-21T00:00:01.000Z";
+  state.advance(1_000);
+  state.observations.push((watch) => observed(watch, "interaction", at, {
+    evidence_fingerprint: INTERACTION_FINGERPRINT,
+    current_interaction: watchInteraction(watch, "executable", at)
+  }));
+  const offered = await state.service.reconcile(created.watch_id);
+  const projection = offered.current_interaction!.projection;
+  state.observations.push((watch) => observed(watch, "pending", at, {
+    async_interaction_absent: {
+      interaction_id: projection.interaction_id,
+      prompt_fingerprint: projection.prompt_fingerprint
+    }
+  }));
+  const retained = await state.service.reconcile(created.watch_id);
+  assert.equal(retained.current_interaction?.aggregate.state, "pending");
+  assert.equal(retained.notification_outbox[0]?.status, "pending");
+});
 
 test("service create/list survives restart and permits independent read-only subscriptions", async (t) => {
   const state = harness(t);
@@ -1292,6 +1366,77 @@ test("callback retries back off with a cap and remain recoverable", async (t) =>
   notification = state.service.get(created.watch_id).notification_outbox[0];
   assert.equal(notification.status, "delivered");
   assert.equal(state.deliveries.length, 4);
+});
+
+test("an ineligible Host callback does not consume a claim or the delivery budget", async (t) => {
+  let eligibleProfile = "legacy-openclaw-cli";
+  const state = harness(t, {
+    canDeliverCallback: (_watch, route) =>
+      route === undefined || route.profile_id === eligibleProfile
+  });
+  const hostRoute: CallbackRouteV1 = {
+    schema: "agent-knock-knock/callback-route",
+    version: 1,
+    transport: "command_json_v1",
+    profile_id: "other-host",
+    profile_revision: "1",
+    controller_session_id: "other-host-session",
+    capabilities: { wake: true, respond: true }
+  };
+  const foreign = state.service.create(exactInput({
+    watch_id: "terminal-watch-a-foreign",
+    callback_route: hostRoute,
+    openclaw_session: hostRoute.controller_session_id,
+    approval_fingerprint: APPROVAL_FINGERPRINT
+  }));
+  const legacy = state.service.create(exactInput({
+    watch_id: "terminal-watch-z-legacy",
+    approval_fingerprint: APPROVAL_FINGERPRINT
+  }));
+  const beforeForeign = state.service.get(foreign.watch_id);
+
+  const summary = await state.service.reconcileAll();
+  assert.equal(summary.errors, 0);
+  assert.equal(summary.callbacks_delivered, 1);
+  assert.equal(state.deliveries[0].watchId, legacy.watch_id);
+  const untouched = state.service.get(foreign.watch_id);
+  assert.deepEqual(untouched, beforeForeign);
+  assert.equal(untouched.notification_outbox[0].attempts, 0);
+  assert.equal(untouched.notification_outbox[0].status, "pending");
+
+  eligibleProfile = hostRoute.profile_id;
+  assert.equal((await state.restart().reconcileAll()).callbacks_delivered, 1);
+  const delivered = state.service.get(foreign.watch_id).notification_outbox[0];
+  assert.equal(delivered.attempts, 1);
+  assert.equal(delivered.status, "delivered");
+  assert.deepEqual(delivered.callback_route, hostRoute);
+});
+
+test("runtime eligibility is rechecked inside the claim lock and lookup errors leave receipts untouched", async (t) => {
+  for (const failure of ["mismatch", "invalid"] as const) {
+    let checks = 0;
+    const state = harness(t, {
+      canDeliverCallback: () => {
+        checks += 1;
+        if (checks === 1) return true;
+        if (failure === "invalid") throw new Error("runtime unavailable");
+        return false;
+      }
+    });
+    const created = state.service.create(exactInput({
+      approval_fingerprint: APPROVAL_FINGERPRINT
+    }));
+    const before = state.service.get(created.watch_id);
+    const summary = await state.service.reconcileAll();
+    assert.equal(checks, 2);
+    assert.equal(summary.errors, 0);
+    assert.equal(summary.callbacks_delivered, 0);
+    const untouched = state.service.get(created.watch_id);
+    assert.deepEqual(untouched, before);
+    assert.equal(untouched.notification_outbox[0].attempts, 0);
+    assert.equal(untouched.notification_outbox[0].status, "pending");
+    assert.equal(state.deliveries.length, 0);
+  }
 });
 
 test("callback scheduling is fair after one Watch fails", async (t) => {

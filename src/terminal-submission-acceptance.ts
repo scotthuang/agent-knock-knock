@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type {
+  CodexAsyncQuestionDurableEvidence
+} from "./codex-async-question-adapter.js";
 import { redactString } from "./runtime-log.js";
 import type {
   CodexOpenRootRolloutIdentity,
@@ -159,6 +162,12 @@ const CODEX_QUESTIONNAIRE_OTHER_DESCRIPTION =
 const CODEX_QUESTIONNAIRE_CUSTOM_LABEL = "Type something.";
 const CODEX_QUESTIONNAIRE_CUSTOM_DESCRIPTION =
   "Enter a free-form answer through Codex Notes.";
+const CODEX_ASYNC_QUESTION_TAIL_MAX_BYTES = 4 * 1024 * 1024;
+const CODEX_ASYNC_QUESTION_MAX_ITEMS = 16;
+const CODEX_ASYNC_QUESTION_MAX_QUESTIONS = 16;
+const CODEX_ASYNC_QUESTION_MAX_OPTIONS = 32;
+const CODEX_ASYNC_QUESTION_MAX_TEXT_LENGTH = 4_096;
+
 
 export interface CodexQuestionnaireScreenEvidence {
   currentStep: number;
@@ -2631,6 +2640,201 @@ interface CodexPendingRequestUserInput {
   rollout: CodexRolloutIdentity;
   turnId: string;
   questions: readonly CodexDurableQuestionnaireQuestion[];
+}
+
+/**
+ * Read only the bounded, complete tail of one exact rollout and return async
+ * questions belonging to its single currently active native turn. A missing
+ * task boundary, a partial record, file drift, or an unsupported payload is a
+ * hard absence rather than permission to infer from screen text alone.
+ */
+export function readCodexAsyncQuestionDurableEvidence(input: {
+  rollout: CodexRolloutIdentity;
+  nativeThreadId: string;
+  maxBytes?: number;
+}): readonly CodexAsyncQuestionDurableEvidence[] | undefined {
+  const rollout = normalizedRolloutIdentity(input.rollout);
+  const nativeThreadId = exactNativeThreadId(input.nativeThreadId);
+  const maxBytes = positiveByteLimit(
+    input.maxBytes,
+    CODEX_ASYNC_QUESTION_TAIL_MAX_BYTES,
+    "Codex async-question rollout scan limit"
+  );
+  const opened = openExactRollout(rollout);
+  try {
+    const before = opened.stat;
+    assertPrivateRegularFile(before);
+    const header = readCodexRolloutHeader(opened.fd, before.size);
+    assertExistingCodexRolloutHeader(header, nativeThreadId);
+    if (!fileEndsWithNewline(opened.fd, before.size)) {
+      throw new Error("Codex async-question rollout has a partial JSONL record");
+    }
+    const readStart = Math.max(0, before.size - maxBytes);
+    const length = before.size - readStart;
+    const buffer = Buffer.allocUnsafe(length);
+    if (fs.readSync(opened.fd, buffer, 0, length, readStart) !== length) {
+      throw new Error("Codex async-question rollout changed while it was read");
+    }
+    const after = fs.fstatSync(opened.fd);
+    if (!sameStableFile(before, after)) {
+      throw new Error(
+        "Codex async-question rollout changed while it was scanned"
+      );
+    }
+    const atBoundary = readStart === 0 ||
+      byteAtOffset(opened.fd, readStart - 1) === 0x0a;
+    const firstComplete = atBoundary ? 0 : buffer.indexOf(0x0a) + 1;
+    if (firstComplete <= 0 && !atBoundary) {
+      throw new Error(
+        "Codex async-question rollout record exceeded its bounded tail scan"
+      );
+    }
+    const records = parseCodexJsonlRecords(
+      buffer.subarray(firstComplete),
+      "async-question tail"
+    );
+    return codexAsyncQuestionEvidenceFromRecords({
+      records,
+      prefixTruncated: readStart > 0
+    });
+  } finally {
+    fs.closeSync(opened.fd);
+  }
+}
+
+function codexAsyncQuestionEvidenceFromRecords(input: {
+  records: readonly CodexJsonlRecordAtOffset[];
+  prefixTruncated: boolean;
+}): readonly CodexAsyncQuestionDurableEvidence[] | undefined {
+  const active = activeCodexAsyncQuestionTask(input);
+  if (!active) return undefined;
+  const evidence: CodexAsyncQuestionDurableEvidence[] = [];
+  let totalQuestions = 0;
+  for (const { value } of input.records.slice(active.startIndex + 1)) {
+    const payload = isRecord(value.payload) ? value.payload : undefined;
+    if (
+      value.type !== "event_msg" ||
+      payload?.type !== "item_completed" ||
+      exactNativeThreadId(payload.turn_id) !== active.turnId ||
+      !isRecord(payload.item) ||
+      payload.item.type !== "AgentMessage" ||
+      payload.item.delivery !== "async"
+    ) {
+      continue;
+    }
+    if (evidence.length >= CODEX_ASYNC_QUESTION_MAX_ITEMS) {
+      throw new Error("Codex async-question item count exceeds the safe limit");
+    }
+    const item = codexAsyncQuestionItemEvidence(payload.item, active.turnId);
+    totalQuestions += item.questions.length;
+    if (totalQuestions > CODEX_ASYNC_QUESTION_MAX_QUESTIONS) {
+      throw new Error(
+        "Codex active async-question total exceeds the safe limit"
+      );
+    }
+    evidence.push(item);
+  }
+  return evidence.length === 0 ? undefined : evidence;
+}
+
+function activeCodexAsyncQuestionTask(input: {
+  records: readonly CodexJsonlRecordAtOffset[];
+  prefixTruncated: boolean;
+}): { turnId: string; startIndex: number } | undefined {
+  let activeTurnId: string | undefined;
+  let activeStartIndex = -1;
+  let activeClosed = false;
+  input.records.forEach(({ value }, index) => {
+    const payload = isRecord(value.payload) ? value.payload : undefined;
+    if (!payload || value.type !== "event_msg") return;
+    if (payload.type === "task_started") {
+      activeTurnId = exactNativeThreadId(payload.turn_id);
+      activeStartIndex = index;
+      activeClosed = false;
+      return;
+    }
+    if (
+      activeTurnId &&
+      (payload.type === "task_complete" || payload.type === "turn_aborted") &&
+      (payload.turn_id === undefined ||
+        exactNativeThreadId(payload.turn_id) === activeTurnId)
+    ) {
+      activeClosed = true;
+    }
+  });
+  if (!activeTurnId || activeStartIndex < 0 || activeClosed) {
+    if (input.prefixTruncated && activeStartIndex < 0) {
+      throw new Error(
+        "Codex async-question tail omitted the active task boundary"
+      );
+    }
+    return undefined;
+  }
+  return { turnId: activeTurnId, startIndex: activeStartIndex };
+}
+
+function codexAsyncQuestionItemEvidence(
+  item: Record<string, unknown>,
+  turnId: string
+): CodexAsyncQuestionDurableEvidence {
+  const itemId = requiredString(
+    item.id,
+    "Codex async-question item id"
+  );
+  const rawQuestions = item.questions;
+  if (
+    !Array.isArray(rawQuestions) ||
+    rawQuestions.length < 1 ||
+    rawQuestions.length > CODEX_ASYNC_QUESTION_MAX_QUESTIONS
+  ) {
+    throw new Error("Codex async-question count is invalid");
+  }
+  const questions = rawQuestions.map((question) => {
+    if (!isRecord(question)) {
+      throw new Error("Codex async-question payload is invalid");
+    }
+    const title = normalizedCodexQuestionnaireText(
+      question.title,
+      "Codex async-question title"
+    );
+    if (title.length > CODEX_ASYNC_QUESTION_MAX_TEXT_LENGTH) {
+      throw new Error("Codex async-question title exceeds the safe limit");
+    }
+    const rawOptions = question.options;
+    if (
+      rawOptions !== undefined && rawOptions !== null &&
+      (!Array.isArray(rawOptions) ||
+        rawOptions.length < 1 ||
+        rawOptions.length > CODEX_ASYNC_QUESTION_MAX_OPTIONS)
+    ) {
+      throw new Error("Codex async-question options are invalid");
+    }
+    const options = rawOptions == null
+      ? undefined
+      : rawOptions.map((option) => {
+          const label = normalizedCodexQuestionnaireText(
+            option,
+            "Codex async-question option"
+          );
+          if (label.length > CODEX_ASYNC_QUESTION_MAX_TEXT_LENGTH) {
+            throw new Error(
+              "Codex async-question option exceeds the safe limit"
+            );
+          }
+          return label;
+        });
+    return {
+      title,
+      ...(options === undefined ? {} : { options })
+    };
+  });
+  return {
+    itemId,
+    turnId,
+    questions,
+    currentIndex: 0,
+    remainingCount: questions.length
+  };
 }
 
 function readPendingCodexRequestUserInput(input: {

@@ -59,7 +59,7 @@ prefilled semantic IDs from a fresh list.
 
 ## Reliable Send
 
-The v29 `action_contracts` expose model-facing semantic IDs only. The trusted
+The v30 `action_contracts` expose model-facing semantic IDs only. The trusted
 adapter privately derives and revalidates terminal, process, binding, native
 thread, composer, approval, handoff, revision, and compare-and-swap evidence.
 Callers never supply those opaque fences.
@@ -70,16 +70,30 @@ attention callbacks to the initiating Host. A completed `turn_id` is history,
 not a destination for another task. A question inside a live Turn uses the
 advertised `respond` action with that Turn's `turn_id`.
 
-Native questionnaire prompts use `respond_interaction`, not ordinary
-`respond`. For a supported pending step, the managed monitor sends an
+Native interaction prompts use `respond_interaction`, not ordinary `respond`.
+For a supported pending step, the managed monitor sends an
 `interaction_required` callback to wake the owning controller conversation.
 That callback is notification only and carries no private response authority:
 first obtain the current managed Turn's `interaction_state` from Status in the
 same controller conversation, show that exact step to the user, and submit only
-its advertised semantic question/option IDs or bounded typed text. One call
-resolves one current step; the resumed monitor notifies the next supported step
-when it appears. Status remains the manual refresh fallback. Never respond to
-`manual_required`, expired, changed, secret-bearing, or uncertain state.
+its advertised semantic question/option IDs or bounded typed text. A blocking
+`questionnaire` does not carry `delivery_mode`. A Codex `async_question`
+coexists with a task that remains `working`; responses default to advertised
+`steer_current_turn` or explicitly select advertised `queue_next_turn`: `steer_current_turn` delivers the answer to that running turn,
+while `queue_next_turn` queues it for the next turn. One call resolves one
+current step; the monitor notifies the next supported step when it appears.
+Status remains the manual refresh fallback. Never submit raw keys, shortcut
+chords, or menu indexes, and never respond to `manual_required`, expired,
+changed, secret-bearing, or uncertain state. Codex 0.154.0 and 0.155.1 use
+version-bound TUI execution; main-only notification and stable-question-ID
+wrappers added after 0.155.1 are not assumed to exist in either release.
+
+The initial async adapter accepts at most four fully visible suggestions plus
+native Other, and custom answers must be a short, fully visible single line
+without leading/trailing whitespace. Wrapped or clipped input cannot prove the
+postcondition and stops without a submit key. Codex's own collapsed-question
+timer still applies: AKK does not keep a question alive or reopen an expired
+one. Refresh Status before responding; an absent question is not retryable.
 
 The user-priority `terminal_user_explicit` path requires one exact live
 physical terminal/process, a scanned non-blocked approval state, and no proven
@@ -139,7 +153,7 @@ two Codex-only actions. `identify_foreground({terminal_id})` holds the exact
 terminal lock and sends the closed `/status` probe exactly once, but performs
 no Store mutation and creates no Session, Turn, receipt, monitor, or callback.
 The returned proof expires after 30 seconds and is diagnostic only: it cannot
-authorize Send, approval, questionnaire response, lifecycle input, or a later
+authorize Send, approval, native-interaction response, lifecycle input, or a later
 binding after the lock is released.
 
 `identify_and_send({terminal_id,request})` is the actionable atomic form. It

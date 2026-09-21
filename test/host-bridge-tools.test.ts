@@ -162,7 +162,7 @@ test("host bridge List uses the compact skill-backed model projection", async (t
   fs.writeFileSync(relayPath, `
 process.stdout.write(JSON.stringify({
   action_contracts: {
-    version: 29,
+    version: 30,
     instructions: [${JSON.stringify(repeatedGuidance)}],
     actions: { send: { use: ${JSON.stringify(repeatedGuidance)} } }
   },
@@ -219,7 +219,7 @@ process.stdout.write(JSON.stringify({
     schema: "agent-knock-knock/host-list-compact",
     version: 1,
     skill: "agent-knock-knock",
-    action_contract_version: 29
+    action_contract_version: 30
   });
   assert.deepEqual(details.terminals[0]?.available_actions, {
     status: true,

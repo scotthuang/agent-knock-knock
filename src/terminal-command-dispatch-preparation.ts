@@ -70,6 +70,7 @@ export interface TerminalDispatchPreparationPorts {
   assertCodexComposerReadyForAutomatedInput(request: {
     options: TerminalControlSendRequest["options"];
     terminalControl: TerminalControlRef;
+    runtime?: TerminalRuntimeIdentity;
   }): Promise<void>;
   assertNoUnresolvedTerminalBridgeSubmission(
     storeDir: string,
@@ -362,7 +363,8 @@ export async function prepareTerminalControlSend(
       }
       await ports.assertCodexComposerReadyForAutomatedInput({
         options,
-        terminalControl
+        terminalControl,
+        runtime: preSendRuntime
       });
     }
     if (bridge) {

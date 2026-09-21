@@ -29,8 +29,7 @@ import type { TerminalCompletionEvidence, TerminalControlRef,
   TerminalAgentAdapterRegistry } from
   "./terminal-agent-adapter.js";
 import { parseTerminalConversationId } from "./terminal-agent-adapter.js";
-import { exactCodexReadyStyledComposerCapture,
-  type TerminalAgentBridge, type TerminalBridgeStatus } from
+import { type TerminalAgentBridge, type TerminalBridgeStatus } from
   "./terminal-agent-bridge.js";
 import type { TerminalControlProvider } from "./terminal-control-provider.js";
 import type { TerminalProcessSource } from "./terminal-process-source.js";
@@ -79,6 +78,8 @@ import { exactRolloutMatches,
   type TerminalNativeIdentity as NativeAgentSessionIdentity } from
   "./terminal-binding-authority.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
+import { assertCodexComposerReadyForAutomatedInput } from
+  "./terminal-composer-readiness-bridge.js";
 
 export type TerminalIdentityCliOptions = Readonly<Record<string, unknown>>;
 
@@ -125,6 +126,7 @@ interface KnownRootSetInput {
 interface ComposerReadyInput {
   options: TerminalIdentityCliOptions;
   terminalControl: TerminalControlRef;
+  runtime?: TerminalRuntimeIdentity;
 }
 
 export interface TerminalIdentityRuntimePorts {
@@ -249,10 +251,12 @@ export function createTerminalIdentityAuthorityCliAdapter(
       codexKnownRootSetForLifecycleTransition(ports, input),
     codexPreMaterializationIdentityForManagedSession,
     assertCodexComposerReadyForAutomatedInput: (input: ComposerReadyInput) =>
-      assertCodexComposerReadyForAutomatedInput(ports, input),
+      assertCodexComposerReadyForAutomatedInput(ports.runtime, input),
     verifyCodexPendingManagedSendStatus: (input: VerifyPendingManagedSendInput) =>
       verifyCodexPendingManagedSendStatus(ports, input),
-    terminalRuntimeForLiveIdentity,
+    terminalRuntimeForLiveIdentity: (
+      input: Parameters<typeof terminalRuntimeForLiveIdentity>[0]
+    ) => terminalRuntimeForLiveIdentityWithVersion(ports, input),
     managedSessionClaimsResolvedTerminal: (session: ManagedSessionState,
       terminal: ResolvedTerminalClaim) =>
       managedSessionClaimsResolvedTerminal(ports, session, terminal),
@@ -1239,36 +1243,6 @@ function codexPreMaterializationIdentityForManagedSession(input: {
   return codexIdentityFence(input.observedIdentity);
 }
 
-async function assertCodexComposerReadyForAutomatedInput(
-  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
-  input: ComposerReadyInput
-): Promise<void> {
-  const provider = ports.runtime.createControlProvider(input.options);
-  const resolvedTerminal = await provider.resolve(
-    provider.endpoint(input.terminalControl)
-  );
-  const resolvedControl = provider.toControlRef(
-    resolvedTerminal,
-    input.terminalControl.capabilities
-  );
-  if (!terminalControlsShareIncarnation(
-    input.terminalControl,
-    resolvedControl
-  )) {
-    throw new Error(
-      "terminal process changed before the Codex composer safety check"
-    );
-  }
-  const styledScreen = await provider.capture(
-    resolvedTerminal,
-    { scrollbackLines: 40, preserveEscapes: true }
-  );
-  if (exactCodexReadyStyledComposerCapture(styledScreen) === undefined) {
-    throw new Error(
-      "Codex composer contains non-placeholder input; refusing automated terminal input"
-    );
-  }
-}
 
 interface VerifyPendingManagedSendInput {
   options: TerminalIdentityCliOptions;
@@ -1362,6 +1336,22 @@ function terminalRuntimeForLiveIdentity(input: {
     ...input,
     codexProcessIncarnation: codexProcessIncarnationForPid
   });
+}
+
+function terminalRuntimeForLiveIdentityWithVersion(
+  ports: CreateTerminalIdentityAuthorityCliAdapterInput,
+  input: Parameters<typeof terminalRuntimeForLiveIdentity>[0]
+): TerminalRuntimeIdentity {
+  const runtime = terminalRuntimeForLiveIdentity(input);
+  if (!input.physicalOnly) return runtime;
+  // Candidate acceptance bypasses the conversation-bound runtime builder.
+  // Carry the exact running process's version into its managed input proof.
+  return {
+    ...runtime,
+    agentVersion: ports.runtime.agentVersionForRunningProcess?.(
+      input.terminal.agent, input.terminal.pid
+    )
+  };
 }
 
 type ResolvedTerminalClaim = Pick<TerminalIdentityTerminal,
@@ -1991,7 +1981,7 @@ async function assertVerifiedEmptyCodexHandoffBoundary(
     );
   }
   if (input.requireEmptyComposer ?? true) {
-    await assertCodexComposerReadyForAutomatedInput(ports, {
+    await assertCodexComposerReadyForAutomatedInput(ports.runtime, {
       options: input.options,
       terminalControl: input.terminal.terminalControl
     });

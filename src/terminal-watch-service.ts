@@ -94,7 +94,14 @@ interface TerminalWatchObservationBase extends TerminalWatchObservationFence {
 }
 
 export type TerminalWatchObservation =
-  | (TerminalWatchObservationBase & { kind: "pending" })
+  | (TerminalWatchObservationBase & {
+      kind: "pending";
+      /** Exact main-Composer capture proved this former async surface absent. */
+      async_interaction_absent?: {
+        interaction_id: string;
+        prompt_fingerprint: string;
+      };
+    })
   | (TerminalWatchObservationBase & {
       kind: "unavailable";
       reason_code?: string;
@@ -151,6 +158,11 @@ export interface TerminalWatchServiceDependencies {
     watch: TerminalWatch,
     route: CallbackRouteV1
   ): CallbackTransportContextV1 | undefined;
+  /** Local runtime eligibility; false leaves another Host's receipt untouched. */
+  canDeliverCallback?(
+    watch: TerminalWatch,
+    route: CallbackRouteV1 | undefined
+  ): boolean;
   deliver(
     input: TerminalWatchDeliveryInput
   ): Promise<CallbackAttemptOutcome> | CallbackAttemptOutcome;
@@ -356,14 +368,16 @@ export function createTerminalWatchService(
       }, { expectedRevision: terminalWatchRevision(current) });
     }
     if (observation.kind === "pending") {
+      const refreshed = supersedeAbsentAsyncInteraction(current, observation, now);
       if (
+        refreshed === current &&
         activityAt === current.last_activity_at &&
         !checkpointChanged
       ) {
         return current;
       }
       return dependencies.repository.save({
-        ...current,
+        ...refreshed,
         observation_checkpoint: checkpoint,
         last_activity_at: activityAt,
         updated_at: now
@@ -676,6 +690,82 @@ export function createTerminalWatchService(
   });
 }
 
+function supersedeAbsentAsyncInteraction(
+  watch: TerminalWatch,
+  observation: Extract<TerminalWatchObservation, { kind: "pending" }>,
+  now: string
+): TerminalWatch {
+  const absent = observation.async_interaction_absent;
+  const prior = watch.current_interaction;
+  if (!absent || prior?.projection.kind !== "async_question" ||
+      prior.aggregate.state !== "pending" ||
+      prior.projection.interaction_id !== absent.interaction_id ||
+      prior.projection.prompt_fingerprint !== absent.prompt_fingerprint) {
+    return watch;
+  }
+  const fingerprint = deterministicEvidenceFingerprint({
+    schema: "agent-knock-knock/terminal-watch-interaction-event",
+    version: 1,
+    watch_id: watch.watch_id,
+    interaction_id: prior.projection.interaction_id,
+    surface_id: prior.projection.surface_id
+  });
+  return {
+    ...watch,
+    current_interaction: {
+      projection: prior.projection,
+      aggregate: reduceTerminalInteractionAggregate(prior.aggregate, {
+        type: "supersede",
+        at: now,
+        reason_code: "async_question_no_longer_visible"
+      })
+    },
+    notification_outbox: watch.notification_outbox.map((notification) =>
+      notification.evidence_fingerprint === fingerprint
+        ? supersedeUndeliveredAttentionNotifications([notification], now)[0]!
+        : notification
+    )
+  };
+}
+
+function snapshotTerminalWatchNotificationCallback(
+  dependencies: Pick<TerminalWatchServiceDependencies, "resolveCallback">,
+  watch: TerminalWatch,
+  notification: TerminalWatchNotification
+): { notification: TerminalWatchNotification; errorCode?: string } {
+  if (terminalWatchNotificationCallbackSnapshot(watch, notification)) {
+    return { notification };
+  }
+  let callback: TerminalWatchCallbackResolution | undefined;
+  try {
+    callback = watch.callback_route
+      ? { route: watch.callback_route }
+      : dependencies.resolveCallback(watch);
+  } catch {
+    return { notification, errorCode: "callback_route_resolution_failed" };
+  }
+  if (!callback) return { notification };
+  try {
+    const parsedRoute = parseCallbackRoute(callback.route);
+    const route = notification.kind === "interaction_manual_required"
+      ? terminalWatchNotificationOnlyRoute(parsedRoute)
+      : parsedRoute;
+    return {
+      notification: {
+        ...notification,
+        callback_route: route,
+        callback_envelope: terminalWatchCallbackEnvelope(
+          watch,
+          notification,
+          route
+        )
+      }
+    };
+  } catch {
+    return { notification, errorCode: "callback_request_construction_failed" };
+  }
+}
+
 function createTerminalWatchNotificationDelivery(input: {
   dependencies: TerminalWatchServiceDependencies;
   notificationLeaseMs: number;
@@ -691,6 +781,13 @@ function createTerminalWatchNotificationDelivery(input: {
       const now = canonicalNow(dependencies.now());
       let index = firstUnresolvedNotificationIndex(current);
       const first = current.notification_outbox[index];
+      if (first && !terminalWatchCallbackDeliveryEligible(
+        dependencies,
+        current,
+        first
+      )) {
+        return { watch: current };
+      }
       if (
         current.status !== "active" &&
         first !== undefined &&
@@ -710,42 +807,21 @@ function createTerminalWatchNotificationDelivery(input: {
       }
       if (
         index < 0 ||
-        !notificationIsClaimable(current.notification_outbox[index], now)
+        !notificationIsClaimable(current.notification_outbox[index], now) ||
+        !terminalWatchCallbackDeliveryEligible(
+          dependencies,
+          current,
+          current.notification_outbox[index]
+        )
       ) {
         return { watch: current };
       }
       const selected = current.notification_outbox[index];
-      let snapshotted = selected;
-      let snapshotErrorCode: string | undefined;
-      if (!terminalWatchNotificationCallbackSnapshot(current, selected)) {
-        let callback: TerminalWatchCallbackResolution | undefined;
-        try {
-          callback = current.callback_route
-            ? { route: current.callback_route }
-            : dependencies.resolveCallback(current);
-        } catch {
-          snapshotErrorCode = "callback_route_resolution_failed";
-        }
-        if (callback) {
-          try {
-            const parsedRoute = parseCallbackRoute(callback.route);
-            const route = selected.kind === "interaction_manual_required"
-              ? terminalWatchNotificationOnlyRoute(parsedRoute)
-              : parsedRoute;
-            snapshotted = {
-              ...selected,
-              callback_route: route,
-              callback_envelope: terminalWatchCallbackEnvelope(
-                current,
-                selected,
-                route
-              )
-            };
-          } catch {
-            snapshotErrorCode = "callback_request_construction_failed";
-          }
-        }
-      }
+      const snapshot = snapshotTerminalWatchNotificationCallback(
+        dependencies,
+        current,
+        selected
+      );
       const attemptId = dependencies.randomUUID();
       const claim = createDurableNotificationLease({
         previousAttempts: selected.attempts,
@@ -754,7 +830,7 @@ function createTerminalWatchNotificationDelivery(input: {
         leaseBaseMs: Date.parse(now),
         leaseMs: notificationLeaseMs
       });
-      const claimed = withNotificationReceipt(snapshotted, {
+      const claimed = withNotificationReceipt(snapshot.notification, {
         status: "delivering",
         attempts: claim.attempt,
         last_attempt_at: claim.attemptedAt,
@@ -774,7 +850,7 @@ function createTerminalWatchNotificationDelivery(input: {
         watch: saved,
         notification: saved.notification_outbox[index],
         attempt_id: attemptId,
-        snapshot_error_code: snapshotErrorCode
+        snapshot_error_code: snapshot.errorCode
       };
     });
   }
@@ -1093,7 +1169,11 @@ async function reconcileAllTerminalWatches(input: {
   const deliveryCandidates = work
     .flatMap((item) => {
       const notification = firstClaimableNotification(item.current, deliveryNow);
-      return notification ? [{ item, notification }] : [];
+      return notification && terminalWatchCallbackDeliveryEligible(
+        dependencies,
+        item.current,
+        notification
+      ) ? [{ item, notification }] : [];
     })
     .sort((left, right) =>
       notificationFairnessTime(left.notification).localeCompare(
@@ -1158,6 +1238,24 @@ async function reconcileAllTerminalWatches(input: {
     });
   }
   return summary;
+}
+
+function terminalWatchCallbackDeliveryEligible(
+  dependencies: TerminalWatchServiceDependencies,
+  watch: TerminalWatch,
+  notification: TerminalWatchNotification
+): boolean {
+  if (!dependencies.canDeliverCallback) return true;
+  try {
+    return dependencies.canDeliverCallback(
+      watch,
+      notification.callback_route ?? watch.callback_route
+    );
+  } catch {
+    // A local runtime lookup failure is not a delivery attempt or a durable
+    // failure of the other Host's immutable route.
+    return false;
+  }
 }
 
 function firstUnresolvedNotificationIndex(watch: TerminalWatch): number {

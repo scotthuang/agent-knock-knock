@@ -259,6 +259,11 @@ export interface TerminalRuntimeIdentity {
   /** Exact managed Turn authorized to answer a native questionnaire. */
   turnId?: string;
   /**
+   * Exact native task/turn id whose durable interaction items may be answered.
+   * This is distinct from AKK's managed Turn id and from the native Session id.
+   */
+  nativeTaskId?: string;
+  /**
    * Subject-neutral questionnaire owner. Managed callers may omit this while
    * the bridge derives it from the exact Turn/message pair; Watch callers must
    * provide their durable exact-task subject explicitly.
@@ -881,6 +886,19 @@ export function parseTerminalConversationId(
     pid,
     legacy
   };
+}
+
+export function isTerminalApprovalPromptEvidence(
+  value: unknown
+): value is { profile: string; sha256: string } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const evidence = value as { profile?: unknown; sha256?: unknown };
+  return typeof evidence.profile === "string" &&
+    /^[a-z0-9][a-z0-9._-]{0,127}$/u.test(evidence.profile) &&
+    typeof evidence.sha256 === "string" &&
+    /^[0-9a-f]{64}$/u.test(evidence.sha256);
 }
 
 function assertTerminalIdentityParts(target: string, pid: number, conversationId?: string): void {

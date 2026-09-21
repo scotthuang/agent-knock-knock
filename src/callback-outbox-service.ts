@@ -859,6 +859,8 @@ function prepareInteractionNotification(
   prepare: (input: PrepareCallbackOutboxInput) => PreparedCallback,
   input: InteractionNotificationPreparationInput
 ) {
+  const asynchronous = isRecord(input.metadata.interaction_state) &&
+    input.metadata.interaction_state.kind === "async_question";
   const callbackRoute = resolveManagedCallbackRoute({
     options: input.options,
     conversation: input.conversation
@@ -898,6 +900,7 @@ function prepareInteractionNotification(
         token: stringValue(input.conversation.gateway_token),
         preserveMessageId: true,
         callbackDeliveryKind: "interaction_notification",
+        ...(asynchronous ? { callbackOutboxLane: "notification" as const } : {}),
         recoverMissingOutbox: input.recoverMissingOutbox === true,
         conversationOverride: input.conversation
       },
