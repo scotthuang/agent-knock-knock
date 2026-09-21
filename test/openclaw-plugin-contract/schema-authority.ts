@@ -113,7 +113,11 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   ]);
   assert.deepEqual(
     Object.keys(respondInteractionParameters.properties),
-    ["turn_id", "watch_id", "interaction_id", "answers"]
+    ["turn_id", "watch_id", "interaction_id", "delivery_mode", "answers"]
+  );
+  assert.deepEqual(
+    respondInteractionParameters.properties.delivery_mode.enum,
+    ["steer_current_turn", "queue_next_turn"]
   );
   assert.equal(respondInteractionParameters.additionalProperties, false);
   assert.deepEqual(
