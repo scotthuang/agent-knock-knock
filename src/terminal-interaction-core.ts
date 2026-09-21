@@ -1,10 +1,17 @@
 import { createHash } from "node:crypto";
 import {
   inspectNativeQuestionnaire,
+  isSecretQuestion,
   type NativeQuestionnaireActionPlan,
   type NativeQuestionnaireInspection,
   type NativeQuestionnaireQuestion
 } from "./terminal-questionnaire-adapter.js";
+import {
+  inspectCodexAsyncQuestion,
+  type CodexAsyncQuestionDurableEvidence,
+  type CodexAsyncQuestionInspection,
+  type CodexAsyncQuestionOwnerPrivateActionPlan
+} from "./codex-async-question-adapter.js";
 import {
   TERMINAL_INTERACTION_SCHEMA,
   TERMINAL_INTERACTION_SUBJECT_VERSION,
@@ -13,6 +20,7 @@ import {
   validateTerminalInteractionSubject,
   validateTerminalInteractionSubjectProjection,
   type TerminalInteractionAgent,
+  type TerminalInteractionDeliveryMode,
   type TerminalInteractionQuestion,
   type TerminalInteractionResponseAuthority,
   type TerminalInteractionSubject,
@@ -110,7 +118,7 @@ export interface BuildTerminalInteractionOfferInput {
   readonly canonicalTerminalIdentity: unknown;
   /** Exact accepted native task/thread/rollout identity. It is hashed, never emitted. */
   readonly nativeTaskIdentity: unknown;
-  readonly inspection: NativeQuestionnaireInspection;
+  readonly inspection: NativeTerminalInteractionInspection;
   readonly now: Date;
   readonly expiresAt?: string;
   readonly ttlMs?: number;
@@ -123,9 +131,9 @@ export interface TerminalInteractionCoreOffer {
   readonly promptFingerprint: string;
   readonly surfaceId: string;
   /** Owner-private: never copy this field into callbacks or public Status. */
-  readonly actionPlan: NativeQuestionnaireActionPlan;
+  readonly actionPlan: NativeTerminalInteractionActionPlan;
   readonly nativeInspection: Exclude<
-    NativeQuestionnaireInspection,
+    NativeTerminalInteractionInspection,
     { readonly status: "none" }
   >;
 }
@@ -134,7 +142,40 @@ export interface CaptureTerminalInteractionInput
   extends Omit<BuildTerminalInteractionOfferInput, "inspection"> {
   readonly screen: string;
   readonly secret?: boolean;
+  readonly codexAsyncQuestionEvidence?:
+    readonly CodexAsyncQuestionDurableEvidence[];
 }
+
+export type NativeTerminalInteractionActionPlan =
+  | NativeQuestionnaireActionPlan
+  | CodexAsyncQuestionOwnerPrivateActionPlan;
+
+export type NativeTerminalInteractionInspection =
+  | NativeQuestionnaireInspection
+  | NativeCodexAsyncQuestionInspection;
+
+export type NativeCodexAsyncQuestionInspection =
+  | { readonly status: "none" }
+  | {
+      readonly status: "actionable";
+      readonly agent: "codex";
+      readonly interaction_kind: "async_question";
+      readonly profile: string;
+      readonly current_step: number;
+      readonly total_steps: number;
+      readonly question: NativeQuestionnaireQuestion;
+      readonly prompt_evidence: {
+        readonly profile: string;
+        readonly exact_region: string;
+        readonly sha256: string;
+      };
+      readonly action_plan: CodexAsyncQuestionOwnerPrivateActionPlan;
+      readonly delivery_modes: readonly TerminalInteractionDeliveryMode[];
+      readonly async_inspection: Exclude<
+        CodexAsyncQuestionInspection,
+        { readonly state: "absent" | "ambiguous" }
+      >;
+    };
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
@@ -178,6 +219,13 @@ function terminalInteractionQuestion(
   return { ...common, response_kind: question.response_kind };
 }
 
+function isNativeCodexAsyncQuestionInspection(
+  inspection: Exclude<NativeTerminalInteractionInspection, { status: "none" }>
+): inspection is Exclude<NativeCodexAsyncQuestionInspection, { status: "none" }> {
+  return "interaction_kind" in inspection &&
+    inspection.interaction_kind === "async_question";
+}
+
 function offerExpiry(input: BuildTerminalInteractionOfferInput): string {
   if (input.expiresAt !== undefined) {
     return input.expiresAt;
@@ -204,14 +252,19 @@ export function buildTerminalInteractionOffer(
     throw new TypeError("native questionnaire agent does not match offer agent");
   }
   const subject = validateTerminalInteractionSubject(input.subject);
+  const { interactionKind, deliveryModes } = nativeInteractionKind(input.inspection);
   // Native exact regions include cursor/highlight state. Public identity must
   // stay stable when the user or TUI merely moves the selection within the
   // same semantic question; exact action plans are still recaptured three
   // times immediately around dispatch.
   const promptFingerprint = sha256("terminal-interaction-prompt", {
+    kind: interactionKind,
     profile: input.inspection.profile,
-    current_step: input.inspection.current_step,
-    total_steps: input.inspection.total_steps,
+    // Async positions describe a changing pending queue, not question identity.
+    current_step: interactionKind === "async_question"
+      ? undefined : input.inspection.current_step,
+    total_steps: interactionKind === "async_question"
+      ? undefined : input.inspection.total_steps,
     question: input.inspection.question
   });
   const surfaceMaterial = {
@@ -221,6 +274,7 @@ export function buildTerminalInteractionOffer(
     terminal: input.canonicalTerminalIdentity,
     native_task: input.nativeTaskIdentity,
     profile: input.inspection.profile,
+    kind: interactionKind,
     prompt_sha256: promptFingerprint
   };
   const surfaceId = `tis_${sha256(
@@ -251,13 +305,14 @@ export function buildTerminalInteractionOffer(
     interaction_id: interactionId,
     subject,
     agent: input.agent,
-    kind: "questionnaire" as const,
+    kind: interactionKind,
     state,
     step: {
       index: input.inspection.current_step,
       total: input.inspection.total_steps
     },
     questions: [question],
+    ...(deliveryModes === undefined ? {} : { delivery_modes: deliveryModes }),
     expires_at: offerExpiry(input),
     surface_id: surfaceId,
     prompt_fingerprint: promptFingerprint,
@@ -284,18 +339,108 @@ export function buildTerminalInteractionOffer(
   };
 }
 
+function nativeInteractionKind(
+  inspection: Exclude<NativeTerminalInteractionInspection, { status: "none" }>
+): {
+  interactionKind: "questionnaire" | "async_question";
+  deliveryModes?: readonly TerminalInteractionDeliveryMode[];
+} {
+  return isNativeCodexAsyncQuestionInspection(inspection)
+    ? {
+        interactionKind: inspection.interaction_kind,
+        deliveryModes: inspection.delivery_modes
+      }
+    : { interactionKind: "questionnaire" };
+}
+
+function nativeAsyncQuestionInspection(input: {
+  agent: TerminalInteractionAgent;
+  agentVersion: string;
+  screen: string;
+  evidence?: readonly CodexAsyncQuestionDurableEvidence[];
+  secret?: boolean;
+}): NativeCodexAsyncQuestionInspection {
+  if (input.agent !== "codex" || !input.evidence?.length) {
+    return { status: "none" };
+  }
+  const inspection = inspectCodexAsyncQuestion({
+    version: input.agentVersion,
+    screen: input.screen,
+    evidence: input.evidence
+  });
+  if (
+    (inspection.state !== "collapsed" && inspection.state !== "expanded") ||
+    !inspection.match
+  ) {
+    return { status: "none" };
+  }
+  const question = inspection.match.question;
+  if (isSecretQuestion(input.secret, question)) return { status: "none" };
+  if (
+    question.response_kind === "single_select" &&
+    (!question.options || question.options.length < 2 ||
+      question.options.length > 5)
+  ) {
+    return { status: "none" };
+  }
+  return {
+    status: "actionable",
+    agent: "codex",
+    interaction_kind: "async_question",
+    profile: inspection.profile,
+    current_step: inspection.state === "expanded"
+      ? inspection.current_step
+      : 1,
+    total_steps: inspection.state === "expanded"
+      ? inspection.total_steps
+      : inspection.pending_count,
+    question: {
+      question_id: question.question_id,
+      prompt: question.prompt,
+      response_kind: question.response_kind,
+      required: true,
+      ...(question.options === undefined
+        ? {}
+        : {
+            options: question.options.map((option) => ({
+              option_id: option.option_id,
+              label: option.label
+            }))
+          })
+    },
+    prompt_evidence: {
+      profile: inspection.profile,
+      exact_region: `sha256:${inspection.prompt_evidence.exact_region_sha256}`,
+      sha256: inspection.prompt_evidence.semantic_sha256
+    },
+    action_plan: inspection.owner_private_action_plan,
+    delivery_modes: ["steer_current_turn", "queue_next_turn"],
+    async_inspection: inspection
+  };
+}
+
 /** Convenience capture entry point; the parser remains single-source. */
 export function captureTerminalInteraction(
   input: CaptureTerminalInteractionInput
 ): TerminalInteractionCoreOffer | undefined {
+  const questionnaire = inspectNativeQuestionnaire({
+    agent: input.agent,
+    version: input.agentVersion,
+    screen: input.screen,
+    secret: input.secret
+  });
+  const inspection = questionnaire.status === "none"
+    ? nativeAsyncQuestionInspection({
+        agent: input.agent,
+        agentVersion: input.agentVersion,
+        screen: input.screen,
+        evidence: input.codexAsyncQuestionEvidence,
+        secret: input.secret
+      })
+    : questionnaire;
   return buildTerminalInteractionOffer({
     ...input,
-    inspection: inspectNativeQuestionnaire({
-      agent: input.agent,
-      version: input.agentVersion,
-      screen: input.screen,
-      secret: input.secret
-    })
+    inspection
   });
 }
 

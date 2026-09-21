@@ -41,6 +41,7 @@ import {
 import { reconcileTerminalMonitorStateCandidate } from
   "../src/terminal-monitor-state-reconciliation-service.js";
 import { isRecord } from "../src/value-guards.js";
+import { retireAbsentAsyncQuestionInSnapshot } from "../src/terminal-monitor-interaction-store.js";
 
 const CONTROL: TerminalControlRef = {
   kind: "tmux",
@@ -125,13 +126,15 @@ function interactionStatus(input: {
   interactionId?: string;
   questionId?: string;
   surfaceId?: string;
+  kind?: "questionnaire" | "async_question";
 } = {}): TerminalBridgeStatus {
   const agent = input.agent ?? "codex";
+  const kind = input.kind ?? "questionnaire";
   return {
     ...status(),
     agent,
-    activity_state: "unknown",
-    activity_reason: "native questionnaire visible",
+    activity_state: kind === "async_question" ? "working" : "unknown",
+    activity_reason: `native ${kind} visible`,
     screen: { digest: "screen-question" },
     interaction_prompt_fingerprint:
       input.fingerprint ?? INTERACTION_FINGERPRINT,
@@ -142,7 +145,7 @@ function interactionStatus(input: {
       interaction_id: input.interactionId ?? "interaction-1",
       turn_id: "turn-1",
       agent,
-      kind: "questionnaire",
+      kind,
       state: "pending",
       step: { index: 1, total: 1 },
       questions: [{
@@ -155,6 +158,14 @@ function interactionStatus(input: {
           { option_id: "blue", label: "Blue" }
         ]
       }],
+      ...(kind === "async_question"
+        ? {
+            delivery_modes: [
+              "steer_current_turn" as const,
+              "queue_next_turn" as const
+            ]
+          }
+        : {}),
       expires_at: "2099-01-01T00:00:00.000Z",
       capabilities: {
         respond: true,
@@ -185,6 +196,9 @@ function subjectAwareInteractionStatus(): TerminalBridgeStatus {
       state: projection.state,
       step: projection.step,
       questions: projection.questions,
+      ...(projection.delivery_modes === undefined
+        ? {}
+        : { delivery_modes: projection.delivery_modes }),
       expires_at: projection.expires_at,
       surface_id: INTERACTION_SURFACE_ID,
       prompt_fingerprint: INTERACTION_FINGERPRINT,
@@ -830,6 +844,236 @@ test("native questionnaire callback runs before completion and uses its own noti
   assert.equal(emitted?.conversation.native_session_takeover, undefined);
   assert.equal(emitted?.conversation.callback_delivery, undefined);
   assert.doesNotMatch(JSON.stringify(emitted), /prompt_fingerprint/u);
+});
+
+test("unanswered async question callback failure does not stop monitoring or duplicate notification", async () => {
+  const trace: string[] = [];
+  const owner = conversation({
+    terminal_bridge_pre_send_screen_fingerprint: "screen-before"
+  });
+  const recordedOwner: Conversation = {
+    ...owner,
+    native_session_takeover: {
+      ...(owner.native_session_takeover as Record<string, unknown>),
+      terminal_bridge_interaction_notification: {
+        terminal_bridge_message_id: "message-1",
+        interaction_id: "interaction-1",
+        prompt_fingerprint: INTERACTION_FINGERPRINT,
+        surface_id: INTERACTION_SURFACE_ID
+      }
+    },
+    callback_notification_delivery: {
+      kind: "interaction_notification", status: "failed"
+    }
+  };
+  const ports = fakePorts(trace, owner);
+  let current = owner;
+  ports.state.load = () => current;
+  let deliveries = 0;
+  ports.callbacks.run = (prepared) => {
+    trace.push("callback.run");
+    if (++deliveries === 1) throw new Error("notification transport unavailable");
+    return callbackResult(prepared.conversation);
+  };
+  ports.state.recordInteractionNotification = (input) => {
+    trace.push("interaction.record");
+    assert.equal(input.terminalStatus.activity_state, "working");
+    assert.equal(input.terminalStatus.interaction_state?.kind, "async_question");
+    const duplicate = current === recordedOwner;
+    current = recordedOwner;
+    return {
+      conversation: recordedOwner,
+      duplicate,
+      stale: false,
+      recorded: { prepared: fakePrepared(recordedOwner) }
+    };
+  };
+  let polls = 0;
+  ports.authority.poll = async () => {
+    assert.ok(++polls < 8, "monitor must finish after the native task completes");
+    return {
+      kind: "observed",
+      poll: polls <= 2
+        ? { status: interactionStatus({ kind: "async_question" }) }
+        : polls === 3
+          ? { status: { ...status(), activity_state: "working" } }
+          : { status: status(), completion: COMPLETION }
+    };
+  };
+
+  await runTerminalMonitor({
+    initialConversation: owner,
+    expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION,
+    lifecycle: { startedRecorded: true },
+    ports
+  });
+
+  assert.ok(trace.includes("event:terminal_bridge_interaction_detected"));
+  assert.ok(trace.includes("callback.run"));
+  assert.equal(trace.filter((event) => event === "interaction.record").length, 2);
+  assert.equal(deliveries, 2, "one optional notification and one completion");
+  assert.equal(trace.includes("completion.prepare"), true);
+  assert.equal(current.status, "waiting_for_agent");
+  assert.ok(trace.includes("log:terminal_bridge_async_question_callback_deferred"));
+});
+
+test("an async notification deferred by its outbox does not hide durable completion", async () => {
+  const trace: string[] = [];
+  const owner = conversation({
+    terminal_bridge_pre_send_screen_fingerprint: "screen-before"
+  });
+  const ports = fakePorts(trace, owner);
+  ports.state.recordInteractionNotification = () => ({
+    conversation: owner, duplicate: false, stale: true
+  });
+  let polls = 0;
+  ports.authority.poll = async () => {
+    assert.ok(++polls < 8);
+    return {
+      kind: "observed",
+      poll: {
+        status: interactionStatus({ kind: "async_question" }),
+        completion: COMPLETION
+      }
+    };
+  };
+  await runTerminalMonitor({
+    initialConversation: owner,
+    expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION,
+    lifecycle: { startedRecorded: true },
+    ports
+  });
+  assert.equal(trace.includes("completion.prepare"), true);
+  assert.equal(trace.includes("event:terminal_bridge_interaction_detected"), false);
+});
+
+test("async monitor callback describes optional input without asking the Turn to wait", () => {
+  const observed = interactionStatus({ kind: "async_question" });
+  const projection = observed.interaction_state!;
+  const owner = conversation({
+    terminal_bridge_interaction_notification: {
+      interaction_id: projection.interaction_id,
+      question_id: projection.questions[0]!.question_id,
+      surface_id: INTERACTION_SURFACE_ID,
+      interaction_state: projection
+    }
+  });
+  let prepared = false;
+  recordMonitorInteractionNotification({
+    conversation: owner,
+    executor: owner.executor,
+    terminalControl: CONTROL,
+    terminalStatus: observed,
+    currentMessageId: "message-1",
+    interactionId: projection.interaction_id,
+    questionId: projection.questions[0]!.question_id,
+    fingerprint: INTERACTION_FINGERPRINT,
+    surfaceId: INTERACTION_SURFACE_ID,
+    ports: {
+      record: ({ onRecorded }) => ({
+        conversation: owner,
+        duplicate: false,
+        stale: false,
+        recorded: onRecorded(owner)
+      }),
+      prepare: (input) => {
+        prepared = true;
+        assert.equal(input.requiresResponse, false);
+        assert.match(input.body, /optional async question and continues working/u);
+        assert.match(input.body, /agent_knock_knock_respond_interaction/u);
+        return { prepared: fakePrepared(owner) };
+      }
+    }
+  });
+  assert.equal(prepared, true);
+});
+
+test("exact async absence retires only the same unreserved notification snapshot", () => {
+  const owner = conversation({
+    terminal_bridge_interaction_notification: {
+      terminal_bridge_message_id: "message-1",
+      interaction_id: "interaction-1",
+      prompt_fingerprint: INTERACTION_FINGERPRINT,
+      callback_message_id: "question-callback",
+      interaction_state: { kind: "async_question" }
+    }
+  });
+  owner.callback_delivery = { kind: "lifecycle", status: "delivered" };
+  owner.callback_notification_delivery = {
+    kind: "interaction_notification", status: "failed",
+    message: {
+      id: "question-callback",
+      metadata: {
+        source: "terminal_bridge", reason: "interaction_required",
+        interaction_state: { interaction_id: "interaction-1", turn_id: "turn-1" }
+      }
+    }
+  };
+  const now = "1970-01-01T00:01:00.000Z";
+  assert.strictEqual(retireAbsentAsyncQuestionInSnapshot(owner, owner, false, now), owner);
+  const retired = retireAbsentAsyncQuestionInSnapshot(owner, owner, true, now);
+  assert.equal((retired.native_session_takeover as Record<string, unknown>)
+    .terminal_bridge_interaction_notification, undefined);
+  assert.equal((retired.callback_notification_delivery as Record<string, unknown>)
+    .status, "superseded");
+  assert.strictEqual(retired.callback_delivery, owner.callback_delivery);
+  assert.equal(retired.status, "waiting_for_agent");
+  const changed = { ...owner, updated_at: now };
+  assert.strictEqual(retireAbsentAsyncQuestionInSnapshot(changed, owner, true, now), changed);
+  for (const state of ["reserved", "uncertain"]) {
+    const reserved = {
+      ...owner,
+      native_session_takeover: {
+        ...(owner.native_session_takeover as Record<string, unknown>),
+        terminal_bridge_interaction_dispatch: { state }
+      }
+    };
+    assert.strictEqual(retireAbsentAsyncQuestionInSnapshot(reserved, reserved, true, now), reserved);
+  }
+});
+
+test("monitor withdraws stale async notification only after positive complete-frame absence", async () => {
+  const trace: string[] = [];
+  let current = conversation({
+    terminal_bridge_interaction_notification: {
+      interaction_state: { kind: "async_question" }
+    }
+  });
+  const owner = current;
+  const ports = fakePorts(trace, current);
+  ports.state.load = () => current;
+  let retired = 0;
+  ports.state.retireAsyncInteractionNotification = ({ absenceProven }) => {
+    assert.equal(absenceProven, true);
+    retired += 1;
+    current = conversation();
+    return current;
+  };
+  let polls = 0;
+  ports.authority.poll = async () => {
+    assert.ok(++polls < 8);
+    const observed = { ...status(), activity_state: "working" as const };
+    if (polls === 1) assert.equal(retired, 0);
+    if (polls === 2) {
+      assert.equal(retired, 0, "missing offer alone is not proof of disappearance");
+      observed.screen = { ...observed.screen, async_question_absent: true };
+    }
+    return { kind: "observed", poll: {
+      status: observed,
+      ...(polls > 2 ? { completion: COMPLETION } : {})
+    } };
+  };
+  await runTerminalMonitor({
+    initialConversation: owner,
+    expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION,
+    lifecycle: { startedRecorded: true },
+    ports
+  });
+  assert.equal(retired, 1);
+  assert.ok(trace.includes("completion.prepare"));
 });
 
 test("monitor consumes v2 ownership internally and persists managed compatibility v1", async () => {

@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import { exactCodexAstraSparkleReadyStyledComposerCapture } from
+  "./codex-astra-composer-proof.js";
+import type { TerminalAgentAdapter, TerminalRuntimeIdentity } from
+  "./terminal-agent-adapter.js";
 
 import { CLAUDE_INJECTED_PASTE_FRAME_PROFILE } from
   "./claude-injected-paste-proof.js";
@@ -21,6 +25,28 @@ import {
 const CODEX_COMPLETE_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s+\S+)?|[-\w.]+ default)\s+·\s+\S.*$/u;
 const CODEX_LARGE_PASTE_CHAR_THRESHOLD = 1_000;
+
+/** Current styled readiness; animated emptiness never overrides input owners. */
+export function codexAutomatedInputComposerReady(input: {
+  screen: string;
+  terminalControl: TerminalControlRef;
+  runtime?: TerminalRuntimeIdentity;
+  adapter(): TerminalAgentAdapter;
+}): boolean {
+  const sparkleEmpty = exactCodexAstraSparkleReadyStyledComposerCapture(
+    input.screen, input.runtime?.agentVersion
+  );
+  if (!sparkleEmpty) {
+    return exactCodexReadyStyledComposerCapture(input.screen) !== undefined;
+  }
+  const inspection = input.adapter().inspectScreen({
+    screen: stripTerminalEscapeSequences(input.screen),
+    runtime: input.runtime
+  });
+  return inspection.activity.state === "idle" && !inspection.approval.blocked &&
+    !codexBlockingModalVisible(input.screen) &&
+    !terminalUserExplicitTerminalInputOwnerBlocked(input.terminalControl);
+}
 
 function exactClaudeModelControlComposerCapture(
   screen: string,
@@ -511,13 +537,18 @@ function currentCodexComposerCapture(
   allowOpaqueLargePastePlaceholder = false,
   classifyOpaqueLargePasteAsDifferent = false,
   exactSlashPopupRows?: readonly string[],
-  allowStyledSlashPopupWithoutViewportPaint = false
+  allowStyledSlashPopupWithoutViewportPaint = false,
+  agentVersion?: string
 ): {
   state: "exact_draft" | "exact_empty" | "different_draft";
   digest: string;
   profiledSlashPopup?: true;
   bareCommand?: true;
 } | undefined {
+  const sparkleEmpty = exactCodexAstraSparkleReadyStyledComposerCapture(
+    styledScreen, agentVersion
+  );
+  if (sparkleEmpty) return { state: "exact_empty", digest: sparkleEmpty.digest };
   const screen = stripTerminalEscapeSequences(styledScreen);
   const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
   while (lines.length > 0 && lines.at(-1)?.trim().length === 0) {

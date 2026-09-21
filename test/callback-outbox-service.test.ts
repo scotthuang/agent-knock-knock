@@ -835,6 +835,60 @@ test("manual interaction preparation wakes without transferring Turn ownership",
   );
 });
 
+test("async question uses the independent notification lane through failure and completion", () => {
+  const harness = createHarness();
+  const lifecycle = { status: "delivered", kind: "previous_lifecycle" };
+  Object.assign(harness.conversation as Conversation, {
+    gateway_method: "agent-knock-knock.callback",
+    callback_delivery: lifecycle,
+    native_session_takeover: {
+      terminal_bridge_interaction_notification: {
+        callback_message_id: "async-question-a",
+        callback_message_ts: NOW.toISOString()
+      }
+    }
+  });
+  const preparation = harness.service.prepareInteractionNotification({
+    options: { statePath: STATE_PATH },
+    statePath: STATE_PATH,
+    logPath: LOG_PATH,
+    conversation: harness.conversation,
+    actor: "codex",
+    body: "Optional async question while work continues.",
+    metadata: { interaction_state: { kind: "async_question" } },
+    requiresResponse: false
+  });
+  assert.ok(preparation.prepared);
+  if (preparation.prepared.outcome !== "deliver") assert.fail("expected outbox");
+  assert.equal(preparation.prepared.callbackOutboxLane, "notification");
+  assert.equal(preparation.callbackMessage.requires_response, false);
+  assert.equal(harness.stored().status, "waiting_for_agent");
+  assert.equal(harness.stored().response_rounds_used, 0);
+  assert.strictEqual(harness.stored().callback_delivery, lifecycle);
+  harness.ports.delivery.deliver = () => {
+    throw new Error("notification unavailable");
+  };
+  assert.throws(
+    () => harness.service.runPrepared(preparation.prepared!),
+    /notification unavailable/u
+  );
+  assert.equal(harness.stored().status, "waiting_for_agent");
+  assert.equal((harness.stored().callback_notification_delivery as
+    Record<string, unknown>).status, "failed");
+  const completed = harness.service.prepare({
+    options: {
+      statePath: STATE_PATH,
+      messageJson: JSON.stringify(callbackMessage(harness.stored())),
+      preserveMessageId: true,
+      gatewayMethod: "agent-knock-knock.callback"
+    },
+    logPath: LOG_PATH
+  });
+  assert.equal(completed.conversation.status, "idle");
+  assert.equal((completed.conversation.callback_notification_delivery as
+    Record<string, unknown>).status, "superseded");
+});
+
 test("approval without a gateway keeps the stable message out of the outbox", () => {
   const harness = createHarness();
   Object.assign(harness.conversation as Conversation, {

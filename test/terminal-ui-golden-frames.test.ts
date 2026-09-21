@@ -11,8 +11,11 @@ import { codexComposerEmpty } from
   "../src/native-thread-lifecycle-recovery-adapter.js";
 import { currentCodexComposerCapture } from
   "../src/terminal-composer-classifier.js";
-import { exactCodexReadyStyledComposerCapture } from
+import { exactCodexReadyStyledComposerCapture,
+  stripTerminalEscapeSequences } from
   "../src/terminal-native-inspection-bridge.js";
+import { exactCodexAstraSparkleReadyStyledComposerCapture } from
+  "../src/codex-astra-composer-proof.js";
 import {
   classifyTerminalModelControlSurface,
   observeTerminalModelControl,
@@ -23,6 +26,8 @@ import {
 } from "../src/terminal-model-control.js";
 import { codex0154IdleFrame, TERMINAL_UI_GOLDENS } from
   "./support/terminal-ui-golden-frames.js";
+import { CODEX_ASTRA_STYLED_COMPOSER_PHASES } from
+  "./support/codex-astra-styled-composer.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const codexPlan = planTerminalModelControl(
@@ -229,6 +234,62 @@ test("Codex Astra sparkle idle grammar rejects incomplete and input-owning frame
     runtime: { agentVersion: "0.154.0" }
   });
   assert.equal(working.activity.state, "working");
+});
+
+test("captured Astra ANSI emptiness is versioned, styled, and stable across animation phases", () => {
+  const digests = CODEX_ASTRA_STYLED_COMPOSER_PHASES.map((screen) => {
+    const capture = exactCodexAstraSparkleReadyStyledComposerCapture(screen, "0.155.1");
+    assert.ok(capture);
+    assert.equal(inspectCodexScreen({
+      screen: stripTerminalEscapeSequences(screen),
+      runtime: { agentVersion: "0.155.1" }
+    }).activity.state, "idle", "the complete task-title footer needs no Main suffix");
+    assert.equal(exactCodexReadyStyledComposerCapture(screen), undefined,
+      "native lifecycle/model/list callers do not acquire the new authority");
+    assert.notEqual(currentCodexComposerCapture(screen, "new task")?.state, "exact_empty");
+    assert.deepEqual(currentCodexComposerCapture(
+      screen, "new task", false, false, undefined, false, "0.155.1"
+    ), { state: "exact_empty", digest: capture.digest });
+    return capture.digest;
+  });
+  assert.equal(digests[0], digests[1]);
+
+  const markerSparkle = CODEX_ASTRA_STYLED_COMPOSER_PHASES[0].replace(
+    "›\u001b[0m\u001b[48;2;57;57;57m ",
+    "›\u001b[0m\u001b[38;2;112;112;112m\u001b[48;2;57;57;57m⠂"
+  );
+  assert.notEqual(markerSparkle, CODEX_ASTRA_STYLED_COMPOSER_PHASES[0]);
+  assert.ok(exactCodexAstraSparkleReadyStyledComposerCapture(markerSparkle, "0.155.1"));
+  assert.equal(inspectCodexScreen({
+    screen: stripTerminalEscapeSequences(markerSparkle),
+    runtime: { agentVersion: "0.155.1" }
+  }).activity.state, "idle");
+});
+
+test("Astra styled proof rejects real Braille drafts, incomplete frames, and style ambiguity", () => {
+  const base = CODEX_ASTRA_STYLED_COMPOSER_PHASES[0];
+  const cases = new Map<string, string>([
+    ["unstyled", stripTerminalEscapeSequences(base)],
+    ["unpainted", base.replaceAll("\u001b[48;2;57;57;57m", "")],
+    ["missing footer", base.split("\n").slice(0, -1).join("\n")],
+    ["truncated footer", base.replace("调用原生异步提问", "调用原生…")],
+    ["no task boundary", base.replace(/ · \u001b\[0m\u001b\[38;2;156;222;211m调用原生异步提问\u001b\[0m$/u, "")],
+    ["unknown glyph", base.replace("⡀", "⣿")],
+    ["real Braille draft", base.replace("Ask Codex to do anything", "⠁⠂⠄")],
+    ["normal draft", base.replace("Ask Codex to do anything", "Review production ⠁")],
+    ["literal placeholder draft", base.replace("\u001b[2m\u001b[48;2;57;57;57mAsk", "\u001b[48;2;57;57;57mAsk")],
+    ["real draft after placeholder", base.replace("anything", "anything draft")],
+    ["dim Braille continuation", base.replace("⡀", "\u001b[2m⡀")],
+    ["non-Astra model", base.replace("gpt-6-astra", "gpt-5.6-sol")],
+    ["new input surface", `${base}\n  enter submit   ctrl + ] skip`]
+  ]);
+  for (const [name, screen] of cases) {
+    assert.notEqual(screen, base, name);
+    assert.equal(exactCodexAstraSparkleReadyStyledComposerCapture(screen, "0.155.1"), undefined, name);
+  }
+  for (const version of [undefined, "0.155.0", "0.155.2"]) {
+    assert.equal(exactCodexAstraSparkleReadyStyledComposerCapture(base, version), undefined);
+  }
 });
 
 test("Codex 0.154 wide and ANSI model-picker goldens preserve exact rows", () => {

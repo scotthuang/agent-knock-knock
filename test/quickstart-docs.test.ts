@@ -47,7 +47,7 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v29 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v30 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -284,7 +284,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(operatorContract, /v29 `action_contracts`/u);
+  assert.match(operatorContract, /v30 `action_contracts`/u);
   assert.match(
     quickstart,
     /terminal_user_explicit_composer_policy=replace_current_composer_and_submit[\s\S]*Codex-named field remains a compatibility alias/u

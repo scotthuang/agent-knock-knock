@@ -10,7 +10,10 @@ export const TERMINAL_INTERACTION_VERSION = 1 as const;
  */
 export const TERMINAL_INTERACTION_SUBJECT_VERSION = 2 as const;
 
-export const TERMINAL_INTERACTION_KINDS = ["questionnaire"] as const;
+export const TERMINAL_INTERACTION_KINDS = [
+  "questionnaire",
+  "async_question"
+] as const;
 export const TERMINAL_INTERACTION_STATES = [
   "pending",
   "manual_required",
@@ -30,6 +33,10 @@ export const TERMINAL_INTERACTION_SUBJECT_KINDS = [
 export const TERMINAL_INTERACTION_RESPONSE_AUTHORITIES = [
   "executable",
   "notify_only"
+] as const;
+export const TERMINAL_INTERACTION_DELIVERY_MODES = [
+  "steer_current_turn",
+  "queue_next_turn"
 ] as const;
 
 export const TERMINAL_INTERACTION_LIMITS = Object.freeze({
@@ -61,6 +68,8 @@ export type TerminalInteractionSubjectKind =
   typeof TERMINAL_INTERACTION_SUBJECT_KINDS[number];
 export type TerminalInteractionResponseAuthority =
   typeof TERMINAL_INTERACTION_RESPONSE_AUTHORITIES[number];
+export type TerminalInteractionDeliveryMode =
+  typeof TERMINAL_INTERACTION_DELIVERY_MODES[number];
 
 export interface TerminalInteractionManagedTurnSubject {
   readonly kind: "managed_turn";
@@ -135,6 +144,8 @@ export interface TerminalInteractionProjection {
     readonly total: number;
   };
   readonly questions: readonly TerminalInteractionQuestion[];
+  /** Present only for non-blocking async_question offers. */
+  readonly delivery_modes?: readonly TerminalInteractionDeliveryMode[];
   /** Pending interaction offers always expire and cannot be replayed. */
   readonly expires_at: string;
   readonly capabilities: {
@@ -163,6 +174,8 @@ export type TerminalInteractionSubjectProjection = {
     readonly total: number;
   };
   readonly questions: readonly TerminalInteractionQuestion[];
+  /** Present only for non-blocking async_question offers. */
+  readonly delivery_modes?: readonly TerminalInteractionDeliveryMode[];
   readonly expires_at: string;
   /** Stable across monitor/Watch observation of the same native surface. */
   readonly surface_id: string;
@@ -229,12 +242,14 @@ export interface TerminalInteractionResponse {
   readonly interaction_id: string;
   readonly turn_id: string;
   readonly answers: readonly TerminalInteractionAnswer[];
+  readonly delivery_mode?: TerminalInteractionDeliveryMode;
 }
 
 export type TerminalInteractionSubjectResponse = {
   readonly interaction_id: string;
   readonly subject: TerminalInteractionSubject;
   readonly answers: readonly TerminalInteractionAnswer[];
+  readonly delivery_mode?: TerminalInteractionDeliveryMode;
 } & (
   | {
       readonly subject: TerminalInteractionManagedTurnSubject;
@@ -613,6 +628,38 @@ function parseExpiresAt(value: unknown): string {
   return expiresAt;
 }
 
+function parseDeliveryModes(
+  value: unknown,
+  kind: TerminalInteractionKind
+): TerminalInteractionDeliveryMode[] | undefined {
+  if (kind === "questionnaire") {
+    if (value !== undefined) {
+      fail(
+        "unknown_field",
+        "$.delivery_modes",
+        "is forbidden for blocking questionnaire interactions"
+      );
+    }
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length < 1) {
+    fail(
+      "invalid_type",
+      "$.delivery_modes",
+      "must advertise at least one delivery mode for async_question"
+    );
+  }
+  const modes = value.map((item, index) =>
+    parseEnum(
+      item,
+      `$.delivery_modes[${index}]`,
+      TERMINAL_INTERACTION_DELIVERY_MODES
+    )
+  );
+  assertUniqueIds(modes, "$.delivery_modes");
+  return modes;
+}
+
 function parseSha256(value: unknown, path: string): string {
   const fingerprint = parseBoundedString(value, path, 64);
   if (!/^[0-9a-f]{64}$/u.test(fingerprint)) {
@@ -699,6 +746,7 @@ export function validateTerminalInteractionProjection(
     "state",
     "step",
     "questions",
+    "delivery_modes",
     "expires_at",
     "capabilities"
   ]);
@@ -712,16 +760,19 @@ export function validateTerminalInteractionProjection(
   const capabilities = parseCapabilities(record.capabilities);
   assertCapabilitiesMatchQuestions(capabilities, questions);
   const expiresAt = parseExpiresAt(record.expires_at);
+  const kind = parseEnum(record.kind, "$.kind", TERMINAL_INTERACTION_KINDS);
+  const deliveryModes = parseDeliveryModes(record.delivery_modes, kind);
   return {
     schema: TERMINAL_INTERACTION_SCHEMA,
     version: TERMINAL_INTERACTION_VERSION,
     interaction_id: parseIdentifier(record.interaction_id, "$.interaction_id"),
     turn_id: parseIdentifier(record.turn_id, "$.turn_id"),
     agent: parseEnum(record.agent, "$.agent", TERMINAL_INTERACTION_AGENTS),
-    kind: parseEnum(record.kind, "$.kind", TERMINAL_INTERACTION_KINDS),
+    kind,
     state: parseEnum(record.state, "$.state", TERMINAL_INTERACTION_STATES),
     step: parseStep(record.step),
     questions,
+    ...(deliveryModes === undefined ? {} : { delivery_modes: deliveryModes }),
     expires_at: expiresAt,
     capabilities
   };
@@ -742,6 +793,7 @@ export function validateTerminalInteractionSubjectProjection(
     "state",
     "step",
     "questions",
+    "delivery_modes",
     "expires_at",
     "surface_id",
     "prompt_fingerprint",
@@ -795,16 +847,19 @@ export function validateTerminalInteractionSubjectProjection(
       "must be false for notify-only response authority"
     );
   }
+  const kind = parseEnum(record.kind, "$.kind", TERMINAL_INTERACTION_KINDS);
+  const deliveryModes = parseDeliveryModes(record.delivery_modes, kind);
   const common = {
     schema: TERMINAL_INTERACTION_SCHEMA,
     version: TERMINAL_INTERACTION_SUBJECT_VERSION,
     interaction_id: parseIdentifier(record.interaction_id, "$.interaction_id"),
     subject,
     agent: parseEnum(record.agent, "$.agent", TERMINAL_INTERACTION_AGENTS),
-    kind: parseEnum(record.kind, "$.kind", TERMINAL_INTERACTION_KINDS),
+    kind,
     state,
     step: parseStep(record.step),
     questions,
+    ...(deliveryModes === undefined ? {} : { delivery_modes: deliveryModes }),
     expires_at: parseExpiresAt(record.expires_at),
     surface_id: parseIdentifier(record.surface_id, "$.surface_id"),
     prompt_fingerprint: parseSha256(
@@ -874,6 +929,9 @@ export function normalizeTerminalInteractionProjectionV2(
     state: parsed.state,
     step: parsed.step,
     questions: parsed.questions,
+    ...(parsed.delivery_modes === undefined
+      ? {}
+      : { delivery_modes: parsed.delivery_modes }),
     expires_at: parsed.expires_at,
     surface_id: legacy.surfaceId,
     prompt_fingerprint: legacy.promptFingerprint,
@@ -900,6 +958,9 @@ export function terminalInteractionPublicCompatibilityProjection(
     state: projection.state,
     step: projection.step,
     questions: projection.questions,
+    ...(projection.delivery_modes === undefined
+      ? {}
+      : { delivery_modes: projection.delivery_modes }),
     expires_at: projection.expires_at,
     capabilities: projection.capabilities
   });
@@ -1057,6 +1118,38 @@ function parseAnswers(
   return answers;
 }
 
+function parseResponseDeliveryMode(
+  value: unknown,
+  projection: Pick<
+    TerminalInteractionAnyProjection,
+    "kind" | "delivery_modes"
+  >
+): TerminalInteractionDeliveryMode | undefined {
+  if (projection.kind === "questionnaire") {
+    if (value !== undefined) {
+      fail(
+        "unknown_field",
+        "$.delivery_mode",
+        "is forbidden for blocking questionnaire responses"
+      );
+    }
+    return undefined;
+  }
+  const mode = parseEnum(
+    value === undefined ? "steer_current_turn" : value,
+    "$.delivery_mode",
+    TERMINAL_INTERACTION_DELIVERY_MODES
+  );
+  if (!projection.delivery_modes?.includes(mode)) {
+    fail(
+      "response_not_allowed",
+      "$.delivery_mode",
+      "was not advertised for this async question"
+    );
+  }
+  return mode;
+}
+
 export function validateTerminalInteractionResponse(
   value: unknown,
   authoritativeStoredProjection: unknown,
@@ -1090,7 +1183,8 @@ export function validateTerminalInteractionResponse(
   const record = parseRecord(value, "$", [
     "interaction_id",
     "turn_id",
-    "answers"
+    "answers",
+    "delivery_mode"
   ]);
   const interactionId = parseIdentifier(record.interaction_id, "$.interaction_id");
   const turnId = parseIdentifier(record.turn_id, "$.turn_id");
@@ -1100,10 +1194,15 @@ export function validateTerminalInteractionResponse(
   if (turnId !== projection.turn_id) {
     fail("interaction_mismatch", "$.turn_id", "does not match projection");
   }
+  const deliveryMode = parseResponseDeliveryMode(
+    record.delivery_mode,
+    projection
+  );
   return {
     interaction_id: interactionId,
     turn_id: turnId,
-    answers: parseAnswers(record.answers, projection)
+    answers: parseAnswers(record.answers, projection),
+    ...(deliveryMode === undefined ? {} : { delivery_mode: deliveryMode })
   };
 }
 
@@ -1143,7 +1242,8 @@ export function validateTerminalInteractionSubjectResponse(
     "interaction_id",
     "subject",
     "turn_id",
-    "answers"
+    "answers",
+    "delivery_mode"
   ]);
   const interactionId = parseIdentifier(record.interaction_id, "$.interaction_id");
   if (interactionId !== projection.interaction_id) {
@@ -1164,14 +1264,24 @@ export function validateTerminalInteractionSubjectResponse(
     }
   }
   const answers = parseAnswers(record.answers, projection);
+  const deliveryMode = parseResponseDeliveryMode(
+    record.delivery_mode,
+    projection
+  );
   return subject.kind === "managed_turn"
     ? {
         interaction_id: interactionId,
         subject,
         ...(legacyTurnId === undefined ? {} : { turn_id: legacyTurnId }),
-        answers
+        answers,
+        ...(deliveryMode === undefined ? {} : { delivery_mode: deliveryMode })
       }
-    : { interaction_id: interactionId, subject, answers };
+    : {
+        interaction_id: interactionId,
+        subject,
+        answers,
+        ...(deliveryMode === undefined ? {} : { delivery_mode: deliveryMode })
+      };
 }
 
 export function validateAnyTerminalInteractionResponse(
@@ -1225,6 +1335,9 @@ export function normalizeTerminalInteractionResponseV2(
   return {
     interaction_id: legacy.interaction_id,
     subject: projection.subject,
-    answers: legacy.answers
+    answers: legacy.answers,
+    ...(legacy.delivery_mode === undefined
+      ? {}
+      : { delivery_mode: legacy.delivery_mode })
   };
 }

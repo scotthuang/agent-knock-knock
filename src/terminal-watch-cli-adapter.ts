@@ -19,11 +19,14 @@ import { claudeRuntimeCompatibilityWarning } from
   "./claude-lifecycle-compatibility.js";
 import { codexRuntimeCompatibilityProfile } from
   "./codex-lifecycle-compatibility.js";
+import { codexAsyncQuestionMainComposerVisible } from
+  "./codex-async-question-adapter.js";
 import type { ExecutorKind } from "./executors.js";
+import { hostProfileCallbackRouteMatchesRuntime } from
+  "./host-profile-callback-transport.js";
 import type {
   TerminalCompletionEvidence,
-  TerminalDurableCompletionRequest,
-  TerminalRuntimeIdentity
+  TerminalDurableCompletionRequest
 } from "./terminal-agent-adapter.js";
 import {
   captureTerminalInteractionRuntimeOffer,
@@ -56,12 +59,10 @@ import {
   type TerminalSubmissionAcceptanceEvidence
 } from "./terminal-submission-acceptance.js";
 import {
-  type NativeQuestionnaireInspection
-} from "./terminal-questionnaire-adapter.js";
-import {
   createTerminalInteractionAggregate,
   hashTerminalInteractionResponse,
-  reduceTerminalInteractionAggregate
+  reduceTerminalInteractionAggregate,
+  type NativeTerminalInteractionInspection
 } from "./terminal-interaction-core.js";
 import {
   selectTerminalInteractionResponder,
@@ -74,6 +75,8 @@ import {
 } from "./terminal-interaction-protocol.js";
 import { executeTerminalInteractionResponseTransaction } from
   "./terminal-interaction-response-transaction.js";
+import { terminalInteractionRuntimeForWatch } from
+  "./terminal-watch-interaction-runtime.js";
 import {
   consumeWatchInteractionResponse,
   settleWatchInteractionResponseFailure,
@@ -291,6 +294,10 @@ export function createTerminalWatchCliAdapter(
       resolveCallbackContext: explicitRoute
         ? () => undefined
         : resolveTerminalWatchOpenClawCallbackContext,
+      canDeliverCallback: createWatchCallbackDeliveryEligibility(
+        options,
+        explicitRoute
+      ),
       deliver: (input) => {
         if (callback.deliverTransport) {
           return callback.deliverTransport(input);
@@ -754,6 +761,22 @@ export function createTerminalWatchCliAdapter(
   });
 }
 
+function createWatchCallbackDeliveryEligibility(
+  options: TerminalWatchCliOptions,
+  explicitRoute: CallbackRouteV1 | undefined
+): (watch: TerminalWatch, persistedRoute: CallbackRouteV1 | undefined) => boolean {
+  return (watch, persistedRoute) => {
+    const route = persistedRoute ??
+      resolveTerminalWatchOpenClawCallback(watch).route;
+    return explicitRoute
+      ? hostProfileCallbackRouteMatchesRuntime(route, {
+          callbackRoute: explicitRoute,
+          controllerScope: options.callbackRouteControllerScope ?? "startup_v1"
+        })
+      : route.transport === "openclaw_gateway_v1";
+  };
+}
+
 function createTerminalWatchStatusRunner(
   dependencies: TerminalWatchCliDependencies,
   serviceFor: (options: TerminalWatchCliOptions) => TerminalWatchService
@@ -868,6 +891,7 @@ function createTerminalWatchInteractionResponder(
           rawTerminal: exact.rawTerminal,
           checkpoint: current.observation_checkpoint,
           version,
+          terminalTarget: terminalControl.target,
           responseAuthority: "executable"
         });
         const bridge = dependencies.createBridge?.(options);
@@ -2020,6 +2044,7 @@ function terminalWatchQuestionnaireObservation(input: {
         rawTerminal,
         checkpoint: responseWatch.observation_checkpoint,
         version,
+        terminalTarget: terminalControlForWatch(rawTerminal).target,
         responseAuthority
       }),
       now: new Date(input.observedAt),
@@ -2027,7 +2052,12 @@ function terminalWatchQuestionnaireObservation(input: {
       trustedTerminalEvidence: input.watch.terminal.terminal_endpoint
     });
   let offer = captureOffer("notify_only");
-  if (!offer) return undefined;
+  if (!offer) return absentAsyncQuestionObservation(input, screen, version);
+  if (input.watch.current_interaction?.projection.kind === "async_question" &&
+      offer.projection.kind === "questionnaire" &&
+      offer.nativeInspection.status !== "actionable") {
+    return absentAsyncQuestionObservation(input, screen, version);
+  }
   if (
     requireFallbackAttribution &&
     !fallbackQuestionnaireContextMatches(
@@ -2076,6 +2106,9 @@ function terminalWatchQuestionnaireObservation(input: {
   const manualInteraction = terminalWatchManualInteractionSummary(
     offer.nativeInspection
   );
+  const interactionReasonPrefix = offer.projection.kind === "async_question"
+    ? "terminal_async_question"
+    : "terminal_questionnaire";
   return {
     ...terminalWatchObservationFence(input.watch),
     kind: "interaction",
@@ -2092,10 +2125,10 @@ function terminalWatchQuestionnaireObservation(input: {
       surface_id: offer.surfaceId
     }),
     reason_code: responseDecision.suppress
-      ? "terminal_questionnaire_managed_responder_precedence"
+      ? `${interactionReasonPrefix}_managed_responder_precedence`
       : currentInteraction.projection.capabilities.respond
-        ? "terminal_questionnaire_response_requested"
-        : "terminal_questionnaire_requires_manual_response",
+        ? `${interactionReasonPrefix}_response_requested`
+        : `${interactionReasonPrefix}_requires_manual_response`,
     current_interaction: currentInteraction,
     ...(responseDecision.suppress
       ? { suppress_notification: true }
@@ -2104,6 +2137,38 @@ function terminalWatchQuestionnaireObservation(input: {
         !currentInteraction.projection.capabilities.respond
       ? { manual_interaction: manualInteraction }
       : {})
+  };
+}
+
+function absentAsyncQuestionObservation(
+  input: {
+    watch: TerminalWatch;
+    rawTerminal?: Record<string, unknown>;
+    observedAt: string;
+    observationCheckpoint?: TerminalWatchObservationCheckpoint;
+  },
+  screen: string,
+  version: string
+): TerminalWatchObservation | undefined {
+  const prior = input.watch.current_interaction;
+  if (prior?.projection.kind !== "async_question" ||
+      prior.aggregate.state !== "pending" ||
+      !input.rawTerminal ||
+      !terminalWatchCandidateMatchesLiveContext(input.watch, input.rawTerminal) ||
+      !codexAsyncQuestionMainComposerVisible({ version, screen })) {
+    return undefined;
+  }
+  return {
+    ...terminalWatchObservationFence(input.watch),
+    kind: "pending",
+    observed_at: input.observedAt,
+    ...(input.observationCheckpoint
+      ? { observation_checkpoint: input.observationCheckpoint }
+      : {}),
+    async_interaction_absent: {
+      interaction_id: prior.projection.interaction_id,
+      prompt_fingerprint: prior.projection.prompt_fingerprint
+    }
   };
 }
 
@@ -2117,7 +2182,7 @@ function fallbackQuestionnaireContextMatches(
   watch: TerminalWatch,
   terminal: Record<string, unknown>,
   checkpoint: TerminalWatchObservationCheckpoint,
-  inspection: Exclude<NativeQuestionnaireInspection, { status: "none" }>
+  inspection: Exclude<NativeTerminalInteractionInspection, { status: "none" }>
 ): boolean {
   if (
     watch.anchor.schema !==
@@ -2145,6 +2210,12 @@ function fallbackQuestionnaireContextMatches(
       accepted.rollout
     );
   if (exactLiveContext) return true;
+  if ("interaction_kind" in inspection) {
+    // Async-question rollout evidence is already exact-file bound, but unlike
+    // blocking request_user_input it has no cross-rollout attribution format
+    // in Codex 0.154/0.155.1. Never follow it to a different live context.
+    return false;
+  }
 
   const inventory = terminal._codex_open_root_rollout_inventory;
   if (!isRecord(inventory)) return false;
@@ -2680,96 +2751,6 @@ function terminalWatchCandidateMatchesLiveContext(
   return false;
 }
 
-function terminalInteractionRuntimeForWatch(input: {
-  watch: TerminalWatch;
-  rawTerminal: Record<string, unknown>;
-  checkpoint: TerminalWatchObservationCheckpoint;
-  version: string;
-  responseAuthority: "executable" | "notify_only";
-}): TerminalRuntimeIdentity {
-  const { watch, rawTerminal, checkpoint } = input;
-  let nativeSessionId = stringValue(rawTerminal.native_agent_session_id);
-  let nativeProcessUuid = stringValue(rawTerminal.native_agent_process_uuid);
-  let nativeProcessBirth = stringValue(rawTerminal.native_agent_process_birth);
-  let nativeRollout = isRecord(rawTerminal.native_agent_rollout)
-    ? rawTerminal.native_agent_rollout as unknown as NonNullable<
-        TerminalRuntimeIdentity["nativeRollout"]
-      >
-    : undefined;
-  if (
-    watch.anchor.schema ===
-      "agent-knock-knock/codex-human-started-active-task-anchor"
-  ) {
-    nativeSessionId = watch.anchor.native_thread_id;
-    nativeProcessUuid = watch.anchor.process_uuid;
-    nativeProcessBirth = watch.anchor.process_birth;
-    nativeRollout = watch.anchor.rollout;
-  } else if (
-    watch.anchor.schema ===
-      "agent-knock-knock/codex-user-explicit-fallback-watch-anchor" &&
-    "schema" in checkpoint &&
-    checkpoint.schema ===
-      "agent-knock-knock/codex-user-explicit-fallback-watch-checkpoint" &&
-    checkpoint.accepted_identity
-  ) {
-    nativeSessionId = checkpoint.accepted_identity.native_thread_id;
-    nativeProcessUuid = checkpoint.accepted_identity.process_uuid;
-    nativeProcessBirth = checkpoint.accepted_identity.process_birth;
-    nativeRollout = checkpoint.accepted_identity.rollout;
-  } else if (
-    watch.anchor.schema ===
-      "agent-knock-knock/claude-human-started-active-task-anchor"
-  ) {
-    nativeSessionId = watch.anchor.session_id;
-  } else if (
-    watch.anchor.schema ===
-      "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
-  ) {
-    nativeSessionId = watch.anchor.transcript_anchor.session_id;
-  }
-  const inventory = isRecord(rawTerminal._codex_open_root_rollout_inventory)
-    ? rawTerminal._codex_open_root_rollout_inventory as unknown as
-      CodexOpenRootRolloutInventory
-    : undefined;
-  const allowedAdditionalNativeIdentities =
-    inventory && nativeRollout
-      ? inventory.roots.filter((root) =>
-          !rolloutFileIdentityMatches(root.rollout, nativeRollout))
-        .map((root) => ({
-          sessionId: root.sessionId,
-          processUuid: root.processUuid,
-          processBirth: root.processBirth,
-          rollout: root.rollout
-        }))
-      : [];
-  const startedAt = Number(rawTerminal.native_agent_process_started_at);
-  return {
-    pid: positiveInteger(rawTerminal.pid, "terminal agent PID"),
-    agentVersion: input.version,
-    interactionSubject: {
-      kind: "terminal_watch",
-      watch_id: watch.watch_id,
-      anchor_fingerprint: watch.anchor.anchor_fingerprint
-    },
-    interactionResponseAuthority: input.responseAuthority,
-    nativeSessionId,
-    nativeProcessUuid,
-    nativeProcessBirth,
-    nativeRollout,
-    requireNativeProcessUuid: watch.agent === "claude" &&
-      !isTerminalActivityWatch(watch),
-    requireNativeRolloutIdentity: watch.agent === "codex" &&
-      !isTerminalActivityWatch(watch),
-    allowedAdditionalNativeIdentities,
-    ...(Number.isSafeInteger(startedAt) && startedAt > 0
-      ? { nativeProcessStartedAt: startedAt }
-      : {}),
-    cwd: watch.terminal.workspace,
-    conversationId: watch.terminal.terminal_id,
-    terminalTarget: terminalControlForWatch(rawTerminal).target
-  };
-}
-
 function terminalWatchScreenExcerpt(
   rawTerminal: Record<string, unknown>,
   projectedTerminal: Record<string, unknown>
@@ -2785,11 +2766,13 @@ function terminalWatchScreenExcerpt(
 }
 
 function terminalWatchManualInteractionSummary(
-  inspection: Exclude<NativeQuestionnaireInspection, { status: "none" }>
+  inspection: Exclude<NativeTerminalInteractionInspection, { status: "none" }>
 ): TerminalWatchManualInteractionSummary {
   const exposeQuestion = inspection.status === "actionable";
   return {
-    kind: "questionnaire",
+    kind: "interaction_kind" in inspection
+      ? inspection.interaction_kind
+      : "questionnaire",
     response_kind: inspection.question.response_kind,
     required: inspection.question.required,
     current_step: inspection.current_step,

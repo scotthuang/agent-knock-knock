@@ -4,12 +4,14 @@ import {
 } from "./command-json-callback-transport.js";
 import type {
   CallbackAttemptOutcome,
+  CallbackRouteV1,
   CallbackTransport,
   CallbackTransportDeliverInput
 } from "./callback-transport.js";
 import {
   trustedHostProfileRuntimeFromEnvironment,
-  type SelectHostProfileOptions
+  type SelectHostProfileOptions,
+  type TrustedHostProfileRuntimeV1
 } from "./host-profile-runtime.js";
 
 export const HOST_PROFILE_CALLBACK_ROUTER_KIND =
@@ -52,16 +54,7 @@ export function createHostProfileCallbackTransport(
       if (!runtime) {
         return permanentFailure("host_profile_runtime_missing");
       }
-      if (
-        runtime.callbackRoute.transport !== input.route.transport ||
-        runtime.callbackRoute.profile_id !== input.route.profile_id ||
-        runtime.callbackRoute.profile_revision !== input.route.profile_revision ||
-        (
-          runtime.controllerScope === "startup_v1" &&
-          runtime.callbackRoute.controller_session_id !==
-            input.route.controller_session_id
-        )
-      ) {
+      if (!hostProfileCallbackRouteMatchesRuntime(input.route, runtime)) {
         return permanentFailure("host_profile_callback_route_mismatch");
       }
 
@@ -90,6 +83,18 @@ export function createHostProfileCallbackTransport(
       }
     }
   });
+}
+
+/** Compare persisted route identity without exporting executable configuration. */
+export function hostProfileCallbackRouteMatchesRuntime(
+  route: CallbackRouteV1,
+  runtime: Pick<TrustedHostProfileRuntimeV1, "callbackRoute" | "controllerScope">
+): boolean {
+  return runtime.callbackRoute.transport === route.transport &&
+    runtime.callbackRoute.profile_id === route.profile_id &&
+    runtime.callbackRoute.profile_revision === route.profile_revision &&
+    (runtime.controllerScope === "route_bound_v1" ||
+      runtime.callbackRoute.controller_session_id === route.controller_session_id);
 }
 
 function permanentFailure(errorCode: string): CallbackAttemptOutcome {

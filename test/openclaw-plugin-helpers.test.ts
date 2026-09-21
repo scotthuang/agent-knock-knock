@@ -137,7 +137,7 @@ test("compact Host List keeps every terminal and moves static prose to the skill
   });
   const projected = compactAkkListModelProjection({
     action_contracts: {
-      version: 29,
+      version: 30,
       instructions: [longText],
       field_semantics: { reason: longText },
       actions: { send: { use: longText } }
@@ -166,7 +166,7 @@ test("compact Host List keeps every terminal and moves static prose to the skill
     schema: "agent-knock-knock/host-list-compact",
     version: 1,
     skill: "agent-knock-knock",
-    action_contract_version: 29
+    action_contract_version: 30
   });
   assert.equal(Object.hasOwn(projected, "action_contracts"), false);
   const compactTerminals = projected.terminals as Record<string, unknown>[];
@@ -214,6 +214,10 @@ test("respond interaction schema exposes provider-portable free text", () => {
   assert.ok(answerSchema.properties.text);
   assert.ok(answerSchema.properties.confirm);
   assert.equal("oneOf" in answerSchema, false);
+  assert.deepEqual(
+    respondInteractionParameters.properties.delivery_mode.enum,
+    ["steer_current_turn", "queue_next_turn"]
+  );
 
   const validate = new AjvJsonSchemaValidator().getValidator(
     respondInteractionParameters
@@ -225,6 +229,16 @@ test("respond interaction schema exposes provider-portable free text", () => {
       question_id: "question_demo",
       response_kind: "free_text",
       text: "Shadow"
+    }]
+  }).valid, true);
+  assert.equal(validate({
+    turn_id: "turn-demo",
+    interaction_id: "ti_demo",
+    delivery_mode: "steer_current_turn",
+    answers: [{
+      question_id: "question_demo",
+      response_kind: "single_select",
+      selected_option_ids: ["option_demo"]
     }]
   }).valid, true);
   assert.equal(validate({

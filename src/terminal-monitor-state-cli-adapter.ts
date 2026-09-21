@@ -29,6 +29,7 @@ import {
   type Conversation
 } from "./protocol.js";
 import { executorDefinitionForKind } from "./executors.js";
+import { retireAbsentAsyncQuestionNotification } from "./terminal-monitor-interaction-store.js";
 import { redactString } from "./runtime-log.js";
 import {
   appendEvent,
@@ -63,7 +64,6 @@ import {
   type TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
 import {
-  validateTerminalInteractionProjection,
   type TerminalInteractionProjection
 } from "./terminal-interaction-protocol.js";
 import { terminalControlFromTakeover } from "./terminal-runtime-cli-adapter.js";
@@ -97,6 +97,7 @@ import {
   reconcileMonitorAcceptance,
   recordMonitorApprovalNotification,
   recordMonitorInteractionNotification,
+  validMonitorInteractionProjection as validInteractionProjection,
   repairLaggingAcceptedMonitorAuthority,
   recoverPreparedMonitorSubmission,
   type ApprovalNotificationAdapterPorts,
@@ -1059,6 +1060,9 @@ class TerminalMonitorStateCliApplication {
     const bridge = input.terminalBridge;
     return {
       state: {
+        retireAsyncInteractionNotification: (request) => retireAbsentAsyncQuestionNotification({
+          ...request, statePath: input.statePath, logPath: input.logPath
+        }),
         load: () => loadState(input.statePath),
         appendEvent: (event) => appendEvent(input.logPath, event),
         markStalled: (reason, detail) => {
@@ -2062,8 +2066,12 @@ class TerminalMonitorStateCliApplication {
     const previousInteractionState = validInteractionProjection(
       previousNotification?.interaction_state
     );
-    const callbackDelivery = isRecord(conversation.callback_delivery)
-      ? conversation.callback_delivery
+    const callbackField = input.terminalStatus.interaction_state?.kind ===
+        "async_question"
+      ? "callback_notification_delivery"
+      : "callback_delivery";
+    const callbackDelivery = isRecord(conversation[callbackField])
+      ? conversation[callbackField]
       : undefined;
     const callbackMessage = isRecord(callbackDelivery?.message)
       ? callbackDelivery.message
@@ -3286,16 +3294,6 @@ function approvalCanBeCleared(
     validTerminalMonitorTimestampMs(
       takeover.terminal_bridge_last_approval_prompt_cleared_at
     ) === undefined;
-}
-
-function validInteractionProjection(
-  value: unknown
-): TerminalInteractionProjection | undefined {
-  try {
-    return validateTerminalInteractionProjection(value);
-  } catch {
-    return undefined;
-  }
 }
 
 function validTerminalInteractionSurfaceId(value: unknown): value is string {

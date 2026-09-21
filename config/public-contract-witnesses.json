@@ -101,7 +101,7 @@
       ]
     },
     "list_action": {
-      "version": 29,
+      "version": 30,
       "actions": [
         "send",
         "retry_submission",
@@ -130,7 +130,7 @@
         "src/terminal-list-renderer.ts"
       ],
       "witnesses": [
-        "action-v29-unit",
+        "action-v30-unit",
         "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
@@ -246,10 +246,10 @@
   },
   "witnesses": [
     {
-      "id": "action-v29-unit",
+      "id": "action-v30-unit",
       "path": "test/terminal-list-renderer.test.ts",
       "tier": "fast",
-      "needle": "the public action contract v29 exposes semantic arguments only"
+      "needle": "the public action contract v30 exposes semantic arguments only"
     },
     {
       "id": "callback-cli-boundary",
@@ -892,13 +892,13 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The imported command service and pure renderer preserve action-contract v29 ordering, semantic model-facing arguments including status-bound interactive responses, exact model-option discovery, exact one-shot Codex model-control residue repair, and set-model offers, explicit foreground identification, version compatibility warnings without version-based action vetoes, agent-neutral user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, proven input-owner suppression, best-effort exact fallback Watch callbacks that never revoke Send, independent screen/native-identity/durable-activity evidence, managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v30 ordering, semantic model-facing arguments including status-bound blocking and asynchronous interaction responses with explicit delivery modes, exact model-option discovery, exact one-shot Codex model-control residue repair, and set-model offers, explicit foreground identification, version compatibility warnings without version-based action vetoes, agent-neutral user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, proven input-owner suppression, best-effort exact fallback Watch callbacks that never revoke Send, independent screen/native-identity/durable-activity evidence, managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
         "management-list-in-process",
         "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
-        "action-v29-unit"
+        "action-v30-unit"
       ],
       "retained_boundary_witnesses": [
         "codex-binding-boundary",

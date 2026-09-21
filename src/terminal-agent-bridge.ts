@@ -6,6 +6,7 @@ import {
   terminalControlCapabilitiesForAdapter,
   terminalApprovalActionForDecision,
   terminalApprovalChoices,
+  isTerminalApprovalPromptEvidence,
   type ActiveTerminalProcess,
   type TerminalAgentAdapter,
   type TerminalAgentAdapterCapabilities,
@@ -105,6 +106,8 @@ import {
   type TerminalSendResult
 } from "./terminal-text-submission-bridge.js";
 import type * as UserExplicitSendContract from "./terminal-user-explicit-send-contract.js";
+import { codexAsyncQuestionMainComposerVisible } from
+  "./codex-async-question-adapter.js";
 import {
   dispatchTerminalUserExplicitComposerClear,
   TerminalUserExplicitClearNotStartedError,
@@ -214,6 +217,8 @@ export interface TerminalBridgeStatus {
     };
   };
   screen: {
+    /** Positive complete-frame absence proof; withdrawal only, never input authority. */
+    async_question_absent?: true;
     excerpt?: string;
     /** SHA-256 of the raw capture. The raw terminal contents are never exposed here. */
     digest?: string;
@@ -2349,20 +2354,6 @@ export function terminalApprovalFingerprint(
     .digest("hex");
 }
 
-function isTerminalApprovalPromptEvidence(
-  value: unknown
-): value is { profile: string; sha256: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const evidence = value as { profile?: unknown; sha256?: unknown };
-  return typeof evidence.profile === "string" &&
-    /^[a-z0-9][a-z0-9._-]{0,127}$/u.test(evidence.profile) &&
-    typeof evidence.sha256 === "string" &&
-    /^[0-9a-f]{64}$/u.test(evidence.sha256);
-}
-
-
 function statusFromInspection(
   adapter: TerminalAgentAdapter,
   terminalControl: TerminalControlRef,
@@ -2466,6 +2457,13 @@ function statusFromInspection(
         : undefined
     },
     screen: {
+      ...(adapter.agent === "codex" && !approval.blocked && !exactModelSurface &&
+          options.screen !== undefined && options.runtime?.agentVersion &&
+          codexAsyncQuestionMainComposerVisible({
+            version: options.runtime.agentVersion, screen: options.screen
+          })
+        ? { async_question_absent: true as const }
+        : {}),
       excerpt: inspection.screenExcerpt,
       digest: options.screen === undefined
         ? undefined

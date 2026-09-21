@@ -30,6 +30,12 @@ import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
 import { associateTerminalEndpointEvidence, terminalControlEvidence } from
   "../src/terminal-control-ref.js";
+import { terminalPreSendRuntime } from
+  "../src/terminal-command-send-preflight.js";
+import type { TerminalControlSendRequest } from
+  "../src/terminal-dispatch-composition.js";
+import { CODEX_ASTRA_STYLED_COMPOSER_PHASES } from
+  "./support/codex-astra-styled-composer.js";
 
 function adapter(
   environment: Partial<
@@ -97,6 +103,70 @@ function adapter(
   ]);
   return createTerminalIdentityAuthorityCliAdapter(ports);
 }
+
+test("candidate acceptance carries the running process version through production Composer readiness", async () => {
+  const control = terminalControl();
+  const conversation = createConversation({
+    userRequest: "candidate acceptance",
+    sessionId: "managed-candidate",
+    turnId: "turn-candidate",
+    executorKind: "codex",
+    now: new Date("2026-09-21T00:00:00.000Z")
+  });
+  const request = {
+    transaction: {} as TerminalControlSendRequest["transaction"],
+    options: {},
+    conversation,
+    nextConversation: conversation,
+    executor: conversation.executor,
+    message: { id: "candidate-message" } as TerminalControlSendRequest["message"],
+    postSendCodexCandidateAnchor: {} as NonNullable<
+      TerminalControlSendRequest["postSendCodexCandidateAnchor"]
+    >
+  } satisfies TerminalControlSendRequest;
+  for (const version of ["0.155.1", undefined, "0.155.2"]) {
+    const observations: Array<[string, number]> = [];
+    const provider = new StaticTerminalControlProvider({
+      panes: [{
+        kind: "tmux", target: "%1", socketPath: "/tmp/tmux.sock",
+        session: "work", window: 0, pane: 1, panePid: 100,
+        currentCommand: "codex", currentPath: "/workspace"
+      }],
+      screens: { "%1": CODEX_ASTRA_STYLED_COMPOSER_PHASES[0] }
+    });
+    const facade = adapter({}, (ports) => {
+      ports.runtime.agentVersionForRunningProcess = (agent, pid) => {
+        observations.push([agent, pid]);
+        return version;
+      };
+      ports.runtime.createControlProvider = () => provider;
+      ports.runtime.createAgentRegistry = () => createProductionTerminalAgentRegistry();
+    });
+    const runtime = terminalPreSendRuntime({
+      request,
+      terminalControl: control,
+      terminalAgentPid: 101
+    }, {
+      terminalRuntimeForLiveIdentity: facade.terminalRuntimeForLiveIdentity,
+      terminalRuntimeIdentityForConversation: () => {
+        throw new Error("candidate acceptance must use the physical runtime branch");
+      }
+    });
+    assert.deepEqual(observations, [["codex", 101]], "observe the agent PID, not the pane PID");
+    assert.equal(runtime.agentVersion, version);
+    assert.equal(runtime.nativeSessionId, undefined);
+    assert.equal(runtime.requireNativeRolloutIdentity, false);
+    const ready = facade.assertCodexComposerReadyForAutomatedInput({
+      options: {}, terminalControl: control, runtime
+    });
+    if (version === "0.155.1") await assert.doesNotReject(ready);
+    else await assert.rejects(ready, /non-placeholder input/u);
+    assert.deepEqual(provider.sentKeys, [], "readiness must never send terminal input");
+    await assert.rejects(facade.assertCodexComposerReadyForAutomatedInput({
+      options: {}, terminalControl: control
+    }), /non-placeholder input/u, "native lifecycle callers remain outside the managed opt-in");
+  }
+});
 
 test("identity facts preserve lifecycle fallback and malformed fail-closed rules", () => {
   assert.deepEqual(exactLifecycleIdentity({

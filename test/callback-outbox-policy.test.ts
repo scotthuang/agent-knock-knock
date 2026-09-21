@@ -575,6 +575,27 @@ test("an answered interaction supersedes only its exact unaccepted callback", ()
     }),
     matching
   );
+
+  const asynchronous: Conversation = {
+    ...matching,
+    native_session_takeover: {
+      ...(matching.native_session_takeover as Record<string, unknown>),
+      terminal_bridge_interaction_notification: {
+        ...(matching.native_session_takeover as Record<string, unknown>)
+          .terminal_bridge_interaction_notification as Record<string, unknown>,
+        interaction_state: { kind: "async_question" }
+      }
+    },
+    callback_delivery: { status: "pending", kind: "lifecycle" },
+    callback_notification_delivery: matching.callback_delivery
+  };
+  const asyncSuperseded = supersedeMatchingInteractionCallbackDelivery(
+    asynchronous,
+    { at: NOW_ISO, interactionId: "interaction-a", fingerprint }
+  );
+  assert.strictEqual(asyncSuperseded.callback_delivery, asynchronous.callback_delivery);
+  assert.equal((asyncSuperseded.callback_notification_delivery as
+    Record<string, unknown>).status, "superseded");
 });
 
 test("transport-started callback reports a live attempt but never becomes retryable", () => {

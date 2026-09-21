@@ -170,6 +170,7 @@ export interface TerminalCommandCliPorts {
   assertCodexComposerReadyForAutomatedInput(request: {
     options: TerminalCommandCliOptions;
     terminalControl: TerminalControlRef;
+    runtime?: TerminalRuntimeIdentity;
   }): Promise<void>;
   assertDeferredCodexForegroundBindingBoundary(request: {
     options: TerminalCommandCliOptions;

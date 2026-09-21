@@ -47,12 +47,18 @@ export const respondInteractionParameters = {
       description:
         "Exact opaque interaction id from the current status response in this controller conversation."
     },
+    delivery_mode: {
+      type: "string",
+      enum: ["steer_current_turn", "queue_next_turn"],
+      description:
+        "Optional for async_question; defaults to steer_current_turn when advertised. Use only a delivery mode advertised by the current interaction_state: steer_current_turn delivers the answer to the running turn; queue_next_turn queues it for the next turn. Omit for blocking questionnaire interactions."
+    },
     answers: {
       type: "array",
       minItems: 1,
       maxItems: TERMINAL_INTERACTION_LIMITS.maxQuestions,
       description:
-        "One typed current-step answer using only advertised opaque semantic ids. For single_select supply selected_option_ids; for free_text supply text; for confirm supply confirm. Supply no other answer field. Raw keys, indexes, rendered labels, fingerprints, versions, and terminal commands are not accepted.",
+        "One typed current-step answer using only advertised opaque semantic ids. For single_select supply selected_option_ids; for free_text supply text; for confirm supply confirm. Async questions optionally select top-level delivery_mode (default: steer_current_turn). Supply no other answer field. Raw keys, indexes, rendered labels, fingerprints, versions, and terminal commands are not accepted.",
       items: {
         type: "object",
         additionalProperties: false,

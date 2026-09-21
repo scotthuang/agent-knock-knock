@@ -172,16 +172,20 @@ direction executable in the fast contract tests and architecture evidence.
 The Issue #320 sequence uses narrow strangler changes:
 
 1. P0 makes model-control availability and execution consume one decision and
-   makes managed Turn and Watch questionnaire responses consume one transaction
-   kernel.
+   makes managed Turn and Watch native-interaction responses consume one
+   transaction kernel.
 2. P1 decomposes the terminal command, List, and Bridge adapters along existing
    use-case boundaries while retaining their public facades and single input
    ledger boundary.
 3. P2 extracts reusable callback/Store kernels, makes the Host tool and Skill
    catalogs single-source, and splits oversized tests and historical documents.
 
-Monitor and Watch share terminal observation and questionnaire execution, but
-they do not share task-completion semantics or persistence ownership. Model
+Monitor and Watch share terminal observation and native-interaction execution,
+including blocking `questionnaire` and working-parallel Codex `async_question`
+offers. An async response defaults to advertised `steer_current_turn` or explicitly
+selects advertised `queue_next_turn`; a blocking questionnaire carries none. Both
+public paths remain semantic-ID-only and never expose raw keys or menu indexes.
+They do not share task-completion semantics or persistence ownership. Model
 control ordinary, residual-continuation, and repair authorities remain separate
 domains. Refactoring must not use file movement to collapse those distinctions.
 

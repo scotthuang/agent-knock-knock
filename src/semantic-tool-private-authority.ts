@@ -948,7 +948,10 @@ function interactionResponseForProjection(
     ...(projection.subject.kind === "managed_turn"
       ? { turn_id: params.turn_id }
       : {}),
-    answers: params.answers
+    answers: params.answers,
+    ...(params.delivery_mode === undefined
+      ? {}
+      : { delivery_mode: params.delivery_mode })
   };
 }
 

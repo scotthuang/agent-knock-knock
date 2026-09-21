@@ -597,6 +597,14 @@
       "owner": "cli-runtime"
     },
     {
+      "path": "src/codex-astra-composer-proof.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/codex-async-question-adapter.ts",
+      "owner": "terminal-action-projection"
+    },
+    {
       "path": "src/codex-lifecycle-compatibility.ts",
       "owner": "lifecycle-core"
     },
@@ -1021,6 +1029,10 @@
       "owner": "terminal-dispatch-core"
     },
     {
+      "path": "src/terminal-composer-readiness-bridge.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-control-provider.ts",
       "owner": "terminal-control"
     },
@@ -1221,6 +1233,10 @@
       "owner": "terminal-monitor-policy"
     },
     {
+      "path": "src/terminal-monitor-interaction-store.ts",
+      "owner": "terminal-monitor-application"
+    },
+    {
       "path": "src/terminal-monitor-launch-plan.ts",
       "owner": "terminal-monitor-supervision"
     },
@@ -1354,6 +1370,10 @@
     },
     {
       "path": "src/terminal-watch-interaction-response-store.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-interaction-runtime.ts",
       "owner": "terminal-watch"
     },
     {

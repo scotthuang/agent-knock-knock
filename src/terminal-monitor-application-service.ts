@@ -183,6 +183,10 @@ export interface MonitorVerifiedDeadResult {
 
 export interface TerminalMonitorServicePorts {
   state: {
+    retireAsyncInteractionNotification?(input: {
+      expectedConversation: Conversation;
+      absenceProven: boolean;
+    }): Conversation;
     load(): Conversation;
     appendEvent(event: { event: string; [key: string]: unknown }): void;
     markStalled(reason: string, detail: JsonRecord): Conversation;
@@ -1097,6 +1101,7 @@ function handleInteractionObservation(
   input: SampledPollInput
 ): "proceed" | "continue" | "finished" {
   const publicProjection = input.terminalStatus.interaction_state;
+  const asynchronous = publicProjection?.kind === "async_question";
   const fingerprint = stringValue(
     input.terminalStatus.interaction_prompt_fingerprint
   );
@@ -1109,6 +1114,7 @@ function handleInteractionObservation(
   );
   const takeover = takeoverFor(input.state.conversation) ?? input.takeover;
   if (!publicProjection) {
+    retireAbsentAsyncQuestion(input);
     return "proceed";
   }
   const projection = normalizeManagedMonitorInteraction(
@@ -1152,10 +1158,11 @@ function handleInteractionObservation(
       interaction_id: publicProjection.interaction_id,
       interaction_state: publicProjection.state,
       response_kind: question?.response_kind,
+      interaction_kind: publicProjection.kind,
       screen_changed_since_send: screenChangedSinceSend,
       reason: manualRequired
-        ? "native questionnaire lacks exact managed-task attribution"
-        : "native questionnaire lacks a current executable monitor offer"
+        ? `native ${publicProjection.kind} lacks exact managed-task attribution`
+        : `native ${publicProjection.kind} lacks a current executable monitor offer`
     });
     return "proceed";
   }
@@ -1194,7 +1201,7 @@ function handleInteractionObservation(
     ? takeover.terminal_bridge_interaction_notification
     : undefined;
   if (
-    manualRequired &&
+    manualRequired && !asynchronous &&
     stringValue(previousNotification?.terminal_bridge_message_id) ===
       input.currentMessageId &&
     stringValue(previousNotification?.interaction_id) ===
@@ -1225,10 +1232,15 @@ function handleInteractionObservation(
       ...input.state.pollPolicyState,
       previousScreenFingerprint: input.currentScreenFingerprint
     };
+    if (asynchronous) return "proceed";
     input.ports.runtime.sleep(input.configuration.pollIntervalMs);
     return "continue";
   }
   if (notification.duplicate) {
+    if (asynchronous) {
+      input.state.conversation = notification.conversation;
+      return "proceed";
+    }
     if (manualRequired) {
       input.state.conversation = notification.conversation;
       input.state.pollPolicyState = {
@@ -1255,7 +1267,8 @@ function handleInteractionObservation(
     terminal_control: input.terminalControl,
     interaction_id: projection.interaction_id,
     question_id: question.question_id,
-    response_kind: question.response_kind
+    response_kind: question.response_kind,
+    interaction_kind: projection.kind
   });
   const prepared = notification.recorded?.prepared;
   if (!prepared) {
@@ -1266,8 +1279,32 @@ function handleInteractionObservation(
       terminalControl: input.terminalControl,
       interactionState: compatibilityProjection
     });
-    return "finished";
+    return asynchronous ? "proceed" : "finished";
   }
+  if (asynchronous) {
+    runAsyncInteractionNotification(input, prepared);
+    return "proceed";
+  }
+  return finishBlockingInteractionNotification(input, {
+    prepared,
+    projection,
+    fingerprint,
+    questionId: question.question_id,
+    manualRequired
+  });
+}
+
+function finishBlockingInteractionNotification(
+  input: SampledPollInput,
+  context: {
+    prepared: PreparedCallback;
+    projection: TerminalInteractionSubjectProjection;
+    fingerprint: string;
+    questionId: string;
+    manualRequired: boolean;
+  }
+): "continue" | "finished" {
+  const { prepared, projection, fingerprint, questionId, manualRequired } = context;
   const result = input.ports.callbacks.run(prepared, { emit: false });
   const afterCallback = input.ports.state.load();
   const afterTakeover = takeoverFor(afterCallback);
@@ -1283,7 +1320,7 @@ function handleInteractionObservation(
       event: "terminal_bridge_interaction_manual_notification_dispatched",
       terminal_control: input.terminalControl,
       interaction_id: projection.interaction_id,
-      question_id: question.question_id,
+      question_id: questionId,
       delivered: result.delivered
     });
     input.ports.runtime.sleep(input.configuration.pollIntervalMs);
@@ -1325,10 +1362,42 @@ function handleInteractionObservation(
     event: "terminal_bridge_monitor_continued_after_interaction",
     terminal_control: input.terminalControl,
     interaction_id: projection.interaction_id,
-    question_id: question.question_id
+    question_id: questionId
   });
   input.ports.runtime.sleep(input.configuration.pollIntervalMs);
   return "continue";
+}
+
+function retireAbsentAsyncQuestion(input: SampledPollInput): void {
+  const takeover = takeoverFor(input.state.conversation);
+  const notification = isRecord(takeover?.terminal_bridge_interaction_notification)
+    ? takeover.terminal_bridge_interaction_notification : undefined;
+  const projection = isRecord(notification?.interaction_state)
+    ? notification.interaction_state : undefined;
+  if (projection?.kind !== "async_question" ||
+      input.terminalStatus.screen.async_question_absent !== true) return;
+  const retired = input.ports.state.retireAsyncInteractionNotification?.({
+    expectedConversation: input.state.conversation,
+    absenceProven: true
+  });
+  if (retired) input.state.conversation = retired;
+}
+
+function runAsyncInteractionNotification(
+  input: SampledPollInput,
+  prepared: PreparedCallback
+): void {
+  try {
+    input.ports.callbacks.run(prepared, { emit: false });
+  } catch {
+    // The independent notification outbox owns retries. Failure to notify an
+    // optional question must not stop observing the still-running native task.
+    input.ports.runtime.log("warn", "terminal_bridge_async_question_callback_deferred", {
+      conversation_id: input.state.conversation.conversation_id,
+      terminal_target: input.terminalControl.target
+    });
+  }
+  input.state.conversation = input.ports.state.load();
 }
 
 function normalizeManagedMonitorInteraction(

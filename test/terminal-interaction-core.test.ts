@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   aggregateMatchesProjection,
   buildTerminalInteractionOffer,
+  captureTerminalInteraction,
   createTerminalInteractionAggregate,
   hashTerminalInteractionResponse,
+  type CaptureTerminalInteractionInput,
   reduceTerminalInteractionAggregate,
   TerminalInteractionTransitionError,
   validateTerminalInteractionAggregate
@@ -211,6 +213,69 @@ test("surface identity canonicalizes record key order", () => {
     canonicalTerminalIdentity: { pid: 42, endpoint: "tmux:test:0.0" }
   });
   assert.equal(first?.surfaceId, second?.surfaceId);
+});
+
+test("async question is a parallel working interaction with delivery modes", () => {
+  const input: CaptureTerminalInteractionInput = {
+    subject: {
+      kind: "managed_turn",
+      turn_id: "turn_async",
+      message_id: "message_async"
+    },
+    agent: "codex",
+    agentVersion: "0.155.1",
+    canonicalTerminalIdentity: { pid: 42, endpoint: "herdr:w1:p1" },
+    nativeTaskIdentity: { rollout: "rollout-async", turn: "native-turn" },
+    screen: [
+      "• Working (3s • esc to interrupt)",
+      "",
+      "• Queued follow-up inputs",
+      "  ? 1 question",
+      "    shift + ← to answer"
+    ].join("\n"),
+    codexAsyncQuestionEvidence: [{
+      itemId: "call_async",
+      turnId: "native-turn",
+      currentIndex: 0,
+      remainingCount: 1,
+      questions: [{
+        title: "Which target should I use?",
+        options: ["Local", "Remote"]
+      }]
+    }],
+    now: NOW,
+    expiresAt: "2026-09-09T00:10:00.000Z",
+    responseAuthority: "executable"
+  };
+  const offer = captureTerminalInteraction(input);
+  assert.ok(offer);
+  assert.equal(offer.projection.kind, "async_question");
+  assert.deepEqual(offer.projection.delivery_modes, [
+    "steer_current_turn",
+    "queue_next_turn"
+  ]);
+  assert.equal(offer.projection.capabilities.respond, true);
+  assert.equal(offer.actionPlan.kind, "open_async_question_editor");
+  const moved = buildTerminalInteractionOffer({
+    ...input,
+    inspection: { ...offer.nativeInspection, current_step: 2, total_steps: 3 }
+  });
+  assert.equal(moved?.projection.interaction_id, offer.projection.interaction_id);
+  assert.equal(moved?.promptFingerprint, offer.promptFingerprint);
+  assert.deepEqual(moved?.projection.step, { index: 2, total: 3 });
+  assert.equal(captureTerminalInteraction({ ...input, secret: true }), undefined);
+  for (const question of [
+    { title: "Enter the password", options: ["Local", "Remote"] },
+    { title: "Which target should I use?", options: ["API key", "Remote"] }
+  ]) {
+    assert.equal(captureTerminalInteraction({
+      ...input,
+      codexAsyncQuestionEvidence: [{
+        ...input.codexAsyncQuestionEvidence![0]!,
+        questions: [question]
+      }]
+    }), undefined);
+  }
 });
 
 test("manual and best-effort observations cannot project response authority", () => {

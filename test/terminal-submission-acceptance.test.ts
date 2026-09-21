@@ -17,6 +17,7 @@ import {
   detectCodexCandidateSetRolloutAcceptance,
   detectCodexRolloutAcceptance,
   observeCodexHumanStartedActiveTask,
+  readCodexAsyncQuestionDurableEvidence,
   validateCodexHumanStartedActiveTaskAnchor,
   validateTerminalSubmissionAcceptanceEvidence,
   type CodexRolloutIdentity
@@ -142,6 +143,46 @@ test("captures Codex item_completed UserMessage evidence used by 0.149.1 surface
     assert.ok(anchor);
     assert.equal(anchor.turn_id, nativeTurnId);
     assert.equal(anchor.request_hash, REQUEST_HASH);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("reads async questions only from one exact active Codex rollout turn", () => {
+  const nativeTurnId = turnId(955);
+  const fixture = codexFixture([
+    {
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: nativeTurnId }
+    },
+    asyncQuestionCompletedRecord(nativeTurnId, "call_async_955", [
+      { title: "Choose the rollout target.", options: ["Local", "Remote"] },
+      { title: "Add a short note.", options: null }
+    ])
+  ]);
+  try {
+    assert.deepEqual(readCodexAsyncQuestionDurableEvidence({
+      rollout: fixture.identity,
+      nativeThreadId: SESSION_ID
+    }), [{
+      itemId: "call_async_955",
+      turnId: nativeTurnId,
+      questions: [
+        {
+          title: "Choose the rollout target.",
+          options: ["Local", "Remote"]
+        },
+        { title: "Add a short note." }
+      ],
+      currentIndex: 0,
+      remainingCount: 2
+    }]);
+
+    appendRecords(fixture.path, [taskCompleteRecord(955, "done")]);
+    assert.equal(readCodexAsyncQuestionDurableEvidence({
+      rollout: fixture.identity,
+      nativeThreadId: SESSION_ID
+    }), undefined);
   } finally {
     fixture.cleanup();
   }
@@ -2545,6 +2586,32 @@ function requestUserInputRecord(
       }),
       internal_chat_message_metadata_passthrough: {
         turn_id: nativeTurnId
+      }
+    }
+  };
+}
+
+function asyncQuestionCompletedRecord(
+  nativeTurnId: string,
+  itemId: string,
+  questions: ReadonlyArray<{
+    title: string;
+    options: readonly string[] | null;
+  }>
+): unknown {
+  return {
+    timestamp: "2026-08-07T01:00:01.500Z",
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      thread_id: SESSION_ID,
+      turn_id: nativeTurnId,
+      item: {
+        type: "AgentMessage",
+        id: itemId,
+        content: [{ type: "Text", text: "redacted async question" }],
+        delivery: "async",
+        questions
       }
     }
   };

@@ -74,6 +74,14 @@ const CODEX_FALLBACK_QUESTION_TWO = `
   tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
 `;
 
+const CODEX_ASYNC_QUESTION_COLLAPSED = [
+  "• Working (3s • esc to interrupt)",
+  "",
+  "• Queued follow-up inputs",
+  "  ? 1 question",
+  "    shift + ← to answer"
+].join("\n");
+
 const CLAUDE_NATIVE_QUESTION = `
 old conversation output
  ☐ Color
@@ -948,7 +956,7 @@ test("response-capable fallback Watch preserves its route for questionnaire deli
     CODEX_FALLBACK_QUESTION_ONE
   );
   fixture.advance();
-  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+  await facade.runReconcileWatches(options);
 
   assert.equal(deliveries.length, 1);
   assert.equal(
@@ -2157,6 +2165,121 @@ test("Terminal Watch snapshots and delivers the trusted generic Host route", asy
   assert.equal(deliveries[0].envelope.source.kind, "terminal_watch");
 });
 
+test("shared-store Watch workers leave foreign callbacks pending until their matching Host runs", async (t) => {
+  const fixture = createFixture(t);
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  const printed: unknown[] = [];
+  let terminals = [fixture.terminal];
+  let nonce = 0;
+  const firstRoute = {
+    schema: "agent-knock-knock/callback-route" as const,
+    version: 1 as const,
+    transport: "command_json_v1",
+    profile_id: "first-host",
+    profile_revision: "1",
+    controller_session_id: "first-controller",
+    capabilities: { wake: true, respond: true }
+  };
+  const secondRoute = {
+    ...firstRoute,
+    profile_id: "second-host",
+    controller_session_id: "second-controller"
+  };
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation(terminals, terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => `shared-host-${++nonce}`,
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value),
+    callback: {
+      deliver() {
+        throw new Error("transport delivery expected");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  const watchIds: string[] = [];
+  for (const callbackRoute of [firstRoute, secondRoute, undefined]) {
+    await facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      ...(callbackRoute
+        ? { callbackRoute }
+        : { openclawSession: "legacy-controller" })
+    });
+    watchIds.push(String(record(record(printed.at(-1)).watch).watch_id));
+  }
+  fs.appendFileSync(fixture.rolloutPath, `${JSON.stringify({
+    timestamp: "2026-08-21T01:00:01.000Z",
+    type: "event_msg",
+    payload: {
+      type: "task_complete",
+      turn_id: TASK_ID,
+      last_agent_message: "shared Host completion"
+    }
+  })}\n`);
+  terminals = [];
+  fixture.advance();
+
+  // The read-only status path may discover completion without the owner runtime.
+  await facade.runWatchStatus({ watch: watchIds[0] });
+  const pending = loadTerminalWatch(fixture.storeDir, watchIds[0]);
+  assert.equal(pending.status, "completed");
+  assert.equal(pending.notification_outbox[0].status, "pending");
+  assert.equal(pending.notification_outbox[0].attempts, 0);
+  assert.equal(deliveries.length, 0);
+
+  // A legacy worker reaches its own third Watch even with a delivery limit of 1.
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].route.controller_session_id, "legacy-controller");
+  assert.equal(record(printed.at(-1)).errors, 0);
+
+  for (const callbackRoute of [
+    { ...firstRoute, transport: "unknown_transport_v1" },
+    { ...firstRoute, profile_id: "absent-host" },
+    { ...firstRoute, profile_revision: "different-revision" },
+    { ...firstRoute, controller_session_id: "different-controller" }
+  ]) {
+    await facade.runReconcileWatches({ callbackRoute });
+    assert.equal(record(printed.at(-1)).errors, 0);
+    assert.equal(record(printed.at(-1)).callbacks_delivered, 0);
+  }
+  for (const watchId of watchIds.slice(0, 2)) {
+    const stored = loadTerminalWatch(fixture.storeDir, watchId);
+    assert.equal(stored.notification_outbox[0].status, "pending");
+    assert.equal(stored.notification_outbox[0].attempts, 0);
+    assert.equal(stored.notification_outbox[0].attempt_id, undefined);
+    assert.equal(stored.notification_outbox[0].last_error_code, undefined);
+  }
+
+  for (const callbackRoute of [firstRoute, secondRoute]) {
+    await facade.runReconcileWatches({ callbackRoute });
+    assert.equal(record(printed.at(-1)).callbacks_delivered, 1);
+  }
+  assert.deepEqual(deliveries.map(({ route }) => route.controller_session_id), [
+    "legacy-controller", "first-controller", "second-controller"
+  ]);
+  for (const watchId of watchIds) {
+    const receipt = loadTerminalWatch(fixture.storeDir, watchId)
+      .notification_outbox[0];
+    assert.equal(receipt.status, "delivered");
+    assert.equal(receipt.attempts, 1);
+  }
+});
+
 test("route-bound Watch reconciliation keeps each initiating controller session", async (t) => {
   const fixture = createFixture(t);
   const deliveries: CallbackTransportDeliverInput[] = [];
@@ -2224,6 +2347,15 @@ test("route-bound Watch reconciliation keeps each initiating controller session"
   await facade.runReconcileWatches({
     storeDir: fixture.storeDir,
     callbackRoute: lifecycleTemplate,
+    callbackRouteControllerScope: "route_bound_v1"
+  });
+  assert.equal(deliveries.length, 0, "a different Profile revision cannot claim");
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute: {
+      ...lifecycleTemplate,
+      profile_revision: initiatingRoute.profile_revision
+    },
     callbackRouteControllerScope: "route_bound_v1"
   });
 
@@ -3035,6 +3167,175 @@ test("exact Watch Status projects an actionable questionnaire and cursor redraw 
     callbackRoute
   });
   assert.equal(deliveries.length, 1, "cursor redraw must keep one surface event");
+});
+
+test("exact Watch projects one response-capable Codex async question while working", async (t) => {
+  const fixture = createFixture(t, "human-only", "0.155.1");
+  const printed: unknown[] = [];
+  const deliveries: CallbackTransportDeliverInput[] = [];
+  let terminal: Record<string, any> = fixture.terminal;
+  const callbackRoute = createTerminalWatchOpenClawCallbackRoute({
+    controllerSessionId: "agent:main:exact-async-question",
+    openclawBin: "/opt/openclaw/bin/openclaw",
+    respond: true
+  });
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {},
+    acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId }) =>
+      exactTerminalObservation([terminal], terminalId),
+    loadClaudeAgentRows: () => [],
+    now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000382",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }),
+    terminalIncarnationBlockingTurns: () => [],
+    printJson: (value) => printed.push(value),
+    callback: {
+      deliver() {
+        throw new Error("legacy callback path must not run");
+      },
+      deliverTransport(input) {
+        deliveries.push(input);
+        return {
+          disposition: "accepted",
+          accepted_at: fixture.now().toISOString(),
+          acceptance_id: input.envelope.delivery_id
+        };
+      }
+    }
+  });
+  await facade.runWatch({
+    terminal: fixture.terminal.id as string,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const watchId = String(record(record(printed.at(-1)).watch).watch_id);
+  fs.appendFileSync(fixture.rolloutPath, `${JSON.stringify({
+    timestamp: "2026-08-21T01:00:00.050Z",
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      turn_id: TASK_ID,
+      item: {
+        type: "AgentMessage",
+        id: "async-question-watch-1",
+        delivery: "async",
+        questions: [{
+          title: "Which target should I use?",
+          options: ["Local", "Remote"]
+        }]
+      }
+    }
+  })}\n`);
+  terminal = withTerminalWatchScreen(
+    terminal,
+    CODEX_ASYNC_QUESTION_COLLAPSED
+  );
+  fixture.advance();
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const publicWatch = record(record(printed.at(-1)).watch);
+  const projection = record(publicWatch.interaction_state);
+  assert.equal(publicWatch.status, "active");
+  assert.equal(publicWatch.interaction_policy, "respond_when_exact");
+  assert.equal(record(publicWatch.capabilities).interaction_respond, true);
+  assert.equal(projection.kind, "async_question");
+  assert.equal(projection.response_authority, "executable");
+  assert.deepEqual(projection.delivery_modes, [
+    "steer_current_turn",
+    "queue_next_turn"
+  ]);
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].envelope.event.type, "interaction_required");
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir,
+    callbackRoute
+  });
+  assert.equal(deliveries.length, 1, "the same async question must notify once");
+
+  fs.appendFileSync(fixture.rolloutPath, `${JSON.stringify({
+    timestamp: "2026-08-21T01:00:02.050Z",
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      turn_id: TASK_ID,
+      item: {
+        type: "AgentMessage",
+        id: "async-question-watch-2",
+        delivery: "async",
+        questions: [{ title: "Which project name should I use?" }]
+      }
+    }
+  })}\n`);
+  terminal = withTerminalWatchScreen(
+    terminal,
+    CODEX_ASYNC_QUESTION_COLLAPSED.replace("1 question", "2 questions")
+  );
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir, callbackRoute });
+  assert.equal(deliveries.length, 1, "an added pending question must not repeat Q1");
+
+  terminal = withTerminalWatchScreen(terminal, [
+    "  Which project name should I use?",
+    "",
+    "  Type your answer",
+    "",
+    "  enter submit   ctrl + ] skip   ⌥ + ↓ main prompt"
+  ].join("\n"));
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir, callbackRoute });
+  assert.equal(deliveries.length, 2, "advancing to Q2 must notify once");
+  assert.equal(loadTerminalWatch(fixture.storeDir, watchId).status, "active");
+
+  for (const excerpt of ["", "• Working (4s • esc to interrupt)"]) {
+    terminal = withTerminalWatchScreen(terminal, excerpt);
+    await facade.runReconcileWatches({ storeDir: fixture.storeDir, callbackRoute });
+    assert.equal(
+      loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.aggregate.state,
+      "pending",
+      "missing or clipped captures cannot prove the question disappeared"
+    );
+  }
+  terminal = withTerminalWatchScreen(terminal, [
+    "• Working (5s • esc to interrupt)", "", "› ", "",
+    "gpt-5.6-sol high · /workspace/project"
+  ].join("\n"));
+  await facade.runWatchStatus({
+    storeDir: fixture.storeDir,
+    watch: watchId,
+    openclawSession: callbackRoute.controller_session_id,
+    callbackRoute
+  });
+  const cleared = record(record(printed.at(-1)).watch);
+  assert.equal(cleared.status, "active");
+  assert.equal(cleared.interaction_state, undefined);
+  assert.equal(record(cleared.capabilities).interaction_respond, false);
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.aggregate.state,
+    "superseded"
+  );
+  assert.equal(deliveries.length, 2);
+
+  fs.appendFileSync(fixture.rolloutPath, `${JSON.stringify({
+    timestamp: "2026-08-21T01:00:05.000Z",
+    type: "event_msg",
+    payload: { type: "task_complete", turn_id: TASK_ID, last_agent_message: "Done" }
+  })}\n`);
+  fixture.setNow("2026-08-21T01:00:06.000Z");
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir, callbackRoute });
+  assert.equal(
+    loadTerminalWatch(fixture.storeDir, watchId).status,
+    "completed",
+    JSON.stringify(printed.at(-1))
+  );
+  assert.equal(deliveries.at(-1)?.envelope.event.type, "completed");
 });
 
 test("a newer stale Codex task Watch cannot claim the current surface", async (t) => {

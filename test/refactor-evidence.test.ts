@@ -1096,7 +1096,7 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
   actionContractDrift.contracts.list_action.version = 28;
   assert.throws(
     () => validate(actionContractDrift),
-    /list action contract version must remain 29/u
+    /list action contract version must remain 30/u
   );
 
   const protocolDrift = loadJson("config/public-contract-witnesses.json");

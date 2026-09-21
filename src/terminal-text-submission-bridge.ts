@@ -248,7 +248,10 @@ export interface TerminalTextSubmissionClassifierPorts {
     styledScreen: string,
     expectedText: string,
     allowOpaqueLargePastePlaceholder?: boolean,
-    classifyOpaqueLargePasteAsDifferent?: boolean
+    classifyOpaqueLargePasteAsDifferent?: boolean,
+    exactSlashPopupRows?: readonly string[],
+    allowStyledSlashPopupWithoutViewportPaint?: boolean,
+    agentVersion?: string
   ): CodexComposerCapture | undefined;
   exactTerminalComposer(
     agent: ExecutorKind,
@@ -1032,7 +1035,10 @@ export class TerminalTextSubmissionBridge {
       styledScreen,
       expectedText,
       options.allowOpaqueLargePastePlaceholder === true,
-      options.classifyOpaqueLargePasteAsDifferent === true
+      options.classifyOpaqueLargePasteAsDifferent === true,
+      undefined,
+      undefined,
+      runtime?.agentVersion
     );
     if (!composer) {
       return {

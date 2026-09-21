@@ -107,7 +107,7 @@ const CODEX_ASTRA_SPARKLE_IDLE_COMPOSER = new RegExp(
   "u"
 );
 const CODEX_ASTRA_COMPLETE_FOOTER =
-  /^gpt-6-astra\s+(?:low|medium|high|xhigh|max|ultra)\s+·\s+(?:~\/|\/)[^·\r\n]+(?:\s+·\s+[^·\r\n]+)*\s+·\s+Main \[default\]$/u;
+  /^gpt-6-astra\s+(?:low|medium|high|xhigh|max|ultra)\s+·\s+(?:~\/|\/)[^·\r\n]+(?:\s+·\s+[^·\r\n]+)+$/u;
 const CODEX_SESSION_STATUS_PATTERN =
   /\bSession:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/giu;
 const CODEX_STATUS_HEADER_PATTERN =

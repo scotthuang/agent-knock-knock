@@ -410,7 +410,7 @@ export interface TerminalWatchManualInteractionOption {
  * response authority.
  */
 export interface TerminalWatchManualInteractionSummary {
-  kind: "questionnaire";
+  kind: "questionnaire" | "async_question";
   response_kind: TerminalWatchManualInteractionResponseKind;
   required: boolean;
   current_step: number;
