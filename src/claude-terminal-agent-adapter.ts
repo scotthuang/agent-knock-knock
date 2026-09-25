@@ -193,6 +193,11 @@ const CLAUDE_STATUS_PANEL_MAX_LINES = 48;
 const CLAUDE_STATUS_PANEL_MAX_REGION_LENGTH = 8_192;
 const CLAUDE_STATUS_PANEL_MAX_FIELDS = 24;
 const CLAUDE_STATUS_PANEL_MAX_FIELD_VALUE_LENGTH = 512;
+const CLAUDE_STATUS_PANEL_DIAGNOSTICS_HEADING = "  System diagnostics";
+const CLAUDE_STATUS_PANEL_DIAGNOSTIC_WARNING = /^ {3}⚠ \S.*$/u;
+const CLAUDE_STATUS_PANEL_DIAGNOSTIC_CONTINUATION = /^ {5}\S.*$/u;
+const CLAUDE_STATUS_PANEL_MAX_DIAGNOSTIC_LINES = 12;
+const CLAUDE_STATUS_PANEL_MAX_DIAGNOSTIC_LINE_LENGTH = 256;
 const CLAUDE_STATUS_PANEL_MAX_EXCERPT_LENGTH = 4_000;
 const CLAUDE_STATUS_PANEL_MAX_EVIDENCE_ENTRIES = 24;
 const PROFILED_CLAUDE_STATUS_PANEL_FIELDS = new Set(
@@ -788,7 +793,54 @@ function parseCurrentClaudeStatusPanel(
   }
 
   const rawFields = new Map<string, string>();
+  let inDiagnostics = false;
+  let diagnosticsEnded = false;
+  let diagnosticWarningCount = 0;
+  let diagnosticLineCount = 0;
   for (const line of regionLines.slice(1, -1)) {
+    if (line === CLAUDE_STATUS_PANEL_DIAGNOSTICS_HEADING) {
+      if (
+        inDiagnostics ||
+        rawFields.get("Version") !== "2.1.282" ||
+        !rawFields.has("Session ID") ||
+        rawFields.get("Session kind") !== "interactive" ||
+        !rawFields.has("cwd") ||
+        !rawFields.has("Model")
+      ) {
+        return {
+          status: "ambiguous",
+          reason: "the Claude Status diagnostics are unprofiled or misplaced"
+        };
+      }
+      inDiagnostics = true;
+      continue;
+    }
+    if (inDiagnostics) {
+      if (line.trim().length === 0) {
+        diagnosticsEnded = true;
+        continue;
+      }
+      diagnosticLineCount += 1;
+      if (
+        diagnosticsEnded ||
+        diagnosticLineCount > CLAUDE_STATUS_PANEL_MAX_DIAGNOSTIC_LINES ||
+        line.length > CLAUDE_STATUS_PANEL_MAX_DIAGNOSTIC_LINE_LENGTH ||
+        !(
+          CLAUDE_STATUS_PANEL_DIAGNOSTIC_WARNING.test(line) ||
+          (diagnosticWarningCount > 0 &&
+            CLAUDE_STATUS_PANEL_DIAGNOSTIC_CONTINUATION.test(line))
+        )
+      ) {
+        return {
+          status: "ambiguous",
+          reason: "the Claude Status diagnostics have an unprofiled shape"
+        };
+      }
+      if (CLAUDE_STATUS_PANEL_DIAGNOSTIC_WARNING.test(line)) {
+        diagnosticWarningCount += 1;
+      }
+      continue;
+    }
     if (line.trim().length === 0) {
       continue;
     }
@@ -814,6 +866,12 @@ function parseCurrentClaudeStatusPanel(
       };
     }
     rawFields.set(name, value);
+  }
+  if (inDiagnostics && diagnosticWarningCount === 0) {
+    return {
+      status: "ambiguous",
+      reason: "the Claude Status diagnostics are incomplete"
+    };
   }
   if (rawFields.size === 0 || rawFields.size > CLAUDE_STATUS_PANEL_MAX_FIELDS) {
     return {
