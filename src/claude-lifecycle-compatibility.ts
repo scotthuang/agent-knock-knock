@@ -59,6 +59,13 @@ const CLAUDE_STATUS_PANEL_FIELDS_2_1_261 = Object.freeze([
   "Organization policy"
 ]);
 
+// Observed in Claude Code 2.1.282 /status. Keep this outside the verified
+// profile registry: only this bounded status-field difference has been checked.
+const CLAUDE_STATUS_PANEL_FIELDS_2_1_282 = Object.freeze([
+  ...CLAUDE_STATUS_PANEL_FIELDS_2_1_261,
+  "Auto mode server"
+]);
+
 const CLAUDE_VERSION_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 
@@ -228,6 +235,12 @@ const CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE:
     resumableSourceVersions: Object.freeze([])
   });
 
+const CLAUDE_2_1_282_UNVERIFIED_LIFECYCLE_PROFILE:
+  ClaudeLifecycleCompatibilityProfile = Object.freeze({
+    ...CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_282
+  });
+
 // Preserve the historical optional-call default. Production discovery always
 // supplies the exact running version, while callers that omitted it before the
 // multi-profile registry continue to inspect 2.1.218 fixtures deterministically.
@@ -261,7 +274,9 @@ export function claudeRuntimeLifecycleCompatibilityProfile(
     return undefined;
   }
   return claudeLifecycleCompatibilityProfile(agentVersion) ??
-    CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE;
+    (agentVersion === "2.1.282"
+      ? CLAUDE_2_1_282_UNVERIFIED_LIFECYCLE_PROFILE
+      : CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE);
 }
 
 export function claudeRuntimeCompatibilityWarning(
@@ -306,7 +321,10 @@ export function claudeLifecycleSourceVersionSupported(
 export function profiledClaudeNativeStatusPanelFields(): readonly string[] {
   return [...new Set(
     Object.values(CLAUDE_LIFECYCLE_PROFILES)
-      .concat(CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE)
+      .concat(
+        CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE,
+        CLAUDE_2_1_282_UNVERIFIED_LIFECYCLE_PROFILE
+      )
       .flatMap((profile) => profile.nativeStatusPanelFields)
   )];
 }

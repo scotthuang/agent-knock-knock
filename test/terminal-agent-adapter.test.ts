@@ -897,6 +897,24 @@ test("Codex adapter accepts current and legacy composer markers without weakenin
   assert.equal(numberedChoice.activity.state, "unknown");
 });
 
+test("Codex 0.157 fullscreen footer stays unknown instead of claiming idle or completion", () => {
+  const inspection = inspectCodexScreen({
+    runtime: { agentVersion: "0.157.0" },
+    screen: [
+      "Tip: Paste an image with Ctrl+V to attach it to your next message.",
+      "",
+      "› Ask Codex to do anything",
+      "",
+      "  GPT-6-Sol high · /repo",
+      "  ← for agents · ? for shortcuts   ⚠ 2 warnings · f2 to view"
+    ].join("\n")
+  });
+
+  assert.equal(inspection.activity.state, "unknown");
+  assert.equal(inspection.approval.approvable, false);
+  assert.equal(inspection.completion, undefined);
+});
+
 test("Codex adapter parses and invalidates approval prompts with the current composer marker", () => {
   const currentApproval = inspectCodexScreen({
     screen: [
@@ -1528,6 +1546,59 @@ for (const version of ["0.153.0", "0.153.4", "0.154.0", "0.155.1"] as const) {
     assert.doesNotMatch(observed.result?.excerpt ?? "", /<redacted-account>/u);
   });
 }
+
+test("Codex 0.157 fullscreen status remains readable through the unverified profile", () => {
+  const nativeThreadId = "22222222-2222-4222-8222-222222222222";
+  const screen = [
+    "/status",
+    "",
+    "╭──────────────────────────────────────────────────────────────────────╮",
+    "│  >_ OpenAI Codex (v0.157.0)                                          │",
+    "│                                                                      │",
+    "│  Server:               Local background server                       │",
+    "│                                                                      │",
+    "│  Model:                GPT-6-Sol (reasoning high, summaries auto)    │",
+    "│  Model provider:       openai                                        │",
+    "│  Directory:            /repo                                         │",
+    "│  Permissions:          Workspace (Ask for approval)                  │",
+    "│  Agents.md:            <none>                                        │",
+    "│  Account:              owner@example.com (Pro)                      │",
+    "│  Collaboration mode:   Default                                       │",
+    `│  Session:              ${nativeThreadId}          │`,
+    "│                                                                      │",
+    "│  Weekly limit:         59% left                                      │",
+    "╰──────────────────────────────────────────────────────────────────────╯",
+    "",
+    "› Ask Codex to do anything",
+    "",
+    "  GPT-6-Sol high · /repo",
+    "  ← for agents · ? for shortcuts   ⚠ 2 warnings · f2 to view"
+  ].join("\n");
+
+  const observed = observeCodexNativeInspection({
+    operation: { kind: "status" },
+    screen,
+    expectedNativeThreadId: nativeThreadId,
+    expectedAgentVersion: "0.157.0"
+  });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.nativeThreadId, nativeThreadId);
+  assert.equal(observed.observedAgentVersion, "0.157.0");
+  assert.deepEqual(observed.result?.fields, [
+    { name: "Server", value: "Local background server" },
+    { name: "Model", value: "GPT-6-Sol (reasoning high, summaries auto)" },
+    { name: "Model provider", value: "openai" },
+    { name: "Directory", value: "/repo" },
+    { name: "Permissions", value: "Workspace (Ask for approval)" },
+    { name: "Agents.md", value: "<none>" },
+    { name: "Account", value: "[REDACTED]" },
+    { name: "Collaboration mode", value: "Default" },
+    { name: "Session", value: nativeThreadId },
+    { name: "Weekly limit", value: "59% left" }
+  ]);
+  assert.doesNotMatch(observed.result?.excerpt ?? "", /owner@example\.com/u);
+  assert.equal(probeCodexNativeInspection("0.157.0").versionCompatibility, "unverified");
+});
 
 test("Codex native inspection observer requires the newest fresh exact status card", () => {
   const nativeThreadId = "22222222-2222-4222-8222-222222222222";

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.9 - 2026-09-25
+
+### Fixed
+
+- Read Claude Code `2.1.282`'s native `/status` panel when it includes the `Auto mode server` row or a bounded `System diagnostics` section. Diagnostic prose is excluded from returned status fields and excerpts.
+
+### Security
+
+- Keep Codex `0.157.0` and Claude Code `2.1.282` on unverified runtime profiles without granting version-bound model-control or questionnaire actions. Claude native status still requires exact session, workspace, and fresh-screen evidence and rejects unprofiled fields or diagnostics.
+
 ## 0.13.8 - 2026-09-21
 
 ### Added
