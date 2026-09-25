@@ -1,5 +1,9 @@
 # Agent Instructions
 
+For periodic test-value audits or test-case pruning, use the repository's
+[test-audit skill](.agents/skills/test-audit/SKILL.md). Its audit workflow does
+not change the test execution policy below.
+
 ## Test execution policy
 
 - During normal development, debugging, refactoring, review, and local installation or local verification, run only the fast test tier: `npm run test:fast`.
