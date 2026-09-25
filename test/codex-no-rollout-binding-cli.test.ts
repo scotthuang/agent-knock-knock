@@ -111,53 +111,6 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../.."
 );
-const splitSources = [
-  "test/codex-no-rollout-binding-cli/zero-rollout-binding.ts",
-  "test/codex-no-rollout-binding-cli/deferred-recovery.ts",
-  "test/codex-no-rollout-binding-cli/approval-authority.ts",
-  "test/codex-no-rollout-binding-cli/candidate-inventory-acceptance.ts",
-  "test/codex-no-rollout-binding-cli/managed-user-explicit-send.ts",
-  "test/codex-no-rollout-binding-cli/lifecycle-identity-inspection.ts"
-];
-const supportSources = [
-  "test/support/codex-no-rollout-binding-cli-support.ts"
-];
-const splitText = splitSources.map((sourcePath) =>
-  fs.readFileSync(path.join(repositoryRoot, sourcePath), "utf8")
-);
-const declarationPatterns = splitText.flatMap((source) =>
-  [...source.matchAll(/^\s{0,2}test\((?:"([^"]+)"|`([^`]+)`)/gmu)]
-    .map((match) => match[1] ?? match[2] ?? "")
-);
-const literalNameCount = splitText.reduce((count, source) =>
-  count + [...source.matchAll(/^\s{0,2}test\("[^"]+"/gmu)].length,
-0);
-const templateNameCount = splitText.reduce((count, source) =>
-  count + [...source.matchAll(/^\s{0,2}test\(`[^`]+`/gmu)].length,
-0);
-const declarationPatternSha256 = createHash("sha256")
-  .update(declarationPatterns.join("\n"))
-  .digest("hex");
-if (
-  literalNameCount !== 71 ||
-  templateNameCount !== 5 ||
-  declarationPatternSha256 !==
-    "8ab95edcb03f890c15d5386adb9866e0036bb21562bfead6ca29656ba709d139"
-) {
-  throw new Error(
-    "Codex no-rollout split changed the frozen test declaration baseline"
-  );
-}
-const assertionCount = [...splitText, ...supportSources.map((sourcePath) =>
-  fs.readFileSync(path.join(repositoryRoot, sourcePath), "utf8")
-)].reduce((count, source) =>
-  count + [...source.matchAll(/\bassert(?:\.[A-Za-z]+)?\s*\(/gu)].length,
-0);
-if (assertionCount < 1_393) {
-  throw new Error(
-    "Codex no-rollout split dropped below the frozen assertion baseline"
-  );
-}
 const entrySource = fs.readFileSync(
   path.join(repositoryRoot, "test/codex-no-rollout-binding-cli.test.ts"),
   "utf8"

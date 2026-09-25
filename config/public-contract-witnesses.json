@@ -561,7 +561,7 @@
       "id": "mutation-incarnation-capability-unit",
       "path": "test/mutation-transaction.test.ts",
       "tier": "fast",
-      "needle": "pane-incarnation reconciliation writes only for its exact locked resources"
+      "needle": "repository adapters reject mixed transactions, wrong scope kinds, and wrong resources"
     },
     {
       "id": "mutation-lock-unit",

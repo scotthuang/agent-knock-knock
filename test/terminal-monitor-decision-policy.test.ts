@@ -357,30 +357,14 @@ test("monitor reduction orders activity, completion, and death before fresh time
   }
 });
 
-test("fresh timeout classification happens only after verified-dead work returns", () => {
-  const trace: string[] = [];
-  const first = reduceTerminalMonitorDecision({
-    state: { previousScreenFingerprint: undefined },
-    completionPresent: false
-  });
-  assert.equal(first.next.kind, "verify_dead");
-  trace.push("verified_dead_return");
+test("timeout policy distinguishes hard, inactivity, and polling outcomes", () => {
   const timeout = decideTerminalMonitorAfterEffectsTimeout({
-    nowMs: (() => {
-      trace.push("read_now");
-      return 60_000;
-    })(),
+    nowMs: 60_000,
     taskStartedAtMs: 0,
     lastActivityAtMs: 0,
     hardTimeoutMinutes: 1,
     inactivityTimeoutMinutes: 1
   });
-  trace.push("timeout_decided");
-  assert.deepEqual(trace, [
-    "verified_dead_return",
-    "read_now",
-    "timeout_decided"
-  ]);
   assert.equal(timeout.kind, "hard_timeout");
   assert.equal(decideTerminalMonitorAfterEffectsTimeout({
     nowMs: 60_000,

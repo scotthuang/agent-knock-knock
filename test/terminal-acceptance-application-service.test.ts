@@ -216,7 +216,7 @@ test("only exact persisted draft proof commits not_accepted", async () => {
   ]);
 });
 
-test("detector and binding errors retain priority over message validation", async () => {
+test("detector errors retain priority over message validation", async () => {
   const current = turn({ messageId: undefined });
   const service = new TerminalAcceptanceApplicationService<Turn>({
     clock: { nowMs: () => 2_000 },

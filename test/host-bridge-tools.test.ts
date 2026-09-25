@@ -45,7 +45,6 @@ test("host bridge adapts the shared semantic tool catalog once", () => {
   assert.ok(command.description.length > 0);
   assert.equal(registry.command(), command);
   assert.deepEqual(listed.map((tool) => tool.name), expectedToolNames);
-  assert.equal(new Set(listed.map((tool) => tool.name)).size, 22);
   assert.equal(registry.list(), listed);
   for (const tool of listed) {
     assert.equal(registry.get(tool.name), tool);

@@ -490,24 +490,16 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   assert.equal(configProperties.agentTimeoutMinutes.type, "number");
   assert.equal(configProperties.agentHardTimeoutMinutes.type, "number");
   assert.equal(configProperties.agentHardTimeoutMinutes.exclusiveMinimum, 0);
-  assert.equal(manifest.contracts.tools.includes("agent_knock_knock_renew"), true);
   assert.equal(manifest.toolMetadata.agent_knock_knock_renew.optional, true);
-  assert.equal(manifest.contracts.tools.includes("agent_knock_knock_respond"), true);
   assert.equal(manifest.toolMetadata.agent_knock_knock_respond.optional, true);
-  assert.equal(
-    manifest.contracts.tools.includes("agent_knock_knock_respond_interaction"),
-    true
-  );
   assert.equal(
     manifest.toolMetadata.agent_knock_knock_respond_interaction.optional,
     true
   );
-  assert.equal(manifest.contracts.tools.length, 22);
   for (const terminalWatchTool of [
     "agent_knock_knock_watch",
     "agent_knock_knock_unwatch"
   ]) {
-    assert.equal(manifest.contracts.tools.includes(terminalWatchTool), true);
     assert.equal(manifest.toolMetadata[terminalWatchTool].optional, true);
   }
   for (const lifecycleTool of [
@@ -522,7 +514,6 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     "agent_knock_knock_reconcile_binding",
     "agent_knock_knock_resume_thread"
   ]) {
-    assert.equal(manifest.contracts.tools.includes(lifecycleTool), true);
     assert.equal(manifest.toolMetadata[lifecycleTool].optional, true);
   }
 

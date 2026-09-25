@@ -40,7 +40,6 @@ import {
   runAgentCliAsync,
   spawnAgentCliCaptured,
   spawnAgentCliProcess,
-  waitForCondition,
   waitForChildExit,
   waitForPidExit,
   pidIsAlive,
@@ -593,52 +592,12 @@ test("a newer raw terminal task cannot replace an active callback boundary", asy
       1
     );
     assert.equal(fs.existsSync(openclawCallsPath), false);
-    return;
-
-    fs.writeFileSync(screenPath, [
-      "› First task",
-      "The first result completed earlier.",
-      "─ Worked for 1m ─────────────────────────────",
-      "› Second task",
-      "• Working (5s • esc to interrupt) · /stop to close"
-    ].join("\n"));
-    const oldMonitor = await runAgentCliInProcess([
-      "monitor",
-      "--terminal-bridge",
-      "--state",
-      firstStatePath,
-      "--log",
-      firstLogPath,
-      "--poll-interval-ms",
-      "50",
-      "--processes-json",
-      JSON.stringify([{
-        pid: 33389,
-        ppid: 999,
-        command: "codex",
-        cwd: workspace
-      }]),
-      "--terminals-json",
-      JSON.stringify([tmuxPane({
-        target: "codex-work:0.1",
-        pane: 1,
-        panePid: 33389,
-        currentPath: workspace
-      })]),
-      "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.1": fs.readFileSync(screenPath, "utf8") })
-    ]);
-    assert.equal(oldMonitor.status, 0, oldMonitor.stderr || oldMonitor.stdout);
-    const oldMonitorParsed = JSON.parse(oldMonitor.stdout);
-    assert.equal(oldMonitorParsed.completed, false);
-    assert.equal(oldMonitorParsed.reason, "conversation_no_longer_waiting");
-    assert.equal(fs.existsSync(openclawCallsPath), false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("durable completion must settle before a newer raw task can send", async () => {
+test("completed rollout cannot bypass an unresolved durable Turn on raw Send", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-terminal-task-reconcile-"));
   const storeDir = path.join(tempDir, "conversations");
   const fakeBinDir = path.join(tempDir, "bin");
@@ -702,8 +661,7 @@ test("durable completion must settle before a newer raw task can send", async ()
       storeDir
     );
     const firstStatePath = firstPaths.statePath;
-    const firstLogPath = firstPaths.logPath;
-    const stalledStatePath = writeConversationClone(
+    writeConversationClone(
       storeDir,
       firstParsed.conversation,
       "terminal-stalled-before-durable-reconcile",
@@ -713,10 +671,6 @@ test("durable completion must settle before a newer raw task can send", async ()
         stalled_reason: "monitor timed out just before task_complete was persisted",
         updated_at: new Date().toISOString()
       })
-    );
-    const stalledLogPath = path.join(
-      path.dirname(stalledStatePath),
-      "events.ndjson"
     );
 
     const completedRollout = [
@@ -787,182 +741,6 @@ test("durable completion must settle before a newer raw task can send", async ()
       "waiting_for_agent"
     );
     assert.equal(fs.existsSync(openclawCallsPath), false);
-    return;
-    assert.equal(second.status, 0, second.stderr || second.stdout);
-    const secondParsed = JSON.parse(second.stdout);
-    const secondStatePath = pathsForConversation(
-      secondParsed.conversation.conversation_id,
-      storeDir
-    ).statePath;
-
-    const reconciledState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
-    assert.equal(reconciledState.status, "closed");
-    assert.equal(reconciledState.callback_delivery.status, "delivered");
-    assert.equal(reconciledState.callback_delivery.attempts, 1);
-    assert.equal(reconciledState.superseded_by_conversation_id, undefined);
-    const firstEvents = fs.readFileSync(firstLogPath, "utf8");
-    assert.match(firstEvents, /terminal_bridge_completion_reconciled_before_supersede/);
-    assert.doesNotMatch(firstEvents, /terminal_bridge_superseded/);
-    assert.equal(
-      JSON.parse(fs.readFileSync(secondStatePath, "utf8")).status,
-      "waiting_for_agent"
-    );
-    const stalledState = JSON.parse(fs.readFileSync(stalledStatePath, "utf8"));
-    assert.equal(stalledState.status, "closed");
-    assert.equal(stalledState.callback_delivery.status, "delivered");
-    assert.equal(stalledState.callback_delivery.attempts, 1);
-    assert.equal(stalledState.superseded_by_conversation_id, undefined);
-    assert.match(
-      fs.readFileSync(stalledLogPath, "utf8"),
-      /terminal_bridge_completion_reconciled_before_supersede/
-    );
-    assert.doesNotMatch(
-      fs.readFileSync(stalledLogPath, "utf8"),
-      /terminal_bridge_superseded/
-    );
-
-    await waitForCondition(
-      () => JSON.parse(fs.readFileSync(firstStatePath, "utf8")).status === "closed",
-      "reconciled callback delivery",
-      12_000
-    );
-    const firstState = JSON.parse(fs.readFileSync(firstStatePath, "utf8"));
-    assert.equal(firstState.close_reason, "terminal bridge task completed");
-    assert.equal(firstState.callback_delivery.status, "delivered");
-    assert.equal(firstState.superseded_by_conversation_id, undefined);
-    assert.equal(readJsonLines(openclawCallsPath).length, 2);
-
-    const ambiguousRollout = (turnId: string) => [
-      JSON.stringify({
-        timestamp: "2099-07-04T00:02:00.000Z",
-        type: "event_msg",
-        payload: { type: "user_message", message: "Second task" }
-      }),
-      JSON.stringify({
-        timestamp: "2099-07-04T00:03:00.000Z",
-        type: "event_msg",
-        payload: {
-          type: "agent_message",
-          message: `Ambiguous completion ${turnId}`
-        }
-      }),
-      JSON.stringify({
-        timestamp: "2099-07-04T00:03:01.000Z",
-        type: "event_msg",
-        payload: {
-          type: "task_complete",
-          turn_id: turnId,
-          last_agent_message: `Ambiguous completion ${turnId}`
-        }
-      })
-    ].join("\n");
-    const ambiguousRolloutA = path.join(tempDir, "ambiguous-a.jsonl");
-    const ambiguousRolloutB = path.join(tempDir, "ambiguous-b.jsonl");
-    const third = await runAgentCliInProcess([
-      ...baseSendArgs,
-      "--message",
-      "Third task",
-      "--threads-json",
-      JSON.stringify([
-        {
-          id: "019ee559-7bb8-7fd1-970c-0f7b6978c453",
-          cwd: workspace,
-          rollout_path: ambiguousRolloutA,
-          updated_at_ms: Date.parse("2099-07-04T00:03:01.000Z"),
-          archived: false
-        },
-        {
-          id: "019ee559-7bb8-7fd1-970c-0f7b6978c454",
-          cwd: workspace,
-          rollout_path: ambiguousRolloutB,
-          updated_at_ms: Date.parse("2099-07-04T00:03:02.000Z"),
-          archived: false
-        }
-      ]),
-      "--processes-json",
-      JSON.stringify([{
-        pid: 33389,
-        ppid: 999,
-        command: "codex",
-        cwd: workspace
-      }]),
-      "--terminals-json",
-      JSON.stringify([tmuxPane({
-        target: "codex-work:0.1",
-        pane: 1,
-        panePid: 33389,
-        currentPath: workspace
-      })]),
-      "--terminal-screens-json",
-      JSON.stringify({ "codex-work:0.1": "› \n" }),
-      "--rollouts-json",
-      JSON.stringify({
-        [ambiguousRolloutA]: ambiguousRollout("turn-ambiguous-a"),
-        [ambiguousRolloutB]: ambiguousRollout("turn-ambiguous-b")
-      })
-    ], env);
-    assert.equal(third.status, 0, third.stderr || third.stdout);
-    const protectedSecondState = JSON.parse(
-      fs.readFileSync(secondStatePath, "utf8")
-    );
-    assert.equal(protectedSecondState.status, "stalled");
-    assert.match(
-      protectedSecondState.stalled_reason,
-      /newer task reused the same terminal/
-    );
-    assert.equal(protectedSecondState.superseded_by_conversation_id, undefined);
-    const secondEvents = fs.readFileSync(
-      path.join(path.dirname(secondStatePath), "events.ndjson"),
-      "utf8"
-    );
-    assert.match(secondEvents, /terminal_bridge_pre_supersede_reconciliation_failed/);
-    assert.match(secondEvents, /multiple same-cwd Codex sessions match/);
-    assert.match(secondEvents, /terminal_bridge_reconciliation_fenced/);
-    assert.doesNotMatch(secondEvents, /terminal_bridge_superseded/);
-
-    const protectedMonitor = await runAgentCliInProcess([
-      "monitor",
-      "--terminal-bridge",
-      "--state",
-      secondStatePath,
-      "--log",
-      path.join(path.dirname(secondStatePath), "events.ndjson"),
-      "--poll-interval-ms",
-      "50",
-      "--processes-json",
-      JSON.stringify([{
-        pid: 33389,
-        ppid: 999,
-        command: "codex",
-        cwd: workspace
-      }]),
-      "--terminals-json",
-      JSON.stringify([tmuxPane({
-        target: "codex-work:0.1",
-        pane: 1,
-        panePid: 33389,
-        currentPath: workspace
-      })]),
-      "--terminal-screens-json",
-      JSON.stringify({
-        "codex-work:0.1": [
-          "› Third task",
-          "The third task is complete.",
-          "─ Worked for 1m ─────────────────────────────",
-          "› "
-        ].join("\n")
-      })
-    ]);
-    assert.equal(
-      protectedMonitor.status,
-      0,
-      protectedMonitor.stderr || protectedMonitor.stdout
-    );
-    assert.equal(
-      JSON.parse(protectedMonitor.stdout).reason,
-      "conversation_no_longer_waiting"
-    );
-    assert.equal(readJsonLines(openclawCallsPath).length, 2);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

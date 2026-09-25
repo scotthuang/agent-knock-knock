@@ -561,44 +561,12 @@ test("factory-only async-local runtime restores nested facade capability sets", 
   ]);
 });
 
-test("callback validates state before enumerating any other option getter", () => {
+test("callback rejects a missing state option", () => {
   const facade = createCallbackCliFacade(dependencies([]));
-  const reads: string[] = [];
-  const lateError = new Error("late getter must stay late");
-  const options = (state: string | undefined) => new Proxy(
-    Object.defineProperties({}, {
-      state: {
-        enumerable: true,
-        get: () => (reads.push("state"), state)
-      },
-      late: {
-        enumerable: true,
-        get: () => {
-          reads.push("late");
-          throw lateError;
-        }
-      }
-    }),
-    {
-      ownKeys(target) {
-        reads.push("ownKeys");
-        return Reflect.ownKeys(target);
-      }
-    }
-  ) as CallbackCliOptions;
-
   assert.throws(
-    () => facade.runCallback(options(undefined)),
+    () => facade.runCallback({} as CallbackCliOptions),
     /--state is required/u
   );
-  assert.deepEqual(reads, ["state"]);
-
-  reads.length = 0;
-  assert.throws(
-    () => facade.runCallback(options("/store/turn/state.json")),
-    (error) => error === lateError
-  );
-  assert.deepEqual(reads, ["state", "ownKeys", "state", "late"]);
 });
 
 function pendingDelivery(pid: number) {

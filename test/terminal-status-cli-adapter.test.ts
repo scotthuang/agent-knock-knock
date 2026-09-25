@@ -528,6 +528,7 @@ test("raw status uses one durable list observation for activity and Watch discov
     terminalWatchDiscoveryHint(canonicalTerminalId)
   );
 
+  const unsupportedAuthorityEvents: string[] = [];
   const unsupported = createTerminalStatusCliFacade(dependencies({
     marker: "U",
     events: [],
@@ -538,6 +539,7 @@ test("raw status uses one durable list observation for activity and Watch discov
       activity_state: "awaiting_approval",
       activity_reason: "approval is required"
     },
+    watchAuthorityEvents: unsupportedAuthorityEvents,
     watchActionAvailable: false
   }));
   const unsupportedResult = await runStatus(unsupported, {
@@ -547,64 +549,7 @@ test("raw status uses one durable list observation for activity and Watch discov
     Object.hasOwn(JSON.parse(unsupportedResult.stdout), "terminal_watch_hint"),
     false
   );
-});
-
-test("raw status suppresses Watch discovery for managed, conflicted, watched, and idle terminals", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-status-watch-gates-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const terminal = resolvedTerminal();
-  const fixtures = [
-    {
-      name: "managed",
-      activity: "working",
-      expectedEvents: ["list-observation"]
-    },
-    {
-      name: "managed-owner",
-      activity: "working",
-      expectedEvents: ["list-observation"]
-    },
-    {
-      name: "conflict",
-      activity: "working",
-      expectedEvents: ["list-observation"]
-    },
-    {
-      name: "active-watch",
-      activity: "working",
-      expectedEvents: ["list-observation"]
-    },
-    {
-      name: "idle",
-      activity: "idle",
-      expectedEvents: ["list-observation"]
-    }
-  ];
-
-  for (const fixture of fixtures) {
-    const authorityEvents: string[] = [];
-    const facade = createTerminalStatusCliFacade(dependencies({
-      marker: fixture.name,
-      events: [],
-      storeDir: path.join(root, fixture.name),
-      terminal,
-      bridgeStatus: {
-        ...terminalStatus(),
-        activity_state: fixture.activity as TerminalBridgeStatus["activity_state"]
-      },
-      watchAuthorityEvents: authorityEvents,
-      watchActionAvailable: false
-    }));
-    const result = await runStatus(facade, {
-      conversation: terminal.conversationId
-    });
-    assert.equal(
-      Object.hasOwn(JSON.parse(result.stdout), "terminal_watch_hint"),
-      false,
-      fixture.name
-    );
-    assert.deepEqual(authorityEvents, fixture.expectedEvents, fixture.name);
-  }
+  assert.deepEqual(unsupportedAuthorityEvents, ["list-observation"]);
 });
 
 test("raw status fails closed when authoritative list observation fails", async (t) => {

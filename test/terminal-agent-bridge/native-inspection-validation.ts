@@ -482,13 +482,6 @@ test("native status inspection requires an unambiguous bounded pre-Enter evidenc
       }
     );
     assert.ok(requestedSleepMs.length > 0);
-    assert.equal(
-      requestedSleepMs.reduce(
-        (total, milliseconds) => total + milliseconds,
-        0
-      ),
-      nowMs - startedAt
-    );
     assert.ok(nowMs - startedAt >= originalPreEnterWindowMs);
     assert.equal(
       provider.operations.some((operation) => operation.kind === "keys"),

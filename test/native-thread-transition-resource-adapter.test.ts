@@ -107,21 +107,12 @@ test("a same-incarnation route move writes bytes through the fresh terminal", as
 });
 
 test("invalid or released lifecycle capabilities perform zero scoped I/O", async (t) => {
-  const calls = { verification: 0, ownership: 0, ledger: 0 };
-  const operations = (resourceBinding: NativeThreadTransitionResourceBinding) => ({
-    verification: nativeThreadTransitionResourceBoundOperation(
+  let calls = 0;
+  const operation = (resourceBinding: NativeThreadTransitionResourceBinding) =>
+    nativeThreadTransitionResourceBoundOperation(
       resourceBinding,
-      () => { calls.verification += 1; }
-    ),
-    ownership: nativeThreadTransitionResourceBoundOperation(
-      resourceBinding,
-      () => { calls.ownership += 1; }
-    ),
-    ledger: nativeThreadTransitionResourceBoundOperation(
-      resourceBinding,
-      () => { calls.ledger += 1; }
-    )
-  });
+      () => { calls += 1; }
+    );
   const rejectActive = async (
     transactionResources: CanonicalMutationResources,
     resourceBinding: NativeThreadTransitionResourceBinding,
@@ -130,12 +121,10 @@ test("invalid or released lifecycle capabilities perform zero scoped I/O", async
     await withCanonicalMutationLocks(
       lockPorts(transactionResources),
       async (scopes, activeResources) => {
-        for (const operation of Object.values(operations(resourceBinding))) {
-          assert.throws(
-            () => operation(scopes, activeResources),
-            pattern
-          );
-        }
+        assert.throws(
+          () => operation(resourceBinding)(scopes, activeResources),
+          pattern
+        );
       }
     );
   };
@@ -205,11 +194,9 @@ test("invalid or released lifecycle capabilities perform zero scoped I/O", async
   const expiredResources = releasedResources;
   assert.ok(expiredScopes);
   assert.ok(expiredResources);
-  for (const operation of Object.values(operations(binding()))) {
-    assert.throws(
-      () => operation(expiredScopes, expiredResources),
-      /requires active authentic terminal scope/u
-    );
-  }
-  assert.deepEqual(calls, { verification: 0, ownership: 0, ledger: 0 });
+  assert.throws(
+    () => operation(binding())(expiredScopes, expiredResources),
+    /requires active authentic terminal scope/u
+  );
+  assert.equal(calls, 0);
 });

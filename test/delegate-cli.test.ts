@@ -127,7 +127,7 @@ test("delegate routes asynchronously to the only idle matching tmux pane", async
   }
 });
 
-test("a recreated pane keeps the prior receipt immutable while accepting a new delegate", async () => {
+test("a recreated pane accepts a new delegate without replay", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-delegate-recreated-pane-")
   );

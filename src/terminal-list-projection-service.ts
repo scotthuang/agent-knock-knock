@@ -39,8 +39,7 @@ import {
   renderHistoricalManagedTurn,
   renderManagedTurnListEntry,
   safeUnavailableManagedTurnActions,
-  sendActionForManagedSession,
-  withoutGenericHandoffSourceClose
+  sendActionForManagedSession
 } from "./terminal-list-renderer.js";
 import {
   decideManagedTurnListActions,
@@ -327,7 +326,6 @@ function renderTerminalFirstListEntry(
     reconcileBindingAction,
     externalHandoffAdoptable,
     handoffDecision,
-    blockingHandoffTurnIds,
     terminalRecoveryBlockingTurns,
     terminalScopedCodexApprovalAction,
     rolloutBackedCodexSession
@@ -371,12 +369,7 @@ function renderTerminalFirstListEntry(
         ? userReleasableManagedTurn(currentTurnValue)
         : currentTurnValue
     : undefined;
-  const currentTurn = currentTurnProjection
-    ? withoutGenericHandoffSourceClose(
-        currentTurnProjection,
-        blockingHandoffTurnIds
-      )
-    : undefined;
+  const currentTurn = currentTurnProjection;
   const nonOwnerRawActions = nonOwnerTerminalActions(
     sessionAwareRawActions as TerminalActionSet<Record<string, any>>,
     {
@@ -402,22 +395,14 @@ function renderTerminalFirstListEntry(
         ? userReleasableManagedTurn(recentTurnValue)
         : recentTurnValue
     : undefined;
-  const recentTurn = recentTurnProjection
-    ? withoutGenericHandoffSourceClose(
-        recentTurnProjection,
-        blockingHandoffTurnIds
-      )
-    : undefined;
+  const recentTurn = recentTurnProjection;
   const history = historyConversations.map((conversation) => {
     const turn = historicalManagedTurnForTerminal(ports, conversation);
-    return withoutGenericHandoffSourceClose(
-      !mutationsAllowed
-        ? readOnlyManagedTurn(turn)
-        : conversationHasNonterminalDeferredTransfer(conversation)
-          ? userReleasableManagedTurn(turn)
-          : turn,
-      blockingHandoffTurnIds
-    );
+    return !mutationsAllowed
+      ? readOnlyManagedTurn(turn)
+      : conversationHasNonterminalDeferredTransfer(conversation)
+        ? userReleasableManagedTurn(turn)
+        : turn;
   });
   const visibleTurnIds = new Set(
     [currentTurn, recentTurn, ...history]

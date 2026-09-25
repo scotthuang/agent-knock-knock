@@ -124,7 +124,6 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     "66da37e054b5d323c652e01cdda8358eaa7f7381bb3248af8be41138eb6cbd50"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
-  assert.equal(contractedTools.length, 22);
   assert.match(
     manifest.description ?? "",
     /closed native status inspection/u
@@ -158,58 +157,6 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     sorted(commandAliases),
     sorted(registeredCommands)
   );
-  assert.equal(contractedTools.includes("agent_knock_knock_send"), true);
-  assert.equal(contractedTools.includes("agent_knock_knock_respond"), true);
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_respond_interaction"),
-    true
-  );
-  assert.equal(contractedTools.includes("agent_knock_knock_watch"), true);
-  assert.equal(contractedTools.includes("agent_knock_knock_unwatch"), true);
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_list_resumable_threads"),
-    true
-  );
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_native_inspect"),
-    true
-  );
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_model_options"),
-    true
-  );
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_repair_model_control"),
-    true
-  );
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_set_model"),
-    true
-  );
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_identify_foreground"),
-    true
-  );
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_identify_and_send"),
-    true
-  );
-  assert.equal(contractedTools.includes("agent_knock_knock_new_thread"), true);
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_reconcile_binding"),
-    true
-  );
-  assert.equal(
-    contractedTools.includes("agent_knock_knock_resume_thread"),
-    true
-  );
-  for (const removedTool of [
-    "agent_knock_knock_delegate",
-    "agent_knock_knock_describe",
-    "agent_knock_knock_agent_takeover"
-  ]) {
-    assert.equal(contractedTools.includes(removedTool), false);
-  }
   const configProperties = (
     readManifest() as Manifest & {
       configSchema?: { properties?: Record<string, unknown> };

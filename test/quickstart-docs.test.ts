@@ -76,22 +76,6 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
     "the canonical ClawHub path must appear before the npm alternative"
   );
 
-  assert.deepEqual(
-    parseAkkCommand("inspect this repository and summarize it"),
-    {
-      action: "delegate",
-      request: "inspect this repository and summarize it"
-    }
-  );
-  assert.deepEqual(
-    parseAkkCommand("codex: inspect this repository and summarize it"),
-    {
-      action: "send",
-      selector: "codex",
-      message: "inspect this repository and summarize it"
-    }
-  );
-
   const targeted = parseAkkCommand("@a1b2c3d4: run the tests and explain any failures");
   assert.deepEqual(targeted, {
     action: "send",

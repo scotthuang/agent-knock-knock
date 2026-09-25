@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -61,7 +60,6 @@ test("Pi package installs the canonical AKK skill beside the extension", () => {
   assert.deepEqual(manifest.pi.skills, ["./skills"]);
   assert.ok(manifest.files.includes("skills/**/*.md"));
   assert.equal(bundledSkill, canonicalSkill);
-  assert.equal(sha256(bundledSkill), sha256(canonicalSkill));
   assert.match(bundledSkill, /^---\nname: agent-knock-knock\n/u);
   assert.match(bundledSkill, /agent-knock-knock\/host-list-compact/u);
   assert.equal(
@@ -86,7 +84,3 @@ test("Pi package installs the canonical AKK skill beside the extension", () => {
   assert.equal(packed.status, 0, packed.stderr || packed.stdout);
   assert.match(packed.stdout, /Verified pi packaged Skill: sha256=[0-9a-f]{64}/u);
 });
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}

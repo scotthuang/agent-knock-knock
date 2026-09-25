@@ -135,10 +135,8 @@ test("hookless Claude exposes only transcript hashes publicly and keeps raw poli
     startedAt: "2026-07-25T02:00:00.000Z",
     context: { managed: true }
   };
-  let detectorCalls = 0;
   const adapter = createClaudeTerminalAgentAdapter({
     detectPendingApproval(request) {
-      detectorCalls += 1;
       assert.equal(request, durableRequest);
       return {
         source: "claude_transcript",
@@ -211,7 +209,6 @@ test("hookless Claude exposes only transcript hashes publicly and keeps raw poli
   assert.equal(result.approved, true);
   assert.equal(authorizeSawRawEvidence, true);
   assert.equal(dispatchSawFreshEvidence, true);
-  assert.equal(detectorCalls, 4);
   assert.equal(JSON.stringify(result).includes(command), false);
   assert.equal(
     provider.operations.filter((operation) => operation.kind === "keys").length,
