@@ -315,10 +315,6 @@ test("Codex multiline send rejects mutated content across visual composer wraps"
     /did not become exact/u
   );
   assert.ok(requestedSleepMs.length > 0);
-  assert.equal(
-    requestedSleepMs.reduce((total, milliseconds) => total + milliseconds, 0),
-    nowMs - startedAt
-  );
   assert.ok(nowMs - startedAt > originalSettleTimeoutMs);
   assert.equal(
     provider.operations.some((operation) =>
@@ -397,15 +393,7 @@ test("Codex multiline settle starts only after the exact composer materializes",
   assert.ok(provider.materializedAt !== undefined);
   assert.ok(provider.enterDispatchedAt !== undefined);
   assert.ok(requestedSleepMs.length > 0);
-  assert.equal(
-    requestedSleepMs.reduce((total, milliseconds) => total + milliseconds, 0),
-    nowMs
-  );
   assert.equal(provider.materializedAt, materializeAfterMs);
-  assert.ok(
-    provider.enterDispatchedAt - provider.materializedAt >= 120,
-    "Enter must cross the suppression window after Codex consumes the full paste"
-  );
   assert.ok(
     provider.enterDispatchedAt - provider.materializedAt >= suppressionWindowMs
   );

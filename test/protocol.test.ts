@@ -339,7 +339,6 @@ test("legacy callback status normalization is idempotent", () => {
   const normalized = normalizeLegacyCallbackStatus(conversation);
   const normalizedAgain = normalizeLegacyCallbackStatus(normalized);
   assert.strictEqual(normalizedAgain, normalized);
-  assert.deepEqual(normalizedAgain, normalized);
   assert.equal(normalizedAgain.status, "idle");
   assert.equal(normalizedAgain.idle_since, "2026-08-06T04:04:17.650Z");
 });

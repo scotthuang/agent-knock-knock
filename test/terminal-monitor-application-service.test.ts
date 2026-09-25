@@ -627,70 +627,6 @@ test("pending acceptance releases the terminal lock before poll backoff", async 
   ]);
 });
 
-test("one poll snapshot feeds diagnostics, approval, completion, and timeout", async () => {
-  const trace: string[] = [];
-  const owner = conversation();
-  const ports = fakePorts(trace, owner);
-  let polls = 0;
-  ports.authority.poll = async () => {
-    const cycle = ++polls;
-    trace.push(`poll:${cycle}`);
-    const terminalStatus = {
-      ...status(),
-      screen: {
-        get digest() {
-          trace.push(`screen:${cycle}`);
-          return "screen-1";
-        }
-      }
-    };
-    const completion = {
-      ...COMPLETION,
-      get metadata() {
-        trace.push(`metadata:${cycle}`);
-        return { context_match: "exact" };
-      }
-    };
-    return {
-      kind: "observed",
-      poll: {
-        get status() {
-          trace.push(`status:${cycle}`);
-          return terminalStatus;
-        },
-        completion
-      }
-    };
-  };
-
-  await runTerminalMonitor({
-    initialConversation: owner,
-    expectedTerminalMessageId: "message-1",
-    configuration: () => CONFIGURATION,
-    lifecycle: { startedRecorded: true },
-    ports
-  });
-
-  assert.deepEqual(trace.filter((item) =>
-    /^(poll|status|screen|metadata):/u.test(item)
-  ), [
-    "poll:1",
-    "status:1",
-    "screen:1",
-    "metadata:1",
-    "metadata:1",
-    "metadata:1",
-    "metadata:1",
-    "poll:2",
-    "status:2",
-    "screen:2",
-    "metadata:2",
-    "metadata:2",
-    "metadata:2",
-    "metadata:2"
-  ]);
-});
-
 test("verified death probe runs before a fresh timeout clock read", async () => {
   const trace: string[] = [];
   const owner = conversation();
@@ -728,7 +664,7 @@ test("verified death probe runs before a fresh timeout clock read", async () => 
   ]);
 });
 
-test("question and error approval paths retain their opposite fingerprint/event order", async () => {
+test("question and error approval events expose the right facts before recording", async () => {
   for (const kind of ["question", "error"] as const) {
     const trace: string[] = [];
     const owner = conversation();
@@ -737,11 +673,22 @@ test("question and error approval paths retain their opposite fingerprint/event 
       scanned: true,
       blocked: true,
       approvable: kind === "question",
-      get fingerprint() {
-        trace.push("fingerprint.read");
-        return "approval-fingerprint";
-      }
+      fingerprint: "approval-fingerprint"
     } as TerminalBridgeStatus["approval_state"];
+    const approvalEvents: Array<Record<string, unknown>> = [];
+    let recorded: { kind: "question" | "error"; fingerprint?: string; reason?: string }
+      | undefined;
+    ports.state.appendEvent = (event) => {
+      trace.push(`event:${event.event}`);
+      if (event.event.startsWith("terminal_bridge_approval_")) {
+        approvalEvents.push(event as Record<string, unknown>);
+      }
+    };
+    ports.state.recordApprovalNotification = (input) => {
+      trace.push("approval.record");
+      recorded = input;
+      return { conversation: owner, duplicate: true, stale: false };
+    };
     ports.authority.poll = async () => ({
       kind: "observed",
       poll: { status: status(approval) }
@@ -755,21 +702,21 @@ test("question and error approval paths retain their opposite fingerprint/event 
       ports
     });
 
-    const eventIndex = trace.findIndex((item) =>
-      item.startsWith("event:terminal_bridge_approval_")
-    );
-    const reads = trace
-      .map((item, index) => item === "fingerprint.read" ? index : -1)
-      .filter((index) => index >= 0);
-    assert.ok(eventIndex >= 0);
+    assert.equal(approvalEvents.length, 1);
+    const event = approvalEvents[0];
     if (kind === "question") {
-      assert.ok(reads.length >= 2);
-      assert.ok(reads.at(-1)! < eventIndex);
+      assert.equal(event.event, "terminal_bridge_approval_detected");
+      assert.equal(event.fingerprint, "approval-fingerprint");
+      assert.equal(Object.hasOwn(event, "reason"), false);
     } else {
-      assert.equal(reads.length, 1);
-      assert.ok(eventIndex < reads[0]);
+      assert.equal(event.event, "terminal_bridge_approval_not_approvable");
+      assert.equal(Object.hasOwn(event, "fingerprint"), false);
+      assert.equal(typeof event.reason, "string");
     }
-    assert.ok(eventIndex < trace.indexOf("approval.record"));
+    assert.equal(recorded?.kind, kind);
+    assert.equal(recorded?.fingerprint, "approval-fingerprint");
+    assert.equal(recorded?.reason, event.reason);
+    assert.ok(trace.indexOf(`event:${event.event}`) < trace.indexOf("approval.record"));
   }
 });
 

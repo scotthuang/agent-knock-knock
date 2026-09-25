@@ -3,23 +3,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { API as TypeScriptApi } from "typescript/unstable/sync";
-import {
-  isBinaryExpression,
-  isCaseClause,
-  isCatchClause,
-  isConditionalExpression,
-  isDoStatement,
-  isForInStatement,
-  isForOfStatement,
-  isForStatement,
-  isFunctionLikeDeclaration,
-  isIfStatement,
-  isWhileStatement,
-  type FunctionLikeDeclaration,
-  type Node,
-  type SourceFile
-} from "typescript/unstable/ast";
 
 import * as terminalMaintenanceCliAdapter from
   "../src/terminal-maintenance-cli-adapter.js";
@@ -317,33 +300,6 @@ function assertOrdered(source: string, tokens: readonly string[]): void {
     assert.notEqual(found, -1, `missing ordered wiring token: ${token}`);
     cursor = found + token.length;
   }
-}
-
-function approximateComplexity(
-  root: FunctionLikeDeclaration,
-  sourceFile: SourceFile
-): number {
-  let value = 1;
-  const visit = (node: Node): void => {
-    if (node !== root && isFunctionLikeDeclaration(node)) return;
-    if (
-      isIfStatement(node) || isConditionalExpression(node) ||
-      isCatchClause(node) || isForStatement(node) ||
-      isForInStatement(node) || isForOfStatement(node) ||
-      isWhileStatement(node) || isDoStatement(node) || isCaseClause(node)
-    ) {
-      value += 1;
-    }
-    if (
-      isBinaryExpression(node) &&
-      ["&&", "||", "??"].includes(node.operatorToken.getText(sourceFile))
-    ) {
-      value += 1;
-    }
-    node.forEachChild(visit);
-  };
-  root.body?.forEachChild(visit);
-  return value;
 }
 
 test("maintenance facade exports one factory and isolates concurrent runtimes", async (t) => {
@@ -866,39 +822,4 @@ test("maintenance adapter declarations keep unknown options and no raw authoriti
   assert.doesNotMatch(source, /\bany\b/u);
   assert.doesNotMatch(source, /JSON\.(?:parse|stringify)/u);
   assert.doesNotMatch(source, /ResolvedTerminal.*capabilit/iu);
-});
-
-test("maintenance functions remain below the hard LOC and complexity gates", () => {
-  const api = new TypeScriptApi({ cwd: process.cwd() });
-  const configPath = path.resolve("tsconfig.json");
-  try {
-    const project = api.updateSnapshot({ openProjects: [configPath] })
-      .getProject(configPath);
-    assert.ok(project);
-    const sourceFile = project.program.getSourceFile(path.resolve(
-      "src/terminal-maintenance-cli-adapter.ts"
-    ));
-    assert.ok(sourceFile);
-    const metrics: Array<{ span: number; complexity: number }> = [];
-    const visit = (node: Node): void => {
-      if (isFunctionLikeDeclaration(node) && node.body) {
-        const line = sourceFile.getLineAndCharacterOfPosition(
-          node.getStart(sourceFile)
-        ).line + 1;
-        const end = sourceFile.getLineAndCharacterOfPosition(node.end).line + 1;
-        metrics.push({
-          span: end - line + 1,
-          complexity: approximateComplexity(node, sourceFile)
-        });
-      }
-      node.forEachChild(visit);
-    };
-    sourceFile.forEachChild(visit);
-    assert.equal(Math.max(...metrics.map((entry) => entry.span)), 222);
-    assert.equal(Math.max(...metrics.map((entry) => entry.complexity)), 29);
-    assert.ok(metrics.every((entry) => entry.span < 500));
-    assert.ok(metrics.every((entry) => entry.complexity < 50));
-  } finally {
-    api.close();
-  }
 });

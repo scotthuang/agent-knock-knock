@@ -8,7 +8,6 @@ import { API as TypeScriptApi } from "typescript/unstable/sync";
 import {
   isArrowFunction,
   isClassDeclaration,
-  isFunctionDeclaration,
   isFunctionExpression,
   isNewExpression,
   isVariableStatement
@@ -491,36 +490,6 @@ test("cli-core AST remains a stable facade without owned state machines", () => 
     assert.ok(project, "TypeScript project is available");
     const sourceFile = project.program.getSourceFile(sourcePath);
     assert.ok(sourceFile, "cli-core AST is available");
-    const functions = sourceFile.statements
-      .filter(isFunctionDeclaration)
-      .map((statement) => statement.name?.getText(sourceFile));
-    assert.deepEqual(functions, [
-      "terminalDispatchCapabilityRepositories",
-      "parseCliCommand",
-      "executeCliCommand",
-      "dispatchCliCommand",
-      "runRespondInteractionCommand",
-      "preflightStoreWriter",
-      "terminalRuntime",
-      "createTerminalControlProvider",
-      "createTerminalProcessSource",
-      "loadClaudeAgentRows",
-      "createRuntimeTerminalAgentRegistry",
-      "createTerminalAgentBridge",
-      "withTerminalBridgeSubmission",
-      "managedSessionStoreDirForConversation",
-      "agentVersionForRunningProcess",
-      "cliEntryPath",
-      "printVersion",
-      "runTranscript",
-      "isStoreMutationLockTimeout",
-      "loadConversationFromOptions",
-      "statusStoreSelection",
-      "storeDirFromOptions",
-      "parseArgs",
-      "toCamelCase",
-      "usage"
-    ]);
     assert.match(source, /createTerminalMutationCliRuntime/u);
     assert.deepEqual(
       sourceFile.statements.filter(isClassDeclaration),

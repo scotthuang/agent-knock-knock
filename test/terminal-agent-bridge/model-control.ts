@@ -860,7 +860,7 @@ test("Codex model control accepts only its exact 0.154 slash completion", async 
     );
   });
 
-  await t.test("a nonempty post-cleanup Composer cannot report repaired", async () => {
+  await t.test("post-clear capture failure cannot report repaired", async () => {
     class UnprovenEmptyProvider extends ModelControlProvider {
       clearDispatched = false;
 

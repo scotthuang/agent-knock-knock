@@ -1431,22 +1431,7 @@ test("facade wiring preserves replay validation and presentation priority", () =
   ]);
 });
 
-test("facade delegates possible-input and approval uncertainty without releasing presentation locks", () => {
-  const transportFailure = compiledModuleFunctionSource(
-    "terminal-command-dispatch-transport",
-    "presentTerminalDispatchTransportFailure",
-    "runTerminalDispatchTransport"
-  );
-  assertOrdered(transportFailure, [
-    "!progress.textInjectedAt",
-    "error instanceof TerminalInputNotStartedError",
-    "application.recordZeroInputAbort({",
-    "return",
-    "application.applyUncertain(",
-    "do_not_retry: true",
-    "presentTerminalUncertain({"
-  ]);
-
+test("facade keeps the approval presentation lock through output", () => {
   const approval = compiledModuleFunctionSource(
     "terminal-approval-cli-adapter",
     "runManagedApprovalDispatch",

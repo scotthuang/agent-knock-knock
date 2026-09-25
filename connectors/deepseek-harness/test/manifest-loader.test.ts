@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -88,7 +87,6 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
     "utf8",
   );
   assert.equal(bundledSkill, canonicalSkill);
-  assert.equal(sha256(bundledSkill), sha256(canonicalSkill));
   assert.match(bundledSkill, /^---\nname: agent-knock-knock\n/u);
   assert.equal(
     manifest.scripts["skill:sync"],
@@ -119,10 +117,6 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
   assert.match(patch, /@scotthuang\/agent-knock-knock-deepseek-harness/u);
   assert.doesNotMatch(patch, /akk-bind/u);
 });
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
 
 for (const version of SUPPORTED_DSH_VERSIONS) {
   test(`accepts one exact launcher-owned DeepSeek Harness ${version} package set`, () => {

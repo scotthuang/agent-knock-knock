@@ -272,7 +272,6 @@ process.stdout.write("{}");
   });
   lifecycleEnvironment.AKK_TEST_VALUE = "lifecycle-mutated";
 
-  assert.equal(adapter.lifecycle, adapter.lifecycle);
   adapter.lifecycle.start();
   await adapter.lifecycle.stop();
   assert.deepEqual(

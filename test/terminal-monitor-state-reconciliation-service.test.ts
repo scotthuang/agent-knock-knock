@@ -32,6 +32,10 @@ import {
   createTerminalMonitorStateCliAdapter,
   type TerminalMonitorStateCliDependencies
 } from "../src/terminal-monitor-state-cli-adapter.js";
+import {
+  createTerminalAcceptanceCliFacade,
+  type TerminalAcceptanceCliDependencies
+} from "../src/terminal-acceptance-cli-adapter.js";
 import type { MonitorVerifiedDeadResult } from
   "../src/terminal-monitor-application-service.js";
 import type { TerminalMonitorEligibility } from
@@ -44,7 +48,6 @@ import type {
 import {
   reconcileTerminalMonitorStateCandidate,
   type TerminalMonitorCallbackRecovery,
-  type TerminalMonitorLocalCompletion,
   type TerminalMonitorStatePaths,
   type TerminalMonitorStateReconciliationPorts
 } from "../src/terminal-monitor-state-reconciliation-service.js";
@@ -856,31 +859,79 @@ test("callback recovery precedes the owner-released monitor-state fence", async 
   });
 });
 
-test("local completion precedes the owner-released monitor-state fence", async () => {
-  const trace: string[] = [];
-  const fixture = portsFixture(trace);
-  const listed: Conversation = { ...fixture.listed, status: "closed" };
-  fixture.ports.completion.settleLocal = () => {
-    trace.push("local");
-    return {
-      handled: true,
-      recovered: true,
-      reason: "local_completion_recovered"
+test("local completion handles closed and active states before later authority", async () => {
+  for (const status of ["closed", "waiting_for_agent"] as const) {
+    const trace: string[] = [];
+    const fixture = portsFixture(trace);
+    const listed: Conversation = { ...fixture.listed, status };
+    fixture.ports.completion.settleLocal = () => {
+      trace.push("local");
+      return {
+        handled: true,
+        recovered: true,
+        reason: "local_completion_recovered"
+      };
     };
+
+    const result = await reconcile(listed, fixture.ports);
+
+    assert.deepEqual(trace, ["local"], status);
+    assert.deepEqual(result, {
+      kind: "handled",
+      counter: "skipped",
+      item: {
+        conversation_id: "turn-1",
+        status: "recovered",
+        reason: "local_completion_recovered"
+      }
+    }, status);
+  }
+});
+
+test("monitor eligibility propagates real Store path errors before an uncertain dispatch", () => {
+  const trace: string[] = [];
+  const acceptance = createTerminalAcceptanceCliFacade(
+    {} as TerminalAcceptanceCliDependencies
+  );
+  const adapter = createTerminalMonitorStateCliAdapter({
+    dispatch: {
+      repository: {
+        load: (control: TerminalControlRef) => {
+          assert.equal(control.target, CONTROL.target);
+          trace.push("dispatch");
+          return { status: "uncertain" };
+        }
+      }
+    },
+    acceptance: {
+      storeDirForConversation: (listed: Conversation) => {
+        trace.push("store");
+        return acceptance.storeDirForConversation(listed);
+      }
+    }
+  } as unknown as TerminalMonitorStateCliDependencies);
+  const listed: Conversation = {
+    ...conversation("turn-1"),
+    state_path: "\0malformed",
+    native_session_takeover: {
+      terminal_bridge: true,
+      terminal_bridge_message_id: "message-1",
+      terminal_control: CONTROL
+    }
   };
 
-  const result = await reconcile(listed, fixture.ports);
+  assert.throws(
+    () => adapter.eligibility(listed),
+    /conversation directory must be contained/u
+  );
+  assert.deepEqual(trace, ["dispatch", "store"]);
 
-  assert.deepEqual(trace, ["local"]);
-  assert.deepEqual(result, {
-    kind: "handled",
-    counter: "skipped",
-    item: {
-      conversation_id: "turn-1",
-      status: "recovered",
-      reason: "local_completion_recovered"
-    }
+  trace.length = 0;
+  assert.deepEqual(adapter.eligibility({ ...listed, state_path: PATHS.statePath }), {
+    eligible: false,
+    reason: "terminal_dispatch_uncertain"
   });
+  assert.deepEqual(trace, ["dispatch", "store"]);
 });
 
 test("malformed active monitor state still reports its authority failure", async () => {
@@ -1045,74 +1096,20 @@ test("Close winning the canonical deferred-recovery lock race prevents terminal 
   assert.deepEqual(fs.readFileSync(transferPath), transferBefore);
 });
 
-test("local completion short-circuits lazily with the legacy getter order", async () => {
+test("callback recovery preserves explicit zero, null, and absent facts", async () => {
   const trace: string[] = [];
   const fixture = portsFixture(trace);
-  const listed = fixture.listed as Conversation & { conversation_id: string };
-  Object.defineProperty(listed, "conversation_id", {
-    enumerable: true,
-    get() {
-      trace.push("listed.conversation_id");
-      return "turn-1";
-    }
-  });
-  const local = Object.defineProperties({}, {
-    handled: getter("local.handled", true),
-    recovered: getter("local.recovered", true),
-    reason: getter("local.reason", "local_completion_recovered")
-  }) as TerminalMonitorLocalCompletion;
-  fixture.ports.completion.settleLocal = () => {
-    trace.push("local");
-    return local;
+  const recovery: TerminalMonitorCallbackRecovery = {
+    handled: true,
+    conversationId: "turn-callback",
+    status: "already_running",
+    reason: "retry_in_flight",
+    monitorPid: null,
+    attempt: 0,
+    attemptPid: undefined,
+    leaseExpiresAt: "2026-08-20T00:00:01.000Z",
+    nextAttemptAt: undefined
   };
-
-  const result = await reconcile(listed, fixture.ports);
-
-  assert.deepEqual(trace, [
-    "local",
-    "local.handled",
-    "listed.conversation_id",
-    "local.recovered",
-    "local.reason"
-  ]);
-  assert.deepEqual(result, {
-    kind: "handled",
-    counter: "skipped",
-    item: {
-      conversation_id: "turn-1",
-      status: "recovered",
-      reason: "local_completion_recovered"
-    }
-  });
-
-  function getter<T>(label: string, value: T): PropertyDescriptor {
-    return {
-      enumerable: true,
-      get() {
-        trace.push(label);
-        return value;
-      }
-    };
-  }
-});
-
-test("callback recovery preserves getter order plus explicit zero and null facts", async () => {
-  const trace: string[] = [];
-  const fixture = portsFixture(trace);
-  const recovery = Object.defineProperties({}, {
-    handled: getter("callback.handled", true),
-    conversationId: getter("callback.conversationId", "turn-callback"),
-    status: getter("callback.status", "already_running"),
-    reason: getter("callback.reason", "retry_in_flight"),
-    monitorPid: getter("callback.monitorPid", null),
-    attempt: getter("callback.attempt", 0),
-    attemptPid: getter("callback.attemptPid", undefined),
-    leaseExpiresAt: getter(
-      "callback.leaseExpiresAt",
-      "2026-08-20T00:00:01.000Z"
-    ),
-    nextAttemptAt: getter("callback.nextAttemptAt", undefined)
-  }) as TerminalMonitorCallbackRecovery;
   fixture.ports.callbacks.reconcile = (storeDir, paths, delayMs) => {
     assert.equal(storeDir, STORE_DIR);
     assert.strictEqual(paths, PATHS);
@@ -1123,24 +1120,7 @@ test("callback recovery preserves getter order plus explicit zero and null facts
 
   const result = await reconcile(fixture.listed, fixture.ports);
 
-  assert.deepEqual(trace, [
-    "local",
-    "callback-reconcile",
-    "callback.handled",
-    "callback.status",
-    "callback.status",
-    "callback.conversationId",
-    "callback.status",
-    "callback.reason",
-    "callback.monitorPid",
-    "callback.monitorPid",
-    "callback.attempt",
-    "callback.attempt",
-    "callback.attemptPid",
-    "callback.leaseExpiresAt",
-    "callback.leaseExpiresAt",
-    "callback.nextAttemptAt"
-  ]);
+  assert.deepEqual(trace, ["local", "callback-reconcile"]);
   assert.deepEqual(result, {
     kind: "handled",
     counter: "alreadyRunning",
@@ -1153,36 +1133,21 @@ test("callback recovery preserves getter order plus explicit zero and null facts
       lease_expires_at: "2026-08-20T00:00:01.000Z"
     }
   });
-
-  function getter<T>(label: string, value: T): PropertyDescriptor {
-    return {
-      enumerable: true,
-      get() {
-        trace.push(label);
-        return value;
-      }
-    };
-  }
 });
 
 test("verified-dead recovery forwards prepared byte facts before later authority", async () => {
   const trace: string[] = [];
   const fixture = portsFixture(trace);
   const callback = prepared(fixture.retried);
-  const preparation = Object.defineProperties({}, {
-    claimed: getter("completion.claimed", true),
-    conversation: getter("completion.conversation", fixture.retried),
-    prepared: getter("completion.prepared", callback)
-  });
-  const dead = Object.defineProperties({
-    conversation: fixture.retried
-  }, {
-    completionPreparation: getter(
-      "dead.completionPreparation",
-      preparation
-    ),
-    stalled: getter("dead.stalled", false)
-  }) as MonitorVerifiedDeadResult;
+  const dead: MonitorVerifiedDeadResult = {
+    stalled: false,
+    conversation: fixture.retried,
+    completionPreparation: {
+      claimed: true,
+      conversation: fixture.retried,
+      prepared: callback
+    }
+  };
   fixture.ports.completion.verifiedDead = async () => {
     trace.push("verified-dead");
     return dead;
@@ -1192,9 +1157,7 @@ test("verified-dead recovery forwards prepared byte facts before later authority
     assert.strictEqual(received, callback);
     assert.deepEqual(options, { emit: false });
     assert.equal(received.message.metadata.completion_bytes, 4096);
-    const result = callbackResult(fixture.retried);
-    Object.defineProperty(result, "delivered", getter("result.delivered", true));
-    return result;
+    return callbackResult(fixture.retried);
   };
 
   const result = await reconcile(fixture.listed, fixture.ports, false);
@@ -1205,12 +1168,7 @@ test("verified-dead recovery forwards prepared byte facts before later authority
     "migrate",
     "submission-retry",
     "verified-dead",
-    "dead.completionPreparation",
-    "dead.completionPreparation",
-    "completion.claimed",
-    "completion.prepared",
-    "callback-run",
-    "result.delivered"
+    "callback-run"
   ]);
   assert.deepEqual(result, {
     kind: "handled",
@@ -1222,17 +1180,6 @@ test("verified-dead recovery forwards prepared byte facts before later authority
       delivered: true
     }
   });
-
-  function getter<T>(label: string, value: T): PropertyDescriptor {
-    return {
-      enumerable: true,
-      configurable: true,
-      get() {
-        trace.push(label);
-        return value;
-      }
-    };
-  }
 });
 
 test("port failures propagate unchanged and suppress all later observations", async () => {

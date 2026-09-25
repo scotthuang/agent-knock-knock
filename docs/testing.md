@@ -6,6 +6,11 @@ edit. The canonical classification is `test/test-tiers.json`. A manifest test
 and every tier runner fail before execution if a test file is missing,
 duplicated, or unclassified.
 
+For periodic reviews of existing test value, use the repository's
+[test-audit skill](../.agents/skills/test-audit/SKILL.md). It records the
+contract each case protects before consolidating or deleting coverage, and
+follows the fast-only development policy below.
+
 `npm run architecture:dashboard` runs the same fail-closed architecture gate
 as `validate:architecture` and prints the current health snapshot. It reports
 total production LOC without gating it, while cycles, hard/default function

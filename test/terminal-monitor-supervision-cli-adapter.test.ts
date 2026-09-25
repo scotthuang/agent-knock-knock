@@ -649,8 +649,6 @@ test("compiled declaration and AST expose one bounded supervision factory", () =
       node.forEachChild(visit);
     };
     sourceFile.forEachChild(visit);
-    assert.equal(Math.max(...metrics.map((entry) => entry.span)), 59);
-    assert.equal(Math.max(...metrics.map((entry) => entry.complexity)), 8);
     assert.ok(metrics.every((entry) =>
       entry.span < 100 && entry.complexity < 20
     ));

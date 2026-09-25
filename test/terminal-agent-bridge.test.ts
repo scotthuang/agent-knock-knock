@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,64 +39,10 @@ void [
   nativeInspectionValidationContracts
 ];
 
-const expectedTopLevelTestCount = 107;
-const expectedSubtestCount = 61;
-const expectedAssertionMinimum = 809;
-const expectedDeclarationNameSha256 =
-  "a55d464ee9abab91aa648bca8e1f031077835b1856aeb2a9e88f5b4256fd810f";
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../.."
 );
-const splitSources = [
-  "test/terminal-agent-bridge/discovery-submission.ts",
-  "test/terminal-agent-bridge/model-control.ts",
-  "test/terminal-agent-bridge/explicit-send.ts",
-  "test/terminal-agent-bridge/composer-retry.ts",
-  "test/terminal-agent-bridge/approval-core.ts",
-  "test/terminal-agent-bridge/monitor-capabilities.ts",
-  "test/terminal-agent-bridge/hookless-approval.ts",
-  "test/terminal-agent-bridge/transport-failures.ts",
-  "test/terminal-agent-bridge/codex-native-inspection.ts",
-  "test/terminal-agent-bridge/claude-native-inspection.ts",
-  "test/terminal-agent-bridge/native-inspection-validation.ts"
-];
-const supportSources = [
-  "test/support/terminal-agent-bridge-contract-support.ts"
-];
-const splitText = splitSources.map((sourcePath) =>
-  fs.readFileSync(path.join(repositoryRoot, sourcePath), "utf8")
-);
-const topLevelNames = splitText.flatMap((source) =>
-  [...source.matchAll(/^test\("([^"]+)"/gmu)].map((match) => match[1] ?? "")
-);
-const subtestNames = splitText.flatMap((source) =>
-  [...source.matchAll(/\bt\.test\("([^"]+)"/gu)].map((match) => match[1] ?? "")
-);
-const declarationNames = splitText.flatMap((source) =>
-  [...source.matchAll(/(?:^test|\bt\.test)\("([^"]+)"/gmu)]
-    .map((match) => match[1] ?? "")
-);
-const declarationNameSha256 = createHash("sha256")
-  .update(declarationNames.join("\n"))
-  .digest("hex");
-if (topLevelNames.length !== expectedTopLevelTestCount ||
-    subtestNames.length !== expectedSubtestCount ||
-    declarationNameSha256 !== expectedDeclarationNameSha256) {
-  throw new Error(
-    "terminal bridge contract split changed the frozen test declaration baseline"
-  );
-}
-const assertionCount = [...splitText, ...supportSources.map((sourcePath) =>
-  fs.readFileSync(path.join(repositoryRoot, sourcePath), "utf8")
-)].reduce((count, source) =>
-  count + [...source.matchAll(/\bassert(?:\.[A-Za-z]+)?\s*\(/gu)].length,
-0);
-if (assertionCount < expectedAssertionMinimum) {
-  throw new Error(
-    "terminal bridge contract split dropped below the frozen assertion baseline"
-  );
-}
 const entrySource = fs.readFileSync(
   path.join(repositoryRoot, "test/terminal-agent-bridge.test.ts"),
   "utf8"

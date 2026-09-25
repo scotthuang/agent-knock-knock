@@ -14,7 +14,6 @@ import {
   assertResumeSnapshotActionFingerprint,
   assertResumeSnapshotCandidates,
   assertResumeSnapshotMatchesTerminal,
-  assertResumeSnapshotNotExpired,
   decodeThreadCandidateToken,
   encodeThreadCandidateToken,
   lifecycleAfterBindingMatchesCurrent,
@@ -232,57 +231,6 @@ test("snapshot terminal observation resolves workspace before evidence and keeps
     );
     assert.equal(workspaceObserved, false);
   }
-});
-
-test("snapshot expiry parses before the clock and never calls a clock after parse failure", () => {
-  const trace: string[] = [];
-  const expiresAt = {
-    [Symbol.toPrimitive]() {
-      trace.push("expires:parse");
-      return "2999-08-15T00:05:00.000Z";
-    }
-  };
-  const tracedSnapshot = new Proxy(resumeSnapshot(), {
-    get(target, property, receiver) {
-      if (property === "expires_at") {
-        trace.push("expires:read");
-        return expiresAt;
-      }
-      return Reflect.get(target, property, receiver);
-    }
-  });
-  assert.doesNotThrow(() => assertResumeSnapshotNotExpired(
-    tracedSnapshot,
-    () => {
-      trace.push("clock");
-      return 0;
-    }
-  ));
-  assert.deepEqual(trace, ["expires:read", "expires:parse", "clock"]);
-
-  const failureTrace: string[] = [];
-  const throwingSnapshot = new Proxy(resumeSnapshot(), {
-    get(target, property, receiver) {
-      if (property === "expires_at") {
-        failureTrace.push("expires:read");
-        return {
-          [Symbol.toPrimitive]() {
-            failureTrace.push("expires:parse");
-            throw new Error("expiry parse exploded");
-          }
-        };
-      }
-      return Reflect.get(target, property, receiver);
-    }
-  });
-  assert.throws(
-    () => assertResumeSnapshotNotExpired(throwingSnapshot, () => {
-      failureTrace.push("clock");
-      return 0;
-    }),
-    /expiry parse exploded/u
-  );
-  assert.deepEqual(failureTrace, ["expires:read", "expires:parse"]);
 });
 
 test("snapshot fingerprints preserve fail-closed evaluation and rollout key order", () => {

@@ -479,27 +479,6 @@ function userCloseFixture(options: { createTargetSession?: boolean } = {}): {
   return { sandbox, storeDir, conversation, transfer };
 }
 
-test("staged schema validation preserves source-before-target getter order", () => {
-  const candidate: any = candidatePrepared();
-  candidate.source_turn_history = [{
-    ...candidate.source_turn_history[0],
-    binding_generation: 0
-  }];
-  Object.defineProperty(candidate, "target_session_id", {
-    configurable: true,
-    enumerable: true,
-    get() {
-      throw new Error("later target getter must not run");
-    }
-  });
-  assert.throws(
-    () => assertDeferredForegroundTransfer(candidate, undefined, {
-      allowMissingRevision: true
-    }),
-    /source Turn history is invalid/u
-  );
-});
-
 test("schema keeps target UUID behind exact transitioning provisional authority", () => {
   assertValid(prepared());
   const target = targetPrepared().transfer;
@@ -668,16 +647,24 @@ test("version 2 freezes exact rollout-backed source history while version 1 rema
   assert.equal(candidate.source_turn_history?.length, 1);
   assert.equal(candidate.source_rollout_authority, undefined);
 
-  assert.throws(
-    () => assertDeferredForegroundTransfer({
-      ...candidate,
-      source_turn_history: candidate.source_turn_history?.map((turn) => ({
-        ...turn,
-        turn_fingerprint: "not-a-fingerprint"
-      }))
-    }, undefined, { allowMissingRevision: true }),
-    /Turn history is invalid/u
-  );
+  for (const source_turn_history of [
+    candidate.source_turn_history?.map((turn) => ({
+      ...turn,
+      turn_fingerprint: "not-a-fingerprint"
+    })),
+    candidate.source_turn_history?.map((turn) => ({
+      ...turn,
+      binding_generation: 0
+    }))
+  ]) {
+    assert.throws(
+      () => assertDeferredForegroundTransfer({
+        ...candidate,
+        source_turn_history
+      }, undefined, { allowMissingRevision: true }),
+      /Turn history is invalid/u
+    );
+  }
   assert.throws(
     () => assertDeferredForegroundTransfer({
       ...candidate,

@@ -2,23 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { API as TypeScriptApi } from "typescript/unstable/sync";
-import {
-  isBinaryExpression,
-  isCaseClause,
-  isCatchClause,
-  isConditionalExpression,
-  isDoStatement,
-  isForInStatement,
-  isForOfStatement,
-  isForStatement,
-  isFunctionLikeDeclaration,
-  isIfStatement,
-  isWhileStatement,
-  type FunctionLikeDeclaration,
-  type Node,
-  type SourceFile
-} from "typescript/unstable/ast";
 
 import {
   createNativeThreadTransitionApplication,
@@ -193,75 +176,6 @@ test("public boundaries are typed and cli-core owns no transition machine", () =
     core,
     /assertVerifiedEmptyCodexTransportBoundary,[\s\S]*?= terminalHandoffCliFacade/u
   );
-});
-
-function approximateComplexity(
-  root: FunctionLikeDeclaration,
-  sourceFile: SourceFile
-): number {
-  let value = 1;
-  const visit = (node: Node): void => {
-    if (node !== root && isFunctionLikeDeclaration(node)) return;
-    if (
-      isIfStatement(node) || isConditionalExpression(node) ||
-      isCatchClause(node) || isForStatement(node) ||
-      isForInStatement(node) || isForOfStatement(node) ||
-      isWhileStatement(node) || isDoStatement(node) || isCaseClause(node)
-    ) {
-      value += 1;
-    }
-    if (
-      isBinaryExpression(node) &&
-      ["&&", "||", "??"].includes(node.operatorToken.getText(sourceFile))
-    ) {
-      value += 1;
-    }
-    node.forEachChild(visit);
-  };
-  root.body?.forEachChild(visit);
-  return value;
-}
-
-test("compiler AST keeps every application function below the hard gate", () => {
-  const api = new TypeScriptApi({ cwd: process.cwd() });
-  const configPath = path.resolve("tsconfig.json");
-  try {
-    const project = api.updateSnapshot({ openProjects: [configPath] })
-      .getProject(configPath);
-    assert.ok(project, "TypeScript project is available");
-    const sourceFile = project.program.getSourceFile(path.resolve(
-      "src/native-thread-transition-application.ts"
-    ));
-    assert.ok(sourceFile, "transition application AST is available");
-    const metrics: Array<{ line: number; span: number; complexity: number }> = [];
-    const visit = (node: Node): void => {
-      if (isFunctionLikeDeclaration(node) && node.body) {
-        const line = sourceFile.getLineAndCharacterOfPosition(
-          node.getStart(sourceFile)
-        ).line + 1;
-        const end = sourceFile.getLineAndCharacterOfPosition(node.end).line + 1;
-        metrics.push({
-          line,
-          span: end - line + 1,
-          complexity: approximateComplexity(node, sourceFile)
-        });
-      }
-      node.forEachChild(visit);
-    };
-    sourceFile.forEachChild(visit);
-    assert.ok(metrics.length > 0);
-    assert.equal(Math.max(...metrics.map((entry) => entry.span)), 445);
-    assert.equal(Math.max(...metrics.map((entry) => entry.complexity)), 44);
-    for (const metric of metrics) {
-      assert.ok(metric.span < 500, `function at line ${metric.line} spans ${metric.span}`);
-      assert.ok(
-        metric.complexity < 50,
-        `function at line ${metric.line} has complexity ${metric.complexity}`
-      );
-    }
-  } finally {
-    api.close();
-  }
 });
 
 test("application bytes preserve mutation order and scoped recovery routes", () => {

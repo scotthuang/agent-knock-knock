@@ -297,7 +297,7 @@ test("every transaction receives fresh unforgeable scopes that expire", async ()
   );
 });
 
-test("repository adapters reject mixed transactions and the wrong scope kind", async () => {
+test("repository adapters reject mixed transactions, wrong scope kinds, and wrong resources", async () => {
   const repository = {
     save: capabilityGatedRepositoryOperation(
       ["terminal", "storeWriter"] as const,
@@ -323,6 +323,20 @@ test("repository adapters reject mixed transactions and the wrong scope kind", a
             storeWriter: inner.storeWriter
           }, TEST_RESOURCES.resources, { status: "resolved" }),
           /requires active authentic terminal scope/u
+        );
+        assert.throws(
+          () => repository.save(inner, {
+            ...TEST_RESOURCES.resources,
+            terminal: OTHER_RESOURCES.terminal
+          }, { status: "resolved" }),
+          /requires active authentic terminal scope/u
+        );
+        assert.throws(
+          () => repository.save(inner, {
+            ...TEST_RESOURCES.resources,
+            storeWriter: OTHER_RESOURCES.storeWriter
+          }, { status: "resolved" }),
+          /requires active authentic storeWriter scope/u
         );
       }
     );
@@ -405,46 +419,6 @@ test("paired repositories inject the exact terminal and Store resources", async 
       "transition-4"
     ),
     /requires active authentic terminal scope/u
-  );
-});
-
-test("pane-incarnation reconciliation writes only for its exact locked resources", async () => {
-  const writes: string[] = [];
-  const reconcileIncarnation = capabilityGatedRepositoryOperation(
-    ["terminal", "storeWriter"] as const,
-    "terminal",
-    (terminal: string, recordedAnchor: number, currentAnchor: number) => {
-      if (recordedAnchor !== currentAnchor) {
-        writes.push(terminal);
-      }
-    }
-  );
-
-  await withCanonicalMutationLocks(
-    fixture({ withState: false }).ports,
-    async (scopes) => {
-      reconcileIncarnation(scopes, TEST_RESOURCES.resources, 101, 202);
-      assert.deepEqual(writes, ["terminal-1"]);
-      assert.throws(
-        () => reconcileIncarnation(
-          scopes,
-          { ...TEST_RESOURCES.resources, terminal: OTHER_RESOURCES.terminal },
-          101,
-          303
-        ),
-        /requires active authentic terminal scope/u
-      );
-      assert.throws(
-        () => reconcileIncarnation(
-          scopes,
-          { ...TEST_RESOURCES.resources, storeWriter: OTHER_RESOURCES.storeWriter },
-          101,
-          303
-        ),
-        /requires active authentic storeWriter scope/u
-      );
-      assert.deepEqual(writes, ["terminal-1"]);
-    }
   );
 });
 

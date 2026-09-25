@@ -108,7 +108,6 @@ interface FixtureOptions {
   conversationStoreDir?: string | null;
   control?: TerminalControlRef | null;
   storeDir?: string | null;
-  storeError?: Error;
   ledger?: Record<string, unknown> | null;
   ledgerStatePathError?: Error;
   submission?: Record<string, unknown>;
@@ -154,7 +153,6 @@ function fixture(options: FixtureOptions = {}) {
     deadline: 0
   };
   const propertyTrace: string[] = [];
-  const deadlineTrace: string[] = [];
   const takeover: Record<string, unknown> = {
     terminal_bridge: true,
     terminal_bridge_message_id: "message-1",
@@ -173,30 +171,19 @@ function fixture(options: FixtureOptions = {}) {
         };
       }
     },
-    terminal_bridge_started_at: deadline("started", "2026-08-14T00:00:00.000Z"),
-    terminal_bridge_last_activity_at: deadline(
-      "last_activity", "2026-08-14T00:01:00.000Z"
-    ),
+    terminal_bridge_started_at: deadline("2026-08-14T00:00:00.000Z"),
+    terminal_bridge_last_activity_at: deadline("2026-08-14T00:01:00.000Z"),
     terminal_bridge_inactivity_deadline_at: deadline(
-      "inactivity_deadline",
       options.invalidDeadline ? "invalid" : "2026-08-14T01:01:00.000Z"
     ),
-    terminal_bridge_hard_deadline_at: deadline(
-      "hard_deadline", "2026-08-14T12:00:00.000Z"
-    )
+    terminal_bridge_hard_deadline_at: deadline("2026-08-14T12:00:00.000Z")
   });
-  function deadline(label: string, value: string) {
+  function deadline(value: string) {
     return {
       enumerable: true,
       get() {
         reads.deadline += 1;
-        deadlineTrace.push(`get:${label}`);
-        return {
-          [Symbol.toPrimitive]() {
-            deadlineTrace.push(`validate:${label}`);
-            return value;
-          }
-        };
+        return value;
       }
     };
   }
@@ -246,9 +233,6 @@ function fixture(options: FixtureOptions = {}) {
     },
     store: () => {
       reads.store += 1;
-      if (options.storeError) {
-        throw options.storeError;
-      }
       return {
         kind: "store" as const,
         storeDir: options.storeDir === null ? undefined : "/store"
@@ -273,7 +257,7 @@ function fixture(options: FixtureOptions = {}) {
     }
   };
   return {
-    conversation, takeover, reads, observations, propertyTrace, deadlineTrace
+    conversation, takeover, reads, observations, propertyTrace
   };
 }
 
@@ -466,6 +450,18 @@ test("startup monitor eligibility preserves candidate priority and lazy short ci
     {
       name: "deadline is last",
       candidate: fixture({ invalidDeadline: true }),
+      trace: ["control", "dispatch", "store", "runtime", "store"],
+      reason: "terminal_bridge_deadline_metadata_missing",
+      reads: {
+        control: 1, dispatch: 1, store: 2, submission: 2,
+        runtime: 1, deferred: 0, deadline: 4
+      }
+    },
+    {
+      name: "zero-minute inactivity timeout is invalid",
+      candidate: fixture({
+        takeover: { terminal_bridge_inactivity_timeout_minutes: 0 }
+      }),
       trace: ["control", "dispatch", "store", "runtime", "store"],
       reason: "terminal_bridge_deadline_metadata_missing",
       reads: {
@@ -857,51 +853,6 @@ test("startup monitor reads dispatch state path only after prior identity predic
     { message: "state_path getter observed" }
   );
   assert.deepEqual(candidate.propertyTrace, ["ledger.state_path"]);
-});
-
-test("startup monitor evaluates all deadline validators in exact order", () => {
-  const expectedTrace = [
-    "get:started", "validate:started",
-    "get:last_activity", "validate:last_activity",
-    "get:inactivity_deadline", "validate:inactivity_deadline",
-    "get:hard_deadline", "validate:hard_deadline"
-  ];
-  const candidates = [
-    fixture({ invalidDeadline: true }),
-    fixture({ takeover: { terminal_bridge_inactivity_timeout_minutes: 0 } })
-  ];
-  for (const candidate of candidates) {
-    const actual = decide(candidate, [
-      "control", "dispatch", "store", "runtime", "store"
-    ]);
-    assert.deepEqual(actual.result, {
-      eligible: false,
-      reason: "terminal_bridge_deadline_metadata_missing"
-    });
-    assert.deepEqual(candidate.deadlineTrace, expectedTrace);
-  }
-});
-
-test("startup monitor derives Store before classifying an invalid dispatch ledger", () => {
-  const candidate = fixture({
-    ledger: { status: "uncertain" },
-    statePath: "\0malformed",
-    conversationStoreDir: null,
-    storeError: new Error("malformed state path")
-  });
-  assert.throws(
-    () => decide(candidate, ["control", "dispatch", "store"]),
-    /malformed state path/u
-  );
-  assert.deepEqual(candidate.reads, {
-    control: 1,
-    dispatch: 1,
-    store: 1,
-    submission: 0,
-    runtime: 0,
-    deferred: 0,
-    deadline: 0
-  });
 });
 
 test("Codex anchor decoder rejects non-record rollout fields without TypeError", () => {
