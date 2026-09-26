@@ -319,6 +319,69 @@ test("collapsed Codex async question opens, recaptures, and steers once", async 
   ]);
 });
 
+test("Codex async question waits for a delayed editor redraw without another open key", async () => {
+  const harness = await fixture([
+    ASYNC_COLLAPSED_SCREEN,
+    ASYNC_COLLAPSED_SCREEN,
+    ASYNC_COLLAPSED_SCREEN,
+    ASYNC_COLLAPSED_SCREEN,
+    ASYNC_EXPANDED_SCREEN,
+    ASYNC_COMPLETED_SCREEN
+  ], ASYNC_EVIDENCE);
+  const result = await answerAsyncFixture(
+    harness, ASYNC_COLLAPSED_SCREEN, { option: 0 }
+  );
+
+  assert.equal(result.responded, true);
+  assert.deepEqual(harness.events.filter((event) => event.startsWith("keys:")), [
+    "keys:S-Left", "keys:1"
+  ]);
+  assert.equal(harness.events.filter((event) => event === "sleep:121").length, 3);
+});
+
+test("Codex async question stops after one open key if the editor changes question", async () => {
+  const changedEvidence: readonly CodexAsyncQuestionDurableEvidence[] = [{
+    ...ASYNC_EVIDENCE[0]!,
+    questions: [{ title: "Which other target?", options: ["Local", "Remote"] }]
+  }];
+  const changedEditor = ASYNC_EXPANDED_SCREEN.replace(
+    "Which target should I use?", "Which other target?"
+  );
+  const harness = await fixture([
+    ASYNC_COLLAPSED_SCREEN,
+    ASYNC_COLLAPSED_SCREEN,
+    ASYNC_COLLAPSED_SCREEN,
+    changedEditor
+  ], ASYNC_EVIDENCE, { evidenceAfterNavigation: changedEvidence });
+
+  await assert.rejects(
+    answerAsyncFixture(harness, ASYNC_COLLAPSED_SCREEN, { option: 0 }),
+    (error: unknown) => error instanceof TerminalInteractionDispatchReservedError &&
+      error.doNotRetry && error.stage === "key_uncertain"
+  );
+  assert.deepEqual(harness.events.filter((event) => event.startsWith("keys:")), [
+    "keys:S-Left"
+  ]);
+  assert.equal(harness.events.filter((event) => event === "sleep:121").length, 1);
+});
+
+test("Codex async question stops after bounded read-only captures if opening never renders", async () => {
+  const harness = await fixture(
+    Array.from({ length: 6 }, () => ASYNC_COLLAPSED_SCREEN),
+    ASYNC_EVIDENCE
+  );
+
+  await assert.rejects(
+    answerAsyncFixture(harness, ASYNC_COLLAPSED_SCREEN, { option: 0 }),
+    (error: unknown) => error instanceof TerminalInteractionDispatchReservedError &&
+      error.doNotRetry && error.stage === "key_uncertain"
+  );
+  assert.deepEqual(harness.events.filter((event) => event.startsWith("keys:")), [
+    "keys:S-Left"
+  ]);
+  assert.equal(harness.events.filter((event) => event === "sleep:121").length, 3);
+});
+
 test("collapsed Codex async countdown redraws 15 to 14 to 13 preserve dispatch", async () => {
   const countdownScreens = [15, 14, 13].map((seconds) =>
     ASYNC_COLLAPSED_SCREEN.replace("? 1 question", `? 1 question · ${seconds}s`)

@@ -14,7 +14,11 @@ import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
 import type { TerminalInteractionSubjectResponse } from
   "../src/terminal-interaction-protocol.js";
-import { createConversation, type Conversation } from "../src/protocol.js";
+import {
+  createConversation,
+  resolveExecutor,
+  type Conversation
+} from "../src/protocol.js";
 
 const NOW = new Date("2026-09-07T12:00:00.000Z");
 const EXPIRES = "2026-09-07T12:10:00.000Z";
@@ -81,6 +85,26 @@ function managedTurn(): Conversation {
   };
 }
 
+function asyncManagedTurn(): Conversation {
+  const base = managedTurn();
+  const takeover = base.native_session_takeover as Record<string, unknown>;
+  return {
+    ...base,
+    executor: resolveExecutor({ kind: "codex", session: "codex-interaction" }),
+    native_session_takeover: {
+      ...takeover,
+      native_session_id: "terminal:v2:tmux:codex:interaction:0.0:4242",
+      terminal_bridge_interaction_notification: {
+        ...INTERACTION_NOTIFICATION,
+        interaction_state: {
+          kind: "async_question",
+          interaction_id: INTERACTION_ID
+        }
+      }
+    }
+  };
+}
+
 function responseJson(): string {
   return JSON.stringify({
     turn_id: "turn-interaction",
@@ -137,7 +161,7 @@ function harness(input: {
         turnId: "turn-interaction",
         messageId: "message-interaction",
         terminalTarget: terminalControl.target,
-        agentVersion: "2.1.263"
+        agentVersion: current.executor.kind === "codex" ? "0.154.0" : "2.1.263"
       }),
       assertTurnBindingCurrent: () => calls.push("binding"),
       assertManagedTerminalDispatchOwner: () => calls.push("owner"),
@@ -196,23 +220,24 @@ function options(overrides: Record<string, unknown> = {}) {
 function successfulBridge() {
   return {
     async resolveStoredTerminal(
-      ..._args: Parameters<TerminalAgentBridge["resolveStoredTerminal"]>
+      agent: Parameters<TerminalAgentBridge["resolveStoredTerminal"]>[0],
+      ..._args: unknown[]
     ): Promise<ResolvedTerminalConversation> {
       return {
-        conversationId: "terminal:v2:tmux:claude:interaction:0.0:4242",
-        agent: "claude" as const,
+        conversationId: `terminal:v2:tmux:${agent}:interaction:0.0:4242`,
+        agent,
         pid: 4242,
         legacy: false,
         adapter: {} as ResolvedTerminalConversation["adapter"],
         terminalControl
       };
     },
-    async respondInteraction(_agent, _control, response, executionOptions) {
+    async respondInteraction(agent, _control, response, executionOptions) {
       const projection = {
         interaction_id: INTERACTION_ID
       } as never;
       const context = {
-        agent: "claude" as const,
+        agent,
         terminalControl,
         fingerprint: FINGERPRINT,
         projection,
@@ -343,7 +368,7 @@ test("a successfully consumed interaction fingerprint cannot be replayed", async
   );
 });
 
-test("post-reservation uncertainty stalls the Turn and preserves one-shot receipt", async () => {
+test("blocking post-reservation uncertainty stalls the Turn and preserves one-shot receipt", async () => {
   const bridge = successfulBridge();
   const subject = harness({
     bridge: {
@@ -392,6 +417,97 @@ test("post-reservation uncertainty stalls the Turn and preserves one-shot receip
     "terminal_interaction_response_uncertain");
   assert.doesNotMatch(JSON.stringify(subject.events), /selected_option_ids/u);
   assert.equal(subject.calls.includes("monitor"), false);
+});
+
+test("uncertain async answer keeps exact task monitoring without allowing another input", async () => {
+  const bridge = successfulBridge();
+  let responses = 0;
+  const subject = harness({
+    conversation: asyncManagedTurn(),
+    bridge: {
+      ...bridge,
+      async respondInteraction(agent, control, response, executionOptions) {
+        responses += 1;
+        const context = {
+          agent,
+          terminalControl: control,
+          fingerprint: FINGERPRINT,
+          projection: { interaction_id: INTERACTION_ID } as never,
+          response: managedRuntimeResponse(response),
+          runtime: executionOptions.runtime
+        };
+        await executionOptions.beforeDispatch?.(context);
+        throw new TerminalInteractionDispatchReservedError(
+          "key_uncertain",
+          "async editor changed after opening"
+        );
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => subject.facade.runRespondInteraction(options()),
+    (error: unknown) =>
+      error instanceof TerminalInteractionDispatchReservedError &&
+      error.doNotRetry
+  );
+  const takeover = subject.current().native_session_takeover as
+    Record<string, unknown>;
+  const dispatch = takeover.terminal_bridge_interaction_dispatch as
+    Record<string, unknown>;
+  assert.equal(subject.current().status, "waiting_for_agent");
+  assert.equal(dispatch.state, "uncertain");
+  assert.equal(subject.events[0]?.read_only_monitoring_continues, true);
+  assert.equal(responses, 1);
+
+  await assert.rejects(
+    () => subject.facade.runRespondInteraction(options()),
+    /previous terminal interaction response has an uncertain outcome/u
+  );
+  assert.equal(responses, 1, "the second attempt must not reach terminal input");
+});
+
+test("an async label without the exact interaction cannot keep monitoring", async () => {
+  const base = asyncManagedTurn();
+  const takeover = base.native_session_takeover as Record<string, unknown>;
+  const notification = takeover.terminal_bridge_interaction_notification as
+    Record<string, unknown>;
+  const bridge = successfulBridge();
+  const subject = harness({
+    conversation: {
+      ...base,
+      native_session_takeover: {
+        ...takeover,
+        terminal_bridge_interaction_notification: {
+          ...notification,
+          interaction_id: "different-interaction"
+        }
+      }
+    },
+    bridge: {
+      ...bridge,
+      async respondInteraction(agent, control, response, executionOptions) {
+        await executionOptions.beforeDispatch?.({
+          agent,
+          terminalControl: control,
+          fingerprint: FINGERPRINT,
+          projection: { interaction_id: INTERACTION_ID } as never,
+          response: managedRuntimeResponse(response),
+          runtime: executionOptions.runtime
+        });
+        throw new TerminalInteractionDispatchReservedError(
+          "key_uncertain", "input outcome is unknown"
+        );
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => subject.facade.runRespondInteraction(options()),
+    TerminalInteractionDispatchReservedError
+  );
+  assert.equal(subject.current().status, "stalled");
+  assert.equal(subject.events[0]?.read_only_monitoring_continues, false);
 });
 
 test("proven zero-input abort clears the exact reservation without stalling", async () => {

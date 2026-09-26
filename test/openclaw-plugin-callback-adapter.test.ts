@@ -221,6 +221,81 @@ test("native questionnaire callbacks require Status before one semantic response
   assert.doesNotMatch(visible, /make the product decision/u);
 });
 
+test("optional Codex async question still asks the user before any response", async () => {
+  const harness = callbackHarness();
+  const turnId = "turn-async-question-callback";
+  const conversation = createConversation({
+    userRequest: "research an ambiguous company",
+    sessionId: "session-async-question-callback",
+    turnId,
+    openclawSession: "agent:main:async-question-callback",
+    executorKind: "codex",
+    executorSession: "codex-async-question-callback"
+  });
+  const message = createMessage({
+    conversation,
+    id: "message-async-question-callback",
+    from: "codex",
+    to: "openclaw",
+    type: "question",
+    requiresResponse: false,
+    body: "Codex has an optional async question and continues working.",
+    metadata: {
+      source: "terminal_bridge",
+      reason: "interaction_required",
+      interaction_state: {
+        schema: "agent-knock-knock/terminal-interaction",
+        version: 1,
+        interaction_id: "interaction-async-callback-1",
+        turn_id: turnId,
+        agent: "codex",
+        kind: "async_question",
+        state: "pending",
+        step: { index: 1, total: 1 },
+        questions: [{
+          question_id: "question-async-callback-1",
+          prompt: "Which company did you mean?",
+          required: true,
+          response_kind: "single_select",
+          options: [
+            { option_id: "option-ai", label: "The AI company" },
+            { option_id: "option-other", label: "Another company" }
+          ]
+        }],
+        delivery_modes: ["steer_current_turn", "queue_next_turn"],
+        expires_at: "2099-09-08T00:00:00.000Z",
+        capabilities: {
+          respond: true,
+          batch_response: false,
+          free_text: false,
+          multi_select: false
+        }
+      }
+    }
+  });
+
+  await harness.handler()({
+    params: {
+      sessionKey: "agent:main:async-question-callback",
+      conversation,
+      message
+    },
+    respond: harness.respond
+  });
+
+  assert.equal(harness.response()?.ok, true);
+  assert.equal(harness.response()?.result?.delivery_required, true);
+  const visible = harness.visible();
+  assert.match(visible, /Requires OpenClaw response: no/u);
+  assert.match(visible, /\[AKK native interaction refresh required\]/u);
+  assert.match(visible, /stop and wait for (?:their|the user's) answer/u);
+  assert.match(visible, /Do not choose on the user's behalf/u);
+  assert.match(visible, /refresh Status/u);
+  assert.match(visible, /agent_knock_knock_respond_interaction/u);
+  assert.doesNotMatch(visible, /\[AKK response command\]/u);
+  assert.doesNotMatch(visible, /make the product decision/u);
+});
+
 test("manual native questionnaire callback instructs manual handling without response tools", async () => {
   const harness = callbackHarness();
   const turnId = "turn-interaction-manual";

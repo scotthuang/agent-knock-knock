@@ -47,6 +47,7 @@ import { inspectCodexAsyncQuestionInputMode } from
   "./terminal-composer-classifier.js";
 
 const TERMINAL_INTERACTION_TTL_MS = 10 * 60 * 1_000;
+const CODEX_ASYNC_QUESTION_OPEN_MAX_CAPTURES = 3;
 const TERMINAL_INTERACTION_IDENTIFIER_PATTERN =
   /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const TERMINAL_INTERACTION_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/u;
@@ -624,23 +625,45 @@ export class TerminalInteractionResponseBridge {
       input.terminalControl,
       [openKey]
     );
-    const expanded = await this.captureAfterAsyncQuestionInput(
-      input,
-      "cannot recapture the async-question editor after opening it"
-    );
-    if (
-      !expanded.offer ||
-      expanded.offer.projection.kind !== "async_question" ||
-      expanded.offer.projection.interaction_id !== offer.projection.interaction_id ||
-      expanded.offer.promptFingerprint !== offer.promptFingerprint ||
-      expanded.offer.actionPlan.kind !== "answer_async_question"
-    ) {
-      throw new TerminalInteractionDispatchReservedError(
-        "key_uncertain",
-        "async-question editor changed after the open action"
+    let terminalControl = input.terminalControl;
+    for (let attempt = 0; attempt < CODEX_ASYNC_QUESTION_OPEN_MAX_CAPTURES; attempt += 1) {
+      // Rendering may lag behind the accepted open key. Recapture without
+      // sending another key, and retain only the exact original question.
+      const captured = await this.captureAfterAsyncQuestionInput(
+        { ...input, terminalControl },
+        "cannot recapture the async-question editor after opening it"
       );
+      terminalControl = captured.terminalControl;
+      const current = captured.offer;
+      if (
+        !current ||
+        current.projection.kind !== "async_question" ||
+        current.projection.interaction_id !== offer.projection.interaction_id ||
+        current.promptFingerprint !== offer.promptFingerprint
+      ) {
+        throw new TerminalInteractionDispatchReservedError(
+          "key_uncertain",
+          "async-question editor changed after the open action"
+        );
+      }
+      if (current.actionPlan.kind === "answer_async_question") {
+        return { terminalControl, offer: current };
+      }
+      if (
+        current.actionPlan.kind !== "open_async_question_editor" ||
+        current.actionPlan.binding !== offer.actionPlan.binding ||
+        current.actionPlan.expected_pending_count !== offer.actionPlan.expected_pending_count
+      ) {
+        throw new TerminalInteractionDispatchReservedError(
+          "key_uncertain",
+          "async-question editor changed after the open action"
+        );
+      }
     }
-    return { terminalControl: expanded.terminalControl, offer: expanded.offer };
+    throw new TerminalInteractionDispatchReservedError(
+      "key_uncertain",
+      "async-question editor did not open after the open action"
+    );
   }
 
   private async verifyAsyncQuestionFreeTextEditor(

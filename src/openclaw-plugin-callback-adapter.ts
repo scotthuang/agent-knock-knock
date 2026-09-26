@@ -227,7 +227,6 @@ function callbackOfferState(
     return "interaction_manual_required";
   }
   return message.type === "question" &&
-      message.requires_response === true &&
       stringValue(messageMetadata?.source) === "terminal_bridge" &&
       stringValue(messageMetadata?.reason) === "interaction_required"
     ? "interaction_refresh_required"
@@ -453,7 +452,7 @@ function buildCallbackDeliveryPlan({
   const workflowGuidance = callbackOffer === "approval_refresh_required"
     ? "The callback could not establish private approval authority. Do not call approve from this callback alone. First call agent_knock_knock_status with only its exact turn_id, present the current approval request, and ask for an explicit user decision."
     : callbackOffer === "interaction_refresh_required"
-      ? "This callback reports a native terminal questionnaire. Do not call agent_knock_knock_respond or agent_knock_knock_respond_interaction from the callback alone. First call agent_knock_knock_status with only its exact turn_id in this controller conversation, present the fresh pending interaction_state to the user, and only after their answer call agent_knock_knock_respond_interaction with the advertised semantic IDs. Answer exactly one current step and never guess raw keys, menu indexes, or labels."
+      ? "This callback reports a native terminal question. Do not call agent_knock_knock_respond or agent_knock_knock_respond_interaction from the callback alone. First call agent_knock_knock_status with only its exact turn_id in this controller conversation, present the fresh pending interaction_state to the user, then stop and wait for their answer. Do not choose on the user's behalf. After the user replies, refresh Status and call agent_knock_knock_respond_interaction only if that exact question is still pending, using its current semantic IDs. Answer exactly one current step and never guess raw keys, menu indexes, or labels."
       : callbackOffer === "interaction_manual_required"
         ? "This callback reports a native terminal questionnaire that AKK cannot answer safely. Inform the user that manual terminal input is required. Do not call agent_knock_knock_respond or agent_knock_knock_respond_interaction and do not guess keys, menu indexes, labels, or answer text."
       : "Respond in this conversation as OpenClaw product manager. If the callback is question or blocked, make the product decision and use agent_knock_knock_respond with its exact turn_id. If it is done, summarize the result to the user.";
@@ -546,8 +545,8 @@ function formatInteractionRefreshShortcut(turnId: string): string {
     "- This callback does not establish private terminal-response authority. Do not call ordinary `agent_knock_knock_respond`.",
     "- First call `agent_knock_knock_status` with only:",
     `  {"turn_id":${JSON.stringify(turnId)}}`,
-    "- Present only the fresh current `interaction_state` and obtain the user's explicit answer.",
-    "- Then call `agent_knock_knock_respond_interaction` with that projection's exact semantic IDs.",
+    "- Present only the fresh current `interaction_state`, then stop and wait for the user's explicit answer. Do not choose for them.",
+    "- After the user replies, refresh Status. If the exact question is still pending, call `agent_knock_knock_respond_interaction` with its current semantic IDs.",
     "- One call answers one current step. Wait for the next callback or refresh Status after success; never retry an uncertain response blindly."
   ].join("\n");
 }

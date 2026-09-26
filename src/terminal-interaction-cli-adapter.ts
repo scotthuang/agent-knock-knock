@@ -678,18 +678,43 @@ function markInteractionResponseUncertain(
 ): void {
   const at = dependencies.runtime.now().toISOString();
   const takeover = takeoverFor(input.conversation);
-  const dispatch = isRecord(takeover?.terminal_bridge_interaction_dispatch)
+  const reservedDispatch = isRecord(takeover?.terminal_bridge_interaction_dispatch)
     ? takeover.terminal_bridge_interaction_dispatch
-    : {
-        interaction_id: input.interactionId,
-        interaction_prompt_fingerprint: input.expectedFingerprint,
-        response_sha256: input.responseSha256,
-        attempt_id: randomUUID(),
-        reserved_at: at
-      };
-  const stalled: Conversation = {
+    : undefined;
+  const dispatch = reservedDispatch
+    ?? {
+      interaction_id: input.interactionId,
+      interaction_prompt_fingerprint: input.expectedFingerprint,
+      response_sha256: input.responseSha256,
+      attempt_id: randomUUID(),
+      reserved_at: at
+    };
+  const notification = isRecord(takeover?.terminal_bridge_interaction_notification)
+    ? takeover.terminal_bridge_interaction_notification
+    : undefined;
+  const interactionState = isRecord(notification?.interaction_state)
+    ? notification.interaction_state
+    : undefined;
+  // An async question does not block the native task. Keep its exact Turn under
+  // read-only observation when an attempted answer is uncertain, while the
+  // durable dispatch receipt continues to forbid another terminal input.
+  const messageId = nonBlankString(takeover?.terminal_bridge_message_id);
+  const monitorAsyncTask = input.conversation.status === "waiting_for_agent" &&
+    messageId !== undefined &&
+    interactionState?.kind === "async_question" &&
+    interactionState.interaction_id === input.interactionId &&
+    notification?.interaction_id === input.interactionId &&
+    notification?.prompt_fingerprint === input.expectedFingerprint &&
+    notification?.terminal_bridge_message_id === messageId &&
+    reservedDispatch?.state === "reserved" &&
+    reservedDispatch.interaction_id === input.interactionId &&
+    reservedDispatch.interaction_prompt_fingerprint ===
+      input.expectedFingerprint &&
+    reservedDispatch.response_sha256 === input.responseSha256 &&
+    reservedDispatch.terminal_bridge_message_id === messageId;
+  const uncertain: Conversation = {
     ...input.conversation,
-    status: "stalled",
+    status: monitorAsyncTask ? "waiting_for_agent" : "stalled",
     native_session_takeover: {
       ...takeover,
       terminal_bridge_interaction_dispatch: {
@@ -704,20 +729,22 @@ function markInteractionResponseUncertain(
     },
     updated_at: at
   };
-  dependencies.repository.saveState(input.loaded.statePath, stalled);
+  dependencies.repository.saveState(input.loaded.statePath, uncertain);
   dependencies.repository.appendEvent(input.loaded.logPath, {
     ts: at,
-    conversation_id: stalled.conversation_id,
+    conversation_id: uncertain.conversation_id,
     event: "terminal_interaction_response_uncertain",
     interaction_id: input.interactionId,
     interaction_prompt_fingerprint: input.expectedFingerprint,
     response_sha256: input.responseSha256,
-    reason: "reserved terminal interaction response did not complete"
+    reason: "reserved terminal interaction response did not complete",
+    read_only_monitoring_continues: monitorAsyncTask
   });
   dependencies.runtime.log("warn", "terminal_interaction_response_uncertain", {
-    conversation_id: stalled.conversation_id,
+    conversation_id: uncertain.conversation_id,
     interaction_id: input.interactionId,
     response_sha256: input.responseSha256,
+    read_only_monitoring_continues: monitorAsyncTask,
     error_name: input.error instanceof Error ? input.error.name : "Error"
   });
 }
