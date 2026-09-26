@@ -896,6 +896,55 @@ test("an async notification deferred by its outbox does not hide durable complet
   assert.equal(trace.includes("event:terminal_bridge_interaction_detected"), false);
 });
 
+test("uncertain async answer retains read-only monitoring through exact task completion", async () => {
+  const trace: string[] = [];
+  const owner = conversation({
+    terminal_bridge_pre_send_screen_fingerprint: "screen-before",
+    terminal_bridge_interaction_dispatch: {
+      state: "uncertain",
+      interaction_id: "interaction-1",
+      terminal_bridge_message_id: "message-1"
+    }
+  });
+  const ports = fakePorts(trace, owner);
+  const pending = interactionStatus({ kind: "async_question" });
+  const uncertain: TerminalBridgeStatus = {
+    ...pending,
+    interaction_state: {
+      ...pending.interaction_state!,
+      state: "response_uncertain",
+      capabilities: {
+        ...pending.interaction_state!.capabilities,
+        respond: false
+      }
+    }
+  };
+  let polls = 0;
+  ports.authority.poll = async () => {
+    assert.ok(++polls < 6);
+    return {
+      kind: "observed",
+      poll: polls === 1
+        ? { status: uncertain }
+        : { status: status(), completion: COMPLETION }
+    };
+  };
+
+  await runTerminalMonitor({
+    initialConversation: owner,
+    expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION,
+    lifecycle: { startedRecorded: true },
+    ports
+  });
+
+  assert.ok(polls >= 3);
+  assert.equal(trace.filter((item) => item === "completion.prepare").length, 1);
+  assert.equal(trace.filter((item) => item === "callback.run").length, 1);
+  assert.equal(trace.includes("state.markStalled"), false);
+  assert.equal(trace.includes("present:conversation_no_longer_waiting"), false);
+});
+
 test("async monitor callback describes optional input without asking the Turn to wait", () => {
   const observed = interactionStatus({ kind: "async_question" });
   const projection = observed.interaction_state!;
