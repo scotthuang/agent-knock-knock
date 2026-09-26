@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.13.9",
+  "version": "0.13.10",
   "description": "Control local Codex and Claude Code from OpenClaw or compatible controller Hosts through shared terminals.",
   "license": "MIT",
   "type": "module",
@@ -23,7 +23,8 @@
     "local-first",
     "terminal-control",
     "terminal-handoff",
-    "tmux"
+    "tmux",
+    "herdr"
   ],
   "openclaw": {
     "extensions": [
@@ -108,7 +109,7 @@
     "test:release": "node scripts/run-release-tests.js",
     "test:release:live": "node scripts/run-release-tests.js --live",
     "clawhub:validate": "npm run build && clawhub --workdir . package validate . --out .clawhub-validation --runtime --allow-execute --no-mock-sdk",
-    "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --topics tmux,codex,claude-code,agent-orchestration,terminal-handoff --dry-run",
+    "clawhub:dry-run": "npm run build && clawhub package publish . --family code-plugin --owner scotthuang --tags latest --topics tmux,herdr,codex,claude-code,agent-orchestration --dry-run",
     "compat:openclaw": "npm run build && node scripts/verify-openclaw-compatibility.js",
     "compat:openclaw:current": "npm run build && node scripts/verify-openclaw-compatibility.js --target current",
     "connectors:verify": "node scripts/connector-release-check.js --offline --all",

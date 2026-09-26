@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.10 - 2026-09-26
+
+### Changed
+
+- Declare the ClawHub plugin category as `developer-tools` and add `herdr` to its searchable topics.
+
+### Fixed
+
+- Present non-blocking Codex `request_user_input_async` questions to the user and wait for an explicit answer instead of treating `requires_response=false` as permission for OpenClaw to decide.
+- Keep monitoring the exact running Codex task for completion when an asynchronous answer has an uncertain outcome, while preserving the one-shot terminal-input fence.
+- Allow a bounded read-only recapture after opening the asynchronous question editor so delayed redraws do not require another key press.
+
 ## 0.13.9 - 2026-09-25
 
 ### Fixed
