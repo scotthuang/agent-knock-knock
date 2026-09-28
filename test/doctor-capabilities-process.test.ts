@@ -153,6 +153,31 @@ test("doctor keeps complete unverified coding-agent versions available with warn
   }
 });
 
+test("doctor reports known paginated Codex protocols as installed with native actions unavailable", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-codex-paginated-"));
+  try {
+    for (const version of ["0.157.0", "0.157.1"]) {
+      const probe = probeDoctorCommand("codex", {
+        executables: {
+          codex: writeFakeExecutable(
+            tempDir,
+            `codex-${version}`,
+            `process.stdout.write("codex-cli ${version}");`
+          )
+        }
+      });
+      assert.equal(probe.status, "ok");
+      assert.equal(probe.available, true);
+      assert.equal(probe.native_profile_supported, false);
+      assert.equal(probe.native_actions_available, false);
+      assert.match(probe.compatibility_warning ?? "", /paginated history/u);
+      assert.doesNotMatch(probe.compatibility_warning ?? "", /attempted optimistically/u);
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("Herdr probe marks only exact 0.8.0 as version supported", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-herdr-version-"));
   try {

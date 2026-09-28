@@ -1,5 +1,8 @@
 import path from "node:path";
 
+import { codexUnsupportedDurableHistoryWarning } from
+  "./codex-lifecycle-compatibility.js";
+
 import {
   captureClaudeTranscriptAnchor,
   defaultClaudeHome,
@@ -294,6 +297,14 @@ export async function prepareTerminalControlSend(
     terminalRuntimeIdentityForConversation:
       ports.terminalRuntimeIdentityForConversation
   });
+  const unsupportedCodexHistory = executor.kind === "codex" && bridge
+    ? codexUnsupportedDurableHistoryWarning(preSendRuntime.agentVersion)
+    : undefined;
+  if (unsupportedCodexHistory) {
+    throw new Error(
+      `refusing managed Codex Send before terminal input: ${unsupportedCodexHistory}`
+    );
+  }
   let preSendScreenFingerprint: string | undefined;
   let codexRolloutAcceptanceAnchor: CodexRolloutAcceptanceAnchor | undefined;
   let claudeTranscriptAnchor: ClaudeTranscriptAnchor | undefined;

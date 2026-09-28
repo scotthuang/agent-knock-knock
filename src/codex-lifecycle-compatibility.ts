@@ -23,6 +23,26 @@ export const CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE =
 const CODEX_SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 
+/**
+ * Known protocol changes are different from a merely unverified release.
+ * These versions create durable TUI threads with paginated history, including
+ * under --no-daemon. Their shared server can also own the history instead of
+ * the physical TUI process, so the legacy rollout/FD protocol cannot prove a
+ * managed task or thread transition.
+ */
+export function codexUnsupportedDurableHistoryWarning(
+  agentVersion: string | undefined
+): string | undefined {
+  if (agentVersion !== "0.157.0" && agentVersion !== "0.157.1") {
+    return undefined;
+  }
+  return `Codex ${agentVersion} creates durable TUI sessions with paginated ` +
+    "history and may use a shared background server; AKK does not yet support " +
+    "that history and identity protocol. Managed completion callbacks, native " +
+    "thread lifecycle actions, and native status dispatch are unavailable; explicit terminal Send " +
+    "and terminal-activity Watch remain available subject to native UI safety checks";
+}
+
 export interface CodexRuntimeCompatibilityProfile {
   readonly behaviorProfile: string;
   readonly versionCompatibility: "verified" | "unverified";
@@ -64,14 +84,16 @@ export function codexRuntimeCompatibilityProfile(
     behaviorProfile: CODEX_GENERIC_RUNTIME_BEHAVIOR_PROFILE,
     versionCompatibility: "unverified",
     compatibilityWarning:
-      `Codex ${agentVersion} has not been regression-tested by AKK; ` +
-      "native terminal behavior will be attempted optimistically and may fail if the UI or lifecycle protocol changed"
+      codexUnsupportedDurableHistoryWarning(agentVersion) ??
+      (`Codex ${agentVersion} has not been regression-tested by AKK; ` +
+        "native terminal behavior will be attempted optimistically and may fail if the UI or lifecycle protocol changed")
   };
 }
 
 export function codexRuntimeLifecycleBehaviorProfile(
   agentVersion: string | undefined
 ): string | undefined {
+  if (codexUnsupportedDurableHistoryWarning(agentVersion)) return undefined;
   return codexRuntimeCompatibilityProfile(agentVersion)?.behaviorProfile;
 }
 

@@ -2144,6 +2144,139 @@ test("Codex acceptance rejects a mismatched response turn identity", () => {
   }
 });
 
+test("legacy acceptance and frozen completion still support minimal session metadata", () => {
+  const fixture = codexFixture();
+  const currentIdentity = {
+    sessionId: SESSION_ID,
+    processUuid: "codex-minimal-process",
+    processBirth: "codex-minimal-birth",
+    rollout: fixture.identity
+  };
+  try {
+    const metadata = JSON.parse(fs.readFileSync(fixture.path, "utf8"));
+    metadata.payload = { id: SESSION_ID };
+    fs.writeFileSync(fixture.path, `${JSON.stringify(metadata)}\n`);
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid: currentIdentity.processUuid,
+      processBirth: currentIdentity.processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 98));
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    assert.ok(acceptanceEvidence);
+    appendRecords(fixture.path, [taskCompleteRecord(98, "Minimal legacy result")]);
+    assert.equal(detectCodexBoundRolloutCompletion({
+      anchor,
+      acceptanceEvidence,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    }).status, "completed");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("persisted Codex anchors reject explicit non-legacy history before acceptance or completion", () => {
+  const fixture = codexFixture();
+  const processBirth = "Tue Aug  4 14:15:13 2026";
+  const processUuid = `codex-pid:4242:birth:${processBirth}`;
+  const currentIdentity = {
+    sessionId: SESSION_ID,
+    processUuid,
+    processBirth,
+    rollout: fixture.identity
+  };
+  // Keep the exact inode and every captured byte boundary unchanged while
+  // simulating metadata that a persisted pre-upgrade anchor never checked.
+  const headerWidth = Buffer.byteLength(
+    fs.readFileSync(fixture.path, "utf8").split("\n")[0]!
+  ) + 64;
+  const setHistoryMode = (mode: unknown): void => {
+    const lines = fs.readFileSync(fixture.path, "utf8").split("\n");
+    const metadata = JSON.parse(lines[0]!);
+    if (mode === undefined) delete metadata.payload.history_mode;
+    else metadata.payload.history_mode = mode;
+    const header = JSON.stringify(metadata);
+    lines[0] = header + " ".repeat(headerWidth - Buffer.byteLength(header));
+    fs.writeFileSync(fixture.path, lines.join("\n"));
+  };
+  try {
+    setHistoryMode(undefined);
+    const anchor = captureCodexRolloutAcceptanceAnchor({
+      nativeThreadId: SESSION_ID,
+      processUuid,
+      processBirth,
+      mode: "existing",
+      rollout: fixture.identity
+    });
+    appendRecords(fixture.path, acceptedTurnRecords(REQUEST, 99));
+    const acceptanceEvidence = detectCodexRolloutAcceptance({
+      anchor,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    });
+    const humanAnchor = captureCodexHumanStartedActiveTaskAnchor({ currentIdentity });
+    assert.ok(acceptanceEvidence);
+    assert.ok(humanAnchor);
+    appendRecords(fixture.path, [taskCompleteRecord(99, "Frozen legacy completion")]);
+    const completionRequest = {
+      anchor,
+      acceptanceEvidence,
+      currentIdentity,
+      requestHash: REQUEST_HASH
+    };
+    assert.equal(detectCodexBoundRolloutCompletion(completionRequest).status, "completed");
+
+    for (const mode of ["paginated", "future", null]) {
+      setHistoryMode(mode);
+      assert.throws(() => captureCodexRolloutAcceptanceAnchor({
+        nativeThreadId: SESSION_ID,
+        processUuid,
+        processBirth,
+        mode: "existing",
+        rollout: fixture.identity
+      }), /does not use legacy history/u);
+      assert.throws(() => captureCodexHumanStartedActiveTaskAnchor({
+        currentIdentity
+      }), /does not use legacy history/u);
+      assert.throws(() => detectCodexRolloutAcceptance({
+        anchor,
+        currentIdentity,
+        requestHash: REQUEST_HASH
+      }), /does not use legacy history/u);
+      const observed = observeCodexHumanStartedActiveTask({
+        anchor: humanAnchor,
+        currentIdentity
+      });
+      assert.equal(observed.status, "invalidated");
+      if (observed.status === "invalidated") {
+        assert.match(observed.reason, /does not use legacy history/u);
+      }
+      const completion = detectCodexBoundRolloutCompletion(completionRequest);
+      assert.equal(completion.status, "failure");
+      assert.match(completion.diagnostics.detail ?? "", /does not use legacy history/u);
+      assert.throws(() => readCodexAsyncQuestionDurableEvidence({
+        rollout: fixture.identity,
+        nativeThreadId: SESSION_ID
+      }), /does not use legacy history/u);
+    }
+    setHistoryMode("legacy");
+    assert.equal(detectCodexBoundRolloutCompletion(completionRequest).status, "completed");
+    assert.equal(observeCodexHumanStartedActiveTask({
+      anchor: humanAnchor,
+      currentIdentity: { ...currentIdentity, processBirth: "later process drift" }
+    }).status, "completed");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("bound Codex completion scans the exact accepted turn beyond the recent 12-turn window", () => {
   const fixture = codexFixture();
   try {

@@ -76,6 +76,14 @@ Open a Web conversation and enter `/akk list`. The connector gives every convers
 
 Suppose several Codex or Claude Code jobs are already running in tmux or Herdr:
 
+Codex CLI 0.157.0/0.157.1 has partial compatibility: fullscreen activity and
+visible native status cards are readable, and explicit terminal Send can use best-effort
+terminal-activity Watch. Its new paginated history is not yet supported for
+managed completion callbacks, native thread transitions, or automated
+questionnaire answers. Automated native `/status` dispatch is also unavailable.
+`--no-daemon` does not restore legacy task history. See
+the [compatibility review](docs/codex-0.157.1-compatibility.md).
+
 - **Watch without babysitting.** `/akk watch <terminal>` observes work already in progress and sends a callback when it finishes, needs approval, or becomes blocked. You can leave the terminal and continue from your phone or another chat client.
 - **Send without typing in a tiny remote console.** `/akk <selector>: <message>` sends your natural-language instruction to the selected live coding-agent terminal. An explicit user Send has priority over stale AKK management state.
 - **Identify an ambiguous Codex foreground explicitly.** When several rollout files or a recent `/clear` prevent durable attribution, an advertised foreground-identification action can inspect one exact idle pane without guessing which rollout is current.

@@ -5,7 +5,8 @@ import {
   type ForkContextPackage
 } from "./codex-session-provider.js";
 import {
-  codexRuntimeCompatibilityProfile
+  codexRuntimeCompatibilityProfile,
+  codexUnsupportedDurableHistoryWarning
 } from "./codex-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
 import type {
@@ -82,6 +83,13 @@ const CODEX_TRANSCRIPT_PROMPT_LINE = /^[›»](?:\s|$).*$/gmu;
 const CODEX_SKILLS_HINT = /^[›»]\s+Use \/skills\b/u;
 const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
+// Diagnostic activity only. These fullscreen rows do not prove a task identity,
+// an empty styled Composer, or permission to use a version-bound native action.
+const CODEX_FULLSCREEN_ACTIVITY_VERSIONS = new Set(["0.157.0", "0.157.1"]);
+const CODEX_FULLSCREEN_MODEL_FOOTER =
+  /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
+const CODEX_FULLSCREEN_SHORTCUT_FOOTER =
+  /^ {2}← for agents · \? for shortcuts(?: {2,}⚠ [1-9]\d? warnings? · f2 to view)?$/u;
 // Verified Codex releases can animate the otherwise empty Astra Composer by replacing
 // blank cells with this closed glyph inventory. Keep this status-only grammar
 // separate from CODEX_COMPOSER_LINE: diagnostic idle classification must not
@@ -179,6 +187,16 @@ export function probeCodexNativeInspection(
       agentVersion,
       statusInspection: false,
       reason: "the running Codex version is not a complete x.y.z version"
+    };
+  }
+  if (codexUnsupportedDurableHistoryWarning(agentVersion)) {
+    return {
+      status: "unsupported",
+      agentVersion,
+      ...runtimeProfile,
+      statusInspection: false,
+      reason: `Codex ${agentVersion} fullscreen command-menu dispatch is ` +
+        "not supported; an already visible native status card can still be read"
     };
   }
   return {
@@ -364,6 +382,18 @@ export function probeCodexThreadLifecycle(
     };
   }
   const runtimeProfile = codexRuntimeCompatibilityProfile(agentVersion);
+  const historyWarning = codexUnsupportedDurableHistoryWarning(agentVersion);
+  if (historyWarning) {
+    return {
+      status: "unsupported",
+      agentVersion,
+      ...runtimeProfile,
+      newThread: false,
+      resumeExact: false,
+      candidateDiscovery: false,
+      reason: historyWarning
+    };
+  }
   if (!runtimeProfile) {
     return {
       status: "unsupported",
@@ -394,6 +424,10 @@ export function planCodexThreadLifecycle(
   const runtimeProfile = codexRuntimeCompatibilityProfile(
     capabilities.agentVersion
   );
+  const historyWarning = codexUnsupportedDurableHistoryWarning(
+    capabilities.agentVersion
+  );
+  if (historyWarning) throw new Error(historyWarning);
   if (
     capabilities.status !== "supported" ||
     !capabilities.agentVersion ||
@@ -866,7 +900,8 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
     options.runtime?.agentVersion
   );
   const screenExcerpt = codexScreenExcerpt(options.screen, options.maxExcerptLength ?? 4000);
-  const completion = activity.state === "idle"
+  const completion = activity.state === "idle" &&
+      !codexUnsupportedDurableHistoryWarning(options.runtime?.agentVersion)
     ? detectCodexScreenCompletion({
         screen: screenExcerpt,
         requestText: options.requestText,
@@ -1370,6 +1405,8 @@ function codexIdlePromptLine(
   lines: readonly string[],
   agentVersion?: string
 ): string | undefined {
+  const fullscreenIdle = codexFullscreenIdlePromptLine(lines, agentVersion);
+  if (fullscreenIdle !== undefined) return fullscreenIdle;
   if (
     agentVersion !== undefined &&
     CODEX_ASTRA_SPARKLE_AGENT_VERSIONS.has(agentVersion)
@@ -1415,6 +1452,27 @@ function codexIdlePromptLine(
     }
   }
   return undefined;
+}
+
+function codexFullscreenIdlePromptLine(
+  lines: readonly string[],
+  agentVersion?: string
+): string | undefined {
+  if (!agentVersion || !CODEX_FULLSCREEN_ACTIVITY_VERSIONS.has(agentVersion)) {
+    return undefined;
+  }
+  const reversedIndex = [...lines].reverse().findIndex((line) =>
+    /^[›»] Ask Codex to do anything\s*$/u.test(line)
+  );
+  if (reversedIndex < 0) return undefined;
+  const composerIndex = lines.length - 1 - reversedIndex;
+  const footer = lines.slice(composerIndex + 1)
+    .filter((line) => line.trim()).map((line) => line.trimEnd());
+  return footer.length === 2 &&
+    CODEX_FULLSCREEN_MODEL_FOOTER.test(footer[0]!) &&
+    CODEX_FULLSCREEN_SHORTCUT_FOOTER.test(footer[1]!)
+    ? lines[composerIndex]
+    : undefined;
 }
 
 function codexAstraSparkleIdlePromptLine(

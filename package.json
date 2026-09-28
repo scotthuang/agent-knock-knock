@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.13.10",
+  "version": "0.13.11",
   "description": "Control local Codex and Claude Code from OpenClaw or compatible controller Hosts through shared terminals.",
   "license": "MIT",
   "type": "module",
@@ -81,6 +81,7 @@
     "docs/assets/agent-knock-knock-icon.png",
     "docs/quickstart-herdr.md",
     "docs/quickstart-tmux.md",
+    "docs/codex-0.157.1-compatibility.md",
     "docs/host-bridge-profiles.md",
     "openclaw.plugin.json",
     "README.md",

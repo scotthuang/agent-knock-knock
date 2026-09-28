@@ -45,6 +45,38 @@ test("Codex session provider normalizes thread rows and degrades missing rollout
   assert.equal(sessions[1].capabilityReason, "missing rollout_path");
 });
 
+test("Codex session rows retain metadata but never expose non-legacy rollout authority", () => {
+  const row = {
+    id: SESSION_ID,
+    cwd: "/repo/project",
+    rollout_path: "/obsolete-rollout.jsonl",
+    title: "archived project work",
+    archived: 1
+  };
+  for (const history of [{}, { history_mode: "legacy" }, { historyMode: "legacy" }]) {
+    const [session] = codexSessionsFromThreadRows([{ ...row, ...history }]);
+    assert.equal(session.capability, "full");
+    assert.equal(session.rolloutPath, row.rollout_path);
+    assert.equal(session.archived, true);
+  }
+  for (const history of [
+    { history_mode: "paginated" },
+    { history_mode: "future" },
+    { history_mode: null },
+    { history_mode: "" },
+    { historyMode: "paginated" },
+    { history_mode: "legacy", historyMode: "paginated" }
+  ]) {
+    const [session] = codexSessionsFromThreadRows([{ ...row, ...history }]);
+    assert.equal(session.capability, "metadata_only");
+    assert.equal(session.capabilityReason, "unsupported Codex history_mode");
+    assert.equal(session.rolloutPath, undefined);
+    assert.equal(session.id, SESSION_ID);
+    assert.equal(session.title, row.title);
+    assert.equal(session.archived, true);
+  }
+});
+
 test("Codex process discovery finds native CLI processes", () => {
   const processes = discoverCodexProcesses([
     {

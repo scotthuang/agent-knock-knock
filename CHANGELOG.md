@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.13.11 - 2026-09-29
+
+### Fixed
+
+- Read Codex 0.157.0/0.157.1's complete fullscreen idle footer as diagnostic activity, while preserving working priority and rejecting clipped or changed surfaces.
+- Preserve visible commands and status fields between independently terminated terminal hyperlinks instead of consuming everything between the first and last link.
+- Carry the freshly observed Codex version into native-status readiness checks so fullscreen classification uses the same client version as discovery.
+- Read Codex's `history_mode` and retain paginated sessions as metadata only. Obsolete JSONL paths cannot supply fork context or native lifecycle candidates; older legacy databases remain supported.
+
+### Compatibility
+
+- Report the known Codex 0.157.0/0.157.1 paginated-history, shared-server, and fullscreen command-menu boundaries explicitly. Refuse managed completion-bridge Send, native thread transitions, and automated native status dispatch before terminal input; keep visible status-card parsing, explicit terminal Send, and best-effort terminal-activity Watch available.
+- Keep 0.157.1 questionnaire, typed model-control, and exact native-action profiles unverified. `--no-daemon` does not restore legacy task history.
+
 ## 0.13.10 - 2026-09-26
 
 ### Changed
