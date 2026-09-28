@@ -91,6 +91,25 @@ test("model-control registry is the canonical verified profile catalog", () => {
         styledPopupWithoutViewportPaint: true
       },
       {
+        agent: "codex",
+        agentVersion: "0.158.0",
+        behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01580,
+        plan: {
+          behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01580,
+          command: "/model",
+          scope: "current_and_new_sessions",
+          requiresIdle: true,
+          requiresExactEmptyComposer: true
+        },
+        zeroRollout: true,
+        residualContinuation: true,
+        residualRepair: true,
+        slashCompletionRows: [
+          "› /model  choose what model and reasoning effort to use"
+        ],
+        styledPopupWithoutViewportPaint: true
+      },
+      {
         agent: "claude",
         agentVersion: CLAUDE_MODEL_CONTROL_AGENT_VERSION,
         behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.claude,

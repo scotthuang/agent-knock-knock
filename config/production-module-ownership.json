@@ -597,6 +597,22 @@
       "owner": "cli-runtime"
     },
     {
+      "path": "src/codex-app-server-interaction-client.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/codex-app-server-questionnaire.ts",
+      "owner": "terminal-action-projection"
+    },
+    {
+      "path": "src/codex-app-server-read-client.ts",
+      "owner": "codex-storage"
+    },
+    {
+      "path": "src/codex-app-server-transport.ts",
+      "owner": "codex-storage"
+    },
+    {
       "path": "src/codex-astra-composer-proof.ts",
       "owner": "terminal-dispatch-core"
     },
@@ -605,12 +621,52 @@
       "owner": "terminal-action-projection"
     },
     {
+      "path": "src/codex-fullscreen-composer-proof.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/codex-lifecycle-compatibility.ts",
       "owner": "lifecycle-core"
     },
     {
       "path": "src/codex-local-session-provider.ts",
       "owner": "agent-session-core"
+    },
+    {
+      "path": "src/codex-paginated-answer-proof.ts",
+      "owner": "codex-storage"
+    },
+    {
+      "path": "src/codex-paginated-async-answer.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/codex-paginated-async-response.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/codex-paginated-observation.ts",
+      "owner": "codex-storage"
+    },
+    {
+      "path": "src/codex-paginated-questionnaire-runtime.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/codex-paginated-task.ts",
+      "owner": "codex-storage"
+    },
+    {
+      "path": "src/codex-paginated-thread-binding.ts",
+      "owner": "terminal-identity-authority"
+    },
+    {
+      "path": "src/codex-paginated-thread-facts.ts",
+      "owner": "terminal-identity-authority"
+    },
+    {
+      "path": "src/codex-paginated-watch.ts",
+      "owner": "terminal-watch"
     },
     {
       "path": "src/codex-process-incarnation.ts",
@@ -989,6 +1045,10 @@
       "owner": "terminal-command-adapter"
     },
     {
+      "path": "src/terminal-approval-fingerprint.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-authority-policy.ts",
       "owner": "terminal-authority-policy"
     },
@@ -1297,6 +1357,10 @@
       "owner": "terminal-list-application"
     },
     {
+      "path": "src/terminal-send-watch-policy.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/terminal-status-cli-adapter.ts",
       "owner": "terminal-status-application"
     },
@@ -1374,6 +1438,10 @@
     },
     {
       "path": "src/terminal-watch-interaction-runtime.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-presentation.ts",
       "owner": "terminal-watch"
     },
     {

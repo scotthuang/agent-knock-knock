@@ -42,7 +42,8 @@ const EXPANDED_OPTIONS = [
 test("Codex async-question profiles are exact and do not float to unknown versions", () => {
   assert.deepEqual(Object.keys(CODEX_ASYNC_QUESTION_PROFILES), [
     "0.154.0",
-    "0.155.1"
+    "0.155.1",
+    "0.158.0"
   ]);
   assert.equal(
     codexAsyncQuestionProfile("0.155.1"),
@@ -57,6 +58,60 @@ test("Codex async-question profiles are exact and do not float to unknown versio
     }),
     { state: "ambiguous", reason: "unsupported_version" }
   );
+});
+
+test("Codex 0.158 compact question hints prove the native tuple and reversible prompt navigation", () => {
+  const screen = EXPANDED_OPTIONS.replace(
+    "enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
+    "enter submit   ctrl+] skip   shift+→ main prompt   shift+← next question"
+  );
+  const inspected = inspectCodexAsyncQuestion({
+    version: "0.158.0", screen, evidence: EVIDENCE
+  });
+  assert.equal(inspected.state, "expanded");
+  if (inspected.state !== "expanded") return;
+  assert.equal(inspected.match.native_question_id,
+    '["request_user_input_async","async-message-call",0]');
+  assert.equal(inspected.owner_private_action_plan.kind, "answer_async_question");
+  if (inspected.owner_private_action_plan.kind !== "answer_async_question") return;
+  assert.equal(inspected.owner_private_action_plan.prompt_stack_back, "shift_right");
+  assert.equal(inspected.owner_private_action_plan.prompt_stack_forward, "shift_left");
+  assert.equal(inspectCodexAsyncQuestion({
+    version: "0.155.1", screen, evidence: EVIDENCE
+  }).state, "ambiguous");
+  assert.equal(inspectCodexAsyncQuestion({
+    version: "0.158.0", screen: EXPANDED_OPTIONS, evidence: EVIDENCE
+  }).state, "ambiguous");
+  assert.equal(inspectCodexAsyncQuestion({
+    version: "0.158.0", evidence: EVIDENCE,
+    screen: screen.replace("main prompt", "prev question")
+  }).state, "ambiguous");
+  assert.equal(inspectCodexAsyncQuestion({
+    version: "0.158.0", evidence: EVIDENCE,
+    screen: screen.replace("shift+→ main prompt", "esc main prompt")
+  }).state, "ambiguous");
+});
+
+test("Codex 0.158 collapsed compact hints and fullscreen Composer withdraw answered surfaces", () => {
+  const inspected = inspectCodexAsyncQuestion({
+    version: "0.158.0", evidence: EVIDENCE,
+    screen: [
+      "• Queued follow-up inputs", "  ? 2 questions", "    shift+← to answer",
+      "", "› Ask Codex to do anything", "",
+      "  GPT-6-Astra high · /repo", "  ← for agents · ? for shortcuts"
+    ].join("\n")
+  });
+  assert.equal(inspected.state, "collapsed");
+  if (inspected.state !== "collapsed") return;
+  assert.equal(inspected.match?.native_question_id,
+    '["request_user_input_async","async-message-call",0]');
+  assert.equal(codexAsyncQuestionMainComposerVisible({
+    version: "0.158.0",
+    screen: "› Ask Codex to do anything\n\n  GPT-6-Astra high · /repo\n  ← for agents · ? for shortcuts"
+  }), true);
+  assert.equal(codexAsyncQuestionMainComposerVisible({
+    version: "0.158.0", screen: "› Ask Codex to do anything\n  GPT-6-Astra high · /repo\n  ← for agents · ? for short…"
+  }), false);
 });
 
 test("pure durable-record parsing retains accepted async calls without returning raw records", () => {

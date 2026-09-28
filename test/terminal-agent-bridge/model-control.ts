@@ -13,7 +13,8 @@ import {
   codexPaddedStyledIdleScreen,
   strictCodexCommandApprovalScreen,
   type TerminalAgentAdapter,
-  type TerminalEndpointRef
+  type TerminalEndpointRef,
+  type TerminalProviderTextOptions
 } from "../support/terminal-agent-bridge-contract-support.js";
 
 test("Codex model control accepts only its exact 0.154 slash completion", async (t) => {
@@ -92,7 +93,7 @@ test("Codex model control accepts only its exact 0.154 slash completion", async 
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       assert.equal(text, "/model");
@@ -960,7 +961,7 @@ test("Claude model control accepts only its selected 2.1.266 /model suggestion",
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       assert.equal(text, "/model");

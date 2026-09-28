@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { CodexPaginatedThreadBinding } from "./codex-paginated-thread-facts.js";
 import { isExecutorKind, type ExecutorKind } from "./executors.js";
 import type {
   TerminalControlCapability,
@@ -263,6 +264,8 @@ export interface TerminalRuntimeIdentity {
    * This is distinct from AKK's managed Turn id and from the native Session id.
    */
   nativeTaskId?: string;
+  /** Daemon-owned history bound by a fresh physical TUI /status transaction. */
+  codexPaginatedThread?: CodexPaginatedThreadBinding;
   /**
    * Subject-neutral questionnaire owner. Managed callers may omit this while
    * the bridge derives it from the exact Turn/message pair; Watch callers must

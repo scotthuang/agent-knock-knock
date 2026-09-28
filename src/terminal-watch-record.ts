@@ -37,6 +37,11 @@ import type {
   TerminalInteractionAggregate
 } from "./terminal-interaction-core.js";
 import { isRecord } from "./value-guards.js";
+import {
+  createCodexPaginatedTaskCheckpoint,
+  type CodexPaginatedTaskAnchor,
+  type CodexPaginatedTaskCheckpoint
+} from "./codex-paginated-task.js";
 
 export const TERMINAL_WATCH_SCHEMA = "agent-knock-knock/terminal-watch" as const;
 export const TERMINAL_WATCH_VERSION = 3 as const;
@@ -105,6 +110,7 @@ export type TerminalWatchAnchor =
   | ClaudeHumanStartedActiveTaskAnchor
   | CodexUserExplicitFallbackWatchAnchor
   | ClaudeUserExplicitFallbackWatchAnchor
+  | CodexPaginatedTaskAnchor
   | TerminalActivityWatchAnchor;
 
 export type TerminalActivityState =
@@ -138,6 +144,11 @@ export function isTerminalActivityWatch(
 } {
   return watch.anchor.schema ===
     "agent-knock-knock/terminal-activity-watch-anchor";
+}
+
+export function isPaginatedSendWatch(watch: Pick<TerminalWatch, "anchor">): boolean {
+  return watch.anchor.schema === "agent-knock-knock/codex-paginated-task-anchor" &&
+    watch.anchor.origin === "user_explicit_send";
 }
 
 /**
@@ -333,11 +344,15 @@ export type TerminalWatchObservationCheckpoint =
   | CodexUserExplicitFallbackWatchObservationCheckpoint
   | ClaudeUserExplicitFallbackWatchObservationCheckpoint
   | ClaudeHumanStartedActiveTaskCheckpoint
+  | CodexPaginatedTaskCheckpoint
   | TerminalActivityWatchObservationCheckpoint;
 
 export function initialTerminalWatchObservationCheckpoint(
   anchor: TerminalWatchAnchor
 ): TerminalWatchObservationCheckpoint {
+  if (anchor.schema === "agent-knock-knock/codex-paginated-task-anchor") {
+    return createCodexPaginatedTaskCheckpoint();
+  }
   if (
     anchor.schema === "agent-knock-knock/terminal-activity-watch-anchor"
   ) {
@@ -539,6 +554,11 @@ export function terminalWatchNotificationOnlyRoute(
   });
 }
 
+function terminalWatchOrigin(watch: TerminalWatch): TerminalWatchCallbackMessageInput["origin"] {
+  if (isUserExplicitFallbackWatch(watch) || isPaginatedSendWatch(watch)) return "terminal_user_explicit_fallback";
+  return isTerminalActivityWatch(watch) ? "terminal_activity_fallback" : "user_selected_terminal";
+}
+
 export function terminalWatchCallbackEnvelope(
   watch: TerminalWatch,
   notification: TerminalWatchNotification,
@@ -570,11 +590,7 @@ export function terminalWatchCallbackEnvelope(
         event,
         agent: watch.agent,
         terminalId: watch.terminal.terminal_id,
-        origin: isUserExplicitFallbackWatch(watch)
-          ? "terminal_user_explicit_fallback"
-          : isTerminalActivityWatch(watch)
-            ? "terminal_activity_fallback"
-            : "user_selected_terminal",
+        origin: terminalWatchOrigin(watch),
         detail: reasonCode,
         manualInteraction: notification.manual_interaction,
         completionText: notification.kind === "completed" ||
@@ -585,11 +601,7 @@ export function terminalWatchCallbackEnvelope(
       requires_response: true,
       metadata: {
         agent: watch.agent,
-        watch_origin: isUserExplicitFallbackWatch(watch)
-          ? "terminal_user_explicit_fallback"
-          : isTerminalActivityWatch(watch)
-            ? "terminal_activity_fallback"
-            : "user_selected_terminal",
+        watch_origin: terminalWatchOrigin(watch),
         watch_mode: isTerminalActivityWatch(watch)
           ? "terminal_activity"
           : "exact_task",

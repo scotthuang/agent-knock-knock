@@ -15,7 +15,8 @@ import {
   codexPaddedStyledIdleScreen,
   type TerminalPane,
   type TerminalEndpointRef,
-  type TerminalProviderCapability
+  type TerminalProviderCapability,
+  type TerminalProviderTextOptions
 } from "../support/terminal-agent-bridge-contract-support.js";
 
 test("native inspection preflights every transport capability before terminal input", async (t) => {
@@ -87,7 +88,7 @@ test("closed Codex status probe crosses a Herdr-style paste window before exactl
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.injectedAt = nowMs;
@@ -171,7 +172,7 @@ test("closed Codex status probe preserves an exact candidate after a slow first 
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.injected = true;
@@ -257,7 +258,7 @@ test("Codex status freshness baseline matches the returned 240-line observation 
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, unchangedLongScreen);
@@ -413,7 +414,7 @@ test("closed Codex status probe diagnoses a truncated popup and sends no Enter",
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -478,7 +479,7 @@ test("Codex status rechecks viewport after beforeEnter and sends no Enter after 
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -540,7 +541,7 @@ test("Codex status catches composer drift during the final viewport proof", asyn
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -620,7 +621,7 @@ test("native status inspection proves an exact stable composer before one Enter"
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.textInjectedAt = performance.now();
@@ -698,7 +699,7 @@ test("native status inspection can settle against an injected monotonic clock", 
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, composerScreen);

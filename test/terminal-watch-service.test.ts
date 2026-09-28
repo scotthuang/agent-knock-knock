@@ -33,8 +33,21 @@ import {
   type TerminalWatchServiceDependencies
 } from "../src/terminal-watch-service.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
-import { createTerminalInteractionAggregate } from
+import { createTerminalInteractionAggregate, reduceTerminalInteractionAggregate } from
   "../src/terminal-interaction-core.js";
+import {
+  createCodexPaginatedTaskAnchor,
+  createCodexPaginatedTaskCheckpoint
+} from "../src/codex-paginated-task.js";
+import {
+  accumulateCodexAppServerQuestionnaireAnswer,
+  buildCodexAppServerQuestionnaireOffer
+} from "../src/codex-app-server-questionnaire.js";
+import type { CodexAppServerPendingQuestion } from
+  "../src/codex-app-server-interaction-client.js";
+import { fingerprint } from "../src/terminal-submission-facts.js";
+import { consumeWatchInteractionResponse } from
+  "../src/terminal-watch-interaction-response-store.js";
 import {
   TERMINAL_INTERACTION_SCHEMA,
   TERMINAL_INTERACTION_SUBJECT_VERSION,
@@ -120,7 +133,8 @@ interface Harness {
   storeDir: string;
   restart(): TerminalWatchService;
   advance(milliseconds: number): void;
-  observations: Array<(watch: TerminalWatch) => TerminalWatchObservation>;
+  observations: Array<(watch: TerminalWatch) =>
+    TerminalWatchObservation | Promise<TerminalWatchObservation>>;
   deliveries: Array<{
     id: string;
     key: string;
@@ -329,6 +343,137 @@ function watchInteraction(
     aggregate: createTerminalInteractionAggregate(projection, START)
   };
 }
+
+test("a delayed paginated poll cannot erase a consumed batch step's private draft", async (t) => {
+  for (const kind of ["pending", "unavailable"] as const) {
+    await t.test(kind, async (t) => {
+      const state = harness(t);
+      const anchor = createCodexPaginatedTaskAnchor({
+        origin: "active_task", captured_at: START, codex_home: "/codex",
+        codex_version: "0.158.0", native_thread_id: THREAD_ID, turn_id: TASK_ID,
+        process_uuid: "codex-process-service", process_birth: "codex-birth-service",
+        pid: 800, request_hash: REQUEST_HASH
+      });
+      const acceptance = {
+        source: "codex_paginated" as const, kind: "native_user_turn" as const,
+        nativeThreadId: THREAD_ID, requestHash: REQUEST_HASH, acceptanceId: TASK_ID,
+        anchorFingerprint: anchor.anchor_fingerprint, metadata: { turn_id: TASK_ID }
+      };
+      const checkpoint = createCodexPaginatedTaskCheckpoint({
+        ...acceptance, evidenceFingerprint: fingerprint(acceptance)
+      });
+      const created = state.service.create(exactInput({ anchor }));
+      const pending: CodexAppServerPendingQuestion = {
+        requestId: 42, threadId: THREAD_ID, turnId: TASK_ID, itemId: "native-batch",
+        isBlocking: true,
+        questions: ["first", "second"].map((id) => ({
+          id, header: "Scope", question: "Describe the " + id + " scope",
+          isOther: false, isSecret: false, options: null
+        }))
+      };
+      const context = {
+        pending, now: new Date(START),
+        subject: {
+          kind: "terminal_watch" as const, watch_id: created.watch_id,
+          anchor_fingerprint: anchor.anchor_fingerprint
+        },
+        canonicalEndpointIdentity: created.terminal.terminal_endpoint
+      };
+      const first = buildCodexAppServerQuestionnaireOffer(context);
+      assert.equal(first.status, "ready");
+      if (first.status !== "ready") throw new Error("Expected the first native step");
+      const interaction = first.offer.projection;
+      state.observations.push((watch) => observed(watch, "interaction", START, {
+        observation_checkpoint: checkpoint,
+        evidence_fingerprint: digest({
+          schema: "agent-knock-knock/terminal-watch-interaction-event", version: 1,
+          watch_id: watch.watch_id, interaction_id: interaction.interaction_id,
+          surface_id: interaction.surface_id
+        }),
+        current_interaction: {
+          projection: interaction, aggregate: createTerminalInteractionAggregate(interaction, START)
+        }
+      }));
+      const offered = await state.service.reconcile(created.watch_id);
+      let releaseObservation!: () => void;
+      let observationStarted!: () => void;
+      const paused = new Promise<void>((resolve) => { releaseObservation = resolve; });
+      const started = new Promise<void>((resolve) => { observationStarted = resolve; });
+      state.observations.push(async (watch) => {
+        observationStarted();
+        await paused;
+        return observed(watch, kind, START, { observation_checkpoint: watch.observation_checkpoint });
+      });
+      const stalePoll = state.service.reconcile(created.watch_id);
+      await started;
+      const advance = accumulateCodexAppServerQuestionnaireAnswer({
+        ...context, offer: first.offer,
+        response: {
+          interaction_id: interaction.interaction_id, subject: interaction.subject,
+          answers: [{
+            question_id: interaction.questions[0].question_id,
+            response_kind: "free_text", text: "private first scope"
+          }]
+        }
+      });
+      assert.equal(advance.status, "advance");
+      if (advance.status !== "advance") throw new Error("Expected a private batch advance");
+      state.advance(1_000);
+      const at = "2026-08-21T00:00:01.000Z";
+      const repository = createTerminalWatchStore(state.storeDir, { acquire: () => () => {} });
+      const reservation = { attemptId: "batch-step-one", responseHash: REQUEST_HASH };
+      const reserved = repository.save({
+        ...offered, updated_at: at,
+        observation_checkpoint: createCodexPaginatedTaskCheckpoint(
+          checkpoint.acceptance_evidence, advance.draft
+        ),
+        current_interaction: {
+          projection: interaction,
+          aggregate: reduceTerminalInteractionAggregate(offered.current_interaction!.aggregate, {
+            type: "reserve", attempt_id: reservation.attemptId,
+            response_hash: reservation.responseHash, at
+          })
+        }
+      }, { expectedRevision: terminalWatchRevision(offered) });
+      const consumed = consumeWatchInteractionResponse(repository, {
+        watchId: created.watch_id, interactionId: interaction.interaction_id,
+        reservation, now: () => new Date(at), notificationFingerprint: digest
+      });
+      assert.ok(terminalWatchRevision(consumed) > terminalWatchRevision(reserved));
+      const persistedAfterConsume = repository.load(created.watch_id);
+      releaseObservation();
+      assert.deepEqual(await stalePoll, persistedAfterConsume, "the stale checkpoint must be discarded");
+      assert.equal(consumed.current_interaction?.aggregate.state, "consumed");
+      const retainedCheckpoint = repository.load(created.watch_id).observation_checkpoint;
+      assert.deepEqual(retainedCheckpoint, consumed.observation_checkpoint);
+      if (!("schema" in retainedCheckpoint) ||
+          retainedCheckpoint.schema !== "agent-knock-knock/codex-paginated-task-checkpoint") {
+        throw new Error("Expected the retained native checkpoint");
+      }
+      const next = buildCodexAppServerQuestionnaireOffer({
+        ...context, draft: retainedCheckpoint.blocking_question_draft
+      });
+      assert.equal(next.status, "ready");
+      if (next.status !== "ready") throw new Error("Expected the next native step");
+      state.observations.push((watch) => observed(watch, "interaction", at, {
+        observation_checkpoint: watch.observation_checkpoint,
+        evidence_fingerprint: digest({
+          schema: "agent-knock-knock/terminal-watch-interaction-event", version: 1,
+          watch_id: watch.watch_id, interaction_id: next.offer.projection.interaction_id,
+          surface_id: next.offer.surfaceId
+        }),
+        current_interaction: {
+          projection: next.offer.projection,
+          aggregate: createTerminalInteractionAggregate(next.offer.projection, at)
+        }
+      }));
+      const refreshed = await state.service.reconcile(created.watch_id);
+      assert.equal(refreshed.current_interaction?.projection.step.index, 2);
+      assert.equal(refreshed.current_interaction?.aggregate.state, "pending");
+      assert.notEqual(refreshed.current_interaction?.projection.interaction_id, interaction.interaction_id);
+    });
+  }
+});
 
 test("exact async absence invalidates only its pending offer and undelivered notification", async (t) => {
   const state = harness(t);

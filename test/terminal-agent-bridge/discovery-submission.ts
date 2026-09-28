@@ -12,7 +12,8 @@ import {
   terminalControl,
   codexPaddedStyledIdleScreen,
   strictCodexCommandApprovalScreen,
-  type TerminalEndpointRef
+  type TerminalEndpointRef,
+  type TerminalProviderTextOptions
 } from "../support/terminal-agent-bridge-contract-support.js";
 
 test("bridge discovers a non-Codex process and preserves agent-aware list identity", async () => {
@@ -112,7 +113,7 @@ test("Codex multiline send crosses the paste window and requires a stable exact 
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.textInjectedAt = performance.now();
@@ -194,7 +195,7 @@ test("Codex multiline send proves an exact draft across visual composer wraps", 
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.textInjectedAt = performance.now();
@@ -280,7 +281,7 @@ test("Codex multiline send rejects mutated content across visual composer wraps"
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -337,7 +338,7 @@ test("Codex multiline settle starts only after the exact composer materializes",
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
     }
@@ -414,7 +415,7 @@ test("Codex multiline send preserves stable-capture opportunity after a slow fir
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -467,7 +468,7 @@ test("send exposes typed proof when injected text fails before any Enter attempt
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [

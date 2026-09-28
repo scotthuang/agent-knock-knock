@@ -20,8 +20,8 @@ Direct slash commands are available in every first-party Host integration:
 | `/akk <task>` | Send a task when AKK can prove one unique send-ready terminal. |
 | `/akk <selector>: <message>` | Send to the exact selector returned by the current list. |
 | `/akk list` | Discover live terminals, managed work, Watches, and safe actions. |
-| `/akk watch <terminal-id>` | Observe one exact terminal without changing it. |
-| `/akk unwatch <watch-id>` | Stop one read-only Watch. |
+| `/akk watch <terminal-id>` | Observe one exact terminal task. |
+| `/akk unwatch <watch-id>` | Stop one Watch. |
 | `/akk threads <terminal-id>` | List resumable native threads for one terminal. |
 | `/akk models <terminal-id>` | Inspect the current native model and reasoning choices for one exact idle terminal. |
 | `/akk repair-model-control <terminal-id>` | Clear only an exact advertised stale profiled Codex 0.154.0/0.155.1 `/model` Composer surface or open native picker and prove an empty Composer. |
@@ -162,12 +162,16 @@ dispatch. The status UUID is provisional; only one rollout that later accepts
 the exact request can become durable Session/Turn identity. A changed or
 uncertain probe boundary stops before the task and is not retried
 automatically. This optional enhancement is not a prerequisite for ordinary
-human Send: ordinary Send retains its user-priority behavior and does not run
-`/status`. Normal List and Status are also observation-only and never probe.
+human Send: ordinary Send retains its user-priority behavior. Codex 0.158.0
+exact Send and active-task Watch use a separate closed `/status` transaction
+to bind the foreground paginated thread. Normal List and Status remain
+observation-only and never probe.
 
 ## Terminal Watch
 
-Watch is read-only and user-intent-first:
+Watch follows the exact terminal selected by the user. Codex 0.158.0 exact
+Watch creation types a closed `/status` command into an available main Composer;
+subsequent observation is read-only. See the [compatibility boundaries](codex-0.158.0-compatibility.md).
 
 ```text
 /akk list
@@ -388,7 +392,7 @@ appear only when the matching state makes them meaningful:
 Explicit Close is the user's management escape hatch. It has priority over
 broken deferred-transfer or handoff state, closes the selected Turn first, and
 then best-effort releases only linked AKK metadata. Refresh List afterward; if
-the agent is still working, a new read-only Watch can observe it.
+the agent is still working, a new Watch can observe it.
 
 An uncertain terminal mutation is not a retry instruction. Do not resend,
 approve, cancel, or repeat Enter blindly. Inspect the exact pane and durable

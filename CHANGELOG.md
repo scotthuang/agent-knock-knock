@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.12 - 2026-09-29
+
+### Fixed
+
+- Track Codex 0.158.0 ordinary terminal Send and active-task Watch through exact foreground thread binding and native paginated history, including completion after terminal exit and callback retries.
+- Recognize current async question identities and submit answers only to the expected active native turn, confirming the exact durable reply. Handle blocking native question requests and private multi-question drafts through the server's single-response protocol.
+- Route paginated Send away from the legacy future-rollout monitor before task input. Keep callback receipts explicit about exact versus activity-only observation.
+- Use native bracketed paste for Codex 0.158.0 tmux physical Send so a long single-line request cannot leave its Enter inside the native character-paste burst.
+- Adapt 0.158.0 fullscreen status, Composer, command menus, async navigation, and model/effort selection. Bump store writer protocol to 8 so older writers cannot overwrite new task and questionnaire state.
+
 ## 0.13.11 - 2026-09-29
 
 ### Fixed

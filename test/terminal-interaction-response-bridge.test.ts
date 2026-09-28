@@ -158,7 +158,7 @@ async function fixture(
     },
     ...(asyncEvidence === undefined
       ? {}
-      : { captureCodexAsyncQuestionEvidence: () =>
+      : { captureCodexAsyncQuestionEvidence: async () =>
           options.evidenceByCapture?.[captureIndex - 1] ??
           (captureIndex >= 4 && options.evidenceAfterNavigation
             ? options.evidenceAfterNavigation
@@ -204,6 +204,50 @@ const ASYNC_COMPLETED_SCREEN = [
 const ASYNC_OTHER_SCREEN = ASYNC_EXPANDED_SCREEN
   .replace("  › 1. Local", "    1. Local")
   .replace("    3. Other", "  › 3. Other");
+
+test("Codex 0.158 foreground status collapses and restores the same async question without answering", async () => {
+  const evidence: readonly CodexAsyncQuestionDurableEvidence[] = [{
+    ...ASYNC_EVIDENCE[0]!, remainingCount: 2,
+    questions: [...ASYNC_EVIDENCE[0]!.questions, { title: "What deadline should I use?" }]
+  }];
+  const first = ASYNC_EXPANDED_SCREEN.replace("  Which target", "  1 of 2\n\n  Which target")
+    .replace("enter submit   ctrl + ] skip   ⌥ + ↓ main prompt",
+      "enter submit   ctrl+] skip   shift+→ main prompt   shift+← next question");
+  const second = [
+    "  2 of 2", "", "  What deadline should I use?", "", "  Type your answer", "",
+    "  enter submit   ctrl+] skip   shift+→ prev question"
+  ].join("\n");
+  const collapsed = [
+    "• Working (3s • esc to interrupt)", "", "• Queued follow-up inputs",
+    "  ? 2 questions", "    shift+← to answer", "",
+    "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m", "",
+    "  GPT-6-Astra high · /repo", "  ← for agents · ? for shortcuts"
+  ].join("\n");
+  const harness = await fixture([second, first, collapsed, collapsed, first, second], evidence);
+  const runtime = { ...RUNTIME, agentVersion: "0.158.0" };
+  const receipt = await harness.service.collapseCodexAsyncQuestionForStatus(harness.control, runtime);
+  assert.ok(receipt.restore);
+  assert.equal(receipt.restore.nativeQuestionId,
+    '["request_user_input_async","call_async_1",1]');
+  await harness.service.restoreCodexAsyncQuestionAfterStatus(receipt.terminalControl, runtime,
+    receipt.restore);
+  assert.deepEqual(harness.events.filter((event) => event.startsWith("keys:")),
+    ["keys:S-Right", "keys:S-Right", "keys:S-Left", "keys:S-Left"]);
+  assert.equal(harness.events.some((event) => event.startsWith("text:")), false);
+});
+
+test("Codex 0.158 foreground status never dismisses a blocking question or existing async answer draft", async () => {
+  const runtime = { ...RUNTIME, agentVersion: "0.158.0" };
+  for (const screen of [OPTIONS_SCREEN, [
+    "  Which target should I use?", "", "  typed answer already present", "",
+    "  enter submit   ctrl+] skip   shift+→ main prompt"
+  ].join("\n")]) {
+    const harness = await fixture([screen], ASYNC_EVIDENCE);
+    await assert.rejects(harness.service.collapseCodexAsyncQuestionForStatus(harness.control, runtime),
+      TerminalInteractionInputNotStartedError);
+    assert.equal(harness.events.some((event) => event.startsWith("keys:") || event.startsWith("text:")), false);
+  }
+});
 
 async function answerAsyncFixture(
   harness: Awaited<ReturnType<typeof fixture>>,

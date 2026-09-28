@@ -1,3 +1,4 @@
+import type { CodexPaginatedTaskAnchor } from "./codex-paginated-task.js";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import type { TerminalRuntimeIdentity } from "./terminal-agent-adapter.js";
 import { rolloutFileIdentityMatches } from "./terminal-binding-authority.js";
@@ -21,12 +22,17 @@ export function terminalInteractionRuntimeForWatch(input: {
   let nativeProcessUuid = stringValue(rawTerminal.native_agent_process_uuid);
   let nativeProcessBirth = stringValue(rawTerminal.native_agent_process_birth);
   let nativeTaskId: string | undefined;
+  let codexPaginatedThread: TerminalRuntimeIdentity["codexPaginatedThread"];
   let nativeRollout = isRecord(rawTerminal.native_agent_rollout)
     ? rawTerminal.native_agent_rollout as unknown as NonNullable<
         TerminalRuntimeIdentity["nativeRollout"]
       >
     : undefined;
-  if (
+  if (watch.anchor.schema === "agent-knock-knock/codex-paginated-task-anchor") {
+    ({ nativeSessionId, nativeProcessUuid, nativeProcessBirth, nativeTaskId,
+      codexPaginatedThread } = paginatedWatchIdentity(watch.anchor, checkpoint));
+    nativeRollout = undefined;
+  } else if (
     watch.anchor.schema ===
       "agent-knock-knock/codex-human-started-active-task-anchor"
   ) {
@@ -74,7 +80,6 @@ export function terminalInteractionRuntimeForWatch(input: {
           rollout: root.rollout
         }))
       : [];
-  const startedAt = Number(rawTerminal.native_agent_process_started_at);
   return {
     pid: positiveInteger(rawTerminal.pid, "terminal agent PID"),
     agentVersion: input.version,
@@ -85,6 +90,7 @@ export function terminalInteractionRuntimeForWatch(input: {
     },
     interactionResponseAuthority: input.responseAuthority,
     nativeTaskId,
+    codexPaginatedThread,
     nativeSessionId,
     nativeProcessUuid,
     nativeProcessBirth,
@@ -92,16 +98,35 @@ export function terminalInteractionRuntimeForWatch(input: {
     requireNativeProcessUuid: watch.agent === "claude" &&
       !isTerminalActivityWatch(watch),
     requireNativeRolloutIdentity: watch.agent === "codex" &&
-      !isTerminalActivityWatch(watch),
+      !isTerminalActivityWatch(watch) && !codexPaginatedThread,
     allowedAdditionalNativeIdentities,
-    ...(Number.isSafeInteger(startedAt) && startedAt > 0
-      ? { nativeProcessStartedAt: startedAt }
-      : {}),
+    ...nativeProcessStartFields(rawTerminal),
     cwd: watch.terminal.workspace,
     conversationId: watch.terminal.terminal_id,
     terminalTarget: input.terminalTarget
   };
 }
+function paginatedWatchIdentity(
+  anchor: CodexPaginatedTaskAnchor, checkpoint: TerminalWatchObservationCheckpoint
+): Pick<TerminalRuntimeIdentity, "nativeSessionId" | "nativeProcessUuid" | "nativeProcessBirth" | "nativeTaskId" | "codexPaginatedThread"> {
+  const nativeTaskId = "schema" in checkpoint && checkpoint.schema === "agent-knock-knock/codex-paginated-task-checkpoint"
+    ? checkpoint.acceptance_evidence?.acceptanceId ?? anchor.turn_id : anchor.turn_id;
+  return {
+    nativeSessionId: anchor.native_thread_id, nativeProcessUuid: anchor.process_uuid,
+    nativeProcessBirth: anchor.process_birth, nativeTaskId,
+    codexPaginatedThread: {
+      codexHome: anchor.codex_home, threadId: anchor.native_thread_id,
+      serverVersion: anchor.codex_version, processUuid: anchor.process_uuid,
+      processBirth: anchor.process_birth, pid: anchor.pid, observedAt: anchor.captured_at
+    }
+  };
+}
+
+function nativeProcessStartFields(rawTerminal: Record<string, unknown>): Pick<TerminalRuntimeIdentity, "nativeProcessStartedAt"> {
+  const startedAt = Number(rawTerminal.native_agent_process_started_at);
+  return Number.isSafeInteger(startedAt) && startedAt > 0 ? { nativeProcessStartedAt: startedAt } : {};
+}
+
 function positiveInteger(value: unknown, label: string): number {
   const result = Number(value);
   if (!Number.isSafeInteger(result) || result <= 0) {

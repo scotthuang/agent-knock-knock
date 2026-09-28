@@ -1084,7 +1084,7 @@ test("protocol 5 Terminal Watch v2 predecessor upgrades directly to the current 
   }
 });
 
-test("protocol 6 upgrades to protocol 7 as the manual-interaction Terminal Watch writer fence", () => {
+test("protocol 6 upgrades to the current Terminal Watch writer fence", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p6-"));
   const storeDir = path.join(sandbox, "store");
   const createdAt = "2026-09-08T00:00:00.000Z";
@@ -1107,13 +1107,30 @@ test("protocol 6 upgrades to protocol 7 as the manual-interaction Terminal Watch
     assert.equal(compatibility.writer_protocol, 6);
     const upgraded = ensureStoreWritable(storeDir);
 
-    assert.equal(upgraded.writer_protocol, 7);
+    assert.equal(upgraded.writer_protocol, STORE_WRITER_PROTOCOL);
     assert.equal(upgraded.created_at, createdAt);
     assert.notEqual(fs.statSync(manifestPath).ino, previousInode);
     assert.deepEqual(fileSnapshot(watchSentinel), previousWatch);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
+});
+
+test("protocol 7 upgrades to protocol 8 without rewriting private paginated Watch state", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p7-"));
+  const storeDir = path.join(sandbox, "store");
+  try {
+    writeStoreManifest(storeDir, { writerProtocol: 7, createdAt: "2026-09-29T00:00:00.000Z" });
+    const watches = path.join(storeDir, "terminal-watches");
+    fs.mkdirSync(watches, { recursive: true, mode: 0o700 });
+    const sentinel = path.join(watches, "private-checkpoint");
+    fs.writeFileSync(sentinel, "owner-private-question-state\n", { mode: 0o600 });
+    const before = fileSnapshot(sentinel);
+    assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
+    assert.equal(ensureStoreWritable(storeDir).writer_protocol, 8);
+    assert.deepEqual(fileSnapshot(sentinel), before);
+    assert.equal(inspectStoreCompatibility(storeDir).status, "compatible");
+  } finally { fs.rmSync(sandbox, { recursive: true, force: true }); }
 });
 
 test("a non-empty protocol 1 Store preserves state, events, and created_at while upgrading", () => {

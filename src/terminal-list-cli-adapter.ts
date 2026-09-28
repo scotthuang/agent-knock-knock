@@ -1342,11 +1342,11 @@ function terminalListFactPortsFor(input: {
       ),
     observeTerminalHasBlockingTurn: () =>
       observeTerminalHasBlockingTurnForList(options, terminalControl),
-    observeComposer: (terminalState) => observeAutomatedInputComposerReady({
+    observeComposer: (terminalState, agentVersion) => observeAutomatedInputComposerReady({
       session,
       terminalControl,
       terminalState,
-      options
+      options, agentVersion
     }),
     observePhysicalProcessIncarnation: () =>
       observePhysicalProcessIncarnationForList(session, terminalControl),
@@ -1906,12 +1906,12 @@ async function observeAutomatedInputComposerReady({
   session,
   terminalControl,
   terminalState,
-  options
+  options, agentVersion
 }: {
   session: ActiveTerminalProcess;
   terminalControl: TerminalControlRef;
   terminalState: Awaited<ReturnType<typeof listStateForTerminal>>;
-  options: TerminalListCliOptions;
+  options: TerminalListCliOptions; agentVersion?: string;
 }): Promise<{
   automatedInputComposerReady: boolean;
   userExplicitComposerReady: boolean;
@@ -1949,7 +1949,7 @@ async function observeAutomatedInputComposerReady({
       resolvedTerminal,
       { scrollbackLines: 40, preserveEscapes: true }
     );
-    ready = exactCodexReadyStyledComposerCapture(styledScreen) !== undefined;
+    ready = exactCodexReadyStyledComposerCapture(styledScreen, agentVersion) !== undefined;
     // Styled Composer evidence remains mandatory for managed/native input,
     // but is advisory for a user's physical Codex Send.
     userExplicitReady = userExplicitPromptSafe;

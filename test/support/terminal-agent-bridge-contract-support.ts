@@ -37,7 +37,8 @@ import {
   StaticTerminalControlProvider,
   TerminalControlInputNotSentError,
   type TerminalControlProvider,
-  type TerminalPane
+  type TerminalPane,
+  type TerminalTextDeliveryOptions
 } from "../../src/terminal-control-provider.js";
 import type {
   TerminalControlRef,
@@ -85,8 +86,12 @@ type ProviderOperation =
   | { kind: "text"; target: string; text: string; socketPath?: string }
   | { kind: "keys"; target: string; keys: string[]; socketPath?: string };
 
+export type TerminalProviderTextOptions =
+  TerminalTextDeliveryOptions & { socketPath?: string };
+
 class RecordingTerminalProvider extends StaticTerminalControlProvider {
   readonly operations: ProviderOperation[] = [];
+  readonly textDeliveryOptions: TerminalTextDeliveryOptions[] = [];
   private readonly recordingScreens = new Map<string, string>();
 
   constructor(
@@ -130,10 +135,11 @@ class RecordingTerminalProvider extends StaticTerminalControlProvider {
   override async sendText(
     terminal: TerminalEndpointRef | string,
     text: string,
-    options: { socketPath?: string } = {}
+    options: TerminalProviderTextOptions = {}
   ): Promise<void> {
     const { target, socketPath } = providerTarget(terminal, options.socketPath);
     this.operations.push({ kind: "text", target, text, socketPath });
+    this.textDeliveryOptions.push({ ...options });
   }
 
   override async sendKeys(

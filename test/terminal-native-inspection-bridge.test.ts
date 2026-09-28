@@ -10,13 +10,15 @@ import {
   planClaudeNativeInspection,
   probeClaudeNativeInspection
 } from "../src/claude-terminal-agent-adapter.js";
+import { createCodexTerminalAgentAdapter } from
+  "../src/codex-terminal-agent-adapter.js";
 import {
   StaticTerminalControlProvider,
   type TerminalPane
 } from "../src/terminal-control-provider.js";
 import type { TerminalEndpointRef } from
   "../src/terminal-control-ref.js";
-import { TerminalNativeInspectionBridge, stripTerminalEscapeSequences } from
+import { TerminalNativeInspectionBridge, stripTerminalEscapeSequences, exactCodexReadyStyledComposerCapture } from
   "../src/terminal-native-inspection-bridge.js";
 
 test("OSC hyperlinks preserve visible commands and status between independently terminated links", () => {
@@ -72,6 +74,141 @@ const COMPOSER_SCREEN = [
   "/ide                          Manage IDE integrations and show status",
   "/usage                        Show session cost, plan usage, and activity stats"
 ].join("\n");
+
+const CODEX_FULLSCREEN_IDLE = [
+  "• Working (2s • esc to interrupt)", "",
+  "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m", "",
+  "  GPT-6-Astra high · /repo", "  ← for agents · ? for shortcuts"
+].join("\n");
+const CODEX_FULLSCREEN_STATUS_POPUP = [
+  "• Working (2s • esc to interrupt)", "",
+  "\x1b[1;7m› /status      show current session configuration and token usage\x1b[0m",
+  "  /statusline  configure which items appear in the status line", "",
+  "\x1b[1m›\x1b[0m /status", "", "  GPT-6-Astra high · /repo"
+].join("\n");
+
+test("Codex 0.158 empty startup without sibling agents retains exact shortcuts and warning footer", () => {
+  const screen = CODEX_FULLSCREEN_IDLE.replace("• Working (2s • esc to interrupt)\n\n", "")
+    .replace("← for agents · ? for shortcuts", "? for shortcuts                              ⚠ 2 warnings · f2 to view");
+  assert.ok(exactCodexReadyStyledComposerCapture(screen, "0.158.0"));
+  assert.equal(createCodexTerminalAgentAdapter().inspectScreen({
+    screen: stripTerminalEscapeSequences(screen), runtime: { agentVersion: "0.158.0" }
+  }).activity.state, "idle");
+  assert.equal(createCodexTerminalAgentAdapter().inspectScreen({
+    screen: stripTerminalEscapeSequences(screen), runtime: { agentVersion: "0.157.1" }
+  }).activity.state, "unknown");
+  assert.equal(exactCodexReadyStyledComposerCapture(
+    screen.replace("? for shortcuts", "? for short…"), "0.158.0"), undefined);
+  assert.equal(exactCodexReadyStyledComposerCapture(
+    screen.replace("f2 to view", "f2 to vi…"), "0.158.0"), undefined);
+});
+
+async function codexFullscreenFixture(popup = CODEX_FULLSCREEN_STATUS_POPUP, finalStyledPopup = popup) {
+  const adapter = createCodexTerminalAgentAdapter();
+  const events: Event[] = [];
+  class Provider extends StaticTerminalControlProvider {
+    screen = CODEX_FULLSCREEN_IDLE;
+    constructor() { super({ panes: [{ ...PANE, currentCommand: "codex", columns: 120 }] }); }
+    override async capture(_terminal: TerminalEndpointRef, options: {
+      scrollbackLines?: number; preserveEscapes?: boolean;
+    } = {}): Promise<string> {
+      return options.preserveEscapes && this.screen !== CODEX_FULLSCREEN_IDLE
+        ? finalStyledPopup : this.screen;
+    }
+    override async sendText(_terminal: TerminalEndpointRef, text: string): Promise<void> {
+      events.push(`text:${text}`); this.screen = popup;
+    }
+    override async sendKeys(_terminal: TerminalEndpointRef, keys: readonly string[]): Promise<void> {
+      events.push(`keys:${keys.join(",")}`);
+    }
+  }
+  const provider = new Provider();
+  const control = provider.toControlRef((await provider.listTerminals())[0]!,
+    terminalControlCapabilitiesForAdapter(adapter));
+  let nowMs = 0;
+  const service = new TerminalNativeInspectionBridge<string>({
+    registry: createTerminalAgentAdapterRegistry([adapter]), terminalProvider: provider,
+    runtime: {
+      verifyIdentity: async (_agent, current) => current,
+      captureInspection: async (currentAdapter, current, options) => ({
+        terminalControl: current, screen: provider.screen,
+        inspection: currentAdapter.inspectScreen({ screen: provider.screen, runtime: options.runtime })
+      }),
+      statusFromInspection: () => "status", nowMs: () => nowMs,
+      sleep: async (ms) => { nowMs += ms; }
+    }
+  });
+  return { events, service, control };
+}
+
+test("private Codex 0.158 working status probe requires empty Composer and the exact above-input popup", async () => {
+  const runtime = { pid: 901, agentVersion: "0.158.0" };
+  const blocked = await codexFullscreenFixture();
+  await assert.rejects(blocked.service.submitCodexStatusProbe(blocked.control, "0.158.0", { runtime }));
+  assert.deepEqual(blocked.events, []);
+  const allowed = await codexFullscreenFixture();
+  await allowed.service.submitCodexStatusProbe(allowed.control, "0.158.0", {
+    runtime, allowWorkingCodexStatus: true
+  });
+  assert.deepEqual(allowed.events, ["text:/status", "keys:C-m"]);
+  const clipped = await codexFullscreenFixture(CODEX_FULLSCREEN_STATUS_POPUP.replace(
+    "configure which items appear in the status line", "configure which items appear…"
+  ));
+  await assert.rejects(clipped.service.submitCodexStatusProbe(clipped.control, "0.158.0", {
+    runtime, allowWorkingCodexStatus: true
+  }));
+  assert.deepEqual(clipped.events, ["text:/status"]);
+});
+
+test("private Codex working status retains closed popup proof with queue-message footer", async () => {
+  const runtime = { pid: 901, agentVersion: "0.158.0" };
+  const popup = `${CODEX_FULLSCREEN_STATUS_POPUP}\n  tab to queue message                              ⚠ 2 warnings · f2 to view`;
+  const allowed = await codexFullscreenFixture(popup);
+  await allowed.service.submitCodexStatusProbe(allowed.control, "0.158.0", {
+    runtime, allowWorkingCodexStatus: true
+  });
+  assert.deepEqual(allowed.events, ["text:/status", "keys:C-m"]);
+  const blocked = await codexFullscreenFixture(popup);
+  await assert.rejects(blocked.service.submitCodexStatusProbe(blocked.control, "0.158.0", { runtime }));
+  assert.deepEqual(blocked.events, []);
+  const unstyled = await codexFullscreenFixture(popup.replace("\x1b[1;7m", "\x1b[1m"));
+  await assert.rejects(unstyled.service.submitCodexStatusProbe(unstyled.control, "0.158.0", {
+    runtime, allowWorkingCodexStatus: true
+  }));
+  assert.deepEqual(unstyled.events, ["text:/status"]);
+});
+
+test("Codex status retains exact command proof when the native queue hint disappears before Enter", async () => {
+  const popup = `${CODEX_FULLSCREEN_STATUS_POPUP}\n  tab to queue message`;
+  const fixture = await codexFullscreenFixture(popup, CODEX_FULLSCREEN_STATUS_POPUP);
+  await fixture.service.submitCodexStatusProbe(fixture.control, "0.158.0", {
+    runtime: { pid: 901, agentVersion: "0.158.0" }, allowWorkingCodexStatus: true
+  });
+  assert.deepEqual(fixture.events, ["text:/status", "keys:C-m"]);
+  const changed = await codexFullscreenFixture(popup,
+    CODEX_FULLSCREEN_STATUS_POPUP.replace("/repo", "/other"));
+  await assert.rejects(changed.service.submitCodexStatusProbe(changed.control, "0.158.0", {
+    runtime: { pid: 901, agentVersion: "0.158.0" }, allowWorkingCodexStatus: true
+  }));
+  assert.deepEqual(changed.events, ["text:/status"]);
+});
+
+test("Codex fullscreen status popup may directly overlay transcript but must retain styled selection before Enter", async () => {
+  const runtime = { pid: 901, agentVersion: "0.158.0" };
+  const adjacent = await codexFullscreenFixture(
+    CODEX_FULLSCREEN_STATUS_POPUP.replace("• Working (2s • esc to interrupt)\n\n",
+      "• Working (2s • esc to interrupt)\n\n│  Weekly limit:         81% left │\n"));
+  await adjacent.service.submitCodexStatusProbe(adjacent.control, "0.158.0", {
+    runtime, allowWorkingCodexStatus: true
+  });
+  assert.deepEqual(adjacent.events, ["text:/status", "keys:C-m"]);
+  const unstyled = await codexFullscreenFixture(
+    CODEX_FULLSCREEN_STATUS_POPUP.replace("\x1b[1;7m", "\x1b[1m"));
+  await assert.rejects(unstyled.service.submitCodexStatusProbe(unstyled.control, "0.158.0", {
+    runtime, allowWorkingCodexStatus: true
+  }), /exact styled popup/u);
+  assert.deepEqual(unstyled.events, ["text:/status"]);
+});
 
 type Event =
   | "verify"

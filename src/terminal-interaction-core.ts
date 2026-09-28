@@ -414,7 +414,8 @@ function nativeAsyncQuestionInspection(input: {
       sha256: inspection.prompt_evidence.semantic_sha256
     },
     action_plan: inspection.owner_private_action_plan,
-    delivery_modes: ["steer_current_turn", "queue_next_turn"],
+    delivery_modes: input.agentVersion === "0.158.0"
+      ? ["steer_current_turn"] : ["steer_current_turn", "queue_next_turn"],
     async_inspection: inspection
   };
 }

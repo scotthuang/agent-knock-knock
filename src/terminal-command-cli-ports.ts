@@ -573,6 +573,7 @@ export interface TerminalCommandCliPorts {
     options: TerminalCommandCliOptions;
     terminal: TerminalCommandTarget;
     requestHash: string;
+    requestText?: string;
     messageId: string;
     physicalToken: string;
   }): Promise<PreparedUserExplicitFallbackWatch | undefined>;

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { assertCodexPaginatedProcess } from "./codex-paginated-thread-binding.js";
 import type { CodingAgentSessionProvider } from "./agent-session-provider.js";
 import type { ForkContextPackage } from "./codex-session-provider.js";
 import type { ActiveCodexProcess } from "./codex-session-provider.js";
@@ -508,6 +509,10 @@ async function verifyTerminalIdentity(
     resolvedTerminal, expectedWorkspace, snapshots,
     candidate: snapshots.find((candidate) => candidate.pid === pid)
   });
+  if (runtime?.codexPaginatedThread) {
+    assertPaginatedInteractionRuntime(runtime, agent, pid);
+    return { terminalControl: provider.toControlRef(resolvedTerminal, terminalControl.capabilities) };
+  }
   const currentNativeIdentity = requiresNativeIdentity(runtime)
     ? await input.identity.resolveCurrent({
         agent,
@@ -528,6 +533,18 @@ async function verifyTerminalIdentity(
     terminalControl: provider.toControlRef(resolvedTerminal,
       terminalControl.capabilities)
   };
+}
+
+function assertPaginatedInteractionRuntime(runtime: TerminalRuntimeIdentity, agent: ExecutorKind, pid: number): void {
+  const binding = runtime.codexPaginatedThread!;
+  if (agent !== "codex" || binding.serverVersion !== "0.158.0" ||
+      runtime.agentVersion !== binding.serverVersion || pid !== binding.pid ||
+      runtime.nativeSessionId !== binding.threadId ||
+      runtime.nativeProcessUuid !== binding.processUuid || runtime.nativeProcessBirth !== binding.processBirth ||
+      !runtime.nativeTaskId || runtime.interactionSubject?.kind !== "terminal_watch") {
+    throw new Error("Codex paginated response requires an exact foreground thread and task binding");
+  }
+  assertCodexPaginatedProcess(binding);
 }
 type RuntimeAgentAdapter = ReturnType<TerminalAgentAdapterRegistry["require"]>;
 type RuntimeResolvedTerminal = Awaited<

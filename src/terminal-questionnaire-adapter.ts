@@ -13,7 +13,8 @@ export const CODEX_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
 > = Object.freeze({
   "0.153.4": "codex/0.153.4/request-user-input-v3",
   "0.154.0": "codex/0.154.0/request-user-input-v3",
-  "0.155.1": "codex/0.155.1/request-user-input-v3"
+  "0.155.1": "codex/0.155.1/request-user-input-v3",
+  "0.158.0": "codex/0.158.0/request-user-input-v4"
 });
 
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
@@ -211,7 +212,7 @@ const MAX_TEXT_ANSWER_CHARACTERS = 4_096;
 // semantic response strictly below that boundary.
 const MAX_CLAUDE_TEXT_ANSWER_CHARACTERS = 799;
 const ANSI_SEQUENCE_PATTERN =
-  /[\u001B\u009B](?:(?:\[[0-?]*[ -/]*[@-~])|(?:\][^\u0007]*(?:\u0007|\u001B\\))|.)/gu;
+  /[\u001B\u009B](?:(?:\[[0-?]*[ -/]*[@-~])|(?:\][^\u0007\u001B]*(?:\u0007|\u001B\\))|.)/gu;
 const UNSAFE_CONTROL_PATTERN =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u;
 const SECRET_INPUT_PATTERN = new RegExp([
@@ -895,7 +896,7 @@ function inspectCodexQuestionnaire(
       ? { ...unanswered, status: "manual_required", reason: "secret_input", action_plan: { kind: "manual_only" } }
       : unanswered;
   }
-  const region = parseCodexQuestionRegion(screen.lines);
+  const region = parseCodexQuestionRegion(screen.lines, profile);
   if (!region) {
     return manualCandidate(
       "codex",
@@ -1034,27 +1035,31 @@ function codexCustomTextFooterTips(header: CodexHeader): readonly string[] {
   return [CODEX_CLEAR_NOTES_TIP, codexSubmitTip(header)];
 }
 
-function codexHasCanonicalOther(options: readonly ParsedOptionRow[]): boolean {
+function codexHasCanonicalOther(options: readonly ParsedOptionRow[], profile: string): boolean {
   const other = options.at(-1);
   return other?.label === CODEX_OTHER_OPTION_LABEL &&
-    other.description === CODEX_OTHER_OPTION_DESCRIPTION;
+    other.description === (profile === "codex/0.158.0/request-user-input-v4"
+      ? "Optionally, add details in notes (tab)"
+      : CODEX_OTHER_OPTION_DESCRIPTION);
 }
 
 function codexCustomTextSurfaceProven(
-  options: readonly ParsedOptionRow[]
+  options: readonly ParsedOptionRow[],
+  profile: string
 ): boolean {
-  return codexHasCanonicalOther(options) &&
+  return codexHasCanonicalOther(options, profile) &&
     options.filter((option) => option.label === CODEX_CUSTOM_TEXT_LABEL).length <= 1;
 }
 
 function codexHasUnprovenCustomTextCandidate(
-  options: readonly ParsedOptionRow[]
+  options: readonly ParsedOptionRow[],
+  profile: string
 ): boolean {
   const candidateVisible = options.some((option) =>
     option.label === CODEX_CUSTOM_TEXT_LABEL ||
     option.label === CODEX_OTHER_OPTION_LABEL
   );
-  return candidateVisible && !codexCustomTextSurfaceProven(options);
+  return candidateVisible && !codexCustomTextSurfaceProven(options, profile);
 }
 
 /**
@@ -1067,9 +1072,10 @@ function codexHasUnprovenCustomTextCandidate(
 function isCodexCustomTextOption(
   option: ParsedOptionRow,
   _index: number,
-  options: readonly ParsedOptionRow[]
+  options: readonly ParsedOptionRow[],
+  profile: string
 ): boolean {
-  return codexCustomTextSurfaceProven(options) &&
+  return codexCustomTextSurfaceProven(options, profile) &&
     option.label === CODEX_CUSTOM_TEXT_LABEL;
 }
 
@@ -1103,7 +1109,7 @@ function codexProjectedChoices(
 ): readonly CodexProjectedChoice[] {
   const normalized = normalizedOptions(profile, prompt, options);
   const nativeChoices = normalized.map((option, index): CodexProjectedChoice => {
-    const customText = isCodexCustomTextOption(options[index]!, index, options);
+    const customText = isCodexCustomTextOption(options[index]!, index, options, profile);
     return {
       option,
       action: {
@@ -1116,7 +1122,7 @@ function codexProjectedChoices(
     };
   });
   if (
-    !codexCustomTextSurfaceProven(options) ||
+    !codexCustomTextSurfaceProven(options, profile) ||
     options.some((option) => option.label === CODEX_CUSTOM_TEXT_LABEL)
   ) {
     return nativeChoices;
@@ -1187,7 +1193,8 @@ function matchExactCodexFooter(
 }
 
 function parseCodexQuestionRegion(
-  lines: readonly string[]
+  lines: readonly string[],
+  profile: string
 ): CodexQuestionRegion | undefined {
   const end = lines.length - 1;
   const headerIndex = lastIndexMatching(lines, (line) => parseCodexHeader(line) !== undefined, end);
@@ -1238,7 +1245,7 @@ function parseCodexQuestionRegion(
     if (
       options &&
       selected &&
-      codexHasCanonicalOther(options) &&
+      codexHasCanonicalOther(options, profile) &&
       selectedIndex === options.length - 1
     ) {
       return {
@@ -1334,7 +1341,7 @@ function codexQuestionInspection(
   if (
     region.mode === "options" &&
     region.options !== undefined &&
-    codexHasUnprovenCustomTextCandidate(region.options)
+    codexHasUnprovenCustomTextCandidate(region.options, profile)
   ) {
     return { ...base, status: "manual_required", reason: "changed_shape", action_plan: { kind: "manual_only" } };
   }

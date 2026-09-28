@@ -46,6 +46,11 @@ export type TerminalDiscoveryDiagnosticLog = (
   fields: Readonly<Record<string, unknown>>
 ) => void;
 
+export interface TerminalTextDeliveryOptions {
+  /** Use tmux's native paste framing; other providers retain their text transport. */
+  bracketedPaste?: boolean;
+}
+
 export interface TerminalControlProvider {
   readonly kind: string;
   readonly supportedCapabilities: readonly TerminalControlCapability[];
@@ -70,7 +75,7 @@ export interface TerminalControlProvider {
     scrollbackLines?: number;
     preserveEscapes?: boolean;
   }): Promise<string>;
-  sendText(terminal: TerminalEndpointRef, text: string): Promise<void>;
+  sendText(terminal: TerminalEndpointRef, text: string, options?: TerminalTextDeliveryOptions): Promise<void>;
   sendKeys(terminal: TerminalEndpointRef, keys: readonly string[]): Promise<void>;
 }
 
@@ -282,8 +287,8 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
     return this.providerForEndpoint(terminal).capture(terminal, options);
   }
 
-  sendText(terminal: TerminalEndpointRef, text: string): Promise<void> {
-    return this.providerForEndpoint(terminal).sendText(terminal, text);
+  sendText(terminal: TerminalEndpointRef, text: string, options?: TerminalTextDeliveryOptions): Promise<void> {
+    return this.providerForEndpoint(terminal).sendText(terminal, text, options);
   }
 
   sendKeys(
@@ -691,7 +696,8 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
 
   async sendText(
     terminal: TerminalEndpointRef,
-    text: string
+    text: string,
+    options: TerminalTextDeliveryOptions = {}
   ): Promise<void> {
     assertTerminalCapability(
       terminal,
@@ -706,7 +712,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     const { target, socketPath } = tmuxIoRoute(terminal);
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
-      if (/[\r\n]/u.test(text)) {
+      if (options.bracketedPaste || /[\r\n]/u.test(text)) {
         const bufferName = `akk-${process.pid}-${randomUUID()}`;
         const setBuffer = this.runCommand(command, tmuxArgs(socketPath, [
           "set-buffer",

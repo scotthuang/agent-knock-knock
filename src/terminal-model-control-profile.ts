@@ -9,6 +9,7 @@ import type { ExecutorKind } from "./executors.js";
 export const TERMINAL_MODEL_CONTROL_PROFILE_IDS = Object.freeze({
   codex: "codex-model-control-0.154.0",
   codex01551: "codex-model-control-0.155.1",
+  codex01580: "codex-model-control-0.158.0",
   claude: "claude-model-control-2.1.266"
 } as const);
 
@@ -60,7 +61,8 @@ export interface TerminalModelControlProfile {
 export const CODEX_MODEL_CONTROL_AGENT_VERSION = "0.154.0";
 export const CODEX_MODEL_CONTROL_AGENT_VERSIONS = Object.freeze([
   CODEX_MODEL_CONTROL_AGENT_VERSION,
-  "0.155.1"
+  "0.155.1",
+  "0.158.0"
 ] as const);
 export type CodexModelControlAgentVersion =
   typeof CODEX_MODEL_CONTROL_AGENT_VERSIONS[number];
@@ -117,6 +119,28 @@ const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
       reason:
         `Codex ${CODEX_MODEL_CONTROL_AGENT_VERSIONS[1]} /model control changes the ` +
         "current session and persisted defaults"
+    }),
+    Object.freeze({
+      agent: "codex",
+      agentVersion: "0.158.0",
+      behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01580,
+      plan: Object.freeze({
+        behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01580,
+        command: "/model",
+        scope: "current_and_new_sessions",
+        requiresIdle: true,
+        requiresExactEmptyComposer: true
+      }),
+      supportsZeroRolloutPhysicalAuthority: true,
+      supportsResidualContinuation: true,
+      supportsResidualRepair: true,
+      slashCompletionRows: Object.freeze([
+        "› /model  choose what model and reasoning effort to use"
+      ]),
+      allowsStyledSlashPopupWithoutViewportPaint: true,
+      reason:
+        "Codex 0.158.0 fullscreen /model uses display labels and an explicit " +
+        "default/session scope footer; the typed path selects persisted defaults"
     }),
     Object.freeze({
       agent: "claude",

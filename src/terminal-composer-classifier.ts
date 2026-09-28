@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import {
+  captureCodexFullscreenComposerFrame,
+  CODEX_FULLSCREEN_COMPOSER_VERSION,
+  exactCodexFullscreenBareCommandCapture,
+  exactCodexFullscreenSlashComposerCapture
+} from "./codex-fullscreen-composer-proof.js";
 import { exactCodexAstraSparkleReadyStyledComposerCapture } from
   "./codex-astra-composer-proof.js";
 import type { TerminalAgentAdapter, TerminalRuntimeIdentity } from
@@ -37,7 +43,7 @@ export function codexAutomatedInputComposerReady(input: {
     input.screen, input.runtime?.agentVersion
   );
   if (!sparkleEmpty) {
-    return exactCodexReadyStyledComposerCapture(input.screen) !== undefined;
+    return exactCodexReadyStyledComposerCapture(input.screen, input.runtime?.agentVersion) !== undefined;
   }
   const inspection = input.adapter().inspectScreen({
     screen: stripTerminalEscapeSequences(input.screen),
@@ -545,6 +551,10 @@ function currentCodexComposerCapture(
   profiledSlashPopup?: true;
   bareCommand?: true;
 } | undefined {
+  if (agentVersion === CODEX_FULLSCREEN_COMPOSER_VERSION) {
+    return fullscreenCodexComposerCapture(styledScreen, expectedText,
+      allowOpaqueLargePastePlaceholder, classifyOpaqueLargePasteAsDifferent, exactSlashPopupRows);
+  }
   const sparkleEmpty = exactCodexAstraSparkleReadyStyledComposerCapture(
     styledScreen, agentVersion
   );
@@ -682,6 +692,46 @@ function currentCodexComposerCapture(
   return comparable.length > 0
     ? { state: "different_draft", digest }
     : undefined;
+}
+
+function fullscreenCodexComposerCapture(
+  screen: string,
+  expectedText: string,
+  allowOpaquePaste: boolean,
+  classifyOpaquePasteAsDifferent: boolean,
+  slashPopupRows?: readonly string[]
+): ReturnType<typeof currentCodexComposerCapture> {
+  const frame = captureCodexFullscreenComposerFrame(screen, CODEX_FULLSCREEN_COMPOSER_VERSION, true);
+  if (!frame) return undefined;
+  const empty = exactCodexReadyStyledComposerCapture(screen, CODEX_FULLSCREEN_COMPOSER_VERSION);
+  if (empty) return { state: "exact_empty", digest: empty.digest };
+  if (slashPopupRows) return fullscreenCodexSlashCapture(screen, expectedText, slashPopupRows);
+  const region = frame.plainLines.slice(frame.composerIndex, frame.footerIndex);
+  while (region.length > 1 && !region.at(-1)!.trim()) region.pop();
+  const body = [frame.composerText,
+    ...region.slice(1).map((line) => line.startsWith("  ") ? line.slice(2) : line)];
+  const digest = createHash("sha256")
+    .update(frame.styledLines.slice(frame.composerIndex).join("\n")).digest("hex");
+  if (terminalComposerRowsMatchExpected(body, composerComparableText(expectedText))) {
+    return { state: "exact_draft", digest };
+  }
+  const placeholder = `[Pasted Content ${Array.from(expectedText).length} chars]`;
+  if (allowOpaquePaste && body.length === 1 && body[0] === placeholder) {
+    return { state: "exact_draft", digest };
+  }
+  return !classifyOpaquePasteAsDifferent && /^\[Pasted Content \d+ chars\]$/u.test(body[0]!)
+    ? undefined : { state: "different_draft", digest };
+}
+
+function fullscreenCodexSlashCapture(
+  screen: string,
+  expectedText: string,
+  rows: readonly string[]
+): ReturnType<typeof currentCodexComposerCapture> {
+  const popup = exactCodexFullscreenSlashComposerCapture(screen, expectedText, rows, true);
+  if (popup) return { state: "exact_draft", digest: popup.digest, profiledSlashPopup: true };
+  const bare = exactCodexFullscreenBareCommandCapture(screen, expectedText);
+  return bare && { state: "exact_draft", digest: bare.digest, bareCommand: true };
 }
 
 /**

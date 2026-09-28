@@ -30,8 +30,10 @@ import {
   type NativeTerminalInteractionInspection
 } from "./terminal-interaction-core.js";
 import {
+  inspectCodexAsyncQuestion,
   verifyCodexAsyncQuestionInjectedText,
   type CodexAsyncQuestionDurableEvidence,
+  type CodexAsyncQuestionInspection,
   type CodexAsyncQuestionOwnerPrivateActionPlan
 } from "./codex-async-question-adapter.js";
 import { readCodexAsyncQuestionDurableEvidence } from
@@ -45,6 +47,8 @@ import { CODEX_PASTE_ENTER_SETTLE_MS } from
   "./terminal-text-submission-bridge.js";
 import { inspectCodexAsyncQuestionInputMode } from
   "./terminal-composer-classifier.js";
+import { exactCodexReadyStyledComposerCapture } from
+  "./terminal-native-inspection-bridge.js";
 
 const TERMINAL_INTERACTION_TTL_MS = 10 * 60 * 1_000;
 const CODEX_ASYNC_QUESTION_OPEN_MAX_CAPTURES = 3;
@@ -199,7 +203,8 @@ interface TerminalInteractionResponseRuntime {
   /** Testable exact-rollout evidence seam; production uses the safe reader. */
   captureCodexAsyncQuestionEvidence?: (
     runtime: TerminalRuntimeIdentity
-  ) => readonly CodexAsyncQuestionDurableEvidence[] | undefined;
+  ) => readonly CodexAsyncQuestionDurableEvidence[] | undefined |
+    Promise<readonly CodexAsyncQuestionDurableEvidence[] | undefined>;
 }
 
 interface AsyncQuestionDispatchInput {
@@ -222,6 +227,20 @@ interface CapturedAsyncQuestionEditor {
   offer: TerminalInteractionRuntimeOffer;
 }
 
+/** Owner-private reversible navigation receipt; contains no terminal keys. */
+export interface CodexAsyncQuestionStatusRestore {
+  readonly nativeQuestionId: string;
+  readonly currentStep: number;
+  readonly totalSteps: number;
+  readonly exactRegionSha256: string;
+}
+
+interface CapturedCodexQuestionStatusSurface {
+  readonly terminalControl: TerminalControlRef;
+  readonly question: CodexAsyncQuestionInspection;
+  readonly emptyMainComposer: boolean;
+}
+
 /**
  * Executes only a closed questionnaire action plan. Store mutation, terminal
  * locking, and the caller's at-most-once ledger remain outside this service.
@@ -231,6 +250,151 @@ export class TerminalInteractionResponseBridge {
     private readonly terminalProvider: TerminalControlProvider,
     private readonly runtime: TerminalInteractionResponseRuntime
   ) {}
+
+  /**
+   * Caller holds the terminal input lock. Only displayed prompt-stack bindings
+   * may collapse an empty exact 0.158 async editor; this never answers, skips,
+   * or interrupts a question. Blocking questionnaires remain input owners.
+   */
+  async collapseCodexAsyncQuestionForStatus(
+    terminalControl: TerminalControlRef,
+    runtime: TerminalRuntimeIdentity,
+    scrollbackLines?: number
+  ): Promise<{
+    terminalControl: TerminalControlRef;
+    restore?: CodexAsyncQuestionStatusRestore;
+  }> {
+    let current = await this.captureCodexQuestionStatusSurface(
+      terminalControl, runtime, scrollbackLines
+    );
+    if (codexQuestionStatusMainComposerReady(current)) {
+      return { terminalControl: current.terminalControl };
+    }
+    if (current.question.state !== "expanded" ||
+        !current.question.match.native_question_id || current.question.total_steps > 16) {
+      throw new TerminalInteractionInputNotStartedError(
+        "Codex foreground status requires an exact empty async editor or main Composer"
+      );
+    }
+    const restore: CodexAsyncQuestionStatusRestore = {
+      nativeQuestionId: current.question.match.native_question_id,
+      currentStep: current.question.current_step,
+      totalSteps: current.question.total_steps,
+      exactRegionSha256: current.question.prompt_evidence.exact_region_sha256
+    };
+    for (let step = restore.currentStep; step > 0; step -= 1) {
+      if (current.question.state !== "expanded" ||
+          current.question.current_step !== step ||
+          current.question.total_steps !== restore.totalSteps ||
+          current.question.owner_private_action_plan.kind !== "answer_async_question" ||
+          !current.question.owner_private_action_plan.prompt_stack_back) {
+        throw new TerminalInteractionDispatchReservedError(
+          "key_uncertain", "Codex async-question navigation changed before foreground status"
+        );
+      }
+      const key = current.question.owner_private_action_plan.prompt_stack_back === "shift_right"
+        ? "S-Right" : "M-Down";
+      await sendTerminalInteractionKeys(this.terminalProvider, current.terminalControl, [key]);
+      await this.runtime.sleep(CODEX_PASTE_ENTER_SETTLE_MS);
+      current = await this.captureCodexQuestionStatusSurface(
+        current.terminalControl, runtime, scrollbackLines
+      ).catch((error) => {
+        throw terminalInteractionReservedError("key_uncertain", error,
+          "cannot recapture Codex async-question navigation before status");
+      });
+    }
+    if (!codexQuestionStatusMainComposerReady(current) ||
+        current.question.state !== "collapsed" ||
+        current.question.pending_count !== restore.totalSteps) {
+      throw new TerminalInteractionDispatchReservedError(
+        "key_uncertain", "Codex async-question collapse did not expose an exact empty main Composer"
+      );
+    }
+    return { terminalControl: current.terminalControl, restore };
+  }
+
+  /** Restore the same complete empty question after a fresh /status read. */
+  async restoreCodexAsyncQuestionAfterStatus(
+    terminalControl: TerminalControlRef,
+    runtime: TerminalRuntimeIdentity,
+    restore: CodexAsyncQuestionStatusRestore,
+    scrollbackLines?: number
+  ): Promise<TerminalControlRef> {
+    let current = await this.captureCodexQuestionStatusSurface(
+      terminalControl, runtime, scrollbackLines
+    );
+    let key = codexQuestionStatusRestoreOpenKey(current, restore);
+    for (let step = 1; step <= restore.currentStep; step += 1) {
+      await sendTerminalInteractionKeys(this.terminalProvider, current.terminalControl, [key]);
+      await this.runtime.sleep(CODEX_PASTE_ENTER_SETTLE_MS);
+      current = await this.captureCodexQuestionStatusSurface(
+        current.terminalControl, runtime, scrollbackLines
+      ).catch((error) => {
+        throw terminalInteractionReservedError("key_uncertain", error,
+          "cannot recapture Codex async-question restoration after status");
+      });
+      if (current.question.state !== "expanded" ||
+          current.question.current_step !== step ||
+          current.question.total_steps !== restore.totalSteps ||
+          current.question.owner_private_action_plan.kind !== "answer_async_question") {
+        throw new TerminalInteractionDispatchReservedError(
+          "key_uncertain", "Codex async-question restoration changed its pending queue"
+        );
+      }
+      if (step < restore.currentStep) {
+        const binding = current.question.owner_private_action_plan.prompt_stack_forward;
+        if (!binding) {
+          throw new TerminalInteractionDispatchReservedError(
+            "key_uncertain", "Codex async-question restoration has no displayed next-question binding"
+          );
+        }
+        key = binding === "shift_left" ? "S-Left" : "M-Up";
+      }
+    }
+    if (current.question.state !== "expanded" ||
+        current.question.match.native_question_id !== restore.nativeQuestionId ||
+        current.question.prompt_evidence.exact_region_sha256 !== restore.exactRegionSha256) {
+      throw new TerminalInteractionDispatchReservedError(
+        "key_uncertain", "Codex async-question restoration did not return to the original empty editor"
+      );
+    }
+    return current.terminalControl;
+  }
+
+  private async captureCodexQuestionStatusSurface(
+    terminalControl: TerminalControlRef,
+    runtime: TerminalRuntimeIdentity,
+    scrollbackLines?: number
+  ): Promise<CapturedCodexQuestionStatusSurface> {
+    if (runtime.agentVersion !== "0.158.0" || !runtime.nativeTaskId) {
+      throw new TerminalInteractionInputNotStartedError(
+        "Codex async-question status navigation requires the exact 0.158 native task"
+      );
+    }
+    const evidence = captureRuntimeAsyncQuestionEvidence({
+      agent: "codex", terminalControl, runtime, screen: "",
+      now: this.runtime.now(),
+      codexAsyncQuestionEvidence: await this.runtime.captureCodexAsyncQuestionEvidence?.(runtime)
+    });
+    const verified = await this.runtime.verifyIdentity("codex", terminalControl, runtime);
+    if (!sameTerminalControlIncarnation(terminalControl, verified)) {
+      throw new Error("Codex question status identity changed before navigation");
+    }
+    const captured = await this.runtime.captureInspection(
+      "codex", verified, runtime, scrollbackLines
+    );
+    if (!sameTerminalControlIncarnation(verified, captured.terminalControl) ||
+        captured.inspection.approval.blocked) {
+      throw new Error("Codex question status surface changed terminal identity or approval ownership");
+    }
+    return {
+      terminalControl: captured.terminalControl,
+      question: inspectCodexAsyncQuestion({
+        version: runtime.agentVersion, screen: captured.screen, evidence
+      }),
+      emptyMainComposer: Boolean(exactCodexReadyStyledComposerCapture(captured.screen, runtime.agentVersion))
+    };
+  }
 
   async respond(
     agent: ExecutorKind,
@@ -511,7 +675,7 @@ export class TerminalInteractionResponseBridge {
           ? {}
           : {
               codexAsyncQuestionEvidence:
-                this.runtime.captureCodexAsyncQuestionEvidence(runtime)
+                await this.runtime.captureCodexAsyncQuestionEvidence(runtime)
             })
       })
     };
@@ -714,7 +878,7 @@ export class TerminalInteractionResponseBridge {
       runtime: input.runtime,
       now: this.runtime.now(),
       codexAsyncQuestionEvidence:
-        this.runtime.captureCodexAsyncQuestionEvidence?.(input.runtime)
+        await this.runtime.captureCodexAsyncQuestionEvidence?.(input.runtime)
     });
     if (
       observed.inspection.approval.blocked ||
@@ -786,6 +950,31 @@ export class TerminalInteractionResponseBridge {
       );
     }
   }
+}
+
+function codexQuestionStatusMainComposerReady(
+  captured: CapturedCodexQuestionStatusSurface
+): boolean {
+  return captured.emptyMainComposer &&
+    ["absent", "collapsed"].includes(captured.question.state);
+}
+
+function codexQuestionStatusRestoreOpenKey(
+  current: CapturedCodexQuestionStatusSurface,
+  restore: CodexAsyncQuestionStatusRestore
+): string {
+  if (!codexQuestionStatusMainComposerReady(current) ||
+      current.question.state !== "collapsed" ||
+      current.question.pending_count !== restore.totalSteps ||
+      current.question.owner_private_action_plan.kind !== "open_async_question_editor" ||
+      !Number.isSafeInteger(restore.currentStep) ||
+      restore.currentStep < 1 || restore.currentStep > restore.totalSteps ||
+      restore.totalSteps > 16) {
+    throw new TerminalInteractionInputNotStartedError(
+      "Codex async-question status restoration is no longer exact"
+    );
+  }
+  return current.question.owner_private_action_plan.binding === "shift_left" ? "S-Left" : "M-Up";
 }
 
 function sameAsyncQuestionSource(

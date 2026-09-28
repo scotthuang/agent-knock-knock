@@ -1,4 +1,8 @@
+import { terminalApprovalFingerprint } from "./terminal-approval-fingerprint.js";
+export { terminalApprovalFingerprint } from "./terminal-approval-fingerprint.js";
 import { createHash } from "node:crypto";
+import { readCodexPaginatedAsyncQuestions } from "./codex-paginated-observation.js";
+import type { CodexAsyncQuestionStatusRestore } from "./terminal-interaction-response-bridge.js";
 import type { ExecutorKind } from "./executors.js";
 import {
   formatTerminalConversationId,
@@ -34,7 +38,6 @@ import {
   hasCanonicalTerminalEndpoint,
   sameTerminalControlIncarnation,
   terminalEndpointFromControlRef,
-  terminalEndpointIdentityKey,
   type TerminalEndpointRef
 } from "./terminal-control-ref.js";
 import {
@@ -742,7 +745,7 @@ export class TerminalAgentBridge {
   async status(
     agent: ExecutorKind,
     terminalControl: TerminalControlRef,
-    options: { scrollbackLines?: number; runtime?: TerminalRuntimeIdentity } = {}
+    options: { scrollbackLines?: number; maxExcerptLength?: number; runtime?: TerminalRuntimeIdentity } = {}
   ): Promise<TerminalBridgeStatus> {
     const adapter = this.registry.require(agent);
     if (
@@ -779,6 +782,18 @@ export class TerminalAgentBridge {
         screen: { error: message }
       };
     }
+  }
+
+  /** Private closed /status postcondition for the observed fullscreen client. */
+  async captureCodexStatusFrame(terminalControl: TerminalControlRef, runtime: TerminalRuntimeIdentity): Promise<{
+    screen: string; emptyComposer: boolean;
+  }> {
+    if (runtime.agentVersion !== "0.158.0") throw new Error("Fullscreen status proof requires Codex 0.158.0");
+    const verified = await this.verifyTerminalIdentity("codex", terminalControl, runtime);
+    const screen = await this.terminalProvider.capture(this.terminalProvider.endpoint(verified), {
+      scrollbackLines: 240, preserveEscapes: true
+    });
+    return { screen, emptyComposer: exactCodexReadyStyledComposerCapture(screen, runtime.agentVersion) !== undefined };
   }
 
   async modelOptions(
@@ -1043,6 +1058,8 @@ export class TerminalAgentBridge {
           }),
         verifyIdentity: (agent, control, runtime) =>
           this.verifyTerminalIdentity(agent, control, runtime),
+        captureCodexAsyncQuestionEvidence: (runtime) =>
+          runtime.codexPaginatedThread ? readCodexPaginatedAsyncQuestions(runtime) : undefined,
         now: () => this.now(),
         sleep: (milliseconds) => this.sleep(milliseconds)
       }
@@ -1271,7 +1288,11 @@ export class TerminalAgentBridge {
           "terminal foreground changed to an editor or viewer after clearing the Composer");
       await this.terminalProvider.sendText(
         this.terminalProvider.endpoint(verifiedForText),
-        normalized
+        normalized,
+        // A complete native Paste event clears Codex's key-burst Enter
+        // suppression. A tmux literal-key ACK does not prove that drain.
+        adapter.agent === "codex" && options.runtime?.agentVersion === "0.158.0" &&
+          verifiedForText.kind === "tmux" ? { bracketedPaste: true } : undefined
       );
     } catch (error) {
       if (error instanceof TerminalUserExplicitClearUncertainError) throw error;
@@ -1533,6 +1554,14 @@ export class TerminalAgentBridge {
       agentVersion,
       options
     );
+  }
+
+  async collapseCodexAsyncQuestionForStatus(control: TerminalControlRef, runtime: TerminalRuntimeIdentity) {
+    return this.interactionResponseBridge().collapseCodexAsyncQuestionForStatus(control, runtime, 240);
+  }
+
+  async restoreCodexAsyncQuestionAfterStatus(control: TerminalControlRef, runtime: TerminalRuntimeIdentity, restore: CodexAsyncQuestionStatusRestore) {
+    return this.interactionResponseBridge().restoreCodexAsyncQuestionAfterStatus(control, runtime, restore, 240);
   }
 
   async observeNativeInspection(
@@ -2229,130 +2258,6 @@ function sameTerminalControlIdentity(
   return sameTerminalControlIncarnation(left, right);
 }
 
-export function terminalApprovalFingerprint(
-  agent: ExecutorKind,
-  terminalControl: TerminalControlRef,
-  inspection: TerminalScreenInspection,
-  options: {
-    screen?: string;
-    runtime?: TerminalRuntimeIdentity;
-    decision?: TerminalApprovalDecision;
-  } = {}
-): string | undefined {
-  if (!inspection.approval.approvable) {
-    return undefined;
-  }
-  const decision = options.decision ?? "approve_once";
-  const choices = terminalApprovalChoices(inspection.approval);
-  const action = terminalApprovalActionForDecision(
-    inspection.approval,
-    decision
-  );
-  if (!action) {
-    return undefined;
-  }
-  const decisionMode = action.mode ?? "keys";
-  const promptEvidence = inspection.approval.promptEvidence;
-  if (
-    decisionMode === "keys" &&
-    !isTerminalApprovalPromptEvidence(promptEvidence)
-  ) {
-    return undefined;
-  }
-  const terminal = terminalEndpointFromControlRef(terminalControl);
-  // Legacy control records without canonical endpoint evidence bind v2 to
-  // their exact stored tmux coordinates. A fresh canonical capture upgrades
-  // new fingerprints to stable endpoint identity; v1 fingerprints are never
-  // recomputed or accepted here.
-  const terminalFingerprint = hasCanonicalTerminalEndpoint(terminalControl)
-    ? {
-        identity: terminalEndpointIdentityKey(terminal),
-        process_anchor_pid: terminal.processAnchorPid
-      }
-    : terminalControl.kind === "tmux" ? {
-        target: terminalControl.target,
-        socket_path: terminalControl.socketPath,
-        session: terminalControl.session,
-        window: terminalControl.window,
-        pane: terminalControl.pane,
-        pane_pid: terminalControl.panePid
-      } : undefined;
-  if (!terminalFingerprint) {
-    return undefined;
-  }
-  return createHash("sha256")
-    .update(JSON.stringify({
-      version: 2,
-      agent,
-      provider: terminal.identity.providerKind,
-      terminal: terminalFingerprint,
-      runtime: {
-        pid: options.runtime?.pid,
-        session_id: options.runtime?.sessionId,
-        native_session_id: options.runtime?.nativeSessionId,
-        native_process_uuid: options.runtime?.nativeProcessUuid,
-        native_process_birth: options.runtime?.nativeProcessBirth,
-        require_native_process_uuid:
-          options.runtime?.requireNativeProcessUuid,
-        require_exact_claude_agent_row:
-          options.runtime?.requireExactClaudeAgentRow,
-        native_process_started_at:
-          options.runtime?.nativeProcessStartedAt,
-        exact_claude_agent_state:
-          options.runtime?.exactClaudeAgentState,
-        require_native_rollout_identity:
-          options.runtime?.requireNativeRolloutIdentity,
-        native_rollout: options.runtime?.nativeRollout,
-        expected_native_session_id:
-          options.runtime?.expectedNativeSessionId,
-        expected_empty_native_session:
-          options.runtime?.expectedEmptyNativeSession,
-        allowed_pre_materialization_native_identity:
-          options.runtime?.allowedPreMaterializationNativeIdentity,
-        allowed_additional_native_identities:
-          options.runtime?.allowedAdditionalNativeIdentities,
-        cwd: options.runtime?.cwd,
-        conversation_id: options.runtime?.conversationId,
-        message_id: options.runtime?.messageId,
-        terminal_target: options.runtime?.terminalTarget
-      },
-      decision,
-      keys: action.keys,
-      label: action.label,
-      available_choices: choices.map((choice) => ({
-        decision: choice.decision,
-        keys: choice.keys,
-        label: choice.label,
-        mode: choice.mode ?? "keys",
-        request_id: choice.requestId
-      })),
-      prompt_kind: inspection.approval.promptKind,
-      command: inspection.approval.command,
-      cwd: inspection.approval.cwd,
-      tool_name: inspection.approval.toolName,
-      request_detail: inspection.approval.requestDetail,
-      policy_evidence: inspection.approval.policyEvidence
-        ? {
-            source: inspection.approval.policyEvidence.source,
-            kind: inspection.approval.policyEvidence.kind,
-            command_sha256: inspection.approval.policyEvidence.commandSha256,
-            evidence_fingerprint:
-              inspection.approval.policyEvidence.evidenceFingerprint,
-            request_id: inspection.approval.policyEvidence.requestId,
-            metadata: inspection.approval.policyEvidence.metadata
-          }
-        : undefined,
-      prompt_evidence: promptEvidence
-        ? {
-            profile: promptEvidence.profile,
-            sha256: promptEvidence.sha256
-          }
-        : undefined,
-      decision_mode: decisionMode,
-      request_id: action.requestId
-    }))
-    .digest("hex");
-}
 
 function statusFromInspection(
   adapter: TerminalAgentAdapter,
