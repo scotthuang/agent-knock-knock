@@ -98,5 +98,32 @@ active store uses the existing exclusive writer upgrade procedure.
 
 Fast fixtures cover paginated read boundaries, identity changes, text acceptance,
 terminal exit and callback replay, expired and competing answers, native question
-batching, durable answer receipts, and fullscreen UI profiles. Real native
-validation and release-gate results are recorded with the release evidence.
+batching, durable answer receipts, and fullscreen UI profiles. The final fast
+tier passed all 2,191 tests.
+
+The pre-publication `npm run test:release` gate passed all 2,706 full tests,
+OpenClaw compatibility verification, ClawHub runtime validation, and the
+ClawHub publication dry-run. Architecture and refactor-evidence checks also
+passed. Documentation-only corrections afterward synchronize the bundled
+Skill's Watch routing, current writer protocol, and supported version list.
+
+Real Codex 0.158.0 validation completed on 2026-09-29 against clean commit
+[`94e2fae`](https://github.com/scotthuang/agent-knock-knock/commit/94e2fae198c503b64a542bcf1faef5ffc754fd3e),
+using isolated tmux terminals and the local background server:
+
+| Native scenario | Observed result |
+| --- | --- |
+| Ordinary Send with an async Yes/No question | Exact request and turn accepted; question callback delivered; one answer confirmed by durable client/message/question identity; correct final text and one completion callback |
+| Plan-mode blocking Yes/No question | One native answer confirmed by the exact function output; correct plan body and one completion callback for the original task |
+| Manual Watch during the async task | Bound the same active turn, observed its exact completion, and delivered one completion callback |
+| Repeated reconciliation | No duplicate completion callback for any of the three Watches |
+
+The live probe delivered callbacks to a local collector, not to an external chat
+channel. OpenClaw callback integration is checked separately by the release gate.
+No user terminal was changed and the shared Codex daemon was not restarted.
+
+The tested runtime contained 236 JavaScript files under `dist/src`. Its SHA-256
+is `3b69df63924582f1c0daba1716c98a745fb21d060504059b68844d2cfa6626fa`,
+computed over sorted relative paths, each followed by a NUL byte, file content,
+and another NUL byte. Final publication checks compare the rebuilt runtime to
+this native-tested artifact.

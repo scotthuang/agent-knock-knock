@@ -342,9 +342,11 @@ releasing the terminal lock; callers must never cache a standalone proof and
 use it as authority for a later action.
 
 Codex native `/status` inspection requires an exact viewport of at least 80
-columns so the complete UUID can be proven. An ordinary terminal-scoped task
-does not run `/status` and does not fail merely because the pane is narrow; it
-can bind from exact native acceptance afterward. Claude inspection must prove,
+columns so the complete UUID can be proven. Legacy terminal-scoped tasks
+can bind from exact native acceptance afterward without running `/status` or
+failing merely because the pane is narrow. Codex 0.158.0 attempts a separate
+closed `/status` binding before physical Send; if an exact callback Watch cannot
+be prepared, its Send receipt states that limitation. Claude inspection must prove,
 parse, and dismiss one fresh Status panel and return to the same idle composer.
 Other complete `x.y.z` agent versions remain callable with a compatibility
 warning; incompatible runtime behavior fails or becomes uncertain rather than
