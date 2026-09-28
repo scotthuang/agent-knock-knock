@@ -516,9 +516,11 @@ function answeredQuestionId(value: unknown): string | undefined {
 
 function completionText(turn: CodexAppServerTurn): string {
   const messages = turn.items.filter((item) =>
-    item.type === "agentMessage" && item.delivery !== "async" &&
+    (item.type === "agentMessage" || item.type === "plan") && item.delivery !== "async" &&
     item.questions == null && typeof item.text === "string");
-  const final = [...messages].reverse().find((item) => item.phase === "final_answer") ??
+  // Native Plan-mode output is a plan item instead of an agentMessage.
+  const final = [...messages].reverse().find((item) =>
+    item.type === "plan" || item.phase === "final_answer") ??
     [...messages].reverse().find((item) => item.phase == null);
   const text = final?.text ?? (turn.status === "completed"
     ? "" : turn.error?.message ?? "Codex native turn " + turn.status);

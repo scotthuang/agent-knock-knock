@@ -49,6 +49,8 @@ import { inspectCodexAsyncQuestionInputMode } from
   "./terminal-composer-classifier.js";
 import { exactCodexReadyStyledComposerCapture } from
   "./terminal-native-inspection-bridge.js";
+import { captureCodexFullscreenComposerFrame } from
+  "./codex-fullscreen-composer-proof.js";
 
 const TERMINAL_INTERACTION_TTL_MS = 10 * 60 * 1_000;
 const CODEX_ASYNC_QUESTION_OPEN_MAX_CAPTURES = 3;
@@ -240,6 +242,9 @@ interface CapturedCodexQuestionStatusSurface {
   readonly question: CodexAsyncQuestionInspection;
   readonly emptyMainComposer: boolean;
 }
+type CodexQuestionStatusInspectionCapture = Awaited<ReturnType<
+  TerminalInteractionResponseRuntime["captureInspection"]
+>>;
 
 /**
  * Executes only a closed questionnaire action plan. Store mutation, terminal
@@ -387,12 +392,41 @@ export class TerminalInteractionResponseBridge {
         captured.inspection.approval.blocked) {
       throw new Error("Codex question status surface changed terminal identity or approval ownership");
     }
+    return this.captureCodexStyledQuestionStatusSurface(captured, runtime, evidence, scrollbackLines);
+  }
+
+  private async captureCodexStyledQuestionStatusSurface(
+    captured: CodexQuestionStatusInspectionCapture,
+    runtime: TerminalRuntimeIdentity,
+    evidence: readonly CodexAsyncQuestionDurableEvidence[] | undefined,
+    scrollbackLines?: number
+  ): Promise<CapturedCodexQuestionStatusSurface> {
+    const styledScreen = await this.terminalProvider.capture(
+      this.terminalProvider.endpoint(captured.terminalControl),
+      { scrollbackLines, preserveEscapes: true }
+    );
+    const verified = await this.runtime.verifyIdentity("codex", captured.terminalControl, runtime);
+    if (!sameTerminalControlIncarnation(captured.terminalControl, verified)) {
+      throw new TerminalInteractionInputNotStartedError(
+        "Codex question status changed terminal identity after its styled capture"
+      );
+    }
+    const latest = await this.runtime.captureInspection("codex", verified, runtime, scrollbackLines);
+    const question = inspectCodexAsyncQuestion({
+      version: runtime.agentVersion!, screen: styledScreen, evidence
+    });
+    if (!sameTerminalControlIncarnation(verified, latest.terminalControl) ||
+        latest.inspection.approval.blocked ||
+        !sameCodexQuestionStatusMaterialization(captured.screen, styledScreen, question, evidence) ||
+        !sameCodexQuestionStatusMaterialization(latest.screen, styledScreen, question, evidence)) {
+      throw new TerminalInteractionInputNotStartedError(
+        "Codex question status lost its exact styled surface or terminal identity"
+      );
+    }
     return {
-      terminalControl: captured.terminalControl,
-      question: inspectCodexAsyncQuestion({
-        version: runtime.agentVersion, screen: captured.screen, evidence
-      }),
-      emptyMainComposer: Boolean(exactCodexReadyStyledComposerCapture(captured.screen, runtime.agentVersion))
+      terminalControl: latest.terminalControl,
+      question,
+      emptyMainComposer: Boolean(exactCodexReadyStyledComposerCapture(styledScreen, runtime.agentVersion))
     };
   }
 
@@ -950,6 +984,21 @@ export class TerminalInteractionResponseBridge {
       );
     }
   }
+}
+
+function sameCodexQuestionStatusMaterialization(
+  plainScreen: string,
+  styledScreen: string,
+  styledQuestion: CodexAsyncQuestionInspection,
+  evidence: readonly CodexAsyncQuestionDurableEvidence[] | undefined
+): boolean {
+  const plainQuestion = inspectCodexAsyncQuestion({ version: "0.158.0", screen: plainScreen, evidence });
+  if (JSON.stringify(plainQuestion) !== JSON.stringify(styledQuestion)) return false;
+  const composerRegion = (screen: string) => {
+    const frame = captureCodexFullscreenComposerFrame(screen, "0.158.0", true);
+    return frame?.plainLines.slice(frame.composerIndex).map((line) => line.trimEnd());
+  };
+  return JSON.stringify(composerRegion(plainScreen)) === JSON.stringify(composerRegion(styledScreen));
 }
 
 function codexQuestionStatusMainComposerReady(

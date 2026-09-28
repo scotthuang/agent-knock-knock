@@ -5,6 +5,7 @@
 ### Fixed
 
 - Track Codex 0.158.0 ordinary terminal Send and active-task Watch through exact foreground thread binding and native paginated history, including completion after terminal exit and callback retries.
+- Preserve native Plan-mode result text in completion callbacks and verify the real styled Composer before answering async questions.
 - Recognize current async question identities and submit answers only to the expected active native turn, confirming the exact durable reply. Handle blocking native question requests and private multi-question drafts through the server's single-response protocol.
 - Route paginated Send away from the legacy future-rollout monitor before task input. Keep callback receipts explicit about exact versus activity-only observation.
 - Use native bracketed paste for Codex 0.158.0 tmux physical Send so a long single-line request cannot leave its Enter inside the native character-paste burst.

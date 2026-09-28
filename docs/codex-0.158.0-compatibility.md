@@ -36,6 +36,9 @@ boundary even when a later turn exists. Repeated sweeps use the existing durable
 callback outbox and delivery identity. A temporary read or callback failure does
 not authorize sending the user request again.
 
+Completion text includes native Plan-mode output as well as final agent messages.
+A completed planning task therefore returns its plan body in the callback.
+
 Physical tmux Send uses native bracketed paste for this exact Codex version,
 including single-line requests. Codex consumes the complete paste as one event
 and clears its character-burst Enter suppression before the one submission key.
@@ -68,6 +71,11 @@ the requested answer. The blocking protocol has no client response ID: an
 identical answer accepted concurrently from the native TUI proves the requested
 answer, but cannot identify which client won. Completed native turns clear expired async questions
 so historical prompts cannot prevent the final callback indefinitely.
+
+Before the async response's foreground check, a private styled capture proves the
+empty Composer; ordinary text captures cannot establish that proof. Identity,
+question, and Composer checks surround that capture so a draft or changed surface
+cannot authorize navigation or an answer.
 
 ## Remaining boundaries
 

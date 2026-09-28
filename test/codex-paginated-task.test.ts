@@ -123,6 +123,38 @@ test("paginated acceptance excludes the pre-Send boundary and binds a separate n
   assert.equal(JSON.stringify(original).includes(REQUEST), false);
 });
 
+test("native Plan-mode completion preserves the exact task's plan body", () => {
+  const plan = { id: "plan-output", type: "plan", text: "Chosen answer: Yes.\n\nImplement the requested change." };
+  const accepted = turn("accepted", 200, "completed", [user("accepted-input", REQUEST), plan]);
+  const result = observeCodexPaginatedTask({
+    anchor: anchor(), snapshot: snapshot([
+      turn("unrelated", 300, "completed", [user("later-input", "A different task"),
+        { id: "later-plan", type: "plan", text: "Unrelated plan" }]),
+      accepted, turn("baseline", 100)
+    ])
+  });
+  if (result.status !== "completed") assert.fail("the exact native Plan task should complete");
+  assert.equal(result.completion.id, "accepted");
+  assert.equal(result.completion.text, plan.text);
+  assert.equal(result.completion.outcome, "success");
+});
+
+test("completion selects the latest explicit native result without using async questions or commentary", () => {
+  const plan = { id: "plan-output", type: "plan", text: "Final native plan." };
+  const commentary = { id: "commentary", type: "agentMessage", phase: "commentary", text: "Working on it." };
+  for (const [outputs, expected] of [
+    [[final("older-result", "Earlier answer."), plan, commentary, asyncQuestion()], plan.text],
+    [[plan, final("newer-result", "Final native answer."), commentary, asyncQuestion()], "Final native answer."]
+  ] as const) {
+    const result = observeCodexPaginatedTask({ anchor: anchor(), snapshot: snapshot([
+      turn("accepted", 200, "completed", [user("accepted-input", REQUEST), ...outputs]),
+      turn("baseline", 100)
+    ]) });
+    if (result.status !== "completed") assert.fail("native task should complete");
+    assert.equal(result.completion.text, expected);
+  }
+});
+
 test("paginated task matching rejects ambiguity, pagination gaps, and partial item views", () => {
   const original = anchor();
   const data = snapshot([turn("second", 300), turn("first", 200), turn("baseline", 100)]);

@@ -31,7 +31,9 @@ test("reads exact paginated thread/turn/items while leaving server questions una
           phase: "final_answer", delivery: "async", questions: [{ title: "UniPat AI?", options: ["Yes", "No"] }] } },
       { turnId: TURN_ID, startedAtMs: 1_790_645_002_000, completedAtMs: 1_790_645_002_000,
         item: { type: "userMessage", id: "answer-1", clientId: null,
-          content: [{ type: "text", text: ANSWER, textElements: [] }] } }
+          content: [{ type: "text", text: ANSWER, textElements: [] }] } },
+      { turnId: TURN_ID, startedAtMs: 1_790_645_003_000, completedAtMs: 1_790_645_003_000,
+        item: { type: "plan", id: `${TURN_ID}-plan`, text: "Proposed plan: Yes." } }
     ]);
     throw new Error(`Unexpected request ${request.method}`);
   });
@@ -43,6 +45,7 @@ test("reads exact paginated thread/turn/items while leaving server questions una
     const items = await client.listItems({ threadId: THREAD_ID, turnId: TURN_ID });
     assert.deepEqual(items.data[0].item.questions, [{ title: "UniPat AI?", options: ["Yes", "No"] }]);
     assert.equal(items.data[1].item.content?.[0].text, ANSWER);
+    assert.equal(items.data[2].item.text, "Proposed plan: Yes.");
     assert.deepEqual(fixture.sent.map((entry) => entry.method), [
       "initialize", "initialized", "thread/read", "thread/turns/list", "thread/items/list"
     ]);
@@ -51,6 +54,20 @@ test("reads exact paginated thread/turn/items while leaving server questions una
     assert.equal((fixture.sent[3].params as Record<string, unknown>).itemsView, "notLoaded");
   } finally { client.close(); }
   assert.equal(fixture.closed, true);
+});
+
+test("rejects malformed canonical proposed plan text", async () => {
+  let planText: unknown;
+  const fixture = new FixtureTransport(() => page([
+    { turnId: TURN_ID, startedAtMs: null, completedAtMs: null,
+      item: { type: "plan", id: `${TURN_ID}-plan`, text: planText } }
+  ]));
+  const client = await connect(fixture);
+  try {
+    for (planText of [undefined, null, 7]) {
+      await assert.rejects(client.listItems({ threadId: THREAD_ID, turnId: TURN_ID }), /Invalid Codex proposed plan text/u);
+    }
+  } finally { client.close(); }
 });
 
 test("rejects a backend version or home mismatch before reading user threads", async () => {

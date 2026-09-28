@@ -351,6 +351,7 @@ function validateItem(value: unknown): CodexAppServerThreadItem {
       }
     }
   }
+  if (item.type === "plan" && typeof item.text !== "string") invalid("Invalid Codex proposed plan text");
   return item as unknown as CodexAppServerThreadItem;
 }
 
