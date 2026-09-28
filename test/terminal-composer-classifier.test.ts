@@ -101,6 +101,20 @@ test("Codex async-question input ownership preserves exact classification priori
       ].join("\n")
     },
     {
+      expected: "expanded",
+      screen: [
+        "• Queued follow-up inputs",
+        "",
+        "  1 of 1",
+        "  Continue with the selected company?",
+        "",
+        "  › 1. Yes",
+        "    2. Other",
+        "",
+        "  enter submit   ctrl+] skip   ⌥+↓ main prompt"
+      ].join("\n")
+    },
+    {
       expected: "ambiguous",
       screen: [
         "  2 of",
@@ -115,6 +129,9 @@ test("Codex async-question input ownership preserves exact classification priori
 
   for (const { expected, screen } of cases) {
     assert.equal(inspectCodexAsyncQuestionInputMode(screen), expected);
+    if (expected === "expanded" || expected === "ambiguous") {
+      assert.equal(terminalUserExplicitInputOwnerBlocked(screen), true);
+    }
   }
 });
 

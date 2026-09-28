@@ -361,17 +361,21 @@ test("native inspection dispatches Enter once, revalidates, and presents under l
       events.push("terminal:resolve");
       return inspectionTerminal;
     },
-    status: async () => ({
-      provider: "tmux",
-      target: TMUX_CONTROL.target,
-      agent: "codex",
-      reachable: true,
-      capabilities: adapter.capabilities,
-      activity_state: "idle",
-      activity_reason: "test",
-      approval_state: { scanned: true, blocked: false, approvable: false },
-      screen: { excerpt: "›" }
-    }),
+    status: async (_agent: unknown, _control: unknown,
+      options?: { runtime?: { agentVersion?: string } }) => {
+      if (options?.runtime) assert.equal(options.runtime.agentVersion, "1.2.3");
+      return {
+        provider: "tmux",
+        target: TMUX_CONTROL.target,
+        agent: "codex",
+        reachable: true,
+        capabilities: adapter.capabilities,
+        activity_state: "idle",
+        activity_reason: "test",
+        approval_state: { scanned: true, blocked: false, approvable: false },
+        screen: { excerpt: "›" }
+      };
+    },
     submitNativeInspection: async (
       _agent: unknown,
       _control: unknown,

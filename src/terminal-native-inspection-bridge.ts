@@ -1651,7 +1651,7 @@ function bareDigestFromNativeInspectionScreenFingerprint(
 
 export function stripTerminalEscapeSequences(value: string): string {
   return value.replace(
-    /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu,
+    /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))/gu,
     ""
   );
 }
@@ -1679,7 +1679,7 @@ export function exactCodexReadyStyledComposerCapture(
   const visible: Array<{ character: string; dim: boolean }> = [];
   for (let index = 0; index < composerLine.length;) {
     if (composerLine[index] === "\x1b") {
-      const escape = /^(?:\x1B\[([0-9;]*)m|\x1B\][^\x07]*(?:\x07|\x1B\\))/u
+      const escape = /^(?:\x1B\[([0-9;]*)m|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\))/u
         .exec(composerLine.slice(index));
       if (escape) {
         if (escape[1] !== undefined) {

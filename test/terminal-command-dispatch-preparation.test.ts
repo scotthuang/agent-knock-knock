@@ -42,8 +42,11 @@ const CONTROL: TerminalControlRef = {
 
 async function runFixture(input: {
   assertSafe?: () => void;
+  bridgeEnabled?: boolean;
+  agentVersion?: string;
+  trace?: string[];
 } = {}): Promise<{ result?: PreparedTerminalControlSend; trace: string[] }> {
-  const trace: string[] = [];
+  const trace = input.trace ?? [];
   const storeDir = path.resolve("/private/tmp/akk-dispatch-preparation-store");
   const conversation = {
     ...createConversation({
@@ -92,7 +95,11 @@ async function runFixture(input: {
       trace.push("native-identity");
       return undefined;
     },
-    assertTurnIdentity: () => trace.push("turn-identity")
+    assertTurnIdentity: () => trace.push("turn-identity"),
+    captureCodexAcceptanceAnchor: () => {
+      trace.push("acceptance-anchor");
+      return undefined;
+    }
   } as unknown as TerminalDispatchExecutionService;
   const ports: TerminalDispatchPreparationPorts = {
     assertCodexComposerReadyForAutomatedInput: async () => {
@@ -140,13 +147,17 @@ async function runFixture(input: {
       return value;
     },
     resolveLedgerPaneIncarnation: (_control, ledger) => ledger,
-    terminalBridgeEnabled: () => false,
+    terminalBridgeEnabled: () => input.bridgeEnabled ?? false,
     terminalRuntimeForLiveIdentity: () => {
       throw new Error("physical runtime must remain lazy");
     },
     terminalRuntimeIdentityForConversation: () => {
       trace.push("runtime");
-      return { pid: 42, cwd: "/private/tmp" };
+      return {
+        pid: 42,
+        cwd: "/private/tmp",
+        ...(input.agentVersion ? { agentVersion: input.agentVersion } : {})
+      };
     },
     presentation: {
       write: () => undefined,
@@ -219,4 +230,35 @@ test("dispatch preparation preserves the verified-idle error boundary", async ()
     runFixture({ assertSafe: () => { throw new Error("fixture blocked"); } }),
     /refusing to send to Codex without a verified idle terminal: fixture blocked/u
   );
+});
+
+test("managed Send rejects known paginated Codex history before UI preparation", async () => {
+  for (const agentVersion of ["0.157.0", "0.157.1"]) {
+    const trace: string[] = [];
+    await assert.rejects(
+      runFixture({ bridgeEnabled: true, agentVersion, trace }),
+      /refusing managed Codex Send before terminal input: Codex 0\.157\.[01].*paginated/u
+    );
+    assert.equal(trace.at(-1), "runtime");
+    for (const step of ["status", "composer", "acceptance-anchor"]) {
+      assert.equal(trace.includes(step), false, step);
+    }
+  }
+});
+
+test("known paginated Codex versions still allow preparation without a completion bridge", async () => {
+  const { result, trace } = await runFixture({ agentVersion: "0.157.1" });
+  assert.equal(result?.bridge, false);
+  assert.equal(result?.preSendRuntime.agentVersion, "0.157.1");
+  assert.equal(trace.includes("safe-terminal"), true);
+});
+
+test("other complete unverified Codex versions keep optimistic managed preparation", async () => {
+  const { result, trace } = await runFixture({
+    bridgeEnabled: true,
+    agentVersion: "0.156.1"
+  });
+  assert.equal(result?.bridge, true);
+  assert.equal(result?.preSendRuntime.agentVersion, "0.156.1");
+  assert.equal(trace.at(-1), "acceptance-anchor");
 });

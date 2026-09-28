@@ -16,8 +16,29 @@ import {
 } from "../src/terminal-control-provider.js";
 import type { TerminalEndpointRef } from
   "../src/terminal-control-ref.js";
-import { TerminalNativeInspectionBridge } from
+import { TerminalNativeInspectionBridge, stripTerminalEscapeSequences } from
   "../src/terminal-native-inspection-bridge.js";
+
+test("OSC hyperlinks preserve visible commands and status between independently terminated links", () => {
+  for (const end of ["\x1b\\", "\x07"]) {
+    const link = (url: string, label: string) =>
+      `\x1b]8;;${url}${end}${label}\x1b]8;;${end}`;
+    const screen = [
+      link("https://github.com/openai/codex/releases/latest", "Release notes"),
+      "\x1b[38;5;5m/status\x1b[39m",
+      "│ >_ \x1b[1mOpenAI Codex\x1b[0m (v0.157.1) │",
+      `│ Visit ${link("https://chatgpt.com/codex/settings/usage", "usage")} │`,
+      "│ Session: 22222222-2222-4222-8222-222222222222 │"
+    ].join("\n");
+    assert.equal(stripTerminalEscapeSequences(screen), [
+      "Release notes",
+      "/status",
+      "│ >_ OpenAI Codex (v0.157.1) │",
+      "│ Visit usage │",
+      "│ Session: 22222222-2222-4222-8222-222222222222 │"
+    ].join("\n"));
+  }
+});
 
 const PANE: TerminalPane = {
   kind: "tmux",

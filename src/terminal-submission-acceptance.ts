@@ -4,6 +4,7 @@ import path from "node:path";
 import type {
   CodexAsyncQuestionDurableEvidence
 } from "./codex-async-question-adapter.js";
+import { codexThreadUsesLegacyRollout } from "./codex-session-provider.js";
 import { redactString } from "./runtime-log.js";
 import type {
   CodexOpenRootRolloutIdentity,
@@ -307,6 +308,7 @@ export function observeCodexHumanStartedActiveTask(
       if (before.size < resumeOffsetBytes) {
         throw new Error("Codex active-task rollout was truncated after observation");
       }
+      assertCodexRolloutLegacyHistory(readCodexRolloutHeader(opened.fd, before.size));
       assertCodexActiveTaskResumeBoundary(opened.fd, resumeOffsetBytes);
       const availableBytes = before.size - resumeOffsetBytes;
       const bytesToRead = Math.min(availableBytes, maxBytes);
@@ -1017,11 +1019,28 @@ function assertExistingCodexRolloutHeader(
   ) {
     throw new Error("Codex active-task rollout header does not identify the exact CLI thread");
   }
+  if (!codexThreadUsesLegacyRollout(payload)) {
+    throw new Error("Codex rollout does not use legacy history");
+  }
   const codexVersion = optionalString(payload.cli_version);
   if (!codexVersion || !CODEX_VERSION_PATTERN.test(codexVersion)) {
     throw new Error("Codex active-task rollout header has no exact CLI version");
   }
   return codexVersion;
+}
+
+/**
+ * Persisted anchors must check the history contract without widening their
+ * existing thread/version requirements. Older legacy headers can be minimal.
+ */
+function assertCodexRolloutLegacyHistory(buffer: Buffer): void {
+  const first = parseCodexJsonlRecords(buffer, "rollout header")[0]?.value;
+  const payload = first?.type === "session_meta" && isRecord(first.payload)
+    ? first.payload
+    : undefined;
+  if (payload && !codexThreadUsesLegacyRollout(payload)) {
+    throw new Error("Codex rollout does not use legacy history");
+  }
 }
 
 function readCodexRolloutHeader(fd: number, size: number): Buffer {
@@ -1131,6 +1150,9 @@ export function captureCodexRolloutAcceptanceAnchor(
         "Codex rollout did not end at a complete JSONL record before terminal submission"
       );
     }
+    if (before.size > 0) {
+      assertCodexRolloutLegacyHistory(readCodexRolloutHeader(opened.fd, before.size));
+    }
     const after = fs.fstatSync(opened.fd);
     if (!sameStableFile(before, after)) {
       throw new Error("Codex rollout changed while its terminal submission anchor was captured");
@@ -1171,6 +1193,9 @@ export function captureCodexCandidateSetRolloutAcceptanceAnchor({
         throw new Error(
           "Codex candidate rollout did not end at a complete JSONL record before terminal submission"
         );
+      }
+      if (before.size > 0) {
+        assertCodexRolloutLegacyHistory(readCodexRolloutHeader(opened.fd, before.size));
       }
       const after = fs.fstatSync(opened.fd);
       if (!sameStableFile(before, after)) {
@@ -1877,6 +1902,13 @@ export function detectCodexBoundRolloutCompletion(options: {
         observedDiagnostics
       );
     }
+    try {
+      if (before.size > 0) {
+        assertCodexRolloutLegacyHistory(readCodexRolloutHeader(opened.fd, before.size));
+      }
+    } catch (error) {
+      return codexCompletionFailure("rollout_unreadable", error, observedDiagnostics);
+    }
     if (bytesToRead === 0) {
       return codexCompletionPending(
         "exact_turn_not_complete",
@@ -2397,6 +2429,31 @@ type CodexAcceptanceRolloutScan =
       evidence: TerminalSubmissionAcceptanceEvidence;
     };
 
+/** Return a safe bounded suffix length, or wait for its incomplete JSONL tail. */
+function codexRolloutAcceptanceReadLength(
+  fd: number,
+  stat: fs.Stats,
+  offsetBytes: number
+): number | undefined {
+  assertPrivateRegularFile(stat);
+  if (stat.size < offsetBytes) {
+    throw new Error("Codex rollout was truncated after terminal submission");
+  }
+  const bytesToRead = stat.size - offsetBytes;
+  if (bytesToRead > CODEX_ACCEPTANCE_MAX_BYTES) {
+    throw new Error(
+      "Codex rollout acceptance suffix exceeded the bounded read limit"
+    );
+  }
+  if (stat.size > 0 && !fileEndsWithNewline(fd, stat.size)) {
+    return undefined;
+  }
+  if (stat.size > 0) {
+    assertCodexRolloutLegacyHistory(readCodexRolloutHeader(fd, stat.size));
+  }
+  return bytesToRead;
+}
+
 function scanCodexRolloutAcceptance({
   rollout: rolloutValue,
   nativeThreadId: nativeThreadIdValue,
@@ -2428,21 +2485,12 @@ function scanCodexRolloutAcceptance({
   const opened = openExactRollout(rollout);
   try {
     const before = opened.stat;
-    assertPrivateRegularFile(before);
-    if (before.size < offsetBytes) {
-      throw new Error("Codex rollout was truncated after terminal submission");
+    const bytesToRead = codexRolloutAcceptanceReadLength(opened.fd, before, offsetBytes);
+    if (bytesToRead === undefined) {
+      return { status: "incomplete" };
     }
-    const bytesToRead = before.size - offsetBytes;
     if (bytesToRead === 0) {
       return { status: "pending" };
-    }
-    if (bytesToRead > CODEX_ACCEPTANCE_MAX_BYTES) {
-      throw new Error(
-        "Codex rollout acceptance suffix exceeded the bounded read limit"
-      );
-    }
-    if (!fileEndsWithNewline(opened.fd, before.size)) {
-      return { status: "incomplete" };
     }
     const buffer = Buffer.allocUnsafe(bytesToRead);
     const bytesRead = fs.readSync(
@@ -2536,6 +2584,9 @@ function assertVirginRolloutHeader(options: {
     throw new Error(
       "virgin Codex rollout metadata does not identify the newly materialized CLI thread"
     );
+  }
+  if (!codexThreadUsesLegacyRollout(payload)) {
+    throw new Error("virgin Codex rollout does not use legacy history");
   }
   const materializedAt = isRecord(record) ? record.timestamp : undefined;
   if (

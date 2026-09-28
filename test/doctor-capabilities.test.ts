@@ -5,6 +5,11 @@ import {
   evaluateDoctorCapabilities,
   runDoctorCapabilityProbes
 } from "../src/doctor-capabilities.js";
+import {
+  codexRuntimeCompatibilityProfile,
+  codexRuntimeLifecycleBehaviorProfile,
+  codexUnsupportedDurableHistoryWarning
+} from "../src/codex-lifecycle-compatibility.js";
 
 function checks(available: string[]) {
   return ["node", "openclaw", "tmux", "herdr", "codex", "claude"]
@@ -86,6 +91,33 @@ test("doctor recognizes exact native profiles without gating ordinary readiness"
   ]);
   assert.equal(result.readiness, "ready");
   assert.deepEqual(result.tmux.agents, ["codex"]);
+});
+
+test("known paginated Codex protocols disable lifecycle without changing generic version policy", () => {
+  for (const version of ["0.157.0", "0.157.1"]) {
+    assert.equal(codexRuntimeLifecycleBehaviorProfile(version), undefined);
+    assert.equal(doctorCodingAgentNativeProfile("codex", version), undefined);
+    const warning = codexUnsupportedDurableHistoryWarning(version);
+    assert.match(warning ?? "", /paginated history/u);
+    assert.match(warning ?? "", /Managed completion callbacks.*unavailable/u);
+    assert.equal(
+      codexRuntimeCompatibilityProfile(version)?.compatibilityWarning,
+      warning
+    );
+  }
+  assert.equal(
+    codexRuntimeLifecycleBehaviorProfile("0.155.1"),
+    "codex-tui-0.155.1"
+  );
+  assert.equal(
+    codexRuntimeLifecycleBehaviorProfile("0.158.0"),
+    "codex-tui-generic-v1"
+  );
+  assert.equal(codexUnsupportedDurableHistoryWarning("0.158.0"), undefined);
+  assert.match(
+    codexRuntimeCompatibilityProfile("0.158.0")?.compatibilityWarning ?? "",
+    /not been regression-tested/u
+  );
 });
 
 test("doctor accepts exact Herdr 0.8.0 as the only terminal transport", () => {

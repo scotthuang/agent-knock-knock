@@ -14,6 +14,8 @@ export interface CodexThreadRow {
   cwd?: string;
   rollout_path?: string;
   rolloutPath?: string;
+  history_mode?: string | null;
+  historyMode?: string | null;
   title?: string;
   preview?: string;
   first_user_message?: string;
@@ -171,6 +173,18 @@ export function codexSessionsFromThreadRows(rows: CodexThreadRow[]): CodexSessio
     .sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
 }
 
+export function codexThreadUsesLegacyRollout(row: {
+  history_mode?: unknown;
+  historyMode?: unknown;
+}): boolean {
+  // Older state databases and session metadata predate this field. An
+  // explicit mode must match exactly: paginated history can retain an
+  // obsolete rollout_path after migration.
+  return ["history_mode", "historyMode"].every((key) =>
+    !Object.hasOwn(row, key) || row[key as keyof typeof row] === "legacy"
+  );
+}
+
 export function codexSessionFromThreadRow(row: CodexThreadRow): CodexSessionSummary | undefined {
   const id = stringValue(row.id);
   const cwd = stringValue(row.cwd);
@@ -178,7 +192,10 @@ export function codexSessionFromThreadRow(row: CodexThreadRow): CodexSessionSumm
     return undefined;
   }
 
-  const rolloutPath = stringValue(row.rolloutPath) ?? stringValue(row.rollout_path);
+  const legacyRollout = codexThreadUsesLegacyRollout(row);
+  const rolloutPath = legacyRollout
+    ? stringValue(row.rolloutPath) ?? stringValue(row.rollout_path)
+    : undefined;
   const updatedAtMs = numberValue(row.updatedAtMs) ?? numberValue(row.updated_at_ms);
   const title = cleanText(stringValue(row.title));
   const preview = cleanText(stringValue(row.preview));
@@ -195,7 +212,11 @@ export function codexSessionFromThreadRow(row: CodexThreadRow): CodexSessionSumm
     updatedAtMs,
     archived: row.archived === true || row.archived === 1,
     capability,
-    capabilityReason: capability === "full" ? undefined : "missing rollout_path"
+    capabilityReason: capability === "full"
+      ? undefined
+      : legacyRollout
+        ? "missing rollout_path"
+        : "unsupported Codex history_mode"
   };
 }
 

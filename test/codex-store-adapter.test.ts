@@ -123,6 +123,20 @@ test("Codex store adapter resolves the one open root rollout for an exact proces
         { fd: "12r", type: "REG", device: "1", inode: "2", path: rootPath }
       ]
     );
+    fs.writeFileSync(rootPath, JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: SESSION_ID,
+        cwd: "/repo/project",
+        originator: "codex-tui",
+        source: "cli",
+        history_mode: "paginated"
+      }
+    }) + "\n", "utf8");
+    await assert.rejects(
+      adapter.resolveActiveSessionIdentityForPid(4242, "/repo/project"),
+      /invalid rollout session metadata/u
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -866,11 +880,11 @@ test("Codex store adapter reports virgin only when the process has no sessions r
 test("Codex store adapter builds thread selects from detected columns", () => {
   assert.equal(
     buildThreadSelect(["id", "cwd", "updated_at"], 25),
-    "select id, cwd, null as rollout_path, null as title, null as preview, null as first_user_message, updated_at * 1000 as updated_at_ms, 0 as archived, null as source, null as model_provider, null as cli_version, null as name from threads order by updated_at * 1000 desc limit 25"
+    "select id, cwd, null as rollout_path, null as title, null as preview, null as first_user_message, updated_at * 1000 as updated_at_ms, 0 as archived, null as source, null as model_provider, null as cli_version, null as name, 'legacy' as history_mode from threads order by updated_at * 1000 desc limit 25"
   );
   assert.equal(
     buildThreadSelect(["id", "cwd", "rollout_path", "updated_at_ms", "archived"], 0),
-    "select id, cwd, rollout_path, null as title, null as preview, null as first_user_message, updated_at_ms, archived, null as source, null as model_provider, null as cli_version, null as name from threads order by updated_at_ms desc limit 1"
+    "select id, cwd, rollout_path, null as title, null as preview, null as first_user_message, updated_at_ms, archived, null as source, null as model_provider, null as cli_version, null as name, 'legacy' as history_mode from threads order by updated_at_ms desc limit 1"
   );
   assert.match(
     buildThreadByIdSelect(["id", "cwd", "updated_at_ms"], SESSION_ID),
@@ -901,6 +915,14 @@ test("Codex store adapter builds thread selects from detected columns", () => {
   assert.match(
     buildThreadSelect(["id", "cwd", "updated_at_ms"], 5, { source: "cli" }),
     /where 0 = 1 order by updated_at_ms desc, id desc limit 5$/u
+  );
+  assert.match(
+    buildThreadSelect(["id", "cwd", "history_mode"], 5, { historyMode: "legacy" }),
+    /, history_mode from threads where history_mode collate binary = :akk_history_mode order by 0 desc, id desc limit 5$/u
+  );
+  assert.match(
+    buildThreadSelect(["id", "cwd"], 5, { historyMode: "legacy" }),
+    /'legacy' as history_mode from threads order by 0 desc limit 5$/u
   );
 });
 
@@ -1002,7 +1024,8 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
     source: "cli",
     model_provider: "openai",
     cli_version: "0.146.1",
-    name: "Candidate name"
+    name: "Candidate name",
+    history_mode: "legacy" as string | null
   };
   const columns = Object.keys(row);
   const queryRequests: Array<{
@@ -1012,6 +1035,7 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       source?: string;
       archived?: boolean;
       modelProvider?: string;
+      historyMode?: string;
     };
   }> = [];
   const adapter = new CodexStoreAdapter({
@@ -1029,7 +1053,7 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       };
     }
   });
-  const writeRollout = (cliVersion: string): void => {
+  const writeRollout = (cliVersion: string, historyMode?: string): void => {
     fs.writeFileSync(rolloutPath, `${JSON.stringify({
       type: "session_meta",
       payload: {
@@ -1038,7 +1062,8 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
         originator: "codex-tui",
         source: "cli",
         cli_version: cliVersion,
-        model_provider: "openai"
+        model_provider: "openai",
+        ...(historyMode !== undefined ? { history_mode: historyMode } : {})
       }
     })}\n`, "utf8");
   };
@@ -1071,7 +1096,8 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
         cwd: "/repo/project",
         source: "cli",
         archived: false,
-        modelProvider: "openai"
+        modelProvider: "openai",
+        historyMode: "legacy"
       }
     });
     assert.match(candidate.fileToken.device, /^\d+$/u);
@@ -1083,6 +1109,23 @@ test("Codex lifecycle candidates require exact root metadata and revalidate the 
       )).status,
       "valid"
     );
+    for (const historyMode of ["paginated", "future", null]) {
+      row.history_mode = historyMode;
+      assert.deepEqual(await adapter.listThreadLifecycleCandidates(request), []);
+      assert.equal(
+        (await adapter.revalidateThreadLifecycleCandidate(
+          candidate.candidateToken,
+          request
+        )).status,
+        "unavailable"
+      );
+    }
+    row.history_mode = "legacy";
+    for (const historyMode of ["paginated", "future"]) {
+      writeRollout("0.146.1", historyMode);
+      assert.deepEqual(await adapter.listThreadLifecycleCandidates(request), []);
+    }
+    writeRollout("0.146.1");
     fs.appendFileSync(rolloutPath, "{}\n", "utf8");
     assert.equal(
       (await adapter.revalidateThreadLifecycleCandidate(
@@ -1232,7 +1275,8 @@ test("Codex lifecycle discovery filters before LIMIT and lists older producer ve
       rowRolloutPath,
       updatedAtMs,
       archived = 0,
-      source = "cli"
+      source = "cli",
+      historyMode = "legacy"
     }: {
       id: string;
       rowCwd: string;
@@ -1240,10 +1284,11 @@ test("Codex lifecycle discovery filters before LIMIT and lists older producer ve
       updatedAtMs: number;
       archived?: number;
       source?: string;
+      historyMode?: string;
     }): string =>
       "insert into threads(" +
       "id,cwd,rollout_path,updated_at_ms,archived,source," +
-      "model_provider,cli_version,title,preview,name" +
+      "model_provider,cli_version,title,preview,name,history_mode" +
       ") values(" + [
         sqliteLiteral(id),
         sqliteLiteral(rowCwd),
@@ -1255,7 +1300,8 @@ test("Codex lifecycle discovery filters before LIMIT and lists older producer ve
         sqliteLiteral(id === SESSION_ID ? "0.140.0" : "0.146.1"),
         sqliteLiteral("title"),
         sqliteLiteral("preview"),
-        sqliteLiteral("name")
+        sqliteLiteral("name"),
+        sqliteLiteral(historyMode)
       ].join(",") + ");";
     const decoys = Array.from({ length: 105 }, (_, index) => rowSql({
       id: `10000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
@@ -1274,9 +1320,17 @@ test("Codex lifecycle discovery filters before LIMIT and lists older producer ve
         "source text not null," +
         "model_provider text not null," +
         "cli_version text not null," +
-        "title text,preview text,name text" +
+        "title text,preview text,name text," +
+        "history_mode text not null default 'legacy'" +
         ");",
       ...decoys,
+      rowSql({
+        id: "20000000-0000-4000-8000-000000000003",
+        rowCwd: cwd,
+        rowRolloutPath: rolloutPath,
+        updatedAtMs: 40_000,
+        historyMode: "paginated"
+      }),
       rowSql({
         id: "20000000-0000-4000-8000-000000000001",
         rowCwd: cwd,
@@ -1312,7 +1366,8 @@ test("Codex lifecycle discovery filters before LIMIT and lists older producer ve
         cwd,
         source: "cli",
         archived: false,
-        modelProvider: "openai"
+        modelProvider: "openai",
+        historyMode: "legacy"
       }
     });
     assert.deepEqual(queryOnlyRows.rows.map((row) => row.id), [SESSION_ID]);
@@ -1333,6 +1388,9 @@ test("Codex lifecycle discovery filters before LIMIT and lists older producer ve
     assert.equal(candidates[0].agentVersion, "0.146.1");
     assert.equal(candidates[0].sourceAgentVersion, "0.140.0");
     assert.equal(candidates[0].candidateToken.version, 2);
+    const historicalRows = await adapter.listThreadRows();
+    assert.equal(historicalRows[0].history_mode, "paginated");
+    assert.equal(historicalRows[0].rollout_path, rolloutPath);
     assert.equal(
       (await adapter.revalidateThreadLifecycleCandidate(
         candidates[0].candidateToken,
@@ -1386,7 +1444,8 @@ test("Codex lifecycle filters survive CANTOPEN recovery on the WAL-safe path", a
       cwd: "/repo/project",
       source: "cli",
       archived: false,
-      modelProvider: "openai"
+      modelProvider: "openai",
+      historyMode: "legacy"
     };
     assert.deepEqual(requests, [
       {

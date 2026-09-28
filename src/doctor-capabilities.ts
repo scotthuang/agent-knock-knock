@@ -6,7 +6,8 @@ import {
 } from "./claude-lifecycle-compatibility.js";
 import {
   codexLifecycleBehaviorProfile,
-  codexRuntimeCompatibilityProfile
+  codexRuntimeCompatibilityProfile,
+  codexRuntimeLifecycleBehaviorProfile
 } from "./codex-lifecycle-compatibility.js";
 
 export type DoctorMode = "tmux";
@@ -122,8 +123,8 @@ export const DOCTOR_PROBE_COMMANDS = Object.freeze(
 
 /**
  * Return the exact native lifecycle/status profile verified for a coding-agent
- * version. This diagnostic never controls action availability: unknown coding-
- * agent versions use the optimistic runtime protocol with a warning.
+ * version. Merely unverified coding-agent versions use the optimistic runtime
+ * protocol with a warning; known incompatible protocols disable native actions.
  */
 export function doctorCodingAgentNativeProfile(
   command: "codex" | "claude",
@@ -366,7 +367,10 @@ function buildProbeResult({
     ...(command === "codex" || command === "claude"
       ? {
           native_profile_supported: nativeProfile !== undefined,
-          native_actions_available: nativeRuntimeProfile !== undefined,
+          native_actions_available: command === "codex"
+            ? status === "ok" &&
+              codexRuntimeLifecycleBehaviorProfile(version) !== undefined
+            : nativeRuntimeProfile !== undefined,
           ...(nativeProfile ? { native_profile: nativeProfile } : {}),
           ...(nativeCompatibilityWarning || invalidAgentVersionWarning
             ? {

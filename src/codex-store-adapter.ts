@@ -13,7 +13,12 @@ import {
 import {
   isValidCodexAgentVersion
 } from "./codex-lifecycle-compatibility.js";
-import { discoverCodexProcesses, type CodexProcessSnapshot, type CodexThreadRow } from "./codex-session-provider.js";
+import {
+  codexThreadUsesLegacyRollout,
+  discoverCodexProcesses,
+  type CodexProcessSnapshot,
+  type CodexThreadRow
+} from "./codex-session-provider.js";
 import type { CodexLocalSessionAdapter } from "./codex-local-session-provider.js";
 import type {
   TerminalThreadLifecycleCandidate,
@@ -60,6 +65,7 @@ export interface CodexThreadQueryFilters {
   source?: string;
   archived?: boolean;
   modelProvider?: string;
+  historyMode?: string;
 }
 
 export interface CodexSqliteThreadQueryResult {
@@ -127,7 +133,8 @@ export class CodexStoreAdapter implements
         cwd: path.resolve(request.cwd),
         source: "cli",
         archived: false,
-        modelProvider: request.modelProvider
+        modelProvider: request.modelProvider,
+        historyMode: "legacy"
       }
     });
     for (const row of rows as CodexLifecycleThreadRow[]) {
@@ -702,7 +709,9 @@ function validateCodexThreadQueryResult(
   result: CodexSqliteThreadQueryResult
 ): CodexThreadRow[] {
   validateCodexThreadColumns(result.columns);
-  return result.rows;
+  return result.columns.includes("history_mode")
+    ? result.rows.map((row) => ({ ...row, history_mode: row.history_mode ?? null }))
+    : result.rows;
 }
 
 function validateCodexThreadColumns(columns: readonly string[]): void {
@@ -1385,7 +1394,8 @@ function readCodexSessionMetadata(
     if (
       typeof payload?.id !== "string" ||
       typeof payload?.cwd !== "string" ||
-      typeof payload?.originator !== "string"
+      typeof payload?.originator !== "string" ||
+      !codexThreadUsesLegacyRollout(payload)
     ) {
       return undefined;
     }
@@ -1423,7 +1433,8 @@ export function buildThreadSelect(
     columnSet.has("source") ? "source" : "null as source",
     columnSet.has("model_provider") ? "model_provider" : "null as model_provider",
     columnSet.has("cli_version") ? "cli_version" : "null as cli_version",
-    columnSet.has("name") ? "name" : "null as name"
+    columnSet.has("name") ? "name" : "null as name",
+    columnSet.has("history_mode") ? "history_mode" : "'legacy' as history_mode"
   ].join(", ");
 
   const predicates: string[] = [];
@@ -1447,6 +1458,13 @@ export function buildThreadSelect(
       ? "model_provider collate binary = :akk_model_provider"
       : "0 = 1");
   }
+  if (filters.historyMode !== undefined) {
+    if (columnSet.has("history_mode")) {
+      predicates.push("history_mode collate binary = :akk_history_mode");
+    } else if (filters.historyMode !== "legacy") {
+      predicates.push("0 = 1");
+    }
+  }
   const where = predicates.length > 0
     ? ` where ${predicates.join(" and ")}`
     : "";
@@ -1464,7 +1482,8 @@ function sqliteThreadFilterParameterCommands(
   const values: Array<[string, string | undefined]> = [
     ["akk_cwd", filters.cwd],
     ["akk_source", filters.source],
-    ["akk_model_provider", filters.modelProvider]
+    ["akk_model_provider", filters.modelProvider],
+    ["akk_history_mode", filters.historyMode]
   ];
   const present = values.filter(
     (entry): entry is [string, string] => entry[1] !== undefined
@@ -1525,6 +1544,7 @@ function codexLifecycleCandidateFromRow({
   const rowModelProvider = stringField(row.model_provider);
   if (
     !nativeThreadId ||
+    !codexThreadUsesLegacyRollout(row) ||
     !NATIVE_THREAD_ID_PATTERN.test(nativeThreadId) ||
     !rowCwd ||
     !rolloutPath ||
@@ -1715,6 +1735,9 @@ function readCodexLifecycleMetadata({
     const modelProvider = stringField(payload?.model_provider);
     if (!id || !cwd || !originator || !source || !cliVersion) {
       throw new Error("Codex lifecycle rollout has incomplete session metadata");
+    }
+    if (!codexThreadUsesLegacyRollout(payload)) {
+      throw new Error("Codex lifecycle rollout does not use legacy history");
     }
     const after = fs.fstatSync(fd);
     if (

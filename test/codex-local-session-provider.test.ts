@@ -85,6 +85,41 @@ test("Codex local session provider degrades when rollout content is unavailable"
   assert.deepEqual(forkContext?.messages, []);
 });
 
+test("Codex paginated history cannot read a retained obsolete rollout for fork context", async () => {
+  const rolloutReads: string[] = [];
+  const provider = new CodexLocalSessionProvider({
+    async listThreadRows() {
+      return [{
+        id: SESSION_ID,
+        cwd: "/repo/project",
+        rollout_path: "/obsolete-rollout.jsonl",
+        history_mode: "paginated",
+        title: "migrated history",
+        archived: true
+      }];
+    },
+    async readRollout(rolloutPath) {
+      rolloutReads.push(rolloutPath);
+      return JSON.stringify({
+        type: "event_msg",
+        payload: { type: "user_message", message: "obsolete context" }
+      });
+    },
+    async listProcessSnapshots() {
+      return [];
+    }
+  });
+  const capabilities = await provider.getCapabilities();
+  assert.equal(capabilities.historicalSessions, "metadata_only");
+  assert.equal(capabilities.forkContext, "partial");
+  const forkContext = await provider.getForkContext({ sessionId: SESSION_ID });
+  assert.equal(forkContext?.source.title, "migrated history");
+  assert.deepEqual(forkContext?.messages, []);
+  assert.deepEqual(forkContext?.commands, []);
+  assert.deepEqual(forkContext?.turns, []);
+  assert.deepEqual(rolloutReads, []);
+});
+
 test("Codex local session provider reports unavailable capabilities without leaking adapter errors", async () => {
   const provider = new CodexLocalSessionProvider(new FailingCodexAdapter());
 

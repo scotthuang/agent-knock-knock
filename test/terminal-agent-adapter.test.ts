@@ -897,22 +897,82 @@ test("Codex adapter accepts current and legacy composer markers without weakenin
   assert.equal(numberedChoice.activity.state, "unknown");
 });
 
-test("Codex 0.157 fullscreen footer stays unknown instead of claiming idle or completion", () => {
-  const inspection = inspectCodexScreen({
-    runtime: { agentVersion: "0.157.0" },
-    screen: [
+test("Codex 0.157 fullscreen idle is diagnostic and incomplete surfaces stay unknown", () => {
+  const screen = [
       "Tip: Paste an image with Ctrl+V to attach it to your next message.",
       "",
       "› Ask Codex to do anything",
       "",
-      "  GPT-6-Sol high · /repo",
-      "  ← for agents · ? for shortcuts   ⚠ 2 warnings · f2 to view"
-    ].join("\n")
-  });
+      "  GPT-6-Sol xhigh · /private/tmp/akk-codex-01571-probe",
+      "  ← for agents · ? for shortcuts                                                              ⚠ 2 warnings · f2 to view"
+    ].join("\n");
 
-  assert.equal(inspection.activity.state, "unknown");
-  assert.equal(inspection.approval.approvable, false);
-  assert.equal(inspection.completion, undefined);
+  for (const version of ["0.157.0", "0.157.1"]) {
+    const inspect = (value: string) => inspectCodexScreen({
+      runtime: { agentVersion: version }, screen: value
+    });
+    for (const frame of [screen, screen.replace(/ +⚠.*$/u, "")]) {
+      const inspection = inspect(frame);
+      assert.equal(inspection.activity.state, "idle", version);
+      assert.equal(inspection.approval.approvable, false);
+      assert.equal(inspection.completion, undefined);
+    }
+    const working = inspect(`• Working (12s • esc to interrupt)\n\n${screen}`);
+    assert.equal(working.activity.state, "working");
+    assert.equal(working.completion, undefined);
+    const completedScreen = inspectCodexScreen({
+      runtime: { agentVersion: version },
+      requestText: "Summarize the current task",
+      screenChangedSinceSend: true,
+      screen: [
+        "› Summarize the current task",
+        "• This is a long final answer shown in the terminal after the task ended.",
+        "─ Worked for 12s ─",
+        screen
+      ].join("\n")
+    });
+    assert.equal(completedScreen.activity.state, "idle");
+    assert.equal(completedScreen.completion, undefined);
+    for (const changed of [
+      screen.replace("Ask Codex to do anything", "unfinished draft"),
+      screen.replace(" · /private/tmp/akk-codex-01571-probe", ""),
+      screen.replace("← for agents", "← for agen…"),
+      screen.replace("f2 to view", "f3 to view"),
+      `${screen}\n  unexplained input owner`,
+      screen.replace("› Ask", "› 1. Ask")
+    ]) {
+      assert.equal(inspect(changed).activity.state, "unknown", changed);
+    }
+  }
+  assert.equal(inspectCodexScreen({ screen }).activity.state, "unknown");
+  assert.equal(inspectCodexScreen({
+    runtime: { agentVersion: "0.157.2" }, screen
+  }).activity.state, "unknown");
+});
+
+test("Codex paginated TUI versions reject native dispatch while status cards remain readable", () => {
+  for (const version of ["0.157.0", "0.157.1"]) {
+    const lifecycle = probeCodexThreadLifecycle(version);
+    assert.equal(lifecycle.status, "unsupported");
+    assert.equal(lifecycle.newThread, false);
+    assert.equal(lifecycle.resumeExact, false);
+    assert.equal(lifecycle.candidateDiscovery, false);
+    assert.match(lifecycle.reason, /paginated/u);
+    const forged = { ...lifecycle, status: "supported" as const,
+      newThread: true, resumeExact: true, candidateDiscovery: true };
+    for (const operation of [
+      { kind: "new_thread" as const },
+      { kind: "resume_thread" as const,
+        nativeThreadId: "22222222-2222-4222-8222-222222222222" }
+    ]) {
+      assert.throws(() => planCodexThreadLifecycle(operation, forged), /paginated/u);
+    }
+    const status = probeCodexNativeInspection(version);
+    assert.equal(status.status, "unsupported");
+    assert.equal(status.statusInspection, false);
+    assert.equal(status.versionCompatibility, "unverified");
+    assert.throws(() => planCodexNativeInspection({ kind: "status" }, status), /command-menu dispatch/u);
+  }
 });
 
 test("Codex adapter parses and invalidates approval prompts with the current composer marker", () => {
@@ -1575,29 +1635,31 @@ test("Codex 0.157 fullscreen status remains readable through the unverified prof
     "  ← for agents · ? for shortcuts   ⚠ 2 warnings · f2 to view"
   ].join("\n");
 
-  const observed = observeCodexNativeInspection({
-    operation: { kind: "status" },
-    screen,
-    expectedNativeThreadId: nativeThreadId,
-    expectedAgentVersion: "0.157.0"
-  });
-  assert.equal(observed.status, "observed");
-  assert.equal(observed.nativeThreadId, nativeThreadId);
-  assert.equal(observed.observedAgentVersion, "0.157.0");
-  assert.deepEqual(observed.result?.fields, [
-    { name: "Server", value: "Local background server" },
-    { name: "Model", value: "GPT-6-Sol (reasoning high, summaries auto)" },
-    { name: "Model provider", value: "openai" },
-    { name: "Directory", value: "/repo" },
-    { name: "Permissions", value: "Workspace (Ask for approval)" },
-    { name: "Agents.md", value: "<none>" },
-    { name: "Account", value: "[REDACTED]" },
-    { name: "Collaboration mode", value: "Default" },
-    { name: "Session", value: nativeThreadId },
-    { name: "Weekly limit", value: "59% left" }
-  ]);
-  assert.doesNotMatch(observed.result?.excerpt ?? "", /owner@example\.com/u);
-  assert.equal(probeCodexNativeInspection("0.157.0").versionCompatibility, "unverified");
+  for (const version of ["0.157.0", "0.157.1"]) {
+    const observed = observeCodexNativeInspection({
+      operation: { kind: "status" },
+      screen: screen.replace("v0.157.0", `v${version}`),
+      expectedNativeThreadId: nativeThreadId,
+      expectedAgentVersion: version
+    });
+    assert.equal(observed.status, "observed");
+    assert.equal(observed.nativeThreadId, nativeThreadId);
+    assert.equal(observed.observedAgentVersion, version);
+    assert.deepEqual(observed.result?.fields, [
+      { name: "Server", value: "Local background server" },
+      { name: "Model", value: "GPT-6-Sol (reasoning high, summaries auto)" },
+      { name: "Model provider", value: "openai" },
+      { name: "Directory", value: "/repo" },
+      { name: "Permissions", value: "Workspace (Ask for approval)" },
+      { name: "Agents.md", value: "<none>" },
+      { name: "Account", value: "[REDACTED]" },
+      { name: "Collaboration mode", value: "Default" },
+      { name: "Session", value: nativeThreadId },
+      { name: "Weekly limit", value: "59% left" }
+    ]);
+    assert.doesNotMatch(observed.result?.excerpt ?? "", /owner@example\.com/u);
+    assert.equal(probeCodexNativeInspection(version).versionCompatibility, "unverified");
+  }
 });
 
 test("Codex native inspection observer requires the newest fresh exact status card", () => {

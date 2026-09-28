@@ -862,7 +862,10 @@ class NativeThreadLifecycleCliApplication {
           ...(snapshot.identity?.sessionId
             ? { expectedNativeSessionId: snapshot.identity.sessionId } : {})
         };
-    return withCodexCompanionFences(runtime, snapshot.codexCompanions);
+    return withCodexCompanionFences({
+      ...runtime,
+      agentVersion: snapshot.version
+    }, snapshot.codexCompanions);
   }
 
   assertInspectionAgentIdentity(input: {
