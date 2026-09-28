@@ -10,7 +10,8 @@ import {
   RecordingTerminalProvider,
   terminalControl,
   codexStatusInspectionPlan,
-  type TerminalEndpointRef
+  type TerminalEndpointRef,
+  type TerminalProviderTextOptions
 } from "../support/terminal-agent-bridge-contract-support.js";
 
 test("native status inspection accepts an exact current slash popup only at a proven idle prompt", async () => {
@@ -18,7 +19,7 @@ test("native status inspection accepts an exact current slash popup only at a pr
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -72,7 +73,7 @@ test("verified modern Codex releases require their exact ordered two-row slash p
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -135,7 +136,7 @@ for (const version of ["0.153.0", "0.153.4", "0.154.0", "0.155.1"] as const) {
       override async sendText(
         target: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(target, text, options);
         this.setScreen(target, [
@@ -203,7 +204,7 @@ test("native status inspection rejects an unprofiled slash popup description bef
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -272,7 +273,7 @@ test("native status inspection ignores historical /status when the current compo
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -332,7 +333,7 @@ test("native status inspection rejects working composer activity", async () => {
       override async sendText(
         target: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(target, text, options);
         this.setScreen(target, screen);
@@ -372,7 +373,7 @@ test("native inspection error stages cannot regress after text injection", async
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -436,7 +437,7 @@ test("native status inspection requires an unambiguous bounded pre-Enter evidenc
       override async sendText(
         target: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(target, text, options);
         this.setScreen(target, [
@@ -522,7 +523,7 @@ test("native status inspection leaves injected text untouched when the final pop
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -575,7 +576,7 @@ test("native status inspection marks any failed Enter attempt uncertain and neve
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [

@@ -17,7 +17,8 @@ import {
   createBridge,
   terminalControl,
   codexPaddedStyledIdleScreen,
-  type TerminalEndpointRef
+  type TerminalEndpointRef,
+  type TerminalProviderTextOptions
 } from "../support/terminal-agent-bridge-contract-support.js";
 
 test("Codex empty composer observation rejects footerless, truncated, and scrollback prompts", async (t) => {
@@ -177,7 +178,7 @@ test("fresh Codex send retains immediate large-paste placeholder support", async
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -216,7 +217,7 @@ test("retry replacement reserves before final exact-empty recapture and text del
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       timeline.push("sendText");
       await super.sendText(target, text, options);
@@ -331,7 +332,7 @@ test("retry replacement sends no Enter when the injected draft changes", async (
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(
@@ -396,7 +397,7 @@ test("retry replacement consumes its attempt and sends no Enter for an opaque pa
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -649,7 +650,7 @@ test("unchanged multilingual multiline composer after one Enter is proven not ac
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, [
@@ -789,7 +790,7 @@ test("Claude exact send accepts Herdr visual wraps without relaxing draft equali
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, composerScreen(this.finalLine));
@@ -901,7 +902,7 @@ test("Codex multiline send fails closed when the stable composer drifts before E
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.textInjectedAt = performance.now();

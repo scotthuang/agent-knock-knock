@@ -106,6 +106,10 @@ import {
   isRecord,
   nonBlankString as stringValue
 } from "./value-guards.js";
+import {
+  assertCodexManagedSendHasLegacyHistory,
+  codexManagedSendRequiresLegacyHistory
+} from "./terminal-send-watch-policy.js";
 
 export type TerminalManagedSendCliPorts = TerminalCommandPortView<
   | "assertExpectedHandoffTokenUsesExactTerminalSelector"
@@ -138,6 +142,7 @@ export type TerminalManagedSendCliPorts = TerminalCommandPortView<
   | "terminalBridgeRuntimeKey"
   | "terminalControlFromTakeover"
   | "terminalList"
+  | "terminalRuntimeForLiveIdentity"
   | "terminalWriterMutationLocks"
   | "verifyCodexPendingManagedSendStatus"
   | "withTerminalDispatchStateScope"
@@ -241,6 +246,7 @@ const soleBoundManagedSessionClaimForTerminal =
 const storeDirFromOptions = rawPort("storeDirFromOptions");
 const terminalBridgeRuntimeKey = rawPort("terminalBridgeRuntimeKey");
 const terminalControlFromTakeover = rawPort("terminalControlFromTakeover");
+const terminalRuntimeForLiveIdentity = rawPort("terminalRuntimeForLiveIdentity");
 const terminalWriterMutationLocks = rawPort("terminalWriterMutationLocks");
 const verifyCodexPendingManagedSendStatus =
   rawPort("verifyCodexPendingManagedSendStatus");
@@ -275,6 +281,32 @@ const runTerminalControlSend = (request: TerminalControlSendRequest) =>
   managedSendRuntime().runTerminalControlSend(request);
 
 const USER_EXPLICIT_MANAGED_LOCK_GRACE_MS = 1_000;
+
+async function assertManagedCodexLegacyHistory(
+  options: Record<string, any>,
+  terminal: TerminalCommandTarget
+): Promise<void> {
+  if (terminal.agent !== "codex") return;
+  const agentVersion = terminalRuntimeForLiveIdentity({
+    terminal, physicalOnly: true
+  }).agentVersion;
+  if (!codexManagedSendRequiresLegacyHistory(agentVersion)) return;
+  let inventory: CodexOpenRootRolloutInventory;
+  try {
+    inventory = await inspectCodexOpenRootRolloutInventory({
+      options, pid: terminal.pid, cwd: terminal.terminalControl.currentPath
+    });
+  } catch {
+    throw new Error(
+      "Codex legacy rollout history could not be verified for managed Send. " +
+      "Refresh AKK list and use its exact physical terminal selector and " +
+      "expected_terminal_token. No Turn was created and no task input was sent."
+    );
+  }
+  assertCodexManagedSendHasLegacyHistory({
+    agentVersion, verifiedLegacyRootCount: inventory.roots.length
+  });
+}
 
 interface RawTerminalInitialAuthority {
   claimedSession?: ManagedSessionState;
@@ -930,6 +962,7 @@ async function runManagedRawTerminalSendAttemptInContext(
       options,
       terminalConversation
     );
+    await assertManagedCodexLegacyHistory(options, terminalConversation);
     await mutationDispatchLedger.beforeMutation(
       scopes, resources, options, terminalConversation
     );
@@ -1326,6 +1359,7 @@ async function runManagedSessionSendInContext(
   await withCanonicalMutationLocks(terminalWriterMutationLocks(
     storeDir, resolvedTerminal.terminalControl
   ), async (scopes, resources) => {
+    await assertManagedCodexLegacyHistory(options, resolvedTerminal);
     const lockedStrictSession = tryLoadManagedSession(storeDir, sessionId);
     if (
       lockedStrictSession?.agent === "codex" &&

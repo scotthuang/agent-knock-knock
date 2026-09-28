@@ -93,7 +93,7 @@ test("doctor recognizes exact native profiles without gating ordinary readiness"
   assert.deepEqual(result.tmux.agents, ["codex"]);
 });
 
-test("known paginated Codex protocols disable lifecycle without changing generic version policy", () => {
+test("Codex 0.158 has a verified profile while older paginated and unknown versions keep their policy", () => {
   for (const version of ["0.157.0", "0.157.1"]) {
     assert.equal(codexRuntimeLifecycleBehaviorProfile(version), undefined);
     assert.equal(doctorCodingAgentNativeProfile("codex", version), undefined);
@@ -111,11 +111,11 @@ test("known paginated Codex protocols disable lifecycle without changing generic
   );
   assert.equal(
     codexRuntimeLifecycleBehaviorProfile("0.158.0"),
-    "codex-tui-generic-v1"
+    "codex-tui-0.158.0"
   );
   assert.equal(codexUnsupportedDurableHistoryWarning("0.158.0"), undefined);
   assert.match(
-    codexRuntimeCompatibilityProfile("0.158.0")?.compatibilityWarning ?? "",
+    codexRuntimeCompatibilityProfile("0.159.0")?.compatibilityWarning ?? "",
     /not been regression-tested/u
   );
 });

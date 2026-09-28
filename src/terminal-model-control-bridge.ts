@@ -49,7 +49,8 @@ export interface TerminalModelControlClassifierPorts {
     allowOpaqueLargePastePlaceholder: boolean,
     classifyOpaqueLargePasteAsDifferent: boolean,
     exactSlashPopupRows?: readonly string[],
-    allowStyledSlashPopupWithoutViewportPaint?: boolean
+    allowStyledSlashPopupWithoutViewportPaint?: boolean,
+    agentVersion?: string
   ): CodexComposerCapture | undefined;
   inspectCodexAsyncQuestionInputMode(
     styledScreen: string
@@ -214,7 +215,8 @@ export function createTerminalModelControlPorts(
             ? terminalModelControlSlashCompletionRows(plan)
             : undefined,
           captureInput.expectedComposer === plan.command &&
-            terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(plan)
+            terminalModelControlAllowsStyledSlashPopupWithoutViewportPaint(plan),
+          modelControlProfile.agentVersion
         )
       : undefined;
     let codexInputBlocked = false;

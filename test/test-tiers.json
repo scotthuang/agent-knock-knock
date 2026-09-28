@@ -159,7 +159,17 @@
     "test/test-tier-manifest.test.ts",
     "test/transcript.test.ts",
     "test/value-guards.test.ts",
-    "test/verified-dead-agent-policy.test.ts"
+    "test/verified-dead-agent-policy.test.ts",
+    "test/codex-app-server-read-client.test.ts",
+    "test/codex-paginated-task.test.ts",
+    "test/codex-app-server-interaction-client.test.ts",
+    "test/codex-paginated-answer-proof.test.ts",
+    "test/codex-app-server-questionnaire.test.ts",
+    "test/codex-paginated-observation.test.ts",
+    "test/codex-paginated-questionnaire-runtime.test.ts",
+    "test/codex-paginated-async-answer.test.ts",
+    "test/codex-paginated-async-response.test.ts",
+    "test/codex-paginated-thread-binding.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",

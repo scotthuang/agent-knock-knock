@@ -17,13 +17,86 @@ import {
   codexPaddedStyledIdleScreen,
   strictCodexCommandApprovalScreen,
   type TerminalPane,
-  type TerminalEndpointRef
+  type TerminalEndpointRef,
+  type TerminalProviderTextOptions
 } from "../support/terminal-agent-bridge-contract-support.js";
 import {
   CLAUDE_DRAFT_REPLACEMENT_SENTINEL,
   TerminalUserExplicitClearUncertainError
 } from
   "../../src/terminal-user-explicit-send-clear.js";
+import {
+  createTerminalEndpointRef,
+  type TerminalControlRef
+} from "../../src/terminal-control-ref.js";
+import type {
+  TerminalControlProvider,
+  TerminalTextDeliveryOptions
+} from "../../src/terminal-control-provider.js";
+
+test("explicit Send requests bracketed paste only for exact Codex 0.158.0 tmux", async (t) => {
+  const cases = [
+    { version: "0.158.0", providerKind: "tmux", bracketedPaste: true },
+    { version: "0.157.1", providerKind: "tmux", bracketedPaste: undefined },
+    { version: undefined, providerKind: "tmux", bracketedPaste: undefined },
+    { version: "0.158.1", providerKind: "tmux", bracketedPaste: undefined },
+    { version: "0.158.0", providerKind: "herdr", bracketedPaste: undefined }
+  ] as const;
+  const request = "Submit the complete single-line request once. ".repeat(12).trimEnd();
+  for (const testCase of cases) {
+    await t.test(`${testCase.providerKind} ${testCase.version ?? "unknown"}`, async () => {
+      const control: TerminalControlRef = testCase.providerKind === "tmux"
+        ? terminalControl(codexTerminalAgentAdapter)
+        : {
+            kind: "herdr", target: "w1:p1", session: "herdr-test", panePid: 100,
+            workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1",
+            terminalId: "terminal-1", capabilities: ["screen_status", "send_keys"]
+          };
+      const endpoint = createTerminalEndpointRef({
+        identity: {
+          providerKind: control.kind, endpointKey: "endpoint-1", resourceKey: "resource-1"
+        },
+        route: { routeKey: "route-1", label: control.target },
+        processAnchorPid: control.panePid,
+        capabilities: control.capabilities,
+        providerRef: control
+      });
+      const defaults = new RecordingTerminalProvider();
+      const textDeliveries: Array<{ text: string; options?: TerminalTextDeliveryOptions }> = [];
+      const keys: string[][] = [];
+      const provider: TerminalControlProvider = {
+        kind: control.kind,
+        supportedCapabilities: defaults.supportedCapabilities,
+        providerCapabilities: defaults.providerCapabilities,
+        diagnostics: async () => ({}),
+        listTerminals: async () => [endpoint],
+        endpoint: () => endpoint,
+        toControlRef: () => control,
+        resolve: async () => endpoint,
+        containsProcess: () => true,
+        capture: async () => "Assistant output with the main Composer off-screen",
+        sendText: async (_terminal, text, options) => {
+          textDeliveries.push({ text, options });
+        },
+        sendKeys: async (_terminal, value) => { keys.push([...value]); }
+      };
+      const bridge = new TerminalAgentBridge({
+        registry: createTerminalAgentAdapterRegistry([codexTerminalAgentAdapter]),
+        terminalProvider: provider,
+        sleep: async () => {}
+      });
+      await bridge.sendUserExplicitCodex(control, request, {
+        runtime: { agentVersion: testCase.version },
+        beforeMutationReservation() {}
+      });
+      assert.deepEqual(textDeliveries, [{
+        text: request,
+        options: testCase.bracketedPaste ? { bracketedPaste: true } : undefined
+      }]);
+      assert.deepEqual(keys, [["C-u"], ["C-m"]]);
+    });
+  }
+});
 
 test("explicit Codex Send replaces even when the Composer is off-screen", async (t) => {
   const request = Array.from(
@@ -89,7 +162,7 @@ test("explicit Codex Send replaces even when the Composer is off-screen", async 
         override async sendText(
           terminal: TerminalEndpointRef | string,
           text: string,
-          options: { socketPath?: string } = {}
+          options: TerminalProviderTextOptions = {}
         ): Promise<void> {
           assert.equal(mutationStarted, true);
           injectedAt = nowMs;
@@ -210,7 +283,7 @@ test("explicit Claude Send replaces empty and nonempty Composer drafts", async (
         override async sendText(
           terminal: TerminalEndpointRef | string,
           text: string,
-          options: { socketPath?: string } = {}
+          options: TerminalProviderTextOptions = {}
         ): Promise<void> {
           if (text === request) replacementTextInjected = true;
           await super.sendText(terminal, text, options);
@@ -269,6 +342,11 @@ test("explicit Claude Send replaces empty and nonempty Composer drafts", async (
               : [`keys:${operation.keys.join(",")}`]
         ),
         ["sentinel", "keys:C-s", "text", "keys:C-m"]
+      );
+      assert.equal(
+        provider.textDeliveryOptions.some((options) => options.bracketedPaste),
+        false,
+        "Claude keeps its existing text-delivery policy"
       );
       assert.equal(
         provider.operations.filter((operation) => operation.kind === "capture")
@@ -422,7 +500,7 @@ test("explicit Claude Send replaces empty and nonempty Composer drafts", async (
       override async sendText(
         terminal: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(terminal, text, options);
         if (text === CLAUDE_DRAFT_REPLACEMENT_SENTINEL) {
@@ -1205,7 +1283,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
       override async sendText(
         target: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(target, text, options);
         this.setScreen(target, `› ${text}\ngpt-5.6-sol high · /repo`);
@@ -1265,7 +1343,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
       override async sendText(
         terminal: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         textInjected = true;
         injectedAt = nowMs;
@@ -1343,7 +1421,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
       override async sendText(
         terminal: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         textInjected = true;
         injectedAt = nowMs;
@@ -1485,7 +1563,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
       override async sendText(
         target: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(target, text, options);
         this.setScreen(
@@ -1543,7 +1621,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
         override async sendText(
           target: TerminalEndpointRef | string,
           text: string,
-          options: { socketPath?: string } = {}
+          options: TerminalProviderTextOptions = {}
         ): Promise<void> {
           await super.sendText(target, text, options);
           this.setScreen(target, [
@@ -1622,7 +1700,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
         override async sendText(
           target: TerminalEndpointRef | string,
           text: string,
-          options: { socketPath?: string } = {}
+          options: TerminalProviderTextOptions = {}
         ): Promise<void> {
           await super.sendText(target, text, options);
           this.setScreen(target, [
@@ -1674,7 +1752,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
         override async sendText(
           target: TerminalEndpointRef | string,
           text: string,
-          options: { socketPath?: string } = {}
+          options: TerminalProviderTextOptions = {}
         ): Promise<void> {
           await super.sendText(target, text, options);
           this.setScreen(target, [
@@ -1732,7 +1810,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
         override async sendText(
           target: TerminalEndpointRef | string,
           text: string,
-          options: { socketPath?: string } = {}
+          options: TerminalProviderTextOptions = {}
         ): Promise<void> {
           await super.sendText(target, text, options);
           this.setScreen(target, placeholderScreen(1));
@@ -1781,7 +1859,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
         override async sendText(
           target: TerminalEndpointRef | string,
           text: string,
-          options: { socketPath?: string } = {}
+          options: TerminalProviderTextOptions = {}
         ): Promise<void> {
           await super.sendText(target, text, options);
           this.setScreen(target, [
@@ -1903,7 +1981,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
       override async sendText(
         target: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(target, text, options);
         this.setScreen(target, working(`❯ ${text}`));

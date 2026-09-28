@@ -103,6 +103,11 @@ import {
   type TerminalWatchTerminalStatus
 } from "./terminal-watch-record.js";
 import { isRecord } from "./value-guards.js";
+import {
+  validateCodexPaginatedTaskAnchor,
+  validateCodexPaginatedTaskCheckpoint,
+  type CodexPaginatedTaskCheckpoint
+} from "./codex-paginated-task.js";
 
 const WATCH_FIELDS = {
   schema: literalGuard(TERMINAL_WATCH_SCHEMA),
@@ -279,7 +284,7 @@ function assertTerminalWatchRecord(
     }
   }
   const minimumCheckpointOffset = watch.anchor.schema ===
-      "agent-knock-knock/terminal-activity-watch-anchor"
+      "agent-knock-knock/terminal-activity-watch-anchor" || watch.anchor.schema === "agent-knock-knock/codex-paginated-task-anchor"
     ? 0
     : watch.anchor.schema ===
       "agent-knock-knock/claude-human-started-active-task-anchor"
@@ -525,6 +530,10 @@ export function assertTerminalWatchObservationCheckpoint(
   value: unknown,
   anchor: TerminalWatchAnchor
 ): asserts value is TerminalWatchObservationCheckpoint {
+  if (anchor.schema === "agent-knock-knock/codex-paginated-task-anchor") {
+    validateCodexPaginatedTaskCheckpoint(value, anchor);
+    return;
+  }
   if (
     anchor.schema === "agent-knock-knock/terminal-activity-watch-anchor"
   ) {
@@ -757,6 +766,11 @@ function assertTerminalWatchAnchor(
 ): asserts value is TerminalWatchAnchor {
   if (!isRecord(value)) {
     throw new Error("terminal Watch anchor must be an object");
+  }
+  if (value.schema === "agent-knock-knock/codex-paginated-task-anchor") {
+    if (agent !== "codex") throw new Error("Codex paginated Watch cannot belong to another agent");
+    validateCodexPaginatedTaskAnchor(value);
+    return;
   }
   if (
     value.schema === "agent-knock-knock/terminal-activity-watch-anchor"
@@ -1453,6 +1467,10 @@ function assertFallbackCheckpointAdvance(
   if (!("schema" in current)) {
     return;
   }
+  if (current.schema === "agent-knock-knock/codex-paginated-task-checkpoint") {
+    assertPaginatedCheckpointAdvance(current, candidate);
+    return;
+  }
   if (
     current.schema ===
       "agent-knock-knock/terminal-activity-watch-checkpoint"
@@ -1509,6 +1527,16 @@ function assertFallbackCheckpointAdvance(
       "fallback Watch accepted identity cannot change"
     );
   }
+}
+
+function assertPaginatedCheckpointAdvance(
+  current: CodexPaginatedTaskCheckpoint, candidate: TerminalWatchObservationCheckpoint
+): void {
+    if (!("schema" in candidate) || candidate.schema !== current.schema ||
+        (current.acceptance_evidence && canonicalJson(current.acceptance_evidence) !==
+          canonicalJson(candidate.acceptance_evidence))) {
+      throw new Error("Codex paginated Watch accepted task cannot change");
+    }
 }
 
 function assertNotificationAdvance(

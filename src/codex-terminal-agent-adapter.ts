@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { CODEX_FULLSCREEN_SHORTCUT_FOOTER as CODEX_158_SHORTCUT_FOOTER } from
+  "./codex-fullscreen-composer-proof.js";
 import {
   classifyCodexProcess,
   type CodexProcessKind,
@@ -6,6 +8,7 @@ import {
 } from "./codex-session-provider.js";
 import {
   codexRuntimeCompatibilityProfile,
+  codexThreadLifecycleHistoryWarning,
   codexUnsupportedDurableHistoryWarning
 } from "./codex-lifecycle-compatibility.js";
 import { redactString } from "./runtime-log.js";
@@ -85,7 +88,7 @@ const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
 // Diagnostic activity only. These fullscreen rows do not prove a task identity,
 // an empty styled Composer, or permission to use a version-bound native action.
-const CODEX_FULLSCREEN_ACTIVITY_VERSIONS = new Set(["0.157.0", "0.157.1"]);
+const CODEX_FULLSCREEN_ACTIVITY_VERSIONS = new Set(["0.157.0", "0.157.1", "0.158.0"]);
 const CODEX_FULLSCREEN_MODEL_FOOTER =
   /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
 const CODEX_FULLSCREEN_SHORTCUT_FOOTER =
@@ -382,7 +385,7 @@ export function probeCodexThreadLifecycle(
     };
   }
   const runtimeProfile = codexRuntimeCompatibilityProfile(agentVersion);
-  const historyWarning = codexUnsupportedDurableHistoryWarning(agentVersion);
+  const historyWarning = codexThreadLifecycleHistoryWarning(agentVersion);
   if (historyWarning) {
     return {
       status: "unsupported",
@@ -424,7 +427,7 @@ export function planCodexThreadLifecycle(
   const runtimeProfile = codexRuntimeCompatibilityProfile(
     capabilities.agentVersion
   );
-  const historyWarning = codexUnsupportedDurableHistoryWarning(
+  const historyWarning = codexThreadLifecycleHistoryWarning(
     capabilities.agentVersion
   );
   if (historyWarning) throw new Error(historyWarning);
@@ -901,7 +904,7 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
   );
   const screenExcerpt = codexScreenExcerpt(options.screen, options.maxExcerptLength ?? 4000);
   const completion = activity.state === "idle" &&
-      !codexUnsupportedDurableHistoryWarning(options.runtime?.agentVersion)
+      !CODEX_FULLSCREEN_ACTIVITY_VERSIONS.has(options.runtime?.agentVersion ?? "")
     ? detectCodexScreenCompletion({
         screen: screenExcerpt,
         requestText: options.requestText,
@@ -1470,7 +1473,7 @@ function codexFullscreenIdlePromptLine(
     .filter((line) => line.trim()).map((line) => line.trimEnd());
   return footer.length === 2 &&
     CODEX_FULLSCREEN_MODEL_FOOTER.test(footer[0]!) &&
-    CODEX_FULLSCREEN_SHORTCUT_FOOTER.test(footer[1]!)
+    (agentVersion === "0.158.0" ? CODEX_158_SHORTCUT_FOOTER : CODEX_FULLSCREEN_SHORTCUT_FOOTER).test(footer[1]!)
     ? lines[composerIndex]
     : undefined;
 }

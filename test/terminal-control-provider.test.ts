@@ -13,7 +13,8 @@ import {
   parseTmuxListPanes,
   type TerminalControlProvider,
   type TerminalPane,
-  type TerminalViewport
+  type TerminalViewport,
+  type TerminalTextDeliveryOptions
 } from "../src/terminal-control-provider.js";
 import {
   createTerminalEndpointRef,
@@ -27,6 +28,7 @@ import type { ActiveCodexProcess } from "../src/codex-session-provider.js";
 
 class RecordingTerminalControlProvider implements TerminalControlProvider {
   readonly calls: string[] = [];
+  readonly textDeliveryOptions: Array<TerminalTextDeliveryOptions | undefined> = [];
   readonly control: TerminalControlRef;
   readonly terminal: TerminalEndpointRef;
 
@@ -117,8 +119,13 @@ class RecordingTerminalControlProvider implements TerminalControlProvider {
     return `${this.kind}:screen`;
   }
 
-  async sendText(terminal: TerminalEndpointRef, text: string): Promise<void> {
+  async sendText(
+    terminal: TerminalEndpointRef,
+    text: string,
+    options?: TerminalTextDeliveryOptions
+  ): Promise<void> {
     this.calls.push(`sendText:${text}`);
+    this.textDeliveryOptions.push(options);
     assert.equal(terminal.identity.providerKind, this.kind);
   }
 
@@ -632,7 +639,9 @@ test("terminal provider registry facade aggregates and dispatches by provider ki
     await provider.capture(beta.terminal, { scrollbackLines: 12 }),
     "beta:screen"
   );
-  await provider.sendText(alpha.terminal, "hello");
+  const deliveryOptions = { bracketedPaste: true };
+  await provider.sendText(alpha.terminal, "hello", deliveryOptions);
+  assert.equal(alpha.textDeliveryOptions[0], deliveryOptions);
   await provider.sendKeys(beta.terminal, ["C-m"]);
 
   assert.deepEqual(alpha.calls, [
@@ -1132,109 +1141,126 @@ test("static viewport inspection requires explicit positive geometry", async () 
   assert.equal(await provider.inspectViewport(terminal), undefined);
 });
 
-test("tmux provider uses canonical socket and pane identity for multiline paste", async () => {
-  const calls: string[][] = [];
-  const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
-  const terminal = await terminalEndpoint(
-    "claude-work:0.0",
-    canonicalSocketPath,
-    {
-      legacySocketPath: "/private/tmp/tmux-501/stale-route",
-      paneId: "%43"
-    }
-  );
-  const provider = new TmuxTerminalControlProvider({
-    socketPaths: [],
-    commands: ["tmux"],
-    runCommand(_command, args) {
-      calls.push(args);
-      return {
-        status: 0,
-        stdout: "",
-        stderr: ""
-      };
-    }
-  });
+const bracketedPasteCases = [
+  { name: "multiline", text: "first line\nsecond line", options: undefined },
+  {
+    name: "single line opt-in",
+    text: "Deliver this complete single-line request as one native paste. ".repeat(12),
+    options: { bracketedPaste: true }
+  }
+] as const;
 
-  await provider.sendText(terminal, "first line\nsecond line");
+test("tmux provider uses canonical socket and pane identity for bracketed paste", async (t) => {
+  for (const testCase of bracketedPasteCases) {
+    await t.test(testCase.name, async () => {
+      const calls: string[][] = [];
+      const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
+      const terminal = await terminalEndpoint(
+        "claude-work:0.0",
+        canonicalSocketPath,
+        {
+          legacySocketPath: "/private/tmp/tmux-501/stale-route",
+          paneId: "%43"
+        }
+      );
+      const provider = new TmuxTerminalControlProvider({
+        socketPaths: [],
+        commands: ["tmux"],
+        runCommand(_command, args) {
+          calls.push(args);
+          return {
+            status: 0,
+            stdout: "",
+            stderr: ""
+          };
+        }
+      });
 
-  assert.equal(calls.length, 2);
-  assert.match(calls[0][4], /^akk-\d+-[0-9a-f-]+$/u);
-  assert.deepEqual(calls[0].slice(0, 5), [
-    "-S",
-    canonicalSocketPath,
-    "set-buffer",
-    "-b",
-    calls[0][4]
-  ]);
-  assert.deepEqual(calls[0].slice(5), ["--", "first line\nsecond line"]);
-  assert.deepEqual(calls[1], [
-    "-S",
-    canonicalSocketPath,
-    "paste-buffer",
-    "-p",
-    "-d",
-    "-b",
-    calls[0][4],
-    "-t",
-    "%43"
-  ]);
-  assert.equal(calls.some((args) => args.includes("send-keys")), false);
+      await provider.sendText(terminal, testCase.text, testCase.options);
+
+      assert.equal(calls.length, 2);
+      assert.match(calls[0][4], /^akk-\d+-[0-9a-f-]+$/u);
+      assert.deepEqual(calls[0].slice(0, 5), [
+        "-S",
+        canonicalSocketPath,
+        "set-buffer",
+        "-b",
+        calls[0][4]
+      ]);
+      assert.deepEqual(calls[0].slice(5), ["--", testCase.text]);
+      assert.deepEqual(calls[1], [
+        "-S",
+        canonicalSocketPath,
+        "paste-buffer",
+        "-p",
+        "-d",
+        "-b",
+        calls[0][4],
+        "-t",
+        "%43"
+      ]);
+      assert.equal(calls.some((args) => args.includes("send-keys")), false);
+    });
+  }
 });
 
-test("tmux provider treats a started multiline paste rejection as uncertain without retry", async () => {
-  const calls: { command: string; args: string[] }[] = [];
-  const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
-  const terminal = await terminalEndpoint(
-    "claude-work:0.0",
-    canonicalSocketPath,
-    {
-      legacySocketPath: "/private/tmp/tmux-501/stale-route",
-      paneId: "%44"
-    }
-  );
-  const provider = new TmuxTerminalControlProvider({
-    socketPaths: [],
-    commands: ["tmux", "/fallback/tmux"],
-    runCommand(command, args) {
-      calls.push({ command, args });
-      if (args.includes("paste-buffer")) {
-        return {
-          status: 1,
-          stdout: "",
-          stderr: "paste rejected after start"
-        };
-      }
-      return { status: 0, stdout: "", stderr: "" };
-    }
-  });
+test("tmux provider never retries a started bracketed paste rejection", async (t) => {
+  for (const testCase of bracketedPasteCases) {
+    await t.test(testCase.name, async () => {
+      const calls: { command: string; args: string[] }[] = [];
+      const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
+      const terminal = await terminalEndpoint(
+        "claude-work:0.0",
+        canonicalSocketPath,
+        {
+          legacySocketPath: "/private/tmp/tmux-501/stale-route",
+          paneId: "%44"
+        }
+      );
+      const provider = new TmuxTerminalControlProvider({
+        socketPaths: [],
+        commands: ["tmux", "/fallback/tmux"],
+        runCommand(command, args) {
+          calls.push({ command, args });
+          if (args.includes("paste-buffer")) {
+            return {
+              status: 1,
+              stdout: "",
+              stderr: "paste rejected after start"
+            };
+          }
+          return { status: 0, stdout: "", stderr: "" };
+        }
+      });
 
-  await assert.rejects(
-    provider.sendText(terminal, "first line\nsecond line"),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.equal(error instanceof TerminalControlInputNotSentError, false);
-      assert.match(error.message, /paste rejected after start/u);
-      return true;
-    }
-  );
+      await assert.rejects(
+        provider.sendText(terminal, testCase.text, testCase.options),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal(error instanceof TerminalControlInputNotSentError, false);
+          assert.match(error.message, /paste rejected after start/u);
+          return true;
+        }
+      );
 
-  assert.deepEqual(calls.map(({ command }) => command), ["tmux", "tmux", "tmux"]);
-  assert.deepEqual(calls.map(({ args }) => args[2]), [
-    "set-buffer",
-    "paste-buffer",
-    "delete-buffer"
-  ]);
-  assert.deepEqual(calls[2].args, [
-    "-S",
-    canonicalSocketPath,
-    "delete-buffer",
-    "-b",
-    calls[0].args[4]
-  ]);
-  assert.equal(calls.some(({ command }) => command === "/fallback/tmux"), false);
-  assert.equal(calls[1].args.at(-1), "%44");
-  assert.equal(calls.every(({ args }) => args[1] === canonicalSocketPath), true);
+      assert.deepEqual(calls.map(({ command }) => command), ["tmux", "tmux", "tmux"]);
+      assert.deepEqual(calls.map(({ args }) => args[2]), [
+        "set-buffer",
+        "paste-buffer",
+        "delete-buffer"
+      ]);
+      assert.deepEqual(calls[2].args, [
+        "-S",
+        canonicalSocketPath,
+        "delete-buffer",
+        "-b",
+        calls[0].args[4]
+      ]);
+      assert.equal(calls.some(({ command }) => command === "/fallback/tmux"), false);
+      assert.equal(calls[1].args.at(-1), "%44");
+      assert.equal(calls.every(({ args }) => args[1] === canonicalSocketPath), true);
+    });
+  }
 });
 
 test("tmux provider proves no input when commands reject or cannot start", async () => {

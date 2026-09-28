@@ -22,6 +22,9 @@ const CODEX_PLAN = planTerminalModelControl(
 const CODEX_01551_PLAN = planTerminalModelControl(
   probeTerminalModelControl("codex", "0.155.1")
 );
+const CODEX_01580_PLAN = planTerminalModelControl(
+  probeTerminalModelControl("codex", "0.158.0")
+);
 const CLAUDE_PLAN = planTerminalModelControl(
   probeTerminalModelControl("claude", "2.1.266")
 );
@@ -104,6 +107,46 @@ test("Codex 0.155.1 model options and set-model use its exact profile", async ()
   assert.deepEqual(result.newSessionDefaults, result.effective);
   assert.equal(result.defaultsChanged, true);
   assert.equal(native.phase, "idle");
+});
+
+test("Codex 0.158 native display names and compact scope footers retain canonical model ids", async () => {
+  const native = new FakeModelTerminal("codex", {
+    currentModel: "gpt-5.2", currentEffort: "high",
+    defaultModel: "gpt-5.2", defaultEffort: "high", codexFullscreen: true
+  });
+  const offer = await discoverTerminalModelOptions({
+    agent: "codex", agentVersion: "0.158.0", plan: CODEX_01580_PLAN,
+    terminalControl: "control", ports: native.ports
+  });
+  assert.equal(offer.catalog.current.model, "gpt-5.2");
+  assert.equal(offer.catalog.models[0]?.id, "gpt-6-astra");
+  const switched = await switchTerminalModel({
+    agent: "codex", agentVersion: "0.158.0", plan: CODEX_01580_PLAN,
+    terminalControl: "control", ports: native.ports,
+    expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
+    request: { model: "gpt-6-astra", reasoningEffort: "ultra" }
+  });
+  assert.equal(switched.outcome, "changed");
+  assert.deepEqual(switched.effective, { model: "gpt-6-astra", reasoningEffort: "ultra" });
+  assert.equal(native.defaultEffort, "high", "Ultra remains conversation-only reasoning");
+  assert.equal(native.phase, "idle");
+  assert.ok(native.sentKeys.every((keys) => keys.length === 1));
+});
+
+test("Codex 0.158 picker parser refuses changed or contradictory footer scope", () => {
+  const advanced = [
+    "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",
+    "  1. Max  For difficult problems when quality matters more than speed · higher usage",
+    "› 2. Ultra (current)  For demanding work using multiple agents · highest usage", "",
+    "  enter apply · s session · esc back"
+  ].join("\n");
+  assert.equal(observeTerminalModelControl(CODEX_01580_PLAN, advanced).state,
+    "codex_advanced_reasoning_picker");
+  assert.equal(observeTerminalModelControl(CODEX_PLAN, advanced).state, "ambiguous");
+  assert.equal(observeTerminalModelControl(CODEX_01580_PLAN,
+    advanced.replace("enter apply", "enter default")).state, "ambiguous");
+  assert.equal(observeTerminalModelControl(CODEX_01580_PLAN,
+    advanced.replace("s session", "s new sessions")).state, "ambiguous");
 });
 
 test("model-control capture facts reduce to one mutually exclusive surface", () => {
@@ -1036,6 +1079,7 @@ class FakeModelTerminal {
   readonly mutateEffortBeforeFirstInput?: TerminalModelReasoningEffort;
   readonly initialResidual?: "profiled_command_popup" | "bare_command";
   readonly materializeBareCommand: boolean;
+  readonly codexFullscreen: boolean;
   readonly claudeEffortsByModel: Readonly<Record<
     string, readonly TerminalModelReasoningEffort[]
   >>;
@@ -1072,6 +1116,7 @@ class FakeModelTerminal {
       mutateEffortBeforeFirstInput?: TerminalModelReasoningEffort;
       initialResidual?: "profiled_command_popup" | "bare_command";
       materializeBareCommand?: boolean;
+      codexFullscreen?: boolean;
       claudeEffortsByModel?: Readonly<Record<
         string, readonly TerminalModelReasoningEffort[]
       >>;
@@ -1088,6 +1133,7 @@ class FakeModelTerminal {
     this.mutateEffortBeforeFirstInput = options.mutateEffortBeforeFirstInput;
     this.initialResidual = options.initialResidual;
     this.materializeBareCommand = options.materializeBareCommand ?? false;
+    this.codexFullscreen = options.codexFullscreen ?? false;
     this.claudeEffortsByModel = options.claudeEffortsByModel ?? {
       opus: ["low", "medium", "high", "xhigh", "max"],
       sonnet: ["low", "medium", "high", "xhigh", "max"],
@@ -1129,7 +1175,7 @@ class FakeModelTerminal {
       }
       return {
         terminalControl: "control",
-        screen: this.screen(),
+        screen: this.codexFullscreen ? this.fullscreenScreen() : this.screen(),
         activityState: "idle" as const,
         approvalBlocked: false,
         exactEmptyComposer: this.phase === "idle",
@@ -1405,5 +1451,26 @@ class FakeModelTerminal {
       ] : []),
       "   Enter to set as default · s to use this session only · Esc to cancel"
     ].join("\n");
+  }
+
+  private fullscreenScreen(): string {
+    const display = (model: string) => model.replace(/^gpt-/u, "GPT-")
+      .replace(/-(astra|sol|luna|terra)$/u, (_, name: string) =>
+        `-${name[0]!.toUpperCase()}${name.slice(1)}`);
+    if (this.phase === "idle") {
+      return [...this.history, "› Ask Codex to do anything", "",
+        `  ${display(this.currentModel)} ${this.currentEffort} · /repo${this.planMode ? " · Plan mode" : ""}`,
+        "  ← for agents · ? for shortcuts"].join("\n");
+    }
+    const footer = this.phase === "codex_reasoning"
+      ? this.selectedEffortIndex >= 4 ? "enter select · esc back" : "enter default · s session · esc back"
+      : this.phase === "codex_advanced"
+        ? this.selectedAdvancedIndex === 1 ? "enter apply · s session · esc back" : "enter default · s session · esc back"
+        : "enter select · esc back";
+    return this.screen().split("\n").map((line) =>
+      line === "Press enter to confirm or esc to go back" ? `  ${footer}` :
+        line.replace(/(Select Reasoning Level for |\d+\. )(gpt-[\w.-]+)/u,
+          (_, prefix: string, model: string) => `${prefix}${display(model)}`)
+    ).join("\n");
   }
 }

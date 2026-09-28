@@ -1,5 +1,13 @@
+import { respondCodexPaginatedAsyncQuestion } from "./codex-paginated-async-response.js";
+import { publicTerminalWatch, terminalWatchCapturedAgentVersion } from "./terminal-watch-presentation.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { CodexLegacyThreadHistoryError, readCodexPaginatedTaskSnapshot } from "./codex-paginated-observation.js";
+import { type CodexPaginatedTaskAnchor } from "./codex-paginated-task.js";
+import { capturePaginatedWatchAnchor as capturePaginatedAnchor, isPaginatedSendWatch, paginatedWatchProcessMatches, observePaginatedWatch, refreshPaginatedResponseForeground } from "./codex-paginated-watch.js";
+import type { CodexAsyncQuestionDurableEvidence } from "./codex-async-question-adapter.js";
+import { observeCodexPaginatedBlockingQuestion, respondCodexPaginatedBlockingQuestion } from "./codex-paginated-questionnaire-runtime.js";
+import { selectCodexUserExplicitSendWatchSource } from "./terminal-send-watch-policy.js";
 import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
 import { callbackRouteFingerprint } from "./callback-route-authority.js";
@@ -15,10 +23,6 @@ import {
   observeClaudeUserExplicitFallbackTranscript,
   observeClaudeHumanStartedActiveTask
 } from "./claude-local-transcript-provider.js";
-import { claudeRuntimeCompatibilityWarning } from
-  "./claude-lifecycle-compatibility.js";
-import { codexRuntimeCompatibilityProfile } from
-  "./codex-lifecycle-compatibility.js";
 import { codexAsyncQuestionMainComposerVisible } from
   "./codex-async-question-adapter.js";
 import type { ExecutorKind } from "./executors.js";
@@ -70,8 +74,7 @@ import {
 } from "./terminal-interaction-authority.js";
 import {
   validateAnyTerminalInteractionProjection,
-  validateTerminalInteractionSubjectResponse,
-  type TerminalInteractionSubjectResponse
+  validateTerminalInteractionSubjectResponse
 } from "./terminal-interaction-protocol.js";
 import { executeTerminalInteractionResponseTransaction } from
   "./terminal-interaction-response-transaction.js";
@@ -167,13 +170,15 @@ export interface PreparedUserExplicitFallbackWatch {
   openclawSession: string;
   openclawBin: string;
   timeoutMs: number;
-  anchor: UserExplicitFallbackWatchAnchor;
+  anchor: UserExplicitFallbackWatchAnchor | CodexPaginatedTaskAnchor;
 }
 
 export interface UserExplicitFallbackWatchReceipt {
   callback_expected: true;
   callback_mode: "terminal_watch";
   watch_id: string;
+  watch_mode?: "exact_task" | "terminal_activity";
+  confidence?: "exact" | "best_effort";
 }
 
 type ExactTerminalWatchObservation =
@@ -195,6 +200,8 @@ type ExactTerminalWatchObservation =
     };
 
 export interface TerminalWatchCliDependencies {
+  capturePaginatedAnchor?: typeof capturePaginatedAnchor;
+  readPaginatedSnapshot?: typeof readCodexPaginatedTaskSnapshot;
   acquireFileLock(lockPath: string): () => void;
   acquireTerminalLock(
     storeDir: string,
@@ -232,6 +239,7 @@ export interface TerminalWatchCliFacade {
     options: TerminalWatchCliOptions;
     terminal: UserExplicitFallbackWatchTarget;
     requestHash: string;
+    requestText?: string;
     messageId: string;
     physicalToken: string;
   }): Promise<PreparedUserExplicitFallbackWatch | undefined>;
@@ -364,6 +372,7 @@ export function createTerminalWatchCliAdapter(
     options: TerminalWatchCliOptions;
     terminal: UserExplicitFallbackWatchTarget;
     requestHash: string;
+    requestText?: string;
     messageId: string;
     physicalToken: string;
   }): Promise<PreparedUserExplicitFallbackWatch | undefined> {
@@ -385,62 +394,9 @@ export function createTerminalWatchCliAdapter(
       rawTerminal.agent_version,
       "running coding-agent version"
     );
-    let anchor: UserExplicitFallbackWatchAnchor;
-    if (input.terminal.agent === "codex") {
-      const inventory = rawTerminal._codex_open_root_rollout_inventory;
-      const acceptanceAnchor = isRecord(inventory)
-        ? captureCodexCandidateSetRolloutAcceptanceAnchor({
-            inventory: inventory as unknown as CodexOpenRootRolloutInventory,
-            now: dependencies.now()
-          })
-        : captureCodexRolloutAcceptanceAnchor({
-            nativeThreadId: requiredString(
-              rawTerminal.native_agent_session_id,
-              "Codex native thread id"
-            ),
-            processUuid: requiredString(
-              rawTerminal.native_agent_process_uuid,
-              "Codex process UUID"
-            ),
-            processBirth: requiredString(
-              rawTerminal.native_agent_process_birth,
-              "Codex process birth"
-            ),
-            mode: "existing",
-            rollout: codexIdentity(rawTerminal).rollout!,
-            now: dependencies.now()
-          });
-      anchor = createCodexUserExplicitFallbackWatchAnchor({
-        acceptanceAnchor,
-        requestHash: input.requestHash,
-        codexVersion: agentVersion
-      });
-    } else {
-      const transcriptAnchor = captureClaudeTranscriptAnchor({
-        sessionId: requiredString(
-          rawTerminal.native_agent_session_id,
-          "Claude native session id"
-        ),
-        cwd: terminalWorkspace(rawTerminal),
-        pid: positiveInteger(rawTerminal.pid, "Claude PID"),
-        claudeHome: stringValue(input.options.claudeHome),
-        agentRows: dependencies.loadClaudeAgentRows(
-          input.options,
-          { required: true }
-        ),
-        now: dependencies.now()
-      });
-      if (!transcriptAnchor) {
-        throw new Error(
-          "Claude transcript anchor is unavailable before terminal input"
-        );
-      }
-      anchor = createClaudeUserExplicitFallbackWatchAnchor({
-        transcriptAnchor,
-        requestHash: input.requestHash,
-        claudeVersion: agentVersion
-      });
-    }
+    const anchor = input.terminal.agent === "codex"
+      ? await captureCodexFallbackWatchAnchor(input, rawTerminal, agentVersion, dependencies)
+      : captureClaudeFallbackWatchAnchor(input, rawTerminal, agentVersion, dependencies);
     return {
       watchId: terminalUserExplicitFallbackWatchId({
         messageId: input.messageId,
@@ -511,7 +467,7 @@ export function createTerminalWatchCliAdapter(
       );
       if (
         !existing ||
-        !isUserExplicitFallbackWatch(existing) ||
+        !(isUserExplicitFallbackWatch(existing) || isPaginatedSendWatch(existing)) ||
         existing.anchor.anchor_fingerprint !==
           input.prepared.anchor.anchor_fingerprint
       ) {
@@ -522,7 +478,9 @@ export function createTerminalWatchCliAdapter(
     return {
       callback_expected: true,
       callback_mode: "terminal_watch",
-      watch_id: watch.watch_id
+      watch_id: watch.watch_id,
+      watch_mode: "exact_task",
+      confidence: "exact"
     };
   }
 
@@ -558,13 +516,15 @@ export function createTerminalWatchCliAdapter(
   }): UserExplicitFallbackWatchReceipt | undefined {
     try {
       const watch = serviceFor(input.options).get(input.watchId);
-      if (!isUserExplicitFallbackWatch(watch) || !watch.callback_route) {
+      if (!(isUserExplicitFallbackWatch(watch) || isPaginatedSendWatch(watch)) || !watch.callback_route) {
         return undefined;
       }
       return {
         callback_expected: true,
         callback_mode: "terminal_watch",
-        watch_id: watch.watch_id
+        watch_id: watch.watch_id,
+        watch_mode: "exact_task",
+        confidence: "exact"
       };
     } catch {
       return undefined;
@@ -593,7 +553,9 @@ export function createTerminalWatchCliAdapter(
     const warnings: string[] = [];
     let anchor: TerminalWatchAnchor | undefined;
     try {
-      anchor = captureTerminalWatchAnchor(
+      anchor = agent === "codex" && rawTerminal.agent_version === "0.158.0"
+        ? await capturePaginatedWatchAnchorWithLock(rawTerminal, options, dependencies)
+        : captureTerminalWatchAnchor(
         agent,
         rawTerminal,
         options,
@@ -898,6 +860,9 @@ function createTerminalWatchInteractionResponder(
         if (!bridge) {
           throw new Error("terminal interaction bridge is unavailable");
         }
+        if (runtime.codexPaginatedThread && executableInteraction.projection.kind === "async_question") {
+          await refreshPaginatedResponseForeground(bridge, terminalControl, runtime, dependencies.now);
+        }
         const attemptId = dependencies.randomUUID();
         const responseHash = hashTerminalInteractionResponse(response);
         const reservation = { attemptId, responseHash };
@@ -908,7 +873,39 @@ function createTerminalWatchInteractionResponder(
           TerminalInteractionResponseExecution
         >({
           reservationFailureFence: "confirmed",
-          dispatch: (hooks) => bridge.respondInteraction(
+          dispatch: (hooks) => "schema" in current.observation_checkpoint &&
+              current.observation_checkpoint.schema === "agent-knock-knock/codex-paginated-task-checkpoint" &&
+              executableInteraction.projection.kind === "questionnaire"
+            ? respondCodexPaginatedBlockingQuestion({
+                watch: current, checkpoint: current.observation_checkpoint, terminalControl,
+                response, expectedFingerprint, now: dependencies.now,
+                authorize: hooks.authorize, beforeDispatch: hooks.beforeDispatch,
+                persistDraft: (draft) => {
+                  current = repository.withWriterLease((scope) => scope.withWatchLock(watchId, () => {
+                    const latest = scope.load(watchId);
+                    const checkpoint = latest.observation_checkpoint;
+                    if (!("schema" in checkpoint) || checkpoint.schema !== "agent-knock-knock/codex-paginated-task-checkpoint") {
+                      throw new Error("Codex blocking question checkpoint changed");
+                    }
+                    const nextCheckpoint = { ...checkpoint };
+                    if (draft) nextCheckpoint.blocking_question_draft = draft;
+                    else delete nextCheckpoint.blocking_question_draft;
+                    return scope.save({ ...latest,
+                      observation_checkpoint: nextCheckpoint,
+                      updated_at: dependencies.now().toISOString()
+                    }, { expectedRevision: terminalWatchRevision(latest) });
+                  }));
+                }
+              })
+            : runtime.codexPaginatedThread && executableInteraction.projection.kind === "async_question"
+              ? respondCodexPaginatedAsyncQuestion({
+                  bridge, terminalControl, terminalEvidence: current.terminal.terminal_endpoint,
+                  runtime, response, now: dependencies.now,
+                  options: { agentVersion: version, expectedFingerprint, expectedExpiresAt,
+                    scrollbackLines: Number(options.scrollbackLines ?? 120), runtime,
+                    authorize: hooks.authorize, beforeDispatch: hooks.beforeDispatch }
+                })
+            : bridge.respondInteraction(
             current.agent,
             terminalControl,
             response,
@@ -1279,6 +1276,9 @@ function sameManualWatchAnchorTarget(
   right: TerminalWatchAnchor
 ): boolean {
   if (left.schema !== right.schema) return false;
+  if (left.schema === "agent-knock-knock/codex-paginated-task-anchor" && right.schema === left.schema) {
+    return samePaginatedWatchTask(left, right);
+  }
   if (
     left.schema ===
       "agent-knock-knock/codex-human-started-active-task-anchor" &&
@@ -1295,11 +1295,7 @@ function sameManualWatchAnchorTarget(
       "agent-knock-knock/claude-human-started-active-task-anchor" &&
     right.schema === left.schema
   ) {
-    return left.prompt_uuid === right.prompt_uuid &&
-      left.pid === right.pid &&
-      left.agent_started_at_ms === right.agent_started_at_ms &&
-      left.device === right.device &&
-      left.inode === right.inode;
+    return sameClaudeWatchTask(left, right);
   }
   if (
     left.schema === "agent-knock-knock/terminal-activity-watch-anchor" &&
@@ -1316,6 +1312,23 @@ function sameManualWatchAnchorTarget(
       );
   }
   return left.anchor_fingerprint === right.anchor_fingerprint;
+}
+
+function sameClaudeWatchTask(
+  left: Extract<TerminalWatchAnchor, { schema: "agent-knock-knock/claude-human-started-active-task-anchor" }>,
+  right: typeof left
+): boolean {
+    return left.prompt_uuid === right.prompt_uuid &&
+      left.pid === right.pid &&
+      left.agent_started_at_ms === right.agent_started_at_ms &&
+      left.device === right.device &&
+      left.inode === right.inode;
+}
+
+function samePaginatedWatchTask(left: CodexPaginatedTaskAnchor, right: CodexPaginatedTaskAnchor): boolean {
+    return left.native_thread_id === right.native_thread_id && left.turn_id === right.turn_id &&
+      left.process_uuid === right.process_uuid && left.process_birth === right.process_birth &&
+      left.origin === right.origin && left.codex_home === right.codex_home;
 }
 
 function optionalIdentityCompatible(
@@ -1354,6 +1367,120 @@ function terminalControlForWatch(
     throw new Error("the exact terminal has no terminal control authority");
   }
   return terminal.terminal_control as unknown as TerminalControlRef;
+}
+
+async function captureCodexFallbackWatchAnchor(
+  input: Parameters<TerminalWatchCliFacade["prepareUserExplicitFallbackWatch"]>[0],
+  rawTerminal: Record<string, unknown>, agentVersion: string, dependencies: TerminalWatchCliDependencies
+): Promise<UserExplicitFallbackWatchAnchor | CodexPaginatedTaskAnchor> {
+      let inventory = rawTerminal._codex_open_root_rollout_inventory;
+      let paginated: CodexPaginatedTaskAnchor | undefined;
+      if (agentVersion === "0.158.0") {
+        try {
+          paginated = await capturePaginatedWatchAnchor(rawTerminal, input.options, dependencies,
+            input.requestText === undefined ? input.requestHash
+              : createHash("sha256").update(input.requestText.replace(/\r\n?/gu, "\n").trim()).digest("hex"));
+        } catch (error) {
+          if (!(error instanceof CodexLegacyThreadHistoryError) || !isRecord(inventory) || !Array.isArray(inventory.roots)) throw error;
+          const roots = inventory.roots.filter((root: CodexOpenRootRolloutInventory["roots"][number]) => root.sessionId === error.threadId);
+          if (roots.length !== 1) throw error;
+          inventory = { ...inventory, roots };
+        }
+      }
+      const source = selectCodexUserExplicitSendWatchSource({
+        agentVersion,
+        legacyRootCount: isRecord(inventory) && Array.isArray(inventory.roots) ? inventory.roots.length : 0,
+        paginatedAnchorAvailable: paginated !== undefined
+      });
+      if (source.source === "none") throw new Error(source.warning);
+      if (paginated) {
+        return paginated;
+      } else {
+      const acceptanceAnchor = isRecord(inventory)
+        ? captureCodexCandidateSetRolloutAcceptanceAnchor({
+            inventory: inventory as unknown as CodexOpenRootRolloutInventory,
+            now: dependencies.now()
+          })
+        : captureCodexRolloutAcceptanceAnchor({
+            nativeThreadId: requiredString(
+              rawTerminal.native_agent_session_id,
+              "Codex native thread id"
+            ),
+            processUuid: requiredString(
+              rawTerminal.native_agent_process_uuid,
+              "Codex process UUID"
+            ),
+            processBirth: requiredString(
+              rawTerminal.native_agent_process_birth,
+              "Codex process birth"
+            ),
+            mode: "existing",
+            rollout: codexIdentity(rawTerminal).rollout!,
+            now: dependencies.now()
+          });
+      return createCodexUserExplicitFallbackWatchAnchor({
+        acceptanceAnchor,
+        requestHash: input.requestHash,
+        codexVersion: agentVersion
+      });
+      }
+
+}
+
+function captureClaudeFallbackWatchAnchor(
+  input: Parameters<TerminalWatchCliFacade["prepareUserExplicitFallbackWatch"]>[0],
+  rawTerminal: Record<string, unknown>, agentVersion: string, dependencies: TerminalWatchCliDependencies
+): UserExplicitFallbackWatchAnchor {
+      const transcriptAnchor = captureClaudeTranscriptAnchor({
+        sessionId: requiredString(
+          rawTerminal.native_agent_session_id,
+          "Claude native session id"
+        ),
+        cwd: terminalWorkspace(rawTerminal),
+        pid: positiveInteger(rawTerminal.pid, "Claude PID"),
+        claudeHome: stringValue(input.options.claudeHome),
+        agentRows: dependencies.loadClaudeAgentRows(
+          input.options,
+          { required: true }
+        ),
+        now: dependencies.now()
+      });
+      if (!transcriptAnchor) {
+        throw new Error(
+          "Claude transcript anchor is unavailable before terminal input"
+        );
+      }
+      return createClaudeUserExplicitFallbackWatchAnchor({
+        transcriptAnchor,
+        requestHash: input.requestHash,
+        claudeVersion: agentVersion
+      });
+
+}
+
+async function capturePaginatedWatchAnchor(
+  terminal: Record<string, unknown>, options: TerminalWatchCliOptions,
+  dependencies: TerminalWatchCliDependencies, requestHash?: string
+): Promise<CodexPaginatedTaskAnchor | undefined> {
+  const bridge = dependencies.createBridge?.(options);
+  if (dependencies.capturePaginatedAnchor) {
+    return dependencies.capturePaginatedAnchor({ terminal, bridge: bridge!, requestHash,
+      codexHome: stringValue(options.codexHome), now: dependencies.now });
+  }
+  if (!bridge) throw new Error("Codex paginated terminal inspection is unavailable");
+  return capturePaginatedAnchor({ terminal, bridge, requestHash,
+    codexHome: stringValue(options.codexHome), now: dependencies.now });
+}
+
+async function capturePaginatedWatchAnchorWithLock(
+  terminal: Record<string, unknown>, options: TerminalWatchCliOptions,
+  dependencies: TerminalWatchCliDependencies
+): Promise<CodexPaginatedTaskAnchor | undefined> {
+  const release = dependencies.acquireTerminalLock(
+    dependencies.storeDirFromOptions(options), terminalControlForWatch(terminal)
+  );
+  try { return await capturePaginatedWatchAnchor(terminal, options, dependencies); }
+  finally { release(); }
 }
 
 function captureTerminalWatchAnchor(
@@ -1396,6 +1523,24 @@ async function observeTerminalWatch(
   const rawTerminal = exactTerminal.state === "available"
     ? exactTerminal.rawTerminal
     : undefined;
+  if (watch.anchor.schema === "agent-knock-knock/codex-paginated-task-anchor") {
+    const terminalMatches = Boolean(rawTerminal && terminalMatchesWatch(rawTerminal, watch) && paginatedWatchProcessMatches(rawTerminal, watch.anchor));
+    return observePaginatedWatch({ watch, observedAt, terminalMatches,
+      terminalAvailable: exactTerminal.state === "available",
+      readSnapshot: dependencies.readPaginatedSnapshot,
+      blockingQuestionnaire: (checkpoint) => observeCodexPaginatedBlockingQuestion({
+        watch, checkpoint, now: new Date(observedAt),
+        responseDecision: (surfaceId, fingerprint) => rawTerminal
+          ? terminalWatchResponseDecision({ ...watch, observation_checkpoint: checkpoint }, rawTerminal,
+              surfaceId, fingerprint, options, dependencies)
+          : { executable: false, suppress: false }
+      }),
+      questionnaire: (checkpoint, questions) => exactTerminal.state === "available"
+        ? terminalWatchQuestionnaireObservation({ watch, observedAt, options, dependencies,
+            rawTerminal, projectedTerminal: exactTerminal.terminal, terminalMatches,
+            observationCheckpoint: checkpoint, codexAsyncQuestionEvidence: questions })
+        : undefined });
+  }
   const projectedTerminal = exactTerminal.state === "available"
     ? exactTerminal.terminal
     : undefined;
@@ -2015,6 +2160,7 @@ function terminalWatchQuestionnaireObservation(input: {
   terminalMatches: boolean;
   observedAt: string;
   observationCheckpoint?: TerminalWatchObservationCheckpoint;
+  codexAsyncQuestionEvidence?: readonly CodexAsyncQuestionDurableEvidence[];
   options: TerminalWatchCliOptions;
   dependencies: TerminalWatchCliDependencies;
 }, requireFallbackAttribution = false): TerminalWatchObservation | undefined {
@@ -2049,7 +2195,8 @@ function terminalWatchQuestionnaireObservation(input: {
       }),
       now: new Date(input.observedAt),
       approvalBlocked: Boolean(approvalFingerprint(input.projectedTerminal)),
-      trustedTerminalEvidence: input.watch.terminal.terminal_endpoint
+      trustedTerminalEvidence: input.watch.terminal.terminal_endpoint,
+      codexAsyncQuestionEvidence: input.codexAsyncQuestionEvidence
     });
   let offer = captureOffer("notify_only");
   if (!offer) return absentAsyncQuestionObservation(input, screen, version);
@@ -2077,7 +2224,7 @@ function terminalWatchQuestionnaireObservation(input: {
     input.options,
     input.dependencies
   );
-  if (responseDecision.executable) {
+  if (responseDecision.executable && !(responseWatch.anchor.schema === "agent-knock-knock/codex-paginated-task-anchor" && offer.projection.kind === "questionnaire")) {
     const executableOffer = captureOffer("executable");
     if (
       !executableOffer ||
@@ -2426,6 +2573,13 @@ function terminalWatchesShareExactTask(
 
 function terminalWatchExactTaskKey(watch: TerminalWatch): string | undefined {
   const anchor = watch.anchor;
+  if (anchor.schema === "agent-knock-knock/codex-paginated-task-anchor") {
+    const checkpoint = watch.observation_checkpoint;
+    const turnId = "schema" in checkpoint && checkpoint.schema === "agent-knock-knock/codex-paginated-task-checkpoint"
+      ? checkpoint.acceptance_evidence?.acceptanceId ?? anchor.turn_id : anchor.turn_id;
+    return turnId ? sha256({ source: "codex_paginated", thread: anchor.native_thread_id,
+      task: turnId, home: anchor.codex_home, process: anchor.process_uuid }) : undefined;
+  }
   if (
     anchor.schema ===
       "agent-knock-knock/codex-human-started-active-task-anchor"
@@ -2710,6 +2864,9 @@ function terminalWatchCandidateMatchesLiveContext(
   terminal: Record<string, unknown>
 ): boolean {
   if (!terminalMatchesWatch(terminal, watch)) return false;
+  if (watch.anchor.schema === "agent-knock-knock/codex-paginated-task-anchor") {
+    return paginatedWatchProcessMatches(terminal, watch.anchor);
+  }
   const sessionId = stringValue(terminal.native_agent_session_id);
   if (
     watch.anchor.schema ===
@@ -3276,143 +3433,6 @@ function codexIdentityForWatch(
   };
 }
 
-function publicTerminalWatch(
-  watch: TerminalWatch,
-  additionalWarnings: readonly string[] = [],
-  exposeInteraction = false
-): Record<string, unknown> {
-  const pending = watch.notification_outbox.filter(({ status }) =>
-    status === "pending" || status === "delivering" || status === "failed"
-  ).length;
-  const capturedAgentVersion = terminalWatchCapturedAgentVersion(watch);
-  const compatibilityWarning = capturedAgentVersion === undefined
-    ? undefined
-    : watch.agent === "codex"
-      ? codexRuntimeCompatibilityProfile(capturedAgentVersion)
-        ?.compatibilityWarning
-      : claudeRuntimeCompatibilityWarning(capturedAgentVersion);
-  const userExplicitFallback = isUserExplicitFallbackWatch(watch);
-  const terminalActivityFallback = isTerminalActivityWatch(watch);
-  const warnings = [...new Set([
-    ...(watch.warnings ?? []),
-    ...additionalWarnings
-  ])];
-  const latestFailedCallback = [...watch.notification_outbox]
-    .reverse()
-    .find(({ status }) => status === "failed");
-  const currentInteraction = exposeInteraction && watch.status === "active" &&
-      watch.current_interaction &&
-      ["pending", "reserved", "response_uncertain"].includes(
-        watch.current_interaction.aggregate.state
-      )
-    ? watch.current_interaction
-    : undefined;
-  const interactionProjection = currentInteraction?.aggregate.state ===
-      "reserved"
-    ? {
-        ...currentInteraction.projection,
-        state: "response_uncertain" as const,
-        capabilities: {
-          ...currentInteraction.projection.capabilities,
-          respond: false
-        }
-      }
-    : currentInteraction?.projection;
-  return {
-    watch_id: watch.watch_id,
-    source: userExplicitFallback
-      ? "terminal_user_explicit_fallback_watch"
-      : terminalActivityFallback
-        ? "terminal_activity_watch"
-        : "user_selected_terminal_watch",
-    watch_mode: terminalActivityFallback ? "terminal_activity" : "exact_task",
-    confidence: terminalActivityFallback ? "best_effort" : "exact",
-    interaction_policy: watch.interaction_policy,
-    capabilities: {
-      interaction_notify: true,
-      interaction_respond: Boolean(
-        interactionProjection?.state === "pending" &&
-        interactionProjection.capabilities.respond
-      )
-    },
-    agent: watch.agent,
-    terminal_id: watch.terminal.terminal_id,
-    native_thread_id: terminalWatchNativeThreadId(watch),
-    workspace: watch.terminal.workspace,
-    status: watch.status,
-    activity_state: watch.status === "active" ? "watching" : "settled",
-    created_at: watch.created_at,
-    deadline_at: watch.deadline_at,
-    updated_at: watch.updated_at,
-    last_activity_at: watch.last_activity_at,
-    ...(compatibilityWarning
-      ? { compatibility_warning: compatibilityWarning }
-      : {}),
-    ...(warnings.length > 0
-      ? { warnings }
-      : {}),
-    callback: {
-      pending,
-      delivered: watch.notification_outbox.filter(
-        ({ status }) => status === "delivered"
-      ).length,
-      failed: watch.notification_outbox.filter(
-        ({ status }) => status === "failed"
-      ).length,
-      superseded: watch.notification_outbox.filter(
-        ({ status }) => status === "superseded"
-      ).length,
-      ...(latestFailedCallback?.last_error_code
-        ? { last_error_code: latestFailedCallback.last_error_code }
-        : {})
-    },
-    ...(interactionProjection
-      ? {
-          interaction_state: interactionProjection,
-          interaction_prompt_fingerprint:
-            interactionProjection.prompt_fingerprint
-        }
-      : {}),
-    ...(watch.settlement
-      ? {
-          settlement: {
-            kind: watch.settlement.kind,
-            observed_at: watch.settlement.observed_at,
-            reason_code: watch.settlement.reason_code,
-            completion_text: watch.settlement.completion_text,
-            completion_id: watch.settlement.completion_id,
-            completion_timestamp: watch.settlement.completion_timestamp
-          }
-        }
-      : {}),
-    available_actions: {
-      status: {
-        tool: "agent_knock_knock_status",
-        arguments: { watch_id: watch.watch_id }
-      },
-      ...(watch.status === "active"
-        ? {
-            unwatch: {
-              tool: "agent_knock_knock_unwatch",
-              arguments: { watch_id: watch.watch_id },
-              requires_user_intent: true
-            }
-          }
-        : {}),
-      ...(interactionProjection?.state === "pending" &&
-          interactionProjection.capabilities.respond
-        ? {
-            respond_interaction: {
-              tool: "agent_knock_knock_respond_interaction",
-              arguments: { watch_id: watch.watch_id },
-              requires_user_intent: true
-            }
-          }
-        : {})
-    }
-  };
-}
-
 function watchStatusInteractionAccess(
   watch: TerminalWatch,
   options: TerminalWatchCliOptions
@@ -3425,40 +3445,6 @@ function watchStatusInteractionAccess(
     );
   }
   return true;
-}
-
-function terminalWatchCapturedAgentVersion(
-  watch: TerminalWatch
-): string | undefined {
-  switch (watch.anchor.schema) {
-    case "agent-knock-knock/codex-human-started-active-task-anchor":
-    case "agent-knock-knock/codex-user-explicit-fallback-watch-anchor":
-      return watch.anchor.codex_version;
-    case "agent-knock-knock/claude-human-started-active-task-anchor":
-    case "agent-knock-knock/claude-user-explicit-fallback-watch-anchor":
-      return watch.anchor.claude_version;
-    case "agent-knock-knock/terminal-activity-watch-anchor":
-      return watch.anchor.agent_version;
-  }
-}
-
-function terminalWatchNativeThreadId(
-  watch: TerminalWatch
-): string | undefined {
-  switch (watch.anchor.schema) {
-    case "agent-knock-knock/codex-human-started-active-task-anchor":
-      return watch.anchor.native_thread_id;
-    case "agent-knock-knock/claude-human-started-active-task-anchor":
-      return watch.anchor.session_id;
-    case "agent-knock-knock/codex-user-explicit-fallback-watch-anchor":
-      return watch.anchor.acceptance_anchor.version === 1
-        ? watch.anchor.acceptance_anchor.native_thread_id
-        : undefined;
-    case "agent-knock-knock/claude-user-explicit-fallback-watch-anchor":
-      return watch.anchor.transcript_anchor.session_id;
-    case "agent-knock-knock/terminal-activity-watch-anchor":
-      return undefined;
-  }
 }
 
 function approvalFingerprint(

@@ -13,7 +13,8 @@ import {
   claudeNativeComposerScreen,
   claudeNarrowNativeComposerScreen,
   claudeNativeStatusPanel,
-  type TerminalEndpointRef
+  type TerminalEndpointRef,
+  type TerminalProviderTextOptions
 } from "../support/terminal-agent-bridge-contract-support.js";
 
 test("verified and unverified Claude versions use the closed stable composer and modal dismissal", async () => {
@@ -43,7 +44,7 @@ test("verified and unverified Claude versions use the closed stable composer and
       override async sendText(
         target: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(target, text, options);
         this.textInjectedAt = performance.now();
@@ -147,7 +148,7 @@ test("verified and generic Claude native status profiles accept the closed 80-co
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, claudeNarrowNativeComposerScreen(text));
@@ -197,7 +198,7 @@ for (const version of [
       override async sendText(
         target: TerminalEndpointRef | string,
         text: string,
-        options: { socketPath?: string } = {}
+        options: TerminalProviderTextOptions = {}
       ): Promise<void> {
         await super.sendText(target, text, options);
         this.setScreen(
@@ -305,7 +306,7 @@ test("Claude native inspection sends no Enter after post-injection identity drif
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.injected = true;
@@ -407,7 +408,7 @@ test("Claude native inspection attempts Enter once and never retries an uncertai
     override async sendText(
       target: TerminalEndpointRef | string,
       text: string,
-      options: { socketPath?: string } = {}
+      options: TerminalProviderTextOptions = {}
     ): Promise<void> {
       await super.sendText(target, text, options);
       this.setScreen(target, claudeNativeComposerScreen(text));

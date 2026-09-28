@@ -38,9 +38,15 @@ compatibility; it can be `unknown` while the screen is visibly idle because
 native identity or durable activity is ambiguous. These axes are diagnostic
 and never replace a current `available_actions` entry as mutation authority.
 
-Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v30 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `model_options({terminal_id})`, the separately advertised Codex-only `repair_model_control({terminal_id})`, followed by `set_model({terminal_id,model,reasoning_effort})`, `native_inspect({terminal_id,inspection})`, `identify_foreground({terminal_id})`, `identify_and_send({terminal_id,request})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, `respond_interaction({turn_id|watch_id,interaction_id,answers,delivery_mode?})` with exactly one subject target and `delivery_mode` present only for an `async_question`, managed `approve({turn_id,decision})` or approve-once-only terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Model selection, model-control residue repair, approval, native interaction response, handoff takeover, and reconciliation require explicit user intent and fresh source state. The trusted plugin/CLI privately derives and revalidates terminal, catalog, binding, candidate, prompt, interaction, composer, handoff, revision, and compare-and-swap fences; the model never transports them. Store format remains 1 and writer protocol is 7; Terminal Watch schema is 3.
+Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` remain slash-command discovery inputs. The v30 structured model contract carries semantic IDs only and does not expose selectors or opaque authority values. Its core shapes are `send({session_id|terminal_id,request})` with mutually exclusive targets, `watch({terminal_id})`, `model_options({terminal_id})`, the separately advertised Codex-only `repair_model_control({terminal_id})`, followed by `set_model({terminal_id,model,reasoning_effort})`, `native_inspect({terminal_id,inspection})`, `identify_foreground({terminal_id})`, `identify_and_send({terminal_id,request})`, `new_thread({terminal_id})`, `resume_thread({terminal_id,native_thread_id})`, `respond_interaction({turn_id|watch_id,interaction_id,answers,delivery_mode?})` with exactly one subject target and `delivery_mode` present only for an `async_question`, managed `approve({turn_id,decision})` or approve-once-only terminal-scoped `approve({terminal_id})`, and `reconcile_binding({terminal_id,conflicting_session_id})`. Model selection, model-control residue repair, approval, native interaction response, handoff takeover, and reconciliation require explicit user intent and fresh source state. The trusted plugin/CLI privately derives and revalidates terminal, catalog, binding, candidate, prompt, interaction, composer, handoff, revision, and compare-and-swap fences; the model never transports them. Store format remains 1 and writer protocol is 8; Terminal Watch schema is 3.
 
-## Turn Flow
+## Managed Turn Flow
+
+This flow describes managed Session/Turn delivery. Codex 0.158.0 physical Send
+uses an independent exact paginated task Watch and returns `watch_id` without
+creating a managed `turn_id`. Its foreground binding, native answer receipts,
+and session-only/new/resume and first-modal limits are described in the
+[0.158.0 compatibility review](codex-0.158.0-compatibility.md).
 
 1. The controller Host calls ordinary send using the exact current listed action and the user-facing request. `session_exact` carries `session_id`; `terminal_follow_current` and `terminal_user_explicit` carry `terminal_id`. Both target fields may be omitted only when AKK must prove one unique send-ready pane. Initial discovery may first resolve one eligible Codex or Claude Code terminal into an AKK session.
 2. AKK verifies that the session is bound to the expected native session, terminal, and idle coding-agent process.
@@ -69,8 +75,10 @@ identity only to the rollout that uniquely accepts the exact request. The
 status UUID is provisional evidence, never durable ownership. Probe or boundary
 uncertainty stops before the task and cannot be retried automatically. This
 operation is optional: ordinary human Send continues to follow its independent
-user-priority contract, and ordinary Send, List, and Status never trigger a
-foreground probe.
+user-priority contract and is never implicitly redirected through these
+identification actions. List and Status never probe. Codex 0.158.0 physical Send
+and exact Watch creation use their separate closed `/status` transaction to
+bind the foreground paginated thread.
 
 An ordinary send never targets a completed or historical `turn_id`. If the current Turn is in the compatibility state `waiting_for_openclaw` because the coding agent asked a question, the controller Host uses `respond(turn_id, answer)`; that answer remains inside the same Turn.
 

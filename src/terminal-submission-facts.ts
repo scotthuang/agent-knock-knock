@@ -128,7 +128,7 @@ export interface CodexRolloutAcceptanceRequest {
 }
 
 export interface TerminalSubmissionAcceptanceEvidence {
-  source: "codex_rollout" | "claude_transcript";
+  source: "codex_rollout" | "codex_paginated" | "claude_transcript";
   kind: "native_user_turn";
   nativeThreadId: string;
   requestHash: string;
@@ -178,7 +178,9 @@ export function validateTerminalSubmissionAcceptanceEvidence(
     if (!isRecord(value.metadata)) {
       throw new Error("native acceptance evidence metadata is invalid");
     }
-    const allowedMetadata = value.source === "codex_rollout"
+    const allowedMetadata = value.source === "codex_paginated"
+      ? new Set(["turn_id"])
+      : value.source === "codex_rollout"
       ? new Set([
           "turn_id", "anchor_offset_bytes", "observed_end_offset_bytes"
         ])

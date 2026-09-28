@@ -61,6 +61,14 @@ const DEFAULT_NOTIFICATION_RETRY_DELAY_MS = 5_000;
 const DEFAULT_NOTIFICATION_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_RECONCILIATION_DELIVERY_LIMIT = 1;
 
+function settledObservationCheckpoint(checkpoint: TerminalWatchObservationCheckpoint): TerminalWatchObservationCheckpoint {
+  if ("schema" in checkpoint && checkpoint.schema === "agent-knock-knock/codex-paginated-task-checkpoint") {
+    const { blocking_question_draft: _privateAnswers, ...settled } = checkpoint;
+    return settled;
+  }
+  return checkpoint;
+}
+
 export interface CreateTerminalWatchInput {
   watch_id?: string;
   agent: ExecutorKind;
@@ -305,6 +313,11 @@ export function createTerminalWatchService(
       const now = canonicalNow(dependencies.now());
       if (Date.parse(now) >= Date.parse(current.deadline_at)) {
         return saveTimeout(current, now);
+      }
+      // A native answer may have advanced private batch state during the read.
+      if (current.anchor.schema === "agent-knock-knock/codex-paginated-task-anchor" &&
+          terminalWatchRevision(listed) !== terminalWatchRevision(current)) {
+        return current;
       }
       assertObservationForWatch(observation, current, now);
       return applyObservation(current, observation, now);
@@ -646,7 +659,7 @@ export function createTerminalWatchService(
       status: input.kind,
       updated_at: input.updatedAt,
       observation_checkpoint:
-        input.observationCheckpoint ?? current.observation_checkpoint,
+        settledObservationCheckpoint(input.observationCheckpoint ?? current.observation_checkpoint),
       last_activity_at: input.lastActivityAt ?? current.last_activity_at,
       settlement: {
         kind: input.kind,

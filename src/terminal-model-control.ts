@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { captureCodexFullscreenComposerFrame } from
+  "./codex-fullscreen-composer-proof.js";
 import type { ExecutorKind } from "./executors.js";
 import {
   isTerminalModelControlPlanForAgent,
@@ -279,18 +281,24 @@ export function parseCodexNativeModelCatalog(
   return { models };
 }
 
-function observeCodexIdleModel(screen: string):
+function observeCodexIdleModel(screen: string, plan?: TerminalModelControlPlan):
 (TerminalModelValue & { readonly planMode: boolean }) | undefined {
   const lines = stripAnsi(screen).replace(/\r\n?/gu, "\n").split("\n");
   while (lines.length > 0 && lines.at(-1)?.trim() === "") lines.pop();
-  const footer = lines.at(-1);
+  const modern = plan?.behaviorProfile === "codex-model-control-0.158.0";
+  const frame = modern ? captureCodexFullscreenComposerFrame(screen, "0.158.0") : undefined;
+  const footer = modern
+    ? frame?.hasShortcutFooter ? frame.plainLines[frame.footerIndex] : undefined
+    : lines.at(-1);
   const match = footer
-    ? /^\s{2,}([a-z0-9][a-z0-9._:/+\-]{0,127})\s+(low|medium|high|xhigh|max|ultra)(?:\s+fast)?(?:\s+·.*|\s+Plan mode(?:\s+\([^)]*\))?)?\s*$/u
+    ? /^\s{2,}([A-Za-z0-9][A-Za-z0-9._:/+\-]{0,127})\s+(low|medium|high|xhigh|max|ultra)(?:\s+fast)?(?:\s+·.*|\s+Plan mode(?:\s+\([^)]*\))?)?\s*$/u
       .exec(footer)
     : undefined;
   if (!match || !isTerminalModelReasoningEffort(match[2])) return undefined;
+  const model = codexSemanticModelLabel(match[1]!, modern);
+  if (!model) return undefined;
   return {
-    model: match[1],
+    model,
     reasoningEffort: match[2],
     planMode: /\bPlan mode\b/u.test(footer ?? "")
   };
@@ -470,7 +478,7 @@ export function observeTerminalModelControl(
 ): TerminalModelControlObservation {
   const normalized = stripAnsi(screen).replace(/\r\n?/gu, "\n");
   return isTerminalModelControlPlanForAgent(plan, "codex")
-    ? observeCodexModelControl(normalized)
+    ? observeCodexModelControl(normalized, plan)
     : observeClaudeModelControl(normalized);
 }
 
@@ -1110,7 +1118,7 @@ export async function discoverTerminalModelOptions(input: {
       codexNativeCatalog?.models.map((model) => [model.id, model]) ?? []
     );
     const currentChoice = nativeById.get(picker.currentModel);
-    let idleCurrent = observeCodexIdleModel(opened.idleCapture.screen);
+    let idleCurrent = observeCodexIdleModel(opened.idleCapture.screen, input.plan);
     models = picker.rows.flatMap((row) => {
       const native = nativeById.get(row.id);
       // A single-effort row commits on Enter instead of opening the profiled
@@ -1132,7 +1140,7 @@ export async function discoverTerminalModelOptions(input: {
     // An adopted profiled slash popup temporarily replaces the ordinary
     // footer. Once the read-only picker is dismissed, the exact idle footer
     // is visible again and can complete the same catalog cross-check.
-    idleCurrent ??= observeCodexIdleModel(dismissed.screen);
+    idleCurrent ??= observeCodexIdleModel(dismissed.screen, input.plan);
     if (!currentChoice || !idleCurrent ||
         idleCurrent.model !== picker.currentModel ||
         !idleCurrent.reasoningEffort ||
@@ -1360,7 +1368,7 @@ export async function switchTerminalModel(input: {
     if (
       input.agent === "codex" &&
       persistence.proven &&
-      observeCodexIdleModel(codexPersistenceBaseline ?? "")?.planMode === true &&
+      observeCodexIdleModel(codexPersistenceBaseline ?? "", input.plan)?.planMode === true &&
       discovery.catalog.current.model !== input.request.model &&
       effective.model === input.request.model &&
       effective.reasoningEffort === discovery.catalog.current.reasoningEffort &&
@@ -2029,7 +2037,8 @@ Promise<TerminalModelControlCapture> {
 }
 
 function observeCodexModelControl(
-  screen: string
+  screen: string,
+  plan: TerminalModelControlPlan
 ): TerminalModelControlObservation {
   const lines = terminalTailLines(screen);
   const fingerprint = screenFingerprint(lines);
@@ -2054,7 +2063,8 @@ function observeCodexModelControl(
   if (latest < 0) {
     return { state: "none", fingerprint, reason: "no current Codex model picker is visible" };
   }
-  const region = currentPickerRegion(lines, latest);
+  const modern = plan.behaviorProfile === "codex-model-control-0.158.0";
+  const region = currentPickerRegion(lines, latest, modern);
   if (!region) {
     return {
       state: "ambiguous",
@@ -2081,18 +2091,22 @@ function observeCodexModelControl(
     return { state: "codex_entry_model_picker", fingerprint, ...parsedEntry };
   }
   if (latest === modelHeader) {
-    const parsedRows = parseCodexModelRows(region);
-    if (!parsedRows) {
+    const parsedRows = parseCodexModelRows(region, modern);
+    if (!parsedRows || modern && ![
+      "enter select · esc back", "enter default · s session · esc back"
+    ].includes(region.at(-1)!.trim())) {
       return { state: "ambiguous", fingerprint, reason: "the Codex model catalog frame is not exact" };
     }
     return { state: "codex_model_picker", fingerprint, ...parsedRows };
   }
   if (latest === reasoningHeader) {
-    const model = /^\s*Select Reasoning Level for (\S+)\s*$/u.exec(
+    const modelLabel = /^\s*Select Reasoning Level for (\S+)\s*$/u.exec(
       region[0] ?? ""
     )?.[1];
+    const model = modelLabel && codexSemanticModelLabel(modelLabel, modern);
     const parsedRows = parseCodexEffortRows(region, false);
-    if (!model || !parsedRows) {
+    if (!model || !parsedRows || modern &&
+        !codexFullscreenEffortFooterMatches(region, parsedRows.rows[parsedRows.selectedIndex]!)) {
       return { state: "ambiguous", fingerprint, reason: "the Codex reasoning frame is not exact" };
     }
     return {
@@ -2104,7 +2118,8 @@ function observeCodexModelControl(
   }
   if (latest === advancedHeader) {
     const parsedRows = parseCodexEffortRows(region, true);
-    if (!parsedRows) {
+    if (!parsedRows || modern &&
+        !codexFullscreenEffortFooterMatches(region, parsedRows.rows[parsedRows.selectedIndex]!)) {
       return { state: "ambiguous", fingerprint, reason: "the Codex advanced-reasoning frame is not exact" };
     }
     return {
@@ -2114,7 +2129,9 @@ function observeCodexModelControl(
     };
   }
   const rows = region.flatMap((line) => {
-    const match = /^\s*(?:›\s*)?\d+\.\s+(Apply to (?:Plan mode override|global default and Plan mode override))\s*$/u
+    const match = (modern
+      ? /^\s*(?:›\s*)?\d+\.\s+(Apply to (?:Plan mode override|global default and Plan mode override))(?:\s{2,}.+)?\s*$/u
+      : /^\s*(?:›\s*)?\d+\.\s+(Apply to (?:Plan mode override|global default and Plan mode override))\s*$/u)
       .exec(line);
     return match ? [match[1]] : [];
   });
@@ -2128,6 +2145,7 @@ function observeCodexModelControl(
     selectedLines.length !== 1 ||
     rows[0] !== "Apply to Plan mode override" ||
     rows[1] !== "Apply to global default and Plan mode override" ||
+    modern && region.at(-1)?.trim() !== "enter select · esc back" ||
     !numberedLines.every((line, index) =>
       new RegExp(`^\\s*(?:›\\s*)?${index + 1}\\.`).test(line)
     )
@@ -2258,7 +2276,14 @@ function observeClaudeModelControl(
   };
 }
 
-function parseCodexModelRows(region: readonly string[]): {
+function codexSemanticModelLabel(label: string, fullscreen: boolean): string | undefined {
+  if (/^[a-z0-9][a-z0-9._:/+\-]*$/u.test(label)) return label;
+  return fullscreen && /^GPT-[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(label)
+    ? label.toLowerCase()
+    : undefined;
+}
+
+function parseCodexModelRows(region: readonly string[], fullscreen = false): {
   rows: readonly ModelRow[];
   selectedIndex: number;
   currentNativeIndex: number;
@@ -2266,12 +2291,14 @@ function parseCodexModelRows(region: readonly string[]): {
 } | undefined {
   const rows: ModelRow[] = [];
   for (const line of region.slice(1, -1)) {
-    const match = /^\s*(›\s*)?(\d+)\.\s+([a-z0-9][a-z0-9._:/+\-]*)(?:\s+((?:\((?:current|default)\)\s*){1,2}))?(?:\s{2,}.*)?$/u
+    const match = /^\s*(›\s*)?(\d+)\.\s+([A-Za-z0-9][A-Za-z0-9._:/+\-]*)(?:\s+((?:\((?:current|default)\)\s*){1,2}))?(?:\s{2,}.*)?$/u
       .exec(line);
     if (!match) continue;
+    const id = codexSemanticModelLabel(match[3]!, fullscreen);
+    if (!id) return undefined;
     const flags = match[4] ?? "";
     rows.push({
-      id: match[3],
+      id,
       label: match[3],
       nativeIndex: Number(match[2]) - 1,
       selected: Boolean(match[1]),
@@ -2430,16 +2457,32 @@ function parseCodexEffortRows(
 
 function currentPickerRegion(
   lines: readonly string[],
-  headerIndex: number
+  headerIndex: number,
+  fullscreen = false
 ): readonly string[] | undefined {
   const after = lines.slice(headerIndex);
-  const footerIndex = after.findIndex((line) =>
-    line.trim() === "Press enter to confirm or esc to go back"
-  );
+  const expectedFooters = fullscreen ? [
+    "enter select · esc back",
+    "enter default · s session · esc back",
+    "enter apply · s session · esc back"
+  ] : ["Press enter to confirm or esc to go back"];
+  const footerIndex = after.findIndex((line) => expectedFooters.includes(line.trim()));
   if (footerIndex < 0 || after.slice(footerIndex + 1).some((line) => line.trim())) {
     return undefined;
   }
   return after.slice(0, footerIndex + 1);
+}
+
+function codexFullscreenEffortFooterMatches(
+  region: readonly string[],
+  selected: EffortRow
+): boolean {
+  const expected = selected.kind !== "effort"
+    ? "enter select · esc back"
+    : selected.effort === "ultra"
+      ? "enter apply · s session · esc back"
+      : "enter default · s session · esc back";
+  return region.at(-1)?.trim() === expected;
 }
 
 function effortFromNativeLabel(

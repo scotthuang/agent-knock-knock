@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   codexActiveWriterViewerVisible,
   codexBlockingModalVisible,
+  currentCodexComposerCapture,
   exactClaudeInjectedPastePlaceholderCapture,
   exactTerminalComposerCapture,
   inspectCodexAsyncQuestionInputMode,
@@ -17,6 +18,92 @@ import {
 import {
   inspectCodexAsyncQuestionInputMode as inspectCodexAsyncQuestionInputModeFromBridge
 } from "../src/terminal-agent-bridge.js";
+import { exactCodexFullscreenSlashComposerCapture } from
+  "../src/codex-fullscreen-composer-proof.js";
+
+const FULLSCREEN_IDLE = [
+  "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m",
+  "", "  GPT-6-Astra high · /repo",
+  "  ← for agents · ? for shortcuts                              ⚠ 2 warnings · f2 to view"
+].join("\n");
+
+test("Codex 0.158 fullscreen Composer distinguishes above-input popup, bare cleanup, and clipped footer", () => {
+  const idle = currentCodexComposerCapture(FULLSCREEN_IDLE, "new request",
+    false, false, undefined, false, "0.158.0");
+  assert.equal(idle?.state, "exact_empty");
+  const popup = [
+    "\x1b[1;7m› /model  choose what model and reasoning effort to use\x1b[0m",
+    "", "\x1b[1m›\x1b[0m /model", "", "  GPT-6-Astra high · /repo"
+  ].join("\n");
+  const completionRows = ["› /model  choose what model and reasoning effort to use"];
+  const parsed = currentCodexComposerCapture(popup, "/model", false,
+    false, completionRows, true, "0.158.0");
+  assert.equal(parsed?.state, "exact_draft");
+  assert.equal(parsed?.profiledSlashPopup, true);
+  assert.equal(currentCodexComposerCapture(
+    `│  Weekly limit:         81% left │\n${popup}`, "/model", false,
+    false, completionRows, true, "0.158.0")?.profiledSlashPopup, true);
+  assert.equal(currentCodexComposerCapture(
+    `  /model-copy  another model command\n${popup}`, "/model", false,
+    false, completionRows, true, "0.158.0"), undefined);
+  const bare = FULLSCREEN_IDLE.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "/model")
+    .replace("  ← for agents · ? for shortcuts", "                              ");
+  const cleanup = currentCodexComposerCapture(bare, "/model", false,
+    false, completionRows, true, "0.158.0");
+  assert.equal(cleanup?.bareCommand, true);
+  assert.equal(cleanup?.profiledSlashPopup, undefined);
+  const typed = bare.replace("/model", "akk composer diagnostic");
+  assert.equal(currentCodexComposerCapture(typed, "akk composer diagnostic", false,
+    false, undefined, false, "0.158.0")?.state, "exact_draft");
+  assert.equal(currentCodexComposerCapture(
+    popup.replace("/model  choose", "/model-copy  choose"), "/model", false,
+    false, completionRows, true, "0.158.0"), undefined);
+  assert.equal(currentCodexComposerCapture(
+    FULLSCREEN_IDLE.replace("? for shortcuts", "? for short…"), "new request",
+    false, false, undefined, false, "0.158.0"), undefined);
+});
+
+test("Codex 0.158 task-running queue footer closes only a nonempty draft", () => {
+  const queueFooter = "  tab to queue message                              ⚠ 2 warnings · f2 to view";
+  const popup = [
+    "\x1b[1;7m› /status      show current session configuration and token usage\x1b[0m",
+    "  /statusline  configure which items appear in the status line", "",
+    "\x1b[1m›\x1b[0m /status", "", "  GPT-6-Astra high · /repo", queueFooter
+  ].join("\n");
+  const rows = ["› /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"];
+  assert.equal(currentCodexComposerCapture(popup, "/status", false,
+    false, rows, true, "0.158.0")?.profiledSlashPopup, true);
+  assert.equal(currentCodexComposerCapture(popup.replace("\x1b[1;7m", "\x1b[1m"),
+    "/status", false, false, rows, true, "0.158.0"), undefined);
+  assert.equal(currentCodexComposerCapture(popup.replace("tab to queue message", "tab to queue mes…"),
+    "/status", false, false, rows, true, "0.158.0"), undefined);
+  const empty = FULLSCREEN_IDLE.replace("  ← for agents · ? for shortcuts                              ⚠ 2 warnings · f2 to view", queueFooter);
+  assert.equal(currentCodexComposerCapture(empty, "new request", false,
+    false, undefined, false, "0.158.0"), undefined);
+  const ordinaryDraft = empty.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "pending text");
+  assert.equal(currentCodexComposerCapture(ordinaryDraft, "pending text", false,
+    false, undefined, false, "0.158.0")?.state, "exact_draft");
+});
+
+test("Codex fullscreen command stability excludes only its validated live hint tail", () => {
+  const rows = ["› /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"];
+  const popup = ["\x1b[1;7m› /status      show current session configuration and token usage\x1b[0m",
+    rows[1]!, "", "\x1b[1m›\x1b[0m /status", "", "  GPT-6-Astra high · /repo"].join("\n");
+  const capture = (screen: string) => exactCodexFullscreenSlashComposerCapture(screen, "/status", rows, true);
+  const expected = capture(popup);
+  assert.ok(expected);
+  assert.equal(capture(`${popup}\n  tab to queue message`)?.digest, expected.digest);
+  assert.equal(capture(`${popup}\n  tab to queue message                              ⚠ 2 warnings · f2 to view`)?.digest,
+    expected.digest);
+  assert.equal(capture(`${popup}\n  unknown input hint`), undefined);
+  assert.equal(capture(popup.replace("\x1b[0m /status", "\x1b[0m /statusline")), undefined);
+  assert.equal(capture(popup.replace("› /status      show", "› /status-copy show")), undefined);
+  for (const changed of [popup.replace("GPT-6-Astra", "GPT-6-Sol"), popup.replace("/repo", "/other")]) {
+    assert.notEqual(capture(changed)?.digest, expected.digest);
+  }
+});
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 

@@ -23,6 +23,26 @@ earlier scrollback
   tab to add notes | enter to submit answer | esc to interrupt
 `;
 
+test("Codex 0.158 blocking questions distinguish the new native Other description from suggestions", () => {
+  const screen = CODEX_OPTIONS.replace(
+    "    3. Option 3  Third choice.",
+    "    3. None of the above  Optionally, add details in notes (tab)"
+  );
+  const parsed = inspectNativeQuestionnaire({
+    agent: "codex", version: "0.158.0", screen
+  });
+  assert.equal(parsed.status, "actionable");
+  if (parsed.status !== "actionable") return;
+  assert.equal(parsed.profile, "codex/0.158.0/request-user-input-v4");
+  assert.equal(parsed.action_plan.kind, "single_select");
+  if (parsed.action_plan.kind !== "single_select") return;
+  assert.equal(parsed.action_plan.choices.some((choice) => choice.outcome === "open_custom_text"), true);
+  const old = inspectNativeQuestionnaire({
+    agent: "codex", version: "0.155.1", screen
+  });
+  assert.equal(old.status, "manual_required");
+});
+
 const CODEX_MULTI_QUESTION = `
   Question 1/2 (2 unanswered)
   Choose an option.

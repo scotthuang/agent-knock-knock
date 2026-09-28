@@ -76,13 +76,12 @@ Open a Web conversation and enter `/akk list`. The connector gives every convers
 
 Suppose several Codex or Claude Code jobs are already running in tmux or Herdr:
 
-Codex CLI 0.157.0/0.157.1 has partial compatibility: fullscreen activity and
-visible native status cards are readable, and explicit terminal Send can use best-effort
-terminal-activity Watch. Its new paginated history is not yet supported for
-managed completion callbacks, native thread transitions, or automated
-questionnaire answers. Automated native `/status` dispatch is also unavailable.
-`--no-daemon` does not restore legacy task history. See
-the [compatibility review](docs/codex-0.157.1-compatibility.md).
+Codex CLI 0.158.0 supports exact paginated task Watches for ordinary terminal
+Send, native question responses, and durable completion callbacks. The adapter
+checks the foreground thread and server version before attaching; uncertain
+answers are never automatically replayed. See the [0.158.0 compatibility
+review](docs/codex-0.158.0-compatibility.md) for managed-session and already-open
+question boundaries. Codex 0.157.x retains its [partial compatibility](docs/codex-0.157.1-compatibility.md).
 
 - **Watch without babysitting.** `/akk watch <terminal>` observes work already in progress and sends a callback when it finishes, needs approval, or becomes blocked. You can leave the terminal and continue from your phone or another chat client.
 - **Send without typing in a tiny remote console.** `/akk <selector>: <message>` sends your natural-language instruction to the selected live coding-agent terminal. An explicit user Send has priority over stale AKK management state.
@@ -129,7 +128,7 @@ OpenClaw / Pi / DeepSeek Harness
       Codex / Claude Code
 ```
 
-For a managed Send, AKK verifies the selected terminal and coding-agent process, writes one user request, monitors that exact Turn, and returns completion or attention callbacks to the initiating Host session. If stale AKK bookkeeping blocks an explicit Codex Send before terminal input, AKK can fall back to a verified one-time physical Send and attach a read-only Watch for callback and Status recovery.
+For a managed Send, AKK verifies the selected terminal and coding-agent process, writes one user request, monitors that exact Turn, and returns completion or attention callbacks to the initiating Host session. If stale AKK bookkeeping blocks an explicit Codex Send before terminal input, AKK can fall back to a verified one-time physical Send and attach a task Watch for callback and Status recovery.
 
 Native Pi and DeepSeek Harness connectors accept the shared catalog through a
 versioned, secretless Host Adapter capability handshake. Startup verifies the
@@ -138,7 +137,7 @@ Skill SHA-256 digests; an older, missing, or drifted handshake fails closed
 instead of mounting a partial tool surface. Connector package versions remain
 independent of one another.
 
-In the current OpenClaw plugin and core Host Adapter, an idle Codex pane with ambiguous foreground rollout identity may advertise `identify_foreground`. That action issues one closed `/status` command to the exact pane. It does not mutate the AKK Store, but it does type into the visible terminal. Its 30-second result is diagnostic only and grants no later authority. The separate `identify_and_send` action keeps one terminal lock across the probe and one requested task, then relies on exact request acceptance—not the status card—for durable Session and Turn identity. Ordinary Send, List, and Status never run this probe.
+In the current OpenClaw plugin and core Host Adapter, an idle Codex pane with ambiguous foreground rollout identity may advertise `identify_foreground`. That action issues one closed `/status` command to the exact pane. It does not mutate the AKK Store, but it does type into the visible terminal. Its 30-second result is diagnostic only and grants no later authority. The separate `identify_and_send` action keeps one terminal lock across the probe and one requested task, then relies on exact request acceptance—not the status card—for durable Session and Turn identity. List and Status never run this probe. Codex 0.158.0 exact Send and active-task Watch use a separate closed `/status` transaction to bind the foreground paginated thread; subsequent observation is read-only.
 
 AKK is local-first: there is no hosted control plane or telemetry. It stores only the local state needed for routing, lifecycle recovery, callback delivery, and idempotency.
 

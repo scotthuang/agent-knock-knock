@@ -128,7 +128,7 @@ export interface TerminalListTerminalFactPorts {
   observeAgentVersion(): string | undefined;
   observeTerminalHasBlockingTurn(): boolean;
   observeComposer(
-    terminalState: EffectiveTerminalListState
+    terminalState: EffectiveTerminalListState, agentVersion?: string
   ): Promise<TerminalListComposerFacts>;
   observePhysicalProcessIncarnation():
     TerminalListPhysicalProcessIncarnation | undefined;
@@ -200,7 +200,7 @@ export async function collectTerminalListTerminalFacts(input: {
       })
     : undefined;
   const terminalHasBlockingTurn = ports.observeTerminalHasBlockingTurn();
-  const composer = await ports.observeComposer(effectiveState);
+  const composer = await ports.observeComposer(effectiveState, agentVersion);
   const processIncarnation = ports.observePhysicalProcessIncarnation();
   const zeroRolloutModelControlVerified = zeroRolloutModelControlFact({
     session,

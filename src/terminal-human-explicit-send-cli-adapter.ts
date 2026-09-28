@@ -70,6 +70,8 @@ import { terminalUserExplicitFallbackWatchId } from
   "./terminal-watch-store.js";
 import { terminalSendResultContract } from
   "./terminal-dispatch-presenter.js";
+import { codexPhysicalSendUsesPaginatedWatch, terminalSendFallbackWatchPresentation } from
+  "./terminal-send-watch-policy.js";
 import { expandHome } from "./cli-command-runtime.js";
 import {
   type TerminalCommandCliOptions,
@@ -809,12 +811,13 @@ function printReplayedUserExplicitSend(
     options,
     watchId
   });
-  const callbackAvailable = callbackReceipt?.callback_expected === true;
+  const observation = terminalSendFallbackWatchPresentation(callbackReceipt);
+  const callbackAvailable = observation.callbackAvailable;
   printJson({
     delivered: true,
     delivered_unmanaged: true,
     delivery_receipt: "enter_dispatched",
-    ...(callbackReceipt ?? { callback_expected: false }),
+    ...observation.receiptFields,
     ...terminalSendResultContract({
       terminalInputDispatched: true,
       agentAcceptance: "unproven",
@@ -826,7 +829,9 @@ function printReplayedUserExplicitSend(
     replayed: true,
     terminal_id: terminal.conversationId,
     message_id: intent.messageId,
-    scope: "terminal_user_explicit"
+    scope: "terminal_user_explicit",
+    warning: observation.summary,
+    next_action: observation.nextAction
   });
 }
 
@@ -1075,6 +1080,7 @@ async function runUserExplicitTerminalFallback(
         options,
         terminal: fresh,
         requestHash: intentLease.intent.boundary.requestHash,
+        requestText: payload,
         messageId,
         physicalToken: intentLease.intent.boundary.physicalToken
       });
@@ -1239,7 +1245,8 @@ async function runUserExplicitTerminalFallback(
       composer_disposition: composerDisposition,
       delivered_unmanaged: true
     });
-    const callbackAvailable = callbackReceipt?.callback_expected === true;
+    const observation = terminalSendFallbackWatchPresentation(callbackReceipt);
+    const callbackAvailable = observation.callbackAvailable;
     printJson({
       delivered: true,
       delivered_unmanaged: true,
@@ -1247,7 +1254,7 @@ async function runUserExplicitTerminalFallback(
       cleanup_warnings: cleanupWarnings,
       intent_warnings: intentWarnings,
       callback_warnings: callbackWarnings,
-      ...(callbackReceipt ?? { callback_expected: false }),
+      ...observation.receiptFields,
       terminal_id: fresh.conversationId,
       message_id: messageId,
       scope: "terminal_user_explicit",
@@ -1267,17 +1274,11 @@ async function runUserExplicitTerminalFallback(
       replaced_existing_draft: true,
       previous_management_release_attempted: true,
       warning: textSummary(
-        `AKK delivered the user's message after managed-state preparation ` +
-        `failed (${fallbackReason}). ` +
-        (callbackReceipt
-          ? `Terminal Watch ${callbackReceipt.watch_id} now provides the ` +
-            `completion callback; no managed Turn was claimed.`
-          : "No callback Watch could be attached.")
+        `AKK delivered the user's message using physical terminal authority ` +
+        `(${fallbackReason}). ` +
+        observation.summary
       ),
-      next_action: callbackReceipt
-        ? `wait for Terminal Watch ${callbackReceipt.watch_id} callback; ` +
-          "watch-status remains available for recovery"
-        : "refresh AKK list; the live coding agent continues independently of AKK callback state"
+      next_action: observation.nextAction
     });
   } finally {
     releaseTerminalLockOnce();
@@ -1329,6 +1330,12 @@ async function runRawTerminalSend(
     options,
     terminal: terminalConversation
   });
+  const usePaginatedWatch = terminalConversation.agent === "codex" &&
+    !identifyForeground && codexPhysicalSendUsesPaginatedWatch(
+      terminalRuntimeForLiveIdentity({
+        terminal: terminalConversation, physicalOnly: true
+      }).agentVersion
+    );
   const explicitOptions: Record<string, any> = {
     ...options,
     messageId: stringValue(options.messageId) ?? `user-send-${randomUUID()}`
@@ -1340,6 +1347,13 @@ async function runRawTerminalSend(
   );
   if (reservation.outcome === "replayed") return;
   const intentLease = reservation.lease;
+  if (usePaginatedWatch) {
+    return runUserExplicitTerminalFallback(
+      explicitOptions, terminalConversation,
+      new Error("Codex 0.158.0 physical Send uses native task Watch observation"),
+      intentLease
+    );
+  }
   const managedResult = await runManagedRawTerminalSend(
     {
       ...explicitOptions,

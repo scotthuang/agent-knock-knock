@@ -21,6 +21,8 @@ import type {
 } from "../src/terminal-control-ref.js";
 import type { CodexAsyncQuestionDurableEvidence } from
   "../src/codex-async-question-adapter.js";
+import { stripTerminalEscapeSequences } from
+  "../src/terminal-native-inspection-bridge.js";
 
 const NOW = new Date("2026-09-07T04:00:00.000Z");
 const PANE: TerminalPane = {
@@ -77,10 +79,19 @@ class RecordingProvider extends StaticTerminalControlProvider {
   readonly events: Event[];
   failText = false;
   failKeys = false;
+  styledScreen = "";
+  ansiCaptureCount = 0;
 
   constructor(events: Event[]) {
     super({ panes: [PANE] });
     this.events = events;
+  }
+
+  override async capture(_terminal: TerminalEndpointRef, options: {
+    scrollbackLines?: number; preserveEscapes?: boolean;
+  } = {}): Promise<string> {
+    if (options.preserveEscapes) this.ansiCaptureCount += 1;
+    return this.styledScreen;
   }
 
   override async sendText(
@@ -122,6 +133,8 @@ async function fixture(
     driftCaptureAt?: number;
     evidenceByCapture?: readonly (readonly CodexAsyncQuestionDurableEvidence[])[];
     evidenceAfterNavigation?: readonly CodexAsyncQuestionDurableEvidence[];
+    plainInspectionScreen?: boolean;
+    styledScreenOverride?: string;
   } = {}
 ) {
   const events: Event[] = [];
@@ -134,7 +147,10 @@ async function fixture(
   const service = new TerminalInteractionResponseBridge(provider, {
     captureInspection: async (_agent, currentControl) => {
       events.push("capture");
-      const screen = screens[Math.min(captureIndex, screens.length - 1)] ?? "";
+      const originalScreen = screens[Math.min(captureIndex, screens.length - 1)] ?? "";
+      provider.styledScreen = options.styledScreenOverride ?? originalScreen;
+      const screen = options.plainInspectionScreen
+        ? stripTerminalEscapeSequences(originalScreen) : originalScreen;
       captureIndex += 1;
       return {
         terminalControl: captureIndex === options.driftCaptureAt
@@ -158,7 +174,7 @@ async function fixture(
     },
     ...(asyncEvidence === undefined
       ? {}
-      : { captureCodexAsyncQuestionEvidence: () =>
+      : { captureCodexAsyncQuestionEvidence: async () =>
           options.evidenceByCapture?.[captureIndex - 1] ??
           (captureIndex >= 4 && options.evidenceAfterNavigation
             ? options.evidenceAfterNavigation
@@ -204,6 +220,73 @@ const ASYNC_COMPLETED_SCREEN = [
 const ASYNC_OTHER_SCREEN = ASYNC_EXPANDED_SCREEN
   .replace("  › 1. Local", "    1. Local")
   .replace("    3. Other", "  › 3. Other");
+
+test("Codex 0.158 foreground status collapses and restores the same async question without answering", async () => {
+  const evidence: readonly CodexAsyncQuestionDurableEvidence[] = [{
+    ...ASYNC_EVIDENCE[0]!, remainingCount: 2,
+    questions: [...ASYNC_EVIDENCE[0]!.questions, { title: "What deadline should I use?" }]
+  }];
+  const first = ASYNC_EXPANDED_SCREEN.replace("  Which target", "  1 of 2\n\n  Which target")
+    .replace("enter submit   ctrl + ] skip   ⌥ + ↓ main prompt",
+      "enter submit   ctrl+] skip   shift+→ main prompt   shift+← next question");
+  const second = [
+    "  2 of 2", "", "  What deadline should I use?", "", "  Type your answer", "",
+    "  enter submit   ctrl+] skip   shift+→ prev question"
+  ].join("\n");
+  const collapsed = [
+    "• Working (3s • esc to interrupt)", "", "• Queued follow-up inputs",
+    "  ? 2 questions", "    shift+← to answer", "",
+    "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m", "",
+    "  GPT-6-Astra high · /repo", "  ← for agents · ? for shortcuts"
+  ].join("\n");
+  const harness = await fixture([second, second, first, first, collapsed, collapsed,
+    collapsed, collapsed, first, first, second, second], evidence, { plainInspectionScreen: true });
+  const runtime = { ...RUNTIME, agentVersion: "0.158.0" };
+  const receipt = await harness.service.collapseCodexAsyncQuestionForStatus(harness.control, runtime);
+  assert.ok(receipt.restore);
+  assert.equal(receipt.restore.nativeQuestionId,
+    '["request_user_input_async","call_async_1",1]');
+  await harness.service.restoreCodexAsyncQuestionAfterStatus(receipt.terminalControl, runtime,
+    receipt.restore);
+  assert.deepEqual(harness.events.filter((event) => event.startsWith("keys:")),
+    ["keys:S-Right", "keys:S-Right", "keys:S-Left", "keys:S-Left"]);
+  assert.equal(harness.events.some((event) => event.startsWith("text:")), false);
+});
+
+test("Codex foreground status proves a collapsed main Composer from fresh ANSI rather than plain inspection", async () => {
+  const collapsed = ["• Working (3s • esc to interrupt)", "", "• Queued follow-up inputs",
+    "  ? 1 question", "    shift+← to answer", "",
+    "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m", "",
+    "  GPT-6-Astra high · /repo", "  ← for agents · ? for shortcuts"].join("\n");
+  const runtime = { ...RUNTIME, agentVersion: "0.158.0" };
+  const ready = await fixture([collapsed], ASYNC_EVIDENCE, { plainInspectionScreen: true });
+  const result = await ready.service.collapseCodexAsyncQuestionForStatus(ready.control, runtime);
+  assert.equal(result.restore, undefined);
+  assert.equal(ready.provider.ansiCaptureCount, 1);
+  assert.equal(ready.events.some((event) => event.startsWith("text:") || event.startsWith("keys:")), false);
+  for (const styledScreenOverride of [stripTerminalEscapeSequences(collapsed),
+    collapsed.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "existing draft"),
+    collapsed.replace("/repo", "/other"), collapsed.replace("? 1 question", "? 2 questions")]) {
+    const blocked = await fixture([collapsed], ASYNC_EVIDENCE,
+      { plainInspectionScreen: true, styledScreenOverride });
+    await assert.rejects(blocked.service.collapseCodexAsyncQuestionForStatus(blocked.control, runtime),
+      TerminalInteractionInputNotStartedError);
+    assert.equal(blocked.events.some((event) => event.startsWith("text:") || event.startsWith("keys:")), false);
+  }
+});
+
+test("Codex 0.158 foreground status never dismisses a blocking question or existing async answer draft", async () => {
+  const runtime = { ...RUNTIME, agentVersion: "0.158.0" };
+  for (const screen of [OPTIONS_SCREEN, [
+    "  Which target should I use?", "", "  typed answer already present", "",
+    "  enter submit   ctrl+] skip   shift+→ main prompt"
+  ].join("\n")]) {
+    const harness = await fixture([screen], ASYNC_EVIDENCE);
+    await assert.rejects(harness.service.collapseCodexAsyncQuestionForStatus(harness.control, runtime),
+      TerminalInteractionInputNotStartedError);
+    assert.equal(harness.events.some((event) => event.startsWith("keys:") || event.startsWith("text:")), false);
+  }
+});
 
 async function answerAsyncFixture(
   harness: Awaited<ReturnType<typeof fixture>>,

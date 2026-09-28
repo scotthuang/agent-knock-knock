@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { captureCodexFullscreenComposerFrame } from
+  "./codex-fullscreen-composer-proof.js";
 
 /**
  * This adapter is deliberately version-bound. Later Codex releases gained
@@ -8,7 +10,8 @@ import { createHash } from "node:crypto";
 export const CODEX_ASYNC_QUESTION_PROFILES: Readonly<Record<string, string>> =
   Object.freeze({
     "0.154.0": "codex/0.154.0/request-user-input-async-v1",
-    "0.155.1": "codex/0.155.1/request-user-input-async-v1"
+    "0.155.1": "codex/0.155.1/request-user-input-async-v1",
+    "0.158.0": "codex/0.158.0/request-user-input-async-v2"
   });
 
 export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
@@ -24,7 +27,7 @@ export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
 });
 
 const ANSI_SEQUENCE_PATTERN =
-  /[\u001B\u009B](?:(?:\[[0-?]*[ -/]*[@-~])|(?:\][^\u0007]*(?:\u0007|\u001B\\))|.)/gu;
+  /[\u001B\u009B](?:(?:\[[0-?]*[ -/]*[@-~])|(?:\][^\u0007\u001B]*(?:\u0007|\u001B\\))|.)/gu;
 const UNSAFE_CONTROL_PATTERN =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
@@ -78,6 +81,8 @@ export interface CodexAsyncQuestionMatch {
   readonly source_question_index: number;
   readonly question: CodexAsyncQuestionSemanticQuestion;
   readonly selected_option_id?: string;
+  /** Exact 0.158 durable AnsweredQuestion tuple, never a public identifier. */
+  readonly native_question_id?: string;
 }
 
 export interface CodexAsyncQuestionPromptEvidence {
@@ -116,6 +121,9 @@ export type CodexAsyncQuestionOwnerPrivateActionPlan =
         CodexAsyncQuestionDeliveryMode,
         "submit" | "queue"
       >>;
+      /** Only a fully visible 0.158 empty editor may authorize this navigation. */
+      readonly prompt_stack_back?: "shift_right" | "alt_down";
+      readonly prompt_stack_forward?: "shift_left" | "alt_up";
       readonly expected_region_sha256: string;
     };
 
@@ -259,7 +267,7 @@ export function inspectCodexAsyncQuestion(input: {
     return { state: "ambiguous", reason: "invalid_durable_evidence", profile };
   }
 
-  const collapsed = parseCollapsed(captured.lines);
+  const collapsed = parseCollapsed(captured.lines, profile);
   const expandedMarker = hasExpandedMarker(captured.lines);
   if (collapsed.status === "exact" && !expandedMarker) {
     return inspectCollapsedQuestion(collapsed, normalizedEvidence, profile);
@@ -343,6 +351,10 @@ export function codexAsyncQuestionMainComposerVisible(input: {
     return false;
   }
   const footer = captured.lines.at(-1)?.trim() ?? "";
+  if (input.version === "0.158.0") {
+    return captureCodexFullscreenComposerFrame(input.screen, input.version)
+      ?.hasShortcutFooter === true;
+  }
   return /^(?:gpt-[\w.-]+(?:\s+\S+)?|[-\w.]+ default)\s+·\s+\S.*$/u
     .test(footer) && captured.lines.slice(0, -1).some(
       (line) => /^[›»](?:\s|$)/u.test(line)
@@ -446,6 +458,12 @@ function inspectExpandedQuestion(
         steer_current_turn: "submit",
         queue_next_turn: "queue"
       },
+      ...(expanded.promptStackBack === undefined
+        ? {}
+        : { prompt_stack_back: expanded.promptStackBack }),
+      ...(expanded.promptStackForward === undefined
+        ? {}
+        : { prompt_stack_forward: expanded.promptStackForward }),
       expected_region_sha256: exactDigest
     }
   };
@@ -467,6 +485,7 @@ interface NormalizedQuestion {
   readonly modelOptions: readonly string[];
   readonly normalizedModelOptions: readonly string[];
   readonly semantic: CodexAsyncQuestionSemanticQuestion;
+  readonly nativeQuestionId?: string;
 }
 
 function normalizeEvidence(
@@ -506,7 +525,12 @@ function normalizeEvidenceEntry(
   for (const [index, question] of value.questions.entries()) {
     const normalized = normalizeQuestion(question, sourceId, index);
     if (!normalized) return undefined;
-    questions.push(normalized);
+    questions.push({
+      ...normalized,
+      ...(isFullscreenProfile(profile)
+        ? { nativeQuestionId: JSON.stringify(["request_user_input_async", itemId, index]) }
+        : {})
+    });
   }
   return {
     itemId,
@@ -631,7 +655,10 @@ function collapsedMatch(
   return {
     source_id: current.entry.sourceId,
     source_question_index: current.question.sourceIndex,
-    question: current.question.semantic
+    question: current.question.semantic,
+    ...(current.question.nativeQuestionId === undefined
+      ? {}
+      : { native_question_id: current.question.nativeQuestionId })
   };
 }
 
@@ -672,7 +699,7 @@ type CollapsedParse =
       readonly exactLines: readonly string[];
     };
 
-function parseCollapsed(lines: readonly string[]): CollapsedParse {
+function parseCollapsed(lines: readonly string[], profile: string): CollapsedParse {
   let header = -1;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     if (lines[index] === "• Queued follow-up inputs") {
@@ -711,12 +738,7 @@ function parseCollapsed(lines: readonly string[]): CollapsedParse {
   ) return { status: "partial" };
   let hint = summary + 1;
   while (hint < lines.length && lines[hint]!.trim().length === 0) hint += 1;
-  const hintLine = lines[hint] ?? "";
-  const binding = hintLine === "    shift + ← to answer"
-    ? "shift_left" as const
-    : hintLine === "    ⌥ + ↑ to answer"
-      ? "alt_up" as const
-      : undefined;
+  const binding = collapsedOpenBinding(lines[hint] ?? "", profile);
   if (!binding) return { status: "partial" };
   return {
     status: "exact",
@@ -727,6 +749,18 @@ function parseCollapsed(lines: readonly string[]): CollapsedParse {
     binding,
     exactLines: lines.slice(header, hint + 1)
   };
+}
+
+function collapsedOpenBinding(
+  line: string,
+  profile: string
+): CodexAsyncQuestionOpenBinding | undefined {
+  const compact = isFullscreenProfile(profile);
+  if (line === (compact ? "    shift+← to answer" : "    shift + ← to answer")) {
+    return "shift_left";
+  }
+  return line === (compact ? "    ⌥+↑ to answer" : "    ⌥ + ↑ to answer")
+    ? "alt_up" : undefined;
 }
 
 function hasExpandedMarker(lines: readonly string[]): boolean {
@@ -756,6 +790,8 @@ type ExpandedParse =
       readonly totalSteps: number;
       readonly match: CodexAsyncQuestionMatch;
       readonly exactLines: readonly string[];
+      readonly promptStackBack?: "shift_right" | "alt_down";
+      readonly promptStackForward?: "shift_left" | "alt_up";
     };
 
 interface ExpandedCandidateMatch {
@@ -794,8 +830,9 @@ function parseExpanded(
       )) {
     return { status: "ambiguous", reason: "clipped_question" };
   }
-  if (!/^enter submit ctrl \+ \] skip ⌥ \+ ↓ (?:main prompt|prev question)(?: (?:⌥ \+ ↑|shift \+ ←) (?:next question|queued messages))?$/u
-    .test(footer)) {
+  const compactFooter = /^enter submit ctrl\+\] skip (shift\+→|⌥\+↓) (main prompt|prev question)(?: (⌥\+↑|shift\+←) (next question|queued messages))?$/u.exec(footer);
+  if (isFullscreenProfile(profile) ? !compactFooter :
+    !/^enter submit ctrl \+ \] skip ⌥ \+ ↓ (?:main prompt|prev question)(?: (?:⌥ \+ ↑|shift \+ ←) (?:next question|queued messages))?$/u.test(footer)) {
     return { status: "ambiguous", reason: "unsupported_keymap" };
   }
   if (evidence.length === 0) {
@@ -847,13 +884,24 @@ function parseExpanded(
     return { status: "ambiguous", reason: "question_match_ambiguous" };
   }
   const exact = unique[0]!;
-  void profile;
+  if (compactFooter &&
+      (exact.currentStep === 1) !== (compactFooter[2] === "main prompt")) {
+    return { status: "ambiguous", reason: "partial_or_unknown_surface" };
+  }
   return {
     status: "exact",
     currentStep: exact.currentStep,
     totalSteps: exact.totalSteps,
     match: exact.match,
-    exactLines: lines.slice(exact.start, lines.length)
+    exactLines: lines.slice(exact.start, lines.length),
+    ...(isFullscreenProfile(profile) && compactFooter
+      ? { promptStackBack: compactFooter[1] === "shift+→"
+          ? "shift_right" as const : "alt_down" as const }
+      : {}),
+    ...(isFullscreenProfile(profile) && compactFooter?.[4] === "next question"
+      ? { promptStackForward: compactFooter[3] === "shift+←"
+          ? "shift_left" as const : "alt_up" as const }
+      : {})
   };
 }
 
@@ -888,7 +936,10 @@ function parseAnswerRegion(
   const match: CodexAsyncQuestionMatch = {
     source_id: source.sourceId,
     source_question_index: question.sourceIndex,
-    question: question.semantic
+    question: question.semantic,
+    ...(question.nativeQuestionId === undefined
+      ? {}
+      : { native_question_id: question.nativeQuestionId })
   };
   if (question.modelOptions.length === 0) {
     return normalizeText(lines[0] ?? "") === "Type your answer" &&
@@ -1145,4 +1196,8 @@ function stableJson(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFullscreenProfile(profile: string): boolean {
+  return profile === CODEX_ASYNC_QUESTION_PROFILES["0.158.0"];
 }
