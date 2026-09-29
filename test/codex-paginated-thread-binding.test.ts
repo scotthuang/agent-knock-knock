@@ -207,6 +207,9 @@ test("0.159 status binding refuses incomplete identity and cross-version status 
 test("0.159 manual Watch and async-answer preflight bind through active status suffixes", async () => {
   for (const suffix of [
     "• Working (4s • esc to interrupt)",
+    "• Thinking (4s • esc to interrupt) · Running hooks",
+    "• Waiting for background terminal (1m 02s • esc to interrupt)\n  └ npm run build",
+    "◦ Inspecting the selected test files (9s • esc to interrupt)",
     "◦ Working (1m 00s • esc to interrupt)\n\n• Queued follow-up inputs\n  ? 1 question · 16s\n    shift+← to answer"
   ]) {
     const harness = fixture([`${STATUS_CARD_159}\n\n${suffix}\n${READY_COMPOSER}`], "0.159.0");

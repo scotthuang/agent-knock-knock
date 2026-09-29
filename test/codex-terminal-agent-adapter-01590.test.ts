@@ -90,13 +90,18 @@ test("0.159 compact welcome and turn tips never replace exact Composer or comple
 });
 
 
-test("0.159 active status ends before the exact Working and collapsed-question suffix", () => {
+test("0.159 active status ends before timed activity and collapsed-question controls", () => {
   const collapsed = "• Queued follow-up inputs\n  ? 1 question · 16s\n    shift+← to answer";
   const observedIdle = observe(SCREEN);
   for (const suffix of [
     "• Working (51s • esc to interrupt)",
     "◦ Working (1m 00s • esc to interrupt)",
     "Working (2h 03m 09s • esc to interrupt)",
+    "• Thinking (4s • esc to interrupt) · Running hooks",
+    "◦ Inspecting the selected test files (9s • esc to interrupt)",
+    "• Compacting context (2s • esc to interrupt)",
+    "• Waiting for background terminal (1m 02s • esc to interrupt)\n  └ npm run build",
+    "• Thinking (2s • esc to interrupt)\n  └ Running hooks\n  └ Checking the project layout\n    and the remaining files\n    before starting the change",
     "• Working (2s • esc to interrupt)\n  └ Tip: Try /help.",
     `◦ Working (51s • esc to interrupt)\n\n${collapsed}`,
     collapsed
@@ -107,13 +112,22 @@ test("0.159 active status ends before the exact Working and collapsed-question s
     assert.equal(status.nativeThreadId, THREAD);
     assert.equal(status.evidenceFingerprint, observedIdle.evidenceFingerprint,
       "live spinner/countdown text must not become status identity evidence");
-    if (suffix.includes("Working")) assert.equal(inspectCodexScreen({ screen,
+    if (suffix.includes("to interrupt")) assert.equal(inspectCodexScreen({ screen,
       runtime: { agentVersion: "0.159.0" } }).activity.state, "working");
   }
   for (const suffix of [
     "• Working (2s • esc to interrupt)\n• Arbitrary assistant transcript",
     "• Working (2s • esc to interrupt)\n  └ Tip: Try /help.\n  injected continuation",
     "• Working (truncated…)",
+    "• Thinking (4s • esc to inter…)",
+    "• Thinking (4s)",
+    "• Thinking (4s • esc to interrupt)\n    continuation without a branch",
+    "• Thinking (4s • esc to interrupt)\n  └ Details\n    row two\n    row three\n    row four\n    oversized fifth row",
+    "• Thinking (4s • esc to interrupt)\n  └ Session: another-session",
+    "• Thinking (4s • esc to interrupt)\n  └ Details\n    Server: Local background server",
+    "• Thinking (4s • esc to interrupt)\n  └ /status",
+    "• Thinking (4s • esc to interrupt) · Session: another-session",
+    "• Thinking (4s • esc to interrupt)\n  Session:             another-session",
     `${collapsed}\n• Arbitrary assistant transcript`,
     collapsed.replace("shift+←", "shift+→"),
     collapsed.replace("1 question", "1 questions"),

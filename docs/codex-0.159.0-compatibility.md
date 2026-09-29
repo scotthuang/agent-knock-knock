@@ -4,10 +4,9 @@ This release candidate extends the existing [0.158.0 adapter](codex-0.158.0-comp
 to `codex-cli 0.159.0`. The official source target is
 [`rust-v0.159.0`](https://github.com/openai/codex/tree/rust-v0.159.0), commit
 `687a119f0fcaace47e1f1abcc77cec6c813fd6da`.
-The protocol delta has been reviewed against that tag and terminal surfaces
-have been captured from the installed binary. Runtime regression and release
-validation are still in progress; this document does not yet claim a successful
-0.159.0 native task run.
+The protocol delta and terminal surfaces were reviewed against that version.
+Fast regressions and the real native task gate passed; the full package-release
+gate is still in progress.
 
 ## Source delta from 0.158.0
 
@@ -27,12 +26,12 @@ a first task is preserved. The daemon transport implementation is unchanged.
 An interrupted turn may now include optional error details. AKK's reader already
 accepts an error object. The new instant-interrupt code path can affect event
 ordering while steering an active turn; source compatibility alone does not
-prove the native async answer and completion sequence. The publication probe
-must verify that sequence on the installed version.
+prove the native async answer and completion sequence. The actual publication
+probe verified that sequence on the installed version, as recorded below.
 
 ## Adapter contract
 
-The intended 0.159.0 contract is the same exact-task path used for 0.158.0:
+The 0.159.0 adapter retains the exact-task path used for 0.158.0:
 
 - A fresh, closed `/status` transaction binds the chosen physical terminal and
   process incarnation to its foreground native thread.
@@ -52,8 +51,10 @@ The installed 0.159.0 binary was inspected in an isolated idle tmux 3.6b pane.
 Its `/status` output no longer has the earlier top/bottom box borders; field
 values may wrap across display lines. The 0.159.0 parser therefore needs its
 own complete-card boundary checks rather than relying on the old box corners.
-The compact welcome header is also borderless, while the styled empty Composer,
-shortcut footer, and model line remain recognizable.
+The parser also separates the completed status fields from native Working and
+queued async-question regions displayed below the card. The compact welcome
+header is borderless, while the styled empty Composer, shortcut footer, and
+model line remain recognizable.
 
 The command popup, model picker, and reasoning picker were captured without
 submitting a model or effort change. The model menu retains the
@@ -67,9 +68,9 @@ thread on the 0.159.0 backend, verified the unchanged process incarnation, and
 restored the styled empty Composer. No model task was started. The owned pane
 was removed only after its terminal and process identity were rechecked.
 
-These checks prove the UI and idle status-binding path, not model execution.
-Existing 0.158.0 evidence does not prove a 0.159.0 question-answer or completion
-result.
+These health checks establish the UI and idle status-binding path. The separate
+0.159.0 native task gate below provides question-answer and completion evidence;
+it does not inherit those claims from earlier 0.158.0 results.
 
 ## Remaining boundaries
 
@@ -107,13 +108,38 @@ upgrading the native client and backend.
   cleanup were recorded. This health check started zero model tasks.
 - Architecture and refactor-evidence validators: passed.
 - Fast tests: 2,220 passed, zero failed or skipped.
-- Full/release suites: not run during development under the repository policy.
-  They are reserved for the immediate gate of an actual package publication.
-- Real 0.159.0 async answer, blocking answer, manual Watch, exact completion,
-  and callback probe: prepared separately, not run. It requires an explicit
-  actual-publication gate and isolated owned tmux sessions. Its callback
-  collector is local; an external chat delivery is a separate claim.
+- Full/release gate: running as the immediate pre-publication gate for the actual
+  0.13.13 release. No success is claimed until all of its stages finish.
 
-Publication must use the same runtime artifact that passes the native gate.
-Final test totals, source and runtime hashes, and native outcomes belong here
-only after they have been observed.
+The real Codex 0.159.0 task gate passed on 2026-09-30 against clean commit
+[`b65fa53`](https://github.com/scotthuang/agent-knock-knock/commit/b65fa53ce1edbca7b18c2a38e49fe30d000b4837),
+using the local background server and isolated owned tmux terminals:
+
+| Native scenario | Observed result |
+| --- | --- |
+| Ordinary Send with an async Yes/No question | Exact accepted task; question callback; answer confirmed by durable client/message/question identity; correct final text and one completion callback |
+| Manual Watch during that async task | Bound the same active turn; exact completion and one completion callback |
+| Plan-mode blocking Yes/No question | Exact native request answered once and confirmed by its function output; correct plan body and one completion callback |
+| Repeated reconciliation | No duplicate completion callback for any of the three Watches |
+
+There were **three accepted model-task attempts in total**: one failed diagnostic
+attempt, then two successful task scenarios on the final runtime. The first
+attempt exposed a status parsing error: native Working and queued async-question
+regions below the new borderless card were treated as malformed status fields.
+Manual Watch binding and the answer's fresh identity check therefore failed;
+that attempt did not confirm an answer or completion. The parser was corrected
+before the final two-scenario gate was run. The final results are not reported
+as if the first attempt had succeeded.
+
+The callbacks were delivered to a local collector, not an external chat channel.
+All owned probe terminals were cleaned up; no user terminal was changed and the
+shared Codex daemon was not restarted. OpenClaw callback integration remains a
+separate stage of the package-release gate.
+
+The tested runtime contained 236 JavaScript files under `dist/src`. Its SHA-256
+is `e9e91d3cdbfe7da371f2c53fe1acd103a4dd0b706eca386df4337c70233af138`,
+computed over sorted relative paths, each followed by a NUL byte, file content,
+and another NUL byte. The canonical Skill SHA-256 is
+`77b05bfd78c8f5a3d3f301d76eadc35e8c538e9774e58a54129b769f7853d638`.
+Final publication checks must compare the packaged runtime and Skill with these
+native-tested artifacts.

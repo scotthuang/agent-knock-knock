@@ -128,10 +128,10 @@ const CODEX_STATUS_HEADER_PATTERN =
 const CODEX_STATUS_TOP_BORDER = /^\s*╭[─-]+╮\s*$/u;
 const CODEX_STATUS_BOTTOM_BORDER = /^\s*╰[─-]+╯\s*$/u;
 const CODEX_STATUS_FIELD = /^\s*│\s*([^:│]{1,64}):\s+(.+?)\s*│\s*$/u;
-// Native status_indicator_widget.rs + motion.rs: full elapsed/interrupt row,
-// including both pulse glyphs and the reduced-motion form without a glyph.
-const CODEX_159_WORKING_ROW =
-  /^(?:[•◦] )?Working \((?:[0-5]?\ds|[1-5]?\dm [0-5]\ds|[1-9]\d*h [0-5]\dm [0-5]\ds) • esc to interrupt\)$/u;
+// Native status_indicator_widget.rs + motion.rs: the title is untrusted
+// display text. Only the complete timed interrupt chrome delimits fields.
+const CODEX_159_ACTIVITY_ROW =
+  /^(?:[•◦] )?[^\s•◦][^\r\n]{0,255} \((?:[0-5]?\ds|[1-5]?\dm [0-5]\ds|[1-9]\d*h [0-5]\dm [0-5]\ds) • esc to interrupt\)(?: · \S[^\r\n]{0,255})?$/u;
 const CODEX_STATUS_MAX_LINES = 64;
 const CODEX_STATUS_MAX_REGION_LENGTH = 8_192;
 const CODEX_STATUS_MAX_FIELDS = 24;
@@ -755,7 +755,7 @@ function parseCodex159StatusCard(
     return uncertain("Codex 0.159 /status closing Composer is incomplete");
   }
   const suffixStart = lines.findIndex((line, index) => index > start && index < end &&
-    (CODEX_159_WORKING_ROW.test(line.trimEnd()) || line === "• Queued follow-up inputs"));
+    (isCodex159ActivityRow(line.trimEnd()) || line === "• Queued follow-up inputs"));
   const fieldEnd = suffixStart < 0 ? end : suffixStart;
   if (suffixStart >= 0 && !closedCodex159StatusSuffix(lines.slice(suffixStart, end))) {
     return uncertain("Codex 0.159 /status contains an unproven live activity suffix");
@@ -812,12 +812,34 @@ function parseCodex159StatusCard(
   };
 }
 
-/** Known UI suffix only: activity, an optional native tip, and collapsed input. */
+/** A shape fence only; never independent identity or input authorization. */
+function isCodex159ActivityRow(line: string): boolean {
+  return CODEX_159_ACTIVITY_ROW.test(line) && safeCodex159StatusDisplayText(line);
+}
+
+function safeCodex159StatusDisplayText(line: string): boolean {
+  return line.length <= 512 && !/[\x00-\x1f\x7f]/u.test(line) &&
+    !/(?:\b(?:Session|Server):|OpenAI Codex|(?:^|\s)\/status(?:\s|$))/iu.test(line);
+}
+
+/** Native activity/details stay outside identity evidence, before the Composer. */
 function closedCodex159StatusSuffix(lines: readonly string[]): boolean {
   const rows = lines.filter((line) => line.trim()).map((line) => line.trimEnd());
-  if (CODEX_159_WORKING_ROW.test(rows[0] ?? "")) {
+  if (isCodex159ActivityRow(rows[0] ?? "")) {
     rows.shift();
-    if (/^ {2}└ Tip: \S.{0,255}$/u.test(rows[0] ?? "")) rows.shift();
+    let details = 0;
+    // A hook overflow plus up to three details rows. Continuations require a
+    // preceding native branch prefix; arbitrary queued user prose is excluded.
+    while (/^(?: {2}└ (?!Tip: )| {4}\S)/u.test(rows[0] ?? "")) {
+      const row = rows.shift()!;
+      if (details >= 4 || details === 0 && !row.startsWith("  └ ") ||
+          !safeCodex159StatusDisplayText(row)) return false;
+      details += 1;
+    }
+    if (/^ {2}└ Tip: \S.{0,255}$/u.test(rows[0] ?? "")) {
+      // bottom_pane renders the working tip only without inline previews.
+      return rows.length === 1 && safeCodex159StatusDisplayText(rows[0]!);
+    }
   }
   if (rows.length === 0) return true;
   if (rows.length !== 3 || rows[0] !== "• Queued follow-up inputs") return false;
@@ -1116,7 +1138,7 @@ export function detectCodexActivityState(
 
   const tailLines = screen.trimEnd().split(/\r?\n/).slice(-30);
   const workingLine = tailLines.find((line) => isCodexWorkingLine(line) ||
-    agentVersion === "0.159.0" && CODEX_159_WORKING_ROW.test(line.trimEnd()));
+    agentVersion === "0.159.0" && isCodex159ActivityRow(line.trimEnd()));
   if (workingLine) {
     return {
       state: "working",
