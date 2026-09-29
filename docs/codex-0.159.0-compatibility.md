@@ -1,12 +1,12 @@
 # Codex CLI 0.159.0 compatibility
 
-This release candidate extends the existing [0.158.0 adapter](codex-0.158.0-compatibility.md)
+AKK 0.13.13 extends the existing [0.158.0 adapter](codex-0.158.0-compatibility.md)
 to `codex-cli 0.159.0`. The official source target is
 [`rust-v0.159.0`](https://github.com/openai/codex/tree/rust-v0.159.0), commit
 `687a119f0fcaace47e1f1abcc77cec6c813fd6da`.
 The protocol delta and terminal surfaces were reviewed against that version.
-Fast regressions and the real native task gate passed; the full package-release
-gate is still in progress.
+Fast regressions, the real native task gate, and the full package-release
+gate passed.
 
 ## Source delta from 0.158.0
 
@@ -51,10 +51,12 @@ The installed 0.159.0 binary was inspected in an isolated idle tmux 3.6b pane.
 Its `/status` output no longer has the earlier top/bottom box borders; field
 values may wrap across display lines. The 0.159.0 parser therefore needs its
 own complete-card boundary checks rather than relying on the old box corners.
-The parser also separates the completed status fields from native Working and
-queued async-question regions displayed below the card. The compact welcome
-header is borderless, while the styled empty Composer, shortcut footer, and
-model line remain recognizable.
+The parser also separates the completed status fields from the native activity
+region, including Working, Thinking, Waiting, Compacting, dynamic status headers,
+and queued async-question summaries. Their bounded render shape helps delimit
+the card; the display text never proves task identity or authorizes input. The
+compact welcome header is borderless, while the styled empty Composer, shortcut
+footer, and model line remain recognizable.
 
 The command popup, model picker, and reasoning picker were captured without
 submitting a model or effort change. The model menu retains the
@@ -108,11 +110,14 @@ upgrading the native client and backend.
   cleanup were recorded. This health check started zero model tasks.
 - Architecture and refactor-evidence validators: passed.
 - Fast tests: 2,220 passed, zero failed or skipped.
-- Full/release gate: running as the immediate pre-publication gate for the actual
-  0.13.13 release. No success is claimed until all of its stages finish.
+- Full/release gate: passed as the immediate pre-publication gate for 0.13.13.
+  All 2,735 full tests passed with zero failures or skips, followed by the
+  OpenClaw 2026.9.1 compatibility check, ClawHub runtime validation, and publish
+  dry-run. The separate legacy new/resume live smoke was not run because those
+  actions are outside the paginated adapter contract.
 
 The real Codex 0.159.0 task gate passed on 2026-09-30 against clean commit
-[`b65fa53`](https://github.com/scotthuang/agent-knock-knock/commit/b65fa53ce1edbca7b18c2a38e49fe30d000b4837),
+[`a4f6b15`](https://github.com/scotthuang/agent-knock-knock/commit/a4f6b150ae9a1b7b3b9366fb1ec43c8fa74b796f),
 using the local background server and isolated owned tmux terminals:
 
 | Native scenario | Observed result |
@@ -122,22 +127,22 @@ using the local background server and isolated owned tmux terminals:
 | Plan-mode blocking Yes/No question | Exact native request answered once and confirmed by its function output; correct plan body and one completion callback |
 | Repeated reconciliation | No duplicate completion callback for any of the three Watches |
 
-There were **three accepted model-task attempts in total**: one failed diagnostic
-attempt, then two successful task scenarios on the final runtime. The first
-attempt exposed a status parsing error: native Working and queued async-question
-regions below the new borderless card were treated as malformed status fields.
-Manual Watch binding and the answer's fresh identity check therefore failed;
-that attempt did not confirm an answer or completion. The parser was corrected
-before the final two-scenario gate was run. The final results are not reported
-as if the first attempt had succeeded.
+There were **five accepted model-task attempts in total**: one diagnostic
+attempt failed when native activity below the borderless card was misread as
+status fields, two scenarios passed on an intermediate runtime, and both
+scenarios passed again on the final runtime after covering Thinking, Waiting,
+Compacting, and dynamic headers. The failed attempt confirmed neither an answer
+nor completion. The results above refer to the final two successful scenarios;
+intermediate successes are retained in the attempt count, not reused as proof
+for the final artifact.
 
 The callbacks were delivered to a local collector, not an external chat channel.
 All owned probe terminals were cleaned up; no user terminal was changed and the
-shared Codex daemon was not restarted. OpenClaw callback integration remains a
-separate stage of the package-release gate.
+shared Codex daemon was not restarted. The separate isolated OpenClaw
+integration stage also passed as part of the package-release gate.
 
 The tested runtime contained 236 JavaScript files under `dist/src`. Its SHA-256
-is `e9e91d3cdbfe7da371f2c53fe1acd103a4dd0b706eca386df4337c70233af138`,
+is `0bcd88903bd6ea2a693e3b88fa03e83282ad12951f40af735bc7fdee403a58bf`,
 computed over sorted relative paths, each followed by a NUL byte, file content,
 and another NUL byte. The canonical Skill SHA-256 is
 `77b05bfd78c8f5a3d3f301d76eadc35e8c538e9774e58a54129b769f7853d638`.

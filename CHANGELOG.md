@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Parse Codex 0.159.0 borderless native status output and wrapped fields while retaining exact fresh-card, session, and Composer checks. Separate native Working and queued-question regions from the status card so active Watch binding and question-answer identity checks can complete.
+- Parse Codex 0.159.0 borderless native status output and wrapped fields while retaining exact fresh-card, session, and Composer checks. Separate native activity (including Thinking, Waiting, Compacting, and dynamic headers) and queued-question regions from the status card so active Watch binding and question-answer identity checks can complete. Display text remains outside task identity evidence.
 
 ## 0.13.12 - 2026-09-29
 
