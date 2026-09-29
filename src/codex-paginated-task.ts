@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { isCodexPaginatedVersion, type CodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import type {
   CodexAppServerThread,
   CodexAppServerThreadItem,
@@ -29,7 +30,7 @@ export interface CodexPaginatedTaskAnchor {
   origin: "user_explicit_send" | "active_task";
   captured_at: string;
   codex_home: string;
-  codex_version: "0.158.0";
+  codex_version: CodexPaginatedVersion;
   native_thread_id: string;
   process_uuid: string;
   process_birth: string;
@@ -124,7 +125,7 @@ export function validateCodexPaginatedTaskAnchor(
     value.schema !== "agent-knock-knock/codex-paginated-task-anchor" ||
     value.version !== 1 ||
     !["user_explicit_send", "active_task"].includes(String(value.origin)) ||
-    value.codex_version !== "0.158.0" ||
+    !isCodexPaginatedVersion(value.codex_version) ||
     !validTimestamp(value.captured_at) ||
     typeof value.codex_home !== "string" ||
     !path.isAbsolute(value.codex_home) ||

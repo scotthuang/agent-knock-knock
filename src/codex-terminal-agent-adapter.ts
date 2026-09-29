@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { CODEX_FULLSCREEN_SHORTCUT_FOOTER as CODEX_158_SHORTCUT_FOOTER } from
+import { captureCodexFullscreenComposerFrame,
+  CODEX_FULLSCREEN_SHORTCUT_FOOTER as CODEX_PAGINATED_SHORTCUT_FOOTER } from
   "./codex-fullscreen-composer-proof.js";
 import {
   classifyCodexProcess,
@@ -7,6 +8,7 @@ import {
   type ForkContextPackage
 } from "./codex-session-provider.js";
 import {
+  isCodexPaginatedVersion,
   codexRuntimeCompatibilityProfile,
   codexThreadLifecycleHistoryWarning,
   codexUnsupportedDurableHistoryWarning
@@ -88,7 +90,7 @@ const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
 // Diagnostic activity only. These fullscreen rows do not prove a task identity,
 // an empty styled Composer, or permission to use a version-bound native action.
-const CODEX_FULLSCREEN_ACTIVITY_VERSIONS = new Set(["0.157.0", "0.157.1", "0.158.0"]);
+const CODEX_FULLSCREEN_ACTIVITY_VERSIONS = new Set(["0.157.0", "0.157.1", "0.158.0", "0.159.0"]);
 const CODEX_FULLSCREEN_MODEL_FOOTER =
   /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
 const CODEX_FULLSCREEN_SHORTCUT_FOOTER =
@@ -126,6 +128,10 @@ const CODEX_STATUS_HEADER_PATTERN =
 const CODEX_STATUS_TOP_BORDER = /^\s*╭[─-]+╮\s*$/u;
 const CODEX_STATUS_BOTTOM_BORDER = /^\s*╰[─-]+╯\s*$/u;
 const CODEX_STATUS_FIELD = /^\s*│\s*([^:│]{1,64}):\s+(.+?)\s*│\s*$/u;
+// Native status_indicator_widget.rs + motion.rs: the title is untrusted
+// display text. Only the complete timed interrupt chrome delimits fields.
+const CODEX_159_ACTIVITY_ROW =
+  /^(?:[•◦] )?[^\s•◦][^\r\n]{0,255} \((?:[0-5]?\ds|[1-5]?\dm [0-5]\ds|[1-9]\d*h [0-5]\dm [0-5]\ds) • esc to interrupt\)(?: · \S[^\r\n]{0,255})?$/u;
 const CODEX_STATUS_MAX_LINES = 64;
 const CODEX_STATUS_MAX_REGION_LENGTH = 8_192;
 const CODEX_STATUS_MAX_FIELDS = 24;
@@ -634,6 +640,9 @@ function parseCodexStatusCardAfterCommand(
   while (topBorderIndex < lines.length && !lines[topBorderIndex].trim()) {
     topBorderIndex += 1;
   }
+  if (lines[topBorderIndex]?.trim() === ">_ OpenAI Codex (v0.159.0)") {
+    return parseCodex159StatusCard(lines, topBorderIndex);
+  }
   if (
     topBorderIndex >= lines.length ||
     !CODEX_STATUS_TOP_BORDER.test(lines[topBorderIndex])
@@ -725,6 +734,118 @@ function parseCodexStatusCardAfterCommand(
     agentVersion: versionMatches[0][1],
     fields
   };
+}
+
+/** 0.159 removes borders. Close fields before the exact native live suffix. */
+function parseCodex159StatusCard(
+  lines: readonly string[],
+  start: number
+): ParsedCodexStatusCard {
+  const uncertain = (reason: string): ParsedCodexStatusCard => ({ status: "ambiguous", reason });
+  const limit = Math.min(lines.length, start + CODEX_STATUS_MAX_LINES);
+  let end = start + 1;
+  while (end < limit && !/^[›»](?:\s|$)/u.test(lines[end]!) &&
+      codexNativeCommandLine(lines[end]!) === undefined) end += 1;
+  if (end === limit) return { status: "missing", reason: "Codex 0.159 /status has no visible closing Composer or command" };
+  // A live main Composer must have its complete footer; a following native
+  // command may close an earlier card in the pre-Enter occurrence inventory.
+  if (/^[›»](?:\s|$)/u.test(lines[end]!) &&
+      codexNativeCommandLine(lines[end]!) === undefined &&
+      captureCodexFullscreenComposerFrame(lines.slice(end).join("\n"), "0.159.0")?.composerIndex !== 0) {
+    return uncertain("Codex 0.159 /status closing Composer is incomplete");
+  }
+  const suffixStart = lines.findIndex((line, index) => index > start && index < end &&
+    (isCodex159ActivityRow(line.trimEnd()) || line === "• Queued follow-up inputs"));
+  const fieldEnd = suffixStart < 0 ? end : suffixStart;
+  if (suffixStart >= 0 && !closedCodex159StatusSuffix(lines.slice(suffixStart, end))) {
+    return uncertain("Codex 0.159 /status contains an unproven live activity suffix");
+  }
+  const region = lines.slice(start, fieldEnd).join("\n").trimEnd();
+  if (region.length > CODEX_STATUS_MAX_REGION_LENGTH) {
+    return uncertain("Codex 0.159 /status exceeds the bounded inspection size");
+  }
+  const fields: Array<{ name: string; value: string }> = [];
+  const names = new Set<string>();
+  let valueColumn: number | undefined;
+  for (const line of lines.slice(start + 1, fieldEnd)) {
+    if (!line.trim()) continue;
+    if (fields.length === 0 && [
+      "  Visit https://chatgpt.com/codex/settings/usage for up-to-date",
+      "  information on rate limits and credits"
+    ].includes(line.trimEnd())) continue;
+    const match = /^ {2}([A-Za-z][^:│]{0,63}): {2,}(\S.*)$/u.exec(line.trimEnd());
+    if (match) {
+      const name = match[1]!.trim();
+      const column = line.indexOf(":") + 1 + /^ +/u.exec(line.slice(line.indexOf(":") + 1))![0].length;
+      if (names.has(name.toLowerCase()) || fields.length >= CODEX_STATUS_MAX_FIELDS ||
+          valueColumn !== undefined && column !== valueColumn) {
+        return uncertain("Codex 0.159 /status fields are duplicated, misaligned, or oversized");
+      }
+      names.add(name.toLowerCase());
+      valueColumn = column;
+      fields.push({ name, value: match[2]! });
+    } else {
+      const previous = fields.at(-1);
+      if (!previous || valueColumn === undefined ||
+          !line.startsWith(" ".repeat(valueColumn)) ||
+          !line.slice(valueColumn).trim() || /^(?:Session|Server)$/u.test(previous.name)) {
+        return uncertain("Codex 0.159 /status contains unproven or wrapped identity text");
+      }
+      previous.value += ` ${line.slice(valueColumn).trim()}`;
+    }
+    if (fields.at(-1)!.value.length > CODEX_STATUS_MAX_FIELD_VALUE_LENGTH) {
+      return uncertain("Codex 0.159 /status field exceeds the bounded inspection size");
+    }
+  }
+  const nativeThreadId = fields.find((field) => field.name === "Session")?.value;
+  if (!nativeThreadId || !isExactNativeThreadId(nativeThreadId) ||
+      !["Model", "Directory", "Permissions", "Agents.md"].every((name) =>
+        fields.some((field) => field.name === name))) {
+    return { status: "missing", reason: "Codex 0.159 /status lacks complete required fields or its exact Session UUID" };
+  }
+  return {
+    status: "observed", region, nativeThreadId: nativeThreadId.toLowerCase(), agentVersion: "0.159.0",
+    fields: fields.map(({ name, value }) => ({
+      name: redactCodexNativeStatusText(name),
+      value: /^account$/iu.test(name) ? "[REDACTED]" : redactCodexNativeStatusText(value)
+    }))
+  };
+}
+
+/** A shape fence only; never independent identity or input authorization. */
+function isCodex159ActivityRow(line: string): boolean {
+  return CODEX_159_ACTIVITY_ROW.test(line) && safeCodex159StatusDisplayText(line);
+}
+
+function safeCodex159StatusDisplayText(line: string): boolean {
+  return line.length <= 512 && !/[\x00-\x1f\x7f]/u.test(line) &&
+    !/(?:\b(?:Session|Server):|OpenAI Codex|(?:^|\s)\/status(?:\s|$))/iu.test(line);
+}
+
+/** Native activity/details stay outside identity evidence, before the Composer. */
+function closedCodex159StatusSuffix(lines: readonly string[]): boolean {
+  const rows = lines.filter((line) => line.trim()).map((line) => line.trimEnd());
+  if (isCodex159ActivityRow(rows[0] ?? "")) {
+    rows.shift();
+    let details = 0;
+    // A hook overflow plus up to three details rows. Continuations require a
+    // preceding native branch prefix; arbitrary queued user prose is excluded.
+    while (/^(?: {2}└ (?!Tip: )| {4}\S)/u.test(rows[0] ?? "")) {
+      const row = rows.shift()!;
+      if (details >= 4 || details === 0 && !row.startsWith("  └ ") ||
+          !safeCodex159StatusDisplayText(row)) return false;
+      details += 1;
+    }
+    if (/^ {2}└ Tip: \S.{0,255}$/u.test(rows[0] ?? "")) {
+      // bottom_pane renders the working tip only without inline previews.
+      return rows.length === 1 && safeCodex159StatusDisplayText(rows[0]!);
+    }
+  }
+  if (rows.length === 0) return true;
+  if (rows.length !== 3 || rows[0] !== "• Queued follow-up inputs") return false;
+  const summary = /^ {2}\? ([1-9]\d{0,2}) (question|questions)(?: · [1-9]\d{0,2}s)?$/u.exec(rows[1]!);
+  return summary !== null && (Number(summary[1]) === 1) === (summary[2] === "question") &&
+    /^ {4}(?:shift\+←|⌥\+↑) to answer$/u.test(rows[2]!);
 }
 
 type CodexStatusEvidenceInventory =
@@ -1016,7 +1137,8 @@ export function detectCodexActivityState(
   }
 
   const tailLines = screen.trimEnd().split(/\r?\n/).slice(-30);
-  const workingLine = tailLines.find((line) => isCodexWorkingLine(line));
+  const workingLine = tailLines.find((line) => isCodexWorkingLine(line) ||
+    agentVersion === "0.159.0" && isCodex159ActivityRow(line.trimEnd()));
   if (workingLine) {
     return {
       state: "working",
@@ -1473,7 +1595,7 @@ function codexFullscreenIdlePromptLine(
     .filter((line) => line.trim()).map((line) => line.trimEnd());
   return footer.length === 2 &&
     CODEX_FULLSCREEN_MODEL_FOOTER.test(footer[0]!) &&
-    (agentVersion === "0.158.0" ? CODEX_158_SHORTCUT_FOOTER : CODEX_FULLSCREEN_SHORTCUT_FOOTER).test(footer[1]!)
+    (isCodexPaginatedVersion(agentVersion) ? CODEX_PAGINATED_SHORTCUT_FOOTER : CODEX_FULLSCREEN_SHORTCUT_FOOTER).test(footer[1]!)
     ? lines[composerIndex]
     : undefined;
 }

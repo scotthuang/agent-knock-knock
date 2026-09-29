@@ -162,16 +162,16 @@ dispatch. The status UUID is provisional; only one rollout that later accepts
 the exact request can become durable Session/Turn identity. A changed or
 uncertain probe boundary stops before the task and is not retried
 automatically. This optional enhancement is not a prerequisite for ordinary
-human Send: ordinary Send retains its user-priority behavior. Codex 0.158.0
+human Send: ordinary Send retains its user-priority behavior. Codex 0.158.0/0.159.0
 exact Send and active-task Watch use a separate closed `/status` transaction
 to bind the foreground paginated thread. Normal List and Status remain
 observation-only and never probe.
 
 ## Terminal Watch
 
-Watch follows the exact terminal selected by the user. Codex 0.158.0 exact
+Watch follows the exact terminal selected by the user. Codex 0.158.0/0.159.0 exact
 Watch creation types a closed `/status` command into an available main Composer;
-subsequent observation is read-only. See the [compatibility boundaries](codex-0.158.0-compatibility.md).
+subsequent observation is read-only. See the [compatibility boundaries](codex-0.159.0-compatibility.md).
 
 ```text
 /akk list
@@ -344,7 +344,7 @@ use it as authority for a later action.
 Codex native `/status` inspection requires an exact viewport of at least 80
 columns so the complete UUID can be proven. Legacy terminal-scoped tasks
 can bind from exact native acceptance afterward without running `/status` or
-failing merely because the pane is narrow. Codex 0.158.0 attempts a separate
+failing merely because the pane is narrow. Codex 0.158.0/0.159.0 attempts a separate
 closed `/status` binding before physical Send; if an exact callback Watch cannot
 be prepared, its Send receipt states that limitation. Claude inspection must prove,
 parse, and dismiss one fresh Status panel and return to the same idle composer.

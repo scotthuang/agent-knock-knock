@@ -87,21 +87,23 @@ const CODEX_FULLSCREEN_STATUS_POPUP = [
   "\x1b[1m›\x1b[0m /status", "", "  GPT-6-Astra high · /repo"
 ].join("\n");
 
-test("Codex 0.158 empty startup without sibling agents retains exact shortcuts and warning footer", () => {
-  const screen = CODEX_FULLSCREEN_IDLE.replace("• Working (2s • esc to interrupt)\n\n", "")
-    .replace("← for agents · ? for shortcuts", "? for shortcuts                              ⚠ 2 warnings · f2 to view");
-  assert.ok(exactCodexReadyStyledComposerCapture(screen, "0.158.0"));
-  assert.equal(createCodexTerminalAgentAdapter().inspectScreen({
-    screen: stripTerminalEscapeSequences(screen), runtime: { agentVersion: "0.158.0" }
-  }).activity.state, "idle");
-  assert.equal(createCodexTerminalAgentAdapter().inspectScreen({
-    screen: stripTerminalEscapeSequences(screen), runtime: { agentVersion: "0.157.1" }
-  }).activity.state, "unknown");
-  assert.equal(exactCodexReadyStyledComposerCapture(
-    screen.replace("? for shortcuts", "? for short…"), "0.158.0"), undefined);
-  assert.equal(exactCodexReadyStyledComposerCapture(
-    screen.replace("f2 to view", "f2 to vi…"), "0.158.0"), undefined);
-});
+for (const version of ["0.158.0", "0.159.0"]) {
+  test(`Codex ${version} empty startup without sibling agents retains exact shortcuts and warning footer`, () => {
+    const screen = CODEX_FULLSCREEN_IDLE.replace("• Working (2s • esc to interrupt)\n\n", "")
+      .replace("← for agents · ? for shortcuts", "? for shortcuts                              ⚠ 2 warnings · f2 to view");
+    assert.ok(exactCodexReadyStyledComposerCapture(screen, version));
+    assert.equal(createCodexTerminalAgentAdapter().inspectScreen({
+      screen: stripTerminalEscapeSequences(screen), runtime: { agentVersion: version }
+    }).activity.state, "idle");
+    assert.equal(createCodexTerminalAgentAdapter().inspectScreen({
+      screen: stripTerminalEscapeSequences(screen), runtime: { agentVersion: "0.157.1" }
+    }).activity.state, "unknown");
+    assert.equal(exactCodexReadyStyledComposerCapture(
+      screen.replace("? for shortcuts", "? for short…"), version), undefined);
+    assert.equal(exactCodexReadyStyledComposerCapture(
+      screen.replace("f2 to view", "f2 to vi…"), version), undefined);
+  });
+}
 
 async function codexFullscreenFixture(popup = CODEX_FULLSCREEN_STATUS_POPUP, finalStyledPopup = popup) {
   const adapter = createCodexTerminalAgentAdapter();
@@ -141,24 +143,26 @@ async function codexFullscreenFixture(popup = CODEX_FULLSCREEN_STATUS_POPUP, fin
   return { events, service, control };
 }
 
-test("private Codex 0.158 working status probe requires empty Composer and the exact above-input popup", async () => {
-  const runtime = { pid: 901, agentVersion: "0.158.0" };
-  const blocked = await codexFullscreenFixture();
-  await assert.rejects(blocked.service.submitCodexStatusProbe(blocked.control, "0.158.0", { runtime }));
-  assert.deepEqual(blocked.events, []);
-  const allowed = await codexFullscreenFixture();
-  await allowed.service.submitCodexStatusProbe(allowed.control, "0.158.0", {
-    runtime, allowWorkingCodexStatus: true
+for (const version of ["0.158.0", "0.159.0"]) {
+  test(`private Codex ${version} working status probe requires empty Composer and the exact above-input popup`, async () => {
+    const runtime = { pid: 901, agentVersion: version };
+    const blocked = await codexFullscreenFixture();
+    await assert.rejects(blocked.service.submitCodexStatusProbe(blocked.control, version, { runtime }));
+    assert.deepEqual(blocked.events, []);
+    const allowed = await codexFullscreenFixture();
+    await allowed.service.submitCodexStatusProbe(allowed.control, version, {
+      runtime, allowWorkingCodexStatus: true
+    });
+    assert.deepEqual(allowed.events, ["text:/status", "keys:C-m"]);
+    const clipped = await codexFullscreenFixture(CODEX_FULLSCREEN_STATUS_POPUP.replace(
+      "configure which items appear in the status line", "configure which items appear…"
+    ));
+    await assert.rejects(clipped.service.submitCodexStatusProbe(clipped.control, version, {
+      runtime, allowWorkingCodexStatus: true
+    }));
+    assert.deepEqual(clipped.events, ["text:/status"]);
   });
-  assert.deepEqual(allowed.events, ["text:/status", "keys:C-m"]);
-  const clipped = await codexFullscreenFixture(CODEX_FULLSCREEN_STATUS_POPUP.replace(
-    "configure which items appear in the status line", "configure which items appear…"
-  ));
-  await assert.rejects(clipped.service.submitCodexStatusProbe(clipped.control, "0.158.0", {
-    runtime, allowWorkingCodexStatus: true
-  }));
-  assert.deepEqual(clipped.events, ["text:/status"]);
-});
+}
 
 test("private Codex working status retains closed popup proof with queue-message footer", async () => {
   const runtime = { pid: 901, agentVersion: "0.158.0" };

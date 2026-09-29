@@ -76,11 +76,11 @@ Open a Web conversation and enter `/akk list`. The connector gives every convers
 
 Suppose several Codex or Claude Code jobs are already running in tmux or Herdr:
 
-Codex CLI 0.158.0 supports exact paginated task Watches for ordinary terminal
+Codex CLI 0.158.0/0.159.0 supports exact paginated task Watches for ordinary terminal
 Send, native question responses, and durable completion callbacks. The adapter
 checks the foreground thread and server version before attaching; uncertain
-answers are never automatically replayed. See the [0.158.0 compatibility
-review](docs/codex-0.158.0-compatibility.md) for managed-session and already-open
+answers are never automatically replayed. See the [0.158.0/0.159.0 compatibility
+review](docs/codex-0.159.0-compatibility.md) for managed-session and already-open
 question boundaries. Codex 0.157.x retains its [partial compatibility](docs/codex-0.157.1-compatibility.md).
 
 - **Watch without babysitting.** `/akk watch <terminal>` observes work already in progress and sends a callback when it finishes, needs approval, or becomes blocked. You can leave the terminal and continue from your phone or another chat client.
@@ -137,7 +137,7 @@ Skill SHA-256 digests; an older, missing, or drifted handshake fails closed
 instead of mounting a partial tool surface. Connector package versions remain
 independent of one another.
 
-In the current OpenClaw plugin and core Host Adapter, an idle Codex pane with ambiguous foreground rollout identity may advertise `identify_foreground`. That action issues one closed `/status` command to the exact pane. It does not mutate the AKK Store, but it does type into the visible terminal. Its 30-second result is diagnostic only and grants no later authority. The separate `identify_and_send` action keeps one terminal lock across the probe and one requested task, then relies on exact request acceptance—not the status card—for durable Session and Turn identity. List and Status never run this probe. Codex 0.158.0 exact Send and active-task Watch use a separate closed `/status` transaction to bind the foreground paginated thread; subsequent observation is read-only.
+In the current OpenClaw plugin and core Host Adapter, an idle Codex pane with ambiguous foreground rollout identity may advertise `identify_foreground`. That action issues one closed `/status` command to the exact pane. It does not mutate the AKK Store, but it does type into the visible terminal. Its 30-second result is diagnostic only and grants no later authority. The separate `identify_and_send` action keeps one terminal lock across the probe and one requested task, then relies on exact request acceptance—not the status card—for durable Session and Turn identity. List and Status never run this probe. Codex 0.158.0/0.159.0 exact Send and active-task Watch use a separate closed `/status` transaction to bind the foreground paginated thread; subsequent observation is read-only.
 
 AKK is local-first: there is no hosted control plane or telemetry. It stores only the local state needed for routing, lifecycle recovery, callback delivery, and idempotency.
 

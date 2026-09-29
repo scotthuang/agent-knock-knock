@@ -1,3 +1,4 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { respondCodexPaginatedAsyncQuestion } from "./codex-paginated-async-response.js";
 import { publicTerminalWatch, terminalWatchCapturedAgentVersion } from "./terminal-watch-presentation.js";
 import { createHash } from "node:crypto";
@@ -553,7 +554,7 @@ export function createTerminalWatchCliAdapter(
     const warnings: string[] = [];
     let anchor: TerminalWatchAnchor | undefined;
     try {
-      anchor = agent === "codex" && rawTerminal.agent_version === "0.158.0"
+      anchor = agent === "codex" && isCodexPaginatedVersion(rawTerminal.agent_version)
         ? await capturePaginatedWatchAnchorWithLock(rawTerminal, options, dependencies)
         : captureTerminalWatchAnchor(
         agent,
@@ -1375,7 +1376,7 @@ async function captureCodexFallbackWatchAnchor(
 ): Promise<UserExplicitFallbackWatchAnchor | CodexPaginatedTaskAnchor> {
       let inventory = rawTerminal._codex_open_root_rollout_inventory;
       let paginated: CodexPaginatedTaskAnchor | undefined;
-      if (agentVersion === "0.158.0") {
+      if (isCodexPaginatedVersion(agentVersion)) {
         try {
           paginated = await capturePaginatedWatchAnchor(rawTerminal, input.options, dependencies,
             input.requestText === undefined ? input.requestHash

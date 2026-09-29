@@ -109,45 +109,49 @@ test("Codex 0.155.1 model options and set-model use its exact profile", async ()
   assert.equal(native.phase, "idle");
 });
 
-test("Codex 0.158 native display names and compact scope footers retain canonical model ids", async () => {
-  const native = new FakeModelTerminal("codex", {
-    currentModel: "gpt-5.2", currentEffort: "high",
-    defaultModel: "gpt-5.2", defaultEffort: "high", codexFullscreen: true
+for (const version of ["0.158.0", "0.159.0"]) {
+  test(`Codex ${version} native display names and compact scope footers retain canonical model ids`, async () => {
+    const native = new FakeModelTerminal("codex", {
+      currentModel: "gpt-5.2", currentEffort: "high",
+      defaultModel: "gpt-5.2", defaultEffort: "high", codexFullscreen: true
+    });
+    const offer = await discoverTerminalModelOptions({
+      agent: "codex", agentVersion: version, plan: planTerminalModelControl(probeTerminalModelControl("codex", version)),
+      terminalControl: "control", ports: native.ports
+    });
+    assert.equal(offer.catalog.current.model, "gpt-5.2");
+    assert.equal(offer.catalog.models[0]?.id, "gpt-6-astra");
+    const switched = await switchTerminalModel({
+      agent: "codex", agentVersion: version, plan: planTerminalModelControl(probeTerminalModelControl("codex", version)),
+      terminalControl: "control", ports: native.ports,
+      expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
+      request: { model: "gpt-6-astra", reasoningEffort: "ultra" }
+    });
+    assert.equal(switched.outcome, "changed");
+    assert.deepEqual(switched.effective, { model: "gpt-6-astra", reasoningEffort: "ultra" });
+    assert.equal(native.defaultEffort, "high", "Ultra remains conversation-only reasoning");
+    assert.equal(native.phase, "idle");
+    assert.ok(native.sentKeys.every((keys) => keys.length === 1));
   });
-  const offer = await discoverTerminalModelOptions({
-    agent: "codex", agentVersion: "0.158.0", plan: CODEX_01580_PLAN,
-    terminalControl: "control", ports: native.ports
-  });
-  assert.equal(offer.catalog.current.model, "gpt-5.2");
-  assert.equal(offer.catalog.models[0]?.id, "gpt-6-astra");
-  const switched = await switchTerminalModel({
-    agent: "codex", agentVersion: "0.158.0", plan: CODEX_01580_PLAN,
-    terminalControl: "control", ports: native.ports,
-    expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
-    request: { model: "gpt-6-astra", reasoningEffort: "ultra" }
-  });
-  assert.equal(switched.outcome, "changed");
-  assert.deepEqual(switched.effective, { model: "gpt-6-astra", reasoningEffort: "ultra" });
-  assert.equal(native.defaultEffort, "high", "Ultra remains conversation-only reasoning");
-  assert.equal(native.phase, "idle");
-  assert.ok(native.sentKeys.every((keys) => keys.length === 1));
-});
+}
 
-test("Codex 0.158 picker parser refuses changed or contradictory footer scope", () => {
-  const advanced = [
-    "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",
-    "  1. Max  For difficult problems when quality matters more than speed · higher usage",
-    "› 2. Ultra (current)  For demanding work using multiple agents · highest usage", "",
-    "  enter apply · s session · esc back"
-  ].join("\n");
-  assert.equal(observeTerminalModelControl(CODEX_01580_PLAN, advanced).state,
-    "codex_advanced_reasoning_picker");
-  assert.equal(observeTerminalModelControl(CODEX_PLAN, advanced).state, "ambiguous");
-  assert.equal(observeTerminalModelControl(CODEX_01580_PLAN,
-    advanced.replace("enter apply", "enter default")).state, "ambiguous");
-  assert.equal(observeTerminalModelControl(CODEX_01580_PLAN,
-    advanced.replace("s session", "s new sessions")).state, "ambiguous");
-});
+for (const version of ["0.158.0", "0.159.0"]) {
+  test(`Codex ${version} picker parser refuses changed or contradictory footer scope`, () => {
+    const advanced = [
+      "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",
+      "  1. Max  For difficult problems when quality matters more than speed · higher usage",
+      "› 2. Ultra (current)  For demanding work using multiple agents · highest usage", "",
+      "  enter apply · s session · esc back"
+    ].join("\n");
+    assert.equal(observeTerminalModelControl(planTerminalModelControl(probeTerminalModelControl("codex", version)), advanced).state,
+      "codex_advanced_reasoning_picker");
+    assert.equal(observeTerminalModelControl(CODEX_PLAN, advanced).state, "ambiguous");
+    assert.equal(observeTerminalModelControl(planTerminalModelControl(probeTerminalModelControl("codex", version)),
+      advanced.replace("enter apply", "enter default")).state, "ambiguous");
+    assert.equal(observeTerminalModelControl(planTerminalModelControl(probeTerminalModelControl("codex", version)),
+      advanced.replace("s session", "s new sessions")).state, "ambiguous");
+  });
+}
 
 test("model-control capture facts reduce to one mutually exclusive surface", () => {
   const capture = (overrides: Partial<{

@@ -1350,7 +1350,7 @@ async function runRawTerminalSend(
   if (usePaginatedWatch) {
     return runUserExplicitTerminalFallback(
       explicitOptions, terminalConversation,
-      new Error("Codex 0.158.0 physical Send uses native task Watch observation"),
+      new Error("Codex paginated physical Send uses native task Watch observation"),
       intentLease
     );
   }

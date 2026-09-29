@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 
-/** Observed on the exact 0.158.0 fullscreen TUI; never a generic fallback. */
+/** Default retained for existing callers; accepted fullscreen versions remain exact. */
 export const CODEX_FULLSCREEN_COMPOSER_VERSION = "0.158.0";
 export const CODEX_FULLSCREEN_MODEL_FOOTER =
   /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
@@ -33,7 +34,7 @@ export function captureCodexFullscreenComposerFrame(
   version: string | undefined,
   allowMultilineDraft = false
 ): CodexFullscreenComposerFrame | undefined {
-  if (version !== CODEX_FULLSCREEN_COMPOSER_VERSION) return undefined;
+  if (!isCodexPaginatedVersion(version)) return undefined;
   const styledLines = screen.replace(/\r\n?/gu, "\n").split("\n");
   while (styledLines.length && !plain(styledLines.at(-1)!).trim()) {
     styledLines.pop();
@@ -88,9 +89,10 @@ export function exactCodexFullscreenSlashComposerCapture(
   screen: string,
   command: string,
   expectedRows: readonly string[],
-  requireStyled = false
+  requireStyled = false,
+  version: string = CODEX_FULLSCREEN_COMPOSER_VERSION
 ): { readonly digest: string; readonly popup: boolean } | undefined {
-  const frame = captureCodexFullscreenComposerFrame(screen, CODEX_FULLSCREEN_COMPOSER_VERSION);
+  const frame = captureCodexFullscreenComposerFrame(screen, version);
   if (!frame || frame.composerText !== command || frame.hasShortcutFooter) {
     return undefined;
   }
@@ -122,9 +124,10 @@ export function exactCodexFullscreenSlashComposerCapture(
 /** Reversible cleanup only; a dismissed popup never authorizes command Enter. */
 export function exactCodexFullscreenBareCommandCapture(
   screen: string,
-  command: string
+  command: string,
+  version: string = CODEX_FULLSCREEN_COMPOSER_VERSION
 ): { readonly digest: string } | undefined {
-  const frame = captureCodexFullscreenComposerFrame(screen, CODEX_FULLSCREEN_COMPOSER_VERSION);
+  const frame = captureCodexFullscreenComposerFrame(screen, version);
   if (!frame || frame.composerText !== command ||
       !/^\x1b\[1m[›»]\x1b\[0m /u.test(frame.styledLines[frame.composerIndex]!)) {
     return undefined;

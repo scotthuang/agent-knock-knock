@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { randomUUID } from "node:crypto";
 import {
   parseCodexAppServerMetadata,
@@ -65,7 +66,7 @@ export async function deliverCodexPaginatedAsyncAnswer(
   try {
     const initialized = await writer.initialize();
     parseCodexAppServerMetadata(initialized, {
-      codexHome: input.binding.codexHome, expectedServerVersion: "0.158.0"
+      codexHome: input.binding.codexHome, expectedServerVersion: input.binding.serverVersion
     }, socketPath);
     transport.send(JSON.stringify({ method: "initialized" }));
     const snapshot = await readSnapshot(input, ports);
@@ -99,7 +100,7 @@ export async function deliverCodexPaginatedAsyncAnswer(
 
 async function readSnapshot(input: CodexPaginatedAsyncAnswerInput, ports: CodexPaginatedAsyncAnswerPorts) {
   return (ports.readSnapshot ?? readCodexPaginatedTaskSnapshot)({
-    codexHome: input.binding.codexHome, serverVersion: "0.158.0",
+    codexHome: input.binding.codexHome, serverVersion: input.binding.serverVersion,
     threadId: input.binding.threadId, boundaryTurnId: input.nativeTurnId
   });
 }
@@ -164,7 +165,7 @@ async function confirmAnswer(input: CodexPaginatedAsyncAnswerInput, ports: Codex
 }
 
 function assertSnapshot(input: CodexPaginatedAsyncAnswerInput, snapshot: CodexPaginatedTaskSnapshot): void {
-  if (snapshot.serverVersion !== "0.158.0" || path.resolve(snapshot.codexHome) !== path.resolve(input.binding.codexHome) ||
+  if (snapshot.serverVersion !== input.binding.serverVersion || path.resolve(snapshot.codexHome) !== path.resolve(input.binding.codexHome) ||
       snapshot.thread.id !== input.binding.threadId || snapshot.thread.historyMode !== "paginated" ||
       snapshot.thread.originator !== "codex-tui" || !snapshot.completeToBoundary ||
       snapshot.turns.length > 128 || !snapshot.turns.some((value) => value.id === input.nativeTurnId) ||
@@ -234,7 +235,7 @@ function validateInput(input: CodexPaginatedAsyncAnswerInput): void {
   identifier(input.binding.threadId);
   identifier(input.nativeTurnId);
   identifier(input.itemId);
-  if (input.binding.serverVersion !== "0.158.0" || !path.isAbsolute(input.binding.codexHome) ||
+  if (!isCodexPaginatedVersion(input.binding.serverVersion) || !path.isAbsolute(input.binding.codexHome) ||
       !Number.isSafeInteger(input.binding.pid) || input.binding.pid <= 1 ||
       !Number.isSafeInteger(input.questionIndex) || input.questionIndex < 0 || input.questionIndex >= 16 ||
       !Number.isSafeInteger(input.timeoutMs ?? 5000) || (input.timeoutMs ?? 5000) < 1 || (input.timeoutMs ?? 5000) > 30_000 ||

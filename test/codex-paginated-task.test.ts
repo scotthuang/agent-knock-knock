@@ -60,10 +60,10 @@ function turn(
   };
 }
 
-function snapshot(turns: CodexAppServerTurn[]): CodexPaginatedTaskSnapshot {
+function snapshot(turns: CodexAppServerTurn[], version = "0.158.0"): CodexPaginatedTaskSnapshot {
   return {
     codexHome: "/codex",
-    serverVersion: "0.158.0",
+    serverVersion: version,
     completeToBoundary: true,
     thread: {
       id: THREAD,
@@ -102,42 +102,45 @@ function answerText(index: number, itemId = "question-item"): string {
   }) + "\n</send_user_message_question_reply>";
 }
 
-test("paginated acceptance excludes the pre-Send boundary and binds a separate native turn", () => {
-  const original = anchor();
-  const old = turn("baseline", 100);
-  assert.equal(observeCodexPaginatedTask({
-    anchor: original, snapshot: snapshot([old])
-  }).status, "pending");
-  const result = observeCodexPaginatedTask({
-    anchor: original, snapshot: snapshot([turn("accepted", 200), old])
+for (const version of ["0.158.0", "0.159.0"] as const) {
+  test(`paginated ${version} acceptance excludes the pre-Send boundary and binds a separate native turn`, () => {
+    const original = anchor({ codex_version: version });
+    const old = turn("baseline", 100);
+    assert.equal(observeCodexPaginatedTask({
+      anchor: original, snapshot: snapshot([old], version)
+    }).status, "pending");
+    const result = observeCodexPaginatedTask({
+      anchor: original, snapshot: snapshot([turn("accepted", 200), old], version)
+    });
+    assert.equal(result.status, "completed");
+    if (result.status !== "completed") assert.fail("exact native turn should complete");
+    assert.equal(result.evidence.source, "codex_paginated");
+    assert.equal(result.evidence.nativeThreadId, THREAD);
+    assert.equal(result.evidence.acceptanceId, "accepted");
+    assert.equal(result.evidence.requestHash, REQUEST_HASH);
+    assert.equal(result.completion.text, "Exact result.");
+    assert.equal(result.completion.outcome, "success");
+    assert.equal(validateCodexPaginatedTaskCheckpoint(result.checkpoint, original), result.checkpoint);
+    assert.equal(JSON.stringify(original).includes(REQUEST), false);
   });
-  assert.equal(result.status, "completed");
-  if (result.status !== "completed") assert.fail("exact native turn should complete");
-  assert.equal(result.evidence.source, "codex_paginated");
-  assert.equal(result.evidence.nativeThreadId, THREAD);
-  assert.equal(result.evidence.acceptanceId, "accepted");
-  assert.equal(result.evidence.requestHash, REQUEST_HASH);
-  assert.equal(result.completion.text, "Exact result.");
-  assert.equal(result.completion.outcome, "success");
-  assert.equal(validateCodexPaginatedTaskCheckpoint(result.checkpoint, original), result.checkpoint);
-  assert.equal(JSON.stringify(original).includes(REQUEST), false);
-});
 
-test("native Plan-mode completion preserves the exact task's plan body", () => {
-  const plan = { id: "plan-output", type: "plan", text: "Chosen answer: Yes.\n\nImplement the requested change." };
-  const accepted = turn("accepted", 200, "completed", [user("accepted-input", REQUEST), plan]);
-  const result = observeCodexPaginatedTask({
-    anchor: anchor(), snapshot: snapshot([
-      turn("unrelated", 300, "completed", [user("later-input", "A different task"),
-        { id: "later-plan", type: "plan", text: "Unrelated plan" }]),
-      accepted, turn("baseline", 100)
-    ])
+  test(`native ${version} Plan-mode completion preserves the exact task's plan body`, () => {
+    const plan = { id: "plan-output", type: "plan", text: "Chosen answer: Yes.\n\nImplement the requested change." };
+    const accepted = turn("accepted", 200, "completed", [user("accepted-input", REQUEST), plan]);
+    const result = observeCodexPaginatedTask({
+      anchor: anchor({ codex_version: version }), snapshot: snapshot([
+        turn("unrelated", 300, "completed", [user("later-input", "A different task"),
+          { id: "later-plan", type: "plan", text: "Unrelated plan" }]),
+        accepted, turn("baseline", 100)
+      ], version)
+    });
+    if (result.status !== "completed") assert.fail("the exact native Plan task should complete");
+    assert.equal(result.completion.id, "accepted");
+    assert.equal(result.completion.text, plan.text);
+    assert.equal(result.completion.outcome, "success");
   });
-  if (result.status !== "completed") assert.fail("the exact native Plan task should complete");
-  assert.equal(result.completion.id, "accepted");
-  assert.equal(result.completion.text, plan.text);
-  assert.equal(result.completion.outcome, "success");
-});
+
+}
 
 test("completion selects the latest explicit native result without using async questions or commentary", () => {
   const plan = { id: "plan-output", type: "plan", text: "Final native plan." };
@@ -210,11 +213,29 @@ test("paginated anchors and checkpoints reject changed bindings", () => {
   })), /exact request binding/u);
 });
 
+test("persisted 0.159 task identity survives reload and rejects a different supported backend", () => {
+  const original = anchor({ codex_version: "0.159.0" });
+  const reloaded = validateCodexPaginatedTaskAnchor(JSON.parse(JSON.stringify(original)));
+  const first = observeCodexPaginatedTask({ anchor: reloaded,
+    snapshot: snapshot([turn("accepted", 200, "inProgress"), turn("baseline", 100)], "0.159.0") });
+  if (first.status !== "accepted") assert.fail("0.159 task must bind before completion");
+  const checkpoint = validateCodexPaginatedTaskCheckpoint(
+    JSON.parse(JSON.stringify(first.checkpoint)), reloaded);
+  const completed = observeCodexPaginatedTask({ anchor: reloaded, checkpoint,
+    snapshot: snapshot([turn("later-identical", 300), turn("accepted", 200)], "0.159.0") });
+  if (completed.status !== "completed") assert.fail("the bound turn must complete");
+  assert.equal(completed.completion.id, "accepted");
+  for (const [binding, backend] of [["0.158.0", "0.159.0"], ["0.159.0", "0.158.0"]] as const) {
+    assert.equal(observeCodexPaginatedTask({ anchor: anchor({ codex_version: binding }),
+      snapshot: snapshot([turn("accepted", 200), turn("baseline", 100)], backend) }).status, "invalidated");
+  }
+});
+
 test("active paginated tasks settle explicit interrupted and failed native outcomes", () => {
   const active = anchor({ origin: "active_task", turn_id: "active", baseline_latest_turn_id: undefined });
   for (const status of ["failed", "interrupted"] as const) {
     const failed = turn("active", 200, status, [user("active-input", REQUEST)]);
-    failed.error = status === "failed" ? { message: "Native failure." } : null;
+    failed.error = { message: "Native failure." };
     const result = observeCodexPaginatedTask({ anchor: active, snapshot: snapshot([failed]) });
     assert.equal(result.status, "completed");
     if (result.status !== "completed") assert.fail("native failure must settle");

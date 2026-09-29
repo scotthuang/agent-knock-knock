@@ -1,7 +1,7 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { createHash } from "node:crypto";
 import {
   captureCodexFullscreenComposerFrame,
-  CODEX_FULLSCREEN_COMPOSER_VERSION,
   exactCodexFullscreenSlashComposerCapture
 } from "./codex-fullscreen-composer-proof.js";
 import type { ExecutorKind } from "./executors.js";
@@ -91,6 +91,10 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "› /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
   ],
+  "codex-tui-0.159.0": [
+    "› /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
+  ],
   "codex-tui-generic-v1": [
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
@@ -116,6 +120,7 @@ const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
   "codex-tui-0.154.0": 80,
   "codex-tui-0.155.1": 80,
   "codex-tui-0.158.0": 80,
+  "codex-tui-0.159.0": 80,
   "codex-tui-generic-v1": 80
 };
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
@@ -308,7 +313,7 @@ export interface TerminalNativeInspectionBeforeEnterContext {
 
 export interface TerminalNativeInspectionOptions {
   runtime?: TerminalRuntimeIdentity;
-  /** Private, in-lock 0.158 status read; public native inspection stays idle-only. */
+  /** Private, in-lock paginated status read; public native inspection stays idle-only. */
   allowWorkingCodexStatus?: true;
   /**
    * Gives the CLI one final in-lock authorization point for its Store binding
@@ -495,12 +500,12 @@ export class TerminalNativeInspectionBridge<TStatus> {
     options: TerminalNativeInspectionOptions = {}
   ): Promise<TerminalCodexStatusProbeResult> {
     if (options.allowWorkingCodexStatus && (
-      agentVersion !== CODEX_FULLSCREEN_COMPOSER_VERSION ||
-      options.runtime?.agentVersion !== CODEX_FULLSCREEN_COMPOSER_VERSION
+      !isCodexPaginatedVersion(agentVersion) ||
+      options.runtime?.agentVersion !== agentVersion
     )) {
       throw nativeInspectionSubmissionError(
         "not_started",
-        new Error("working native status requires the exact Codex 0.158.0 runtime"),
+        new Error("working native status requires the same exact verified paginated Codex runtime"),
         "unsupported_profile"
       );
     }
@@ -1277,7 +1282,7 @@ export class TerminalNativeInspectionBridge<TStatus> {
         `terminal control identity changed after the final ${adapter.displayName} /status composer capture`
       );
     }
-    const finalScreen = plan.behaviorProfile === "codex-tui-0.158.0"
+    const finalScreen = codexFullscreenStatusVersion(plan) !== undefined
       ? await this.captureCodexStyledStatusPopup(verifiedImmediatelyBeforeEnter, plan,
           expected, runtime, allowWorkingCodexStatus)
       : captured.screen;
@@ -1305,7 +1310,7 @@ export class TerminalNativeInspectionBridge<TStatus> {
     assertNativeInspectionComposerSafe(adapter.inspectScreen({ screen: plainScreen, runtime }),
       adapter.displayName, allowWorking);
     const styled = exactCodexFullscreenSlashComposerCapture(styledScreen, plan.command,
-      CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile] ?? [], true);
+      CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile] ?? [], true, codexFullscreenStatusVersion(plan));
     const materialized = exactNativeInspectionComposerCapture("codex", plainScreen, plan);
     if (!styled || !materialized || materialized.digest !== expected.digest ||
         materialized.kind !== expected.kind) {
@@ -1490,11 +1495,12 @@ function exactCodexNativeInspectionComposerCapture(
   digest: string;
   kind: TerminalNativeInspectionMaterializationKind;
 } | undefined {
-  if (plan.behaviorProfile === "codex-tui-0.158.0") {
+  if (codexFullscreenStatusVersion(plan) !== undefined) {
     const captured = exactCodexFullscreenSlashComposerCapture(
       stripTerminalEscapeSequences(screen),
       plan.command,
-      CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile]!
+      CODEX_NATIVE_STATUS_POPUP_BY_PROFILE[plan.behaviorProfile]!,
+      false, codexFullscreenStatusVersion(plan)
     );
     return captured && { digest: captured.digest, kind: "exact_slash_popup" };
   }
@@ -1725,7 +1731,7 @@ export function exactCodexReadyStyledComposerCapture(
   screen: string,
   agentVersion?: string
 ): { digest: string } | undefined {
-  if (agentVersion === CODEX_FULLSCREEN_COMPOSER_VERSION) {
+  if (isCodexPaginatedVersion(agentVersion)) {
     const frame = captureCodexFullscreenComposerFrame(screen, agentVersion);
     if (!frame || !frame.hasShortcutFooter ||
         !["", "Ask Codex to do anything"].includes(frame.composerText)) {
@@ -1913,4 +1919,9 @@ function codexNativeInspectionComposerMismatchDiagnostic(
   return observedTruncation && everyKnownPrefix
     ? "composer_viewport_truncated"
     : "composer_not_exact";
+}
+
+function codexFullscreenStatusVersion(plan: TerminalNativeInspectionPlan): string | undefined {
+  const version = /^codex-tui-(.+)$/u.exec(plan.behaviorProfile)?.[1];
+  return isCodexPaginatedVersion(version) ? version : undefined;
 }

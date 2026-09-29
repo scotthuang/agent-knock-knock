@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.13 - 2026-09-30
+
+### Changed
+
+- Extend the paginated task adapter to Codex 0.159.0 for physical Send, exact task Watch, native questions and answer receipts, and completion callbacks.
+- Preserve existing string-cursor pagination while accepting 0.159.0 as an independently checked client/backend version.
+- Keep the existing 0.158.0 support and the documented 0.157.x limitations. Store writer protocol remains 8 and Terminal Watch schema remains 3.
+
+### Fixed
+
+- Parse Codex 0.159.0 borderless native status output and wrapped fields while retaining exact fresh-card, session, and Composer checks. Separate native activity (including Thinking, Waiting, Compacting, and dynamic headers) and queued-question regions from the status card so active Watch binding and question-answer identity checks can complete. Display text remains outside task identity evidence.
+
 ## 0.13.12 - 2026-09-29
 
 ### Fixed

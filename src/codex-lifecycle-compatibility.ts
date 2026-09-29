@@ -10,8 +10,16 @@ const CODEX_LIFECYCLE_PROFILES: Readonly<Record<string, string>> = Object.freeze
   "0.153.4": "codex-tui-0.153.4",
   "0.154.0": "codex-tui-0.154.0",
   "0.155.1": "codex-tui-0.155.1",
-  "0.158.0": "codex-tui-0.158.0"
+  "0.158.0": "codex-tui-0.158.0",
+  "0.159.0": "codex-tui-0.159.0"
 });
+
+export type CodexPaginatedVersion = "0.158.0" | "0.159.0";
+
+/** Versions whose paginated history and physical TUI binding are verified together. */
+export function isCodexPaginatedVersion(value: unknown): value is CodexPaginatedVersion {
+  return value === "0.158.0" || value === "0.159.0";
+}
 
 /**
  * Stable behavior contract used for a complete x.y.z Codex version that
@@ -46,7 +54,7 @@ export function codexUnsupportedDurableHistoryWarning(
 
 /** Paginated Watch support does not implement legacy managed thread transitions. */
 export function codexThreadLifecycleHistoryWarning(agentVersion: string | undefined): string | undefined {
-  if (agentVersion === "0.158.0") return "Codex 0.158.0 paginated task Watch is supported, but managed native thread new/resume requires a separate paginated lifecycle adapter";
+  if (isCodexPaginatedVersion(agentVersion)) return `Codex ${agentVersion} paginated task Watch is supported, but managed native thread new/resume requires a separate paginated lifecycle adapter`;
   return codexUnsupportedDurableHistoryWarning(agentVersion);
 }
 
