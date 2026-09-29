@@ -128,6 +128,10 @@ const CODEX_STATUS_HEADER_PATTERN =
 const CODEX_STATUS_TOP_BORDER = /^\s*╭[─-]+╮\s*$/u;
 const CODEX_STATUS_BOTTOM_BORDER = /^\s*╰[─-]+╯\s*$/u;
 const CODEX_STATUS_FIELD = /^\s*│\s*([^:│]{1,64}):\s+(.+?)\s*│\s*$/u;
+// Native status_indicator_widget.rs + motion.rs: full elapsed/interrupt row,
+// including both pulse glyphs and the reduced-motion form without a glyph.
+const CODEX_159_WORKING_ROW =
+  /^(?:[•◦] )?Working \((?:[0-5]?\ds|[1-5]?\dm [0-5]\ds|[1-9]\d*h [0-5]\dm [0-5]\ds) • esc to interrupt\)$/u;
 const CODEX_STATUS_MAX_LINES = 64;
 const CODEX_STATUS_MAX_REGION_LENGTH = 8_192;
 const CODEX_STATUS_MAX_FIELDS = 24;
@@ -732,7 +736,7 @@ function parseCodexStatusCardAfterCommand(
   };
 }
 
-/** 0.159 removes borders. The next command/Composer closes the bounded card. */
+/** 0.159 removes borders. Close fields before the exact native live suffix. */
 function parseCodex159StatusCard(
   lines: readonly string[],
   start: number
@@ -750,14 +754,20 @@ function parseCodex159StatusCard(
       captureCodexFullscreenComposerFrame(lines.slice(end).join("\n"), "0.159.0")?.composerIndex !== 0) {
     return uncertain("Codex 0.159 /status closing Composer is incomplete");
   }
-  const region = lines.slice(start, end).join("\n").trimEnd();
+  const suffixStart = lines.findIndex((line, index) => index > start && index < end &&
+    (CODEX_159_WORKING_ROW.test(line.trimEnd()) || line === "• Queued follow-up inputs"));
+  const fieldEnd = suffixStart < 0 ? end : suffixStart;
+  if (suffixStart >= 0 && !closedCodex159StatusSuffix(lines.slice(suffixStart, end))) {
+    return uncertain("Codex 0.159 /status contains an unproven live activity suffix");
+  }
+  const region = lines.slice(start, fieldEnd).join("\n").trimEnd();
   if (region.length > CODEX_STATUS_MAX_REGION_LENGTH) {
     return uncertain("Codex 0.159 /status exceeds the bounded inspection size");
   }
   const fields: Array<{ name: string; value: string }> = [];
   const names = new Set<string>();
   let valueColumn: number | undefined;
-  for (const line of lines.slice(start + 1, end)) {
+  for (const line of lines.slice(start + 1, fieldEnd)) {
     if (!line.trim()) continue;
     if (fields.length === 0 && [
       "  Visit https://chatgpt.com/codex/settings/usage for up-to-date",
@@ -800,6 +810,20 @@ function parseCodex159StatusCard(
       value: /^account$/iu.test(name) ? "[REDACTED]" : redactCodexNativeStatusText(value)
     }))
   };
+}
+
+/** Known UI suffix only: activity, an optional native tip, and collapsed input. */
+function closedCodex159StatusSuffix(lines: readonly string[]): boolean {
+  const rows = lines.filter((line) => line.trim()).map((line) => line.trimEnd());
+  if (CODEX_159_WORKING_ROW.test(rows[0] ?? "")) {
+    rows.shift();
+    if (/^ {2}└ Tip: \S.{0,255}$/u.test(rows[0] ?? "")) rows.shift();
+  }
+  if (rows.length === 0) return true;
+  if (rows.length !== 3 || rows[0] !== "• Queued follow-up inputs") return false;
+  const summary = /^ {2}\? ([1-9]\d{0,2}) (question|questions)(?: · [1-9]\d{0,2}s)?$/u.exec(rows[1]!);
+  return summary !== null && (Number(summary[1]) === 1) === (summary[2] === "question") &&
+    /^ {4}(?:shift\+←|⌥\+↑) to answer$/u.test(rows[2]!);
 }
 
 type CodexStatusEvidenceInventory =
@@ -1091,7 +1115,8 @@ export function detectCodexActivityState(
   }
 
   const tailLines = screen.trimEnd().split(/\r?\n/).slice(-30);
-  const workingLine = tailLines.find((line) => isCodexWorkingLine(line));
+  const workingLine = tailLines.find((line) => isCodexWorkingLine(line) ||
+    agentVersion === "0.159.0" && CODEX_159_WORKING_ROW.test(line.trimEnd()));
   if (workingLine) {
     return {
       state: "working",

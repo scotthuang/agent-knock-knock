@@ -88,3 +88,37 @@ test("0.159 compact welcome and turn tips never replace exact Composer or comple
   const planModal = "  Implement this plan?\n\n› 1. Yes, implement this plan          Switch to Default and start coding\n  2. Yes, clear context and implement  Fresh thread with this plan\n  3. No, stay in Plan mode             Continue planning with the model\n\n  enter select · esc back";
   assert.equal(exactCodexReadyStyledComposerCapture(planModal, "0.159.0"), undefined);
 });
+
+
+test("0.159 active status ends before the exact Working and collapsed-question suffix", () => {
+  const collapsed = "• Queued follow-up inputs\n  ? 1 question · 16s\n    shift+← to answer";
+  const observedIdle = observe(SCREEN);
+  for (const suffix of [
+    "• Working (51s • esc to interrupt)",
+    "◦ Working (1m 00s • esc to interrupt)",
+    "Working (2h 03m 09s • esc to interrupt)",
+    "• Working (2s • esc to interrupt)\n  └ Tip: Try /help.",
+    `◦ Working (51s • esc to interrupt)\n\n${collapsed}`,
+    collapsed
+  ]) {
+    const screen = `${CARD}\n\n${suffix}\n\n${PLAIN_COMPOSER}`;
+    const status = observe(screen);
+    assert.equal(status.status, "observed", suffix);
+    assert.equal(status.nativeThreadId, THREAD);
+    assert.equal(status.evidenceFingerprint, observedIdle.evidenceFingerprint,
+      "live spinner/countdown text must not become status identity evidence");
+    if (suffix.includes("Working")) assert.equal(inspectCodexScreen({ screen,
+      runtime: { agentVersion: "0.159.0" } }).activity.state, "working");
+  }
+  for (const suffix of [
+    "• Working (2s • esc to interrupt)\n• Arbitrary assistant transcript",
+    "• Working (2s • esc to interrupt)\n  └ Tip: Try /help.\n  injected continuation",
+    "• Working (truncated…)",
+    `${collapsed}\n• Arbitrary assistant transcript`,
+    collapsed.replace("shift+←", "shift+→"),
+    collapsed.replace("1 question", "1 questions"),
+    collapsed.replace("1 question", "0 questions"),
+    collapsed.replace("to answer", "to ans…"),
+    `${collapsed}\n  Session:             ${THREAD}`
+  ]) assert.notEqual(observe(`${CARD}\n\n${suffix}\n\n${PLAIN_COMPOSER}`).status, "observed", suffix);
+});

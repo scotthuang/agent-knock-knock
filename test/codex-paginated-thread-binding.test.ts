@@ -202,3 +202,17 @@ test("0.159 status binding refuses incomplete identity and cross-version status 
   const olderClient = fixture([POST_STATUS_159], "0.158.0");
   await assert.rejects(captureCodexPaginatedThreadBinding(olderClient.input), /fresh exact foreground thread/u);
 });
+
+
+test("0.159 manual Watch and async-answer preflight bind through active status suffixes", async () => {
+  for (const suffix of [
+    "• Working (4s • esc to interrupt)",
+    "◦ Working (1m 00s • esc to interrupt)\n\n• Queued follow-up inputs\n  ? 1 question · 16s\n    shift+← to answer"
+  ]) {
+    const harness = fixture([`${STATUS_CARD_159}\n\n${suffix}\n${READY_COMPOSER}`], "0.159.0");
+    const binding = await captureCodexPaginatedThreadBinding({ ...harness.input, allowWorking: true });
+    assert.equal(binding.threadId, THREAD);
+    assert.equal(binding.serverVersion, "0.159.0");
+    assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "incarnation"]);
+  }
+});
