@@ -950,17 +950,20 @@ test("Codex 0.157 fullscreen idle is diagnostic and incomplete surfaces stay unk
   }).activity.state, "unknown");
 });
 
-test("Codex 0.158 status support does not advertise legacy native thread transitions", () => {
-  const lifecycle = probeCodexThreadLifecycle("0.158.0");
-  assert.equal(lifecycle.status, "unsupported");
-  assert.equal(lifecycle.newThread, false);
-  assert.equal(lifecycle.resumeExact, false);
-  assert.match(lifecycle.reason, /paginated lifecycle adapter/u);
-  assert.equal(probeCodexNativeInspection("0.158.0").statusInspection, true);
-  assert.throws(() => planCodexThreadLifecycle({ kind: "new_thread" }, {
-    ...lifecycle, status: "supported", newThread: true, resumeExact: true
-  }), /paginated lifecycle adapter/u);
-});
+for (const version of ["0.158.0", "0.159.0"]) {
+  test(`Codex ${version} status support does not advertise legacy native thread transitions`, () => {
+    const lifecycle = probeCodexThreadLifecycle(version);
+    assert.equal(lifecycle.status, "unsupported");
+    assert.equal(lifecycle.newThread, false);
+    assert.equal(lifecycle.resumeExact, false);
+    assert.match(lifecycle.reason, /paginated lifecycle adapter/u);
+    assert.equal(probeCodexNativeInspection(version).statusInspection, true);
+    assert.throws(() => planCodexThreadLifecycle({ kind: "new_thread" }, {
+      ...lifecycle, status: "supported", newThread: true, resumeExact: true
+    }), /paginated lifecycle adapter/u);
+  });
+
+}
 
 test("Codex paginated TUI versions reject native dispatch while status cards remain readable", () => {
   for (const version of ["0.157.0", "0.157.1"]) {

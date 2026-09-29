@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import {
   CodexAppServerReadError,
   parseCodexAppServerMetadata,
@@ -76,7 +77,7 @@ export class CodexAppServerInteractionClient {
   }
 
   static async connect(options: CodexAppServerInteractionOptions): Promise<CodexAppServerInteractionClient> {
-    if (options.binding.serverVersion !== "0.158.0" || !path.isAbsolute(options.binding.codexHome)) throw new Error("Native Codex question binding is unsupported");
+    if (!isCodexPaginatedVersion(options.binding.serverVersion) || !path.isAbsolute(options.binding.codexHome)) throw new Error("Native Codex question binding is unsupported");
     identifier(options.binding.threadId);
     identifier(options.nativeTurnId);
     const timeoutMs = options.timeoutMs ?? 5_000;
@@ -89,11 +90,11 @@ export class CodexAppServerInteractionClient {
       // Resume updates future client identity. Preserve the native TUI identity so hooks,
       // plugin prompts and MCP policy retain their existing Codex terminal behavior.
       const initialized = await client.request("initialize", {
-        clientInfo: { name: "codex-tui", title: "AKK native question bridge", version: "0.158.0" },
+        clientInfo: { name: "codex-tui", title: "AKK native question bridge", version: options.binding.serverVersion },
         capabilities: { experimentalApi: true }
       });
       Object.assign(metadata, parseCodexAppServerMetadata(initialized, {
-        codexHome: options.binding.codexHome, expectedServerVersion: "0.158.0"
+        codexHome: options.binding.codexHome, expectedServerVersion: options.binding.serverVersion
       }, socketPath));
       transport.send(JSON.stringify({ method: "initialized" }));
       await client.verifyActiveQuestionTurn();

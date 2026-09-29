@@ -1,12 +1,14 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 const CODEX_PAGINATED_DEFAULT_HISTORY_VERSIONS = new Set([
   "0.157.0",
   "0.157.1",
-  "0.158.0"
+  "0.158.0",
+  "0.159.0"
 ]);
 
 /** New physical Sends can acquire a paginated task anchor before task input. */
 export function codexPhysicalSendUsesPaginatedWatch(agentVersion?: string): boolean {
-  return agentVersion === "0.158.0";
+  return isCodexPaginatedVersion(agentVersion);
 }
 
 export function codexManagedSendRequiresLegacyHistory(agentVersion?: string): boolean {

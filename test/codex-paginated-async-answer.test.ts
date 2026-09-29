@@ -14,9 +14,11 @@ const TURN = "01a0e959-4bb1-7fc3-8649-e153fd90faae";
 const ITEM = "async-question-message";
 const NATIVE_ID = JSON.stringify(["request_user_input_async", ITEM, 0]);
 const CLIENT_ID = "b5e512ec-70b1-4f59-b72c-af6d55e6c511";
+const CODEX_VERSIONS = ["0.158.0", "0.159.0"] as const;
+type CodexVersion = (typeof CODEX_VERSIONS)[number];
 
-test("sends one closed native turn CAS and confirms only its exact durable reply", async () => {
-  const fixture = new AsyncAnswerFixture();
+for (const version of CODEX_VERSIONS) test("sends one closed native turn CAS and confirms only its exact durable reply for " + version, async () => {
+  const fixture = new AsyncAnswerFixture(version);
   const result = await fixture.deliver();
   assert.deepEqual(result, { status: "confirmed", clientUserMessageId: CLIENT_ID,
     nativeTurnId: TURN, nativeQuestionId: NATIVE_ID });
@@ -32,6 +34,7 @@ test("sends one closed native turn CAS and confirms only its exact durable reply
   assert.deepEqual(fixture.sent.map((value) => value.method), ["initialize", "initialized", "turn/steer"]);
   assert.equal(fixture.closed, true);
   assert.equal(fixture.reads, 2);
+  assert.deepEqual(fixture.snapshotReadVersions, [version, version]);
 });
 
 test("refuses stale turn, changed full question or an already answered tuple before reservation", async () => {
@@ -102,6 +105,18 @@ test("rechecks process incarnation and accepts only the exact backend before res
   assert.equal(oldServer.closed, true);
 });
 
+test("rejects both crossed 0.158 and 0.159 async client/backend versions before reserving", async () => {
+  for (const [clientVersion, backendVersion] of [["0.158.0", "0.159.0"], ["0.159.0", "0.158.0"]] as const) {
+    const fixture = new AsyncAnswerFixture(clientVersion);
+    fixture.serverVersion = backendVersion;
+    await assert.rejects(fixture.deliver(), /backend version/u);
+    assert.equal(fixture.reads, 0);
+    assert.equal(fixture.reservations, 0);
+    assert.equal(fixture.steers().length, 0);
+    assert.equal(fixture.closed, true);
+  }
+});
+
 test("reservation rejection performs no native input and caller mutation cannot retarget the reserved answer", async () => {
   const rejected = new AsyncAnswerFixture();
   const input = rejected.input();
@@ -147,29 +162,34 @@ type Mode = "normal" | "rpc-reject" | "disconnect" | "wrong-turn" | "prose" | "o
   "modified-answer" | "competing" | "duplicate-id" | "no-receipt";
 type Message = { id?: string; method?: string; params?: unknown; result?: unknown; error?: unknown };
 class AsyncAnswerFixture implements CodexAppServerReadTransport {
-  readonly snapshot: CodexPaginatedTaskSnapshot = {
-    codexHome: HOME, serverVersion: "0.158.0", completeToBoundary: true,
-    thread: { id: THREAD, sessionId: THREAD, cwd: "/tmp/project", cliVersion: "0.158.0",
-      historyMode: "paginated", originator: "codex-tui", source: "vscode", turns: [],
-      status: { type: "active", activeFlags: [] } },
-    turns: [{ id: TURN, status: "inProgress", itemsView: "full", error: null,
-      startedAt: 1_790_643_600, completedAt: null, durationMs: null,
-      items: [{ id: ITEM, type: "agentMessage", delivery: "async", phase: "final_answer", text: "UniPat AI?",
-        questions: [{ title: "UniPat AI?", options: ["Yes", "No"] }] }] }]
-  };
+  readonly snapshot: CodexPaginatedTaskSnapshot;
   readonly sent: Message[] = [];
   mode: Mode = "normal";
-  serverVersion = "0.158.0";
+  serverVersion: string;
   reservations = 0;
   reads = 0;
+  readonly snapshotReadVersions: string[] = [];
   closed = false;
   changeProcessAfterRead = false;
   throwOnClose = false;
   private clock = 0;
   private listener?: (text: string) => void;
   private disconnected?: (error: Error) => void;
+  constructor(readonly version: CodexVersion = "0.158.0") {
+    this.snapshot = {
+      codexHome: HOME, serverVersion: version, completeToBoundary: true,
+      thread: { id: THREAD, sessionId: THREAD, cwd: "/tmp/project", cliVersion: version,
+        historyMode: "paginated", originator: "codex-tui", source: "vscode", turns: [],
+        status: { type: "active", activeFlags: [] } },
+      turns: [{ id: TURN, status: "inProgress", itemsView: "full", error: null,
+        startedAt: 1_790_643_600, completedAt: null, durationMs: null,
+        items: [{ id: ITEM, type: "agentMessage", delivery: "async", phase: "final_answer", text: "UniPat AI?",
+          questions: [{ title: "UniPat AI?", options: ["Yes", "No"] }] }] }]
+    };
+    this.serverVersion = version;
+  }
   input(): CodexPaginatedAsyncAnswerInput {
-    return { binding: { codexHome: HOME, threadId: THREAD, serverVersion: "0.158.0", pid: 34744,
+    return { binding: { codexHome: HOME, threadId: THREAD, serverVersion: this.version, pid: 34744,
       processUuid: "fixture-process", processBirth: "fixture-birth", observedAt: "2026-09-29T03:00:00Z" },
       nativeTurnId: TURN, itemId: ITEM, questionIndex: 0,
       expectedQuestion: { title: "UniPat AI?", options: ["Yes", "No"] }, answer: "Yes", timeoutMs: 200,
@@ -177,7 +197,11 @@ class AsyncAnswerFixture implements CodexAppServerReadTransport {
   }
   ports(): CodexPaginatedAsyncAnswerPorts {
     return { transportFactory: async () => this,
-      readSnapshot: async () => { this.reads += 1; return structuredClone(this.snapshot); },
+      readSnapshot: async (input) => {
+        this.reads += 1;
+        this.snapshotReadVersions.push(input.serverVersion);
+        return structuredClone(this.snapshot);
+      },
       incarnation: () => ({ processUuid: this.changeProcessAfterRead && this.reads > 0 ? "changed" : "fixture-process",
         processBirth: "fixture-birth", evidence: "codex_process_birth" }),
       randomId: () => CLIENT_ID, now: () => this.clock,

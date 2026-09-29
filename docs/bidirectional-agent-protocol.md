@@ -42,11 +42,11 @@ Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` rem
 
 ## Managed Turn Flow
 
-This flow describes managed Session/Turn delivery. Codex 0.158.0 physical Send
+This flow describes managed Session/Turn delivery. Codex 0.158.0/0.159.0 physical Send
 uses an independent exact paginated task Watch and returns `watch_id` without
 creating a managed `turn_id`. Its foreground binding, native answer receipts,
 and session-only/new/resume and first-modal limits are described in the
-[0.158.0 compatibility review](codex-0.158.0-compatibility.md).
+[0.158.0/0.159.0 compatibility review](codex-0.159.0-compatibility.md).
 
 1. The controller Host calls ordinary send using the exact current listed action and the user-facing request. `session_exact` carries `session_id`; `terminal_follow_current` and `terminal_user_explicit` carry `terminal_id`. Both target fields may be omitted only when AKK must prove one unique send-ready pane. Initial discovery may first resolve one eligible Codex or Claude Code terminal into an AKK session.
 2. AKK verifies that the session is bound to the expected native session, terminal, and idle coding-agent process.
@@ -76,7 +76,7 @@ status UUID is provisional evidence, never durable ownership. Probe or boundary
 uncertainty stops before the task and cannot be retried automatically. This
 operation is optional: ordinary human Send continues to follow its independent
 user-priority contract and is never implicitly redirected through these
-identification actions. List and Status never probe. Codex 0.158.0 physical Send
+identification actions. List and Status never probe. Codex 0.158.0/0.159.0 physical Send
 and exact Watch creation use their separate closed `/status` transaction to
 bind the foreground paginated thread.
 

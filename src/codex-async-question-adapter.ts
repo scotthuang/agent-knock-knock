@@ -1,3 +1,4 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { createHash } from "node:crypto";
 import { captureCodexFullscreenComposerFrame } from
   "./codex-fullscreen-composer-proof.js";
@@ -11,7 +12,8 @@ export const CODEX_ASYNC_QUESTION_PROFILES: Readonly<Record<string, string>> =
   Object.freeze({
     "0.154.0": "codex/0.154.0/request-user-input-async-v1",
     "0.155.1": "codex/0.155.1/request-user-input-async-v1",
-    "0.158.0": "codex/0.158.0/request-user-input-async-v2"
+    "0.158.0": "codex/0.158.0/request-user-input-async-v2",
+    "0.159.0": "codex/0.159.0/request-user-input-async-v2"
   });
 
 export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
@@ -81,7 +83,7 @@ export interface CodexAsyncQuestionMatch {
   readonly source_question_index: number;
   readonly question: CodexAsyncQuestionSemanticQuestion;
   readonly selected_option_id?: string;
-  /** Exact 0.158 durable AnsweredQuestion tuple, never a public identifier. */
+  /** Exact paginated-history AnsweredQuestion tuple, never a public identifier. */
   readonly native_question_id?: string;
 }
 
@@ -121,7 +123,7 @@ export type CodexAsyncQuestionOwnerPrivateActionPlan =
         CodexAsyncQuestionDeliveryMode,
         "submit" | "queue"
       >>;
-      /** Only a fully visible 0.158 empty editor may authorize this navigation. */
+      /** Only a fully visible, profiled empty editor may authorize this navigation. */
       readonly prompt_stack_back?: "shift_right" | "alt_down";
       readonly prompt_stack_forward?: "shift_left" | "alt_up";
       readonly expected_region_sha256: string;
@@ -351,7 +353,7 @@ export function codexAsyncQuestionMainComposerVisible(input: {
     return false;
   }
   const footer = captured.lines.at(-1)?.trim() ?? "";
-  if (input.version === "0.158.0") {
+  if (isCodexPaginatedVersion(input.version)) {
     return captureCodexFullscreenComposerFrame(input.screen, input.version)
       ?.hasShortcutFooter === true;
   }
@@ -1199,5 +1201,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFullscreenProfile(profile: string): boolean {
-  return profile === CODEX_ASYNC_QUESTION_PROFILES["0.158.0"];
+  return profile === CODEX_ASYNC_QUESTION_PROFILES["0.158.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.0"];
 }

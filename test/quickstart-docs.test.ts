@@ -205,8 +205,9 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     assert.match(document, /at least 80 columns/u);
     assert.match(
       document,
-      /ordinary (?:terminal-scoped )?task[\s\S]{0,160}(?:does not|so it does not) run `\/status`[\s\S]{0,120}(?:does not fail|or fail) merely because the pane is narrow/u
+      /Legacy terminal-scoped (?:ordinary )?tasks[\s\S]{0,160}without running `\/status` or failing merely because the pane is narrow/u
     );
+    assert.match(document, /Codex 0\.158\.0\/0\.159\.0 attempts[\s\S]{0,50}closed `\/status` binding before physical Send/u);
     assert.match(
       document,
       /Until (?:that )?promotion commits[\s\S]*strict `session_id` send[\s\S]*`respond`[\s\S]*(?:managed `approve`|`approve`)[\s\S]*`cancel`[\s\S]*native lifecycle[\s\S]*(?:callback delivery|callback authority)[\s\S]*`native_inspect`/u
@@ -341,14 +342,14 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     interactionDesign,
     /not a published package contract|local POC implemented/u
   );
-  assert.match(storageContract, /current writer protocol is 7/u);
+  assert.match(storageContract, /current writer protocol is 8/u);
   assert.match(
     storageContract,
-    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 7/u
+    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 8/u
   );
   assert.match(
     storageContract,
-    /Protocols 3 through 6 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
+    /Protocols 3 through 7 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
   );
   assert.match(
     operatorContract,

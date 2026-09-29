@@ -1,3 +1,4 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { createHash } from "node:crypto";
 import { captureCodexFullscreenComposerFrame } from
   "./codex-fullscreen-composer-proof.js";
@@ -285,8 +286,9 @@ function observeCodexIdleModel(screen: string, plan?: TerminalModelControlPlan):
 (TerminalModelValue & { readonly planMode: boolean }) | undefined {
   const lines = stripAnsi(screen).replace(/\r\n?/gu, "\n").split("\n");
   while (lines.length > 0 && lines.at(-1)?.trim() === "") lines.pop();
-  const modern = plan?.behaviorProfile === "codex-model-control-0.158.0";
-  const frame = modern ? captureCodexFullscreenComposerFrame(screen, "0.158.0") : undefined;
+  const version = plan && terminalModelControlProfileForPlan(plan)?.agentVersion;
+  const modern = isCodexPaginatedVersion(version);
+  const frame = modern ? captureCodexFullscreenComposerFrame(screen, version) : undefined;
   const footer = modern
     ? frame?.hasShortcutFooter ? frame.plainLines[frame.footerIndex] : undefined
     : lines.at(-1);
@@ -2063,7 +2065,7 @@ function observeCodexModelControl(
   if (latest < 0) {
     return { state: "none", fingerprint, reason: "no current Codex model picker is visible" };
   }
-  const modern = plan.behaviorProfile === "codex-model-control-0.158.0";
+  const modern = isCodexPaginatedVersion(terminalModelControlProfileForPlan(plan)?.agentVersion);
   const region = currentPickerRegion(lines, latest, modern);
   if (!region) {
     return {

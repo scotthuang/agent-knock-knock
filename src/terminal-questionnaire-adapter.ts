@@ -14,7 +14,8 @@ export const CODEX_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
   "0.153.4": "codex/0.153.4/request-user-input-v3",
   "0.154.0": "codex/0.154.0/request-user-input-v3",
   "0.155.1": "codex/0.155.1/request-user-input-v3",
-  "0.158.0": "codex/0.158.0/request-user-input-v4"
+  "0.158.0": "codex/0.158.0/request-user-input-v4",
+  "0.159.0": "codex/0.159.0/request-user-input-v4"
 });
 
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
@@ -1038,7 +1039,7 @@ function codexCustomTextFooterTips(header: CodexHeader): readonly string[] {
 function codexHasCanonicalOther(options: readonly ParsedOptionRow[], profile: string): boolean {
   const other = options.at(-1);
   return other?.label === CODEX_OTHER_OPTION_LABEL &&
-    other.description === (profile === "codex/0.158.0/request-user-input-v4"
+    other.description === (["codex/0.158.0/request-user-input-v4", "codex/0.159.0/request-user-input-v4"].includes(profile)
       ? "Optionally, add details in notes (tab)"
       : CODEX_OTHER_OPTION_DESCRIPTION);
 }

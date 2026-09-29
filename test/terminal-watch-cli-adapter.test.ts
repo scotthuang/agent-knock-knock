@@ -101,71 +101,74 @@ Which color do you prefer?
 Enter to select · ↑/↓ to navigate · Esc to cancel
 `;
 
-test("paginated Send retains an exact callback across terminal exit and callback replay", async (t) => {
-  const fixture = createFixture(t, "human-only", "0.158.0");
-  const callbacks: TerminalWatchCallbackInput[] = [];
-  let terminals: Record<string, unknown>[] = [{ ...fixture.terminal, native_agent_rollout: undefined }];
-  let completed = false;
-  const request = "Exact paginated task";
-  const requestHash = createHash("sha256").update(request).digest("hex");
-  const nativeAnchor = createCodexPaginatedTaskAnchor({
-    origin: "user_explicit_send", captured_at: fixture.now().toISOString(),
-    codex_home: "/codex", codex_version: "0.158.0", native_thread_id: THREAD_ID,
-    process_uuid: fixture.terminal.native_agent_process_uuid,
-    process_birth: fixture.terminal.native_agent_process_birth, pid: fixture.terminal.pid,
-    request_hash: requestHash
+for (const version of ["0.158.0", "0.159.0"] as const) {
+  test(`paginated ${version} Send retains an exact callback across terminal exit and callback replay`, async (t) => {
+    const fixture = createFixture(t, "human-only", version);
+    const callbacks: TerminalWatchCallbackInput[] = [];
+    let terminals: Record<string, unknown>[] = [{ ...fixture.terminal, native_agent_rollout: undefined }];
+    let completed = false;
+    const request = "Exact paginated task";
+    const requestHash = createHash("sha256").update(request).digest("hex");
+    const nativeAnchor = createCodexPaginatedTaskAnchor({
+      origin: "user_explicit_send", captured_at: fixture.now().toISOString(),
+      codex_home: "/codex", codex_version: version, native_thread_id: THREAD_ID,
+      process_uuid: fixture.terminal.native_agent_process_uuid,
+      process_birth: fixture.terminal.native_agent_process_birth, pid: fixture.terminal.pid,
+      request_hash: requestHash
+    });
+    const facade = createTerminalWatchCliAdapter({
+      acquireFileLock: () => () => {}, acquireTerminalLock: () => () => {},
+      observeExactTerminal: async ({ terminalId }) => exactTerminalObservation(terminals, terminalId),
+      loadClaudeAgentRows: () => [], now: fixture.now,
+      randomUUID: () => "00000000-0000-4000-8000-000000000300",
+      storeDirFromOptions: () => fixture.storeDir,
+      terminalDispatchOwnership: () => ({ state: "none" }), terminalIncarnationBlockingTurns: () => [],
+      printJson: () => {}, capturePaginatedAnchor: async (input) => {
+        assert.equal(input.requestHash, requestHash, "native whitespace normalization precedes anchoring");
+        return nativeAnchor;
+      },
+      readPaginatedSnapshot: async () => ({
+        codexHome: "/codex", serverVersion: version, completeToBoundary: true,
+        thread: { id: THREAD_ID, sessionId: THREAD_ID, cwd: fixture.terminal.workspace,
+          historyMode: "paginated", cliVersion: version, originator: "codex-tui",
+          source: "vscode", status: { type: completed ? "idle" : "active", activeFlags: [] }, turns: [] },
+        turns: [{ id: TASK_ID, status: completed ? "completed" : "inProgress", itemsView: "full",
+          startedAt: 1787274001, completedAt: completed ? 1787274002 : null,
+          durationMs: completed ? 1000 : null, error: null,
+          items: [{ id: "user-exact", type: "userMessage", content: [{ type: "text", text: request }] },
+            ...(completed ? [{ id: "final-exact", type: "agentMessage", phase: "final_answer", text: "Paginated result" }] : [])] }]
+      }),
+      callback: { deliver(input) { callbacks.push(input); return { runId: input.idempotencyKey, status: "started" }; } }
+    });
+    const options = { storeDir: fixture.storeDir, openclawSession: "agent:main:paginated",
+      callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "agent:main:paginated", respond: true }) };
+    const prepared = await facade.prepareUserExplicitFallbackWatch({ options,
+      terminal: { conversationId: fixture.terminal.id, agent: "codex", pid: fixture.terminal.pid,
+        terminalControl: fixture.terminal.terminal_control as never },
+      requestHash: createHash("sha256").update("  " + request).digest("hex"), requestText: "  " + request + "\r\n",
+      messageId: "paginated-send", physicalToken: "c".repeat(64) });
+    assert.ok(prepared);
+    const receipt = await facade.attachUserExplicitFallbackWatch({ options, prepared });
+    assert.equal(receipt.watch_mode, "exact_task");
+    await facade.runReconcileWatches(options);
+    assert.equal(callbacks.length, 0);
+    const accepted = loadTerminalWatch(fixture.storeDir, prepared.watchId);
+    assert.equal(record(accepted.observation_checkpoint).acceptance_evidence.source, "codex_paginated");
+    completed = true;
+    terminals = [];
+    fixture.advance();
+    await facade.runReconcileWatches(options);
+    await facade.runReconcileWatches(options);
+    assert.equal(callbacks.length, 1, "native completion is delivered once despite terminal exit and repeated sweeps");
+    const settled = loadTerminalWatch(fixture.storeDir, prepared.watchId);
+    assert.equal(settled.status, "completed");
+    assert.equal(settled.settlement?.completion_id, TASK_ID);
+    assert.equal(settled.settlement?.completion_text, "Paginated result");
+    assert.deepEqual(facade.userExplicitFallbackWatchReceipt({ options, watchId: prepared.watchId }), receipt);
+    assert.equal(facade.listPublicWatches(fixture.storeDir, { includeAll: true })[0].source, "terminal_user_explicit_fallback_watch");
   });
-  const facade = createTerminalWatchCliAdapter({
-    acquireFileLock: () => () => {}, acquireTerminalLock: () => () => {},
-    observeExactTerminal: async ({ terminalId }) => exactTerminalObservation(terminals, terminalId),
-    loadClaudeAgentRows: () => [], now: fixture.now,
-    randomUUID: () => "00000000-0000-4000-8000-000000000300",
-    storeDirFromOptions: () => fixture.storeDir,
-    terminalDispatchOwnership: () => ({ state: "none" }), terminalIncarnationBlockingTurns: () => [],
-    printJson: () => {}, capturePaginatedAnchor: async (input) => {
-      assert.equal(input.requestHash, requestHash, "native whitespace normalization precedes anchoring");
-      return nativeAnchor;
-    },
-    readPaginatedSnapshot: async () => ({
-      codexHome: "/codex", serverVersion: "0.158.0", completeToBoundary: true,
-      thread: { id: THREAD_ID, sessionId: THREAD_ID, cwd: fixture.terminal.workspace,
-        historyMode: "paginated", cliVersion: "0.158.0", originator: "codex-tui",
-        source: "vscode", status: { type: completed ? "idle" : "active", activeFlags: [] }, turns: [] },
-      turns: [{ id: TASK_ID, status: completed ? "completed" : "inProgress", itemsView: "full",
-        startedAt: 1787274001, completedAt: completed ? 1787274002 : null,
-        durationMs: completed ? 1000 : null, error: null,
-        items: [{ id: "user-exact", type: "userMessage", content: [{ type: "text", text: request }] },
-          ...(completed ? [{ id: "final-exact", type: "agentMessage", phase: "final_answer", text: "Paginated result" }] : [])] }]
-    }),
-    callback: { deliver(input) { callbacks.push(input); return { runId: input.idempotencyKey, status: "started" }; } }
-  });
-  const options = { storeDir: fixture.storeDir, openclawSession: "agent:main:paginated",
-    callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "agent:main:paginated", respond: true }) };
-  const prepared = await facade.prepareUserExplicitFallbackWatch({ options,
-    terminal: { conversationId: fixture.terminal.id, agent: "codex", pid: fixture.terminal.pid,
-      terminalControl: fixture.terminal.terminal_control as never },
-    requestHash: createHash("sha256").update("  " + request).digest("hex"), requestText: "  " + request + "\r\n",
-    messageId: "paginated-send", physicalToken: "c".repeat(64) });
-  assert.ok(prepared);
-  const receipt = await facade.attachUserExplicitFallbackWatch({ options, prepared });
-  assert.equal(receipt.watch_mode, "exact_task");
-  await facade.runReconcileWatches(options);
-  assert.equal(callbacks.length, 0);
-  const accepted = loadTerminalWatch(fixture.storeDir, prepared.watchId);
-  assert.equal(record(accepted.observation_checkpoint).acceptance_evidence.source, "codex_paginated");
-  completed = true;
-  terminals = [];
-  fixture.advance();
-  await facade.runReconcileWatches(options);
-  await facade.runReconcileWatches(options);
-  assert.equal(callbacks.length, 1, "native completion is delivered once despite terminal exit and repeated sweeps");
-  const settled = loadTerminalWatch(fixture.storeDir, prepared.watchId);
-  assert.equal(settled.status, "completed");
-  assert.equal(settled.settlement?.completion_id, TASK_ID);
-  assert.equal(settled.settlement?.completion_text, "Paginated result");
-  assert.deepEqual(facade.userExplicitFallbackWatchReceipt({ options, watchId: prepared.watchId }), receipt);
-  assert.equal(facade.listPublicWatches(fixture.storeDir, { includeAll: true })[0].source, "terminal_user_explicit_fallback_watch");
-});
+
+}
 
 test("user-explicit fallback attaches after terminal exit and recovers completion before its first sweep", async (t) => {
   const fixture = createFixture(t);

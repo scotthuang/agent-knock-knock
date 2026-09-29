@@ -1,3 +1,4 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import type { ExecutorKind } from "./executors.js";
 import type {
   TerminalRuntimeIdentity,
@@ -371,9 +372,9 @@ export class TerminalInteractionResponseBridge {
     runtime: TerminalRuntimeIdentity,
     scrollbackLines?: number
   ): Promise<CapturedCodexQuestionStatusSurface> {
-    if (runtime.agentVersion !== "0.158.0" || !runtime.nativeTaskId) {
+    if (!isCodexPaginatedVersion(runtime.agentVersion) || !runtime.nativeTaskId) {
       throw new TerminalInteractionInputNotStartedError(
-        "Codex async-question status navigation requires the exact 0.158 native task"
+        "Codex async-question status navigation requires an exact supported paginated native task"
       );
     }
     const evidence = captureRuntimeAsyncQuestionEvidence({
@@ -417,8 +418,8 @@ export class TerminalInteractionResponseBridge {
     });
     if (!sameTerminalControlIncarnation(verified, latest.terminalControl) ||
         latest.inspection.approval.blocked ||
-        !sameCodexQuestionStatusMaterialization(captured.screen, styledScreen, question, evidence) ||
-        !sameCodexQuestionStatusMaterialization(latest.screen, styledScreen, question, evidence)) {
+        !sameCodexQuestionStatusMaterialization(captured.screen, styledScreen, question, evidence, runtime.agentVersion!) ||
+        !sameCodexQuestionStatusMaterialization(latest.screen, styledScreen, question, evidence, runtime.agentVersion!)) {
       throw new TerminalInteractionInputNotStartedError(
         "Codex question status lost its exact styled surface or terminal identity"
       );
@@ -990,12 +991,13 @@ function sameCodexQuestionStatusMaterialization(
   plainScreen: string,
   styledScreen: string,
   styledQuestion: CodexAsyncQuestionInspection,
-  evidence: readonly CodexAsyncQuestionDurableEvidence[] | undefined
+  evidence: readonly CodexAsyncQuestionDurableEvidence[] | undefined,
+  agentVersion: string
 ): boolean {
-  const plainQuestion = inspectCodexAsyncQuestion({ version: "0.158.0", screen: plainScreen, evidence });
+  const plainQuestion = inspectCodexAsyncQuestion({ version: agentVersion, screen: plainScreen, evidence });
   if (JSON.stringify(plainQuestion) !== JSON.stringify(styledQuestion)) return false;
   const composerRegion = (screen: string) => {
-    const frame = captureCodexFullscreenComposerFrame(screen, "0.158.0", true);
+    const frame = captureCodexFullscreenComposerFrame(screen, agentVersion, true);
     return frame?.plainLines.slice(frame.composerIndex).map((line) => line.trimEnd());
   };
   return JSON.stringify(composerRegion(plainScreen)) === JSON.stringify(composerRegion(styledScreen));

@@ -1,3 +1,4 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { terminalApprovalFingerprint } from "./terminal-approval-fingerprint.js";
 export { terminalApprovalFingerprint } from "./terminal-approval-fingerprint.js";
 import { createHash } from "node:crypto";
@@ -788,7 +789,7 @@ export class TerminalAgentBridge {
   async captureCodexStatusFrame(terminalControl: TerminalControlRef, runtime: TerminalRuntimeIdentity): Promise<{
     screen: string; emptyComposer: boolean;
   }> {
-    if (runtime.agentVersion !== "0.158.0") throw new Error("Fullscreen status proof requires Codex 0.158.0");
+    if (!isCodexPaginatedVersion(runtime.agentVersion)) throw new Error("Fullscreen status proof requires a verified paginated Codex version");
     const verified = await this.verifyTerminalIdentity("codex", terminalControl, runtime);
     const screen = await this.terminalProvider.capture(this.terminalProvider.endpoint(verified), {
       scrollbackLines: 240, preserveEscapes: true
@@ -1291,7 +1292,7 @@ export class TerminalAgentBridge {
         normalized,
         // A complete native Paste event clears Codex's key-burst Enter
         // suppression. A tmux literal-key ACK does not prove that drain.
-        adapter.agent === "codex" && options.runtime?.agentVersion === "0.158.0" &&
+        adapter.agent === "codex" && isCodexPaginatedVersion(options.runtime?.agentVersion) &&
           verifiedForText.kind === "tmux" ? { bracketedPaste: true } : undefined
       );
     } catch (error) {

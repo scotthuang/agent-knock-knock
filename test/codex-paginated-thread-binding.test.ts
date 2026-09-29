@@ -41,44 +41,65 @@ const PRE_ENTER = [
   "  /statusline  configure which items appear in the status line", "",
   "\x1b[1m›\x1b[0m /status", "", "  GPT-6-Astra high · /repo"
 ].join("\n");
+const STATUS_CARD_159 = [
+  "/status", "", "  >_ OpenAI Codex (v0.159.0)", "",
+  "  Visit https://chatgpt.com/codex/settings/usage for up-to-date",
+  "  information on rate limits and credits", "",
+  "  Server:              Local background server", "",
+  "  Model:               GPT-6-Astra (reasoning high, summaries auto)",
+  "  Model provider:      openai",
+  "  Directory:           /repo",
+  "  Permissions:         Workspace (Ask for approval)",
+  "  Agents.md:           AGENTS.md",
+  "  Account:             Pro (More)",
+  "  Collaboration mode:  Default",
+  `  Session:             ${THREAD}`, "",
+  "  Weekly limit:        [█████████████░░░░░░░] 63% left",
+  "                       (resets 12:58 AM on 4 Oct)"
+].join("\n");
+const POST_STATUS_159 = `${STATUS_CARD_159}\n${READY_COMPOSER}`;
+const PRE_ENTER_159 = PRE_ENTER.replace(STATUS_CARD, STATUS_CARD_159);
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function fixture(frames: readonly string[] = [POST_STATUS]) {
+function fixture(frames?: readonly string[], version = "0.158.0") {
+  const postStatus = version === "0.159.0" ? POST_STATUS_159 : POST_STATUS;
+  const preEnter = version === "0.159.0" ? PRE_ENTER_159 : PRE_ENTER;
+  const captures = frames ?? [postStatus];
   const events: string[] = [];
   let captureIndex = 0;
   let incarnationCount = 0;
   const state = { processChanged: false };
   const receipt: TerminalCodexStatusProbeResult = {
     stage: "enter_dispatched", agent: "codex", terminalControl: CONTROL,
-    command: "/status", behaviorProfile: "codex-tui-0.158.0", enterCount: 1,
+    command: "/status", behaviorProfile: `codex-tui-${version}`, enterCount: 1,
     preTextScreenDigest: `sha256:${digest(READY_COMPOSER)}`,
-    preEnterScreenDigest: `sha256:${digest(PRE_ENTER)}`,
-    observationBaselineDigest: digest(PRE_ENTER), observationScrollbackLines: 240,
+    preEnterScreenDigest: `sha256:${digest(preEnter)}`,
+    observationBaselineDigest: digest(preEnter), observationScrollbackLines: 240,
     preEnterEvidenceInventory: observeCodexNativeInspection({
-      operation: { kind: "status" }, screen: stripTerminalEscapeSequences(POST_STATUS)
+      operation: { kind: "status" }, screen: stripTerminalEscapeSequences(postStatus)
     }).evidenceInventory ?? [],
     materialization: {
-      kind: "exact_slash_popup", digest: digest(PRE_ENTER),
+      kind: "exact_slash_popup", digest: digest(preEnter),
       stableCaptures: 2, stableForMs: 100
     }
   };
   const input: BindingInput = {
-    terminalControl: CONTROL, pid: 4242, agentVersion: "0.158.0",
+    terminalControl: CONTROL, pid: 4242, agentVersion: version,
     codexHome: "/codex", now: () => NOW,
     bridge: {
-      async submitCodexStatusProbe(control, version, options) {
+      async submitCodexStatusProbe(control, requestedVersion, options) {
         events.push("closed_status");
         assert.equal(control, CONTROL);
-        assert.equal(version, "0.158.0");
-        assert.deepEqual(options?.runtime, { pid: 4242, agentVersion: "0.158.0" });
+        assert.equal(requestedVersion, version);
+        assert.deepEqual(options?.runtime, { pid: 4242, agentVersion: version });
         return receipt;
       },
       async captureCodexStatusFrame() {
         events.push("capture");
-        const screen = frames[Math.min(captureIndex++, frames.length - 1)]!;
-        return { screen, emptyComposer: exactCodexReadyStyledComposerCapture(screen, "0.158.0") !== undefined };
+        const screen = captures[Math.min(captureIndex++, captures.length - 1)]!;
+        return { screen, emptyComposer: exactCodexReadyStyledComposerCapture(screen, version) !== undefined };
       }
     },
     incarnation(pid) {
@@ -148,4 +169,36 @@ test("status binding refuses a changed physical process and never retries the na
   const unsupported = fixture();
   await assert.rejects(captureCodexPaginatedThreadBinding({ ...unsupported.input, agentVersion: "0.158.1" }), /requires version 0\.158\.0/u);
   assert.deepEqual(unsupported.events, []);
+});
+
+
+test("0.159 borderless status binds the exact local foreground process and restores its styled Composer", async () => {
+  const spinner = `• Working (4s • esc to interrupt)\n${PRE_ENTER_159}`;
+  const harness = fixture([spinner, POST_STATUS_159], "0.159.0");
+  const binding = await captureCodexPaginatedThreadBinding(harness.input);
+  assert.equal(binding.threadId, THREAD);
+  assert.equal(binding.serverVersion, "0.159.0");
+  assert.equal(binding.pid, 4242);
+  assert.equal(binding.processBirth, "exact-birth");
+  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "sleep", "capture", "incarnation"]);
+});
+
+test("0.159 status binding refuses incomplete identity and cross-version status results", async () => {
+  for (const [name, screen] of Object.entries({
+    old_runtime_status: POST_STATUS,
+    wrong_version: POST_STATUS_159.replace("v0.159.0", "v0.159.1"),
+    missing_server: POST_STATUS_159.replace("  Server:              Local background server", ""),
+    embedded_server: POST_STATUS_159.replace("Local background server", "Embedded app server"),
+    duplicate_session: POST_STATUS_159.replace(`  Session:             ${THREAD}`, `  Session:             ${THREAD}\n  Session:             ${THREAD}`),
+    clipped_session: POST_STATUS_159.replace(THREAD, THREAD.slice(0, -1)),
+    clipped_footer: POST_STATUS_159.replace("? for shortcuts", "? for short…"),
+    draft: POST_STATUS_159.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "keep this answer draft")
+  })) {
+    const harness = fixture([screen], "0.159.0");
+    await assert.rejects(captureCodexPaginatedThreadBinding(harness.input), /fresh exact foreground thread/u, name);
+    assert.equal(harness.events.filter((event) => event === "closed_status").length, 1, name);
+    assert.equal(harness.events.filter((event) => event === "incarnation").length, 1, name);
+  }
+  const olderClient = fixture([POST_STATUS_159], "0.158.0");
+  await assert.rejects(captureCodexPaginatedThreadBinding(olderClient.input), /fresh exact foreground thread/u);
 });

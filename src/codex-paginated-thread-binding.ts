@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { codexProcessIncarnationForPid } from "./codex-process-incarnation.js";
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { createCodexTerminalAgentAdapter } from "./codex-terminal-agent-adapter.js";
 import type { TerminalAgentBridge } from "./terminal-agent-bridge.js";
 import type { TerminalControlRef } from "./terminal-control-ref.js";
@@ -26,8 +27,8 @@ export async function captureCodexPaginatedThreadBinding(input: {
   sleep?: (milliseconds: number) => Promise<void>;
   incarnation?: typeof codexProcessIncarnationForPid;
 }): Promise<CodexPaginatedThreadBinding> {
-  if (input.agentVersion !== "0.158.0") {
-    throw new Error("Codex paginated foreground inspection requires version 0.158.0");
+  if (!isCodexPaginatedVersion(input.agentVersion)) {
+    throw new Error("Codex paginated foreground inspection requires version 0.158.0 or 0.159.0");
   }
   const incarnation = input.incarnation ?? codexProcessIncarnationForPid;
   const before = incarnation(input.pid);
@@ -41,7 +42,7 @@ export async function captureCodexPaginatedThreadBinding(input: {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const frame = await input.bridge.captureCodexStatusFrame(input.terminalControl, runtime);
     const observed = adapter.observeNativeInspection?.({
-      operation: { kind: "status" }, expectedAgentVersion: "0.158.0",
+      operation: { kind: "status" }, expectedAgentVersion: input.agentVersion,
       screen: stripTerminalEscapeSequences(frame.screen),
       previousScreenFingerprint: submission.preEnterScreenDigest
     });
@@ -57,7 +58,7 @@ export async function captureCodexPaginatedThreadBinding(input: {
       }
       return {
         codexHome: codexPaginatedHome(input.codexHome),
-        threadId: observed.nativeThreadId, serverVersion: "0.158.0",
+        threadId: observed.nativeThreadId, serverVersion: input.agentVersion,
         processUuid: after.processUuid, processBirth: after.processBirth,
         pid: input.pid, observedAt: (input.now?.() ?? new Date()).toISOString()
       };

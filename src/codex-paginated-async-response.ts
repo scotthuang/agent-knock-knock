@@ -1,3 +1,4 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { readCodexPaginatedAsyncQuestions } from "./codex-paginated-observation.js";
 import { deliverCodexPaginatedAsyncAnswer } from "./codex-paginated-async-answer.js";
 import type { CodexAsyncQuestionDurableEvidence, CodexAsyncQuestionDurableQuestion } from "./codex-async-question-adapter.js";
@@ -82,7 +83,8 @@ export async function respondCodexPaginatedAsyncQuestion(
 async function recaptureAsyncOffer(input: PaginatedAsyncResponseInput): Promise<{
   offer: TerminalInteractionRuntimeOffer; evidence: readonly CodexAsyncQuestionDurableEvidence[];
 }> {
-  if (input.runtime.agentVersion !== "0.158.0" || !input.runtime.codexPaginatedThread || !input.runtime.nativeTaskId ||
+  if (!isCodexPaginatedVersion(input.runtime.agentVersion) || !input.runtime.codexPaginatedThread || !input.runtime.nativeTaskId ||
+      input.runtime.codexPaginatedThread.serverVersion !== input.runtime.agentVersion ||
       input.response.delivery_mode !== "steer_current_turn") {
     throw new TerminalInteractionInputNotStartedError("Codex paginated answers require an exact active task and current-turn delivery");
   }

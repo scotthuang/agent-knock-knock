@@ -1,7 +1,7 @@
+import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { createHash } from "node:crypto";
 import {
   captureCodexFullscreenComposerFrame,
-  CODEX_FULLSCREEN_COMPOSER_VERSION,
   exactCodexFullscreenBareCommandCapture,
   exactCodexFullscreenSlashComposerCapture
 } from "./codex-fullscreen-composer-proof.js";
@@ -551,9 +551,9 @@ function currentCodexComposerCapture(
   profiledSlashPopup?: true;
   bareCommand?: true;
 } | undefined {
-  if (agentVersion === CODEX_FULLSCREEN_COMPOSER_VERSION) {
+  if (isCodexPaginatedVersion(agentVersion)) {
     return fullscreenCodexComposerCapture(styledScreen, expectedText,
-      allowOpaqueLargePastePlaceholder, classifyOpaqueLargePasteAsDifferent, exactSlashPopupRows);
+      allowOpaqueLargePastePlaceholder, classifyOpaqueLargePasteAsDifferent, agentVersion, exactSlashPopupRows);
   }
   const sparkleEmpty = exactCodexAstraSparkleReadyStyledComposerCapture(
     styledScreen, agentVersion
@@ -699,13 +699,14 @@ function fullscreenCodexComposerCapture(
   expectedText: string,
   allowOpaquePaste: boolean,
   classifyOpaquePasteAsDifferent: boolean,
+  agentVersion: string,
   slashPopupRows?: readonly string[]
 ): ReturnType<typeof currentCodexComposerCapture> {
-  const frame = captureCodexFullscreenComposerFrame(screen, CODEX_FULLSCREEN_COMPOSER_VERSION, true);
+  const frame = captureCodexFullscreenComposerFrame(screen, agentVersion, true);
   if (!frame) return undefined;
-  const empty = exactCodexReadyStyledComposerCapture(screen, CODEX_FULLSCREEN_COMPOSER_VERSION);
+  const empty = exactCodexReadyStyledComposerCapture(screen, agentVersion);
   if (empty) return { state: "exact_empty", digest: empty.digest };
-  if (slashPopupRows) return fullscreenCodexSlashCapture(screen, expectedText, slashPopupRows);
+  if (slashPopupRows) return fullscreenCodexSlashCapture(screen, expectedText, slashPopupRows, agentVersion);
   const region = frame.plainLines.slice(frame.composerIndex, frame.footerIndex);
   while (region.length > 1 && !region.at(-1)!.trim()) region.pop();
   const body = [frame.composerText,
@@ -726,11 +727,12 @@ function fullscreenCodexComposerCapture(
 function fullscreenCodexSlashCapture(
   screen: string,
   expectedText: string,
-  rows: readonly string[]
+  rows: readonly string[],
+  agentVersion: string
 ): ReturnType<typeof currentCodexComposerCapture> {
-  const popup = exactCodexFullscreenSlashComposerCapture(screen, expectedText, rows, true);
+  const popup = exactCodexFullscreenSlashComposerCapture(screen, expectedText, rows, true, agentVersion);
   if (popup) return { state: "exact_draft", digest: popup.digest, profiledSlashPopup: true };
-  const bare = exactCodexFullscreenBareCommandCapture(screen, expectedText);
+  const bare = exactCodexFullscreenBareCommandCapture(screen, expectedText, agentVersion);
   return bare && { state: "exact_draft", digest: bare.digest, bareCommand: true };
 }
 
