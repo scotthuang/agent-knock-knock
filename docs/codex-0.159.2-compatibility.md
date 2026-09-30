@@ -203,3 +203,24 @@ PID, and birth revalidated. The designated Herdr process retained its original
 standalone CLI, plugin, and Skill to this exact runtime, restarted only the
 Gateway, and passed `agent-knock-knock doctor --timeout-ms 60000`. The user
 reported successful manual testing before authorizing publication.
+
+
+## Publication gate for 0.13.14
+
+After the user's successful local test and explicit publication authorization,
+`npm run test:release` passed on 2026-10-01:
+
+- Full suite: **2,851 passed**, zero failures, cancellations, or skips.
+- Isolated OpenClaw 2026.9.1: install, runtime loading, callback, Doctor, bundled
+  Skill, tmux fixture/diagnostics, update/reinstall, and uninstall passed.
+- ClawHub Plugin Inspector runtime validation: **PASS**, with the real SDK.
+- ClawHub publish dry-run: passed with the `herdr` topic retained.
+
+The first full run exposed seven old TAB-separated tmux viewport fixture
+responses across four test helpers, causing eleven failures. Those fixtures now
+return the requested ASCII `x` format and assert the exact format argument;
+negative malformed-viewport and native input safety assertions remain intact.
+The final run above includes those corrections. Production runtime and Skill
+hashes remained identical to the native-tested and user-tested candidate above.
+No additional credentialed native lifecycle smoke was run; the existing actual
+native observations and their limitations remain the evidence for that scope.
