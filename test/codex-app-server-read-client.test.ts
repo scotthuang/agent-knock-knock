@@ -4,6 +4,7 @@ import {
   connectCodexAppServerReadClient,
   CodexAppServerReadError,
   isCodexUnmaterializedThreadError,
+  type CodexAppServerReadOptions,
   type CodexAppServerReadTransport
 } from "../src/codex-app-server-read-client.js";
 
@@ -80,6 +81,41 @@ test("rejects a backend version or home mismatch before reading user threads", a
       error instanceof CodexAppServerReadError && error.code === "incompatible_server");
     assert.equal(fixture.closed, true);
     assert.deepEqual(fixture.sent.map((entry) => entry.method), ["initialize"]);
+  }
+});
+
+test("bootstraps only the audited TUI/backend pair and pins subsequent reads to the backend", async () => {
+  for (const options of [
+    { expectedServerVersion: "0.159.0", allowAuditedBackendPatch: true },
+    { expectedServerVersion: "0.159.2", allowAuditedBackendPatch: true },
+    { expectedServerVersion: "0.159.2" }
+  ] as const) {
+    const fixture = new FixtureTransport(() => ({ thread: thread() }),
+      { ...initialize(), userAgent: "codex_cli_rs/0.159.2 (Mac OS)" });
+    const client = await connect(fixture, 1000, options);
+    try {
+      assert.equal(client.metadata.serverVersion, "0.159.2");
+      assert.equal((await client.readThread(THREAD_ID)).id, THREAD_ID);
+    } finally { client.close(); }
+  }
+});
+
+test("rejects unbound patch drift, reversed pairs and unaudited bootstrap backends before reading", async () => {
+  for (const [expectedServerVersion, backendVersion, allowAuditedBackendPatch] of [
+    ["0.159.0", "0.159.2", false],
+    ["0.159.2", "0.159.0", false],
+    ["0.159.2", "0.159.0", true],
+    ["0.158.0", "0.159.2", true],
+    ["0.159.0", "0.159.1", true],
+    ["0.159.0", "0.159.3", true]
+  ] as const) {
+    const fixture = new FixtureTransport(() => ({}),
+      { ...initialize(), userAgent: `codex_cli_rs/${backendVersion} (Mac OS)` });
+    await assert.rejects(connect(fixture, 1000, {
+      expectedServerVersion, ...(allowAuditedBackendPatch ? { allowAuditedBackendPatch: true } : {})
+    }), (error: unknown) => error instanceof CodexAppServerReadError && error.code === "incompatible_server");
+    assert.deepEqual(fixture.sent.map((entry) => entry.method), ["initialize"]);
+    assert.equal(fixture.closed, true);
   }
 });
 
@@ -163,9 +199,10 @@ class FixtureTransport implements CodexAppServerReadTransport {
   disconnect(error: Error): void { this.disconnectListener?.(error); }
 }
 
-function connect(fixture: FixtureTransport, timeoutMs = 1000) {
+function connect(fixture: FixtureTransport, timeoutMs = 1000,
+  options: Partial<Pick<CodexAppServerReadOptions, "expectedServerVersion" | "allowAuditedBackendPatch">> = {}) {
   return connectCodexAppServerReadClient({
-    codexHome: HOME, expectedServerVersion: "0.158.0", timeoutMs,
+    codexHome: HOME, expectedServerVersion: "0.158.0", timeoutMs, ...options,
     transportFactory: async ({ socketPath }) => {
       assert.equal(socketPath, `${HOME}/app-server-control/app-server-control.sock`);
       return fixture;

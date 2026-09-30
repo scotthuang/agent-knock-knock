@@ -42,7 +42,8 @@ async function openQuestion(watch: TerminalWatch, checkpoint: CodexPaginatedTask
   if (anchor.schema !== "agent-knock-knock/codex-paginated-task-anchor" || !turnId) return undefined;
   validateCodexPaginatedTaskCheckpoint(checkpoint, anchor);
   const client = await connect({ nativeTurnId: turnId, binding: {
-    codexHome: anchor.codex_home, serverVersion: anchor.codex_version,
+    codexHome: anchor.codex_home, agentVersion: anchor.codex_version,
+    serverVersion: anchor.backend_version ?? anchor.codex_version,
     threadId: anchor.native_thread_id, pid: anchor.pid, processUuid: anchor.process_uuid,
     processBirth: anchor.process_birth, observedAt: anchor.captured_at
   } });

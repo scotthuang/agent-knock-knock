@@ -581,6 +581,10 @@
       "owner": "terminal-agent-core"
     },
     {
+      "path": "src/claude-transcript-record-order.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/cli-command-runtime.ts",
       "owner": "cli-runtime"
     },
@@ -675,6 +679,10 @@
     {
       "path": "src/codex-session-provider.ts",
       "owner": "agent-session-core"
+    },
+    {
+      "path": "src/codex-status-history-navigation.ts",
+      "owner": "terminal-dispatch-core"
     },
     {
       "path": "src/codex-store-adapter.ts",

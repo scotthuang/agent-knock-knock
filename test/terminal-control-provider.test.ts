@@ -757,6 +757,8 @@ test("terminal provider registry routes optional viewport inspection exactly", a
   assert.equal(await provider.inspectViewport?.(beta.terminal), undefined);
   assert.deepEqual(alpha.calls, ["inspectViewport"]);
   assert.deepEqual(beta.calls, []);
+  await assert.rejects(provider.scrollHistoryDown!(beta.terminal), TerminalControlInputNotSentError);
+  assert.deepEqual(beta.calls, []);
 });
 
 test("terminal enrichment fails closed when providers contain the same process", async () => {
@@ -977,7 +979,45 @@ test("tmux provider uses canonical socket and pane identity for capture and send
   ]);
 });
 
-test("tmux viewport inspection freshly resolves a stable pane id", async () => {
+test("tmux closed history scrolling uses one raw wheel event on a freshly verified stable pane", async () => {
+  const socketPath = "/private/tmp/tmux-501/canonical";
+  const terminal = await terminalEndpoint("codex-work:0.0", socketPath, {
+    legacySocketPath: "/private/tmp/tmux-501/stale-route", paneId: "%42"
+  });
+  for (const outcome of ["success", "process-drift", "socket-drift", "capability", "timeout", "rejected"] as const) {
+    const calls: { command: string; args: string[] }[] = [];
+    const provider = new TmuxTerminalControlProvider({
+      commands: ["tmux", "/fallback/tmux"], socketPaths: [],
+      runCommand(command, args) {
+        calls.push({ command, args });
+        if (args.includes("list-panes")) {
+          return { status: 0, stderr: "", stdout: `codex-work\t0\t0\t${outcome === "process-drift" ? 999 : 36017}\tnode\t/repo\t${outcome === "socket-drift" ? "/another/socket" : socketPath}\t%42\n` };
+        }
+        assert.ok(args.includes("send-keys"));
+        return { status: outcome === "timeout" ? null : outcome === "rejected" ? 1 : 0,
+          stdout: "", stderr: "", ...(outcome === "timeout" ? { error: new Error("lost ACK") } : {}) };
+      }
+    });
+    const facade = createTerminalControlProviderRegistry([provider]).asProvider();
+    const target = outcome === "capability" ? { ...terminal, capabilities: [] } : terminal;
+    if (outcome === "success") await facade.scrollHistoryDown!(target);
+    else await assert.rejects(facade.scrollHistoryDown!(target), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error instanceof TerminalControlInputNotSentError, outcome !== "timeout");
+      return true;
+    });
+    const writes = calls.filter(({ args }) => args.includes("send-keys"));
+    assert.equal(writes.length, outcome.endsWith("drift") || outcome === "capability" ? 0 : 1);
+    if (writes.length) {
+      assert.equal(writes[0]!.command, "tmux");
+      assert.deepEqual(writes[0]!.args, ["-S", socketPath, "send-keys", "-t", "%42", "-H",
+        "1b", "5b", "3c", "36", "35", "3b", "32", "3b", "32", "4d"]);
+    }
+    assert.equal(calls.some(({ args }) => args.includes("paste-buffer")), false);
+  }
+});
+
+test("tmux viewport inspection uses ASCII dimensions after resolving a stable pane id", async () => {
   const calls: string[][] = [];
   const canonicalSocketPath = "/private/tmp/tmux-501/canonical";
   const terminal = await terminalEndpoint(
@@ -999,7 +1039,12 @@ test("tmux viewport inspection freshly resolves a stable pane id", async () => {
         };
       }
       if (args.includes("display-message")) {
-        return { status: 0, stdout: "132\t41\n", stderr: "" };
+        // Actual tmux 3.6b under an unset/C locale sanitizes TAB to '_'.
+        const stdout = args.at(-1)!
+          .replace("#{pane_width}", "132")
+          .replace("#{pane_height}", "41")
+          .replace(/\t/gu, "_");
+        return { status: 0, stdout: `${stdout}\n`, stderr: "" };
       }
       throw new Error(`unexpected tmux command ${args.join(" ")}`);
     }
@@ -1023,7 +1068,7 @@ test("tmux viewport inspection freshly resolves a stable pane id", async () => {
       "-p",
       "-t",
       "%42",
-      "#{pane_width}\t#{pane_height}"
+      "#{pane_width}x#{pane_height}"
     ]
   ]);
 });
@@ -1042,7 +1087,7 @@ test("tmux viewport inspection rejects process-anchor drift before display", asy
     runCommand(_command, args) {
       if (args.includes("display-message")) {
         displayAttempts += 1;
-        return { status: 0, stdout: "132\t41\n", stderr: "" };
+        return { status: 0, stdout: "132x41\n", stderr: "" };
       }
       return {
         status: 0,
@@ -1085,6 +1130,52 @@ test("tmux viewport inspection returns unknown for missing geometry", async () =
   assert.equal(await provider.inspectViewport(terminal), undefined);
 });
 
+test("tmux viewport rejects malformed dimensions with bounded output-shape diagnostics", async () => {
+  const commandDigests = new Set<string>();
+  const socketDigests = new Set<string>();
+  for (const [index, output] of [
+    "132\t41\n", "132_41\n", "132x0\n", "9007199254740992x41\n",
+    "132x41\n100x30\n", "private-terminal-text".repeat(100)
+  ].entries()) {
+    const suffix = index % 2;
+    const command = `/private-command/${"private-component/".repeat(80)}tmux-${suffix}`;
+    const socketPath = `/private-socket/${"private-component/".repeat(80)}socket-${suffix}`;
+    const terminal = await terminalEndpoint("codex-work:0.0", socketPath, { paneId: "%42" });
+    const provider = new TmuxTerminalControlProvider({
+      socketPaths: [],
+      commands: [command],
+      runCommand(_command, args) {
+        return {
+          status: 0,
+          stdout: args.includes("display-message") ? output :
+            `codex-work\t0\t0\t36017\tnode\t/repo\t${socketPath}\t%42\n`,
+          stderr: ""
+        };
+      }
+    });
+    await assert.rejects(provider.inspectViewport(terminal), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /invalid viewport for %42/u);
+      const detail = JSON.parse(error.message.slice(error.message.indexOf("{")));
+      assert.equal(detail.command, undefined);
+      assert.equal(detail.socketPath, undefined);
+      assert.match(detail.command_sha256, /^[0-9a-f]{16}$/u);
+      assert.match(detail.socket_sha256, /^[0-9a-f]{16}$/u);
+      commandDigests.add(detail.command_sha256);
+      socketDigests.add(detail.socket_sha256);
+      assert.equal(detail.paneId, "%42");
+      assert.equal(detail.stdout_bytes, Buffer.byteLength(output));
+      assert.ok(detail.stdout_shape.length <= 96);
+      assert.ok(detail.separator_bytes_hex.length <= 16);
+      assert.ok(error.message.length < 512);
+      assert.doesNotMatch(error.message, /private-terminal-text|private-command|private-socket|private-component/u);
+      return true;
+    });
+  }
+  assert.equal(commandDigests.size, 2);
+  assert.equal(socketDigests.size, 2);
+});
+
 test("tmux viewport inspection never falls back to a mutable legacy selector", async () => {
   const endpointProvider = new StaticTerminalControlProvider({
     panes: [{
@@ -1109,7 +1200,7 @@ test("tmux viewport inspection never falls back to a mutable legacy selector", a
         status: 0,
         stdout: args.includes("list-panes")
           ? "legacy-work\t0\t0\t36017\tnode\t/repo\n"
-          : "132\t41\n",
+          : "132x41\n",
         stderr: ""
       };
     }

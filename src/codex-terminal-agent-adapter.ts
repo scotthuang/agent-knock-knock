@@ -90,7 +90,7 @@ const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
 // Diagnostic activity only. These fullscreen rows do not prove a task identity,
 // an empty styled Composer, or permission to use a version-bound native action.
-const CODEX_FULLSCREEN_ACTIVITY_VERSIONS = new Set(["0.157.0", "0.157.1", "0.158.0", "0.159.0"]);
+const CODEX_FULLSCREEN_ACTIVITY_VERSIONS = new Set(["0.157.0", "0.157.1", "0.158.0", "0.159.0", "0.159.2"]);
 const CODEX_FULLSCREEN_MODEL_FOOTER =
   /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
 const CODEX_FULLSCREEN_SHORTCUT_FOOTER =
@@ -640,8 +640,10 @@ function parseCodexStatusCardAfterCommand(
   while (topBorderIndex < lines.length && !lines[topBorderIndex].trim()) {
     topBorderIndex += 1;
   }
-  if (lines[topBorderIndex]?.trim() === ">_ OpenAI Codex (v0.159.0)") {
-    return parseCodex159StatusCard(lines, topBorderIndex);
+  const borderlessVersion = /^>_ OpenAI Codex \(v(0\.159\.(?:0|2))\)$/u
+    .exec(lines[topBorderIndex]?.trim() ?? "")?.[1];
+  if (borderlessVersion === "0.159.0" || borderlessVersion === "0.159.2") {
+    return parseCodex159StatusCard(lines, topBorderIndex, borderlessVersion);
   }
   if (
     topBorderIndex >= lines.length ||
@@ -739,7 +741,8 @@ function parseCodexStatusCardAfterCommand(
 /** 0.159 removes borders. Close fields before the exact native live suffix. */
 function parseCodex159StatusCard(
   lines: readonly string[],
-  start: number
+  start: number,
+  agentVersion: "0.159.0" | "0.159.2"
 ): ParsedCodexStatusCard {
   const uncertain = (reason: string): ParsedCodexStatusCard => ({ status: "ambiguous", reason });
   const limit = Math.min(lines.length, start + CODEX_STATUS_MAX_LINES);
@@ -751,7 +754,7 @@ function parseCodex159StatusCard(
   // command may close an earlier card in the pre-Enter occurrence inventory.
   if (/^[›»](?:\s|$)/u.test(lines[end]!) &&
       codexNativeCommandLine(lines[end]!) === undefined &&
-      captureCodexFullscreenComposerFrame(lines.slice(end).join("\n"), "0.159.0")?.composerIndex !== 0) {
+      captureCodexFullscreenComposerFrame(lines.slice(end).join("\n"), agentVersion)?.composerIndex !== 0) {
     return uncertain("Codex 0.159 /status closing Composer is incomplete");
   }
   const suffixStart = lines.findIndex((line, index) => index > start && index < end &&
@@ -804,7 +807,7 @@ function parseCodex159StatusCard(
     return { status: "missing", reason: "Codex 0.159 /status lacks complete required fields or its exact Session UUID" };
   }
   return {
-    status: "observed", region, nativeThreadId: nativeThreadId.toLowerCase(), agentVersion: "0.159.0",
+    status: "observed", region, nativeThreadId: nativeThreadId.toLowerCase(), agentVersion,
     fields: fields.map(({ name, value }) => ({
       name: redactCodexNativeStatusText(name),
       value: /^account$/iu.test(name) ? "[REDACTED]" : redactCodexNativeStatusText(value)
@@ -823,7 +826,7 @@ function safeCodex159StatusDisplayText(line: string): boolean {
 }
 
 /** Native activity/details stay outside identity evidence, before the Composer. */
-function closedCodex159StatusSuffix(lines: readonly string[]): boolean {
+export function closedCodex159StatusSuffix(lines: readonly string[]): boolean {
   const rows = lines.filter((line) => line.trim()).map((line) => line.trimEnd());
   if (isCodex159ActivityRow(rows[0] ?? "")) {
     rows.shift();
@@ -843,7 +846,7 @@ function closedCodex159StatusSuffix(lines: readonly string[]): boolean {
   }
   if (rows.length === 0) return true;
   if (rows.length !== 3 || rows[0] !== "• Queued follow-up inputs") return false;
-  const summary = /^ {2}\? ([1-9]\d{0,2}) (question|questions)(?: · [1-9]\d{0,2}s)?$/u.exec(rows[1]!);
+  const summary = /^ {2}\? ([1-9]\d{0,2}) (question|questions)(?: · (?:[1-9]|1\d|20)s)?$/u.exec(rows[1]!);
   return summary !== null && (Number(summary[1]) === 1) === (summary[2] === "question") &&
     /^ {4}(?:shift\+←|⌥\+↑) to answer$/u.test(rows[2]!);
 }
@@ -1138,7 +1141,7 @@ export function detectCodexActivityState(
 
   const tailLines = screen.trimEnd().split(/\r?\n/).slice(-30);
   const workingLine = tailLines.find((line) => isCodexWorkingLine(line) ||
-    agentVersion === "0.159.0" && isCodex159ActivityRow(line.trimEnd()));
+    (agentVersion === "0.159.0" || agentVersion === "0.159.2") && isCodex159ActivityRow(line.trimEnd()));
   if (workingLine) {
     return {
       state: "working",

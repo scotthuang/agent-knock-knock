@@ -166,7 +166,7 @@ The mapping diagnoses a release gate; it never replaces the complete
 pre-publication full/release suite.
 Safety fences from #87, native lifecycle smoke tooling from #88, Store upgrade
 paths, Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4/0.154.0/0.155.1, OpenClaw boundaries, and verified
-Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267 schemas
+Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267/2.1.285 schemas
 remain covered.
 
 The [Codex 0.157.1 compatibility review](./codex-0.157.1-compatibility.md)
@@ -174,6 +174,10 @@ records partial fullscreen/status support and the known paginated-history
 boundary. Managed completion and native thread transitions remain unavailable
 on 0.157.0/0.157.1; passing the test suite does not promote those versions to
 verified native-action profiles.
+
+The [Claude Code 2.1.285 compatibility review](./claude-2.1.285-compatibility.md)
+records native observations, the attachment ordering repair, and explicit
+coverage limits for this local-only update.
 
 ## #206 Terminal Watch fast contract
 

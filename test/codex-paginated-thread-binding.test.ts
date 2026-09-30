@@ -64,13 +64,16 @@ function digest(value: string): string {
 }
 
 function fixture(frames?: readonly string[], version = "0.158.0") {
-  const postStatus = version === "0.159.0" ? POST_STATUS_159 : POST_STATUS;
-  const preEnter = version === "0.159.0" ? PRE_ENTER_159 : PRE_ENTER;
+  const postStatus = version === "0.159.0" || version === "0.159.2"
+    ? POST_STATUS_159.replace("v0.159.0", `v${version}`) : POST_STATUS;
+  const preEnter = version === "0.159.0" || version === "0.159.2"
+    ? PRE_ENTER_159.replace("v0.159.0", `v${version}`) : PRE_ENTER;
   const captures = frames ?? [postStatus];
   const events: string[] = [];
   let captureIndex = 0;
   let incarnationCount = 0;
   const state = { processChanged: false };
+  let backendVersion = version;
   const receipt: TerminalCodexStatusProbeResult = {
     stage: "enter_dispatched", agent: "codex", terminalControl: CONTROL,
     command: "/status", behaviorProfile: `codex-tui-${version}`, enterCount: 1,
@@ -96,7 +99,10 @@ function fixture(frames?: readonly string[], version = "0.158.0") {
         assert.deepEqual(options?.runtime, { pid: 4242, agentVersion: version });
         return receipt;
       },
-      async captureCodexStatusFrame() {
+      async captureCodexStatusFrame(control, observedRuntime, submitted) {
+        assert.equal(control, CONTROL);
+        assert.deepEqual(observedRuntime, { pid: 4242, agentVersion: version });
+        assert.equal(submitted, receipt);
         events.push("capture");
         const screen = captures[Math.min(captureIndex++, captures.length - 1)]!;
         return { screen, emptyComposer: exactCodexReadyStyledComposerCapture(screen, version) !== undefined };
@@ -109,9 +115,16 @@ function fixture(frames?: readonly string[], version = "0.158.0") {
       const birth = state.processChanged && incarnationCount > 1 ? "changed-birth" : "exact-birth";
       return { processUuid: `codex-pid:4242:birth:${birth}`, processBirth: birth, evidence: "codex_process_birth" };
     },
-    sleep: async (ms) => { assert.equal(ms, 100); events.push("sleep"); }
+    sleep: async (ms) => { assert.equal(ms, 100); events.push("sleep"); },
+    resolveBackendVersion: async ({ codexHome, agentVersion }) => {
+      assert.equal(codexHome, "/codex");
+      assert.equal(agentVersion, version);
+      events.push("backend");
+      return backendVersion;
+    }
   };
-  return { input, receipt, events, state };
+  return { input, receipt, events, state,
+    setBackendVersion: (value: string) => { backendVersion = value; } };
 }
 
 test("closed fullscreen status accepts an identical newest card when the visible occurrence count plateaus", async () => {
@@ -123,18 +136,19 @@ test("closed fullscreen status accepts an identical newest card when the visible
   assert.deepEqual(post.evidenceInventory, harness.receipt.preEnterEvidenceInventory);
   const binding = await captureCodexPaginatedThreadBinding(harness.input);
   assert.deepEqual(binding, {
-    codexHome: "/codex", threadId: THREAD, serverVersion: "0.158.0", pid: 4242,
+    codexHome: "/codex", threadId: THREAD,
+    agentVersion: "0.158.0", serverVersion: "0.158.0", pid: 4242,
     processUuid: "codex-pid:4242:birth:exact-birth", processBirth: "exact-birth",
     observedAt: NOW.toISOString()
   });
-  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "incarnation"]);
+  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "backend", "incarnation"]);
 });
 
 test("spinner redraw with the exact command still present waits for restored empty Composer", async () => {
   const spinner = `• Working (4s • esc to interrupt)\n${PRE_ENTER}`;
   const harness = fixture([spinner, POST_STATUS]);
   assert.equal((await captureCodexPaginatedThreadBinding(harness.input)).threadId, THREAD);
-  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "sleep", "capture", "incarnation"]);
+  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "sleep", "capture", "backend", "incarnation"]);
 });
 
 test("status binding refuses draft, spinner-only, clipped card/footer, embedded server, or wrong version", async () => {
@@ -165,7 +179,7 @@ test("status binding refuses a changed physical process and never retries the na
   const harness = fixture();
   harness.state.processChanged = true;
   await assert.rejects(captureCodexPaginatedThreadBinding(harness.input), /process changed/u);
-  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "incarnation"]);
+  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "backend", "incarnation"]);
   const unsupported = fixture();
   await assert.rejects(captureCodexPaginatedThreadBinding({ ...unsupported.input, agentVersion: "0.158.1" }), /requires version 0\.158\.0/u);
   assert.deepEqual(unsupported.events, []);
@@ -178,9 +192,10 @@ test("0.159 borderless status binds the exact local foreground process and resto
   const binding = await captureCodexPaginatedThreadBinding(harness.input);
   assert.equal(binding.threadId, THREAD);
   assert.equal(binding.serverVersion, "0.159.0");
+  assert.equal(binding.agentVersion, "0.159.0");
   assert.equal(binding.pid, 4242);
   assert.equal(binding.processBirth, "exact-birth");
-  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "sleep", "capture", "incarnation"]);
+  assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "sleep", "capture", "backend", "incarnation"]);
 });
 
 test("0.159 status binding refuses incomplete identity and cross-version status results", async () => {
@@ -216,6 +231,32 @@ test("0.159 manual Watch and async-answer preflight bind through active status s
     const binding = await captureCodexPaginatedThreadBinding({ ...harness.input, allowWorking: true });
     assert.equal(binding.threadId, THREAD);
     assert.equal(binding.serverVersion, "0.159.0");
-    assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "incarnation"]);
+    assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "backend", "incarnation"]);
   }
+});
+
+test("0.159.0 TUI binds only its audited 0.159.2 shared backend and rejects drift", async () => {
+  const mixed = fixture([POST_STATUS_159], "0.159.0");
+  mixed.setBackendVersion("0.159.2");
+  const binding = await captureCodexPaginatedThreadBinding(mixed.input);
+  assert.equal(binding.agentVersion, "0.159.0");
+  assert.equal(binding.serverVersion, "0.159.2");
+  for (const incompatible of ["0.158.0", "0.159.3"]) {
+    const changed = fixture([POST_STATUS_159], "0.159.0");
+    changed.setBackendVersion(incompatible);
+    await assert.rejects(captureCodexPaginatedThreadBinding(changed.input),
+      /versions are not an audited pair/u);
+    assert.equal(changed.events.filter((event) => event === "incarnation").length, 1);
+  }
+});
+
+test("0.159.2 TUI binds its exact 0.159.2 shared backend", async () => {
+  const harness = fixture(undefined, "0.159.2");
+  const binding = await captureCodexPaginatedThreadBinding(harness.input);
+  assert.equal(binding.agentVersion, "0.159.2");
+  assert.equal(binding.serverVersion, "0.159.2");
+  const reversed = fixture(undefined, "0.159.2");
+  reversed.setBackendVersion("0.159.0");
+  await assert.rejects(captureCodexPaginatedThreadBinding(reversed.input),
+    /versions are not an audited pair/u);
 });

@@ -13,7 +13,8 @@ export const CODEX_ASYNC_QUESTION_PROFILES: Readonly<Record<string, string>> =
     "0.154.0": "codex/0.154.0/request-user-input-async-v1",
     "0.155.1": "codex/0.155.1/request-user-input-async-v1",
     "0.158.0": "codex/0.158.0/request-user-input-async-v2",
-    "0.159.0": "codex/0.159.0/request-user-input-async-v2"
+    "0.159.0": "codex/0.159.0/request-user-input-async-v2",
+    "0.159.2": "codex/0.159.2/request-user-input-async-v2"
   });
 
 export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
@@ -1202,5 +1203,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isFullscreenProfile(profile: string): boolean {
   return profile === CODEX_ASYNC_QUESTION_PROFILES["0.158.0"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.0"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.2"];
 }

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "./value-guards.js";
 import {
+  TERMINAL_HISTORY_SCROLL_DOWN_BYTES,
   TerminalControlInputNotSentError,
   TerminalControlUnavailableError,
   type CommandResult,
@@ -53,6 +54,14 @@ export const HERDR_EXACT_PROTOCOL = 19;
 const HERDR_MAX_READ_LINES = 1_000;
 const HERDR_MAX_TTY_PATH_BYTES = 1_024;
 const HERDR_MAX_TTY_VIEWPORT_DIMENSION = 65_535;
+// Herdr 0.8.0 src/input/encode.rs: PageUp legacy bytes and Ctrl-End's
+// xterm modifier (1 + Ctrl's 4). Its API combo parser omits these keys.
+const HERDR_NAVIGATION_KEY_BYTES = {
+  pageup: "\x1b[5~",
+  "ctrl+end": "\x1b[1;5F",
+  "history-down": TERMINAL_HISTORY_SCROLL_DOWN_BYTES
+} as const;
+type HerdrNavigationKey = keyof typeof HERDR_NAVIGATION_KEY_BYTES;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -60,6 +69,7 @@ export interface HerdrTtyDeviceIdentity {
   device: string;
   inode: string;
   rdev: string;
+  /** Mutable activity metadata, not part of a character device's identity. */
   ctimeNs: string;
   ownerUid: number;
   symbolicLink: boolean;
@@ -691,7 +701,11 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     // format=ansi. Codex uses dim styling to distinguish an empty composer
     // placeholder from real draft text, so ANSI captures must come from the
     // visible terminal buffer where those escapes are preserved.
-    const source = options.preserveEscapes ? "visible" : "detection";
+    // AKK uses zero scrollback for the current viewport. Herdr's lines=0
+    // means zero returned lines; an unbounded visible-source read instead
+    // returns the viewport alone, still within the transport response limit.
+    const viewportOnly = requestedLines === 0;
+    const source = options.preserveEscapes || viewportOnly ? "visible" : "detection";
     const format = options.preserveEscapes ? "ansi" : "text";
     const result = await this.invoke(
       control.socketPath!,
@@ -702,7 +716,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         // screen. Plain reads therefore use its populated agent-detection
         // buffer; ANSI reads use the visible buffer to retain composer style.
         source,
-        lines: Math.min(requestedLines, HERDR_MAX_READ_LINES),
+        ...(viewportOnly ? {} : { lines: Math.min(requestedLines, HERDR_MAX_READ_LINES) }),
         format
       },
       { expectedSocketIdentity: socketIdentity }
@@ -754,8 +768,21 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     if (translated.length === 0) {
       return;
     }
+    const navigation = translated.find((key): key is HerdrNavigationKey =>
+      key === "pageup" || key === "ctrl+end");
+    if (navigation && translated.length !== 1) {
+      throw new TerminalControlInputNotSentError(
+        "Herdr native navigation requires exactly one key per request"
+      );
+    }
     const resolved = await this.resolveForInput(terminal);
-    await this.sendInput(resolved, { keys: translated });
+    await this.sendInput(resolved, navigation ? { navigation } : { keys: translated });
+  }
+
+  async scrollHistoryDown(terminal: TerminalEndpointRef): Promise<void> {
+    assertInputEndpointCapability(terminal, this.providerCapabilities, "key_delivery");
+    const resolved = await this.resolveForInput(terminal);
+    await this.sendInput(resolved, { navigation: "history-down" });
   }
 
   private logDiagnostic(
@@ -1205,23 +1232,28 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
 
   private async sendInput(
     resolved: ResolvedHerdrControl,
-    params: { text: string } | { keys: string[] }
+    params: { text: string } | { keys: string[] } | { navigation: HerdrNavigationKey }
   ): Promise<void> {
     const { control, socketIdentity } = resolved;
+    // pane.send_input.text is bracketed paste. Only closed fixed navigation
+    // uses pane.send_text's direct PTY bytes; callers cannot supply raw data.
+    const method = "navigation" in params ? "pane.send_text" : "pane.send_input";
+    const input = "navigation" in params
+      ? { text: HERDR_NAVIGATION_KEY_BYTES[params.navigation] } : params;
     try {
       const result = await this.invoke(
         control.socketPath!,
-        "pane.send_input",
+        method,
         {
           pane_id: control.paneId,
-          ...params
+          ...input
         },
         { expectedSocketIdentity: socketIdentity }
       );
       if (result.type !== "ok") {
         // A syntactically valid success response arrived after dispatch but did
         // not acknowledge the expected operation. Its effect is uncertain.
-        throw new Error("Herdr pane.send_input returned an unexpected result");
+        throw new Error(`Herdr ${method} returned an unexpected result`);
       }
     } catch (error) {
       if (inputDefinitelyNotSent(error)) {
@@ -1815,10 +1847,12 @@ function sameHerdrTtyDeviceIdentity(
   left: HerdrTtyDeviceIdentity,
   right: HerdrTtyDeviceIdentity
 ): boolean {
+  // Active PTY output changes ctime on macOS. Device/inode/rdev plus the
+  // separately checked shell birth and TTY path prove identity across stty;
+  // a write timestamp must not make a running task look like a replaced PTY.
   return left.device === right.device &&
     left.inode === right.inode &&
     left.rdev === right.rdev &&
-    left.ctimeNs === right.ctimeNs &&
     left.ownerUid === right.ownerUid &&
     left.symbolicLink === right.symbolicLink &&
     left.characterDevice === right.characterDevice;

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
+import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
 import { randomUUID } from "node:crypto";
 import {
   parseCodexAppServerMetadata,
@@ -16,6 +16,8 @@ import {
 } from "./codex-paginated-task.js";
 import type { CodexPaginatedThreadBinding } from "./codex-paginated-thread-facts.js";
 import type { CodexAsyncQuestionDurableQuestion } from "./codex-async-question-adapter.js";
+
+const DEFAULT_RECEIPT_OBSERVATION_MS = 15_000;
 
 export interface CodexPaginatedAsyncAnswerInput {
   binding: CodexPaginatedThreadBinding;
@@ -80,6 +82,7 @@ export async function deliverCodexPaginatedAsyncAnswer(
     // No mutation precedes this callback. Once reserved, every uncertain outcome is fenced.
     await input.beforeDispatch?.();
     const result = { clientUserMessageId, nativeTurnId: input.nativeTurnId, nativeQuestionId };
+    let deliveryFailed = false;
     try {
       const steered = object(await writer.answer({
         threadId: input.binding.threadId, expectedTurnId: input.nativeTurnId,
@@ -88,10 +91,15 @@ export async function deliverCodexPaginatedAsyncAnswer(
       if (steered.turnId !== input.nativeTurnId) return {
         ...result, status: "response_uncertain", reason: "native_async_answer_turn_changed"
       };
-    } catch {
-      return { ...result, status: "response_uncertain", reason: "native_async_answer_delivery_uncertain" };
+    } catch { deliveryFailed = true; }
+    // A timed-out RPC may still commit the one submitted reply. Observe exact
+    // durable history on a separate read-only connection before declaring it uncertain.
+    try {
+      const observed = await confirmAnswer(input, ports, result, text, DEFAULT_RECEIPT_OBSERVATION_MS);
+      return deliveryFailed && observed.reason === "native_async_answer_receipt_pending"
+        ? { ...observed, reason: "native_async_answer_delivery_uncertain" }
+        : observed;
     }
-    try { return await confirmAnswer(input, ports, result, text, timeoutMs); }
     catch { return { ...result, status: "response_uncertain", reason: "native_async_answer_evidence_unavailable" }; }
   } finally {
     try { writer.close(); } catch { /* Closing the private connection cannot change durable answer evidence. */ }
@@ -135,7 +143,8 @@ async function confirmAnswer(input: CodexPaginatedAsyncAnswerInput, ports: Codex
   const now = ports.now ?? Date.now;
   const sleep = ports.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const deadline = now() + timeoutMs;
-  do {
+  let turnFinishedWithoutReceipt = false;
+  for (;;) {
     try {
       assertProcess(input.binding, ports);
       const snapshot = await readSnapshot(input, ports);
@@ -153,15 +162,16 @@ async function confirmAnswer(input: CodexPaginatedAsyncAnswerInput, ports: Codex
           ? { ...result, status: "response_uncertain", reason: "native_async_answer_has_competing_reply" }
           : { ...result, status: "confirmed" };
       }
-      if (turn.status !== "inProgress") return {
-        ...result, status: "response_uncertain", reason: "native_async_turn_finished_without_answer_receipt"
-      };
+      if (turn.status !== "inProgress") turnFinishedWithoutReceipt = true;
     } catch {
       return { ...result, status: "response_uncertain", reason: "native_async_answer_evidence_unavailable" };
     }
-    await sleep(100);
-  } while (now() < deadline);
-  return { ...result, status: "response_uncertain", reason: "native_async_answer_receipt_pending" };
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) break;
+    await sleep(Math.min(100, remainingMs));
+  }
+  return { ...result, status: "response_uncertain", reason: turnFinishedWithoutReceipt
+    ? "native_async_turn_finished_without_answer_receipt" : "native_async_answer_receipt_pending" };
 }
 
 function assertSnapshot(input: CodexPaginatedAsyncAnswerInput, snapshot: CodexPaginatedTaskSnapshot): void {
@@ -235,7 +245,8 @@ function validateInput(input: CodexPaginatedAsyncAnswerInput): void {
   identifier(input.binding.threadId);
   identifier(input.nativeTurnId);
   identifier(input.itemId);
-  if (!isCodexPaginatedVersion(input.binding.serverVersion) || !path.isAbsolute(input.binding.codexHome) ||
+  if (!isAuditedCodexPaginatedServerPair(input.binding.agentVersion,
+      input.binding.serverVersion) || !path.isAbsolute(input.binding.codexHome) ||
       !Number.isSafeInteger(input.binding.pid) || input.binding.pid <= 1 ||
       !Number.isSafeInteger(input.questionIndex) || input.questionIndex < 0 || input.questionIndex >= 16 ||
       !Number.isSafeInteger(input.timeoutMs ?? 5000) || (input.timeoutMs ?? 5000) < 1 || (input.timeoutMs ?? 5000) > 30_000 ||

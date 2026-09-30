@@ -256,6 +256,12 @@ function claudeUserExplicitPostClearTrailingIsKnown(
   const footerRows = lines.slice(0, auxiliaryStart);
   if (footerRows.length === 0 || footerRows.length > 2) return false;
   const footer = footerRows.map((line) => line.trim()).join(" ");
+  // Claude 2.1.285 hides the shortcut hints after the Composer settles.
+  // Keep the remaining native manual-mode label exact, including its optional
+  // stash indicator; arbitrary trailing text must still block submission.
+  if (/^⏸ manual mode on(?:\s+(?:Draft restored\s*·\s*)?› stashed)?$/u.test(footer)) {
+    return true;
+  }
   return /^\s*(?:[⏵⏴⏸]{1,2}|\?)\s+.*(?:manual mode|auto mode|accept edits|bypass permissions|for shortcuts).*(?:←\s+for\s+ag(?:ents|…)|\(shift\+tab\s+to\s+cycle\))(?:\s+(?:Draft restored\s*·\s*)?› stashed)?\s*$/iu
     .test(footer);
 }

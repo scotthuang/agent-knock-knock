@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { isCodexPaginatedVersion, type CodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
+import {
+  isAuditedCodexPaginatedServerPair,
+  isCodexPaginatedVersion,
+  type CodexPaginatedBackendVersion,
+  type CodexPaginatedVersion
+} from "./codex-lifecycle-compatibility.js";
 import type {
   CodexAppServerThread,
   CodexAppServerThreadItem,
@@ -30,7 +35,10 @@ export interface CodexPaginatedTaskAnchor {
   origin: "user_explicit_send" | "active_task";
   captured_at: string;
   codex_home: string;
+  /** Physical foreground TUI version; legacy anchors implicitly use it as backend too. */
   codex_version: CodexPaginatedVersion;
+  /** Present only for an audited shared backend with a different version. */
+  backend_version?: CodexPaginatedBackendVersion;
   native_thread_id: string;
   process_uuid: string;
   process_birth: string;
@@ -76,7 +84,7 @@ export type CodexPaginatedTaskObservation =
   | { status: "invalidated"; reason: string };
 
 const ANCHOR_KEYS = new Set([
-  "schema", "version", "origin", "captured_at", "codex_home", "codex_version",
+  "schema", "version", "origin", "captured_at", "codex_home", "codex_version", "backend_version",
   "native_thread_id", "process_uuid", "process_birth", "pid", "request_hash",
   "baseline_latest_turn_id", "turn_id", "anchor_fingerprint"
 ]);
@@ -101,6 +109,8 @@ export function createCodexPaginatedTaskAnchor(
     captured_at: input.captured_at,
     codex_home: input.codex_home,
     codex_version: input.codex_version,
+    ...(input.backend_version === undefined || input.backend_version === input.codex_version
+      ? {} : { backend_version: input.backend_version }),
     native_thread_id: input.native_thread_id,
     process_uuid: input.process_uuid,
     process_birth: input.process_birth,
@@ -126,6 +136,9 @@ export function validateCodexPaginatedTaskAnchor(
     value.version !== 1 ||
     !["user_explicit_send", "active_task"].includes(String(value.origin)) ||
     !isCodexPaginatedVersion(value.codex_version) ||
+    !isAuditedCodexPaginatedServerPair(value.codex_version,
+      value.backend_version === undefined ? value.codex_version : value.backend_version) ||
+    value.backend_version === value.codex_version ||
     !validTimestamp(value.captured_at) ||
     typeof value.codex_home !== "string" ||
     !path.isAbsolute(value.codex_home) ||
@@ -226,7 +239,7 @@ export function observeCodexPaginatedTask(input: {
   const snapshot = input.snapshot;
   if (
     snapshot.codexHome !== anchor.codex_home ||
-    snapshot.serverVersion !== anchor.codex_version ||
+    snapshot.serverVersion !== (anchor.backend_version ?? anchor.codex_version) ||
     snapshot.thread.id !== anchor.native_thread_id ||
     snapshot.thread.historyMode !== "paginated"
   ) return { status: "invalidated", reason: "Codex paginated history identity changed" };

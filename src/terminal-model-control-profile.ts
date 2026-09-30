@@ -11,7 +11,9 @@ export const TERMINAL_MODEL_CONTROL_PROFILE_IDS = Object.freeze({
   codex01551: "codex-model-control-0.155.1",
   codex01580: "codex-model-control-0.158.0",
   codex01590: "codex-model-control-0.159.0",
-  claude: "claude-model-control-2.1.266"
+  codex01592: "codex-model-control-0.159.2",
+  claude: "claude-model-control-2.1.266",
+  claude21285: "claude-model-control-2.1.285"
 } as const);
 
 export type TerminalModelControlBehaviorProfile =
@@ -64,7 +66,8 @@ export const CODEX_MODEL_CONTROL_AGENT_VERSIONS = Object.freeze([
   CODEX_MODEL_CONTROL_AGENT_VERSION,
   "0.155.1",
   "0.158.0",
-  "0.159.0"
+  "0.159.0",
+  "0.159.2"
 ] as const);
 export type CodexModelControlAgentVersion =
   typeof CODEX_MODEL_CONTROL_AGENT_VERSIONS[number];
@@ -167,6 +170,28 @@ const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
         "default/session scope footer; the typed path selects persisted defaults"
     }),
     Object.freeze({
+      agent: "codex",
+      agentVersion: "0.159.2",
+      behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01592,
+      plan: Object.freeze({
+        behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01592,
+        command: "/model",
+        scope: "current_and_new_sessions",
+        requiresIdle: true,
+        requiresExactEmptyComposer: true
+      }),
+      supportsZeroRolloutPhysicalAuthority: true,
+      supportsResidualContinuation: true,
+      supportsResidualRepair: true,
+      slashCompletionRows: Object.freeze([
+        "› /model  choose what model and reasoning effort to use"
+      ]),
+      allowsStyledSlashPopupWithoutViewportPaint: true,
+      reason:
+        "Codex 0.159.2 fullscreen /model uses display labels and an explicit " +
+        "default/session scope footer; the typed path selects persisted defaults"
+    }),
+    Object.freeze({
       agent: "claude",
       agentVersion: CLAUDE_MODEL_CONTROL_AGENT_VERSION,
       behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.claude,
@@ -184,6 +209,26 @@ const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
       allowsStyledSlashPopupWithoutViewportPaint: false,
       reason:
         `Claude Code ${CLAUDE_MODEL_CONTROL_AGENT_VERSION} /model supports the ` +
+        "explicit session-only selection path"
+    }),
+    Object.freeze({
+      agent: "claude",
+      agentVersion: "2.1.285",
+      behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.claude21285,
+      plan: Object.freeze({
+        behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.claude21285,
+        command: "/model",
+        scope: "current_session",
+        requiresIdle: true,
+        requiresExactEmptyComposer: true
+      }),
+      supportsZeroRolloutPhysicalAuthority: false,
+      supportsResidualContinuation: false,
+      supportsResidualRepair: false,
+      slashCompletionRows: Object.freeze([]),
+      allowsStyledSlashPopupWithoutViewportPaint: false,
+      reason:
+        `Claude Code 2.1.285 /model supports the ` +
         "explicit session-only selection path"
     })
   ] satisfies readonly TerminalModelControlProfile[]);

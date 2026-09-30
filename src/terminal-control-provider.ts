@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -51,6 +51,10 @@ export interface TerminalTextDeliveryOptions {
   bracketedPaste?: boolean;
 }
 
+// One SGR WheelDown event at screen column 2, row 2 (one-based), without
+// modifiers or a click. Herdr 0.8.0 input/encode.rs uses button code 65.
+export const TERMINAL_HISTORY_SCROLL_DOWN_BYTES = "\x1b[<65;2;2M";
+
 export interface TerminalControlProvider {
   readonly kind: string;
   readonly supportedCapabilities: readonly TerminalControlCapability[];
@@ -66,6 +70,8 @@ export interface TerminalControlProvider {
   inspectViewport?(
     terminal: TerminalEndpointRef
   ): Promise<TerminalViewport | undefined>;
+  /** Closed transcript navigation; the caller must first prove a safe viewport/frame. */
+  scrollHistoryDown?(terminal: TerminalEndpointRef): Promise<void>;
   containsProcess(
     terminal: TerminalEndpointRef,
     process: Pick<TerminalProcessSnapshot, "pid" | "ppid">,
@@ -266,6 +272,14 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
     return provider.inspectViewport
       ? provider.inspectViewport(terminal)
       : undefined;
+  }
+
+  async scrollHistoryDown(terminal: TerminalEndpointRef): Promise<void> {
+    const provider = this.providerForEndpoint(terminal);
+    if (!provider.scrollHistoryDown) {
+      throw new TerminalControlInputNotSentError("Terminal provider does not support closed history scrolling");
+    }
+    await provider.scrollHistoryDown(terminal);
   }
 
   containsProcess(
@@ -636,10 +650,14 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
         "-p",
         "-t",
         stablePaneId,
-        "#{pane_width}\t#{pane_height}"
+        // tmux replaces TAB with '_' under the C/unset locale used by some
+        // Gateway processes. A printable ASCII separator is locale-independent.
+        "#{pane_width}x#{pane_height}"
       ]));
       if (result.status === 0) {
-        return parseTmuxViewport(result.stdout, resolved.route.label);
+        return parseTmuxViewport(result.stdout, {
+          command, socketPath, paneId: stablePaneId
+        });
       }
       lastResult = result;
     }
@@ -647,6 +665,25 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
       lastResult?.stderr || lastResult?.error?.message ||
       `tmux display-message failed for ${stablePaneId}`
     );
+  }
+
+  async scrollHistoryDown(terminal: TerminalEndpointRef): Promise<void> {
+    let resolved: TerminalEndpointRef;
+    try {
+      assertTerminalCapability(terminal, "send_keys", this.supportedCapabilities);
+      assertInputProviderCapability(this.kind, this.providerCapabilities, "key_delivery");
+      resolved = await this.resolve(terminal);
+      if (!sameTerminalControlIncarnation(terminal, resolved) ||
+          !/^pane-id:%\d+$/u.test(resolved.identity.resourceKey) ||
+          !resolved.identity.endpointKey.startsWith("socket:/")) {
+        throw new Error("tmux stable pane, socket, or process changed before history scrolling");
+      }
+    } catch (error) {
+      throw new TerminalControlInputNotSentError(terminalProviderErrorMessage(error));
+    }
+    // tmux send-keys -H sends each fixed ASCII byte directly, without paste framing.
+    await this.sendKeys(resolved, ["-H", ...[...Buffer.from(TERMINAL_HISTORY_SCROLL_DOWN_BYTES)]
+      .map((byte) => byte.toString(16))]);
   }
 
   async sendKeys(
@@ -784,21 +821,43 @@ function commandDefinitelyDidNotStart(error: Error | undefined): boolean {
 
 function parseTmuxViewport(
   output: string,
-  terminalLabel: string
+  route: { command: string; socketPath?: string; paneId: string }
 ): TerminalViewport | undefined {
   const value = output.trim();
   if (!value) {
     return undefined;
   }
-  const match = /^(\d+)\t(\d+)$/u.exec(value);
+  const match = /^(\d+)x(\d+)$/u.exec(value);
   const columns = match ? positiveSafeInteger(Number(match[1])) : undefined;
   const rows = match ? positiveSafeInteger(Number(match[2])) : undefined;
   if (!columns || !rows) {
     throw new Error(
-      `tmux display-message returned an invalid viewport for ${terminalLabel}`
+      `tmux display-message returned an invalid viewport for ${route.paneId}: ` +
+      JSON.stringify({
+        command_sha256: tmuxViewportRouteDigest(route.command),
+        socket_sha256: tmuxViewportRouteDigest(route.socketPath),
+        paneId: route.paneId,
+        ...tmuxViewportOutputShape(output)
+      })
     );
   }
   return { columns, rows };
+}
+
+function tmuxViewportRouteDigest(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+function tmuxViewportOutputShape(output: string): Record<string, unknown> {
+  const prefix = output.slice(0, 96);
+  return {
+    stdout_bytes: Buffer.byteLength(output),
+    // Preserve only numeric shape and known separators, never arbitrary output.
+    stdout_shape: prefix.replace(/\d/gu, "#").replace(/[^\t\r\n#:_x\\ ]/gu, "?"),
+    separator_bytes_hex: [...Buffer.from(prefix)].filter((byte) =>
+      [9, 10, 13, 32, 58, 92, 95, 120].includes(byte)
+    ).slice(0, 16).map((byte) => byte.toString(16).padStart(2, "0"))
+  };
 }
 
 function positiveSafeInteger(value: unknown): number | undefined {

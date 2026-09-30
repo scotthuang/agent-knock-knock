@@ -18,7 +18,7 @@ import {
 } from "../src/terminal-control-provider.js";
 import type { TerminalEndpointRef } from
   "../src/terminal-control-ref.js";
-import { TerminalNativeInspectionBridge, stripTerminalEscapeSequences, exactCodexReadyStyledComposerCapture } from
+import { TerminalNativeInspectionBridge, stripTerminalEscapeSequences, exactCodexReadyStyledComposerCapture, isExactClaudeIdleComposer } from
   "../src/terminal-native-inspection-bridge.js";
 
 test("OSC hyperlinks preserve visible commands and status between independently terminated links", () => {
@@ -64,6 +64,20 @@ const IDLE_SCREEN = [
   "────────────────────────────────────────────────",
   "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
 ].join("\n");
+test("Claude named-session border preserves empty-composer proof without treating titles or drafts as authority", () => {
+  const named = [
+    "──────────────────────────────────────── AKK-CC285-compat ─",
+    "❯\u00a0",
+    "──────────────────────────────────────────────────────────",
+    "  ⏸ manual mode on · ? for shortcuts · ← for agents    › stashed"
+  ].join("\n");
+  assert.equal(isExactClaudeIdleComposer(named), true);
+  assert.equal(isExactClaudeIdleComposer(named.replace("❯\u00a0", "❯ unsent draft")), false);
+  assert.equal(isExactClaudeIdleComposer(named + "\nSelect an option"), false);
+  assert.equal(isExactClaudeIdleComposer(named.replace("AKK-CC285-compat ─", "truncated title")), false);
+  assert.equal(isExactClaudeIdleComposer(named.replace("AKK-CC285-compat", "x".repeat(129))), false);
+  assert.equal(isExactClaudeIdleComposer(named.replace("──────────────────────────────────────────────────────────", "──────────────────────────────────────── closing title ─")), false);
+});
 const COMPOSER_SCREEN = [
   "────────────────────────────────────────────────",
   "❯ /status",
@@ -87,7 +101,21 @@ const CODEX_FULLSCREEN_STATUS_POPUP = [
   "\x1b[1m›\x1b[0m /status", "", "  GPT-6-Astra high · /repo"
 ].join("\n");
 
-for (const version of ["0.158.0", "0.159.0"]) {
+// Captured from the designated Herdr Codex 0.159.0 pane. Keep its separate
+// SGR resets, truecolor selection fill, CRLF, and 91-column background padding.
+const HERDR_CODEX_159_STATUS_POPUP = [
+  "\x1b[0m\x1b[1m\x1b[38;2;0;0;46m\x1b[48;2;99;168;248m› /status      " +
+    "\x1b[0m\x1b[38;2;0;0;46m\x1b[48;2;99;168;248mshow current session configuration and token usage" +
+    "\x1b[0m\x1b[1m\x1b[38;2;0;0;46m\x1b[48;2;99;168;248m" + " ".repeat(26) + "\x1b[0m",
+  "  /\x1b[0m\x1b[1mstatus\x1b[0mline  \x1b[0m\x1b[2mconfigure which items appear in the status line\x1b[0m",
+  "\x1b[0m\x1b[48;2;57;57;57m" + " ".repeat(91) + "\x1b[0m",
+  "\x1b[0m\x1b[1m\x1b[48;2;57;57;57m›\x1b[0m\x1b[48;2;57;57;57m /status" + " ".repeat(82) + "\x1b[0m",
+  "\x1b[0m\x1b[48;2;57;57;57m" + " ".repeat(91) + "\x1b[0m",
+  "  \x1b[0m\x1b[38;2;246;226;183mGPT-6-Astra high\x1b[0m\x1b[38;2;165;165;165m · " +
+    "\x1b[0m\x1b[38;2;171;223;167m/repo\x1b[0m"
+].join("\r\n");
+
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} empty startup without sibling agents retains exact shortcuts and warning footer`, () => {
     const screen = CODEX_FULLSCREEN_IDLE.replace("• Working (2s • esc to interrupt)\n\n", "")
       .replace("← for agents · ? for shortcuts", "? for shortcuts                              ⚠ 2 warnings · f2 to view");
@@ -143,7 +171,7 @@ async function codexFullscreenFixture(popup = CODEX_FULLSCREEN_STATUS_POPUP, fin
   return { events, service, control };
 }
 
-for (const version of ["0.158.0", "0.159.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`private Codex ${version} working status probe requires empty Composer and the exact above-input popup`, async () => {
     const runtime = { pid: 901, agentVersion: version };
     const blocked = await codexFullscreenFixture();
@@ -213,6 +241,35 @@ test("Codex fullscreen status popup may directly overlay transcript but must ret
   }), /exact styled popup/u);
   assert.deepEqual(unstyled.events, ["text:/status"]);
 });
+
+for (const version of ["0.159.0", "0.159.2"]) {
+  test(`Codex ${version} Herdr status reconciles detection text with the native painted selection`, async () => {
+    const plain = stripTerminalEscapeSequences(HERDR_CODEX_159_STATUS_POPUP)
+      .split(/\r?\n/u).map((line) => line.trimEnd()).join("\n");
+    const fixture = await codexFullscreenFixture(plain, HERDR_CODEX_159_STATUS_POPUP);
+    await fixture.service.submitCodexStatusProbe(fixture.control, version, {
+      runtime: { pid: 901, agentVersion: version }, allowWorkingCodexStatus: true
+    });
+    assert.deepEqual(fixture.events, ["text:/status", "keys:C-m"]);
+
+    for (const changed of [
+      HERDR_CODEX_159_STATUS_POPUP.replaceAll("\x1b[48;2;99;168;248m", ""),
+      HERDR_CODEX_159_STATUS_POPUP.replaceAll("\x1b[48;2;99;168;248m", "\x1b[48;2;99;168;247m"),
+      HERDR_CODEX_159_STATUS_POPUP.replace("m› /status", "m\x1b[0m› /status"),
+      HERDR_CODEX_159_STATUS_POPUP.replace("m›\x1b[0m", "m\x1b[2m›\x1b[0m"),
+      HERDR_CODEX_159_STATUS_POPUP.replace("show current session configuration", "\x1b[0mshow current session configuration"),
+      HERDR_CODEX_159_STATUS_POPUP.replace("/repo", "/other"),
+      HERDR_CODEX_159_STATUS_POPUP + "\r\n  ctrl+c copy · enter copy & follow · esc clear",
+      plain
+    ]) {
+      const blocked = await codexFullscreenFixture(plain, changed);
+      await assert.rejects(blocked.service.submitCodexStatusProbe(blocked.control, version, {
+        runtime: { pid: 901, agentVersion: version }, allowWorkingCodexStatus: true
+      }), /exact styled popup/u);
+      assert.deepEqual(blocked.events, ["text:/status"]);
+    }
+  });
+}
 
 type Event =
   | "verify"

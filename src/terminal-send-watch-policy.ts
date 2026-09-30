@@ -3,7 +3,8 @@ const CODEX_PAGINATED_DEFAULT_HISTORY_VERSIONS = new Set([
   "0.157.0",
   "0.157.1",
   "0.158.0",
-  "0.159.0"
+  "0.159.0",
+  "0.159.2"
 ]);
 
 /** New physical Sends can acquire a paginated task anchor before task input. */

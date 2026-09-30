@@ -11,14 +11,27 @@ const CODEX_LIFECYCLE_PROFILES: Readonly<Record<string, string>> = Object.freeze
   "0.154.0": "codex-tui-0.154.0",
   "0.155.1": "codex-tui-0.155.1",
   "0.158.0": "codex-tui-0.158.0",
-  "0.159.0": "codex-tui-0.159.0"
+  "0.159.0": "codex-tui-0.159.0",
+  "0.159.2": "codex-tui-0.159.2"
 });
 
-export type CodexPaginatedVersion = "0.158.0" | "0.159.0";
+export type CodexPaginatedVersion = "0.158.0" | "0.159.0" | "0.159.2";
+export type CodexPaginatedBackendVersion = CodexPaginatedVersion;
 
 /** Versions whose paginated history and physical TUI binding are verified together. */
 export function isCodexPaginatedVersion(value: unknown): value is CodexPaginatedVersion {
-  return value === "0.158.0" || value === "0.159.0";
+  return value === "0.158.0" || value === "0.159.0" || value === "0.159.2";
+}
+
+/** Audited physical TUI and shared app-server pairs; unknown patch versions fail closed. */
+export function isAuditedCodexPaginatedServerPair(
+  agentVersion: unknown,
+  serverVersion: unknown
+): serverVersion is CodexPaginatedBackendVersion {
+  return agentVersion === "0.158.0" && serverVersion === "0.158.0" ||
+    agentVersion === "0.159.0" &&
+      (serverVersion === "0.159.0" || serverVersion === "0.159.2") ||
+    agentVersion === "0.159.2" && serverVersion === "0.159.2";
 }
 
 /**

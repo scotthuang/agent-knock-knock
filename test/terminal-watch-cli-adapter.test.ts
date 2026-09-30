@@ -101,7 +101,7 @@ Which color do you prefer?
 Enter to select · ↑/↓ to navigate · Esc to cancel
 `;
 
-for (const version of ["0.158.0", "0.159.0"] as const) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
   test(`paginated ${version} Send retains an exact callback across terminal exit and callback replay`, async (t) => {
     const fixture = createFixture(t, "human-only", version);
     const callbacks: TerminalWatchCallbackInput[] = [];

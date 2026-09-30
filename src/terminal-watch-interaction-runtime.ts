@@ -116,7 +116,9 @@ function paginatedWatchIdentity(
     nativeProcessBirth: anchor.process_birth, nativeTaskId,
     codexPaginatedThread: {
       codexHome: anchor.codex_home, threadId: anchor.native_thread_id,
-      serverVersion: anchor.codex_version, processUuid: anchor.process_uuid,
+      agentVersion: anchor.codex_version,
+      serverVersion: anchor.backend_version ?? anchor.codex_version,
+      processUuid: anchor.process_uuid,
       processBirth: anchor.process_birth, pid: anchor.pid, observedAt: anchor.captured_at
     }
   };

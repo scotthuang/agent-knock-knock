@@ -107,16 +107,19 @@ export function exactCodexFullscreenSlashComposerCapture(
     return undefined;
   }
   if (requireStyled && (
-    !/^\x1b\[1m[›»]\x1b\[0m /u.test(frame.styledLines[frame.composerIndex]!) ||
-    ![...frame.styledLines[popupStart]!.matchAll(/\x1b\[([0-9;]*)m/gu)]
-      .some((match) => sgrHasReverse(match[1]!))
+    !hasCodexComposerMarkerStyle(frame.styledLines[frame.composerIndex]!) ||
+    !hasCodexSelectedPopupStyle(frame.styledLines[popupStart]!)
   )) return undefined;
   return {
     popup: true,
     // The validated queue hint can disappear as native busy state settles.
     // Retain the menu, Composer, and model/path row as the command proof.
     digest: createHash("sha256")
-      .update(frame.styledLines.slice(popupStart, frame.footerIndex + 1).join("\n"))
+      .update(frame.styledLines.slice(popupStart, frame.footerIndex + 1)
+        // Herdr's detection text trims terminal background padding, whereas
+        // its visible ANSI buffer preserves it. Only plain proofs normalize
+        // these trailing spaces; leading columns and all content remain exact.
+        .map((line) => requireStyled ? line : line.trimEnd()).join("\n"))
       .digest("hex")
   };
 }
@@ -129,7 +132,7 @@ export function exactCodexFullscreenBareCommandCapture(
 ): { readonly digest: string } | undefined {
   const frame = captureCodexFullscreenComposerFrame(screen, version);
   if (!frame || frame.composerText !== command ||
-      !/^\x1b\[1m[›»]\x1b\[0m /u.test(frame.styledLines[frame.composerIndex]!)) {
+      !hasCodexComposerMarkerStyle(frame.styledLines[frame.composerIndex]!)) {
     return undefined;
   }
   let previous = frame.composerIndex - 1;
@@ -144,16 +147,107 @@ export function exactCodexFullscreenBareCommandCapture(
   };
 }
 
-function sgrHasReverse(parameters: string): boolean {
+interface CodexCellStyle {
+  readonly bold: boolean;
+  readonly dim: boolean;
+  readonly reverse: boolean;
+  readonly foreground?: string;
+  readonly background?: string;
+}
+
+interface CodexStyledCharacter {
+  readonly character: string;
+  readonly style: CodexCellStyle;
+}
+
+const RESET_STYLE: CodexCellStyle = { bold: false, dim: false, reverse: false };
+
+function hasCodexComposerMarkerStyle(line: string): boolean {
+  const cells = codexStyledCharacters(line);
+  const marker = cells?.[0];
+  return marker !== undefined && /^[›»]$/u.test(marker.character) &&
+    marker.style.bold && !marker.style.dim && !marker.style.reverse &&
+    cells![1]?.character === " " &&
+    cells!.every(({ style }) => !style.dim && !style.reverse);
+}
+
+function hasCodexSelectedPopupStyle(line: string): boolean {
+  const cells = codexStyledCharacters(line)?.filter(({ character }) => character.trim());
+  const marker = cells?.[0];
+  if (!marker || !/^[›»]$/u.test(marker.character) || !marker.style.bold) return false;
+  // Codex style/contrast.rs uses reverse when the terminal background is
+  // unknown. With truecolor background detection it instead paints one of
+  // these two native blue fills and the fixed dark readable foreground.
+  return cells!.every(({ style }) => !style.dim && (marker.style.reverse
+    ? style.reverse
+    : !style.reverse && style.foreground === "rgb:0,0,46" &&
+      ["rgb:99,168,248", "rgb:164,205,251"].includes(style.background ?? "") &&
+      style.background === marker.style.background));
+}
+
+function codexStyledCharacters(line: string): readonly CodexStyledCharacter[] | undefined {
+  const cells: CodexStyledCharacter[] = [];
+  let style: CodexCellStyle = RESET_STYLE;
+  for (let offset = 0; offset < line.length;) {
+    if (line[offset] === "\x1b") {
+      const escape = /^\x1b\[([0-9;]*)m/u.exec(line.slice(offset));
+      if (!escape) return undefined;
+      const next = codexSgrStyle(style, escape[1]!);
+      if (!next) return undefined;
+      style = next;
+      offset += escape[0].length;
+      continue;
+    }
+    const character = String.fromCodePoint(line.codePointAt(offset)!);
+    if (/[\u0000-\u001F\u007F-\u009F]/u.test(character)) return undefined;
+    cells.push({ character, style });
+    offset += character.length;
+  }
+  return cells;
+}
+
+function codexSgrStyle(previous: CodexCellStyle, parameters: string): CodexCellStyle | undefined {
   const codes = parameters.split(";").map(Number);
+  let style = previous;
   for (let index = 0; index < codes.length; index += 1) {
-    if ([38, 48, 58].includes(codes[index]!) && codes[index + 1] === 2) {
-      index += 4;
-    } else if ([38, 48, 58].includes(codes[index]!) && codes[index + 1] === 5) {
-      index += 2;
-    } else if (codes[index] === 7) {
-      return true;
+    const code = codes[index]!;
+    if ([38, 48].includes(code)) {
+      const color = codexSgrColor(codes.slice(index + 1));
+      if (!color) return undefined;
+      style = { ...style, [code === 38 ? "foreground" : "background"]: color.value };
+      index += color.length;
+    } else {
+      const next = codexSimpleSgrStyle(style, code);
+      if (!next) return undefined;
+      style = next;
     }
   }
-  return false;
+  return style;
+}
+
+function codexSgrColor(codes: readonly number[]): { value: string; length: number } | undefined {
+  const size = codes[0] === 2 ? 3 : codes[0] === 5 ? 1 : 0;
+  const components = codes.slice(1, size + 1);
+  if (!size || components.length !== size || components.some((value) => value < 0 || value > 255)) {
+    return undefined;
+  }
+  return { value: `${size === 3 ? "rgb" : "indexed"}:${components.join(",")}`, length: size + 1 };
+}
+
+function codexSimpleSgrStyle(style: CodexCellStyle, code: number): CodexCellStyle | undefined {
+  if (code === 0) return RESET_STYLE;
+  if (code === 1) return { ...style, bold: true };
+  if (code === 2) return { ...style, dim: true };
+  if (code === 7) return { ...style, reverse: true };
+  if (code === 22) return { ...style, bold: false, dim: false };
+  if (code === 27) return { ...style, reverse: false };
+  if (code === 39) return { ...style, foreground: undefined };
+  if (code === 49) return { ...style, background: undefined };
+  if (code >= 30 && code <= 37 || code >= 90 && code <= 97) {
+    return { ...style, foreground: `ansi:${code}` };
+  }
+  if (code >= 40 && code <= 47 || code >= 100 && code <= 107) {
+    return { ...style, background: `ansi:${code}` };
+  }
+  return undefined;
 }

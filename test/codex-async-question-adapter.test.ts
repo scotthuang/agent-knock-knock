@@ -44,13 +44,16 @@ test("Codex async-question profiles are exact and do not float to unknown versio
     "0.154.0",
     "0.155.1",
     "0.158.0",
-    "0.159.0"
+    "0.159.0",
+    "0.159.2"
   ]);
   assert.equal(
     codexAsyncQuestionProfile("0.155.1"),
     "codex/0.155.1/request-user-input-async-v1"
   );
   assert.equal(codexAsyncQuestionProfile("0.155.2"), undefined);
+  assert.equal(codexAsyncQuestionProfile("0.159.1"), undefined);
+  assert.equal(codexAsyncQuestionProfile("0.159.3"), undefined);
   assert.deepEqual(
     inspectCodexAsyncQuestion({
       version: "0.155.2",
@@ -61,7 +64,7 @@ test("Codex async-question profiles are exact and do not float to unknown versio
   );
 });
 
-for (const version of ["0.158.0", "0.159.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} compact question hints prove the native tuple and reversible prompt navigation`, () => {
     const screen = EXPANDED_OPTIONS.replace(
       "enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
@@ -95,7 +98,7 @@ for (const version of ["0.158.0", "0.159.0"]) {
   });
 }
 
-for (const version of ["0.158.0", "0.159.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} collapsed compact hints and fullscreen Composer withdraw answered surfaces`, () => {
     const inspected = inspectCodexAsyncQuestion({
       version, evidence: EVIDENCE,

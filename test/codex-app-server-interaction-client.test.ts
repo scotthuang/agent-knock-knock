@@ -9,19 +9,21 @@ import {
 } from "../src/codex-app-server-interaction-client.js";
 import type { CodexAppServerReadTransport } from "../src/codex-app-server-read-client.js";
 import type { CodexPaginatedThreadBinding } from "../src/codex-paginated-thread-binding.js";
+import type { CodexPaginatedBackendVersion, CodexPaginatedVersion } from "../src/codex-lifecycle-compatibility.js";
 
 const THREAD_ID = "01a0e958-4bb1-7fc3-8649-e153fd90faae";
 const TURN_ID = "01a0e959-4bb1-7fc3-8649-e153fd90faae";
 const ITEM_ID = "call_exact_question_1";
 const ANSWERS = { confirm_company: { answers: ["Yes"] } };
-const CODEX_VERSIONS = ["0.158.0", "0.159.0"] as const;
-type CodexVersion = (typeof CODEX_VERSIONS)[number];
+const CODEX_VERSION_PAIRS = [["0.158.0", "0.158.0"], ["0.159.0", "0.159.0"],
+  ["0.159.0", "0.159.2"], ["0.159.2", "0.159.2"]] as const;
 
-for (const version of CODEX_VERSIONS) test("rejoins only the exact loaded question turn and reads replay without answering for " + version, async () => {
-  const fixture = new InteractionFixture(version);
+for (const [version, serverVersion] of CODEX_VERSION_PAIRS) test("rejoins only the exact loaded question turn and reads replay without answering for " + version + "/" + serverVersion, async () => {
+  const fixture = new InteractionFixture(version, serverVersion);
   const client = await fixture.connect();
   try {
     const pending = client.listPendingQuestions();
+    assert.equal(client.metadata.serverVersion, serverVersion);
     assert.equal(pending.length, 1);
     assert.equal(pending[0].requestId, 77);
     assert.equal(pending[0].itemId, ITEM_ID);
@@ -40,8 +42,8 @@ for (const version of CODEX_VERSIONS) test("rejoins only the exact loaded questi
   assert.equal(fixture.closed, true);
 });
 
-for (const version of CODEX_VERSIONS) test("confirms one exact durable answer and prevents concurrent response retries for " + version, async () => {
-  const fixture = new InteractionFixture(version);
+for (const [version, serverVersion] of CODEX_VERSION_PAIRS) test("confirms one exact durable answer and prevents concurrent response retries for " + version + "/" + serverVersion, async () => {
+  const fixture = new InteractionFixture(version, serverVersion);
   const client = await fixture.connect();
   try {
     const results = await Promise.allSettled([client.answer(77, ANSWERS), client.answer(77, ANSWERS)]);
@@ -83,15 +85,30 @@ test("rejects unloaded or changed active turns before any resume or answer", asy
   }
 });
 
-test("rejects both crossed 0.158 and 0.159 blocking client/backend versions before subscribing or answering", async () => {
-  for (const [clientVersion, backendVersion] of [["0.158.0", "0.159.0"], ["0.159.0", "0.158.0"]] as const) {
-    const fixture = new InteractionFixture(clientVersion);
+test("rejects blocking backend changes in either direction before subscribing or answering", async () => {
+  for (const [clientVersion, boundVersion, backendVersion] of [
+    ["0.158.0", "0.158.0", "0.159.0"], ["0.159.0", "0.159.0", "0.158.0"],
+    ["0.159.0", "0.159.0", "0.159.2"], ["0.159.0", "0.159.2", "0.159.0"]
+  ] as const) {
+    const fixture = new InteractionFixture(clientVersion, boundVersion);
     fixture.backendVersion = backendVersion;
     try {
       await assert.rejects(fixture.connect(), /backend version/u);
       assert.deepEqual(fixture.sent.map((message) => message.method), ["initialize"]);
       assert.equal(fixture.answerWrites().length, 0);
       assert.equal(fixture.closed, true);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("rejects reversed or unaudited blocking bindings before connecting", async () => {
+  for (const [clientVersion, backendVersion] of [
+    ["0.159.2", "0.159.0"], ["0.158.0", "0.159.2"], ["0.159.0", "0.159.3"]
+  ] as const) {
+    const fixture = new InteractionFixture(clientVersion, backendVersion);
+    try {
+      await assert.rejects(fixture.connect(), /binding is unsupported/u);
+      assert.deepEqual(fixture.sent, []);
     } finally { fixture.cleanup(); }
   }
 });
@@ -139,8 +156,8 @@ class InteractionFixture implements CodexAppServerReadTransport {
   private messageListener?: (text: string) => void;
   private disconnectListener?: (error: Error) => void;
 
-  constructor(readonly version: CodexVersion = "0.158.0") {
-    this.backendVersion = version;
+  constructor(readonly version: CodexPaginatedVersion = "0.158.0", readonly boundServerVersion: string = version) {
+    this.backendVersion = boundServerVersion;
     fs.mkdirSync(path.dirname(this.rolloutPath));
     fs.writeFileSync(this.rolloutPath, `${JSON.stringify({ ordinal: 0, type: "session_meta", payload: { id: THREAD_ID, history_mode: "paginated" } })}\n` +
       `${JSON.stringify({ ordinal: 1, type: "event_msg", payload: { type: "task_started", turn_id: TURN_ID } })}\n`, { mode: 0o600 });
@@ -152,7 +169,9 @@ class InteractionFixture implements CodexAppServerReadTransport {
     });
   }
   binding(): CodexPaginatedThreadBinding {
-    return { codexHome: this.home, threadId: THREAD_ID, serverVersion: this.version, processUuid: "codex-pid:1234:birth:fixture", processBirth: "fixture", pid: 1234, observedAt: "2026-09-29T00:00:00.000Z" };
+    return { codexHome: this.home, threadId: THREAD_ID, agentVersion: this.version,
+      serverVersion: this.boundServerVersion as CodexPaginatedBackendVersion,
+      processUuid: "codex-pid:1234:birth:fixture", processBirth: "fixture", pid: 1234, observedAt: "2026-09-29T00:00:00.000Z" };
   }
   send(text: string): void {
     const message = JSON.parse(text) as Message;

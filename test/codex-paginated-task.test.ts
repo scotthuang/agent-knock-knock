@@ -231,6 +231,66 @@ test("persisted 0.159 task identity survives reload and rejects a different supp
   }
 });
 
+test("a persisted 0.159.0 frontend task completes on its bound 0.159.2 backend without rebinding", () => {
+  const original = anchor({ codex_version: "0.159.0", backend_version: "0.159.2" });
+  const reloaded = validateCodexPaginatedTaskAnchor(JSON.parse(JSON.stringify(original)));
+  assert.equal(reloaded.codex_version, "0.159.0");
+  assert.equal(reloaded.backend_version, "0.159.2");
+  const first = observeCodexPaginatedTask({ anchor: reloaded,
+    snapshot: snapshot([turn("accepted", 200, "inProgress"), turn("baseline", 100)], "0.159.2") });
+  if (first.status !== "accepted") assert.fail("the audited mixed-version task must bind");
+  const checkpoint = validateCodexPaginatedTaskCheckpoint(
+    JSON.parse(JSON.stringify(first.checkpoint)), reloaded);
+  const completed = observeCodexPaginatedTask({ anchor: reloaded, checkpoint,
+    snapshot: snapshot([turn("later-identical", 300), turn("accepted", 200)], "0.159.2") });
+  if (completed.status !== "completed") assert.fail("the originally accepted task must complete");
+  assert.equal(completed.completion.id, "accepted");
+  assert.equal(completed.completion.text, "Exact result.");
+  assert.equal(completed.evidence.acceptanceId, first.evidence.acceptanceId);
+  assert.equal(completed.evidence.anchorFingerprint, original.anchor_fingerprint);
+
+  for (const backend of ["0.159.0", "0.158.0", "0.159.3"]) {
+    assert.equal(observeCodexPaginatedTask({ anchor: reloaded, checkpoint,
+      snapshot: snapshot([turn("accepted", 200)], backend) }).status, "invalidated",
+    `a task bound to 0.159.2 must reject backend drift to ${backend}`);
+  }
+});
+
+test("mixed-version anchors bind the backend into their fingerprint and acceptance checkpoint", () => {
+  const mixed = anchor({ codex_version: "0.159.0", backend_version: "0.159.2" });
+  const sameVersion = anchor({ codex_version: "0.159.0" });
+  assert.notEqual(mixed.anchor_fingerprint, sameVersion.anchor_fingerprint);
+  const missingBackend = { ...mixed };
+  delete missingBackend.backend_version;
+  assert.throws(() => validateCodexPaginatedTaskAnchor(missingBackend), /fingerprint/u);
+  assert.throws(() => validateCodexPaginatedTaskAnchor({ ...sameVersion, backend_version: "0.159.2" }),
+    /fingerprint/u);
+  assert.throws(() => validateCodexPaginatedTaskAnchor({ ...mixed, backend_version: "0.159.3" }));
+  const explicitNull = { ...mixed, backend_version: null };
+  const { anchor_fingerprint: _previousFingerprint, ...unsignedNull } = explicitNull;
+  const resignedNull = {
+    ...explicitNull,
+    anchor_fingerprint: createHash("sha256").update(JSON.stringify(unsignedNull)).digest("hex")
+  };
+  assert.throws(() => validateCodexPaginatedTaskAnchor(resignedNull), /anchor is invalid/u);
+  const accepted = observeCodexPaginatedTask({ anchor: mixed,
+    snapshot: snapshot([turn("accepted", 200, "inProgress"), turn("baseline", 100)], "0.159.2") });
+  if (accepted.status !== "accepted") assert.fail("mixed-version fixture must bind");
+  assert.throws(() => validateCodexPaginatedTaskCheckpoint(accepted.checkpoint, sameVersion),
+    /different task/u);
+});
+
+test("legacy anchors without a backend version retain exact same-version history binding", () => {
+  for (const version of ["0.158.0", "0.159.0"] as const) {
+    const original = validateCodexPaginatedTaskAnchor(JSON.parse(JSON.stringify(anchor({ codex_version: version }))));
+    assert.equal(Object.hasOwn(original, "backend_version"), false);
+    assert.equal(observeCodexPaginatedTask({ anchor: original,
+      snapshot: snapshot([turn("accepted", 200), turn("baseline", 100)], version) }).status, "completed");
+    assert.equal(observeCodexPaginatedTask({ anchor: original,
+      snapshot: snapshot([turn("accepted", 200), turn("baseline", 100)], "0.159.2") }).status, "invalidated");
+  }
+});
+
 test("active paginated tasks settle explicit interrupted and failed native outcomes", () => {
   const active = anchor({ origin: "active_task", turn_id: "active", baseline_latest_turn_id: undefined });
   for (const status of ["failed", "interrupted"] as const) {

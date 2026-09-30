@@ -23,7 +23,7 @@ const NOW = new Date("2026-09-29T03:00:00.000Z");
 const REQUEST = "Check UniPat AI";
 const HASH = createHash("sha256").update(REQUEST).digest("hex");
 const BINDING: CodexPaginatedThreadBinding = {
-  codexHome: HOME, threadId: THREAD, serverVersion: "0.158.0",
+  codexHome: HOME, threadId: THREAD, agentVersion: "0.158.0", serverVersion: "0.158.0",
   processUuid: "fixture-process", processBirth: "fixture-birth", pid: 34744,
   observedAt: NOW.toISOString()
 };
@@ -129,6 +129,8 @@ test("captures only the latest active task while explicit send preserves the lat
   assert.equal(anchor?.request_hash, HASH);
   assert.equal(anchor?.baseline_latest_turn_id, undefined);
   assert.equal(active.closed, true);
+  assert.equal(anchor?.codex_version, "0.158.0");
+  assert.equal(Object.hasOwn(anchor!, "backend_version"), false);
 
   const oldActive = new ReaderFixture({ turns: new Map([["", page([turn("completed"), turn("old-active", "inProgress")])]]) });
   assert.equal(await capture(oldActive), undefined);
@@ -146,6 +148,67 @@ test("captures only the latest active task while explicit send preserves the lat
   assert.equal(ambiguous.closed, true);
 });
 
+test("mixed-version capture preserves the physical frontend and pins both capture modes to the actual backend", async () => {
+  const binding: CodexPaginatedThreadBinding = {
+    ...BINDING, agentVersion: "0.159.0", serverVersion: "0.159.2"
+  };
+  for (const requestHash of [undefined, HASH]) {
+    const fixture = new ReaderFixture({
+      serverVersion: "0.159.2",
+      turns: new Map([["", page([turn("latest", "inProgress")])]]),
+      items: new Map([["latest:", page([entry("latest", user("request", REQUEST))])]])
+    });
+    const anchor = await capture(fixture, requestHash, binding);
+    assert.ok(anchor);
+    assert.equal(anchor.codex_version, "0.159.0");
+    assert.equal(anchor.backend_version, "0.159.2");
+    assert.equal(anchor.request_hash, HASH);
+    assert.equal(anchor.origin, requestHash ? "user_explicit_send" : "active_task");
+    assert.equal(anchor.turn_id, requestHash ? undefined : "latest");
+    assert.equal(anchor.baseline_latest_turn_id, requestHash ? "latest" : undefined);
+    assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2" }]);
+    assert.equal(fixture.closed, true);
+  }
+
+  const sameVersion = new ReaderFixture({ serverVersion: "0.159.0", turns: new Map([["", page([])]]) });
+  const anchor = await capture(sameVersion, HASH, { ...binding, serverVersion: "0.159.0" });
+  assert.ok(anchor);
+  assert.equal(anchor.codex_version, "0.159.0");
+  assert.equal(Object.hasOwn(anchor, "backend_version"), false);
+  assert.equal(sameVersion.closed, true);
+});
+
+test("mixed-version snapshots retain the actual backend while historical thread cliVersion remains independent", async () => {
+  const fixture = new ReaderFixture({
+    serverVersion: "0.159.2",
+    turns: new Map([["", page([turn("accepted"), turn("baseline")])]]),
+    items: new Map([["accepted:", page([
+      entry("accepted", user("input", REQUEST)), entry("accepted", agent("result", "Done"))
+    ])]])
+  });
+  const snapshot = await read(fixture, "baseline", "0.159.2");
+  assert.equal(snapshot.serverVersion, "0.159.2");
+  assert.equal(snapshot.thread.cliVersion, "0.158.0");
+  assert.equal(snapshot.completeToBoundary, true);
+  assert.deepEqual(snapshot.turns[0]!.items.map((item) => item.id), ["input", "result"]);
+  assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2" }]);
+  assert.equal(fixture.closed, true);
+});
+
+test("a refused backend connection does not retry capture or observation against the physical frontend version", async () => {
+  const mismatch = new CodexAppServerReadError("incompatible_server", "Fixture backend version changed");
+  for (const operation of ["capture", "snapshot"] as const) {
+    const fixture = new ReaderFixture({ connectError: mismatch });
+    const result = operation === "capture"
+      ? capture(fixture, HASH, { ...BINDING, agentVersion: "0.159.0", serverVersion: "0.159.2" })
+      : read(fixture, "accepted", "0.159.2");
+    await assert.rejects(result, (error) => error === mismatch);
+    assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2" }]);
+    assert.equal(fixture.turnCalls.length, 0);
+    assert.equal(fixture.itemCalls.length, 0);
+  }
+});
+
 test("legacy foreground capture preserves its exact thread identity for the legacy reader", async () => {
   const fixture = new ReaderFixture({ thread: { ...thread(), historyMode: "legacy" } });
   await assert.rejects(capture(fixture, HASH), (error) =>
@@ -154,12 +217,12 @@ test("legacy foreground capture preserves its exact thread identity for the lega
   assert.equal(fixture.closed, true);
 });
 
-function read(fixture: ReaderFixture, boundaryTurnId?: string) {
-  return readCodexPaginatedTaskSnapshot({ codexHome: HOME, serverVersion: "0.158.0", threadId: THREAD,
+function read(fixture: ReaderFixture, boundaryTurnId?: string, serverVersion = "0.158.0") {
+  return readCodexPaginatedTaskSnapshot({ codexHome: HOME, serverVersion, threadId: THREAD,
     ...(boundaryTurnId ? { boundaryTurnId } : {}), connect: fixture.connect });
 }
-function capture(fixture: ReaderFixture, requestHash?: string) {
-  return captureCodexPaginatedTaskAnchor({ binding: BINDING, now: NOW, requestHash, connect: fixture.connect });
+function capture(fixture: ReaderFixture, requestHash?: string, binding = BINDING) {
+  return captureCodexPaginatedTaskAnchor({ binding, now: NOW, requestHash, connect: fixture.connect });
 }
 function thread(status: CodexAppServerThread["status"] = { type: "idle" }): CodexAppServerThread {
   return { id: THREAD, sessionId: THREAD, cwd: "/tmp/project", historyMode: "paginated", cliVersion: "0.158.0",
@@ -193,13 +256,18 @@ class ReaderFixture {
   readonly itemCalls: (CodexAppServerListOptions & { turnId?: string })[] = [];
   closed = false;
   constructor(private readonly options: {
+    serverVersion?: string;
+    connectError?: Error;
     thread?: CodexAppServerThread;
     turns?: ReadonlyMap<string, CodexAppServerPage<CodexAppServerTurn>>;
     items?: ReadonlyMap<string, CodexAppServerPage<CodexAppServerItemEntry>>;
     turnError?: Error;
-  } = {}) {}
+  } = {}) {
+    this.metadata.serverVersion = options.serverVersion ?? "0.158.0";
+  }
   connect = async (options: { codexHome: string; expectedServerVersion: string }) => {
     this.connections.push(options);
+    if (this.options.connectError) throw this.options.connectError;
     return this;
   };
   async readThread(id: string): Promise<CodexAppServerThread> {

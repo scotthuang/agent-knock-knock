@@ -2326,10 +2326,11 @@ function runInProcessTmux(
     );
   }
   if (args[0] === "display-message") {
+    assert.equal(args.at(-1), "#{pane_width}x#{pane_height}");
     return successfulCommand(
       fixture.viewportColumns === null
         ? ""
-        : `${fixture.viewportColumns}\t${fixture.viewportRows}\n`
+        : `${fixture.viewportColumns}x${fixture.viewportRows}\n`
     );
   }
   if (args[0] === "capture-pane") {
@@ -2561,10 +2562,11 @@ if (args[0] === "list-panes") {
       `\t\t${FIXTURE_TMUX_PANE_ID}\n`
   )});
 } else if (args[0] === "display-message") {
+  if (args.at(-1) !== "#{pane_width}x#{pane_height}") throw new Error("unexpected viewport format");
   process.stdout.write(${JSON.stringify(
     options.viewportColumns === null
       ? ""
-      : `${options.viewportColumns}\t${options.viewportRows}\n`
+      : `${options.viewportColumns}x${options.viewportRows}\n`
   )});
 } else if (args[0] === "capture-pane") {
   const screen = fs.readFileSync(${JSON.stringify(options.screenPath)}, "utf8");

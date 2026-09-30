@@ -59,8 +59,8 @@ const CLAUDE_STATUS_PANEL_FIELDS_2_1_261 = Object.freeze([
   "Organization policy"
 ]);
 
-// Observed in Claude Code 2.1.282 /status. Keep this outside the verified
-// profile registry: only this bounded status-field difference has been checked.
+// Observed in Claude Code 2.1.282 and 2.1.285 /status. The 2.1.282 runtime
+// remains unverified: only its bounded status-field difference was checked.
 const CLAUDE_STATUS_PANEL_FIELDS_2_1_282 = Object.freeze([
   ...CLAUDE_STATUS_PANEL_FIELDS_2_1_261,
   "Auto mode server"
@@ -209,13 +209,35 @@ const CLAUDE_LIFECYCLE_PROFILES: Readonly<
       "2.1.266",
       "2.1.267"
     ])
+  }),
+  "2.1.285": Object.freeze({
+    lifecycleBehaviorProfile: "claude-code-2.1.285",
+    nativeInspectionBehaviorProfile:
+      "claude-code-2.1.285-native-status",
+    nativeInspectionComposerStableMs: 80,
+    nativeInspectionComposerSettleTimeoutMs: 5_000,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_282,
+    nativeStatusPanelRequiredValues: Object.freeze({
+      "Session kind": "interactive"
+    }),
+    resumableSourceVersions: Object.freeze([
+      "2.1.218",
+      "2.1.226",
+      "2.1.237",
+      "2.1.251",
+      "2.1.259",
+      "2.1.263",
+      "2.1.266",
+      "2.1.267",
+      "2.1.285"
+    ])
   })
 });
 
 /**
  * Best-effort runtime protocol for complete x.y.z Claude Code versions
- * that AKK has not regression-tested yet. This deliberately reuses the newest
- * verified, bounded Status modal shape; a real TUI change therefore fails at
+ * that AKK has not regression-tested yet. This deliberately reuses the existing
+ * bounded Status modal shape; a real TUI change therefore fails at
  * observation instead of being blocked solely by its version number.
  */
 const CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE:
