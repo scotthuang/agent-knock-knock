@@ -90,7 +90,8 @@ childProcess.spawnSync = (command, args = [], options) => {
     )});
   }
   if (commandName === "tmux" && args[0] === "display-message") {
-    return successful("100\\t40\\n");
+    if (args.at(-1) !== "#{pane_width}x#{pane_height}") throw new Error("unexpected viewport format");
+    return successful("100x40\\n");
   }
   if (commandName === "tmux" && args[0] === "capture-pane") {
     return successful(fs.readFileSync(${JSON.stringify(screenPath)}, "utf8"));
@@ -136,7 +137,9 @@ if [ "$command" = "list-panes" ]; then
     `tmux-sticky-bin\t0\t0\t${panePid}\tcodex\t${workspace}\t\t%42`
   )}
 elif [ "$command" = "display-message" ]; then
-  printf '100\\t40\\n'
+  for viewport_format in "$@"; do :; done
+  [ "$viewport_format" = '#{pane_width}x#{pane_height}' ] || exit 2
+  printf '100x40\\n'
 elif [ "$command" = "capture-pane" ]; then
   cat ${sh(screenPath)}
 elif [ "$command" = "send-keys" ]; then

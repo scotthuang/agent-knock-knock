@@ -1649,7 +1649,8 @@ if (args[0] === "list-panes") {
   process.exit(0);
 }
 if (args[0] === "display-message") {
-  process.stdout.write("100\\t30\\n");
+  if (args.at(-1) !== "#{pane_width}x#{pane_height}") throw new Error("unexpected viewport format");
+  process.stdout.write("100x30\\n");
   process.exit(0);
 }
 if (args[0] === "capture-pane") {
