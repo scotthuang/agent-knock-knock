@@ -207,7 +207,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
       document,
       /Legacy terminal-scoped (?:ordinary )?tasks[\s\S]{0,160}without running `\/status` or failing merely because the pane is narrow/u
     );
-    assert.match(document, /Codex 0\.158\.0\/0\.159\.0 attempts[\s\S]{0,50}closed `\/status` binding before physical Send/u);
+    assert.match(document, /Codex 0\.158\.0\/0\.159\.0\/0\.159\.2 attempts[\s\S]{0,50}closed `\/status` binding before physical Send/u);
     assert.match(
       document,
       /Until (?:that )?promotion commits[\s\S]*strict `session_id` send[\s\S]*`respond`[\s\S]*(?:managed `approve`|`approve`)[\s\S]*`cancel`[\s\S]*native lifecycle[\s\S]*(?:callback delivery|callback authority)[\s\S]*`native_inspect`/u

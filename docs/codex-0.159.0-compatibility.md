@@ -148,3 +148,85 @@ and another NUL byte. The canonical Skill SHA-256 is
 `77b05bfd78c8f5a3d3f301d76eadc35e8c538e9774e58a54129b769f7853d638`.
 Final publication checks must compare the packaged runtime and Skill with these
 native-tested artifacts.
+
+## Local terminal-routing follow-up (2026-09-30, not a release)
+
+The checks above describe the published 0.13.13 artifact. A subsequent local
+investigation reproduced additional failures in the user's Gateway environment
+and Herdr terminal. Its changes and evidence are separate from that release.
+An activity-only Watch's idle notification was not used as task-success evidence.
+
+### Reproduced causes
+
+- **tmux viewport:** tmux 3.6b renders a TAB in `display-message` as `_` when
+  `LANG`, `LC_ALL`, and `LC_CTYPE` are absent, as in the running Gateway. The
+  existing `akk:0.0` pane returned `213_63` with the old format and `213x63` with
+  an ASCII `x` separator. It was not an undersized viewport. The reader now
+  requires two positive safe integers separated by `x`; diagnostics contain
+  bounded, redacted shape information rather than arbitrary terminal output.
+- **Herdr viewport capture:** Herdr 0.8.0 interprets `pane.read` with `lines: 0`
+  as an empty result. AKK's zero-scrollback capture means the current viewport,
+  so the adapter now uses `source: visible` and omits `lines` for that case,
+  for both text and ANSI captures. Positive scrollback requests are unchanged.
+- **Codex fullscreen command popup:** the actual Herdr renderer splits Composer
+  attributes across SGR sequences and uses Codex's selected-row blue background
+  with dark text instead of reverse video. It also preserves background padding
+  to the right edge. The parser now tracks SGR state, accepts the two known
+  Codex selection palettes, and normalizes only trailing line padding when
+  comparing plain and styled frames. It still requires an exact command/menu,
+  a bold, non-dim Composer, and selection styling across the whole visible row.
+  Copy selection, unknown styles, nonempty input, identity drift, and unrelated
+  modals do not gain input authority.
+- **Different foreground and daemon versions:** the designated physical TUI
+  was `codex-cli 0.159.0`, while its existing shared daemon identified itself as
+  `codex-tui/0.159.2`. A read of only the `/status`-bound thread confirmed the
+  same thread/session ID and exact workspace. `thread.cliVersion` also came
+  from the daemon; it is not proof of the physical executable's version.
+  Treating all three values as one version incorrectly rejected Watch
+  preparation before task submission. The reviewed daemon source is official
+  tag [`rust-v0.159.2`](https://github.com/openai/codex/tree/ff6aec96948b70d94983af2641a6b67c94faeff5).
+  Its protocol, paginated thread processor, and production TUI sources have no
+  changes from 0.159.0; daemon implementation changes concern feedback reports.
+
+The new terminal regressions exercise the actual renderer shapes, locale
+failure, and zero-line behavior, including negative cases for unsafe styling,
+malformed dimensions, and diagnostic leakage. Socket/pane identity, process
+birth, ownership locks, approval checks, and one-shot input rules remain active.
+
+Physical TUI and daemon versions are now bound separately. The reviewed pairs
+are `(0.158.0, 0.158.0)`, `(0.159.0, 0.159.0)`, `(0.159.0, 0.159.2)`, and
+`(0.159.2, 0.159.2)`; this does not enable arbitrary newer daemons or reverse
+version combinations. The separately requested physical CLI upgrade is covered
+in [0.159.2 compatibility](codex-0.159.2-compatibility.md).
+A task anchor retains `codex_version` for the physical process
+and records `backend_version` when the daemon differs. The extra field is
+strictly validated and included in its fingerprint. Old anchors without it
+retain their exact same-version meaning. Subsequent reads and answers require
+the recorded backend version, so a daemon upgrade cannot silently migrate an
+active Watch. Native UI operations continue using the physical TUI version.
+
+### Native verification scope
+
+The designated existing Herdr Codex was located by its actual working directory
+`~/workspace/herdr-codex`, then fenced by stable terminal ID, PID, and process
+birth. Neither the `~/workspace` pane nor the OpenClaw project pane was used as
+a substitute. The existing process and conversation were retained. Its initial
+native copy-selection mode was explicitly cleared only after two matching
+frames and an empty Composer were verified. The old `/status` implementation
+then reproduced the styled-popup failure before Enter; only that owned command
+draft was cleared before testing the fixed transaction.
+
+The original `akk:0.0` pane was used only for read-only viewport metadata checks
+under both the Gateway's locale-free environment and a UTF-8 control environment.
+Both returned 213 by 63 with the fixed provider. Input observations use an
+additional owned tmux server, launched through the existing `mycodes --yolo`
+wrapper in the designated workspace. This separate tmux observation does not
+replace the required observation on the already-open Herdr session.
+
+No existing Claude/Codex work session, shared Codex daemon, or Gateway is
+restarted. The OpenClaw pane's earlier task result remains unverified; its idle
+state or this repair's evidence must not be used to claim that task succeeded.
+Callback transport observations use a local collector, not an external chat
+notification. Unknown renderer styles and native thread new/resume retain the
+boundaries above. Full, integration, and release suites are intentionally
+excluded by `AGENTS.md` for this local work; there is no npm/ClawHub publication.

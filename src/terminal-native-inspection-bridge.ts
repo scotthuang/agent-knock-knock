@@ -95,6 +95,10 @@ const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "› /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
   ],
+  "codex-tui-0.159.2": [
+    "› /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"
+  ],
   "codex-tui-generic-v1": [
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"
@@ -121,6 +125,7 @@ const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
   "codex-tui-0.155.1": 80,
   "codex-tui-0.158.0": 80,
   "codex-tui-0.159.0": 80,
+  "codex-tui-0.159.2": 80,
   "codex-tui-generic-v1": 80
 };
 const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
@@ -174,6 +179,12 @@ const CLAUDE_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
     "/ide Manage IDE integrations and show status",
     "/usage Show session cost, plan usage, and activity stats"
   ],
+  "claude-code-2.1.285-native-status": [
+    "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
+    "/statusline Set up Claude Code's status line UI",
+    "/ide Manage IDE integrations and show status",
+    "/usage Show session cost, plan usage, and activity stats"
+  ],
   "claude-code-unverified-native-status-v1": [
     "/status Show Claude Code status including version, model, account, API connectivity, and tool statuses",
     "/statusline Set up Claude Code's status line UI",
@@ -213,6 +224,10 @@ const CLAUDE_NATIVE_STATUS_SETTLE_BY_PROFILE: Readonly<
     maximumSettleMs: 5_000
   },
   "claude-code-2.1.267-native-status": {
+    minimumStableMs: 80,
+    maximumSettleMs: 5_000
+  },
+  "claude-code-2.1.285-native-status": {
     minimumStableMs: 80,
     maximumSettleMs: 5_000
   },
@@ -1676,13 +1691,20 @@ export function exactClaudeComposerFrame(screen: string): {
 } | undefined {
   const lines = screen.replace(/\r\n?/gu, "\n").replace(/\u00a0/gu, " ")
     .split("\n");
+  // Named Claude sessions render the display name inside the upper border.
+  // It is only frame decoration, never native session or task identity.
+  const plainDivider = /^\s*[─━]{8,}\s*$/u;
+  const namedDivider = /^\s*[─━]{8,} [^\x00-\x1f\x7f]{1,128} [─━]+\s*$/u;
   const dividerIndexes = lines
-    .map((line, index) => /^\s*[─━]{8,}\s*$/u.test(line) ? index : -1)
+    .map((line, index) => plainDivider.test(line) || namedDivider.test(line) ? index : -1)
     .filter((index) => index >= 0);
   if (dividerIndexes.length < 2) {
     return undefined;
   }
   const closeIndex = dividerIndexes.at(-1)!;
+  if (!plainDivider.test(lines[closeIndex])) {
+    return undefined;
+  }
   const openIndex = dividerIndexes.at(-2)!;
   return {
     lines,

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
 import {
   connectCodexUnixWebSocket,
   type CodexAppServerReadTransport
@@ -75,6 +76,8 @@ export interface CodexAppServerMetadata {
 export interface CodexAppServerReadOptions {
   codexHome: string;
   expectedServerVersion: string;
+  /** Only the fresh TUI /status binding may discover an audited shared backend patch. */
+  allowAuditedBackendPatch?: true;
   timeoutMs?: number;
   transportFactory?: (options: {
     socketPath: string;
@@ -268,7 +271,9 @@ export function isCodexUnmaterializedThreadError(error: unknown, threadId: strin
 export function parseCodexAppServerMetadata(value: unknown, options: CodexAppServerReadOptions, socketPath: string): CodexAppServerMetadata {
   const result = record(value);
   const version = typeof result.userAgent === "string" ? /^[^/]+\/([^\s]+)(?:\s|$)/u.exec(result.userAgent)?.[1] : undefined;
-  if (version !== options.expectedServerVersion) {
+  if (version !== options.expectedServerVersion &&
+      !(options.allowAuditedBackendPatch &&
+        isAuditedCodexPaginatedServerPair(options.expectedServerVersion, version))) {
     throw new CodexAppServerReadError("incompatible_server", "Codex app-server backend version does not match the required version");
   }
   if (typeof result.codexHome !== "string" || !path.isAbsolute(result.codexHome) || !sameHome(result.codexHome, options.codexHome)) {

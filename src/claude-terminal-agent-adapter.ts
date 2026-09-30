@@ -801,7 +801,7 @@ function parseCurrentClaudeStatusPanel(
     if (line === CLAUDE_STATUS_PANEL_DIAGNOSTICS_HEADING) {
       if (
         inDiagnostics ||
-        rawFields.get("Version") !== "2.1.282" ||
+        !["2.1.282", "2.1.285"].includes(rawFields.get("Version") ?? "") ||
         !rawFields.has("Session ID") ||
         rawFields.get("Session kind") !== "interactive" ||
         !rawFields.has("cwd") ||
@@ -1414,11 +1414,16 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
       isClaudePermissionFooterLine(line) ? index : -1
     )
     .filter((index) => index >= 0);
-  const orderedChoices = [3, 4].includes(choiceRows.length) &&
+  const orderedChoices = [2, 3, 4].includes(choiceRows.length) &&
     choiceRows.every((choice, index) => choice.number === index + 1) &&
     choiceRows.every((choice, index) =>
       index === 0 || choice.index > choiceRows[index - 1].index
     );
+  const detailLines = absoluteHeaderIndex >= 0
+    ? lines.slice(absoluteHeaderIndex + 1, markerIndex)
+      .map((line) => line.trim())
+      .filter(Boolean)
+    : [];
   const legacyLabels = orderedChoices && choiceRows.length === 3 &&
     isOneTimeYesChoice(choiceRows[0].label) &&
     isPersistentPermissionChoice(choiceRows[1].label) &&
@@ -1432,7 +1437,11 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     isPersistentPermissionChoice(choiceRows[1].label) &&
     isClaudeAutoModeChoice(choiceRows[2].label) &&
     /^No(?:\b|,)/iu.test(choiceRows[3].label);
-  const exactLabels = legacyLabels || autoOnlyLabels || currentLabels;
+  const ruleRequiredLabels = isClaudeRuleRequiredPermissionChoiceSet(
+    choiceRows.map((choice) => choice.label), detailLines
+  );
+  const exactLabels = legacyLabels || autoOnlyLabels || currentLabels ||
+    ruleRequiredLabels;
   const exactChoiceSpacing = orderedChoices && [
     {
       previousChoice: undefined,
@@ -1458,11 +1467,6 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
       return !trimmed || /^[─━═╌╍┄┅┈┉\s]+$/u.test(trimmed);
     });
   const markerNearBottom = markerIndex >= Math.max(0, lines.length - 12);
-  const detailLines = absoluteHeaderIndex >= 0
-    ? lines.slice(absoluteHeaderIndex + 1, markerIndex)
-      .map((line) => line.trim())
-      .filter(Boolean)
-    : [];
   const hasExactDialogShape =
     absoluteHeaderIndex >= 0 &&
     markerNearBottom &&
@@ -1506,7 +1510,9 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
     requestDetail,
     toolName: "Bash",
     promptEvidence: terminalApprovalPromptEvidence(
-      autoOnlyLabels || currentLabels
+      ruleRequiredLabels
+        ? "claude-bash-permission-prompt-v3"
+        : autoOnlyLabels || currentLabels
         ? "claude-bash-permission-prompt-v2"
         : "claude-bash-permission-prompt-v1",
       lines.slice(absoluteHeaderIndex, promptRegionEnd + 1).join("\n")
@@ -1532,6 +1538,22 @@ export function detectClaudeApprovalPrompt(screen: string): TerminalApprovalInsp
       label: "Yes"
     }
   };
+}
+
+function isClaudeRuleRequiredPermissionChoiceSet(
+  labels: readonly string[],
+  detailLines: readonly string[]
+): boolean {
+  // An explicit ask rule in Claude Code 2.1.285 suppresses persistent and
+  // auto-mode choices. Require its exact native explanation as well as the
+  // two labels; a truncated legacy menu is not a two-choice dialog.
+  // Numbering, highlight, spacing, and footer remain checked by the caller.
+  return labels.length === 2 &&
+    isOneTimeYesChoice(labels[0]) &&
+    labels[1] === "No" &&
+    detailLines.length >= 3 &&
+    detailLines.slice(-2).join("\n") ===
+      "Permission rule Bash requires confirmation for this command.\n/permissions to update rules";
 }
 
 function claudeApprovalDetectionLines(screen: string): string[] {

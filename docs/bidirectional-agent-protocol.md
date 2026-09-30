@@ -42,11 +42,11 @@ Human-friendly selectors such as `only`, `codex`, `claude`, and `@short-ref` rem
 
 ## Managed Turn Flow
 
-This flow describes managed Session/Turn delivery. Codex 0.158.0/0.159.0 physical Send
+This flow describes managed Session/Turn delivery. Codex 0.158.0/0.159.0/0.159.2 physical Send
 uses an independent exact paginated task Watch and returns `watch_id` without
 creating a managed `turn_id`. Its foreground binding, native answer receipts,
 and session-only/new/resume and first-modal limits are described in the
-[0.158.0/0.159.0 compatibility review](codex-0.159.0-compatibility.md).
+[0.158.0/0.159.0/0.159.2 compatibility review](codex-0.159.2-compatibility.md).
 
 1. The controller Host calls ordinary send using the exact current listed action and the user-facing request. `session_exact` carries `session_id`; `terminal_follow_current` and `terminal_user_explicit` carry `terminal_id`. Both target fields may be omitted only when AKK must prove one unique send-ready pane. Initial discovery may first resolve one eligible Codex or Claude Code terminal into an AKK session.
 2. AKK verifies that the session is bound to the expected native session, terminal, and idle coding-agent process.
@@ -76,7 +76,7 @@ status UUID is provisional evidence, never durable ownership. Probe or boundary
 uncertainty stops before the task and cannot be retried automatically. This
 operation is optional: ordinary human Send continues to follow its independent
 user-priority contract and is never implicitly redirected through these
-identification actions. List and Status never probe. Codex 0.158.0/0.159.0 physical Send
+identification actions. List and Status never probe. Codex 0.158.0/0.159.0/0.159.2 physical Send
 and exact Watch creation use their separate closed `/status` transaction to
 bind the foreground paginated thread.
 
@@ -150,7 +150,7 @@ For the next ordinary send, refresh `agent_knock_knock_list` and use only the re
 
 `agent_knock_knock_status` is an AKK Turn/screen inspection. It does not execute a coding-agent slash command. Native inspection is a separate terminal action advertised when the adapter, terminal identity, private binding fence, idle composer, and ownership state are currently safe. An unverified semantic agent version adds a warning but does not hide the action.
 
-The `agent_knock_knock_native_inspect` contract accepts exactly two fields: the full `terminal_id` and `inspection="status"`. The adapter owns the closed command, and AKK derives the fresh binding fence internally; callers cannot supply a command string or opaque authority. Regression-tested profiles cover Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4/0.154.0/0.155.1 and Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267. Other complete `x.y.z` versions use the generic runtime profile with a compatibility warning; unchanged UI behavior succeeds, while incompatible behavior fails or is reported uncertain without automatic retry. Claude's modal Status panel must be freshly proven, parsed, dismissed once, and followed by the same idle empty composer. `/usage`, `/cost`, `/stats`, `/usage-credits`, `/model`, `/compact`, and arbitrary slash commands remain unavailable. Bare Codex `/usage` opens an interactive menu whose later Enter can select an account-side usage-limit reset, so it must not be treated as a read-only inspection.
+The `agent_knock_knock_native_inspect` contract accepts exactly two fields: the full `terminal_id` and `inspection="status"`. The adapter owns the closed command, and AKK derives the fresh binding fence internally; callers cannot supply a command string or opaque authority. Regression-tested profiles cover Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4/0.154.0/0.155.1 and Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267/2.1.285. Other complete `x.y.z` versions use the generic runtime profile with a compatibility warning; unchanged UI behavior succeeds, while incompatible behavior fails or is reported uncertain without automatic retry. Claude's modal Status panel must be freshly proven, parsed, dismissed once, and followed by the same idle empty composer. `/usage`, `/cost`, `/stats`, `/usage-credits`, `/model`, `/compact`, and arbitrary slash commands remain unavailable. Bare Codex `/usage` opens an interactive menu whose later Enter can select an account-side usage-limit reset, so it must not be treated as a read-only inspection.
 
 Native model control is a separate two-step mutation based on explicit authority
 for one exact physical pane/process. `model_options({terminal_id})` dynamically

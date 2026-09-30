@@ -953,7 +953,8 @@ for (const [version, suffix] of [
   ["2.1.259", 259],
   ["2.1.263", 263],
   ["2.1.266", 266],
-  ["2.1.267", 267]
+  ["2.1.267", 267],
+  ["2.1.285", 285]
 ] as const) {
   test(`Claude ${version} transcript supports lifecycle, acceptance, completion, and approval evidence`, (t) => {
     const fixture = createFixture(t, suffix);
@@ -1112,6 +1113,130 @@ test("fallback Watch identifies one anchored Claude request from its hash only",
     detectClaudeTranscriptCompletionByHash(wrongRequest, providerOptions),
     undefined
   );
+});
+
+test("Claude 2.1.285 fallback completion follows attachments written before their prompt", (t) => {
+  const fixture = createFixture(t, 286);
+  const request = "Complete the exact task with prewritten attachments";
+  const anchor = fixture.capture();
+  fixture.write(prewrittenAttachmentRecords(turnRecords({
+    request,
+    assistantText: "Prewritten attachment task completed",
+    sessionId: fixture.sessionId,
+    version: "2.1.285"
+  })));
+  const observed = observeClaudeUserExplicitFallbackTranscript({
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    requestHash: fingerprint(request),
+    startedAt: anchor.captured_at,
+    context: { claudeTranscriptAnchor: anchor, pid: PID }
+  }, { claudeHome: fixture.claudeHome });
+  assert.equal(observed.status, "completed");
+  if (observed.status === "completed") {
+    assert.equal(observed.acceptance.acceptanceId, uuid(1));
+    assert.equal(observed.completion.text, "Prewritten attachment task completed");
+    assert.equal(observed.completion.metadata?.claude_version, "2.1.285");
+  }
+});
+
+test("Claude human Watch anchors native input-needed waiting and early attachments", (t) => {
+  const fixture = createFixture(t, 287);
+  const records = prewrittenAttachmentRecords(turnRecords({
+    request: "Watch a human task with prewritten attachments",
+    assistantText: "Human attachment task completed",
+    sessionId: fixture.sessionId,
+    version: "2.1.285"
+  }));
+  const assistantIndex = records.findIndex((record) => record.type === "assistant");
+  fixture.write(records.slice(0, assistantIndex));
+  fixture.agentRows[0] = {
+    ...fixture.agentRows[0],
+    status: "waiting",
+    waitingFor: "input needed"
+  };
+  const anchor = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: fixture.sessionId,
+    cwd: fixture.workspace,
+    pid: PID,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  });
+  assert.ok(anchor);
+  assert.equal(anchor.turn_start_offset_bytes, 0);
+  const pending = observeClaudeHumanStartedActiveTask({
+    anchor,
+    claudeHome: fixture.claudeHome,
+    agentRows: fixture.agentRows
+  });
+  assert.equal(pending.status, "pending");
+  if (pending.status !== "pending") {
+    return;
+  }
+  assert.equal(pending.checkpoint.record_count, 7);
+  fixture.append(records.slice(assistantIndex));
+  const completed = observeClaudeHumanStartedActiveTask({
+    anchor,
+    checkpoint: pending.checkpoint,
+    resumeOffsetBytes: pending.safeResumeOffsetBytes,
+    claudeHome: fixture.claudeHome,
+    agentRows: []
+  });
+  assert.equal(completed.status, "completed");
+  if (completed.status === "completed") {
+    assert.equal(completed.completion.text, "Human attachment task completed");
+    assert.equal(completed.completion.metadata?.prompt_uuid, uuid(1));
+  }
+});
+
+test("Claude pending approval preserves the exact tool through prewritten attachments", (t) => {
+  const fixture = createFixture(t, 288);
+  const request = "Inspect permission evidence after early attachments";
+  const anchor = fixture.capture();
+  fixture.write(prewrittenAttachmentRecords(pendingBashRecords({
+    request,
+    command: "printf attachment-permission",
+    sessionId: fixture.sessionId,
+    version: "2.1.285"
+  })));
+  const approval = fixture.detectPending(anchor, request);
+  assert.equal(approval?.toolName, "Bash");
+  assert.equal(approval?.claudeVersion, "2.1.285");
+});
+
+test("prewritten attachments preserve transcript identity and ancestry rejection", (t) => {
+  const cases: Array<[string, (records: Record<string, unknown>[]) => void]> = [
+    ["duplicate UUID", (records) => records.splice(1, 0, { ...records[0] })],
+    ["cyclic parents", (records) => { records[0].parentUuid = records[1].uuid; }],
+    ["missing parent", (records) => { records[0].parentUuid = uuid(9999); }],
+    ["changed version", (records) => { records[0].version = "2.1.284"; }],
+    ["foreign session", (records) => { records[0].sessionId = uuid(9998); }],
+    ["non-attachment forward parent", (records) => {
+      const index = records.findIndex((record) => record.type === "assistant");
+      [records[index], records[index + 1]] = [records[index + 1], records[index]];
+    }]
+  ];
+  for (const [index, [name, mutate]] of cases.entries()) {
+    const fixture = createFixture(t, 290 + index);
+    const request = `Reject prewritten attachment ${name}`;
+    const anchor = fixture.capture();
+    const records = fixture.normalizeRecords(prewrittenAttachmentRecords(turnRecords({
+      request,
+      assistantText: "Must not complete",
+      sessionId: fixture.sessionId,
+      version: "2.1.285"
+    })));
+    mutate(records);
+    fixture.writeRaw(records.map(jsonLine).join(""));
+    const observed = observeClaudeUserExplicitFallbackTranscript({
+      sessionId: fixture.sessionId,
+      cwd: fixture.workspace,
+      requestHash: fingerprint(request),
+      startedAt: anchor.captured_at,
+      context: { claudeTranscriptAnchor: anchor, pid: PID }
+    }, { claudeHome: fixture.claudeHome });
+    assert.equal(observed.status, "unavailable", name);
+  }
 });
 
 test("Claude lifecycle candidate discovery excludes sidechains, teams, daemons, and loops", (t) => {
@@ -2926,6 +3051,41 @@ function turnRecords({
     })
   );
   return records;
+}
+
+function prewrittenAttachmentRecords(
+  records: Record<string, unknown>[]
+): Record<string, unknown>[] {
+  const [prompt, ...rest] = records;
+  const attachments: Record<string, unknown>[] = Array.from({ length: 6 }, (_, index) => ({
+    ...baseRecord(
+      uuid(9100 + index),
+      index === 0 ? prompt.uuid as string : uuid(9099 + index),
+      PROMPT_AT,
+      prompt.sessionId as string,
+      prompt.version as string
+    ),
+    type: "attachment",
+    attachment: { type: "ide_selection" }
+  }));
+  rest[0].parentUuid = attachments.at(-1)!.uuid;
+  const duration = rest.at(-1)!;
+  if (duration.subtype === "turn_duration") {
+    const finalAttachment = {
+      ...attachments[0],
+      uuid: uuid(9106),
+      parentUuid: duration.parentUuid
+    };
+    duration.parentUuid = finalAttachment.uuid;
+    rest.splice(rest.length - 1, 0, finalAttachment);
+  }
+  return [
+    ...attachments.slice(3),
+    { type: "file-history-snapshot", snapshot: {} },
+    prompt,
+    ...attachments.slice(0, 3),
+    ...rest
+  ];
 }
 
 function userRecord({

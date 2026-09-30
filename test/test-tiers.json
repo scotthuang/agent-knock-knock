@@ -170,7 +170,8 @@
     "test/codex-paginated-questionnaire-runtime.test.ts",
     "test/codex-paginated-async-answer.test.ts",
     "test/codex-paginated-async-response.test.ts",
-    "test/codex-paginated-thread-binding.test.ts"
+    "test/codex-paginated-thread-binding.test.ts",
+    "test/codex-status-history-navigation.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",

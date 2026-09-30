@@ -36,7 +36,8 @@ const RUNTIME: TerminalRuntimeIdentity = {
   nativeProcessBirth: "exact-birth",
   interactionSubject: { kind: "terminal_watch", watch_id: "watch_async_42", anchor_fingerprint: "a".repeat(64) },
   codexPaginatedThread: {
-    codexHome: "/codex", threadId: THREAD, serverVersion: "0.158.0",
+    codexHome: "/codex", threadId: THREAD,
+    agentVersion: "0.158.0", serverVersion: "0.158.0",
     processUuid: "codex-pid:4242:birth:exact-birth", processBirth: "exact-birth",
     pid: 4242, observedAt: NOW.toISOString()
   }
@@ -79,7 +80,12 @@ function responseFor(offer: TerminalInteractionRuntimeOffer, answer: TerminalInt
   return { interaction_id: offer.projection.interaction_id, subject, answers: [answer], delivery_mode: "steer_current_turn" };
 }
 
-function fixture(screen = OPTIONS_SCREEN, option: number | string = 1, evidence = EVIDENCE) {
+function fixture(
+  screen = OPTIONS_SCREEN,
+  option: number | string = 1,
+  evidence = EVIDENCE,
+  runtime: TerminalRuntimeIdentity = RUNTIME
+) {
   const events: string[] = [];
   const writes: NativeAnswer[] = [];
   const delegated: TerminalInteractionSubjectResponse[] = [];
@@ -89,7 +95,7 @@ function fixture(screen = OPTIONS_SCREEN, option: number | string = 1, evidence 
     delivery: "confirmed" as "confirmed" | "response_uncertain" | "preflight_throw" | "write_throw"
   };
   const offer = captureTerminalInteractionRuntimeOffer({
-    agent: "codex", terminalControl: CONTROL, runtime: RUNTIME, screen, now: NOW,
+    agent: "codex", terminalControl: CONTROL, runtime, screen, now: NOW,
     trustedTerminalEvidence: terminalControlEvidence(CONTROL), codexAsyncQuestionEvidence: evidence
   });
   assert.ok(offer);
@@ -109,12 +115,12 @@ function fixture(screen = OPTIONS_SCREEN, option: number | string = 1, evidence 
       events.push("original_bridge");
       const authority = await options.authorize?.({
         agent: "codex", terminalControl: CONTROL, fingerprint: offer.promptFingerprint,
-        projection: offer.projection, response, runtime: RUNTIME
+        projection: offer.projection, response, runtime
       });
       assert.equal(authority?.approved, true);
       await options.beforeDispatch?.({
         agent: "codex", terminalControl: CONTROL, fingerprint: offer.promptFingerprint,
-        projection: offer.projection, response, runtime: RUNTIME
+        projection: offer.projection, response, runtime
       });
       events.push("native_other_open");
       delegated.push(current as TerminalInteractionSubjectResponse);
@@ -123,10 +129,10 @@ function fixture(screen = OPTIONS_SCREEN, option: number | string = 1, evidence 
   };
   const input: ResponseInput = {
     bridge, terminalControl: CONTROL, terminalEvidence: terminalControlEvidence(CONTROL),
-    runtime: RUNTIME, response, now: () => NOW,
+    runtime, response, now: () => NOW,
     options: {
-      agentVersion: "0.158.0", expectedFingerprint: offer.promptFingerprint,
-      expectedExpiresAt: offer.projection.expires_at, runtime: RUNTIME,
+      agentVersion: runtime.agentVersion!, expectedFingerprint: offer.promptFingerprint,
+      expectedExpiresAt: offer.projection.expires_at, runtime,
       authorize(context) {
         events.push("authorize");
         assert.equal(context.fingerprint, offer.promptFingerprint);
@@ -171,6 +177,23 @@ test("paginated async selection uses the exact semantic label and native questio
   assert.deepEqual(native.expectedQuestion, EVIDENCE[0]!.questions[1]);
   assert.equal(native.binding.threadId, THREAD);
   assert.deepEqual(harness.offer.projection.delivery_modes, ["steer_current_turn"]);
+});
+
+test("mixed Codex 0.159.0 physical and 0.159.2 backend keeps exact native async delivery", async () => {
+  const runtime: TerminalRuntimeIdentity = {
+    ...RUNTIME, agentVersion: "0.159.0",
+    codexPaginatedThread: {
+      ...RUNTIME.codexPaginatedThread!, agentVersion: "0.159.0", serverVersion: "0.159.2"
+    }
+  };
+  const harness = fixture(OPTIONS_SCREEN, 1, EVIDENCE, runtime);
+  const result = await respondCodexPaginatedAsyncQuestion(harness.input);
+  assert.equal(result.outcome, "confirmed");
+  assert.equal(harness.writes.length, 1);
+  assert.equal(harness.writes[0]?.binding.agentVersion, "0.159.0");
+  assert.equal(harness.writes[0]?.binding.serverVersion, "0.159.2");
+  assert.equal(harness.writes[0]?.nativeTurnId, TURN);
+  assert.equal(harness.writes[0]?.answer, "Production");
 });
 
 test("Other only opens through the original bridge; its text answer uses the exact current-turn CAS", async () => {

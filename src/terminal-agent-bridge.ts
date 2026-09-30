@@ -1,3 +1,4 @@
+import { captureCodexStatusHistory } from "./codex-status-history-navigation.js";
 import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { terminalApprovalFingerprint } from "./terminal-approval-fingerprint.js";
 export { terminalApprovalFingerprint } from "./terminal-approval-fingerprint.js";
@@ -33,7 +34,8 @@ import {
   enrichActiveProcessesWithTerminalControl,
   TerminalControlInputNotSentError,
   type TerminalDiscoveryDiagnosticLog,
-  type TerminalControlProvider
+  type TerminalControlProvider,
+  type TerminalViewport
 } from "./terminal-control-provider.js";
 import {
   hasCanonicalTerminalEndpoint,
@@ -786,15 +788,61 @@ export class TerminalAgentBridge {
   }
 
   /** Private closed /status postcondition for the observed fullscreen client. */
-  async captureCodexStatusFrame(terminalControl: TerminalControlRef, runtime: TerminalRuntimeIdentity): Promise<{
-    screen: string; emptyComposer: boolean;
-  }> {
+  async captureCodexStatusFrame(
+    terminalControl: TerminalControlRef,
+    runtime: TerminalRuntimeIdentity,
+    submission?: TerminalCodexStatusProbeResult
+  ): Promise<{ screen: string; emptyComposer: boolean }> {
     if (!isCodexPaginatedVersion(runtime.agentVersion)) throw new Error("Fullscreen status proof requires a verified paginated Codex version");
-    const verified = await this.verifyTerminalIdentity("codex", terminalControl, runtime);
-    const screen = await this.terminalProvider.capture(this.terminalProvider.endpoint(verified), {
-      scrollbackLines: 240, preserveEscapes: true
+    if (submission && !sameTerminalControlIncarnation(terminalControl, submission.terminalControl)) {
+      throw new Error("Codex status submission belongs to a different terminal incarnation");
+    }
+    const capture = async () => {
+      const verified = await this.verifyTerminalIdentity("codex", terminalControl, runtime);
+      return this.terminalProvider.capture(this.terminalProvider.endpoint(verified), {
+        scrollbackLines: 240, preserveEscapes: true
+      });
+    };
+    const screen = await captureCodexStatusHistory({
+      screen: await capture(), version: runtime.agentVersion, submission,
+      ports: {
+        capture,
+        inspectViewport: async () => {
+          const verified = await this.verifyTerminalIdentity("codex", terminalControl, runtime);
+          return this.terminalProvider.inspectViewport?.(this.terminalProvider.endpoint(verified));
+        },
+        scrollHistoryDown: (viewport) => this.scrollCodexStatusHistoryDown(terminalControl, runtime, viewport),
+        sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+        sendKey: async (key) => {
+          const verified = await this.verifyTerminalIdentity("codex", terminalControl, runtime);
+          const terminal = this.terminalProvider.endpoint(verified);
+          assertTerminalMutationCapabilities({
+            provider: this.terminalProvider, terminal,
+            semantic: ["send_keys", "screen_status"],
+            transport: ["stable_resource_resolution", "screen_capture", "ansi_capture", "key_delivery"]
+          });
+          await this.terminalProvider.sendKeys(terminal, [key]);
+        }
+      }
     });
     return { screen, emptyComposer: exactCodexReadyStyledComposerCapture(screen, runtime.agentVersion) !== undefined };
+  }
+
+  private async scrollCodexStatusHistoryDown(
+    control: TerminalControlRef, runtime: TerminalRuntimeIdentity, expected: TerminalViewport
+  ): Promise<void> {
+    const verified = await this.verifyTerminalIdentity("codex", control, runtime);
+    const terminal = this.terminalProvider.endpoint(verified);
+    assertTerminalMutationCapabilities({
+      provider: this.terminalProvider, terminal, semantic: ["send_keys", "screen_status"],
+      transport: ["stable_resource_resolution", "screen_capture", "ansi_capture", "key_delivery"]
+    });
+    const viewport = await this.terminalProvider.inspectViewport?.(terminal);
+    if (!viewport || viewport.columns !== expected.columns || viewport.rows !== expected.rows ||
+        !this.terminalProvider.scrollHistoryDown) {
+      throw new Error("Codex transcript viewport or closed history-scroll capability changed before input");
+    }
+    await this.terminalProvider.scrollHistoryDown(terminal);
   }
 
   async modelOptions(

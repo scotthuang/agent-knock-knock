@@ -6,6 +6,8 @@ import {
 } from "../src/codex-terminal-agent-adapter.js";
 import { exactCodexReadyStyledComposerCapture } from
   "../src/terminal-native-inspection-bridge.js";
+import { captureCodexFullscreenComposerFrame } from
+  "../src/codex-fullscreen-composer-proof.js";
 
 const THREAD = "11111111-2222-4333-8444-555555555555";
 const COMPOSER = [
@@ -31,8 +33,52 @@ const CARD = [
   "  Weekly limit:        [█████████████░░░░░░░] 63% left (resets 12:58 AM on 4 Oct)"
 ].join("\n");
 const SCREEN = `${CARD}\n\n${PLAIN_COMPOSER}`;
-const observe = (screen: string) => observeCodexNativeInspection({
-  operation: { kind: "status" }, screen, expectedAgentVersion: "0.159.0"
+const observe = (screen: string, expectedAgentVersion = "0.159.0") => observeCodexNativeInspection({
+  operation: { kind: "status" }, screen, expectedAgentVersion
+});
+
+// 0.159.2 has the same official TUI rendering code as 0.159.0. Keep its
+// physical version independent even though the card grammar is shared.
+test("0.159.2 borderless status retains its exact physical version through idle and active observations", () => {
+  const card = CARD.replace("v0.159.0", "v0.159.2");
+  const idle = `${card}\n\n${PLAIN_COMPOSER}`;
+  const observed = observe(idle, "0.159.2");
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.observedAgentVersion, "0.159.2");
+  assert.equal(observed.nativeThreadId, THREAD);
+  assert.equal(observed.result?.fields.find((field) => field.name === "Account")?.value, "[REDACTED]");
+  for (const suffix of [
+    "• Inspecting the selected test files (9s • esc to interrupt)",
+    "• Working (2s • esc to interrupt)\n\n• Queued follow-up inputs\n  ? 1 question\n    shift+← to answer"
+  ]) {
+    const screen = `${card}\n\n${suffix}\n\n${PLAIN_COMPOSER}`;
+    const active = observe(screen, "0.159.2");
+    assert.equal(active.status, "observed");
+    assert.equal(active.evidenceFingerprint, observed.evidenceFingerprint);
+    assert.equal(inspectCodexScreen({ screen, runtime: { agentVersion: "0.159.2" } }).activity.state, "working");
+  }
+  assert.equal(observe(SCREEN, "0.159.2").status, "mismatch");
+  assert.equal(observe(idle, "0.159.0").status, "mismatch");
+  for (const changed of [
+    idle.replace("v0.159.2", "v0.159.1"),
+    idle.replace("v0.159.2", "v0.159.3"),
+    idle.replace("? for shortcuts", "? for short…"),
+    `${card}\n\n• Thinking (2s • esc to interrupt)\n  └ Session: another-session\n\n${PLAIN_COMPOSER}`
+  ]) assert.notEqual(observe(changed, "0.159.2").status, "observed");
+});
+
+test("0.159.2 compact welcome with GPT-6.1 Sol still requires the exact styled empty Composer", () => {
+  const header = "  >_ OpenAI Codex (v0.159.2)\n     /repo\n\n  The code must flow.\n\n";
+  const composer = COMPOSER.replace("GPT-6-Astra", "GPT-6.1-Sol");
+  assert.ok(exactCodexReadyStyledComposerCapture(`${header}${composer}`, "0.159.2"));
+  assert.equal(inspectCodexScreen({ screen: PLAIN_COMPOSER.replace("GPT-6-Astra", "GPT-6.1-Sol"),
+    runtime: { agentVersion: "0.159.2" } }).activity.state, "idle");
+  assert.equal(exactCodexReadyStyledComposerCapture(`${header}${PLAIN_COMPOSER}`, "0.159.2"), undefined);
+  assert.equal(exactCodexReadyStyledComposerCapture(
+    composer.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "keep my draft"), "0.159.2"), undefined);
+  // The generic styled-empty helper also serves legacy versions; the closed
+  // fullscreen profile parser owns this version check, independently of welcome text.
+  assert.equal(captureCodexFullscreenComposerFrame(`${header}${composer}`, "0.159.3"), undefined);
 });
 
 test("0.159 borderless status proves its native identity and keeps account values private", () => {
@@ -135,4 +181,16 @@ test("0.159 active status ends before timed activity and collapsed-question cont
     collapsed.replace("to answer", "to ans…"),
     `${collapsed}\n  Session:             ${THREAD}`
   ]) assert.notEqual(observe(`${CARD}\n\n${suffix}\n\n${PLAIN_COMPOSER}`).status, "observed", suffix);
+});
+
+
+test("native collapsed-question countdown is optional and limited to the source-rendered final twenty seconds", () => {
+  for (const countdown of ["", " · 1s", " · 16s", " · 20s"]) {
+    const screen = `${CARD}\n\n• Queued follow-up inputs\n  ? 1 question${countdown}\n    shift+← to answer\n\n${PLAIN_COMPOSER}`;
+    assert.equal(observe(screen).status, "observed", countdown);
+  }
+  for (const countdown of [" · 0s", " · 21s", " · 999s", " · 1m", " · 20s extra"]) {
+    const screen = `${CARD}\n\n• Queued follow-up inputs\n  ? 1 question${countdown}\n    shift+← to answer\n\n${PLAIN_COMPOSER}`;
+    assert.notEqual(observe(screen).status, "observed", countdown);
+  }
 });

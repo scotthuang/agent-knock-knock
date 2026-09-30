@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.14 - 2026-10-01
+
+### Changed
+
+- Support Codex CLI 0.159.2 and the reviewed 0.159.0 foreground/0.159.2 shared-backend pair. Bind the physical and backend versions separately for paginated Send, Watch, native questions, and answer receipts; reject unreviewed pairs and backend drift.
+- Add exact Claude Code 2.1.285 lifecycle, native status, question, and model-control profiles while retaining earlier version checks.
+
+### Fixed
+
+- Recover clipped Codex `/status` cards through bounded native history navigation, requiring a complete card, unique captured overlap, and restoration before using its thread identity. Correct locale-free tmux viewport parsing, Herdr visible-screen reads, and native style checks.
+- Continue read-only confirmation of a single Codex async answer for up to 15 seconds after dispatch, including a timed-out RPC, without repeating the answer.
+- Recognize Claude's named-session Composer and Bash ask-rule prompt, and read transcript attachments written before their parent records without changing conversation order or weakening identity checks.
+
 ## 0.13.13 - 2026-09-30
 
 ### Changed

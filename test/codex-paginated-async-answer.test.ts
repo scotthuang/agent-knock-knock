@@ -7,6 +7,7 @@ import {
 } from "../src/codex-paginated-async-answer.js";
 import type { CodexAppServerReadTransport } from "../src/codex-app-server-read-client.js";
 import type { CodexPaginatedTaskSnapshot } from "../src/codex-paginated-task.js";
+import type { CodexPaginatedBackendVersion, CodexPaginatedVersion } from "../src/codex-lifecycle-compatibility.js";
 
 const HOME = "/tmp/akk-native-async-answer";
 const THREAD = "01a0e958-4bb1-7fc3-8649-e153fd90faae";
@@ -14,11 +15,11 @@ const TURN = "01a0e959-4bb1-7fc3-8649-e153fd90faae";
 const ITEM = "async-question-message";
 const NATIVE_ID = JSON.stringify(["request_user_input_async", ITEM, 0]);
 const CLIENT_ID = "b5e512ec-70b1-4f59-b72c-af6d55e6c511";
-const CODEX_VERSIONS = ["0.158.0", "0.159.0"] as const;
-type CodexVersion = (typeof CODEX_VERSIONS)[number];
+const CODEX_VERSION_PAIRS = [["0.158.0", "0.158.0"], ["0.159.0", "0.159.0"],
+  ["0.159.0", "0.159.2"], ["0.159.2", "0.159.2"]] as const;
 
-for (const version of CODEX_VERSIONS) test("sends one closed native turn CAS and confirms only its exact durable reply for " + version, async () => {
-  const fixture = new AsyncAnswerFixture(version);
+for (const [version, serverVersion] of CODEX_VERSION_PAIRS) test("sends one closed native turn CAS and confirms only its exact durable reply for " + version + "/" + serverVersion, async () => {
+  const fixture = new AsyncAnswerFixture(version, serverVersion);
   const result = await fixture.deliver();
   assert.deepEqual(result, { status: "confirmed", clientUserMessageId: CLIENT_ID,
     nativeTurnId: TURN, nativeQuestionId: NATIVE_ID });
@@ -34,7 +35,7 @@ for (const version of CODEX_VERSIONS) test("sends one closed native turn CAS and
   assert.deepEqual(fixture.sent.map((value) => value.method), ["initialize", "initialized", "turn/steer"]);
   assert.equal(fixture.closed, true);
   assert.equal(fixture.reads, 2);
-  assert.deepEqual(fixture.snapshotReadVersions, [version, version]);
+  assert.deepEqual(fixture.snapshotReadVersions, [serverVersion, serverVersion]);
 });
 
 test("refuses stale turn, changed full question or an already answered tuple before reservation", async () => {
@@ -80,15 +81,51 @@ test("does not mistake matching prose, another client, a modified payload or a c
   }
 });
 
-test("a successful CAS without canonical commit times out without retrying", async () => {
-  const fixture = new AsyncAnswerFixture();
-  fixture.mode = "no-receipt";
-  const result = await fixture.deliver();
-  assert.equal(result.status, "response_uncertain");
-  assert.equal(result.reason, "native_async_answer_receipt_pending");
-  assert.equal(fixture.steers().length, 1);
-  assert.ok(fixture.reads >= 2);
-  assert.equal(fixture.closed, true);
+test("one native answer waits up to 15 seconds for its exact receipt, including after RPC failure and early completion", async () => {
+  for (const { receiptDelayMs, mode, completedBeforeReceipt } of [
+    { receiptDelayMs: 6_000, mode: "no-receipt", completedBeforeReceipt: false },
+    { receiptDelayMs: 6_000, mode: "rpc-reject", completedBeforeReceipt: true },
+    { receiptDelayMs: 15_001, mode: "no-receipt", completedBeforeReceipt: false }
+  ] as const) {
+    const fixture = new AsyncAnswerFixture("0.159.2");
+    fixture.mode = mode;
+    let elapsedMs = 0;
+    let committed = false;
+    const ports = fixture.ports();
+    ports.now = () => elapsedMs;
+    ports.sleep = async (milliseconds) => {
+      elapsedMs += milliseconds;
+      if (completedBeforeReceipt) {
+        fixture.snapshot.turns[0]!.status = "completed";
+        fixture.snapshot.thread.status = { type: "idle" };
+      }
+      if (!committed && elapsedMs >= receiptDelayMs) {
+        const params = fixture.steers()[0]!.params as { input: { text: string }[] };
+        fixture.snapshot.turns[0]!.items.push(fixture.replyItem(CLIENT_ID, params.input[0]!.text));
+        fixture.snapshot.turns[0]!.status = "completed";
+        fixture.snapshot.thread.status = { type: "idle" };
+        committed = true;
+      }
+    };
+    // Keep the fixture's 200ms RPC timeout: durable observation has its own window.
+    const result = await deliverCodexPaginatedAsyncAnswer(fixture.input(), ports);
+    if (receiptDelayMs < 15_000) {
+      assert.deepEqual(result, { status: "confirmed", clientUserMessageId: CLIENT_ID,
+        nativeTurnId: TURN, nativeQuestionId: NATIVE_ID });
+      assert.equal(committed, true);
+      assert.ok(elapsedMs >= receiptDelayMs && elapsedMs < 15_000);
+    } else {
+      assert.equal(result.status, "response_uncertain");
+      assert.equal(result.reason, "native_async_answer_receipt_pending");
+      assert.equal(committed, false);
+      assert.equal(elapsedMs, 15_000);
+    }
+    assert.equal(fixture.reservations, 1);
+    assert.equal(fixture.steers().length, 1);
+    assert.deepEqual(fixture.sent.map((value) => value.method), ["initialize", "initialized", "turn/steer"]);
+    assert.ok(fixture.reads >= 2);
+    assert.equal(fixture.closed, true);
+  }
 });
 
 test("rechecks process incarnation and accepts only the exact backend before reserving", async () => {
@@ -105,14 +142,56 @@ test("rechecks process incarnation and accepts only the exact backend before res
   assert.equal(oldServer.closed, true);
 });
 
-test("rejects both crossed 0.158 and 0.159 async client/backend versions before reserving", async () => {
-  for (const [clientVersion, backendVersion] of [["0.158.0", "0.159.0"], ["0.159.0", "0.158.0"]] as const) {
-    const fixture = new AsyncAnswerFixture(clientVersion);
+test("rejects async backend changes in either direction before reserving", async () => {
+  for (const [clientVersion, boundVersion, backendVersion] of [
+    ["0.158.0", "0.158.0", "0.159.0"], ["0.159.0", "0.159.0", "0.158.0"],
+    ["0.159.0", "0.159.0", "0.159.2"], ["0.159.0", "0.159.2", "0.159.0"]
+  ] as const) {
+    const fixture = new AsyncAnswerFixture(clientVersion, boundVersion);
     fixture.serverVersion = backendVersion;
     await assert.rejects(fixture.deliver(), /backend version/u);
     assert.equal(fixture.reads, 0);
     assert.equal(fixture.reservations, 0);
     assert.equal(fixture.steers().length, 0);
+    assert.equal(fixture.closed, true);
+  }
+});
+
+test("rejects reversed or unaudited async bindings before connecting", async () => {
+  for (const [clientVersion, backendVersion] of [
+    ["0.159.2", "0.159.0"], ["0.158.0", "0.159.2"], ["0.159.0", "0.159.3"]
+  ] as const) {
+    const fixture = new AsyncAnswerFixture(clientVersion, backendVersion);
+    await assert.rejects(fixture.deliver(), /Native async answer input is invalid/u);
+    assert.deepEqual(fixture.sent, []);
+    assert.equal(fixture.reads, 0);
+    assert.equal(fixture.reservations, 0);
+  }
+});
+
+test("mixed-version answers keep preflight and receipt evidence pinned to the bound backend", async () => {
+  for (const stage of ["preflight", "receipt"] as const) {
+    const fixture = new AsyncAnswerFixture("0.159.0", "0.159.2");
+    const ports = fixture.ports();
+    const read = ports.readSnapshot!;
+    ports.readSnapshot = async (input) => {
+      const snapshot = await read(input);
+      if (stage === "preflight" || fixture.reads > 1) snapshot.serverVersion = "0.159.0";
+      return snapshot;
+    };
+    const delivered = deliverCodexPaginatedAsyncAnswer(fixture.input(), ports);
+    if (stage === "preflight") {
+      await assert.rejects(delivered, /history is not exact/u);
+      assert.equal(fixture.reservations, 0);
+      assert.equal(fixture.steers().length, 0);
+    } else {
+      const result = await delivered;
+      assert.equal(result.status, "response_uncertain");
+      assert.equal(result.reason, "native_async_answer_evidence_unavailable");
+      assert.equal(fixture.reservations, 1);
+      assert.equal(fixture.steers().length, 1);
+    }
+    assert.equal(fixture.snapshotReadVersions.every((version) => version === "0.159.2"), true);
     assert.equal(fixture.closed, true);
   }
 });
@@ -175,9 +254,9 @@ class AsyncAnswerFixture implements CodexAppServerReadTransport {
   private clock = 0;
   private listener?: (text: string) => void;
   private disconnected?: (error: Error) => void;
-  constructor(readonly version: CodexVersion = "0.158.0") {
+  constructor(readonly version: CodexPaginatedVersion = "0.158.0", readonly boundServerVersion: string = version) {
     this.snapshot = {
-      codexHome: HOME, serverVersion: version, completeToBoundary: true,
+      codexHome: HOME, serverVersion: boundServerVersion, completeToBoundary: true,
       thread: { id: THREAD, sessionId: THREAD, cwd: "/tmp/project", cliVersion: version,
         historyMode: "paginated", originator: "codex-tui", source: "vscode", turns: [],
         status: { type: "active", activeFlags: [] } },
@@ -186,10 +265,11 @@ class AsyncAnswerFixture implements CodexAppServerReadTransport {
         items: [{ id: ITEM, type: "agentMessage", delivery: "async", phase: "final_answer", text: "UniPat AI?",
           questions: [{ title: "UniPat AI?", options: ["Yes", "No"] }] }] }]
     };
-    this.serverVersion = version;
+    this.serverVersion = boundServerVersion;
   }
   input(): CodexPaginatedAsyncAnswerInput {
-    return { binding: { codexHome: HOME, threadId: THREAD, serverVersion: this.version, pid: 34744,
+    return { binding: { codexHome: HOME, threadId: THREAD, agentVersion: this.version,
+      serverVersion: this.boundServerVersion as CodexPaginatedBackendVersion, pid: 34744,
       processUuid: "fixture-process", processBirth: "fixture-birth", observedAt: "2026-09-29T03:00:00Z" },
       nativeTurnId: TURN, itemId: ITEM, questionIndex: 0,
       expectedQuestion: { title: "UniPat AI?", options: ["Yes", "No"] }, answer: "Yes", timeoutMs: 200,

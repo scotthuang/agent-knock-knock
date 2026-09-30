@@ -27,7 +27,7 @@ const FULLSCREEN_IDLE = [
   "  ← for agents · ? for shortcuts                              ⚠ 2 warnings · f2 to view"
 ].join("\n");
 
-for (const version of ["0.158.0", "0.159.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} fullscreen Composer distinguishes above-input popup, bare cleanup, and clipped footer`, () => {
     const idle = currentCodexComposerCapture(FULLSCREEN_IDLE, "new request",
       false, false, undefined, false, version);
@@ -65,7 +65,7 @@ for (const version of ["0.158.0", "0.159.0"]) {
   });
 }
 
-for (const version of ["0.158.0", "0.159.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} task-running queue footer closes only a nonempty draft`, () => {
     const queueFooter = "  tab to queue message                              ⚠ 2 warnings · f2 to view";
     const popup = [
@@ -107,6 +107,32 @@ test("Codex fullscreen command stability excludes only its validated live hint t
   for (const changed of [popup.replace("GPT-6-Astra", "GPT-6-Sol"), popup.replace("/repo", "/other")]) {
     assert.notEqual(capture(changed)?.digest, expected.digest);
   }
+});
+
+test("Codex fullscreen popup styling uses effective SGR state rather than byte spelling", () => {
+  const rows = ["› /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"];
+  const popup = ["\x1b[0m\x1b[1m\x1b[7m" + rows[0] + "\x1b[0m",
+    rows[1]!, "", "\x1b[0;1;48;2;57;57;57m›\x1b[0;48;2;57;57;57m /status\x1b[0m",
+    "", "  GPT-6-Astra high · /repo"].join("\n");
+  const capture = (screen: string) => exactCodexFullscreenSlashComposerCapture(
+    screen, "/status", rows, true, "0.159.0");
+  assert.ok(capture(popup));
+  for (const changed of [
+    popup.replace("\x1b[7m", "\x1b[7;27m"),
+    popup.replace("\x1b[7m", "\x1b[38;5;7m"),
+    popup.replace("\x1b[7m", "\x1b[38;2;7;7;7m"),
+    popup.replace("\x1b[7m", "\x1b[7;2m"),
+    popup.replace("0;1;48", "0;1;22;48"),
+    popup.replace("0;1;48", "0;1;2;48"),
+    popup.replace("show current session", "\x1b[27mshow current session")
+  ]) {
+    assert.equal(capture(changed), undefined);
+  }
+  const plain = rows.join("\n") + "\n\n› /status\n\n  GPT-6-Astra high · /repo";
+  const padded = plain.split("\n").map((line) => line.padEnd(91)).join("\r\n");
+  assert.equal(exactCodexFullscreenSlashComposerCapture(padded, "/status", rows, false, "0.159.0")?.digest,
+    exactCodexFullscreenSlashComposerCapture(plain, "/status", rows, false, "0.159.0")?.digest);
 });
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -379,6 +405,10 @@ test("Claude stash-clear proof accepts known footers and rejects unknown overlay
     "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to",
     "  interrupt · ← for ag…"
   ]), undefined);
+  for (const footer of ["  ⏸ manual mode on", "  ⏸ manual mode on       › stashed"]) {
+    assert.equal(failure([footer]), undefined);
+    assert.match(failure([`${footer} unexpected overlay`]) ?? "", /did not prove/u);
+  }
   assert.match(
     failure(["  Unknown overlay still owns input"]) ?? "",
     /did not prove/u

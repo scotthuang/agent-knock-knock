@@ -251,15 +251,18 @@ function createHarness(): HerdrHarness {
             tab_id: pane.tabId,
             source: wireRequest.params.source,
             format: wireRequest.params.format,
-            text: wireRequest.params.source === "visible" &&
-              wireRequest.params.format === "ansi"
-              ? "\u001b[2mplaceholder\u001b[0m"
-              : "placeholder",
+            text: wireRequest.params.lines === 0
+              ? ""
+              : wireRequest.params.source === "visible" &&
+                  wireRequest.params.format === "ansi"
+                ? "\u001b[2mplaceholder\u001b[0m"
+                : "placeholder",
             revision: 0,
-            truncated: false
+            truncated: wireRequest.params.lines === 0
           }
         });
       case "pane.send_input":
+      case "pane.send_text":
         if (harness.inputFailure) {
           throw harness.inputFailure;
         }
@@ -562,6 +565,32 @@ test("Herdr capture resolves freshly and selects a style-preserving source", asy
   });
 });
 
+test("Herdr zero-scrollback capture reads the current viewport in text and ANSI", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal);
+  for (const preserveEscapes of [false, true]) {
+    harness.requests.length = 0;
+    const captured = await harness.provider.capture(terminal, {
+      scrollbackLines: 0,
+      preserveEscapes
+    });
+    assert.equal(captured, preserveEscapes
+      ? "\u001b[2mplaceholder\u001b[0m"
+      : "placeholder");
+    const read = harness.requests.find((entry) =>
+      entry.request.method === "pane.read");
+    assert.ok(read);
+    assert.deepEqual(read.request.params, {
+      pane_id: "w1:p1",
+      source: "visible",
+      format: preserveEscapes ? "ansi" : "text"
+    });
+    assert.equal(harness.requests.some((entry) =>
+      entry.request.method === "pane.send_input"), false);
+  }
+});
+
 test("Herdr viewport inspection uses a fresh same-incarnation snapshot", async () => {
   const harness = createHarness();
   const [terminal] = await harness.provider.listTerminals();
@@ -826,6 +855,27 @@ test("exact Herdr PTY inspection uses absolute macOS and Linux command variants"
   }
 });
 
+test("exact Herdr PTY inspection tolerates output timestamps changing on the same active device", () => {
+  for (const platform of ["darwin", "linux"] as const) {
+    let statCount = 0;
+    const viewport = inspectHerdrTtyViewport(7_001, {
+      platform,
+      currentUid: 501,
+      statTty() {
+        statCount += 1;
+        return ttyDeviceIdentity({ ctimeNs: String(9000 + statCount) });
+      },
+      runCommand(command) {
+        return command.endsWith("/stty")
+          ? commandSuccess("40 91\n")
+          : commandSuccess(psTtyEvidence(platform === "darwin" ? "ttys007" : "pts/4"));
+      }
+    });
+    assert.deepEqual(viewport, { columns: 91, rows: 40 });
+    assert.equal(statCount, 2);
+  }
+});
+
 test("exact Herdr PTY inspection rejects TTY, birth, and device incarnation drift", () => {
   let psCount = 0;
   assert.throws(
@@ -868,23 +918,47 @@ test("exact Herdr PTY inspection rejects TTY, birth, and device incarnation drif
     /TTY process identity changed during viewport inspection/u
   );
 
-  let statCount = 0;
-  assert.throws(
-    () => inspectHerdrTtyViewport(7_001, {
-      platform: "linux",
+  for (const field of ["device", "inode", "rdev"] as const) {
+    let statCount = 0;
+    assert.throws(
+      () => inspectHerdrTtyViewport(7_001, {
+        platform: "linux",
+        currentUid: 501,
+        statTty() {
+          statCount += 1;
+          return ttyDeviceIdentity({ [field]: String(41 + statCount) });
+        },
+        runCommand(command) {
+          return command.endsWith("/stty")
+            ? commandSuccess("40 80\n")
+            : commandSuccess(psTtyEvidence("pts/4"));
+        }
+      }),
+      /TTY device .* changed during viewport inspection/u
+    );
+  }
+});
+
+test("exact Herdr PTY inspection rejects device safety changes after reading its size", () => {
+  for (const changed of [
+    { symbolicLink: true }, { characterDevice: false }, { ownerUid: 502 }
+  ]) {
+    let statCount = 0;
+    assert.throws(() => inspectHerdrTtyViewport(7_001, {
+      platform: "darwin",
       currentUid: 501,
       statTty() {
         statCount += 1;
-        return ttyDeviceIdentity({ rdev: String(41 + statCount) });
+        return ttyDeviceIdentity(statCount === 1 ? {} : changed);
       },
       runCommand(command) {
         return command.endsWith("/stty")
           ? commandSuccess("40 80\n")
-          : commandSuccess(psTtyEvidence("pts/4"));
+          : commandSuccess(psTtyEvidence("ttys007"));
       }
-    }),
-    /TTY device .* changed during viewport inspection/u
-  );
+    }), /symbolic link|character device|owned by uid/u);
+    assert.equal(statCount, 2);
+  }
 });
 
 test("exact Herdr PTY inspection rejects unsafe devices and malformed sizes", () => {
@@ -1068,17 +1142,67 @@ test("Herdr input refuses process-anchor and server-socket drift before dispatch
   );
 });
 
+test("Herdr sends singleton navigation as fixed non-paste PTY bytes with socket authority", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal);
+  for (const [key, text] of [
+    ["PageUp", "\x1b[5~"], ["C-End", "\x1b[1;5F"], ["history-down", "\x1b[<65;2;2M"]
+  ] as const) {
+    harness.requests.length = 0;
+    if (key === "history-down") await harness.provider.scrollHistoryDown(terminal);
+    else await harness.provider.sendKeys(terminal, [key]);
+    const inputs = harness.requests.filter((entry) =>
+      entry.request.method === "pane.send_text" || entry.request.method === "pane.send_input");
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0].request.method, "pane.send_text");
+    assert.deepEqual(inputs[0].request.params, { pane_id: "w1:p1", text });
+    assert.deepEqual(inputs[0].options?.expectedSocketIdentity, SOCKET_IDENTITY);
+  }
+});
+
+test("Herdr navigation preserves identity fences and never retries uncertain writes", async () => {
+  for (const operation of ["key", "wheel"] as const) {
+    for (const failure of ["process", "socket", "capability", "not-connected", "lost-ack", "unexpected-result"] as const) {
+      const harness = createHarness();
+      const [terminal] = await harness.provider.listTerminals();
+      assert.ok(terminal);
+      harness.requests.length = 0;
+      if (failure === "process") harness.state.shellPid = 8_001;
+      if (failure === "socket") harness.socketIdentity = { ...SOCKET_IDENTITY, inode: "7002" };
+      if (failure === "not-connected" || failure === "lost-ack") {
+        harness.inputFailure = new HerdrTransportError(failure, failure === "not-connected");
+      }
+      if (failure === "unexpected-result") harness.inputResult = { type: "unexpected" };
+      const target = failure === "capability" ? { ...terminal, capabilities: [] } : terminal;
+      await assert.rejects(operation === "wheel" ? harness.provider.scrollHistoryDown(target)
+        : harness.provider.sendKeys(target, ["C-End"]), (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error instanceof TerminalControlInputNotSentError,
+          failure === "process" || failure === "socket" || failure === "capability" || failure === "not-connected");
+        return true;
+      });
+      const writes = harness.requests.filter((entry) =>
+        entry.request.method === "pane.send_text" || entry.request.method === "pane.send_input");
+      assert.equal(writes.length, failure === "process" || failure === "socket" || failure === "capability" ? 0 : 1);
+    }
+  }
+});
+
 test("Herdr rejects every unsupported key before discovery or dispatch", async () => {
   const harness = createHarness();
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
   harness.requests.length = 0;
 
-  await assert.rejects(
-    harness.provider.sendKeys(terminal, ["C-m", "Prefix+x"]),
-    TerminalControlInputNotSentError
-  );
-  assert.deepEqual(harness.requests, []);
+  for (const keys of [
+    ["C-m", "Prefix+x"], ["PageUp", "Prefix+x"], ["PageUp", "C-End"],
+    ["PageUp", "C-m"], ["C-End", "C-End"], ["\x1b[5~"], ["\x1b[<65;2;2M"],
+    ["history-down"], ["not-a-key"]
+  ]) {
+    await assert.rejects(harness.provider.sendKeys(terminal, keys), TerminalControlInputNotSentError);
+    assert.deepEqual(harness.requests, []);
+  }
   assert.equal(translateHerdrKey("S-Tab"), "shift+tab");
 });
 

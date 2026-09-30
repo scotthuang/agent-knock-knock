@@ -145,7 +145,10 @@ export async function captureCodexPaginatedTaskAnchor(input: {
     return createCodexPaginatedTaskAnchor({
       origin: input.requestHash ? "user_explicit_send" : "active_task",
       captured_at: input.now.toISOString(), codex_home: binding.codexHome,
-      codex_version: binding.serverVersion, native_thread_id: binding.threadId,
+      codex_version: binding.agentVersion,
+      ...(binding.serverVersion === binding.agentVersion
+        ? {} : { backend_version: binding.serverVersion }),
+      native_thread_id: binding.threadId,
       process_uuid: binding.processUuid, process_birth: binding.processBirth,
       pid: binding.pid, request_hash: input.requestHash ?? activeHash!,
       ...(input.requestHash && latest ? { baseline_latest_turn_id: latest.id } : {}),

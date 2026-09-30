@@ -23,7 +23,7 @@ earlier scrollback
   tab to add notes | enter to submit answer | esc to interrupt
 `;
 
-for (const version of ["0.158.0", "0.159.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} blocking questions distinguish the new native Other description from suggestions`, () => {
     const screen = CODEX_OPTIONS.replace(
       "    3. Option 3  Third choice.",
@@ -711,7 +711,7 @@ test("Codex false positives remain absent and changed versions fail closed", () 
     reason: "no_questionnaire_surface"
   });
 
-  for (const version of ["0.154.1", "0.155.0", "0.155.2"]) {
+  for (const version of ["0.154.1", "0.155.0", "0.155.2", "0.159.1", "0.159.3"]) {
     assert.equal(manual(inspectNativeQuestionnaire({
       agent: "codex",
       version,
@@ -766,7 +766,38 @@ test("Claude 2.1.263 exact framed choice exposes only semantic option ids", () =
   assert.equal(parsed.prompt_evidence.exact_region.includes("old conversation"), false);
 });
 
-for (const version of ["2.1.266", "2.1.267"] as const) {
+test("Claude 2.1.285 observed native question keeps the proven numeric single dispatch", () => {
+  const screen = [
+    "─".repeat(140),
+    " ☐ Compat",
+    "",
+    "Does this native question render correctly?",
+    "",
+    "❯ 1. Yes",
+    "     Confirm the compatibility probe",
+    "  2. No",
+    "     Reject the compatibility probe",
+    "  3. Type something.",
+    "─".repeat(140),
+    "  4. Chat about this",
+    "",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel"
+  ].join("\n");
+  const parsed = actionable(inspectNativeQuestionnaire({
+    agent: "claude", version: "2.1.285", screen
+  }));
+  assert.equal(parsed.profile, "claude-code/2.1.285/ask-user-question-v1");
+  assert.equal(parsed.question.prompt, "Does this native question render correctly?");
+  assert.deepEqual(parsed.question.options?.map((option) => option.label),
+    ["Yes", "No", "Type something."]);
+  assert.equal(parsed.action_plan.kind, "single_select");
+  if (parsed.action_plan.kind === "single_select") {
+    assert.deepEqual(parsed.action_plan.choices[0]?.stages,
+      [{ kind: "key", key: "1" }]);
+  }
+});
+
+for (const version of ["2.1.266", "2.1.267", "2.1.285"] as const) {
   test(`Claude ${version} keeps the exact questionnaire state machine under a version-bound profile`, () => {
     const profile = claudeNativeQuestionnaireProfile(version);
     assert.equal(profile, CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES[version]);
@@ -804,6 +835,38 @@ for (const version of ["2.1.266", "2.1.267"] as const) {
     assert.notEqual(choice.question.question_id, previous.question.question_id);
   });
 }
+
+test("Claude 2.1.285 named-session bottom border cannot hide a native questionnaire", () => {
+  const border = "─".repeat(121) + " AKK-CC285-compat ─";
+  for (const fixture of [CLAUDE_SINGLE_SELECT, CLAUDE_CUSTOM_TEXT_EDIT, CLAUDE_FINAL_REVIEW]) {
+    const plain = actionable(inspectNativeQuestionnaire({
+      agent: "claude", version: "2.1.285", screen: fixture
+    }));
+    const named = actionable(inspectNativeQuestionnaire({
+      agent: "claude", version: "2.1.285", screen: `${fixture.trimEnd()}\n${border}\n\n`
+    }));
+    assert.deepEqual(named.action_plan, plain.action_plan);
+    assert.deepEqual(named.question, plain.question);
+    assert.equal(named.prompt_evidence.sha256, plain.prompt_evidence.sha256,
+      "session display names are not question identity");
+  }
+  for (const changed of [
+    `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border}\nNew overlay owns input`,
+    `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border}\n${border}`,
+    `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border.slice(0, -2)}`,
+    `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${"─".repeat(8)} ${"x".repeat(129)} ─`,
+    `${CLAUDE_SINGLE_SELECT.trimEnd().replace("Esc to cancel", "Esc to close")}\n${border}`,
+    `${CLAUDE_SINGLE_SELECT.trimEnd().replace("  2. Blue", "  3. Blue")}\n${border}`,
+    `${CLAUDE_SINGLE_SELECT.trimEnd().replace("❯ 1. Red", "  1. Red")}\n${border}`
+  ]) {
+    assert.notEqual(inspectNativeQuestionnaire({
+      agent: "claude", version: "2.1.285", screen: changed
+    }).status, "actionable");
+  }
+  assert.notEqual(inspectNativeQuestionnaire({
+    agent: "claude", version: "2.1.267", screen: `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border}`
+  }).status, "actionable");
+});
 
 test("Claude exact multi-select is detected but mutation fails closed", () => {
   const parsed = manual(inspectNativeQuestionnaire({

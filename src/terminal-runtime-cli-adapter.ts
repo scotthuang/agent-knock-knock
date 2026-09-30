@@ -1,4 +1,4 @@
-import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
+import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
 import { spawnSync } from "node:child_process";
 import { assertCodexPaginatedProcess } from "./codex-paginated-thread-binding.js";
 import type { CodingAgentSessionProvider } from "./agent-session-provider.js";
@@ -538,8 +538,9 @@ async function verifyTerminalIdentity(
 
 function assertPaginatedInteractionRuntime(runtime: TerminalRuntimeIdentity, agent: ExecutorKind, pid: number): void {
   const binding = runtime.codexPaginatedThread!;
-  if (agent !== "codex" || !isCodexPaginatedVersion(binding.serverVersion) ||
-      runtime.agentVersion !== binding.serverVersion || pid !== binding.pid ||
+  if (agent !== "codex" || !isAuditedCodexPaginatedServerPair(
+        binding.agentVersion, binding.serverVersion) ||
+      runtime.agentVersion !== binding.agentVersion || pid !== binding.pid ||
       runtime.nativeSessionId !== binding.threadId ||
       runtime.nativeProcessUuid !== binding.processUuid || runtime.nativeProcessBirth !== binding.processBirth ||
       !runtime.nativeTaskId || runtime.interactionSubject?.kind !== "terminal_watch") {

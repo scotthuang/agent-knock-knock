@@ -59,6 +59,8 @@ test("model control is closed to exact regression-tested agent versions", () => 
   assert.equal(probeTerminalModelControl("codex", "0.154.1").status, "unsupported");
   assert.equal(probeTerminalModelControl("codex", "0.155.0").status, "unsupported");
   assert.equal(probeTerminalModelControl("codex", "0.155.2").status, "unsupported");
+  assert.equal(probeTerminalModelControl("codex", "0.159.1").status, "unsupported");
+  assert.equal(probeTerminalModelControl("codex", "0.159.3").status, "unsupported");
   assert.equal(probeTerminalModelControl("claude", "2.1.267").status, "unsupported");
   assert.throws(
     () => planTerminalModelControl(
@@ -109,7 +111,29 @@ test("Codex 0.155.1 model options and set-model use its exact profile", async ()
   assert.equal(native.phase, "idle");
 });
 
-for (const version of ["0.158.0", "0.159.0"]) {
+test("Codex 0.159.2 official model catalog keeps GPT-6.1 Sol and the shifted native selection indices", () => {
+  const plan = planTerminalModelControl(probeTerminalModelControl("codex", "0.159.2"));
+  const observed = observeTerminalModelControl(plan, [
+    "  Select Model and Effort", "", "",
+    "  1. GPT-6.1-Sol (default)  Latest workhorse model for coding and everyday work.",
+    "  2. GPT-6-Astra            Frontier intelligence for the most demanding work.",
+    "  3. GPT-6-Sol              Previous generation workhorse model.",
+    "  4. GPT-6-Luna             Fast and affordable model for easier tasks.",
+    "  5. GPT-5.6-Sol            Older generation workhorse model.",
+    "  6. GPT-5.6-Terra          Older balanced model for straightforward work.",
+    "  7. GPT-5.6-Luna           Older fast and efficient model.",
+    "› 8. GPT-5.5 (current)      Legacy coding model.", "", "  enter select · esc back"
+  ].join("\n"));
+  assert.equal(observed.state, "codex_model_picker");
+  if (observed.state !== "codex_model_picker") return;
+  assert.equal(observed.rows[0]?.id, "gpt-6.1-sol");
+  assert.equal(observed.rows[0]?.presetDefault, true);
+  assert.equal(observed.rows[2]?.id, "gpt-6-sol");
+  assert.equal(observed.rows[7]?.id, "gpt-5.5");
+  assert.equal(observed.selectedIndex, 7);
+});
+
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} native display names and compact scope footers retain canonical model ids`, async () => {
     const native = new FakeModelTerminal("codex", {
       currentModel: "gpt-5.2", currentEffort: "high",
@@ -135,7 +159,7 @@ for (const version of ["0.158.0", "0.159.0"]) {
   });
 }
 
-for (const version of ["0.158.0", "0.159.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} picker parser refuses changed or contradictory footer scope`, () => {
     const advanced = [
       "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",
@@ -447,6 +471,33 @@ test("Claude 2.1.266 parser exposes semantic families despite duplicate provider
   assert.equal(observed.displayedEffort, "max");
   assert.deepEqual(observed.rows.map((row) => row.id), ["opus", "sonnet", "haiku"]);
   assert.deepEqual(observed.rows.map((row) => row.nativeIndex), [1, 2, 3]);
+});
+
+test("Claude 2.1.285 observed picker keeps Fable outside the supported semantic families", () => {
+  const plan = planTerminalModelControl(probeTerminalModelControl("claude", "2.1.285"));
+  const observed = observeTerminalModelControl(plan, [
+    "─".repeat(140),
+    "  Select model",
+    "  Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.",
+    "",
+    "    1. Default (recommended)  Use the default model (currently deepseek-flash[1m])",
+    "  ❯ 2. deepseek-flash ✔       Custom Opus model",
+    "    3. Fable                  Fable 5.1 · Most capable for your hardest and longest-running tasks · $10/$50 per Mtok",
+    "    4. deepseek-flash         Custom Sonnet model",
+    "    5. deepseek-flash         Custom Haiku model",
+    "",
+    "  ● High effort (default) ←/→ to adjust",
+    "",
+    "  Enter to set as default · s to use this session only · Esc to cancel"
+  ].join("\n"));
+  assert.equal(plan.scope, "current_session");
+  assert.equal(plan.behaviorProfile, "claude-model-control-2.1.285");
+  assert.equal(observed.state, "claude_model_picker");
+  if (observed.state !== "claude_model_picker") return;
+  assert.equal(observed.currentModel, "opus");
+  assert.equal(observed.currentEffort, "high");
+  assert.deepEqual(observed.rows.map((row) => row.id), ["opus", "sonnet", "haiku"]);
+  assert.deepEqual(observed.rows.map((row) => row.nativeIndex), [1, 3, 4]);
 });
 
 test("Claude Default-current is accepted only when its description proves a family", () => {
@@ -909,32 +960,35 @@ test("Codex commit receipt uncertainty is never retried after the native commit"
   assert.equal(native.phase, "idle");
 });
 
-test("Claude switch uses literal session-only s and never mutates defaults", async () => {
-  const native = new FakeModelTerminal("claude", {
-    currentModel: "opus",
-    currentEffort: "high",
-    defaultModel: "opus",
-    defaultEffort: "high"
-  });
-  const offer = await discoverTerminalModelOptions({
-    agent: "claude", agentVersion: "2.1.266", plan: CLAUDE_PLAN,
-    terminalControl: "control", ports: native.ports
-  });
-  const result = await switchTerminalModel({
-    agent: "claude", agentVersion: "2.1.266", plan: CLAUDE_PLAN,
-    terminalControl: "control", ports: native.ports,
-    expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
-    request: { model: "sonnet", reasoningEffort: "low" }
-  });
+for (const version of ["2.1.266", "2.1.285"] as const) {
+  test(`Claude ${version} switch uses literal session-only s and never mutates defaults`, async () => {
+    const plan = planTerminalModelControl(probeTerminalModelControl("claude", version));
+    const native = new FakeModelTerminal("claude", {
+      currentModel: "opus",
+      currentEffort: "high",
+      defaultModel: "opus",
+      defaultEffort: "high"
+    });
+    const offer = await discoverTerminalModelOptions({
+      agent: "claude", agentVersion: version, plan,
+      terminalControl: "control", ports: native.ports
+    });
+    const result = await switchTerminalModel({
+      agent: "claude", agentVersion: version, plan,
+      terminalControl: "control", ports: native.ports,
+      expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
+      request: { model: "sonnet", reasoningEffort: "low" }
+    });
 
-  assert.equal(result.outcome, "changed");
-  assert.equal(result.scope, "current_session");
-  assert.equal(result.defaultsChanged, false);
-  assert.deepEqual(result.effective, { model: "sonnet", reasoningEffort: "low" });
-  assert.equal(native.defaultModel, "opus");
-  assert.ok(native.sentKeys.some((keys) => keys[0] === "s"));
-  assert.ok(native.sentKeys.every((keys) => keys.length === 1));
-});
+    assert.equal(result.outcome, "changed");
+    assert.equal(result.scope, "current_session");
+    assert.equal(result.defaultsChanged, false);
+    assert.deepEqual(result.effective, { model: "sonnet", reasoningEffort: "low" });
+    assert.equal(native.defaultModel, "opus");
+    assert.ok(native.sentKeys.some((keys) => keys[0] === "s"));
+    assert.ok(native.sentKeys.every((keys) => keys.length === 1));
+  });
+}
 
 test("Claude discovery projects each model's live effort ring and excludes no-effort rows", async () => {
   const native = new FakeModelTerminal("claude", {

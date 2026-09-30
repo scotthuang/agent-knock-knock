@@ -5,7 +5,8 @@ export const CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
 > = Object.freeze({
   "2.1.263": "claude-code/2.1.263/ask-user-question-v1",
   "2.1.266": "claude-code/2.1.266/ask-user-question-v1",
-  "2.1.267": "claude-code/2.1.267/ask-user-question-v1"
+  "2.1.267": "claude-code/2.1.267/ask-user-question-v1",
+  "2.1.285": "claude-code/2.1.285/ask-user-question-v1"
 });
 
 export const CODEX_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
@@ -15,7 +16,8 @@ export const CODEX_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
   "0.154.0": "codex/0.154.0/request-user-input-v3",
   "0.155.1": "codex/0.155.1/request-user-input-v3",
   "0.158.0": "codex/0.158.0/request-user-input-v4",
-  "0.159.0": "codex/0.159.0/request-user-input-v4"
+  "0.159.0": "codex/0.159.0/request-user-input-v4",
+  "0.159.2": "codex/0.159.2/request-user-input-v4"
 });
 
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
@@ -267,8 +269,29 @@ export function inspectNativeQuestionnaire(
 ): NativeQuestionnaireInspection {
   const screen = normalizedScreenLines(options.screen);
   return options.agent === "claude"
-    ? inspectClaudeQuestionnaire(options, screen)
+    ? inspectClaudeQuestionnaire(options, claudeQuestionnaireContentScreen(screen, options.version))
     : inspectCodexQuestionnaire(options, screen);
+}
+
+function claudeQuestionnaireContentScreen(
+  screen: ScreenLines,
+  version: string
+): ScreenLines {
+  // Named Claude 2.1.285 sessions append their main Composer border below
+  // the questionnaire footer. The display name is decoration, not question
+  // identity. Remove exactly that final row only after a complete known footer.
+  const footer = screen.lines.at(-2) ?? "";
+  if (version !== "2.1.285" ||
+      !/^─{8,} [^\u0000-\u001F\u007F]{1,128} ─+$/u.test(screen.lines.at(-1) ?? "") ||
+      ![
+        CLAUDE_SELECTION_FOOTER,
+        CLAUDE_SINGLE_SELECTION_FOOTER,
+        CLAUDE_CUSTOM_TEXT_FOOTER,
+        "  2. Cancel"
+      ].includes(footer)) {
+    return screen;
+  }
+  return { ...screen, lines: screen.lines.slice(0, -1) };
 }
 
 function normalizedScreenLines(screen: string): ScreenLines {
@@ -1039,7 +1062,8 @@ function codexCustomTextFooterTips(header: CodexHeader): readonly string[] {
 function codexHasCanonicalOther(options: readonly ParsedOptionRow[], profile: string): boolean {
   const other = options.at(-1);
   return other?.label === CODEX_OTHER_OPTION_LABEL &&
-    other.description === (["codex/0.158.0/request-user-input-v4", "codex/0.159.0/request-user-input-v4"].includes(profile)
+    other.description === (["codex/0.158.0/request-user-input-v4", "codex/0.159.0/request-user-input-v4",
+      "codex/0.159.2/request-user-input-v4"].includes(profile)
       ? "Optionally, add details in notes (tab)"
       : CODEX_OTHER_OPTION_DESCRIPTION);
 }

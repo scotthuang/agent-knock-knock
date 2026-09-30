@@ -32,8 +32,9 @@ import {
 test("managed Monitor refuses paginated zero-root history and preserves proven legacy support", () => {
   assert.equal(codexPhysicalSendUsesPaginatedWatch("0.158.0"), true);
   assert.equal(codexPhysicalSendUsesPaginatedWatch("0.159.0"), true);
+  assert.equal(codexPhysicalSendUsesPaginatedWatch("0.159.2"), true);
   assert.equal(codexPhysicalSendUsesPaginatedWatch("0.155.1"), false);
-  for (const agentVersion of ["0.157.0", "0.157.1", "0.158.0", "0.159.0"]) {
+  for (const agentVersion of ["0.157.0", "0.157.1", "0.158.0", "0.159.0", "0.159.2"]) {
     assert.throws(() => assertCodexManagedSendHasLegacyHistory({
       agentVersion, verifiedLegacyRootCount: 0
     }), /No Turn was created and no task input was sent/u);
@@ -50,7 +51,7 @@ test("managed Monitor refuses paginated zero-root history and preserves proven l
 });
 
 test("paginated Codex Send cannot promise a future legacy rollout callback", () => {
-  for (const agentVersion of ["0.157.0", "0.157.1", "0.158.0", "0.159.0"]) {
+  for (const agentVersion of ["0.157.0", "0.157.1", "0.158.0", "0.159.0", "0.159.2"]) {
     const unavailable = selectCodexUserExplicitSendWatchSource({
       agentVersion,
       legacyRootCount: 0,
@@ -212,7 +213,7 @@ test(
   }
 );
 
-for (const version of ["0.158.0", "0.159.0"] as const) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
   test(`Codex ${version} physical Send prepares paginated Watch before input and never attempts managed Send`, async (t) => {
     for (const callbackAvailable of [true, false]) {
       await t.test(callbackAvailable ? "exact callback and same-ID replay" : "unavailable reader has no callback promise", async (nested) => {

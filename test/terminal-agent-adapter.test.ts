@@ -950,7 +950,7 @@ test("Codex 0.157 fullscreen idle is diagnostic and incomplete surfaces stay unk
   }).activity.state, "unknown");
 });
 
-for (const version of ["0.158.0", "0.159.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   test(`Codex ${version} status support does not advertise legacy native thread transitions`, () => {
     const lifecycle = probeCodexThreadLifecycle(version);
     assert.equal(lifecycle.status, "unsupported");

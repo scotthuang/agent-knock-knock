@@ -103,7 +103,8 @@ test("verified Claude versions expose distinct closed modal native status plans"
     "2.1.259",
     "2.1.263",
     "2.1.266",
-    "2.1.267"
+    "2.1.267",
+    "2.1.285"
   ]) {
     const capability = probeClaudeNativeInspection(version);
     assert.equal(capability.status, "supported");
@@ -186,91 +187,93 @@ test("unverified Claude native inspection succeeds when the latest safe modal sh
   assert.equal(observed.observedAgentVersion, "2.1.238");
 });
 
-test("Claude 2.1.282 parses its observed status row and omits telemetry diagnostics", () => {
-  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
-  const diagnostics = [
-    "  System diagnostics",
-    "   ⚠ .claude/settings.json turns telemetry off: PRIVATE-DIAGNOSTIC-MARKER",
-    "     values unless managed settings set the same variable."
-  ].join("\n");
-  const screen = claudeStatusPanel(nativeThreadId, "2.1.282");
-  assert.equal(
-    probeClaudeNativeInspection("2.1.282").versionCompatibility,
-    "unverified"
-  );
-  for (const panel of [
-    screen,
-    screen.replace("  Esc to cancel", `${diagnostics}\n\n  Esc to cancel`)
-  ]) {
-    const observed = observeClaudeNativeInspection({
-      operation: { kind: "status" },
-      screen: panel,
-      preEnterEvidenceInventory: [],
-      expectedNativeThreadId: nativeThreadId,
-      expectedAgentVersion: "2.1.282",
-      expectedCwd: "/repo"
-    });
-    assert.equal(observed.status, "observed");
+for (const version of ["2.1.282", "2.1.285"] as const) {
+  test(`Claude ${version} parses its status row and omits bounded telemetry diagnostics`, () => {
+    const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+    const diagnostics = [
+      "  System diagnostics",
+      "   ⚠ .claude/settings.json turns telemetry off: PRIVATE-DIAGNOSTIC-MARKER",
+      "     values unless managed settings set the same variable."
+    ].join("\n");
+    const screen = claudeStatusPanel(nativeThreadId, version);
     assert.equal(
-      observed.result?.fields.find((field) =>
-        field.name === "Auto mode server"
-      )?.value,
-      "Enabled"
+      probeClaudeNativeInspection(version).versionCompatibility,
+      version === "2.1.282" ? "unverified" : "verified"
     );
-    assert.doesNotMatch(JSON.stringify(observed.result), /PRIVATE-DIAGNOSTIC-MARKER|System diagnostics/u);
-  }
-});
-
-test("Claude 2.1.282 diagnostics reject unknown, repeated, misplaced, and incomplete rows", () => {
-  const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
-  const screen = claudeStatusPanel(nativeThreadId, "2.1.282");
-  const diagnostic = "  System diagnostics\n   ⚠ telemetry warning";
-  const withDiagnostic = screen.replace(
-    "  Esc to cancel",
-    `${diagnostic}\n\n  Esc to cancel`
-  );
-  const rejectedPanels = [
-    screen.replace(
-      "  Auto mode server:",
-      "  Unknown account:     alice@example.com\n  Auto mode server:"
-    ),
-    screen.replace(
-      "  Auto mode server:",
-      `  Session ID:          ${nativeThreadId}\n  Auto mode server:`
-    ),
-    screen.replace(
-      "\n  Model:",
-      `\n${diagnostic}\n  Model:`
-    ),
-    screen.replace(
-      "  Esc to cancel",
-      "  System diagnostics\n  Esc to cancel"
-    ),
-    withDiagnostic.replace(
-      "\n\n  Esc to cancel",
-      "\n  Session ID:          11111111-1111-4111-8111-111111111111\n\n  Esc to cancel"
-    ),
-    withDiagnostic.replace(
-      "   ⚠ telemetry warning",
-      "     unanchored continuation"
-    ),
-    claudeStatusPanel(nativeThreadId, "2.1.281").replace(
-      "  Esc to cancel",
-      `${diagnostic}\n  Esc to cancel`
-    )
-  ];
-  for (const panel of rejectedPanels) {
-    assert.equal(
-      observeClaudeNativeInspection({
+    for (const panel of [
+      screen,
+      screen.replace("  Esc to cancel", `${diagnostics}\n\n  Esc to cancel`)
+    ]) {
+      const observed = observeClaudeNativeInspection({
         operation: { kind: "status" },
         screen: panel,
+        preEnterEvidenceInventory: [],
         expectedNativeThreadId: nativeThreadId,
+        expectedAgentVersion: version,
         expectedCwd: "/repo"
-      }).status,
-      "ambiguous"
+      });
+      assert.equal(observed.status, "observed");
+      assert.equal(
+        observed.result?.fields.find((field) =>
+          field.name === "Auto mode server"
+        )?.value,
+        "Enabled"
+      );
+      assert.doesNotMatch(JSON.stringify(observed.result), /PRIVATE-DIAGNOSTIC-MARKER|System diagnostics/u);
+    }
+  });
+
+  test(`Claude ${version} diagnostics reject unknown, repeated, misplaced, and incomplete rows`, () => {
+    const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
+    const screen = claudeStatusPanel(nativeThreadId, version);
+    const diagnostic = "  System diagnostics\n   ⚠ telemetry warning";
+    const withDiagnostic = screen.replace(
+      "  Esc to cancel",
+      `${diagnostic}\n\n  Esc to cancel`
     );
-  }
-});
+    const rejectedPanels = [
+      screen.replace(
+        "  Auto mode server:",
+        "  Unknown account:     alice@example.com\n  Auto mode server:"
+      ),
+      screen.replace(
+        "  Auto mode server:",
+        `  Session ID:          ${nativeThreadId}\n  Auto mode server:`
+      ),
+      screen.replace(
+        "\n  Model:",
+        `\n${diagnostic}\n  Model:`
+      ),
+      screen.replace(
+        "  Esc to cancel",
+        "  System diagnostics\n  Esc to cancel"
+      ),
+      withDiagnostic.replace(
+        "\n\n  Esc to cancel",
+        "\n  Session ID:          11111111-1111-4111-8111-111111111111\n\n  Esc to cancel"
+      ),
+      withDiagnostic.replace(
+        "   ⚠ telemetry warning",
+        "     unanchored continuation"
+      ),
+      claudeStatusPanel(nativeThreadId, "2.1.281").replace(
+        "  Esc to cancel",
+        `${diagnostic}\n  Esc to cancel`
+      )
+    ];
+    for (const panel of rejectedPanels) {
+      assert.equal(
+        observeClaudeNativeInspection({
+          operation: { kind: "status" },
+          screen: panel,
+          expectedNativeThreadId: nativeThreadId,
+          expectedCwd: "/repo"
+        }).status,
+        "ambiguous"
+      );
+    }
+  });
+}
 
 test("Claude native inspection requires a fresh exact current Status panel", () => {
   const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
@@ -361,7 +364,8 @@ for (const version of [
   "2.1.259",
   "2.1.263",
   "2.1.266",
-  "2.1.267"
+  "2.1.267",
+  "2.1.285"
 ] as const) {
   test(`Claude ${version} status inspection accepts only its exact Session-kind panel`, () => {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
@@ -382,7 +386,7 @@ for (const version of [
       )?.value,
       "interactive"
     );
-    if (["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267"].includes(version)) {
+    if (["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267", "2.1.285"].includes(version)) {
       assert.equal(
         observed.result?.fields.find((field) =>
           field.name === "Peer address"
@@ -395,7 +399,7 @@ for (const version of [
         )?.value,
         "connected"
       );
-      if (["2.1.263", "2.1.266", "2.1.267"].includes(version)) {
+      if (["2.1.263", "2.1.266", "2.1.267", "2.1.285"].includes(version)) {
         assert.equal(
           observed.result?.fields.find((field) =>
             field.name === "Organization policy"
@@ -844,6 +848,46 @@ test("Claude 2.1.259 Bash approval accepts the current footer without Ctrl+E", (
     approval.promptEvidence?.profile,
     "claude-bash-permission-prompt-v2"
   );
+});
+
+test("Claude 2.1.285 explicit Bash ask rule permits only the observed one-time Yes", () => {
+  const screen = [
+    "─".repeat(140),
+    " Bash command",
+    "",
+    "   printf AKK_CC_285_APPROVAL_OK",
+    "   Print approval probe marker",
+    "",
+    " Permission rule Bash requires confirmation for this command.",
+    " /permissions to update rules",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. No",
+    "",
+    " Esc to cancel · Tab to amend"
+  ].join("\n");
+  const approval = detectClaudeApprovalPrompt(screen);
+  assert.equal(approval.approvable, true);
+  if (!approval.approvable) assert.fail("expected the observed explicit-rule Bash dialog");
+  assert.equal(approval.promptEvidence?.profile, "claude-bash-permission-prompt-v3");
+  assert.deepEqual(approval.choices, [{
+    decision: "approve_once", mode: "keys", keys: ["C-m"], label: "Yes"
+  }]);
+  for (const changed of [
+    screen.replace("Permission rule Bash requires confirmation for this command.", "This command requires approval"),
+    screen.replace(" /permissions to update rules\n", ""),
+    screen.replace(" ❯ 1. Yes\n   2. No", "   1. Yes\n ❯ 2. No"),
+    screen.replace("1. Yes", "1. Yes, but ask again next time"),
+    screen.replace(" Bash command", " Read file"),
+    screen.replace("   2. No", "   3. No")
+  ]) {
+    const rejected = detectClaudeApprovalPrompt(changed);
+    assert.equal(rejected.approvable, false);
+    assert.equal(rejected.action, undefined);
+  }
+  const unmanaged = inspectClaudeScreen({ screen });
+  assert.equal(unmanaged.approval.approvable, false);
 });
 
 test("Claude 2.1.259 wrapped auto-mode tip does not replace exact transcript command correlation", () => {
@@ -1487,7 +1531,8 @@ test("Claude lifecycle plans keep exact profiles and optimistically support comp
     "2.1.259",
     "2.1.263",
     "2.1.266",
-    "2.1.267"
+    "2.1.267",
+    "2.1.285"
   ]) {
     const profile = probeClaudeThreadLifecycle(version);
     assert.equal(profile.status, "supported");
@@ -1742,7 +1787,7 @@ function claudeStatusPanel(
     ...(version === "2.1.218"
       ? []
       : ["  Session kind:        interactive"]),
-    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267", "2.1.282"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267", "2.1.282", "2.1.285"].includes(version)
       ? ["  Peer address:        unix:///private/tmp/claude.sock"]
       : []),
     "  cwd:                 /repo",
@@ -1752,13 +1797,13 @@ function claudeStatusPanel(
     "  Model:               claude-sonnet",
     "  MCP servers:         1 failed · /mcp",
     "  Setting sources:     User settings, Project local settings",
-    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267", "2.1.282"].includes(version)
+    ...(["2.1.251", "2.1.259", "2.1.263", "2.1.266", "2.1.267", "2.1.282", "2.1.285"].includes(version)
       ? ["  Managed settings (remote): connected"]
       : []),
-    ...(["2.1.263", "2.1.266", "2.1.267", "2.1.282"].includes(version)
+    ...(["2.1.263", "2.1.266", "2.1.267", "2.1.282", "2.1.285"].includes(version)
       ? ["  Organization policy: failed to load through proxy"]
       : []),
-    ...(version === "2.1.282"
+    ...(["2.1.282", "2.1.285"].includes(version)
       ? ["  Auto mode server:    Enabled"]
       : []),
     "",

@@ -11,6 +11,12 @@ import {
   claudeRuntimeLifecycleCompatibilityProfile,
   DEFAULT_CLAUDE_LIFECYCLE_VERSION,
 } from "./claude-lifecycle-compatibility.js";
+import {
+  assertParentsPrecedeChildren,
+  earliestClaudeTranscriptRecordOffset,
+  initialClaudeTranscriptCheckpointRecords,
+  orderClaudePrewrittenAttachments
+} from "./claude-transcript-record-order.js";
 import { redactString } from "./runtime-log.js";
 import { isRecord } from "./value-guards.js";
 import type {
@@ -814,7 +820,9 @@ export function captureClaudeHumanStartedActiveTaskAnchor(
       before.size,
       maxBytes
     );
-    const records = recordEntries.map((entry) => entry.record);
+    const records = orderClaudePrewrittenAttachments(
+      recordEntries.map((entry) => entry.record)
+    );
     const after = fs.fstatSync(opened.fd);
     if (!sameStableTranscriptFile(before, after)) {
       throw new Error(
@@ -868,7 +876,8 @@ export function captureClaudeHumanStartedActiveTaskAnchor(
     })) {
       return undefined;
     }
-    if (!pendingApprovalTurn(snapshot)) {
+    const activeTurn = pendingApprovalTurn(snapshot);
+    if (!activeTurn) {
       throw new Error(
         "Claude active root prompt has no unique unfinished foreground chain"
       );
@@ -888,7 +897,9 @@ export function captureClaudeHumanStartedActiveTaskAnchor(
       request_hash: requestHash,
       claude_version: claudeVersion,
       transcript_file_id: fileId,
-      turn_start_offset_bytes: promptEntry.offsetBytes,
+      turn_start_offset_bytes: earliestClaudeTranscriptRecordOffset(
+        recordEntries, activeTurn.descendants, promptEntry.offsetBytes
+      ),
       observed_end_offset_bytes: before.size
     };
     return {
@@ -981,12 +992,12 @@ export function observeClaudeHumanStartedActiveTask(
         );
       }
       const safeResumeOffsetBytes = resumeOffsetBytes + completeLength;
-      const suffixRecords = readCompleteJsonlRecordEntries(
+      const suffixRecords = orderClaudePrewrittenAttachments(readCompleteJsonlRecordEntries(
         opened.fd,
         resumeOffsetBytes,
         completeLength,
         { preReadBuffer: suffixBuffer.subarray(0, completeLength) }
-      ).map((entry) => entry.record);
+      ).map((entry) => entry.record));
       const after = fs.fstatSync(opened.fd);
       if (!sameStableTranscriptFile(before, after)) {
         assertObservableClaudeActiveTaskAgent(options.agentRows, anchor);
@@ -1000,7 +1011,11 @@ export function observeClaudeHumanStartedActiveTask(
       const advanced = advanceClaudeHumanStartedActiveTaskCheckpoint(
         anchor,
         checkpoint,
-        suffixRecords,
+        checkpoint.record_count === 0
+          ? initialClaudeTranscriptCheckpointRecords(
+              suffixRecords, anchor.prompt_uuid, hasTurnCompletionSignal
+            )
+          : suffixRecords,
         safeResumeOffsetBytes
       );
       if (advanced.completion) {
@@ -1154,7 +1169,7 @@ function isActiveClaudeAgentState(agent: ClaudeAgentRow): boolean {
     agent.status === "busy" ||
     (
       agent.status === "waiting" &&
-      ["dialog open", "permission prompt"].includes(agent.waitingFor ?? "")
+      ["dialog open", "permission prompt", "input needed"].includes(agent.waitingFor ?? "")
     );
 }
 
@@ -2974,8 +2989,10 @@ function readCompleteJsonlRecords(
   offset: number,
   length: number
 ): TranscriptRecord[] {
-  return readCompleteJsonlRecordEntries(fd, offset, length)
-    .map((entry) => entry.record);
+  return orderClaudePrewrittenAttachments(
+    readCompleteJsonlRecordEntries(fd, offset, length)
+      .map((entry) => entry.record)
+  );
 }
 
 function readBoundedCompleteJsonlTail(
@@ -3079,23 +3096,6 @@ function descendantRecords(
     predicate(record) &&
     descendantChain(recordsByUuid, ancestorUuid, record) !== undefined
   );
-}
-
-function assertParentsPrecedeChildren(
-  records: readonly TranscriptRecord[],
-  recordsByUuid: ReadonlyMap<string, TranscriptRecord>
-): void {
-  const indexes = new Map<TranscriptRecord, number>(
-    records.map((record, index) => [record, index])
-  );
-  for (const record of records) {
-    const parentUuid = uuidValue(record.parentUuid);
-    const parent = parentUuid ? recordsByUuid.get(parentUuid) : undefined;
-    if (parent && (indexes.get(parent) ?? Number.POSITIVE_INFINITY) >=
-      (indexes.get(record) ?? Number.NEGATIVE_INFINITY)) {
-      throw new Error("Claude transcript parent UUID does not precede its child record");
-    }
-  }
 }
 
 function descendantChain(

@@ -66,7 +66,8 @@ export async function observePaginatedWatch(input: {
   let snapshot;
   try {
     snapshot = await (input.readSnapshot ?? readCodexPaginatedTaskSnapshot)({
-      codexHome: anchor.codex_home, threadId: anchor.native_thread_id, serverVersion: anchor.codex_version,
+      codexHome: anchor.codex_home, threadId: anchor.native_thread_id,
+      serverVersion: anchor.backend_version ?? anchor.codex_version,
       boundaryTurnId: checkpoint.acceptance_evidence?.acceptanceId ?? anchor.turn_id ?? anchor.baseline_latest_turn_id
     });
   } catch {
@@ -124,9 +125,10 @@ export async function refreshPaginatedResponseForeground(
   const navigation = await bridge.collapseCodexAsyncQuestionForStatus(control, runtime);
   const current = await captureCodexPaginatedThreadBinding({
     bridge, terminalControl: navigation.terminalControl, pid: bound.pid,
-    agentVersion: bound.serverVersion, codexHome: bound.codexHome, allowWorking: true, now
+    agentVersion: bound.agentVersion, codexHome: bound.codexHome, allowWorking: true, now
   });
-  if (current.threadId !== bound.threadId || current.processUuid !== bound.processUuid || current.processBirth !== bound.processBirth) {
+  if (current.threadId !== bound.threadId || current.serverVersion !== bound.serverVersion ||
+      current.processUuid !== bound.processUuid || current.processBirth !== bound.processBirth) {
     throw new Error("Codex foreground thread changed before the exact question response");
   }
   runtime.codexPaginatedThread = current;
