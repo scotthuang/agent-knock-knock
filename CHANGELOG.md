@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.15-local.20261002 - Local candidate
+## 0.13.15 - 2026-10-02
 
 - Attempt Codex exact callback observation through validated runtime UI and paginated read contracts on newer versions; preserve exact task identity across compatible backend upgrades.
 - Automatically attach a notification-only terminal-activity Watch when exact Codex or Claude Send preparation is unavailable and physical identity remains safe.

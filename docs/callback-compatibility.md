@@ -58,3 +58,17 @@ Future-version responses and TUI frames are contract regressions, not a claim of
 native end-to-end certification for every future version. This local change has
 not been tested against a live 0.159.3 app-server: the current execution sandbox
 denies process inspection and access to its control socket.
+
+
+## Local acceptance and publication preparation
+
+Scott reported manually installing `0.13.15-local.20261002` and successfully
+testing the fix before authorizing npm and ClawHub publication. This is user
+acceptance evidence; this session did not collect a new detailed native test
+trace or independently certify every future Codex version.
+
+The proposed stable version is `0.13.15`, using the runtime from commit
+`13607c4c39e9dbf37550ef1d8c78d6127838244f`. Release preparation updates package
+version metadata, release notes and the bundled Skill instructions only.
+Registry availability and the complete publication gate must pass before
+publication is claimed. The local installation is not repeated.
