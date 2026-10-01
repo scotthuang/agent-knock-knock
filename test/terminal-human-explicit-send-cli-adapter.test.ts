@@ -21,7 +21,7 @@ import {
   CALLBACK_ROUTE_VERSION
 } from "../src/callback-transport.js";
 import { createCodexPaginatedTaskAnchor } from "../src/codex-paginated-task.js";
-import { terminalUserExplicitFallbackWatchId } from "../src/terminal-watch-store.js";
+import { createTerminalActivityWatchAnchor, terminalUserExplicitFallbackWatchId } from "../src/terminal-watch-store.js";
 import {
   assertCodexManagedSendHasLegacyHistory,
   codexPhysicalSendUsesPaginatedWatch,
@@ -34,7 +34,11 @@ test("managed Monitor refuses paginated zero-root history and preserves proven l
   assert.equal(codexPhysicalSendUsesPaginatedWatch("0.159.0"), true);
   assert.equal(codexPhysicalSendUsesPaginatedWatch("0.159.2"), true);
   assert.equal(codexPhysicalSendUsesPaginatedWatch("0.155.1"), false);
-  for (const agentVersion of ["0.157.0", "0.157.1", "0.158.0", "0.159.0", "0.159.2"]) {
+  assert.equal(codexPhysicalSendUsesPaginatedWatch("0.157.1"), false);
+  for (const agentVersion of ["0.159.3", "0.160.0", "1.0.0"]) {
+    assert.equal(codexPhysicalSendUsesPaginatedWatch(agentVersion), true);
+  }
+  for (const agentVersion of ["0.157.0", "0.157.1", "0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1.0.0"]) {
     assert.throws(() => assertCodexManagedSendHasLegacyHistory({
       agentVersion, verifiedLegacyRootCount: 0
     }), /No Turn was created and no task input was sent/u);
@@ -51,7 +55,7 @@ test("managed Monitor refuses paginated zero-root history and preserves proven l
 });
 
 test("paginated Codex Send cannot promise a future legacy rollout callback", () => {
-  for (const agentVersion of ["0.157.0", "0.157.1", "0.158.0", "0.159.0", "0.159.2"]) {
+  for (const agentVersion of ["0.157.0", "0.157.1", "0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1.0.0"]) {
     const unavailable = selectCodexUserExplicitSendWatchSource({
       agentVersion,
       legacyRootCount: 0,
@@ -60,7 +64,7 @@ test("paginated Codex Send cannot promise a future legacy rollout callback", () 
     assert.equal(unavailable.source, "none");
     if (unavailable.source !== "none") assert.fail("callback source must be absent");
     assert.equal(unavailable.reasonCode, "codex_paginated_history_anchor_unavailable");
-    assert.match(unavailable.warning, /no automatic completion callback Watch/u);
+    assert.match(unavailable.warning, /no exact-task completion callback[\s\S]*best-effort terminal-activity Watch/u);
     assert.deepEqual(selectCodexUserExplicitSendWatchSource({
       agentVersion,
       legacyRootCount: 0,
@@ -213,10 +217,11 @@ test(
   }
 );
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1.0.0"] as const) {
   test(`Codex ${version} physical Send prepares paginated Watch before input and never attempts managed Send`, async (t) => {
-    for (const callbackAvailable of [true, false]) {
-      await t.test(callbackAvailable ? "exact callback and same-ID replay" : "unavailable reader has no callback promise", async (nested) => {
+    for (const callbackKind of ["exact", "activity", "unavailable", "unsafe"] as const) {
+      const callbackAvailable = callbackKind === "exact" || callbackKind === "activity";
+      await t.test(`${callbackKind} callback and same-ID replay safety`, async (nested) => {
         const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-paginated-physical-send-"));
         nested.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
         const workspace = path.join(sandbox, "workspace");
@@ -247,7 +252,9 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
         let watchId = "";
         const receipt = () => callbackAvailable ? {
           callback_expected: true as const, callback_mode: "terminal_watch" as const,
-          watch_id: watchId, watch_mode: "exact_task" as const, confidence: "exact" as const
+          watch_id: watchId,
+          watch_mode: callbackKind === "activity" ? "terminal_activity" as const : "exact_task" as const,
+          confidence: callbackKind === "activity" ? "best_effort" as const : "exact" as const
         } : undefined;
         const bridge = {
           async resolveConversationId() { return terminal; },
@@ -291,6 +298,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
           async prepareUserExplicitFallbackWatch(input) {
             events.push("prepare_watch");
             assert.equal(input.requestText, payload);
+            if (callbackKind === "unsafe") throw Object.assign(new Error("Native status Enter outcome uncertain"), { doNotRetry: true });
             if (!callbackAvailable) throw new Error("Exact paginated reader unavailable");
             watchId = terminalUserExplicitFallbackWatchId({
               messageId: input.messageId, physicalToken: input.physicalToken,
@@ -311,9 +319,16 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
                 controller_session_id: "fixture-session"
               },
               openclawSession: "fixture-session", openclawBin: "openclaw", timeoutMs: 60_000,
-              anchor: createCodexPaginatedTaskAnchor({
+              ...(callbackKind === "activity" ? { warnings: ["exact_task_anchor_unavailable: protocol unavailable; terminal_activity_fallback"] } : {}),
+              anchor: callbackKind === "activity" ? createTerminalActivityWatchAnchor({
+                capturedAt: new Date("2026-10-01T00:00:00.000Z"),
+                terminalId: terminal.conversationId, pid: 4242, initialActivityState: "idle",
+                nativeProcessUuid: processUuid, nativeProcessBirth: processBirth,
+                origin: "user_explicit_send", requestHash: input.requestHash
+              }) : createCodexPaginatedTaskAnchor({
                 origin: "user_explicit_send", captured_at: "2026-10-01T00:00:00.000Z",
                 codex_home: "/codex", codex_version: version,
+                thread_cwd: workspace, thread_originator: "codex-tui",
                 native_thread_id: "019ee559-7bb8-7fd1-970c-0f7b6978c44e",
                 process_uuid: processUuid, process_birth: processBirth, pid: 4242,
                 request_hash: input.requestHash
@@ -349,6 +364,13 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
           }
         };
         const options = { expectedTerminalToken, messageId: "paginated-message", background: true };
+        if (callbackKind === "unsafe") {
+          await assert.rejects(() => runHumanExplicitTerminalSend(dependencies, options, payload, terminal), /Native status Enter outcome uncertain/u);
+          assert.equal(sends, 0, "uncertain probe forbids subsequent task input");
+          await assert.rejects(() => runHumanExplicitTerminalSend(dependencies, options, payload, terminal), /automatic replay is forbidden/u);
+          assert.equal(sends, 0, "same-message reservation prevents replay after an uncertain probe");
+          return;
+        }
         await runHumanExplicitTerminalSend(dependencies, options, payload, terminal);
         assert.equal(managedAttempts, 0);
         assert.equal(sends, 1);
@@ -358,7 +380,13 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
         assert.equal(events[1], "physical_send");
         if (callbackAvailable) {
           assert.equal(events[2], "attach_watch");
-          assert.equal(printed[0]?.watch_mode, "exact_task");
+          assert.equal(printed[0]?.watch_mode, callbackKind === "activity" ? "terminal_activity" : "exact_task");
+          assert.equal((printed[0]?.capabilities as Record<string, unknown>).interaction_respond, false);
+          if (callbackKind === "activity") {
+            assert.equal(printed[0]?.confidence, "best_effort");
+            assert.match(JSON.stringify(printed[0]?.callback_warnings), /terminal_activity_fallback/u);
+            assert.match(String(printed[0]?.next_action), /stable idle is not proof/u);
+          }
         } else {
           assert.match(JSON.stringify(printed[0]?.callback_warnings), /reader unavailable/u);
           assert.doesNotMatch(String(printed[0]?.next_action), /wait for .* callback/u);

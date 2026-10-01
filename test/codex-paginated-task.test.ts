@@ -174,7 +174,7 @@ test("paginated task matching rejects ambiguity, pagination gaps, and partial it
     anchor: original, snapshot: snapshot([partial, turn("baseline", 100)])
   }).status, "unavailable");
   assert.equal(observeCodexPaginatedTask({
-    anchor: original, snapshot: { ...data, serverVersion: "0.158.1" }
+    anchor: original, snapshot: { ...data, serverVersion: "nightly" }
   }).status, "invalidated");
 });
 
@@ -213,7 +213,7 @@ test("paginated anchors and checkpoints reject changed bindings", () => {
   })), /exact request binding/u);
 });
 
-test("persisted 0.159 task identity survives reload and rejects a different supported backend", () => {
+test("persisted 0.159 task identity survives reload and revalidates a different backend", () => {
   const original = anchor({ codex_version: "0.159.0" });
   const reloaded = validateCodexPaginatedTaskAnchor(JSON.parse(JSON.stringify(original)));
   const first = observeCodexPaginatedTask({ anchor: reloaded,
@@ -227,7 +227,7 @@ test("persisted 0.159 task identity survives reload and rejects a different supp
   assert.equal(completed.completion.id, "accepted");
   for (const [binding, backend] of [["0.158.0", "0.159.0"], ["0.159.0", "0.158.0"]] as const) {
     assert.equal(observeCodexPaginatedTask({ anchor: anchor({ codex_version: binding }),
-      snapshot: snapshot([turn("accepted", 200), turn("baseline", 100)], backend) }).status, "invalidated");
+      snapshot: snapshot([turn("accepted", 200), turn("baseline", 100)], backend) }).status, "completed");
   }
 });
 
@@ -251,8 +251,8 @@ test("a persisted 0.159.0 frontend task completes on its bound 0.159.2 backend w
 
   for (const backend of ["0.159.0", "0.158.0", "0.159.3"]) {
     assert.equal(observeCodexPaginatedTask({ anchor: reloaded, checkpoint,
-      snapshot: snapshot([turn("accepted", 200)], backend) }).status, "invalidated",
-    `a task bound to 0.159.2 must reject backend drift to ${backend}`);
+      snapshot: snapshot([turn("accepted", 200)], backend) }).status, "completed",
+    `a task bound to 0.159.2 must revalidate its exact task on ${backend}`);
   }
 });
 
@@ -280,15 +280,64 @@ test("mixed-version anchors bind the backend into their fingerprint and acceptan
     /different task/u);
 });
 
-test("legacy anchors without a backend version retain exact same-version history binding", () => {
+test("legacy anchors retain their fingerprint and exact task identity across backend upgrades", () => {
   for (const version of ["0.158.0", "0.159.0"] as const) {
     const original = validateCodexPaginatedTaskAnchor(JSON.parse(JSON.stringify(anchor({ codex_version: version }))));
     assert.equal(Object.hasOwn(original, "backend_version"), false);
     assert.equal(observeCodexPaginatedTask({ anchor: original,
       snapshot: snapshot([turn("accepted", 200), turn("baseline", 100)], version) }).status, "completed");
     assert.equal(observeCodexPaginatedTask({ anchor: original,
-      snapshot: snapshot([turn("accepted", 200), turn("baseline", 100)], "0.159.2") }).status, "invalidated");
+      snapshot: snapshot([turn("accepted", 200), turn("baseline", 100)], "0.159.2") }).status, "completed");
   }
+});
+
+test("v2 future-backend task survives upgrades but never rebinds identity or accepts malformed completion", () => {
+  const original = anchor({ codex_version: "0.159.0", backend_version: "0.159.3",
+    thread_cwd: "/repo", thread_originator: "codex-tui" });
+  assert.equal(original.version, 2);
+  assert.equal(validateCodexPaginatedTaskAnchor(JSON.parse(JSON.stringify(original))).anchor_fingerprint,
+    original.anchor_fingerprint);
+  const accepted = observeCodexPaginatedTask({ anchor: original,
+    snapshot: snapshot([turn("accepted", 200, "inProgress"), turn("baseline", 100)], "0.159.3") });
+  if (accepted.status !== "accepted") assert.fail("the future backend should bind the exact native input");
+  const upgraded = snapshot([turn("later-identical", 300), turn("accepted", 200)], "0.160.0");
+  // Logging session metadata may change across daemon restarts; native thread/turn identity cannot.
+  upgraded.thread.sessionId = "new-daemon-session";
+  const result = observeCodexPaginatedTask({ anchor: original, checkpoint: accepted.checkpoint, snapshot: upgraded });
+  assert.equal(result.status, "completed");
+  if (result.status !== "completed") assert.fail("the exact accepted task must finish after backend upgrade");
+  assert.equal(result.completion.id, "accepted");
+  assert.equal(result.evidence.anchorFingerprint, original.anchor_fingerprint);
+
+  for (const invalid of [
+    { ...upgraded, codexHome: "/different-home" },
+    { ...upgraded, thread: { ...upgraded.thread, id: "different-thread" } },
+    { ...upgraded, thread: { ...upgraded.thread, cwd: "/different-project" } },
+    { ...upgraded, thread: { ...upgraded.thread, originator: "other-client" } },
+    { ...upgraded, turns: [turn("accepted", 200, "completed", [user("changed", "Different task")])] }
+  ]) {
+    assert.equal(observeCodexPaginatedTask({ anchor: original, checkpoint: accepted.checkpoint, snapshot: invalid }).status,
+      "invalidated");
+  }
+  for (const incomplete of [
+    { ...upgraded, completeToBoundary: false },
+    { ...upgraded, turns: [turn("unrelated", 300)] },
+    { ...upgraded, turns: [{ ...turn("accepted", 200), itemsView: "summary" as const }] },
+    { ...upgraded, turns: [{ ...turn("accepted", 200), status: "newUnknownOutcome" as "completed" }] }
+  ]) {
+    assert.equal(observeCodexPaginatedTask({ anchor: original, checkpoint: accepted.checkpoint, snapshot: incomplete }).status,
+      "unavailable");
+  }
+});
+
+test("future anchors require v2 verified thread metadata and preserve legacy validation", () => {
+  assert.throws(() => anchor({ backend_version: "0.159.3" }), /anchor is invalid/u);
+  assert.throws(() => anchor({ backend_version: "0.159.3", thread_cwd: "/repo" }), /thread metadata/u);
+  assert.throws(() => anchor({ backend_version: "0.159.3", thread_cwd: "relative", thread_originator: "codex-tui" }), /thread metadata/u);
+  const valid = anchor({ codex_version: "0.160.0", backend_version: "1.0.0",
+    thread_cwd: "/repo", thread_originator: "codex-tui" });
+  assert.equal(valid.version, 2);
+  assert.throws(() => validateCodexPaginatedTaskAnchor({ ...valid, thread_cwd: "/different-project" }), /fingerprint/u);
 });
 
 test("active paginated tasks settle explicit interrupted and failed native outcomes", () => {

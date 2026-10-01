@@ -87,6 +87,23 @@ test("short native viewport joins captured unique overlap, then restores latest 
   assert.ok(!screen.includes("Back to bottom"));
 });
 
+test("unverified frontend reuses history navigation only with its exact closed status receipt and UI", async () => {
+  for (const version of ["0.159.3", "0.160.0", "1.0.0"]) {
+    const paused = PAUSED.replace("v0.159.2", `v${version}`);
+    const receipt = { ...RECEIPT, behaviorProfile: `codex-tui-fullscreen-status-v1@${version}` };
+    const h = run({ version, receipt, frames: [LATEST, paused, paused, LATEST] });
+    const observed = observeCodexNativeInspection({ operation: { kind: "status" },
+      expectedAgentVersion: version, screen: stripTerminalEscapeSequences(await h.result) });
+    assert.equal(observed.status, "observed");
+    assert.equal(observed.nativeThreadId, THREAD);
+    assert.deepEqual(h.keys, ["PageUp", "C-End"]);
+    const changed = run({ version, receipt,
+      screen: LATEST.replace("? for shortcuts", "unknown pager") });
+    await changed.result;
+    assert.deepEqual(changed.keys, []);
+  }
+});
+
 test("active 91x29 viewport with only the command clipped recovers its real command through unique version-header overlap", async () => {
   const active = [
     "› Prior user prompt pinned by native UI", ...HEADER.slice(2, -1), ...FIELDS,
@@ -120,7 +137,7 @@ test("active native timer drift outside the captured static card does not invali
 
 for (const [name, screen, version, receipt] of [
   ["complete card", COMPLETE, "0.159.2", RECEIPT],
-  ["unsupported version", LATEST, "0.159.3", RECEIPT],
+  ["mismatched version receipt", LATEST, "0.159.3", RECEIPT],
   ["legacy bordered profile", LATEST, "0.158.0", RECEIPT],
   ["unowned prior history", LATEST, "0.159.2", null],
   ["wrong command receipt", LATEST, "0.159.2", { ...RECEIPT, command: "/model" }],

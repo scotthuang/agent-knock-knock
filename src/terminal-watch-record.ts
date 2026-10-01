@@ -37,6 +37,7 @@ import type {
   TerminalInteractionAggregate
 } from "./terminal-interaction-core.js";
 import { isRecord } from "./value-guards.js";
+import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
 import {
   createCodexPaginatedTaskCheckpoint,
   type CodexPaginatedTaskAnchor,
@@ -126,7 +127,10 @@ export type TerminalActivityState =
  */
 export interface TerminalActivityWatchAnchor {
   schema: "agent-knock-knock/terminal-activity-watch-anchor";
-  version: 1;
+  version: 1 | 2;
+  /** Correlates a physical Send receipt, never proof of native task acceptance. */
+  origin?: "user_explicit_send";
+  request_hash?: string;
   captured_at: string;
   terminal_id: string;
   pid: number;
@@ -159,6 +163,9 @@ export function isPaginatedSendWatch(watch: Pick<TerminalWatch, "anchor">): bool
 export function initialTerminalWatchInteractionPolicy(
   anchor: TerminalWatchAnchor
 ): TerminalWatchInteractionPolicy {
+  if (anchor.schema === "agent-knock-knock/codex-paginated-task-anchor" &&
+      !isAuditedCodexPaginatedServerPair(anchor.codex_version,
+        anchor.backend_version ?? anchor.codex_version)) return "notify_only";
   return anchor.schema ===
       "agent-knock-knock/terminal-activity-watch-anchor"
     ? "notify_only"
@@ -173,10 +180,17 @@ export function createTerminalActivityWatchAnchor(input: {
   nativeProcessUuid?: string;
   nativeProcessBirth?: string;
   agentVersion?: string;
+  origin?: "user_explicit_send";
+  requestHash?: string;
 }): TerminalActivityWatchAnchor {
+  if ((input.origin === undefined) !== (input.requestHash === undefined)) {
+    throw new Error("terminal activity Send origin and request hash must be supplied together");
+  }
+  if (input.requestHash !== undefined) assertSha256(input.requestHash, "terminal activity Send request hash");
   const base = {
     schema: "agent-knock-knock/terminal-activity-watch-anchor" as const,
-    version: 1 as const,
+    version: input.origin ? 2 as const : 1 as const,
+    ...(input.origin ? { origin: input.origin, request_hash: input.requestHash! } : {}),
     captured_at: input.capturedAt.toISOString(),
     terminal_id: nonEmptyString(input.terminalId, "terminal id"),
     pid: positiveIntegerValue(input.pid, "terminal PID"),
@@ -533,6 +547,8 @@ export interface TerminalWatchCallbackMessageInput {
     | "user_selected_terminal"
     | "terminal_user_explicit_fallback"
     | "terminal_activity_fallback";
+  /** Only new Send-correlated activity anchors set this; old callback bodies stay stable. */
+  activitySend?: boolean;
   detail?: string;
   completionText?: string;
   manualInteraction?: TerminalWatchManualInteractionSummary;
@@ -591,6 +607,8 @@ export function terminalWatchCallbackEnvelope(
         agent: watch.agent,
         terminalId: watch.terminal.terminal_id,
         origin: terminalWatchOrigin(watch),
+        ...(isTerminalActivityWatch(watch) && watch.anchor.origin === "user_explicit_send"
+          ? { activitySend: true } : {}),
         detail: reasonCode,
         manualInteraction: notification.manual_interaction,
         completionText: notification.kind === "completed" ||
@@ -649,7 +667,9 @@ export function terminalWatchCallbackMessage(
     userExplicitFallback
       ? "AKK delivered this exact request through terminal_user_explicit unmanaged fallback and then attached Terminal Watch. It is not a managed AKK Turn."
       : terminalActivityFallback
-        ? "This is a read-only best-effort observation of the exact selected terminal/process activity epoch. It is not an AKK Turn and AKK did not send terminal input."
+        ? input.activitySend
+          ? "This is a read-only best-effort observation of the exact selected terminal/process activity epoch after AKK Send. It is not an AKK Turn. The Watch itself does not send terminal input, and native task acceptance remains unproven."
+          : "This is a read-only best-effort observation of the exact selected terminal/process activity epoch. It is not an AKK Turn and AKK did not send terminal input."
         : "This is a read-only observation of an exact task anchor in the terminal selected by the user. Terminal Watch itself did not send, adopt, or mutate the task; the task may independently have an AKK-managed Turn.",
     eventInstruction,
     "Do not poll files, processes, terminal panes, stdout, or stderr. Use only this structured event.",

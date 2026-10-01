@@ -23,6 +23,18 @@ export function isCodexPaginatedVersion(value: unknown): value is CodexPaginated
   return value === "0.158.0" || value === "0.159.0" || value === "0.159.2";
 }
 
+/**
+ * Eligibility to try the closed paginated read contract, not proof of support.
+ * The actual styled Composer, command popup, fresh status identity and backend
+ * response must still pass their independent checks. Never use this for native
+ * interaction writes, which require an audited physical/server version pair.
+ */
+export function isCodexPaginatedReadCandidate(value: unknown): value is string {
+  if (typeof value !== "string" || !CODEX_SEMVER.test(value)) return false;
+  const [major, minor] = value.split(".").map(Number);
+  return major! > 0 || minor! >= 158;
+}
+
 /** Audited physical TUI and shared app-server pairs; unknown patch versions fail closed. */
 export function isAuditedCodexPaginatedServerPair(
   agentVersion: unknown,
@@ -68,6 +80,7 @@ export function codexUnsupportedDurableHistoryWarning(
 /** Paginated Watch support does not implement legacy managed thread transitions. */
 export function codexThreadLifecycleHistoryWarning(agentVersion: string | undefined): string | undefined {
   if (isCodexPaginatedVersion(agentVersion)) return `Codex ${agentVersion} paginated task Watch is supported, but managed native thread new/resume requires a separate paginated lifecycle adapter`;
+  if (isCodexPaginatedReadCandidate(agentVersion)) return `Codex ${agentVersion} may support the paginated task read contract, but managed native thread new/resume requires a separate paginated lifecycle adapter`;
   return codexUnsupportedDurableHistoryWarning(agentVersion);
 }
 
@@ -115,6 +128,21 @@ export function codexRuntimeCompatibilityProfile(
       codexUnsupportedDurableHistoryWarning(agentVersion) ??
       (`Codex ${agentVersion} has not been regression-tested by AKK; ` +
         "native terminal behavior will be attempted optimistically and may fail if the UI or lifecycle protocol changed")
+  };
+}
+
+/** A shared strict fullscreen status grammar, with the actual TUI version pinned. */
+export function codexNativeInspectionCompatibilityProfile(
+  agentVersion: string | undefined
+): CodexRuntimeCompatibilityProfile | undefined {
+  const profile = codexRuntimeCompatibilityProfile(agentVersion);
+  if (!profile || profile.versionCompatibility === "verified" ||
+      !isCodexPaginatedReadCandidate(agentVersion)) return profile;
+  return {
+    ...profile,
+    behaviorProfile: `codex-tui-fullscreen-status-v1@${agentVersion}`,
+    compatibilityWarning: `Codex ${agentVersion} has not been regression-tested by AKK; ` +
+      "read-only status and task observation require the recognized fullscreen UI and paginated read contracts; native interaction writes remain version-gated"
   };
 }
 

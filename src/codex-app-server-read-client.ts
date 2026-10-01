@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
+import { isAuditedCodexPaginatedServerPair, isValidCodexAgentVersion } from "./codex-lifecycle-compatibility.js";
 import {
   connectCodexUnixWebSocket,
   type CodexAppServerReadTransport
@@ -76,6 +76,8 @@ export interface CodexAppServerMetadata {
 export interface CodexAppServerReadOptions {
   codexHome: string;
   expectedServerVersion: string;
+  /** Read-only consumers revalidate the actual response contract on every connection. */
+  compatibility?: "read_contract";
   /** Only the fresh TUI /status binding may discover an audited shared backend patch. */
   allowAuditedBackendPatch?: true;
   timeoutMs?: number;
@@ -96,7 +98,13 @@ export class CodexAppServerReadError extends Error {
     public readonly code: "invalid_response" | "incompatible_server" | "timeout" | "closed" | "rpc_error",
     message: string,
     public readonly rpcCode?: number,
-    public readonly rpcMessage?: string
+    public readonly rpcMessage?: string,
+    public readonly compatibilityDetails?: {
+      stage: "initialize" | "thread/read" | "thread/turns/list" | "thread/items/list";
+      actual_backend_version?: string;
+      expected_backend_version?: string;
+      compatibility: "exact_version" | "read_contract";
+    }
   ) {
     super(message);
     this.name = "CodexAppServerReadError";
@@ -119,7 +127,8 @@ export class CodexAppServerReadClient {
   private constructor(
     private readonly transport: CodexAppServerReadTransport,
     private readonly timeoutMs: number,
-    metadata: CodexAppServerMetadata
+    metadata: CodexAppServerMetadata,
+    private readonly readPolicy: Pick<CodexAppServerReadOptions, "expectedServerVersion" | "compatibility">
   ) {
     this.metadata = metadata;
     this.unsubscribe = [
@@ -137,7 +146,7 @@ export class CodexAppServerReadClient {
     const socketPath = path.join(options.codexHome, "app-server-control", "app-server-control.sock");
     const transport = await (options.transportFactory ?? connectCodexUnixWebSocket)({ socketPath, timeoutMs });
     const metadata = { socketPath, serverVersion: "", codexHome: "", platformFamily: "", platformOs: "" };
-    const client = new CodexAppServerReadClient(transport, timeoutMs, metadata);
+    const client = new CodexAppServerReadClient(transport, timeoutMs, metadata, options);
     try {
       const result = await client.request("initialize", {
         clientInfo: { name: "agent-knock-knock-read", title: "AKK read-only history", version: "1" },
@@ -148,22 +157,24 @@ export class CodexAppServerReadClient {
       return client;
     } catch (error) {
       client.close();
-      throw error;
+      throw client.withReadContext(error, "initialize");
     }
   }
 
   async readThread(threadId: string): Promise<CodexAppServerThread> {
-    const result = record(await this.request("thread/read", { threadId: identifier(threadId), includeTurns: false }));
-    const thread = record(result.thread);
-    if (thread.id !== threadId) invalid("Codex app-server returned a different thread");
-    identifier(thread.sessionId);
-    if (typeof thread.cwd !== "string" || !path.isAbsolute(thread.cwd)) invalid("Invalid thread cwd");
-    if (thread.historyMode !== "legacy" && thread.historyMode !== "paginated") invalid("Unknown thread history mode");
-    if (typeof thread.cliVersion !== "string") invalid("Invalid thread CLI version");
-    validateThreadStatus(thread.status);
-    if (!Array.isArray(thread.turns)) invalid("Invalid thread turns");
-    thread.turns.forEach(validateTurn);
-    return thread as unknown as CodexAppServerThread;
+    return this.validatedRead("thread/read", { threadId: identifier(threadId), includeTurns: false }, (value) => {
+      const thread = record(record(value).thread);
+      if (thread.id !== threadId) invalid("Codex app-server returned a different thread");
+      identifier(thread.sessionId);
+      if (typeof thread.cwd !== "string" || !path.isAbsolute(thread.cwd)) invalid("Invalid thread cwd");
+      if (thread.historyMode !== "legacy" && thread.historyMode !== "paginated") invalid("Unknown thread history mode");
+      if (typeof thread.cliVersion !== "string") invalid("Invalid thread CLI version");
+      if (thread.originator !== null && typeof thread.originator !== "string") invalid("Invalid thread originator");
+      validateThreadStatus(thread.status);
+      if (!Array.isArray(thread.turns)) invalid("Invalid thread turns");
+      thread.turns.forEach(validateTurn);
+      return thread as unknown as CodexAppServerThread;
+    });
   }
 
   async listTurns(options: CodexAppServerListOptions & {
@@ -172,10 +183,9 @@ export class CodexAppServerReadClient {
     if (options.itemsView && !["notLoaded", "summary", "full"].includes(options.itemsView)) {
       throw new Error("Invalid Codex turn items view");
     }
-    const result = await this.request("thread/turns/list", {
+    return this.validatedRead("thread/turns/list", {
       ...listParams(options), itemsView: options.itemsView ?? "notLoaded"
-    });
-    return parsePage(result, validateTurn);
+    }, (value) => parsePage(value, validateTurn));
   }
 
   async listItems(options: CodexAppServerListOptions & {
@@ -183,11 +193,13 @@ export class CodexAppServerReadClient {
   }): Promise<CodexAppServerPage<CodexAppServerItemEntry>> {
     const params = listParams(options);
     if (options.turnId !== undefined) params.turnId = identifier(options.turnId);
-    const page = parsePage(await this.request("thread/items/list", params), validateItemEntry);
-    if (options.turnId && page.data.some((entry) => entry.turnId !== options.turnId)) {
-      invalid("Codex app-server returned items from a different turn");
-    }
-    return page;
+    return this.validatedRead("thread/items/list", params, (value) => {
+      const page = parsePage(value, validateItemEntry);
+      if (options.turnId && page.data.some((entry) => entry.turnId !== options.turnId)) {
+        invalid("Codex app-server returned items from a different turn");
+      }
+      return page;
+    });
   }
 
   close(): void {
@@ -195,6 +207,26 @@ export class CodexAppServerReadClient {
       this.finish(new CodexAppServerReadError("closed", "Codex app-server read connection closed"));
     }
     this.transport.close();
+  }
+
+  private async validatedRead<T>(method: "thread/read" | "thread/turns/list" | "thread/items/list",
+    params: unknown, validate: (value: unknown) => T): Promise<T> {
+    try { return validate(await this.request(method, params)); }
+    catch (error) { throw this.withReadContext(error, method); }
+  }
+
+  private withReadContext(error: unknown, stage: NonNullable<CodexAppServerReadError["compatibilityDetails"]>["stage"]): unknown {
+    if (!(error instanceof CodexAppServerReadError) || error.compatibilityDetails) return error;
+    const actual = isValidCodexAgentVersion(this.metadata.serverVersion) ? this.metadata.serverVersion : undefined;
+    const expected = isValidCodexAgentVersion(this.readPolicy.expectedServerVersion) ? this.readPolicy.expectedServerVersion : undefined;
+    // Error.message is a local schema/transport diagnostic. Never interpolate rpcMessage:
+    // a server's rejection can contain a user's request or private filesystem paths.
+    return new CodexAppServerReadError(error.code,
+      `${error.message} (stage=${stage}, reason=${error.code}, actual=${actual ?? "unknown"}, expected=${expected ?? "unknown"})`,
+      error.rpcCode, error.rpcMessage, { stage,
+        ...(actual ? { actual_backend_version: actual } : {}),
+        ...(expected ? { expected_backend_version: expected } : {}),
+        compatibility: this.readPolicy.compatibility ?? "exact_version" });
   }
 
   private request(method: string, params: unknown): Promise<unknown> {
@@ -240,7 +272,8 @@ export class CodexAppServerReadClient {
         pending.reject(new CodexAppServerReadError("invalid_response", "Codex app-server response omitted result"));
       }
     } catch (error) {
-      this.finish(error instanceof Error ? error : new Error("Invalid Codex app-server response"));
+      this.finish(error instanceof CodexAppServerReadError ? error :
+        new CodexAppServerReadError("invalid_response", "Invalid Codex app-server response"));
       this.transport.close();
     }
   }
@@ -270,17 +303,35 @@ export function isCodexUnmaterializedThreadError(error: unknown, threadId: strin
 
 export function parseCodexAppServerMetadata(value: unknown, options: CodexAppServerReadOptions, socketPath: string): CodexAppServerMetadata {
   const result = record(value);
-  const version = typeof result.userAgent === "string" ? /^[^/]+\/([^\s]+)(?:\s|$)/u.exec(result.userAgent)?.[1] : undefined;
-  if (version !== options.expectedServerVersion &&
-      !(options.allowAuditedBackendPatch &&
-        isAuditedCodexPaginatedServerPair(options.expectedServerVersion, version))) {
-    throw new CodexAppServerReadError("incompatible_server", "Codex app-server backend version does not match the required version");
-  }
+  const version = parseCompatibleServerVersion(result.userAgent, options);
   if (typeof result.codexHome !== "string" || !path.isAbsolute(result.codexHome) || !sameHome(result.codexHome, options.codexHome)) {
     throw new CodexAppServerReadError("incompatible_server", "Codex app-server backend home does not match the selected home");
   }
   if (typeof result.platformFamily !== "string" || typeof result.platformOs !== "string") invalid("Missing Codex app-server platform metadata");
   return { serverVersion: version, codexHome: result.codexHome, socketPath, platformFamily: result.platformFamily, platformOs: result.platformOs };
+}
+
+function parseCompatibleServerVersion(userAgent: unknown, options: CodexAppServerReadOptions): string {
+  const version = typeof userAgent === "string" ? /^[^/]+\/([^\s]+)(?:\s|$)/u.exec(userAgent)?.[1] : undefined;
+  const compatibleVersion = options.compatibility === "read_contract"
+    ? isValidCodexAgentVersion(version)
+    : version === options.expectedServerVersion ||
+      Boolean(options.allowAuditedBackendPatch &&
+        isAuditedCodexPaginatedServerPair(options.expectedServerVersion, version));
+  if (!compatibleVersion || !isValidCodexAgentVersion(version)) {
+    throw incompatibleServerVersion(version, options);
+  }
+  return version;
+}
+
+function incompatibleServerVersion(version: string | undefined, options: CodexAppServerReadOptions): CodexAppServerReadError {
+  const actual = isValidCodexAgentVersion(version) ? version : undefined;
+  const expected = isValidCodexAgentVersion(options.expectedServerVersion) ? options.expectedServerVersion : undefined;
+  const compatibility = options.compatibility ?? "exact_version";
+  return new CodexAppServerReadError("incompatible_server",
+    `Codex app-server backend version rejected during initialize (actual=${actual ?? "unparseable"}, expected=${expected ?? "unparseable"}, compatibility=${compatibility})`,
+    undefined, undefined, { stage: "initialize", ...(actual ? { actual_backend_version: actual } : {}),
+      ...(expected ? { expected_backend_version: expected } : {}), compatibility });
 }
 
 function sameHome(left: string, right: string): boolean {
@@ -302,7 +353,8 @@ function listParams(options: CodexAppServerListOptions): Record<string, unknown>
 function parsePage<T>(value: unknown, validate: (entry: unknown) => T): CodexAppServerPage<T> {
   const page = record(value);
   if (!Array.isArray(page.data) || page.data.length > 100) invalid("Invalid bounded Codex history page");
-  const cursor = (value: unknown) => value == null ? null : identifier(value, 4096);
+  // Missing/renamed cursors must not turn a partial page into proof of exhaustion.
+  const cursor = (value: unknown) => value === null ? null : identifier(value, 4096);
   return { data: page.data.map(validate), nextCursor: cursor(page.nextCursor), backwardsCursor: cursor(page.backwardsCursor) };
 }
 

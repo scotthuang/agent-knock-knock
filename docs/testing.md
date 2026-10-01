@@ -233,7 +233,7 @@ replays terminal input while resolving that identity.
 The semantic
 `native_thread_id` remains public for resume. The plugin/CLI still derives and
 revalidates those private fences under lock. Store format remains 1 and the
-Terminal Watch schema is 3; writer protocol 8 also fences paginated task
+Terminal Watch schema is 3; writer protocol 9 fences capability-checked paginated task
 bindings and private native-question checkpoints from older writers. It retains
 the manual-interaction notification state and bounded callback metadata introduced
 in writer protocol 7. The Watch schema version fences the response aggregate.

@@ -1,4 +1,4 @@
-import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
+import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { createHash } from "node:crypto";
 import {
   captureCodexFullscreenComposerFrame,
@@ -557,7 +557,7 @@ function currentCodexComposerCapture(
   profiledSlashPopup?: true;
   bareCommand?: true;
 } | undefined {
-  if (isCodexPaginatedVersion(agentVersion)) {
+  if (isCodexPaginatedReadCandidate(agentVersion)) {
     return fullscreenCodexComposerCapture(styledScreen, expectedText,
       allowOpaqueLargePastePlaceholder, classifyOpaqueLargePasteAsDifferent, agentVersion, exactSlashPopupRows);
   }

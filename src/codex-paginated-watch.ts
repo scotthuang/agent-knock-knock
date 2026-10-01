@@ -9,6 +9,7 @@ import { isRecord, nonBlankString } from "./value-guards.js";
 import { terminalWatchObservationFence, type TerminalWatchObservation } from "./terminal-watch-service.js";
 import type { CodexAsyncQuestionDurableEvidence } from "./codex-async-question-adapter.js";
 import { createHash } from "node:crypto";
+import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
 
 export { isPaginatedSendWatch } from "./terminal-watch-record.js";
 
@@ -51,7 +52,8 @@ export async function observePaginatedWatch(input: {
   terminalMatches: boolean;
   terminalAvailable: boolean;
   questionnaire: (checkpoint: CodexPaginatedTaskCheckpoint,
-    questions: readonly CodexAsyncQuestionDurableEvidence[]) => TerminalWatchObservation | undefined;
+    questions: readonly CodexAsyncQuestionDurableEvidence[],
+    allowResponses: boolean) => TerminalWatchObservation | undefined;
   blockingQuestionnaire?: (checkpoint: CodexPaginatedTaskCheckpoint) => Promise<TerminalWatchObservation | undefined>;
   readSnapshot?: typeof readCodexPaginatedTaskSnapshot;
 }): Promise<TerminalWatchObservation> {
@@ -81,11 +83,27 @@ export async function observePaginatedWatch(input: {
     return { ...base, kind: "invalidated", reason_code: "codex_paginated_terminal_identity_changed",
       evidence_fingerprint: digest({ anchor: anchor.anchor_fingerprint, reason: "physical_identity_changed" }) };
   }
-  if (input.terminalMatches && paginatedTaskNeedsBlockingAnswer(snapshot) && input.blockingQuestionnaire) {
+  // Read compatibility never grants write compatibility. A previously actionable
+  // Watch must not keep answer authority after its shared backend changes.
+  const allowResponses = snapshot.serverVersion === (anchor.backend_version ?? anchor.codex_version) &&
+    isAuditedCodexPaginatedServerPair(anchor.codex_version, snapshot.serverVersion);
+  const prior = watch.current_interaction;
+  if (!allowResponses && prior?.aggregate.state === "pending" &&
+      prior.projection.response_authority === "executable") {
+    // Revoke the stored offer before considering another surface. Its old
+    // prompt is not fresh evidence for a replacement manual notification.
+    return { ...base, kind: input.terminalAvailable ? "pending" : "unavailable",
+      observation_checkpoint: result.checkpoint, last_activity_at: input.observedAt,
+      interaction_write_capability_lost: {
+        interaction_id: prior.projection.interaction_id,
+        prompt_fingerprint: prior.projection.prompt_fingerprint
+      } };
+  }
+  if (input.terminalMatches && allowResponses && paginatedTaskNeedsBlockingAnswer(snapshot) && input.blockingQuestionnaire) {
     const blocking = await input.blockingQuestionnaire(result.checkpoint);
     if (blocking) return blocking;
   }
-  const interaction = input.terminalMatches ? input.questionnaire(result.checkpoint, result.questions) : undefined;
+  const interaction = input.terminalMatches ? input.questionnaire(result.checkpoint, result.questions, allowResponses) : undefined;
   return interaction ?? { ...base, kind: input.terminalAvailable ? "pending" : "unavailable",
     observation_checkpoint: result.checkpoint, last_activity_at: input.observedAt };
 }

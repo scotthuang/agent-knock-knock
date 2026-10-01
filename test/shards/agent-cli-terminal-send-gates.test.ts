@@ -563,6 +563,7 @@ test("raw terminal send requires managed background mode while cancel remains di
   const tmuxCallsPath = path.join(tempDir, "tmux-calls.ndjson");
   const screenPath = path.join(tempDir, "screen.txt");
   const workspace = path.join(tempDir, "workspace");
+  const storeDir = path.join(tempDir, "store");
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -578,6 +579,8 @@ test("raw terminal send requires managed background mode while cancel remains di
     const conversationId = "terminal:tmux:codex-work:0.1:33389";
     const sent = await runAgentCliInProcess([
       "send",
+      "--store-dir",
+      storeDir,
       "--conversation",
       conversationId,
       "--message",
@@ -595,6 +598,8 @@ test("raw terminal send requires managed background mode while cancel remains di
 
     const cancelled = await runAgentCliInProcess([
       "cancel",
+      "--store-dir",
+      storeDir,
       "--conversation",
       conversationId
     ], {

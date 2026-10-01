@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { codexNativeInspectionCompatibilityProfile, isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { captureCodexFullscreenComposerFrame } from "./codex-fullscreen-composer-proof.js";
 import type { TerminalViewport } from "./terminal-control-provider.js";
 import { closedCodex159StatusSuffix, observeCodexNativeInspection } from "./codex-terminal-agent-adapter.js";
@@ -8,7 +9,7 @@ import {
   type TerminalCodexStatusProbeResult
 } from "./terminal-native-inspection-bridge.js";
 
-/** Only the observed 0.159 owned-screen navigation protocol, never a generic pager. */
+/** Only the recognized owned-screen navigation grammar, never a generic pager. */
 const PAUSED_FOOTER = /^ {2}(?:New activity · )?enter\/esc latest · \? shortcuts(?: {2,}⚠ [1-9]\d? warnings? · f2 to view)?$/u;
 const HISTORY_GAP = /^ +(?:New activity · )?↓ Back to bottom · esc *$/u;
 const SESSION = /^ {2}Session: {2,}[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u;
@@ -227,11 +228,11 @@ export async function captureCodexStatusHistory(input: {
   ports: CodexStatusHistoryPorts;
 }): Promise<string> {
   const { screen, version, submission, ports } = input;
-  if (!["0.159.0", "0.159.2"].includes(version) || completeStatus(screen, version)) return screen;
+  if (!isCodexPaginatedReadCandidate(version) || completeStatus(screen, version)) return screen;
   const tail = clippedTail(screen, version);
   if (!tail || !submission || submission.stage !== "enter_dispatched" || submission.enterCount !== 1 ||
       submission.agent !== "codex" || submission.command !== "/status" ||
-      submission.behaviorProfile !== `codex-tui-${version}` ||
+      submission.behaviorProfile !== codexNativeInspectionCompatibilityProfile(version)?.behaviorProfile ||
       !/^[0-9a-f]{64}$/u.test(submission.observationBaselineDigest) ||
       createHash("sha256").update(screen).digest("hex") === submission.observationBaselineDigest) return screen;
   // The original transaction's styled command -> cleared Composer transition

@@ -48,9 +48,9 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   : 0;
 
 export const STORE_FORMAT_VERSION = 1;
-export const STORE_WRITER_PROTOCOL = 8;
+export const STORE_WRITER_PROTOCOL = 9;
 export const STORE_SESSION_AUTHORITY_PROTOCOL = 3;
-const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4, 5, 6, 7]);
+const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);
 
 export interface StoreManifest {
   schema: typeof STORE_SCHEMA;

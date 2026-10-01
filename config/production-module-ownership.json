@@ -1457,6 +1457,10 @@
       "owner": "terminal-watch"
     },
     {
+      "path": "src/terminal-watch-send-activity.ts",
+      "owner": "terminal-watch"
+    },
+    {
       "path": "src/terminal-watch-service.ts",
       "owner": "terminal-watch"
     },

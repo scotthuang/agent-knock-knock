@@ -124,13 +124,79 @@ test("rejects cross-thread, cross-turn and unknown lifecycle evidence", async ()
     if (request.method === "thread/read") return { thread: { ...thread(), id: "another-thread" } };
     if (request.method === "thread/turns/list") return page([{ ...turn(), status: "unknown" }]);
     return page([{ turnId: "another-turn", item: { id: "item-1", type: "contextCompaction" }, startedAtMs: null, completedAtMs: null }]);
-  });
-  const client = await connect(fixture);
+  }, { ...initialize(), userAgent: "codex_cli_rs/0.160.0 (Mac OS)" });
+  const client = await connect(fixture, 1000, { compatibility: "read_contract" });
   try {
     await assert.rejects(client.readThread(THREAD_ID), /different thread/u);
     await assert.rejects(client.listTurns({ threadId: THREAD_ID }), /Unknown Codex turn status/u);
     await assert.rejects(client.listItems({ threadId: THREAD_ID, turnId: TURN_ID }), /different turn/u);
     await assert.rejects(client.listItems({ threadId: THREAD_ID, limit: 101 }), /page limit/u);
+  } finally { client.close(); }
+});
+
+test("future read-only backends must prove the same RPC contract without answering server requests", async () => {
+  for (const backend of ["0.159.3", "0.160.0", "1.0.0"]) {
+    const fixture = new FixtureTransport((request) => {
+      if (request.method === "thread/read") return { thread: thread() };
+      if (request.method === "thread/turns/list") return page([turn()]);
+      return page([{ turnId: TURN_ID, startedAtMs: null, completedAtMs: null,
+        item: { id: "input", type: "userMessage", content: [{ type: "text", text: "Exact task" }] } }]);
+    }, { ...initialize(), userAgent: `codex_cli_rs/${backend} (Mac OS)` });
+    const client = await connect(fixture, 1000, { compatibility: "read_contract" });
+    try {
+      assert.equal(client.metadata.serverVersion, backend);
+      assert.equal((await client.readThread(THREAD_ID)).id, THREAD_ID);
+      assert.equal((await client.listTurns({ threadId: THREAD_ID })).data[0].id, TURN_ID);
+      assert.equal((await client.listItems({ threadId: THREAD_ID, turnId: TURN_ID })).data[0].turnId, TURN_ID);
+      assert.deepEqual(fixture.sent.map((entry) => entry.method),
+        ["initialize", "initialized", "thread/read", "thread/turns/list", "thread/items/list"]);
+    } finally { client.close(); }
+  }
+});
+
+test("read-contract mode rejects unknown version metadata and preserves structured exact-version diagnostics", async () => {
+  for (const [version, compatibility] of [["nightly", "read_contract"], ["0.159.3", undefined]] as const) {
+    const fixture = new FixtureTransport(() => ({}),
+      { ...initialize(), userAgent: `codex_cli_rs/${version} (Mac OS)` });
+    await assert.rejects(connect(fixture, 1000, { compatibility }), (error: unknown) => {
+      assert.ok(error instanceof CodexAppServerReadError);
+      assert.equal(error.code, "incompatible_server");
+      assert.deepEqual(error.compatibilityDetails, {
+        stage: "initialize", expected_backend_version: "0.158.0",
+        ...(version === "nightly" ? {} : { actual_backend_version: version }),
+        compatibility: compatibility ?? "exact_version"
+      });
+      return true;
+    });
+    assert.deepEqual(fixture.sent.map((entry) => entry.method), ["initialize"]);
+  }
+});
+
+test("future pagination cannot omit cursors or return unsupported read methods as an empty history", async () => {
+  const fixture = new FixtureTransport((request) => {
+    if (request.method === "thread/turns/list") return { data: [turn()] };
+    fixture.emit({ id: request.id, error: { code: -32601, message: "method not found: PRIVATE_TASK_TEXT /private/user/path" } });
+    return undefined;
+  }, { ...initialize(), userAgent: "codex_cli_rs/0.160.0 (Mac OS)" });
+  const client = await connect(fixture, 1000, { compatibility: "read_contract" });
+  try {
+    await assert.rejects(client.listTurns({ threadId: THREAD_ID }), (error: unknown) => {
+      assert.ok(error instanceof CodexAppServerReadError);
+      assert.equal(error.compatibilityDetails?.stage, "thread/turns/list");
+      assert.equal(error.compatibilityDetails?.actual_backend_version, "0.160.0");
+      return /identifier/u.test(error.message);
+    });
+    await assert.rejects(client.listItems({ threadId: THREAD_ID, turnId: TURN_ID }),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexAppServerReadError);
+        assert.equal(error.code, "rpc_error");
+        assert.equal(error.rpcCode, -32601);
+        assert.deepEqual(error.compatibilityDetails, { stage: "thread/items/list", actual_backend_version: "0.160.0",
+          expected_backend_version: "0.158.0", compatibility: "read_contract" });
+        assert.match(error.message, /actual=0\.160\.0, expected=0\.158\.0/u);
+        assert.doesNotMatch(error.message, /PRIVATE_TASK_TEXT|\/private\/user/u);
+        return true;
+      });
   } finally { client.close(); }
 });
 
@@ -200,7 +266,7 @@ class FixtureTransport implements CodexAppServerReadTransport {
 }
 
 function connect(fixture: FixtureTransport, timeoutMs = 1000,
-  options: Partial<Pick<CodexAppServerReadOptions, "expectedServerVersion" | "allowAuditedBackendPatch">> = {}) {
+  options: Partial<Pick<CodexAppServerReadOptions, "expectedServerVersion" | "allowAuditedBackendPatch" | "compatibility">> = {}) {
   return connectCodexAppServerReadClient({
     codexHome: HOME, expectedServerVersion: "0.158.0", timeoutMs, ...options,
     transportFactory: async ({ socketPath }) => {

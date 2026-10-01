@@ -1,4 +1,12 @@
-import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
+import {
+  assertAutomaticActivityWatchIdentity,
+  automaticSendWatchReceipt,
+  createAutomaticActivityWatchAnchor,
+  isAutomaticSendWatch,
+  unsafeFallbackWatchPreparation,
+  type UserExplicitFallbackWatchReceipt
+} from "./terminal-watch-send-activity.js";
+import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { respondCodexPaginatedAsyncQuestion } from "./codex-paginated-async-response.js";
 import { publicTerminalWatch, terminalWatchCapturedAgentVersion } from "./terminal-watch-presentation.js";
 import { createHash } from "node:crypto";
@@ -128,6 +136,7 @@ import {
   type TerminalWatchTerminalIdentity,
   type TerminalActivityState,
   type TerminalActivityWatchObservationCheckpoint,
+  type TerminalActivityWatchAnchor,
   type UserExplicitFallbackWatchAnchor
 } from "./terminal-watch-store.js";
 import {
@@ -171,16 +180,11 @@ export interface PreparedUserExplicitFallbackWatch {
   openclawSession: string;
   openclawBin: string;
   timeoutMs: number;
-  anchor: UserExplicitFallbackWatchAnchor | CodexPaginatedTaskAnchor;
+  anchor: UserExplicitFallbackWatchAnchor | CodexPaginatedTaskAnchor | TerminalActivityWatchAnchor;
+  warnings?: string[];
 }
 
-export interface UserExplicitFallbackWatchReceipt {
-  callback_expected: true;
-  callback_mode: "terminal_watch";
-  watch_id: string;
-  watch_mode?: "exact_task" | "terminal_activity";
-  confidence?: "exact" | "best_effort";
-}
+export type { UserExplicitFallbackWatchReceipt } from "./terminal-watch-send-activity.js";
 
 type ExactTerminalWatchObservation =
   | {
@@ -377,7 +381,7 @@ export function createTerminalWatchCliAdapter(
     messageId: string;
     physicalToken: string;
   }): Promise<PreparedUserExplicitFallbackWatch | undefined> {
-    const callbackRoute = callbackRouteForUserExplicitFallback(input.options);
+    let callbackRoute = callbackRouteForUserExplicitFallback(input.options);
     if (!callbackRoute) return undefined;
     await bestEffortStabilizePriorFallbackWatch(
       input.options,
@@ -391,13 +395,38 @@ export function createTerminalWatchCliAdapter(
     );
     const rawTerminal = observed.rawTerminal;
     assertSameUserExplicitFallbackTerminal(input.terminal, rawTerminal);
-    const agentVersion = requiredString(
-      rawTerminal.agent_version,
-      "running coding-agent version"
-    );
-    const anchor = input.terminal.agent === "codex"
-      ? await captureCodexFallbackWatchAnchor(input, rawTerminal, agentVersion, dependencies)
-      : captureClaudeFallbackWatchAnchor(input, rawTerminal, agentVersion, dependencies);
+    const warnings: string[] = [];
+    let anchor: PreparedUserExplicitFallbackWatch["anchor"];
+    try {
+      const agentVersion = requiredString(
+        rawTerminal.agent_version,
+        "running coding-agent version"
+      );
+      anchor = input.terminal.agent === "codex"
+        ? await captureCodexFallbackWatchAnchor(input, rawTerminal, agentVersion, dependencies)
+        : captureClaudeFallbackWatchAnchor(input, rawTerminal, agentVersion, dependencies);
+    } catch (error) {
+      // A failed/uncertain native-input transaction is not an observation
+      // failure. Never turn it into permission to dispatch the user's task.
+      if (unsafeFallbackWatchPreparation(error)) throw error;
+      const current = await exactTerminalForWatch(
+        input.terminal.conversationId, input.options, dependencies
+      );
+      assertSameUserExplicitFallbackTerminal(input.terminal, current.rawTerminal);
+      anchor = createAutomaticActivityWatchAnchor({
+        capturedAt: dependencies.now(), terminalId: input.terminal.conversationId,
+        pid: input.terminal.pid, requestHash: input.requestHash,
+        before: rawTerminal, current: current.rawTerminal,
+        previousWorkspace: terminalWorkspace(rawTerminal),
+        currentWorkspace: terminalWorkspace(current.rawTerminal),
+        control: terminalControlForWatch(current.rawTerminal)
+      });
+      callbackRoute = terminalWatchNotificationOnlyRoute(callbackRoute);
+      warnings.push(
+        `exact_task_anchor_unavailable: ${safeDiagnostic(error)}`,
+        "terminal_activity_fallback: observing post-Send terminal/process activity; stable idle is not exact task completion"
+      );
+    }
     return {
       watchId: terminalUserExplicitFallbackWatchId({
         messageId: input.messageId,
@@ -419,6 +448,7 @@ export function createTerminalWatchCliAdapter(
       callbackRoute,
       openclawSession: callbackRoute.controller_session_id,
       openclawBin: stringValue(input.options.openclawBin) ?? "openclaw",
+      ...(warnings.length > 0 ? { warnings } : {}),
       timeoutMs: positiveMinutes(
         input.options.hardTimeoutMinutes ??
           input.options.agentHardTimeoutMinutes,
@@ -440,15 +470,16 @@ export function createTerminalWatchCliAdapter(
       });
     } catch {
       // Observation itself is best effort after the user's physical Send.
-      // Persist the exact pre-Send identity and let the durable provider
-      // artifact settle or invalidate the Watch.
+      // Persist the exact pre-Send identity: native evidence may recover a
+      // result; activity Watches must wait for a matching live observation.
     }
     if (observed?.state === "available") {
       assertPreparedFallbackTerminal(input.prepared, observed.rawTerminal);
     }
     // An absent or temporarily unavailable terminal after Enter is not a
-    // callback veto. The immutable pre-Send provider anchor and terminal
-    // identity remain sufficient to recover a completion already on disk.
+    // callback veto. Exact anchors may recover an on-disk completion;
+    // activity anchors preserve their process fence and can only report loss
+    // or resume observation, never infer completion from disappearance.
     const service = serviceFor(input.options);
     let watch: TerminalWatch;
     try {
@@ -457,6 +488,7 @@ export function createTerminalWatchCliAdapter(
         agent: input.prepared.agent,
         terminal: input.prepared.terminalIdentity,
         anchor: input.prepared.anchor,
+        warnings: input.prepared.warnings,
         callback_route: input.prepared.callbackRoute,
         openclaw_session: input.prepared.openclawSession,
         openclaw_bin: input.prepared.openclawBin,
@@ -468,7 +500,7 @@ export function createTerminalWatchCliAdapter(
       );
       if (
         !existing ||
-        !(isUserExplicitFallbackWatch(existing) || isPaginatedSendWatch(existing)) ||
+        !isAutomaticSendWatch(existing) ||
         existing.anchor.anchor_fingerprint !==
           input.prepared.anchor.anchor_fingerprint
       ) {
@@ -476,13 +508,7 @@ export function createTerminalWatchCliAdapter(
       }
       watch = existing;
     }
-    return {
-      callback_expected: true,
-      callback_mode: "terminal_watch",
-      watch_id: watch.watch_id,
-      watch_mode: "exact_task",
-      confidence: "exact"
-    };
+    return automaticSendWatchReceipt(watch);
   }
 
   async function bestEffortStabilizePriorFallbackWatch(
@@ -517,16 +543,10 @@ export function createTerminalWatchCliAdapter(
   }): UserExplicitFallbackWatchReceipt | undefined {
     try {
       const watch = serviceFor(input.options).get(input.watchId);
-      if (!(isUserExplicitFallbackWatch(watch) || isPaginatedSendWatch(watch)) || !watch.callback_route) {
+      if (!isAutomaticSendWatch(watch) || !watch.callback_route) {
         return undefined;
       }
-      return {
-        callback_expected: true,
-        callback_mode: "terminal_watch",
-        watch_id: watch.watch_id,
-        watch_mode: "exact_task",
-        confidence: "exact"
-      };
+      return automaticSendWatchReceipt(watch);
     } catch {
       return undefined;
     }
@@ -554,7 +574,7 @@ export function createTerminalWatchCliAdapter(
     const warnings: string[] = [];
     let anchor: TerminalWatchAnchor | undefined;
     try {
-      anchor = agent === "codex" && isCodexPaginatedVersion(rawTerminal.agent_version)
+      anchor = agent === "codex" && isCodexPaginatedReadCandidate(rawTerminal.agent_version)
         ? await capturePaginatedWatchAnchorWithLock(rawTerminal, options, dependencies)
         : captureTerminalWatchAnchor(
         agent,
@@ -1189,6 +1209,10 @@ function assertPreparedFallbackTerminal(
       "terminal changed before the user-explicit fallback Watch was attached"
     );
   }
+  if (isTerminalActivityWatch(prepared)) {
+    assertAutomaticActivityWatchIdentity(prepared.anchor, observed,
+      terminalWorkspace(observed), prepared.terminalIdentity.workspace);
+  }
 }
 
 async function exactTerminalForWatch(
@@ -1302,7 +1326,9 @@ function sameManualWatchAnchorTarget(
     left.schema === "agent-knock-knock/terminal-activity-watch-anchor" &&
     right.schema === left.schema
   ) {
-    return left.pid === right.pid &&
+    return left.origin === right.origin &&
+      left.request_hash === right.request_hash &&
+      left.pid === right.pid &&
       optionalIdentityCompatible(
         left.native_process_uuid,
         right.native_process_uuid
@@ -1376,7 +1402,7 @@ async function captureCodexFallbackWatchAnchor(
 ): Promise<UserExplicitFallbackWatchAnchor | CodexPaginatedTaskAnchor> {
       let inventory = rawTerminal._codex_open_root_rollout_inventory;
       let paginated: CodexPaginatedTaskAnchor | undefined;
-      if (isCodexPaginatedVersion(agentVersion)) {
+      if (isCodexPaginatedReadCandidate(agentVersion)) {
         try {
           paginated = await capturePaginatedWatchAnchor(rawTerminal, input.options, dependencies,
             input.requestText === undefined ? input.requestHash
@@ -1536,8 +1562,8 @@ async function observeTerminalWatch(
               surfaceId, fingerprint, options, dependencies)
           : { executable: false, suppress: false }
       }),
-      questionnaire: (checkpoint, questions) => exactTerminal.state === "available"
-        ? terminalWatchQuestionnaireObservation({ watch, observedAt, options, dependencies,
+      questionnaire: (checkpoint, questions, allowResponses) => exactTerminal.state === "available"
+        ? terminalWatchQuestionnaireObservation({ watch: allowResponses ? watch : { ...watch, interaction_policy: "notify_only" }, observedAt, options, dependencies,
             rawTerminal, projectedTerminal: exactTerminal.terminal, terminalMatches,
             observationCheckpoint: checkpoint, codexAsyncQuestionEvidence: questions })
         : undefined });

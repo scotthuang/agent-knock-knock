@@ -34,12 +34,21 @@ import type {
   TerminalTextDeliveryOptions
 } from "../../src/terminal-control-provider.js";
 
-test("explicit Send requests bracketed paste only for exact Codex 0.158.0 tmux", async (t) => {
+const FORWARD_CODEX_COMPOSER = [
+  "• Working (2s • esc to interrupt)", "",
+  "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m", "",
+  "  GPT-6-Astra high · /repo", "  ← for agents · ? for shortcuts"
+].join("\n");
+
+test("explicit Send uses paginated tmux paste after audited or freshly recognized input authority", async (t) => {
   const cases = [
     { version: "0.158.0", providerKind: "tmux", bracketedPaste: true },
     { version: "0.157.1", providerKind: "tmux", bracketedPaste: undefined },
     { version: undefined, providerKind: "tmux", bracketedPaste: undefined },
-    { version: "0.158.1", providerKind: "tmux", bracketedPaste: undefined },
+    { version: "0.158.1", providerKind: "tmux", bracketedPaste: true },
+    { version: "0.159.3", providerKind: "tmux", bracketedPaste: true },
+    { version: "0.160.0", providerKind: "tmux", bracketedPaste: true },
+    { version: "1.0.0", providerKind: "tmux", bracketedPaste: true },
     { version: "0.158.0", providerKind: "herdr", bracketedPaste: undefined }
   ] as const;
   const request = "Submit the complete single-line request once. ".repeat(12).trimEnd();
@@ -74,7 +83,8 @@ test("explicit Send requests bracketed paste only for exact Codex 0.158.0 tmux",
         toControlRef: () => control,
         resolve: async () => endpoint,
         containsProcess: () => true,
-        capture: async () => "Assistant output with the main Composer off-screen",
+        capture: async () => ["0.158.1", "0.159.3", "0.160.0", "1.0.0"].includes(testCase.version ?? "")
+          ? FORWARD_CODEX_COMPOSER : "Assistant output with the main Composer off-screen",
         sendText: async (_terminal, text, options) => {
           textDeliveries.push({ text, options });
         },
@@ -96,6 +106,57 @@ test("explicit Send requests bracketed paste only for exact Codex 0.158.0 tmux",
       assert.deepEqual(keys, [["C-u"], ["C-m"]]);
     });
   }
+});
+
+test("unverified main Send requires a fresh visible Composer and verifies explicit draft replacement", async () => {
+  const version = "0.159.3";
+  const draft = FORWARD_CODEX_COMPOSER.replace(
+    "\x1b[2mAsk Codex to do anything\x1b[0m", "replace my visible draft\n  and its second line");
+  class ForwardProvider extends RecordingTerminalProvider {
+    clearWorks = true;
+    override async sendKeys(target: TerminalEndpointRef | string, keys: readonly string[]): Promise<void> {
+      await super.sendKeys(target, keys);
+      if (this.clearWorks && keys.join(",") === "C-u") this.setScreen(target, FORWARD_CODEX_COMPOSER);
+    }
+  }
+  const request = "Run the requested task once.";
+  const fixture = (screen: string) => {
+    const provider = new ForwardProvider([PANE], { [PANE.target]: screen });
+    const bridge = createBridge(codexTerminalAgentAdapter, provider);
+    const run = (beforeMutationReservation = () => {}) => bridge.sendUserExplicitCodex(
+      terminalControl(codexTerminalAgentAdapter), request,
+      { runtime: { agentVersion: version }, beforeMutationReservation });
+    const mutations = () => provider.operations.filter((operation) => operation.kind !== "capture");
+    return { provider, run, mutations };
+  };
+  const accepted = fixture(draft);
+  await accepted.run();
+  assert.deepEqual(accepted.mutations().map((operation) =>
+    operation.kind === "keys" ? operation.keys : operation.kind === "text" ? operation.text : undefined),
+  [["C-u"], request, ["C-m"]]);
+  assert.deepEqual(accepted.provider.textDeliveryOptions, [{ bracketedPaste: true }]);
+  for (const screen of [
+    "Assistant output with the main Composer off-screen",
+    FORWARD_CODEX_COMPOSER.replace("? for shortcuts", "unknown footer"),
+    draft.replace("\x1b[1m›\x1b[0m", "›"),
+    FORWARD_CODEX_COMPOSER + "\n  unknown input owner"
+  ]) {
+    const blocked = fixture(screen);
+    await assert.rejects(blocked.run(), TerminalInputNotStartedError);
+    assert.deepEqual(blocked.mutations(), []);
+  }
+  const drifted = fixture(FORWARD_CODEX_COMPOSER);
+  await assert.rejects(drifted.run(() => drifted.provider.setScreen(PANE.target,
+    "Assistant output with the main Composer off-screen")), TerminalInputNotStartedError);
+  assert.deepEqual(drifted.mutations(), [], "preparation never caches input authority across reservation");
+  const unclear = fixture(draft);
+  unclear.provider.clearWorks = false;
+  await assert.rejects(unclear.run(), (error: unknown) => {
+    assert.ok(error instanceof TerminalUserExplicitClearUncertainError);
+    assert.match(error.message, /task text was not sent/u);
+    return true;
+  });
+  assert.deepEqual(unclear.mutations().map((operation) => operation.kind === "keys" ? operation.keys : undefined), [["C-u"]]);
 });
 
 test("explicit Codex Send replaces even when the Composer is off-screen", async (t) => {

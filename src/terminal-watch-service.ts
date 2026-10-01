@@ -99,6 +99,11 @@ interface TerminalWatchObservationBase extends TerminalWatchObservationFence {
   last_activity_at?: string;
   safe_resume_offset_bytes?: number;
   observation_checkpoint?: TerminalWatchObservationCheckpoint;
+  /** Internal invalidation of one previously executable paginated offer. */
+  interaction_write_capability_lost?: {
+    interaction_id: string;
+    prompt_fingerprint: string;
+  };
 }
 
 export type TerminalWatchObservation =
@@ -372,16 +377,18 @@ export function createTerminalWatchService(
         : observation.last_activity_at
     );
     if (observation.kind === "unavailable") {
-      if (!checkpointChanged) return current;
+      const refreshed = supersedeUnwritableCodexInteraction(current, observation, now);
+      if (!checkpointChanged && refreshed === current) return current;
       return dependencies.repository.save({
-        ...current,
+        ...refreshed,
         observation_checkpoint: checkpoint,
         last_activity_at: activityAt,
         updated_at: now
       }, { expectedRevision: terminalWatchRevision(current) });
     }
     if (observation.kind === "pending") {
-      const refreshed = supersedeAbsentAsyncInteraction(current, observation, now);
+      const refreshed = supersedeAbsentAsyncInteraction(
+        supersedeUnwritableCodexInteraction(current, observation, now), observation, now);
       if (
         refreshed === current &&
         activityAt === current.last_activity_at &&
@@ -703,6 +710,50 @@ export function createTerminalWatchService(
   });
 }
 
+const BACKEND_WRITE_CAPABILITY_CHANGED = "codex_backend_write_capability_changed";
+
+function supersedeUnwritableCodexInteraction(
+  watch: TerminalWatch,
+  observation: TerminalWatchObservation,
+  now: string
+): TerminalWatch {
+  if (!observation.interaction_write_capability_lost) return watch;
+  // The observation fence, exact offer IDs, and pending authority were checked
+  // under the Watch lock by assertObservationForWatch.
+  const prior = watch.current_interaction!;
+  const revoked: TerminalWatch = {
+    ...watch,
+    current_interaction: {
+      projection: prior.projection,
+      aggregate: reduceTerminalInteractionAggregate(prior.aggregate, {
+        type: "supersede", at: now, reason_code: BACKEND_WRITE_CAPABILITY_CHANGED
+      })
+    }
+  };
+  return {
+    ...revoked,
+    notification_outbox: watch.notification_outbox.map((notification) =>
+      isRevokedBackendInteractionNotification(revoked, notification)
+        ? supersedeUndeliveredAttentionNotifications([notification], now)[0]!
+        : notification)
+  };
+}
+
+function isRevokedBackendInteractionNotification(
+  watch: TerminalWatch,
+  notification: TerminalWatchNotification
+): boolean {
+  const prior = watch.current_interaction;
+  return prior?.aggregate.state === "superseded" &&
+    prior.aggregate.resolution?.reason_code === BACKEND_WRITE_CAPABILITY_CHANGED &&
+    notification.kind === "interaction_required" &&
+    notification.evidence_fingerprint === deterministicEvidenceFingerprint({
+      schema: "agent-knock-knock/terminal-watch-interaction-event", version: 1,
+      watch_id: watch.watch_id, interaction_id: prior.projection.interaction_id,
+      surface_id: prior.projection.surface_id
+    });
+}
+
 function supersedeAbsentAsyncInteraction(
   watch: TerminalWatch,
   observation: Extract<TerminalWatchObservation, { kind: "pending" }>,
@@ -802,8 +853,8 @@ function createTerminalWatchNotificationDelivery(input: {
         return { watch: current };
       }
       if (
-        current.status !== "active" &&
         first !== undefined &&
+        (current.status !== "active" || isRevokedBackendInteractionNotification(current, first)) &&
         isAttentionNotification(first) &&
         notificationIsClaimable(first, now)
       ) {
@@ -895,7 +946,7 @@ function createTerminalWatchNotificationDelivery(input: {
         outcome,
         retryEnabled: true,
         supersede: isAttentionNotification(selected) &&
-          current.status !== "active"
+          (current.status !== "active" || isRevokedBackendInteractionNotification(current, selected))
       });
       const settled: TerminalWatchNotification =
         decision.state === "accepted"
@@ -1421,6 +1472,18 @@ function assertObservationForWatch(
     );
     if (Date.parse(observation.last_activity_at) > Date.parse(now)) {
       throw new Error("terminal Watch activity cannot come from the future");
+    }
+  }
+  if (observation.interaction_write_capability_lost !== undefined) {
+    const lost = observation.interaction_write_capability_lost;
+    const prior = watch.current_interaction;
+    if ((observation.kind !== "pending" && observation.kind !== "unavailable") ||
+        watch.anchor.schema !== "agent-knock-knock/codex-paginated-task-anchor" ||
+        prior?.aggregate.state !== "pending" ||
+        prior.projection.response_authority !== "executable" ||
+        lost?.interaction_id !== prior.projection.interaction_id ||
+        lost?.prompt_fingerprint !== prior.projection.prompt_fingerprint) {
+      throw new Error("Codex response-capability invalidation does not match its pending exact interaction");
     }
   }
   if (observation.safe_resume_offset_bytes !== undefined) {

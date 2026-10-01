@@ -1,3 +1,4 @@
+import { unsafeFallbackWatchPreparation } from "./terminal-watch-send-activity.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
@@ -1085,6 +1086,12 @@ async function runUserExplicitTerminalFallback(
         physicalToken: intentLease.intent.boundary.physicalToken
       });
     } catch (error) {
+      if (unsafeFallbackWatchPreparation(error)) {
+        // The probe may have touched the shared composer, or failed an input
+        // identity/safety check. Retain the same-message reservation and do
+        // not dispatch task input after this uncertain native transaction.
+        throw error;
+      }
       const warning = `automatic callback Watch preparation failed: ${
         error instanceof Error ? error.message : String(error)
       }`;
@@ -1099,12 +1106,16 @@ async function runUserExplicitTerminalFallback(
         }
       );
     }
+    callbackWarnings.push(...(preparedCallbackWatch?.warnings ?? []));
     let composerDisposition: "replaced_current_composer" =
       "replaced_current_composer";
     try {
       const revalidatePhysicalMutation = async (
         terminalControl: TerminalControlRef
       ) => {
+        if (!hasFreshExplicitTerminalSendToken(options, { ...fresh, terminalControl })) {
+          throw new Error("the explicit terminal send token changed during callback preparation; refresh AKK list");
+        }
         const currentStatus = await bridge.status(
           fresh.agent,
           terminalControl,

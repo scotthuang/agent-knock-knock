@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
+import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 
-/** Default retained for existing callers; accepted fullscreen versions remain exact. */
+/** Default retained for existing callers; every frame still requires the closed UI grammar. */
 export const CODEX_FULLSCREEN_COMPOSER_VERSION = "0.158.0";
 export const CODEX_FULLSCREEN_MODEL_FOOTER =
   /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
@@ -34,7 +34,7 @@ export function captureCodexFullscreenComposerFrame(
   version: string | undefined,
   allowMultilineDraft = false
 ): CodexFullscreenComposerFrame | undefined {
-  if (!isCodexPaginatedVersion(version)) return undefined;
+  if (!isCodexPaginatedReadCandidate(version)) return undefined;
   const styledLines = screen.replace(/\r\n?/gu, "\n").split("\n");
   while (styledLines.length && !plain(styledLines.at(-1)!).trim()) {
     styledLines.pop();
@@ -82,6 +82,18 @@ function closedCodexFullscreenFooterTail(
     CODEX_FULLSCREEN_WARNING_FOOTER.test(footer) ||
     !["", "Ask Codex to do anything"].includes(composerText.trim()) &&
       CODEX_FULLSCREEN_QUEUE_FOOTER.test(footer);
+}
+
+/** Editable native draft for an explicit replacement; never command Enter authority. */
+export function captureCodexFullscreenStyledDraftFrame(
+  screen: string,
+  version: string | undefined
+): CodexFullscreenComposerFrame | undefined {
+  const frame = captureCodexFullscreenComposerFrame(screen, version, true);
+  return frame && frame.composerText.trim().length > 0 &&
+    frame.composerText !== "Ask Codex to do anything" &&
+    hasCodexComposerMarkerStyle(frame.styledLines[frame.composerIndex]!)
+    ? frame : undefined;
 }
 
 /** The selected completion list is above the Composer in fullscreen mode. */

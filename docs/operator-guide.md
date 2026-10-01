@@ -106,13 +106,18 @@ sends `C-u` once. Claude Code physical fallback uses a sentinel-backed native
 does not interrupt an active turn, then proves the main Composer empty. Each
 then injects the new request,
 waits through the paste window, and dispatches Enter exactly once. After text
-injection, Composer observation cannot veto Enter.
+injection, Composer observation cannot veto Enter. Unreviewed Codex fullscreen
+frontends additionally require a recognizable styled Composer before clearing
+and a fresh empty Composer afterward, before any task text is sent.
 
 AKK first takes the managed path where its stronger pre-input requirements
 hold. Otherwise it may deliver unmanaged work once and best-effort attaches a
-Terminal Watch that provides the completion callback. Watch preparation or
-persistence failure is reported but never vetoes, revokes, or retries the
-successful Send. If clear or request input may have occurred and terminal
+Terminal Watch that provides the completion callback. Exact preparation failure falls back to a request-correlated terminal-activity
+Watch when the physical identity and observation path remain valid. Its callback
+reports stable idle with best-effort confidence, never exact task success.
+Watch persistence failure never vetoes, revokes, or retries a successful
+Send. Uncertain native probe input or unsafe input surfaces stop before task
+text; they do not authorize this fallback. If clear or request input may have occurred and terminal
 delivery or native acceptance is uncertain, AKK does not retry automatically;
 inspect Status, the exact pane, or the returned Watch instead.
 
@@ -171,7 +176,9 @@ observation-only and never probe.
 
 Watch follows the exact terminal selected by the user. Codex 0.158.0/0.159.0/0.159.2 exact
 Watch creation types a closed `/status` command into an available main Composer;
-subsequent observation is read-only. See the [compatibility boundaries](codex-0.159.2-compatibility.md).
+subsequent observation is read-only. Newer Codex versions may use the same
+strict observed UI and paginated read contracts. See the
+[upgrade compatibility policy](callback-compatibility.md).
 
 ```text
 /akk list
@@ -194,7 +201,8 @@ observe working or approval activity and then stable idle. That callback proves
 only that the observed activity became idle, not that one uniquely identified
 task succeeded, and it contains no exact-task completion text.
 
-A Watch sends no terminal input and does not adopt, reserve, block, interrupt,
+After initial Codex foreground binding, Watch observation sends no terminal
+input and does not adopt, reserve, block, interrupt,
 approve, or own the selected task. Manual-Watch approval events are
 notification-only and never participate in auto-approval. Durable Watch state,
 notification identities, and callback outboxes make restart recovery
@@ -344,9 +352,9 @@ use it as authority for a later action.
 Codex native `/status` inspection requires an exact viewport of at least 80
 columns so the complete UUID can be proven. Legacy terminal-scoped tasks
 can bind from exact native acceptance afterward without running `/status` or
-failing merely because the pane is narrow. Codex 0.158.0/0.159.0/0.159.2 attempts a separate
-closed `/status` binding before physical Send; if an exact callback Watch cannot
-be prepared, its Send receipt states that limitation. Claude inspection must prove,
+failing merely because the pane is narrow. Codex paginated read-contract candidates attempt a separate
+closed `/status` binding before physical Send. If an exact callback Watch cannot
+be prepared safely, AKK may prepare terminal-activity observation; the receipt states the actual mode and limitation. Claude inspection must prove,
 parse, and dismiss one fresh Status panel and return to the same idle composer.
 Other complete `x.y.z` agent versions remain callable with a compatibility
 warning; incompatible runtime behavior fails or becomes uncertain rather than
