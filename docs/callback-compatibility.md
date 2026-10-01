@@ -53,22 +53,32 @@ versions. Full server responses, task text and raw RPC errors are not copied int
 callback warnings. The expected version is diagnostic on read-contract
 connections and remains a strict requirement on native interaction connections.
 
-Validation uses the fast test tier, type checking and architecture validators.
-Future-version responses and TUI frames are contract regressions, not a claim of
-native end-to-end certification for every future version. This local change has
-not been tested against a live 0.159.3 app-server: the current execution sandbox
-denies process inspection and access to its control socket.
+Development validation uses the fast test tier, type checking and architecture
+validators. Future-version responses and TUI frames are contract regressions,
+not a claim of native end-to-end certification for every future version. Initial
+sandbox restrictions prevented an independent live 0.159.3 app-server check;
+the publication checks below do not replace that native end-to-end coverage.
 
 
-## Local acceptance and publication preparation
+## Local acceptance and release validation
 
 Scott reported manually installing `0.13.15-local.20261002` and successfully
 testing the fix before authorizing npm and ClawHub publication. This is user
 acceptance evidence; this session did not collect a new detailed native test
 trace or independently certify every future Codex version.
 
-The proposed stable version is `0.13.15`, using the runtime from commit
+Stable version `0.13.15` uses the runtime from commit
 `13607c4c39e9dbf37550ef1d8c78d6127838244f`. Release preparation updates package
-version metadata, release notes and the bundled Skill instructions only.
-Registry availability and the complete publication gate must pass before
-publication is claimed. The local installation is not repeated.
+version metadata, release notes, the bundled Skill and publication checks.
+All 239 runtime JavaScript files match the user-tested local installation.
+The local installation was not repeated.
+
+The immediate publication gate passed on Node.js `24.18.0`:
+
+- `npm run test:release`: 2,913 tests passed, zero failed or skipped.
+- Isolated OpenClaw `2026.9.1` installation, plugin loading, callback, doctor,
+  read-only tmux fixture, update/reinstall and uninstall checks passed.
+- ClawHub runtime validation with the real SDK and artifact dry-run passed.
+
+The optional credentialed native lifecycle smoke was not repeated during
+publication. Existing user terminals and the real Gateway were left running.
