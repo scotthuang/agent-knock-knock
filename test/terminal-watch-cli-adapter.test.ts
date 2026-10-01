@@ -101,6 +101,116 @@ Which color do you prefer?
 Enter to select · ↑/↓ to navigate · Esc to cancel
 `;
 
+for (const agent of ["codex", "claude"] as const) {
+  test(`${agent} automatic Send falls back to a post-dispatch activity epoch without exact task or answer authority`, async (t) => {
+    const fixture = createFixture(t, "human-only", "0.159.2");
+    const callbacks: TerminalWatchCallbackInput[] = [];
+    let terminal: Record<string, any> = {
+      ...fixture.terminal, agent,
+      agent_version: agent === "codex" ? "0.159.2" : "2.1.999",
+      native_agent_session_id: undefined, native_agent_rollout: undefined,
+      activity_state: "working"
+    };
+    let exactAttempts = 0;
+    const facade = createTerminalWatchCliAdapter({
+      acquireFileLock: () => () => {}, acquireTerminalLock: () => () => {},
+      observeExactTerminal: async ({ terminalId }) => exactTerminalObservation([terminal], terminalId),
+      loadClaudeAgentRows: () => [], now: fixture.now,
+      randomUUID: () => "00000000-0000-4000-8000-000000000421",
+      storeDirFromOptions: () => fixture.storeDir,
+      terminalDispatchOwnership: () => ({ state: "none" }), terminalIncarnationBlockingTurns: () => [],
+      printJson: () => {},
+      capturePaginatedAnchor: async () => {
+        exactAttempts += 1;
+        throw new Error("app-server protocol capability unavailable");
+      },
+      callback: { deliver(input) { callbacks.push(input); return { runId: input.idempotencyKey, status: "started" }; } }
+    });
+    const options = { storeDir: fixture.storeDir,
+      callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "agent:main:activity-send", respond: true }) };
+    const prepared = await facade.prepareUserExplicitFallbackWatch({ options,
+      terminal: { conversationId: terminal.id, agent, pid: terminal.pid, terminalControl: terminal.terminal_control },
+      requestHash: "d".repeat(64), messageId: "automatic-activity", physicalToken: "c".repeat(64) });
+    assert.ok(prepared);
+    assert.equal(exactAttempts, agent === "codex" ? 1 : 0, "provider-specific exact observation is attempted first");
+    assert.equal(prepared.anchor.schema, "agent-knock-knock/terminal-activity-watch-anchor");
+    assert.deepEqual(facade.listPublicWatches(fixture.storeDir), [], "capture cannot attach a callback before task dispatch");
+    assert.match(prepared.warnings!.join("\n"), /exact_task_anchor_unavailable[\s\S]*terminal_activity_fallback/u);
+    assert.equal(prepared.callbackRoute.capabilities?.respond, false);
+
+    // The preceding pane was already working, but that is not proof of work
+    // caused by this Send. Attachment and repeated idle samples stay pending.
+    terminal = { ...terminal, activity_state: "idle" };
+    const receipt = await facade.attachUserExplicitFallbackWatch({ options, prepared });
+    assert.equal(receipt.watch_mode, "terminal_activity");
+    assert.equal(receipt.confidence, "best_effort");
+    assert.deepEqual(await facade.attachUserExplicitFallbackWatch({ options, prepared }), receipt);
+    assert.deepEqual(facade.userExplicitFallbackWatchReceipt({ options, watchId: prepared.watchId }), receipt);
+    for (let i = 0; i < 3; i += 1) await facade.runReconcileWatches(options);
+    assert.equal(callbacks.length, 0, "idle without post-Send activity is not completion");
+    assert.equal(loadTerminalWatch(fixture.storeDir, prepared.watchId).interaction_policy, "notify_only");
+    terminal = { ...terminal, activity_state: "working" };
+    await facade.runReconcileWatches(options);
+    terminal = { ...terminal, activity_state: "idle" };
+    await facade.runReconcileWatches(options);
+    assert.equal(callbacks.length, 0, "one idle sample cannot settle an activity epoch");
+    await facade.runReconcileWatches(options);
+    await facade.runReconcileWatches(options);
+    assert.equal(callbacks.length, 1, "stable idle notification is idempotent");
+    assert.equal(callbacks[0].origin, "terminal_activity_fallback");
+    assert.equal(callbacks[0].completionText, undefined);
+    const settled = loadTerminalWatch(fixture.storeDir, prepared.watchId);
+    assert.equal(settled.settlement?.reason_code, "terminal_activity_became_stably_idle");
+    assert.equal(settled.settlement?.completion_id, undefined);
+    const envelope = terminalWatchCallbackEnvelope(settled, settled.notification_outbox[0], prepared.callbackRoute);
+    assert.equal(envelope.event.metadata?.watch_mode, "terminal_activity");
+    assert.equal(envelope.event.metadata?.confidence, "best_effort");
+    assert.match(envelope.event.body, /not an exact task completion proof/u);
+  });
+}
+
+test("automatic activity fallback refuses missing or changed physical identity and uncertain native probes", async (t) => {
+  for (const failure of ["no-process", "observation-unavailable", "changed-process", "changed-endpoint", "no-screen", "uncertain-probe", "unsafe-composer"]) {
+    await t.test(failure, async (nested) => {
+      const fixture = createFixture(nested, "human-only", "0.159.2");
+      let observations = 0;
+      const terminal: Record<string, any> = { ...fixture.terminal, native_agent_rollout: undefined,
+        ...(failure === "no-process" ? { native_agent_process_uuid: undefined } : {}),
+        ...(failure === "no-screen" ? { terminal_control: { ...fixture.terminal.terminal_control, capabilities: [] } } : {}) };
+      const facade = createTerminalWatchCliAdapter({
+        acquireFileLock: () => () => {}, acquireTerminalLock: () => () => {},
+        observeExactTerminal: async ({ terminalId }) => {
+          observations += 1;
+          if (observations > 1 && failure === "observation-unavailable") return { state: "unavailable", summary: {} };
+          const current = observations > 1 && failure === "changed-process"
+            ? { ...terminal, native_agent_process_birth: "different birth" }
+            : observations > 1 && failure === "changed-endpoint"
+              ? { ...terminal, terminal_control: { ...terminal.terminal_control, panePid: 7777 } }
+              : terminal;
+          return exactTerminalObservation([current], terminalId);
+        },
+        loadClaudeAgentRows: () => [], now: fixture.now, randomUUID: () => "00000000-0000-4000-8000-000000000422",
+        storeDirFromOptions: () => fixture.storeDir, terminalDispatchOwnership: () => ({ state: "none" }),
+        terminalIncarnationBlockingTurns: () => [], printJson: () => {},
+        capturePaginatedAnchor: async () => {
+          throw Object.assign(new Error("exact probe unavailable"),
+            failure === "uncertain-probe" ? { doNotRetry: true } :
+            failure === "unsafe-composer" ? { diagnostic: "composer_not_ready" } : {});
+        }
+      });
+      await assert.rejects(() => facade.prepareUserExplicitFallbackWatch({
+        options: { callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "agent:main:safety" }) },
+        terminal: { conversationId: terminal.id, agent: "codex", pid: terminal.pid, terminalControl: terminal.terminal_control },
+        requestHash: "d".repeat(64), messageId: "unsafe-activity", physicalToken: "c".repeat(64)
+      }));
+      assert.deepEqual(facade.listPublicWatches(fixture.storeDir), []);
+      if (failure === "uncertain-probe" || failure === "unsafe-composer") {
+        assert.equal(observations, 1, "unsafe native input cannot be reinterpreted as an observation-only fallback");
+      }
+    });
+  }
+});
+
 for (const version of ["0.158.0", "0.159.0", "0.159.2"] as const) {
   test(`paginated ${version} Send retains an exact callback across terminal exit and callback replay`, async (t) => {
     const fixture = createFixture(t, "human-only", version);

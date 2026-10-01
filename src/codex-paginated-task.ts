@@ -3,8 +3,7 @@ import path from "node:path";
 import {
   isAuditedCodexPaginatedServerPair,
   isCodexPaginatedVersion,
-  type CodexPaginatedBackendVersion,
-  type CodexPaginatedVersion
+  isCodexPaginatedReadCandidate
 } from "./codex-lifecycle-compatibility.js";
 import type {
   CodexAppServerThread,
@@ -31,14 +30,17 @@ import { isRecord } from "./value-guards.js";
 
 export interface CodexPaginatedTaskAnchor {
   schema: "agent-knock-knock/codex-paginated-task-anchor";
-  version: 1;
+  version: 1 | 2;
   origin: "user_explicit_send" | "active_task";
   captured_at: string;
   codex_home: string;
   /** Physical foreground TUI version; legacy anchors implicitly use it as backend too. */
-  codex_version: CodexPaginatedVersion;
-  /** Present only for an audited shared backend with a different version. */
-  backend_version?: CodexPaginatedBackendVersion;
+  codex_version: string;
+  /** Observed backend at capture; read compatibility is revalidated on each read. */
+  backend_version?: string;
+  /** Required by v2; absent from unmodified legacy v1 fingerprints. */
+  thread_cwd?: string;
+  thread_originator?: string;
   native_thread_id: string;
   process_uuid: string;
   process_birth: string;
@@ -86,6 +88,7 @@ export type CodexPaginatedTaskObservation =
 const ANCHOR_KEYS = new Set([
   "schema", "version", "origin", "captured_at", "codex_home", "codex_version", "backend_version",
   "native_thread_id", "process_uuid", "process_birth", "pid", "request_hash",
+  "thread_cwd", "thread_originator",
   "baseline_latest_turn_id", "turn_id", "anchor_fingerprint"
 ]);
 const CHECKPOINT_KEYS = new Set([
@@ -104,7 +107,7 @@ export function createCodexPaginatedTaskAnchor(
 ): CodexPaginatedTaskAnchor {
   const base = {
     schema: "agent-knock-knock/codex-paginated-task-anchor" as const,
-    version: 1 as const,
+    version: input.thread_cwd === undefined ? 1 as const : 2 as const,
     origin: input.origin,
     captured_at: input.captured_at,
     codex_home: input.codex_home,
@@ -112,6 +115,10 @@ export function createCodexPaginatedTaskAnchor(
     ...(input.backend_version === undefined || input.backend_version === input.codex_version
       ? {} : { backend_version: input.backend_version }),
     native_thread_id: input.native_thread_id,
+    ...(input.thread_cwd === undefined ? {} : {
+      thread_cwd: input.thread_cwd,
+      thread_originator: input.thread_originator
+    }),
     process_uuid: input.process_uuid,
     process_birth: input.process_birth,
     pid: input.pid,
@@ -129,21 +136,13 @@ export function createCodexPaginatedTaskAnchor(
 export function validateCodexPaginatedTaskAnchor(
   value: unknown
 ): CodexPaginatedTaskAnchor {
-  if (
-    !isRecord(value) ||
-    Object.keys(value).some((key) => !ANCHOR_KEYS.has(key)) ||
-    value.schema !== "agent-knock-knock/codex-paginated-task-anchor" ||
-    value.version !== 1 ||
-    !["user_explicit_send", "active_task"].includes(String(value.origin)) ||
-    !isCodexPaginatedVersion(value.codex_version) ||
-    !isAuditedCodexPaginatedServerPair(value.codex_version,
-      value.backend_version === undefined ? value.codex_version : value.backend_version) ||
-    value.backend_version === value.codex_version ||
-    !validTimestamp(value.captured_at) ||
-    typeof value.codex_home !== "string" ||
-    !path.isAbsolute(value.codex_home) ||
-    !Number.isSafeInteger(value.pid) || Number(value.pid) <= 1
-  ) throw new Error("Codex paginated task anchor is invalid");
+  assertAnchorEnvelope(value);
+  if (value.version === 2) {
+    if (typeof value.thread_cwd !== "string" || !path.isAbsolute(value.thread_cwd) ||
+        value.thread_originator !== "codex-tui") throw new Error("Codex paginated thread metadata is invalid");
+  } else if (value.thread_cwd !== undefined || value.thread_originator !== undefined) {
+    throw new Error("Legacy Codex paginated anchor cannot contain v2 thread metadata");
+  }
   if (exactNativeThreadId(String(value.native_thread_id)) !== value.native_thread_id) {
     throw new Error("Codex paginated anchor has an invalid native thread");
   }
@@ -158,6 +157,30 @@ export function validateCodexPaginatedTaskAnchor(
     throw new Error("Codex paginated anchor fingerprint does not match");
   }
   return value as unknown as CodexPaginatedTaskAnchor;
+}
+
+/** Decode the stored envelope before checking its native identity and fingerprint. */
+function assertAnchorEnvelope(value: unknown): asserts value is Record<string, unknown> {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((key) => !ANCHOR_KEYS.has(key)) ||
+    value.schema !== "agent-knock-knock/codex-paginated-task-anchor" ||
+    (value.version !== 1 && value.version !== 2) ||
+    !["user_explicit_send", "active_task"].includes(String(value.origin)) ||
+    !validAnchorVersions(value) ||
+    value.backend_version === value.codex_version ||
+    !validTimestamp(value.captured_at) ||
+    typeof value.codex_home !== "string" ||
+    !path.isAbsolute(value.codex_home) ||
+    !Number.isSafeInteger(value.pid) || Number(value.pid) <= 1
+  ) throw new Error("Codex paginated task anchor is invalid");
+}
+
+function validAnchorVersions(value: Record<string, unknown>): boolean {
+  const backend = value.backend_version === undefined ? value.codex_version : value.backend_version;
+  return value.version === 2
+    ? isCodexPaginatedReadCandidate(value.codex_version) && isCodexPaginatedReadCandidate(backend)
+    : isCodexPaginatedVersion(value.codex_version) && isAuditedCodexPaginatedServerPair(value.codex_version, backend);
 }
 
 function validateAnchorTaskBinding(value: Record<string, unknown>): void {
@@ -239,9 +262,11 @@ export function observeCodexPaginatedTask(input: {
   const snapshot = input.snapshot;
   if (
     snapshot.codexHome !== anchor.codex_home ||
-    snapshot.serverVersion !== (anchor.backend_version ?? anchor.codex_version) ||
+    !isCodexPaginatedReadCandidate(snapshot.serverVersion) ||
     snapshot.thread.id !== anchor.native_thread_id ||
-    snapshot.thread.historyMode !== "paginated"
+    snapshot.thread.historyMode !== "paginated" || snapshot.thread.originator !== "codex-tui" ||
+    (anchor.version === 2 && (snapshot.thread.cwd !== anchor.thread_cwd ||
+      snapshot.thread.originator !== anchor.thread_originator))
   ) return { status: "invalidated", reason: "Codex paginated history identity changed" };
   if (!snapshot.completeToBoundary) {
     return unavailable("Codex paginated history did not reach the exact task boundary");

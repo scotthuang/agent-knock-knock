@@ -1116,7 +1116,7 @@ test("protocol 6 upgrades to the current Terminal Watch writer fence", () => {
   }
 });
 
-test("protocol 7 upgrades to protocol 8 without rewriting private paginated Watch state", () => {
+test("protocol 7 upgrades to the current writer without rewriting private paginated Watch state", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-store-upgrade-p7-"));
   const storeDir = path.join(sandbox, "store");
   try {
@@ -1127,7 +1127,7 @@ test("protocol 7 upgrades to protocol 8 without rewriting private paginated Watc
     fs.writeFileSync(sentinel, "owner-private-question-state\n", { mode: 0o600 });
     const before = fileSnapshot(sentinel);
     assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
-    assert.equal(ensureStoreWritable(storeDir).writer_protocol, 8);
+    assert.equal(ensureStoreWritable(storeDir).writer_protocol, STORE_WRITER_PROTOCOL);
     assert.deepEqual(fileSnapshot(sentinel), before);
     assert.equal(inspectStoreCompatibility(storeDir).status, "compatible");
   } finally { fs.rmSync(sandbox, { recursive: true, force: true }); }

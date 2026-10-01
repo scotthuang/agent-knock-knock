@@ -49,7 +49,7 @@ test("reads all item pages through the exact descending turn boundary and closes
   assert.deepEqual(fixture.turnCalls.map((value) => value.cursor), [undefined, "turn-page-2"]);
   assert.equal(fixture.turnCalls.every((value) => value.sortDirection === "desc" && value.itemsView === "notLoaded"), true);
   assert.equal(fixture.itemCalls.every((value) => value.sortDirection === "asc" && value.turnId !== "older"), true);
-  assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.158.0" }]);
+  assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.158.0", compatibility: "read_contract" }]);
   assert.equal(fixture.closed, true);
 });
 
@@ -130,6 +130,9 @@ test("captures only the latest active task while explicit send preserves the lat
   assert.equal(anchor?.baseline_latest_turn_id, undefined);
   assert.equal(active.closed, true);
   assert.equal(anchor?.codex_version, "0.158.0");
+  assert.equal(anchor?.version, 2);
+  assert.equal(anchor?.thread_cwd, "/tmp/project");
+  assert.equal(anchor?.thread_originator, "codex-tui");
   assert.equal(Object.hasOwn(anchor!, "backend_version"), false);
 
   const oldActive = new ReaderFixture({ turns: new Map([["", page([turn("completed"), turn("old-active", "inProgress")])]]) });
@@ -148,7 +151,7 @@ test("captures only the latest active task while explicit send preserves the lat
   assert.equal(ambiguous.closed, true);
 });
 
-test("mixed-version capture preserves the physical frontend and pins both capture modes to the actual backend", async () => {
+test("mixed-version capture preserves the frontend and records the actual backend and thread identity", async () => {
   const binding: CodexPaginatedThreadBinding = {
     ...BINDING, agentVersion: "0.159.0", serverVersion: "0.159.2"
   };
@@ -166,7 +169,7 @@ test("mixed-version capture preserves the physical frontend and pins both captur
     assert.equal(anchor.origin, requestHash ? "user_explicit_send" : "active_task");
     assert.equal(anchor.turn_id, requestHash ? undefined : "latest");
     assert.equal(anchor.baseline_latest_turn_id, requestHash ? "latest" : undefined);
-    assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2" }]);
+    assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2", compatibility: "read_contract" }]);
     assert.equal(fixture.closed, true);
   }
 
@@ -191,7 +194,7 @@ test("mixed-version snapshots retain the actual backend while historical thread 
   assert.equal(snapshot.thread.cliVersion, "0.158.0");
   assert.equal(snapshot.completeToBoundary, true);
   assert.deepEqual(snapshot.turns[0]!.items.map((item) => item.id), ["input", "result"]);
-  assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2" }]);
+  assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2", compatibility: "read_contract" }]);
   assert.equal(fixture.closed, true);
 });
 
@@ -203,18 +206,39 @@ test("a refused backend connection does not retry capture or observation against
       ? capture(fixture, HASH, { ...BINDING, agentVersion: "0.159.0", serverVersion: "0.159.2" })
       : read(fixture, "accepted", "0.159.2");
     await assert.rejects(result, (error) => error === mismatch);
-    assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2" }]);
+    assert.deepEqual(fixture.connections, [{ codexHome: HOME, expectedServerVersion: "0.159.2", compatibility: "read_contract" }]);
     assert.equal(fixture.turnCalls.length, 0);
     assert.equal(fixture.itemCalls.length, 0);
   }
 });
 
 test("legacy foreground capture preserves its exact thread identity for the legacy reader", async () => {
-  const fixture = new ReaderFixture({ thread: { ...thread(), historyMode: "legacy" } });
+  const fixture = new ReaderFixture({ thread: { ...thread(), historyMode: "legacy", originator: "codex_cli_rs" } });
   await assert.rejects(capture(fixture, HASH), (error) =>
     error instanceof CodexLegacyThreadHistoryError && error.threadId === THREAD);
   assert.equal(fixture.turnCalls.length, 0);
   assert.equal(fixture.closed, true);
+});
+
+test("capture revalidates the actual backend after initialize drift and stores v2 thread identity", async () => {
+  const fixture = new ReaderFixture({ serverVersion: "0.159.3", turns: new Map([["", page([])]]) });
+  const anchor = await capture(fixture, HASH, { ...BINDING, agentVersion: "0.159.0", serverVersion: "0.159.2" });
+  assert.equal(anchor?.version, 2);
+  assert.equal(anchor?.backend_version, "0.159.3");
+  assert.equal(anchor?.thread_cwd, "/tmp/project");
+  assert.equal(anchor?.thread_originator, "codex-tui");
+  assert.equal(fixture.closed, true);
+});
+
+test("capture and observation reject a foreign thread or client before reading its turns", async () => {
+  for (const metadata of [{ ...thread(), id: "foreign-thread" }, { ...thread(), originator: "foreign-client" }]) {
+    for (const operation of ["capture", "snapshot"]) {
+      const fixture = new ReaderFixture({ thread: metadata, serverVersion: "0.160.0" });
+      await assert.rejects(operation === "capture" ? capture(fixture, HASH) : read(fixture), /native thread identity changed/u);
+      assert.equal(fixture.turnCalls.length, 0);
+      assert.equal(fixture.closed, true);
+    }
+  }
 });
 
 function read(fixture: ReaderFixture, boundaryTurnId?: string, serverVersion = "0.158.0") {

@@ -175,13 +175,28 @@ test("status binding refuses an unchanged pre-Enter frame even if a caller claim
   await assert.rejects(captureCodexPaginatedThreadBinding(harness.input), /fresh exact foreground thread/u);
 });
 
+test("an unclosed status transaction blocks fallback Send while a later backend read failure does not", async () => {
+  const unfinished = fixture([PRE_ENTER]);
+  await assert.rejects(captureCodexPaginatedThreadBinding(unfinished.input),
+    (error: unknown) => error instanceof Error && "doNotRetry" in error && error.doNotRetry === true);
+  const captureFailed = fixture();
+  captureFailed.input.bridge.captureCodexStatusFrame = async () => { throw new Error("Screen unavailable"); };
+  await assert.rejects(captureCodexPaginatedThreadBinding(captureFailed.input),
+    (error: unknown) => error instanceof Error && "doNotRetry" in error && error.doNotRetry === true);
+  const closed = fixture();
+  const backendFailure = new Error("Read contract unavailable");
+  closed.input.resolveBackendVersion = async () => { throw backendFailure; };
+  await assert.rejects(captureCodexPaginatedThreadBinding(closed.input), (error: unknown) => error === backendFailure);
+  assert.equal("doNotRetry" in backendFailure, false);
+});
+
 test("status binding refuses a changed physical process and never retries the native command", async () => {
   const harness = fixture();
   harness.state.processChanged = true;
   await assert.rejects(captureCodexPaginatedThreadBinding(harness.input), /process changed/u);
   assert.deepEqual(harness.events, ["incarnation", "closed_status", "capture", "backend", "incarnation"]);
   const unsupported = fixture();
-  await assert.rejects(captureCodexPaginatedThreadBinding({ ...unsupported.input, agentVersion: "0.158.1" }), /requires version 0\.158\.0/u);
+  await assert.rejects(captureCodexPaginatedThreadBinding({ ...unsupported.input, agentVersion: "0.157.1" }), /requires a complete version at least 0\.158\.0/u);
   assert.deepEqual(unsupported.events, []);
 });
 
@@ -235,17 +250,19 @@ test("0.159 manual Watch and async-answer preflight bind through active status s
   }
 });
 
-test("0.159.0 TUI binds only its audited 0.159.2 shared backend and rejects drift", async () => {
+test("0.159.0 TUI preserves frontend identity while discovering a future read backend", async () => {
   const mixed = fixture([POST_STATUS_159], "0.159.0");
   mixed.setBackendVersion("0.159.2");
   const binding = await captureCodexPaginatedThreadBinding(mixed.input);
   assert.equal(binding.agentVersion, "0.159.0");
   assert.equal(binding.serverVersion, "0.159.2");
-  for (const incompatible of ["0.158.0", "0.159.3"]) {
+  mixed.setBackendVersion("0.160.0");
+  assert.equal((await captureCodexPaginatedThreadBinding(mixed.input)).serverVersion, "0.160.0");
+  for (const incompatible of ["0.157.1", "nightly"]) {
     const changed = fixture([POST_STATUS_159], "0.159.0");
     changed.setBackendVersion(incompatible);
     await assert.rejects(captureCodexPaginatedThreadBinding(changed.input),
-      /versions are not an audited pair/u);
+      /paginated read candidate version/u);
     assert.equal(changed.events.filter((event) => event === "incarnation").length, 1);
   }
 });
@@ -257,6 +274,5 @@ test("0.159.2 TUI binds its exact 0.159.2 shared backend", async () => {
   assert.equal(binding.serverVersion, "0.159.2");
   const reversed = fixture(undefined, "0.159.2");
   reversed.setBackendVersion("0.159.0");
-  await assert.rejects(captureCodexPaginatedThreadBinding(reversed.input),
-    /versions are not an audited pair/u);
+  assert.equal((await captureCodexPaginatedThreadBinding(reversed.input)).serverVersion, "0.159.0");
 });

@@ -261,6 +261,11 @@ function assertTerminalWatchRecord(
       "a terminal activity Watch must remain interaction notify-only"
     );
   }
+  if (watch.anchor.schema === "agent-knock-knock/codex-paginated-task-anchor" &&
+      initialTerminalWatchInteractionPolicy(watch.anchor) === "notify_only" &&
+      watch.interaction_policy !== "notify_only") {
+    throw new Error("an unreviewed paginated Watch must remain interaction notify-only");
+  }
   assertTerminalWatchCurrentInteraction(watch.current_interaction, watch);
   const checkpoint = watch.observation_checkpoint;
   if (
@@ -779,7 +784,11 @@ function assertTerminalWatchAnchor(
       schema: literalGuard(
         "agent-knock-knock/terminal-activity-watch-anchor"
       ),
-      version: literalGuard(1),
+      version: literalGuard(value.version === 2 ? 2 : 1),
+      ...(value.version === 2 ? {
+        origin: literalGuard("user_explicit_send"),
+        request_hash: assertSha256
+      } : {}),
       captured_at: assertTimestamp,
       terminal_id: assertNonEmptyString,
       pid: POSITIVE_INTEGER,

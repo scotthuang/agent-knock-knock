@@ -133,16 +133,17 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   });
 }
 
-async function codexFullscreenFixture(popup = CODEX_FULLSCREEN_STATUS_POPUP, finalStyledPopup = popup) {
+async function codexFullscreenFixture(popup = CODEX_FULLSCREEN_STATUS_POPUP, finalStyledPopup = popup,
+  initialScreen = CODEX_FULLSCREEN_IDLE) {
   const adapter = createCodexTerminalAgentAdapter();
   const events: Event[] = [];
   class Provider extends StaticTerminalControlProvider {
-    screen = CODEX_FULLSCREEN_IDLE;
+    screen = initialScreen;
     constructor() { super({ panes: [{ ...PANE, currentCommand: "codex", columns: 120 }] }); }
     override async capture(_terminal: TerminalEndpointRef, options: {
       scrollbackLines?: number; preserveEscapes?: boolean;
     } = {}): Promise<string> {
-      return options.preserveEscapes && this.screen !== CODEX_FULLSCREEN_IDLE
+      return options.preserveEscapes && this.screen !== initialScreen
         ? finalStyledPopup : this.screen;
     }
     override async sendText(_terminal: TerminalEndpointRef, text: string): Promise<void> {
@@ -171,7 +172,7 @@ async function codexFullscreenFixture(popup = CODEX_FULLSCREEN_STATUS_POPUP, fin
   return { events, service, control };
 }
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1.0.0"]) {
   test(`private Codex ${version} working status probe requires empty Composer and the exact above-input popup`, async () => {
     const runtime = { pid: 901, agentVersion: version };
     const blocked = await codexFullscreenFixture();
@@ -191,6 +192,35 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
     assert.deepEqual(clipped.events, ["text:/status"]);
   });
 }
+
+test("unverified Codex status candidates keep initial UI, exact runtime, and selected-popup gates", async () => {
+  const version = "0.160.0";
+  const runtime = { pid: 901, agentVersion: version };
+  for (const initial of [
+    CODEX_FULLSCREEN_IDLE.replace("? for shortcuts", "unknown input footer"),
+    CODEX_FULLSCREEN_IDLE.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "preserve this draft"),
+    CODEX_FULLSCREEN_IDLE + "\n  enter select · esc back"
+  ]) {
+    const fixture = await codexFullscreenFixture(undefined, undefined, initial);
+    await assert.rejects(fixture.service.submitCodexStatusProbe(fixture.control, version,
+      { runtime, allowWorkingCodexStatus: true }));
+    assert.deepEqual(fixture.events, [], "unknown input surfaces must stop before text");
+  }
+  const mismatched = await codexFullscreenFixture();
+  await assert.rejects(mismatched.service.submitCodexStatusProbe(mismatched.control, version,
+    { runtime: { ...runtime, agentVersion: "1.0.0" }, allowWorkingCodexStatus: true }));
+  assert.deepEqual(mismatched.events, []);
+  for (const changed of [
+    CODEX_FULLSCREEN_STATUS_POPUP.replace("\x1b[1;7m", "\x1b[1m"),
+    CODEX_FULLSCREEN_STATUS_POPUP.replace("› /status      show", "› /status-copy show"),
+    CODEX_FULLSCREEN_STATUS_POPUP + "\n  unknown input hint"
+  ]) {
+    const fixture = await codexFullscreenFixture(CODEX_FULLSCREEN_STATUS_POPUP, changed);
+    await assert.rejects(fixture.service.submitCodexStatusProbe(fixture.control, version,
+      { runtime, allowWorkingCodexStatus: true }));
+    assert.deepEqual(fixture.events, ["text:/status"], "changed popup must never receive Enter");
+  }
+});
 
 test("private Codex working status retains closed popup proof with queue-message footer", async () => {
   const runtime = { pid: 901, agentVersion: "0.158.0" };

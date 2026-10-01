@@ -2,8 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   inspectCodexScreen,
-  observeCodexNativeInspection
+  observeCodexNativeInspection,
+  planCodexNativeInspection,
+  probeCodexNativeInspection,
+  probeCodexThreadLifecycle
 } from "../src/codex-terminal-agent-adapter.js";
+import { isAuditedCodexPaginatedServerPair, isCodexPaginatedReadCandidate,
+  isCodexPaginatedVersion } from "../src/codex-lifecycle-compatibility.js";
 import { exactCodexReadyStyledComposerCapture } from
   "../src/terminal-native-inspection-bridge.js";
 import { captureCodexFullscreenComposerFrame } from
@@ -76,9 +81,63 @@ test("0.159.2 compact welcome with GPT-6.1 Sol still requires the exact styled e
   assert.equal(exactCodexReadyStyledComposerCapture(`${header}${PLAIN_COMPOSER}`, "0.159.2"), undefined);
   assert.equal(exactCodexReadyStyledComposerCapture(
     composer.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "keep my draft"), "0.159.2"), undefined);
-  // The generic styled-empty helper also serves legacy versions; the closed
-  // fullscreen profile parser owns this version check, independently of welcome text.
-  assert.equal(captureCodexFullscreenComposerFrame(`${header}${composer}`, "0.159.3"), undefined);
+  // Recognizing the same Composer grammar is not proof of the header version.
+  // The complete status parser independently pins that version and Session.
+  assert.ok(captureCodexFullscreenComposerFrame(`${header}${composer}`, "0.159.3"));
+  assert.equal(observe(`${CARD}\n\n${PLAIN_COMPOSER}`, "0.159.3").status, "mismatch");
+});
+
+for (const version of ["0.159.3", "0.160.0", "1.0.0"]) {
+  test(`unverified Codex ${version} observes the shared UI contract without gaining native write support`, () => {
+    assert.equal(isCodexPaginatedReadCandidate(version), true);
+    assert.equal(isCodexPaginatedVersion(version), false);
+    assert.equal(isAuditedCodexPaginatedServerPair(version, version), false);
+    const capability = probeCodexNativeInspection(version);
+    assert.equal(capability.versionCompatibility, "unverified");
+    assert.match(capability.compatibilityWarning!, /not been regression-tested/u);
+    assert.equal(planCodexNativeInspection({ kind: "status" }, capability).behaviorProfile,
+      `codex-tui-fullscreen-status-v1@${version}`);
+    const lifecycle = probeCodexThreadLifecycle(version);
+    assert.equal(lifecycle.newThread, false);
+    assert.equal(lifecycle.resumeExact, false);
+    const screen = SCREEN.replace("v0.159.0", `v${version}`);
+    const observed = observe(screen, version);
+    assert.equal(observed.status, "observed");
+    assert.equal(observed.observedAgentVersion, version);
+    assert.equal(observed.nativeThreadId, THREAD);
+    assert.equal(observe(screen, "0.159.2").status, "mismatch");
+    assert.equal(observeCodexNativeInspection({ operation: { kind: "status" }, screen,
+      expectedAgentVersion: version, preEnterEvidenceInventory: observed.evidenceInventory }).status, "stale");
+    for (const changed of [
+      screen.replace("? for shortcuts", "? for short…"),
+      screen.replace(`  Session:             ${THREAD}`, `  Session:             ${THREAD}\n  Session:             ${THREAD}`),
+      screen.replace("  Permissions:         Workspace (Ask for approval)\n", ""),
+      screen.replace("  Directory:", "   Directory:")
+    ]) assert.notEqual(observe(changed, version).status, "observed");
+    for (const [state, prefix] of [
+      ["working", "• Waiting for background terminal (7m 58s • esc to interrupt)"],
+      ["idle", "• Done.\n  Worked for 2s • 10:00 AM"]
+    ]) {
+      const inspected = inspectCodexScreen({ screen: `${prefix}\n\n${PLAIN_COMPOSER}`,
+        runtime: { agentVersion: version }, screenChangedSinceSend: true });
+      assert.equal(inspected.activity.state, state);
+      assert.equal(inspected.completion, undefined,
+        "a recognized idle screen must not become exact completion evidence");
+    }
+    for (const changed of [
+      PLAIN_COMPOSER.replace("? for shortcuts", "unknown footer"),
+      PLAIN_COMPOSER.replace("Ask Codex to do anything", "") + "\n  unknown input owner",
+      PLAIN_COMPOSER.replace("Ask Codex to do anything", "unsent draft")
+    ]) assert.equal(inspectCodexScreen({ screen: changed,
+      runtime: { agentVersion: version } }).activity.state, "unknown");
+  });
+}
+
+test("paginated read eligibility rejects malformed and older version identities", () => {
+  for (const version of [undefined, null, 159, "0.157.1", "0.159", "0.159.3-beta", "00.159.3", "1.0.0 extra"]) {
+    assert.equal(isCodexPaginatedReadCandidate(version), false, String(version));
+  }
+  assert.equal(isAuditedCodexPaginatedServerPair("0.159.2", "0.159.3"), false);
 });
 
 test("0.159 borderless status proves its native identity and keeps account values private", () => {

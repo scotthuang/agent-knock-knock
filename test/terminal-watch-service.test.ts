@@ -37,8 +37,11 @@ import { createTerminalInteractionAggregate, reduceTerminalInteractionAggregate 
   "../src/terminal-interaction-core.js";
 import {
   createCodexPaginatedTaskAnchor,
-  createCodexPaginatedTaskCheckpoint
+  createCodexPaginatedTaskCheckpoint,
+  type CodexPaginatedTaskSnapshot
 } from "../src/codex-paginated-task.js";
+import { observePaginatedWatch } from "../src/codex-paginated-watch.js";
+import { publicTerminalWatch } from "../src/terminal-watch-presentation.js";
 import {
   accumulateCodexAppServerQuestionnaireAnswer,
   buildCodexAppServerQuestionnaireOffer
@@ -540,6 +543,147 @@ test("async absence does not revoke a blocking questionnaire", async (t) => {
   const retained = await state.service.reconcile(created.watch_id);
   assert.equal(retained.current_interaction?.aggregate.state, "pending");
   assert.equal(retained.notification_outbox[0]?.status, "pending");
+});
+
+test("backend write capability loss durably revokes old offers without replaying their prompts or losing completion", async (t) => {
+  for (const kind of ["questionnaire", "async_question"] as const) {
+    for (const terminalAvailable of [true, false]) await t.test(`${kind}, terminal=${terminalAvailable}`, async (t) => {
+      const state = harness(t);
+      const request = "Complete the original exact task";
+      const anchor = createCodexPaginatedTaskAnchor({
+        origin: "active_task", captured_at: START, codex_home: "/codex",
+        codex_version: "0.159.0", backend_version: "0.159.2",
+        native_thread_id: THREAD_ID, turn_id: TASK_ID,
+        thread_cwd: "/workspace/project", thread_originator: "codex-tui",
+        process_uuid: "codex-process-service", process_birth: "codex-birth-service",
+        pid: 800, request_hash: createHash("sha256").update(request).digest("hex")
+      });
+      const created = state.service.create(exactInput({ anchor }));
+      const offeredAt = "2026-08-21T00:00:01.000Z";
+      state.advance(1_000);
+      state.observations.push((watch) => {
+        const interaction = watchInteraction(watch, "executable", "2026-08-21T00:00:30.000Z", "pending", kind);
+        return observed(watch, "interaction", offeredAt, {
+          evidence_fingerprint: digest({
+            schema: "agent-knock-knock/terminal-watch-interaction-event", version: 1,
+            watch_id: watch.watch_id, interaction_id: interaction.projection.interaction_id,
+            surface_id: interaction.projection.surface_id
+          }), current_interaction: interaction
+        });
+      });
+      const offered = await state.service.reconcile(created.watch_id);
+      assert.equal(offered.notification_outbox[0]?.kind, "interaction_required");
+      state.restart();
+      const prior = state.service.get(created.watch_id).current_interaction!.projection;
+      const lost = { interaction_id: prior.interaction_id, prompt_fingerprint: prior.prompt_fingerprint };
+      for (const invalid of [
+        { interaction_write_capability_lost: { ...lost, interaction_id: "other-question" } },
+        { interaction_write_capability_lost: { ...lost, prompt_fingerprint: "f".repeat(64) } },
+        { interaction_write_capability_lost: lost, anchor_fingerprint: "f".repeat(64) }
+      ]) {
+        state.observations.push((watch) => observed(watch, "pending", offeredAt, invalid));
+        await assert.rejects(state.service.reconcile(created.watch_id), /does not match/u);
+        assert.equal(state.service.get(created.watch_id).current_interaction?.aggregate.state, "pending");
+      }
+      let snapshot: CodexPaginatedTaskSnapshot = {
+        codexHome: "/codex", serverVersion: "0.159.3", completeToBoundary: true,
+        thread: { id: THREAD_ID, sessionId: THREAD_ID, cwd: "/workspace/project",
+          historyMode: "paginated", cliVersion: "0.159.0", originator: "codex-tui", source: "cli",
+          status: { type: "active", activeFlags: ["waitingOnUserInput"] }, turns: [] },
+        turns: [{ id: TASK_ID, status: "inProgress", itemsView: "full", error: null,
+          startedAt: 100, completedAt: null, durationMs: null,
+          items: [{ id: "request", type: "userMessage", content: [{ type: "text", text: request }] }] }]
+      };
+      const changedAt = "2026-08-21T00:00:02.000Z";
+      state.advance(1_000);
+      const read = (watch: TerminalWatch) => observePaginatedWatch({
+        watch, observedAt: changedAt, terminalAvailable, terminalMatches: terminalAvailable,
+        readSnapshot: async () => snapshot,
+        blockingQuestionnaire: async () => assert.fail("old question cannot be opened after backend write compatibility changes"),
+        questionnaire: () => assert.fail("old prompt cannot become a fresh manual notification during revocation")
+      });
+      state.observations.push(read);
+      const revoked = await state.service.reconcile(created.watch_id);
+      assert.equal(revoked.status, "active");
+      assert.equal(revoked.current_interaction?.aggregate.state, "superseded");
+      assert.equal(revoked.current_interaction?.aggregate.resolution?.reason_code, "codex_backend_write_capability_changed");
+      assert.deepEqual(revoked.anchor, anchor);
+      assert.equal(revoked.interaction_policy, offered.interaction_policy);
+      assert.equal(revoked.notification_outbox.length, 1);
+      assert.equal(revoked.notification_outbox[0]?.status, "superseded");
+      const restored = state.restart().get(created.watch_id);
+      const visible = publicTerminalWatch(restored, [], true);
+      assert.equal((visible.capabilities as { interaction_respond: boolean }).interaction_respond, false);
+      assert.equal(visible.interaction_state, undefined);
+      assert.equal((await state.service.reconcileAll()).callbacks_delivered, 0);
+      assert.equal(state.deliveries.length, 0);
+      snapshot = { ...snapshot, turns: [{ ...snapshot.turns[0]!, status: "completed", completedAt: 101,
+        durationMs: 1000, items: [...snapshot.turns[0]!.items,
+          { id: "result", type: "agentMessage", phase: "final_answer", text: "Exact original task completed" }] }] };
+      state.observations.push(read);
+      const completed = await state.service.reconcile(created.watch_id);
+      assert.equal(completed.status, "completed");
+      assert.equal(completed.settlement?.completion_id, TASK_ID);
+      assert.equal((await state.service.reconcileAll()).callbacks_delivered, 1);
+      assert.deepEqual(state.deliveries.map((delivery) => delivery.kind), ["completed"]);
+    });
+  }
+});
+
+test("a revoked backend interaction does not reclaim an expired callback lease", async (t) => {
+  const state = harness(t);
+  const anchor = createCodexPaginatedTaskAnchor({
+    origin: "active_task", captured_at: START, codex_home: "/codex",
+    codex_version: "0.159.0", backend_version: "0.159.2",
+    native_thread_id: THREAD_ID, turn_id: TASK_ID,
+    process_uuid: "codex-process-service", process_birth: "codex-birth-service",
+    pid: 800, request_hash: REQUEST_HASH
+  });
+  const created = state.service.create(exactInput({ anchor }));
+  const offeredAt = "2026-08-21T00:00:01.000Z";
+  state.advance(1_000);
+  state.observations.push((watch) => {
+    const interaction = watchInteraction(watch, "executable", "2026-08-21T00:00:30.000Z");
+    return observed(watch, "interaction", offeredAt, {
+      evidence_fingerprint: digest({
+        schema: "agent-knock-knock/terminal-watch-interaction-event", version: 1,
+        watch_id: watch.watch_id, interaction_id: interaction.projection.interaction_id,
+        surface_id: interaction.projection.surface_id
+      }), current_interaction: interaction
+    });
+  });
+  await state.service.reconcile(created.watch_id);
+  let releaseDelivery = () => {};
+  let deliveryStarted = () => {};
+  const started = new Promise<void>((resolve) => { deliveryStarted = resolve; });
+  const blocked = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+  state.deliveryOutcomes.push(async () => { deliveryStarted(); await blocked; });
+  const oldWorker = state.service.reconcileAll();
+  await started;
+  try {
+    state.advance(500);
+    state.observations.push((watch) => observed(watch, "pending", "2026-08-21T00:00:01.500Z", {
+      interaction_write_capability_lost: {
+        interaction_id: watch.current_interaction!.projection.interaction_id,
+        prompt_fingerprint: watch.current_interaction!.projection.prompt_fingerprint
+      }
+    }));
+    const revoked = await state.service.reconcile(created.watch_id);
+    assert.equal(revoked.current_interaction?.aggregate.state, "superseded");
+    assert.equal(revoked.notification_outbox[0]?.status, "delivering", "an in-flight transport cannot be unsent");
+    const snapshot = revoked.notification_outbox[0]?.callback_envelope;
+    state.advance(600);
+    const recovered = await state.restart().reconcileAll();
+    assert.equal(recovered.callbacks_delivered, 0);
+    const loaded = state.service.get(created.watch_id);
+    assert.equal(loaded.status, "active");
+    assert.equal(loaded.notification_outbox[0]?.status, "superseded");
+    assert.deepEqual(loaded.notification_outbox[0]?.callback_envelope, snapshot);
+    assert.equal(state.deliveries.length, 1, "the expired interaction delivery must not be replayed");
+  } finally {
+    releaseDelivery();
+    await oldWorker;
+  }
 });
 
 test("service create/list survives restart and permits independent read-only subscriptions", async (t) => {

@@ -191,7 +191,7 @@
     },
     "store_protocols": {
       "format_version": 1,
-      "current_writer_protocol": 8,
+      "current_writer_protocol": 9,
       "session_authority_protocol": 3,
       "terminal_watch_schema": "agent-knock-knock/terminal-watch",
       "terminal_watch_version": 3,
@@ -202,7 +202,8 @@
         4,
         5,
         6,
-        7
+        7,
+        8
       ],
       "authority_paths": [
         "src/session-store.ts",
@@ -241,6 +242,10 @@
         {
           "protocol": 8,
           "witness": "store-protocol-8-boundary"
+        },
+        {
+          "protocol": 9,
+          "witness": "store-protocol-9-boundary"
         }
       ],
       "witnesses": [
@@ -662,7 +667,13 @@
       "id": "store-protocol-8-boundary",
       "path": "test/store.test.ts",
       "tier": "integration",
-      "needle": "protocol 7 upgrades to protocol 8 without rewriting private paginated Watch state"
+      "needle": "protocol 7 upgrades to the current writer without rewriting private paginated Watch state"
+    },
+    {
+      "id": "store-protocol-9-boundary",
+      "path": "test/terminal-watch-store.test.ts",
+      "tier": "fast",
+      "needle": "protocol 8 upgrades to the capability-aware writer without rewriting an existing Watch"
     },
     {
       "id": "store-protocol-cli-boundary",

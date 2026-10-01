@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.15-local.20261002 - Local candidate
+
+- Attempt Codex exact callback observation through validated runtime UI and paginated read contracts on newer versions; preserve exact task identity across compatible backend upgrades.
+- Automatically attach a notification-only terminal-activity Watch when exact Codex or Claude Send preparation is unavailable and physical identity remains safe.
+- Preserve strict native answer permissions and refuse uncertain probe input; include sanitized backend-version and operation diagnostics in read errors.
+- Use store writer protocol 9 with backward-readable anchors, leaving existing private Watch records intact.
+
 ## 0.13.14 - 2026-10-01
 
 ### Changed

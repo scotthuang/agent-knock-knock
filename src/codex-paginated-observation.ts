@@ -17,7 +17,7 @@ import type { TerminalRuntimeIdentity } from "./terminal-agent-adapter.js";
 import type { CodexAsyncQuestionDurableEvidence } from "./codex-async-question-adapter.js";
 
 type ReadClient = Pick<CodexAppServerReadClient, "metadata" | "readThread" | "listTurns" | "listItems" | "close">;
-type Connect = (options: { codexHome: string; expectedServerVersion: string }) => Promise<ReadClient>;
+type Connect = (options: { codexHome: string; expectedServerVersion: string; compatibility: "read_contract" }) => Promise<ReadClient>;
 
 export async function readCodexPaginatedAsyncQuestions(runtime: TerminalRuntimeIdentity): Promise<
   readonly CodexAsyncQuestionDurableEvidence[] | undefined
@@ -49,11 +49,12 @@ export async function readCodexPaginatedTaskSnapshot(input: {
   connect?: Connect;
 }): Promise<CodexPaginatedTaskSnapshot> {
   const client = await (input.connect ?? connectCodexAppServerReadClient)({
-    codexHome: input.codexHome, expectedServerVersion: input.serverVersion
+    codexHome: input.codexHome, expectedServerVersion: input.serverVersion, compatibility: "read_contract"
   });
   try {
     const thread = await client.readThread(input.threadId);
     if (thread.historyMode === "legacy") throw new CodexLegacyThreadHistoryError(thread.id);
+    assertReadThreadIdentity(thread, input.threadId);
     const listed = await readTurnsThroughBoundary(client, input.threadId, input.boundaryTurnId).catch((error: unknown) => {
       if (!input.boundaryTurnId && thread.status.type === "idle" && isCodexUnmaterializedThreadError(error, input.threadId)) {
         return { turns: [], complete: true };
@@ -127,11 +128,12 @@ export async function captureCodexPaginatedTaskAnchor(input: {
 }): Promise<CodexPaginatedTaskAnchor | undefined> {
   const { binding } = input;
   const client = await (input.connect ?? connectCodexAppServerReadClient)({
-    codexHome: binding.codexHome, expectedServerVersion: binding.serverVersion
+    codexHome: binding.codexHome, expectedServerVersion: binding.serverVersion, compatibility: "read_contract"
   });
   try {
     const thread = await client.readThread(binding.threadId);
     if (thread.historyMode === "legacy") throw new CodexLegacyThreadHistoryError(thread.id);
+    assertReadThreadIdentity(thread, binding.threadId);
     const page = await client.listTurns({ threadId: binding.threadId, limit: 2, sortDirection: "desc", itemsView: "notLoaded" }).catch((error: unknown) => {
       if (thread.status.type === "idle" && isCodexUnmaterializedThreadError(error, binding.threadId)) return { data: [] };
       throw error;
@@ -146,9 +148,11 @@ export async function captureCodexPaginatedTaskAnchor(input: {
       origin: input.requestHash ? "user_explicit_send" : "active_task",
       captured_at: input.now.toISOString(), codex_home: binding.codexHome,
       codex_version: binding.agentVersion,
-      ...(binding.serverVersion === binding.agentVersion
-        ? {} : { backend_version: binding.serverVersion }),
+      ...(client.metadata.serverVersion === binding.agentVersion
+        ? {} : { backend_version: client.metadata.serverVersion }),
       native_thread_id: binding.threadId,
+      thread_cwd: thread.cwd,
+      thread_originator: thread.originator!,
       process_uuid: binding.processUuid, process_birth: binding.processBirth,
       pid: binding.pid, request_hash: input.requestHash ?? activeHash!,
       ...(input.requestHash && latest ? { baseline_latest_turn_id: latest.id } : {}),
@@ -156,5 +160,11 @@ export async function captureCodexPaginatedTaskAnchor(input: {
     });
   } finally {
     client.close();
+  }
+}
+
+function assertReadThreadIdentity(thread: Awaited<ReturnType<ReadClient["readThread"]>>, threadId: string): void {
+  if (thread.id !== threadId || thread.originator !== "codex-tui") {
+    throw new Error("Codex paginated native thread identity changed");
   }
 }

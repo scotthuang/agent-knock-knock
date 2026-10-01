@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { captureCodexFullscreenComposerFrame,
-  CODEX_FULLSCREEN_SHORTCUT_FOOTER as CODEX_PAGINATED_SHORTCUT_FOOTER } from
+import { captureCodexFullscreenComposerFrame } from
   "./codex-fullscreen-composer-proof.js";
 import {
   classifyCodexProcess,
@@ -8,7 +7,8 @@ import {
   type ForkContextPackage
 } from "./codex-session-provider.js";
 import {
-  isCodexPaginatedVersion,
+  isCodexPaginatedReadCandidate,
+  codexNativeInspectionCompatibilityProfile,
   codexRuntimeCompatibilityProfile,
   codexThreadLifecycleHistoryWarning,
   codexUnsupportedDurableHistoryWarning
@@ -90,7 +90,10 @@ const CODEX_FOOTER_LINE =
   /^(?:gpt-[\w.-]+(?:\s|$)|[-\w.]+ default ·)/u;
 // Diagnostic activity only. These fullscreen rows do not prove a task identity,
 // an empty styled Composer, or permission to use a version-bound native action.
-const CODEX_FULLSCREEN_ACTIVITY_VERSIONS = new Set(["0.157.0", "0.157.1", "0.158.0", "0.159.0", "0.159.2"]);
+function codexFullscreenActivityCandidate(version: string | undefined): boolean {
+  return version === "0.157.0" || version === "0.157.1" ||
+    isCodexPaginatedReadCandidate(version);
+}
 const CODEX_FULLSCREEN_MODEL_FOOTER =
   /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
 const CODEX_FULLSCREEN_SHORTCUT_FOOTER =
@@ -189,7 +192,7 @@ export function probeCodexNativeInspection(
       reason: "the running Codex version could not be verified"
     };
   }
-  const runtimeProfile = codexRuntimeCompatibilityProfile(agentVersion);
+  const runtimeProfile = codexNativeInspectionCompatibilityProfile(agentVersion);
   if (!runtimeProfile) {
     return {
       status: "unsupported",
@@ -215,7 +218,9 @@ export function probeCodexNativeInspection(
     statusInspection: true,
     reason: runtimeProfile.versionCompatibility === "verified"
       ? "Codex /status native inspection is supported by the verified version"
-      : "Codex /status native inspection will use the generic runtime profile for this unverified version"
+      : isCodexPaginatedReadCandidate(agentVersion)
+        ? "Codex /status may use the shared fullscreen grammar only after exact runtime UI proof"
+        : "Codex /status native inspection will use the generic runtime profile for this unverified version"
   };
 }
 
@@ -223,7 +228,7 @@ export function planCodexNativeInspection(
   operation: TerminalNativeInspectionOperation,
   capabilities: TerminalNativeInspectionCapabilities
 ): TerminalNativeInspectionPlan {
-  const runtimeProfile = codexRuntimeCompatibilityProfile(
+  const runtimeProfile = codexNativeInspectionCompatibilityProfile(
     capabilities.agentVersion
   );
   if (
@@ -640,9 +645,9 @@ function parseCodexStatusCardAfterCommand(
   while (topBorderIndex < lines.length && !lines[topBorderIndex].trim()) {
     topBorderIndex += 1;
   }
-  const borderlessVersion = /^>_ OpenAI Codex \(v(0\.159\.(?:0|2))\)$/u
+  const borderlessVersion = /^>_ OpenAI Codex \(v(\d+\.\d+\.\d+)\)$/u
     .exec(lines[topBorderIndex]?.trim() ?? "")?.[1];
-  if (borderlessVersion === "0.159.0" || borderlessVersion === "0.159.2") {
+  if (isCodexPaginatedReadCandidate(borderlessVersion)) {
     return parseCodex159StatusCard(lines, topBorderIndex, borderlessVersion);
   }
   if (
@@ -742,7 +747,7 @@ function parseCodexStatusCardAfterCommand(
 function parseCodex159StatusCard(
   lines: readonly string[],
   start: number,
-  agentVersion: "0.159.0" | "0.159.2"
+  agentVersion: string
 ): ParsedCodexStatusCard {
   const uncertain = (reason: string): ParsedCodexStatusCard => ({ status: "ambiguous", reason });
   const limit = Math.min(lines.length, start + CODEX_STATUS_MAX_LINES);
@@ -1028,7 +1033,7 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
   );
   const screenExcerpt = codexScreenExcerpt(options.screen, options.maxExcerptLength ?? 4000);
   const completion = activity.state === "idle" &&
-      !CODEX_FULLSCREEN_ACTIVITY_VERSIONS.has(options.runtime?.agentVersion ?? "")
+      !codexFullscreenActivityCandidate(options.runtime?.agentVersion)
     ? detectCodexScreenCompletion({
         screen: screenExcerpt,
         requestText: options.requestText,
@@ -1141,7 +1146,7 @@ export function detectCodexActivityState(
 
   const tailLines = screen.trimEnd().split(/\r?\n/).slice(-30);
   const workingLine = tailLines.find((line) => isCodexWorkingLine(line) ||
-    (agentVersion === "0.159.0" || agentVersion === "0.159.2") && isCodex159ActivityRow(line.trimEnd()));
+    isCodexPaginatedReadCandidate(agentVersion) && isCodex159ActivityRow(line.trimEnd()));
   if (workingLine) {
     return {
       state: "working",
@@ -1535,6 +1540,9 @@ function codexIdlePromptLine(
 ): string | undefined {
   const fullscreenIdle = codexFullscreenIdlePromptLine(lines, agentVersion);
   if (fullscreenIdle !== undefined) return fullscreenIdle;
+  // A changed fullscreen footer or unknown overlay must not fall through to
+  // the legacy bare-prompt heuristic and become an apparent stable idle.
+  if (isCodexPaginatedReadCandidate(agentVersion)) return undefined;
   if (
     agentVersion !== undefined &&
     CODEX_ASTRA_SPARKLE_AGENT_VERSIONS.has(agentVersion)
@@ -1586,8 +1594,15 @@ function codexFullscreenIdlePromptLine(
   lines: readonly string[],
   agentVersion?: string
 ): string | undefined {
-  if (!agentVersion || !CODEX_FULLSCREEN_ACTIVITY_VERSIONS.has(agentVersion)) {
+  if (!agentVersion || !codexFullscreenActivityCandidate(agentVersion)) {
     return undefined;
+  }
+  if (isCodexPaginatedReadCandidate(agentVersion)) {
+    const frame = captureCodexFullscreenComposerFrame(lines.join("\n"), agentVersion);
+    return frame?.hasShortcutFooter &&
+      ["", "Ask Codex to do anything"].includes(frame.composerText)
+      ? frame.plainLines[frame.composerIndex]
+      : undefined;
   }
   const reversedIndex = [...lines].reverse().findIndex((line) =>
     /^[›»] Ask Codex to do anything\s*$/u.test(line)
@@ -1598,7 +1613,7 @@ function codexFullscreenIdlePromptLine(
     .filter((line) => line.trim()).map((line) => line.trimEnd());
   return footer.length === 2 &&
     CODEX_FULLSCREEN_MODEL_FOOTER.test(footer[0]!) &&
-    (isCodexPaginatedVersion(agentVersion) ? CODEX_PAGINATED_SHORTCUT_FOOTER : CODEX_FULLSCREEN_SHORTCUT_FOOTER).test(footer[1]!)
+    CODEX_FULLSCREEN_SHORTCUT_FOOTER.test(footer[1]!)
     ? lines[composerIndex]
     : undefined;
 }

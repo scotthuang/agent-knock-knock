@@ -30,6 +30,7 @@ import {
   terminalWatchNotificationId,
   terminalWatchNotificationIdempotencyKey,
   terminalWatchCallbackEnvelope,
+  terminalWatchCallbackMessage,
   terminalWatchNotificationCallbackSnapshot,
   terminalWatchRevision,
   type ClaudeUserExplicitFallbackWatchObservationCheckpoint,
@@ -59,6 +60,7 @@ import {
   type CodexHumanStartedActiveTaskAnchor
 } from "../src/terminal-submission-acceptance.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
+import { ensureStoreWritable, inspectStoreCompatibility, storeManifestPath } from "../src/store.js";
 
 const THREAD_ID = "11111111-1111-4111-8111-111111111111";
 const TASK_ID = "22222222-2222-4222-8222-222222222222";
@@ -457,6 +459,52 @@ test("terminal Watch Store persists private atomic records and lists them", (t) 
   assert.equal(fs.statSync(paths.root).mode & 0o777, 0o700);
   assert.equal(fs.statSync(paths.statePath).mode & 0o777, 0o600);
   assert.equal(saved.anchor.anchor_fingerprint, codexAnchor().anchor_fingerprint);
+});
+
+test("protocol 8 upgrades to the capability-aware writer without rewriting an existing Watch", (t) => {
+  const storeDir = tempStore(t);
+  const saved = saveTerminalWatch(storeDir, watch(), { expectedRevision: null });
+  const statePath = pathsForTerminalWatch(saved.watch_id, storeDir).statePath;
+  const original = fs.readFileSync(statePath);
+  const manifestPath = storeManifestPath(storeDir);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, writer_protocol: 8 }));
+  assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
+  assert.equal(ensureStoreWritable(storeDir).writer_protocol, 9);
+  assert.deepEqual(fs.readFileSync(statePath), original);
+  assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
+});
+
+test("Send activity correlation survives storage without granting acceptance or response authority", (t) => {
+  const storeDir = tempStore(t);
+  const anchor = createTerminalActivityWatchAnchor({
+    capturedAt: new Date(CREATED_AT), terminalId: "terminal:v2:fixture", pid: 700,
+    initialActivityState: "idle", origin: "user_explicit_send", requestHash: SHA_B,
+    nativeProcessUuid: "exact-process", nativeProcessBirth: "exact-birth"
+  });
+  const saved = saveTerminalWatch(storeDir, {
+    ...watch(), anchor, interaction_policy: "notify_only",
+    observation_checkpoint: initialTerminalWatchObservationCheckpoint(anchor)
+  }, { expectedRevision: null });
+  assert.equal(anchor.version, 2);
+  const messageInput = { watchId: saved.watch_id, event: "completed" as const,
+    agent: "codex" as const, terminalId: saved.terminal.terminal_id,
+    origin: "terminal_activity_fallback" as const };
+  assert.match(terminalWatchCallbackMessage(messageInput), /AKK did not send terminal input/u);
+  const sendBody = terminalWatchCallbackMessage({ ...messageInput, activitySend: true });
+  assert.match(sendBody, /native task acceptance remains unproven/u);
+  assert.doesNotMatch(sendBody, /AKK did not send terminal input/u);
+  assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
+  assert.equal((saved.observation_checkpoint as {has_seen_activity: boolean}).has_seen_activity, false);
+  for (const tampered of [
+    { ...anchor, request_hash: SHA_A }, { ...anchor, version: 1 },
+    { ...anchor, origin: undefined }, { ...anchor, request_hash: undefined }
+  ]) assert.throws(() => assertTerminalWatch({ ...saved, anchor: tampered }, saved.watch_id));
+  assert.throws(() => assertTerminalWatch({ ...saved, interaction_policy: "respond_when_exact" }, saved.watch_id), /notify-only/u);
+  assert.throws(() => createTerminalActivityWatchAnchor({
+    capturedAt: new Date(CREATED_AT), terminalId: "terminal:v2:fixture", pid: 700,
+    initialActivityState: "idle", origin: "user_explicit_send"
+  }), /together/u);
 });
 
 test("terminal-activity Watch round-trips its confidence checkpoint and immutable warnings", (t) => {

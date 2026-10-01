@@ -1,19 +1,14 @@
-import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
-const CODEX_PAGINATED_DEFAULT_HISTORY_VERSIONS = new Set([
-  "0.157.0",
-  "0.157.1",
-  "0.158.0",
-  "0.159.0",
-  "0.159.2"
-]);
+import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
+const CODEX_PRE_READ_CONTRACT_PAGINATED_VERSIONS = new Set(["0.157.0", "0.157.1"]);
 
 /** New physical Sends can acquire a paginated task anchor before task input. */
 export function codexPhysicalSendUsesPaginatedWatch(agentVersion?: string): boolean {
-  return isCodexPaginatedVersion(agentVersion);
+  return isCodexPaginatedReadCandidate(agentVersion);
 }
 
 export function codexManagedSendRequiresLegacyHistory(agentVersion?: string): boolean {
-  return CODEX_PAGINATED_DEFAULT_HISTORY_VERSIONS.has(agentVersion ?? "");
+  return isCodexPaginatedReadCandidate(agentVersion) ||
+    CODEX_PRE_READ_CONTRACT_PAGINATED_VERSIONS.has(agentVersion ?? "");
 }
 
 /** Managed Monitor still consumes legacy rollouts, never paginated thread data. */
@@ -51,7 +46,7 @@ export function selectCodexUserExplicitSendWatchSource(input: {
 }): CodexUserExplicitSendWatchSource {
   if (input.paginatedAnchorAvailable) return { source: "codex_paginated" };
   if (
-    CODEX_PAGINATED_DEFAULT_HISTORY_VERSIONS.has(input.agentVersion ?? "") &&
+    codexManagedSendRequiresLegacyHistory(input.agentVersion) &&
     !(Number.isSafeInteger(input.legacyRootCount) &&
       Number(input.legacyRootCount) > 0)
   ) {
@@ -60,7 +55,9 @@ export function selectCodexUserExplicitSendWatchSource(input: {
       reasonCode: "codex_paginated_history_anchor_unavailable",
       warning: `Codex ${input.agentVersion} has no verified legacy root ` +
         "rollout or exact paginated history anchor. The message can still be " +
-        "sent, but no automatic completion callback Watch can be attached."
+        "sent, but no exact-task completion callback can be established. " +
+        "A best-effort terminal-activity Watch may still be attached after " +
+        "physical identity and screen-status validation."
     };
   }
   return { source: "codex_rollout" };

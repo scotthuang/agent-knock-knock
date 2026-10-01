@@ -1,5 +1,6 @@
 import { captureCodexStatusHistory } from "./codex-status-history-navigation.js";
-import { isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
+import { captureCodexFullscreenStyledDraftFrame } from "./codex-fullscreen-composer-proof.js";
+import { isCodexPaginatedReadCandidate, isCodexPaginatedVersion } from "./codex-lifecycle-compatibility.js";
 import { terminalApprovalFingerprint } from "./terminal-approval-fingerprint.js";
 export { terminalApprovalFingerprint } from "./terminal-approval-fingerprint.js";
 import { createHash } from "node:crypto";
@@ -793,7 +794,7 @@ export class TerminalAgentBridge {
     runtime: TerminalRuntimeIdentity,
     submission?: TerminalCodexStatusProbeResult
   ): Promise<{ screen: string; emptyComposer: boolean }> {
-    if (!isCodexPaginatedVersion(runtime.agentVersion)) throw new Error("Fullscreen status proof requires a verified paginated Codex version");
+    if (!isCodexPaginatedReadCandidate(runtime.agentVersion)) throw new Error("Fullscreen status proof requires a paginated Codex runtime candidate");
     if (submission && !sameTerminalControlIncarnation(terminalControl, submission.terminalControl)) {
       throw new Error("Codex status submission belongs to a different terminal incarnation");
     }
@@ -1211,12 +1212,16 @@ export class TerminalAgentBridge {
       error instanceof TerminalEnterDispatchReservedError
         ? error
         : new TerminalEnterDispatchReservedError(message, { cause: error });
+    const requireObservedFullscreenComposer = adapter.agent === "codex" &&
+      isCodexPaginatedReadCandidate(options.runtime?.agentVersion) &&
+      !isCodexPaginatedVersion(options.runtime?.agentVersion);
     const captureSafePrompt = async (
       control: TerminalControlRef,
-      requireExactEmptyClaudeComposer = false
+      requireExactEmptyClaudeComposer = false,
+      requireExactEmptyCodexComposer = false
     ): Promise<TerminalControlRef> => {
       try {
-        const captured = await this.captureInspection(
+        let captured = await this.captureInspection(
           adapter,
           control,
           {
@@ -1226,6 +1231,25 @@ export class TerminalAgentBridge {
             scrollbackLines: 0
           }
         );
+        if (requireObservedFullscreenComposer) {
+          // Forward compatibility is conditional on a fresh native input
+          // surface, never on a cached /status proof from Watch preparation.
+          const styledScreen = await this.terminalProvider.capture(
+            this.terminalProvider.endpoint(captured.terminalControl),
+            { scrollbackLines: 0, preserveEscapes: true }
+          );
+          const empty = exactCodexReadyStyledComposerCapture(
+            styledScreen, options.runtime?.agentVersion);
+          if (!empty && (requireExactEmptyCodexComposer ||
+              !captureCodexFullscreenStyledDraftFrame(styledScreen, options.runtime?.agentVersion))) {
+            throw new Error(requireExactEmptyCodexComposer
+              ? "Codex main Composer could not be proven empty after draft clear; task text was not sent"
+              : "Codex fullscreen input surface is unavailable or changed; explicit Send requires a visible recognized main Composer");
+          }
+          const screen = stripTerminalEscapeSequences(styledScreen);
+          captured = { ...captured, screen,
+            inspection: adapter.inspectScreen({ screen, runtime: options.runtime }) };
+        }
         const asyncQuestionInputMode = adapter.agent === "codex"
           ? inspectCodexAsyncQuestionInputMode(captured.screen)
           : "absent";
@@ -1327,6 +1351,17 @@ export class TerminalAgentBridge {
 
     let verifiedForText: TerminalControlRef;
     try {
+      if (requireObservedFullscreenComposer) {
+        try {
+          clearedForText = await captureSafePrompt(clearedForText, false, true);
+        } catch (error) {
+          throw new TerminalUserExplicitClearUncertainError(
+            "Codex Composer clear could not be revalidated; task text was not sent: " +
+              (error instanceof Error ? error.message : String(error)),
+            { cause: error }
+          );
+        }
+      }
       verifiedForText = await this.verifyTerminalIdentity(
         adapter.agent, clearedForText, options.runtime);
       if (!sameTerminalControlIdentity(clearedForText, verifiedForText)) {
@@ -1340,7 +1375,7 @@ export class TerminalAgentBridge {
         normalized,
         // A complete native Paste event clears Codex's key-burst Enter
         // suppression. A tmux literal-key ACK does not prove that drain.
-        adapter.agent === "codex" && isCodexPaginatedVersion(options.runtime?.agentVersion) &&
+        adapter.agent === "codex" && isCodexPaginatedReadCandidate(options.runtime?.agentVersion) &&
           verifiedForText.kind === "tmux" ? { bracketedPaste: true } : undefined
       );
     } catch (error) {
