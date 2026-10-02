@@ -72,7 +72,7 @@ On 2026-10-02, isolated macOS sessions running the locally installed Codex
 identity, stale catalogs, confirmation grammar, changed input frames, uncertain
 transport, one-attempt authority, and ordinary Send/approval separation.
 `npm run validate:architecture` and `npm run validate:refactor-evidence` passed.
-Full/release suites were not run, per the repository's development test policy.
+Full/release suites were not run during development, per the repository's test policy.
 
 Codex 0.159.2 has source-contract and regression coverage; it was not launched
 for this live check. `approve_for_me` and a selectable `read_only` transition,
@@ -80,3 +80,6 @@ custom profiles, other platforms, and an external controller's complete
 permission-to-callback conversation were not exercised live. Host/connector
 tool registration and controller-scoped authority are covered by regression
 checks; the live operations above used the CLI.
+
+Scott subsequently tested the locally installed `0.13.16-local.permissions.20261002`
+candidate successfully and authorized the npm and ClawHub `0.13.16` release.
