@@ -149,7 +149,7 @@ The decomposition gives Watch capture, fallback observation, interaction
 authority, and response execution separate owners; Monitor reconciliation and
 recovery likewise leave its CLI facade. Legacy Codex rollout file access,
 record parsing, human-started task observation, interaction evidence, and bound
-completion now have distinct modules. Native lifecycle recovery, model-control
+completion now have distinct modules. Native model-control execution and
 surface/input handling, Codex inventory, and native inspection proof are also
 separated from their existing public entry points.
 
@@ -215,12 +215,15 @@ Those files and the remaining 330 default-threshold function violations remain
 follow-up work. This closeout does not claim that all complexity is eliminated
 or that the longer-horizon 250-violation goal has been reached.
 
-Validation at this documentation checkpoint: TypeScript no-emit checking,
-JavaScript syntax/module-link checking, architecture and refactor-evidence
-validators, static preservation review, and compiled public-contract parity
-have passed. Final fast/release test results are to be recorded at the release
-gate. No live terminal scenarios were executed during this refactor; source
-and package comparisons do not substitute for live verification.
+Validation completed for publication: `npm run test:fast` passed all 2,434
+tests; `npm run test:release` passed all 2,949 full-suite tests, the isolated
+OpenClaw 2026.9.1 install/callback/update/uninstall scenario, ClawHub runtime
+inspection (zero breakages or warnings), and publication dry run. TypeScript
+no-emit checking, JavaScript syntax/module-link checking, architecture and
+refactor-evidence validators, static preservation review, and compiled
+public-contract parity also passed. All 27 changed production modules retain
+their previous runtime exports. No live terminal scenarios were executed;
+fixture coverage and package comparisons do not substitute for live verification.
 
 ## Contract synchronization
 
