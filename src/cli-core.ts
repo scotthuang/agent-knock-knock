@@ -1117,10 +1117,8 @@ const nativeThreadTransitionApplication =
   });
 
 const nativeThreadLifecycleFacade = Object.freeze({
-  ...nativeThreadLifecycleQueryFacade,
-  ...nativeThreadTransitionApplication
+  ...nativeThreadLifecycleQueryFacade, ...nativeThreadTransitionApplication
 });
-
 const runListResumableThreads = nativeThreadLifecycleFacade.runList;
 const nativeInspectionCommands: Readonly<Record<
   string,
@@ -1131,12 +1129,12 @@ const nativeInspectionCommands: Readonly<Record<
   "identify-foreground": nativeThreadLifecycleFacade.runIdentifyForeground,
   "model-options": nativeThreadLifecycleFacade.runModelOptions,
   "repair-model-control": nativeThreadLifecycleFacade.runRepairModelControl,
-  "set-model": nativeThreadLifecycleFacade.runSetModel
+  "set-model": nativeThreadLifecycleFacade.runSetModel,
+  "permission-options": nativeThreadLifecycleFacade.runPermissionOptions,
+  "set-permissions": nativeThreadLifecycleFacade.runSetPermissions
 });
-const codexLatentClearResumeObservation =
-  nativeThreadLifecycleFacade.codexLatentClearResumeObservation;
-const nativeInspectionComposerEmpty =
-  nativeThreadLifecycleFacade.nativeInspectionComposerEmpty;
+const codexLatentClearResumeObservation = nativeThreadLifecycleFacade.codexLatentClearResumeObservation;
+const nativeInspectionComposerEmpty = nativeThreadLifecycleFacade.nativeInspectionComposerEmpty;
 
 const terminalStatusCliFacade = createTerminalStatusCliFacade({
   selection: {
@@ -1812,6 +1810,8 @@ function usage() {
   agent-knock-knock list-resumable-threads --terminal <exact-terminal-id> [--selection-scope <opaque-scope>]
   agent-knock-knock native-inspect --terminal <exact-terminal-id> --inspection status --expected-binding-token <token>
   agent-knock-knock model-options --terminal <exact-terminal-id> --expected-binding-token <token>
+  agent-knock-knock permission-options --terminal <exact-terminal-id> --expected-binding-token <token>
+  agent-knock-knock set-permissions --terminal <exact-terminal-id> --expected-binding-token <token> --expected-catalog-fingerprint <sha256> --mode <advertised-permission-id>
   agent-knock-knock repair-model-control --terminal <exact-terminal-id> --expected-binding-token <token>
   agent-knock-knock set-model --terminal <exact-terminal-id> --expected-binding-token <token> --expected-catalog-fingerprint <sha256> --model <semantic-id> --reasoning-effort <low|medium|high|xhigh|max|ultra>
   agent-knock-knock identify-foreground --terminal <exact-terminal-id> --expected-terminal-token <token>

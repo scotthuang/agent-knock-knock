@@ -1,4 +1,5 @@
 import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
+import { observeCodexPermissionSurface } from "./codex-permission-surface.js";
 import { createHash } from "node:crypto";
 import {
   captureCodexFullscreenComposerFrame,
@@ -140,13 +141,37 @@ function exactClaudeModelControlComposerCapture(
 function codexBlockingModalVisible(screen: string): boolean {
   const tail = screen.replace(/\r\n?/gu, "\n").split("\n").slice(-80)
     .join("\n");
-  return /\b(?:press|use)\s+(?:esc|escape)\s+to\s+(?:cancel|close|dismiss)\b/iu
+  return codexPermissionInputOwnerVisible(screen) ||
+    /\b(?:press|use)\s+(?:esc|escape)\s+to\s+(?:cancel|close|dismiss)\b/iu
     .test(tail) ||
     /\besc\s+to\s+cancel\b/iu.test(tail) ||
     codexActiveWriterViewerVisible(tail) ||
     ["expanded", "ambiguous"].includes(
       inspectCodexAsyncQuestionInputMode(tail)
     );
+}
+
+/** Permission selectors own input; recognizing them never grants approval keys. */
+function codexPermissionInputOwnerVisible(screen: string): boolean {
+  const observed = observeCodexPermissionSurface(screen);
+  if (observed.state === "picker" || observed.state === "full_access_confirmation") {
+    return true;
+  }
+  const lines = stripTerminalEscapeSequences(screen)
+    .replace(/\r\n?/gu, "\n").split("\n");
+  const titles = ["Update Model Permissions", "Enable full access?"];
+  let titleIndex = -1;
+  for (let index = Math.max(0, lines.length - 80); index < lines.length; index += 1) {
+    const visible = lines[index]!.trim().replace(/(?:…|\.{3})$/u, "");
+    if (visible.length >= 16 && titles.some((title) => title.startsWith(visible))) {
+      titleIndex = index;
+    }
+  }
+  if (titleIndex < 0) return false;
+  // A complete newer main Composer makes old menu text historical. This reads
+  // the fullscreen shape only; it grants neither a version profile nor input.
+  const composer = captureCodexFullscreenComposerFrame(screen, "0.159.2", true);
+  return !composer || composer.composerIndex <= titleIndex;
 }
 
 /**
@@ -181,7 +206,8 @@ function terminalUserExplicitInputOwnerBlocked(
     (line, index) => index > modalFooterIndex &&
       (CODEX_COMPOSER_MARKER.test(line) || /^\s*❯(?:\s|\u00a0|$)/u.test(line))
   );
-  return modalFooterIndex >= 0 && !laterMainComposer ||
+  return codexPermissionInputOwnerVisible(screen) ||
+    modalFooterIndex >= 0 && !laterMainComposer ||
     codexActiveWriterViewerVisible(screen) ||
     ["expanded", "ambiguous"].includes(
       inspectCodexAsyncQuestionInputMode(screen)

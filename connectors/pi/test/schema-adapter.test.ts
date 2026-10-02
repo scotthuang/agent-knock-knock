@@ -16,7 +16,7 @@ test("adapts every AKK HostAdapter tool schema for Pi 0.84.4", async () => {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   });
   try {
-    assert.equal(adapter.tools.length, 22);
+    assert.equal(adapter.tools.length, 24);
     assert.equal(
       catalogDigest(adapter),
       "f469d4e7320c789a48ca106e3a89a5f81815d4da7c14920bfd11d25fdf598a98"

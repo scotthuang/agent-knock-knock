@@ -333,6 +333,8 @@ test("the public action contract v30 exposes semantic arguments only", () => {
       "list_resumable_threads",
       "native_inspect",
       "model_options",
+      "permission_options",
+      "set_permissions",
       "repair_model_control",
       "set_model",
       "identify_foreground",
@@ -372,6 +374,10 @@ test("the public action contract v30 exposes semantic arguments only", () => {
     assert.equal(encoded.includes(forbidden), false, forbidden);
   }
   const actions = contracts.actions as Record<string, any>;
+  assert.deepEqual(actions.permission_options.required, ["terminal_id"]);
+  assert.deepEqual(actions.set_permissions.required, ["terminal_id", "mode"]);
+  assert.equal(actions.set_permissions.scope, "current_session");
+  assert.equal(actions.set_permissions.uncertain_retry_allowed, false);
   assert.deepEqual(actions.repair_model_control.required, ["terminal_id"]);
   assert.equal(
     actions.repair_model_control.authority_scope,

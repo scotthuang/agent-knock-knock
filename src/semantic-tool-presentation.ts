@@ -641,7 +641,8 @@ function sanitizeModelFacingValue(
     delete output.missing_required;
   }
   if (
-    output.tool === "agent_knock_knock_set_model" &&
+    (output.tool === "agent_knock_knock_set_model" ||
+      output.tool === "agent_knock_knock_set_permissions") &&
     isRecord(output.arguments)
   ) {
     const terminalId = stringValue(
@@ -652,7 +653,9 @@ function sanitizeModelFacingValue(
       : {};
     if (Array.isArray(output.missing_required)) {
       output.missing_required = output.missing_required.filter((field) =>
-        field === "model" || field === "reasoning_effort"
+        output.tool === "agent_knock_knock_set_permissions"
+          ? field === "mode"
+          : field === "model" || field === "reasoning_effort"
       );
     }
   }

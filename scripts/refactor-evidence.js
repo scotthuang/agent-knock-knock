@@ -62,6 +62,8 @@ const PUBLIC_COMMANDS = Object.freeze([
   "model-options",
   "repair-model-control",
   "set-model",
+  "permission-options",
+  "set-permissions",
   "resume-thread",
   "reconcile-binding",
   "respond",
@@ -92,6 +94,8 @@ const PUBLIC_ACTIONS = Object.freeze([
   "model_options",
   "repair_model_control",
   "set_model",
+  "permission_options",
+  "set_permissions",
   "identify_foreground",
   "identify_and_send",
   "resume_thread",
@@ -114,6 +118,8 @@ const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_model_options",
   "agent_knock_knock_repair_model_control",
   "agent_knock_knock_set_model",
+  "agent_knock_knock_permission_options",
+  "agent_knock_knock_set_permissions",
   "agent_knock_knock_identify_foreground",
   "agent_knock_knock_identify_and_send",
   "agent_knock_knock_new_thread",
@@ -147,6 +153,7 @@ const OPENCLAW_AUTHORITY_ROLES = Object.freeze({
     "src/semantic-tool-model-facing-field-policy.ts",
   semantic_presentation: "src/semantic-tool-presentation.ts",
   semantic_private_authority: "src/semantic-tool-private-authority.ts",
+  semantic_permission_control: "src/semantic-permission-control.ts",
   semantic_private_authority_offers:
     "src/semantic-private-authority-offers.ts",
   semantic_relay: "src/semantic-tool-relay.ts",
@@ -173,6 +180,7 @@ const HOST_BRIDGE_AUTHORITY_PATHS = Object.freeze([
   "src/host-profile-callback-transport.ts",
   "src/host-profile-runtime.ts",
   "src/host-profile.ts",
+  "src/semantic-permission-control.ts",
   "src/semantic-private-authority-offers.ts",
   "src/semantic-tool-arguments.ts",
   "src/semantic-tool-catalog.ts",
@@ -1015,6 +1023,8 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
       "listResumableThreadsParameters",
       "nativeInspectParameters",
       "modelOptionsParameters",
+      "permissionOptionsParameters",
+      "setPermissionsParameters",
       "repairModelControlParameters",
       "setModelParameters",
       "identifyForegroundParameters",
@@ -1119,6 +1129,59 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
     "./semantic-tool-presentation.js",
     ["toolResult", "usesHostBridgeToolPresentation"],
     "semantic tool-runtime role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_runtime,
+    "./semantic-permission-control.js",
+    ["registerPermissionControlTools", "handleAkkPermissionCommand"],
+    "semantic permission-control registration boundary"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.semantic_runtime,
+    /registerPermissionControlTools\(api, registerCliTool\)/u,
+    "semantic permission-control shared registrar"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.semantic_permission_control,
+    /export async function buildPrivatePermissionOptionsArgs[\s\S]*?export function rememberDisplayedPermissionOptionsOffer[\s\S]*?export function buildPrivateSetPermissionsArgs/u,
+    "semantic permission-control private authority role"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_permission_control,
+    "./semantic-private-authority-offers.js",
+    ["consumeSemanticPrivateAuthorityOffer", "rememberSemanticPrivateAuthorityOffer"],
+    "semantic permission-control single-use offer boundary"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_permission_control,
+    "./semantic-tool-arguments.js",
+    ["requiredControllerSessionKey", "requiredControllerSessionId"],
+    "semantic permission-control controller incarnation boundary"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_permission_control,
+    "./semantic-tool-private-authority.js",
+    ["assertOnlyModelControlParameters", "privateTerminalActionArguments"],
+    "semantic permission-control current terminal authority boundary"
+  );
+  assertDirectNamedImport(
+    repoRoot,
+    roles.semantic_permission_control,
+    "./semantic-tool-schemas.js",
+    ["permissionOptionsParameters", "setPermissionsParameters"],
+    "semantic permission-control schema boundary"
+  );
+  assertSourcePattern(
+    repoRoot,
+    roles.semantic_permission_control,
+    /export function registerPermissionControlTools[\s\S]*?name: "agent_knock_knock_permission_options"[\s\S]*?parameters: permissionOptionsParameters[\s\S]*?name: "agent_knock_knock_set_permissions"[\s\S]*?parameters: setPermissionsParameters/u,
+    "semantic permission-control tool registrations"
   );
   assertSourcePattern(
     repoRoot,
@@ -1290,6 +1353,7 @@ function validateOpenClawAuthorityRoles(authorityPaths, repoRoot) {
     roles.semantic_model_facing_policy,
     roles.semantic_presentation,
     roles.semantic_private_authority,
+    roles.semantic_permission_control,
     roles.semantic_private_authority_offers,
     roles.semantic_relay,
     roles.semantic_runtime,

@@ -135,7 +135,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   assert.equal(lifecycleStarts, 1);
   assert.equal(commands.length, 1);
   assert.equal(commands[0]?.name, "akk");
-  assert.equal(tools.length, 22);
+  assert.equal(tools.length, 24);
   assert.deepEqual(capabilityVerifications, [
     undefined,
     tools.map((tool) => tool.name),

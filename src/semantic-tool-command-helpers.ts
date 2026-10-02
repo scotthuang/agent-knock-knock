@@ -214,6 +214,8 @@ export type AkkCommand =
   | { action: "unwatch"; watchId: string }
   | { action: "list-resumable-threads"; terminalId: string }
   | { action: "model-options"; terminalId: string }
+  | { action: "permission-options"; terminalId: string }
+  | { action: "set-permissions"; terminalId: string; mode: string }
   | { action: "repair-model-control"; terminalId: string }
   | {
       action: "set-model";
@@ -305,6 +307,21 @@ function parseAkkLifecycleCommand(
       throw new Error(usage);
     }
     return { action: "list-resumable-threads", terminalId };
+  }
+  if (action === "permissions" || action === "permission-options") {
+    const usage = "Usage: /akk permissions <exact-terminal-id>";
+    const { token: terminalId, rest: extra } = takeRequiredToken(rest, usage);
+    assertExactTerminalId(terminalId, usage);
+    if (extra.trim()) throw new Error(usage);
+    return { action: "permission-options", terminalId };
+  }
+  if (action === "set-permissions") {
+    const usage = "Usage: /akk set-permissions <exact-terminal-id> <advertised-mode-id>";
+    const { token: terminalId, rest: modeInput } = takeRequiredToken(rest, usage);
+    assertExactTerminalId(terminalId, usage);
+    const { token: mode, rest: extra } = takeRequiredToken(modeInput, usage);
+    if (extra.trim() || !/^[a-z][a-z0-9_-]{0,63}$/u.test(mode)) throw new Error(usage);
+    return { action: "set-permissions", terminalId, mode };
   }
   if (action === "models" || action === "model-options") {
     const usage = "Usage: /akk models <exact-terminal-id>";
@@ -538,6 +555,8 @@ export function akkUsageText(): string {
     "/akk models <exact-terminal-id>",
     "/akk repair-model-control <exact-terminal-id>",
     "/akk set-model <exact-terminal-id> <advertised-model-id> <advertised-reasoning-effort>",
+    "/akk permissions <exact-terminal-id>",
+    "/akk set-permissions <exact-terminal-id> <advertised-mode-id>",
     "/akk new-thread <exact-terminal-id>",
     "/akk clear-thread <exact-terminal-id>",
     "/akk resume-thread <exact-terminal-id> [uuid|previous|number|@short-id]",
@@ -1192,10 +1211,11 @@ export function buildAkkCommandCliArgs(
         ["--codex-home", codexHome],
         ["--selection-scope", nonEmptyString(context.selectionScope)]
       );
+    case "permission-options":
     case "model-options":
       return withOptionalArgs(
         [
-          "model-options",
+          command.action,
           "--terminal",
           command.terminalId,
           "--expected-binding-token",
@@ -1212,6 +1232,17 @@ export function buildAkkCommandCliArgs(
           command.terminalId,
           "--expected-binding-token",
           requiredExpectedBindingToken(context.expectedBindingToken)
+        ],
+        ["--store-dir", storeDir],
+        ["--codex-home", codexHome]
+      );
+    case "set-permissions":
+      return withOptionalArgs(
+        [
+          "set-permissions", "--terminal", command.terminalId,
+          "--expected-binding-token", requiredExpectedBindingToken(context.expectedBindingToken),
+          "--expected-catalog-fingerprint", requiredExpectedCatalogFingerprint(context.expectedCatalogFingerprint),
+          "--mode", command.mode
         ],
         ["--store-dir", storeDir],
         ["--codex-home", codexHome]
@@ -1670,6 +1701,7 @@ function formatAvailableActions(
     "resume_thread",
     "native_inspect",
     "model_options",
+    "permission_options",
     "repair_model_control"
   ]);
   const names = Object.keys(actions)

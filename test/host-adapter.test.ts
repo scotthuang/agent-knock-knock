@@ -20,6 +20,8 @@ const expectedToolNames = [
   "agent_knock_knock_model_options",
   "agent_knock_knock_repair_model_control",
   "agent_knock_knock_set_model",
+  "agent_knock_knock_permission_options",
+  "agent_knock_knock_set_permissions",
   "agent_knock_knock_identify_foreground",
   "agent_knock_knock_identify_and_send",
   "agent_knock_knock_new_thread",

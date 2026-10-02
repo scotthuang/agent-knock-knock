@@ -20,7 +20,7 @@ test("all 22 real AKK schemas pass the shared supported DSH validator", async ()
     logger: { info() {}, warn() {} },
   });
   try {
-    assert.equal(adapter.tools.length, 22);
+    assert.equal(adapter.tools.length, 24);
     assert.equal(
       catalogDigest(adapter),
       "f469d4e7320c789a48ca106e3a89a5f81815d4da7c14920bfd11d25fdf598a98"

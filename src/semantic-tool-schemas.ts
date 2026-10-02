@@ -304,6 +304,41 @@ export const modelOptionsParameters = {
   }
 };
 
+export const permissionOptionsParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description: "Exact full terminal_id from the current terminal row's advertised permission_options action. Codex must be idle with an empty Composer; AKK verifies its physical and native thread identities before closed inspection."
+    }
+  }
+};
+
+export const setPermissionsParameters = {
+  type: "object",
+  additionalProperties: false,
+  required: ["terminal_id", "mode"],
+  properties: {
+    terminal_id: {
+      type: "string",
+      minLength: 1,
+      pattern: "^terminal:v[0-9]+:\\S+$",
+      description: "Exact full terminal_id used for the immediately preceding permission_options result in this controller conversation."
+    },
+    mode: {
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+      pattern: "^[a-z][a-z0-9_-]*$",
+      description: "Exact semantic mode id explicitly selected by the user from the displayed native permission catalog. Full Access requires explicit authorization for that mode. Labels, menu indexes, slash commands, keys, arbitrary profiles, and configuration paths are not accepted."
+    }
+  }
+};
+
 export const repairModelControlParameters = {
   type: "object",
   additionalProperties: false,

@@ -67,6 +67,8 @@ import {
 } from "./terminal-action-projection.js";
 import { materializeModelControlAvailability } from
   "./terminal-model-control-availability.js";
+import { permissionControlCapability, renderPermissionControlListActions } from
+  "./terminal-permission-control-list-projection.js";
 import { terminalModelControlPlanConforms,
   type TerminalModelControlCapabilities,
   type TerminalModelControlProfile,
@@ -92,7 +94,8 @@ import type { TerminalDispatchLedgerDocument } from
 import {
   listActionContracts,
   renderAvailableListActions,
-  renderTerminalModelControlActions
+  renderTerminalModelControlActions,
+  renderTerminalPhysicalEntry
 } from "./terminal-list-renderer.js";
 import type { TerminalProcessSource } from "./terminal-process-source.js";
 import type { TerminalControlProvider } from "./terminal-control-provider.js";
@@ -1097,6 +1100,7 @@ async function terminalControlledListEntry(
     native_thread_lifecycle: lifecycleCapability,
     native_inspection: nativeInspectionCapability,
     model_control: modelControlCapability,
+    permission_control: permissionControlCapability(session.agent, agentVersion),
     ...(compatibilityWarnings.length > 0
       ? { compatibility_warnings: compatibilityWarnings }
       : {}),
@@ -1224,6 +1228,9 @@ async function terminalControlledListEntry(
     availability: modelControlAvailability,
     mutationScope: modelControlCapability.scope
   });
+  const permissionControlActions = renderPermissionControlListActions({
+    session, terminalControl, facts, renderedActions: modelControlActions
+  });
   const foregroundIdentificationActions =
     terminalUserExplicitSendAuthority.eligible &&
       commands.identify_foreground === true
@@ -1252,17 +1259,9 @@ async function terminalControlledListEntry(
           }
         }
       : {};
-  const { commands: _commands, ...publicEntry } = entry;
-  return {
-    ...publicEntry,
-    ...(terminalUserExplicitSendAction
-      ? { _terminal_user_explicit_send_action: terminalUserExplicitSendAction }
-      : {}),
-    available_actions: {
-      ...modelControlActions,
-      ...foregroundIdentificationActions
-    }
-  };
+  return renderTerminalPhysicalEntry(entry,
+    { ...permissionControlActions, ...foregroundIdentificationActions },
+    terminalUserExplicitSendAction);
 }
 
 async function collectTerminalFactsForList(
