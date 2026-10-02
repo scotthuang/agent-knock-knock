@@ -1,3 +1,8 @@
+import { createTerminalPermissionControlCliAdapter } from "./terminal-permission-control-cli-adapter.js";
+import type {
+  TerminalNativeControlCliBoundary,
+  TerminalNativeControlCliOptions
+} from "./terminal-native-control-cli-contract.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -90,7 +95,7 @@ import {
 } from "./terminal-model-control.js";
 import { nonBlankString } from "./value-guards.js";
 
-export type NativeLifecycleCliOptions = Readonly<Record<string, unknown>>;
+export type NativeLifecycleCliOptions = TerminalNativeControlCliOptions;
 
 export const CODEX_FOREGROUND_IDENTIFICATION_TTL_MS = 30_000;
 export const CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES = 240;
@@ -264,9 +269,7 @@ export interface NativeThreadOwnershipRequest {
   allowedManagedSessionIds?: string[];
 }
 
-export interface NativeThreadLifecycleCliFacade {
-  resolveLifecycleTerminal(options: NativeLifecycleCliOptions):
-    Promise<ResolvedTerminalConversation>;
+export interface NativeThreadLifecycleCliFacade extends TerminalNativeControlCliBoundary {
   queryPorts(options: NativeLifecycleCliOptions): NativeThreadLifecycleQueryPorts;
   assertExclusive(input: NativeThreadOwnershipRequest): Promise<void>;
   currentSnapshot(
@@ -285,6 +288,8 @@ export interface NativeThreadLifecycleCliFacade {
   ): TerminalAgentAdapter;
   runList(options: NativeLifecycleCliOptions): Promise<void>;
   runInspect(options: NativeLifecycleCliOptions): Promise<void>;
+  runPermissionOptions(options: NativeLifecycleCliOptions): Promise<void>;
+  runSetPermissions(options: NativeLifecycleCliOptions): Promise<void>;
   runModelOptions(options: NativeLifecycleCliOptions): Promise<void>;
   runSetModel(options: NativeLifecycleCliOptions): Promise<void>;
   runRepairModelControl(options: NativeLifecycleCliOptions): Promise<void>;
@@ -294,11 +299,6 @@ export interface NativeThreadLifecycleCliFacade {
     terminal: LifecycleTerminalObservation;
     expectedTerminalToken: string;
   }): Promise<CodexForegroundIdentificationProof>;
-  assertSameInspectionTerminal(
-    expected: LifecycleTerminalObservation,
-    actual: LifecycleTerminalObservation,
-    stage: string
-  ): void;
   codexLatentClearResumeObservation(input: {
     screen?: string;
     agentVersion?: string;
@@ -310,6 +310,21 @@ export function createNativeThreadLifecycleCliAdapter(
   ports: CreateNativeThreadLifecycleCliAdapterInput
 ): NativeThreadLifecycleCliFacade {
   const app = new NativeThreadLifecycleCliApplication(ports);
+  const permissions = createTerminalPermissionControlCliAdapter({
+    runtime: {
+      forOptions: ports.runtime.forOptions,
+      physicalProcessIncarnation: ports.identity.physicalProcessIncarnation,
+      physicalRuntime: (terminal) => ports.identity.runtimeForLiveIdentity({ terminal, physicalOnly: true })
+    },
+    lifecycle: {
+      resolveLifecycleTerminal: (options) => app.resolveLifecycleTerminal(options),
+      assertSameInspectionTerminal: (expected, actual, stage) => app.assertSameInspectionTerminal(expected, actual, stage),
+      assertInspectionReady: (input) => app.assertInspectionReady(input),
+      assertForegroundHasNoLifecycleTransition: (options, terminal) => app.assertForegroundHasNoLifecycleTransition(options, terminal)
+    },
+    state: ports.state,
+    output: ports.output
+  });
   return Object.freeze({
     resolveLifecycleTerminal: (options) => app.resolveLifecycleTerminal(options),
     queryPorts: (options) => app.queryPorts(options),
@@ -320,6 +335,8 @@ export function createNativeThreadLifecycleCliAdapter(
     agentAdapter: (options, agent) => app.agentAdapter(options, agent),
     runList: (options) => app.runList(options),
     runInspect: (options) => app.runInspect(options),
+    runPermissionOptions: permissions.runPermissionOptions,
+    runSetPermissions: permissions.runSetPermissions,
     runModelOptions: (options) => app.runModelOptions(options),
     runSetModel: (options) => app.runSetModel(options),
     runRepairModelControl: (options) => app.runRepairModelControl(options),
@@ -328,6 +345,9 @@ export function createNativeThreadLifecycleCliAdapter(
       app.identifyCodexForegroundWhileLocked(input),
     assertSameInspectionTerminal: (expected, actual, stage) =>
       app.assertSameInspectionTerminal(expected, actual, stage),
+    assertInspectionReady: (input) => app.assertInspectionReady(input),
+    assertForegroundHasNoLifecycleTransition: (options, terminal) =>
+      app.assertForegroundHasNoLifecycleTransition(options, terminal),
     codexLatentClearResumeObservation,
     nativeInspectionComposerEmpty
   });

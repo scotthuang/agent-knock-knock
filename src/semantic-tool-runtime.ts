@@ -116,6 +116,9 @@ import {
   RECONCILE_BINDING_AUTHORITY_KIND
 } from "./semantic-tool-private-authority.js";
 
+import { registerPermissionControlTools, handleAkkPermissionCommand } from
+  "./semantic-permission-control.js";
+
 export {
   bindSemanticToolAsyncRelay,
   bindSemanticToolRelayEnvironment,
@@ -153,11 +156,12 @@ export function createAkkSemanticToolCatalog(
   beginSemanticToolCatalog(api);
   const command = {
     name: "akk",
-    description: "Send coding work through existing Codex or Claude Code shared terminals, inspect managed Turns, observe a user-selected terminal with durable read-only Terminal Watch, manage native threads, and safely inspect or change an idle pane's native model selection.",
+    description: "Send coding work through existing Codex or Claude Code shared terminals, inspect managed Turns, observe a user-selected terminal with durable read-only Terminal Watch, manage native threads, and safely inspect or change an idle pane's native model selection or Codex permissions.",
     acceptsArgs: true,
     requiresAuthentication: true,
     progressMessage: "AKK is handling the request...",
     promptGuidance: [
+      "Use /akk permissions on an advertised idle Codex terminal before /akk set-permissions. Read the current permission mode and returned built-in choices, then apply the requested or authorized mode. Full Access is an ordinary option with no additional user confirmation; AKK automatically handles its native confirmation inside the closed permission transaction, never through generic approve. Ordinary Send does not change permissions. Scope is the current session/thread and may survive Resume; global defaults remain unchanged. Send the task only after a verified matching effective mode. An uncertain result must not be retried automatically.",
       "Use /akk <task> when exactly one send-ready coding-agent terminal pane should receive new work. Send-ready means an exact live process and terminal plus a scanned, non-blocked approval state. Parsed working activity and ordinary main-Composer visibility, stability, exactness, or existing draft contents do not veto this user-priority path. A proven input-owning native approval, questionnaire/editor, menu, or read-only viewer remains a zero-input boundary; profiled Codex 0.154.0/0.155.1 exact collapsed async-question summaries remain sendable, while expanded, clipped, or ambiguous editors do not. Codex sends C-u once to replace the current Composer; Claude Code uses a sentinel-backed native C-s stash-clear transaction that is independent of the cursor position and does not interrupt an active turn, then proves the main Composer empty. Each injects the request, waits through the paste window, and dispatches Enter exactly once; after text injection, no Composer observation may veto Enter. Managed Send may still require exact empty before input, while native inspection and native lifecycle input remain exact-empty-only. Broken or stale AKK management activity records do not veto the user's physical Send. Structured tools use only semantic identifiers returned by AKK: session_id for an exact managed context, terminal_id for the currently verified pane, turn_id for one managed Turn, watch_id for one Terminal Watch, and native_thread_id for one resumable native thread. Draft text, composer digests, and opaque freshness authority stay private; AKK revalidates them under its locks. Once the mutation sequence begins, an uncertain result must not be automatically retried. /akk watch is read-only and follows user intent: it prefers an exact task anchor, but version, artifact, managed ownership, and action-advertisement uncertainty degrade to a warning-bearing terminal-activity Watch instead of vetoing the request. New/clear/resume, approval, reconciliation, handoff, and recovery still require the documented user intent or explicit confirmation. AKK never starts a coding-agent process.",
       "Use /akk models on one exact currently advertised physical pane before /akk set-model. Profiled Codex 0.154.0/0.155.1 may use either one exact current native Session or a verified-zero-rollout pane; identify_foreground is diagnostic and is never a prerequisite for that zero-rollout path. Claude Code still requires one exact current native Session. Both steps require no active Turn and no approval, questionnaire/editor, or read-only viewer. model_options normally requires an empty Composer; when List binds it to one exact stable Codex /model residual, it may continue only that residual into read-only catalog discovery. repair_model_control remains the separate clear-only alternative and never presses Enter or selects anything. Only ids and reasoning efforts from that current native catalog are valid. Codex changes the current session and persists the selected model for future sessions; ordinary efforts, including max, are also persisted, while ultra remains current-session-only and Codex chooses a non-ultra future fallback. Claude Code changes only the current session. Read effective and new_session_defaults separately. Model control never accepts slash text, raw keys, menu indexes, display labels, scope overrides, or private authority; an uncertain outcome must not be retried automatically."
     ],
@@ -269,6 +273,7 @@ export function createAkkSemanticToolCatalog(
   });
 
   registerModelControlTools(api);
+  registerPermissionControlTools(api, registerCliTool);
 
   registerForegroundIdentificationTools(api);
 
@@ -925,6 +930,9 @@ async function handleAkkCommand(
       };
     }
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+    if (parsed.action === "permission-options" || parsed.action === "set-permissions") {
+      return await handleAkkPermissionCommand(api, ctx, parsed);
+    }
     if (
       parsed.action === "model-options" ||
       parsed.action === "repair-model-control" ||

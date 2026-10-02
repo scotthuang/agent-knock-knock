@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.16 - 2026-10-02
+
+- Add Codex permission discovery and explicit session permission changes through the native `/permissions` menu, including automatic Full Access confirmation without an additional user prompt and fresh status/menu verification before sending a task.
+- Keep permission menus separate from ordinary Send and generic approvals, and stop automatic retries when terminal input or its result is uncertain.
+
 ## 0.13.15 - 2026-10-02
 
 - Attempt Codex exact callback observation through validated runtime UI and paginated read contracts on newer versions; preserve exact task identity across compatible backend upgrades.

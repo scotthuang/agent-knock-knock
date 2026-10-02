@@ -27,6 +27,8 @@
         "model-options",
         "repair-model-control",
         "set-model",
+        "permission-options",
+        "set-permissions",
         "resume-thread",
         "reconcile-binding",
         "respond",
@@ -63,7 +65,7 @@
       "version": 1,
       "transport": "mcp_stdio",
       "callback_driver": "command_json_v1",
-      "tool_count": 22,
+      "tool_count": 24,
       "authority_paths": [
         "schemas/host-profile-v1.schema.json",
         "src/command-json-callback-transport.ts",
@@ -76,6 +78,7 @@
         "src/host-profile-callback-transport.ts",
         "src/host-profile-runtime.ts",
         "src/host-profile.ts",
+        "src/semantic-permission-control.ts",
         "src/semantic-private-authority-offers.ts",
         "src/semantic-tool-arguments.ts",
         "src/semantic-tool-catalog.ts",
@@ -97,7 +100,8 @@
         "host-bridge-mcp-unit",
         "host-bridge-stdio-unit",
         "host-bridge-tools-unit",
-        "host-profile-unit"
+        "host-profile-unit",
+        "permission-controller-authority-unit"
       ]
     },
     "list_action": {
@@ -113,6 +117,8 @@
         "model_options",
         "repair_model_control",
         "set_model",
+        "permission_options",
+        "set_permissions",
         "identify_foreground",
         "identify_and_send",
         "resume_thread",
@@ -147,6 +153,8 @@
         "agent_knock_knock_model_options",
         "agent_knock_knock_repair_model_control",
         "agent_knock_knock_set_model",
+        "agent_knock_knock_permission_options",
+        "agent_knock_knock_set_permissions",
         "agent_knock_knock_identify_foreground",
         "agent_knock_knock_identify_and_send",
         "agent_knock_knock_new_thread",
@@ -172,6 +180,7 @@
         "src/openclaw-plugin-supervisor.ts",
         "src/openclaw-plugin.ts",
         "src/openclaw-private-authority-offers.ts",
+        "src/semantic-permission-control.ts",
         "src/semantic-private-authority-offers.ts",
         "src/semantic-tool-arguments.ts",
         "src/semantic-tool-catalog.ts",
@@ -186,7 +195,8 @@
         "src/semantic-tool-value-helpers.ts"
       ],
       "witnesses": [
-        "openclaw-plugin-boundary"
+        "openclaw-plugin-boundary",
+        "permission-controller-authority-unit"
       ]
     },
     "store_protocols": {
@@ -602,6 +612,12 @@
       "path": "test/openclaw-plugin-contract.test.ts",
       "tier": "integration",
       "needle": "OpenClaw runtime registrations match the published manifest"
+    },
+    {
+      "id": "permission-controller-authority-unit",
+      "path": "test/semantic-permission-control.test.ts",
+      "tier": "fast",
+      "needle": "controller tool and slash paths keep permission authority private and cannot retry an uncertain mutation"
     },
     {
       "id": "session-authority-unit",

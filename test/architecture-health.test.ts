@@ -78,8 +78,8 @@ test("architecture health dashboard stays within the 0.13.3 refactor baseline", 
   assert.equal(health.policy.production_file_physical_loc_maximum, 4_999);
   assert.equal(health.hotspots.length, 8);
   assert.deepEqual(health.contract_sync.semantic_tools, {
-    openclaw: 22,
-    host_bridge: 22
+    openclaw: 24,
+    host_bridge: 24
   });
   assert.equal(health.contract_sync.canonical_skill_sha256.length, 64);
   assert.equal(
@@ -212,7 +212,7 @@ test("architecture health rejects complexity, hotspot, tool, and skill drift", a
       },
       repoRoot
     }),
-    /Host Bridge tool count 21 does not match OpenClaw tool count 22/u
+    /Host Bridge tool count 21 does not match OpenClaw tool count 24/u
   );
 
   assert.throws(

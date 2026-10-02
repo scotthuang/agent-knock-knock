@@ -98,6 +98,7 @@ import {
 } from "./terminal-native-inspection-bridge.js";
 import { createTerminalModelControlPorts } from
   "./terminal-model-control-bridge.js";
+import { TerminalPermissionControlRuntime } from "./terminal-permission-control-runtime.js";
 import {
   CODEX_EXACT_CANDIDATE_GRACE_CAPTURES,
   CODEX_MULTILINE_SETTLE_POLL_MS,
@@ -844,6 +845,18 @@ export class TerminalAgentBridge {
       throw new Error("Codex transcript viewport or closed history-scroll capability changed before input");
     }
     await this.terminalProvider.scrollHistoryDown(terminal);
+  }
+
+  get permissionOptions() { return this.permissionControl().permissionOptions; }
+  get setPermissions() { return this.permissionControl().setPermissions; }
+
+  private permissionControl(): TerminalPermissionControlRuntime {
+    return new TerminalPermissionControlRuntime({
+      provider: this.terminalProvider, adapter: this.registry.require("codex"), sleep: this.sleep,
+      verifyIdentity: (control, runtime) => this.verifyTerminalIdentity("codex", control, runtime),
+      submitStatus: this.submitCodexStatusProbe.bind(this),
+      captureStatus: this.captureCodexStatusFrame.bind(this)
+    });
   }
 
   async modelOptions(

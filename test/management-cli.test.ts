@@ -340,6 +340,8 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         "list_resumable_threads",
         "native_inspect",
         "model_options",
+        "permission_options",
+        "set_permissions",
         "repair_model_control",
         "set_model",
         "identify_foreground",

@@ -673,6 +673,10 @@
       "owner": "terminal-watch"
     },
     {
+      "path": "src/codex-permission-surface.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
       "path": "src/codex-process-incarnation.ts",
       "owner": "terminal-identity-authority"
     },
@@ -959,6 +963,10 @@
     {
       "path": "src/runtime-log.ts",
       "owner": "runtime-log"
+    },
+    {
+      "path": "src/semantic-permission-control.ts",
+      "owner": "host-bridge"
     },
     {
       "path": "src/semantic-private-authority-offers.ts",
@@ -1337,8 +1345,36 @@
       "owner": "cli-runtime"
     },
     {
+      "path": "src/terminal-native-control-cli-contract.ts",
+      "owner": "native-thread-lifecycle-cli"
+    },
+    {
       "path": "src/terminal-native-inspection-bridge.ts",
       "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-permission-control-availability.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/terminal-permission-control-bridge.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-permission-control-cli-adapter.ts",
+      "owner": "native-thread-lifecycle-cli"
+    },
+    {
+      "path": "src/terminal-permission-control-list-projection.ts",
+      "owner": "terminal-list-application"
+    },
+    {
+      "path": "src/terminal-permission-control-runtime.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-permission-control.ts",
+      "owner": "terminal-agent-core"
     },
     {
       "path": "src/terminal-process-facts.ts",

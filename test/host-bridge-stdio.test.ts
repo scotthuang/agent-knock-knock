@@ -46,6 +46,7 @@ const EXPECTED_TOOLS = [
   "agent_knock_knock_model_options",
   "agent_knock_knock_native_inspect",
   "agent_knock_knock_new_thread",
+  "agent_knock_knock_permission_options",
   "agent_knock_knock_reconcile_binding",
   "agent_knock_knock_renew",
   "agent_knock_knock_repair_model_control",
@@ -55,6 +56,7 @@ const EXPECTED_TOOLS = [
   "agent_knock_knock_retry_callback",
   "agent_knock_knock_send",
   "agent_knock_knock_set_model",
+  "agent_knock_knock_set_permissions",
   "agent_knock_knock_status",
   "agent_knock_knock_unwatch",
   "agent_knock_knock_watch"

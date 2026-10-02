@@ -1,0 +1,95 @@
+# Set Codex permissions before a task
+
+AKK can inspect and change the built-in permissions of an existing, idle Codex
+session through its native `/permissions` menu. The terminal must have an empty
+Composer and no running task, approval, question, editor, or viewer. AKK verifies
+the physical pane/process and native thread before acting.
+
+In a controller conversation:
+
+```text
+/akk list
+/akk permissions <exact-terminal-id>
+/akk set-permissions <exact-terminal-id> <advertised-mode-id>
+```
+
+Use the permission action advertised by the current List row. The first command
+opens and dismisses closed native UI inspection; it does not change permissions.
+It returns the current mode and the modes this native picker actually offers.
+Use the exact semantic ID for the requested or authorized permission mode.
+For example, `ask_for_approval` may be available on a given Codex build. A mode
+reported as current is not necessarily selectable: macOS can report `read_only`
+while omitting it from its menu. Named/custom profiles are not supported.
+
+The corresponding tools are:
+
+```text
+agent_knock_knock_permission_options({terminal_id})
+agent_knock_knock_set_permissions({terminal_id, mode})
+```
+
+Both calls must use the same controller conversation. The private catalog is
+valid for one attempt only; a refresh replaces it. Callers cannot provide raw
+slash commands, keys, menu indexes, display labels, paths, fingerprints, or tokens.
+
+Full Access is an ordinary selectable mode and needs no additional user
+confirmation. AKK automatically handles its exact native confirmation inside
+this permission transaction, without pausing for a second user reply or using
+the generic approval tool. Ordinary Send does not change permissions.
+
+A verified change returns `outcome=changed` or `already_effective`, the requested
+and effective mode, `scope=current_session`, and `defaults_changed=false`.
+Changes apply to this session/thread and may remain when the thread is resumed;
+they do not change global defaults. Send the task only after the effective mode
+matches the request. If the result is `uncertain`, inspect the terminal and do not
+retry automatically. A running or blocked terminal must reach a safe idle state
+before permission inspection; AKK does not interrupt its task to open the menu.
+
+## Compatibility and verification
+
+The permission-write profile currently covers Codex 0.159.2 and 0.159.3. It is
+independent of native model selection, task observation, and interaction-write
+profiles. Unsupported versions, named/custom profiles, disabled or incomplete
+menus, and conflicting native status stop the operation before a permission
+selection. A permission catalog never grants authority over another native
+thread, even when its process and pane are unchanged.
+
+On 2026-10-02, isolated macOS sessions running the locally installed Codex
+0.159.3 were exercised through the built AKK CLI:
+
+- **tmux:** discovered `read_only`, selected `ask_for_approval`, and proved
+  `Workspace (Ask for approval)` in a fresh native status plus the menu's current
+  marker. A subsequent AKK Send created a temporary file with exactly the
+  requested contents, and Codex returned `DONE`.
+- **Herdr:** discovered `read_only`, selected `full_access` through the exact
+  native confirmation, then proved `Full Access` in a fresh status and the
+  reopened menu's current marker. The operation dismissed the menu afterward.
+- Both sessions used a temporary workspace and private AKK Store. Existing user
+  sessions were untouched. Permission selection did not change global Codex
+  configuration; the test-only workspace trust entry was removed on cleanup.
+
+`npm run test:fast` passed all 2,433 tests, including stale physical/thread
+identity, stale catalogs, confirmation grammar, changed input frames, uncertain
+transport, one-attempt authority, and ordinary Send/approval separation.
+`npm run validate:architecture` and `npm run validate:refactor-evidence` passed.
+Full/release suites were not run during development, per the repository's test policy.
+
+Codex 0.159.2 has source-contract and regression coverage; it was not launched
+for this live check. `approve_for_me` and a selectable `read_only` transition,
+custom profiles, other platforms, and an external controller's complete
+permission-to-callback conversation were not exercised live. Host/connector
+tool registration and controller-scoped authority are covered by regression
+checks; the live operations above used the CLI.
+
+Scott subsequently tested the locally installed `0.13.16-local.permissions.20261002`
+candidate successfully and authorized the npm and ClawHub `0.13.16` release.
+
+The immediate pre-publication `npm run test:release` gate passed all 2,948
+tests. Its isolated OpenClaw 2026.9.1 check loaded all 24 tools and passed
+callback delivery, doctor, bundled Skill eligibility, update/reinstall, and
+uninstall checks. ClawHub runtime validation passed with zero breakages or
+warnings, and its publication dry run passed. The formal package's 248 runtime
+JavaScript files and bundled Skill match the user-tested candidate; only release
+metadata, verification documentation, and an older action-list test changed
+after that candidate. The optional general native lifecycle smoke was not rerun;
+the permission-specific live coverage and remaining limits are listed above.

@@ -27,11 +27,11 @@ test("semantic catalog freezes the exact ordered tool metadata digest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "2aad0598c4271a15f53c39099f90267cdaf2da3d57ad45cf4654ef1cffc3abe4"
+    "a7c88ec635f4b043f416b94e6f88abf705cb1180f22771d404524a7bdfe44356"
   );
   assert.equal(
     publicMetadataDigest(catalog.command, catalog.tools),
-    "2ee78c21317694a9afbc771a59a92a9075b8a6c28e035e877676fd6cd7d5d364"
+    "f363ecc328a85e14f71c7f7194b3cecf8455d3c39d89a40010673e882d116eee"
   );
   assert.equal(Object.isFrozen(catalog), true);
   assert.equal(Object.isFrozen(catalog.command), true);
@@ -146,6 +146,7 @@ test("Host and semantic core have no reverse dependency on OpenClaw adapters", (
     "src/host-bridge.ts",
     "src/host-monitor-reconciliation.ts",
     "src/semantic-private-authority-offers.ts",
+    "src/semantic-permission-control.ts",
     "src/semantic-tool-arguments.ts",
     "src/semantic-tool-catalog.ts",
     "src/semantic-tool-command-helpers.ts",

@@ -27,6 +27,7 @@ export type TerminalActionName =
   | "list_resumable_threads"
   | "native_inspect"
   | "model_options"
+  | "permission_options"
   | "repair_model_control"
   | "identify_foreground"
   | "identify_and_send"

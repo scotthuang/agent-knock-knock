@@ -111,6 +111,7 @@ function compactAkkListFeatures(
   const lifecycle = recordValue(terminal.native_thread_lifecycle);
   const inspection = recordValue(terminal.native_inspection);
   const modelControl = recordValue(terminal.model_control);
+  const permissionControl = recordValue(terminal.permission_control);
   if (typeof lifecycle?.status === "string") {
     output.native_threads = lifecycle.status;
   }
@@ -122,6 +123,9 @@ function compactAkkListFeatures(
     output.model_control = Object.keys(model).length === 1
       ? model.status
       : model;
+  }
+  if (typeof permissionControl?.status === "string") {
+    output.permission_control = compactAkkListScalars(permissionControl, ["status", "scope"]);
   }
   return output;
 }

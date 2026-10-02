@@ -2,7 +2,7 @@
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
   "categories": ["developer-tools"],
-  "description": "Control local Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection and model switching, compatibility warnings for unverified versions, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
+  "description": "Control local Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection, model switching, and Codex permission control, compatibility warnings for unverified versions, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
   "activation": {
     "onStartup": true,
     "onCommands": ["akk"]
@@ -23,6 +23,8 @@
       "agent_knock_knock_model_options",
       "agent_knock_knock_repair_model_control",
       "agent_knock_knock_set_model",
+      "agent_knock_knock_permission_options",
+      "agent_knock_knock_set_permissions",
       "agent_knock_knock_identify_foreground",
       "agent_knock_knock_identify_and_send",
       "agent_knock_knock_new_thread",
@@ -62,6 +64,12 @@
       "optional": true
     },
     "agent_knock_knock_set_model": {
+      "optional": true
+    },
+    "agent_knock_knock_permission_options": {
+      "optional": true
+    },
+    "agent_knock_knock_set_permissions": {
       "optional": true
     },
     "agent_knock_knock_identify_foreground": {

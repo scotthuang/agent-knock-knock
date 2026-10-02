@@ -107,10 +107,10 @@ test("final refactor evidence reproduces startup counts and historical selection
 
   assert.deepEqual(evidence.publicContracts, {
     contractCount: 5,
-    witnessCount: 78,
+    witnessCount: 79,
     migrationCount: 11,
-    hostBridgeToolCount: 22,
-    openclawToolCount: 22,
+    hostBridgeToolCount: 24,
+    openclawToolCount: 24,
     storeProtocolCount: 9
   });
 });
@@ -1130,6 +1130,16 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
     /Host Bridge authority_paths must equal/u
   );
 
+  const missingPermissionAuthority = loadJson("config/public-contract-witnesses.json");
+  missingPermissionAuthority.contracts.host_bridge.authority_paths =
+    missingPermissionAuthority.contracts.host_bridge.authority_paths.filter(
+      (repositoryPath: string) => repositoryPath !== "src/semantic-permission-control.ts"
+    );
+  assert.throws(
+    () => validate(missingPermissionAuthority),
+    /Host Bridge authority_paths must equal/u
+  );
+
   const duplicateTool = loadJson("config/public-contract-witnesses.json");
   const duplicateTools = duplicateTool.contracts.openclaw_tools.tools;
   duplicateTools[duplicateTools.length - 1] =
@@ -1141,6 +1151,7 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
     "src/openclaw-plugin-command-adapter.ts",
     "src/openclaw-plugin-schemas.ts",
     "src/semantic-tool-catalog.ts",
+    "src/semantic-permission-control.ts",
     "src/semantic-tool-schemas.ts",
     "src/semantic-tool-relay.ts",
     "src/semantic-tool-runtime.ts"

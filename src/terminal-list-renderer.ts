@@ -9,6 +9,8 @@ import {
 } from "./value-guards.js";
 import type { ModelControlAvailabilityDecision } from
   "./terminal-model-control-availability.js";
+import type { TerminalPermissionControlAvailability } from
+  "./terminal-permission-control-availability.js";
 import type { ManagedTurnListActionDecision } from
   "./terminal-managed-turn-list-action-policy.js";
 
@@ -279,6 +281,30 @@ export function listActionContracts(): JsonRecord {
         safety_boundary:
           "Exact live pane/process, no approval, questionnaire/editor, read-only viewer, or active Turn, plus either an idle empty Composer or one exact stable profiled Codex 0.154.0/0.155.1 /model Composer residual.",
         candidate_source: "terminals[].available_actions.model_options"
+      },
+      permission_options: {
+        tool: "agent_knock_knock_permission_options",
+        target_argument: "terminal_id",
+        required: ["terminal_id"],
+        creates_turn: false,
+        creates_session: false,
+        mutates_store: false,
+        sends_terminal_input: true,
+        input_scope: "Closed Codex /status and /permissions discovery, followed by exact dismissal to an empty Composer.",
+        authority_scope: "terminal_user_explicit_permission_control",
+        safety_boundary: "Exact live pane/process, verified idle empty Composer, no active Turn, transition, approval, questionnaire/editor, or viewer.",
+        candidate_source: "terminals[].available_actions.permission_options"
+      },
+      set_permissions: {
+        tool: "agent_knock_knock_set_permissions",
+        target_argument: "terminal_id",
+        required: ["terminal_id", "mode"],
+        semantic_choice_source: "The preceding permission_options result in this same controller conversation.",
+        scope: "current_session",
+        accepts_raw_command_or_keys: false,
+        postcondition_required: true,
+        uncertain_retry_allowed: false,
+        candidate_source: "permission_options.available_actions.set_permissions"
       },
       repair_model_control: {
         tool: "agent_knock_knock_repair_model_control",
@@ -601,6 +627,43 @@ export function renderTerminalModelControlActions(input: {
     );
   }
   return actions;
+}
+
+export function renderTerminalPermissionControlActions(input: {
+  readonly renderedActions: JsonRecord;
+  readonly availability: TerminalPermissionControlAvailability;
+}): JsonRecord {
+  const actions = { ...input.renderedActions };
+  delete actions.permission_options;
+  if (input.availability.available) {
+    actions.permission_options = {
+      tool: "agent_knock_knock_permission_options",
+      arguments: {
+        terminal_id: input.availability.terminalId,
+        expected_binding_token: input.availability.expectedBindingToken
+      },
+      authority_scope: "terminal_user_explicit_permission_control",
+      mutation_scope: "current_session",
+      requires_user_intent: true
+    };
+  }
+  return actions;
+}
+
+/** Keep internal command flags out of the public physical-terminal row. */
+export function renderTerminalPhysicalEntry(
+  source: JsonRecord,
+  actions: JsonRecord,
+  userExplicitSendAction?: JsonRecord
+): JsonRecord {
+  const { commands: _commands, ...entry } = source;
+  return {
+    ...entry,
+    ...(userExplicitSendAction
+      ? { _terminal_user_explicit_send_action: userExplicitSendAction }
+      : {}),
+    available_actions: actions
+  };
 }
 
 function modelControlRepairAction(
@@ -1073,6 +1136,7 @@ export function withoutInspectionActionsDuringNativeTransition(
   return Object.fromEntries(Object.entries(actions).filter(
     ([actionName]) =>
       actionName !== "native_inspect" &&
+      actionName !== "permission_options" &&
       actionName !== "model_options" &&
       actionName !== "repair_model_control"
   ));

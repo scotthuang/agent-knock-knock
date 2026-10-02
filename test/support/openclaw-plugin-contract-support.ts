@@ -17,6 +17,7 @@ import {
   identifyAndSendParameters,
   identifyForegroundParameters,
   modelOptionsParameters,
+  permissionOptionsParameters,
   nativeInspectParameters,
   newThreadParameters,
   reconcileBindingParameters,
@@ -25,6 +26,7 @@ import {
   resumeThreadParameters,
   sendParameters,
   setModelParameters,
+  setPermissionsParameters,
   unwatchParameters,
   watchParameters
 } from "../../src/openclaw-plugin-schemas.js";
@@ -575,6 +577,7 @@ export {
   identifyAndSendParameters,
   identifyForegroundParameters,
   modelOptionsParameters,
+  permissionOptionsParameters,
   nativeInspectParameters,
   newThreadParameters,
   reconcileBindingParameters,
@@ -583,6 +586,7 @@ export {
   resumeThreadParameters,
   sendParameters,
   setModelParameters,
+  setPermissionsParameters,
   unwatchParameters,
   watchParameters,
   registerOpenClawCallbackGateway,
