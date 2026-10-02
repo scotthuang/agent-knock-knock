@@ -27,8 +27,8 @@ function options() {
     scope: "current_session",
     current: "read_only",
     choices: [
-      { id: "ask_for_approval", label: "Ask for approval", description: "Requests approval as needed.", requires_confirmation: false },
-      { id: "full_access", label: "Full Access", description: "Allows actions without sandbox restrictions.", requires_confirmation: true }
+      { id: "ask_for_approval", label: "Ask for approval", description: "Requests approval as needed." },
+      { id: "full_access", label: "Full Access", description: "Allows actions without sandbox restrictions." }
     ],
     catalog_fingerprint: fingerprint,
     available_actions: { set_permissions: {
@@ -157,7 +157,7 @@ else throw new Error("unexpected CLI operation");
   assert.doesNotMatch(JSON.stringify(displayed), /binding-private|list-private|catalog_fingerprint|expected_binding_token/u);
   const display = displayed.details as ReturnType<typeof options>;
   assert.equal(display.current, "read_only");
-  assert.equal(display.choices[1].requires_confirmation, true);
+  assert.deepEqual(Object.keys(display.choices[1]).sort(), ["description", "id", "label"]);
   assert.deepEqual(display.available_actions.set_permissions.arguments, { terminal_id: terminalId });
   const result = await registry.execute("agent_knock_knock_set_permissions", "apply", parameters());
   assert.equal(result.isError, undefined);

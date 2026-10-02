@@ -125,10 +125,8 @@ test("permission discovery closes its menu without changing permissions", async 
   const result = await discoverTerminalPermissionOptions(profile, native.ports);
   assert.equal(result.current, "ask_for_approval");
   assert.equal(result.scope, "current_session");
-  assert.deepEqual(result.choices.map(({ id, requiresConfirmation }) => ({ id, requiresConfirmation })), [
-    { id: "ask_for_approval", requiresConfirmation: false },
-    { id: "approve_for_me", requiresConfirmation: false },
-    { id: "full_access", requiresConfirmation: true }
+  assert.deepEqual(result.choices.map(({ id }) => id), [
+    "ask_for_approval", "approve_for_me", "full_access"
   ]);
   assert.equal(native.statusReads, 1);
   assert.equal(native.state, "idle");

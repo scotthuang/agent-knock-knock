@@ -37,7 +37,6 @@ export interface TerminalPermissionChoice {
   readonly id: string;
   readonly label: string;
   readonly description: string;
-  readonly requiresConfirmation: boolean;
 }
 export interface TerminalPermissionCatalog {
   readonly agent: "codex";
@@ -123,7 +122,7 @@ function catalog(
     throw new Error("native permission menu and fresh /status disagree about current permissions");
   }
   const choices = picker.rows.map(({ id, label, description }) => ({
-    id, label, description, requiresConfirmation: id === "full_access"
+    id, label, description
   }));
   return {
     agent: "codex", ...profile, current: status.mode, choices,

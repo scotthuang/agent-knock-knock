@@ -89,8 +89,7 @@ class TerminalPermissionControlCliApplication {
         choices: catalog.choices.map((choice) => ({
           id: choice.id,
           label: choice.label,
-          description: choice.description,
-          requires_confirmation: choice.requiresConfirmation
+          description: choice.description
         })),
         catalog_fingerprint: catalog.catalogFingerprint,
         available_actions: {

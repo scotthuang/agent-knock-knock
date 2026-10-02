@@ -75,8 +75,8 @@ function fixture() {
         agent: "codex", agentVersion: profile.agentVersion,
         behaviorProfile: profile.behaviorProfile, scope: "current_session",
         current: "read-only", choices: [
-          { id: "read-only", label: "Read Only", description: "Read only", requiresConfirmation: false },
-          { id: "full-access", label: "Full Access", description: "Full access", requiresConfirmation: true }
+          { id: "read-only", label: "Read Only", description: "Read only" },
+          { id: "full-access", label: "Full Access", description: "Full access" }
         ], catalogFingerprint: fingerprint
       };
     },
@@ -135,7 +135,7 @@ test("permission CLI queries a physical pane under lock and returns one scoped p
   const result = subject.output[0] as Record<string, any>;
   assert.equal(result.current, "read-only");
   assert.equal(result.scope, "current_session");
-  assert.equal(result.choices[1].requires_confirmation, true);
+  assert.deepEqual(Object.keys(result.choices[1]).sort(), ["description", "id", "label"]);
   assert.deepEqual(result.available_actions.set_permissions.arguments, {
     terminal_id: terminalId, expected_binding_token: bindingToken(),
     expected_catalog_fingerprint: fingerprint

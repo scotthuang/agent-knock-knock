@@ -334,7 +334,7 @@ export const setPermissionsParameters = {
       minLength: 1,
       maxLength: 64,
       pattern: "^[a-z][a-z0-9_-]*$",
-      description: "Exact semantic mode id explicitly selected by the user from the displayed native permission catalog. Full Access requires explicit authorization for that mode. Labels, menu indexes, slash commands, keys, arbitrary profiles, and configuration paths are not accepted."
+      description: "Exact semantic mode id from the current native permission catalog for the requested or authorized change. Full Access is an ordinary option with no additional user confirmation; AKK handles its native dialog automatically. Labels, menu indexes, slash commands, keys, arbitrary profiles, and configuration paths are not accepted."
     }
   }
 };
