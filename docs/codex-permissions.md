@@ -83,3 +83,13 @@ checks; the live operations above used the CLI.
 
 Scott subsequently tested the locally installed `0.13.16-local.permissions.20261002`
 candidate successfully and authorized the npm and ClawHub `0.13.16` release.
+
+The immediate pre-publication `npm run test:release` gate passed all 2,948
+tests. Its isolated OpenClaw 2026.9.1 check loaded all 24 tools and passed
+callback delivery, doctor, bundled Skill eligibility, update/reinstall, and
+uninstall checks. ClawHub runtime validation passed with zero breakages or
+warnings, and its publication dry run passed. The formal package's 248 runtime
+JavaScript files and bundled Skill match the user-tested candidate; only release
+metadata, verification documentation, and an older action-list test changed
+after that candidate. The optional general native lifecycle smoke was not rerun;
+the permission-specific live coverage and remaining limits are listed above.
