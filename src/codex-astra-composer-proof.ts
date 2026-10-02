@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { stripTerminalEscapeSequences } from
-  "./terminal-native-inspection-bridge.js";
+  "./terminal-native-inspection-proof.js";
 
 const CODEX_ASTRA_PLACEHOLDER = "Ask Codex to do anything";
 const CODEX_ASTRA_SPARKLE = /^[⠁⠂⠄⠈⠐⠠⡀⢀]$/u;

@@ -1079,6 +1079,60 @@ test("reversible switch failure exits exactly and preserves the original error",
   assert.equal(native.phase, "idle");
 });
 
+test("Claude switch cleanup follows the latest proven control after effort navigation fails", async () => {
+  const native = new FakeModelTerminal("claude", {
+    currentModel: "opus", currentEffort: "high",
+    defaultModel: "opus", defaultEffort: "high"
+  });
+  const offer = await discoverTerminalModelOptions({
+    agent: "claude", agentVersion: "2.1.266", plan: CLAUDE_PLAN,
+    terminalControl: "control", ports: native.ports
+  });
+  let openedPickers = 0;
+  let selectionAdvanced = false;
+  let failedEffort = false;
+  const cleanupControls: unknown[] = [];
+  const ports: TerminalModelControlPorts = {
+    ...native.ports,
+    capture: async (request) => {
+      if (failedEffort) {
+        cleanupControls.push(request.terminalControl);
+        assert.equal(request.terminalControl, "refreshed-control");
+      }
+      const captured = await native.ports.capture(request);
+      return selectionAdvanced
+        ? { ...captured, terminalControl: "refreshed-control" }
+        : captured;
+    },
+    sendKeys: async (control, keys) => {
+      if (native.phase === "composer" && keys[0] === "C-m") openedPickers += 1;
+      // The first picker belongs to rediscovery; fail only during selection.
+      if (!failedEffort && openedPickers === 2 && keys[0] === "Right") {
+        // Preserve the fake transport's one-authorization-per-key bookkeeping
+        // so cleanup tests control freshness, not an unrelated authority gap.
+        await native.ports.sendKeys(control, keys);
+        failedEffort = true;
+        throw new Error("synthetic Claude effort navigation failure");
+      }
+      await native.ports.sendKeys(control, keys);
+      // Opening the second picker keeps the old control. Refresh only after
+      // the selection helper has moved to Sonnet, before its effort failure.
+      if (openedPickers === 2 && keys[0] === "Down") selectionAdvanced = true;
+    }
+  };
+  await assert.rejects(switchTerminalModel({
+    agent: "claude", agentVersion: "2.1.266", plan: CLAUDE_PLAN,
+    terminalControl: "control", ports,
+    expectedCatalogFingerprint: offer.catalog.catalogFingerprint,
+    request: { model: "sonnet", reasoningEffort: "max" }
+  }), /^Error: synthetic Claude effort navigation failure$/u);
+  assert.equal(selectionAdvanced, true);
+  assert.equal(failedEffort, true);
+  assert.ok(cleanupControls.length > 0);
+  assert.equal(native.phase, "idle");
+  assert.equal(native.sentKeys.some((keys) => keys.includes("s")), false);
+});
+
 test("cleanup failure keeps its exact error and requires a fresh residual scan", async () => {
   const native = new FakeModelTerminal("codex", {
     currentModel: "gpt-5.2",

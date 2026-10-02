@@ -1,4 +1,6 @@
-import type { ExecutorKind } from "./executors.js";
+import type {
+  ExecutorKind
+} from "./executors.js";
 
 /**
  * Verified native model-control behavior profiles.
@@ -367,4 +369,17 @@ function nonBlank(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : undefined;
+}
+
+export function probeTerminalModelControl(
+  agent: ExecutorKind,
+  agentVersion: string | undefined
+): TerminalModelControlCapabilities {
+  return probeTerminalModelControlProfile(agent, agentVersion);
+}
+
+export function planTerminalModelControl(
+  capabilities: TerminalModelControlCapabilities
+): TerminalModelControlPlan {
+  return planTerminalModelControlProfile(capabilities);
 }

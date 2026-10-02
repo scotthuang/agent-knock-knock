@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.17 - 2026-10-02
+
+- Separate Watch observation and response adapters, Monitor recovery and persistence, and native model-control preparation into focused modules while preserving identity, locking, and single-input boundaries.
+- Separate legacy Codex rollout acceptance, completion, human-started task observation, and question attribution; retain existing public entry points and diagnostic outcomes.
+- Isolate native screen parsers and SQLite/read-only rollout inventory adapters, and organize tool descriptions separately from execution without changing the public contracts.
+- Split large regression fixtures and validation scripts by responsibility while retaining their assertions, test selection mappings, and lifecycle cleanup.
+- Lower architecture budgets to four production files over 2,000 lines and 330 default complexity warnings, with tighter Watch and Monitor file limits.
+
 ## 0.13.16 - 2026-10-02
 
 - Add Codex permission discovery and explicit session permission changes through the native `/permissions` menu, including automatic Full Access confirmation without an additional user prompt and fresh status/menu verification before sending a task.

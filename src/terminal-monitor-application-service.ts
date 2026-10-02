@@ -37,10 +37,16 @@ import {
   nonBlankString as stringValue
 } from "./value-guards.js";
 import {
-  normalizeTerminalInteractionProjectionV2,
   terminalInteractionPublicCompatibilityProjection,
   type TerminalInteractionSubjectProjection
 } from "./terminal-interaction-protocol.js";
+
+import {
+  normalizeManagedMonitorInteraction,
+  terminalInteractionSurfaceId,
+  interactionCallbackPublicConversation,
+  interactionObservationMatchesMonitor
+} from "./terminal-monitor-interaction-projection.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1097,9 +1103,44 @@ async function handleObservedPoll(
   });
 }
 
+interface ManagedMonitorInteractionContext {
+  projection: TerminalInteractionSubjectProjection;
+  question: NonNullable<TerminalBridgeStatus["interaction_state"]>["questions"][number];
+  fingerprint: string;
+  surfaceId: string;
+  asynchronous: boolean;
+  manualRequired: boolean;
+  takeover: JsonRecord | undefined;
+  compatibilityProjection: NonNullable<TerminalBridgeStatus["interaction_state"]>;
+  compatibilityStatus: TerminalBridgeStatus;
+}
+
 function handleInteractionObservation(
   input: SampledPollInput
 ): "proceed" | "continue" | "finished" {
+  const context = currentManagedMonitorInteraction(input);
+  if (!context) return "proceed";
+  const existing = existingMonitorInteractionDisposition(input, context);
+  if (existing) return existing;
+  const { projection, question, fingerprint, surfaceId, compatibilityStatus } = context;
+  const notification = input.ports.state.recordInteractionNotification({
+    conversation: input.state.conversation,
+    executor: input.state.executor,
+    terminalControl: input.terminalControl,
+    terminalStatus: compatibilityStatus,
+    currentMessageId: input.currentMessageId,
+    interactionId: projection.interaction_id,
+    questionId: question.question_id,
+    fingerprint,
+    surfaceId
+  });
+  return handleRecordedMonitorInteraction(input, context, notification);
+}
+
+/** Resolve exact managed-task attribution before writing a notification. */
+function currentManagedMonitorInteraction(
+  input: SampledPollInput
+): ManagedMonitorInteractionContext | undefined {
   const publicProjection = input.terminalStatus.interaction_state;
   const asynchronous = publicProjection?.kind === "async_question";
   const fingerprint = stringValue(
@@ -1115,7 +1156,7 @@ function handleInteractionObservation(
   const takeover = takeoverFor(input.state.conversation) ?? input.takeover;
   if (!publicProjection) {
     retireAbsentAsyncQuestion(input);
-    return "proceed";
+    return undefined;
   }
   const projection = normalizeManagedMonitorInteraction(
     input,
@@ -1129,7 +1170,7 @@ function handleInteractionObservation(
     input.currentScreenFingerprint !== undefined &&
     input.currentScreenFingerprint !== input.state.preSendScreenFingerprint;
   if (publicProjection.questions.length !== 1 || !question) {
-    return "proceed";
+    return undefined;
   }
   const executable = publicProjection.state === "pending" &&
     publicProjection.capabilities.respond === true &&
@@ -1138,7 +1179,7 @@ function handleInteractionObservation(
     !publicProjection.capabilities.respond ||
     question.response_kind === "multi_select";
   if (!executable && !manualRequired) {
-    return "proceed";
+    return undefined;
   }
   const attributable =
     projection !== undefined &&
@@ -1164,7 +1205,7 @@ function handleInteractionObservation(
         ? `native ${publicProjection.kind} lacks exact managed-task attribution`
         : `native ${publicProjection.kind} lacks a current executable monitor offer`
     });
-    return "proceed";
+    return undefined;
   }
   const compatibilityProjection = terminalInteractionPublicCompatibilityProjection(
     projection
@@ -1173,6 +1214,16 @@ function handleInteractionObservation(
     ...input.terminalStatus,
     interaction_state: compatibilityProjection
   };
+  return { projection, question, fingerprint, surfaceId, asynchronous,
+    manualRequired, takeover, compatibilityProjection, compatibilityStatus };
+}
+
+function existingMonitorInteractionDisposition(
+  input: SampledPollInput,
+  context: ManagedMonitorInteractionContext
+): "proceed" | "continue" | undefined {
+  const { takeover, fingerprint, projection, question, manualRequired,
+    asynchronous, surfaceId } = context;
   if (
     stringValue(takeover?.terminal_bridge_last_interaction_message_id) ===
       input.currentMessageId &&
@@ -1216,17 +1267,17 @@ function handleInteractionObservation(
     input.ports.runtime.sleep(input.configuration.pollIntervalMs);
     return "continue";
   }
-  const notification = input.ports.state.recordInteractionNotification({
-    conversation: input.state.conversation,
-    executor: input.state.executor,
-    terminalControl: input.terminalControl,
-    terminalStatus: compatibilityStatus,
-    currentMessageId: input.currentMessageId,
-    interactionId: projection.interaction_id,
-    questionId: question.question_id,
-    fingerprint,
-    surfaceId
-  });
+  return undefined;
+}
+
+/** Blocking questions may pause the monitor; async notification failures do not. */
+function handleRecordedMonitorInteraction(
+  input: SampledPollInput,
+  context: ManagedMonitorInteractionContext,
+  notification: MonitorInteractionNotificationResult
+): "proceed" | "continue" | "finished" {
+  const { projection, question, fingerprint, asynchronous, manualRequired,
+    compatibilityProjection } = context;
   if (notification.stale) {
     input.state.pollPolicyState = {
       ...input.state.pollPolicyState,
@@ -1400,61 +1451,6 @@ function runAsyncInteractionNotification(
   input.state.conversation = input.ports.state.load();
 }
 
-function normalizeManagedMonitorInteraction(
-  input: SampledPollInput,
-  projection: NonNullable<TerminalBridgeStatus["interaction_state"]>,
-  fingerprint: string | undefined,
-  surfaceId: string | undefined
-): TerminalInteractionSubjectProjection | undefined {
-  if (!input.currentMessageId || !fingerprint || !surfaceId) {
-    return undefined;
-  }
-  try {
-    return normalizeTerminalInteractionProjectionV2(projection, {
-      subject: {
-        kind: "managed_turn",
-        turn_id: turnIdForConversation(input.state.conversation),
-        message_id: input.currentMessageId
-      },
-      surfaceId,
-      promptFingerprint: fingerprint,
-      responseAuthority: projection.state === "pending" &&
-          projection.capabilities.respond
-        ? "executable"
-        : "notify_only"
-    });
-  } catch {
-    return undefined;
-  }
-}
-
-function terminalInteractionSurfaceId(value: unknown): string | undefined {
-  const candidate = stringValue(value);
-  return candidate && /^tis_[0-9a-f]{40}$/u.test(candidate)
-    ? candidate
-    : undefined;
-}
-
-function interactionCallbackPublicConversation(
-  conversation: Conversation
-): Conversation {
-  const projected = { ...conversation };
-  delete projected.native_session_takeover;
-  delete projected.callback_delivery;
-  delete projected.callback_notification_delivery;
-  return projected;
-}
-
-function interactionObservationMatchesMonitor(
-  input: SampledPollInput,
-  projection: TerminalBridgeStatus["interaction_state"]
-): boolean {
-  return input.terminalStatus.reachable &&
-    input.terminalStatus.provider === input.terminalControl.kind &&
-    input.terminalStatus.target === input.terminalControl.target &&
-    input.terminalStatus.agent === input.state.executor.kind &&
-    (projection === undefined || projection.agent === input.state.executor.kind);
-}
 
 function persistDetectorDiagnostic(input: SampledPollInput): {
   proceed: boolean;

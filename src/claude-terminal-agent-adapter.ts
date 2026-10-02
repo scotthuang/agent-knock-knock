@@ -40,7 +40,7 @@ import {
   observeTerminalModelControl,
   planTerminalModelControl,
   probeTerminalModelControl
-} from "./terminal-model-control.js";
+} from "./terminal-model-control-surface.js";
 
 export type ClaudeProcessKind = "claude_cli";
 

@@ -9,7 +9,7 @@ import { canonicalModelControlSubject } from
   "./terminal-model-control-subject.js";
 import type { TerminalControlRef } from "./terminal-control-ref.js";
 import type { TerminalModelControlResidualKind } from
-  "./terminal-model-control.js";
+  "./terminal-model-control-contract.js";
 
 export interface ModelControlActionPolicyFacts {
   readonly exactTerminalRow: boolean;

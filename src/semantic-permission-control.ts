@@ -48,7 +48,8 @@ function exactTerminalId(value: unknown): string {
 
 function semanticMode(value: unknown): string {
   if (typeof value !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/u.test(value)) {
-    throw new Error("mode must be one exact semantic id from the displayed permission catalog; raw commands, keys, labels, and menu indexes are forbidden");
+    throw new Error("mode must be one exact semantic id from the displayed permission catalog; " +
+      "raw commands, keys, labels, and menu indexes are forbidden");
   }
   return value;
 }
@@ -134,7 +135,9 @@ export function buildPrivateSetPermissionsArgs(
   const mode = semanticMode(params.mode);
   const offered = consumeSemanticPrivateAuthorityOffer<PermissionOffer>(api, offerKey(context, terminalId));
   if (!offered || !isRecord(offered.args) || !Array.isArray(offered.choices)) {
-    throw new Error("set_permissions requires current choices shown by agent_knock_knock_permission_options in this controller conversation; refresh permission options before another attempt");
+    throw new Error("set_permissions requires current choices shown by " +
+      "agent_knock_knock_permission_options in this controller conversation; " +
+      "refresh permission options before another attempt");
   }
   if (!offered.choices.includes(mode)) throw new Error("mode was not advertised by the current native permission catalog");
   if (offered.args.terminal_id !== terminalId || offered.args.expected_catalog_fingerprint !== offered.fingerprint) {
@@ -160,7 +163,16 @@ export function isAkkSetPermissionsSuccess(value: unknown): boolean {
 export function registerPermissionControlTools(api, registerCliTool): void {
   registerCliTool(api, {
     name: "agent_knock_knock_permission_options",
-    description: "Inspect the current Codex permission setting and built-in choices for one explicitly selected idle physical terminal. This closed /status and /permissions inspection sends native UI input but does not change permissions. It requires an empty Composer, exact pane/process and native thread identity, and no active task or input-owning prompt. Use current, scope, and returned choices to select the requested or authorized mode before set_permissions. Full Access is an ordinary option and needs no additional user confirmation. Only modes actually displayed by this native picker may be selected; arbitrary profiles and configuration paths are unsupported.",
+    description: "Inspect the current Codex permission setting and built-in choices for one " +
+      "explicitly selected idle physical terminal. This closed /status and " +
+      "/permissions inspection sends native UI input but does not change " +
+      "permissions. It requires an empty Composer, exact pane/process and native " +
+      "thread identity, and no active task or input-owning prompt. Use current, " +
+      "scope, and returned choices to select the requested or authorized mode " +
+      "before set_permissions. Full Access is an ordinary option and needs no " +
+      "additional user confirmation. Only modes actually displayed by this native " +
+      "picker may be selected; arbitrary profiles and configuration paths are " +
+      "unsupported.",
     parameters: permissionOptionsParameters,
     timeoutMs: PERMISSION_CONTROL_TIMEOUT_MS,
     normalizeTurnIdentity: false,
@@ -169,7 +181,19 @@ export function registerPermissionControlTools(api, registerCliTool): void {
   });
   registerCliTool(api, {
     name: "agent_knock_knock_set_permissions",
-    description: "Set one requested or authorized Codex permission mode from the immediately preceding permission_options result in the same controller conversation. Consumes that private catalog once and revalidates the exact physical terminal, native thread, empty Composer and idle state. Full Access is an ordinary selectable mode with no additional user confirmation. AKK automatically handles its exact native confirmation inside this closed transaction; never ask the user to confirm it separately or use generic approve for it. Scope is the current session/thread and may persist when that thread is resumed; global defaults stay unchanged. Ordinary Send does not change permissions. No raw commands, keys, menu indexes, labels, arbitrary profiles, tokens, or scope overrides are accepted. Proceed with a task only after changed/already_effective and effective.mode matches the request; uncertain means stop and do not retry automatically.",
+    description: "Set one requested or authorized Codex permission mode from the immediately " +
+      "preceding permission_options result in the same controller conversation. " +
+      "Consumes that private catalog once and revalidates the exact physical " +
+      "terminal, native thread, empty Composer and idle state. Full Access is an " +
+      "ordinary selectable mode with no additional user confirmation. AKK " +
+      "automatically handles its exact native confirmation inside this closed " +
+      "transaction; never ask the user to confirm it separately or use generic " +
+      "approve for it. Scope is the current session/thread and may persist when " +
+      "that thread is resumed; global defaults stay unchanged. Ordinary Send does " +
+      "not change permissions. No raw commands, keys, menu indexes, labels, " +
+      "arbitrary profiles, tokens, or scope overrides are accepted. Proceed with a " +
+      "task only after changed/already_effective and effective.mode matches the " +
+      "request; uncertain means stop and do not retry automatically.",
     parameters: setPermissionsParameters,
     timeoutMs: PERMISSION_CONTROL_TIMEOUT_MS,
     normalizeTurnIdentity: false,
@@ -205,7 +229,9 @@ export function formatAkkPermissionOptionsCommandResult(result: Record<string, u
     "scope: current_session (may be retained when this thread is resumed); global defaults are unchanged.",
     ...choices.map((choice) => `- ${choice.id}: ${choice.label} — ${choice.description}`),
     `next: /akk set-permissions ${terminalId} <advertised-mode-id>`,
-    "Use a displayed mode for the requested permission change. Full Access needs no additional user confirmation; AKK handles its native dialog automatically."
+    "Use a displayed mode for the requested permission change. Full Access needs " +
+      "no additional user confirmation; AKK handles its native dialog " +
+      "automatically."
   ].join("\n");
 }
 
@@ -219,6 +245,7 @@ export function formatAkkSetPermissionsCommandResult(result: Record<string, unkn
     `effective: ${stringValue(effective.mode) ?? "unproven"}`,
     "scope: current_session (may be retained when this thread is resumed); global defaults are unchanged.",
     ...(stringValue(result.reason) ? [`reason: ${modelFacingErrorMessage(new Error(String(result.reason)))}`] : []),
-    success ? "You can now send the intended task. No task or AKK Turn was created by this permission change." : "Stop before sending the task. Do not retry automatically; inspect the terminal and refresh permission options before a deliberate new attempt."
+    success ? "You can now send the intended task. No task or AKK Turn was created by this permission change." : "Stop before sending the task. Do not retry automatically; inspect the " +
+      "terminal and refresh permission options before a deliberate new attempt."
   ].join("\n");
 }

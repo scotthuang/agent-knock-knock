@@ -637,6 +637,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/codex-open-rollout-inventory.ts",
+      "owner": "codex-storage"
+    },
+    {
       "path": "src/codex-paginated-answer-proof.ts",
       "owner": "codex-storage"
     },
@@ -681,8 +685,36 @@
       "owner": "terminal-identity-authority"
     },
     {
+      "path": "src/codex-rollout-bound-completion.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/codex-rollout-file.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/codex-rollout-human-task.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/codex-rollout-interaction-evidence.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/codex-rollout-inventory.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/codex-rollout-records.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/codex-session-provider.ts",
       "owner": "agent-session-core"
+    },
+    {
+      "path": "src/codex-sqlite-thread-query.ts",
+      "owner": "codex-storage"
     },
     {
       "path": "src/codex-status-history-navigation.ts",
@@ -857,6 +889,10 @@
       "owner": "native-thread-lifecycle-cli"
     },
     {
+      "path": "src/native-thread-lifecycle-cli-contract.ts",
+      "owner": "native-thread-lifecycle-cli"
+    },
+    {
       "path": "src/native-thread-lifecycle-ledger-cli-adapter.ts",
       "owner": "native-thread-transition-settlement"
     },
@@ -985,6 +1021,10 @@
       "owner": "host-bridge"
     },
     {
+      "path": "src/semantic-tool-descriptions.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/semantic-tool-list-projection.ts",
       "owner": "host-bridge"
     },
@@ -1039,6 +1079,10 @@
     {
       "path": "src/terminal-acceptance-cli-adapter.ts",
       "owner": "terminal-acceptance-application"
+    },
+    {
+      "path": "src/terminal-action-contracts.ts",
+      "owner": "terminal-list-renderer"
     },
     {
       "path": "src/terminal-action-projection.ts",
@@ -1281,11 +1325,27 @@
       "owner": "terminal-dispatch-core"
     },
     {
+      "path": "src/terminal-model-control-cli-adapter.ts",
+      "owner": "native-thread-lifecycle-cli"
+    },
+    {
+      "path": "src/terminal-model-control-contract.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/terminal-model-control-input.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
       "path": "src/terminal-model-control-profile.ts",
       "owner": "terminal-agent-core"
     },
     {
       "path": "src/terminal-model-control-subject.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/terminal-model-control-surface.ts",
       "owner": "terminal-agent-core"
     },
     {
@@ -1297,16 +1357,32 @@
       "owner": "terminal-agent-core"
     },
     {
+      "path": "src/terminal-model-selection.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
       "path": "src/terminal-monitor-application-service.ts",
       "owner": "terminal-monitor-application"
+    },
+    {
+      "path": "src/terminal-monitor-attention-store.ts",
+      "owner": "terminal-monitor-state"
     },
     {
       "path": "src/terminal-monitor-cli-adapter.ts",
       "owner": "terminal-monitor-application"
     },
     {
+      "path": "src/terminal-monitor-collateral-recovery.ts",
+      "owner": "terminal-monitor-state"
+    },
+    {
       "path": "src/terminal-monitor-decision-policy.ts",
       "owner": "terminal-monitor-policy"
+    },
+    {
+      "path": "src/terminal-monitor-interaction-projection.ts",
+      "owner": "terminal-monitor-application"
     },
     {
       "path": "src/terminal-monitor-interaction-store.ts",
@@ -1329,7 +1405,15 @@
       "owner": "terminal-monitor-policy"
     },
     {
+      "path": "src/terminal-monitor-startup-recovery.ts",
+      "owner": "terminal-monitor-state"
+    },
+    {
       "path": "src/terminal-monitor-state-cli-adapter.ts",
+      "owner": "terminal-monitor-state"
+    },
+    {
+      "path": "src/terminal-monitor-state-contract.ts",
       "owner": "terminal-monitor-state"
     },
     {
@@ -1350,6 +1434,18 @@
     },
     {
       "path": "src/terminal-native-inspection-bridge.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-native-inspection-contract.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-native-inspection-profile.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/terminal-native-inspection-proof.ts",
       "owner": "terminal-dispatch-core"
     },
     {
@@ -1465,6 +1561,10 @@
       "owner": "terminal-dispatch-core"
     },
     {
+      "path": "src/terminal-watch-anchor-capture.ts",
+      "owner": "terminal-watch"
+    },
+    {
       "path": "src/terminal-watch-callback-cli-adapter.ts",
       "owner": "terminal-watch"
     },
@@ -1473,7 +1573,19 @@
       "owner": "terminal-watch"
     },
     {
+      "path": "src/terminal-watch-cli-contract.ts",
+      "owner": "terminal-watch"
+    },
+    {
       "path": "src/terminal-watch-codec.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-fallback-observation.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-interaction-observation.ts",
       "owner": "terminal-watch"
     },
     {
@@ -1485,11 +1597,27 @@
       "owner": "terminal-watch"
     },
     {
+      "path": "src/terminal-watch-observation-adapter.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-observation-evidence.ts",
+      "owner": "terminal-watch"
+    },
+    {
       "path": "src/terminal-watch-presentation.ts",
       "owner": "terminal-watch"
     },
     {
       "path": "src/terminal-watch-record.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-response-authority.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-response-cli-adapter.ts",
       "owner": "terminal-watch"
     },
     {
@@ -1502,6 +1630,10 @@
     },
     {
       "path": "src/terminal-watch-store.ts",
+      "owner": "terminal-watch"
+    },
+    {
+      "path": "src/terminal-watch-terminal-identity.ts",
       "owner": "terminal-watch"
     },
     {

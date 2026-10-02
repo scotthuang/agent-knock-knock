@@ -40,7 +40,8 @@ export const respondInteractionParameters = {
     watch_id: {
       ...terminalInteractionIdentifierSchema,
       description:
-        "Exact authoritative Terminal Watch id from the current interaction_state projection. Supply exactly one of turn_id or watch_id."
+        "Exact authoritative Terminal Watch id from the current interaction_state " +
+          "projection. Supply exactly one of turn_id or watch_id."
     },
     interaction_id: {
       ...terminalInteractionIdentifierSchema,
@@ -51,20 +52,30 @@ export const respondInteractionParameters = {
       type: "string",
       enum: ["steer_current_turn", "queue_next_turn"],
       description:
-        "Optional for async_question; defaults to steer_current_turn when advertised. Use only a delivery mode advertised by the current interaction_state: steer_current_turn delivers the answer to the running turn; queue_next_turn queues it for the next turn. Omit for blocking questionnaire interactions."
+        "Optional for async_question; defaults to steer_current_turn when advertised. " +
+          "Use only a delivery mode advertised by the current interaction_state: " +
+          "steer_current_turn delivers the answer to the running turn; queue_next_turn " +
+          "queues it for the next turn. Omit for blocking questionnaire interactions."
     },
     answers: {
       type: "array",
       minItems: 1,
       maxItems: TERMINAL_INTERACTION_LIMITS.maxQuestions,
       description:
-        "One typed current-step answer using only advertised opaque semantic ids. For single_select supply selected_option_ids; for free_text supply text; for confirm supply confirm. Async questions optionally select top-level delivery_mode (default: steer_current_turn). Supply no other answer field. Raw keys, indexes, rendered labels, fingerprints, versions, and terminal commands are not accepted.",
+        "One typed current-step answer using only advertised opaque semantic ids. For " +
+          "single_select supply selected_option_ids; for free_text supply text; for " +
+          "confirm supply confirm. Async questions optionally select top-level " +
+          "delivery_mode (default: steer_current_turn). Supply no other answer field. " +
+          "Raw keys, indexes, rendered labels, fingerprints, versions, and terminal " +
+          "commands are not accepted.",
       items: {
         type: "object",
         additionalProperties: false,
         required: ["question_id", "response_kind"],
         description:
-          "Provider-portable answer envelope. AKK revalidates the exact discriminator-specific shape against the current authoritative interaction before sending terminal input.",
+          "Provider-portable answer envelope. AKK revalidates the exact " +
+            "discriminator-specific shape against the current authoritative interaction " +
+            "before sending terminal input.",
         properties: {
           ...terminalInteractionAnswerBase,
           response_kind: {
@@ -129,26 +140,53 @@ export const sendParameters = {
       type: "string",
       minLength: 1,
       description:
-        "Exact authoritative Turn id only from a current available_actions.retry_submission action. This retry form is exactly {turn_id}: the caller never supplies request text, terminal or Session target, timeout override, or callback route. AKK may use only the immutable original request, and only after revalidating the durable submission and live composer under lock."
+        "Exact authoritative Turn id only from a current " +
+          "available_actions.retry_submission action. This retry form is exactly " +
+          "{turn_id}: the caller never supplies request text, terminal or Session " +
+          "target, timeout override, or callback route. AKK may use only the immutable " +
+          "original request, and only after revalidating the durable submission and " +
+          "live composer under lock."
     },
     session_id: {
       type: "string",
       minLength: 1,
       description:
-        "Strict session-scoped AKK id only when the current list action prefills it. This preserves that exact native context and never follows the pane after a human switches threads. A rollout-backed Codex Session is a continuing context label but is not a direct ordinary-send target; use that terminal row's follow-current selector action instead. Discovery selectors, terminal ids, and turn ids are never session_id destinations."
+        "Strict session-scoped AKK id only when the current list action prefills it. " +
+          "This preserves that exact native context and never follows the pane after a " +
+          "human switches threads. A rollout-backed Codex Session is a continuing " +
+          "context label but is not a direct ordinary-send target; use that terminal " +
+          "row's follow-current selector action instead. Discovery selectors, terminal " +
+          "ids, and turn ids are never session_id destinations."
     },
     terminal_id: {
       type: "string",
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal-scoped send action. Codex and Claude Code terminal_user_explicit identify one exact live physical terminal/process with a scanned, non-blocked approval state and no proven input-owning questionnaire, editor, menu, or read-only viewer. Composer visibility, stability, exactness, existing draft contents, and parsed working activity are not eligibility vetoes. Codex sends C-u once; Claude Code uses a sentinel-backed native C-s stash-clear transaction that is independent of the cursor position and does not interrupt an active turn, then proves the main Composer empty. Each then injects this request, waits through the paste window, and dispatches Enter exactly once without a post-text Composer veto. Broken AKK state cannot veto the user; unmanaged delivery has no managed callback Turn, but AKK best-effort attaches an exact Terminal Watch callback before management release. Watch failure is reported without changing a successful Send. Once mutation begins, an uncertain result must not be retried automatically. Human discovery selectors are not structured-tool authority. Omit both target fields only when AKK should select the unique send-ready pane."
+        "Exact full terminal_id from the current terminal-scoped send action. Codex " +
+          "and Claude Code terminal_user_explicit identify one exact live physical " +
+          "terminal/process with a scanned, non-blocked approval state and no proven " +
+          "input-owning questionnaire, editor, menu, or read-only viewer. Composer " +
+          "visibility, stability, exactness, existing draft contents, and parsed " +
+          "working activity are not eligibility vetoes. Codex sends C-u once; Claude " +
+          "Code uses a sentinel-backed native C-s stash-clear transaction that is " +
+          "independent of the cursor position and does not interrupt an active turn, " +
+          "then proves the main Composer empty. Each then injects this request, waits " +
+          "through the paste window, and dispatches Enter exactly once without a " +
+          "post-text Composer veto. Broken AKK state cannot veto the user; unmanaged " +
+          "delivery has no managed callback Turn, but AKK best-effort attaches an exact " +
+          "Terminal Watch callback before management release. Watch failure is reported " +
+          "without changing a successful Send. Once mutation begins, an uncertain " +
+          "result must not be retried automatically. Human discovery selectors are not " +
+          "structured-tool authority. Omit both target fields only when AKK should " +
+          "select the unique send-ready pane."
     },
     request: {
       type: "string",
       minLength: 1,
       description:
-        "Message for the coding agent. Each accepted ordinary send creates a new turn inside the selected session without clearing native agent context."
+        "Message for the coding agent. Each accepted ordinary send creates a new turn " +
+          "inside the selected session without clearing native agent context."
     },
     type: {
       type: "string",
@@ -181,7 +219,9 @@ export const respondParameters = {
     turn_id: {
       type: "string",
       description:
-        "Authoritative AKK turn id from a question or blocked callback, never a discovery selector or terminal id. A response continues this exact in-flight turn and does not create a new turn."
+        "Authoritative AKK turn id from a question or blocked callback, never a " +
+          "discovery selector or terminal id. A response continues this exact in-flight " +
+          "turn and does not create a new turn."
     },
     request: {
       type: "string",
@@ -228,7 +268,9 @@ export const watchParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id selected by the user, normally copied from the current terminal row. Watch is read-only: AKK prefers an exact task anchor and otherwise uses a warning-bearing best-effort terminal-activity fallback."
+        "Exact full terminal_id selected by the user, normally copied from the " +
+          "current terminal row. Watch is read-only: AKK prefers an exact task anchor " +
+          "and otherwise uses a warning-bearing best-effort terminal-activity fallback."
     },
     hardTimeoutMinutes: {
       type: "number",
@@ -263,7 +305,9 @@ export const listResumableThreadsParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the selected terminal row's current available_actions. Do not use a short ref, session id, turn id, or constructed selector."
+        "Exact full terminal_id from the selected terminal row's current " +
+          "available_actions. Do not use a short ref, session id, turn id, or " +
+          "constructed selector."
     }
   }
 };
@@ -278,13 +322,21 @@ export const nativeInspectParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current native_inspect action. Never use a short ref, Session id, Turn id, or constructed selector. AKK refreshes and revalidates the binding internally."
+        "Exact full terminal_id from the current native_inspect action. Never use a " +
+          "short ref, Session id, Turn id, or constructed selector. AKK refreshes and " +
+          "revalidates the binding internally."
     },
     inspection: {
       type: "string",
       enum: ["status"],
       description:
-        "Closed adapter-owned inspection kind. Codex 0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4/0.154.0/0.155.1 and Claude Code 2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267/2.1.285 are regression-tested; another complete x.y.z version remains callable through the generic runtime profile with a compatibility warning. This is never an arbitrary native command string."
+        "Closed adapter-owned inspection kind. Codex " +
+          "0.146.0/0.146.1/0.147.0/0.148.0/0.149.1/0.150.1/0.151.0/0.153.0/0.153.4/0.15" +
+          "4.0/0.155.1 and Claude Code " +
+          "2.1.218/2.1.226/2.1.237/2.1.251/2.1.259/2.1.263/2.1.266/2.1.267/2.1.285 are " +
+          "regression-tested; another complete x.y.z version remains callable through " +
+          "the generic runtime profile with a compatibility warning. This is never an " +
+          "arbitrary native command string."
     }
   }
 };
@@ -299,7 +351,13 @@ export const modelOptionsParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal row's advertised model_options action. This is explicit current-snapshot authority for one live physical pane/process, including a profiled Codex 0.154.0/0.155.1 pane with no materialized rollout or one exact stable /model residual. AKK consumes any residual-entry authority during this closed discovery; after exact dismissal it retains only a fresh ordinary terminal/catalog offer for one set_model attempt."
+        "Exact full terminal_id from the current terminal row's advertised " +
+          "model_options action. This is explicit current-snapshot authority for one " +
+          "live physical pane/process, including a profiled Codex 0.154.0/0.155.1 pane " +
+          "with no materialized rollout or one exact stable /model residual. AKK " +
+          "consumes any residual-entry authority during this closed discovery; after " +
+          "exact dismissal it retains only a fresh ordinary terminal/catalog offer for " +
+          "one set_model attempt."
     }
   }
 };
@@ -313,7 +371,9 @@ export const permissionOptionsParameters = {
       type: "string",
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
-      description: "Exact full terminal_id from the current terminal row's advertised permission_options action. Codex must be idle with an empty Composer; AKK verifies its physical and native thread identities before closed inspection."
+      description: "Exact full terminal_id from the current terminal row's advertised " +
+        "permission_options action. Codex must be idle with an empty Composer; AKK " +
+        "verifies its physical and native thread identities before closed inspection."
     }
   }
 };
@@ -334,7 +394,11 @@ export const setPermissionsParameters = {
       minLength: 1,
       maxLength: 64,
       pattern: "^[a-z][a-z0-9_-]*$",
-      description: "Exact semantic mode id from the current native permission catalog for the requested or authorized change. Full Access is an ordinary option with no additional user confirmation; AKK handles its native dialog automatically. Labels, menu indexes, slash commands, keys, arbitrary profiles, and configuration paths are not accepted."
+      description: "Exact semantic mode id from the current native permission catalog for the " +
+        "requested or authorized change. Full Access is an ordinary option with no " +
+        "additional user confirmation; AKK handles its native dialog automatically. " +
+        "Labels, menu indexes, slash commands, keys, arbitrary profiles, and " +
+        "configuration paths are not accepted."
     }
   }
 };
@@ -349,7 +413,11 @@ export const repairModelControlParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal row's advertised repair_model_control action. AKK privately binds this one-shot repair to the exact profiled Codex 0.154.0/0.155.1 pane/process and exact native /model Composer residue or open model picker; no command, key, menu index, draft text, token, or fingerprint is accepted."
+        "Exact full terminal_id from the current terminal row's advertised " +
+          "repair_model_control action. AKK privately binds this one-shot repair to the " +
+          "exact profiled Codex 0.154.0/0.155.1 pane/process and exact native /model " +
+          "Composer residue or open model picker; no command, key, menu index, draft " +
+          "text, token, or fingerprint is accepted."
     }
   }
 };
@@ -364,7 +432,11 @@ export const setModelParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full physical-pane terminal_id used in the immediately preceding agent_knock_knock_model_options call in this controller conversation. For a verified-zero-rollout profiled Codex 0.154.0/0.155.1 pane, foreground attribution and identify_foreground are not prerequisites; Claude Code still requires its exact current native Session."
+        "Exact full physical-pane terminal_id used in the immediately preceding " +
+          "agent_knock_knock_model_options call in this controller conversation. For a " +
+          "verified-zero-rollout profiled Codex 0.154.0/0.155.1 pane, foreground " +
+          "attribution and identify_foreground are not prerequisites; Claude Code still " +
+          "requires its exact current native Session."
     },
     model: {
       type: "string",
@@ -372,7 +444,9 @@ export const setModelParameters = {
       maxLength: 160,
       pattern: "^[A-Za-z0-9][A-Za-z0-9._:/+\\-]*$",
       description:
-        "Exact semantic model id advertised by the current model-options catalog. Display labels, menu indexes, slash commands, keys, and constructed model names are not accepted."
+        "Exact semantic model id advertised by the current model-options catalog. " +
+          "Display labels, menu indexes, slash commands, keys, and constructed model " +
+          "names are not accepted."
     },
     reasoning_effort: {
       type: "string",
@@ -380,7 +454,9 @@ export const setModelParameters = {
       maxLength: 64,
       pattern: "^[a-z][a-z0-9_-]*$",
       description:
-        "Exact reasoning-effort value advertised for this model. The full model/effort tuple is required so AKK can verify an unambiguous postcondition."
+        "Exact reasoning-effort value advertised for this model. The full " +
+          "model/effort tuple is required so AKK can verify an unambiguous " +
+          "postcondition."
     }
   }
 };
@@ -395,7 +471,10 @@ export const identifyForegroundParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full Codex terminal_id from the current identify_foreground action. AKK sends the closed /status probe exactly once under the terminal lock and returns only a short-lived diagnostic foreground observation. It does not bind a Session or authorize later input."
+        "Exact full Codex terminal_id from the current identify_foreground action. " +
+          "AKK sends the closed /status probe exactly once under the terminal lock and " +
+          "returns only a short-lived diagnostic foreground observation. It does not " +
+          "bind a Session or authorize later input."
     }
   }
 };
@@ -410,7 +489,10 @@ export const identifyAndSendParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full Codex terminal_id from the current identify_and_send action. AKK keeps one terminal lock from the explicit /status foreground probe through the single task dispatch; final durable identity still comes only from exact request acceptance."
+        "Exact full Codex terminal_id from the current identify_and_send action. AKK " +
+          "keeps one terminal lock from the explicit /status foreground probe through " +
+          "the single task dispatch; final durable identity still comes only from exact " +
+          "request acceptance."
     },
     request: {
       type: "string",
@@ -445,7 +527,8 @@ export const newThreadParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current new_thread action. AKK refreshes and revalidates the lifecycle binding internally."
+        "Exact full terminal_id from the current new_thread action. AKK refreshes and " +
+          "revalidates the lifecycle binding internally."
     }
   }
 };
@@ -494,7 +577,8 @@ export const resumeThreadParameters = {
       pattern:
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
       description:
-        "Complete native thread UUID from a resumable=true row returned for this exact terminal. Never truncate, guess, or select an unavailable row."
+        "Complete native thread UUID from a resumable=true row returned for this " +
+          "exact terminal. Never truncate, guess, or select an unavailable row."
     }
   }
 };
@@ -570,20 +654,25 @@ export const statusParameters = {
       type: "string",
       deprecated: true,
       description:
-        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled by that terminal row's available status action. Managed Turn status must use turn_id; never construct or guess a raw-terminal selector."
+        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled " +
+          "by that terminal row's available status action. Managed Turn status must use " +
+          "turn_id; never construct or guess a raw-terminal selector."
     },
     watch_id: {
       type: "string",
       minLength: 1,
       description:
-        "Authoritative Terminal Watch id prefilled by a current watch row. This inspects externally started work and is mutually exclusive with Turn targets."
+        "Authoritative Terminal Watch id prefilled by a current watch row. This " +
+          "inspects externally started work and is mutually exclusive with Turn " +
+          "targets."
     },
     idleTimeoutMinutes: {
       type: "number"
     },
     trace: {
       type: "boolean",
-      description: "Include a safe executor trace summary with tool calls, permission requests, monitor events, and redacted thinking markers."
+      description: "Include a safe executor trace summary with tool calls, permission requests, " +
+        "monitor events, and redacted thinking markers."
     }
   }
 };
@@ -605,7 +694,9 @@ export const cancelParameters = {
       type: "string",
       deprecated: true,
       description:
-        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled by that terminal row's available cancel action. Managed Turn cancellation must use turn_id; never construct or guess a raw-terminal selector."
+        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled " +
+          "by that terminal row's available cancel action. Managed Turn cancellation " +
+          "must use turn_id; never construct or guess a raw-terminal selector."
     },
     idleTimeoutMinutes: {
       type: "number"
@@ -635,7 +726,9 @@ export const closeParameters = {
       type: "string",
       deprecated: true,
       description:
-        "Deprecated legacy Turn alias, or an exact list-prefilled raw-terminal/orphan recovery selector. Managed Turn close must use turn_id; never construct or guess a raw-terminal selector."
+        "Deprecated legacy Turn alias, or an exact list-prefilled raw-terminal/orphan " +
+          "recovery selector. Managed Turn close must use turn_id; never construct or " +
+          "guess a raw-terminal selector."
     },
     reason: {
       type: "string"
@@ -643,12 +736,16 @@ export const closeParameters = {
     expected_message_id: {
       type: "string",
       description:
-        "Required only to clear an orphaned terminal dispatch shown by AKK list. Must exactly match that entry's current message_id and must not be combined with expected_transition_id."
+        "Required only to clear an orphaned terminal dispatch shown by AKK list. Must " +
+          "exactly match that entry's current message_id and must not be combined with " +
+          "expected_transition_id."
     },
     expected_transition_id: {
       type: "string",
       description:
-        "Required only to recover an unresolved native-thread lifecycle transition shown by AKK list. Must exactly match that entry's current transition_id and must not be combined with expected_message_id."
+        "Required only to recover an unresolved native-thread lifecycle transition " +
+          "shown by AKK list. Must exactly match that entry's current transition_id and " +
+          "must not be combined with expected_message_id."
     }
   }
 };
@@ -666,7 +763,9 @@ export const approveParameters = {
       type: "string",
       enum: ["approve_once", "reject"],
       description:
-        "Closed semantic decision from the current AKK status offer. Defaults to approve_once. Raw keys, menu indexes, and rendered labels are never accepted."
+        "Closed semantic decision from the current AKK status offer. Defaults to " +
+          "approve_once. Raw keys, menu indexes, and rendered labels are never " +
+          "accepted."
     },
     turn_id: {
       type: "string",
@@ -677,7 +776,9 @@ export const approveParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal-scoped approval action. Managed Turn approval must use turn_id. AKK binds the user's reviewed prompt and revalidates terminal authority internally."
+        "Exact full terminal_id from the current terminal-scoped approval action. " +
+          "Managed Turn approval must use turn_id. AKK binds the user's reviewed prompt " +
+          "and revalidates terminal authority internally."
     }
   }
 };

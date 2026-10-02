@@ -1,18 +1,40 @@
-import { createTerminalPermissionControlCliAdapter } from "./terminal-permission-control-cli-adapter.js";
+import {
+  createTerminalModelControlCliAdapter
+} from "./terminal-model-control-cli-adapter.js";
 import type {
-  TerminalNativeControlCliBoundary,
-  TerminalNativeControlCliOptions
+  NativeLifecycleCliOptions,
+  NativeLifecycleSnapshot,
+  NativeThreadOwnershipRequest,
+  CreateNativeThreadLifecycleCliAdapterInput
+} from "./native-thread-lifecycle-cli-contract.js";
+export type {
+  NativeLifecycleCliOptions,
+  NativeLifecycleSnapshot,
+  NativeThreadOwnershipRequest,
+  CreateNativeThreadLifecycleCliAdapterInput
+} from "./native-thread-lifecycle-cli-contract.js";
+import {
+  createTerminalPermissionControlCliAdapter
+} from "./terminal-permission-control-cli-adapter.js";
+import type {
+  TerminalNativeControlCliBoundary
 } from "./terminal-native-control-cli-contract.js";
 import fs from "node:fs";
 import path from "node:path";
 
-import { createClaudeThreadLifecycleCandidateProvider } from
-  "./claude-local-transcript-provider.js";
-import { codexRuntimeLifecycleBehaviorProfile } from
-  "./codex-lifecycle-compatibility.js";
-import { expandHome } from "./cli-command-runtime.js";
-import type { ExecutorKind } from "./executors.js";
-import type { FileLockAcquisitionOptions } from "./file-lock-cli-adapter.js";
+import {
+  createClaudeThreadLifecycleCandidateProvider
+} from "./claude-local-transcript-provider.js";
+import {
+  codexRuntimeLifecycleBehaviorProfile
+} from "./codex-lifecycle-compatibility.js";
+import {
+  expandHome
+} from "./cli-command-runtime.js";
+import type {
+  ExecutorKind
+} from "./executors.js";
+
 import {
   isExactNativeThreadId,
   legacyManagedSessionBindingToken,
@@ -29,18 +51,19 @@ import {
   type LifecycleTerminalObservation,
   type NativeThreadLifecycleQueryPorts
 } from "./native-thread-lifecycle-query-service.js";
-import { codexComposerEmpty } from
-  "./native-thread-lifecycle-recovery-adapter.js";
+import {
+  codexComposerEmpty
+} from "./native-thread-lifecycle-recovery-adapter.js";
 import {
   createNativeThreadResumeSnapshot,
   saveNativeThreadResumeSnapshot
 } from "./native-thread-resume-snapshot.js";
-import { terminalActionFingerprint } from
-  "./native-thread-resume-snapshot-policy.js";
+import {
+  terminalActionFingerprint
+} from "./native-thread-resume-snapshot-policy.js";
 import {
   isSessionSendBlockingStatus,
-  turnIdForConversation,
-  type Conversation
+  turnIdForConversation
 } from "./protocol.js";
 import {
   listManagedSessions,
@@ -49,20 +72,17 @@ import {
 import type {
   ActiveTerminalProcess,
   TerminalAgentAdapter,
-  TerminalControlRef,
   TerminalNativeInspectionObservation,
   TerminalNativeInspectionObservationRequest,
   TerminalNativeInspectionPlan,
-  TerminalRuntimeIdentity,
-  TerminalThreadLifecycleCapabilities
+  TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
 import {
   isExactClaudeNativeInspectionIdleComposer,
   NativeInspectionSubmissionError,
   type ResolvedTerminalConversation,
   type TerminalAgentBridge,
-  type TerminalBridgeStatus,
-  type TerminalModelControlBridgeOptions
+  type TerminalBridgeStatus
 } from "./terminal-agent-bridge.js";
 import {
   terminalControlAliasMatches,
@@ -70,32 +90,13 @@ import {
   withCodexCompanionFences,
   type CodexAllowedCompanionSet
 } from "./terminal-authority-policy.js";
-import type { TerminalNativeIdentity } from
-  "./terminal-binding-authority.js";
-import type { TerminalDispatchLedgerDocument } from
-  "./terminal-dispatch-ledger-codec.js";
-import {
-  decideModelControlAvailability,
-  type ModelControlAvailabilityDecision,
-  type ModelControlSafetyFacts
-} from "./terminal-model-control-availability.js";
-import type { TerminalRuntimeCliAdapter } from
-  "./terminal-runtime-cli-adapter.js";
-import {
-  isCodexModelControlAgentVersion,
-  isTerminalModelControlPlanForAgent,
-  isTerminalModelReasoningEffort,
-  terminalModelControlPlanConforms,
-  terminalModelControlProfileForPlan,
-  terminalUserExplicitModelControlBindingToken,
-  type TerminalModelCatalog,
-  type TerminalModelControlPlan,
-  type TerminalModelControlResidualObservation,
-  type TerminalModelSwitchRequest
-} from "./terminal-model-control.js";
-import { nonBlankString } from "./value-guards.js";
+import type {
+  TerminalNativeIdentity
+} from "./terminal-binding-authority.js";
 
-export type NativeLifecycleCliOptions = TerminalNativeControlCliOptions;
+import {
+  nonBlankString
+} from "./value-guards.js";
 
 export const CODEX_FOREGROUND_IDENTIFICATION_TTL_MS = 30_000;
 export const CODEX_FOREGROUND_IDENTIFICATION_SCROLLBACK_LINES = 240;
@@ -127,146 +128,6 @@ export interface CodexForegroundIdentificationProof {
     readonly enterCount: 1;
     readonly materialization: NativeInspectionSubmission["materialization"];
   };
-}
-
-export interface NativeLifecycleSnapshot {
-  readonly identity?: TerminalNativeIdentity;
-  readonly runtimeIdentity?: TerminalNativeIdentity;
-  readonly codexCompanions: CodexAllowedCompanionSet;
-  readonly session?: ManagedSessionState;
-  readonly version?: string;
-  readonly capabilities: TerminalThreadLifecycleCapabilities;
-  readonly bindingToken: string;
-  readonly bindingTokens: readonly string[];
-}
-
-interface NativeLifecycleIdentityPorts {
-  resolveCurrent(input: {
-    options: NativeLifecycleCliOptions;
-    agent: ExecutorKind;
-    pid: number;
-    cwd?: string;
-    preferredSessionId?: string;
-    allowedCompanionIdentity?: CodexAllowedCompanionSet["primary"];
-    allowedAdditionalIdentities?: readonly NonNullable<
-      CodexAllowedCompanionSet["primary"]
-    >[];
-  }): Promise<TerminalNativeIdentity | undefined>;
-  managedContext(input: {
-    storeDir: string;
-    terminal: ResolvedTerminalConversation;
-  }): {
-    preferredSessionId?: string;
-    companions: CodexAllowedCompanionSet;
-  };
-  boundSession(input: {
-    storeDir: string;
-    terminal: ResolvedTerminalConversation;
-    identity?: TerminalNativeIdentity;
-  }): ManagedSessionState | undefined;
-  materializeSession(input: {
-    options: NativeLifecycleCliOptions;
-    terminal: ResolvedTerminalConversation;
-    identity?: TerminalNativeIdentity;
-  }): ManagedSessionState | undefined;
-  refineSession(input: {
-    storeDir: string;
-    session: ManagedSessionState;
-    terminalControl: TerminalControlRef;
-    identity?: TerminalNativeIdentity;
-  }): ManagedSessionState;
-  logicalIdentity(input: {
-    storeDir: string;
-    session: ManagedSessionState;
-    observedIdentity?: TerminalNativeIdentity;
-  }): TerminalNativeIdentity | undefined;
-  companionSet(input: {
-    storeDir: string;
-    session: ManagedSessionState;
-  }): CodexAllowedCompanionSet;
-  processIncarnation(pid: number): {
-    processUuid: string;
-    processBirth: string;
-  };
-  /**
-   * Provider-independent operating-system process identity used only for
-   * explicit physical-terminal authority. Keep it separate from Codex native
-   * lifecycle identity so the producer and consumer of a physical token cannot
-   * silently choose different UUID namespaces.
-   */
-  physicalProcessIncarnation(pid: number): {
-    processUuid: string;
-    processBirth: string;
-  };
-  runtimeForLiveIdentity(input: {
-    terminal: LifecycleTerminalObservation;
-    identity?: TerminalNativeIdentity;
-    expectedEmptyNativeSession?: boolean;
-    physicalOnly?: boolean;
-  }): TerminalRuntimeIdentity;
-  ownerIsInactive(input: {
-    session: ManagedSessionState;
-    terminal: LifecycleTerminalObservation;
-    identity?: TerminalNativeIdentity;
-  }): boolean;
-  assertCodexComposerReady(input: {
-    options: NativeLifecycleCliOptions;
-    terminalControl: TerminalControlRef;
-  }): Promise<void>;
-}
-
-interface NativeLifecycleStatePorts {
-  storeDir(options: NativeLifecycleCliOptions): string;
-  inspectStore(storeDir: string): { writable: boolean };
-  runtimeDir(): string;
-  acquireTerminal(
-    storeDir: string,
-    terminalControl: TerminalControlRef,
-    options?: FileLockAcquisitionOptions
-  ): () => void;
-  loadLedger(terminalControl: TerminalControlRef):
-    TerminalDispatchLedgerDocument | undefined;
-  managedTurns(storeDir: string, sessionId: string): readonly Conversation[];
-  terminalBlockingTurns(
-    storeDir: string,
-    terminalControl: TerminalControlRef
-  ): readonly Conversation[];
-  hasUnresolvedTransition(
-    storeDir: string,
-    session: ManagedSessionState
-  ): boolean;
-  dispatchOwnership(terminalControl: TerminalControlRef): { state: string };
-  assertNativeThreadStoreAuthority(input: {
-    terminalControl: TerminalControlRef;
-    nativeThreadId: string;
-    storeDir: string;
-  }): void;
-  orphanedForRecovery(terminalControl: TerminalControlRef):
-    TerminalDispatchLedgerDocument | undefined;
-}
-
-export interface CreateNativeThreadLifecycleCliAdapterInput {
-  runtime: {
-    forOptions(options: NativeLifecycleCliOptions): TerminalRuntimeCliAdapter;
-    sleep(milliseconds: number): Promise<void>;
-  };
-  identity: NativeLifecycleIdentityPorts;
-  state: NativeLifecycleStatePorts;
-  output: {
-    cwd(): string;
-    print(value: unknown): void;
-  };
-}
-
-export interface NativeThreadOwnershipRequest {
-  options: NativeLifecycleCliOptions;
-  agent: ExecutorKind;
-  currentPid: number;
-  nativeThreadId: string;
-  storeDir: string;
-  terminalControl: TerminalControlRef;
-  excludedManagedSessionId?: string;
-  allowedManagedSessionIds?: string[];
 }
 
 export interface NativeThreadLifecycleCliFacade extends TerminalNativeControlCliBoundary {
@@ -325,6 +186,22 @@ export function createNativeThreadLifecycleCliAdapter(
     state: ports.state,
     output: ports.output
   });
+  const models = createTerminalModelControlCliAdapter({
+    ...ports,
+    lifecycle: {
+      resolveLifecycleTerminal: (options) => app.resolveLifecycleTerminal(options),
+      assertSameInspectionTerminal: (expected, actual, stage) => app.assertSameInspectionTerminal(expected, actual, stage),
+      assertInspectionReady: (input) => app.assertInspectionReady(input),
+      assertForegroundHasNoLifecycleTransition: (options, terminal) => app.assertForegroundHasNoLifecycleTransition(options, terminal),
+      currentSnapshot: (options, terminal) => app.currentSnapshot(options, terminal),
+      agentAdapter: (options, agent) => app.agentAdapter(options, agent),
+      assertExclusive: (input) => app.assertExclusive(input),
+      inspectionRuntime: (terminal, snapshot) => app.inspectionRuntime(terminal, snapshot),
+      assertInspectionAgentIdentity: (input) => app.assertInspectionAgentIdentity(input),
+      observeInitialInspectionReady: (options, terminal, snapshot, bridge) =>
+        app.observeInitialInspectionReady(options, terminal, snapshot, bridge)
+    }
+  });
   return Object.freeze({
     resolveLifecycleTerminal: (options) => app.resolveLifecycleTerminal(options),
     queryPorts: (options) => app.queryPorts(options),
@@ -337,9 +214,9 @@ export function createNativeThreadLifecycleCliAdapter(
     runInspect: (options) => app.runInspect(options),
     runPermissionOptions: permissions.runPermissionOptions,
     runSetPermissions: permissions.runSetPermissions,
-    runModelOptions: (options) => app.runModelOptions(options),
-    runSetModel: (options) => app.runSetModel(options),
-    runRepairModelControl: (options) => app.runRepairModelControl(options),
+    runModelOptions: models.runModelOptions,
+    runSetModel: models.runSetModel,
+    runRepairModelControl: models.runRepairModelControl,
     runIdentifyForeground: (options) => app.runIdentifyForeground(options),
     identifyCodexForegroundWhileLocked: (input) =>
       app.identifyCodexForegroundWhileLocked(input),
@@ -584,72 +461,6 @@ class NativeThreadLifecycleCliApplication {
       codexCompanions: input.codexCompanions,
       session: input.session, version, capabilities,
       bindingToken: bindingTokens[0], bindingTokens
-    });
-  }
-
-  /**
-   * Model control on Codex is an explicit physical-pane operation. A freshly
-   * started TUI may legitimately have no rollout-backed Session yet. Keep the
-   * physical token separate from native lifecycle binding while retaining the
-   * resolver's fail-closed behavior for genuinely ambiguous live rollouts.
-   */
-  async modelControlSnapshot(
-    options: NativeLifecycleCliOptions,
-    terminal: ResolvedTerminalConversation
-  ): Promise<NativeLifecycleSnapshot> {
-    if (terminal.agent !== "codex") {
-      return this.currentSnapshot(options, terminal);
-    }
-    const snapshot = await this.currentSnapshot(options, terminal);
-    const nativeThreadId = snapshot.identity?.sessionId ??
-      snapshot.session?.binding?.native_thread_id;
-    if (isExactNativeThreadId(nativeThreadId) ||
-        snapshot.identity || snapshot.session) {
-      return snapshot;
-    }
-    const adapter = this.agentAdapter(options, terminal.agent);
-    const { capability, plan, profile } = modelControlProfileObservation(
-      adapter, snapshot.version
-    );
-    if (!plan || profile?.agent !== "codex" ||
-        !profile.supportsZeroRolloutPhysicalAuthority) {
-      throw new Error(
-        capability?.reason ?? "Codex has no verified physical model-control profile"
-      );
-    }
-    const bindingToken = this.physicalModelControlBindingToken(
-      terminal,
-      snapshot.version,
-      plan.behaviorProfile
-    );
-    return Object.freeze({
-      ...snapshot,
-      bindingToken,
-      bindingTokens: Object.freeze([bindingToken])
-    });
-  }
-
-  physicalModelControlBindingToken(
-    terminal: ResolvedTerminalConversation,
-    agentVersion: string | undefined,
-    behaviorProfile: TerminalModelControlPlan["behaviorProfile"]
-  ): string {
-    const version = required(
-      nonBlankString(agentVersion),
-      "Codex physical model control requires an exact running version"
-    );
-    const incarnation = this.ports.identity.physicalProcessIncarnation(
-      terminal.pid
-    );
-    return terminalUserExplicitModelControlBindingToken({
-      terminalId: terminal.conversationId,
-      terminalControl: terminal.terminalControl,
-      pid: terminal.pid,
-      workspace: terminal.terminalControl.currentPath ?? this.ports.output.cwd(),
-      processUuid: incarnation.processUuid,
-      processBirth: incarnation.processBirth,
-      agentVersion: version,
-      behaviorProfile
     });
   }
 
@@ -1418,847 +1229,6 @@ class NativeThreadLifecycleCliApplication {
     }
   }
 
-  validateModelOptions(options: NativeLifecycleCliOptions): string {
-    if (options.command !== undefined || options.message !== undefined ||
-        options.model !== undefined || options.reasoningEffort !== undefined ||
-        options.expectedCatalogFingerprint !== undefined) {
-      throw new Error(
-        "model-options accepts only an exact terminal and current binding authority"
-      );
-    }
-    return required(
-      nonBlankString(options.expectedBindingToken),
-      "--expected-binding-token is required"
-    );
-  }
-
-  validateSetModel(options: NativeLifecycleCliOptions): {
-    expectedBindingToken: string;
-    expectedCatalogFingerprint: string;
-    request: TerminalModelSwitchRequest;
-  } {
-    if (options.command !== undefined || options.message !== undefined ||
-        options.scope !== undefined || options.keys !== undefined ||
-        options.index !== undefined) {
-      throw new Error(
-        "set-model accepts no command, key, menu index, or caller-selected scope"
-      );
-    }
-    const expectedBindingToken = required(
-      nonBlankString(options.expectedBindingToken),
-      "--expected-binding-token is required"
-    );
-    const expectedCatalogFingerprint = required(
-      nonBlankString(options.expectedCatalogFingerprint),
-      "--expected-catalog-fingerprint is required"
-    );
-    if (!/^[0-9a-f]{64}$/u.test(expectedCatalogFingerprint)) {
-      throw new Error(
-        "--expected-catalog-fingerprint must be the exact sha256 from model-options"
-      );
-    }
-    const model = required(
-      nonBlankString(options.model), "--model is required"
-    );
-    const reasoningEffort = options.reasoningEffort;
-    if (!isTerminalModelReasoningEffort(reasoningEffort)) {
-      throw new Error(
-        "--reasoning-effort must be one exact semantic value advertised by model-options"
-      );
-    }
-    return {
-      expectedBindingToken,
-      expectedCatalogFingerprint,
-      request: { model, reasoningEffort }
-    };
-  }
-
-  validateRepairModelControl(options: NativeLifecycleCliOptions): string {
-    if (
-      options.command !== undefined ||
-      options.message !== undefined ||
-      options.model !== undefined ||
-      options.reasoningEffort !== undefined ||
-      options.expectedCatalogFingerprint !== undefined ||
-      options.scope !== undefined ||
-      options.keys !== undefined ||
-      options.index !== undefined
-    ) {
-      throw new Error(
-        "repair-model-control accepts only an exact terminal and current private repair authority"
-      );
-    }
-    return required(
-      nonBlankString(options.expectedBindingToken),
-      "--expected-binding-token is required"
-    );
-  }
-
-  async runModelOptions(options: NativeLifecycleCliOptions): Promise<void> {
-    const expectedBindingToken = this.validateModelOptions(options);
-    const context = await this.withPreparedModelControl(
-      options,
-      expectedBindingToken,
-      async (prepared) => {
-        const result = await prepared.bridge.modelOptions(
-          prepared.terminal.agent,
-          prepared.terminal.terminalControl,
-          prepared.agentVersion,
-          prepared.plan,
-          {
-            runtime: prepared.runtime,
-            beforeInput: () => prepared.initialResidual
-              ? this.assertFreshModelControlResidualBoundary(prepared)
-              : this.assertFreshModelControlBoundary(prepared),
-            loadCodexCatalog: prepared.loadCodexCatalog,
-            initialResidual: prepared.initialResidual
-          }
-        );
-        if (prepared.initialResidual) {
-          await this.assertFreshModelControlBoundary({
-            ...prepared,
-            expectedBindingToken: prepared.ordinaryBindingToken,
-            initialResidual: undefined
-          });
-        }
-        return { prepared, catalog: result.catalog };
-      },
-      { allowResidualEntry: true }
-    );
-    this.ports.output.print(this.modelOptionsResult(
-      context.prepared,
-      context.catalog
-    ));
-  }
-
-  async runSetModel(options: NativeLifecycleCliOptions): Promise<void> {
-    const validated = this.validateSetModel(options);
-    const output = await this.withPreparedModelControl(
-      options,
-      validated.expectedBindingToken,
-      async (prepared) => {
-        const result = await prepared.bridge.setModel(
-          prepared.terminal.agent,
-          prepared.terminal.terminalControl,
-          prepared.agentVersion,
-          prepared.plan,
-          validated.expectedCatalogFingerprint,
-          validated.request,
-          {
-            runtime: prepared.runtime,
-            beforeInput: () => this.assertFreshModelControlBoundary(prepared),
-            loadCodexCatalog: prepared.loadCodexCatalog
-          }
-        );
-        return { prepared, result };
-      }
-    );
-    const { result, prepared } = output;
-    this.ports.output.print({
-      terminal_id: prepared.terminal.conversationId,
-      agent: prepared.terminal.agent,
-      agent_version: prepared.agentVersion,
-      behavior_profile: prepared.plan.behaviorProfile,
-      outcome: result.outcome,
-      requested: modelValueOutput(result.requested),
-      ...(result.effective
-        ? { effective: modelValueOutput(result.effective) }
-        : {}),
-      ...(result.newSessionDefaults
-        ? { new_session_defaults: modelValueOutput(result.newSessionDefaults) }
-        : {}),
-      scope: result.scope,
-      defaults_changed: result.defaultsChanged,
-      do_not_retry: result.doNotRetry,
-      ...(result.reason ? { reason: result.reason } : {})
-    });
-  }
-
-  async runRepairModelControl(
-    options: NativeLifecycleCliOptions
-  ): Promise<void> {
-    const expectedBindingToken = this.validateRepairModelControl(options);
-    const output = await this.withPreparedModelControlRepair(
-      options,
-      expectedBindingToken,
-      async (prepared) => {
-        const result = await prepared.bridge.repairModelControlResidual(
-          prepared.terminal.agent,
-          prepared.terminal.terminalControl,
-          prepared.agentVersion,
-          prepared.plan,
-          prepared.residual.fingerprint,
-          {
-            runtime: prepared.runtime,
-            beforeInput: () =>
-              this.assertFreshModelControlResidualBoundary(prepared)
-          }
-        );
-        return { prepared, result };
-      }
-    );
-    this.ports.output.print({
-      terminal_id: output.prepared.terminal.conversationId,
-      agent: output.prepared.terminal.agent,
-      agent_version: output.prepared.agentVersion,
-      behavior_profile: output.prepared.plan.behaviorProfile,
-      outcome: output.result.outcome,
-      terminal_input_attempted: output.result.terminalInputAttempted,
-      composer_postcondition: output.result.composerPostcondition,
-      do_not_retry: output.result.doNotRetry,
-      ...(output.result.reason ? { reason: output.result.reason } : {}),
-      ...(output.result.outcome === "repaired"
-        ? { next: "refresh_list_then_model_options" }
-        : {})
-    });
-  }
-
-  async withPreparedModelControlRepair<T>(
-    options: NativeLifecycleCliOptions,
-    expectedBindingToken: string,
-    operation: (context: TerminalModelControlRepairContext) => Promise<T>
-  ): Promise<T> {
-    const storeDir = this.ports.state.storeDir(options);
-    if (this.ports.state.inspectStore(storeDir).writable !== true) {
-      throw new Error(
-        "model-control repair requires a compatible AKK Store for current-snapshot authority"
-      );
-    }
-    const initiallyResolved = await this.resolveLifecycleTerminal(options);
-    const release = this.ports.state.acquireTerminal(
-      storeDir,
-      initiallyResolved.terminalControl,
-      { timeoutMs: 30_000 }
-    );
-    try {
-      const runtimeFacade = this.ports.runtime.forOptions(options);
-      const bridge = runtimeFacade.createBridge();
-      const terminal = await bridge.resolveStoredTerminal(
-        initiallyResolved.agent,
-        initiallyResolved.pid,
-        initiallyResolved.terminalControl,
-        { pid: initiallyResolved.pid }
-      );
-      this.assertSameInspectionTerminal(
-        initiallyResolved,
-        terminal,
-        "while waiting for model-control repair ownership"
-      );
-      if (terminal.agent !== "codex") {
-        throw new Error(
-          "model-control residual repair currently supports only verified Codex profiles"
-        );
-      }
-      const snapshot = await this.modelControlSnapshot(options, terminal);
-      const agentVersion = required(
-        nonBlankString(snapshot.version),
-        "model-control repair requires an exact running agent version"
-      );
-      const adapter = runtimeFacade.createAgentRegistry().require(terminal.agent);
-      const { capability, plan, profile } = modelControlProfileObservation(
-        adapter, agentVersion
-      );
-      if (!plan || profile?.agent !== "codex" ||
-          !profile.supportsResidualRepair) {
-        throw new Error(
-          capability?.reason ??
-          "the running Codex version has no verified model-control repair profile"
-        );
-      }
-      await this.assertModelControlExclusive({ options, terminal, snapshot });
-      const runtime = this.inspectionRuntime(terminal, snapshot);
-      const status = await this.assertModelControlRepairReady({
-        options,
-        terminal,
-        snapshot,
-        bridge,
-        runtime
-      });
-      const residual = await bridge.inspectModelControlResidual(
-        terminal.agent,
-        terminal.terminalControl,
-        agentVersion,
-        plan,
-        { runtime, beforeInput: () => undefined }
-      );
-      if (residual.state !== "recoverable") {
-        throw new Error(residual.reason);
-      }
-      const availability = this.modelControlAvailability({
-        options,
-        terminal,
-        snapshot,
-        agentVersion,
-        plan,
-        status,
-        surface: {
-          kind: "residual",
-          residualKind: residual.kind,
-          residualFingerprint: residual.fingerprint,
-          activityState: status.activity_state
-        }
-      });
-      const repairBindingToken =
-        availability.availability === "residual_continuation"
-          ? availability.repairBindingToken
-          : availability.availability === "repair_only"
-            ? availability.expectedBindingToken
-            : undefined;
-      if (repairBindingToken !== expectedBindingToken) {
-        throw new Error(
-          "the exact model-control residual changed after it was listed; refresh AKK list"
-        );
-      }
-      return await operation({
-        options,
-        terminal,
-        snapshot,
-        bridge,
-        runtime,
-        adapter,
-        agentVersion,
-        plan,
-        expectedBindingToken,
-        residual
-      });
-    } finally {
-      release();
-    }
-  }
-
-  async assertFreshModelControlResidualBoundary(
-    context: TerminalModelControlResidualBoundaryContext
-  ): Promise<void> {
-    const terminal = await this.resolveModelControlBoundaryTerminal(context);
-    this.assertSameInspectionTerminal(
-      context.terminal,
-      terminal,
-      "immediately before model-control repair input"
-    );
-    const snapshot = await this.modelControlSnapshot(context.options, terminal);
-    if (snapshot.version !== context.agentVersion) {
-      throw new Error(
-        "terminal binding or coding-agent version changed during model-control repair"
-      );
-    }
-    const expectedNativeThreadId = context.snapshot.identity?.sessionId ??
-      context.snapshot.session?.binding?.native_thread_id;
-    const actualNativeThreadId = snapshot.identity?.sessionId ??
-      snapshot.session?.binding?.native_thread_id;
-    if (expectedNativeThreadId !== actualNativeThreadId) {
-      throw new Error(
-        "the current native Session changed during model-control repair"
-      );
-    }
-    const { plan } = modelControlProfileObservation(
-      context.adapter, snapshot.version
-    );
-    if (!plan || JSON.stringify(plan) !== JSON.stringify(context.plan)) {
-      throw new Error(
-        "the exact model-control repair profile changed during the operation"
-      );
-    }
-    await this.assertModelControlExclusive({
-      options: context.options,
-      terminal,
-      snapshot
-    });
-    await this.assertModelControlRepairReady({
-      options: context.options,
-      terminal,
-      snapshot,
-      bridge: context.bridge,
-      runtime: context.runtime
-    });
-  }
-
-  async assertModelControlRepairReady(input: {
-    options: NativeLifecycleCliOptions;
-    terminal: ResolvedTerminalConversation;
-    snapshot: NativeLifecycleSnapshot;
-    bridge: TerminalAgentBridge;
-    runtime: TerminalRuntimeIdentity;
-  }): Promise<TerminalBridgeStatus> {
-    const status = await input.bridge.status(
-      input.terminal.agent,
-      input.terminal.terminalControl,
-      { runtime: input.runtime }
-    );
-    if (
-      status.reachable !== true ||
-      status.approval_state.scanned !== true ||
-      status.approval_state.blocked === true ||
-      status.interaction_state !== undefined
-    ) {
-      throw new Error(
-        "model-control repair requires a reachable prompt with no approval or questionnaire"
-      );
-    }
-    const storeDir = this.ports.state.storeDir(input.options);
-    const blocker = this.ports.state.terminalBlockingTurns(
-      storeDir,
-      input.terminal.terminalControl
-    )[0];
-    if (blocker) {
-      throw new Error(
-        `terminal ${input.terminal.terminalControl.target} still has unresolved Turn ` +
-        `${turnIdForConversation(blocker)} (${blocker.status})`
-      );
-    }
-    if (
-      input.snapshot.session &&
-      this.ports.state.hasUnresolvedTransition(storeDir, input.snapshot.session)
-    ) {
-      throw new Error(
-        `managed Session ${input.snapshot.session.session_id} has an unresolved native-thread transition`
-      );
-    }
-    if (
-      this.ports.state.dispatchOwnership(input.terminal.terminalControl).state !==
-      "none"
-    ) {
-      throw new Error(
-        "the terminal has unresolved dispatch ownership during model-control repair"
-      );
-    }
-    if (this.ports.state.orphanedForRecovery(input.terminal.terminalControl)) {
-      throw new Error(
-        "the terminal has unresolved input ownership during model-control repair"
-      );
-    }
-    return status;
-  }
-
-  modelControlAvailability(input: {
-    options: NativeLifecycleCliOptions;
-    terminal: ResolvedTerminalConversation;
-    snapshot: NativeLifecycleSnapshot;
-    agentVersion: string;
-    plan: TerminalModelControlPlan;
-    status: TerminalBridgeStatus;
-    surface: ModelControlSafetyFacts["surface"];
-  }): ModelControlAvailabilityDecision {
-    const nativeThreadId = input.snapshot.identity?.sessionId ??
-      input.snapshot.session?.binding?.native_thread_id;
-    const zeroRolloutVerified = input.terminal.agent === "codex" &&
-      !input.snapshot.identity && !input.snapshot.session;
-    const incarnation = this.ports.identity.physicalProcessIncarnation(
-      input.terminal.pid
-    );
-    const storeDir = this.ports.state.storeDir(input.options);
-    return decideModelControlAvailability({
-      exactTerminalRow: true,
-      terminalId: input.terminal.conversationId,
-      processState: "active",
-      terminalControl: input.terminal.terminalControl,
-      agent: input.terminal.agent,
-      pid: input.terminal.pid,
-      processUuid: incarnation.processUuid,
-      processBirth: incarnation.processBirth,
-      agentVersion: input.agentVersion,
-      behaviorProfile: input.plan.behaviorProfile,
-      nativeAuthority: isExactNativeThreadId(nativeThreadId)
-        ? {
-            kind: "exact_session",
-            ordinaryBindingToken: input.snapshot.bindingToken
-          }
-        : zeroRolloutVerified
-          ? { kind: "verified_zero_rollout" }
-          : { kind: "unavailable" },
-      modelControlSupported: true,
-      approvalScanned: input.status.approval_state.scanned === true,
-      approvalBlocked: input.status.approval_state.blocked === true,
-      terminalHasInteraction: input.status.interaction_state !== undefined,
-      terminalHasBlockingTurn: this.ports.state.terminalBlockingTurns(
-        storeDir, input.terminal.terminalControl
-      ).length > 0,
-      hasOrphanedDispatch:
-        this.ports.state.dispatchOwnership(input.terminal.terminalControl)
-          .state !== "none" ||
-        this.ports.state.orphanedForRecovery(
-          input.terminal.terminalControl
-        ) !== undefined,
-      surface: input.surface
-    });
-  }
-
-  async withPreparedModelControl<T>(
-    options: NativeLifecycleCliOptions,
-    expectedBindingToken: string,
-    operation: (context: TerminalModelControlContext) => Promise<T>,
-    behavior: { readonly allowResidualEntry?: boolean } = {}
-  ): Promise<T> {
-    const storeDir = this.ports.state.storeDir(options);
-    if (this.ports.state.inspectStore(storeDir).writable !== true) {
-      throw new Error(
-        "terminal model control requires a compatible AKK Store for current-snapshot authority"
-      );
-    }
-    const initiallyResolved = await this.resolveLifecycleTerminal(options);
-    const release = this.ports.state.acquireTerminal(
-      storeDir, initiallyResolved.terminalControl, { timeoutMs: 30_000 }
-    );
-    try {
-      const runtimeFacade = this.ports.runtime.forOptions(options);
-      const bridge = runtimeFacade.createBridge();
-      const terminal = await bridge.resolveStoredTerminal(
-        initiallyResolved.agent,
-        initiallyResolved.pid,
-        initiallyResolved.terminalControl,
-        { pid: initiallyResolved.pid }
-      );
-      this.assertSameInspectionTerminal(
-        initiallyResolved,
-        terminal,
-        "while waiting for model-control ownership"
-      );
-      const snapshot = await this.modelControlSnapshot(options, terminal);
-      const ordinaryBindingToken = required(
-        nonBlankString(snapshot.bindingToken),
-        "terminal model control requires current ordinary binding authority"
-      );
-      const hasOrdinaryAuthority =
-        snapshot.bindingTokens.includes(expectedBindingToken);
-      if (!hasOrdinaryAuthority && !behavior.allowResidualEntry) {
-        throw new Error(
-          "terminal binding changed after it was listed; refresh AKK list and retry"
-        );
-      }
-      const agentVersion = required(
-        nonBlankString(snapshot.version),
-        "model control requires an exact running agent version"
-      );
-      const adapter = runtimeFacade.createAgentRegistry().require(terminal.agent);
-      const { capability, plan, profile } = modelControlProfileObservation(
-        adapter, agentVersion
-      );
-      if (capability?.status !== "supported" ||
-          capability.modelSelection !== true ||
-          capability.reasoningEffortSelection !== true) {
-        throw new Error(
-          capability?.reason ??
-          `${adapter.displayName} has no verified model-control profile`
-        );
-      }
-      if (!plan || !profile) {
-        throw new Error("the agent adapter did not produce a model-control plan");
-      }
-      await this.assertModelControlExclusive({ options, terminal, snapshot });
-      let initialResidual: Extract<
-        TerminalModelControlResidualObservation,
-        { state: "recoverable" }
-      > | undefined;
-      let runtime: TerminalRuntimeIdentity;
-      if (hasOrdinaryAuthority) {
-        const ready = await this.observeInitialInspectionReady(
-          options, terminal, snapshot, bridge
-        );
-        runtime = ready.runtime;
-        if (ready.status.approval_state.scanned !== true ||
-            ready.status.approval_state.blocked === true ||
-            ready.status.interaction_state !== undefined) {
-          throw new Error(
-            "model control requires a freshly scanned terminal with no approval or questionnaire"
-          );
-        }
-        const availability = this.modelControlAvailability({
-          options,
-          terminal,
-          snapshot,
-          agentVersion,
-          plan,
-          status: ready.status,
-          surface: {
-            kind: "idle_empty",
-            screenState: ready.status.screen_state
-          }
-        });
-        if (availability.availability !== "open_from_empty" ||
-            availability.expectedBindingToken !== ordinaryBindingToken) {
-          throw new Error(
-            "model control requires an exact verified idle pane with an empty composer and no blocking interaction"
-          );
-        }
-      } else {
-        if (
-          terminal.agent !== "codex" ||
-          terminalModelControlProfileForPlan(plan)
-            ?.supportsResidualContinuation !== true
-        ) {
-          throw new Error(
-            "terminal binding changed after it was listed; refresh AKK list and retry"
-          );
-        }
-        runtime = this.inspectionRuntime(terminal, snapshot);
-        const status = await this.assertModelControlRepairReady({
-          options,
-          terminal,
-          snapshot,
-          bridge,
-          runtime
-        });
-        const observed = await bridge.inspectModelControlResidual(
-          terminal.agent,
-          terminal.terminalControl,
-          agentVersion,
-          plan,
-          { runtime, beforeInput: () => undefined }
-        );
-        if (observed.state !== "recoverable") {
-          throw new Error(observed.reason);
-        }
-        const availability = this.modelControlAvailability({
-          options,
-          terminal,
-          snapshot,
-          agentVersion,
-          plan,
-          status,
-          surface: {
-            kind: "residual",
-            residualKind: observed.kind,
-            residualFingerprint: observed.fingerprint,
-            activityState: status.activity_state
-          }
-        });
-        if (availability.availability !== "residual_continuation" ||
-            availability.expectedBindingToken !== expectedBindingToken) {
-          throw new Error(
-            "the exact model-control residual changed after it was listed; refresh AKK list"
-          );
-        }
-        initialResidual = observed;
-      }
-      const codexCatalogVersion = profile.agent === "codex" &&
-          isCodexModelControlAgentVersion(profile.agentVersion)
-        ? profile.agentVersion
-        : undefined;
-      return await operation({
-        options,
-        terminal,
-        snapshot,
-        bridge,
-        runtime,
-        adapter,
-        agentVersion,
-        plan,
-        expectedBindingToken,
-        ordinaryBindingToken,
-        initialResidual,
-        ...(terminal.agent === "codex" &&
-            isTerminalModelControlPlanForAgent(plan, "codex") &&
-            codexCatalogVersion !== undefined
-          ? {
-              loadCodexCatalog: async () =>
-                runtimeFacade.codexModelCatalogForRunningProcess(
-                  terminal.pid,
-                  codexCatalogVersion,
-                  terminal.terminalControl.currentPath
-                )
-            }
-          : {})
-      });
-    } finally {
-      release();
-    }
-  }
-
-  async assertFreshModelControlBoundary(
-    context: TerminalModelControlContext
-  ): Promise<void> {
-    const terminal = await this.resolveModelControlBoundaryTerminal(context);
-    this.assertSameInspectionTerminal(
-      context.terminal,
-      terminal,
-      "immediately before model-control input"
-    );
-    const snapshot = await this.modelControlSnapshot(context.options, terminal);
-    if (!snapshot.bindingTokens.includes(context.expectedBindingToken) ||
-        snapshot.version !== context.agentVersion) {
-      throw new Error(
-        "terminal binding or coding-agent version changed during model control; refresh AKK list"
-      );
-    }
-    const expectedNativeThreadId = context.snapshot.identity?.sessionId ??
-      context.snapshot.session?.binding?.native_thread_id;
-    const actualNativeThreadId = snapshot.identity?.sessionId ??
-      snapshot.session?.binding?.native_thread_id;
-    if (expectedNativeThreadId !== actualNativeThreadId) {
-      throw new Error(
-        "the current native Session changed during model control; inspect the pane before retrying"
-      );
-    }
-    const { plan } = modelControlProfileObservation(
-      context.adapter, snapshot.version
-    );
-    if (!plan || JSON.stringify(plan) !== JSON.stringify(context.plan)) {
-      throw new Error(
-        "the exact model-control profile changed during the operation"
-      );
-    }
-    await this.assertModelControlExclusive({
-      options: context.options,
-      terminal,
-      snapshot
-    });
-    this.assertInspectionReady({
-      options: context.options,
-      terminal,
-      session: snapshot.session
-    });
-    this.assertModelControlAgentIdentity({
-      options: context.options,
-      terminal,
-      snapshot
-    });
-  }
-
-  async resolveModelControlBoundaryTerminal(
-    context: TerminalModelControlResidualBoundaryContext
-  ): Promise<ResolvedTerminalConversation> {
-    try {
-      return await context.bridge.resolveStoredTerminal(
-        context.terminal.agent,
-        context.terminal.pid,
-        context.terminal.terminalControl,
-        context.runtime
-      );
-    } catch (idleError) {
-      if (
-        context.terminal.agent !== "claude" ||
-        !terminalModelControlPlanConforms({
-          agent: context.terminal.agent,
-          agentVersion: context.agentVersion,
-          plan: context.plan
-        }) ||
-        context.runtime.requireExactClaudeAgentRow !== true ||
-        context.runtime.exactClaudeAgentState !== "idle"
-      ) {
-        throw idleError;
-      }
-      try {
-        return await context.bridge.resolveStoredTerminal(
-          context.terminal.agent,
-          context.terminal.pid,
-          context.terminal.terminalControl,
-          { ...context.runtime, exactClaudeAgentState: "status_dialog" }
-        );
-      } catch {
-        // All immutable process, native Session, cwd, and terminal fences are
-        // identical in both attempts. Only the exact Claude agents UI state
-        // differs, and the bridge must still prove a fresh profiled model
-        // surface after this read-only boundary before any key is dispatched.
-        throw idleError;
-      }
-    }
-  }
-
-  assertModelControlAgentIdentity(input: {
-    options: NativeLifecycleCliOptions;
-    terminal: ResolvedTerminalConversation;
-    snapshot: NativeLifecycleSnapshot;
-  }): void {
-    if (input.terminal.agent !== "claude") return;
-    try {
-      this.assertInspectionAgentIdentity({
-        ...input,
-        stage: "during model control",
-        expectedClaudeState: "idle"
-      });
-    } catch (idleError) {
-      try {
-        this.assertInspectionAgentIdentity({
-          ...input,
-          stage: "during model control",
-          expectedClaudeState: "status_dialog"
-        });
-      } catch {
-        throw idleError;
-      }
-    }
-  }
-
-  async assertModelControlExclusive(input: {
-    options: NativeLifecycleCliOptions;
-    terminal: ResolvedTerminalConversation;
-    snapshot: NativeLifecycleSnapshot;
-  }): Promise<void> {
-    if (input.terminal.agent === "codex") {
-      const nativeThreadId = input.snapshot.identity?.sessionId ??
-        input.snapshot.session?.binding?.native_thread_id;
-      if (!nativeThreadId && !input.snapshot.identity && !input.snapshot.session) {
-        // A fresh, verified-empty Codex process has no durable native Session
-        // to own yet. The physical pane/process/cwd fence remains exact.
-        this.assertForegroundHasNoLifecycleTransition(
-          input.options,
-          input.terminal
-        );
-        return;
-      }
-      if (!isExactNativeThreadId(nativeThreadId)) {
-        throw new Error(
-          "Codex model control requires either a fresh zero-rollout pane or one exact current native Session identity"
-        );
-      }
-      await this.assertExclusive({
-        options: input.options,
-        agent: input.terminal.agent,
-        currentPid: input.terminal.pid,
-        nativeThreadId,
-        storeDir: this.ports.state.storeDir(input.options),
-        terminalControl: input.terminal.terminalControl,
-        excludedManagedSessionId: input.snapshot.session?.session_id
-      });
-      return;
-    }
-    const nativeThreadId = input.snapshot.identity?.sessionId ??
-      input.snapshot.session?.binding?.native_thread_id;
-    if (!isExactNativeThreadId(nativeThreadId)) {
-      throw new Error(
-        "model control requires one exact current native Session identity"
-      );
-    }
-    await this.assertExclusive({
-      options: input.options,
-      agent: input.terminal.agent,
-      currentPid: input.terminal.pid,
-      nativeThreadId,
-      storeDir: this.ports.state.storeDir(input.options),
-      terminalControl: input.terminal.terminalControl,
-      excludedManagedSessionId: input.snapshot.session?.session_id
-    });
-  }
-
-  modelOptionsResult(
-    context: TerminalModelControlContext,
-    catalog: TerminalModelCatalog
-  ): unknown {
-    return {
-      terminal_id: context.terminal.conversationId,
-      agent: context.terminal.agent,
-      agent_version: context.agentVersion,
-      behavior_profile: catalog.behaviorProfile,
-      scope: catalog.scope,
-      current: modelValueOutput(catalog.current),
-      models: catalog.models.map((model) => ({
-        id: model.id,
-        label: model.label,
-        reasoning_efforts: [...model.reasoningEfforts]
-      })),
-      catalog_fingerprint: catalog.catalogFingerprint,
-      available_actions: {
-        set_model: {
-          tool: "agent_knock_knock_set_model",
-          arguments: {
-            terminal_id: context.terminal.conversationId,
-            expected_binding_token: context.ordinaryBindingToken,
-            expected_catalog_fingerprint: catalog.catalogFingerprint
-          }
-        }
-      }
-    };
-  }
-
   validateInspectionOptions(options: NativeLifecycleCliOptions): string {
     const inspection = required(
       nonBlankString(options.inspection), "--inspection is required"
@@ -2688,49 +1658,6 @@ interface NativeInspectionContext {
   };
 }
 
-interface TerminalModelControlResidualBoundaryContext {
-  options: NativeLifecycleCliOptions;
-  terminal: ResolvedTerminalConversation;
-  snapshot: NativeLifecycleSnapshot;
-  bridge: TerminalAgentBridge;
-  runtime: TerminalRuntimeIdentity;
-  adapter: TerminalAgentAdapter;
-  agentVersion: string;
-  plan: TerminalModelControlPlan;
-}
-
-interface TerminalModelControlContext
-  extends TerminalModelControlResidualBoundaryContext {
-  expectedBindingToken: string;
-  ordinaryBindingToken: string;
-  initialResidual?: Extract<
-    TerminalModelControlResidualObservation,
-    { state: "recoverable" }
-  >;
-  loadCodexCatalog?: TerminalModelControlBridgeOptions["loadCodexCatalog"];
-}
-
-interface TerminalModelControlRepairContext
-  extends TerminalModelControlResidualBoundaryContext {
-  expectedBindingToken: string;
-  residual: Extract<
-    TerminalModelControlResidualObservation,
-    { state: "recoverable" }
-  >;
-}
-
-function modelValueOutput(value: {
-  model: string;
-  reasoningEffort?: string;
-}): Record<string, string> {
-  return {
-    model: value.model,
-    ...(value.reasoningEffort
-      ? { reasoning_effort: value.reasoningEffort }
-      : {})
-  };
-}
-
 interface NativeInspectionObservationResult {
   observation: TerminalNativeInspectionObservation;
   request: TerminalNativeInspectionObservationRequest;
@@ -2829,21 +1756,6 @@ function nativeInspectionComposerEmpty(
   return agent === "codex"
     ? codexComposerEmpty(screen)
     : isExactClaudeNativeInspectionIdleComposer(String(screen ?? ""));
-}
-
-function modelControlProfileObservation(
-  adapter: TerminalAgentAdapter,
-  agentVersion: string | undefined
-) {
-  const capability = adapter.probeModelControl?.(agentVersion);
-  const plan = capability?.status === "supported"
-    ? adapter.planModelControl?.(capability)
-    : undefined;
-  return {
-    capability,
-    plan,
-    profile: plan ? terminalModelControlProfileForPlan(plan) : undefined
-  };
 }
 
 function required<T>(value: T | undefined, message: string): T {

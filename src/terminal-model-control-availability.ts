@@ -1,10 +1,10 @@
+import type { TerminalModelControlResidualKind } from "./terminal-model-control-contract.js";
 import type { ExecutorKind } from "./executors.js";
 import {
   terminalUserExplicitModelControlBindingToken,
   terminalUserExplicitModelControlResidualEntryBindingToken,
-  terminalUserExplicitModelControlRepairBindingToken,
-  type TerminalModelControlResidualKind
-} from "./terminal-model-control.js";
+  terminalUserExplicitModelControlRepairBindingToken
+} from "./terminal-model-control-subject.js";
 import {
   terminalModelControlProfileFor,
   type TerminalModelControlBehaviorProfile

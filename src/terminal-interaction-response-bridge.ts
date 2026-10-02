@@ -49,7 +49,7 @@ import { CODEX_PASTE_ENTER_SETTLE_MS } from
 import { inspectCodexAsyncQuestionInputMode } from
   "./terminal-composer-classifier.js";
 import { exactCodexReadyStyledComposerCapture } from
-  "./terminal-native-inspection-bridge.js";
+  "./terminal-native-inspection-proof.js";
 import { captureCodexFullscreenComposerFrame } from
   "./codex-fullscreen-composer-proof.js";
 

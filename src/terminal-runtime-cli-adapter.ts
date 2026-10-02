@@ -48,11 +48,9 @@ import {
 import { StaticTerminalProcessSource, SystemTerminalProcessSource,
   type TerminalProcessSource } from "./terminal-process-source.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
-import {
-  parseCodexNativeModelCatalog,
-  type CodexModelControlAgentVersion,
-  type CodexNativeModelCatalog
-} from "./terminal-model-control.js";
+import { parseCodexNativeModelCatalog } from "./terminal-model-control-surface.js";
+import type { CodexModelControlAgentVersion } from "./terminal-model-control-profile.js";
+import type { CodexNativeModelCatalog } from "./terminal-model-control-contract.js";
 
 const TERMINAL_CONTROL_CAPABILITIES = ["screen_status", "send_keys",
   "terminal_approval", "screen_completion", "durable_completion",
