@@ -253,9 +253,13 @@ function deferredCloseFenceFacade(input: {
   } as unknown as TerminalMonitorStateCliDependencies);
 }
 
-function compiledMonitorStateSource(startToken: string, endToken: string): string {
+function compiledMonitorStateSource(
+  startToken: string,
+  endToken: string,
+  moduleName = "terminal-monitor-state-cli-adapter"
+): string {
   const source = fs.readFileSync(
-    new URL("../src/terminal-monitor-state-cli-adapter.js", import.meta.url),
+    new URL(`../src/${moduleName}.js`, import.meta.url),
     "utf8"
   );
   const start = source.indexOf(startToken);
@@ -956,8 +960,9 @@ test("malformed active monitor state still reports its authority failure", async
 
 test("startup retry recovery preserves terminal outcomes and finalizes accepted crash lags", () => {
   const recovery = compiledMonitorStateSource(
-    "async #recoverSubmissionRetry(",
-    "async #recoverDeferred("
+    "async recoverSubmissionRetry(",
+    "async recoverDeferred(",
+    "terminal-monitor-startup-recovery"
   );
   assertSourceOrder(recovery, [
     "decideTerminalSubmissionRetryStartup",
@@ -974,7 +979,8 @@ test("startup retry recovery preserves terminal outcomes and finalizes accepted 
   ]);
   const accepted = compiledMonitorStateSource(
     "function finalizeTerminalSubmissionRetryStartupAccepted(",
-    "function mirrorDeferredSubmissionRetryEnter("
+    "function mirrorDeferredSubmissionRetryEnter(",
+    "terminal-monitor-startup-recovery"
   );
   assertSourceOrder(accepted, [
     "loadDeferredForegroundTransfer",
@@ -1214,10 +1220,18 @@ test("service and CLI declarations retain narrow canonical facade boundaries", (
     "../src/terminal-monitor-state-cli-adapter.d.ts",
     import.meta.url
   ), "utf8");
-  const adapterSource = fs.readFileSync(new URL(
-    "../../src/terminal-monitor-state-cli-adapter.ts",
+  const adapterContractDeclaration = fs.readFileSync(new URL(
+    "../src/terminal-monitor-state-contract.d.ts",
     import.meta.url
   ), "utf8");
+  const adapterSource = [
+    "terminal-monitor-state-cli-adapter",
+    "terminal-monitor-startup-recovery",
+    "terminal-monitor-collateral-recovery",
+    "terminal-monitor-attention-store"
+  ].map((moduleName) => fs.readFileSync(new URL(
+    `../../src/${moduleName}.ts`, import.meta.url
+  ), "utf8")).join("\n");
   const coreSource = fs.readFileSync(new URL(
     "../../src/cli-core.ts",
     import.meta.url
@@ -1228,7 +1242,7 @@ test("service and CLI declarations retain narrow canonical facade boundaries", (
     "export type TerminalMonitorStateItem"
   );
   const adapterDependencies = boundary(
-    adapterDeclaration,
+    adapterContractDeclaration,
     "export interface TerminalMonitorStateCliDependencies",
     "export interface TerminalMonitorStateCliAdapter"
   );
@@ -1247,7 +1261,15 @@ test("service and CLI declarations retain narrow canonical facade boundaries", (
     serviceDeclaration,
     /node:|\bStore\b|\bSession\b|ResolvedTerminalConversation|TerminalAgentAdapter|Record<[^>]*\bany\b|\block\b/u
   );
-  assert.match(adapterDeclaration, /callbacks: Pick<CallbackCliFacade,/u);
+  assert.match(adapterContractDeclaration, /callbacks: Pick<CallbackCliFacade,/u);
+  assert.match(
+    adapterDeclaration,
+    /export type \{[^}]*TerminalMonitorStateCliDependencies[^}]*TerminalMonitorStateCliAdapter[^}]*\} from "\.\/terminal-monitor-state-contract\.js"/u
+  );
+  assert.match(
+    adapterDeclaration,
+    /createTerminalMonitorStateCliAdapter\(dependencies: TerminalMonitorStateCliDependencies\): TerminalMonitorStateCliAdapter/u
+  );
   assert.doesNotMatch(
     adapterSource,
     /callbackOutboxService|openClawCallbackTransport|runPreparedCallback|emitPreparedCallbackResult/u

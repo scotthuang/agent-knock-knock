@@ -7,7 +7,7 @@ import {
 import {
   exactCodexReadyStyledComposerCapture,
   stripTerminalEscapeSequences
-} from "./terminal-native-inspection-bridge.js";
+} from "./terminal-native-inspection-proof.js";
 import {
   codexActiveWriterViewerVisible,
   codexBlockingModalVisible,

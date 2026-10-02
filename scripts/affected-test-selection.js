@@ -36,6 +36,24 @@ export const testSupportImpactByPath = Object.freeze({
     "test/shards/agent-cli-session-acceptance.test.ts",
     "test/shards/agent-cli-terminal-send-gates.test.ts"
   ],
+  "test/codex-no-rollout-binding-cli/approval-authority.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/candidate-inventory-acceptance.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/deferred-recovery.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/lifecycle-identity-inspection.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/managed-user-explicit-send.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
+  "test/codex-no-rollout-binding-cli/zero-rollout-binding.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts"
+  ],
   "test/codex-sticky-rollout-fixture.ts": [
     "test/codex-sticky-rollout-lifecycle-core.test.ts"
   ],
@@ -59,20 +77,6 @@ export const testSupportImpactByPath = Object.freeze({
     "test/store-protocol-cli.test.ts",
     "test/turn-session-binding-cli.test.ts"
   ],
-  "test/support/terminal-ui-golden-frames.ts": [
-    "test/model-control-cli-closed-loop.test.ts",
-    "test/terminal-list-cli-adapter.test.ts",
-    "test/terminal-ui-golden-frames.test.ts"
-  ],
-  "test/support/openclaw-plugin-contract-support.ts": [
-    "test/openclaw-plugin-contract/callback-relay.ts",
-    "test/openclaw-plugin-contract/command-results.ts",
-    "test/openclaw-plugin-contract/manifest-registration.ts",
-    "test/openclaw-plugin-contract/model-interaction.ts",
-    "test/openclaw-plugin-contract/native-lifecycle-tools.ts",
-    "test/openclaw-plugin-contract/routing-supervision.ts",
-    "test/openclaw-plugin-contract/schema-authority.ts"
-  ],
   "test/openclaw-plugin-contract/callback-relay.ts": [
     "test/openclaw-plugin-contract.test.ts"
   ],
@@ -94,6 +98,96 @@ export const testSupportImpactByPath = Object.freeze({
   "test/openclaw-plugin-contract/schema-authority.ts": [
     "test/openclaw-plugin-contract.test.ts"
   ],
+  "test/support/codex-no-rollout-binding-cli-support.ts": [
+    "test/codex-no-rollout-binding-cli.test.ts",
+    "test/codex-no-rollout-binding-cli/zero-rollout-binding.ts",
+    "test/codex-no-rollout-binding-cli/deferred-recovery.ts",
+    "test/codex-no-rollout-binding-cli/approval-authority.ts",
+    "test/codex-no-rollout-binding-cli/candidate-inventory-acceptance.ts",
+    "test/codex-no-rollout-binding-cli/managed-user-explicit-send.ts",
+    "test/codex-no-rollout-binding-cli/lifecycle-identity-inspection.ts"
+  ],
+  "test/support/codex-no-rollout/checkpoint.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/cli.ts"
+  ],
+  "test/support/codex-no-rollout/cli.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/dispatch.ts",
+    "test/support/codex-no-rollout/foreground.ts"
+  ],
+  "test/support/codex-no-rollout/codex.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/cli.ts"
+  ],
+  "test/support/codex-no-rollout/dispatch.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts"
+  ],
+  "test/support/codex-no-rollout/fake-executables.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/fixture.ts"
+  ],
+  "test/support/codex-no-rollout/fixture.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts"
+  ],
+  "test/support/codex-no-rollout/foreground.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts"
+  ],
+  "test/support/codex-no-rollout/herdr.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/cli.ts"
+  ],
+  "test/support/codex-no-rollout/model.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/checkpoint.ts",
+    "test/support/codex-no-rollout/cli.ts",
+    "test/support/codex-no-rollout/codex.ts",
+    "test/support/codex-no-rollout/dispatch.ts",
+    "test/support/codex-no-rollout/fake-executables.ts",
+    "test/support/codex-no-rollout/fixture.ts",
+    "test/support/codex-no-rollout/foreground.ts",
+    "test/support/codex-no-rollout/herdr.ts",
+    "test/support/codex-no-rollout/rollouts.ts",
+    "test/support/codex-no-rollout/sessions.ts",
+    "test/support/codex-no-rollout/tmux.ts",
+    "test/support/codex-no-rollout/turns.ts"
+  ],
+  "test/support/codex-no-rollout/rollouts.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/codex.ts",
+    "test/support/codex-no-rollout/foreground.ts",
+    "test/support/codex-no-rollout/tmux.ts"
+  ],
+  "test/support/codex-no-rollout/sessions.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/dispatch.ts"
+  ],
+  "test/support/codex-no-rollout/test-registration.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/checkpoint.ts",
+    "test/support/codex-no-rollout/codex.ts",
+    "test/support/codex-no-rollout/dispatch.ts",
+    "test/support/codex-no-rollout/fixture.ts",
+    "test/support/codex-no-rollout/foreground.ts",
+    "test/support/codex-no-rollout/turns.ts"
+  ],
+  "test/support/codex-no-rollout/tmux.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts",
+    "test/support/codex-no-rollout/cli.ts",
+    "test/support/codex-no-rollout/herdr.ts"
+  ],
+  "test/support/codex-no-rollout/turns.ts": [
+    "test/support/codex-no-rollout-binding-cli-support.ts"
+  ],
+  "test/support/openclaw-plugin-contract-support.ts": [
+    "test/openclaw-plugin-contract/callback-relay.ts",
+    "test/openclaw-plugin-contract/command-results.ts",
+    "test/openclaw-plugin-contract/manifest-registration.ts",
+    "test/openclaw-plugin-contract/model-interaction.ts",
+    "test/openclaw-plugin-contract/native-lifecycle-tools.ts",
+    "test/openclaw-plugin-contract/routing-supervision.ts",
+    "test/openclaw-plugin-contract/schema-authority.ts"
+  ],
   "test/support/terminal-agent-bridge-contract-support.ts": [
     "test/terminal-agent-bridge/approval-core.ts",
     "test/terminal-agent-bridge/claude-native-inspection.ts",
@@ -106,6 +200,11 @@ export const testSupportImpactByPath = Object.freeze({
     "test/terminal-agent-bridge/monitor-capabilities.ts",
     "test/terminal-agent-bridge/native-inspection-validation.ts",
     "test/terminal-agent-bridge/transport-failures.ts"
+  ],
+  "test/support/terminal-ui-golden-frames.ts": [
+    "test/model-control-cli-closed-loop.test.ts",
+    "test/terminal-list-cli-adapter.test.ts",
+    "test/terminal-ui-golden-frames.test.ts"
   ],
   "test/terminal-agent-bridge/approval-core.ts": [
     "test/terminal-agent-bridge.test.ts"
@@ -140,32 +239,39 @@ export const testSupportImpactByPath = Object.freeze({
   "test/terminal-agent-bridge/transport-failures.ts": [
     "test/terminal-agent-bridge.test.ts"
   ],
-  "test/support/codex-no-rollout-binding-cli-support.ts": [
-    "test/codex-no-rollout-binding-cli.test.ts",
-    "test/codex-no-rollout-binding-cli/zero-rollout-binding.ts",
-    "test/codex-no-rollout-binding-cli/deferred-recovery.ts",
-    "test/codex-no-rollout-binding-cli/approval-authority.ts",
-    "test/codex-no-rollout-binding-cli/candidate-inventory-acceptance.ts",
-    "test/codex-no-rollout-binding-cli/managed-user-explicit-send.ts",
-    "test/codex-no-rollout-binding-cli/lifecycle-identity-inspection.ts"
+  "test/terminal-watch-cli-adapter/accepted-fallback-interactions.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
   ],
-  "test/codex-no-rollout-binding-cli/zero-rollout-binding.ts": [
-    "test/codex-no-rollout-binding-cli.test.ts"
+  "test/terminal-watch-cli-adapter/activity-fallback.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
   ],
-  "test/codex-no-rollout-binding-cli/deferred-recovery.ts": [
-    "test/codex-no-rollout-binding-cli.test.ts"
+  "test/terminal-watch-cli-adapter/claude-fallback.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
   ],
-  "test/codex-no-rollout-binding-cli/approval-authority.ts": [
-    "test/codex-no-rollout-binding-cli.test.ts"
+  "test/terminal-watch-cli-adapter/exact-lifecycle.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
   ],
-  "test/codex-no-rollout-binding-cli/candidate-inventory-acceptance.ts": [
-    "test/codex-no-rollout-binding-cli.test.ts"
+  "test/terminal-watch-cli-adapter/fallback-callbacks.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
   ],
-  "test/codex-no-rollout-binding-cli/managed-user-explicit-send.ts": [
-    "test/codex-no-rollout-binding-cli.test.ts"
+  "test/terminal-watch-cli-adapter/fixtures.ts": [
+    "test/terminal-watch-cli-adapter/accepted-fallback-interactions.ts",
+    "test/terminal-watch-cli-adapter/activity-fallback.ts",
+    "test/terminal-watch-cli-adapter/claude-fallback.ts",
+    "test/terminal-watch-cli-adapter/exact-lifecycle.ts",
+    "test/terminal-watch-cli-adapter/fallback-callbacks.ts",
+    "test/terminal-watch-cli-adapter/interaction-observation.ts",
+    "test/terminal-watch-cli-adapter/interaction-ownership.ts",
+    "test/terminal-watch-cli-adapter/interaction-response.ts"
   ],
-  "test/codex-no-rollout-binding-cli/lifecycle-identity-inspection.ts": [
-    "test/codex-no-rollout-binding-cli.test.ts"
+  "test/terminal-watch-cli-adapter/interaction-observation.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
+  ],
+  "test/terminal-watch-cli-adapter/interaction-ownership.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
+  ],
+  "test/terminal-watch-cli-adapter/interaction-response.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
   ]
 });
 

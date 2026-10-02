@@ -45,7 +45,7 @@ function directTestSupportConsumers(supportPath: string): string[] {
   for (const importerPath of walkTypeScriptSources(path.join(repoRoot, "test"))) {
     const source = fs.readFileSync(path.join(repoRoot, importerPath), "utf8");
     const specifiers = source.matchAll(
-      /(?:\bfrom\s+|\bimport\s*\()(["'])([^"']+)\1/gu
+      /(?:\bfrom\s+|\bimport\s+|\bimport\s*\()(["'])([^"']+)\1/gu
     );
     for (const match of specifiers) {
       if (!match[2].startsWith(".")) {

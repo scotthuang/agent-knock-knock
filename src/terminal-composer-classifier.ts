@@ -18,7 +18,7 @@ import type { TerminalControlRef } from "./terminal-control-ref.js";
 import {
   isTerminalModelControlPlanForAgent,
   type TerminalModelControlPlan
-} from "./terminal-model-control.js";
+} from "./terminal-model-control-profile.js";
 import {
   claudeNativeInspectionTrailingIsFooter,
   CODEX_COMPOSER_FOOTER,
@@ -27,7 +27,7 @@ import {
   exactClaudeComposerFrame,
   inferCodexVisibleViewportColumns,
   stripTerminalEscapeSequences
-} from "./terminal-native-inspection-bridge.js";
+} from "./terminal-native-inspection-proof.js";
 
 const CODEX_COMPLETE_COMPOSER_FOOTER =
   /^(?:gpt-[\w.-]+(?:\s+\S+)?|[-\w.]+ default)\s+·\s+\S.*$/u;

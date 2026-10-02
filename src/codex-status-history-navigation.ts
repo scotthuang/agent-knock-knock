@@ -1,3 +1,4 @@
+import type { TerminalCodexStatusProbeResult } from "./terminal-native-inspection-contract.js";
 import { createHash } from "node:crypto";
 import { codexNativeInspectionCompatibilityProfile, isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { captureCodexFullscreenComposerFrame } from "./codex-fullscreen-composer-proof.js";
@@ -5,9 +6,8 @@ import type { TerminalViewport } from "./terminal-control-provider.js";
 import { closedCodex159StatusSuffix, observeCodexNativeInspection } from "./codex-terminal-agent-adapter.js";
 import {
   exactCodexReadyStyledComposerCapture,
-  stripTerminalEscapeSequences,
-  type TerminalCodexStatusProbeResult
-} from "./terminal-native-inspection-bridge.js";
+  stripTerminalEscapeSequences
+} from "./terminal-native-inspection-proof.js";
 
 /** Only the recognized owned-screen navigation grammar, never a generic pager. */
 const PAUSED_FOOTER = /^ {2}(?:New activity · )?enter\/esc latest · \? shortcuts(?: {2,}⚠ [1-9]\d? warnings? · f2 to view)?$/u;

@@ -9,7 +9,7 @@ import { connectCodexAppServerReadClient } from "./codex-app-server-read-client.
 import { createCodexTerminalAgentAdapter } from "./codex-terminal-agent-adapter.js";
 import type { TerminalAgentBridge } from "./terminal-agent-bridge.js";
 import type { TerminalControlRef } from "./terminal-control-ref.js";
-import { stripTerminalEscapeSequences } from "./terminal-native-inspection-bridge.js";
+import { stripTerminalEscapeSequences } from "./terminal-native-inspection-proof.js";
 
 import type { CodexPaginatedThreadBinding } from "./codex-paginated-thread-facts.js";
 export type { CodexPaginatedThreadBinding } from "./codex-paginated-thread-facts.js";

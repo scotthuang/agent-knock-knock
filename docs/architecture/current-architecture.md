@@ -1,12 +1,13 @@
 # Current architecture and health budget
 
-Status: authoritative current architecture for the Issue #320 refactor cycle.
+Status: authoritative current architecture through the `0.13.17` refactor closeout.
 
-Snapshot: `main@0667537ac6efe116c5261fa33370a4190f2d2226`, package
+Historical opening snapshot: `main@0667537ac6efe116c5261fa33370a4190f2d2226`, package
 `0.13.3`, measured 2026-09-15. The machine-readable baseline and budgets are
 in [`config/architecture-health-budget.json`](../../config/architecture-health-budget.json).
 Run `npm run architecture:dashboard` to validate the budgets and print the
-current JSON dashboard.
+current JSON dashboard. The `0.13.17` closeout below supersedes the earlier
+ratchet values; the opening and P2 measurements remain historical evidence.
 
 The stable [orchestration architecture index](./orchestration-refactor.md)
 routes readers to this current document or the immutable
@@ -106,12 +107,13 @@ Measured on 2026-09-15 at `main@9b4b007` before the closeout-budget commit:
 | Production files over 2,000 LOC | 9 | -10 |
 | Largest production file | 3,635 LOC | below the new 5,000-LOC gate |
 
-The P2 closeout converts the achieved concentration reductions into executable
-non-regression gates. The checked-in budget permits no more than nine production
-files over 2,000 physical LOC, rejects every production file at 5,000 LOC or
-larger, and lowers each tracked hotspot ceiling to its post-refactor size. The
-default function-violation ceiling is likewise lowered from the opening 338 to
-the measured closeout value; it is not raised to absorb later feature growth.
+The P2 closeout converted the achieved concentration reductions into executable
+non-regression gates. At that milestone the budget permitted no more than nine
+production files over 2,000 physical LOC, rejected every production file at
+5,000 LOC or larger, and lowered each tracked hotspot ceiling to its
+post-refactor size. The default function-violation ceiling was likewise lowered
+from the opening 338 to the measured closeout value. The `0.13.17` milestone
+tightens these ratchets again; it does not raise them to absorb feature growth.
 
 The separate 90-day goal of at most 250 default-threshold violations is not a
 claim about this P2 milestone. Reaching it requires function-level decomposition
@@ -124,6 +126,104 @@ Two other 90-day measures are longitudinal rather than static source gates:
 the typical production-file touch count for a new agent/version profile and
 `test:fast` p50/p95. They require evidence across multiple future changes or
 runs and are not inferred from a single P2 checkout.
+
+## 0.13.17 refactor closeout
+
+Measured on 2026-10-02 against the released `0.13.16` source at `d9e6b3f`.
+This phase covers the published backend, its test support, and release
+verification scripts. Uncommitted Control UI work from another checkout is
+outside this comparison.
+
+| Metric | 0.13.16 baseline | 0.13.17 closeout | Delta |
+| --- | ---: | ---: | ---: |
+| Production modules | 248 | 281 | +33 |
+| Production physical LOC | 161,601 | 163,877 | +2,276 |
+| Production functions | 6,922 | 6,965 | +43 |
+| Production import edges | 1,590 | 1,821 | +231 |
+| Import cycles / hard function violations | 0 / 0 | 0 / 0 | unchanged |
+| Default function violations | 332 | 330 | -2 |
+| Production files over 2,000 LOC | 9 | 4 | -5 |
+| Largest production file | 3,631 LOC | 3,534 LOC | -97 LOC |
+
+The decomposition gives Watch capture, fallback observation, interaction
+authority, and response execution separate owners; Monitor reconciliation and
+recovery likewise leave its CLI facade. Legacy Codex rollout file access,
+record parsing, human-started task observation, interaction evidence, and bound
+completion now have distinct modules. Native model-control execution and
+surface/input handling, Codex inventory, and native inspection proof are also
+separated from their existing public entry points.
+
+| Existing production entry point | Before LOC | After LOC |
+| --- | ---: | ---: |
+| `src/terminal-watch-cli-adapter.ts` | 3,631 | 651 |
+| `src/terminal-monitor-state-cli-adapter.ts` | 3,476 | 1,119 |
+| `src/terminal-submission-acceptance.ts` | 3,414 | 771 |
+| `src/native-thread-lifecycle-cli-adapter.ts` | 2,852 | 1,764 |
+| `src/terminal-model-control.ts` | 2,658 | 1,151 |
+| `src/codex-store-adapter.ts` | 1,795 | 744 |
+| `src/terminal-native-inspection-bridge.ts` | 1,956 | 1,080 |
+
+These are physical line counts, including comments and blank lines. Splitting
+modules and wrapping long descriptions adds explicit imports, interfaces, and
+lines: total production LOC increases about 1.4%. That growth is reported,
+not presented as code removal. The improvement is reduced responsibility
+concentration with unchanged dependency direction and public behavior.
+Production lines over 160, 200, and 300 characters fall from 192/118/63 to
+87/36/9 respectively; script lines over 160 characters fall from six to zero.
+This is targeted readability work, not a repository-wide formatting rewrite.
+
+Test and maintenance boundaries are preserved too. The 4,970-line Watch test
+file becomes a 9-line registration entry over eight behavior groups and shared
+fixtures; its 42 test definitions and 352 assertion calls are unchanged in
+static AST comparison. The 3,080-line no-rollout support file becomes a
+112-line export facade over 14 modules; all 62 functions and 86 assertions are
+retained, including the deliberate subprocess and crash/exit cases. The
+affected-test map records the new direct consumers without changing test-tier
+entry points. The 1,744-line refactor-evidence script and 1,339-line OpenClaw
+compatibility script become 50-line and 90-line entry points over domain
+modules. The compatibility flow retains all 72 assertions and the same
+Gateway cleanup boundary. Its full-host function now delegates lifecycle
+stages rather than owning the entire scenario inline.
+
+The bound-completion detector preserves acceptance and identity error
+precedence, diagnostic fields, the same open descriptor for reads and stat
+checks, and its `finally` close on every post-open return. Public facades retain
+their exports. Compiled comparison against the immutable `0.13.16` package
+confirms equal action-contract values, fresh nested contract objects, equal
+schema exports, and the same complete 24-tool catalog. Extracted descriptions
+and guidance retain their exact text; native approval and input checks are not
+relaxed. Long captured ANSI fixture data remains intact.
+
+The current executable ratchets now permit at most **330 default function
+violations** and **four production files over 2,000 LOC**. Watch, Monitor, and
+List hotspot ceilings are **651**, **1,119**, and **2,616** LOC respectively.
+The other hotspot ceilings remain as recorded in the budget manifest. Import
+cycles and hard function violations must remain zero, and the 4,999-LOC
+production-file ceiling remains unchanged. These values replace the earlier
+P2 allowances; the historical snapshot is not rewritten.
+
+Four production files still exceed 2,000 physical lines:
+
+| Remaining concentration | Physical LOC |
+| --- | ---: |
+| `src/claude-local-transcript-provider.ts` | 3,534 |
+| `src/terminal-agent-bridge.ts` | 2,641 |
+| `src/terminal-list-cli-adapter.ts` | 2,616 |
+| `src/terminal-acceptance-cli-adapter.ts` | 2,272 |
+
+Those files and the remaining 330 default-threshold function violations remain
+follow-up work. This closeout does not claim that all complexity is eliminated
+or that the longer-horizon 250-violation goal has been reached.
+
+Validation completed for publication: `npm run test:fast` passed all 2,434
+tests; `npm run test:release` passed all 2,949 full-suite tests, the isolated
+OpenClaw 2026.9.1 install/callback/update/uninstall scenario, ClawHub runtime
+inspection (zero breakages or warnings), and publication dry run. TypeScript
+no-emit checking, JavaScript syntax/module-link checking, architecture and
+refactor-evidence validators, static preservation review, and compiled
+public-contract parity also passed. All 27 changed production modules retain
+their previous runtime exports. No live terminal scenarios were executed;
+fixture coverage and package comparisons do not substitute for live verification.
 
 ## Contract synchronization
 

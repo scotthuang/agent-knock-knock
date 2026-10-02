@@ -166,10 +166,16 @@ export class CodexAppServerReadClient {
       const thread = record(record(value).thread);
       if (thread.id !== threadId) invalid("Codex app-server returned a different thread");
       identifier(thread.sessionId);
-      if (typeof thread.cwd !== "string" || !path.isAbsolute(thread.cwd)) invalid("Invalid thread cwd");
-      if (thread.historyMode !== "legacy" && thread.historyMode !== "paginated") invalid("Unknown thread history mode");
+      if (typeof thread.cwd !== "string" || !path.isAbsolute(thread.cwd)) {
+        invalid("Invalid thread cwd");
+      }
+      if (thread.historyMode !== "legacy" && thread.historyMode !== "paginated") {
+        invalid("Unknown thread history mode");
+      }
       if (typeof thread.cliVersion !== "string") invalid("Invalid thread CLI version");
-      if (thread.originator !== null && typeof thread.originator !== "string") invalid("Invalid thread originator");
+      if (thread.originator !== null && typeof thread.originator !== "string") {
+        invalid("Invalid thread originator");
+      }
       validateThreadStatus(thread.status);
       if (!Array.isArray(thread.turns)) invalid("Invalid thread turns");
       thread.turns.forEach(validateTurn);
@@ -230,8 +236,12 @@ export class CodexAppServerReadClient {
   }
 
   private request(method: string, params: unknown): Promise<unknown> {
-    if (this.closed) return Promise.reject(new CodexAppServerReadError("closed", "Codex app-server read connection closed"));
-    if (this.pending.size >= MAX_PENDING_REQUESTS) return Promise.reject(new Error("Too many Codex app-server reads"));
+    if (this.closed) {
+      return Promise.reject(new CodexAppServerReadError("closed", "Codex app-server read connection closed"));
+    }
+    if (this.pending.size >= MAX_PENDING_REQUESTS) {
+      return Promise.reject(new Error("Too many Codex app-server reads"));
+    }
     const id = `akk-read-${this.nextRequestId++}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -251,7 +261,9 @@ export class CodexAppServerReadClient {
 
   private receive(message: string): void {
     try {
-      if (Buffer.byteLength(message) > MAX_MESSAGE_BYTES) invalid("Codex app-server message exceeded its bound");
+      if (Buffer.byteLength(message) > MAX_MESSAGE_BYTES) {
+        invalid("Codex app-server message exceeded its bound");
+      }
       const response = record(JSON.parse(message));
       // Never respond to server requests: doing so could answer another client's question.
       if (response.method !== undefined || typeof response.id !== "string") return;
@@ -307,7 +319,12 @@ export function parseCodexAppServerMetadata(value: unknown, options: CodexAppSer
   if (typeof result.codexHome !== "string" || !path.isAbsolute(result.codexHome) || !sameHome(result.codexHome, options.codexHome)) {
     throw new CodexAppServerReadError("incompatible_server", "Codex app-server backend home does not match the selected home");
   }
-  if (typeof result.platformFamily !== "string" || typeof result.platformOs !== "string") invalid("Missing Codex app-server platform metadata");
+  if (
+    typeof result.platformFamily !== "string" ||
+    typeof result.platformOs !== "string"
+  ) {
+    invalid("Missing Codex app-server platform metadata");
+  }
   return { serverVersion: version, codexHome: result.codexHome, socketPath, platformFamily: result.platformFamily, platformOs: result.platformOs };
 }
 
@@ -341,10 +358,18 @@ function sameHome(left: string, right: string): boolean {
 
 function listParams(options: CodexAppServerListOptions): Record<string, unknown> {
   const params: Record<string, unknown> = { threadId: identifier(options.threadId), limit: options.limit ?? 100 };
-  if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > 100) throw new Error("Codex history page limit must be between 1 and 100");
+  if (
+    !Number.isSafeInteger(params.limit) ||
+    (params.limit as number) < 1 ||
+    (params.limit as number) > 100
+  ) {
+    throw new Error("Codex history page limit must be between 1 and 100");
+  }
   if (options.cursor !== undefined) params.cursor = identifier(options.cursor, 4096);
   if (options.sortDirection !== undefined) {
-    if (options.sortDirection !== "asc" && options.sortDirection !== "desc") throw new Error("Invalid Codex history sort direction");
+    if (options.sortDirection !== "asc" && options.sortDirection !== "desc") {
+      throw new Error("Invalid Codex history sort direction");
+    }
     params.sortDirection = options.sortDirection;
   }
   return params;
@@ -352,7 +377,9 @@ function listParams(options: CodexAppServerListOptions): Record<string, unknown>
 
 function parsePage<T>(value: unknown, validate: (entry: unknown) => T): CodexAppServerPage<T> {
   const page = record(value);
-  if (!Array.isArray(page.data) || page.data.length > 100) invalid("Invalid bounded Codex history page");
+  if (!Array.isArray(page.data) || page.data.length > 100) {
+    invalid("Invalid bounded Codex history page");
+  }
   // Missing/renamed cursors must not turn a partial page into proof of exhaustion.
   const cursor = (value: unknown) => value === null ? null : identifier(value, 4096);
   return { data: page.data.map(validate), nextCursor: cursor(page.nextCursor), backwardsCursor: cursor(page.backwardsCursor) };
@@ -361,7 +388,14 @@ function parsePage<T>(value: unknown, validate: (entry: unknown) => T): CodexApp
 function validateThreadStatus(value: unknown): void {
   const status = record(value);
   if (["notLoaded", "idle", "systemError"].includes(status.type as string)) return;
-  if (status.type !== "active" || !Array.isArray(status.activeFlags) || status.activeFlags.some((flag) => flag !== "waitingOnApproval" && flag !== "waitingOnUserInput")) invalid("Unknown Codex thread status");
+  if (
+    status.type !== "active" ||
+    !Array.isArray(status.activeFlags) ||
+    status.activeFlags.some((flag) => flag !== "waitingOnApproval" &&
+    flag !== "waitingOnUserInput")
+  ) {
+    invalid("Unknown Codex thread status");
+  }
 }
 
 function validateTurn(value: unknown): CodexAppServerTurn {
@@ -370,9 +404,13 @@ function validateTurn(value: unknown): CodexAppServerTurn {
   if (!TURN_STATUSES.has(turn.status as string)) invalid("Unknown Codex turn status");
   if (!Array.isArray(turn.items)) invalid("Invalid Codex turn items");
   turn.items.forEach(validateItem);
-  if (!["notLoaded", "summary", "full"].includes(turn.itemsView as string)) invalid("Unknown Codex turn items view");
+  if (!["notLoaded", "summary", "full"].includes(turn.itemsView as string)) {
+    invalid("Unknown Codex turn items view");
+  }
   for (const field of ["startedAt", "completedAt", "durationMs"]) nullableNumber(turn[field]);
-  if (turn.error !== null && (typeof record(turn.error).message !== "string")) invalid("Invalid Codex turn error");
+  if (turn.error !== null && (typeof record(turn.error).message !== "string")) {
+    invalid("Invalid Codex turn error");
+  }
   return turn as unknown as CodexAppServerTurn;
 }
 
@@ -394,35 +432,59 @@ function validateItem(value: unknown): CodexAppServerThreadItem {
     for (const input of item.content) {
       const content = record(input);
       identifier(content.type);
-      if (content.type === "text" && typeof content.text !== "string") invalid("Invalid Codex user message text");
+      if (content.type === "text" && typeof content.text !== "string") {
+        invalid("Invalid Codex user message text");
+      }
     }
   }
   if (item.type === "agentMessage") {
     if (typeof item.text !== "string") invalid("Invalid Codex agent message text");
-    if (item.delivery != null && item.delivery !== "async") invalid("Unknown Codex agent message delivery");
+    if (item.delivery != null && item.delivery !== "async") {
+      invalid("Unknown Codex agent message delivery");
+    }
     if (item.questions != null) {
       if (!Array.isArray(item.questions)) invalid("Invalid Codex async questions");
       for (const value of item.questions) {
         const question = record(value);
-        if (typeof question.title !== "string" || (question.options !== null && (!Array.isArray(question.options) || question.options.some((option) => typeof option !== "string")))) invalid("Invalid Codex async question");
+        if (
+          typeof question.title !== "string" ||
+          (question.options !== null &&
+          (!Array.isArray(question.options) ||
+          question.options.some((option) => typeof option !== "string")))
+        ) {
+          invalid("Invalid Codex async question");
+        }
       }
     }
   }
-  if (item.type === "plan" && typeof item.text !== "string") invalid("Invalid Codex proposed plan text");
+  if (item.type === "plan" && typeof item.text !== "string") {
+    invalid("Invalid Codex proposed plan text");
+  }
   return item as unknown as CodexAppServerThreadItem;
 }
 
 function nullableNumber(value: unknown): void {
-  if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value))) invalid("Invalid Codex history timestamp");
+  if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value))) {
+    invalid("Invalid Codex history timestamp");
+  }
 }
 
 function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) invalid("Invalid Codex app-server object");
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    invalid("Invalid Codex app-server object");
+  }
   return value as Record<string, unknown>;
 }
 
 function identifier(value: unknown, limit = 512): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > limit || /[\u0000-\u001f\u007f]/u.test(value)) invalid("Invalid Codex app-server identifier");
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > limit ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    invalid("Invalid Codex app-server identifier");
+  }
   return value;
 }
 

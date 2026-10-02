@@ -17,18 +17,18 @@
   "budgets": {
     "max_import_cycles": 0,
     "max_hard_function_violations": 0,
-    "max_default_function_violations": 332,
+    "max_default_function_violations": 330,
     "large_file_threshold_physical_loc": 2000,
-    "max_large_production_files": 9,
+    "max_large_production_files": 4,
     "max_production_file_physical_loc": 4999,
     "hotspot_max_physical_loc": {
       "src/claude-local-transcript-provider.ts": 3534,
       "src/openclaw-plugin-command-adapter.ts": 32,
       "src/terminal-agent-bridge.ts": 2641,
       "src/terminal-command-cli-adapter.ts": 1915,
-      "src/terminal-list-cli-adapter.ts": 2617,
-      "src/terminal-monitor-state-cli-adapter.ts": 3478,
-      "src/terminal-watch-cli-adapter.ts": 3635,
+      "src/terminal-list-cli-adapter.ts": 2616,
+      "src/terminal-monitor-state-cli-adapter.ts": 1119,
+      "src/terminal-watch-cli-adapter.ts": 651,
       "src/terminal-watch-store.ts": 495
     }
   },

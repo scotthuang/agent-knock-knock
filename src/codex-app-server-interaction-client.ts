@@ -84,7 +84,9 @@ export class CodexAppServerInteractionClient {
     identifier(options.binding.threadId);
     identifier(options.nativeTurnId);
     const timeoutMs = options.timeoutMs ?? 5_000;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new Error("Codex question timeout is invalid");
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+      throw new Error("Codex question timeout is invalid");
+    }
     const socketPath = path.join(options.binding.codexHome, "app-server-control", "app-server-control.sock");
     const transport = await (options.transportFactory ?? connectCodexUnixWebSocket)({ socketPath, timeoutMs });
     const metadata = { socketPath, codexHome: "", serverVersion: "", platformFamily: "", platformOs: "" };
@@ -121,14 +123,23 @@ export class CodexAppServerInteractionClient {
   }
 
   async answer(requestId: string | number, answers: CodexAppServerQuestionAnswers): Promise<CodexAppServerAnswerResult> {
-    if (this.sentAnswers.has(requestId)) throw new Error("Codex question response was already sent; it cannot be retried");
+    if (this.sentAnswers.has(requestId)) {
+      throw new Error("Codex question response was already sent; it cannot be retried");
+    }
     const question = this.questions.get(requestId);
     if (!question || this.closed) throw new Error("The exact Codex question is no longer pending");
     const exactAnswers = structuredClone(answers);
     validateAnswers(question, exactAnswers);
     await this.verifyActiveQuestionTurn();
-    if (this.sentAnswers.has(requestId)) throw new Error("Codex question response was already sent; it cannot be retried");
-    if (this.questions.get(requestId) !== question || this.resolvedRequests.has(requestId)) throw new Error("The exact Codex question was resolved before answering");
+    if (this.sentAnswers.has(requestId)) {
+      throw new Error("Codex question response was already sent; it cannot be retried");
+    }
+    if (
+      this.questions.get(requestId) !== question ||
+      this.resolvedRequests.has(requestId)
+    ) {
+      throw new Error("The exact Codex question was resolved before answering");
+    }
     let proof: CodexPaginatedAnswerProofAnchor | undefined;
     try {
       if (this.rolloutPath) proof = (this.options.captureAnswerProof ?? captureCodexPaginatedAnswerProof)({
@@ -151,7 +162,9 @@ export class CodexAppServerInteractionClient {
 
   async close(): Promise<void> {
     try {
-      if (this.attached && !this.closed) await this.request("thread/unsubscribe", { threadId: this.options.binding.threadId });
+      if (this.attached && !this.closed) {
+        await this.request("thread/unsubscribe", { threadId: this.options.binding.threadId });
+      }
     } catch { /* Disconnect still removes only this client's subscription. */ }
     this.finish(new Error("Codex question connection closed"));
     this.transport.close();
@@ -163,7 +176,9 @@ export class CodexAppServerInteractionClient {
     const page = object(await this.request("thread/turns/list", {
       threadId: this.options.binding.threadId, limit: 2, sortDirection: "desc", itemsView: "notLoaded"
     }));
-    if (!Array.isArray(page.data) || page.data.length === 0) throw new Error("Codex question's current turn is unavailable");
+    if (!Array.isArray(page.data) || page.data.length === 0) {
+      throw new Error("Codex question's current turn is unavailable");
+    }
     const latest = object(page.data[0]);
     if (latest.id !== this.options.nativeTurnId || latest.status !== "inProgress" ||
         page.data.slice(1).some((turn) => object(turn).status === "inProgress")) throw new Error("Codex question's exact active turn changed");
@@ -172,22 +187,39 @@ export class CodexAppServerInteractionClient {
   private assertNativeThread(value: unknown, requireWaiting: boolean): void {
     const thread = object(value);
     const status = object(thread.status);
-    if (thread.id !== this.options.binding.threadId || thread.historyMode !== "paginated" || thread.originator !== "codex-tui") throw new Error("Codex question's native thread identity changed");
-    if (status.type !== "active" || (requireWaiting && (!Array.isArray(status.activeFlags) || !status.activeFlags.includes("waitingOnUserInput")))) throw new Error("Codex question's thread is not loaded and waiting on user input");
+    if (
+      thread.id !== this.options.binding.threadId ||
+      thread.historyMode !== "paginated" ||
+      thread.originator !== "codex-tui"
+    ) {
+      throw new Error("Codex question's native thread identity changed");
+    }
+    if (
+      status.type !== "active" ||
+      (requireWaiting &&
+      (!Array.isArray(status.activeFlags) ||
+      !status.activeFlags.includes("waitingOnUserInput")))
+    ) {
+      throw new Error("Codex question's thread is not loaded and waiting on user input");
+    }
     this.rolloutPath = typeof thread.path === "string" ? thread.path : undefined;
   }
 
   private async confirmAnswer(question: CodexAppServerPendingQuestion, answers: CodexAppServerQuestionAnswers,
     proof: CodexPaginatedAnswerProofAnchor | undefined): Promise<CodexAppServerAnswerResult> {
     const result = { requestId: question.requestId, itemId: question.itemId };
-    if (!proof) return { ...result, status: "response_uncertain", reason: "canonical_question_answer_evidence_unavailable" };
+    if (!proof) {
+      return { ...result, status: "response_uncertain", reason: "canonical_question_answer_evidence_unavailable" };
+    }
     const sleep = this.options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     const deadline = Date.now() + this.timeoutMs;
     do {
       try {
         const observed = (this.options.readAnswerProof ?? readCodexPaginatedAnswerProof)(proof, answers);
         if (observed === "matched") return { ...result, status: "confirmed" };
-        if (observed === "different") return { ...result, status: "response_uncertain", reason: "another_question_answer_won" };
+        if (observed === "different") {
+          return { ...result, status: "response_uncertain", reason: "another_question_answer_won" };
+        }
       } catch { return { ...result, status: "response_uncertain", reason: "canonical_question_answer_evidence_changed" }; }
       if (this.closed) break;
       await sleep(100);
@@ -197,7 +229,9 @@ export class CodexAppServerInteractionClient {
 
   private request(method: AllowedMethod, params: unknown): Promise<unknown> {
     if (this.closed) return Promise.reject(new Error("Codex question connection is closed"));
-    if (this.requests.size >= 16) return Promise.reject(new Error("Too many scoped Codex question operations"));
+    if (this.requests.size >= 16) {
+      return Promise.reject(new Error("Too many scoped Codex question operations"));
+    }
     const id = `akk-question-${this.nextId++}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -212,7 +246,9 @@ export class CodexAppServerInteractionClient {
 
   private receive(text: string): void {
     try {
-      if (Buffer.byteLength(text) > 8 * 1024 * 1024) throw new Error("Codex question message exceeded its bound");
+      if (Buffer.byteLength(text) > 8 * 1024 * 1024) {
+        throw new Error("Codex question message exceeded its bound");
+      }
       const message = object(JSON.parse(text));
       if (message.method === "item/tool/requestUserInput") { this.captureQuestion(message); return; }
       if (message.method === "serverRequest/resolved") {
@@ -220,7 +256,9 @@ export class CodexAppServerInteractionClient {
         if (params.threadId === this.options.binding.threadId && validRequestId(params.requestId)) {
           this.questions.delete(params.requestId);
           this.resolvedRequests.add(params.requestId);
-          if (this.resolvedRequests.size > 128) throw new Error("Too many Codex question resolution notifications");
+          if (this.resolvedRequests.size > 128) {
+            throw new Error("Too many Codex question resolution notifications");
+          }
         }
         return;
       }
@@ -239,20 +277,39 @@ export class CodexAppServerInteractionClient {
 
   private captureQuestion(message: Record<string, unknown>): void {
     const params = object(message.params);
-    if (params.threadId !== this.options.binding.threadId || params.turnId !== this.options.nativeTurnId) return;
+    if (
+      params.threadId !== this.options.binding.threadId ||
+      params.turnId !== this.options.nativeTurnId
+    ) {
+      return;
+    }
     if (!validRequestId(message.id) || this.resolvedRequests.has(message.id)) return;
-    if (this.questions.size >= 16 && !this.questions.has(message.id)) throw new Error("Too many pending Codex questions");
+    if (this.questions.size >= 16 && !this.questions.has(message.id)) {
+      throw new Error("Too many pending Codex questions");
+    }
     identifier(params.itemId);
-    if (!Array.isArray(params.questions) || params.questions.length === 0 || params.questions.length > 16) throw new Error("Codex question batch is invalid");
+    if (
+      !Array.isArray(params.questions) ||
+      params.questions.length === 0 ||
+      params.questions.length > 16
+    ) {
+      throw new Error("Codex question batch is invalid");
+    }
     const questions = params.questions.map(parseQuestion);
-    if (new Set(questions.map((question) => question.id)).size !== questions.length) throw new Error("Codex question IDs are duplicated");
-    if (params.isBlocking !== undefined && typeof params.isBlocking !== "boolean") throw new Error("Codex question blocking flag is invalid");
+    if (new Set(questions.map((question) => question.id)).size !== questions.length) {
+      throw new Error("Codex question IDs are duplicated");
+    }
+    if (params.isBlocking !== undefined && typeof params.isBlocking !== "boolean") {
+      throw new Error("Codex question blocking flag is invalid");
+    }
     const question = {
       requestId: message.id, threadId: params.threadId as string, turnId: params.turnId as string,
       itemId: params.itemId as string, questions, isBlocking: params.isBlocking === undefined ? true : params.isBlocking
     };
     const previous = this.questions.get(message.id);
-    if (previous && JSON.stringify(previous) !== JSON.stringify(question)) throw new Error("Codex pending question changed under the same request ID");
+    if (previous && JSON.stringify(previous) !== JSON.stringify(question)) {
+      throw new Error("Codex pending question changed under the same request ID");
+    }
     if (!previous) this.questions.set(message.id, question);
   }
 
@@ -270,16 +327,32 @@ export const connectCodexAppServerInteractionClient = CodexAppServerInteractionC
 function parseQuestion(value: unknown): CodexAppServerInputQuestion {
   const question = object(value);
   identifier(question.id);
-  for (const field of ["header", "question"]) if (typeof question[field] !== "string" || (question[field] as string).length > 64 * 1024) throw new Error("Codex native question text is invalid");
-  for (const field of ["isOther", "isSecret"]) if (question[field] !== undefined && typeof question[field] !== "boolean") throw new Error("Codex native question flag is invalid");
+  for (const field of ["header", "question"]) if (
+    typeof question[field] !== "string" ||
+    (question[field] as string).length > 64 * 1024
+  ) {
+    throw new Error("Codex native question text is invalid");
+  }
+  for (const field of ["isOther", "isSecret"]) if (question[field] !== undefined && typeof question[field] !== "boolean") {
+    throw new Error("Codex native question flag is invalid");
+  }
   const options = question.options == null ? null : question.options;
-  if (options !== null && (!Array.isArray(options) || options.length > 32)) throw new Error("Codex question options exceeded their bound");
+  if (options !== null && (!Array.isArray(options) || options.length > 32)) {
+    throw new Error("Codex question options exceeded their bound");
+  }
   return {
     id: question.id as string, header: question.header as string, question: question.question as string,
     isOther: question.isOther === true, isSecret: question.isSecret === true,
     options: options === null ? null : (options as unknown[]).map((value) => {
       const option = object(value);
-      if (typeof option.label !== "string" || typeof option.description !== "string" || option.label.length > 512 || option.description.length > 64 * 1024) throw new Error("Codex question option is invalid");
+      if (
+        typeof option.label !== "string" ||
+        typeof option.description !== "string" ||
+        option.label.length > 512 ||
+        option.description.length > 64 * 1024
+      ) {
+        throw new Error("Codex question option is invalid");
+      }
       return { label: option.label, description: option.description };
     })
   };
@@ -287,7 +360,9 @@ function parseQuestion(value: unknown): CodexAppServerInputQuestion {
 function validateAnswers(question: CodexAppServerPendingQuestion, value: CodexAppServerQuestionAnswers): void {
   const answers = object(value);
   const ids = question.questions.map((question) => question.id).sort();
-  if (JSON.stringify(Object.keys(answers).sort()) !== JSON.stringify(ids)) throw new Error("Codex response must answer the exact full question batch");
+  if (JSON.stringify(Object.keys(answers).sort()) !== JSON.stringify(ids)) {
+    throw new Error("Codex response must answer the exact full question batch");
+  }
   for (const id of ids) {
     const answer = object(answers[id]);
     if (Object.keys(answer).length !== 1 || !Array.isArray(answer.answers) || answer.answers.length === 0 || answer.answers.length > 32 ||
@@ -295,13 +370,22 @@ function validateAnswers(question: CodexAppServerPendingQuestion, value: CodexAp
   }
 }
 function identifier(value: unknown): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 512 || /[\u0000-\u001f\u007f]/u.test(value)) throw new Error("Codex question identity is invalid");
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 512 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new Error("Codex question identity is invalid");
+  }
   return value;
 }
 function validRequestId(value: unknown): value is string | number {
   return typeof value === "string" ? value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(value) : Number.isSafeInteger(value) && Number(value) >= 0;
 }
 function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid Codex question protocol object");
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid Codex question protocol object");
+  }
   return value as Record<string, unknown>;
 }
