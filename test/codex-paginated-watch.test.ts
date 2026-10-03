@@ -10,10 +10,10 @@ import { terminalControlEvidence } from "../src/terminal-control-ref.js";
 const NOW = "2026-10-02T00:00:00.000Z";
 const THREAD = "019ee559-7bb8-7fd1-970c-0f7b6978c44e";
 const REQUEST = "Observe only this task.";
-function fixture(backend = "0.159.2") {
+function fixture(backend = "0.159.2", agentVersion = "0.159.0") {
   const anchor = createCodexPaginatedTaskAnchor({
     origin: "active_task", captured_at: NOW, codex_home: "/codex",
-    codex_version: "0.159.0", backend_version: backend,
+    codex_version: agentVersion, backend_version: backend,
     native_thread_id: THREAD, thread_cwd: "/repo", thread_originator: "codex-tui",
     process_uuid: "exact-process", process_birth: "exact-birth", pid: 700,
     request_hash: createHash("sha256").update(REQUEST).digest("hex"), turn_id: "active-turn"
@@ -43,9 +43,20 @@ function fixture(backend = "0.159.2") {
   return { watch, snapshot };
 }
 
-test("backend upgrade keeps exact Watch pending without retaining native answer authority", async () => {
-  for (const actual of ["0.159.2", "0.159.3", "1.0.0"]) {
-    const { watch, snapshot } = fixture();
+test("Watch grants native answer authority only for the unchanged audited backend pair", async () => {
+  for (const [agentVersion, boundBackend, actual, allowed] of [
+    ["0.159.0", "0.159.2", "0.159.2", true],
+    ["0.159.0", "0.159.2", "0.159.3", false],
+    ["0.159.0", "0.159.2", "1.0.0", false],
+    ["0.159.3", "0.159.3", "0.159.3", true],
+    ["0.159.3", "0.160.0", "0.160.0", true],
+    ["0.160.0", "0.160.0", "0.160.0", true],
+    ["0.159.3", "0.159.3", "0.160.0", false],
+    ["0.159.3", "0.160.0", "0.159.3", false],
+    ["0.160.0", "0.159.3", "0.159.3", false],
+    ["0.159.2", "0.160.0", "0.160.0", false]
+  ] as const) {
+    const { watch, snapshot } = fixture(boundBackend, agentVersion);
     snapshot.serverVersion = actual;
     let blockingReads = 0;
     let answerAuthority: boolean | undefined;
@@ -56,8 +67,8 @@ test("backend upgrade keeps exact Watch pending without retaining native answer 
       questionnaire: (_checkpoint, _questions, allowResponses) => { answerAuthority = allowResponses; return undefined; }
     });
     assert.equal(result.kind, "pending");
-    assert.equal(answerAuthority, actual === "0.159.2");
-    assert.equal(blockingReads, actual === "0.159.2" ? 1 : 0);
+    assert.equal(answerAuthority, allowed);
+    assert.equal(blockingReads, allowed ? 1 : 0);
   }
   assert.equal(fixture("0.159.3").watch.interaction_policy, "notify_only");
 });

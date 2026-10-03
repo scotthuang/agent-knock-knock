@@ -87,7 +87,7 @@ test("0.159.2 compact welcome with GPT-6.1 Sol still requires the exact styled e
   assert.equal(observe(`${CARD}\n\n${PLAIN_COMPOSER}`, "0.159.3").status, "mismatch");
 });
 
-for (const version of ["0.159.3", "0.160.0", "1.0.0"]) {
+for (const version of ["0.160.1", "1.0.0"]) {
   test(`unverified Codex ${version} observes the shared UI contract without gaining native write support`, () => {
     assert.equal(isCodexPaginatedReadCandidate(version), true);
     assert.equal(isCodexPaginatedVersion(version), false);
@@ -138,6 +138,48 @@ test("paginated read eligibility rejects malformed and older version identities"
     assert.equal(isCodexPaginatedReadCandidate(version), false, String(version));
   }
   assert.equal(isAuditedCodexPaginatedServerPair("0.159.2", "0.159.3"), false);
+});
+
+test("0.160 server status omits summaries while compact Option queue chrome stays outside identity", () => {
+  // Official #49145 changes Model content, not Session or card boundaries.
+  const card = CARD.replace("v0.159.0", "v0.160.0").replace(
+    "(reasoning high, summaries auto)", "(reasoning high)"
+  );
+  const idle = observe(`${card}\n\n${PLAIN_COMPOSER}`, "0.160.0");
+  assert.equal(idle.status, "observed");
+  assert.equal(idle.result?.fields.find(({ name }) => name === "Model")?.value,
+    "GPT-6-Astra (reasoning high)");
+  const queued = "• Working (2s • esc to interrupt)\n\n• Queued follow-up inputs\n  ? 2 questions · 5s\n    ⌥↑ to answer";
+  const screen = `${card}\n\n${queued}\n\n${PLAIN_COMPOSER}`;
+  const active = observe(screen, "0.160.0");
+  assert.equal(active.status, "observed");
+  assert.equal(active.nativeThreadId, THREAD);
+  assert.equal(active.evidenceFingerprint, idle.evidenceFingerprint);
+  assert.equal(inspectCodexScreen({ screen, runtime: { agentVersion: "0.160.0" } }).activity.state, "working");
+  assert.equal(observe(screen, "0.159.3").status, "mismatch");
+  for (const changed of [
+    screen.replace("⌥↑ to answer", "⌥ ↑ to answer"),
+    screen.replace("⌥↑ to answer", "alt+↑ to answer"),
+    screen.replace("⌥↑ to answer", `⌥↑ to answer Session: ${THREAD}`),
+    screen.replace("  Permissions:         Workspace (Ask for approval)\n", ""),
+    `${card}\n\nReconnecting to server…\n  ctrl+c quit`
+  ]) assert.notEqual(observe(changed, "0.160.0").status, "observed");
+});
+
+test("0.160 Plan cycling hint retains the styled empty Composer and cannot disguise a draft or modal", () => {
+  // Official #49037 renders this hint only when wide enough and input is idle.
+  for (const mode of ["Plan mode", "Plan mode (shift+tab to cycle)"]) {
+    const screen = COMPOSER.replace("high · /repo", `high · /repo                  ${mode}`);
+    assert.ok(exactCodexReadyStyledComposerCapture(screen, "0.160.0"));
+    assert.equal(inspectCodexScreen({ screen, runtime: { agentVersion: "0.160.0" } }).activity.state, "idle");
+    assert.equal(exactCodexReadyStyledComposerCapture(screen.replace(
+      "\x1b[2mAsk Codex to do anything\x1b[0m", "unsent draft"
+    ), "0.160.0"), undefined);
+    assert.equal(exactCodexReadyStyledComposerCapture(
+      `${screen}\n  enter select · esc back`, "0.160.0"), undefined);
+    assert.equal(exactCodexReadyStyledComposerCapture(
+      screen.replaceAll(/\x1b\[[0-9;]*m/gu, ""), "0.160.0"), undefined);
+  }
 });
 
 test("0.159 borderless status proves its native identity and keeps account values private", () => {

@@ -43,7 +43,7 @@ interface ParsedRow { number: number; selected: boolean; text: string; line: Lin
 interface ParsedRows { rows: ParsedRow[]; preamble: string }
 const RESET: Style = { bold: false, dim: false, reverse: false };
 
-/** Closed, styled Codex 0.159.2/0.159.3 permission picker grammar. */
+/** Closed, styled Codex 0.159.2/0.159.3/0.160.0 permission picker grammar. */
 export function observeCodexPermissionSurface(styledScreen: string): CodexPermissionSurface {
   const rawLines = styledScreen.replace(/\r\n?/gu, "\n").split("\n");
   const plainLines = rawLines.map((line) => line.replace(/\x1b\[[0-9;]*m/gu, ""));

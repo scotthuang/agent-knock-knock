@@ -14,6 +14,8 @@ export const TERMINAL_MODEL_CONTROL_PROFILE_IDS = Object.freeze({
   codex01580: "codex-model-control-0.158.0",
   codex01590: "codex-model-control-0.159.0",
   codex01592: "codex-model-control-0.159.2",
+  codex01593: "codex-model-control-0.159.3",
+  codex01600: "codex-model-control-0.160.0",
   claude: "claude-model-control-2.1.266",
   claude21285: "claude-model-control-2.1.285"
 } as const);
@@ -69,7 +71,9 @@ export const CODEX_MODEL_CONTROL_AGENT_VERSIONS = Object.freeze([
   "0.155.1",
   "0.158.0",
   "0.159.0",
-  "0.159.2"
+  "0.159.2",
+  "0.159.3",
+  "0.160.0"
 ] as const);
 export type CodexModelControlAgentVersion =
   typeof CODEX_MODEL_CONTROL_AGENT_VERSIONS[number];
@@ -171,14 +175,18 @@ const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
         "Codex 0.159.0 fullscreen /model uses display labels and an explicit " +
         "default/session scope footer; the typed path selects persisted defaults"
     }),
-    Object.freeze({
-      agent: "codex",
-      agentVersion: "0.159.2",
-      behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01592,
+    ...([
+      ["0.159.2", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01592],
+      ["0.159.3", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01593],
+      ["0.160.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01600]
+    ] as const).map(([agentVersion, behaviorProfile]) => Object.freeze({
+      agent: "codex" as const,
+      agentVersion,
+      behaviorProfile,
       plan: Object.freeze({
-        behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01592,
-        command: "/model",
-        scope: "current_and_new_sessions",
+        behaviorProfile,
+        command: "/model" as const,
+        scope: "current_and_new_sessions" as const,
         requiresIdle: true,
         requiresExactEmptyComposer: true
       }),
@@ -190,9 +198,9 @@ const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
       ]),
       allowsStyledSlashPopupWithoutViewportPaint: true,
       reason:
-        "Codex 0.159.2 fullscreen /model uses display labels and an explicit " +
+        `Codex ${agentVersion} fullscreen /model uses display labels and an explicit ` +
         "default/session scope footer; the typed path selects persisted defaults"
-    }),
+    })),
     Object.freeze({
       agent: "claude",
       agentVersion: CLAUDE_MODEL_CONTROL_AGENT_VERSION,

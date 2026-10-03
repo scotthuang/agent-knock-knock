@@ -85,16 +85,21 @@ test("rejects a backend version or home mismatch before reading user threads", a
 });
 
 test("bootstraps only the audited TUI/backend pair and pins subsequent reads to the backend", async () => {
-  for (const options of [
-    { expectedServerVersion: "0.159.0", allowAuditedBackendPatch: true },
-    { expectedServerVersion: "0.159.2", allowAuditedBackendPatch: true },
-    { expectedServerVersion: "0.159.2" }
+  for (const [expectedServerVersion, backendVersion, allowAuditedBackendPatch] of [
+    ["0.159.0", "0.159.2", true],
+    ["0.159.2", "0.159.2", true],
+    ["0.159.2", "0.159.2", false],
+    ["0.159.3", "0.159.3", false],
+    ["0.159.3", "0.160.0", true],
+    ["0.160.0", "0.160.0", false]
   ] as const) {
     const fixture = new FixtureTransport(() => ({ thread: thread() }),
-      { ...initialize(), userAgent: "codex_cli_rs/0.159.2 (Mac OS)" });
-    const client = await connect(fixture, 1000, options);
+      { ...initialize(), userAgent: `codex_cli_rs/${backendVersion} (Mac OS)` });
+    const client = await connect(fixture, 1000, {
+      expectedServerVersion, ...(allowAuditedBackendPatch ? { allowAuditedBackendPatch: true } : {})
+    });
     try {
-      assert.equal(client.metadata.serverVersion, "0.159.2");
+      assert.equal(client.metadata.serverVersion, backendVersion);
       assert.equal((await client.readThread(THREAD_ID)).id, THREAD_ID);
     } finally { client.close(); }
   }
@@ -107,7 +112,11 @@ test("rejects unbound patch drift, reversed pairs and unaudited bootstrap backen
     ["0.159.2", "0.159.0", true],
     ["0.158.0", "0.159.2", true],
     ["0.159.0", "0.159.1", true],
-    ["0.159.0", "0.159.3", true]
+    ["0.159.0", "0.159.3", true],
+    ["0.159.3", "0.160.0", false],
+    ["0.160.0", "0.159.3", true],
+    ["0.159.2", "0.160.0", true],
+    ["0.159.3", "0.160.1", true]
   ] as const) {
     const fixture = new FixtureTransport(() => ({}),
       { ...initialize(), userAgent: `codex_cli_rs/${backendVersion} (Mac OS)` });

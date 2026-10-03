@@ -21,6 +21,14 @@ For example, `ask_for_approval` may be available on a given Codex build. A mode
 reported as current is not necessarily selectable: macOS can report `read_only`
 while omitting it from its menu. Named/custom profiles are not supported.
 
+Codex 0.160.0 can start a local folder outside a project with
+`Workspace (granular)` permissions. AKK reports this as `workspace_granular`,
+which describes the current state only; it cannot be selected. The native menu
+may offer its usual standard modes without marking any of them current. Choose
+an advertised mode to switch from this state. AKK verifies the new mode through
+a fresh status and the reopened menu's current marker on the same native thread.
+Other custom or unknown permission states remain unsupported.
+
 The corresponding tools are:
 
 ```text
@@ -47,7 +55,7 @@ before permission inspection; AKK does not interrupt its task to open the menu.
 
 ## Compatibility and verification
 
-The permission-write profile currently covers Codex 0.159.2 and 0.159.3. It is
+The permission-write profile currently covers Codex 0.159.2, 0.159.3, and 0.160.0. It is
 independent of native model selection, task observation, and interaction-write
 profiles. Unsupported versions, named/custom profiles, disabled or incomplete
 menus, and conflicting native status stop the operation before a permission
@@ -93,3 +101,6 @@ JavaScript files and bundled Skill match the user-tested candidate; only release
 metadata, verification documentation, and an older action-list test changed
 after that candidate. The optional general native lifecycle smoke was not rerun;
 the permission-specific live coverage and remaining limits are listed above.
+
+For the 0.160.0 source review, current native verification, and remaining
+boundaries, see [Codex 0.160.0 compatibility](codex-0.160.0-compatibility.md).

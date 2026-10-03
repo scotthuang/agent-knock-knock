@@ -12,15 +12,18 @@ const CODEX_LIFECYCLE_PROFILES: Readonly<Record<string, string>> = Object.freeze
   "0.155.1": "codex-tui-0.155.1",
   "0.158.0": "codex-tui-0.158.0",
   "0.159.0": "codex-tui-0.159.0",
-  "0.159.2": "codex-tui-0.159.2"
+  "0.159.2": "codex-tui-0.159.2",
+  "0.159.3": "codex-tui-0.159.3",
+  "0.160.0": "codex-tui-0.160.0"
 });
 
-export type CodexPaginatedVersion = "0.158.0" | "0.159.0" | "0.159.2";
+export type CodexPaginatedVersion = "0.158.0" | "0.159.0" | "0.159.2" | "0.159.3" | "0.160.0";
 export type CodexPaginatedBackendVersion = CodexPaginatedVersion;
 
 /** Versions whose paginated history and physical TUI binding are verified together. */
 export function isCodexPaginatedVersion(value: unknown): value is CodexPaginatedVersion {
-  return value === "0.158.0" || value === "0.159.0" || value === "0.159.2";
+  return value === "0.158.0" || value === "0.159.0" || value === "0.159.2" ||
+    value === "0.159.3" || value === "0.160.0";
 }
 
 /**
@@ -43,7 +46,10 @@ export function isAuditedCodexPaginatedServerPair(
   return agentVersion === "0.158.0" && serverVersion === "0.158.0" ||
     agentVersion === "0.159.0" &&
       (serverVersion === "0.159.0" || serverVersion === "0.159.2") ||
-    agentVersion === "0.159.2" && serverVersion === "0.159.2";
+    agentVersion === "0.159.2" && serverVersion === "0.159.2" ||
+    agentVersion === "0.159.3" &&
+      (serverVersion === "0.159.3" || serverVersion === "0.160.0") ||
+    agentVersion === "0.160.0" && serverVersion === "0.160.0";
 }
 
 /**

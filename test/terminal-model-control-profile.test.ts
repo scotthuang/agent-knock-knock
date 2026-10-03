@@ -128,12 +128,16 @@ test("model-control registry is the canonical verified profile catalog", () => {
         ],
         styledPopupWithoutViewportPaint: true
       },
-      {
+      ...([
+        ["0.159.2", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01592],
+        ["0.159.3", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01593],
+        ["0.160.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01600]
+      ] as const).map(([agentVersion, behaviorProfile]) => ({
         agent: "codex",
-        agentVersion: "0.159.2",
-        behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01592,
+        agentVersion,
+        behaviorProfile,
         plan: {
-          behaviorProfile: TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01592,
+          behaviorProfile,
           command: "/model",
           scope: "current_and_new_sessions",
           requiresIdle: true,
@@ -146,7 +150,7 @@ test("model-control registry is the canonical verified profile catalog", () => {
           "› /model  choose what model and reasoning effort to use"
         ],
         styledPopupWithoutViewportPaint: true
-      },
+      })),
       {
         agent: "claude",
         agentVersion: CLAUDE_MODEL_CONTROL_AGENT_VERSION,

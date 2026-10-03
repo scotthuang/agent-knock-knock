@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { observeCodexPermissionSurface } from "../src/codex-permission-surface.js";
 
-// Text matches upstream Codex 0.159.2/0.159.3 snapshots. ANSI matches
+// Text matches upstream Codex 0.159.2/0.159.3/0.160.0 snapshots. ANSI matches
 // SelectionView's native bold heading and selection_style() reverse fallback.
 const PICKER = [
   "\x1b[1m  Update Model Permissions\x1b[0m", "", "",
