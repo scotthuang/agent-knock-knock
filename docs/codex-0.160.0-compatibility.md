@@ -93,7 +93,12 @@ workspace paths from launch. Launching through other symlink paths can still
 encounter this conservative identity limitation.
 
 `npm run test:fast` passed 2,464 tests; type checking, build, and architecture
-validation passed. The final release gate is recorded with the release.
+validation passed. The immediate pre-publication `npm run test:release` gate
+passed 2,979 tests, isolated OpenClaw 2026.9.1 compatibility (24 tools,
+callback delivery, install/update/uninstall), ClawHub runtime validation, and
+publication dry-run. The general native lifecycle smoke was not run because
+paginated new/resume remains outside the supported path; the targeted native
+proof above covers this release's actual task and permission paths.
 
 ## Retained boundaries
 
