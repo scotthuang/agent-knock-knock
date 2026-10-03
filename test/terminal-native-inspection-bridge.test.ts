@@ -194,7 +194,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1
 }
 
 test("unverified Codex status candidates keep initial UI, exact runtime, and selected-popup gates", async () => {
-  const version = "0.160.0";
+  const version = "0.160.1";
   const runtime = { pid: 901, agentVersion: version };
   for (const initial of [
     CODEX_FULLSCREEN_IDLE.replace("? for shortcuts", "unknown input footer"),

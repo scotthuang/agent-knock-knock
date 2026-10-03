@@ -12,7 +12,7 @@ export interface TerminalPermissionControlProfile {
 export function terminalPermissionControlProfileFor(
   version: string
 ): TerminalPermissionControlProfile | undefined {
-  return ["0.159.2", "0.159.3"].includes(version)
+  return ["0.159.2", "0.159.3", "0.160.0"].includes(version)
     ? { agentVersion: version, behaviorProfile: "codex-permissions-fullscreen-v1", scope: "current_session" }
     : undefined;
 }
@@ -80,6 +80,9 @@ export function permissionModeFromStatus(value: string): string | undefined {
   if (value === "Full Access") return "full_access";
   if (value === "Workspace (Ask for approval)") return "ask_for_approval";
   if (value === "Workspace (Approve for me)") return "approve_for_me";
+  // 0.160 projectless defaults may use granular approvals. This current-only
+  // state is not a selectable preset and must never imply Ask for approval.
+  if (value === "Workspace (granular)") return "workspace_granular";
   if (value === "Read Only (Ask for approval)" || value === "Read Only") return "read_only";
   return undefined;
 }

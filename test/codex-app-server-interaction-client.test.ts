@@ -16,7 +16,8 @@ const TURN_ID = "01a0e959-4bb1-7fc3-8649-e153fd90faae";
 const ITEM_ID = "call_exact_question_1";
 const ANSWERS = { confirm_company: { answers: ["Yes"] } };
 const CODEX_VERSION_PAIRS = [["0.158.0", "0.158.0"], ["0.159.0", "0.159.0"],
-  ["0.159.0", "0.159.2"], ["0.159.2", "0.159.2"]] as const;
+  ["0.159.0", "0.159.2"], ["0.159.2", "0.159.2"],
+  ["0.159.3", "0.159.3"], ["0.159.3", "0.160.0"], ["0.160.0", "0.160.0"]] as const;
 
 for (const [version, serverVersion] of CODEX_VERSION_PAIRS) test("rejoins only the exact loaded question turn and reads replay without answering for " + version + "/" + serverVersion, async () => {
   const fixture = new InteractionFixture(version, serverVersion);
@@ -88,7 +89,9 @@ test("rejects unloaded or changed active turns before any resume or answer", asy
 test("rejects blocking backend changes in either direction before subscribing or answering", async () => {
   for (const [clientVersion, boundVersion, backendVersion] of [
     ["0.158.0", "0.158.0", "0.159.0"], ["0.159.0", "0.159.0", "0.158.0"],
-    ["0.159.0", "0.159.0", "0.159.2"], ["0.159.0", "0.159.2", "0.159.0"]
+    ["0.159.0", "0.159.0", "0.159.2"], ["0.159.0", "0.159.2", "0.159.0"],
+    ["0.159.3", "0.159.3", "0.160.0"], ["0.159.3", "0.160.0", "0.159.3"],
+    ["0.160.0", "0.160.0", "0.160.1"]
   ] as const) {
     const fixture = new InteractionFixture(clientVersion, boundVersion);
     fixture.backendVersion = backendVersion;
@@ -103,7 +106,8 @@ test("rejects blocking backend changes in either direction before subscribing or
 
 test("rejects reversed or unaudited blocking bindings before connecting", async () => {
   for (const [clientVersion, backendVersion] of [
-    ["0.159.2", "0.159.0"], ["0.158.0", "0.159.2"], ["0.159.0", "0.159.3"]
+    ["0.159.2", "0.159.0"], ["0.158.0", "0.159.2"], ["0.159.0", "0.159.3"],
+    ["0.160.0", "0.159.3"], ["0.159.2", "0.160.0"], ["0.159.3", "0.160.1"]
   ] as const) {
     const fixture = new InteractionFixture(clientVersion, backendVersion);
     try {
@@ -201,7 +205,8 @@ class InteractionFixture implements CodexAppServerReadTransport {
       status: this.change === "unloaded" ? { type: "notLoaded" } : { type: "active", activeFlags: ["waitingOnUserInput"] } };
   }
   question() {
-    return { threadId: THREAD_ID, turnId: TURN_ID, itemId: ITEM_ID, questions: [{
+    return { threadId: THREAD_ID, turnId: TURN_ID, itemId: ITEM_ID, isBlocking: true,
+      autoResolutionMs: null, questions: [{
       id: "confirm_company", header: "Company", question: "UniPat AI?", isOther: true, isSecret: false,
       options: [{ label: "Yes", description: "Research this company" }, { label: "No", description: "Select another company" }]
     }] };

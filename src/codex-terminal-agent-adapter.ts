@@ -853,7 +853,9 @@ export function closedCodex159StatusSuffix(lines: readonly string[]): boolean {
   if (rows.length !== 3 || rows[0] !== "• Queued follow-up inputs") return false;
   const summary = /^ {2}\? ([1-9]\d{0,2}) (question|questions)(?: · (?:[1-9]|1\d|20)s)?$/u.exec(rows[1]!);
   return summary !== null && (Number(summary[1]) === 1) === (summary[2] === "question") &&
-    /^ {4}(?:shift\+←|⌥\+↑) to answer$/u.test(rows[2]!);
+    // Both closed native display spellings are read-only chrome, never input
+    // authority. Async navigation separately pins the versioned key grammar.
+    /^ {4}(?:shift\+←|⌥\+?↑) to answer$/u.test(rows[2]!);
 }
 
 type CodexStatusEvidenceInventory =

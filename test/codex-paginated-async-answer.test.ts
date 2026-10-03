@@ -16,7 +16,8 @@ const ITEM = "async-question-message";
 const NATIVE_ID = JSON.stringify(["request_user_input_async", ITEM, 0]);
 const CLIENT_ID = "b5e512ec-70b1-4f59-b72c-af6d55e6c511";
 const CODEX_VERSION_PAIRS = [["0.158.0", "0.158.0"], ["0.159.0", "0.159.0"],
-  ["0.159.0", "0.159.2"], ["0.159.2", "0.159.2"]] as const;
+  ["0.159.0", "0.159.2"], ["0.159.2", "0.159.2"],
+  ["0.159.3", "0.159.3"], ["0.159.3", "0.160.0"], ["0.160.0", "0.160.0"]] as const;
 
 for (const [version, serverVersion] of CODEX_VERSION_PAIRS) test("sends one closed native turn CAS and confirms only its exact durable reply for " + version + "/" + serverVersion, async () => {
   const fixture = new AsyncAnswerFixture(version, serverVersion);
@@ -145,7 +146,9 @@ test("rechecks process incarnation and accepts only the exact backend before res
 test("rejects async backend changes in either direction before reserving", async () => {
   for (const [clientVersion, boundVersion, backendVersion] of [
     ["0.158.0", "0.158.0", "0.159.0"], ["0.159.0", "0.159.0", "0.158.0"],
-    ["0.159.0", "0.159.0", "0.159.2"], ["0.159.0", "0.159.2", "0.159.0"]
+    ["0.159.0", "0.159.0", "0.159.2"], ["0.159.0", "0.159.2", "0.159.0"],
+    ["0.159.3", "0.159.3", "0.160.0"], ["0.159.3", "0.160.0", "0.159.3"],
+    ["0.160.0", "0.160.0", "0.160.1"]
   ] as const) {
     const fixture = new AsyncAnswerFixture(clientVersion, boundVersion);
     fixture.serverVersion = backendVersion;
@@ -159,7 +162,8 @@ test("rejects async backend changes in either direction before reserving", async
 
 test("rejects reversed or unaudited async bindings before connecting", async () => {
   for (const [clientVersion, backendVersion] of [
-    ["0.159.2", "0.159.0"], ["0.158.0", "0.159.2"], ["0.159.0", "0.159.3"]
+    ["0.159.2", "0.159.0"], ["0.158.0", "0.159.2"], ["0.159.0", "0.159.3"],
+    ["0.160.0", "0.159.3"], ["0.159.2", "0.160.0"], ["0.159.3", "0.160.1"]
   ] as const) {
     const fixture = new AsyncAnswerFixture(clientVersion, backendVersion);
     await assert.rejects(fixture.deliver(), /Native async answer input is invalid/u);
@@ -169,14 +173,15 @@ test("rejects reversed or unaudited async bindings before connecting", async () 
   }
 });
 
-test("mixed-version answers keep preflight and receipt evidence pinned to the bound backend", async () => {
+for (const [version, serverVersion] of [["0.159.0", "0.159.2"], ["0.159.3", "0.160.0"]] as const)
+test("mixed-version answers pin preflight and receipt to " + version + "/" + serverVersion, async () => {
   for (const stage of ["preflight", "receipt"] as const) {
-    const fixture = new AsyncAnswerFixture("0.159.0", "0.159.2");
+    const fixture = new AsyncAnswerFixture(version, serverVersion);
     const ports = fixture.ports();
     const read = ports.readSnapshot!;
     ports.readSnapshot = async (input) => {
       const snapshot = await read(input);
-      if (stage === "preflight" || fixture.reads > 1) snapshot.serverVersion = "0.159.0";
+      if (stage === "preflight" || fixture.reads > 1) snapshot.serverVersion = version;
       return snapshot;
     };
     const delivered = deliverCodexPaginatedAsyncAnswer(fixture.input(), ports);
@@ -191,7 +196,7 @@ test("mixed-version answers keep preflight and receipt evidence pinned to the bo
       assert.equal(fixture.reservations, 1);
       assert.equal(fixture.steers().length, 1);
     }
-    assert.equal(fixture.snapshotReadVersions.every((version) => version === "0.159.2"), true);
+    assert.equal(fixture.snapshotReadVersions.every((version) => version === serverVersion), true);
     assert.equal(fixture.closed, true);
   }
 });

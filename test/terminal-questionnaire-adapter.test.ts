@@ -23,7 +23,7 @@ earlier scrollback
   tab to add notes | enter to submit answer | esc to interrupt
 `;
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0"]) {
   test(`Codex ${version} blocking questions distinguish the new native Other description from suggestions`, () => {
     const screen = CODEX_OPTIONS.replace(
       "    3. Option 3  Third choice.",
@@ -711,7 +711,7 @@ test("Codex false positives remain absent and changed versions fail closed", () 
     reason: "no_questionnaire_surface"
   });
 
-  for (const version of ["0.154.1", "0.155.0", "0.155.2", "0.159.1", "0.159.3"]) {
+  for (const version of ["0.154.1", "0.155.0", "0.155.2", "0.159.1", "0.160.1"]) {
     assert.equal(manual(inspectNativeQuestionnaire({
       agent: "codex",
       version,

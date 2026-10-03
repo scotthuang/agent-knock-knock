@@ -179,19 +179,21 @@ test("paginated async selection uses the exact semantic label and native questio
   assert.deepEqual(harness.offer.projection.delivery_modes, ["steer_current_turn"]);
 });
 
-test("mixed Codex 0.159.0 physical and 0.159.2 backend keeps exact native async delivery", async () => {
+for (const [agentVersion, serverVersion] of [["0.159.0", "0.159.2"],
+  ["0.159.3", "0.159.3"], ["0.159.3", "0.160.0"], ["0.160.0", "0.160.0"]] as const)
+test("Codex " + agentVersion + "/" + serverVersion + " keeps exact native async delivery", async () => {
   const runtime: TerminalRuntimeIdentity = {
-    ...RUNTIME, agentVersion: "0.159.0",
+    ...RUNTIME, agentVersion,
     codexPaginatedThread: {
-      ...RUNTIME.codexPaginatedThread!, agentVersion: "0.159.0", serverVersion: "0.159.2"
+      ...RUNTIME.codexPaginatedThread!, agentVersion, serverVersion
     }
   };
   const harness = fixture(OPTIONS_SCREEN, 1, EVIDENCE, runtime);
   const result = await respondCodexPaginatedAsyncQuestion(harness.input);
   assert.equal(result.outcome, "confirmed");
   assert.equal(harness.writes.length, 1);
-  assert.equal(harness.writes[0]?.binding.agentVersion, "0.159.0");
-  assert.equal(harness.writes[0]?.binding.serverVersion, "0.159.2");
+  assert.equal(harness.writes[0]?.binding.agentVersion, agentVersion);
+  assert.equal(harness.writes[0]?.binding.serverVersion, serverVersion);
   assert.equal(harness.writes[0]?.nativeTurnId, TURN);
   assert.equal(harness.writes[0]?.answer, "Production");
 });

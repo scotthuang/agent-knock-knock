@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.18 - 2026-10-04
+
+- Adapt Codex 0.160.0 async-question Option-key hints while preserving exact versioned input checks and older keymaps.
+- Recognize the new native `Workspace (granular)` current permission state so an idle session can select a verified standard preset without treating granular permissions as an existing standard preset.
+- Review Codex 0.159.3 and 0.160.0 native status, question, model, and permission profiles; preserve paginated task identity, exact callback, and answer confirmation boundaries.
+- Add audited 0.159.3/0.160.0 shared-backend compatibility alongside matching-version pairs, with regression coverage for replay, backend drift, and unreviewed write rejection.
+
 ## 0.13.17 - 2026-10-02
 
 - Separate Watch observation and response adapters, Monitor recovery and persistence, and native model-control preparation into focused modules while preserving identity, locking, and single-input boundaries.

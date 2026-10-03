@@ -87,10 +87,14 @@ test("short native viewport joins captured unique overlap, then restores latest 
   assert.ok(!screen.includes("Back to bottom"));
 });
 
-test("unverified frontend reuses history navigation only with its exact closed status receipt and UI", async () => {
-  for (const version of ["0.159.3", "0.160.0", "1.0.0"]) {
+test("verified and unverified frontends reuse history navigation only with the exact status profile and UI", async () => {
+  for (const [version, behaviorProfile] of [
+    ["0.159.3", "codex-tui-0.159.3"], ["0.160.0", "codex-tui-0.160.0"],
+    ["0.160.1", "codex-tui-fullscreen-status-v1@0.160.1"],
+    ["1.0.0", "codex-tui-fullscreen-status-v1@1.0.0"]
+  ]) {
     const paused = PAUSED.replace("v0.159.2", `v${version}`);
-    const receipt = { ...RECEIPT, behaviorProfile: `codex-tui-fullscreen-status-v1@${version}` };
+    const receipt = { ...RECEIPT, behaviorProfile };
     const h = run({ version, receipt, frames: [LATEST, paused, paused, LATEST] });
     const observed = observeCodexNativeInspection({ operation: { kind: "status" },
       expectedAgentVersion: version, screen: stripTerminalEscapeSequences(await h.result) });

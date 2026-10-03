@@ -109,7 +109,7 @@ test("explicit Send uses paginated tmux paste after audited or freshly recognize
 });
 
 test("unverified main Send requires a fresh visible Composer and verifies explicit draft replacement", async () => {
-  const version = "0.159.3";
+  const version = "0.160.1";
   const draft = FORWARD_CODEX_COMPOSER.replace(
     "\x1b[2mAsk Codex to do anything\x1b[0m", "replace my visible draft\n  and its second line");
   class ForwardProvider extends RecordingTerminalProvider {

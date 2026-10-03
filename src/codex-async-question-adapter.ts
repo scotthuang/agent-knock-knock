@@ -14,7 +14,9 @@ export const CODEX_ASYNC_QUESTION_PROFILES: Readonly<Record<string, string>> =
     "0.155.1": "codex/0.155.1/request-user-input-async-v1",
     "0.158.0": "codex/0.158.0/request-user-input-async-v2",
     "0.159.0": "codex/0.159.0/request-user-input-async-v2",
-    "0.159.2": "codex/0.159.2/request-user-input-async-v2"
+    "0.159.2": "codex/0.159.2/request-user-input-async-v2",
+    "0.159.3": "codex/0.159.3/request-user-input-async-v2",
+    "0.160.0": "codex/0.160.0/request-user-input-async-v3"
   });
 
 export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
@@ -762,7 +764,9 @@ function collapsedOpenBinding(
   if (line === (compact ? "    shift+← to answer" : "    shift + ← to answer")) {
     return "shift_left";
   }
-  return line === (compact ? "    ⌥+↑ to answer" : "    ⌥ + ↑ to answer")
+  const altHint = profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"]
+    ? "    ⌥↑ to answer" : compact ? "    ⌥+↑ to answer" : "    ⌥ + ↑ to answer";
+  return line === altHint
     ? "alt_up" : undefined;
 }
 
@@ -833,7 +837,11 @@ function parseExpanded(
       )) {
     return { status: "ambiguous", reason: "clipped_question" };
   }
-  const compactFooter = /^enter submit ctrl\+\] skip (shift\+→|⌥\+↓) (main prompt|prev question)(?: (⌥\+↑|shift\+←) (next question|queued messages))?$/u.exec(footer);
+  // 0.160 key_hint.rs no longer inserts '+' after the macOS Option glyph.
+  // Match the complete versioned footer; mixed/unknown keymaps grant no input.
+  const compactFooter = (profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"]
+    ? /^enter submit ctrl\+\] skip (shift\+→|⌥↓) (main prompt|prev question)(?: (⌥↑|shift\+←) (next question|queued messages))?$/u
+    : /^enter submit ctrl\+\] skip (shift\+→|⌥\+↓) (main prompt|prev question)(?: (⌥\+↑|shift\+←) (next question|queued messages))?$/u).exec(footer);
   if (isFullscreenProfile(profile) ? !compactFooter :
     !/^enter submit ctrl \+ \] skip ⌥ \+ ↓ (?:main prompt|prev question)(?: (?:⌥ \+ ↑|shift \+ ←) (?:next question|queued messages))?$/u.test(footer)) {
     return { status: "ambiguous", reason: "unsupported_keymap" };
@@ -1204,5 +1212,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isFullscreenProfile(profile: string): boolean {
   return profile === CODEX_ASYNC_QUESTION_PROFILES["0.158.0"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.0"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.2"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.2"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.3"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"];
 }

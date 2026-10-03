@@ -60,7 +60,7 @@ test("model control is closed to exact regression-tested agent versions", () => 
   assert.equal(probeTerminalModelControl("codex", "0.155.0").status, "unsupported");
   assert.equal(probeTerminalModelControl("codex", "0.155.2").status, "unsupported");
   assert.equal(probeTerminalModelControl("codex", "0.159.1").status, "unsupported");
-  assert.equal(probeTerminalModelControl("codex", "0.159.3").status, "unsupported");
+  assert.equal(probeTerminalModelControl("codex", "0.160.1").status, "unsupported");
   assert.equal(probeTerminalModelControl("claude", "2.1.267").status, "unsupported");
   assert.throws(
     () => planTerminalModelControl(
@@ -133,7 +133,7 @@ test("Codex 0.159.2 official model catalog keeps GPT-6.1 Sol and the shifted nat
   assert.equal(observed.selectedIndex, 7);
 });
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0"]) {
   test(`Codex ${version} native display names and compact scope footers retain canonical model ids`, async () => {
     const native = new FakeModelTerminal("codex", {
       currentModel: "gpt-5.2", currentEffort: "high",
@@ -159,7 +159,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   });
 }
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0"]) {
   test(`Codex ${version} picker parser refuses changed or contradictory footer scope`, () => {
     const advanced = [
       "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",

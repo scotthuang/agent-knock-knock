@@ -45,7 +45,9 @@ test("Codex async-question profiles are exact and do not float to unknown versio
     "0.155.1",
     "0.158.0",
     "0.159.0",
-    "0.159.2"
+    "0.159.2",
+    "0.159.3",
+    "0.160.0"
   ]);
   assert.equal(
     codexAsyncQuestionProfile("0.155.1"),
@@ -53,7 +55,7 @@ test("Codex async-question profiles are exact and do not float to unknown versio
   );
   assert.equal(codexAsyncQuestionProfile("0.155.2"), undefined);
   assert.equal(codexAsyncQuestionProfile("0.159.1"), undefined);
-  assert.equal(codexAsyncQuestionProfile("0.159.3"), undefined);
+  assert.equal(codexAsyncQuestionProfile("0.160.1"), undefined);
   assert.deepEqual(
     inspectCodexAsyncQuestion({
       version: "0.155.2",
@@ -64,7 +66,7 @@ test("Codex async-question profiles are exact and do not float to unknown versio
   );
 });
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0"]) {
   test(`Codex ${version} compact question hints prove the native tuple and reversible prompt navigation`, () => {
     const screen = EXPANDED_OPTIONS.replace(
       "enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
@@ -98,7 +100,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
   });
 }
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0"]) {
   test(`Codex ${version} collapsed compact hints and fullscreen Composer withdraw answered surfaces`, () => {
     const inspected = inspectCodexAsyncQuestion({
       version, evidence: EVIDENCE,
@@ -121,6 +123,42 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2"]) {
     }), false);
   });
 }
+
+test("0.160 Option question hints retain the exact native tuple and reject old or mixed key labels", () => {
+  // Official rust-v0.160.0 question_queue_hint_Up snapshot and key_hint.rs:
+  // the Option glyph is adjacent to its arrow; ctrl+] is unchanged.
+  const screen = EXPANDED_OPTIONS.replace(
+    "enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
+    "enter submit   ctrl+] skip   ⌥↓ main prompt   ⌥↑ next question"
+  );
+  const inspect = (screen: string, version = "0.160.0") =>
+    inspectCodexAsyncQuestion({ version, screen, evidence: EVIDENCE });
+  const expanded = inspect(screen);
+  assert.equal(expanded.state, "expanded");
+  if (expanded.state !== "expanded") return;
+  assert.equal(expanded.match.native_question_id,
+    '["request_user_input_async","async-message-call",0]');
+  assert.equal(expanded.profile, "codex/0.160.0/request-user-input-async-v3");
+  assert.equal(expanded.owner_private_action_plan.kind, "answer_async_question");
+  if (expanded.owner_private_action_plan.kind !== "answer_async_question") return;
+  assert.equal(expanded.owner_private_action_plan.prompt_stack_back, "alt_down");
+  assert.equal(expanded.owner_private_action_plan.prompt_stack_forward, "alt_up");
+  const collapsed = "• Queued follow-up inputs\n  ? 2 questions · 5s\n    ⌥↑ to answer";
+  assert.equal(inspect(collapsed).state, "collapsed");
+  for (const changed of [
+    screen.replace("⌥↓", "⌥+↓"), screen.replace("⌥↑", "⌥+↑"),
+    screen.replace("⌥↓", "⌥ ↓"), screen.replace("ctrl+]", "ctrl + ]"),
+    screen.replace("⌥↑", "alt+↑"), screen.replace("next question", "next quest…"),
+    collapsed.replace("⌥↑", "⌥+↑"), collapsed.replace("⌥↑", "⌥ ↑")
+  ]) assert.equal(inspect(changed).state, "ambiguous");
+  for (const version of ["0.158.0", "0.159.2", "0.159.3"]) {
+    assert.equal(inspect(screen, version).state, "ambiguous");
+    assert.equal(inspect(collapsed, version).state, "ambiguous");
+    assert.equal(inspect(screen.replaceAll("⌥", "⌥+"), version).state, "expanded");
+    assert.equal(inspect(collapsed.replace("⌥↑", "⌥+↑"), version).state, "collapsed");
+  }
+  assert.equal(inspectCodexAsyncQuestion({ version: "0.160.0", screen }).state, "ambiguous");
+});
 
 test("pure durable-record parsing retains accepted async calls without returning raw records", () => {
   const argumentsJson = JSON.stringify({
