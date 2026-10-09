@@ -281,7 +281,8 @@ process.stdout.write("{}");
     [
       "reconcile-monitors:lifecycle-original",
       "reconcile-watches:lifecycle-original",
-      "reconcile-desktop-watches:lifecycle-original"
+      "reconcile-desktop-watches:lifecycle-original",
+      "reconcile-codex-native-watches:lifecycle-original"
     ]
   );
 });

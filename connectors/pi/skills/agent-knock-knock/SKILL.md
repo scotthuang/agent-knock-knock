@@ -1,21 +1,33 @@
 ---
 name: agent-knock-knock
-description: Discover, send tasks to, and monitor existing Codex Desktop conversations or Codex and Claude Code tmux/Herdr terminals with Agent Knock Knock.
+description: Discover and control loaded Codex CLI threads, existing Codex Desktop conversations, or Codex and Claude Code tmux/Herdr terminals with Agent Knock Knock.
 ---
 
 # Agent Knock Knock
 
 Use this skill when the user explicitly invokes `AKK`, `akk`, or `Agent Knock Knock`, or asks a supported controller Host to inspect or control a coding-agent conversation listed by AKK.
 
-AKK supports existing local Codex Desktop conversations and Codex or Claude Code already running inside tmux or local Herdr `0.8.0`. It never launches a replacement coding agent. The controller Host, AKK, the coding agent, and its Desktop app or terminal host must run as the same OS user.
+AKK supports loaded local Codex CLI threads through their shared backend, existing local Codex Desktop conversations, and Codex or Claude Code already running inside tmux or local Herdr `0.8.0`. It never launches a replacement coding agent. The controller Host, AKK, the coding agent, and its Desktop app or terminal host must run as the same OS user.
 
 Treat `AKK` and `akk` the same way.
 
 ## Role
 
-The controller Host interprets the user's request, sends the requested work into the selected conversation, handles actionable callbacks, and reports the outcome. The coding agent performs the engineering work in its existing Desktop conversation or tmux/Herdr terminal.
+The controller Host interprets the user's request, sends the requested work into the selected conversation, handles actionable callbacks, and reports the outcome. The coding agent performs the engineering work in its existing CLI backend thread, Desktop conversation, or tmux/Herdr terminal.
 
 Keep the user's requested scope and approval boundaries. Do not expand a task, approve a permission, interrupt a process, or close a managed record unless the user request or an explicit trusted policy authorizes that action.
+
+## Direct Codex CLI
+
+Use `codex_cli_sessions[]` from List and its exact `codex-cli:v1:...` conversation ID. This route addresses the existing loaded backend thread and works without tmux or Herdr. It never starts a replacement CLI or treats saved history as a live owner. Embedded CLI sessions without a reachable shared backend continue to use the terminal route. Desktop uses its separate route below.
+
+- Select by the returned title, working directory and native thread identity. Copy the advertised action; do not construct IDs, infer thread ownership from the newest same-directory history, or substitute another target. A physical terminal row and direct thread row can refer to the same work; send only once using the selected route.
+- Send with `agent_knock_knock_send({conversation_id,request})`. AKK preserves current settings, submits once and returns `codex-cli-watch:...` for the accepted native task. Keep the receipt if acceptance is uncertain; refresh its Status instead of blindly sending again.
+- Read the current thread with `agent_knock_knock_status({conversation_id})`. Watch an already-running exact task with `agent_knock_knock_watch({conversation_id})`; use `agent_knock_knock_status({watch_id})` for that task's result. A later idle state or different completed task is not evidence that the watched task succeeded. `agent_knock_knock_unwatch({watch_id})` only stops observation.
+- When a callback reports a question or approval, refresh Status for that exact conversation or Watch and present the current request. Use `agent_knock_knock_respond_interaction` with that same `conversation_id` or `watch_id`, the current `interaction_id`, and the advertised typed `answers`. Blocking questions and async questions are supported; async delivery is `steer_current_turn` only. For authorized command/file approval, use `agent_knock_knock_approve` with the same target, exact `interaction_id`, and the advertised `approve_once` or `reject` decision. The backend revalidates the native request and task; no terminal tokens, raw keys or menu indexes are needed.
+- Inspect permissions using `agent_knock_knock_permission_options({conversation_id})`, then apply the requested or authorized `read-only`, `default`, or `full-access` with `agent_knock_knock_set_permissions({conversation_id,mode})`. Full Access is a normal option with no additional confirmation. AKK waits for the effective thread setting before reporting success; global defaults stay unchanged and no task is created. Send permission-dependent work only after the setting is verified.
+
+Use AKK's advertised actions and read the actual operation result after backend upgrades. A missing backend method fails that operation with an unsupported-capability diagnostic; it does not justify sending UI input to a guessed terminal. Existing terminal and Desktop capabilities retain their own limits. Model selection and native thread lifecycle operations are not added to this direct route.
 
 ## Codex Desktop
 
@@ -38,7 +50,7 @@ Core slash-command forms:
 
 - `/akk <task>`: send a new task only when exactly one send-ready coding-agent pane exists across all workspaces.
 - `/akk <selector>: <message>`: resolve one exact eligible AKK session and create a new Turn for the message.
-- `/akk list`: list live coding-agent terminals, their managed-turn context, Desktop catalog candidates, and durable Watches. Use the semantic tools above for Desktop task operations.
+- `/akk list`: list live coding-agent terminals, their managed-turn context, loaded direct Codex CLI threads, Desktop catalog candidates, and durable Watches. Use the semantic tools above for Desktop task operations.
 - `/akk watch <exact-terminal-id>`: observe one exact user-selected terminal without submitting a task or creating a Session or Turn; prefer an exact task anchor and otherwise use a clearly labeled best-effort terminal-activity Watch.
 - `/akk unwatch <watch-id>`: cancel only that observation; do not interrupt or otherwise change the TUI task.
 - `/akk threads <exact-terminal-id>`: list verified native threads that may be resumed in one exact terminal.
@@ -70,7 +82,7 @@ AKK discovers eligible panes across workspaces. When more than one target matche
 Natural-language forms:
 
 - `AKK: <task>`: call `agent_knock_knock_send` with `request=<task>` and neither target ID. This succeeds only when exactly one send-ready pane exists. A scanned blocked approval or proven input-owning questionnaire, editor, menu, or read-only viewer vetoes physical Send; parsed working activity and an existing draft do not. Unreviewed Codex frontends require the styled-Composer checks above; reviewed physical Send paths do not require ordinary main-Composer visibility. Codex replaces the current Composer with `C-u`; Claude Code uses a sentinel-backed native `C-s` stash-clear transaction that is independent of the cursor position and does not interrupt an active turn, then proves the main Composer empty. Each injects the request and submits exactly once. Broken or stale AKK management activity records do not veto that independently verified live terminal/process.
-- `AKK Codex: <task>`: list first, require one exact eligible Codex row, then call `agent_knock_knock_send` with that row's `terminal_id` and `request=<task>`.
+- `AKK Codex: <task>`: list first and identify one exact eligible Codex conversation. For a direct CLI or Desktop row, copy its advertised Send with `conversation_id`; for a terminal row use its `terminal_id`. Send `request=<task>` once through that route. Do not count duplicate representations of the same proven thread as separate tasks.
 - `AKK Claude: <task>`: list first, require one exact eligible Claude row, then call `agent_knock_knock_send` with that row's `terminal_id` and `request=<task>`.
 - Requests to list AKK or local coding-agent work: call `agent_knock_knock_list`.
 - Requests to observe an exact Codex or Claude Code terminal: normally call `agent_knock_knock_list` and copy that row's advertised `watch` action, then pass its complete `terminal_id`. If the user explicitly selected a complete exact terminal ID, missing `available_actions.watch` is not a veto: Watch may still be called with that ID. Never guess, shorten, or substitute a selector. AKK prefers an exact task anchor and otherwise records warnings and observes the terminal/process activity epoch.
@@ -93,7 +105,7 @@ Natural-language forms:
 
 ## Sessions and Turns
 
-For terminal resources, AKK's identity hierarchy is terminal → native Codex or Claude Code session → AKK session → Turns. Desktop instead uses its `conversation_id` and independent `desktop-watch:...` records as described above. `session_id` is the strict terminal ordinary-send target for one exact native context. `terminal_id` is the deliberately different follow-current target that lets the user hand the pane's currently verified context back to AKK after a safe human-driven switch. Each accepted managed Send creates a distinct `turn_id` without clearing the native agent context; Codex paginated physical Send instead returns an independent exact-task or terminal-activity Watch when observation can be attached. A `turn_id` is used for history, callbacks, respond, status, approval, cancellation, renewal, callback retry, close, and the explicitly advertised submission-retry form of Send.
+For terminal resources, AKK's identity hierarchy is terminal → native Codex or Claude Code session → AKK session → Turns. Direct Codex CLI uses its `conversation_id` and independent `codex-cli-watch:...` records; Desktop uses `conversation_id` and `desktop-watch:...`, as described above. `session_id` is the strict terminal ordinary-send target for one exact native context. `terminal_id` is the deliberately different follow-current target that lets the user hand the pane's currently verified context back to AKK after a safe human-driven switch. Each accepted managed Send creates a distinct `turn_id` without clearing the native agent context; Codex paginated physical Send instead returns an independent exact-task or terminal-activity Watch when observation can be attached. A `turn_id` is used for history, callbacks, respond, status, approval, cancellation, renewal, callback retry, close, and the explicitly advertised submission-retry form of Send.
 
 Use `agent_knock_knock_send` with `request` and neither `session_id` nor `terminal_id` only when the target is unspecified. AKK must resolve exactly one eligible Codex or Claude Code pane across all workspaces and use its currently advertised Send path. Managed delivery attaches or discovers its AKK session and verifies idle before input; Codex paginated physical Send does not require a managed Session and follows its terminal input-safety checks. If no eligible pane exists, report AKK's setup guidance; do not substitute another execution path.
 

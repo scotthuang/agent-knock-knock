@@ -69,8 +69,8 @@ test("current-but-unselectable and invented permission modes cannot be used; fai
 });
 
 test("permission tools reject raw authority and native input syntax", () => {
-  assert.deepEqual(Object.keys(permissionOptionsParameters.properties), ["terminal_id"]);
-  assert.deepEqual(Object.keys(setPermissionsParameters.properties), ["terminal_id", "mode"]);
+  assert.deepEqual(Object.keys(permissionOptionsParameters.properties), ["conversation_id", "terminal_id"]);
+  assert.deepEqual(Object.keys(setPermissionsParameters.properties), ["conversation_id", "terminal_id", "mode"]);
   assert.equal(setPermissionsParameters.additionalProperties, false);
   for (const field of ["keys", "command", "index", "label", "scope", "profile", "expected_binding_token", "expected_catalog_fingerprint"]) {
     assert.throws(() => buildPrivateSetPermissionsArgs({}, { ...parameters(), [field]: "unexpected" }, context), /only typed semantic fields/u);

@@ -1,5 +1,7 @@
 import { executorDefinitionForKind } from "./executors.js";
 import { isDesktopConversationId, parseDesktopConversationId } from "./desktop-identity.js";
+import { isCodexNativeConversationId, parseCodexNativeConversationId } from "./codex-native-identity.js";
+import { validateNativeInteractionProjections } from "./codex-native-public-projection.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -7,6 +9,7 @@ import {
 import {
   formatAkkTerminalWatchHint,
   formatAkkWatchStatusCommandResult,
+  formatCodexNativeCommandResult,
   isAkkModelFacingDiagnosticField,
   isAkkModelFacingPrivateAuthorityField,
   isAkkNativeSubmissionAccepted,
@@ -34,6 +37,7 @@ export function usesHostBridgeToolPresentation(api: object): boolean {
 }
 
 export function sendCommandResultIsError(result) {
+  if (isRecord(result) && codexNativeResult(result)) return !codexNativeSubmissionAccepted(result);
   return isSuccessfulTerminalDispatch(result)
     ? false
     : terminalSubmissionReported(result)
@@ -112,6 +116,7 @@ function executorDisplayName(kind) {
 }
 
 export function formatStatusCommandResult(result) {
+  if (isRecord(result) && codexNativeResult(result)) return formatCodexNativeCommandResult(result, "status");
   if (
     stringValue(result.watch_id) ||
     (isRecord(result.watch) && stringValue(result.watch.watch_id)) ||
@@ -405,6 +410,7 @@ function formatManagedSendCommandResult(result) {
 }
 
 export function formatSendCommandResult(result) {
+  if (isRecord(result) && codexNativeResult(result)) return formatCodexNativeCommandResult(result, "Send");
   return result.scope === "terminal_user_explicit"
     ? formatTerminalUserExplicitSendResult(result)
     : formatManagedSendCommandResult(result);
@@ -423,6 +429,7 @@ export function formatCancelCommandResult(result) {
 }
 
 export function formatApproveCommandResult(result) {
+  if (isRecord(result) && codexNativeResult(result)) return formatCodexNativeCommandResult(result, "response");
   const conversation = result.conversation ?? {};
   const { sessionId, turnId } = publicTurnIdentity(result);
   return [
@@ -602,7 +609,9 @@ function sanitizeModelFacingValue(
     if (key === "interaction_state") {
       try {
         output[key] = sanitizeModelFacingValue(
-          validateAnyTerminalInteractionProjection(item),
+          value.source === "codex_cli"
+            ? validateNativeInteractionProjections(item, value.conversation_id, value.watch_id)
+            : validateAnyTerminalInteractionProjection(item),
           undefined,
           [...path, key]
         );
@@ -696,6 +705,7 @@ export function isSubmissionError(result: unknown): boolean {
     return false;
   }
   if (desktopResult(result)) return !desktopSubmissionAccepted(result);
+  if (codexNativeResult(result)) return !codexNativeSubmissionAccepted(result);
   if (isSuccessfulTerminalDispatch(result)) {
     return false;
   }
@@ -717,6 +727,23 @@ export function isSubmissionError(result: unknown): boolean {
 
 function desktopResult(result: Record<string, unknown>): boolean {
   return result.source === "codex_desktop" || isDesktopConversationId(result.conversation_id);
+}
+
+function codexNativeResult(result: Record<string, unknown>): boolean {
+  return result.source === "codex_cli" || isCodexNativeConversationId(result.conversation_id);
+}
+
+function codexNativeSubmissionAccepted(result: Record<string, unknown>): boolean {
+  try {
+    if (!isCodexNativeConversationId(result.conversation_id)) return false;
+    const target = parseCodexNativeConversationId(result.conversation_id);
+    return result.source === "codex_cli" && result.agent_acceptance === "proven" && result.delivered === true
+      && result.send_state === "accepted" && result.delivery_receipt === "native_task_verified"
+      && result.native_thread_id === target.threadId
+      && typeof result.native_turn_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{1,160}$/u.test(result.native_turn_id)
+      && typeof result.watch_id === "string" && /^codex-cli-watch:[A-Za-z0-9_-]{8,128}$/u.test(result.watch_id)
+      && ["watching", "completed", "failed", "interrupted"].includes(String(result.status));
+  } catch { return false; }
 }
 
 function desktopSubmissionAccepted(result: Record<string, unknown>): boolean {
@@ -742,7 +769,7 @@ export function withTurnIdentity(result) {
   if (!isRecord(result)) {
     return result;
   }
-  if (desktopResult(result)) return result;
+  if (desktopResult(result) || codexNativeResult(result)) return result;
   const sources = [
     { label: "result", value: result },
     { label: "result.conversation", value: result.conversation },

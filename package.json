@@ -94,7 +94,8 @@
     "docs/callback-compatibility.md",
     "docs/codex-permissions.md",
     "docs/codex-0.160.0-compatibility.md",
-    "docs/codex-desktop-compatibility.md"
+    "docs/codex-desktop-compatibility.md",
+    "docs/codex-cli-native-compatibility.md"
   ],
   "publishConfig": {
     "access": "public"

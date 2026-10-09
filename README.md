@@ -4,9 +4,9 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-339933)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/scotthuang/agent-knock-knock/blob/main/LICENSE)
 
-Agent Knock Knock lets **OpenClaw, Pi, or DeepSeek Harness** control existing **Codex Desktop conversations** and Codex or Claude Code running in **tmux or Herdr**. Discover conversations, send the next task from chat, and get callbacks when the coding agent finishes or needs attention.
+Agent Knock Knock lets **OpenClaw, Pi, or DeepSeek Harness** control existing **Codex Desktop conversations**, **Codex CLI shared-backend conversations**, and Codex or Claude Code running in **tmux or Herdr**. Discover conversations, send the next task from chat, and get callbacks when the coding agent finishes or needs attention.
 
-AKK never launches a hidden replacement agent. The controller Host, the human, and AKK work in the same native conversation, through its original Desktop owner or shared terminal.
+AKK never launches a hidden replacement agent. The controller Host, the human, and AKK work in the same native conversation, through its original Desktop owner, CLI shared backend, or shared terminal.
 
 **Stay in the terminal. Stay in control. No hooks. No agent-side plugins. No YOLO.**
 
@@ -75,6 +75,8 @@ Open a Web conversation and enter `/akk list`. The connector gives every convers
 ## What AKK Gives You
 
 AKK 0.14 adds Codex Desktop discovery, task sending, Status, and exact task Watches. List includes Desktop catalog candidates even when the app has unloaded their live owner; only a freshly verified live conversation can receive a task. Desktop approval and question answering remain manual in this first version. See [Desktop compatibility and usage](docs/codex-desktop-compatibility.md).
+
+Codex CLI sessions connected to a shared backend can also be controlled directly, without tmux or Herdr. Native CLI rows support task sending, exact Watch and callbacks, command/file approvals, blocking and asynchronous answers, and per-thread permission settings. See the [CLI shared-backend guide](docs/codex-cli-native-compatibility.md).
 
 The existing terminal workflows remain available for Codex or Claude Code running in tmux or Herdr:
 
@@ -153,6 +155,7 @@ AKK is local-first: there is no hosted control plane or telemetry. It stores onl
 | --- | --- |
 | Terminal hosts | tmux; local Herdr `0.8.0` protocol `19` |
 | Codex Desktop | macOS `26.1002.52244`, build `13536`; local existing conversations via private IPC; send, status, and exact Watch only |
+| Codex CLI shared backend | Verified CLI `0.160.0` + app-server `0.162.0`; loaded main CLI threads, with live protocol checks |
 | Coding agents | Codex and Claude Code; unknown complete versions are allowed with a compatibility warning and fail naturally if behavior changed |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
 | Pi connector | Pi `0.84.4` |

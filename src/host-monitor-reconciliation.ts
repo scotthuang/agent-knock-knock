@@ -16,6 +16,7 @@ export const HOST_MONITOR_RECONCILIATION_INTERVAL_MS =
 const MANAGED_MONITOR_PHASE = "managed_turn_monitors";
 const TERMINAL_WATCH_PHASE = "terminal_watches";
 const DESKTOP_WATCH_PHASE = "desktop_watches";
+const CODEX_NATIVE_WATCH_PHASE = "codex_native_watches";
 
 const scheduleUnref: HostLifecycleSchedule = (callback, delayMs) => {
   const timer = setTimeout(callback, delayMs);
@@ -42,9 +43,9 @@ export function createHostMonitorReconciliationService(
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
     return args;
   };
-  const desktopWatchReconciliationArgs = (): string[] => {
+  const nativeWatchReconciliationArgs = (command: string): string[] => {
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-    const args = ["reconcile-desktop-watches"];
+    const args = [command];
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
     pushOptional(args, "--openclaw-bin", config.openclawBin);
     pushOptional(args, "--codex-home", config.codexHome);
@@ -70,7 +71,7 @@ export function createHostMonitorReconciliationService(
   const reportWatches = (
     result: Record<string, unknown>,
     reason: string,
-    kind: "Terminal Watch" | "Desktop Watch" = "Terminal Watch"
+    kind: "Terminal Watch" | "Desktop Watch" | "Codex CLI Watch" = "Terminal Watch"
   ): void => {
     if (
       reason === "startup_reconciliation" ||
@@ -112,10 +113,11 @@ export function createHostMonitorReconciliationService(
       );
       return;
     }
+    const label = phase === CODEX_NATIVE_WATCH_PHASE ? "Codex CLI Watch" : "Desktop Watch";
     api.logger.warn?.(
       reason === "startup"
-        ? `agent-knock-knock Desktop Watch reconciliation skipped after startup error: ${message}`
-        : `agent-knock-knock Desktop Watch supervision deferred after error: ${message}`
+        ? `agent-knock-knock ${label} reconciliation skipped after startup error: ${message}`
+        : `agent-knock-knock ${label} supervision deferred after error: ${message}`
     );
   };
 
@@ -147,8 +149,15 @@ export function createHostMonitorReconciliationService(
         name: DESKTOP_WATCH_PHASE,
         async run({ reason }) {
           const reconciliationReason = watchReason(reason);
-          const result = await runCliAsync(api, desktopWatchReconciliationArgs());
+          const result = await runCliAsync(api, nativeWatchReconciliationArgs("reconcile-desktop-watches"));
           reportWatches(result, reconciliationReason, "Desktop Watch");
+        }
+      },
+      {
+        name: CODEX_NATIVE_WATCH_PHASE,
+        async run({ reason }) {
+          const result = await runCliAsync(api, nativeWatchReconciliationArgs("reconcile-codex-native-watches"));
+          reportWatches(result, watchReason(reason), "Codex CLI Watch");
         }
       }
     ]

@@ -48,6 +48,11 @@ export type CallbackEnvelopeSourceV1 =
       kind: "desktop_watch";
       watch_id: string;
       desktop_id: string;
+    }
+  | {
+      kind: "codex_native_watch";
+      watch_id: string;
+      native_id: string;
     };
 
 export interface CallbackEnvelopeEventV1 {
@@ -421,6 +426,13 @@ function parseEnvelopeSource(value: unknown): CallbackEnvelopeSourceV1 {
       kind: "desktop_watch",
       watch_id: requiredRouteString(value.watch_id, "source.watch_id"),
       desktop_id: requiredRouteString(value.desktop_id, "source.desktop_id")
+    };
+  }
+  if (value.kind === "codex_native_watch") {
+    return {
+      kind: "codex_native_watch",
+      watch_id: requiredRouteString(value.watch_id, "source.watch_id"),
+      native_id: requiredRouteString(value.native_id, "source.native_id")
     };
   }
   throw new Error(

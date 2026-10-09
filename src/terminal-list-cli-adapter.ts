@@ -235,7 +235,7 @@ export interface TerminalListReconciliationPorts {
 }
 
 export interface TerminalListDiscoveryPorts {
-  desktopList?(options: TerminalListCliOptions): Promise<Record<string, unknown>>;
+  localCodexList?(options: TerminalListCliOptions): Promise<Record<string, unknown>>;
   createRuntimeTerminalAgentRegistry(
     options: TerminalListCliOptions
   ): TerminalAgentAdapterRegistry;
@@ -606,7 +606,7 @@ async function runList(options: TerminalListCliOptions) {
   });
 
   printJson({
-    ...await terminalListRuntime().desktopList?.(options),
+    ...await terminalListRuntime().localCodexList?.(options),
     store_dir: storeDir,
     store,
     reconciliation,

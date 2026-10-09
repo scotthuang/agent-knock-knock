@@ -1,0 +1,210 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test, { type TestContext } from "node:test";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
+import { createAkkSemanticToolCatalog } from "../src/semantic-tool-runtime.js";
+import { bindSemanticToolRelayPath } from "../src/semantic-tool-relay.js";
+import { buildAkkCommandCliArgs, parseAkkCommand, formatAkkListCommandResult,
+  formatAkkWatchCommandResult, formatAkkUnwatchCommandResult } from "../src/semantic-tool-command-helpers.js";
+import { formatStatusCommandResult, formatSendCommandResult, formatApproveCommandResult } from "../src/semantic-tool-presentation.js";
+import { approveParameters, respondInteractionParameters } from "../src/semantic-tool-schemas.js";
+
+const identity = { codexHome: "/test/codex-home", threadId: "01a11faa-fe88-7491-80ee-41842ac032e3" };
+const conversationId = createCodexNativeConversationId(identity);
+const watchId = "codex-cli-watch:11111111-2222-4333-8444-555555555555";
+const controller = { sessionKey: "agent:test:direct-cli", sessionId: "controller-one" };
+const terminalId = "terminal:v2:tmux:codex:test:0.0:1234";
+const response = { interaction_id: "native-question-one", answers: [
+  { question_id: "question-one", response_kind: "single_select", selected_option_ids: ["option-green"] }
+] };
+type Result = { details: Record<string, any>; isError?: boolean };
+
+function harness(t: TestContext) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-native-semantic-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const relay = path.join(dir, "relay.cjs"), calls = path.join(dir, "calls.jsonl"), reply = path.join(dir, "reply.json");
+  fs.writeFileSync(reply, JSON.stringify({ source: "codex_cli", conversation_id: conversationId, watch_id: watchId,
+    native_thread_id: identity.threadId, native_turn_id: "turn-one", status: "watching", delivered: true,
+    agent_acceptance: "proven", send_state: "accepted", delivery_receipt: "native_task_verified", callback_expected: true }));
+  fs.writeFileSync(relay, `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(process.argv.slice(2))+'\\n');process.stdout.write(fs.readFileSync(${JSON.stringify(reply)},'utf8'));`);
+  const owner = { pluginConfig: { storeDir: path.join(dir, "store"), codexHome: identity.codexHome,
+    openclawBin: "/test/openclaw", agentHardTimeoutMinutes: 60 }, logger: { info() {}, warn() {} } };
+  bindSemanticToolRelayPath(owner, relay);
+  const catalog = createAkkSemanticToolCatalog(owner, new Map());
+  return {
+    async execute(name: string, args: Record<string, unknown>, callId = "call-one", context: Record<string, unknown> = controller): Promise<Result> {
+      const tool = catalog.tools.find(value => value.name === `agent_knock_knock_${name}`);
+      assert.ok(tool);
+      return await tool.execute(context, callId, args) as Result;
+    },
+    calls: (): string[][] => fs.existsSync(calls) ? fs.readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [],
+    reply: (value: unknown) => fs.writeFileSync(reply, JSON.stringify(value))
+  };
+}
+const argument = (args: string[], flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
+
+test("direct CLI Host send/watch/status retain backend identity and stable message routing without terminal discovery", async t => {
+  const h = harness(t);
+  const result = await h.execute("send", { conversation_id: conversationId, request: "One task" });
+  assert.equal(result.details.conversation_id, conversationId);
+  assert.equal(result.details.watch_id, watchId);
+  assert.equal("turn_id" in result.details, false);
+  await h.execute("send", { conversation_id: conversationId, request: "One task" });
+  await h.execute("watch", { conversation_id: conversationId });
+  await h.execute("status", { conversation_id: conversationId });
+  await h.execute("status", { watch_id: watchId });
+  await h.execute("unwatch", { watch_id: watchId });
+  const calls = h.calls();
+  assert.deepEqual(calls.map(args => args[0]), ["send", "send", "watch-terminal", "status", "watch-status", "unwatch-terminal"]);
+  assert.equal(argument(calls[0], "--message-id"), argument(calls[1], "--message-id"));
+  assert.equal(argument(calls[0], "--message"), "One task");
+  assert.equal(argument(calls[0], "--openclaw-bin"), "/test/openclaw");
+  for (const args of calls) {
+    assert.equal(argument(args, "--openclaw-session"), controller.sessionKey);
+    assert.equal(argument(args, "--codex-home"), identity.codexHome);
+    assert.equal(args.includes("--terminal"), false);
+    assert.equal(args.some(value => /token|fingerprint/u.test(value)), false);
+  }
+});
+
+test("direct CLI approval and typed answers use exact native interaction targets and no terminal offers", async t => {
+  const h = harness(t);
+  await h.execute("approve", { conversation_id: conversationId, interaction_id: "approval-one", decision: "reject" });
+  await h.execute("approve", { watch_id: watchId, interaction_id: "approval-two" });
+  await h.execute("respond_interaction", { conversation_id: conversationId, ...response });
+  const multiple = [response.answers[0], { question_id: "question-two", response_kind: "free_text", text: "Second answer" }];
+  await h.execute("respond_interaction", { watch_id: watchId, ...response, answers: multiple, delivery_mode: "steer_current_turn" });
+  const calls = h.calls();
+  assert.deepEqual(calls.map(args => args[0]), ["approve", "approve", "respond-interaction", "respond-interaction"]);
+  assert.equal(argument(calls[0], "--decision"), "reject");
+  assert.equal(argument(calls[1], "--decision"), "approve_once");
+  assert.equal(argument(calls[1], "--watch"), watchId);
+  assert.deepEqual(JSON.parse(argument(calls[2], "--response-json")!), response);
+  assert.equal(JSON.parse(argument(calls[3], "--response-json")!).delivery_mode, "steer_current_turn");
+  assert.deepEqual(JSON.parse(argument(calls[3], "--response-json")!).answers, multiple);
+  for (const args of calls) assert.equal(argument(args, "--codex-home"), identity.codexHome);
+});
+
+test("send-derived digest Watch IDs work across native Host status, responses and unwatch", async t => {
+  const h = harness(t);
+  const digestWatchId = `codex-cli-watch:${"a".repeat(64)}`;
+  h.reply({ source: "codex_cli", conversation_id: conversationId, watch_id: digestWatchId, state: "sent" });
+  const approval = { watch_id: digestWatchId, interaction_id: "approval-one", decision: "approve_once" };
+  const answer = { watch_id: digestWatchId, ...response };
+  assert.equal(new AjvJsonSchemaValidator().getValidator(approveParameters)(approval).valid, true);
+  assert.equal(new AjvJsonSchemaValidator().getValidator(respondInteractionParameters)(answer).valid, true);
+  await h.execute("status", { watch_id: digestWatchId });
+  await h.execute("approve", approval);
+  await h.execute("respond_interaction", answer);
+  await h.execute("unwatch", { watch_id: digestWatchId });
+  assert.deepEqual(h.calls().map(args => args[0]), ["watch-status", "approve", "respond-interaction", "unwatch-terminal"]);
+  for (const args of h.calls()) assert.equal(argument(args, "--watch"), digestWatchId);
+  for (const command of ["status", "unwatch"]) {
+    const args = buildAkkCommandCliArgs(parseAkkCommand(`${command} ${digestWatchId}`), {}, controller)!;
+    assert.equal(argument(args, "--watch"), digestWatchId);
+  }
+});
+
+test("direct CLI permissions use backend presets without demanding terminal UI offers", async t => {
+  const h = harness(t);
+  h.reply({ source: "codex_cli", conversation_id: conversationId, agent: "codex", scope: "current_session",
+    current: "default", choices: [{ id: "full-access", label: "Full Access", description: "Unrestricted" }] });
+  await h.execute("native_inspect", { conversation_id: conversationId, inspection: "status" });
+  await h.execute("permission_options", { conversation_id: conversationId });
+  h.reply({ source: "codex_cli", conversation_id: conversationId, scope: "current_session", defaults_changed: false,
+    do_not_retry: false, outcome: "changed", requested: { mode: "full-access" }, effective: { mode: "full-access" } });
+  const result = await h.execute("set_permissions", { conversation_id: conversationId, mode: "full-access" });
+  assert.equal(result.isError, undefined);
+  const calls = h.calls();
+  assert.deepEqual(calls.map(args => args[0]), ["native-inspect", "native-inspect", "set-permissions"]);
+  assert.equal(argument(calls[0], "--action"), "status");
+  assert.equal(argument(calls[1], "--action"), "permissions");
+  assert.equal(argument(calls[2], "--mode"), "full-access");
+});
+
+test("native response tools distinguish unconfirmed dispatch from failed or uncertain responses", async t => {
+  const h = harness(t);
+  for (const name of ["approve", "respond_interaction"]) {
+    const params = name === "approve"
+      ? { conversation_id: conversationId, interaction_id: "approval-one", decision: "approve_once" }
+      : { conversation_id: conversationId, ...response };
+    for (const state of ["reserved", "not_sent", "uncertain", "sent", "confirmed"]) {
+      h.reply({ source: "codex_cli", conversation_id: conversationId, interaction_id: params.interaction_id,
+        response_id: "response-one", state, ...(state === "confirmed" ? { evidence: "native_task_continued" } : {}), resend_allowed: false });
+      const result = await h.execute(name, params);
+      assert.equal(result.isError, ["reserved", "not_sent", "uncertain"].includes(state) ? true : undefined);
+      assert.equal(result.details.state, state);
+      assert.equal(result.details.evidence, state === "confirmed" ? "native_task_continued" : undefined);
+      assert.equal("turn_id" in result.details, false);
+    }
+  }
+});
+
+test("native semantic validation rejects mixed identities and malformed responses before relay", async t => {
+  const h = harness(t);
+  for (const extra of [{ terminal_id: terminalId }, { turn_id: "turn-one" }, { watch_id: watchId }, { session_id: "session-one" }]) {
+    await assert.rejects(h.execute("send", { conversation_id: conversationId, request: "No send", ...extra }));
+  }
+  for (const args of [
+    { conversation_id: conversationId, ...response, delivery_mode: "queue_next_turn" },
+    { conversation_id: conversationId, ...response, answers: [{ ...response.answers[0], text: "mixed" }] },
+    { conversation_id: conversationId, ...response, answers: [response.answers[0], response.answers[0]] },
+    { conversation_id: conversationId, ...response, answers: [{ question_id: "q", response_kind: "free_text", text: "bad\u0000control" }] },
+    { watch_id: watchId, turn_id: "turn-one", ...response }
+  ]) await assert.rejects(h.execute("respond_interaction", args));
+  await assert.rejects(h.execute("approve", { conversation_id: conversationId }), /interaction_id/u);
+  await assert.rejects(h.execute("set_permissions", { conversation_id: conversationId, mode: "arbitrary-profile" }));
+  await assert.rejects(h.execute("unwatch", { watch_id: "codex-cli-watch:../../escape" }));
+  await assert.rejects(h.execute("watch", { conversation_id: conversationId }, "call", {}), /controller session/iu);
+  assert.deepEqual(h.calls(), []);
+});
+
+test("native JSON answers preserve multiline text while terminal schemas retain single-line restrictions", async t => {
+  const h = harness(t);
+  const text = "First line\nSecond\tcolumn\r\nThird line";
+  const answer = { interaction_id: "question-native", answers: [{ question_id: "q-one", response_kind: "free_text", text }] };
+  const validate = new AjvJsonSchemaValidator().getValidator(respondInteractionParameters);
+  for (const target of [{ conversation_id: conversationId }, { watch_id: watchId }]) {
+    assert.equal(validate({ ...target, ...answer }).valid, true);
+    await h.execute("respond_interaction", { ...target, ...answer });
+  }
+  for (const target of [{ turn_id: "managed-turn-one" }, { watch_id: "terminal-watch-one" }]) {
+    assert.equal(validate({ ...target, ...answer }).valid, false);
+    assert.equal(validate({ ...target, ...answer, answers: [{ ...answer.answers[0], text: "One line" }] }).valid, true);
+  }
+  for (const args of h.calls()) assert.equal(JSON.parse(argument(args, "--response-json")!).answers[0].text, text);
+  assert.equal(validate({ conversation_id: conversationId, ...answer,
+    answers: [{ ...answer.answers[0], text: "bad\u001bcontrol" }] }).valid, false);
+});
+
+test("native slash Watch and Status keep exact backend IDs and controller route", () => {
+  const config = { codexHome: identity.codexHome };
+  for (const command of [`watch ${conversationId}`, `status ${conversationId}`, `status ${watchId}`, `unwatch ${watchId}`]) {
+    const args = buildAkkCommandCliArgs(parseAkkCommand(command), config, controller)!;
+    assert.equal(argument(args, "--openclaw-session"), controller.sessionKey);
+    assert.equal(argument(args, "--codex-home"), identity.codexHome);
+    assert.equal(args.includes("--terminal"), false);
+  }
+  assert.equal(parseAkkCommand(`permissions ${conversationId}`).action, "permission-options");
+  assert.equal(parseAkkCommand(`set-permissions ${conversationId} full-access`).action, "set-permissions");
+  assert.match(formatAkkListCommandResult({ codex_cli_sessions: [{ conversation_id: conversationId, title: "CLI work" }] }), /CLI work/u);
+});
+
+test("native slash presentation reports backend task evidence without invented terminal or managed identities", () => {
+  const result = { source: "codex_cli", conversation_id: conversationId, watch_id: watchId,
+    native_thread_id: identity.threadId, native_turn_id: "native-turn-one", status: "completed",
+    final_text: "Verified result", send_state: "accepted", agent_acceptance: "proven", callback_expected: false,
+    callback_notifications: [{ status: "accepted" }] };
+  for (const format of [formatStatusCommandResult, formatSendCommandResult, formatAkkWatchCommandResult, formatAkkUnwatchCommandResult]) {
+    const text = format(result);
+    assert.match(text, /native task: native-turn-one/u);
+    assert.match(text, /completion: Verified result/u);
+    assert.doesNotMatch(text, /(?:^|\n)(?:terminal|session|turn):/u);
+  }
+  const responseText = formatApproveCommandResult({ ...result, state: "sent" });
+  assert.match(responseText, /dispatched; native effect is not yet confirmed/u);
+  assert.doesNotMatch(responseText, /AKK approved|session:|terminal:/u);
+});

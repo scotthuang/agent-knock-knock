@@ -192,6 +192,8 @@ test("trusted CLI authority is injected only for Turn and Watch creation or reco
     ["watch-terminal", untrusted],
     ["reconcile-watches", untrusted],
     ["reconcile-desktop-watches", untrusted],
+    ["reconcile-codex-native-watches", untrusted],
+    ["monitor-codex-native", { ...untrusted, watch: "codex-cli-watch:fixture" }],
     ["monitor-desktop", { ...untrusted, watch: "desktop-watch:fixture" }]
   ] as const) {
     const applied = applyTrustedHostProfileCliOptions(
