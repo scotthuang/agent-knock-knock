@@ -1,6 +1,7 @@
 import { semanticCommandGuidance, semanticToolDescriptions } from
   "./semantic-tool-descriptions.js";
 import { createHash, randomUUID } from "node:crypto";
+import { desktopSendToolArgs, desktopWatchTarget, validatedDesktopWatchId } from "./desktop-semantic.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -176,13 +177,14 @@ export function createAkkSemanticToolCatalog(
     normalizeTurnIdentity: false,
     buildArgs: (params, toolContext) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const desktopId = desktopWatchTarget(params);
       const openclawSession =
-        stringValue(toolContext?.sessionKey) ??
-        "agent:main:main";
+        desktopId ? requiredControllerSessionKey(toolContext?.sessionKey)
+          : stringValue(toolContext?.sessionKey) ?? "agent:main:main";
       const args = [
         "watch-terminal",
-        "--terminal",
-        requiredString(params.terminal_id, "terminal_id")
+        desktopId ? "--conversation" : "--terminal",
+        desktopId ?? requiredString(params.terminal_id, "terminal_id")
       ];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       pushOptional(
@@ -203,13 +205,14 @@ export function createAkkSemanticToolCatalog(
       semanticToolDescriptions.unwatch,
     parameters: unwatchParameters,
     normalizeTurnIdentity: false,
-    buildArgs: (params) => {
+    buildArgs: (params, toolContext) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const args = [
         "unwatch-terminal",
         "--watch",
         requiredString(params.watch_id, "watch_id")
       ];
+      if (validatedDesktopWatchId(params.watch_id)) pushOptional(args, "--openclaw-session", requiredString(toolContext?.sessionKey, "controller session"));
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       return args;
     }
@@ -626,6 +629,11 @@ function registerSemanticListTool(api): void {
       );
       pushOptional(args, "--agent", stringValue(params.agent));
       pushOptional(args, "--status", stringValue(params.status));
+      pushOptional(args, "--desktop-search", stringValue(params.desktopSearch));
+      pushOptional(args, "--desktop-project", stringValue(params.desktopProject));
+      pushOptional(args, "--desktop-cursor", stringValue(params.desktopCursor));
+      pushOptional(args, "--desktop-limit", numberString(params.desktopLimit));
+      pushOptional(args, "--codex-home", stringValue(config.codexHome));
       if (params.all === true) args.push("--all");
       if (params.noApprovalScan === true) args.push("--no-approval-scan");
       if (params.terminalDebug === true) args.push("--terminal-debug");
@@ -1272,6 +1280,7 @@ function buildStatusCliArgs(api, params, toolContext) {
       );
     }
     const watchId = requiredString(params.watch_id, "watch_id");
+    validatedDesktopWatchId(watchId);
     const watchArgs = [
       "watch-status",
       "--watch",
@@ -1331,6 +1340,8 @@ async function runSendRequest(
   toolContext,
   messageId?: string
 ): Promise<Record<string, any>> {
+  const desktopArgs = desktopSendToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}, messageId);
+  if (desktopArgs) return runHostAwareCli(api, desktopArgs);
   if (Object.hasOwn(params, "turn_id")) {
     const unexpected = Object.keys(params).filter((key) => key !== "turn_id");
     if (unexpected.length > 0) {

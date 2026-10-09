@@ -1,4 +1,5 @@
 import { executorDefinitionForKind } from "./executors.js";
+import { isDesktopConversationId, parseDesktopConversationId } from "./desktop-identity.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -694,6 +695,7 @@ export function isSubmissionError(result: unknown): boolean {
   if (!isRecord(result)) {
     return false;
   }
+  if (desktopResult(result)) return !desktopSubmissionAccepted(result);
   if (isSuccessfulTerminalDispatch(result)) {
     return false;
   }
@@ -713,6 +715,23 @@ export function isSubmissionError(result: unknown): boolean {
     result.status === "delivered_unfenced";
 }
 
+function desktopResult(result: Record<string, unknown>): boolean {
+  return result.source === "codex_desktop" || isDesktopConversationId(result.conversation_id);
+}
+
+function desktopSubmissionAccepted(result: Record<string, unknown>): boolean {
+  try {
+    if (!isDesktopConversationId(result.conversation_id)) return false;
+    const target = parseDesktopConversationId(result.conversation_id);
+    return result.source === "codex_desktop" && result.agent_acceptance === "proven" && result.delivered === true
+      && result.send_state === "accepted" && result.delivery_receipt === "native_task_verified"
+      && result.native_thread_id === target.threadId
+      && typeof result.native_turn_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{1,160}$/u.test(result.native_turn_id)
+      && typeof result.watch_id === "string" && /^desktop-watch:[A-Za-z0-9_-]{8,128}$/u.test(result.watch_id)
+      && (result.status === "watching" || result.status === "completed");
+  } catch { return false; }
+}
+
 function terminalSubmissionReported(result: Record<string, unknown>): boolean {
   return result.submission_outcome !== undefined ||
     result.delivery_receipt !== undefined ||
@@ -723,6 +742,7 @@ export function withTurnIdentity(result) {
   if (!isRecord(result)) {
     return result;
   }
+  if (desktopResult(result)) return result;
   const sources = [
     { label: "result", value: result },
     { label: "result.conversation", value: result.conversation },
@@ -754,17 +774,7 @@ export function withTurnIdentity(result) {
   if (!hasModernIdentity && !compatibilityId) {
     return result;
   }
-  if (
-    !hasModernIdentity &&
-    (
-      compatibilityId?.startsWith("terminal:") ||
-      stringValue(result.source) === "terminal" ||
-      (
-        isRecord(result.summary) &&
-        stringValue(result.summary.source) === "terminal"
-      )
-    )
-  ) {
+  if (!hasModernIdentity && hasUnmanagedTerminalIdentity(result, compatibilityId)) {
     return result;
   }
   const sessionId = explicitSessionId ?? compatibilityId;
@@ -774,6 +784,11 @@ export function withTurnIdentity(result) {
     session_id: sessionId,
     turn_id: turnId
   };
+}
+
+function hasUnmanagedTerminalIdentity(result: Record<string, unknown>, compatibilityId: string | undefined): boolean {
+  return compatibilityId?.startsWith("terminal:") === true || stringValue(result.source) === "terminal"
+    || (isRecord(result.summary) && stringValue(result.summary.source) === "terminal");
 }
 
 function consistentResultIdentity(field, sources) {

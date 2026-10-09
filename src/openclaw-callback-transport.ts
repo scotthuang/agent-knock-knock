@@ -295,7 +295,7 @@ function deliverGenericOpenClawCallback(input: {
   if (!callbackEnvelopeMatchesRoute(request.envelope, route)) {
     return permanentFailure("callback_envelope_route_mismatch");
   }
-  if (request.envelope.source.kind === "terminal_watch") {
+  if (request.envelope.source.kind === "terminal_watch" || request.envelope.source.kind === "desktop_watch") {
     return deliverGenericTerminalWatchCallback({
       request,
       route,

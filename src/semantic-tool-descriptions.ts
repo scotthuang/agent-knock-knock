@@ -1,17 +1,22 @@
 // Model-facing wording is data; execution and authority stay in the tool runtime.
 export const semanticToolDescriptions = {
-  akk: "Send coding work through existing Codex or Claude Code shared terminals, " +
+  akk: "Discover Codex Desktop conversations, send tasks and watch their completion; " +
+    "Desktop approvals and questions require manual handling. Send coding work " +
+    "through existing Codex or Claude Code shared terminals, " +
     "inspect managed Turns, observe a user-selected terminal with durable " +
     "read-only Terminal Watch, manage native threads, and safely inspect or " +
     "change an idle pane's native model selection or Codex permissions.",
-  watch: "Start one durable read-only Terminal Watch for the user's exact selected " +
+  watch: "For Desktop, use the exact conversation_id from List to watch one currently " +
+    "active native task. An unresolved identity or idle thread is refused; Desktop " +
+    "questions and approvals are notification-only and require manual handling. " +
+    "For terminals, start one durable read-only Terminal Watch for the user's exact selected " +
     "Codex or Claude Code terminal. AKK prefers an exact durable task anchor; if " +
     "version, artifact, task, managed-ownership, or action-advertisement evidence " +
     "is unavailable, it remains callable and returns warnings while using " +
     "best-effort terminal activity. That fallback reports stable-idle activity, " +
     "not proof of exact task completion. Watch creates no AKK Session or Turn, " +
     "sends no terminal input, and never adopts or blocks the terminal task.",
-  unwatch: "Stop one exact durable Terminal Watch by its authoritative watch_id. This " +
+  unwatch: "Stop one exact durable terminal or Desktop Watch by its authoritative watch_id. This " +
     "cancels observation only; it sends no terminal input and does not interrupt, " +
     "adopt, or otherwise mutate the human's coding-agent task.",
   list_resumable_threads: "List structurally verified native Codex or Claude Code threads for one exact " +
@@ -44,17 +49,22 @@ export const semanticToolDescriptions = {
     "native_thread_id from a resumable=true row; AKK refreshes binding and " +
     "candidate evidence privately. This creates or reactivates an AKK Session but " +
     "no Turn.",
-  status: "Inspect one exact AKK-managed Turn by its authoritative turn_id, one durable " +
-    "Terminal Watch by its authoritative watch_id, or use only a raw terminal " +
-    "row's own prefilled compatibility selector. These targets are mutually " +
-    "exclusive. The deprecated conversation_id remains a legacy Turn alias and " +
-    "the list-prefilled raw-terminal input; never construct it. User-selected " +
+  status: "Inspect one exact managed Turn by turn_id, a terminal or Desktop Watch " +
+    "by watch_id, or a conversation_id returned by List. Desktop status reads " +
+    "the original thread when reachable; metadata alone cannot prove live task " +
+    "state. Desktop questions and approvals require manual handling. Targets " +
+    "are mutually exclusive. Legacy Turn aliases and list-prefilled raw-terminal " +
+    "selectors remain supported; never construct a conversation_id. User-selected " +
     "Watch status reports whether it uses an exact task anchor or best-effort " +
     "terminal activity without implying Watch sent or adopted the task; that task " +
     "may independently be managed. Automatic terminal_user_explicit fallback " +
     "Watch status describes the exact request AKK physically sent without " +
     "claiming a managed Turn. AKK never starts a coding agent.",
-  send: "Start a new AKK Turn, use one advertised terminal_user_explicit " +
+  send: "For Desktop, pass request and the exact conversation_id from List. AKK " +
+    "requires a reachable idle original owner, inherits thread settings, sends " +
+    "once and monitors the exact accepted task. It never automatically opens a " +
+    "thread, approves, answers questions or retries an uncertain Desktop send. " +
+    "For terminals, start a new AKK Turn, use one advertised terminal_user_explicit " +
     "user-priority send, or explicitly recover one current uncertain submission " +
     "only through its advertised retry_submission action. Ordinary send requires " +
     "request and may use session_id or terminal_id exactly as advertised. " +
@@ -132,12 +142,12 @@ export const semanticToolDescriptions = {
     "Session, ledger, and callback cleanup is best-effort and cannot veto closing " +
     "the Turn; warnings identify metadata AKK preserved. Refresh list afterward " +
     "and use Watch if the coding agent is still working.",
-  list: "List live AKK terminal resources and Terminal Watches. The model-facing " +
-    "result is a compact projection: available_actions contains current semantic " +
-    "action names and action_inputs contains only their dynamic semantic inputs. " +
-    "Follow the installed agent-knock-knock skill for action meaning, target " +
-    "rules, safety boundaries, and recovery behavior; AKK privately revalidates " +
-    "every mutation.",
+  list: "List terminals, Desktop conversation candidates and Watches. Desktop " +
+    "metadata is distinct from verified live capabilities. Use desktopSearch, " +
+    "desktopProject and desktopCursor to find more candidates. The compact " +
+    "projection has available_actions and action_inputs for exact targets. " +
+    "Follow the agent-knock-knock skill for action meaning and safety; AKK " +
+    "privately revalidates every mutation.",
   model_options: "Inspect the exact current native model catalog for one explicitly selected " +
     "physical Codex or Claude Code pane. This is the required read-only first " +
     "step before set_model. Profiled Codex 0.154.0/0.155.1 accepts one exact " +

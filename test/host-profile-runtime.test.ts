@@ -167,7 +167,7 @@ test("a child reloads the selected file and rejects an edited fingerprint", (t) 
   );
 });
 
-test("trusted CLI authority is injected only for operations that create a Turn or Watch", (t) => {
+test("trusted CLI authority is injected only for Turn and Watch creation or recovery", (t) => {
   const fixture = createProfileFixture(t);
   const runtime = startupRuntime(fixture);
   const relay = hostProfileRelayEnvironment(runtime, {
@@ -190,7 +190,9 @@ test("trusted CLI authority is injected only for operations that create a Turn o
     ["delegate", untrusted],
     ["send", untrusted],
     ["watch-terminal", untrusted],
-    ["reconcile-watches", untrusted]
+    ["reconcile-watches", untrusted],
+    ["reconcile-desktop-watches", untrusted],
+    ["monitor-desktop", { ...untrusted, watch: "desktop-watch:fixture" }]
   ] as const) {
     const applied = applyTrustedHostProfileCliOptions(
       command,
@@ -211,7 +213,10 @@ test("trusted CLI authority is injected only for operations that create a Turn o
 
   for (const [command, commandOptions] of [
     ["send", { ...untrusted, turn: "turn-existing" }],
-    ["respond", untrusted]
+    ["respond", untrusted],
+    ["status", untrusted],
+    ["watch-status", untrusted],
+    ["unwatch-terminal", untrusted]
   ] as const) {
     const applied = applyTrustedHostProfileCliOptions(
       command,

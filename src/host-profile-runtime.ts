@@ -195,9 +195,11 @@ export function applyTrustedHostProfileCliOptions(
   if (!runtime) return options as Record<string, unknown>;
   const createsManagedTurn = commandName === "delegate" ||
     (commandName === "send" && !nonBlankString(options.turn));
-  const ownsTerminalWatchRoute = commandName === "watch-terminal" ||
-    commandName === "reconcile-watches";
-  if (!createsManagedTurn && !ownsTerminalWatchRoute) {
+  const ownsWatchRoute = commandName === "watch-terminal" ||
+    commandName === "reconcile-watches" ||
+    commandName === "reconcile-desktop-watches" ||
+    commandName === "monitor-desktop";
+  if (!createsManagedTurn && !ownsWatchRoute) {
     return options as Record<string, unknown>;
   }
   return {

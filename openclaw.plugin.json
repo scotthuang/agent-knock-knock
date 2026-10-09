@@ -2,7 +2,7 @@
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
   "categories": ["developer-tools"],
-  "description": "Control local Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection, model switching, and Codex permission control, compatibility warnings for unverified versions, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
+  "description": "Discover Codex Desktop conversations, send tasks and watch exact completion with manual-only approvals and questions. Control Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection, model and permission control, compatibility warnings, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
   "activation": {
     "onStartup": true,
     "onCommands": ["akk"]
@@ -124,7 +124,7 @@
     "properties": {
       "storeDir": {
         "type": "string",
-        "description": "Stable AKK Store root. Defaults to ~/.agent-knock-knock/store and contains the compatibility manifest, authoritative managed Sessions and Turns, plus durable Terminal Watch records."
+        "description": "Stable AKK Store root. Defaults to ~/.agent-knock-knock/store and contains the compatibility manifest, authoritative managed Sessions and Turns, plus durable terminal and Desktop Watch records."
       },
       "openclawBin": {
         "type": "string",
@@ -132,7 +132,7 @@
       },
       "codexHome": {
         "type": "string",
-        "description": "Optional CODEX_HOME path used to correlate Codex session metadata with eligible terminal panes."
+        "description": "Optional CODEX_HOME path used for Codex terminal metadata and local Desktop conversation discovery and IPC."
       },
       "idleTimeoutMinutes": {
         "type": "number",

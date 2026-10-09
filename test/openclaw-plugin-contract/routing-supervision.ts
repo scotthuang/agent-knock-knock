@@ -129,7 +129,12 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       }
     ]);
     assert.deepEqual(sendTool?.parameters?.not, {
-      required: ["session_id", "terminal_id"]
+      anyOf: [
+        { required: ["session_id", "terminal_id"] },
+        { required: ["conversation_id", "terminal_id"] },
+        { required: ["conversation_id", "session_id"] },
+        { required: ["conversation_id", "turn_id"] }
+      ]
     });
     assert.equal(
       "timeoutSeconds" in (sendTool?.parameters?.properties ?? {}),
@@ -609,7 +614,7 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     while (
       (!fs.existsSync(callsPath) ||
         readSupervisorCalls(callsPath).filter((entry) => entry.phase === "start")
-          .length < 4) &&
+          .length < 6) &&
       Date.now() < deadline
     ) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -617,7 +622,7 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     await service?.stop?.();
     const stoppedCalls = readSupervisorCalls(callsPath);
     assert.equal(
-      stoppedCalls.filter((entry) => entry.phase === "start").length >= 4,
+      stoppedCalls.filter((entry) => entry.phase === "start").length >= 6,
       true
     );
     assert.equal(
@@ -627,16 +632,22 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     const starts = stoppedCalls.filter((entry) => entry.phase === "start");
     assert.equal(starts[0]?.args[0], "reconcile-monitors");
     assert.equal(starts[1]?.args[0], "reconcile-watches");
-    assert.equal(starts[2]?.args[0], "reconcile-monitors");
-    assert.equal(starts[3]?.args[0], "reconcile-watches");
+    assert.equal(starts[2]?.args[0], "reconcile-desktop-watches");
+    assert.equal(starts[3]?.args[0], "reconcile-monitors");
+    assert.equal(starts[4]?.args[0], "reconcile-watches");
+    assert.equal(starts[5]?.args[0], "reconcile-desktop-watches");
     assert.equal(optionAfter(starts[0]?.args ?? [], "--reason"), "startup_reconciliation");
-    assert.equal(optionAfter(starts[2]?.args ?? [], "--reason"), "monitor_supervision");
+    assert.equal(optionAfter(starts[3]?.args ?? [], "--reason"), "monitor_supervision");
     assert.equal(starts[1]?.args.includes("--reason"), false);
-    assert.equal(starts[3]?.args.includes("--reason"), false);
+    assert.equal(starts[2]?.args.includes("--reason"), false);
+    assert.equal(starts[4]?.args.includes("--reason"), false);
+    assert.equal(starts[5]?.args.includes("--reason"), false);
     assert.equal(starts[0]?.args.includes("--terminal-monitors-only"), false);
     assert.equal(starts[1]?.args.includes("--terminal-monitors-only"), false);
-    assert.equal(starts[2]?.args.includes("--terminal-monitors-only"), true);
-    assert.equal(starts[3]?.args.includes("--terminal-monitors-only"), false);
+    assert.equal(starts[2]?.args.includes("--terminal-monitors-only"), false);
+    assert.equal(starts[3]?.args.includes("--terminal-monitors-only"), true);
+    assert.equal(starts[4]?.args.includes("--terminal-monitors-only"), false);
+    assert.equal(starts[5]?.args.includes("--terminal-monitors-only"), false);
     const countAfterStop = stoppedCalls.length;
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
     assert.equal(readSupervisorCalls(callsPath).length, countAfterStop);
@@ -646,9 +657,9 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
   }
 });
 
-test("OpenClaw supervisor isolates managed monitor and Terminal Watch failures", async () => {
+test("OpenClaw supervisor isolates managed monitor, Terminal Watch, and Desktop Watch failures", async () => {
   const runFailureCase = async (
-    failingCommand: "reconcile-monitors" | "reconcile-watches"
+    failingCommand: "reconcile-monitors" | "reconcile-watches" | "reconcile-desktop-watches"
   ): Promise<void> => {
     const tempDir = fs.mkdtempSync(
       path.join(os.tmpdir(), `akk-plugin-supervisor-${failingCommand}-`)
@@ -700,7 +711,7 @@ test("OpenClaw supervisor isolates managed monitor and Terminal Watch failures",
       const deadline = Date.now() + 2_000;
       while (
         (!fs.existsSync(callsPath) ||
-          fs.readFileSync(callsPath, "utf8").trim().split("\n").length < 4) &&
+          fs.readFileSync(callsPath, "utf8").trim().split("\n").length < 6) &&
         Date.now() < deadline
       ) {
         await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -710,19 +721,24 @@ test("OpenClaw supervisor isolates managed monitor and Terminal Watch failures",
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as string[]);
-      assert.deepEqual(calls.slice(0, 4).map((args) => args[0]), [
+      assert.deepEqual(calls.slice(0, 6).map((args) => args[0]), [
         "reconcile-monitors",
         "reconcile-watches",
+        "reconcile-desktop-watches",
         "reconcile-monitors",
-        "reconcile-watches"
+        "reconcile-watches",
+        "reconcile-desktop-watches"
       ]);
       assert.equal(
         warnings.some((message) =>
           failingCommand === "reconcile-monitors"
             ? message.includes("monitor supervision deferred") ||
               message.includes("monitor reconciliation skipped")
-            : message.includes("Terminal Watch supervision deferred") ||
-              message.includes("Terminal Watch reconciliation skipped")
+            : failingCommand === "reconcile-watches"
+              ? message.includes("Terminal Watch supervision deferred") ||
+                message.includes("Terminal Watch reconciliation skipped")
+              : message.includes("Desktop Watch supervision deferred") ||
+                message.includes("Desktop Watch reconciliation skipped")
         ),
         true
       );
@@ -734,4 +750,5 @@ test("OpenClaw supervisor isolates managed monitor and Terminal Watch failures",
 
   await runFailureCase("reconcile-monitors");
   await runFailureCase("reconcile-watches");
+  await runFailureCase("reconcile-desktop-watches");
 });

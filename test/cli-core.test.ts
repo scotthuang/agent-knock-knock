@@ -95,7 +95,8 @@ test("CLI command execution uses scoped terminal and process dependencies", asyn
       terminalControlProviderRegistry:
         createTerminalControlProviderRegistry([terminalProvider]),
       terminalProcessSource,
-      runtimeLog: () => undefined
+      runtimeLog: () => undefined,
+      env: { HOME: root }
     });
     const output = JSON.parse(result.stdout);
 

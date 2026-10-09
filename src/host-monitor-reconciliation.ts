@@ -15,6 +15,7 @@ export const HOST_MONITOR_RECONCILIATION_INTERVAL_MS =
 
 const MANAGED_MONITOR_PHASE = "managed_turn_monitors";
 const TERMINAL_WATCH_PHASE = "terminal_watches";
+const DESKTOP_WATCH_PHASE = "desktop_watches";
 
 const scheduleUnref: HostLifecycleSchedule = (callback, delayMs) => {
   const timer = setTimeout(callback, delayMs);
@@ -41,6 +42,14 @@ export function createHostMonitorReconciliationService(
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
     return args;
   };
+  const desktopWatchReconciliationArgs = (): string[] => {
+    const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+    const args = ["reconcile-desktop-watches"];
+    pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+    pushOptional(args, "--openclaw-bin", config.openclawBin);
+    pushOptional(args, "--codex-home", config.codexHome);
+    return args;
+  };
   const report = (result: Record<string, unknown>, reason: string): void => {
     if (
       reason === "startup_reconciliation" ||
@@ -60,7 +69,8 @@ export function createHostMonitorReconciliationService(
   };
   const reportWatches = (
     result: Record<string, unknown>,
-    reason: string
+    reason: string,
+    kind: "Terminal Watch" | "Desktop Watch" = "Terminal Watch"
   ): void => {
     if (
       reason === "startup_reconciliation" ||
@@ -69,7 +79,7 @@ export function createHostMonitorReconciliationService(
       Number(result.errors ?? 0) > 0
     ) {
       api.logger.info?.(
-        `agent-knock-knock Terminal Watch ${reason}: ` +
+        `agent-knock-knock ${kind} ${reason}: ` +
         `checked=${result.checked ?? 0} changed=${result.changed ?? 0} ` +
         `callbacks_delivered=${result.callbacks_delivered ?? 0} ` +
         `errors=${result.errors ?? 0}`
@@ -94,10 +104,18 @@ export function createHostMonitorReconciliationService(
       );
       return;
     }
+    if (phase === TERMINAL_WATCH_PHASE) {
+      api.logger.warn?.(
+        reason === "startup"
+          ? `agent-knock-knock Terminal Watch reconciliation skipped after startup error: ${message}`
+          : `agent-knock-knock Terminal Watch supervision deferred after error: ${message}`
+      );
+      return;
+    }
     api.logger.warn?.(
       reason === "startup"
-        ? `agent-knock-knock Terminal Watch reconciliation skipped after startup error: ${message}`
-        : `agent-knock-knock Terminal Watch supervision deferred after error: ${message}`
+        ? `agent-knock-knock Desktop Watch reconciliation skipped after startup error: ${message}`
+        : `agent-knock-knock Desktop Watch supervision deferred after error: ${message}`
     );
   };
 
@@ -123,6 +141,14 @@ export function createHostMonitorReconciliationService(
           const reconciliationReason = watchReason(reason);
           const result = await runCliAsync(api, watchReconciliationArgs());
           reportWatches(result, reconciliationReason);
+        }
+      },
+      {
+        name: DESKTOP_WATCH_PHASE,
+        async run({ reason }) {
+          const reconciliationReason = watchReason(reason);
+          const result = await runCliAsync(api, desktopWatchReconciliationArgs());
+          reportWatches(result, reconciliationReason, "Desktop Watch");
         }
       }
     ]

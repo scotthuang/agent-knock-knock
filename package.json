@@ -1,7 +1,7 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.13.18",
-  "description": "Control local Codex and Claude Code from OpenClaw or compatible controller Hosts through shared terminals.",
+  "version": "0.14.0",
+  "description": "Control local Codex Desktop conversations and Codex or Claude Code terminals from OpenClaw or compatible controller Hosts.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/scotthuang/agent-knock-knock#readme",
@@ -93,7 +93,8 @@
     "docs/claude-2.1.285-compatibility.md",
     "docs/callback-compatibility.md",
     "docs/codex-permissions.md",
-    "docs/codex-0.160.0-compatibility.md"
+    "docs/codex-0.160.0-compatibility.md",
+    "docs/codex-desktop-compatibility.md"
   ],
   "publishConfig": {
     "access": "public"

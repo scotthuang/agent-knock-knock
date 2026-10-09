@@ -1,3 +1,4 @@
+import { dispatchDesktopCli, desktopListForCli } from "./desktop-cli-adapter.js";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -224,7 +225,6 @@ import {
 } from "./cli-runtime-context.js";
 
 export type { CliCommandExecutionResult };
-
 const cliFileLock = createFileLockCliAdapter({
   now: cliNow,
   nowMs: cliNowMs,
@@ -476,6 +476,7 @@ export async function executeCliCommand(
 }
 
 async function dispatchCliCommand(commandName, options) {
+  if (await dispatchDesktopCli(commandName, options)) return;
   if (commandName === "host-profile") {
     runHostProfileCommand(options);
     return;
@@ -494,9 +495,7 @@ async function dispatchCliCommand(commandName, options) {
       commandName === "respond") &&
     typeof (options.message ?? options.request) === "string"
   ) {
-    // This pure syntax fence must run before selector discovery. Native
-    // lifecycle commands never need terminal, process, or Store observation.
-    // runSend retains the same check at the execution boundary.
+    // Reject native slash input before terminal discovery; runSend repeats this fence.
     terminalSubmissionPayload(options.message ?? options.request);
   }
   if (!(commandName === "send" && options.turn)) {
@@ -1215,6 +1214,7 @@ const terminalListCliFacade = createTerminalListCliFacade({
       terminalMonitorSupervisionCliFacade.reconcileMonitors(options, request)
   },
   discovery: {
+    desktopList: desktopListForCli,
     agentVersionForRunningProcess,
     codexLatentClearResumeObservation,
     codexManagedIdentityResolutionContext,
