@@ -1,4 +1,4 @@
-import { dispatchDesktopCli, desktopListForCli } from "./desktop-cli-adapter.js";
+import { dispatchLocalCodexCli, localCodexListForCli } from "./local-codex-cli-adapter.js";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -476,7 +476,7 @@ export async function executeCliCommand(
 }
 
 async function dispatchCliCommand(commandName, options) {
-  if (await dispatchDesktopCli(commandName, options)) return;
+  if (await dispatchLocalCodexCli(commandName, options)) return;
   if (commandName === "host-profile") {
     runHostProfileCommand(options);
     return;
@@ -1214,7 +1214,7 @@ const terminalListCliFacade = createTerminalListCliFacade({
       terminalMonitorSupervisionCliFacade.reconcileMonitors(options, request)
   },
   discovery: {
-    desktopList: desktopListForCli,
+    localCodexList: localCodexListForCli,
     agentVersionForRunningProcess,
     codexLatentClearResumeObservation,
     codexManagedIdentityResolutionContext,

@@ -40,6 +40,22 @@ export function compactAkkListModelProjection(
       desktop_scan: compactAkkListScalars(recordValue(result.desktop_scan) ?? {}, [
         "total_candidates", "returned", "next_cursor", "catalog_complete", "live_count", "application_version", "application_build", "write_contract_verified", "watch_error", "membership_is_not_live_identity"])
     } : {}),
+    ...(Array.isArray(result.codex_cli_sessions) ? {
+      codex_cli_sessions: arrayValue(result.codex_cli_sessions).map(row => ({
+        ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
+          "native_thread_id", "native_turn_id", "activity_state", "connection_state", "backend_version",
+          "pending_interaction_count", "interaction_requests_scanned", "attention_required", "updated_at", "observation_error"]),
+        ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
+        capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, [
+          "status", "send", "watch", "interaction_notify", "interaction_respond", "approve", "set_permissions"]),
+        ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
+      })),
+      codex_cli_watches: arrayValue(result.codex_cli_watches).map(row => compactAkkListScalars(row, [
+        "watch_id", "conversation_id", "status", "observation_mode", "anchor_state", "native_thread_id",
+        "native_turn_id", "pending_interaction_count", "callback_expected", "observation_error"])),
+      codex_cli_scan: compactAkkListScalars(recordValue(result.codex_cli_scan) ?? {}, [
+        "status", "returned", "loaded_count", "complete", "error", "watch_error"])
+    } : {}),
     terminals: arrayValue(result.terminals).map(compactAkkListTerminal),
     terminal_watches: arrayValue(result.terminal_watches)
       .map(compactAkkListWatch),

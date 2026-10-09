@@ -186,7 +186,15 @@
     "test/codex-permission-surface.test.ts",
     "test/terminal-permission-control.test.ts",
     "test/terminal-permission-control-cli-adapter.test.ts",
-    "test/terminal-permission-control-bridge.test.ts"
+    "test/terminal-permission-control-bridge.test.ts",
+    "test/codex-native-cli-adapter.test.ts",
+    "test/codex-native-client.test.ts",
+    "test/codex-native-public-projection.test.ts",
+    "test/codex-native-response-service.test.ts",
+    "test/codex-native-runtime.test.ts",
+    "test/codex-native-semantic.test.ts",
+    "test/codex-native-snapshot.test.ts",
+    "test/codex-native-task-service.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",

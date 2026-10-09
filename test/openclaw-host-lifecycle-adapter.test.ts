@@ -82,33 +82,38 @@ test("OpenClaw adapts Host lifecycle phases without changing its contract", asyn
 
     assert.equal(service.id, "agent-knock-knock-monitor-reconciliation");
     service.start();
-    await waitForCalls(callsPath, 3);
+    await waitForCalls(callsPath, 4);
     api.pluginConfig = { storeDir: secondStoreDir, openclawBin: secondOpenClawBin, codexHome };
-    const calls = await waitForCalls(callsPath, 6);
+    const calls = await waitForCalls(callsPath, 8);
     await service.stop();
 
-    assert.deepEqual(calls.slice(0, 6).map((args) => args[0]), [
+    assert.deepEqual(calls.slice(0, 8).map((args) => args[0]), [
       "reconcile-monitors",
       "reconcile-watches",
       "reconcile-desktop-watches",
+      "reconcile-codex-native-watches",
       "reconcile-monitors",
       "reconcile-watches",
-      "reconcile-desktop-watches"
+      "reconcile-desktop-watches",
+      "reconcile-codex-native-watches"
     ]);
     assert.equal(optionAfter(calls[0], "--reason"), "startup_reconciliation");
-    assert.equal(optionAfter(calls[3], "--reason"), "monitor_supervision");
+    assert.equal(optionAfter(calls[4], "--reason"), "monitor_supervision");
     assert.equal(calls[0].includes("--terminal-monitors-only"), false);
-    assert.equal(calls[3].includes("--terminal-monitors-only"), true);
+    assert.equal(calls[4].includes("--terminal-monitors-only"), true);
     assert.equal(optionAfter(calls[0], "--store-dir"), firstStoreDir);
     assert.equal(optionAfter(calls[1], "--store-dir"), firstStoreDir);
     assert.equal(optionAfter(calls[2], "--store-dir"), firstStoreDir);
-    assert.equal(optionAfter(calls[3], "--store-dir"), secondStoreDir);
     assert.equal(optionAfter(calls[4], "--store-dir"), secondStoreDir);
     assert.equal(optionAfter(calls[5], "--store-dir"), secondStoreDir);
+    assert.equal(optionAfter(calls[6], "--store-dir"), secondStoreDir);
     assert.equal(optionAfter(calls[2], "--openclaw-bin"), firstOpenClawBin);
-    assert.equal(optionAfter(calls[5], "--openclaw-bin"), secondOpenClawBin);
+    assert.equal(optionAfter(calls[6], "--openclaw-bin"), secondOpenClawBin);
     assert.equal(optionAfter(calls[2], "--codex-home"), codexHome);
-    assert.equal(optionAfter(calls[5], "--codex-home"), codexHome);
+    assert.equal(optionAfter(calls[6], "--codex-home"), codexHome);
+    assert.equal(optionAfter(calls[3], "--openclaw-bin"), firstOpenClawBin);
+    assert.equal(optionAfter(calls[7], "--openclaw-bin"), secondOpenClawBin);
+    assert.equal(optionAfter(calls[7], "--codex-home"), codexHome);
     assert.equal(warnings.length, 0);
     assert.equal(
       info.some((message) => message.includes("monitor reconciliation")),
@@ -125,9 +130,9 @@ test("OpenClaw adapts Host lifecycle phases without changing its contract", asyn
       true
     );
 
-    const countAfterStop = (await waitForCalls(callsPath, 6)).length;
+    const countAfterStop = (await waitForCalls(callsPath, 8)).length;
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
-    assert.equal((await waitForCalls(callsPath, 6)).length, countAfterStop);
+    assert.equal((await waitForCalls(callsPath, 8)).length, countAfterStop);
   } finally {
     await service?.stop();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -152,16 +157,18 @@ test("Desktop recovery has an independent error boundary and reports failures", 
   const service = createMonitorReconciliationService(api, 50);
   t.after(() => service.stop());
   service.start();
-  await waitForCalls(callsPath, 6);
+  await waitForCalls(callsPath, 8);
   await service.stop();
-  const calls = await waitForCalls(callsPath, 6);
-  assert.deepEqual(calls.slice(0, 6).map(args => args[0]), [
-    "reconcile-monitors", "reconcile-watches", "reconcile-desktop-watches",
-    "reconcile-monitors", "reconcile-watches", "reconcile-desktop-watches"
+  const calls = await waitForCalls(callsPath, 8);
+  assert.deepEqual(calls.slice(0, 8).map(args => args[0]), [
+    "reconcile-monitors", "reconcile-watches", "reconcile-desktop-watches", "reconcile-codex-native-watches",
+    "reconcile-monitors", "reconcile-watches", "reconcile-desktop-watches", "reconcile-codex-native-watches"
   ]);
   assert.ok(warnings.some(message => message.includes("monitor reconciliation skipped after startup error")));
   assert.ok(warnings.some(message => message.includes("Desktop Watch reconciliation skipped after startup error")
     && message.includes("reconcile-desktop-watches fixture failure")));
   assert.ok(warnings.some(message => message.includes("Desktop Watch supervision deferred after error")));
+  assert.ok(warnings.some(message => message.includes("Codex CLI Watch reconciliation skipped after startup error")));
+  assert.ok(warnings.some(message => message.includes("Codex CLI Watch supervision deferred after error")));
   assert.ok(!warnings.some(message => message.includes("Terminal Watch")));
 });

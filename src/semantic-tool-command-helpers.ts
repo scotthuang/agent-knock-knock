@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isCodexNativeConversationId, isCodexNativeWatchId, parseCodexNativeConversationId } from "./codex-native-identity.js";
 import { recordValue } from "./value-guards.js";
 import {
   isTerminalApprovalDecision,
@@ -283,9 +284,9 @@ function parseAkkLifecycleCommand(
     return { action: "doctor" };
   }
   if (action === "watch") {
-    const usage = "Usage: /akk watch <exact-terminal-id>";
+    const usage = "Usage: /akk watch <exact-terminal-id|codex-cli-conversation-id>";
     const { token: terminalId, rest: extra } = takeRequiredToken(rest, usage);
-    assertExactTerminalId(terminalId, usage);
+    assertExactTerminalOrNativeId(terminalId, usage);
     if (extra.trim()) {
       throw new Error(usage);
     }
@@ -311,14 +312,14 @@ function parseAkkLifecycleCommand(
   if (action === "permissions" || action === "permission-options") {
     const usage = "Usage: /akk permissions <exact-terminal-id>";
     const { token: terminalId, rest: extra } = takeRequiredToken(rest, usage);
-    assertExactTerminalId(terminalId, usage);
+    assertExactTerminalOrNativeId(terminalId, usage);
     if (extra.trim()) throw new Error(usage);
     return { action: "permission-options", terminalId };
   }
   if (action === "set-permissions") {
     const usage = "Usage: /akk set-permissions <exact-terminal-id> <advertised-mode-id>";
     const { token: terminalId, rest: modeInput } = takeRequiredToken(rest, usage);
-    assertExactTerminalId(terminalId, usage);
+    assertExactTerminalOrNativeId(terminalId, usage);
     const { token: mode, rest: extra } = takeRequiredToken(modeInput, usage);
     if (extra.trim() || !/^[a-z][a-z0-9_-]{0,63}$/u.test(mode)) throw new Error(usage);
     return { action: "set-permissions", terminalId, mode };
@@ -574,12 +575,15 @@ export function akkUsageText(): string {
 }
 
 export function formatAkkListCommandResult(result: Record<string, unknown>): string {
+  const nativeSessions = arrayValue(result.codex_cli_sessions);
+  const nativeWatches = arrayValue(result.codex_cli_watches);
   const desktopSessions = arrayValue(result.desktop_sessions);
   const desktopWatches = arrayValue(result.desktop_watches);
   const terminals = arrayValue(result.terminals);
   const terminalWatches = arrayValue(result.terminal_watches);
   const unavailableManagedTurns = arrayValue(result.unavailable_managed_turns);
   if (
+    nativeSessions.length === 0 && nativeWatches.length === 0 &&
     desktopSessions.length === 0 && desktopWatches.length === 0 &&
     terminals.length === 0 &&
     terminalWatches.length === 0 &&
@@ -664,6 +668,12 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
 
   return [
     heading,
+    ...(nativeSessions.length ? ["Direct Codex CLI conversations:", ...nativeSessions.flatMap(row => [
+      `- ${row.title ?? row.native_thread_id} | ${row.cwd ?? "unknown directory"} | ${row.activity_state ?? "unknown"}`,
+      `  conversation_id: ${row.conversation_id}`, ...formatAvailableActions("  actions", row)
+    ])] : []),
+    ...(nativeWatches.length ? ["Direct Codex CLI watches:", ...nativeWatches.map(row =>
+      `- ${row.watch_id}: ${row.status}`)] : []),
     ...(desktopSessions.length ? ["Desktop conversations:", ...desktopSessions.map(row =>
       `- ${row.title} | ${row.cwd ?? "unknown directory"} | ${row.activity_state} | ${row.connection_state}\n  conversation_id: ${row.conversation_id}`)] : []),
     ...(desktopWatches.length ? ["Desktop watches:", ...desktopWatches.map(row =>
@@ -703,6 +713,7 @@ export { compactAkkListModelProjection } from "./semantic-tool-list-projection.j
 export function formatAkkWatchCommandResult(
   result: Record<string, unknown>
 ): string {
+  if (result.source === "codex_cli") return formatCodexNativeCommandResult(result, "Watch started");
   const watch = terminalWatchRecord(result);
   return [
     "AKK Terminal Watch started:",
@@ -725,6 +736,8 @@ export function formatAkkWatchCommandResult(
 export function formatAkkUnwatchCommandResult(
   result: Record<string, unknown>
 ): string {
+  if (result.source === "codex_cli") return formatCodexNativeCommandResult(result, "Watch stopped") +
+    "\nObservation stopped; the native task was not interrupted.";
   const watch = terminalWatchRecord(result);
   return [
     "AKK Terminal Watch stopped:",
@@ -737,6 +750,7 @@ export function formatAkkUnwatchCommandResult(
 export function formatAkkWatchStatusCommandResult(
   result: Record<string, unknown>
 ): string {
+  if (result.source === "codex_cli") return formatCodexNativeCommandResult(result, "Watch status");
   const watch = terminalWatchRecord(result);
   const userExplicitFallback = watch.source ===
     "terminal_user_explicit_fallback_watch";
@@ -785,6 +799,44 @@ export function formatAkkWatchStatusCommandResult(
         ? "This is a best-effort read-only terminal-activity Watch; stable idle is not exact task-completion proof."
         : "This is a user-selected read-only exact-task observation; Watch itself did not send, adopt, or mutate the task."
   ].join("\n");
+}
+
+/** Native thread/task identities are not managed Session/Turn or physical pane IDs. */
+export function formatCodexNativeCommandResult(result: Record<string, unknown>, operation: string): string {
+  const latest = recordValue(result.latest_turn);
+  const finalText = nonEmptyString(result.final_text) ?? nonEmptyString(latest?.final_text);
+  const notifications = arrayValue(result.callback_notifications);
+  const interactions = arrayValue(result.interaction_state);
+  const state = nonEmptyString(result.state);
+  const sendState = nonEmptyString(result.send_state);
+  return [
+    `AKK Codex CLI ${operation}:`,
+    `conversation: ${nonEmptyString(result.conversation_id) ?? "unknown"}`,
+    ...(nonEmptyString(result.watch_id) ? [`watch: ${result.watch_id}`] : []),
+    ...(nonEmptyString(result.native_thread_id) ? [`native thread: ${result.native_thread_id}`] : []),
+    ...(nonEmptyString(result.native_turn_id) ? [`native task: ${result.native_turn_id}`] : []),
+    `status: ${nonEmptyString(result.status) ?? nonEmptyString(result.activity_state) ?? state ?? "unknown"}`,
+    ...(sendState ? [`send: ${sendState}; native acceptance: ${nonEmptyString(result.agent_acceptance) ?? "unproven"}`] : []),
+    ...formatNativeResponseState(state, result.evidence),
+    ...(typeof result.callback_expected === "boolean" ? [`callback expected: ${result.callback_expected}`] : []),
+    ...notifications.map(note => `callback: ${nonEmptyString(note.status) ?? "unknown"}`),
+    ...(nonEmptyString(result.observation_error) ? [`observation: ${result.observation_error}`] : []),
+    ...(finalText ? [`completion: ${truncateText(finalText, 2000)}`] : []),
+    ...interactions.flatMap(interaction => [
+      `pending ${nonEmptyString(interaction.kind) ?? "interaction"}: ${interaction.interaction_id}`,
+      ...(nonEmptyString(interaction.command) ? [`  command: ${truncateText(interaction.command, 500)}`] : []),
+      ...arrayValue(interaction.questions).map(question => `  ${question.question_id}: ${question.title}`)
+    ]),
+    ...(interactions.length ? ["Use the current typed Status actions to answer or approve this exact request."] : []),
+    ...(sendState && sendState !== "accepted" ? ["Acceptance is not proven. Keep this receipt and refresh Status; do not resend automatically."] : [])
+  ].join("\n");
+}
+
+function formatNativeResponseState(state: string | undefined, evidence: unknown): string[] {
+  if (!state) return [];
+  if (state === "confirmed") return [`response: confirmed (${nonEmptyString(evidence) ?? "native evidence"})`];
+  if (state === "sent") return ["response: dispatched; native effect is not yet confirmed."];
+  return [`response: ${state}; do not resend automatically.`];
 }
 
 export function formatAkkTerminalWatchHint(
@@ -1186,12 +1238,12 @@ export function buildAkkCommandCliArgs(
       );
     case "watch": {
       const openclawSession =
-        nonEmptyString(context.sessionKey) ??
+        (isCodexNativeConversationId(command.terminalId) ? requiredNativeController(context.sessionKey) : nonEmptyString(context.sessionKey)) ??
         "agent:main:main";
       return withOptionalArgs(
         [
           "watch-terminal",
-          "--terminal",
+          isCodexNativeConversationId(command.terminalId) ? "--conversation" : "--terminal",
           command.terminalId
         ],
         ["--store-dir", storeDir],
@@ -1200,13 +1252,16 @@ export function buildAkkCommandCliArgs(
           finiteNumberString(config.agentHardTimeoutMinutes)
         ],
         ["--openclaw-session", openclawSession],
-        ["--openclaw-bin", nonEmptyString(config.openclawBin)]
+        ["--openclaw-bin", nonEmptyString(config.openclawBin)],
+        ["--codex-home", isCodexNativeConversationId(command.terminalId) ? codexHome : undefined]
       );
     }
     case "unwatch":
       return withOptionalArgs(
         ["unwatch-terminal", "--watch", command.watchId],
-        ["--store-dir", storeDir]
+        ["--store-dir", storeDir],
+        ["--openclaw-session", command.watchId.startsWith("codex-cli-watch:") ? requiredNativeController(context.sessionKey) : undefined],
+        ["--codex-home", command.watchId.startsWith("codex-cli-watch:") ? codexHome : undefined]
       );
     case "list-resumable-threads":
       return withOptionalArgs(
@@ -1352,7 +1407,9 @@ export function buildAkkCommandCliArgs(
       if (command.watchId) {
         return withOptionalArgs(
           ["watch-status", "--watch", command.watchId],
-          ["--store-dir", storeDir]
+          ["--store-dir", storeDir],
+          ["--openclaw-session", command.watchId.startsWith("codex-cli-watch:") ? requiredNativeController(context.sessionKey) : undefined],
+          ["--codex-home", command.watchId.startsWith("codex-cli-watch:") ? codexHome : undefined]
         );
       }
       return withOptionalArgs(
@@ -1360,11 +1417,13 @@ export function buildAkkCommandCliArgs(
           "status",
           "--reconcile",
           ...(command.turnId
-            ? ["--turn", command.turnId]
+            ? [isCodexNativeConversationId(command.turnId) ? "--conversation" : "--turn", command.turnId]
             : [])
         ],
         ["--store-dir", storeDir],
-        ["--idle-timeout-minutes", idleTimeoutMinutes]
+        ["--idle-timeout-minutes", idleTimeoutMinutes],
+        ["--openclaw-session", isCodexNativeConversationId(command.turnId) ? requiredNativeController(context.sessionKey) : undefined],
+        ["--codex-home", isCodexNativeConversationId(command.turnId) ? codexHome : undefined]
       );
     case "send": {
       const openclawSession =
@@ -1443,7 +1502,18 @@ export function buildAkkCommandCliArgs(
 }
 
 function isTerminalWatchId(value: string): boolean {
-  return /^terminal-watch-[A-Za-z0-9._:-]+$/u.test(value);
+  return /^terminal-watch-[A-Za-z0-9._:-]+$/u.test(value) || isCodexNativeWatchId(value);
+}
+
+function requiredNativeController(value: unknown): string {
+  const key = nonEmptyString(value);
+  if (!key) throw new Error("controller session is required for a direct Codex CLI action");
+  return key;
+}
+
+function assertExactTerminalOrNativeId(value: string, usage: string): void {
+  if (isCodexNativeConversationId(value)) parseCodexNativeConversationId(value);
+  else assertExactTerminalId(value, usage);
 }
 
 function parseSelectorMessage(

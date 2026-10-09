@@ -70,6 +70,13 @@
         "test/openclaw-plugin-contract.test.ts"
       ]
     },
+    "codex-native": {
+      "selection": "targeted",
+      "integration_tests": [
+        "test/cli-ux.test.ts",
+        "test/openclaw-plugin-contract.test.ts"
+      ]
+    },
     "codex-storage": {
       "selection": "targeted",
       "integration_tests": [
@@ -644,6 +651,70 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/codex-native-cli-adapter.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-client-interactions.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-client-rpc.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-client.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-identity.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-monitor.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-outbox.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-public-projection.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-record-store.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-response-service.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-runtime.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-semantic.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-snapshot.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-state-store.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-task-service.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-native-types.ts",
+      "owner": "codex-native"
+    },
+    {
       "path": "src/codex-open-rollout-inventory.ts",
       "owner": "codex-storage"
     },
@@ -938,6 +1009,10 @@
     {
       "path": "src/live-lifecycle-smoke.ts",
       "owner": "lifecycle-smoke"
+    },
+    {
+      "path": "src/local-codex-cli-adapter.ts",
+      "owner": "codex-native"
     },
     {
       "path": "src/managed-session.ts",

@@ -65,9 +65,10 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
       { required: ["conversation_id", "turn_id"] }
     ]
   });
-  assert.deepEqual(nativeInspectParameters.required, [
-    "terminal_id",
-    "inspection"
+  assert.deepEqual(nativeInspectParameters.required, ["inspection"]);
+  assert.deepEqual(nativeInspectParameters.oneOf, [
+    { required: ["terminal_id"], not: { required: ["conversation_id"] } },
+    { required: ["conversation_id"], not: { required: ["terminal_id"] } }
   ]);
   assert.deepEqual(modelOptionsParameters.required, ["terminal_id"]);
   assert.deepEqual(repairModelControlParameters.required, ["terminal_id"]);
@@ -113,16 +114,22 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   assert.deepEqual(respondInteractionParameters.oneOf, [
     {
       required: ["turn_id"],
-      not: { required: ["watch_id"] }
+      not: { anyOf: [{ required: ["watch_id"] }, { required: ["conversation_id"] }] },
+      properties: { answers: { maxItems: 1,
+        items: { properties: { text: { pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" } } } } }
     },
     {
       required: ["watch_id"],
-      not: { required: ["turn_id"] }
-    }
+      not: { anyOf: [{ required: ["turn_id"] }, { required: ["conversation_id"] }] },
+      allOf: [{ if: { properties: { watch_id: { pattern: "^terminal-watch-" } } },
+        then: { properties: { answers: { maxItems: 1,
+          items: { properties: { text: { pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" } } } } } } }]
+    },
+    { required: ["conversation_id"], not: { anyOf: [{ required: ["turn_id"] }, { required: ["watch_id"] }] } }
   ]);
   assert.deepEqual(
     Object.keys(respondInteractionParameters.properties),
-    ["turn_id", "watch_id", "interaction_id", "delivery_mode", "answers"]
+    ["conversation_id", "turn_id", "watch_id", "interaction_id", "delivery_mode", "answers"]
   );
   assert.deepEqual(
     respondInteractionParameters.properties.delivery_mode.enum,
@@ -153,16 +160,20 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   );
   assert.deepEqual(approveParameters.anyOf, [
     { required: ["turn_id"] },
-    { required: ["terminal_id"] }
+    { required: ["terminal_id"] },
+    { required: ["conversation_id", "interaction_id"] },
+    { required: ["watch_id", "interaction_id"] }
   ]);
-  assert.deepEqual(approveParameters.not, {
-    required: ["turn_id", "terminal_id"]
-  });
+  assert.deepEqual(approveParameters.not, { anyOf: [
+    { required: ["turn_id", "terminal_id"] }, { required: ["turn_id", "conversation_id"] },
+    { required: ["turn_id", "watch_id"] }, { required: ["terminal_id", "conversation_id"] },
+    { required: ["terminal_id", "watch_id"] }, { required: ["conversation_id", "watch_id"] }
+  ] });
   assert.deepEqual(watchParameters.oneOf, [
     { required: ["terminal_id"], not: { required: ["conversation_id"] } },
     { required: ["conversation_id"], not: { required: ["terminal_id"] } }
   ]);
-  assert.equal(watchParameters.properties.conversation_id.pattern, "^desktop:v1:[A-Za-z0-9_-]+$");
+  assert.equal(watchParameters.properties.conversation_id.pattern, "^(?:desktop|codex-cli):v1:[A-Za-z0-9_-]+$");
   assert.deepEqual(unwatchParameters.required, ["watch_id"]);
   assert.ok(closeParameters.properties.expected_message_id);
   assert.ok(closeParameters.properties.expected_transition_id);

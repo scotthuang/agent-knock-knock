@@ -22,6 +22,8 @@ import { permissionOptionsParameters, setPermissionsParameters } from
 import { runHostAwareCli } from "./semantic-tool-relay.js";
 import { modelFacingErrorMessage } from "./semantic-tool-presentation.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
+import { nativeConversationTarget, nativePermissionToolArgs } from "./codex-native-semantic.js";
+import { isCodexNativeConversationId } from "./codex-native-identity.js";
 
 const PERMISSION_CONTROL_TIMEOUT_MS = 3 * 60_000;
 type ControllerContext = { sessionKey?: unknown; sessionId?: unknown };
@@ -59,6 +61,8 @@ export async function buildPrivatePermissionOptionsArgs(
   params: Record<string, unknown>,
   context: ControllerContext
 ): Promise<string[]> {
+  const native = nativePermissionToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "permissions");
+  if (native) return native;
   assertOnlyModelControlParameters(params, ["terminal_id"], "permission_options");
   const terminalId = exactTerminalId(params.terminal_id);
   // Refresh revokes the old offer even if discovery subsequently fails. Check
@@ -130,6 +134,8 @@ export function buildPrivateSetPermissionsArgs(
   params: Record<string, unknown>,
   context: ControllerContext
 ): string[] {
+  const native = nativePermissionToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "set-permissions");
+  if (native) return native;
   assertOnlyModelControlParameters(params, ["terminal_id", "mode"], "set_permissions");
   const terminalId = exactTerminalId(params.terminal_id);
   const mode = semanticMode(params.mode);
@@ -163,7 +169,9 @@ export function isAkkSetPermissionsSuccess(value: unknown): boolean {
 export function registerPermissionControlTools(api, registerCliTool): void {
   registerCliTool(api, {
     name: "agent_knock_knock_permission_options",
-    description: "Inspect the current Codex permission setting and built-in choices for one " +
+    description: "For a listed direct Codex CLI conversation_id, read settings and built-in " +
+      "choices through its backend without terminal input. For terminal_id, " +
+      "inspect the current Codex permission setting and built-in choices for one " +
       "explicitly selected idle physical terminal. This closed /status and " +
       "/permissions inspection sends native UI input but does not change " +
       "permissions. It requires an empty Composer, exact pane/process and native " +
@@ -177,11 +185,16 @@ export function registerPermissionControlTools(api, registerCliTool): void {
     timeoutMs: PERMISSION_CONTROL_TIMEOUT_MS,
     normalizeTurnIdentity: false,
     buildArgs: (params, context) => buildPrivatePermissionOptionsArgs(api, params, context ?? {}),
-    rememberResult: (result, params, context) => rememberDisplayedPermissionOptionsOffer(api, context ?? {}, params.terminal_id, result)
+    rememberResult: (result, params, context) => {
+      if (!nativeConversationTarget(params)) rememberDisplayedPermissionOptionsOffer(api, context ?? {}, params.terminal_id, result);
+    }
   });
   registerCliTool(api, {
     name: "agent_knock_knock_set_permissions",
-    description: "Set one requested or authorized Codex permission mode from the immediately " +
+    description: "For a listed direct Codex CLI conversation_id, set read-only, default, or " +
+      "full-access through its backend and verify effective settings; no terminal " +
+      "UI or extra confirmation is needed. For terminal_id, set one requested or " +
+      "authorized Codex permission mode from the immediately " +
       "preceding permission_options result in the same controller conversation. " +
       "Consumes that private catalog once and revalidates the exact physical " +
       "terminal, native thread, empty Composer and idle state. Full Access is an " +
@@ -207,11 +220,12 @@ export async function handleAkkPermissionCommand(
   context: ControllerContext,
   command: Extract<AkkCommand, { action: "permission-options" | "set-permissions" }>
 ): Promise<{ text: string; isError?: boolean }> {
-  const params = { terminal_id: command.terminalId };
+  const native = isCodexNativeConversationId(command.terminalId);
+  const params = native ? { conversation_id: command.terminalId } : { terminal_id: command.terminalId };
   if (command.action === "permission-options") {
     const args = await buildPrivatePermissionOptionsArgs(api, params, context);
     const result = await runHostAwareCli(api, args, { timeoutMs: PERMISSION_CONTROL_TIMEOUT_MS });
-    rememberDisplayedPermissionOptionsOffer(api, context, command.terminalId, result);
+    if (!native) rememberDisplayedPermissionOptionsOffer(api, context, command.terminalId, result);
     return { text: formatAkkPermissionOptionsCommandResult(result) };
   }
   const args = buildPrivateSetPermissionsArgs(api, { ...params, mode: command.mode }, context);
@@ -220,18 +234,18 @@ export async function handleAkkPermissionCommand(
 }
 
 export function formatAkkPermissionOptionsCommandResult(result: Record<string, unknown>): string {
-  const terminalId = stringValue(result.terminal_id) ?? "unknown";
+  const terminalId = stringValue(result.conversation_id) ?? stringValue(result.terminal_id) ?? "unknown";
+  const native = result.source === "codex_cli";
   const choices = Array.isArray(result.choices) ? result.choices.filter(isRecord) : [];
   return [
     "AKK Codex permission options:",
-    `terminal: ${terminalId}`,
+    `${native ? "conversation" : "terminal"}: ${terminalId}`,
     `current: ${stringValue(result.current) ?? "unknown"}`,
     "scope: current_session (may be retained when this thread is resumed); global defaults are unchanged.",
     ...choices.map((choice) => `- ${choice.id}: ${choice.label} — ${choice.description}`),
     `next: /akk set-permissions ${terminalId} <advertised-mode-id>`,
     "Use a displayed mode for the requested permission change. Full Access needs " +
-      "no additional user confirmation; AKK handles its native dialog " +
-      "automatically."
+      "no additional user confirmation; " + (native ? "AKK verifies the effective backend settings." : "AKK handles its native dialog automatically.")
   ].join("\n");
 }
 

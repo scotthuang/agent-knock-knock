@@ -1,12 +1,16 @@
 // Model-facing wording is data; execution and authority stay in the tool runtime.
 export const semanticToolDescriptions = {
-  akk: "Discover Codex Desktop conversations, send tasks and watch their completion; " +
+  akk: "Control loaded Codex CLI threads directly through their backend: discover, " +
+    "send, watch completion, answer questions, approve requests and set permissions " +
+    "without tmux or Herdr. Discover Codex Desktop conversations, send tasks and watch their completion; " +
     "Desktop approvals and questions require manual handling. Send coding work " +
     "through existing Codex or Claude Code shared terminals, " +
     "inspect managed Turns, observe a user-selected terminal with durable " +
     "read-only Terminal Watch, manage native threads, and safely inspect or " +
     "change an idle pane's native model selection or Codex permissions.",
-  watch: "For Desktop, use the exact conversation_id from List to watch one currently " +
+  watch: "For direct Codex CLI, use conversation_id from List to watch its exact " +
+    "active task; use the returned codex-cli-watch ID for Status and interactions. " +
+    "For Desktop, use the exact conversation_id from List to watch one currently " +
     "active native task. An unresolved identity or idle thread is refused; Desktop " +
     "questions and approvals are notification-only and require manual handling. " +
     "For terminals, start one durable read-only Terminal Watch for the user's exact selected " +
@@ -16,7 +20,7 @@ export const semanticToolDescriptions = {
     "best-effort terminal activity. That fallback reports stable-idle activity, " +
     "not proof of exact task completion. Watch creates no AKK Session or Turn, " +
     "sends no terminal input, and never adopts or blocks the terminal task.",
-  unwatch: "Stop one exact durable terminal or Desktop Watch by its authoritative watch_id. This " +
+  unwatch: "Stop one exact durable terminal, Desktop or direct Codex CLI Watch by its authoritative watch_id. This " +
     "cancels observation only; it sends no terminal input and does not interrupt, " +
     "adopt, or otherwise mutate the human's coding-agent task.",
   list_resumable_threads: "List structurally verified native Codex or Claude Code threads for one exact " +
@@ -26,7 +30,8 @@ export const semanticToolDescriptions = {
     "and binding freshness evidence privately. Number and short-id fields are " +
     "slash-command display aids, never tool arguments. This is read-only for " +
     "Session/Turn state and creates no AKK Turn.",
-  native_inspect: "Execute one closed native status inspection in an exact Codex or Claude Code " +
+  native_inspect: "For a direct Codex CLI conversation_id, read native backend status " +
+    "without TUI input. For terminal_id, execute one closed native status inspection in an exact Codex or Claude Code " +
     "terminal. Verified versions use their regression-tested profile; unverified " +
     "complete x.y.z versions remain callable through the generic runtime protocol " +
     "and return a compatibility warning. Pass only terminal_id and " +
@@ -49,7 +54,8 @@ export const semanticToolDescriptions = {
     "native_thread_id from a resumable=true row; AKK refreshes binding and " +
     "candidate evidence privately. This creates or reactivates an AKK Session but " +
     "no Turn.",
-  status: "Inspect one exact managed Turn by turn_id, a terminal or Desktop Watch " +
+  status: "Inspect direct Codex CLI conversation_id or codex-cli-watch watch_id through " +
+    "its backend, including current typed approvals and questions. Inspect one exact managed Turn by turn_id, a terminal or Desktop Watch " +
     "by watch_id, or a conversation_id returned by List. Desktop status reads " +
     "the original thread when reachable; metadata alone cannot prove live task " +
     "state. Desktop questions and approvals require manual handling. Targets " +
@@ -60,7 +66,11 @@ export const semanticToolDescriptions = {
     "may independently be managed. Automatic terminal_user_explicit fallback " +
     "Watch status describes the exact request AKK physically sent without " +
     "claiming a managed Turn. AKK never starts a coding agent.",
-  send: "For Desktop, pass request and the exact conversation_id from List. AKK " +
+  send: "For direct Codex CLI, pass request and conversation_id from List. AKK " +
+    "submits once to the loaded backend thread, inherits its settings and binds " +
+    "an exact native-task Watch for completion and interaction callbacks; no " +
+    "terminal input or replacement process is used. Preserve uncertain receipts " +
+    "and never repeat a send blindly. For Desktop, pass request and the exact conversation_id from List. AKK " +
     "requires a reachable idle original owner, inherits thread settings, sends " +
     "once and monitors the exact accepted task. It never automatically opens a " +
     "thread, approves, answers questions or retries an uncertain Desktop send. " +
@@ -103,7 +113,11 @@ export const semanticToolDescriptions = {
     "This continues that turn and does not create a new turn; for later ordinary " +
     "work refresh agent_knock_knock_list and use that terminal row's currently " +
     "advertised send action.",
-  respond_interaction: "Answer exactly one current native interaction step shown by " +
+  respond_interaction: "For direct Codex CLI use its conversation_id or exact " +
+    "codex-cli-watch watch_id and current interaction_id with typed answers. " +
+    "The backend revalidates that exact request and turn; async replies use " +
+    "steer_current_turn only; supply every question in that native request. " +
+    "For terminal targets, answer exactly one current native interaction step shown by " +
     "agent_knock_knock_status in this controller conversation. Supply exactly one " +
     "authoritative subject target: turn_id for a managed Turn or watch_id for an " +
     "interactive Terminal Watch, plus interaction_id and one typed semantic " +
@@ -118,10 +132,12 @@ export const semanticToolDescriptions = {
     "again instead of rejecting an otherwise live prompt. Raw keys, menu indexes, " +
     "rendered labels, fingerprints, versions, and terminal commands are never " +
     "accepted. An uncertain response must never be retried blindly.",
-  approve: "Dispatch one closed semantic decision for the current exact permission " +
+  approve: "For direct Codex CLI use conversation_id or codex-cli-watch watch_id " +
+    "plus the pending interaction_id from Status, and the authorized approve_once " +
+    "or reject decision. Dispatch one closed semantic decision for the current exact permission " +
     "request only after the user reviews and explicitly chooses it. decision " +
-    "defaults to approve_once for compatibility; reject is available only on a " +
-    "managed Turn when the adapter proves a safe native reject choice. Use " +
+    "defaults to approve_once for compatibility. On terminal targets, reject is " +
+    "available only on a managed Turn when the adapter proves a safe native reject choice. Use " +
     "turn_id for a managed Turn or terminal_id for a separately advertised " +
     "approve_once-only terminal action. AKK privately refreshes the prompt and " +
     "authority, then recaptures it under lock. Raw keys, indexes, and labels are " +
@@ -142,12 +158,11 @@ export const semanticToolDescriptions = {
     "Session, ledger, and callback cleanup is best-effort and cannot veto closing " +
     "the Turn; warnings identify metadata AKK preserved. Refresh list afterward " +
     "and use Watch if the coding agent is still working.",
-  list: "List terminals, Desktop conversation candidates and Watches. Desktop " +
-    "metadata is distinct from verified live capabilities. Use desktopSearch, " +
-    "desktopProject and desktopCursor to find more candidates. The compact " +
-    "projection has available_actions and action_inputs for exact targets. " +
-    "Follow the agent-knock-knock skill for action meaning and safety; AKK " +
-    "privately revalidates every mutation.",
+  list: "List loaded direct Codex CLI threads, terminals, Desktop candidates and Watches. " +
+    "Desktop metadata is distinct from live capabilities. Use desktopSearch, " +
+    "desktopProject and desktopCursor for more candidates. The compact projection " +
+    "has available_actions and action_inputs for exact targets. Follow the " +
+    "agent-knock-knock skill; AKK privately revalidates every mutation.",
   model_options: "Inspect the exact current native model catalog for one explicitly selected " +
     "physical Codex or Claude Code pane. This is the required read-only first " +
     "step before set_model. Profiled Codex 0.154.0/0.155.1 accepts one exact " +

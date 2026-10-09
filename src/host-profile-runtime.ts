@@ -198,7 +198,9 @@ export function applyTrustedHostProfileCliOptions(
   const ownsWatchRoute = commandName === "watch-terminal" ||
     commandName === "reconcile-watches" ||
     commandName === "reconcile-desktop-watches" ||
-    commandName === "monitor-desktop";
+    commandName === "monitor-desktop" ||
+    commandName === "reconcile-codex-native-watches" ||
+    commandName === "monitor-codex-native";
   if (!createsManagedTurn && !ownsWatchRoute) {
     return options as Record<string, unknown>;
   }

@@ -1274,3 +1274,17 @@ test("sessions.send redirect after possible injection is uncertain and not woken
     ["agent.callback"]
   );
 });
+
+test("native Codex Watch routes through chat.send without a managed conversation context", () => {
+  const input = terminalWatchGenericInput();
+  input.envelope = createCallbackEnvelope({ route: input.route,
+    source: { kind: "codex_native_watch", watch_id: "codex-cli-watch:exacttask", native_id: "codex-cli:v1:exact" },
+    event: { id: "native-settled", type: "codex_native_watch.settled", body: "Exact CLI task completed", requires_response: false } });
+  const harness = createHarness([processResult({ runId: input.envelope.idempotency_key, status: "started" })]);
+  const outcome = harness.transport.deliver(input);
+  assert.equal(outcome.disposition, "accepted"); assert.equal(harness.spawnCalls.length, 1);
+  const parameters = JSON.parse(String(harness.spawnCalls[0].args[4]));
+  assert.equal(parameters.sessionKey, input.route.controller_session_id);
+  assert.equal(parameters.idempotencyKey, input.envelope.idempotency_key);
+  assert.equal(parameters.message, "Exact CLI task completed");
+});

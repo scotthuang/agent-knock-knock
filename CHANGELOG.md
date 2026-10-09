@@ -4,6 +4,7 @@
 
 ### Added
 
+- Control loaded Codex CLI conversations through their shared app-server without tmux, Herdr, or terminal input. Add native discovery, exact task send/Watch, durable completion and interaction callbacks, command/file approvals, blocking and async answers, and per-thread permission settings.
 - Discover Codex Desktop conversations alongside terminal sessions, with search, project filtering, pagination, and separate catalog and live-owner evidence. Keep unloaded and creator-unknown conversations discoverable without treating metadata as permission to send.
 - Send tasks to an exact existing Desktop conversation through its original owner, record a durable send intent, and bind monitoring to the accepted native task. Repeated message IDs and uncertain submissions never automatically resend task text.
 - Add Desktop Status and exact task Watch, with durable completion and manual-attention notifications. Monitoring retains its original native task when a later task starts; stopping a Watch leaves the Desktop task running.

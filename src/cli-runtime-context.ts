@@ -19,6 +19,8 @@ type CliDependencyOptions = Readonly<Record<string, unknown>>;
  * parallel without sharing providers, output, environment, or clocks.
  */
 export interface CliCommandDependencies<Options extends CliDependencyOptions = CliDependencyOptions> {
+  createCodexNativeRuntime?: typeof import("./codex-native-runtime.js").createCodexNativeRuntime;
+  launchCodexNativeMonitor?: typeof import("./codex-native-monitor.js").launchCodexNativeMonitor;
   createDesktopRuntime?: typeof import("./desktop-runtime.js").createDesktopRuntime;
   launchDesktopMonitor?: typeof import("./desktop-monitor.js").launchDesktopMonitor;
   terminalControlProviderRegistry?: TerminalControlProviderRegistry;
