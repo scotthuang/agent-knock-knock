@@ -280,7 +280,8 @@ process.stdout.write("{}");
     fs.readFileSync(logPath, "utf8").trim().split("\n"),
     [
       "reconcile-monitors:lifecycle-original",
-      "reconcile-watches:lifecycle-original"
+      "reconcile-watches:lifecycle-original",
+      "reconcile-desktop-watches:lifecycle-original"
     ]
   );
 });

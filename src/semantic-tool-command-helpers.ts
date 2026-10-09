@@ -574,10 +574,13 @@ export function akkUsageText(): string {
 }
 
 export function formatAkkListCommandResult(result: Record<string, unknown>): string {
+  const desktopSessions = arrayValue(result.desktop_sessions);
+  const desktopWatches = arrayValue(result.desktop_watches);
   const terminals = arrayValue(result.terminals);
   const terminalWatches = arrayValue(result.terminal_watches);
   const unavailableManagedTurns = arrayValue(result.unavailable_managed_turns);
   if (
+    desktopSessions.length === 0 && desktopWatches.length === 0 &&
     terminals.length === 0 &&
     terminalWatches.length === 0 &&
     unavailableManagedTurns.length === 0
@@ -661,6 +664,11 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
 
   return [
     heading,
+    ...(desktopSessions.length ? ["Desktop conversations:", ...desktopSessions.map(row =>
+      `- ${row.title} | ${row.cwd ?? "unknown directory"} | ${row.activity_state} | ${row.connection_state}\n  conversation_id: ${row.conversation_id}`)] : []),
+    ...(desktopWatches.length ? ["Desktop watches:", ...desktopWatches.map(row =>
+      `- ${row.watch_id}: ${row.status}`)] : []),
+    ...(recordValue(result.desktop_scan)?.next_cursor ? [`Desktop next_cursor: ${recordValue(result.desktop_scan)?.next_cursor}`] : []),
     ...(terminalLines.length > 0
       ? ["live terminals:", ...terminalLines]
       : []),

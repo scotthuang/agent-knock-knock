@@ -1,21 +1,34 @@
 ---
 name: agent-knock-knock
-description: Control local Codex and Claude Code through shared tmux or Herdr terminals with Agent Knock Knock.
+description: Discover, send tasks to, and monitor existing Codex Desktop conversations or Codex and Claude Code tmux/Herdr terminals with Agent Knock Knock.
 ---
 
 # Agent Knock Knock
 
-Use this skill when the user explicitly invokes `AKK`, `akk`, or `Agent Knock Knock`, or asks a supported controller Host to inspect or control a coding-agent terminal listed by AKK.
+Use this skill when the user explicitly invokes `AKK`, `akk`, or `Agent Knock Knock`, or asks a supported controller Host to inspect or control a coding-agent conversation listed by AKK.
 
-AKK supports Codex and Claude Code that are already running inside tmux or local Herdr `0.8.0`. It never launches a coding agent. The controller Host, terminal host, AKK, and coding agent must run as the same OS user.
+AKK supports existing local Codex Desktop conversations and Codex or Claude Code already running inside tmux or local Herdr `0.8.0`. It never launches a replacement coding agent. The controller Host, AKK, the coding agent, and its Desktop app or terminal host must run as the same OS user.
 
 Treat `AKK` and `akk` the same way.
 
 ## Role
 
-The controller Host interprets the user's request, sends the requested work into the selected shared terminal, handles actionable callbacks, and reports the outcome. The coding agent performs the engineering work in its existing tmux or Herdr terminal.
+The controller Host interprets the user's request, sends the requested work into the selected conversation, handles actionable callbacks, and reports the outcome. The coding agent performs the engineering work in its existing Desktop conversation or tmux/Herdr terminal.
 
 Keep the user's requested scope and approval boundaries. Do not expand a task, approve a permission, interrupt a process, or close a managed record unless the user request or an explicit trusted policy authorizes that action.
+
+## Codex Desktop
+
+Desktop uses `desktop_sessions[]` from `agent_knock_knock_list` and a full `desktop:v1:...` conversation ID. It is separate from `terminals[]`, terminal selectors, managed Sessions, and managed Turns. The terminal-specific instructions below do not grant Desktop input authority.
+
+- Find the intended row by title and project. Use List's `desktopSearch`, `desktopProject`, `desktopLimit`, and returned pagination cursor as `desktopCursor` when needed. Do not assume the first page is the complete catalog, ask for a deep link when List can discover the target, or invent a conversation ID. If multiple rows match the user's reference, show the titles and project paths and ask which one they mean.
+- Catalog metadata includes unloaded conversations and entries whose original creator is unknown or was a CLI. It does not prove a current Desktop owner or task. Use the row's live state and advertised actions; keep an unavailable row visible rather than silently substituting another conversation. Desktop v1 cannot open, load, resume, or create a conversation. If it has no verified live owner, tell the user to open that conversation in Desktop and refresh List.
+- Send a new task with `agent_knock_knock_send({conversation_id,request})`, using the exact listed Desktop ID and no `session_id`, `terminal_id`, or `turn_id`. The trusted Host supplies the stable message identity. AKK requires a freshly verified idle thread with no pending question, approval, or unconfirmed input, preserves its current settings, and attempts task submission once. It never sends a task through a replacement CLI, steers known active work, or retries uncertain input. Use the returned `watch_id` for follow-up; delivery uncertainty is not proof of acceptance or failure.
+- Inspect the conversation with `agent_knock_knock_status({conversation_id})`. For an exact task's outcome use `agent_knock_knock_status({watch_id})`; a conversation becoming idle is not proof that the watched task succeeded. Each Desktop Watch remains bound to its original native task even when another task starts later.
+- Observe an already-running Desktop task with `agent_knock_knock_watch({conversation_id})`. This requires one exact active native task; an idle or unknown conversation does not fall back to terminal-activity observation. Keep its `desktop-watch:...` ID. `agent_knock_knock_unwatch({watch_id})` stops observation without interrupting work.
+- Desktop v1 only sends, observes, and notifies. Questions and approvals require the user to respond in Desktop. An attention callback is not permission to use `respond`, `respond_interaction`, `approve`, `autoApprove`, terminal keys, permission changes, or model changes. Report the manual action and keep the Watch for the final outcome.
+
+Desktop control is reviewed for macOS Codex Desktop `26.1002.52244` build `13536` through private local IPC. Read the actual capability and error result after an app update; never downgrade to raw UI input or relax identity checks. The native protocol has no atomic idle-and-send operation, so concurrent human input can make acceptance uncertain. Preserve the returned Watch and reconcile it instead of repeating the task.
 
 ## Chat Routing
 
@@ -25,7 +38,7 @@ Core slash-command forms:
 
 - `/akk <task>`: send a new task only when exactly one send-ready coding-agent pane exists across all workspaces.
 - `/akk <selector>: <message>`: resolve one exact eligible AKK session and create a new Turn for the message.
-- `/akk list`: list live coding-agent terminals, their current or recent managed-turn context, and durable Terminal Watches.
+- `/akk list`: list live coding-agent terminals, their managed-turn context, Desktop catalog candidates, and durable Watches. Use the semantic tools above for Desktop task operations.
 - `/akk watch <exact-terminal-id>`: observe one exact user-selected terminal without submitting a task or creating a Session or Turn; prefer an exact task anchor and otherwise use a clearly labeled best-effort terminal-activity Watch.
 - `/akk unwatch <watch-id>`: cancel only that observation; do not interrupt or otherwise change the TUI task.
 - `/akk threads <exact-terminal-id>`: list verified native threads that may be resumed in one exact terminal.
@@ -80,7 +93,7 @@ Natural-language forms:
 
 ## Sessions and Turns
 
-AKK's identity hierarchy is terminal → native Codex or Claude Code session → AKK session → Turns. `session_id` is the strict ordinary-send target for one exact native context. `terminal_id` is the deliberately different follow-current target that lets the user hand the pane's currently verified context back to AKK after a safe human-driven switch. Each accepted managed Send creates a distinct `turn_id` without clearing the native agent context; Codex paginated physical Send instead returns an independent exact-task or terminal-activity Watch when observation can be attached. A `turn_id` is used for history, callbacks, respond, status, approval, cancellation, renewal, callback retry, close, and the explicitly advertised submission-retry form of Send.
+For terminal resources, AKK's identity hierarchy is terminal → native Codex or Claude Code session → AKK session → Turns. Desktop instead uses its `conversation_id` and independent `desktop-watch:...` records as described above. `session_id` is the strict terminal ordinary-send target for one exact native context. `terminal_id` is the deliberately different follow-current target that lets the user hand the pane's currently verified context back to AKK after a safe human-driven switch. Each accepted managed Send creates a distinct `turn_id` without clearing the native agent context; Codex paginated physical Send instead returns an independent exact-task or terminal-activity Watch when observation can be attached. A `turn_id` is used for history, callbacks, respond, status, approval, cancellation, renewal, callback retry, close, and the explicitly advertised submission-retry form of Send.
 
 Use `agent_knock_knock_send` with `request` and neither `session_id` nor `terminal_id` only when the target is unspecified. AKK must resolve exactly one eligible Codex or Claude Code pane across all workspaces and use its currently advertised Send path. Managed delivery attaches or discovers its AKK session and verifies idle before input; Codex paginated physical Send does not require a managed Session and follows its terminal input-safety checks. If no eligible pane exists, report AKK's setup guidance; do not substitute another execution path.
 
@@ -224,7 +237,7 @@ A trusted, default-disabled plugin `autoApprove` policy may independently approv
 
 ## Terminal Sessions
 
-`agent_knock_knock_list` is terminal-first: every eligible already-running Codex or Claude Code pane appears once in `terminals[]`, even when retained managed Turns reference it. The resource chain is terminal → verified native session → managed AKK `session_id` → Turns; independent observation-only records appear in `terminal_watches[]` and are addressed only by `watch_id`. `process_state` reports process liveness. Read `screen_state` as bounded live-TUI evidence, `native_identity_state` as foreground native-session resolution, and `durable_activity_state` as exact artifact-backed task activity. The legacy `activity_state` is a conservative compatibility projection and may remain `unknown` while `screen_state="idle"`; none of these diagnostic fields replaces `available_actions` authority. `managed.current_turn` is the authoritative active Turn for that terminal; otherwise `managed.recent_turn` shows the newest retained context. A human-driven thread mismatch remains `management_state="conflict"`; `handoff_state="external_handoff_adoptable"` authorizes only the exact fenced `send` advertised on that row, while `external_handoff_blocked` means do not send or guess a recovery. Listing itself never adopts the new context. Request `all=true` only when older `managed.history`, settled Terminal Watches, or retained unavailable history is needed. By default, `unavailable_managed_turns[]` contains attention-needed records whose terminal is unavailable.
+The terminal portion of `agent_knock_knock_list` includes every eligible already-running Codex or Claude Code pane once in `terminals[]`, even when retained managed Turns reference it. Desktop candidates appear separately in `desktop_sessions[]`. The terminal resource chain is terminal → verified native session → managed AKK `session_id` → Turns; independent terminal observation records appear in `terminal_watches[]` and are addressed only by `watch_id`. `process_state` reports process liveness. Read `screen_state` as bounded live-TUI evidence, `native_identity_state` as foreground native-session resolution, and `durable_activity_state` as exact artifact-backed task activity. The legacy `activity_state` is a conservative compatibility projection and may remain `unknown` while `screen_state="idle"`; none of these diagnostic fields replaces `available_actions` authority. `managed.current_turn` is the authoritative active Turn for that terminal; otherwise `managed.recent_turn` shows the newest retained context. A human-driven thread mismatch remains `management_state="conflict"`; `handoff_state="external_handoff_adoptable"` authorizes only the exact fenced `send` advertised on that row, while `external_handoff_blocked` means do not send or guess a recovery. Listing itself never adopts the new context. Request `all=true` only when older `managed.history`, settled Terminal Watches, or retained unavailable history is needed. By default, `unavailable_managed_turns[]` contains attention-needed records whose terminal is unavailable.
 
 ### Compact controller-Host List projection
 

@@ -4,9 +4,7 @@ import path from "node:path";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import { listDeferredForegroundTransfers } from
   "./deferred-foreground-transfer.js";
-import {
-  type ExecutorKind
-} from "./executors.js";
+import { type ExecutorKind } from "./executors.js";
 import {
   isExactNativeThreadId,
   unmanagedTerminalBindingToken,
@@ -237,6 +235,7 @@ export interface TerminalListReconciliationPorts {
 }
 
 export interface TerminalListDiscoveryPorts {
+  desktopList?(options: TerminalListCliOptions): Promise<Record<string, unknown>>;
   createRuntimeTerminalAgentRegistry(
     options: TerminalListCliOptions
   ): TerminalAgentAdapterRegistry;
@@ -607,6 +606,7 @@ async function runList(options: TerminalListCliOptions) {
   });
 
   printJson({
+    ...await terminalListRuntime().desktopList?.(options),
     store_dir: storeDir,
     store,
     reconciliation,

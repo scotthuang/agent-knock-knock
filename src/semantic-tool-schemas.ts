@@ -134,8 +134,17 @@ export const sendParameters = {
       }
     }
   ],
-  not: { required: ["session_id", "terminal_id"] },
+  not: { anyOf: [
+    { required: ["session_id", "terminal_id"] },
+    { required: ["conversation_id", "terminal_id"] },
+    { required: ["conversation_id", "session_id"] },
+    { required: ["conversation_id", "turn_id"] }
+  ] },
   properties: {
+    conversation_id: {
+      type: "string", pattern: "^desktop:v1:[A-Za-z0-9_-]+$",
+      description: "Exact Desktop conversation_id from List. Desktop v1 requires a reachable idle original owner, sends once and binds an exact task Watch. Approvals, answers, automatic loading and retries of uncertain sends are unsupported."
+    },
     turn_id: {
       type: "string",
       minLength: 1,
@@ -234,6 +243,10 @@ export const listParameters = {
   type: "object",
   additionalProperties: false,
   properties: {
+    desktopSearch: { type: "string", description: "Search saved Desktop candidates by title, directory or native thread ID; unconfirmed live connections remain listed." },
+    desktopProject: { type: "string", description: "Exact Desktop project ID or absolute directory." },
+    desktopCursor: { type: "string", description: "Opaque next_cursor from the preceding Desktop page for the same filters." },
+    desktopLimit: { type: "integer", minimum: 1, maximum: 100, description: "Desktop page size (default 30)." },
     agent: {
       type: "string",
       enum: EXECUTOR_KINDS
@@ -261,8 +274,11 @@ export const listParameters = {
 export const watchParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["terminal_id"],
+  oneOf: [{ required: ["terminal_id"], not: { required: ["conversation_id"] } },
+    { required: ["conversation_id"], not: { required: ["terminal_id"] } }],
   properties: {
+    conversation_id: { type: "string", pattern: "^desktop:v1:[A-Za-z0-9_-]+$",
+      description: "Exact Desktop conversation_id from List. Observe the currently active exact native turn; idle or unresolved task identity is refused without sending input." },
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -276,7 +292,7 @@ export const watchParameters = {
       type: "number",
       exclusiveMinimum: 0,
       description:
-        "Optional maximum lifetime for observing this exact terminal."
+        "Optional maximum lifetime for observing this exact terminal or Desktop task."
     }
   }
 };
@@ -290,7 +306,7 @@ export const unwatchParameters = {
       type: "string",
       minLength: 1,
       description:
-        "Authoritative Terminal Watch id returned by watch or prefilled by list/status."
+        "Authoritative terminal or Desktop Watch id returned by watch or prefilled by list/status."
     }
   }
 };
@@ -652,17 +668,17 @@ export const statusParameters = {
     },
     conversation_id: {
       type: "string",
-      deprecated: true,
       description:
-        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled " +
-          "by that terminal row's available status action. Managed Turn status must use " +
-          "turn_id; never construct or guess a raw-terminal selector."
+        "Exact Desktop conversation_id from List, or the exact raw-terminal selector " +
+          "prefilled by that terminal row's available status action. Legacy Turn aliases " +
+          "remain supported but deprecated; managed Turn status must use turn_id. " +
+          "Never construct a Desktop identity; never construct or guess a raw-terminal selector."
     },
     watch_id: {
       type: "string",
       minLength: 1,
       description:
-        "Authoritative Terminal Watch id prefilled by a current watch row. This " +
+        "Authoritative terminal or Desktop Watch id prefilled by a current watch row. This " +
           "inspects externally started work and is mutually exclusive with Turn " +
           "targets."
     },

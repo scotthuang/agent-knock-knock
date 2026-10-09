@@ -58,7 +58,12 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   };
   assertNoModelOpaqueAuthority(mutationSchemas, "$.mutationSchemas");
   assert.deepEqual(sendParameters.not, {
-    required: ["session_id", "terminal_id"]
+    anyOf: [
+      { required: ["session_id", "terminal_id"] },
+      { required: ["conversation_id", "terminal_id"] },
+      { required: ["conversation_id", "session_id"] },
+      { required: ["conversation_id", "turn_id"] }
+    ]
   });
   assert.deepEqual(nativeInspectParameters.required, [
     "terminal_id",
@@ -153,7 +158,11 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
   assert.deepEqual(approveParameters.not, {
     required: ["turn_id", "terminal_id"]
   });
-  assert.deepEqual(watchParameters.required, ["terminal_id"]);
+  assert.deepEqual(watchParameters.oneOf, [
+    { required: ["terminal_id"], not: { required: ["conversation_id"] } },
+    { required: ["conversation_id"], not: { required: ["terminal_id"] } }
+  ]);
+  assert.equal(watchParameters.properties.conversation_id.pattern, "^desktop:v1:[A-Za-z0-9_-]+$");
   assert.deepEqual(unwatchParameters.required, ["watch_id"]);
   assert.ok(closeParameters.properties.expected_message_id);
   assert.ok(closeParameters.properties.expected_transition_id);

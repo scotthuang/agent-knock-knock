@@ -643,8 +643,12 @@ test("/akk watch and unwatch require authoritative exact identities", () => {
   );
 });
 
-test("Terminal Watch tool schemas require exact and mutually exclusive targets", () => {
-  assert.deepEqual(watchParameters.required, ["terminal_id"]);
+test("Terminal and Desktop Watch tool schemas require exact and mutually exclusive targets", () => {
+  assert.deepEqual(watchParameters.oneOf, [
+    { required: ["terminal_id"], not: { required: ["conversation_id"] } },
+    { required: ["conversation_id"], not: { required: ["terminal_id"] } }
+  ]);
+  assert.equal(watchParameters.properties.conversation_id.pattern, "^desktop:v1:[A-Za-z0-9_-]+$");
   assert.equal(
     Object.hasOwn(watchParameters.properties, "expected_binding_token"),
     false

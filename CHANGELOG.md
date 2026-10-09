@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.0 - 2026-10-09
+
+### Added
+
+- Discover Codex Desktop conversations alongside terminal sessions, with search, project filtering, pagination, and separate catalog and live-owner evidence. Keep unloaded and creator-unknown conversations discoverable without treating metadata as permission to send.
+- Send tasks to an exact existing Desktop conversation through its original owner, record a durable send intent, and bind monitoring to the accepted native task. Repeated message IDs and uncertain submissions never automatically resend task text.
+- Add Desktop Status and exact task Watch, with durable completion and manual-attention notifications. Monitoring retains its original native task when a later task starts; stopping a Watch leaves the Desktop task running.
+
+### Compatibility
+
+- Review local macOS Codex Desktop `26.1002.52244` build `13536` private IPC. Desktop v1 does not load inactive conversations, launch replacement CLI sessions, change permissions or models, answer questions, or approve requests. It reports unsupported or uncertain state explicitly.
+- Preserve the existing tmux and Herdr adapters and their terminal-specific interaction controls.
+
 ## 0.13.18 - 2026-10-04
 
 - Adapt Codex 0.160.0 async-question Option-key hints while preserving exact versioned input checks and older keymaps.
