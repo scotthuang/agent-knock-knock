@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add Desktop command/file approval decisions and blocking questionnaire responses through the original conversation owner, with exact native request and result evidence.
+- Add per-conversation Desktop Read Only/Default/Full Access settings, explicit model/effort and Plan/default controls, and exact-task cancellation. Verify effective settings instead of treating acknowledgements as success; report the unavailable model catalog explicitly.
+
+- Fix missed Codex Desktop asynchronous-question notifications by reading questions from native messages as well as pending requests.
+- Add typed responses for Desktop asynchronous questions in the exact active task, with durable response deduplication, native answer confirmation, and expiry of undelivered obsolete reminders.
+
 ## 0.14.0 - 2026-10-09
 
 ### Added

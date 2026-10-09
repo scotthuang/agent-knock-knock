@@ -1,6 +1,8 @@
+import { formatDesktopCommandResult } from "./desktop-command-presentation.js";
 import { executorDefinitionForKind } from "./executors.js";
 import { isDesktopConversationId, parseDesktopConversationId } from "./desktop-identity.js";
 import { isCodexNativeConversationId, parseCodexNativeConversationId } from "./codex-native-identity.js";
+import { validateDesktopInteractionProjections } from "./desktop-interaction-projection.js";
 import { validateNativeInteractionProjections } from "./codex-native-public-projection.js";
 import {
   isRecord,
@@ -116,6 +118,7 @@ function executorDisplayName(kind) {
 }
 
 export function formatStatusCommandResult(result) {
+  if (isRecord(result) && desktopResult(result)) return formatDesktopCommandResult(result, "status");
   if (isRecord(result) && codexNativeResult(result)) return formatCodexNativeCommandResult(result, "status");
   if (
     stringValue(result.watch_id) ||
@@ -410,6 +413,7 @@ function formatManagedSendCommandResult(result) {
 }
 
 export function formatSendCommandResult(result) {
+  if (isRecord(result) && desktopResult(result)) return formatDesktopCommandResult(result, "Send");
   if (isRecord(result) && codexNativeResult(result)) return formatCodexNativeCommandResult(result, "Send");
   return result.scope === "terminal_user_explicit"
     ? formatTerminalUserExplicitSendResult(result)
@@ -417,6 +421,7 @@ export function formatSendCommandResult(result) {
 }
 
 export function formatCancelCommandResult(result) {
+  if (isRecord(result) && desktopResult(result)) return formatDesktopCommandResult(result, "cancel");
   const conversation = result.conversation ?? {};
   const { sessionId, turnId } = publicTurnIdentity(result);
   return [
@@ -429,6 +434,7 @@ export function formatCancelCommandResult(result) {
 }
 
 export function formatApproveCommandResult(result) {
+  if (isRecord(result) && desktopResult(result)) return formatDesktopCommandResult(result, "response");
   if (isRecord(result) && codexNativeResult(result)) return formatCodexNativeCommandResult(result, "response");
   const conversation = result.conversation ?? {};
   const { sessionId, turnId } = publicTurnIdentity(result);
@@ -611,7 +617,9 @@ function sanitizeModelFacingValue(
         output[key] = sanitizeModelFacingValue(
           value.source === "codex_cli"
             ? validateNativeInteractionProjections(item, value.conversation_id, value.watch_id)
-            : validateAnyTerminalInteractionProjection(item),
+            : value.source === "codex_desktop"
+              ? validateDesktopInteractionProjections(item, value.conversation_id, value.watch_id, value.native_turn_id)
+              : validateAnyTerminalInteractionProjection(item),
           undefined,
           [...path, key]
         );

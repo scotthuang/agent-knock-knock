@@ -32,11 +32,12 @@ export function compactAkkListModelProjection(
     ...(Array.isArray(result.desktop_sessions) ? {
       desktop_sessions: arrayValue(result.desktop_sessions).map(row => ({
         ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent", "native_thread_id",
-          "host_id", "updated_at", "catalog_membership", "creator_originator", "connection_state", "activity_state", "native_turn_id", "pending_manual_count"]),
-        capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, ["send", "watch", "status", "interaction_notify", "interaction_respond", "approve"])
+          "host_id", "updated_at", "catalog_membership", "creator_originator", "connection_state", "activity_state", "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count"]),
+        capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, ["send", "watch", "status", "interaction_notify", "interaction_respond", "approve", "set_permissions", "set_model", "cancel"]),
+        ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
       })),
       desktop_watches: arrayValue(result.desktop_watches).map(row => compactAkkListScalars(row, [
-        "watch_id", "conversation_id", "status", "observation_mode", "anchor_state", "native_turn_id", "pending_manual_count", "callback_expected", "observation_error"])),
+        "watch_id", "conversation_id", "status", "observation_mode", "anchor_state", "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count", "callback_expected", "observation_error"])),
       desktop_scan: compactAkkListScalars(recordValue(result.desktop_scan) ?? {}, [
         "total_candidates", "returned", "next_cursor", "catalog_complete", "live_count", "application_version", "application_build", "write_contract_verified", "watch_error", "membership_is_not_live_identity"])
     } : {}),

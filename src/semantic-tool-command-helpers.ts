@@ -1,3 +1,4 @@
+import { formatDesktopCommandResult } from "./desktop-command-presentation.js";
 import path from "node:path";
 import { isCodexNativeConversationId, isCodexNativeWatchId, parseCodexNativeConversationId } from "./codex-native-identity.js";
 import { recordValue } from "./value-guards.js";
@@ -1028,6 +1029,7 @@ export function formatAkkThreadsCommandResult(
 export function formatAkkModelOptionsCommandResult(
   result: Record<string, unknown>
 ): string {
+  if (result.source === "codex_desktop") return formatDesktopCommandResult(result, "model options");
   const terminalId = nonEmptyString(result.terminal_id) ?? "unknown";
   const scope = nonEmptyString(result.scope) ?? "unknown";
   const current = recordValue(result.current) ?? {};
@@ -1059,6 +1061,7 @@ export function formatAkkModelOptionsCommandResult(
 export function formatAkkSetModelCommandResult(
   result: Record<string, unknown>
 ): string {
+  if (result.source === "codex_desktop") return formatDesktopCommandResult(result, "set model");
   const outcome = nonEmptyString(result.outcome) ?? "uncertain";
   const requested = recordValue(result.requested) ?? {};
   const effective = recordValue(result.effective) ?? {};

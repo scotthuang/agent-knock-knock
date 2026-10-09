@@ -1,10 +1,15 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { connectDesktopIpcTransport } from "./desktop-ipc-transport.js";
+import { sendDesktopAsyncAnswer } from "./desktop-ipc-async-answer.js";
+import { respondDesktopRequest, readDesktopModelSettings, updateDesktopSettings, interruptDesktopTurn,
+  type DesktopNativeOperationPort } from "./desktop-ipc-native-operations.js";
 import { desktopRecord, reduceDesktopSnapshot } from "./desktop-snapshot.js";
 import { DesktopIpcError, type DesktopIpcClientOptions, type DesktopIpcTransport, type DesktopOwner,
   type DesktopObserveTarget, type DesktopSendTurnOptions, type DesktopSnapshot, type DesktopTurnReceipt,
-  type DesktopDispatchState } from "./desktop-types.js";
+  type DesktopDispatchState, type DesktopAsyncAnswerOptions, type DesktopAsyncAnswerReceipt, type DesktopRequestOptions,
+  type DesktopRequestReceipt, type DesktopModelSettings, type DesktopSettingsOptions, type DesktopSettingsReceipt,
+  type DesktopInterruptOptions, type DesktopInterruptReceipt } from "./desktop-types.js";
 
 export const VERIFIED_DESKTOP_BUILD = Object.freeze({ version: "26.1002.52244", build: "13536" });
 const MIN_TIMEOUT_MS = 12_000;
@@ -39,7 +44,7 @@ function isExactStreamMessage(message: Record<string, unknown>, target: DesktopO
     && (message.targetClientIds == null || (Array.isArray(message.targetClientIds) && message.targetClientIds.includes(clientId)));
 }
 
-/** No generic RPC entry point, ownership acquisition, resume, steering, or approval responses. */
+/** Scoped native operations only; no generic RPC entry point or ownership acquisition. */
 export class DesktopIpcClient {
   private readonly pending = new Map<string, Pending>();
   private readonly unsubscribe: (() => void)[];
@@ -145,18 +150,62 @@ export class DesktopIpcClient {
     } finally { this.sending = false; }
   }
 
+  async answerAsyncOnce(options: DesktopAsyncAnswerOptions): Promise<DesktopAsyncAnswerReceipt> {
+    this.assertOpen(); this.validateWrite(options.clientUserMessageId); this.sending = true;
+    try {
+      return await sendDesktopAsyncAnswer(options, {
+        discoverOwner: (threadId, ownerId) => this.discoverOwner(threadId, ownerId),
+        observeThread: target => this.observeThread(target),
+        request: (params, ownerId) => this.request("thread-follower-steer-turn", 1, params, ownerId),
+        markDispatched: () => { this.assertOpen(); this.sentMessageIds.add(options.clientUserMessageId); }
+      });
+    } finally { this.sending = false; }
+  }
+
+  respondRequestOnce(options: DesktopRequestOptions): Promise<DesktopRequestReceipt> {
+    return this.nativeOperation(options.operationId, port => respondDesktopRequest(options, port));
+  }
+  readModelSettings(target: DesktopObserveTarget): Promise<DesktopModelSettings> {
+    return readDesktopModelSettings(target, this.nativePort());
+  }
+  updateThreadSettingsOnce(options: DesktopSettingsOptions): Promise<DesktopSettingsReceipt> {
+    return this.nativeOperation(options.operationId, port => updateDesktopSettings(options, port));
+  }
+  interruptTurnOnce(options: DesktopInterruptOptions): Promise<DesktopInterruptReceipt> {
+    return this.nativeOperation(options.operationId, port => interruptDesktopTurn(options, port));
+  }
+  private nativePort(operationKey?: string): DesktopNativeOperationPort {
+    return { discoverOwner: (thread, owner) => this.discoverOwner(thread, owner), observeThread: target => this.observeThread(target),
+      request: (method, version, params, owner) => this.request(method, version, params, owner),
+      markDispatched: () => {
+        this.assertOpen();
+        if (!operationKey) throw new DesktopIpcError("invalid_argument", "Readonly Desktop operation cannot dispatch");
+        this.sentMessageIds.add(operationKey);
+      } };
+  }
+  private async nativeOperation<T>(operationId: string, operation: (port: DesktopNativeOperationPort) => Promise<T>): Promise<T> {
+    if (typeof operationId !== "string" || !operationId.trim() || operationId.length > 512) throw new DesktopIpcError("invalid_argument", "Invalid Desktop operation identity");
+    const key = crypto.createHash("sha256").update(`desktop-operation:${operationId}`).digest("hex");
+    this.assertOpen(); this.validateWrite(key); this.sending = true;
+    try { return await operation(this.nativePort(key)); } finally { this.sending = false; }
+  }
+
   private validateSubmission(options: DesktopSendTurnOptions): void {
-    if (this.options.compatibility.version !== VERIFIED_DESKTOP_BUILD.version
-      || this.options.compatibility.build !== VERIFIED_DESKTOP_BUILD.build) {
-      throw new DesktopIpcError("incompatible_desktop", "Desktop write capability requires the verified version and build");
-    }
-    id(options.clientUserMessageId, "user message identity");
+    this.validateWrite(options.clientUserMessageId);
     if (typeof options.prompt !== "string" || !options.prompt.trim() || Buffer.byteLength(options.prompt) > 1024 * 1024
       || !Number.isSafeInteger(options.expectedRevision) || options.expectedRevision < 0
       || (options.expectedLatestTurnId !== null && typeof options.expectedLatestTurnId !== "string")) {
       throw new DesktopIpcError("invalid_argument", "Invalid Desktop turn submission");
     }
-    if (this.sending || this.sentMessageIds.has(options.clientUserMessageId)) {
+  }
+
+  private validateWrite(clientUserMessageId: string): void {
+    if (this.options.compatibility.version !== VERIFIED_DESKTOP_BUILD.version
+      || this.options.compatibility.build !== VERIFIED_DESKTOP_BUILD.build) {
+      throw new DesktopIpcError("incompatible_desktop", "Desktop write capability requires the verified version and build");
+    }
+    id(clientUserMessageId, "user message identity");
+    if (this.sending || this.sentMessageIds.has(clientUserMessageId)) {
       throw new DesktopIpcError("duplicate_submission", "Desktop submission is already attempted; it will not be retried");
     }
   }

@@ -7,8 +7,10 @@ import {
   createCallbackEnvelope, parseCallbackAttemptOutcome, parseCallbackRoute,
   type CallbackAttemptOutcome, type CallbackEnvelopeV1, type CallbackRouteV1
 } from "./callback-transport.js";
-import type { DesktopThreadIdentity } from "./desktop-types.js";
+import type { DesktopAsyncInteraction, DesktopInteraction, DesktopThreadIdentity } from "./desktop-types.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
+import { assertDesktopAsyncInteraction } from "./desktop-async-state.js";
+import { assertDesktopInteraction } from "./desktop-interaction-state.js";
 
 export const DESKTOP_TASKS_DIRECTORY = "desktop-tasks";
 export type DesktopTaskStatus = "awaiting_acceptance" | "watching" | "completed" |
@@ -55,6 +57,10 @@ export interface DesktopTaskRecord {
   observation_error?: string;
   pending_manual_count: number;
   pending_manual_fingerprint?: string;
+  /** Older v1 records omit this field; absence means no observed async questions. */
+  pending_async_interactions?: DesktopAsyncInteraction[];
+  /** All executable interactions; old async-only records remain readable. */
+  pending_interactions?: DesktopInteraction[];
   final_text?: string;
   notifications: DesktopNotification[];
 }
@@ -118,8 +124,43 @@ function assertNotification(r: DesktopTaskRecord, n: DesktopNotification, ids: S
   const envelope = createCallbackEnvelope({ route: r.callback_route, source: n.envelope.source, event: n.envelope.event });
   if (!isDeepStrictEqual(envelope, n.envelope) || envelope.source.kind !== "desktop_watch" ||
     envelope.source.watch_id !== r.id || envelope.source.desktop_id !== r.desktop_id ||
-    envelope.event.id !== n.id || envelope.event.requires_response) throw new Error("Desktop callback identity mismatch");
+    envelope.event.id !== n.id) throw new Error("Desktop callback identity mismatch");
+  if (envelope.event.requires_response) assertInteractionNotification(r, n);
   assertNotificationDelivery(n);
+}
+function assertInteractionNotification(record: DesktopTaskRecord, notification: DesktopNotification): void {
+  const event = notification.envelope.event; const metadata = event.metadata;
+  if (event.type !== "desktop_watch.interaction" || !metadata || !nonblank(metadata.interaction_id) ||
+    !["respond", "approve"].includes(String(metadata.action)) || metadata.thread_id !== record.target.threadId || metadata.turn_id !== record.native_turn_id ||
+    notification.id !== `${record.id}:interaction:${metadata.interaction_id}` || !metadata.interaction || typeof metadata.interaction !== "object") {
+    throw new Error("Desktop response notification requires an exact interaction");
+  }
+  const interaction = metadata.interaction as Record<string, unknown>;
+  if (!["async_question", "blocking_question", "command_approval", "file_approval"].includes(String(interaction.kind)) || interaction.interaction_id !== metadata.interaction_id ||
+    interaction.native_thread_id !== record.target.threadId || interaction.native_turn_id !== record.native_turn_id) {
+    throw new Error("Desktop response notification has a different interaction identity");
+  }
+  if (metadata.action !== (String(interaction.kind).endsWith("approval") ? "approve" : "respond")) throw new Error("Desktop notification action does not match its interaction");
+}
+function assertAsyncInteractions(record: DesktopTaskRecord): void {
+  if (record.pending_async_interactions === undefined) return;
+  if (!Array.isArray(record.pending_async_interactions)) throw new Error("Invalid Desktop pending async questions");
+  const ids = new Set<string>();
+  for (const interaction of record.pending_async_interactions) {
+    assertDesktopAsyncInteraction(interaction, record.target, record.native_turn_id);
+    if (!record.native_turn_id || ids.has(interaction.id)) throw new Error("Desktop async question lacks a unique task anchor");
+    ids.add(interaction.id);
+  }
+}
+function assertPendingInteractions(record: DesktopTaskRecord): void {
+  if (record.pending_interactions === undefined) return;
+  if (!Array.isArray(record.pending_interactions)) throw new Error("Invalid Desktop pending interactions");
+  const ids = new Set<string>();
+  for (const interaction of record.pending_interactions) {
+    assertDesktopInteraction(interaction, record.target, record.native_turn_id);
+    if (!record.native_turn_id || ids.has(interaction.id)) throw new Error("Desktop interaction lacks a unique task anchor");
+    ids.add(interaction.id);
+  }
 }
 function assertNotificationDelivery(n: DesktopNotification): void {
   if (n.outcome) parseCallbackAttemptOutcome(n.outcome);
@@ -131,6 +172,8 @@ export function assertDesktopTaskRecord(value: unknown): asserts value is Deskto
   if (!r || typeof r !== "object" || r.schema !== "agent-knock-knock/desktop-task" ||
     r.version !== 1 || !Number.isSafeInteger(r.revision) || r.revision < 1) throw new Error("invalid Desktop task record");
   assertTaskIdentity(r); assertTaskLifecycle(r);
+  assertAsyncInteractions(r);
+  assertPendingInteractions(r);
   if (r.kind === "send") assertSendIntent(r);
   else if (r.send_intent !== undefined || !r.native_turn_id) throw new Error("invalid Desktop watch anchor");
   if (r.callback_route) {

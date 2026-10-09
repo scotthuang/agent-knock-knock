@@ -4,7 +4,9 @@ export const SEMANTIC_APPROVAL_AUTHORITY_KIND = "approval";
 export const SEMANTIC_INTERACTION_AUTHORITY_KIND = "interaction";
 export const SEMANTIC_INTERACTION_AUTHORITY_SUBJECT_KINDS = [
   "managed_turn",
-  "terminal_watch"
+  "terminal_watch",
+  "desktop_conversation",
+  "desktop_watch"
 ] as const;
 
 export type SemanticInteractionAuthoritySubjectKind =
