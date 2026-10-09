@@ -5,6 +5,9 @@ import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "./desktop-ipc-client.j
 import { DesktopSessionCatalog } from "./desktop-session-catalog.js";
 import { createDesktopStateStore } from "./desktop-state-store.js";
 import { createDesktopTaskService } from "./desktop-task-service.js";
+import { createDesktopResponseStore } from "./desktop-response-store.js";
+import { createDesktopSessionControls } from "./desktop-session-controls.js";
+import { createDesktopResponseService } from "./desktop-response-service.js";
 import { createFileLockCliAdapter } from "./file-lock-cli-adapter.js";
 import { createOpenClawCallbackTransport } from "./openclaw-callback-transport.js";
 import { createHostProfileCallbackTransport } from "./host-profile-callback-transport.js";
@@ -57,6 +60,12 @@ export function createDesktopRuntime(options: DesktopRuntimeOptions) {
     },
     async start(identity, input) {
       return (await clientFor(identity)).sendTurnOnce(input);
+    },
+    async answerAsync(identity, input) {
+      return (await clientFor(identity)).answerAsyncOnce(input);
+    },
+    async respondRequest(identity, input) {
+      return (await clientFor(identity)).respondRequestOnce(input);
     }
   };
   const locks = createFileLockCliAdapter({ now: cliNow, nowMs: cliNowMs, pid: cliPid, sleepSync: cliSleepSync });
@@ -69,7 +78,14 @@ export function createDesktopRuntime(options: DesktopRuntimeOptions) {
     deliver: input => callbacks.deliver(input),
     resolveCallbackContext: task => ({ legacyOptions: { gatewayMethod: "chat.send",
       openclawSession: task.controller_session, gatewaySession: task.controller_session, openclawBin: options.openclawBin } }) });
-  return { catalog, compatibility, tasks, transport,
+  const responses = createDesktopResponseService({ tasks: repository,
+    repository: createDesktopResponseStore(options.storeDir, { acquire: lock => locks.acquire(lock) }),
+    observe: transport.observe, answerAsync: transport.answerAsync!, respondRequest: transport.respondRequest!, now: cliNow });
+  const controls = createDesktopSessionControls({ observe: transport.observe,
+    readModelSettings: async (identity, target) => (await clientFor(identity)).readModelSettings(target),
+    updateSettings: async (identity, input) => (await clientFor(identity)).updateThreadSettingsOnce(input),
+    interruptTurn: async (identity, input) => (await clientFor(identity)).interruptTurnOnce(input) });
+  return { catalog, compatibility, tasks, responses, transport, controls,
     async close() { for (const client of clients.values()) { try { (await client).close(); } catch { /* failed connection */ } } }
   };
 }

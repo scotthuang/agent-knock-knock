@@ -10,6 +10,7 @@ import type { DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, Desk
 import { findDesktopSubmission } from "./desktop-snapshot.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
 import type { DesktopNotification, DesktopStateRepository, DesktopTaskRecord } from "./desktop-state-store.js";
+import { clearDesktopInteractionAttention, desktopManualRequests, revokeObsoleteDesktopManualAttention, updateDesktopInteractionAttention } from "./desktop-task-interactions.js";
 
 export interface DesktopTaskInput {
   target: DesktopThreadIdentity;
@@ -60,7 +61,7 @@ function submissionTurn(snapshot: DesktopSnapshot, clientId: string, text: strin
   return findDesktopSubmission(snapshot, clientId, text)?.turn;
 }
 function finalText(turn: DesktopTurn): string {
-  const messages = turn.items.filter(item => item.type === "agentMessage" && typeof item.text === "string");
+  const messages = turn.items.filter(item => item.type === "agentMessage" && item.delivery !== "async" && typeof item.text === "string");
   const finals = messages.filter(item => item.phase === "final_answer");
   // Older snapshots can omit phase; explicit commentary/analysis must never
   // become the task's final result when no final answer exists.
@@ -136,7 +137,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       id, watch_id: id, desktop_id: input.desktopId, target: structuredClone(input.target),
       controller_session: input.controllerSession, kind, status: kind === "send" ? "awaiting_acceptance" : "watching",
       created_at: date.toISOString(), updated_at: date.toISOString(), deadline_at: new Date(date.getTime() + timeout).toISOString(),
-      ...(route ? { callback_route: route } : {}), pending_manual_count: 0, notifications: [] };
+      ...(route ? { callback_route: route } : {}), pending_manual_count: 0, pending_async_interactions: [], pending_interactions: [], notifications: [] };
   }
   private duplicate(task: DesktopTaskRecord, input: DesktopSendInput): DesktopTaskRecord {
     if (task.kind !== "send" || task.controller_session !== input.controllerSession ||
@@ -225,15 +226,15 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       const turn = matchingTurns.length === 1 ? matchingTurns[0] : undefined;
       if (!turn) task.observation_error = "desktop_exact_turn_unavailable";
       else {
-        const requests = turn.status === "inProgress" ? snapshot.pendingRequests.filter(request => request.turnId === task.native_turn_id) : [];
-        // Unattributed requests are only task-relevant while our exact task is the active tail.
-        if (snapshot.latestTurnId === task.native_turn_id && turn.status === "inProgress") requests.push(...snapshot.pendingRequests.filter(request => !request.turnId));
+        updateDesktopInteractionAttention(task, snapshot);
+        const requests = desktopManualRequests(task, snapshot);
         task.pending_manual_count = requests.length;
         if (requests.length) {
           const fingerprint = digest(requests.map(request => [request.kind, request.requestId, request.method, request.turnId]).sort());
           task.pending_manual_fingerprint = fingerprint;
           this.notify(task, `manual:${fingerprint}`, `Desktop task ${task.id} is waiting for a question or approval. Handle it manually in Desktop. AKK will continue watching this exact task.`);
         } else delete task.pending_manual_fingerprint;
+        revokeObsoleteDesktopManualAttention(task);
         if (["completed", "failed", "interrupted"].includes(turn.status)) {
           if (!turn.itemsComplete) task.observation_error = "desktop_exact_turn_items_incomplete";
           else {
@@ -263,6 +264,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
         } else task.observation_error = observationError;
         if (live(task) && this.now().getTime() >= Date.parse(task.deadline_at)) {
           task.status = "timed_out";
+          clearDesktopInteractionAttention(task, "desktop_watch_timed_out");
           this.notify(task, "timed_out", `Desktop Watch ${task.id} reached its deadline. This does not mean the native task stopped or that an uncertain send was rejected. AKK will not resend it.`);
         }
       });
@@ -354,6 +356,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     return this.update(id, task => {
       if (task.controller_session !== input.controllerSession) throw new DesktopTaskError("desktop_controller_mismatch", "Only the owning controller can cancel this Watch");
       if (live(task)) task.status = "cancelled";
+      clearDesktopInteractionAttention(task, "desktop_watch_cancelled");
       // Cancellation revokes future callbacks, but cannot recall an already-dispatched transport attempt.
       for (const notification of task.notifications) if (["ready", "retry_wait"].includes(notification.status)) {
         notification.status = "failed"; notification.outcome = { disposition: "permanent_failure", error_code: "desktop_watch_cancelled" };

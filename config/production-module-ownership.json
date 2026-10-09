@@ -863,7 +863,27 @@
       "owner": "lifecycle-core"
     },
     {
+      "path": "src/desktop-async-interactions.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-async-state.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-cli-adapter.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-cli-controls.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-command-presentation.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-control-semantic.ts",
       "owner": "codex-desktop"
     },
     {
@@ -871,7 +891,23 @@
       "owner": "codex-desktop"
     },
     {
+      "path": "src/desktop-interaction-projection.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-interaction-state.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-ipc-async-answer.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-ipc-client.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-ipc-native-operations.ts",
       "owner": "codex-desktop"
     },
     {
@@ -895,6 +931,34 @@
       "owner": "codex-desktop"
     },
     {
+      "path": "src/desktop-request-interactions.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-response-dispatch.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-response-evidence.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-response-service.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-response-store.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-response-types.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-response-value.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-runtime.ts",
       "owner": "codex-desktop"
     },
@@ -907,11 +971,23 @@
       "owner": "codex-desktop"
     },
     {
+      "path": "src/desktop-session-controls.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-snapshot-details.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-snapshot.ts",
       "owner": "codex-desktop"
     },
     {
       "path": "src/desktop-state-store.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-task-interactions.ts",
       "owner": "codex-desktop"
     },
     {

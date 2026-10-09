@@ -2,8 +2,9 @@
 
 AKK can discover an existing local Codex Desktop conversation, send a task to
 its original Desktop owner, and monitor the exact native task for completion
-or manual attention. It does not open a second CLI conversation from the same
-history. Desktop approval and question answering are outside this first version.
+or attention. It can notify and answer asynchronous questions in the same active
+native task. It does not open a second CLI conversation from the same history.
+Command/file approvals, blocking questions, session settings, and exact task interruption use that same original owner. Unsupported native request forms remain manual.
 
 The reviewed application is macOS Codex Desktop `26.1002.52244`, build `13536`,
 bundle ID `com.openai.codex`, installed as `/Applications/ChatGPT.app`. These
@@ -22,9 +23,14 @@ uses that version.
 | Automatic monitoring | Retain a durable Watch for the accepted native task and reconcile uncertain acceptance without resending |
 | Explicit Watch | Bind to one exact task already running in the selected Desktop conversation |
 | Completion | Settle from the bound native task's terminal state and retain its result even if a later task starts |
-| Questions and approvals | Notify that manual attention is needed; the user responds in Desktop |
+| Asynchronous questions | Expose the question and options, notify the controller, and submit its explicit answer to the same active task |
+| Blocking questions | Notify with all native questions and submit one complete typed answer to the exact pending request |
+| Command/file approvals | Notify with the available current command or file preview; submit explicit accept-once or reject and confirm native item progression |
+| Permissions | Apply Read Only, Default, or Full Access to this idle conversation and verify the effective policy |
+| Model and mode | Read current settings; apply an explicitly requested model/effort and optional Plan/default mode; no model catalog is exposed |
+| Cancellation | Interrupt the exact selected native task; an old task ID never cancels a newer task |
 | Unwatch | Stop observation without cancelling or changing the Desktop task |
-| Cold loading, resume, new conversation, cancellation, model or permission changes | Not supported by the Desktop adapter |
+| Cold loading, resume, new conversation | Not supported by the Desktop adapter |
 
 No Desktop operation types a slash command or uses terminal activity as exact
 completion evidence. Existing terminal capabilities remain separate and retain
@@ -100,9 +106,63 @@ An idle conversation, a newer message, or a callback transport acknowledgement
 does not by itself prove the selected task succeeded. A completion result may
 be `completed`, `failed`, or `interrupted`; inspect the recorded outcome.
 
-Questions and approvals produce manual-attention notifications while the
-Watch continues. Respond in Desktop. Desktop v1 never turns an attention
-notification into an executable answer or approval offer.
+Asynchronous questions appear in `interaction_state` on fresh conversation or
+Watch Status. The Watch sends a durable notification with the question and
+options while the task continues working. A notification is not permission to
+choose an answer: the controller refreshes Status, presents the question to the
+user, and waits for their reply. It then refreshes Status and calls
+`agent_knock_knock_respond_interaction` with the exact conversation or Watch,
+interaction ID, and the advertised question/option IDs. Free-text answers are
+also supported. Only `steer_current_turn` is supported; a completed task's
+question cannot start another task.
+
+The response is recorded before dispatch. Inspect later Status `response_state`
+to recover its receipt without resending. The durable dispatcher deduplicates
+repeated identical answers, but an expired or consumed Host offer does not
+authorize another Respond call. A native acknowledgement is `sent`, not
+`confirmed`; confirmation requires the matching accepted native answer in the
+original task. An uncertain outcome is observed, never automatically replayed. Later Status
+returns `response_state` so receipt recovery does not require resending an answer.
+Answered questions disappear from the pending list. Undelivered reminders are
+withdrawn when the question is answered or its task ends; an already delivered
+notification cannot be recalled.
+
+Blocking questions use the same response tool, with all advertised questions
+answered together and no `delivery_mode`. Command/file approvals use
+`agent_knock_knock_approve` with the exact conversation or Watch,
+`interaction_id`, and `decision: "approve_once"` or `"reject"`. Refresh Status in
+the same controller conversation before acting. Approval confirmation requires
+the exact native command/file item to advance; a missing request or a completed
+task alone is insufficient. Other native request forms remain manual.
+
+## Settings and cancellation
+
+`permission_options({conversation_id})` exposes `read-only`, `default`, and
+`full-access`. `set_permissions({conversation_id,mode})` changes only this idle
+conversation. Full Access is an ordinary option with no extra confirmation.
+AKK verifies the effective permission profile, approval policy, reviewer, and
+sandbox type before reporting `applied: true`; global defaults are unchanged.
+For an idle conversation, `applies_to: "next_task"` reads resolved
+`latestThreadSettings`. The app keeps `currentPermissions` from the last task
+until another starts; during active work, permission inspection reports that
+current task's actual policy instead.
+
+`model_options({conversation_id})` reports the current model, reasoning effort,
+and collaboration mode. The reviewed follower API has no model-list method:
+`catalog_available` is false, not an empty or fabricated available-model list.
+`set_model({conversation_id,model,reasoning_effort,collaboration_mode?})` accepts
+an explicitly requested model ID. Optional mode is `plan` or `default`; omitting
+it preserves the existing mode and custom instructions. Readback confirms the
+effective settings, not model availability or account entitlement. Settings
+changes require an idle conversation. Unknown outcomes are inspected, never
+automatically replayed.
+
+`cancel({watch_id})` targets the Watch's original native task.
+`cancel({conversation_id,expected_native_turn_id})` uses the exact task ID from
+fresh Status. Both use the native expected-turn interruption contract. An old
+settled task returns its existing outcome without interrupting a newer task.
+Cancellation may race with completion: report the observed native outcome,
+not a promised interruption. `unwatch` only stops monitoring.
 
 ## Protocol and persistence
 
@@ -156,7 +216,7 @@ support for every Desktop build, platform, or remote host.
 
 The reviewed boundary does not cover Windows/Linux Desktop, cloud-hosted
 threads, arbitrary installations of the app, automatic conversation loading,
-approval or question responses, permission/model changes, or atomic
+automatic model catalog discovery, unsupported approval forms, or atomic
 coordination with simultaneous human input. Completion generation and durable
 delivery state must also be distinguished from successful delivery through an
 external chat provider.
@@ -192,9 +252,109 @@ correlation, CLI/tool routing, persistence, manual-attention fixtures, and
 existing terminal regressions. Build, architecture and refactor-evidence
 validators passed without increasing architecture budgets. Full/release tests
 were not run because this was an implementation round, not publication.
-Manual questions/approvals, app restart during a task, unloaded-thread
-activation, and alternate app builds were not exercised live.
+Those initial implementation tests did not exercise manual questions/approvals,
+app restart during a task, unloaded-thread activation, or alternate app builds.
+Later verification and the asynchronous-question change are recorded below.
 
 The installed app bundle identifies the reviewed version. The private IPC
 handshake does not attest the live owner's build; installations where the
 running app and its on-disk bundle differ remain a compatibility boundary.
+
+## Asynchronous-question repair — 2026-10-09
+
+A dedicated-thread reproduction confirmed that Desktop stores asynchronous
+questions on `agentMessage.delivery = "async"` with `questions`, while
+`requests` can remain empty. The original adapter dropped these fields and
+missed the notification. The repaired adapter reads both structures and
+recognizes accepted native replies, including steering messages that later
+materialize as canonical user messages.
+
+The changed production semantic tools and compiled CLI were exercised against
+the same reviewed Desktop build, without installing the patch:
+
+- A choice question appeared in Watch Status and delivered one durable
+  question notification. The advertised Green option was submitted through
+  `respond_interaction`; exact native answer evidence confirmed the response,
+  and the original task completed with Green.
+- A free-text question appeared in conversation Status. Orchid was submitted
+  to that exact conversation through the same tool, and the original task
+  completed with Orchid. Later Status exposed the confirmed `response_state`.
+- Repeating each answer recovered the same confirmed response record, with no
+  additional task. Answered questions disappeared, and each task delivered one
+  completion callback.
+
+These two repair proofs used the production Host-profile callback transport
+with a local receiver; this patch was not installed into the running Gateway
+and no new WeChat delivery is claimed. The earlier Desktop completion proof
+separately reached WeChat and was confirmed by the user. A preliminary native
+PoC was also repeated before implementing the repair.
+
+Fast regressions cover incomplete history, stale questions, owner/turn changes,
+unknown dispatch outcomes, explicit retries after proven non-dispatch, response
+recovery through Status, cross-Watch deduplication, and retirement of unsent
+obsolete notifications. Partial history is unknown, not proof that a question
+was answered. Native async-answer acknowledgement and exact answer confirmation
+remain separate states. That repair alone did not enable approvals, blocking responses, or settings.
+The subsequent implementation below adds those controls; cold loading remains unsupported.
+
+The final repair check passed `npm run test:fast` (**2622/2622**), including its
+build, plus `npm run validate:architecture`, `npm run validate:refactor-evidence`
+and `git diff --check`. Architecture budgets were unchanged. Full/integration
+and release suites were not run under the repository's development test policy.
+
+## Native controls implementation — 2026-10-09
+
+The production semantic tools, compiled CLI, durable response store, and Watch
+monitor were exercised against the same reviewed Desktop build in the dedicated
+test conversation. This round did not rely on direct proof-script responses:
+all task sends, answers, approvals, settings changes, and cancellation used the
+AKK product entry points.
+
+Eight native tasks verified:
+
+- Read Only command approval accepted and execution observed; a separate command
+  rejected, with its proposed file demonstrably absent.
+- File approval accepted and the exact expected file contents observed.
+- Plan-mode blocking input answered both native questions in one typed response;
+  native answer records and the original task's final result agreed.
+- Default-mode asynchronous input answered in the same running task, preserving
+  the earlier async-question repair.
+- Default permission mode allowed a benign workspace write; Full Access allowed
+  a benign write to a dedicated directory outside that workspace. Native task
+  permissions and file contents confirmed both effects.
+- An exact Watch cancelled its own active task. The native state and callback
+  reported `interrupted`; repeating cancellation for that settled native ID
+  returned its existing outcome without issuing another interruption.
+
+Seven tasks completed and one was intentionally interrupted. Each produced one
+settlement callback; all five approval/question interactions also produced
+attention notifications and confirmed response records. This round used the
+production Host-profile callback transport with a local receiver, not a new
+Gateway/WeChat delivery test. Earlier user-confirmed WeChat evidence remains
+separate.
+
+The same product controls changed the model and reasoning effort, switched
+Plan/default mode, and verified the effective collaboration settings. They then
+restored the original model, effort, mode, and permission preset. Test files were
+removed after verifying their exact contents; the conversation was left idle
+and its test monitors exited. No unrelated conversation was used.
+
+One real readback issue was corrected during this verification: idle setting
+updates replace `latestThreadSettings`, while `currentPermissions` remains the
+last task's applied policy. AKK now distinguishes next-task settings from active
+task permissions instead of incorrectly timing out on an already-applied change.
+Regression coverage preserves both native fields and rejects partial preset
+matches. Model confirmation likewise uses the effective collaboration tuple,
+not only a top-level model cache.
+
+Limitations still include automatic new/cold-resume operations, model catalog
+and account-availability discovery, unsupported native request forms, alternate
+Desktop builds/platforms, and atomic coordination with simultaneous human input.
+No package publication or local installation was performed in this round.
+
+Final checks passed `npm run test:fast` (**2662/2662**, including the build),
+`npm run validate:architecture`, `npm run validate:refactor-evidence`, Skill
+synchronization/validation, and `git diff --check`. Architecture budgets were
+unchanged. Full/integration/release suites were skipped under the development
+test policy. An additional native settings check confirmed that changing only
+model/effort preserves the current mode, then restored the original settings.

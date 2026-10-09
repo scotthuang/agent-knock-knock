@@ -32,16 +32,23 @@ test("catalog-only Desktop conversations remain selectable without claiming live
   const result = desktopSessionProjection(entry);
   assert.equal(result.conversation_id, conversationId); assert.equal(result.creator_originator, "codex-tui");
   assert.equal(result.connection_state, "unconfirmed"); assert.equal(result.activity_state, "unknown");
-  assert.deepEqual(result.capabilities, { status: true, send: false, watch: false, interaction_notify: false, interaction_respond: false, approve: false });
+  assert.deepEqual(result.capabilities, { status: true, send: false, watch: false, interaction_notify: false, interaction_respond: false, approve: false, set_permissions: false, set_model: false, cancel: false });
   assert.deepEqual(result.available_actions, { status: { tool: "agent_knock_knock_status", input: { conversation_id: conversationId } } });
 });
 
 test("Desktop send requires a verified write contract; Watch requires a uniquely active exact tail", () => {
   assert.equal((desktopSessionProjection(entry, snapshot(), false).capabilities as any).send, false);
   assert.equal((desktopSessionProjection(entry, snapshot(), true).capabilities as any).send, true);
+  assert.equal((desktopSessionProjection(entry, snapshot(), false).capabilities as any).set_permissions, false);
+  assert.equal((desktopSessionProjection(entry, snapshot(), true).capabilities as any).set_permissions, true);
   const running = snapshot({ runtimeStatus: "active", canSend: false, latestTurnId: "turn-one",
     turns: [{ turnId: "turn-one", status: "inProgress", items: [], itemsComplete: true }] });
   assert.equal((desktopSessionProjection(entry, running).capabilities as any).watch, true);
+  assert.equal((desktopSessionProjection(entry, running, true).capabilities as any).set_permissions, false);
+  assert.equal((desktopSessionProjection(entry, running, true).capabilities as any).set_model, false);
+  assert.equal((desktopSessionProjection(entry, running, true).capabilities as any).cancel, true);
+  assert.deepEqual((desktopSessionProjection(entry, running, true).available_actions as any).cancel.input,
+    { conversation_id: conversationId, expected_native_turn_id: "turn-one" });
   for (const invalid of [{ ...running, runtimeStatus: "unknown" as const }, { ...running, tailKnown: false },
     { ...running, latestTurnId: "different-turn" }]) {
     assert.equal((desktopSessionProjection(entry, invalid).capabilities as any).watch, false);

@@ -194,7 +194,15 @@
     "test/codex-native-runtime.test.ts",
     "test/codex-native-semantic.test.ts",
     "test/codex-native-snapshot.test.ts",
-    "test/codex-native-task-service.test.ts"
+    "test/codex-native-task-service.test.ts",
+    "test/desktop-async-interactions.test.ts",
+    "test/desktop-response-service.test.ts",
+    "test/desktop-interaction-projection.test.ts",
+    "test/desktop-async-semantic.test.ts",
+    "test/desktop-native-protocol.test.ts",
+    "test/desktop-request-response-service.test.ts",
+    "test/desktop-request-task-service.test.ts",
+    "test/desktop-session-controls.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",

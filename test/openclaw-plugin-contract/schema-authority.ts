@@ -70,17 +70,21 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     { required: ["terminal_id"], not: { required: ["conversation_id"] } },
     { required: ["conversation_id"], not: { required: ["terminal_id"] } }
   ]);
-  assert.deepEqual(modelOptionsParameters.required, ["terminal_id"]);
+  assert.deepEqual(modelOptionsParameters.oneOf, [
+    { required: ["terminal_id"], not: { required: ["conversation_id"] } },
+    { required: ["conversation_id"], not: { required: ["terminal_id"] } }
+  ]);
   assert.deepEqual(repairModelControlParameters.required, ["terminal_id"]);
   assert.deepEqual(Object.keys(repairModelControlParameters.properties), [
     "terminal_id"
   ]);
   assert.deepEqual(setModelParameters.required, [
-    "terminal_id",
     "model",
     "reasoning_effort"
   ]);
   assert.deepEqual(Object.keys(setModelParameters.properties), [
+    "conversation_id",
+    "collaboration_mode",
     "terminal_id",
     "model",
     "reasoning_effort"

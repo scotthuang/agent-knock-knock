@@ -74,7 +74,7 @@ Open a Web conversation and enter `/akk list`. The connector gives every convers
 
 ## What AKK Gives You
 
-AKK 0.14 adds Codex Desktop discovery, task sending, Status, and exact task Watches. List includes Desktop catalog candidates even when the app has unloaded their live owner; only a freshly verified live conversation can receive a task. Desktop approval and question answering remain manual in this first version. See [Desktop compatibility and usage](docs/codex-desktop-compatibility.md).
+AKK 0.14 adds Codex Desktop discovery, task sending, Status, and exact task Watches. List includes Desktop catalog candidates even when the app has unloaded their live owner; only a freshly verified live conversation can receive a task. Desktop supports command/file approval decisions, blocking and asynchronous answers, per-conversation permissions, explicit model and Plan/default settings, and exact task cancellation. See [Desktop compatibility and usage](docs/codex-desktop-compatibility.md).
 
 Codex CLI sessions connected to a shared backend can also be controlled directly, without tmux or Herdr. Native CLI rows support task sending, exact Watch and callbacks, command/file approvals, blocking and asynchronous answers, and per-thread permission settings. See the [CLI shared-backend guide](docs/codex-cli-native-compatibility.md).
 
@@ -94,7 +94,7 @@ question boundaries. Codex 0.157.x retains its [partial compatibility](docs/code
 - **Switch models through the native catalog.** `/akk models <exact-terminal-id>` lists the choices currently offered by one exact physical Codex or Claude Code pane; a Codex rollout/native-thread attribution is not required, so this also works before the first rollout materializes. `/akk set-model ...` consumes one exact advertised model/reasoning-effort tuple without accepting raw slash commands, keys, or menu indexes. Codex synchronizes the model and ordinary efforts through `max` to the current and future-session defaults; its `ultra` effort is current-session-only, and the native UI does not expose the exact non-Ultra effort chosen for future sessions, so AKK omits that unobservable field. Claude Code changes only the current session.
 - **Continue or clear only a proven model-control residue.** If a failed profiled Codex 0.154.0/0.155.1 model-control attempt leaves an exact `/model` completion surface or bare `/model` Composer, a fresh List may advertise both `/akk models <exact-terminal-id>` and `/akk repair-model-control <exact-terminal-id>`. Models uses a separate residual-bound authority to continue that exact native slash command into read-only catalog discovery without retyping it. If the exact native picker is already open, List marks the pane non-idle and advertises repair only. Repair remains the cleanup-only escape hatch, never presses Enter, and must prove an empty Composer.
 - **Inspect and recover.** `/akk status <turn-or-watch>` shows current state when a callback is delayed. Durable callback records and Watches provide a recovery path after transient Host failures.
-- **Approve deliberately in supported terminals.** AKK can surface Codex or Claude Code permission requests and submit an explicit human decision. It preserves the coding agent's existing permission mode. Desktop v1 only notifies you to handle questions and approvals in the app.
+- **Approve deliberately in supported conversations.** AKK can surface Codex or Claude Code permission requests and submit an explicit human decision. It preserves the coding agent's existing permission mode. Desktop exposes typed command/file approvals and blocking or asynchronous answers through the original conversation owner.
 - **Hand control back and forth.** Attach to the same tmux or Herdr pane whenever you want. AKK does not create a parallel hidden conversation.
 
 The common workflow is:
@@ -154,7 +154,7 @@ AKK is local-first: there is no hosted control plane or telemetry. It stores onl
 | Component | Supported boundary |
 | --- | --- |
 | Terminal hosts | tmux; local Herdr `0.8.0` protocol `19` |
-| Codex Desktop | macOS `26.1002.52244`, build `13536`; local existing conversations via private IPC; send, status, and exact Watch only |
+| Codex Desktop | macOS `26.1002.52244`, build `13536`; local existing conversations via private IPC; send, Status, exact Watch, approvals/answers, settings, and cancellation |
 | Codex CLI shared backend | Verified CLI `0.160.0` + app-server `0.162.0`; loaded main CLI threads, with live protocol checks |
 | Coding agents | Codex and Claude Code; unknown complete versions are allowed with a compatibility warning and fail naturally if behavior changed |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
@@ -172,7 +172,7 @@ Choose the guide that matches what you are trying to do:
 | --- | --- |
 | [tmux quick start](docs/quickstart-tmux.md) | First OpenClaw task, multiple panes, and selectors |
 | [Herdr quick start](docs/quickstart-herdr.md) | Local Herdr discovery and exact-version checks |
-| [Codex Desktop](docs/codex-desktop-compatibility.md) | Discover existing Desktop conversations, send once, monitor exact tasks, and handle manual attention |
+| [Codex Desktop](docs/codex-desktop-compatibility.md) | Discover existing Desktop conversations, send and monitor exact tasks, respond to interactions, and change native settings |
 | [Pi connector](connectors/pi/README.md) | Pi installation, semantic tool catalog, bundled skill, native approval, callbacks, upgrade, and uninstall |
 | [DeepSeek Harness connector](connectors/deepseek-harness/README.md) | Harness installation, approval contract, callbacks, upgrade, and troubleshooting |
 | [Operator guide](docs/operator-guide.md) | Complete command reference, reliable Send, Watch, Status, approval, recovery, Sessions, and native threads |
@@ -206,7 +206,7 @@ Connector development uses `npm run pi:build` from the repository root, or `cd c
 
 ## Security and Privacy
 
-AKK controls local coding-agent sessions, so treat installation as privileged local automation. Use an unprivileged OS account, restrict tmux, Herdr, and Desktop IPC sockets, keep the state directory private, and review approval prompts before allowing input. Ordinary AKK Send does not change agent permissions. Desktop tasks inherit that conversation's current settings; handle its questions and approvals manually. The explicit terminal Codex permission tool applies only the user-selected native mode; model-facing tools never receive terminal-control tokens, callback credentials, Composer text, or approval fingerprints.
+AKK controls local coding-agent sessions, so treat installation as privileged local automation. Use an unprivileged OS account, restrict tmux, Herdr, and Desktop IPC sockets, keep the state directory private, and review approval prompts before allowing input. Ordinary AKK Send does not change agent permissions. Desktop tasks inherit that conversation's current settings. Respond to supported approvals and questions through their advertised actions; unknown request forms remain manual. The explicit Codex permission tool applies only the user-selected native mode; model-facing tools never receive terminal-control tokens, callback credentials, Composer text, or approval fingerprints.
 
 Report vulnerabilities privately using [GitHub Security Advisories](https://github.com/scotthuang/agent-knock-knock/security/advisories/new). Please do not include secrets, private terminal output, or credentials in a public issue.
 

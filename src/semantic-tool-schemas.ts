@@ -2,9 +2,9 @@ import { EXECUTOR_KINDS } from "./executors.js";
 import { TERMINAL_INTERACTION_LIMITS } from
   "./terminal-interaction-protocol.js";
 
-const nativeConversationSchema = {
-  type: "string", pattern: "^codex-cli:v1:[A-Za-z0-9_-]+$",
-  description: "Exact direct Codex CLI conversation_id returned by List; identifies one loaded backend thread without requiring tmux or Herdr."
+const desktopConversationSchema = {
+  type: "string", pattern: "^desktop:v1:[A-Za-z0-9_-]+$",
+  description: "Exact Desktop conversation_id from List; never a CLI or terminal selector."
 };
 const nativeOrDesktopConversationSchema = {
   type: "string", pattern: "^(?:desktop|codex-cli):v1:[A-Za-z0-9_-]+$",
@@ -53,8 +53,17 @@ export const respondInteractionParameters = {
     },
     { required: ["conversation_id"], not: { anyOf: [{ required: ["turn_id"] }, { required: ["watch_id"] }] } }
   ],
+  allOf: [{
+    if: { anyOf: [{ required: ["conversation_id"] }, { required: ["watch_id"] }], properties: {
+      conversation_id: { pattern: "^desktop:v1:" }, watch_id: { pattern: "^desktop-watch:" }
+    } },
+    then: { properties: {
+      delivery_mode: { enum: ["steer_current_turn"] },
+      answers: { maxItems: 16, items: { properties: { response_kind: { enum: ["single_select", "free_text"] } } } }
+    } }
+  }],
   properties: {
-    conversation_id: nativeConversationSchema,
+    conversation_id: nativeOrDesktopConversationSchema,
     turn_id: {
       ...terminalInteractionIdentifierSchema,
       description:
@@ -63,8 +72,8 @@ export const respondInteractionParameters = {
     watch_id: {
       ...terminalInteractionIdentifierSchema,
       description:
-        "Exact terminal or direct Codex CLI Watch id from the current interaction_state " +
-          "projection. Supply exactly one of turn_id, watch_id, or direct CLI conversation_id."
+        "Exact terminal, Desktop, or direct Codex CLI Watch id from the current interaction_state " +
+          "projection. Supply exactly one of turn_id, watch_id, or Desktop/direct CLI conversation_id."
     },
     interaction_id: {
       ...terminalInteractionIdentifierSchema,
@@ -86,7 +95,7 @@ export const respondInteractionParameters = {
       maxItems: 16,
       description:
         "Typed answers using only advertised opaque semantic ids: one current step " +
-          "for terminal interactions, every question in one direct CLI request. For " +
+          "for terminal interactions, every question in one Desktop or direct CLI request. For " +
           "single_select supply selected_option_ids; for free_text supply text; for " +
           "confirm supply confirm. Async questions optionally select top-level " +
           "delivery_mode (default: steer_current_turn). Supply no other answer field. " +
@@ -99,7 +108,7 @@ export const respondInteractionParameters = {
         description:
           "Provider-portable answer envelope. AKK revalidates the exact " +
             "discriminator-specific shape against the current authoritative interaction " +
-            "before sending terminal input.",
+            "before dispatching an answer.",
         properties: {
           ...terminalInteractionAnswerBase,
           response_kind: {
@@ -123,7 +132,7 @@ export const respondInteractionParameters = {
             maxLength: TERMINAL_INTERACTION_LIMITS.maxTextAnswerLength,
             pattern: "^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f]+$",
             description:
-              "Required only for free_text. Direct Codex CLI JSON answers allow newlines and tabs; terminal answers require one non-empty line without control characters."
+              "Required only for free_text. Desktop and direct Codex CLI JSON answers allow newlines and tabs; terminal answers require one non-empty line without control characters."
           },
           confirm: {
             type: "boolean",
@@ -167,7 +176,7 @@ export const sendParameters = {
   properties: {
     conversation_id: {
       ...nativeOrDesktopConversationSchema,
-      description: "Exact Desktop or direct Codex CLI conversation_id from List. Send once into the loaded original thread and bind an exact task Watch. Desktop approvals and answers remain manual; direct CLI advertises typed interactions. Uncertain sends are not automatically replayed."
+      description: "Exact Desktop or direct Codex CLI conversation_id from List. Send once into the loaded original thread and bind an exact task Watch. Use Status for current Desktop or direct CLI typed approvals and questions. Uncertain sends are not automatically replayed."
     },
     turn_id: {
       type: "string",
@@ -358,7 +367,7 @@ export const nativeInspectParameters = {
   required: ["inspection"],
   oneOf: terminalOrNativeTarget,
   properties: {
-    conversation_id: nativeConversationSchema,
+    conversation_id: nativeOrDesktopConversationSchema,
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -386,8 +395,9 @@ export const nativeInspectParameters = {
 export const modelOptionsParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["terminal_id"],
+  oneOf: terminalOrNativeTarget,
   properties: {
+    conversation_id: desktopConversationSchema,
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -409,7 +419,7 @@ export const permissionOptionsParameters = {
   additionalProperties: false,
   oneOf: terminalOrNativeTarget,
   properties: {
-    conversation_id: nativeConversationSchema,
+    conversation_id: nativeOrDesktopConversationSchema,
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -427,7 +437,7 @@ export const setPermissionsParameters = {
   required: ["mode"],
   oneOf: terminalOrNativeTarget,
   properties: {
-    conversation_id: nativeConversationSchema,
+    conversation_id: nativeOrDesktopConversationSchema,
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -470,8 +480,13 @@ export const repairModelControlParameters = {
 export const setModelParameters = {
   type: "object",
   additionalProperties: false,
-  required: ["terminal_id", "model", "reasoning_effort"],
+  required: ["model", "reasoning_effort"],
+  oneOf: terminalOrNativeTarget,
+  allOf: [{ if: { required: ["terminal_id"] }, then: { not: { required: ["collaboration_mode"] } } }],
   properties: {
+    conversation_id: desktopConversationSchema,
+    collaboration_mode: { type: "string", enum: ["plan", "default"],
+      description: "Desktop only: optional current-thread collaboration mode. Omit to retain the current mode." },
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -489,7 +504,7 @@ export const setModelParameters = {
       maxLength: 160,
       pattern: "^[A-Za-z0-9][A-Za-z0-9._:/+\\-]*$",
       description:
-        "Exact semantic model id advertised by the current model-options catalog. " +
+        "For Desktop, the explicit model id requested by the user; its IPC exposes no model catalog, so do not infer available models. For a terminal, an exact id advertised by the current model-options catalog. " +
           "Display labels, menu indexes, slash commands, keys, and constructed model " +
           "names are not accepted."
     },
@@ -499,7 +514,7 @@ export const setModelParameters = {
       maxLength: 64,
       pattern: "^[a-z][a-z0-9_-]*$",
       description:
-        "Exact reasoning-effort value advertised for this model. The full " +
+        "For Desktop, the explicitly requested effort; for terminals, the effort advertised for this model. The full " +
           "model/effort tuple is required so AKK can verify an unambiguous " +
           "postcondition."
     }
@@ -725,27 +740,24 @@ export const statusParameters = {
 export const cancelParameters = {
   type: "object",
   additionalProperties: false,
-  not: { required: ["turn_id", "conversation_id"] },
-  anyOf: [
-    { required: ["turn_id"] },
-    { required: ["conversation_id"] }
+  oneOf: [
+    { required: ["turn_id"], not: { anyOf: [{ required: ["conversation_id"] }, { required: ["watch_id"] }] } },
+    { required: ["conversation_id"], not: { anyOf: [{ required: ["turn_id"] }, { required: ["watch_id"] }] } },
+    { required: ["watch_id"], not: { anyOf: [{ required: ["turn_id"] }, { required: ["conversation_id"] }] } }
   ],
+  allOf: [{
+    if: { required: ["conversation_id"], properties: { conversation_id: { pattern: "^desktop:v1:" } } },
+    then: { required: ["expected_native_turn_id"], not: { required: ["idleTimeoutMinutes"] } },
+    else: { not: { required: ["expected_native_turn_id"] } }
+  }, { if: { required: ["watch_id"] }, then: { not: { required: ["idleTimeoutMinutes"] } } }],
   properties: {
-    turn_id: {
-      type: "string",
-      description: "Authoritative AKK turn id to interrupt."
-    },
-    conversation_id: {
-      type: "string",
-      deprecated: true,
-      description:
-        "Deprecated legacy Turn alias, or the exact raw-terminal selector prefilled " +
-          "by that terminal row's available cancel action. Managed Turn cancellation " +
-          "must use turn_id; never construct or guess a raw-terminal selector."
-    },
-    idleTimeoutMinutes: {
-      type: "number"
-    }
+    turn_id: { type: "string", description: "Authoritative AKK turn id to interrupt." },
+    watch_id: { type: "string", pattern: "^desktop-watch:[A-Za-z0-9_-]{8,128}$",
+      description: "Exact Desktop Watch; interrupt only its anchored native task, never a later task." },
+    conversation_id: { type: "string", description: "Exact Desktop conversation plus expected_native_turn_id from Status; otherwise a legacy Turn alias or the list-prefilled unmanaged terminal cancel selector." },
+    expected_native_turn_id: { ...terminalInteractionIdentifierSchema,
+      description: "Desktop conversation only: exact native_turn_id from current Status. A changed task is rejected." },
+    idleTimeoutMinutes: { type: "number" }
   }
 };
 
@@ -810,11 +822,11 @@ export const approveParameters = {
     { required: ["watch_id", "interaction_id"] }
   ],
   properties: {
-    conversation_id: nativeConversationSchema,
-    watch_id: { type: "string", pattern: "^codex-cli-watch:[A-Za-z0-9_-]{8,128}$",
-      description: "Exact direct Codex CLI Watch whose Status advertises this approval." },
+    conversation_id: nativeOrDesktopConversationSchema,
+    watch_id: { type: "string", pattern: "^(?:desktop-watch|codex-cli-watch):[A-Za-z0-9_-]{8,128}$",
+      description: "Exact Desktop or direct Codex CLI Watch whose Status advertises this approval." },
     interaction_id: { ...terminalInteractionIdentifierSchema,
-      description: "Required for direct CLI approval: exact currently pending interaction_id from Status." },
+      description: "Required for Desktop or direct CLI approval: exact currently pending interaction_id from Status." },
     decision: {
       type: "string",
       enum: ["approve_once", "reject"],

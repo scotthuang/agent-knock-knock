@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { DesktopIpcError, type DesktopCompatibility, type DesktopIpcTransport } from "../src/desktop-types.js";
 import { DesktopFrameDecoder, encodeDesktopFrame, readDesktopSocketIdentity } from "../src/desktop-ipc-transport.js";
+import { reduceDesktopSnapshot } from "../src/desktop-snapshot.js";
 
 const target = { threadId: "thread-one", ownerClientId: "owner-one" };
 const baseline = () => ({ id: target.threadId, hostId: "local", mode: "default", resumeState: "resumed",
@@ -19,6 +20,7 @@ class Fixture implements DesktopIpcTransport {
   revision = 7;
   acceptedTurnId = "accepted-turn";
   startHandler?: (request: Wire) => void;
+  steerHandler?: (request: Wire) => void;
   followHandler?: (request: Wire) => void;
   ownerHandler?: (request: Wire) => void;
   private messages = new Set<(message: unknown) => void>();
@@ -37,6 +39,10 @@ class Fixture implements DesktopIpcTransport {
       if (this.startHandler) this.startHandler(request);
       else this.respond(request, { handledByClientId: target.ownerClientId,
         result: { result: { turn: { id: this.acceptedTurnId, status: "inProgress" } } } });
+    }
+    if (request.method === "thread-follower-steer-turn") {
+      if (this.steerHandler) this.steerHandler(request);
+      else this.respond(request, { handledByClientId: target.ownerClientId, result: { result: { turnId: "active-turn" } } });
     }
   }
   respond(request: Wire, overrides: Wire): void {
@@ -58,6 +64,92 @@ const connect = (fixture: Fixture, compatibility: DesktopCompatibility = VERIFIE
   socketPath: "/tmp/akk-test-not-a-real-socket", compatibility, transportFactory: async () => fixture
 });
 const starts = (fixture: Fixture) => fixture.sent.filter((message) => message.method === "thread-follower-start-turn");
+const steers = (fixture: Fixture) => fixture.sent.filter((message) => message.method === "thread-follower-steer-turn");
+function asyncFixture() {
+  const fixture = new Fixture();
+  fixture.state = { ...baseline(), cwd: "/tmp/desktop-test", threadRuntimeStatus: { type: "active" },
+    turns: [{ turnId: "active-turn", status: "inProgress", items: [{ id: "async-one", type: "agentMessage",
+      text: "Pick a color", delivery: "async", questions: [{ title: "Pick a color", options: ["Blue", "Green"] }] }] }]
+  };
+  const snapshot = reduceDesktopSnapshot(fixture.state, { ...target, revision: fixture.revision });
+  const answer = { ...target, expectedRevision: snapshot.revision, expectedTurnId: "active-turn",
+    interactionId: snapshot.asyncQuestions![0].id, answer: "Green", clientUserMessageId: "answer-one" };
+  return { fixture, answer };
+}
+
+test("Desktop async answer uses one exact-owner steer and permits ordinary progress during durable persistence", async () => {
+  const { fixture, answer } = asyncFixture(), client = await connect(fixture);
+  try {
+    const receipt = await client.answerAsyncOnce({ ...answer, beforeDispatch: async () => {
+      fixture.revision++;
+      fixture.state.turns[0].items.push({ id: "progress", type: "agentMessage", text: "Still working", phase: "commentary" });
+    } });
+    assert.equal(receipt.turnId, "active-turn");
+    assert.equal(receipt.revision, 8);
+    assert.equal(receipt.atomicTurnPrecondition, false);
+    assert.equal(starts(fixture).length, 0);
+    const request = steers(fixture)[0];
+    assert.equal(request.targetClientId, target.ownerClientId);
+    assert.equal(request.version, 1);
+    assert.equal(request.params.clientUserMessageId, answer.clientUserMessageId);
+    assert.equal(request.params.restoreMessage.cwd, "/tmp/desktop-test");
+    assert.deepEqual(request.params.restoreMessage.context.commentAttachments, []);
+    assert.match(request.params.input[0].text, /request_user_input_async/u);
+    await assert.rejects(client.answerAsyncOnce(answer), (error: unknown) => error instanceof DesktopIpcError && error.code === "duplicate_submission");
+    assert.equal(steers(fixture).length, 1);
+  } finally { client.close(); }
+});
+
+test("Desktop async answers reject completed tasks, changed questions and human answers before dispatch", async () => {
+  for (const change of ["complete", "changed", "answered", "new-turn"] as const) {
+    const { fixture, answer } = asyncFixture(), client = await connect(fixture);
+    try {
+      await assert.rejects(client.answerAsyncOnce({ ...answer, beforeDispatch: async () => {
+        fixture.revision++;
+        if (change === "complete") fixture.state.turns[0].status = "completed";
+        if (change === "changed") fixture.state.turns[0].items[0].questions[0].title = "Another question";
+        if (change === "new-turn") fixture.state.turns[0].turnId = "other-turn";
+        if (change === "answered") fixture.state.turns[0].items.push({ id: "human-answer", type: "userMessage", content: [{
+          type: "text", text: `<send_user_message_question_reply>\n${JSON.stringify([{ questionItemId: JSON.stringify([
+            "request_user_input_async", "async-one", 0]), question: "Pick a color", answer: "Blue" }])}\n</send_user_message_question_reply>`
+        }] });
+      } }), (error: unknown) => error instanceof DesktopIpcError && error.dispatchState === "not_sent" && error.code === "stale_interaction");
+      assert.equal(steers(fixture).length, 0);
+    } finally { client.close(); }
+  }
+});
+
+test("Desktop async post-dispatch disconnect or wrong-task acknowledgement stays uncertain and is not replayed", async () => {
+  for (const mode of ["disconnect", "wrong-task", "rpc-error"] as const) {
+    const { fixture, answer } = asyncFixture(), client = await connect(fixture);
+    fixture.steerHandler = request => {
+      if (mode === "disconnect") fixture.disconnect();
+      else fixture.respond(request, { handledByClientId: target.ownerClientId,
+        ...(mode === "rpc-error" ? { resultType: "error" } : { result: { result: { turnId: "other-turn" } } }) });
+    };
+    try {
+      await assert.rejects(client.answerAsyncOnce(answer), (error: unknown) => error instanceof DesktopIpcError && error.dispatchState === "unknown");
+      await assert.rejects(client.answerAsyncOnce(answer));
+      assert.equal(steers(fixture).length, 1);
+    } finally { client.close(); }
+  }
+});
+
+test("Desktop async response preserves exact owner and verified-build write boundaries", async () => {
+  const { fixture, answer } = asyncFixture(), client = await connect(fixture, { version: "future", build: "future" });
+  try {
+    await assert.rejects(client.answerAsyncOnce(answer), (error: unknown) => error instanceof DesktopIpcError && error.code === "incompatible_desktop");
+    assert.equal(steers(fixture).length, 0);
+  } finally { client.close(); }
+  const second = asyncFixture(), secondClient = await connect(second.fixture);
+  second.fixture.ownerHandler = request => second.fixture.respond(request, {
+    handledByClientId: "different-owner", result: { supportsUntrustedAppInput: true }
+  });
+  try {
+    await assert.rejects(secondClient.answerAsyncOnce(second.answer), (error: unknown) => error instanceof DesktopIpcError && error.code === "owner_changed");
+    assert.equal(steers(second.fixture).length, 0);
+  } finally { secondClient.close(); }
+});
 
 test("Desktop submits one exact text to the confirmed owner with inherited settings and no retries", async () => {
   const fixture = new Fixture(), client = await connect(fixture);

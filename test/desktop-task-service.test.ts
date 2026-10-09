@@ -8,6 +8,7 @@ import { createDesktopStateStore } from "../src/desktop-state-store.js";
 import { createDesktopTaskService, desktopTaskNeedsReconciliation, type DesktopTaskServiceDependencies } from "../src/desktop-task-service.js";
 import { DesktopIpcError, type DesktopSnapshot, type DesktopTurn } from "../src/desktop-types.js";
 import { createDesktopConversationId } from "../src/desktop-identity.js";
+import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
 
 const target = { codexHome: "/test/codex", hostId: "local", threadId: "thread-exact" };
 const input = { target, desktopId: createDesktopConversationId(target), controllerSession: "controller-one", messageId: "message-one", text: "Do the exact task" };
@@ -324,4 +325,82 @@ test("separate Desktop repositories reject a stale save instead of losing anothe
   assert.throws(() => other.save(stale, stale.revision), /revision conflict/);
   assert.equal(other.load(sent.id)?.status, "completed");
   assert.equal(other.load(sent.id)?.native_turn_id, "native-one");
+});
+
+function asyncQuestionTurn(): DesktopTurn {
+  return { turnId: "native-one", status: "inProgress", itemsComplete: true,
+    items: [{ id: "async-item", type: "agentMessage", text: "Choose a color", phase: "final_answer", delivery: "async",
+      questions: [{ title: "Choose a color", options: ["Blue", "Green"] }] }] };
+}
+
+test("Desktop async question notifies once with public answer IDs while the same task continues working", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([asyncQuestionTurn()]);
+  const watched = await h.service.watch({ ...input, callbackRoute: route });
+  assert.equal(watched.status, "watching"); assert.equal(watched.pending_manual_count, 0);
+  assert.equal(watched.pending_async_interactions?.length, 1); assert.equal(h.state.notifications.length, 1);
+  const event = h.state.notifications[0].envelope.event;
+  assert.equal(event.requires_response, true); assert.equal(event.type, "desktop_watch.interaction");
+  assert.match(event.body, /may continue working/); assert.match(event.body, /Refresh AKK Status/);
+  assert.match(event.body, /after the user supplies an answer/); assert.match(event.body, /q:[a-f0-9]{64}/);
+  assert.match(event.body, /o:[a-f0-9]{64}/);
+  assert.doesNotMatch(JSON.stringify(event), /interaction_prompt_fingerprint|expires_at|available_actions/);
+  await createDesktopTaskService(h.deps).reconcile(watched.id);
+  assert.equal(h.state.notifications.length, 1); assert.equal(h.service.status(watched.id).notifications.length, 1);
+});
+
+test("incomplete Desktop history retains a pending question and retry instead of resolving and losing its notification", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([asyncQuestionTurn()]);
+  h.state.outcomes.push({ disposition: "retryable_failure", error_code: "temporary_outage" });
+  const watched = await h.service.watch({ ...input, callbackRoute: route });
+  const originalInteraction = watched.pending_async_interactions![0];
+  assert.equal(watched.notifications[0].status, "retry_wait");
+  h.state.snapshot.turns[0].itemsComplete = false; h.state.snapshot.turns[0].items = [];
+  const partial = await h.service.reconcile(watched.id);
+  assert.equal(partial.observation_error, "desktop_async_questions_incomplete");
+  assert.deepEqual(partial.pending_async_interactions, [originalInteraction]); assert.equal(partial.notifications[0].status, "retry_wait");
+  h.state.snapshot = snapshot([asyncQuestionTurn()]);
+  const recovered = await h.service.reconcile(watched.id);
+  assert.equal(recovered.observation_error, undefined); assert.equal(recovered.notifications.length, 1);
+  assert.equal(recovered.notifications[0].status, "retry_wait"); assert.equal(h.state.notifications.length, 1);
+  h.state.now += 6000;
+  assert.equal((await h.service.reconcile(watched.id)).notifications[0].status, "accepted");
+  assert.equal(h.state.notifications.length, 2); assert.equal(h.state.notifications[0].envelope.event.id, h.state.notifications[1].envelope.event.id);
+});
+
+test("accepted async answers revoke undelivered question reminders without cancelling the watched task", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([asyncQuestionTurn()]); delete h.deps.deliver;
+  const watched = await h.service.watch({ ...input, callbackRoute: route });
+  assert.equal(watched.notifications[0].status, "ready");
+  const question = desktopAsyncQuestions(h.state.snapshot)[0];
+  h.state.snapshot.turns[0].items.push({ id: "answer-item", type: "userMessage", clientId: "human-answer",
+    content: [{ type: "text", text: buildDesktopAsyncReply(question, "Green") }] });
+  const answered = await h.service.reconcile(watched.id);
+  assert.equal(answered.status, "watching"); assert.deepEqual(answered.pending_async_interactions, []);
+  assert.equal(answered.notifications[0].status, "failed"); assert.equal(answered.notifications[0].outcome?.disposition, "permanent_failure");
+  assert.equal(h.state.starts, 0);
+});
+
+test("Desktop completion revokes async attention and excludes async question text from the final result", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([asyncQuestionTurn()]); delete h.deps.deliver;
+  const watched = await h.service.watch({ ...input, callbackRoute: route });
+  h.state.snapshot.turns[0].status = "completed";
+  h.state.snapshot.turns[0].items.push({ id: "final-answer", type: "agentMessage", phase: "final_answer", text: "The actual completed result" });
+  const completed = await h.service.reconcile(watched.id);
+  assert.equal(completed.final_text, "The actual completed result"); assert.deepEqual(completed.pending_async_interactions, []);
+  assert.equal(completed.notifications[0].status, "failed");
+  assert.equal(completed.notifications[1].envelope.event.type, "desktop_watch.settled");
+});
+
+test("timeout and Unwatch withdraw queued async offers without changing the native task", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([asyncQuestionTurn()]); delete h.deps.deliver;
+  const timeout = await h.service.watch({ ...input, callbackRoute: route, timeoutMs: 1 });
+  const cancelled = await h.service.watch({ ...input, callbackRoute: route });
+  const stopped = h.service.unwatch(cancelled.id, { controllerSession: input.controllerSession });
+  assert.equal(stopped.status, "cancelled"); assert.deepEqual(stopped.pending_async_interactions, []);
+  assert.equal(stopped.notifications[0].status, "failed");
+  h.state.now += 2;
+  const expired = await h.service.reconcile(timeout.id);
+  assert.equal(expired.status, "timed_out"); assert.deepEqual(expired.pending_async_interactions, []);
+  assert.equal(expired.notifications[0].status, "failed");
+  assert.equal(h.state.snapshot.turns[0].status, "inProgress"); assert.equal(h.state.starts, 0);
 });

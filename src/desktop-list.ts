@@ -28,7 +28,7 @@ export async function listDesktopSessions(runtime: DesktopRuntime, options: Reco
     }
   }));
   let watches: Record<string, unknown>[] = []; let watchError: string | undefined;
-  try { watches = runtime.tasks.list().map(desktopTaskProjection); }
+  try { watches = runtime.tasks.list().map(task => desktopTaskProjection(task, desktopWritesVerified(runtime.compatibility))); }
   catch { watchError = "desktop_watch_store_unavailable"; }
   return { desktop_sessions: sessions, desktop_watches: watches,
     desktop_scan: { total_candidates: page.total, returned: sessions.length, next_cursor: page.nextCursor,

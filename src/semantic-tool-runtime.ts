@@ -1,7 +1,9 @@
+import { isDesktopConversationId } from "./desktop-identity.js";
+import { desktopControlToolArgs, desktopCancelToolArgs } from "./desktop-control-semantic.js";
 import { semanticCommandGuidance, semanticToolDescriptions } from
   "./semantic-tool-descriptions.js";
 import { createHash, randomUUID } from "node:crypto";
-import { desktopSendToolArgs, desktopWatchTarget, validatedDesktopWatchId } from "./desktop-semantic.js";
+import { desktopApprovalToolArgs, desktopInteractionToolArgs, isDesktopInteractionResponseError, rememberDisplayedDesktopInteractionOffers, desktopSendToolArgs, desktopWatchTarget, validatedDesktopWatchId } from "./desktop-semantic.js";
 import { isNativeInteractionResponseError, nativeApprovalToolArgs, nativeConversationTarget, nativeInteractionToolArgs,
   nativePermissionToolArgs, nativeSendToolArgs, validatedNativeWatchId } from "./codex-native-semantic.js";
 import {
@@ -197,7 +199,7 @@ export function createAkkSemanticToolCatalog(
       );
       pushOptional(args, "--openclaw-session", openclawSession);
       pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
-      if (nativeConversationTarget(params)) pushOptional(args, "--codex-home", stringValue(config.codexHome));
+      if (desktopId) pushOptional(args, "--codex-home", stringValue(config.codexHome));
       return args;
     }
   });
@@ -216,7 +218,7 @@ export function createAkkSemanticToolCatalog(
         requiredString(params.watch_id, "watch_id")
       ];
       if (validatedNativeWatchId(params.watch_id) ?? validatedDesktopWatchId(params.watch_id)) pushOptional(args, "--openclaw-session", requiredString(toolContext?.sessionKey, "controller session"));
-      if (validatedNativeWatchId(params.watch_id)) pushOptional(args, "--codex-home", stringValue(config.codexHome));
+      if (validatedNativeWatchId(params.watch_id) ?? validatedDesktopWatchId(params.watch_id)) pushOptional(args, "--codex-home", stringValue(config.codexHome));
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       return args;
     }
@@ -255,6 +257,8 @@ export function createAkkSemanticToolCatalog(
       }
       const nativeArgs = nativePermissionToolArgs(params, config, context ?? {}, "status");
       if (nativeArgs) return nativeArgs;
+      const desktopArgs = desktopControlToolArgs(params, config, context ?? {}, "status");
+      if (desktopArgs) return desktopArgs;
       const terminalId = requiredString(params.terminal_id, "terminal_id");
       const action = await privateTerminalActionArguments(
         api,
@@ -276,7 +280,8 @@ export function createAkkSemanticToolCatalog(
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       pushOptional(args, "--codex-home", stringValue(config.codexHome));
       return args;
-    }
+    },
+    rememberResult: (result, _params, context) => rememberDisplayedDesktopInteractionOffers(api, context ?? {}, result)
   });
 
   registerModelControlTools(api);
@@ -435,6 +440,7 @@ export function createAkkSemanticToolCatalog(
         try {
           const result = await runStatusRequest(api, params, toolContext);
           const rendered = toolResult(result);
+          rememberDisplayedDesktopInteractionOffers(api, toolContext ?? {}, result);
           rememberDisplayedApprovalOffer(
             api,
             toolContext?.sessionKey,
@@ -520,8 +526,9 @@ export function createAkkSemanticToolCatalog(
     description:
       semanticToolDescriptions.respond_interaction,
     parameters: respondInteractionParameters,
-    isErrorResult: isNativeInteractionResponseError,
+    isErrorResult: result => isNativeInteractionResponseError(result) || isDesktopInteractionResponseError(result),
     buildArgs: (params, toolContext) => nativeInteractionToolArgs(params,
+      isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}) ?? desktopInteractionToolArgs(api, params,
       isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}) ?? buildPrivateInteractionResponseArgs(
       api,
       params,
@@ -537,8 +544,9 @@ export function createAkkSemanticToolCatalog(
     description:
       semanticToolDescriptions.approve,
     parameters: approveParameters,
-    isErrorResult: isNativeInteractionResponseError,
+    isErrorResult: result => isNativeInteractionResponseError(result) || isDesktopInteractionResponseError(result),
     buildArgs: (params, toolContext) => nativeApprovalToolArgs(params,
+      isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}) ?? desktopApprovalToolArgs(api, params,
       isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}) ?? buildPrivateApprovalArgs(api, params, {
       sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
       sessionId: requiredControllerSessionId(toolContext?.sessionId)
@@ -576,8 +584,11 @@ export function createAkkSemanticToolCatalog(
     name: "agent_knock_knock_cancel",
     description: semanticToolDescriptions.cancel,
     parameters: cancelParameters,
-    buildArgs: (params) => {
+    isErrorResult: result => isRecord(result) && result.source === "codex_desktop" && result.outcome === "unconfirmed",
+    buildArgs: (params, context) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const desktop = desktopCancelToolArgs(params, config, context ?? {});
+      if (desktop) return desktop;
       const args = ["cancel"];
       pushTurnTarget(args, params);
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
@@ -660,7 +671,9 @@ function registerModelControlTools(api): void {
     parameters: modelOptionsParameters,
     timeoutMs: MODEL_OPTIONS_CLI_TIMEOUT_MS,
     normalizeTurnIdentity: false,
-    buildArgs: async (params) => {
+    buildArgs: async (params, context) => {
+      const desktop = desktopControlToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context ?? {}, "model-options");
+      if (desktop) return desktop;
       assertOnlyModelControlParameters(
         params,
         ["terminal_id"],
@@ -688,7 +701,7 @@ function registerModelControlTools(api): void {
       return args;
     },
     rememberResult: (result, params, toolContext) =>
-      rememberDisplayedModelOptionsOffer(
+      params.conversation_id === undefined && rememberDisplayedModelOptionsOffer(
         api,
         toolContext?.sessionKey,
         toolContext?.sessionId,
@@ -742,7 +755,8 @@ function registerModelControlTools(api): void {
     timeoutMs: SET_MODEL_CLI_TIMEOUT_MS,
     normalizeTurnIdentity: false,
     isErrorResult: (result) => !isAkkSetModelSuccess(result),
-    buildArgs: (params, toolContext) => buildPrivateSetModelArgs(
+    buildArgs: (params, toolContext) => desktopControlToolArgs(params,
+      isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}, "set-model") ?? buildPrivateSetModelArgs(
       api,
       params,
       {
@@ -1049,6 +1063,14 @@ async function handleAkkModelCommand(
 ) {
   const sessionKey = requiredControllerSessionKey(ctx.sessionKey);
   const sessionId = requiredControllerSessionId(ctx.sessionId);
+  if (isDesktopConversationId(parsed.terminalId) && parsed.action !== "repair-model-control") {
+    const params = { conversation_id: parsed.terminalId,
+      ...(parsed.action === "set-model" ? { model: parsed.model, reasoning_effort: parsed.reasoningEffort } : {}) };
+    const args = desktopControlToolArgs(params, config, { sessionKey }, parsed.action)!;
+    const result = await runHostAwareCli(api, args, { timeoutMs: SET_MODEL_CLI_TIMEOUT_MS });
+    return parsed.action === "model-options" ? { text: formatAkkModelOptionsCommandResult(result) }
+      : { text: formatAkkSetModelCommandResult(result), isError: !isAkkSetModelSuccess(result) };
+  }
   if (parsed.action === "model-options") {
     const action = await privateTerminalActionArguments(
       api,
@@ -1298,7 +1320,7 @@ function buildStatusCliArgs(api, params, toolContext) {
       "--openclaw-session",
       requiredControllerSessionKey(toolContext?.sessionKey)
     ];
-    if (validatedNativeWatchId(watchId)) pushOptional(watchArgs, "--codex-home", stringValue(config.codexHome));
+    if (validatedNativeWatchId(watchId) ?? validatedDesktopWatchId(watchId)) pushOptional(watchArgs, "--codex-home", stringValue(config.codexHome));
     pushOptional(
       watchArgs,
       "--store-dir",
@@ -1311,7 +1333,7 @@ function buildStatusCliArgs(api, params, toolContext) {
     "--reconcile"
   ];
   pushTurnTarget(args, params);
-  if (nativeConversationTarget(params)) {
+  if (nativeConversationTarget(params) ?? (typeof params.conversation_id === "string" && params.conversation_id.startsWith("desktop:v1:") ? params.conversation_id : undefined)) {
     pushOptional(args, "--openclaw-session", requiredString(toolContext?.sessionKey, "controller session"));
     pushOptional(args, "--codex-home", stringValue(config.codexHome));
   }

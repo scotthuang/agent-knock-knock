@@ -1,3 +1,5 @@
+import { desktopControlToolArgs, desktopConversationTarget } from "./desktop-control-semantic.js";
+import { isDesktopConversationId } from "./desktop-identity.js";
 import {
   consumeSemanticPrivateAuthorityOffer,
   rememberSemanticPrivateAuthorityOffer,
@@ -62,6 +64,8 @@ export async function buildPrivatePermissionOptionsArgs(
   context: ControllerContext
 ): Promise<string[]> {
   const native = nativePermissionToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "permissions");
+  const desktop = desktopControlToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "permissions");
+  if (desktop) return desktop;
   if (native) return native;
   assertOnlyModelControlParameters(params, ["terminal_id"], "permission_options");
   const terminalId = exactTerminalId(params.terminal_id);
@@ -135,6 +139,8 @@ export function buildPrivateSetPermissionsArgs(
   context: ControllerContext
 ): string[] {
   const native = nativePermissionToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "set-permissions");
+  const desktop = desktopControlToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "set-permissions");
+  if (desktop) return desktop;
   if (native) return native;
   assertOnlyModelControlParameters(params, ["terminal_id", "mode"], "set_permissions");
   const terminalId = exactTerminalId(params.terminal_id);
@@ -169,7 +175,7 @@ export function isAkkSetPermissionsSuccess(value: unknown): boolean {
 export function registerPermissionControlTools(api, registerCliTool): void {
   registerCliTool(api, {
     name: "agent_knock_knock_permission_options",
-    description: "For a listed direct Codex CLI conversation_id, read settings and built-in " +
+    description: "For a listed Desktop or direct Codex CLI conversation_id, read settings and built-in " +
       "choices through its backend without terminal input. For terminal_id, " +
       "inspect the current Codex permission setting and built-in choices for one " +
       "explicitly selected idle physical terminal. This closed /status and " +
@@ -186,12 +192,12 @@ export function registerPermissionControlTools(api, registerCliTool): void {
     normalizeTurnIdentity: false,
     buildArgs: (params, context) => buildPrivatePermissionOptionsArgs(api, params, context ?? {}),
     rememberResult: (result, params, context) => {
-      if (!nativeConversationTarget(params)) rememberDisplayedPermissionOptionsOffer(api, context ?? {}, params.terminal_id, result);
+      if (!nativeConversationTarget(params) && !desktopConversationTarget(params)) rememberDisplayedPermissionOptionsOffer(api, context ?? {}, params.terminal_id, result);
     }
   });
   registerCliTool(api, {
     name: "agent_knock_knock_set_permissions",
-    description: "For a listed direct Codex CLI conversation_id, set read-only, default, or " +
+    description: "For a listed Desktop or direct Codex CLI conversation_id, set read-only, default, or " +
       "full-access through its backend and verify effective settings; no terminal " +
       "UI or extra confirmation is needed. For terminal_id, set one requested or " +
       "authorized Codex permission mode from the immediately " +
@@ -220,7 +226,7 @@ export async function handleAkkPermissionCommand(
   context: ControllerContext,
   command: Extract<AkkCommand, { action: "permission-options" | "set-permissions" }>
 ): Promise<{ text: string; isError?: boolean }> {
-  const native = isCodexNativeConversationId(command.terminalId);
+  const native = isCodexNativeConversationId(command.terminalId) || isDesktopConversationId(command.terminalId);
   const params = native ? { conversation_id: command.terminalId } : { terminal_id: command.terminalId };
   if (command.action === "permission-options") {
     const args = await buildPrivatePermissionOptionsArgs(api, params, context);
@@ -235,7 +241,7 @@ export async function handleAkkPermissionCommand(
 
 export function formatAkkPermissionOptionsCommandResult(result: Record<string, unknown>): string {
   const terminalId = stringValue(result.conversation_id) ?? stringValue(result.terminal_id) ?? "unknown";
-  const native = result.source === "codex_cli";
+  const native = result.source === "codex_cli" || result.source === "codex_desktop";
   const choices = Array.isArray(result.choices) ? result.choices.filter(isRecord) : [];
   return [
     "AKK Codex permission options:",

@@ -412,13 +412,15 @@ test("/akk help lists the supported tmux executors", () => {
 });
 
 test("model-control schemas expose only semantic current-catalog inputs", () => {
-  assert.deepEqual(modelOptionsParameters.required, ["terminal_id"]);
+  assert.deepEqual(modelOptionsParameters.oneOf, [
+    { required: ["terminal_id"], not: { required: ["conversation_id"] } },
+    { required: ["conversation_id"], not: { required: ["terminal_id"] } }
+  ]);
   assert.deepEqual(repairModelControlParameters.required, ["terminal_id"]);
   assert.deepEqual(Object.keys(repairModelControlParameters.properties), [
     "terminal_id"
   ]);
   assert.deepEqual(setModelParameters.required, [
-    "terminal_id",
     "model",
     "reasoning_effort"
   ]);

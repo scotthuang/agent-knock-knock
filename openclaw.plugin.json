@@ -2,7 +2,7 @@
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
   "categories": ["developer-tools"],
-  "description": "Control loaded Codex CLI threads directly through their backend for discovery, tasks, exact completion callbacks, approvals, answers and permission settings without tmux or Herdr. Discover Codex Desktop conversations, send tasks and watch exact completion with manual-only approvals and questions. Control Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection, model and permission control, compatibility warnings, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
+  "description": "Control loaded Codex CLI threads directly through their backend for discovery, tasks, exact completion callbacks, approvals, answers and permission settings without tmux or Herdr. Discover Codex Desktop conversations, send tasks, watch exact completion, approve or reject command/file requests, answer blocking and asynchronous questions, adjust current-conversation permissions and model settings, and cancel exact tasks. Control Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection, model and permission control, compatibility warnings, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
   "activation": {
     "onStartup": true,
     "onCommands": ["akk"]

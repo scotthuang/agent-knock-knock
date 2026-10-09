@@ -1,5 +1,8 @@
 import { DesktopIpcError, type DesktopSnapshot, type DesktopTurn, type DesktopTurnItem,
   type DesktopPendingRequest, type DesktopTurnStatus } from "./desktop-types.js";
+import { desktopAsyncQuestions } from "./desktop-async-interactions.js";
+import { parseDesktopRequestInteraction } from "./desktop-request-interactions.js";
+import { desktopSettingsSnapshot, projectDesktopItemDetails } from "./desktop-snapshot-details.js";
 
 export function desktopRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -15,25 +18,52 @@ const approvals = new Set(["item/commandExecution/requestApproval", "item/fileCh
 const questions = new Set(["item/tool/requestUserInput", "item/tool/requestOptionPicker",
   "mcpServer/elicitation/request", "item/plan/requestImplementation"]);
 
-function item(value: unknown): DesktopTurnItem {
-  if (!desktopRecord(value)) invalid("Invalid Desktop turn item");
-  const result: DesktopTurnItem = { id: identifier(value.id, "item id"), type: identifier(value.type, "item type") };
+function content(value: unknown): { type: string; text?: string }[] {
+  if (!Array.isArray(value)) invalid("Invalid Desktop message content");
+  return value.map(part => {
+    if (!desktopRecord(part)) invalid("Invalid Desktop message content part");
+    const type = identifier(part.type, "content type");
+    if (type === "text" && typeof part.text !== "string") invalid("Invalid Desktop user message text");
+    return { type, ...(typeof part.text === "string" ? { text: part.text } : {}) };
+  });
+}
+
+function asyncQuestions(value: unknown): NonNullable<DesktopTurnItem["questions"]> {
+  if (!Array.isArray(value) || value.length > 64) invalid("Invalid Desktop async questions");
+  return value.map(question => {
+    if (!desktopRecord(question) || typeof question.title !== "string" || question.title.length > 16_384) {
+      invalid("Invalid Desktop async question title");
+    }
+    if (question.options == null) return { title: question.title };
+    if (!Array.isArray(question.options) || question.options.length > 128
+      || question.options.some(option => typeof option !== "string" || option.length > 16_384)) {
+      invalid("Invalid Desktop async question options");
+    }
+    return { title: question.title, options: [...question.options] as string[] };
+  });
+}
+
+function projectItemStringFields(value: Record<string, unknown>, result: DesktopTurnItem): void {
   for (const key of ["text", "status"] as const) {
     if (value[key] !== undefined && typeof value[key] !== "string") invalid(`Invalid Desktop item ${key}`);
     if (typeof value[key] === "string") result[key] = value[key];
   }
-  for (const key of ["clientId", "phase", "serverUserMessageId", "serverClientUserMessageId"] as const) {
+  for (const key of ["clientId", "phase", "serverUserMessageId", "serverClientUserMessageId",
+    "clientUserMessageId", "targetTurnId", "delivery"] as const) {
     if (value[key] !== undefined && value[key] !== null && typeof value[key] !== "string") invalid(`Invalid Desktop item ${key}`);
     if (value[key] !== undefined) result[key] = value[key] as string | null;
   }
-  if (value.content !== undefined) {
-    if (!Array.isArray(value.content)) invalid("Invalid Desktop message content");
-    result.content = value.content.map((part) => {
-      if (!desktopRecord(part)) invalid("Invalid Desktop message content part");
-      const type = identifier(part.type, "content type");
-      if (type === "text" && typeof part.text !== "string") invalid("Invalid Desktop user message text");
-      return { type, ...(typeof part.text === "string" ? { text: part.text } : {}) };
-    });
+}
+
+function item(value: unknown): DesktopTurnItem {
+  if (!desktopRecord(value)) invalid("Invalid Desktop turn item");
+  const result: DesktopTurnItem = { id: identifier(value.id, "item id"), type: identifier(value.type, "item type") };
+  projectItemStringFields(value, result);
+  projectDesktopItemDetails(value, result);
+  if (value.content !== undefined) result.content = content(value.content);
+  if (result.type === "steeringUserMessage" && value.input !== undefined) result.input = content(value.input);
+  if (result.type === "agentMessage" && value.questions !== undefined) {
+    result.questions = value.questions === null ? null : asyncQuestions(value.questions);
   }
   if (result.type === "userMessage" && !result.content) invalid("Desktop user message has no content");
   if (result.type === "agentMessage" && typeof result.text !== "string") invalid("Desktop agent message has no text");
@@ -86,7 +116,7 @@ function pendingRequest(value: unknown): DesktopPendingRequest {
   return {
     kind: method && approvals.has(method) ? "approval" : method && questions.has(method) ? "user_input" : "unknown",
     ...(method ? { method } : {}),
-    ...(typeof value.id === "string" || typeof value.id === "number" ? { requestId: String(value.id) } : {}),
+    ...(typeof value.id === "string" || typeof value.id === "number" ? { requestId: value.id } : {}),
     ...(desktopRecord(value.params) && typeof value.params.turnId === "string" ? { turnId: value.params.turnId } : {})
   };
 }
@@ -183,6 +213,11 @@ export function reduceDesktopSnapshot(raw: unknown, identity: SnapshotIdentity):
   const requests = raw.requests.map(pendingRequest);
   const unconfirmed = Array.isArray(raw.unconfirmedTurnSubmissions) ? raw.unconfirmedTurnSubmissions.length : 0;
   const blocked = sendBlockedReason(raw, { ...history, runtimeStatus, requests: requests.length, unconfirmed, tailKnown: canonical.tailKnown });
+  const async = desktopAsyncQuestions({ threadId: identity.threadId, turns: history.turns });
+  const interactions = raw.requests.flatMap(request => {
+    const interaction = parseDesktopRequestInteraction(request, identity.threadId, history.turns);
+    return interaction ? [interaction] : [];
+  });
   return {
     threadId: identity.threadId, ownerClientId: identity.ownerClientId, revision: identity.revision,
     ...(typeof raw.title === "string" ? { title: raw.title } : {}),
@@ -191,6 +226,7 @@ export function reduceDesktopSnapshot(raw: unknown, identity: SnapshotIdentity):
     ...(typeof raw.originator === "string" ? { originator: raw.originator } : {}),
     ...(typeof raw.resumeState === "string" ? { resumeState: raw.resumeState } : {}),
     runtimeStatus, pendingRequests: requests, pendingRequestCount: requests.length,
+    asyncQuestions: async, pendingInteractions: [...interactions, ...async], ...desktopSettingsSnapshot(raw),
     unconfirmedSubmissionCount: unconfirmed, tailKnown: canonical.tailKnown,
     latestTurnId: canonical.tailKnown && !history.unidentifiedTurn ? history.tailId : null,
     turns: history.turns, canSend: blocked === undefined, ...(blocked ? { idleBlockedReason: blocked } : {})
