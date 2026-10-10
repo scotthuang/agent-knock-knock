@@ -97,6 +97,14 @@ and [Desktop guide](codex-desktop-compatibility.md) for native acceptance and
 interaction capabilities. The remainder of this section covers terminal Send,
 including its physical-input fallback and terminal response adapters.
 
+Starting in AKK 0.14.1, new Send monitoring and explicit or
+automatic Watch share a default **720-minute hard deadline**. Explicit request
+parameters override the Host hard-timeout configuration, which overrides that
+default. Save and use the Watch returned by Send; do not add another Watch merely
+to obtain completion callbacks. Expiry ends observation, not the native task.
+Existing saved deadlines and repeated message IDs are not extended by an upgrade.
+Managed terminal inactivity remains a separate 60-minute default.
+
 The v30 `action_contracts` expose model-facing semantic IDs only. The trusted
 adapter privately derives and revalidates terminal, process, binding, native
 thread, composer, approval, handoff, revision, and compare-and-swap evidence.
@@ -407,6 +415,27 @@ Status follows its target. An exact backend task's `watch_id` or Send-produced
 A backend conversation Status reads the selected native conversation. Bound
 terminal Turns and Watches retain their original observation route. List
 never types into a terminal.
+
+AKK 0.14.1 adds a single `progress` object to CLI
+backend and Desktop Status. Conversation Status selects its current native turn;
+Watch Status always selects the Watch's original turn, even after a newer task
+starts. The latest public commentary and up to two short action type/status
+summaries share an 800-Unicode-code-point body budget, with unused space shared
+between them. Redaction precedes truncation, which preserves complete graphemes.
+Reasoning, analysis, raw command output, tool arguments and diffs are excluded.
+This is a progress-body limit, not a limit on the whole Status JSON. List does not
+include this body, and the terminal screen contract is unchanged.
+
+`progress.native_turn_id` identifies the selected task; `read_at` records the
+read time. `latest_item_at` is a native timestamp of the displayed progress, or
+`null` if none is available; it is never replaced with the read time. `truncated`
+reports shortening of the selected progress body or omission of code blocks. `state: "no_public_progress"` means the read
+succeeded without eligible public progress, while `state: "read_error"` means
+the exact task/items could not be read completely. Neither means the task has
+stopped. Missing old-turn data is never replaced with a successor's progress.
+`trace` retains its existing terminal behavior; it is not an unbounded backend
+progress mode. Final answers and current questions/approvals retain their own
+existing fields.
 
 When the selected conversation is an unbound physical Codex terminal, targeted
 Status may use the existing closed `/status` identity inspection if that pane

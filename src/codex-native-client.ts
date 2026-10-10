@@ -1,4 +1,5 @@
 import { CodexNativeRpc } from "./codex-native-client-rpc.js";
+import { validNativeItemTime } from "./backend-public-progress.js";
 import { buildNativeAsyncReply, nativeResponse, parseNativeRequest, hydrateNativeFileApproval } from "./codex-native-client-interactions.js";
 import { nativeId, nativeRecord, nativeInvalid, nativePage, parseNativeThread, parseNativeTurn, parseNativeItem,
   isMainCodexCliThread, nativeAsyncInteractions, parseNativePermissions } from "./codex-native-snapshot.js";
@@ -202,7 +203,11 @@ export class CodexNativeClient {
       const page = nativePage(await this.rpc.call("thread/items/list", { threadId, turnId, limit: 100, sortDirection: "asc",
         ...(cursor ? { cursor } : {}) }), raw => {
         const entry = nativeRecord(raw); if (entry.turnId !== turnId) nativeInvalid("Native history crossed the exact turn");
-        return parseNativeItem(entry.item);
+        const item = parseNativeItem(entry.item);
+        // These timestamps belong to this exact item, not the thread/turn or read.
+        return { ...item,
+          ...(validNativeItemTime(entry.startedAtMs) ? { startedAtMs: entry.startedAtMs } : {}),
+          ...(validNativeItemTime(entry.completedAtMs) ? { completedAtMs: entry.completedAtMs } : {}) };
       });
       for (const item of page.data) { if (items.some(i => i.id === item.id)) nativeInvalid("Duplicate native task item"); items.push(item); }
       if (page.nextCursor === null) return items;

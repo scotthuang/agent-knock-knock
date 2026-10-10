@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Control Codex CLI through its shared backend, Codex Desktop through native IPC, and Codex or Claude Code through terminals from OpenClaw or compatible controller Hosts.",
   "license": "MIT",
   "type": "module",

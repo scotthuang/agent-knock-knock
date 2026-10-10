@@ -1,10 +1,12 @@
+import { monitorMinutesToMs, resolveMonitorHardTimeoutMinutes } from "./monitor-deadline-policy.js";
 import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
+import { backendPublicProgress, backendPublicProgressReadError } from "./backend-public-progress.js";
 import { desktopObservationStopped } from "./desktop-task-recovery.js";
 import { desktopControlForCli } from "./desktop-cli-controls.js";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { cliCwd, cliEnv, cliDependencies, writeCliStdout } from "./cli-runtime-context.js";
+import { cliCwd, cliEnv, cliDependencies, cliNow, writeCliStdout } from "./cli-runtime-context.js";
 import { isDesktopConversationId, parseDesktopConversationId } from "./desktop-identity.js";
 import { isDesktopWatchId } from "./desktop-semantic.js";
 import { createDesktopRuntime, desktopWritesVerified, type DesktopRuntime, type DesktopRuntimeOptions } from "./desktop-runtime.js";
@@ -90,8 +92,19 @@ async function inspectOrStopDesktopWatch(runtime: DesktopRuntime, command: strin
   } else if (command === "watch-status" || command === "status") {
     const current = await runtime.tasks.reconcile(watch);
     output({ ...desktopTaskProjection(current, desktopWritesVerified(runtime.compatibility)),
+      progress: await desktopWatchProgress(runtime, current),
       response_state: await desktopResponseStates(runtime, current.desktop_id, current.native_turn_id, controller) });
   } else throw new Error("Desktop Watch ID is only valid for status or unwatch");
+}
+
+async function desktopWatchProgress(runtime: DesktopRuntime, task: ReturnType<DesktopRuntime["tasks"]["status"]>) {
+  if (!task.native_turn_id) return backendPublicProgressReadError(null, cliNow().toISOString(), "missing_exact_turn");
+  try {
+    const snapshot = await runtime.transport.observe(task.target);
+    if (snapshot.threadId !== task.target.threadId) throw new Error("Desktop snapshot identity mismatch");
+    return backendPublicProgress({ nativeTurnId: task.native_turn_id,
+      turn: snapshot.turns.find(turn => turn.turnId === task.native_turn_id), readAt: cliNow().toISOString() });
+  } catch { return backendPublicProgressReadError(task.native_turn_id, cliNow().toISOString()); }
 }
 
 async function getDesktopConversation(runtime: DesktopRuntime, options: Options,
@@ -118,12 +131,15 @@ function latestTurnProjection(turn: DesktopTurn | undefined) {
 async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, entry }: DesktopConversation, options: Options): Promise<void> {
   try {
     const snapshot = await runtime.transport.observe(identity);
+    if (snapshot.threadId !== identity.threadId) throw new Error("Desktop snapshot identity mismatch");
     const current = snapshot.turns.find(turn => turn.turnId === snapshot.latestTurnId);
     output({ ...desktopSessionProjection(entry, snapshot, desktopWritesVerified(runtime.compatibility)),
       source: "codex_desktop", latest_turn: latestTurnProjection(current),
+      progress: backendPublicProgress({ nativeTurnId: snapshot.latestTurnId, turn: current, readAt: cliNow().toISOString() }),
       response_state: await desktopResponseStates(runtime, entry.conversationId, snapshot.latestTurnId ?? undefined, str(options.openclawSession)) });
-  } catch (error) { output(desktopSessionProjection(entry, undefined, false,
-    error instanceof DesktopIpcError ? error.code : "live_owner_not_confirmed")); }
+  } catch (error) { output({ ...desktopSessionProjection(entry, undefined, false,
+    error instanceof DesktopIpcError ? error.code : "live_owner_not_confirmed"),
+    progress: backendPublicProgressReadError(null, cliNow().toISOString()) }); }
 }
 
 async function sendOrWatchDesktopTask(runtime: DesktopRuntime, command: "send" | "watch-terminal",
@@ -131,7 +147,7 @@ async function sendOrWatchDesktopTask(runtime: DesktopRuntime, command: "send" |
   const controllerSession = required(options.openclawSession, "controller session");
   const route = options.callbackRoute ? parseCallbackRoute(options.callbackRoute)
     : createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: controllerSession, openclawBin: config.openclawBin });
-  const timeout = Number(options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes ?? 60) * 60_000;
+  const timeout = monitorMinutesToMs(resolveMonitorHardTimeoutMinutes(options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes));
   const input = { target: identity, desktopId: id, controllerSession, timeoutMs: timeout,
     callbackRoute: { ...route, capabilities: { wake: true, respond: false } } };
   const task = command === "send" ? await runtime.tasks.send({ ...input,
@@ -287,7 +303,7 @@ async function recoverDesktopTaskForCli(runtime: DesktopRuntime, command: string
   const controllerSession = required(options.openclawSession, "controller session");
   const minutes = options.minutes ?? options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes;
   const task = command === "close" ? runtime.tasks.close(id, { controllerSession, reason: str(options.reason) })
-    : command === "renew" ? await runtime.tasks.renew(id, { controllerSession, ...(minutes === undefined ? {} : { timeoutMs: Number(minutes) * 60_000 }) })
+    : command === "renew" ? await runtime.tasks.renew(id, { controllerSession, ...(minutes === undefined ? {} : { timeoutMs: monitorMinutesToMs(Number(minutes)) }) })
     : command === "recover" ? await runtime.tasks.recover(id, { controllerSession })
     : await runtime.tasks.retryCallback(id, { controllerSession, notificationId: str(options.notificationId) });
   const result = desktopTaskProjection(task, desktopWritesVerified(runtime.compatibility));

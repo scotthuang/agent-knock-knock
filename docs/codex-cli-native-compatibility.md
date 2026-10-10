@@ -166,7 +166,7 @@ permit automatic replay of `sent` or `uncertain` responses.
 | Evidence | Scope |
 | --- | --- |
 | Live-tested combination, 2026-10-09 | **macOS: Codex CLI 0.160.0 + shared app-server 0.162.0**; production-adapter operations and limits are recorded below. |
-| Current local observation, 2026-10-10 | `codex --version` returned **0.162.1**. The installed daemon version marker and running daemon executable path also identified **0.162.1**. This read-only audit did not obtain a fresh runtime handshake or run an end-to-end task. |
+| Additional targeted live proof, 2026-10-10 | **macOS: Codex CLI 0.162.1 + shared app-server 0.162.1**. Verified public Status progress while a task was in progress through the running OpenClaw plugin, an actual 720-minute Send deadline, one isolated local completion acknowledgement, and repeated Send retaining the original task/deadline. No new WeChat delivery or full native-operation matrix is claimed. |
 | Runtime admission | A loaded main CLI thread, the selected local Codex home, valid stable `x.y.z` backend metadata, and the required live protocol shapes/methods. There is **no established numeric minimum** or exact version allowlist for direct control. |
 | Platform evidence | The live proof was on macOS. It does not establish a Linux/Windows direct-control validation matrix. |
 

@@ -1,3 +1,4 @@
+import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES, monitorMinutesToMs } from "./monitor-deadline-policy.js";
 import {
   automaticSendWatchReceipt,
   createAutomaticActivityWatchAnchor,
@@ -68,8 +69,6 @@ import {
 } from "./terminal-watch-terminal-identity.js";
 import { observeTerminalWatch } from "./terminal-watch-observation-adapter.js";
 import { approvalFingerprint } from "./terminal-watch-observation-evidence.js";
-
-const DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES = 720;
 
 export function createTerminalWatchCliAdapter(
   dependencies: TerminalWatchCliDependencies
@@ -246,11 +245,11 @@ export function createTerminalWatchCliAdapter(
       openclawSession: callbackRoute.controller_session_id,
       openclawBin: stringValue(input.options.openclawBin) ?? "openclaw",
       ...(warnings.length > 0 ? { warnings } : {}),
-      timeoutMs: positiveMinutes(
+      timeoutMs: monitorMinutesToMs(positiveMinutes(
         input.options.hardTimeoutMinutes ??
           input.options.agentHardTimeoutMinutes,
-        DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES
-      ) * 60_000,
+        DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES
+      )),
       anchor
     };
   }
@@ -464,10 +463,10 @@ export function createTerminalWatchCliAdapter(
         : { callback_route: callbackRoute }),
       openclaw_session: openclawSession,
       openclaw_bin: openclawBin,
-      timeout_ms: positiveMinutes(
+      timeout_ms: monitorMinutesToMs(positiveMinutes(
         options.hardTimeoutMinutes,
-        DEFAULT_TERMINAL_WATCH_HARD_TIMEOUT_MINUTES
-      ) * 60_000,
+        DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES
+      )),
       approval_fingerprint: approvalFingerprint(projectedTerminal),
       approval_reason_code: approvalFingerprint(projectedTerminal)
         ? "terminal_waiting_for_approval"

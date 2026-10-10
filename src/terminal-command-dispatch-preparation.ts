@@ -1,3 +1,4 @@
+import { resolveMonitorHardTimeoutMinutes } from "./monitor-deadline-policy.js";
 import path from "node:path";
 
 import { codexUnsupportedDurableHistoryWarning } from
@@ -196,7 +197,7 @@ export async function prepareTerminalControlSend(
     options.agentTimeoutMinutes ?? defaults.agentTimeoutMinutes
   );
   const agentHardTimeoutMinutes = ports.positiveMinutes(
-    options.agentHardTimeoutMinutes ?? defaults.agentHardTimeoutMinutes,
+    resolveMonitorHardTimeoutMinutes(options.agentHardTimeoutMinutes, defaults.agentHardTimeoutMinutes),
     "--agent-hard-timeout-minutes"
   );
   const terminalPayload = terminalSubmissionPayload(String(message.body ?? ""));

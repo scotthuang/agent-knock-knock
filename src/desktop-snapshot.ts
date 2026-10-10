@@ -3,6 +3,7 @@ import { DesktopIpcError, type DesktopSnapshot, type DesktopTurn, type DesktopTu
 import { desktopAsyncQuestions } from "./desktop-async-interactions.js";
 import { parseDesktopRequestInteraction } from "./desktop-request-interactions.js";
 import { desktopSettingsSnapshot, projectDesktopItemDetails } from "./desktop-snapshot-details.js";
+import { validNativeItemTime } from "./backend-public-progress.js";
 
 export function desktopRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -60,6 +61,9 @@ function item(value: unknown): DesktopTurnItem {
   const result: DesktopTurnItem = { id: identifier(value.id, "item id"), type: identifier(value.type, "item type") };
   projectItemStringFields(value, result);
   projectDesktopItemDetails(value, result);
+  for (const field of ["startedAtMs", "completedAtMs"] as const) {
+    if (validNativeItemTime(value[field])) result[field] = value[field];
+  }
   if (value.content !== undefined) result.content = content(value.content);
   if (result.type === "steeringUserMessage" && value.input !== undefined) result.input = content(value.input);
   if (result.type === "agentMessage" && value.questions !== undefined) {

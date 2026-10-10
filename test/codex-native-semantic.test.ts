@@ -432,3 +432,17 @@ test("listed aliases are accepted across permission/model schemas without allowi
   const interaction_id = `codex-native-interaction:${"e".repeat(64)}`;
   assert.equal(new AjvJsonSchemaValidator().getValidator(respondInteractionParameters)({ conversation_id: terminalId, ...response, interaction_id }).valid, true);
 });
+
+
+test("native Send and explicit Watch preserve request over plugin hard-timeout configuration", async t => {
+  const h = harness(t);
+  await h.execute("send", { conversation_id: conversationId, request: "Configured task" });
+  await h.execute("send", { conversation_id: conversationId, request: "Explicit task", agentHardTimeoutMinutes: 19 });
+  await h.execute("watch", { conversation_id: conversationId });
+  await h.execute("watch", { conversation_id: conversationId, hardTimeoutMinutes: 23 });
+  const calls = h.calls();
+  assert.equal(argument(calls[0], "--agent-hard-timeout-minutes"), "60");
+  assert.equal(argument(calls[1], "--agent-hard-timeout-minutes"), "19");
+  assert.equal(argument(calls[2], "--hard-timeout-minutes"), "60");
+  assert.equal(argument(calls[3], "--hard-timeout-minutes"), "23");
+});

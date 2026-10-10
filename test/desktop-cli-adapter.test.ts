@@ -35,8 +35,9 @@ function fixture(t: { after(fn: () => void): void }) {
   let sends = 0, callbacks = 0, launches = 0, closed = 0, answers = 0;
   let deferredAnswer: DesktopTurnItem | undefined;
   let deferAnswer = false;
+  let readFailure = false;
   const transport: DesktopTransportPort = {
-    observe: async () => structuredClone(snapshot),
+    observe: async () => { if (readFailure) throw new Error("private IPC failure"); return structuredClone(snapshot); },
     async answerAsync(_identity, input) {
       await input.beforeDispatch?.(snapshot); answers++;
       const question = desktopAsyncQuestions(snapshot).find(item => item.id === input.interactionId)!;
@@ -86,7 +87,7 @@ function fixture(t: { after(fn: () => void): void }) {
     launchDesktopMonitor: async () => { launches++; return 1234; } };
   const run = async (command: string, options: Record<string, unknown> = {}) => JSON.parse((await executeCliCommand(command,
     { storeDir, ...options }, deps)).stdout);
-  return { id, tasks, run, deps, get sends() { return sends; }, get callbacks() { return callbacks; },
+  return { id, tasks, run, deps, get snapshot() { return snapshot; }, failReads() { readFailure = true; }, get sends() { return sends; }, get callbacks() { return callbacks; },
     get launches() { return launches; }, get closed() { return closed; }, get answers() { return answers; },
     ask(delayed = false) {
       deferAnswer = delayed;
@@ -102,6 +103,37 @@ function fixture(t: { after(fn: () => void): void }) {
       snapshot.turns[0]!.status = "completed";
       snapshot.turns[0]!.items.push({ id: "answer", type: "agentMessage", phase: "final_answer", text: "EXACT_DONE" }); } };
 }
+
+test("Desktop Status public progress is fresh, exact-turn scoped and never copied into List", async t => {
+  const f = fixture(t);
+  assert.equal((await f.run("status", { conversation: f.id })).progress.state, "no_public_progress");
+  const sent = await f.run("send", { conversation: f.id, message: "READY", messageId: "progress-test", openclawSession: "controller" });
+  f.snapshot.turns[0].items.push({ id: "progress", type: "agentMessage", phase: "commentary", text: "桌面任务公开进度", completedAtMs: 1_700_000_000_000 });
+  const running = await f.run("status", { conversation: f.id });
+  assert.equal(running.progress.text, "桌面任务公开进度");
+  assert.equal(running.latest_turn.response_text, "");
+  assert.equal(running.progress.native_turn_id, sent.native_turn_id);
+  assert.equal(running.progress.latest_item_at, "2023-11-14T22:13:20.000Z");
+  assert.ok(Number.isFinite(Date.parse(running.progress.read_at)));
+  assert.equal((await f.run("desktop-list")).desktop_sessions[0].progress, undefined);
+  f.finish();
+  await f.run("watch-status", { watch: sent.watch_id });
+  f.snapshot.latestTurnId = "successor";
+  f.snapshot.turns.unshift({ turnId: "successor", status: "inProgress", itemsComplete: true,
+    items: [{ id: "new-progress", type: "agentMessage", phase: "commentary", text: "新的桌面任务" }] });
+  const old = await f.run("status", { watch: sent.watch_id });
+  assert.equal(old.progress.text, "桌面任务公开进度");
+  assert.equal(old.progress.native_turn_id, sent.native_turn_id);
+  assert.equal((await f.run("status", { conversation: f.id })).progress.native_turn_id, "successor");
+  f.snapshot.turns.pop();
+  assert.equal((await f.run("status", { watch: sent.watch_id })).progress.reason, "missing_exact_turn");
+  f.failReads();
+  const failed = await f.run("status", { conversation: f.id });
+  assert.equal(failed.progress.state, "read_error");
+  assert.equal(JSON.stringify(failed).includes("private IPC failure"), false);
+  assert.equal((await f.run("status", { watch: sent.watch_id })).progress.state, "read_error");
+  assert.equal(f.callbacks, 1);
+});
 
 test("Desktop CLI sends once, launches exact Watch, recovers completion and enforces controller ownership", async t => {
   const f = fixture(t);
@@ -223,4 +255,20 @@ test("Desktop CLI recovery uses only exact persisted Watch IDs and separates Clo
   assert.equal(closed.management_state, "closed"); assert.equal(closed.close_reason, "controller finished");
   await assert.rejects(f.run("recover", { ...owner, watch: sent.watch_id }), /closed/);
   assert.equal(f.sends, 1);
+});
+
+
+test("Desktop Send/Watch defaults and lower-level timeout aliases preserve their precedence", async t => {
+  const variants = [
+    { options: {}, expected: 720 },
+    { options: { agentHardTimeoutMinutes: 45 }, expected: 45 },
+    { options: { hardTimeoutMinutes: 30, agentHardTimeoutMinutes: 45 }, expected: 30 }
+  ];
+  for (const { options, expected } of variants) {
+    const f = fixture(t);
+    const sent = await f.run("send", { conversation: f.id, message: "READY", messageId: "timeout-policy", openclawSession: "controller", ...options });
+    assert.equal(Date.parse(sent.deadline_at) - Date.parse(sent.created_at), expected * 60_000);
+    const watched = await f.run("watch-terminal", { conversation: f.id, openclawSession: "observer", ...options });
+    assert.equal(Date.parse(watched.deadline_at) - Date.parse(watched.created_at), expected * 60_000);
+  }
 });

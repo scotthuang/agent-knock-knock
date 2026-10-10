@@ -28,6 +28,9 @@ export interface CodexAppServerThreadItem {
   clientId?: string | null;
   text?: string;
   phase?: string | null;
+  /** Item-entry timestamps retained by native Status reads; absent on older protocols. */
+  startedAtMs?: number | null;
+  completedAtMs?: number | null;
   delivery?: "async" | null;
   questions?: { title: string; options: string[] | null }[] | null;
   [key: string]: unknown;

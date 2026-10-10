@@ -1,3 +1,4 @@
+import { resolveMonitorHardTimeoutMs } from "./monitor-deadline-policy.js";
 import { backendCallbackMaxAttempts } from "./backend-task-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -138,7 +139,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
   private make(input: DesktopTaskInput, id: string, kind: "send" | "watch"): DesktopTaskRecord {
     if (!input.controllerSession?.trim() || !input.desktopId?.trim() || !input.target?.threadId?.trim()) throw new DesktopTaskError("invalid_argument", "Desktop identity and controller session are required");
     if (!isDeepStrictEqual(parseDesktopConversationId(input.desktopId), input.target)) throw new DesktopTaskError("desktop_identity_mismatch", "Desktop conversation ID does not match its native target");
-    const timeout = input.timeoutMs ?? 3_600_000;
+    const timeout = resolveMonitorHardTimeoutMs(input.timeoutMs);
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 7 * 24 * 3_600_000) throw new DesktopTaskError("invalid_argument", "Desktop Watch timeout must be between 1 millisecond and 7 days");
     const route = input.callbackRoute === undefined ? undefined : parseCallbackRoute(input.callbackRoute);
     if (route && (route.controller_session_id !== input.controllerSession || route.capabilities?.respond === true)) throw new DesktopTaskError("callback_controller_mismatch", "Desktop callbacks must be notification-only and belong to the controller");

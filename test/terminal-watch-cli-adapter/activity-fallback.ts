@@ -64,11 +64,21 @@ for (const agent of ["codex", "claude"] as const) {
       terminal: { conversationId: terminal.id, agent, pid: terminal.pid, terminalControl: terminal.terminal_control },
       requestHash: "d".repeat(64), messageId: "automatic-activity", physicalToken: "c".repeat(64) });
     assert.ok(prepared);
+    assert.equal(prepared.timeoutMs, 43_200_000, "automatic terminal Watch shares the 12-hour hard default");
     assert.equal(exactAttempts, agent === "codex" ? 1 : 0, "provider-specific exact observation is attempted first");
     assert.equal(prepared.anchor.schema, "agent-knock-knock/terminal-activity-watch-anchor");
     assert.deepEqual(facade.listPublicWatches(fixture.storeDir), [], "capture cannot attach a callback before task dispatch");
     assert.match(prepared.warnings!.join("\n"), /exact_task_anchor_unavailable[\s\S]*terminal_activity_fallback/u);
     assert.equal(prepared.callbackRoute.capabilities?.respond, false);
+    for (const [overrides, minutes] of [
+      [{ agentHardTimeoutMinutes: 40 }, 40],
+      [{ hardTimeoutMinutes: 20, agentHardTimeoutMinutes: 40 }, 20]
+    ] as const) {
+      const alternate = await facade.prepareUserExplicitFallbackWatch({ options: { ...options, ...overrides },
+        terminal: { conversationId: terminal.id, agent, pid: terminal.pid, terminalControl: terminal.terminal_control },
+        requestHash: "d".repeat(64), messageId: "automatic-activity", physicalToken: "c".repeat(64) });
+      assert.equal(alternate?.timeoutMs, minutes * 60_000);
+    }
 
     // The preceding pane was already working, but that is not proof of work
     // caused by this Send. Attachment and repeated idle samples stay pending.

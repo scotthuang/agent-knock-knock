@@ -66,6 +66,8 @@ test("Terminal Watch CLI observes one exact human-started Codex task and deliver
   });
   const created = record(record(printed.at(-1)).watch);
   const watchId = String(created.watch_id);
+  const persisted = loadTerminalWatch(fixture.storeDir, watchId);
+  assert.equal(Date.parse(persisted.deadline_at) - Date.parse(persisted.created_at), 10 * 60_000);
   assert.match(watchId, /^terminal-watch-/u);
   assert.equal(created.status, "active");
   assert.equal("observation_checkpoint" in created, false);
@@ -133,6 +135,8 @@ test("Terminal Watch accepts an unverified complete Codex version and returns it
   assert.equal(created.status, "active");
   assert.match(created.compatibility_warning, /Codex 0\.150\.0/u);
   assert.match(created.compatibility_warning, /not been regression-tested/u);
+  const persisted = loadTerminalWatch(fixture.storeDir, String(created.watch_id));
+  assert.equal(Date.parse(persisted.deadline_at) - Date.parse(persisted.created_at), 43_200_000);
 });
 
 test("Terminal Watch snapshots and delivers the trusted generic Host route", async (t) => {

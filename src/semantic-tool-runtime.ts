@@ -566,7 +566,7 @@ export function createAkkSemanticToolCatalog(
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const backend = backendRecoveryToolArgs("renew", params, context ?? {}, {
         storeDir: resolvePluginStoreDir(config), codexHome: stringValue(config.codexHome),
-        defaultMinutes: config.agentTimeoutMinutes as number | undefined
+        defaultMinutes: config.agentHardTimeoutMinutes as number | undefined
       });
       if (backend) return backend;
       const args = ["renew"];

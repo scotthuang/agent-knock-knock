@@ -29,6 +29,15 @@ from Send, List or Status. A conversation ID alone cannot select a task to close
 renew, recover, or retry. Multiple eligible failed notifications require an
 explicit `notification_id`.
 
+Starting in AKK 0.14.1, backend Renew with no explicit
+`minutes` uses the Host's `agentHardTimeoutMinutes`, then the shared 720-minute
+default. It sets the deadline to the later of the saved deadline and now plus
+that duration; it does not add the duration to the old deadline. Terminal managed
+Renew still refreshes its inactivity window (default 60 minutes) and cannot
+exceed its original hard lifetime. Recover does not renew either deadline.
+An upgrade alone never extends saved deadlines, revives expired observation or
+replays accepted notifications.
+
 Closed management cannot be reopened. Unwatch does not release an unresolved
 Send reservation; Close explicitly releases management without asserting that
 the native submission failed. Reusing the original Send message ID still returns

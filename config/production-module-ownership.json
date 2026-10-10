@@ -547,6 +547,10 @@
       "owner": "approval-policy"
     },
     {
+      "path": "src/backend-public-progress.ts",
+      "owner": "conversation-trace"
+    },
+    {
       "path": "src/backend-recovery-semantic.ts",
       "owner": "host-bridge"
     },
@@ -1157,6 +1161,10 @@
     {
       "path": "src/managed-turn-recovery-service.ts",
       "owner": "terminal-acceptance-application"
+    },
+    {
+      "path": "src/monitor-deadline-policy.ts",
+      "owner": "terminal-monitor-policy"
     },
     {
       "path": "src/mutation-transaction.ts",

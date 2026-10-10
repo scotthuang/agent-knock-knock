@@ -215,7 +215,9 @@
     "test/conversation-route-legacy.test.ts",
     "test/conversation-routing-home.test.ts",
     "test/backend-task-recovery.test.ts",
-    "test/backend-recovery-semantic.test.ts"
+    "test/backend-recovery-semantic.test.ts",
+    "test/backend-public-progress.test.ts",
+    "test/monitor-deadline-policy.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",

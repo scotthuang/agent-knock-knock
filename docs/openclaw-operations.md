@@ -132,7 +132,7 @@ under `plugins.entries.agent-knock-knock.config`:
 | `codexHome` | Auto-detected | Optional Codex home used for native-session discovery. |
 | `idleTimeoutMinutes` | `10080` | Retention checked during controlled reconciliation. |
 | `agentTimeoutMinutes` | `60` | Terminal inactivity timeout. |
-| `agentHardTimeoutMinutes` | `720` | Maximum monitor lifetime. |
+| `agentHardTimeoutMinutes` | `720` | New Send/Watch hard lifetime across backend and terminal routes starting in AKK 0.14.1; also the default backend Renew duration. AKK 0.14.0 backend Send/Watch used 60 minutes when this setting is omitted. |
 
 A custom `storeDir` must be a dedicated private directory. AKK initializes a
 missing or empty path and refuses a non-empty manifestless directory instead

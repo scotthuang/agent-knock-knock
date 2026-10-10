@@ -1,8 +1,10 @@
+import { monitorMinutesToMs, resolveMonitorHardTimeoutMinutes } from "./monitor-deadline-policy.js";
 import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
+import { backendPublicProgress, backendPublicProgressReadError } from "./backend-public-progress.js";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { cliCwd, cliDependencies, cliEnv, writeCliStdout } from "./cli-runtime-context.js";
+import { cliCwd, cliDependencies, cliEnv, cliNow, writeCliStdout } from "./cli-runtime-context.js";
 import { createTerminalWatchOpenClawCallbackRoute, parseCallbackRoute } from "./callback-transport.js";
 import { isCodexNativeConversationId, parseCodexNativeConversationId } from "./codex-native-identity.js";
 import { isCodexNativeWatchId, type PersistedNativeInteraction, type CodexNativeTaskRecord } from "./codex-native-state-store.js";
@@ -88,7 +90,7 @@ async function sendOrWatch(runtime: Runtime, command: string, options: Options) 
   const route = options.callbackRoute ? parseCallbackRoute(options.callbackRoute)
     : createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: controllerSession, openclawBin: text(options.openclawBin) });
   const input = { target, nativeId: id, controllerSession, callbackRoute: route,
-    timeoutMs: Number(options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes ?? 60) * 60_000 };
+    timeoutMs: monitorMinutesToMs(resolveMonitorHardTimeoutMinutes(options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes)) };
   const task = command === "send" ? await runtime.tasks.send({ ...input,
     messageId: text(options.messageId) ?? randomUUID(), text: required(options.message ?? options.request, "message") })
     : await runtime.tasks.watch(input);
@@ -96,11 +98,32 @@ async function sendOrWatch(runtime: Runtime, command: string, options: Options) 
 }
 
 async function inspectConversation(runtime: Runtime, options: Options) {
-  const { target } = conversation(options);
-  const client = await runtime.clientFor(target);
-  // Subscription replays current requests on an already loaded thread; it cannot load a historical conversation.
-  await client.subscribe(target.threadId);
-  output(codexNativeSessionProjection(target, await client.readSnapshot(target.threadId), client.metadata.serverVersion, true));
+  const { id, target } = conversation(options);
+  try {
+    const client = await runtime.clientFor(target);
+    // Subscription replays current requests on an already loaded thread; it cannot load a historical conversation.
+    await client.subscribe(target.threadId);
+    const snapshot = await client.readSnapshot(target.threadId);
+    if (snapshot.threadId !== target.threadId) throw new Error("Native snapshot identity mismatch");
+    output({ ...codexNativeSessionProjection(target, snapshot, client.metadata.serverVersion, true),
+      progress: backendPublicProgress({ nativeTurnId: snapshot.latestTurnId,
+        turn: snapshot.turns.find(turn => turn.id === snapshot.latestTurnId), readAt: cliNow().toISOString() }) });
+  } catch {
+    output({ source: "codex_cli", conversation_id: id, native_thread_id: target.threadId, native_turn_id: null,
+      connection_state: "unconfirmed", activity_state: "unknown", interaction_requests_scanned: false,
+      pending_interaction_count: null, observation_error: "native_status_read_failed",
+      progress: backendPublicProgressReadError(null, cliNow().toISOString()) });
+  }
+}
+
+async function watchProgress(runtime: Runtime, task: CodexNativeTaskRecord) {
+  if (!task.native_turn_id) return backendPublicProgressReadError(null, cliNow().toISOString(), "missing_exact_turn");
+  try {
+    const snapshot = await runtime.read(task.target, task.native_turn_id);
+    if (snapshot.threadId !== task.target.threadId) throw new Error("Native snapshot identity mismatch");
+    return backendPublicProgress({ nativeTurnId: task.native_turn_id,
+      turn: snapshot.turns.find(turn => turn.id === task.native_turn_id), readAt: cliNow().toISOString() });
+  } catch { return backendPublicProgressReadError(task.native_turn_id, cliNow().toISOString()); }
 }
 
 async function permissionCommand(runtime: Runtime, command: string, options: Options) {
@@ -174,13 +197,14 @@ async function watchCommand(runtime: Runtime, command: string, options: Options)
   if (command === "unwatch-terminal") {
     output(codexNativeTaskProjection(runtime.tasks.unwatch(id, { controllerSession: required(options.openclawSession, "controller session") })));
   } else if (command === "watch-status" || command === "status") {
-    output(codexNativeTaskProjection(await runtime.reconcile(id)));
+    const current = await runtime.reconcile(id);
+    output({ ...codexNativeTaskProjection(current), progress: await watchProgress(runtime, current) });
   } else if (["close", "renew", "recover", "retry-callback"].includes(command)) {
     const controllerSession = required(options.openclawSession, "controller session");
     const result = command === "close" ? runtime.tasks.close(id, { controllerSession, reason: text(options.reason) })
       : command === "renew" ? await runtime.tasks.renew(id, { controllerSession,
         ...((options.minutes ?? options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes) !== undefined
-          ? { timeoutMs: Number(options.minutes ?? options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes) * 60_000 } : {}) })
+          ? { timeoutMs: monitorMinutesToMs(Number(options.minutes ?? options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes)) } : {}) })
       : command === "recover" ? await runtime.tasks.recover(id, { controllerSession })
       : await runtime.tasks.retryCallback(id, { controllerSession, notificationId: text(options.notificationId) });
     output(command === "close" ? codexNativeTaskProjection(result) : await launchIfNeeded(result, options));

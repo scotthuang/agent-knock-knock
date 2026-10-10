@@ -1,3 +1,4 @@
+import { resolveMonitorHardTimeoutMs } from "./monitor-deadline-policy.js";
 import type { CallbackAttemptOutcome } from "./callback-transport.js";
 
 /** Additive fields keep existing v1 backend records readable. Management and observation are separate. */
@@ -77,7 +78,7 @@ function assertNotificationHistory(previous: BackendRecoveryNotification[], next
     if (!current || current.attempts < old.attempts || (current.retry_budget_until ?? 0) < (old.retry_budget_until ?? 0)) throw new Error("Backend callback history cannot be reset");
   }
 }
-export function backendRenewalDeadline(task: BackendRecoveryTask, now: Date, timeoutMs = 3_600_000): string {
+export function backendRenewalDeadline(task: BackendRecoveryTask, now: Date, timeoutMs = resolveMonitorHardTimeoutMs()): string {
   if (task.closed_at) throw new BackendRecoveryError("backend_task_closed", "Closed management cannot be renewed");
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 7 * 24 * 3_600_000) {
     throw new BackendRecoveryError("invalid_argument", "Renewal must be between one millisecond and seven days");

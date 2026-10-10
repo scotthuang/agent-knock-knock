@@ -14,9 +14,9 @@ Codex. Claude Code and applicable Codex terminal workflows use tmux or Herdr.
 AKK does not launch a hidden replacement agent.
 
 AKK 0.14.0 introduces Codex CLI shared-backend control, Codex Desktop support,
-unified conversation routing, and exact-task recovery. Existing terminal
-workflows remain available. See the [0.14.0 release notes](CHANGELOG.md#0140---2026-10-10)
-for the complete changes.
+unified conversation routing, and exact-task recovery. **0.14.1 adds bounded
+public progress in Status and shared 12-hour monitoring defaults.** See the
+[release notes](CHANGELOG.md#0141---2026-10-10) for changes and validation limits.
 
 ## What you can do
 
@@ -100,9 +100,10 @@ These are distinct provider boundaries, not a blanket minimum Codex version.
 | **Codex / Claude Code terminals** | tmux or local Herdr **0.8.0 / protocol 19**. Reviewed Codex TUI profiles include **0.160.0**; Claude Code **2.1.285** was verified on macOS arm64. Operations depend on the agent version and current UI. |
 | **OpenClaw / runtime** | OpenClaw **2026.6.5+**, plugin API/Gateway **2026.5.12+**; Node.js **22.19.0+**. Core terminal support targets macOS/Linux; the Desktop profile is macOS-only. |
 
-The local CLI executable and daemon installation were observed at **0.162.1**
-on 2026-10-10; this is not a new end-to-end compatibility result. Frontend and
-backend versions need not match. The [CLI evidence](docs/codex-cli-native-compatibility.md#compatibility-and-limits)
+Additional targeted verification on 2026-10-10 used **CLI 0.162.1 + backend
+0.162.1** for public Status progress, 12-hour Send monitoring and an isolated
+completion callback. Other native capabilities were not repeated in that run.
+Frontend and backend versions need not match. The [CLI evidence](docs/codex-cli-native-compatibility.md#compatibility-and-limits)
 and [Desktop profile](docs/codex-desktop-compatibility.md#version-and-platform-evidence)
 separate current observations, tested operations, and unsupported cases.
 

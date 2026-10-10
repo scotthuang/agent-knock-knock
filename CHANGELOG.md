@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.1 - 2026-10-10
+
+- Add bounded, redacted public progress to Codex CLI backend and Desktop conversation/task Status: the latest commentary and up to two action summaries share an 800-code-point, grapheme-safe budget. Keep exact Watch turn attribution, native timestamps and read failures explicit; List and terminal screen output are unchanged.
+- Share a 720-minute default monitoring hard deadline across backend and terminal Send/Watch entry points and service fallbacks. Backend Renew uses the hard-timeout configuration; terminal managed Renew retains its independent inactivity window. Existing deadlines, replay identities and accepted callback records are unchanged.
+
+### Validation boundaries
+
+- Verified public progress during an active task, 720-minute Send monitoring, a single local completion acknowledgement, and idempotent Send on macOS with Codex CLI and shared app-server both at 0.162.1. This does not establish a new numeric minimum or claim all native operations were repeated.
+- Desktop behavior is covered by regression tests; Desktop live verification was explicitly skipped for this release. The existing exact supported app/build requirement remains unchanged.
+
 ## 0.14.0 - 2026-10-10
 
 ### Added

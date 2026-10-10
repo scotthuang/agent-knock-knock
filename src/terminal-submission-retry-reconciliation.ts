@@ -1,3 +1,4 @@
+import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES } from "./monitor-deadline-policy.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 
@@ -82,7 +83,6 @@ import type { TerminalSubmissionRetryReconciliationPorts } from
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
 
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
-const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const terminalBridgeSubmission = dispatchReceipt.terminalBridgeSubmission;
 const TERMINAL_SUBMISSION_RETRY_LEDGER_KEYS = [
   "submission_retry_attempt_id",
@@ -322,7 +322,7 @@ export class TerminalSubmissionRetryReconciliation {
       : DEFAULT_AGENT_TIMEOUT_MINUTES;
     const hardMinutes = Number.isFinite(configuredHard) && configuredHard > 0
       ? configuredHard
-      : DEFAULT_AGENT_HARD_TIMEOUT_MINUTES;
+      : DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES;
     return {
       ...conversation,
       native_session_takeover: {

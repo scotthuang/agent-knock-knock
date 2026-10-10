@@ -1,3 +1,4 @@
+import { resolveMonitorHardTimeoutMinutes } from "./monitor-deadline-policy.js";
 import { pushOptional, requiredControllerSessionKey, requiredString } from "./semantic-tool-arguments.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 
@@ -50,11 +51,11 @@ export function backendRecoveryToolArgs(command: BackendRecoveryCommand, params:
   pushOptional(args, "--store-dir", options.storeDir);
   pushOptional(args, "--codex-home", options.codexHome);
   if (command === "renew") {
-    const minutes = params.minutes ?? options.defaultMinutes;
-    if (minutes !== undefined) {
-      if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) throw new Error("minutes must be a positive number");
-      args.push("--minutes", String(minutes));
+    const supplied = params.minutes ?? options.defaultMinutes;
+    if (supplied !== undefined && (typeof supplied !== "number" || !Number.isFinite(supplied) || supplied <= 0)) {
+      throw new Error("minutes must be a positive number");
     }
+    args.push("--minutes", String(resolveMonitorHardTimeoutMinutes(params.minutes, options.defaultMinutes)));
   }
   if (Object.hasOwn(params, "reason")) args.push("--reason", requiredString(params.reason, "reason"));
   if (Object.hasOwn(params, "notification_id")) args.push("--notification-id", requiredString(params.notification_id, "notification_id"));
