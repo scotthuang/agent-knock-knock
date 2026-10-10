@@ -1536,7 +1536,7 @@ function buildBackendRecoveryCommandArgs(command: AkkCommand, config: Record<str
       if (command.expectedTransitionId !== undefined) params.expected_transition_id = command.expectedTransitionId;
     }
     const backend = backendRecoveryToolArgs(command.action, params, context, {
-      storeDir: resolvePluginStoreDir(config), codexHome: nonEmptyString(config.codexHome), defaultMinutes: config.agentTimeoutMinutes as number | undefined
+      storeDir: resolvePluginStoreDir(config), codexHome: nonEmptyString(config.codexHome), defaultMinutes: config.agentHardTimeoutMinutes as number | undefined
     });
     if (backend) return backend;
   }

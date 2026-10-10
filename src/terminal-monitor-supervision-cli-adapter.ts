@@ -1,3 +1,4 @@
+import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES } from "./monitor-deadline-policy.js";
 import type { CallbackCliFacade } from "./callback-cli-adapter.js";
 import type { CallbackOutboxLane } from "./callback-outbox-settlement.js";
 import { expandHome, positiveMinutes } from "./cli-command-runtime.js";
@@ -21,7 +22,6 @@ type LogLevel = "info" | "warn" | "error";
 type Release = () => void;
 
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
-const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const DEFAULT_MONITOR_POLL_INTERVAL_MS = 5000;
 const DEFAULT_CALLBACK_RETRY_DELAY_MS = 5000;
 
@@ -959,7 +959,7 @@ class TerminalMonitorSupervisionCliApplication {
         hardTimeoutMinutes: positiveMinutes(
           options.agentHardTimeoutMinutes ??
             initialTakeover?.terminal_bridge_hard_timeout_minutes ??
-            DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+            DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES,
           "--agent-hard-timeout-minutes"
         )
       }),

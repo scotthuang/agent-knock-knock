@@ -587,3 +587,44 @@ test("Desktop Recover records an overdue active task as timed out without extend
   assert.equal(recovered.notifications[0].id, `${sent.id}:timed_out`);
   assert.equal(recovered.renewal_count, undefined); assert.equal(h.state.starts, 1);
 });
+
+
+test("Desktop service Send and Watch share 12-hour defaults and exact expiry boundaries", async t => {
+  for (const kind of ["send", "watch"] as const) {
+    const h = harness(t);
+    if (kind === "watch") h.state.snapshot = snapshot([turn("native-one")]);
+    const startedAt = h.state.now;
+    const task = await h.service[kind](input);
+    assert.equal(Date.parse(task.deadline_at) - startedAt, 43_200_000);
+    h.state.now = startedAt + 3_600_000;
+    assert.equal((await h.service.reconcile(task.id)).status, "watching", "60 minutes is not a backend inactivity deadline");
+    h.state.now = startedAt + 43_200_000 - 1;
+    assert.equal((await h.service.reconcile(task.id)).status, "watching");
+    h.state.now++;
+    assert.equal((await h.service.reconcile(task.id)).status, "timed_out");
+  }
+});
+
+test("Desktop preserves existing short deadlines through restart, replay and Recover; only Renew extends", async t => {
+  const h = harness(t);
+  const sent = await h.service.send({ ...input, callbackRoute: route, timeoutMs: 3_600_000 });
+  h.state.now += 3_600_000;
+  const service = createDesktopTaskService(h.deps);
+  const expired = await service.reconcile(sent.id);
+  assert.equal(expired.status, "timed_out");
+  const accepted = expired.notifications.filter(note => note.status === "accepted").map(note => note.id);
+  assert.equal(accepted.length, 1);
+  const replay = await service.send({ ...input, callbackRoute: route });
+  assert.equal(replay.deadline_at, sent.deadline_at);
+  assert.equal(replay.status, "timed_out");
+  const recovered = await service.recover(sent.id, { controllerSession: input.controllerSession });
+  assert.equal(recovered.deadline_at, sent.deadline_at);
+  assert.equal(recovered.status, "timed_out");
+  const renewed = await service.renew(sent.id, { controllerSession: input.controllerSession });
+  assert.equal(Date.parse(renewed.deadline_at) - h.state.now, 43_200_000);
+  assert.equal(renewed.renewal_count, 1);
+  assert.equal(h.state.starts, 1);
+  assert.deepEqual(renewed.notifications.filter(note => note.status === "accepted").map(note => note.id), accepted);
+  await service.reconcile(sent.id);
+  assert.equal(h.state.notifications.length, 1, "accepted timeout notification is neither revived nor redelivered");
+});

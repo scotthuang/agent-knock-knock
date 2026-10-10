@@ -20,9 +20,10 @@ function fixture(t: { after(fn: () => void): void }) {
     loaded: true, latestTurnId: null, turns: [], pendingInteractions: [], canSend: true };
   let settings: CodexNativePermissions = { preset: "read-only", profileId: ":read-only", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "readOnly" } };
   let sends = 0, callbacks = 0, launches = 0, updates = 0;
+  let readFailure = false; let successfulReadsBeforeFailure = 0;
   const client: CodexNativeClientPort = {
     metadata: { serverVersion: "0.162.0", codexHome: target.codexHome, socketPath: "/fixture", platformFamily: "unix", platformOs: "macos" },
-    async discover() { return [snapshot.thread]; }, async readSnapshot() { return structuredClone(snapshot); }, async subscribe() {}, close() {},
+    async discover() { return [snapshot.thread]; }, async readSnapshot() { if (readFailure && successfulReadsBeforeFailure-- <= 0) throw new Error("private backend failure"); return structuredClone(snapshot); }, async subscribe() {}, close() {},
     async start(_thread, input) {
       await input.beforeDispatch?.(structuredClone(snapshot)); sends++;
       snapshot.thread.status = { type: "active", activeFlags: [] }; snapshot.canSend = false; snapshot.latestTurnId = `native-turn-${sends}`;
@@ -42,12 +43,48 @@ function fixture(t: { after(fn: () => void): void }) {
   };
   const run = async (command: string, options: Record<string, unknown> = {}) => JSON.parse((await executeCliCommand(command,
     { storeDir: path.join(root, "store"), ...options }, deps)).stdout);
-  return { run, id, target, snapshot, deps, get sends() { return sends; }, get callbacks() { return callbacks; },
+  return { run, id, target, snapshot, deps, failReads(after = 0) { readFailure = true; successfulReadsBeforeFailure = after; }, get sends() { return sends; }, get callbacks() { return callbacks; },
     get launches() { return launches; }, get updates() { return updates; },
     finish() { snapshot.thread.status = { type: "idle" }; snapshot.canSend = true; snapshot.turns[0]!.status = "completed";
       snapshot.turns[0]!.items.push({ id: "final", type: "agentMessage", phase: "final_answer", text: "NATIVE_EXACT_DONE" }); }
   };
 }
+
+test("native Status public progress stays on the exact selected turn and distinguishes empty from failed reads", async t => {
+  const f = fixture(t);
+  const empty = await f.run("status", { conversation: f.id });
+  assert.equal(empty.progress.state, "no_public_progress");
+  assert.equal(empty.progress.native_turn_id, null);
+  const sent = await f.run("send", { conversation: f.id, message: "READY", messageId: "progress-test", openclawSession: "controller" });
+  f.snapshot.turns[0].items.push({ id: "progress", type: "agentMessage", phase: "commentary", text: "正在检查旧任务", startedAtMs: 1_700_000_000_000 });
+  const running = await f.run("status", { conversation: f.id });
+  assert.equal(running.progress.text, "正在检查旧任务");
+  assert.equal(running.latest_turn.response_text, "");
+  assert.equal(running.progress.native_turn_id, sent.native_turn_id);
+  assert.equal(running.progress.latest_item_at, "2023-11-14T22:13:20.000Z");
+  assert.ok(Number.isFinite(Date.parse(running.progress.read_at)));
+  assert.deepEqual((toolResult(running).details as typeof running).progress, running.progress);
+  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].progress, undefined);
+  f.finish();
+  await f.run("watch-status", { watch: sent.watch_id });
+  f.snapshot.latestTurnId = "successor";
+  f.snapshot.turns.unshift({ id: "successor", status: "inProgress", itemsComplete: true,
+    items: [{ id: "new-progress", type: "agentMessage", phase: "commentary", text: "新任务进度不可串给旧 Watch" }] });
+  const old = await f.run("status", { watch: sent.watch_id });
+  assert.equal(old.progress.text, "正在检查旧任务");
+  assert.equal(old.progress.native_turn_id, sent.native_turn_id);
+  assert.equal((await f.run("status", { conversation: f.id })).progress.native_turn_id, "successor");
+  f.snapshot.turns.pop();
+  assert.equal((await f.run("status", { watch: sent.watch_id })).progress.reason, "missing_exact_turn");
+  // Let route selection succeed, then fail the Status snapshot itself.
+  f.failReads(1);
+  const failed = await f.run("status", { conversation: f.id });
+  assert.equal(failed.progress.state, "read_error");
+  assert.equal(failed.pending_interaction_count, null);
+  assert.equal(JSON.stringify(failed).includes("private backend failure"), false);
+  assert.equal((await f.run("status", { watch: sent.watch_id })).progress.state, "read_error");
+  assert.equal(f.callbacks, 1);
+});
 
 test("native CLI Send persists one exact task, Status recovers completion without a monitor, callback is once", async t => {
   const f = fixture(t);
@@ -118,4 +155,20 @@ test("native CLI exact task recovery preserves ownership and management without 
   await assert.rejects(f.run("renew", { conversation: f.id, openclawSession: "controller" }), /exact/i);
   await assert.rejects(f.run("recover", { watch: sent.watch_id, openclawSession: "other" }), /different controller/);
   assert.equal(f.sends, 1);
+});
+
+
+test("Native CLI Send/Watch defaults and lower-level timeout aliases preserve their precedence", async t => {
+  const variants = [
+    { options: {}, expected: 720 },
+    { options: { agentHardTimeoutMinutes: 45 }, expected: 45 },
+    { options: { hardTimeoutMinutes: 30, agentHardTimeoutMinutes: 45 }, expected: 30 }
+  ];
+  for (const { options, expected } of variants) {
+    const f = fixture(t);
+    const sent = await f.run("send", { conversation: f.id, message: "READY", messageId: "timeout-policy", openclawSession: "controller", ...options });
+    assert.equal(Date.parse(sent.deadline_at) - Date.parse(sent.created_at), expected * 60_000);
+    const watched = await f.run("watch-terminal", { conversation: f.id, openclawSession: "observer", ...options });
+    assert.equal(Date.parse(watched.deadline_at) - Date.parse(watched.created_at), expected * 60_000);
+  }
 });

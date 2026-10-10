@@ -9,6 +9,7 @@ export const semanticToolDescriptions = {
     "read-only Terminal Watch, manage native threads, and safely inspect or " +
     "change an idle pane's native model selection or Codex permissions.",
   watch: "Pass conversation_id from List; AKK prefers the exact backend observation route. Retain the returned watch_id; an existing Watch never changes its task or transport. For direct Codex CLI, watch its exact " +
+    "task with a default 720-minute hard deadline unless overridden. Send already returns its automatic Watch; do not create a duplicate for the same submission. Observe the " +
     "active task; use the returned codex-cli-watch ID for Status and interactions. " +
     "For Desktop, use the exact conversation_id from List to watch one currently " +
     "active native task. An unresolved identity or idle thread is refused; Desktop " +
@@ -55,6 +56,7 @@ export const semanticToolDescriptions = {
     "candidate evidence privately. This creates or reactivates an AKK Session but " +
     "no Turn.",
   status: "Inspect conversation_id from List; AKK prefers the exact backend, resolving an idle terminal alias with a safe native status probe when needed. For a task result use its returned watch_id or turn_id, without migrating that observation. Inspect direct Codex CLI conversation_id or codex-cli-watch watch_id through " +
+    "its backend. CLI/Desktop progress contains at most 800 Unicode code points of redacted public commentary and short action summaries for that exact task, with read_at, nullable native latest_item_at, and truncated. Distinguish no_public_progress from read_error; neither proves completion. List has no progress body. Inspect " +
     "its backend, including current typed approvals and questions. Inspect one exact managed Turn by turn_id, a terminal or Desktop Watch " +
     "by watch_id, or a conversation_id returned by List. Desktop status reads " +
     "the original thread when reachable; metadata alone cannot prove live task " +
@@ -67,6 +69,7 @@ export const semanticToolDescriptions = {
     "Watch status describes the exact request AKK physically sent without " +
     "claiming a managed Turn. AKK never starts a coding agent.",
   send: "Pass request and conversation_id from List. AKK prefers a backend only when the exact same live thread is proven, otherwise retaining eligible terminal delivery. Targeted conversation operations may use the safe native /status identity probe when needed; List sends no input. It never retries uncertain dispatch through another route. Backend busy or blocked state is not transport unavailability. For direct Codex CLI, AKK " +
+    "uses a shared default 720-minute monitoring hard deadline unless overridden; terminal inactivity remains separate. Do not create another Watch when the receipt already provides automatic monitoring. AKK " +
     "submits once to the loaded backend thread, inherits its settings and binds " +
     "an exact native-task Watch for completion and interaction callbacks; no " +
     "terminal input or replacement process is used. Preserve uncertain receipts " +
@@ -149,7 +152,7 @@ export const semanticToolDescriptions = {
     "not accepted. Never retry an interrupted decision blindly.",
   renew: "Renew monitoring for an exact terminal turn_id or original Codex CLI/Desktop " +
     "task watch_id (also returned as turn_id by Send). Backend renewal verifies the original " +
-    "bound task and extends its deadline; it never follows the current task or sends input.",
+    "bound task and extends its deadline using explicit minutes, then hard-timeout configuration, then the 720-minute default. Terminal managed renewal instead refreshes inactivity within its original hard lifetime. It never follows the current task or sends input.",
   recover: "Reobserve and reconcile one exact original Codex CLI or Desktop task using its " +
     "watch_id or send-produced turn_id and restart its monitor when appropriate. Only the " +
     "originating controller can recover it. This does not extend its deadline, replay input, " +

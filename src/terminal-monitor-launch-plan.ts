@@ -1,3 +1,4 @@
+import { resolveMonitorHardTimeoutMinutes } from "./monitor-deadline-policy.js";
 import type { Conversation } from "./protocol.js";
 import { isRecord } from "./value-guards.js";
 
@@ -80,10 +81,10 @@ export function terminalMonitorTimeoutPlan(
         nativeTakeover?.terminal_bridge_inactivity_timeout_minutes ??
         input.defaultAgentTimeoutMinutes ?? 60
     ),
-    agentHardTimeoutMinutes: Number(
+    agentHardTimeoutMinutes: resolveMonitorHardTimeoutMinutes(
       input.options.agentHardTimeoutMinutes ??
         nativeTakeover?.terminal_bridge_hard_timeout_minutes ??
-        input.defaultAgentHardTimeoutMinutes ?? 720
+        input.defaultAgentHardTimeoutMinutes
     ),
     pollIntervalMs: Number(
       input.options.monitorPollIntervalMs ?? input.defaultPollIntervalMs ?? 5000

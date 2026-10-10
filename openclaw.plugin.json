@@ -149,7 +149,7 @@
       "agentHardTimeoutMinutes": {
         "type": "number",
         "exclusiveMinimum": 0,
-        "description": "Fallback lifetime ceiling for a managed terminal bridge monitor or Terminal Watch that has not produced approval or completion. Defaults to 720 minutes."
+        "description": "Default hard monitoring lifetime for Codex CLI backend/Desktop Send and Watch, Terminal Watch, and managed terminal tasks; also used by backend renew when minutes is omitted. Explicit call parameters take precedence. Defaults to 720 minutes. Independent of the managed terminal inactivity timeout."
       },
       "autoApprove": {
         "type": "object",

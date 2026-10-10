@@ -1,3 +1,4 @@
+import { resolveMonitorHardTimeoutMs } from "./monitor-deadline-policy.js";
 import { backendObservationStopped, backendRenewalDeadline, prepareBackendCallbackRetry } from "./backend-task-recovery.js";
 import { clearDesktopInteractionAttention } from "./desktop-task-interactions.js";
 import { desktopInteractions } from "./desktop-request-interactions.js";
@@ -60,7 +61,7 @@ function fresh(task: DesktopTaskRecord, initial: DesktopTaskRecord, input: Deskt
   if (task.revision !== initial.revision) throw new DesktopTaskError("desktop_task_changed", "Desktop task changed during recovery; refresh Status");
 }
 function timeoutMs(value?: number): number {
-  const timeout = value ?? 3_600_000;
+  const timeout = resolveMonitorHardTimeoutMs(value);
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 7 * 24 * 3_600_000) throw new DesktopTaskError("invalid_argument", "Desktop Watch timeout must be between 1 millisecond and 7 days");
   return timeout;
 }

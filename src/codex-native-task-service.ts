@@ -1,3 +1,4 @@
+import { resolveMonitorHardTimeoutMs } from "./monitor-deadline-policy.js";
 import { backendObservationStopped, backendRenewalDeadline, isBackendCallbackRetryable,
   prepareBackendCallbackRetry, stopBackendObservation, closeBackendManagement } from "./backend-task-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -125,7 +126,7 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
   private make(input: CodexNativeTaskInput, id: string, kind: "send" | "watch"): CodexNativeTaskRecord {
     if (!input.controllerSession?.trim()) throw new CodexNativeTaskError("invalid_argument", "Native task controller is required");
     assertNativeIdentity(input.nativeId, input.target);
-    const timeout = input.timeoutMs ?? 3_600_000;
+    const timeout = resolveMonitorHardTimeoutMs(input.timeoutMs);
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 7 * 24 * 3_600_000) throw new CodexNativeTaskError("invalid_argument", "Native Watch timeout must be between one millisecond and seven days");
     const route = input.callbackRoute === undefined ? undefined : parseCallbackRoute(input.callbackRoute);
     if (route && route.controller_session_id !== input.controllerSession) throw new CodexNativeTaskError("callback_controller_mismatch", "Native callback belongs to a different controller");

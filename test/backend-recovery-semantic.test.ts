@@ -17,13 +17,13 @@ const context = { sessionKey: "originating-controller", sessionId: "controller-i
 const commands = ["renew", "recover", "close", "retry-callback"] as const;
 const value = (args: readonly string[], flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
 
-function harness(t: TestContext) {
+function harness(t: TestContext, hardTimeoutMinutes?: number) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-recovery-semantic-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const relay = path.join(dir, "relay.cjs");
   const calls = path.join(dir, "calls.jsonl");
   fs.writeFileSync(relay, `const fs=require('node:fs'); const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(args)+'\\n'); process.stdout.write(JSON.stringify({source:'codex_cli',watch_id:args[args.indexOf('--watch')+1],status:'watching',argv:args}));`);
-  const api = { pluginConfig: { storeDir: path.join(dir, "store"), codexHome: "/fixture/codex", agentTimeoutMinutes: 42 },
+  const api = { pluginConfig: { storeDir: path.join(dir, "store"), codexHome: "/fixture/codex", agentTimeoutMinutes: 42, ...(hardTimeoutMinutes === undefined ? {} : { agentHardTimeoutMinutes: hardTimeoutMinutes }) },
     logger: { info() {}, warn() {} } };
   bindSemanticToolRelayPath(api, relay);
   const catalog = createAkkSemanticToolCatalog(api, new Map());
@@ -180,4 +180,28 @@ test("compact backend watches retain manual recovery state and notification iden
   const text = formatBackendRecoveryCommandResult({ ...row, callback_notifications: [{ notification_id: "notification-one", status: "retryable_failure" }] }, "retry-callback")!;
   assert.match(text, /notification-one: retryable_failure/u);
   assert.doesNotMatch(text, /callback delivered/u);
+});
+
+
+test("backend Renew uses explicit minutes then hard-timeout config then shared default, separate from managed inactivity", async t => {
+  for (const [configured, expected] of [[undefined, 720], [95, 95]] as const) {
+    const h = harness(t, configured);
+    const tool = h.catalog.tools.find(item => item.name === "agent_knock_knock_renew")!;
+    for (const watch of watches) {
+      await tool.execute(context, "renew-default", { watch_id: watch });
+      assert.equal(value(h.calls().at(-1)!, "--minutes"), String(expected));
+      await tool.execute(context, "renew-explicit", { watch_id: watch, minutes: 8 });
+      assert.equal(value(h.calls().at(-1)!, "--minutes"), "8");
+      const config = { agentTimeoutMinutes: 42, ...(configured === undefined ? {} : { agentHardTimeoutMinutes: configured }) };
+      const slash = buildAkkCommandCliArgs(parseAkkCommand(`renew ${watch}`), config, context)!;
+      assert.equal(value(slash, "--minutes"), String(expected));
+    }
+    await tool.execute(context, "renew-managed", { turn_id: "managed-terminal-task" });
+    assert.equal(value(h.calls().at(-1)!, "--minutes"), "42", "managed terminal Renew retains inactivity configuration");
+  }
+  const terminal = buildAkkCommandCliArgs(parseAkkCommand("renew managed-terminal-task"), {}, context)!;
+  assert.equal(value(terminal, "--minutes"), undefined, "no backend hard-default injected into terminal Renew");
+  for (const minutes of ["10", 0, -1, Infinity]) assert.throws(() => backendRecoveryToolArgs("renew", {
+    watch_id: watches[0], minutes
+  }, context), /positive number/);
 });

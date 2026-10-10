@@ -1,3 +1,4 @@
+import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES } from "./monitor-deadline-policy.js";
 // Raw CLI infrastructure for ordinary terminal send/respond/approval commands.
 import {
   AsyncLocalStorage
@@ -321,7 +322,6 @@ export type { CliCommandExecutionResult };
 
 
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
-const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS = 5000;
 const DEFAULT_TERMINAL_ACCEPTANCE_POLL_INTERVAL_MS = 50;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -1526,7 +1526,7 @@ function terminalApprovalDependencies():
     },
     defaults: {
       agentTimeoutMinutes: DEFAULT_AGENT_TIMEOUT_MINUTES,
-      agentHardTimeoutMinutes: DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+      agentHardTimeoutMinutes: DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES,
       claudeScreenApprovalTtlMs: CLAUDE_SCREEN_APPROVAL_TTL_MS
     }
   };
@@ -1758,7 +1758,7 @@ async function runTurnResponse({ options, messageBody }) {
           agentHardTimeoutMinutes:
             options.agentHardTimeoutMinutes ??
             preparedTakeover?.terminal_bridge_hard_timeout_minutes ??
-            DEFAULT_AGENT_HARD_TIMEOUT_MINUTES
+            DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES
         };
         await runTerminalControlSend({
           transaction: {
@@ -1875,7 +1875,7 @@ function terminalDispatchTransportDependencies():
     preparationPorts: terminalDispatchPreparationPorts(),
     defaults: {
       agentTimeoutMinutes: DEFAULT_AGENT_TIMEOUT_MINUTES,
-      agentHardTimeoutMinutes: DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+      agentHardTimeoutMinutes: DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES,
       ordinaryScrollbackLines: 120,
       foregroundScrollbackLines: 240,
       acceptanceTimeoutMs: DEFAULT_TERMINAL_ACCEPTANCE_TIMEOUT_MS,

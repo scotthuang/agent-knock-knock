@@ -9,6 +9,8 @@ export interface DesktopTurnItem {
   content?: { type: string; text?: string }[];
   phase?: string | null;
   status?: string;
+  startedAtMs?: number | null;
+  completedAtMs?: number | null;
   serverUserMessageId?: string | null;
   serverClientUserMessageId?: string | null;
   clientUserMessageId?: string | null;

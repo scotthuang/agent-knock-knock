@@ -1,3 +1,4 @@
+import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES } from "./monitor-deadline-policy.js";
 import { dispatchLocalCodexCli, localCodexListForCli } from "./local-codex-cli-adapter.js";
 import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
 import { executeConversationCommand } from "./conversation-routing-cli-adapter.js";
@@ -259,7 +260,6 @@ const terminalDispatchRecordProcessAnchor =
   terminalDispatchRepository.processAnchor;
 
 const DEFAULT_AGENT_TIMEOUT_MINUTES = 60;
-const DEFAULT_AGENT_HARD_TIMEOUT_MINUTES = 720;
 const CLAUDE_SCREEN_APPROVAL_TTL_MS = 10 * 60 * 1000;
 const CALLBACK_ATTEMPT_LEASE_MS = 2 * 60 * 1000;
 const CALLBACK_RETRY_DELAYS_MS = [5000, 15000, 60000, 60000];
@@ -1482,7 +1482,7 @@ const terminalInteractionCliFacade = createTerminalInteractionCliAdapter({
 const terminalMaintenanceCliFacade = createTerminalMaintenanceCliFacade({
   runtime: {
     defaultAgentTimeoutMinutes: DEFAULT_AGENT_TIMEOUT_MINUTES,
-    defaultAgentHardTimeoutMinutes: DEFAULT_AGENT_HARD_TIMEOUT_MINUTES,
+    defaultAgentHardTimeoutMinutes: DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES,
     monitorLockVersion: terminalMonitorSupervisionCliFacade.monitorLockVersion,
     loadConversation: loadConversationFromOptions,
     storeDir: storeDirFromOptions,

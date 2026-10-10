@@ -86,6 +86,26 @@ test("exact native task lookup paginates turn and item history without substitut
   } finally { c.close(); }
 });
 
+test("native item reads preserve actual per-item timestamps without replacing missing timestamps", async () => {
+  const f = new Fixture();
+  f.handler = m => m.method === "thread/items/list" ? page([
+    { ...entry(TURN, { id: "comment", type: "agentMessage", phase: "commentary", text: "Build started" }),
+      startedAtMs: 1791630000000, completedAtMs: null },
+    { ...entry(TURN, { id: "tool", type: "commandExecution", status: "completed" }),
+      startedAtMs: 1791630001000, completedAtMs: 1791630002000 },
+    entry(TURN, { id: "old-protocol", type: "agentMessage", phase: "commentary", text: "No timestamp" })
+  ]) : baseHandler(m);
+  const c = await connect(f);
+  try {
+    const items = (await c.readSnapshot(THREAD)).selectedTurn!.items;
+    assert.equal(items[0].startedAtMs, 1791630000000);
+    assert.equal(items[0].completedAtMs, undefined);
+    assert.equal(items[1].completedAtMs, 1791630002000);
+    assert.equal(items[2].startedAtMs, undefined);
+    assert.equal(items[2].completedAtMs, undefined);
+  } finally { c.close(); }
+});
+
 test("native send checks idle state and preserves uncertain dispatch instead of retrying", async () => {
   const f = new Fixture(); let active = true;
   f.handler = m => {
