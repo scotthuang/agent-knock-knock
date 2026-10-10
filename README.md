@@ -26,8 +26,8 @@ openclaw plugins install clawhub:@scotthuang/agent-knock-knock
 
 If the installer asks you to restart the Gateway, run `openclaw gateway restart`.
 
-**For Codex CLI or Codex Desktop, keep your conversation open.** Supported
-connections work directly; you do not need to set up a terminal container.
+**For Codex CLI 0.159 or later, or Codex Desktop, keep your conversation open.**
+You can connect directly without tmux or Herdr.
 See the [CLI guide](docs/codex-cli-native-compatibility.md) or
 [Desktop guide](docs/codex-desktop-compatibility.md) for supported setups.
 
@@ -48,7 +48,8 @@ AKK chooses the connection for you. Keep the task/Watch ID returned by Send
 to check its status later. To follow a task you already started yourself,
 ask OpenClaw to Watch that conversation.
 
-**For Claude Code or Codex terminal workflows**, start a shared coding-agent terminal in your project:
+**For Codex CLI versions earlier than 0.159, or Claude Code, use tmux or Herdr.**
+To use tmux, start the coding agent in your project:
 
 ```bash
 cd /absolute/path/to/project
