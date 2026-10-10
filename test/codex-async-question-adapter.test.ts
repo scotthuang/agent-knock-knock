@@ -47,7 +47,8 @@ test("Codex async-question profiles are exact and do not float to unknown versio
     "0.159.0",
     "0.159.2",
     "0.159.3",
-    "0.160.0"
+    "0.160.0",
+    "0.162.1"
   ]);
   assert.equal(
     codexAsyncQuestionProfile("0.155.1"),
@@ -158,6 +159,45 @@ test("0.160 Option question hints retain the exact native tuple and reject old o
     assert.equal(inspect(collapsed.replace("⌥↑", "⌥+↑"), version).state, "collapsed");
   }
   assert.equal(inspectCodexAsyncQuestion({ version: "0.160.0", screen }).state, "ambiguous");
+});
+
+test("0.162.1 macOS symbol key hints keep question identity and exact navigation bindings", () => {
+  // Public rust-v0.162.1 key_hint.rs and question_queue_hint_{Left,Up}
+  // snapshots use Control/Shift symbols without '+' on macOS.
+  for (const [back, forward, backAction, forwardAction] of [
+    ["⇧→", "⇧←", "shift_right", "shift_left"],
+    ["⌥↓", "⌥↑", "alt_down", "alt_up"]
+  ] as const) {
+    const screen = EXPANDED_OPTIONS.replace(
+      "enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
+      `enter submit   ⌃] skip   ${back} main prompt   ${forward} next question`
+    );
+    const inspect = (candidate: string) => inspectCodexAsyncQuestion({
+      version: "0.162.1", screen: candidate, evidence: EVIDENCE
+    });
+    const observed = inspect(screen);
+    assert.equal(observed.state, "expanded");
+    if (observed.state !== "expanded") continue;
+    assert.equal(observed.profile, "codex/0.162.1/request-user-input-async-v4");
+    assert.equal(observed.match.native_question_id,
+      '["request_user_input_async","async-message-call",0]');
+    assert.equal(observed.owner_private_action_plan.kind, "answer_async_question");
+    if (observed.owner_private_action_plan.kind !== "answer_async_question") continue;
+    assert.equal(observed.owner_private_action_plan.prompt_stack_back, backAction);
+    assert.equal(observed.owner_private_action_plan.prompt_stack_forward, forwardAction);
+    const collapsed = `• Queued follow-up inputs\n  ? 2 questions · 5s\n    ${forward} to answer`;
+    assert.equal(inspect(collapsed).state, "collapsed");
+    for (const changed of [
+      screen.replace("⌃]", "ctrl+]"), screen.replace("⌃]", "⌃+]"),
+      screen.replace(back, `${back[0]} ${back[1]}`),
+      screen.replace(forward, "shift+←"),
+      collapsed.replace(forward, "shift+←"),
+      screen.replace("next question", "next quest…")
+    ]) assert.equal(inspect(changed).state, "ambiguous");
+    assert.equal(inspectCodexAsyncQuestion({ version: "0.160.0", screen,
+      evidence: EVIDENCE }).state, "ambiguous");
+    assert.equal(inspectCodexAsyncQuestion({ version: "0.162.1", screen }).state, "ambiguous");
+  }
 });
 
 test("pure durable-record parsing retains accepted async calls without returning raw records", () => {

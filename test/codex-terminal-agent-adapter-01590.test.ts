@@ -42,6 +42,37 @@ const observe = (screen: string, expectedAgentVersion = "0.159.0") => observeCod
   operation: { kind: "status" }, screen, expectedAgentVersion
 });
 
+test("0.162.1 recognizes the new usage URL without relaxing exact status identity", () => {
+  // Public rust-v0.162.1 status/card.rs changed only this informational URL.
+  // Synthetic account, path and UUID deliberately contain no local evidence.
+  const screen = SCREEN.replace("v0.159.0", "v0.162.1")
+    .replace("https://chatgpt.com/codex/settings/usage", "https://chatgpt.com/settings/usage");
+  const observed = observe(screen, "0.162.1");
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.nativeThreadId, THREAD);
+  assert.equal(observed.observedAgentVersion, "0.162.1");
+  assert.equal(observed.result?.fields.find(({ name }) => name === "Account")?.value, "[REDACTED]");
+  assert.equal(probeCodexNativeInspection("0.162.1").versionCompatibility, "verified");
+  assert.equal(isAuditedCodexPaginatedServerPair("0.162.1", "0.162.1"), true);
+  for (const backend of ["0.162.0", "0.162.2", "0.160.0"]) {
+    assert.equal(isAuditedCodexPaginatedServerPair("0.162.1", backend), false);
+  }
+  const lifecycle = probeCodexThreadLifecycle("0.162.1");
+  assert.equal(lifecycle.newThread, false);
+  assert.equal(lifecycle.resumeExact, false);
+  for (const changed of [
+    screen.replace("https://chatgpt.com/settings/usage", "https://example.test/settings/usage"),
+    screen.replace("for up-to-date", "for usage details"),
+    screen.replace("v0.162.1", "v0.162.0"),
+    screen.replace(`  Session:             ${THREAD}`, `  Session:             ${THREAD}\n  Session:             ${THREAD}`),
+    screen.replace("? for shortcuts", "? for short…")
+  ]) assert.notEqual(observe(changed, "0.162.1").status, "observed");
+  assert.equal(observeCodexNativeInspection({ operation: { kind: "status" }, screen,
+    expectedAgentVersion: "0.162.1", preEnterEvidenceInventory: observed.evidenceInventory }).status, "stale");
+  const queue = "• Working (2s • esc to interrupt)\n\n• Queued follow-up inputs\n  ? 1 question · 5s\n    ⇧← to answer";
+  assert.equal(observe(screen.replace(PLAIN_COMPOSER, `${queue}\n\n${PLAIN_COMPOSER}`), "0.162.1").status, "observed");
+});
+
 // 0.159.2 has the same official TUI rendering code as 0.159.0. Keep its
 // physical version independent even though the card grammar is shared.
 test("0.159.2 borderless status retains its exact physical version through idle and active observations", () => {

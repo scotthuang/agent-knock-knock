@@ -292,6 +292,47 @@ test("Codex 0.153.4 exact option snapshot yields one semantic question", () => {
     "  tab to add notes | enter to submit answer | esc to interrupt");
 });
 
+test("Codex 0.162.1 blocking questions use exact macOS navigation without reusing older profiles", () => {
+  const profile = "codex/0.162.1/request-user-input-v5";
+  assert.equal(codexNativeQuestionnaireProfile("0.162.1"), profile);
+  assert.equal(codexNativeQuestionnaireProfile("0.162.2"), undefined);
+  const modern = (screen: string) => screen
+    .replace("Optionally, add details in notes (tab).", "Optionally, add details in notes (tab)")
+    .replace("ctrl + p / ctrl + n change question", "⌃p / ⌃n change question");
+  for (const screen of [CODEX_OPTIONS, CODEX_FREEFORM, CODEX_MULTI_FREEFORM,
+    CODEX_MULTI_FREEFORM_WRAPPED, CODEX_CUSTOM_OPTIONS, CODEX_CUSTOM_TEXT_EDIT,
+    CODEX_UNANSWERED_CONFIRM]) {
+    const parsed = actionable(inspectNativeQuestionnaire({ agent: "codex",
+      version: "0.162.1", screen: modern(screen) }));
+    assert.equal(parsed.profile, profile);
+    assert.equal(parsed.prompt_evidence.profile, profile);
+    const older = inspectNativeQuestionnaire({ agent: "codex", version: "0.160.0", screen: modern(screen) });
+    if (older.status === "actionable") {
+      assert.notEqual(parsed.question.question_id, older.question.question_id);
+      assert.notEqual(parsed.prompt_evidence.sha256, older.prompt_evidence.sha256);
+    }
+  }
+  const options = actionable(inspectNativeQuestionnaire({ agent: "codex", version: "0.162.1",
+    screen: modern(CODEX_CUSTOM_OPTIONS) }));
+  assert.equal(options.action_plan.kind, "single_select");
+  if (options.action_plan.kind === "single_select") {
+    assert.equal(options.action_plan.choices.some((choice) => choice.outcome === "open_custom_text"), true);
+  }
+  for (const screen of [
+    CODEX_MULTI_FREEFORM,
+    modern(CODEX_MULTI_FREEFORM).replace("⌃p", "ctrl+p"),
+    modern(CODEX_MULTI_FREEFORM).replace("⌃n", "^n"),
+    modern(CODEX_FREEFORM).replace("enter to submit answer", "⌃j to submit answer")
+  ]) assert.equal(inspectNativeQuestionnaire({ agent: "codex", version: "0.162.1", screen }).status, "manual_required");
+  assert.equal(inspectNativeQuestionnaire({ agent: "codex", version: "0.162.1",
+    screen: modern(CODEX_OPTIONS).replace("esc to interrupt", "esc to inter…") }).status, "none",
+    "a clipped footer is not a proven questionnaire surface and grants no answer authority");
+  assert.equal(inspectNativeQuestionnaire({ agent: "codex", version: "0.160.0",
+    screen: modern(CODEX_MULTI_FREEFORM) }).status, "manual_required");
+  assert.equal(inspectNativeQuestionnaire({ agent: "codex", version: "0.162.1",
+    screen: modern(CODEX_FREEFORM), secret: true }).status, "manual_required");
+});
+
 test("verified Codex releases preserve exact request_user_input shapes with version-bound authority", () => {
   for (const version of ["0.154.0", "0.155.1"]) {
     assert.equal(

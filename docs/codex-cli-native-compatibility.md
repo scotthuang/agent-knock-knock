@@ -167,6 +167,7 @@ permit automatic replay of `sent` or `uncertain` responses.
 | --- | --- |
 | Live-tested combination, 2026-10-09 | **macOS: Codex CLI 0.160.0 + shared app-server 0.162.0**; production-adapter operations and limits are recorded below. |
 | Additional targeted live proof, 2026-10-10 | **macOS: Codex CLI 0.162.1 + shared app-server 0.162.1**. Verified public Status progress while a task was in progress through the running OpenClaw plugin, an actual 720-minute Send deadline, one isolated local completion acknowledgement, and repeated Send retaining the original task/deadline. No new WeChat delivery or full native-operation matrix is claimed. |
+| 0.14.2 compatibility review, 2026-10-10 | **macOS: Codex CLI 0.162.1 + shared app-server 0.162.1**. Expanded dedicated-session validation, native UI fixes and retained limits are recorded in the [operation matrix](codex-0.162.1-compatibility.md#verification-record). |
 | Runtime admission | A loaded main CLI thread, the selected local Codex home, valid stable `x.y.z` backend metadata, and the required live protocol shapes/methods. There is **no established numeric minimum** or exact version allowlist for direct control. |
 | Platform evidence | The live proof was on macOS. It does not establish a Linux/Windows direct-control validation matrix. |
 
@@ -178,12 +179,14 @@ not establish support. Unsupported methods or changed response shapes fail for
 that operation with a diagnostic; unknown state never becomes task completion.
 Prerelease version suffixes do not meet the stable version syntax check.
 
-The **0.162.1** installation is an observation, not a minimum requirement or a
-newly verified combination. No separate 0.162.1 end-to-end evidence was found in
-this audit. A thread's `cliVersion` is creation metadata, not proof of the
-currently attached frontend's executable version. The terminal TUI's
-[audited version pairs](codex-0.160.0-compatibility.md) govern a different
-adapter and must not be used as the direct-control version matrix.
+The additional **0.162.1/0.162.1** proof above is limited to the stated
+operations; the [0.14.2 compatibility review](codex-0.162.1-compatibility.md)
+records the subsequent native UI/protocol review and its separate verification
+matrix. Neither record establishes a numeric minimum. A thread's `cliVersion`
+is creation metadata, not proof of the currently attached frontend's executable
+version. The terminal TUI's [audited version pairs](codex-0.162.1-compatibility.md#version-and-route-boundaries)
+govern a different adapter and must not be used as the direct-control version
+matrix.
 
 The permission update API is experimental. Backends may evolve, so action-time
 contract checks and the actual effective settings remain necessary.

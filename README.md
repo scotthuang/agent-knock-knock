@@ -14,9 +14,10 @@ Codex. Claude Code and applicable Codex terminal workflows use tmux or Herdr.
 AKK does not launch a hidden replacement agent.
 
 AKK 0.14.0 introduces Codex CLI shared-backend control, Codex Desktop support,
-unified conversation routing, and exact-task recovery. **0.14.1 adds bounded
-public progress in Status and shared 12-hour monitoring defaults.** See the
-[release notes](CHANGELOG.md#0141---2026-10-10) for changes and validation limits.
+unified conversation routing, and exact-task recovery. Bounded public progress
+in Status and shared 12-hour monitoring defaults continue in **0.14.2, which
+adapts Codex CLI 0.162.1 native status and interaction surfaces.** See the
+[release notes](CHANGELOG.md#0142---2026-10-10) for changes and validation limits.
 
 ## What you can do
 
@@ -95,14 +96,14 @@ These are distinct provider boundaries, not a blanket minimum Codex version.
 
 | Connection | Requirements and verified scope |
 | --- | --- |
-| **Codex CLI direct** | Loaded main CLI thread on a compatible local shared backend. Live-tested on **macOS: CLI 0.160.0 + app-server 0.162.0**. Runtime identity/protocol checks determine availability; no numeric minimum has been established. |
+| **Codex CLI direct** | Loaded main CLI thread on a compatible local shared backend. Live-tested on **macOS: CLI 0.162.1 + app-server 0.162.1**; the earlier **0.160.0 + 0.162.0** matrix remains documented. Runtime identity/protocol checks determine availability; no numeric minimum has been established. |
 | **Codex Desktop** | Verified **macOS app 26.1002.52244, build 13536**, bundle `com.openai.codex` at `/Applications/ChatGPT.app`. Native writes require that **exact version/build** and a verified live owner. |
-| **Codex / Claude Code terminals** | tmux or local Herdr **0.8.0 / protocol 19**. Reviewed Codex TUI profiles include **0.160.0**; Claude Code **2.1.285** was verified on macOS arm64. Operations depend on the agent version and current UI. |
+| **Codex / Claude Code terminals** | tmux or local Herdr **0.8.0 / protocol 19**. Reviewed Codex TUI profiles include **0.160.0 and 0.162.1**; Claude Code **2.1.285** was verified on macOS arm64. Operations depend on the agent version and current UI. |
 | **OpenClaw / runtime** | OpenClaw **2026.6.5+**, plugin API/Gateway **2026.5.12+**; Node.js **22.19.0+**. Core terminal support targets macOS/Linux; the Desktop profile is macOS-only. |
 
-Additional targeted verification on 2026-10-10 used **CLI 0.162.1 + backend
-0.162.1** for public Status progress, 12-hour Send monitoring and an isolated
-completion callback. Other native capabilities were not repeated in that run.
+The [Codex 0.162.1 review](docs/codex-0.162.1-compatibility.md) separates this
+release's native UI/protocol changes and verification from the earlier targeted
+proof of Status progress, 12-hour Send monitoring and an isolated callback.
 Frontend and backend versions need not match. The [CLI evidence](docs/codex-cli-native-compatibility.md#compatibility-and-limits)
 and [Desktop profile](docs/codex-desktop-compatibility.md#version-and-platform-evidence)
 separate current observations, tested operations, and unsupported cases.
@@ -127,6 +128,7 @@ Host versions, callbacks, and upgrade procedure.
 | Guide | What it covers |
 | --- | --- |
 | [CLI direct control](docs/codex-cli-native-compatibility.md) | Discovery, sending, Watch, interactions, routing, and version evidence |
+| [Codex 0.162.1 compatibility](docs/codex-0.162.1-compatibility.md) | Status and interaction changes, exact frontend/backend evidence, and retained limits |
 | [Codex Desktop](docs/codex-desktop-compatibility.md) | Sidebar discovery, live-owner requirements, native controls, and tested build |
 | [Backend Recovery](docs/backend-task-recovery.md) | Exact-task recovery, renewal, Close versus Unwatch, and callback retry |
 | [tmux](docs/quickstart-tmux.md) · [Herdr](docs/quickstart-herdr.md) | Terminal setup and the first task |

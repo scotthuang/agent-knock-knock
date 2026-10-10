@@ -12,7 +12,7 @@ import { codexNativeTaskNeedsReconciliation, nativeDigest, nativeErrorCode } fro
 import { createCodexNativeRuntime, type CodexNativeRuntimeOptions } from "./codex-native-runtime.js";
 import { launchCodexNativeMonitor, runCodexNativeMonitor } from "./codex-native-monitor.js";
 import { codexNativeSessionProjection, codexNativeTaskProjection, nativeQuestionResponse } from "./codex-native-public-projection.js";
-import type { CodexNativeIdentity, CodexNativePermissionPreset, NativeInteractionResponse } from "./codex-native-types.js";
+import { CodexNativeError, type CodexNativeIdentity, type CodexNativePermissionPreset, type NativeInteractionResponse } from "./codex-native-types.js";
 
 type Options = Record<string, unknown>;
 type Runtime = ReturnType<typeof createCodexNativeRuntime>;
@@ -102,10 +102,21 @@ async function inspectConversation(runtime: Runtime, options: Options) {
   try {
     const client = await runtime.clientFor(target);
     // Subscription replays current requests on an already loaded thread; it cannot load a historical conversation.
-    await client.subscribe(target.threadId);
+    let subscriptionUnavailable = false;
+    try { await client.subscribe(target.threadId); }
+    catch (error) {
+      if (!(error instanceof CodexNativeError) || error.code !== "unmaterialized_subscription") throw error;
+      subscriptionUnavailable = true;
+    }
     const snapshot = await client.readSnapshot(target.threadId);
     if (snapshot.threadId !== target.threadId) throw new Error("Native snapshot identity mismatch");
-    output({ ...codexNativeSessionProjection(target, snapshot, client.metadata.serverVersion, true),
+    if (subscriptionUnavailable && (!snapshot.loaded || snapshot.thread.id !== target.threadId
+      || snapshot.thread.historyMode !== "paginated" || snapshot.thread.status.type !== "idle"
+      || snapshot.historyMaterialized !== false || snapshot.turns.length || snapshot.latestTurnId !== null
+      || snapshot.pendingInteractions.length)) throw new Error("Native subscription failure did not retain an exact empty thread");
+    output({ ...codexNativeSessionProjection(target, snapshot, client.metadata.serverVersion, !subscriptionUnavailable),
+      ...(subscriptionUnavailable ? { subscription_state: "unavailable_unmaterialized_history",
+        observation_error: "native_subscription_unmaterialized" } : {}),
       progress: backendPublicProgress({ nativeTurnId: snapshot.latestTurnId,
         turn: snapshot.turns.find(turn => turn.id === snapshot.latestTurnId), readAt: cliNow().toISOString() }) });
   } catch {

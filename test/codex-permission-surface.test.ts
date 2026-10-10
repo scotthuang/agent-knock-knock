@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { observeCodexPermissionSurface } from "../src/codex-permission-surface.js";
+import { codex1621PermissionConfirmation } from "./fixtures/codex-permission-confirmation-01621.js";
 
 // Text matches upstream Codex 0.159.2/0.159.3/0.160.0 snapshots. ANSI matches
 // SelectionView's native bold heading and selection_style() reverse fallback.
@@ -133,4 +134,28 @@ test("permission selection recognizes the verified truecolor native highlight", 
   const observed = observeCodexPermissionSurface(truecolor);
   assert.equal(observed.state, "picker");
   assert.equal(observeCodexPermissionSurface(truecolor.replaceAll("99;168;248", "10;20;30")).state, "ambiguous");
+});
+
+
+test("0.162.1 centered Full Access confirmation retains exact warning, geometry and native styles", () => {
+  const frame = codex1621PermissionConfirmation();
+  const observed = observeCodexPermissionSurface(frame, "0.162.1");
+  assert.equal(observed.state, "full_access_confirmation");
+  if (observed.state === "full_access_confirmation") assert.equal(observed.selectedIndex, 0);
+  const cancel = observeCodexPermissionSurface(codex1621PermissionConfirmation(1), "0.162.1");
+  assert.equal(cancel.state, "full_access_confirmation");
+  if (cancel.state === "full_access_confirmation") assert.equal(cancel.selectedIndex, 1);
+  for (const version of [undefined, "0.160.0", "0.162.2"]) {
+    assert.notEqual(observeCodexPermissionSurface(frame, version).state, "full_access_confirmation");
+  }
+  for (const changed of [
+    frame.replaceAll(/\x1b\[[0-9;]*m/gu, ""),
+    frame.replace("\x1b[1;7m›", "\x1b[1m›"),
+    frame.replace("Apply full access for this session", "Apply full access for future tasks"),
+    frame.replace("data loss, leaks, or unexpected behavior.", "data loss, leaks, or […]"),
+    frame.replace("  computer and run", "computer and run"),
+    frame.replace(" select · ", " select / "),
+    frame.replace("Previous public update", "Previous 中文 update"),
+    `${frame}\n${frame}`
+  ]) assert.equal(observeCodexPermissionSurface(changed, "0.162.1").state, "ambiguous");
 });

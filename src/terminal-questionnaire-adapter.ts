@@ -19,7 +19,8 @@ export const CODEX_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
   "0.159.0": "codex/0.159.0/request-user-input-v4",
   "0.159.2": "codex/0.159.2/request-user-input-v4",
   "0.159.3": "codex/0.159.3/request-user-input-v4",
-  "0.160.0": "codex/0.160.0/request-user-input-v4"
+  "0.160.0": "codex/0.160.0/request-user-input-v4",
+  "0.162.1": "codex/0.162.1/request-user-input-v5"
 });
 
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
@@ -1049,10 +1050,14 @@ function codexOptionFooterTips(header: CodexHeader): readonly string[] {
   ];
 }
 
-function codexFreeTextFooterTips(header: CodexHeader): readonly string[] {
+function codexFreeTextFooterTips(header: CodexHeader, profile: string): readonly string[] {
+  // 0.162.1 macOS renders Control as a symbol. This exact UI contract does
+  // not authorize remapped submit keys or another platform's navigation.
+  const navigation = profile === CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.162.1"]
+    ? "⌃p / ⌃n change question" : CODEX_FREE_TEXT_NAVIGATION_TIP;
   return [
     codexSubmitTip(header),
-    ...(header.totalSteps > 1 ? [CODEX_FREE_TEXT_NAVIGATION_TIP] : []),
+    ...(header.totalSteps > 1 ? [navigation] : []),
     CODEX_INTERRUPT_TIP
   ];
 }
@@ -1066,7 +1071,7 @@ function codexHasCanonicalOther(options: readonly ParsedOptionRow[], profile: st
   return other?.label === CODEX_OTHER_OPTION_LABEL &&
     other.description === (["codex/0.158.0/request-user-input-v4", "codex/0.159.0/request-user-input-v4",
       "codex/0.159.2/request-user-input-v4", "codex/0.159.3/request-user-input-v4",
-      "codex/0.160.0/request-user-input-v4"].includes(profile)
+      "codex/0.160.0/request-user-input-v4", "codex/0.162.1/request-user-input-v5"].includes(profile)
       ? "Optionally, add details in notes (tab)"
       : CODEX_OTHER_OPTION_DESCRIPTION);
 }
@@ -1234,7 +1239,7 @@ function parseCodexQuestionRegion(
   const prompt = promptLine.slice(2);
   const freeTextFooter = matchExactCodexFooter(
     lines,
-    codexFreeTextFooterTips(header)
+    codexFreeTextFooterTips(header, profile)
   );
   const freeTextLines = freeTextFooter
     ? lines.slice(headerIndex + 2, freeTextFooter.start)

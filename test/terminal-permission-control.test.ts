@@ -160,11 +160,11 @@ test("permission discovery closes its menu without changing permissions", async 
   assert.ok(!native.inputs.some(({ action, state }) => action === "C-m" && state === "picker"));
 });
 
-test("0.160 permission offers retain current-session scope and cannot migrate between frontend profiles", async () => {
+for (const version of ["0.160.0", "0.162.1"]) test(`${version} permission offers retain current-session scope and cannot migrate between frontend profiles`, async () => {
   const native = nativePane();
-  const current = terminalPermissionControlProfileFor("0.160.0")!;
+  const current = terminalPermissionControlProfileFor(version)!;
   const offer = await discoverTerminalPermissionOptions(current, native.ports);
-  assert.equal(offer.agentVersion, "0.160.0");
+  assert.equal(offer.agentVersion, version);
   assert.equal(offer.scope, "current_session");
   await assert.rejects(switchTerminalPermissions(profile, "full_access", offer.catalogFingerprint, native.ports),
     /thread or permission catalog changed/u);
@@ -410,7 +410,7 @@ test("native permission menus cannot be consumed as a task prompt or a generic a
       modelControlSurface: false, requireExactEmptyClaudeComposer: false
     }) ?? "", /blocked/u);
     const plain = screen.replaceAll(/\x1b\[[0-9;]*m/gu, "");
-    for (const agentVersion of ["0.159.2", "0.159.3", "0.160.0"]) {
+    for (const agentVersion of ["0.159.2", "0.159.3", "0.160.0", "0.162.1"]) {
       const inspected = inspectCodexScreen({ screen: plain, runtime: { agentVersion } });
       assert.equal(inspected.approval.approvable, false);
       assert.notEqual(inspected.activity.state, "idle", "a permission menu cannot complete an activity Watch");
