@@ -12,7 +12,7 @@ const packageRoot = path.resolve(
   "../.."
 );
 
-test("ClawHub quickstarts reach a first task without a top-level workspace", () => {
+test("quickstarts install AKK 0.14 and distinguish backend from terminal requirements", () => {
   const tmux = read("docs/quickstart-tmux.md");
   const readme = read("README.md");
   const clawHubPreview = readme.split(/\r?\n/u).slice(0, 50).join("\n");
@@ -27,10 +27,20 @@ test("ClawHub quickstarts reach a first task without a top-level workspace", () 
       /openclaw config set plugins\.entries\.agent-knock-knock\.config\.workspace "\$\(pwd -P\)"/u
     );
     assert.match(document, /openclaw gateway restart/u);
-    assert.match(document, /tmux new-session -s akk-work -c "\$\(pwd -P\)" codex/u);
-    assert.match(document, /\/akk doctor/u);
-    assert.match(document, /\/akk inspect this repository and summarize it/u);
   }
+  assert.match(tmux, /tmux new-session -s akk-work -c "\$\(pwd -P\)" codex/u);
+  assert.match(tmux, /\/akk doctor/u);
+  assert.match(tmux, /\/akk inspect this repository and summarize it/u);
+  assert.doesNotMatch(clawHubPreview, /tmux new-session/u);
+  const readmeContract = readme.replace(/\s+/gu, " ");
+  assert.match(readmeContract, /Codex CLI shared-backend connections and Codex Desktop work without tmux or Herdr/u);
+  assert.match(readmeContract, /AKK 0\.14\.0 introduces Codex CLI shared-backend control, Codex Desktop support/u);
+  assert.match(readmeContract, /Use ClawHub for the OpenClaw plugin, including the 0\.14 backend and Desktop features/u);
+  assert.doesNotMatch(readmeContract, /unreleased 0\.14|published terminal release/u);
+  assert.match(readme, /openclaw-operations\.md#local-development-build/u);
+  assert.match(readme, /docs\/codex-cli-native-compatibility\.md/u);
+  assert.match(readme, /docs\/codex-desktop-compatibility\.md/u);
+  assert.match(readme, /docs\/backend-task-recovery\.md/u);
   for (const document of [tmux, readme]) {
     assert.doesNotMatch(
       document,

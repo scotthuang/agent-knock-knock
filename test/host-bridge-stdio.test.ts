@@ -48,6 +48,7 @@ const EXPECTED_TOOLS = [
   "agent_knock_knock_new_thread",
   "agent_knock_knock_permission_options",
   "agent_knock_knock_reconcile_binding",
+  "agent_knock_knock_recover",
   "agent_knock_knock_renew",
   "agent_knock_knock_repair_model_control",
   "agent_knock_knock_respond",

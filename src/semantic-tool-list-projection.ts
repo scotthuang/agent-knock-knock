@@ -29,35 +29,25 @@ export function compactAkkListModelProjection(
         ? { action_contract_version: finiteNumber(actionContracts?.version) }
         : {})
     },
-    ...(Array.isArray(result.desktop_sessions) ? {
-      desktop_sessions: arrayValue(result.desktop_sessions).map(row => ({
-        ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent", "native_thread_id",
-          "host_id", "updated_at", "catalog_membership", "creator_originator", "connection_state", "activity_state", "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count"]),
-        capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, ["send", "watch", "status", "interaction_notify", "interaction_respond", "approve", "set_permissions", "set_model", "cancel"]),
-        ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
-      })),
-      desktop_watches: arrayValue(result.desktop_watches).map(row => compactAkkListScalars(row, [
-        "watch_id", "conversation_id", "status", "observation_mode", "anchor_state", "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count", "callback_expected", "observation_error"])),
-      desktop_scan: compactAkkListScalars(recordValue(result.desktop_scan) ?? {}, [
-        "total_candidates", "returned", "next_cursor", "catalog_complete", "live_count", "application_version", "application_build", "write_contract_verified", "watch_error", "membership_is_not_live_identity"])
+    ...(Array.isArray(result.desktop_sessions) || Array.isArray(result.desktop_watches) || recordValue(result.desktop_scan) ? {
+      ...(!Array.isArray(result.conversations) ? { desktop_sessions: arrayValue(result.desktop_sessions).map(compactDesktopConversation) } : {}),
+      desktop_watches: arrayValue(result.desktop_watches).map(compactBackendWatch),
+      desktop_scan: { ...compactAkkListScalars(recordValue(result.desktop_scan) ?? {}, [
+        "view", "total_candidates", "history_candidates", "returned", "next_cursor", "catalog_complete", "live_count", "application_version", "application_build", "write_contract_verified", "watch_error", "membership_is_not_live_identity",
+        "sidebar_status", "sidebar_mode", "sidebar_selection_scope", "live_probe_scope"]),
+        limitations: stringArrayValue(recordValue(result.desktop_scan)?.limitations) }
     } : {}),
-    ...(Array.isArray(result.codex_cli_sessions) ? {
-      codex_cli_sessions: arrayValue(result.codex_cli_sessions).map(row => ({
-        ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
-          "native_thread_id", "native_turn_id", "activity_state", "connection_state", "backend_version",
-          "pending_interaction_count", "interaction_requests_scanned", "attention_required", "updated_at", "observation_error"]),
-        ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
-        capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, [
-          "status", "send", "watch", "interaction_notify", "interaction_respond", "approve", "set_permissions"]),
-        ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
-      })),
-      codex_cli_watches: arrayValue(result.codex_cli_watches).map(row => compactAkkListScalars(row, [
-        "watch_id", "conversation_id", "status", "observation_mode", "anchor_state", "native_thread_id",
-        "native_turn_id", "pending_interaction_count", "callback_expected", "observation_error"])),
+    ...(Array.isArray(result.codex_cli_sessions) || Array.isArray(result.codex_cli_watches) || recordValue(result.codex_cli_scan) ? {
+      ...(!Array.isArray(result.conversations) ? { codex_cli_sessions: arrayValue(result.codex_cli_sessions).map(compactNativeConversation) } : {}),
+      codex_cli_watches: arrayValue(result.codex_cli_watches).map(compactBackendWatch),
       codex_cli_scan: compactAkkListScalars(recordValue(result.codex_cli_scan) ?? {}, [
         "status", "returned", "loaded_count", "complete", "error", "watch_error"])
     } : {}),
-    terminals: arrayValue(result.terminals).map(compactAkkListTerminal),
+    ...(Array.isArray(result.conversations)
+      ? { conversations: arrayValue(result.conversations).map(compactConversation),
+          conversation_routing: compactAkkListScalars(recordValue(result.conversation_routing) ?? {},
+            ["policy", "exact_associations", "unresolved_terminals"]) }
+      : { terminals: arrayValue(result.terminals).map(compactAkkListTerminal) }),
     terminal_watches: arrayValue(result.terminal_watches)
       .map(compactAkkListWatch),
     unavailable_managed_turns: arrayValue(result.unavailable_managed_turns)
@@ -67,11 +57,59 @@ export function compactAkkListModelProjection(
   };
 }
 
+function compactBackendWatch(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...compactAkkListScalars(row, ["watch_id", "turn_id", "conversation_id", "source", "status", "task_kind",
+      "management_state", "observation_state", "observation_mode", "anchor_state", "native_thread_id",
+      "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count",
+      "callback_expected", "callback_in_flight", "observation_error", "observation_status", "observation_active",
+      "hard_timeout_at", "deadline_at", "closed_at", "unwatched_at", "renewal_count", "renewed_at", "recovered_at"]),
+    ...(Array.isArray(row.retryable_callback_ids) ? { retryable_callback_ids: stringArrayValue(row.retryable_callback_ids) } : {}),
+    ...(Array.isArray(row.callback_notifications) ? { callback_notifications: arrayValue(row.callback_notifications)
+      .map(item => ({ ...compactAkkListScalars(item, ["id", "notification_id", "kind", "status", "attempts", "next_attempt_at", "retryable", "error_code"]),
+        ...compactAkkListActions(item.available_actions) })) } : {}),
+    ...compactAkkListActions(row.available_actions, { watch_id: row.watch_id, turn_id: row.turn_id })
+  };
+}
+
+function compactDesktopConversation(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent", "native_thread_id",
+      "host_id", "updated_at", "catalog_membership", "creator_originator", "connection_state", "activity_state", "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count",
+      "sidebar_section", "sidebar_project_id", "sidebar_project_name", "observation_error", "can_send_reason", "manual_action"]),
+    capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, ["send", "watch", "status", "interaction_notify", "interaction_respond", "approve", "set_permissions", "set_model", "cancel"]),
+    ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
+  };
+}
+
+function compactNativeConversation(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
+      "native_thread_id", "native_turn_id", "activity_state", "connection_state", "backend_version",
+      "pending_interaction_count", "interaction_requests_scanned", "attention_required", "updated_at", "observation_error"]),
+    ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
+    capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, [
+      "status", "send", "watch", "interaction_notify", "interaction_respond", "approve", "set_permissions"]),
+    ...(Array.isArray(row.terminal_controls)
+      ? { terminal_controls: arrayValue(row.terminal_controls).map(compactAkkListTerminal) } : {}),
+    ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
+  };
+}
+
+function compactConversation(row: Record<string, unknown>): Record<string, unknown> {
+  const output = row.source === "codex_desktop" ? compactDesktopConversation(row)
+    : row.source === "codex_cli" ? compactNativeConversation(row) : compactAkkListTerminal(row);
+  return { ...output, ...compactAkkListScalars(row, ["conversation_id", "route_preference", "route_status"]),
+    ...(Array.isArray(row.terminal_aliases) ? { terminal_aliases: stringArrayValue(row.terminal_aliases) } : {}) };
+}
+
 function compactAkkListTerminal(
   terminal: Record<string, unknown>
 ): Record<string, unknown> {
   const output = compactAkkListScalars(terminal, [
     "id",
+    "conversation_id",
+    "title",
     "short_ref",
     "source",
     "agent",
@@ -328,7 +366,7 @@ function compactAkkListActionInput(
     ? "agent_knock_knock_send"
     : `agent_knock_knock_${name}`;
   if (tool && tool !== expectedTool) output.tool = tool;
-  const args = compactAkkListActionArguments(action.arguments, name, parentIds);
+  const args = compactAkkListActionArguments(action.arguments ?? action.input, name, parentIds);
   if (Object.keys(args).length > 0) output.arguments = args;
   const missingRequired = stringArrayValue(action.missing_required)
     .filter((field) => !isAkkModelFacingPrivateAuthorityField(field));

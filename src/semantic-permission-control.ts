@@ -24,7 +24,8 @@ import { permissionOptionsParameters, setPermissionsParameters } from
 import { runHostAwareCli } from "./semantic-tool-relay.js";
 import { modelFacingErrorMessage } from "./semantic-tool-presentation.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
-import { nativeConversationTarget, nativePermissionToolArgs } from "./codex-native-semantic.js";
+import { nativeConversationTarget, nativePermissionToolArgs, routedCodexTerminalControlArgs } from "./codex-native-semantic.js";
+import { normalizeTerminalConversationTarget } from "./semantic-conversation-target.js";
 import { isCodexNativeConversationId } from "./codex-native-identity.js";
 
 const PERMISSION_CONTROL_TIMEOUT_MS = 3 * 60_000;
@@ -63,6 +64,7 @@ export async function buildPrivatePermissionOptionsArgs(
   params: Record<string, unknown>,
   context: ControllerContext
 ): Promise<string[]> {
+  params = normalizeTerminalConversationTarget(params);
   const native = nativePermissionToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "permissions");
   const desktop = desktopControlToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "permissions");
   if (desktop) return desktop;
@@ -72,6 +74,8 @@ export async function buildPrivatePermissionOptionsArgs(
   // Refresh revokes the old offer even if discovery subsequently fails. Check
   // the controller incarnation before issuing any native inspection input.
   consumeSemanticPrivateAuthorityOffer(api, offerKey(context, terminalId));
+  const routed = routedCodexTerminalControlArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "permissions");
+  if (routed) return routed;
   const action = await privateTerminalActionArguments(
     api, terminalId, "agent_knock_knock_permission_options", { reconcile: false }
   );
@@ -138,6 +142,7 @@ export function buildPrivateSetPermissionsArgs(
   params: Record<string, unknown>,
   context: ControllerContext
 ): string[] {
+  params = normalizeTerminalConversationTarget(params);
   const native = nativePermissionToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "set-permissions");
   const desktop = desktopControlToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "set-permissions");
   if (desktop) return desktop;
@@ -147,6 +152,8 @@ export function buildPrivateSetPermissionsArgs(
   const mode = semanticMode(params.mode);
   const offered = consumeSemanticPrivateAuthorityOffer<PermissionOffer>(api, offerKey(context, terminalId));
   if (!offered || !isRecord(offered.args) || !Array.isArray(offered.choices)) {
+    const routed = routedCodexTerminalControlArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context, "set-permissions");
+    if (routed) return routed; // Terminal fallback still requires a displayed catalog in the CLI router.
     throw new Error("set_permissions requires current choices shown by " +
       "agent_knock_knock_permission_options in this controller conversation; " +
       "refresh permission options before another attempt");
@@ -175,9 +182,9 @@ export function isAkkSetPermissionsSuccess(value: unknown): boolean {
 export function registerPermissionControlTools(api, registerCliTool): void {
   registerCliTool(api, {
     name: "agent_knock_knock_permission_options",
-    description: "For a listed Desktop or direct Codex CLI conversation_id, read settings and built-in " +
-      "choices through its backend without terminal input. For terminal_id, " +
-      "inspect the current Codex permission setting and built-in choices for one " +
+    description: "Use the listed conversation_id or terminal_id. AKK prefers the exact backend for " +
+      "settings and built-in choices, resolving an idle terminal alias when needed. If the " +
+      "backend is unavailable, inspect the current Codex permission setting for one " +
       "explicitly selected idle physical terminal. This closed /status and " +
       "/permissions inspection sends native UI input but does not change " +
       "permissions. It requires an empty Composer, exact pane/process and native " +
@@ -192,14 +199,16 @@ export function registerPermissionControlTools(api, registerCliTool): void {
     normalizeTurnIdentity: false,
     buildArgs: (params, context) => buildPrivatePermissionOptionsArgs(api, params, context ?? {}),
     rememberResult: (result, params, context) => {
+      if (isRecord(result) && (result.source === "codex_cli" || result.source === "codex_desktop")) return;
+      params = normalizeTerminalConversationTarget(params);
       if (!nativeConversationTarget(params) && !desktopConversationTarget(params)) rememberDisplayedPermissionOptionsOffer(api, context ?? {}, params.terminal_id, result);
     }
   });
   registerCliTool(api, {
     name: "agent_knock_knock_set_permissions",
-    description: "For a listed Desktop or direct Codex CLI conversation_id, set read-only, default, or " +
-      "full-access through its backend and verify effective settings; no terminal " +
-      "UI or extra confirmation is needed. For terminal_id, set one requested or " +
+    description: "Use the listed conversation_id or terminal_id; AKK prefers the exact backend to " +
+      "set read-only, default, or full-access and verify effective settings without " +
+      "extra confirmation. Terminal fallback requires one requested or " +
       "authorized Codex permission mode from the immediately " +
       "preceding permission_options result in the same controller conversation. " +
       "Consumes that private catalog once and revalidates the exact physical " +
@@ -231,7 +240,7 @@ export async function handleAkkPermissionCommand(
   if (command.action === "permission-options") {
     const args = await buildPrivatePermissionOptionsArgs(api, params, context);
     const result = await runHostAwareCli(api, args, { timeoutMs: PERMISSION_CONTROL_TIMEOUT_MS });
-    if (!native) rememberDisplayedPermissionOptionsOffer(api, context, command.terminalId, result);
+    if (!native && result.source !== "codex_cli") rememberDisplayedPermissionOptionsOffer(api, context, command.terminalId, result);
     return { text: formatAkkPermissionOptionsCommandResult(result) };
   }
   const args = buildPrivateSetPermissionsArgs(api, { ...params, mode: command.mode }, context);

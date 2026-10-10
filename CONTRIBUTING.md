@@ -12,10 +12,11 @@ npm run build
 npm run test:fast
 ```
 
-The fast tier is the default development loop. Add the integration files
-mapped to the subsystem you changed, then run the full suite before opening a
-pull request. The checked-in tier manifest and targeted commands are documented
-in [docs/testing.md](docs/testing.md).
+The fast tier is the only test tier for normal development, review, and local
+installation, as required by [AGENTS.md](AGENTS.md). Do not run integration or
+full suites merely to open a pull request. Full/release tests are reserved for
+the immediate gate before an actual npm or ClawHub publication. See
+[docs/testing.md](docs/testing.md) for the tier manifest and release workflow.
 
 For local OpenClaw testing, link the plugin from this checkout:
 
@@ -31,13 +32,14 @@ Before opening a pull request, run:
 
 ```bash
 npm run typecheck
-npm test
+npm run test:fast
 npm pack --dry-run
 ```
 
-`npm test` is an alias for `test:full`; it never selects a weaker tier. Use
-`npm run test:profile -- --output /tmp/akk-test-profile.json` when a change may
-affect test runtime, subprocess behavior, polling, or concurrency.
+`npm run test:fast` includes the build and Skill consistency check. `npm test`
+is an alias for `test:full` and belongs to release validation, not this
+development loop. Build, type checking, architecture/evidence validators, and
+non-test packaging checks do not authorize a broader test tier.
 
 The pull request description is the verification record while hosted Actions
 are disabled: include the local Node.js version, exact commands, pass counts,

@@ -1,6 +1,7 @@
 import { formatDesktopCommandResult } from "./desktop-command-presentation.js";
+import { backendRecoveryTarget, backendRecoveryToolArgs, isBackendTaskWatchId } from "./backend-recovery-semantic.js";
 import path from "node:path";
-import { isCodexNativeConversationId, isCodexNativeWatchId, parseCodexNativeConversationId } from "./codex-native-identity.js";
+import { isCodexNativeConversationId, parseCodexNativeConversationId } from "./codex-native-identity.js";
 import { recordValue } from "./value-guards.js";
 import {
   isTerminalApprovalDecision,
@@ -242,7 +243,8 @@ export type AkkCommand =
     }
   | { action: "cancel"; turnId: string }
   | { action: "renew"; turnId: string; minutes?: string }
-  | { action: "retry-callback"; turnId: string }
+  | { action: "recover"; turnId: string }
+  | { action: "retry-callback"; turnId: string; notificationId?: string }
   | AkkCloseCommand
   | { action: "delegate"; request: string };
 
@@ -484,11 +486,21 @@ function parseAkkTurnCommand(
     return { action: "renew", turnId, minutes: minutes || undefined };
   }
   if (action === "retry-callback" || action === "retry") {
-    const { token: turnId } = takeRequiredToken(
+    const { token: turnId, rest: notificationInput } = takeRequiredToken(
       rest,
-      "Usage: /akk retry-callback <turn-selector>"
+      "Usage: /akk retry-callback <turn-selector> [--notification-id <id>]"
     );
-    return { action: "retry-callback", turnId };
+    const notification = notificationInput.trim();
+    const selection = /^--notification-id\s+(\S+)$/u.exec(notification);
+    if (notification && !selection) throw new Error("Usage: /akk retry-callback <turn-selector> [--notification-id <id>]");
+    return { action: "retry-callback", turnId, ...(selection ? { notificationId: selection[1] } : {}) };
+  }
+  if (action === "recover") {
+    const usage = "Usage: /akk recover <backend-watch-id>";
+    const { token: turnId, rest: extra } = takeRequiredToken(rest, usage);
+    if (extra.trim()) throw new Error(usage);
+    backendRecoveryTarget({ turn_id: turnId }, "recover");
+    return { action: "recover", turnId };
   }
   if (action === "close" || action === "done") {
     return parseAkkCloseCommand(rest);
@@ -567,6 +579,7 @@ export function akkUsageText(): string {
     "/akk respond <turn-selector>: <answer>",
     "/akk approve <turn-selector> [approve_once|reject]",
     "/akk cancel <turn-selector>",
+    "/akk recover <backend-watch-id>",
     "Native interactions are answered through Status plus the typed respond_interaction tool; there is no raw-key or menu-index /akk command.",
     "Codex async_question stays parallel to a working task; delivery_mode defaults to advertised steer_current_turn, or explicitly choose advertised queue_next_turn. A blocking questionnaire omits delivery_mode.",
     "Model control targets one exact physical pane; Codex rollout attribution and identify-foreground are not prerequisites.",
@@ -575,12 +588,77 @@ export function akkUsageText(): string {
   ].join("\n");
 }
 
+function formatAkkTerminalControlLines(terminal: Record<string, unknown>): string[] {
+  const managed = recordValue(terminal.managed) ?? {};
+  const managementConflict = recordValue(terminal.management_conflict);
+  const currentTurn = recordValue(managed.current_turn);
+  const recentTurn = recordValue(managed.recent_turn);
+  const history = arrayValue(managed.history);
+  const sessionId = nonEmptyString(managed.session_id);
+  const sessionShortRef = nonEmptyString(managed.session_short_ref);
+  const hiddenTurnCount = finiteNumber(managed.hidden_turn_count) ?? 0;
+  const recovery = orphanedTerminalDispatchRecovery(terminal);
+  const terminalId = nonEmptyString(terminal.id);
+  const availableActions = recordValue(terminal.available_actions) ?? {};
+  const hasLifecycleAction = [
+    "list_resumable_threads",
+    "new_thread",
+    "resume_thread"
+  ].some((name) => Object.hasOwn(availableActions, name));
+  const hasWatchAction = Object.hasOwn(availableActions, "watch");
+  return [
+    `- ${formatTerminalLine(terminal)}`,
+    ...compatibilityWarningLines(terminal),
+    ...(hasLifecycleAction && terminalId
+      ? [`  lifecycle terminal_id: ${terminalId}`]
+      : []),
+    ...(hasWatchAction && terminalId
+      ? [`  AKK Watch available: /akk watch ${terminalId} — observe this exact terminal without input; exact task evidence is preferred and terminal-activity fallback is best-effort.`]
+      : []),
+    ...(sessionId || sessionShortRef
+      ? [`  AKK session: ${sessionShortRef ?? sessionId}`]
+      : []),
+    ...formatAvailableActions("terminal actions", terminal),
+    ...(currentTurn
+      ? [
+          `  current turn: ${formatManagedTurnLine(currentTurn)}`,
+          ...formatAvailableActions("current turn actions", currentTurn)
+        ]
+      : []),
+    ...(recentTurn
+      ? [
+          `  recent turn: ${formatManagedTurnLine(recentTurn)}`,
+          ...formatAvailableActions("recent turn actions", recentTurn)
+        ]
+      : []),
+    ...history.slice(0, 20).flatMap(
+      (turn) => [
+        `  history: ${formatManagedTurnLine(turn)}`,
+        ...formatAvailableActions("history actions", turn)
+      ]
+    ),
+    ...(hiddenTurnCount > 0 && history.length === 0
+      ? [`  older managed turns: ${hiddenTurnCount} (use all=true to include)`]
+      : []),
+    ...(managementConflict
+      ? [
+          `  management conflict: ${nonEmptyString(managementConflict.reason) ?? "current terminal ownership is unresolved"}`,
+          ...(nonEmptyString(managementConflict.recovery)
+            ? [`  recovery: ${nonEmptyString(managementConflict.recovery)}`]
+            : [])
+        ]
+      : []),
+    ...(recovery ? [`  recovery: ${recovery}`] : [])
+  ];
+}
+
 export function formatAkkListCommandResult(result: Record<string, unknown>): string {
-  const nativeSessions = arrayValue(result.codex_cli_sessions);
+  const conversations = Array.isArray(result.conversations) ? arrayValue(result.conversations) : undefined;
+  const nativeSessions = conversations?.filter(row => row.source === "codex_cli") ?? arrayValue(result.codex_cli_sessions);
   const nativeWatches = arrayValue(result.codex_cli_watches);
-  const desktopSessions = arrayValue(result.desktop_sessions);
+  const desktopSessions = conversations?.filter(row => row.source === "codex_desktop") ?? arrayValue(result.desktop_sessions);
   const desktopWatches = arrayValue(result.desktop_watches);
-  const terminals = arrayValue(result.terminals);
+  const terminals = conversations?.filter(row => row.source !== "codex_cli" && row.source !== "codex_desktop") ?? arrayValue(result.terminals);
   const terminalWatches = arrayValue(result.terminal_watches);
   const unavailableManagedTurns = arrayValue(result.unavailable_managed_turns);
   if (
@@ -593,69 +671,7 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     return "AKK found no live terminals or unavailable managed turns.";
   }
 
-  const terminalLines = terminals.slice(0, 20).flatMap((terminal) => {
-    const managed = recordValue(terminal.managed) ?? {};
-    const managementConflict = recordValue(terminal.management_conflict);
-    const currentTurn = recordValue(managed.current_turn);
-    const recentTurn = recordValue(managed.recent_turn);
-    const history = arrayValue(managed.history);
-    const sessionId = nonEmptyString(managed.session_id);
-    const sessionShortRef = nonEmptyString(managed.session_short_ref);
-    const hiddenTurnCount = finiteNumber(managed.hidden_turn_count) ?? 0;
-    const recovery = orphanedTerminalDispatchRecovery(terminal);
-    const terminalId = nonEmptyString(terminal.id);
-    const availableActions = recordValue(terminal.available_actions) ?? {};
-    const hasLifecycleAction = [
-      "list_resumable_threads",
-      "new_thread",
-      "resume_thread"
-    ].some((name) => Object.hasOwn(availableActions, name));
-    const hasWatchAction = Object.hasOwn(availableActions, "watch");
-    return [
-      `- ${formatTerminalLine(terminal)}`,
-      ...compatibilityWarningLines(terminal),
-      ...(hasLifecycleAction && terminalId
-        ? [`  lifecycle terminal_id: ${terminalId}`]
-        : []),
-      ...(hasWatchAction && terminalId
-        ? [`  AKK Watch available: /akk watch ${terminalId} — observe this exact terminal without input; exact task evidence is preferred and terminal-activity fallback is best-effort.`]
-        : []),
-      ...(sessionId || sessionShortRef
-        ? [`  AKK session: ${sessionShortRef ?? sessionId}`]
-        : []),
-      ...formatAvailableActions("terminal actions", terminal),
-      ...(currentTurn
-        ? [
-            `  current turn: ${formatManagedTurnLine(currentTurn)}`,
-            ...formatAvailableActions("current turn actions", currentTurn)
-          ]
-        : []),
-      ...(recentTurn
-        ? [
-            `  recent turn: ${formatManagedTurnLine(recentTurn)}`,
-            ...formatAvailableActions("recent turn actions", recentTurn)
-          ]
-        : []),
-      ...history.slice(0, 20).flatMap(
-        (turn) => [
-          `  history: ${formatManagedTurnLine(turn)}`,
-          ...formatAvailableActions("history actions", turn)
-        ]
-      ),
-      ...(hiddenTurnCount > 0 && history.length === 0
-        ? [`  older managed turns: ${hiddenTurnCount} (use all=true to include)`]
-        : []),
-      ...(managementConflict
-        ? [
-            `  management conflict: ${nonEmptyString(managementConflict.reason) ?? "current terminal ownership is unresolved"}`,
-            ...(nonEmptyString(managementConflict.recovery)
-              ? [`  recovery: ${nonEmptyString(managementConflict.recovery)}`]
-              : [])
-          ]
-        : []),
-      ...(recovery ? [`  recovery: ${recovery}`] : [])
-    ];
-  });
+  const terminalLines = terminals.slice(0, 20).flatMap(formatAkkTerminalControlLines);
 
   const watchLines = terminalWatches.slice(0, 20).flatMap((watch) => [
     `- ${formatTerminalWatchLine(watch)}`,
@@ -668,10 +684,12 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     : `AKK terminals (${terminals.length} live, ${unavailableManagedTurns.length} unavailable managed turns):`;
 
   return [
-    heading,
+    conversations ? `AKK conversations (${conversations.length}); select a conversation_id and AKK chooses the transport:` : heading,
     ...(nativeSessions.length ? ["Direct Codex CLI conversations:", ...nativeSessions.flatMap(row => [
       `- ${row.title ?? row.native_thread_id} | ${row.cwd ?? "unknown directory"} | ${row.activity_state ?? "unknown"}`,
-      `  conversation_id: ${row.conversation_id}`, ...formatAvailableActions("  actions", row)
+      `  conversation_id: ${row.conversation_id}`, ...formatAvailableActions("  actions", row),
+      ...arrayValue(row.terminal_controls).flatMap(terminal => ["  associated terminal controls:",
+        ...formatAkkTerminalControlLines(terminal).map(line => `  ${line}`)])
     ])] : []),
     ...(nativeWatches.length ? ["Direct Codex CLI watches:", ...nativeWatches.map(row =>
       `- ${row.watch_id}: ${row.status}`)] : []),
@@ -1232,6 +1250,9 @@ export function buildAkkCommandCliArgs(
   const codexHome = nonEmptyString(config.codexHome);
   const idleTimeoutMinutes = finiteNumberString(config.idleTimeoutMinutes);
 
+  const backendRecovery = buildBackendRecoveryCommandArgs(command, config, context);
+  if (backendRecovery) return backendRecovery;
+
   switch (command.action) {
     case "list":
       return withOptionalArgs(
@@ -1263,8 +1284,8 @@ export function buildAkkCommandCliArgs(
       return withOptionalArgs(
         ["unwatch-terminal", "--watch", command.watchId],
         ["--store-dir", storeDir],
-        ["--openclaw-session", command.watchId.startsWith("codex-cli-watch:") ? requiredNativeController(context.sessionKey) : undefined],
-        ["--codex-home", command.watchId.startsWith("codex-cli-watch:") ? codexHome : undefined]
+        ["--openclaw-session", isBackendTaskWatchId(command.watchId) ? requiredNativeController(context.sessionKey) : undefined],
+        ["--codex-home", isBackendTaskWatchId(command.watchId) ? codexHome : undefined]
       );
     case "list-resumable-threads":
       return withOptionalArgs(
@@ -1411,8 +1432,8 @@ export function buildAkkCommandCliArgs(
         return withOptionalArgs(
           ["watch-status", "--watch", command.watchId],
           ["--store-dir", storeDir],
-          ["--openclaw-session", command.watchId.startsWith("codex-cli-watch:") ? requiredNativeController(context.sessionKey) : undefined],
-          ["--codex-home", command.watchId.startsWith("codex-cli-watch:") ? codexHome : undefined]
+          ["--openclaw-session", isBackendTaskWatchId(command.watchId) ? requiredNativeController(context.sessionKey) : undefined],
+          ["--codex-home", isBackendTaskWatchId(command.watchId) ? codexHome : undefined]
         );
       }
       return withOptionalArgs(
@@ -1504,8 +1525,25 @@ export function buildAkkCommandCliArgs(
   }
 }
 
+function buildBackendRecoveryCommandArgs(command: AkkCommand, config: Record<string, unknown>, context: { sessionKey?: unknown }): string[] | undefined {
+  if (command.action === "renew" || command.action === "recover" || command.action === "retry-callback" || command.action === "close") {
+    const params: Record<string, unknown> = { turn_id: command.turnId };
+    if (command.action === "renew" && command.minutes !== undefined) params.minutes = Number(command.minutes);
+    if (command.action === "retry-callback" && command.notificationId !== undefined) params.notification_id = command.notificationId;
+    if (command.action === "close") {
+      params.reason = command.reason;
+      if (command.expectedMessageId !== undefined) params.expected_message_id = command.expectedMessageId;
+      if (command.expectedTransitionId !== undefined) params.expected_transition_id = command.expectedTransitionId;
+    }
+    const backend = backendRecoveryToolArgs(command.action, params, context, {
+      storeDir: resolvePluginStoreDir(config), codexHome: nonEmptyString(config.codexHome), defaultMinutes: config.agentTimeoutMinutes as number | undefined
+    });
+    if (backend) return backend;
+  }
+}
+
 function isTerminalWatchId(value: string): boolean {
-  return /^terminal-watch-[A-Za-z0-9._:-]+$/u.test(value) || isCodexNativeWatchId(value);
+  return /^terminal-watch-[A-Za-z0-9._:-]+$/u.test(value) || isBackendTaskWatchId(value);
 }
 
 function requiredNativeController(value: unknown): string {
@@ -1775,6 +1813,7 @@ function formatAvailableActions(
     "approve",
     "cancel",
     "renew",
+    "recover",
     "retry_callback",
     "close",
     "list_resumable_threads",

@@ -143,3 +143,23 @@ test("Desktop response dispatch barrier rechecks the same owner and native quest
   const result = await createDesktopResponseService(h.deps).respond(h.input);
   assert.equal(result.state, "not_sent"); assert.equal(result.error_code, "snapshot_changed"); assert.equal(h.state.sends, 0);
 });
+
+test("stopped Desktop Watch rejects responses before observation and again at the dispatch barrier", async t => {
+  const h = harness(t); let observations = 0;
+  h.deps.observe = async () => { observations++; return structuredClone(h.state.snapshot); };
+  const tasks = createDesktopTaskService({ repository: h.tasks, observe: h.deps.observe, start: async () => { throw new Error("must not start"); } });
+  const watched = await tasks.watch({ target, desktopId, controllerSession: h.input.controllerSession });
+  tasks.unwatch(watched.id, { controllerSession: h.input.controllerSession });
+  const before = observations;
+  await assert.rejects(h.service.respondWatch(watched.id, h.input), { code: "desktop_watch_stopped" });
+  assert.equal(observations, before); assert.equal(h.repository.list().length, 0);
+  await tasks.renew(watched.id, { controllerSession: h.input.controllerSession });
+  h.deps.answerAsync = async (_target, options) => {
+    tasks.unwatch(watched.id, { controllerSession: h.input.controllerSession });
+    await options.beforeDispatch?.(h.state.snapshot); h.state.sends++;
+    throw new Error("must not reach backend dispatch");
+  };
+  const response = await createDesktopResponseService(h.deps).respondWatch(watched.id, h.input);
+  assert.equal(response.state, "not_sent"); assert.equal(response.error_code, "desktop_watch_stopped");
+  assert.equal(h.state.sends, 0);
+});

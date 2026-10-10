@@ -3,8 +3,47 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import { codexNativeRuntimeOptions } from "../src/codex-native-cli-adapter.js";
+import { desktopRuntimeOptions } from "../src/desktop-cli-adapter.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+
+test("ordinary tests isolate backend discovery while fixture overrides remain explicit", async () => {
+  const { testProcessEnvironment } = await import(
+    pathToFileURL(path.join(repoRoot, "scripts", "test-tier-utils.js")).href
+  );
+  const previousNative = process.env.AKK_NATIVE_CODEX_HOMES;
+  const previousDesktop = process.env.AKK_DESKTOP_CODEX_HOMES;
+  try {
+    process.env.AKK_NATIVE_CODEX_HOMES = '["/user-configured-native"]';
+    process.env.AKK_DESKTOP_CODEX_HOMES = '["/user-configured-desktop"]';
+    const environment = testProcessEnvironment();
+    assert.equal(environment.HOME, process.env.HOME);
+    const [home] = JSON.parse(environment.AKK_NATIVE_CODEX_HOMES);
+    assert.ok(path.isAbsolute(home));
+    assert.equal(fs.existsSync(home), false);
+    assert.equal(environment.AKK_DESKTOP_CODEX_HOMES, environment.AKK_NATIVE_CODEX_HOMES);
+    await runCliCommandExecution("list", {}, { env: environment }, async () => {
+      const options = { codexHome: "/separately-configured-home" };
+      assert.deepEqual(codexNativeRuntimeOptions(options).codexHomes, [home]);
+      assert.deepEqual(desktopRuntimeOptions(options).codexHomes, [home]);
+    });
+    const fixtureHomes = JSON.stringify([path.join(path.dirname(home), "fixture")]);
+    const fixtureEnvironment = testProcessEnvironment({
+      AKK_NATIVE_CODEX_HOMES: fixtureHomes,
+      AKK_DESKTOP_CODEX_HOMES: fixtureHomes
+    });
+    assert.equal(fixtureEnvironment.AKK_NATIVE_CODEX_HOMES, fixtureHomes);
+    assert.equal(fixtureEnvironment.AKK_DESKTOP_CODEX_HOMES, fixtureHomes);
+  } finally {
+    for (const [key, value] of [["AKK_NATIVE_CODEX_HOMES", previousNative],
+      ["AKK_DESKTOP_CODEX_HOMES", previousDesktop]] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 function walkTests(directory: string): string[] {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

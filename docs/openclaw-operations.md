@@ -3,7 +3,8 @@
 This document covers OpenClaw-specific installation choices, optional tool
 routing, configuration, approval policy, recovery, and diagnostics. For
 ordinary AKK commands and cross-Host reliability semantics, use the
-[Operator Guide](operator-guide.md).
+[Operator Guide](operator-guide.md). AKK 0.14.0 introduces the Codex CLI
+backend, Desktop, and backend Recovery support described here.
 
 ## Requirements and compatibility
 
@@ -12,20 +13,30 @@ ordinary AKK commands and cross-Host reliability semantics, use the
 - OpenClaw `2026.6.5` or newer for normal packaged installation.
 - Plugin API and Gateway `2026.5.12` or newer. The adjacent tested boundary,
   `2026.5.10-beta.2`, lacks the required session workflow API.
-- tmux, or local Herdr `0.8.0` using socket protocol 19.
-- An authenticated Codex or Claude Code CLI running under the same OS user as
-  OpenClaw and AKK.
+- An existing supported coding-agent environment running under the same OS
+  user as OpenClaw and AKK; choose its setup below.
 
-OpenClaw, AKK, the terminal provider, and the coding agent must share the OS
-user because AKK verifies and controls local processes and private terminal
-endpoints. Workspace is not a routing boundary: fresh terminal identity and
-explicit user selection are.
+| Coding-agent environment | Requirement |
+| --- | --- |
+| Codex CLI shared backend | An authenticated, loaded main CLI conversation on a compatible local backend; [CLI backend guide](codex-cli-native-compatibility.md). No tmux or Herdr required. |
+| Codex Desktop | The supported local app and the intended conversation open in its original owner; [Desktop guide](codex-desktop-compatibility.md). No tmux or Herdr required. |
+| Codex or Claude Code terminal | An authenticated CLI in tmux or local Herdr `0.8.0` using socket protocol 19; [tmux](quickstart-tmux.md) or [Herdr](quickstart-herdr.md) setup. |
+
+OpenClaw and AKK inspect local processes, private backend endpoints, and any
+selected terminal provider. Workspace is not a routing boundary: exact current
+conversation identity and explicit user selection are. Terminal setup
+instructions apply only when using the terminal route.
 
 ## Choose one installation path
 
+Use one AKK installation per OpenClaw profile: ClawHub, npm, or a linked local
+checkout. ClawHub is the normal OpenClaw path; npm also provides the standalone
+CLI. A [local development build](#local-development-build) is optional.
+
 ### ClawHub
 
-This is the normal OpenClaw installation:
+This installs the OpenClaw plugin with the 0.14 backend, Desktop, and terminal
+capabilities:
 
 ```bash
 openclaw plugins install clawhub:@scotthuang/agent-knock-knock
@@ -58,6 +69,35 @@ alternative installation paths. For a nonstandard OpenClaw executable:
 agent-knock-knock install-openclaw --verify \
   --openclaw-bin /absolute/path/to/openclaw
 ```
+
+## Local development build
+
+Use a reviewed checkout when developing AKK or evaluating source changes.
+This optional source installation is not required for the 0.14 backend or
+Desktop features. Choose an OpenClaw profile with no other AKK installation,
+or remove its existing installation
+through OpenClaw's plugin management before linking this checkout. Do not
+layer the link on top of a ClawHub or npm-installed plugin in the same profile.
+
+From the reviewed repository checkout, build and link the plugin:
+
+```bash
+npm ci
+npm run build
+openclaw plugins install --link .
+openclaw plugins enable agent-knock-knock
+openclaw gateway restart
+```
+
+Keep the checkout available while the plugin is linked. After changing its
+source, rebuild and restart the Gateway so it loads the new compiled code.
+For CLI backend or Desktop use, start with a fresh AKK List, select the intended
+conversation, and inspect its Status and advertised capabilities. These paths
+use their own setup guides above; a terminal session is not a prerequisite.
+`/akk doctor` checks the terminal-oriented installation environment. Missing
+terminal prerequisites in that result do not establish that a backend or
+Desktop conversation is unavailable. See [Contributing](../CONTRIBUTING.md)
+for development checks.
 
 ## Optional natural-language routing
 
@@ -106,8 +146,15 @@ callback is not authorization: the Host must refresh Status, show the current
 request, obtain explicit human confirmation, and invoke only the approval
 action advertised for that exact prompt.
 
-Claude Code manual approval is deliberately narrow. It supports the current
-AKK-managed Turn only and requires an exact one-time Bash **Yes** choice
+CLI backend and Desktop approvals use the current typed interaction in the
+original native task and controller session. Copy the advertised interaction
+and decision; do not translate terminal approval keys into backend requests.
+See the [CLI backend](codex-cli-native-compatibility.md) and
+[Desktop](codex-desktop-compatibility.md) guides for supported request types.
+
+Terminal approval has separate boundaries. Claude Code manual approval is
+deliberately narrow. It supports the current AKK-managed Turn only and
+requires an exact one-time Bash **Yes** choice
 correlated with the owner-private transcript. Persistent permission choices,
 unknown dialogs, and changed evidence remain manual in the TUI.
 
@@ -148,54 +195,80 @@ Terminal Watch approval notifications never participate in auto-approval.
 ## Supervisor and callbacks
 
 OpenClaw starts one non-overlapping AKK supervision cycle at startup and after
-each previous cycle completes. Managed-Turn monitor recovery and Terminal Watch
-reconciliation have independent error boundaries, so one failure does not
-starve the other.
+each previous cycle completes. Terminal managed-Turn monitors, Terminal
+Watches, CLI backend Watches, and Desktop Watches have independent recovery
+phases and error boundaries, so a failure in one does not starve the others.
 
-With a writable Store, healthy Gateway, successful reconciliation, and an
-unchanged Turn binding, AKK prepares one immutable completion message and
-outbox entry within 30 seconds after reliable native completion evidence
+For terminal managed Turns, with a writable Store, healthy Gateway, successful
+reconciliation, and an unchanged Turn binding, AKK prepares one immutable
+completion message and outbox entry within 30 seconds after reliable native completion evidence
 becomes stable. External transport and wake acknowledgement are outside that
 bound. Status remains the manual recovery path when presentation is delayed.
 
+For CLI backend and Desktop work, retain the exact task ID returned by Send
+or Watch. Use [backend task recovery](backend-task-recovery.md) for Recover,
+Renew, Close, Unwatch, and Retry Callback. These operations target that original
+task and controller session without terminal input. Close releases Send
+management; it does not cancel Codex. Unwatch stops observation. A callback
+accepted by OpenClaw does not prove delivery by a downstream chat channel, and
+an uncertain callback is not eligible for manual replay.
+
+Terminal binding and menu recovery remain separate; see
+[terminal recovery and diagnostics](operator-guide.md#terminal-recovery-and-diagnostics).
+
 ## Troubleshooting
 
-Start with:
+For CLI backend and Desktop, start with fresh List and Status for the selected
+conversation or exact task. For terminal installation diagnostics, use:
 
 ```text
 /akk doctor
 ```
 
 With the standalone npm CLI installed, `agent-knock-knock doctor` additionally
-checks the executable environment directly.
+checks the executable environment directly. Doctor's readiness result includes
+tmux/Herdr and CLI prerequisites; a missing terminal requirement is not a
+backend or Desktop health result.
 
 | Symptom | Recovery |
 | --- | --- |
-| No eligible terminal | Start authenticated Codex or Claude Code inside tmux or supported Herdr as the same OS user, then refresh `/akk list`. |
+| CLI backend conversation is missing | Check that the intended main CLI conversation is loaded under the selected local Codex home, then refresh List; see the [CLI backend guide](codex-cli-native-compatibility.md). |
+| Desktop row has no live owner | Open that exact conversation in the supported Desktop app, then refresh List. Catalog membership alone does not grant Send capability. |
+| No eligible terminal, when terminal control is intended | Start authenticated Codex or Claude Code inside tmux or supported Herdr as the same OS user, then refresh `/akk list`. |
 | Plugin or callbacks cannot find OpenClaw | Configure `openclawBin`; for npm installation, pass the matching `--openclaw-bin` to `install-openclaw`. |
-| Source changes do not appear | Build, reinstall from the checkout, and let the installer perform its single Gateway restart. |
-| Turn is `stalled` | Inspect Status and the exact pane; use the advertised Renew action only if the same Turn is still live. |
-| Turn is `callback_failed` | Use the advertised Retry Callback action; it reuses the original message identity. |
-| Human native-thread switch conflicts with active work | Ask the user whether to keep the old work or take over the current thread. Use only the nested fresh action returned by List. |
-| List reports orphaned dispatch or transition state | Inspect the pane, then run only the exact Close recovery command returned by List. It leaves the coding agent and terminal running. |
+| Linked source changes do not appear | Run `npm run build` in the linked checkout and restart the Gateway; see [Local development build](#local-development-build). |
+| Backend observation is stale, stopped, or expired | Inspect Status for the original `watch_id`, then use the action advertised for its state; [backend recovery](backend-task-recovery.md) distinguishes Recover from Renew. |
+| Backend callback failed | Use only an advertised Retry Callback action for an eligible notification; select its exact `notification_id` when several are eligible. Accepted, in-flight, and uncertain deliveries cannot be replayed. |
+| Terminal Turn is `stalled` | Inspect Status and the exact pane; use the advertised Renew action only if the same Turn is still live. |
+| Terminal Turn is `callback_failed` | Use the advertised Retry Callback action; it reuses the original message identity. |
+| Human native-thread switch conflicts with active terminal work | Ask the user whether to keep the old work or take over the current thread. Use only the nested fresh action returned by List. |
+| Terminal List reports orphaned dispatch or transition state | Inspect the pane, then run only the exact Close recovery command returned by List. It leaves the coding agent and terminal running. |
 | Claude approval is not offered | Resolve unsupported, persistent, stale, or uncorrelated dialogs in the TUI. |
 | Claude request was not auto-approved | Check the enabled rule, agent, canonical workspace, exact argv, and current screen/transcript evidence. |
 
-Local read-only diagnostics:
+Terminal diagnostics:
 
 ```bash
 agent-knock-knock status --conversation latest --trace
 agent-knock-knock list --terminal-debug
 ```
 
+For backend tasks, use the exact returned task ID instead of `latest`, for
+example `agent-knock-knock status --watch '<watch_id>'`. Status for that task
+reads its original backend without terminal input. List never types into a
+terminal; a targeted conversation Status for an unbound, idle physical Codex
+terminal may perform the closed identity inspection described in the
+[Operator Guide](operator-guide.md#akk-status-and-native-inspection).
+
 Trace and logs must not expose agent reasoning, raw callback payloads,
 credentials, tokens, passwords, or proxy secrets.
 
 ## Trust and privacy
 
-AKK has no hosted control plane or telemetry and does not change coding-agent
-permission settings. Terminal, Session, Turn, Watch, receipt, and log state
-stay on the local machine. Claude approval callbacks omit raw commands; Codex
+AKK has no hosted control plane or telemetry. Ordinary Send preserves the
+coding agent's permission settings; an explicit supported permission action
+applies the user's selected mode. Terminal, Session, Turn, Watch, receipt, and
+log state stay on the local machine. Claude approval callbacks omit raw commands; Codex
 may include bounded visible command detail so the Host can present it for
 review.
 

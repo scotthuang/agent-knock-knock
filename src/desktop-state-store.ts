@@ -1,3 +1,4 @@
+import { assertBackendRecoveryFields, assertBackendRecoveryUpdate, type BackendRecoveryFields, type BackendRetryFields } from "./backend-task-recovery.js";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -26,7 +27,7 @@ export interface DesktopSendIntent {
   receipt_turn_id?: string;
   error_code?: string;
 }
-export interface DesktopNotification {
+export interface DesktopNotification extends BackendRetryFields {
   id: string;
   envelope: CallbackEnvelopeV1;
   status: "ready" | "leased" | "retry_wait" | "accepted" | "failed" | "uncertain";
@@ -36,7 +37,7 @@ export interface DesktopNotification {
   retry_at?: string;
   outcome?: CallbackAttemptOutcome;
 }
-export interface DesktopTaskRecord {
+export interface DesktopTaskRecord extends BackendRecoveryFields {
   schema: "agent-knock-knock/desktop-task";
   version: 1;
   revision: number;
@@ -163,6 +164,7 @@ function assertPendingInteractions(record: DesktopTaskRecord): void {
   }
 }
 function assertNotificationDelivery(n: DesktopNotification): void {
+  if (n.retry_budget_until !== undefined && (!Number.isSafeInteger(n.retry_budget_until) || n.retry_budget_until < 1)) throw new Error("invalid Desktop delivery retry budget");
   if (n.outcome) parseCallbackAttemptOutcome(n.outcome);
   if (n.status === "leased" && (!nonblank(n.attempt_id) || !validTime(n.lease_expires_at))) throw new Error("invalid Desktop delivery lease");
   if (n.status === "retry_wait" && (!validTime(n.retry_at) || n.outcome?.disposition !== "retryable_failure")) throw new Error("invalid Desktop delivery retry");
@@ -171,7 +173,7 @@ export function assertDesktopTaskRecord(value: unknown): asserts value is Deskto
   const r = value as DesktopTaskRecord;
   if (!r || typeof r !== "object" || r.schema !== "agent-knock-knock/desktop-task" ||
     r.version !== 1 || !Number.isSafeInteger(r.revision) || r.revision < 1) throw new Error("invalid Desktop task record");
-  assertTaskIdentity(r); assertTaskLifecycle(r);
+  assertTaskIdentity(r); assertTaskLifecycle(r); assertBackendRecoveryFields(r);
   assertAsyncInteractions(r);
   assertPendingInteractions(r);
   if (r.kind === "send") assertSendIntent(r);
@@ -247,9 +249,10 @@ export function createDesktopStateStore(storeDir: string, locks: { acquire(lockP
       const current = load(record.id);
       if ((current?.revision ?? null) !== expectedRevision) throw new Error("Desktop task revision conflict");
       if (current) {
-        for (const key of ["id", "watch_id", "desktop_id", "target", "controller_session", "kind", "created_at", "deadline_at", "callback_route"] as const) {
+        for (const key of ["id", "watch_id", "desktop_id", "target", "controller_session", "kind", "created_at", "callback_route"] as const) {
           if (!isDeepStrictEqual(current[key], record[key])) throw new Error(`Desktop task immutable ${key} changed`);
         }
+        assertBackendRecoveryUpdate(current, record);
         if (current.native_turn_id && current.native_turn_id !== record.native_turn_id) throw new Error("Desktop exact turn anchor cannot change");
         if (current.send_intent) {
           for (const key of ["message_id", "client_user_message_id", "text", "owner_client_id", "baseline_turn_ids", "dispatched_at"] as const) {

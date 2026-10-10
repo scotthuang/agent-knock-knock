@@ -32,7 +32,8 @@ export interface DesktopMetadataReaderOptions {
 const PAGE_SIZE = 100;
 const STATE_COLUMNS = [
   "id", "cwd", "title", "name", "updated_at", "updated_at_ms", "originator",
-  "archived", "source", "thread_source", "project_id", "parent_thread_id"
+  "archived", "source", "thread_source", "project_id", "parent_thread_id",
+  "is_pinned", "thread_section_id", "section_position", "recency_at_ms"
 ] as const;
 const CATALOG_COLUMNS = [
   "host_id", "thread_id", "display_title", "cwd", "source_updated_at",
@@ -90,7 +91,9 @@ async function readSnapshot(
   }
   requireColumns(table, columns, required);
   const selected = selectedColumns(isState ? STATE_COLUMNS : CATALOG_COLUMNS, columns);
-  const predicate = isState ? "archived = 0" : "missing_candidate = 0";
+  // Archived metadata is needed to reject stale sidebar assignments and pins.
+  // Content/history tables are never read; the catalog filters these rows later.
+  const predicate = isState ? "1 = 1" : "missing_candidate = 0";
   const order = isState ? "id" : "host_id, thread_id";
   const { rows, pageCount } = await scanSnapshotRows(copy, query, { table, selected, predicate, order, maxRows });
   const hosts = isState ? Object.create(null) : await readCatalogHosts(copy, query);

@@ -251,8 +251,13 @@ export function agentCliTestEnv(
   env: NodeJS.ProcessEnv
 ): NodeJS.ProcessEnv {
   const inferredRuntimeDir = inferredAgentCliRuntimeDir(args);
+  const unavailableBackendHomes = JSON.stringify([
+    path.join(testRuntimeDir, "unavailable-backend")
+  ]);
   return {
     ...process.env,
+    AKK_NATIVE_CODEX_HOMES: unavailableBackendHomes,
+    AKK_DESKTOP_CODEX_HOMES: unavailableBackendHomes,
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
     AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted",
     ...(inferredRuntimeDir && env.AKK_RUNTIME_DIR === undefined
@@ -276,7 +281,7 @@ function managedStateMachineSendArgs(args: string[]): string[] {
   }
   const exactTerminalTarget = ["--session", "--conversation"]
     .map((option) => args.indexOf(option))
-    .some((index) => index >= 0 && args[index + 1]?.startsWith("terminal:v"));
+    .some((index) => index >= 0 && /^(?:terminal:v|terminal:tmux:)/u.test(args[index + 1] ?? ""));
   return exactTerminalTarget ? [...args, "--managed-only"] : args;
 }
 

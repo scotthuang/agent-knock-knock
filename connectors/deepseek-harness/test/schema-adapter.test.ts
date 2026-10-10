@@ -13,14 +13,15 @@ import {
   compileAuthoritativeInputValidator,
 } from "../src/schema-adapter.js";
 
-test("all 22 real AKK schemas pass the shared supported DSH validator", async () => {
+test("all pinned AKK 0.13.3 schemas pass the shared supported DSH validator", async () => {
   const adapter = createHostAdapter({
     environmentForContext: () => ({}),
     lifecycleEnvironment: {},
     logger: { info() {}, warn() {} },
   });
   try {
-    assert.equal(adapter.tools.length, 24);
+    // Contract for the published dependency pinned in this connector's lockfile.
+    assert.equal(adapter.tools.length, 22);
     assert.equal(
       catalogDigest(adapter),
       "f469d4e7320c789a48ca106e3a89a5f81815d4da7c14920bfd11d25fdf598a98"

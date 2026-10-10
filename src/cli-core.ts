@@ -1,4 +1,6 @@
 import { dispatchLocalCodexCli, localCodexListForCli } from "./local-codex-cli-adapter.js";
+import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
+import { executeConversationCommand } from "./conversation-routing-cli-adapter.js";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -7,15 +9,10 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { validateCodexRolloutAcceptanceAnchor } from
   "./terminal-submission-acceptance.js";
-import {
-  isRecord,
-  nonBlankString as stringValue
-} from "./value-guards.js";
+import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
 import { loadDeferredForegroundTransfer } from
   "./deferred-foreground-transfer.js";
-import {
-  createFileLockCliAdapter
-} from "./file-lock-cli-adapter.js";
+import { createFileLockCliAdapter } from "./file-lock-cli-adapter.js";
 import {
   budgetAction,
   createMessage,
@@ -396,6 +393,7 @@ const STORE_MUTATION_COMMANDS = new Set([
   "approve",
   "cancel",
   "renew",
+  "recover",
   "reconcile-monitors",
   "reconcile-watches",
   "watch-terminal",
@@ -459,19 +457,17 @@ export async function executeCliCommand(
   options: CliCommandOptions = {},
   dependencies: CliCommandDependencies = {}
 ): Promise<CliCommandExecutionResult> {
-  return runCliCommandExecution(
-    commandName,
-    options,
-    dependencies,
-    () => dispatchCliCommand(
-      commandName,
-      applyTrustedHostProfileCliOptions(
+  return runCliCommandExecution(commandName, options, dependencies,
+    () => {
+      const scopedOptions = applyTrustedHostProfileCliOptions(commandName, options, cliEnv(), cliCwd());
+      assertBackendRecoveryCliTarget(commandName, scopedOptions);
+      return executeConversationCommand(
         commandName,
-        options,
-        cliEnv(),
-        cliCwd()
-      )
-    )
+        scopedOptions,
+        (request, terminalId) => terminalListCliFacade.buildTerminalListGroup({ options: request, agentFilter: "codex", terminalId }).then(scan => scan.terminalControlled),
+        dispatchCliCommand
+      );
+    }
   );
 }
 
@@ -1798,7 +1794,7 @@ function usage() {
   agent-knock-knock --help
   agent-knock-knock --version
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
-  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--reconcile] [--no-approval-scan] [--terminal-debug]
+  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--all] [--reconcile] [--no-approval-scan] [--terminal-debug] [--desktop-view sidebar|history] [--desktop-search <text>] [--desktop-project <id|path>] [--desktop-limit <1-100>] [--desktop-cursor <cursor>]
   agent-knock-knock watch-terminal --terminal <exact-terminal-id> --openclaw-session <session> [--hard-timeout-minutes <minutes>] [--store-dir <dir>] [--openclaw-bin <path>]
   agent-knock-knock watch-status --watch <terminal-watch-id> [--store-dir <dir>]
   agent-knock-knock unwatch-terminal --watch <terminal-watch-id> [--store-dir <dir>]
@@ -1822,9 +1818,10 @@ function usage() {
   agent-knock-knock respond-interaction (--turn <turn-id|selector> | --watch <watch-id>) --interaction <id> --response-json <json> --expected-interaction-fingerprint <fingerprint> --expected-interaction-expires-at <timestamp>  # async_question defaults to advertised steer_current_turn (delivery_mode may select queue_next_turn); questionnaire forbids it; never use raw keys or menu indexes
   agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] [--decision approve_once|reject] [--expected-terminal-token <token>] --expected-approval-fingerprint <fingerprint>
   agent-knock-knock cancel [--turn <turn-id|selector>] [--conversation <selector>]
-  agent-knock-knock renew [--turn <turn-id|selector>] [--conversation <selector>]
-  agent-knock-knock retry-callback [--turn <turn-id|selector>] [--conversation <selector>]
-  agent-knock-knock close [--turn <turn-id|selector>] [--conversation <selector>] [--reason <text>] [--expected-message-id <message-id> | --expected-transition-id <transition-id> | --expected-handoff-token <token>]
+  agent-knock-knock renew (--watch <backend-watch-id> | --turn <turn-id|selector> | --conversation <legacy-selector>) [--minutes <positive-minutes>] [--openclaw-session <originating-controller>]
+  agent-knock-knock recover (--watch <backend-watch-id> | --turn <backend-watch-id>) --openclaw-session <originating-controller>
+  agent-knock-knock retry-callback (--watch <backend-watch-id> | --turn <turn-id|selector> | --conversation <legacy-selector>) [--notification-id <backend-notification-id>] [--openclaw-session <originating-controller>]
+  agent-knock-knock close (--watch <backend-watch-id> | --turn <turn-id|selector> | --conversation <legacy-selector>) [--openclaw-session <originating-controller>] [--reason <text>] [--expected-message-id <message-id> | --expected-transition-id <transition-id> | --expected-handoff-token <token>]  # recovery fences are terminal-only; passive backend Watches use unwatch-terminal
   agent-knock-knock install-openclaw [--verify] [--openclaw-bin <path>] [--skill-path <path>] [--skill-only] [--no-restart]
   agent-knock-knock doctor [--openclaw-bin <path>] [--tmux-bin <path>] [--herdr-bin <path>]
   agent-knock-knock host-profile example

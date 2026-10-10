@@ -11,6 +11,12 @@ socket.
 
 ## Status and compatibility
 
+This connector's pinned AKK 0.13.3 runtime provides terminal control. The
+[root README](../../README.md) describes the newer AKK 0.14.0 CLI direct,
+Desktop, and Recovery features; installing this connector does not select that
+runtime automatically. The AKK core release does not upgrade this connector's
+pinned dependency.
+
 This is a POC prerelease distributed on npm as
 `@scotthuang/agent-knock-knock-pi`. Prereleases use the `next` dist-tag:
 

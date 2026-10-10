@@ -1,8 +1,9 @@
 # Agent Knock Knock for DeepSeek Harness
 
 This package is the native DeepSeek Harness Web connector for Agent Knock
-Knock (AKK). When the Web Host mounts the bundle, it adds `/akk`, the 22 AKK
-semantic tools, and the bundled `agent-knock-knock` skill to every live Agent.
+Knock (AKK). When the Web Host mounts the bundle, it adds `/akk`, the AKK
+semantic tools supplied by its pinned runtime, and the bundled
+`agent-knock-knock` skill to every live Agent.
 There is no `/akk-bind` step, separate skill installation, or session id for
 the user to copy.
 
@@ -11,6 +12,11 @@ package. It does not modify DeepSeek Harness and has its own version, build,
 tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
+
+This connector pins AKK **0.13.3** in its package and lockfile. Its terminal
+workflow is separate from the AKK 0.14.0 CLI direct, Desktop, and Recovery
+features in the [root README](../../README.md). Neither a newer core release
+nor a root checkout replaces the connector's pinned runtime automatically.
 
 This prerelease supports DeepSeek Harness `0.1.1-rc.2`, `0.1.2-alpha.1`, and
 `0.1.5-rc.2` on the resident Web Host and Node.js `>=22.19.0`. Activation locates the real

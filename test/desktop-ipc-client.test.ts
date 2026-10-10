@@ -65,6 +65,38 @@ const connect = (fixture: Fixture, compatibility: DesktopCompatibility = VERIFIE
 });
 const starts = (fixture: Fixture) => fixture.sent.filter((message) => message.method === "thread-follower-start-turn");
 const steers = (fixture: Fixture) => fixture.sent.filter((message) => message.method === "thread-follower-steer-turn");
+
+test("Desktop router no-client-found identifies an unloaded conversation without dispatching a turn", async () => {
+  const fixture = new Fixture(), client = await connect(fixture);
+  fixture.ownerHandler = request => fixture.emit({ type: "response", requestId: request.requestId,
+    resultType: "error", error: "no-client-found" });
+  try {
+    await assert.rejects(client.discoverOwner(target.threadId),
+      (error: unknown) => error instanceof DesktopIpcError && error.code === "no_live_owner" && error.dispatchState === "not_sent");
+    await assert.rejects(client.sendTurnOnce(options()),
+      (error: unknown) => error instanceof DesktopIpcError && error.code === "no_live_owner" && error.dispatchState === "not_sent");
+    assert.equal(starts(fixture).length, 0);
+    assert.equal(fixture.sent.some(message => message.method === "thread-stream-following-changed"), false);
+  } finally { client.close(); }
+});
+
+test("Desktop unloaded-owner diagnostic does not relax successful response or conflicting identity checks", async () => {
+  for (const overrides of [
+    { resultType: "success", method: undefined },
+    { resultType: "error", error: "no-client-found", method: "unrelated-method" },
+    { resultType: "error", error: "no-client-found", version: 999 },
+    { resultType: "error", error: "no-client-found", handledByClientId: "different-owner" }
+  ]) {
+    const fixture = new Fixture(), client = await connect(fixture);
+    fixture.ownerHandler = request => fixture.respond(request, overrides);
+    try {
+      await assert.rejects(client.discoverOwner(target.threadId, target.ownerClientId),
+        (error: unknown) => error instanceof DesktopIpcError && ["invalid_response", "owner_changed"].includes(error.code));
+      assert.equal(starts(fixture).length, 0);
+    } finally { client.close(); }
+  }
+});
+
 function asyncFixture() {
   const fixture = new Fixture();
   fixture.state = { ...baseline(), cwd: "/tmp/desktop-test", threadRuntimeStatus: { type: "active" },

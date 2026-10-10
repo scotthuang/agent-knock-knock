@@ -122,8 +122,8 @@ test("acceptance polling is bounded and does not wait on an ambiguous send witho
   const unmaterialized = await service.send(input);
   assert.equal(unmaterialized.send_intent?.state, "uncertain"); assert.equal(unmaterialized.native_turn_id, undefined);
   assert.equal(sleeps, 2); assert.equal(h.state.starts, 1);
-  // Cancel observation so the independent uncertainty case can reserve this idle thread.
-  service.unwatch(unmaterialized.id, { controllerSession: input.controllerSession });
+  // Retire this managed task so the independent uncertainty case can reserve this idle thread.
+  service.close(unmaterialized.id, { controllerSession: input.controllerSession });
   h.deps.start = async (_identity, options) => {
     await options.beforeDispatch?.(h.state.snapshot); h.state.starts++; throw new CodexNativeError("timeout", "missing receipt", "unknown");
   };
@@ -245,7 +245,8 @@ test("Unwatch revokes queued callbacks without cancelling or sending to the nati
   const h = harness(t); h.state.snapshot = snapshot([turn("native-one")]);
   const watched = await h.service.watch(input);
   assert.throws(() => h.service.unwatch(watched.id, { controllerSession: "wrong-controller" }), { code: "codex_native_controller_mismatch" });
-  assert.equal(h.service.unwatch(watched.id, { controllerSession: input.controllerSession }).status, "cancelled");
+  assert.ok(h.service.unwatch(watched.id, { controllerSession: input.controllerSession }).unwatched_at);
+  assert.equal(h.service.status(watched.id).status, "watching");
   assert.equal(h.state.starts, 0); assert.equal(h.state.snapshot.turns[0].status, "inProgress");
 });
 
@@ -258,4 +259,225 @@ test("native record store rejects anchor changes and isolates malformed records 
   assert.throws(() => h.repository.list());
   fs.unlinkSync(corrupt); fs.symlinkSync(path.join(root, `${sent.id}.json`), corrupt);
   assert.throws(() => h.repository.scanForReconciliation(), /owner-private/);
+});
+
+test("send management remains owned after Unwatch, while Close permanently retires the original task", async t => {
+  const h = harness(t); const sent = await h.service.send(input);
+  const unwatched = h.service.unwatch(sent.id, { controllerSession: input.controllerSession });
+  assert.equal(unwatched.status, "watching"); assert.ok(unwatched.unwatched_at);
+  const reads = h.state.observations.length;
+  await h.service.reconcile(sent.id);
+  assert.equal(h.state.observations.length, reads); assert.equal(codexNativeTaskNeedsReconciliation(unwatched), false);
+  const closed = h.service.close(sent.id, { controllerSession: input.controllerSession, reason: "Owner finished" });
+  assert.equal(closed.status, "watching"); assert.equal(closed.close_reason, "Owner finished"); assert.ok(closed.closed_at);
+  for (const operation of [() => h.service.renew(sent.id, { controllerSession: input.controllerSession }),
+    () => h.service.recover(sent.id, { controllerSession: input.controllerSession }),
+    () => h.service.retryCallback(sent.id, { controllerSession: input.controllerSession })]) {
+    await assert.rejects(operation(), { code: "codex_native_task_closed" });
+  }
+  assert.equal(h.state.observations.length, reads); assert.equal(h.state.starts, 1);
+  const passive = await h.service.watch(input);
+  assert.throws(() => h.service.close(passive.id, { controllerSession: input.controllerSession }), { code: "codex_native_unmanaged_watch" });
+});
+
+test("all owner-only task mutations fail before transport observation or callback delivery", async t => {
+  const h = harness(t); const sent = await h.service.send(input); const reads = h.state.observations.length;
+  const foreign = { controllerSession: "another-owner" };
+  assert.throws(() => h.service.close(sent.id, foreign), { code: "codex_native_controller_mismatch" });
+  assert.throws(() => h.service.unwatch(sent.id, foreign), { code: "codex_native_controller_mismatch" });
+  for (const operation of [h.service.renew.bind(h.service), h.service.recover.bind(h.service), h.service.retryCallback.bind(h.service)]) {
+    await assert.rejects(operation(sent.id, foreign), { code: "codex_native_controller_mismatch" });
+  }
+  assert.equal(h.state.observations.length, reads); assert.equal(h.state.notifications.length, 0);
+});
+
+test("expired recovery reads the original turn, preserves deadline, and does not follow a newer task", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, timeoutMs: 1 });
+  h.state.now += 2; assert.equal((await h.service.reconcile(sent.id)).status, "timed_out");
+  h.state.snapshot = snapshot([turn("newer-task")], { selectedTurn: turn("native-one", "completed", h.state.clientId) });
+  h.state.snapshot.selectedTurn!.items.push({ id: "answer", type: "agentMessage", text: "original result", phase: "final_answer" });
+  const recovered = await createCodexNativeTaskService(h.deps).recover(sent.id, { controllerSession: input.controllerSession });
+  assert.equal(recovered.status, "completed"); assert.equal(recovered.final_text, "original result");
+  assert.equal(recovered.deadline_at, sent.deadline_at); assert.ok(recovered.recovered_at);
+  assert.equal(h.state.observations.at(-1), "native-one"); assert.equal(h.state.starts, 1);
+});
+
+test("unwatched recovery refreshes original evidence without resuming observation or callbacks", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  h.service.unwatch(sent.id, { controllerSession: input.controllerSession });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const recovered = await h.service.recover(sent.id, { controllerSession: input.controllerSession });
+  assert.equal(recovered.status, "completed"); assert.ok(recovered.unwatched_at);
+  assert.equal(recovered.notifications.length, 0); assert.equal(codexNativeTaskNeedsReconciliation(recovered), false);
+});
+
+test("uncertain native reservations remain blocking after timeout and Unwatch until explicitly closed", async t => {
+  const h = harness(t);
+  h.deps.start = async (_identity, options) => {
+    await options.beforeDispatch?.(h.state.snapshot); h.state.starts++;
+    throw new CodexNativeError("timeout", "lost receipt", "unknown");
+  };
+  const service = createCodexNativeTaskService(h.deps);
+  const sent = await service.send({ ...input, timeoutMs: 1 });
+  h.state.now += 2; await service.reconcile(sent.id);
+  await assert.rejects(service.send({ ...input, messageId: "new-message" }), { code: "codex_native_send_pending" });
+  service.unwatch(sent.id, { controllerSession: input.controllerSession });
+  await assert.rejects(createCodexNativeTaskService(h.deps).send({ ...input, messageId: "new-message" }), { code: "codex_native_send_pending" });
+  service.close(sent.id, { controllerSession: input.controllerSession });
+  await service.send({ ...input, messageId: "new-message" });
+  assert.equal(h.state.starts, 2);
+});
+
+test("Renew resumes only the original active turn and retires each older timeout generation", async t => {
+  const h = harness(t); h.deps.deliver = undefined;
+  const service = createCodexNativeTaskService(h.deps);
+  const sent = await service.send({ ...input, callbackRoute: route, timeoutMs: 1 });
+  h.state.now += 2; const expired = await service.reconcile(sent.id);
+  assert.equal(expired.status, "timed_out"); assert.equal(expired.notifications[0].status, "ready");
+  service.unwatch(sent.id, { controllerSession: input.controllerSession });
+  h.state.snapshot = snapshot([turn("newer-task")], { selectedTurn: turn("native-one", "inProgress", h.state.clientId) });
+  const renewed = await createCodexNativeTaskService(h.deps).renew(sent.id, { controllerSession: input.controllerSession, timeoutMs: 10 });
+  assert.equal(renewed.status, "watching"); assert.equal(renewed.unwatched_at, undefined); assert.equal(renewed.renewal_count, 1);
+  assert.ok(Date.parse(renewed.deadline_at) > Date.parse(expired.deadline_at));
+  assert.equal(renewed.notifications[0].outcome?.disposition, "permanent_failure");
+  h.state.now += 11; const reexpired = await service.reconcile(sent.id);
+  assert.equal(reexpired.notifications.length, 2); assert.notEqual(reexpired.notifications[0].id, reexpired.notifications[1].id);
+  assert.equal(reexpired.notifications[1].status, "ready"); assert.equal(h.state.starts, 1);
+  for (const timeoutMs of [0, 604_800_001, 1.5]) await assert.rejects(service.renew(sent.id, { controllerSession: input.controllerSession, timeoutMs }), { code: "invalid_argument" });
+});
+
+test("Renew records original completion without inventing an active observation or extending its deadline", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, timeoutMs: 1 });
+  h.state.now += 2; await h.service.reconcile(sent.id);
+  h.state.snapshot = snapshot([turn("newer-task")], { selectedTurn: turn("native-one", "completed", h.state.clientId) });
+  const done = await h.service.renew(sent.id, { controllerSession: input.controllerSession, timeoutMs: 100 });
+  assert.equal(done.status, "completed"); assert.equal(done.deadline_at, sent.deadline_at); assert.equal(done.renewal_count, undefined);
+  assert.equal(codexNativeTaskNeedsReconciliation(done), false);
+});
+
+test("Close wins over an in-flight recovery and a failed in-flight callback never restarts retries", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  let finishObservation!: (value: CodexNativeSnapshot) => void;
+  h.deps.observe = async () => new Promise(resolve => { finishObservation = resolve; });
+  const service = createCodexNativeTaskService(h.deps);
+  const recovering = service.recover(sent.id, { controllerSession: input.controllerSession });
+  service.close(sent.id, { controllerSession: input.controllerSession });
+  finishObservation(snapshot([turn("native-one", "completed", h.state.clientId)]));
+  await assert.rejects(recovering, { code: "codex_native_task_closed" });
+  assert.equal(service.status(sent.id).status, "watching"); assert.equal(h.state.notifications.length, 0);
+});
+
+test("a failed callback already in flight may settle after Unwatch but cannot restart retries", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  let release!: (outcome: CallbackAttemptOutcome) => void;
+  let announce!: () => void; const dispatched = new Promise<void>(resolve => { announce = resolve; });
+  h.deps.deliver = async value => { h.state.notifications.push(value); announce(); return new Promise(resolve => { release = resolve; }); };
+  const service = createCodexNativeTaskService(h.deps); const reconciling = service.reconcile(sent.id);
+  await dispatched; service.unwatch(sent.id, { controllerSession: input.controllerSession });
+  release({ disposition: "retryable_failure", error_code: "temporarily_unavailable" });
+  const stopped = await reconciling;
+  assert.equal(stopped.notifications[0].status, "failed"); assert.ok(stopped.unwatched_at);
+  h.state.now += 100_000; await service.reconcile(sent.id); assert.equal(h.state.notifications.length, 1);
+});
+
+test("manual retry preserves callback identity and cumulative attempts with exactly one exhausted-budget grant", async t => {
+  const h = harness(t); h.deps.maxDeliveryAttempts = 1;
+  h.deps.deliver = async value => { h.state.notifications.push(value); return { disposition: "retryable_failure", error_code: "temporarily_unavailable" }; };
+  const service = createCodexNativeTaskService(h.deps); const sent = await service.send({ ...input, callbackRoute: route });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const failed = await service.reconcile(sent.id); assert.equal(failed.notifications[0].status, "failed");
+  const note = failed.notifications[0];
+  const retried = await createCodexNativeTaskService(h.deps).retryCallback(sent.id, { controllerSession: input.controllerSession, notificationId: note.id });
+  assert.equal(retried.notifications[0].attempts, 2); assert.equal(retried.notifications[0].status, "failed");
+  assert.deepEqual(retried.notifications[0].envelope, note.envelope); assert.equal(retried.notifications[0].id, note.id);
+  h.state.now += 100_000; await service.reconcile(sent.id); assert.equal(h.state.notifications.length, 2);
+  assert.equal(h.state.notifications[0].attempt.number, 1); assert.equal(h.state.notifications[1].attempt.number, 2);
+  assert.equal(h.state.starts, 1);
+});
+
+test("manual callback retry rejects accepted, uncertain, and stale interaction delivery", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([turn("native-one")], { pendingInteractions: [pending()] });
+  h.state.outcomes.push({ disposition: "retryable_failure", error_code: "temporarily_unavailable" });
+  const watched = await h.service.watch({ ...input, callbackRoute: route });
+  h.state.snapshot.pendingInteractions = [];
+  await assert.rejects(h.service.retryCallback(watched.id, { controllerSession: input.controllerSession }), { code: "codex_native_callback_stale" });
+  assert.equal(h.state.observations.at(-1), "native-one"); assert.equal(h.state.notifications.length, 1);
+  assert.equal(h.service.status(watched.id).notifications[0].outcome?.disposition, "permanent_failure");
+  for (const disposition of ["accepted", "uncertain"] as const) {
+    h.state.snapshot.pendingInteractions = [pending()];
+    h.state.outcomes.push(disposition === "accepted" ? { disposition, acceptance_id: "receipt", accepted_at: new Date(h.state.now).toISOString() }
+      : { disposition, error_code: "lost_ack", observed_at: new Date(h.state.now).toISOString() });
+    const other = await h.service.watch({ ...input, callbackRoute: route });
+    const count = h.state.observations.length;
+    await assert.rejects(h.service.retryCallback(other.id, { controllerSession: input.controllerSession }), { code: "codex_native_callback_not_retryable" });
+    assert.equal(h.state.observations.length, count);
+  }
+});
+
+test("renewal rejects a stale observation when Unwatch takes effect while the original turn is read", async t => {
+  const h = harness(t); const sent = await h.service.send(input);
+  let finish!: (value: CodexNativeSnapshot) => void;
+  h.deps.observe = async () => new Promise(resolve => { finish = resolve; });
+  const service = createCodexNativeTaskService(h.deps);
+  const renewing = service.renew(sent.id, { controllerSession: input.controllerSession });
+  const stopped = service.unwatch(sent.id, { controllerSession: input.controllerSession });
+  finish(structuredClone(h.state.snapshot));
+  await assert.rejects(renewing, { code: "codex_native_task_changed" });
+  assert.equal(service.status(sent.id).unwatched_at, stopped.unwatched_at);
+  assert.equal(service.status(sent.id).renewal_count, undefined);
+});
+
+test("failed in-flight timeout delivery cannot retry an obsolete renewal generation", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route, timeoutMs: 1 });
+  let release!: (outcome: CallbackAttemptOutcome) => void;
+  let announce!: () => void; const dispatched = new Promise<void>(resolve => { announce = resolve; });
+  h.deps.deliver = async value => { h.state.notifications.push(value); announce(); return new Promise(resolve => { release = resolve; }); };
+  const service = createCodexNativeTaskService(h.deps); h.state.now += 2;
+  const timingOut = service.reconcile(sent.id); await dispatched;
+  const renewed = await service.renew(sent.id, { controllerSession: input.controllerSession, timeoutMs: 100_000 });
+  assert.equal(renewed.renewal_count, 1);
+  release({ disposition: "retryable_failure", error_code: "temporarily_unavailable" });
+  const settled = await timingOut;
+  assert.equal(settled.notifications[0].outcome?.disposition, "permanent_failure");
+  await assert.rejects(service.retryCallback(sent.id, { controllerSession: input.controllerSession }), { code: "codex_native_callback_not_retryable" });
+  assert.equal(h.state.notifications.length, 1);
+});
+
+test("stopped callbacks finish expired leases locally without native observation or replay", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  h.deps.deliver = undefined;
+  const service = createCodexNativeTaskService(h.deps); const settled = await service.reconcile(sent.id);
+  settled.notifications[0].status = "leased"; settled.notifications[0].attempts = 1;
+  settled.notifications[0].attempt_id = "interrupted-process";
+  settled.notifications[0].lease_expires_at = new Date(h.state.now + 30_000).toISOString();
+  h.repository.save(settled, settled.revision);
+  const stopped = service.close(sent.id, { controllerSession: input.controllerSession });
+  assert.equal(codexNativeTaskNeedsReconciliation(stopped), true);
+  const reads = h.state.observations.length; h.state.now += 30_001;
+  const expired = await createCodexNativeTaskService(h.deps).reconcile(sent.id);
+  assert.equal(expired.notifications[0].status, "uncertain"); assert.equal(codexNativeTaskNeedsReconciliation(expired), false);
+  assert.equal(h.state.observations.length, reads); assert.equal(h.state.notifications.length, 0);
+});
+
+test("Recover keeps legacy cancelled records stopped when the original task completes", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  const legacy = { ...sent, status: "cancelled" as const }; h.repository.save(legacy, legacy.revision);
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const recovered = await h.service.recover(sent.id, { controllerSession: input.controllerSession });
+  assert.equal(recovered.status, "completed"); assert.equal(recovered.unwatched_at, legacy.updated_at);
+  assert.equal(recovered.notifications.length, 0); assert.equal(codexNativeTaskNeedsReconciliation(recovered), false);
+});
+
+test("Renew preserves durable settled proof when the original turn appears active in a stale snapshot", async t => {
+  const h = harness(t); const sent = await h.service.send(input);
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  h.state.snapshot.turns[0].items.push({ id: "final", type: "agentMessage", phase: "final_answer", text: "Durable completion" });
+  const completed = await h.service.reconcile(sent.id);
+  h.state.snapshot = snapshot([turn("native-one", "inProgress", h.state.clientId)]);
+  const renewed = await h.service.renew(sent.id, { controllerSession: input.controllerSession, timeoutMs: 604_800_000 });
+  assert.equal(renewed.status, "completed"); assert.equal(renewed.final_text, "Durable completion");
+  assert.equal(renewed.deadline_at, completed.deadline_at); assert.equal(renewed.renewal_count, undefined);
+  assert.equal(codexNativeTaskNeedsReconciliation(renewed), false); assert.equal(h.state.starts, 1);
 });

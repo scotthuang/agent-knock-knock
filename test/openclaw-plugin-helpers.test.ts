@@ -650,13 +650,12 @@ test("Terminal, Desktop and direct Codex CLI Watch schemas require exact and mut
     { required: ["terminal_id"], not: { required: ["conversation_id"] } },
     { required: ["conversation_id"], not: { required: ["terminal_id"] } }
   ]);
-  assert.equal(watchParameters.properties.conversation_id.pattern, "^(?:desktop|codex-cli):v1:[A-Za-z0-9_-]+$");
   const validate = new AjvJsonSchemaValidator().getValidator(watchParameters);
-  for (const conversationId of ["desktop:v1:ZXhhY3QtdGFyZ2V0", "codex-cli:v1:ZXhhY3QtdGFyZ2V0"]) {
+  for (const conversationId of ["desktop:v1:ZXhhY3QtdGFyZ2V0", "codex-cli:v1:ZXhhY3QtdGFyZ2V0", exactTerminalId]) {
     assert.equal(validate({ conversation_id: conversationId }).valid, true);
     assert.equal(validate({ conversation_id: conversationId, terminal_id: exactTerminalId }).valid, false);
   }
-  assert.equal(validate({ conversation_id: exactTerminalId }).valid, false);
+  assert.equal(validate({ conversation_id: "terminal:invalid" }).valid, false);
   assert.equal(validate({ conversation_id: "codex-cli:v1:../../escape" }).valid, false);
   assert.equal(validate({ conversation_id: "codex-cli:v2:ZXhhY3QtdGFyZ2V0" }).valid, false);
   assert.equal(

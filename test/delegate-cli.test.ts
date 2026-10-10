@@ -652,7 +652,7 @@ test("explicit selectors cannot send outside the configured workspace", async ()
     assert.equal(fullId.status, 1, fullId.stdout);
     assert.match(
       fullId.stderr,
-      /workspace|no longer available/iu
+      /workspace|no longer available|exact selected terminal is unavailable/iu
     );
 
     const mismatchedIdentity = await runCli("send", [
@@ -681,7 +681,7 @@ test("explicit selectors cannot send outside the configured workspace", async ()
     assert.equal(mismatchedIdentity.status, 1, mismatchedIdentity.stdout);
     assert.match(
       mismatchedIdentity.stderr,
-      /workspace|no longer available/iu
+      /workspace|no longer available|exact selected terminal is unavailable/iu
     );
     if (fs.existsSync(storeDir)) {
       assert.deepEqual(fs.readdirSync(storeDir), []);

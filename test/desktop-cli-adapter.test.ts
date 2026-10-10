@@ -18,9 +18,15 @@ import type { DesktopSnapshot, DesktopTransportPort, DesktopTurnItem } from "../
 import type { CliCommandDependencies } from "../src/cli-runtime-context.js";
 
 function fixture(t: { after(fn: () => void): void }) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-cli-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-cli-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const target = { codexHome: path.join(root, ".codex"), hostId: "local", threadId: "desktop-thread" };
+  fs.mkdirSync(target.codexHome);
+  fs.writeFileSync(path.join(target.codexHome, ".codex-global-state.json"), JSON.stringify({
+    "pinned-thread-ids": [target.threadId], "electron-persisted-atom-state": {
+      "flat-project-sidebar-preferences-v1": { mode: "project" }, "sidebar-collapsed-sections-v1": { chats: true }
+    }
+  }));
   const id = createDesktopConversationId(target);
   const storeDir = path.join(root, "store");
   let snapshot: DesktopSnapshot = { threadId: target.threadId, ownerClientId: "exact-owner", revision: 1,
@@ -124,6 +130,8 @@ test("Desktop CLI list/status are read-only, idle Watch refuses, unsupported ope
   const list = await f.run("desktop-list");
   assert.equal(list.desktop_sessions[0].conversation_id, f.id);
   assert.equal(list.desktop_sessions[0].connection_state, "unconfirmed");
+  assert.equal(list.desktop_scan.view, "sidebar");
+  assert.equal(list.desktop_sessions[0].can_send_reason, "unsupported_desktop_host");
   const status = await f.run("status", { conversation: f.id });
   assert.equal(status.connection_state, "live_owner_verified"); assert.equal(status.latest_turn, null);
   await assert.rejects(f.run("watch-terminal", { conversation: f.id, openclawSession: "controller-one" }), /no uniquely confirmed active task/);
@@ -192,4 +200,27 @@ test("Desktop CLI exposes honest model settings and cancels only the exact selec
   assert.equal(f.tasks.status(sent.watch_id).status, "interrupted");
   const settled = await f.run("cancel", { conversation: f.id, expectedNativeTurnId: "turn-one" });
   assert.equal(settled.outcome, "already_settled");
+});
+
+test("Desktop CLI recovery uses only exact persisted Watch IDs and separates Close from Unwatch", async t => {
+  const f = fixture(t); const owner = { openclawSession: "controller-recovery" };
+  const sent = await f.run("send", { ...owner, conversation: f.id, message: "Recovery task", messageId: "recovery-task" });
+  const stopped = await f.run("unwatch-terminal", { ...owner, watch: sent.watch_id });
+  assert.equal(stopped.status, "watching"); assert.equal(stopped.management_state, "managed");
+  assert.equal(stopped.observation_state, "stopped"); assert.equal(stopped.callback_expected, false);
+  const renewed = await f.run("renew", { ...owner, turn: sent.watch_id, minutes: 1 });
+  assert.equal(renewed.renewal_count, 1); assert.equal(renewed.observation_state, "watching");
+  assert.equal(renewed.native_turn_id, sent.native_turn_id); assert.equal(renewed.monitor_pid, 1234);
+  assert.equal((await f.run("status", { ...owner, turn: sent.watch_id })).watch_id, sent.watch_id);
+  for (const command of ["close", "renew", "recover", "retry-callback"]) {
+    await assert.rejects(f.run(command, { ...owner, conversation: f.id }), /exact.*Watch ID/);
+    await assert.rejects(f.run(command, { ...owner, watch: sent.watch_id, turn: sent.watch_id }), /exactly one/);
+    await assert.rejects(f.run(command, { ...owner, watch: sent.watch_id, expectedRevision: 1 }), /fences/);
+    await assert.rejects(f.run(command, { watch: sent.watch_id, openclawSession: "foreign" }), /owning controller/);
+  }
+  const closed = await f.run("close", { ...owner, watch: sent.watch_id, reason: "controller finished" });
+  assert.equal(closed.status, "closed"); assert.equal(closed.observation_status, "watching");
+  assert.equal(closed.management_state, "closed"); assert.equal(closed.close_reason, "controller finished");
+  await assert.rejects(f.run("recover", { ...owner, watch: sent.watch_id }), /closed/);
+  assert.equal(f.sends, 1);
 });

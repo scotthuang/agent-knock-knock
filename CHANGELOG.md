@@ -1,14 +1,6 @@
 # Changelog
 
-## Unreleased
-
-- Add Desktop command/file approval decisions and blocking questionnaire responses through the original conversation owner, with exact native request and result evidence.
-- Add per-conversation Desktop Read Only/Default/Full Access settings, explicit model/effort and Plan/default controls, and exact-task cancellation. Verify effective settings instead of treating acknowledgements as success; report the unavailable model catalog explicitly.
-
-- Fix missed Codex Desktop asynchronous-question notifications by reading questions from native messages as well as pending requests.
-- Add typed responses for Desktop asynchronous questions in the exact active task, with durable response deduplication, native answer confirmation, and expiry of undelivered obsolete reminders.
-
-## 0.14.0 - 2026-10-09
+## 0.14.0 - 2026-10-10
 
 ### Added
 
@@ -16,11 +8,28 @@
 - Discover Codex Desktop conversations alongside terminal sessions, with search, project filtering, pagination, and separate catalog and live-owner evidence. Keep unloaded and creator-unknown conversations discoverable without treating metadata as permission to send.
 - Send tasks to an exact existing Desktop conversation through its original owner, record a durable send intent, and bind monitoring to the accepted native task. Repeated message IDs and uncertain submissions never automatically resend task text.
 - Add Desktop Status and exact task Watch, with durable completion and manual-attention notifications. Monitoring retains its original native task when a later task starts; stopping a Watch leaves the Desktop task running.
+- Add exact-task Recover, observation Renew, managed Close, and manual Retry Callback for direct Codex CLI and Desktop. Separate stopping observation from closing Send management, retain unresolved submission ownership until explicitly closed, and preserve callback identity and uncertain-outcome boundaries without terminal fallback.
+- Add Desktop command/file approval decisions and blocking questionnaire responses through the original conversation owner, with exact native request and result evidence.
+- Add typed responses for Desktop asynchronous questions in the exact active task, with durable response deduplication, native answer confirmation, and expiry of undelivered obsolete reminders.
+- Add per-conversation Desktop Read Only/Default/Full Access settings, explicit model/effort and Plan/default controls, and exact-task cancellation. Verify effective settings instead of treating acknowledgements as success; report the unavailable model catalog explicitly.
+
+### Changed
+
+- Present unified `conversations[]` for Send, Status, and Watch, preferring a verified Codex backend and preserving eligible terminal fallback. Coalesce only exact native identity matches, keep task/interaction routes fixed, and never replay an uncertain mutation through another transport. Preserve raw CLI provider arrays for diagnostics and existing clients.
+- Apply backend-first capability selection across Codex conversation commands, including permission reads/updates and native interaction actions. Allow targeted Status and other eligible operations to resolve an idle terminal through the existing exact native status inspection; preserve no-input List, bound task/interaction identities, and terminal-only lifecycle semantics.
+- Default Desktop List to persisted expanded sidebar membership, with explicit `desktop_view: "history"` / `--desktop-view history` for the broader historical catalog. Keep unconnected rows visible and report unsupported layouts without falling back to history; live counts describe the current page only.
+
+### Fixed
+
+- Recover missed Codex Desktop asynchronous-question notifications by reading questions from native messages as well as pending requests.
+- Preserve exact legacy terminal identifiers and explicit managed-only operations through conversation routing. Keep routing reservations independent of managed Store writer locks so eligible physical Send retains its existing compatibility and lock ordering.
 
 ### Compatibility
 
-- Review local macOS Codex Desktop `26.1002.52244` build `13536` private IPC. Desktop v1 does not load inactive conversations, launch replacement CLI sessions, change permissions or models, answer questions, or approve requests. It reports unsupported or uncertain state explicitly.
+- Review direct CLI operations on macOS with Codex CLI `0.160.0` and shared app-server `0.162.0`. The local CLI and daemon installation observed at `0.162.1` on 2026-10-10 is not a new end-to-end verification or a numeric minimum; runtime identity and protocol checks determine direct-control availability.
+- Require the reviewed macOS Codex Desktop `26.1002.52244` build `13536` for native writes through its private IPC. This exact build is not a minimum-version promise. Loading inactive conversations and launching replacement CLI sessions remain unsupported.
 - Preserve the existing tmux and Herdr adapters and their terminal-specific interaction controls.
+- Keep Pi and DeepSeek Harness connector releases independent. Their current manifests still pin AKK `0.13.3`; releasing the core package does not upgrade those connector runtimes.
 
 ## 0.13.18 - 2026-10-04
 

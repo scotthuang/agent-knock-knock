@@ -547,6 +547,14 @@
       "owner": "approval-policy"
     },
     {
+      "path": "src/backend-recovery-semantic.ts",
+      "owner": "host-bridge"
+    },
+    {
+      "path": "src/backend-task-recovery.ts",
+      "owner": "callback-outbox"
+    },
+    {
       "path": "src/callback-cli-adapter.ts",
       "owner": "callback-outbox"
     },
@@ -811,6 +819,42 @@
       "owner": "host-bridge"
     },
     {
+      "path": "src/conversation-list.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/conversation-route-dispatch.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/conversation-route-legacy.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/conversation-route-store.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/conversation-routing-cli-adapter.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/conversation-routing-commands.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/conversation-routing-home.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/conversation-routing-identity.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/conversation-runtime-route-store.ts",
+      "owner": "codex-native"
+    },
+    {
       "path": "src/conversation-trace.ts",
       "owner": "conversation-trace"
     },
@@ -975,6 +1019,18 @@
       "owner": "codex-desktop"
     },
     {
+      "path": "src/desktop-sidebar-metadata.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-sidebar-projects.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-sidebar-selection.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-snapshot-details.ts",
       "owner": "codex-desktop"
     },
@@ -988,6 +1044,10 @@
     },
     {
       "path": "src/desktop-task-interactions.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-task-recovery.ts",
       "owner": "codex-desktop"
     },
     {
@@ -1217,6 +1277,10 @@
     {
       "path": "src/runtime-log.ts",
       "owner": "runtime-log"
+    },
+    {
+      "path": "src/semantic-conversation-target.ts",
+      "owner": "host-bridge"
     },
     {
       "path": "src/semantic-permission-control.ts",

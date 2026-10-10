@@ -87,7 +87,7 @@ test("Desktop semantic mutation rejects mixed targets, unsupported types and mis
   await assert.rejects(h.execute("status", { watch_id: watchId, conversation_id: desktopId }));
   await assert.rejects(h.execute("status", { conversation_id: desktopId, turn_id: "turn-one" }));
   await assert.rejects(h.execute("status", { watch_id: watchId }, "call", {}), /controller session/iu);
-  await assert.rejects(h.execute("watch", { conversation_id: terminalId }));
+  await assert.rejects(h.execute("watch", { conversation_id: "terminal:invalid" }));
   for (const invalidWatch of ["desktop-watch:short", "desktop-watch:" + "a".repeat(129), "desktop-watch:../../escape"]) {
     await assert.rejects(h.execute("unwatch", { watch_id: invalidWatch }), /Invalid Desktop Watch ID/u);
     await assert.rejects(h.execute("status", { watch_id: invalidWatch }), /Invalid Desktop Watch ID/u);
@@ -134,11 +134,13 @@ test("Desktop semantic List routes filters and keeps public candidates while str
     raw: { marker: "PRIVATE_RAW_MARKER" }, conversationState: { marker: "PRIVATE_STATE_MARKER" }
   }], desktop_watches: [{ watch_id: watchId, conversation_id: desktopId, status: "watching", native_turn_id: "native-turn-one",
     owner_client_id: "PRIVATE_WATCH_OWNER", send_intent: { text: "PRIVATE_SEND_INTENT" } }],
-    desktop_scan: { complete: true, total: 31, next_cursor: "next-desktop-page", raw: "PRIVATE_SCAN_RAW" } });
-  const result = await h.execute("list", { desktopSearch: "avatar", desktopProject: "/test/project", desktopCursor: "desktop-page", desktopLimit: 5, agent: "codex" });
+    desktop_scan: { view: "history", catalog_complete: true, total_candidates: 31, returned: 1,
+      live_probe_scope: "returned_page", live_count: 0, next_cursor: "next-desktop-page", raw: "PRIVATE_SCAN_RAW" } });
+  const result = await h.execute("list", { desktop_view: "history", desktopSearch: "avatar", desktopProject: "/test/project", desktopCursor: "desktop-page", desktopLimit: 5, agent: "codex" });
   const args = h.calls()[0];
   assert.equal(h.calls().length, 1);
   assert.equal(args[0], "list");
+  assert.equal(argument(args, "--desktop-view"), "history");
   assert.equal(argument(args, "--desktop-search"), "avatar");
   assert.equal(argument(args, "--desktop-project"), "/test/project");
   assert.equal(argument(args, "--desktop-cursor"), "desktop-page");
@@ -148,5 +150,27 @@ test("Desktop semantic List routes filters and keeps public candidates while str
   assert.equal(result.details.desktop_sessions[0].connection_state, "unconfirmed");
   assert.equal(result.details.desktop_watches[0].watch_id, watchId);
   assert.equal(result.details.desktop_scan.next_cursor, "next-desktop-page");
+  assert.equal(result.details.desktop_scan.view, "history");
+  assert.equal(result.details.desktop_scan.total_candidates, 31);
+  assert.equal(result.details.desktop_scan.live_probe_scope, "returned_page");
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_/u);
+});
+
+test("Desktop List defaults to sidebar and rejects unknown views before catalog discovery", async t => {
+  const h = harness(t);
+  h.reply({ desktop_sessions: [], terminals: [], desktop_scan: {
+    view: "sidebar", sidebar_status: "unsupported", sidebar_selection_scope: "persisted_expanded_membership",
+    limitations: ["The saved connection layout cannot be reconstructed."], history_candidates: 341, total_candidates: 0
+  } });
+  const result = await h.execute("list", {});
+  assert.equal(result.details.desktop_scan.sidebar_status, "unsupported");
+  assert.equal(result.details.desktop_scan.sidebar_selection_scope, "persisted_expanded_membership");
+  assert.equal(result.details.desktop_scan.history_candidates, 341);
+  assert.deepEqual(result.details.desktop_scan.limitations, ["The saved connection layout cannot be reconstructed."]);
+  await h.execute("list", { desktop_view: "sidebar" });
+  assert.deepEqual(h.calls().map(args => argument(args, "--desktop-view")), ["sidebar", "sidebar"]);
+  for (const desktop_view of ["all", "", true]) {
+    await assert.rejects(h.execute("list", { desktop_view }), /desktop_view must be sidebar or history/u);
+  }
+  assert.equal(h.calls().length, 2, "An invalid view never widens discovery to history");
 });

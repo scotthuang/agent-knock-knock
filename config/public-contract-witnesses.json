@@ -36,6 +36,7 @@
         "approve",
         "cancel",
         "renew",
+        "recover",
         "reconcile-monitors",
         "reconcile-watches",
         "close",
@@ -65,7 +66,7 @@
       "version": 1,
       "transport": "mcp_stdio",
       "callback_driver": "command_json_v1",
-      "tool_count": 24,
+      "tool_count": 25,
       "authority_paths": [
         "schemas/host-profile-v1.schema.json",
         "src/command-json-callback-transport.ts",
@@ -129,6 +130,7 @@
         "approve",
         "cancel",
         "renew",
+        "recover",
         "retry_callback",
         "close"
       ],
@@ -165,6 +167,7 @@
         "agent_knock_knock_respond",
         "agent_knock_knock_respond_interaction",
         "agent_knock_knock_renew",
+        "agent_knock_knock_recover",
         "agent_knock_knock_retry_callback",
         "agent_knock_knock_cancel",
         "agent_knock_knock_close",

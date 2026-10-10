@@ -31,6 +31,9 @@
     "test/deferred-foreground-recovery-service.test.ts",
     "test/deferred-foreground-transfer.test.ts",
     "test/desktop-cli-adapter.test.ts",
+    "test/desktop-sidebar-selection.test.ts",
+    "test/desktop-sidebar-metadata.test.ts",
+    "test/desktop-list.test.ts",
     "test/desktop-identity.test.ts",
     "test/desktop-ipc-client.test.ts",
     "test/desktop-metadata-reader.test.ts",
@@ -202,7 +205,17 @@
     "test/desktop-native-protocol.test.ts",
     "test/desktop-request-response-service.test.ts",
     "test/desktop-request-task-service.test.ts",
-    "test/desktop-session-controls.test.ts"
+    "test/desktop-session-controls.test.ts",
+    "test/conversation-route-store.test.ts",
+    "test/conversation-runtime-route-store.test.ts",
+    "test/conversation-route-dispatch.test.ts",
+    "test/conversation-routing-identity.test.ts",
+    "test/conversation-routing-cli-adapter.test.ts",
+    "test/conversation-list.test.ts",
+    "test/conversation-route-legacy.test.ts",
+    "test/conversation-routing-home.test.ts",
+    "test/backend-task-recovery.test.ts",
+    "test/backend-recovery-semantic.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",

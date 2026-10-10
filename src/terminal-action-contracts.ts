@@ -94,8 +94,9 @@ function actionContractInstructions() {
         "internally. They never create a Turn.",
       "Native inspection is a separate terminal action: use only its closed " +
         "inspection enum and current exact terminal_id. AKK resolves current " +
-        "lifecycle authority internally, and AKK status does not execute a native " +
-        "slash command.",
+        "lifecycle authority internally. Targeted Codex conversation commands may " +
+        "resolve an idle terminal alias with a safe native /status identity probe " +
+        "before selecting the backend; List sends no input.",
       "Native model control is a separate explicit exact-physical-pane action. " +
         "model_options requires one currently advertised terminal_id, an exact live " +
         "pane/process, no approval, questionnaire/editor, read-only viewer, or active " +
@@ -124,14 +125,17 @@ function actionContractInstructions() {
         "that grants no later authority. identify_and_send keeps that same terminal " +
         "lock, revalidates the observation, and sends one task; it never falls back " +
         "to unmanaged delivery. Final Session identity still comes only from the " +
-        "rollout that uniquely accepts the exact task. Ordinary list, status, and " +
-        "send never invoke this probe.",
+        "rollout that uniquely accepts the exact task. List never invokes this " +
+        "diagnostic. Targeted conversation routing may use the separate native " +
+        "status inspection to establish an exact backend identity.",
       "Terminal Watch is a read-only user-directed observation of one exact live " +
         "terminal. AKK prefers an exact durable task anchor and otherwise degrades to " +
         "best-effort terminal-activity observation; version, artifact, managed " +
         "ownership, and stale action-advertisement uncertainty produce warnings " +
-        "rather than vetoing Watch. It sends no terminal input and creates no AKK " +
-        "Session or Turn. Pass the exact terminal_id and use watch_id for later " +
+        "rather than vetoing Watch. An initial conversation-targeted Watch may " +
+        "resolve an idle terminal alias with a native status probe; an already " +
+        "bound Watch keeps its provider and sends no terminal input. Watch " +
+        "creates no AKK Session or Turn. Pass the exact terminal_id and use watch_id for later " +
         "status or unwatch operations.",
       "A verified, idle human native-thread switch may expose a terminal-scoped " +
         "send; that action atomically adopts the live context before creating its " +

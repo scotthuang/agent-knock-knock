@@ -1,6 +1,8 @@
 // Infrastructure composition for terminal list discovery and selector projection.
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
+import { unifiedConversationList } from "./conversation-list.js";
+import { withConversationRoutingHome } from "./conversation-routing-home.js";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import { listDeferredForegroundTransfers } from
   "./deferred-foreground-transfer.js";
@@ -604,8 +606,7 @@ async function runList(options: TerminalListCliOptions) {
     agentFilter,
     statusFilter
   });
-
-  printJson({
+  printJson(unifiedConversationList({
     ...await terminalListRuntime().localCodexList?.(options),
     store_dir: storeDir,
     store,
@@ -618,7 +619,7 @@ async function runList(options: TerminalListCliOptions) {
       ...terminalScan.summary,
       terminal_count: projected.terminals.length
     }
-  });
+  }, terminalScan.terminalControlled));
   runtimeLog("info", "terminals_listed", {
     store_dir: storeDir,
     terminal_count: projected.terminals.length,
@@ -1259,11 +1260,10 @@ async function terminalControlledListEntry(
           }
         }
       : {};
-  return renderTerminalPhysicalEntry(entry,
+  return withConversationRoutingHome(renderTerminalPhysicalEntry(entry,
     { ...permissionControlActions, ...foregroundIdentificationActions },
-    terminalUserExplicitSendAction);
+    terminalUserExplicitSendAction));
 }
-
 async function collectTerminalFactsForList(
   session: ActiveTerminalProcess,
   activeSessions: ActiveTerminalProcess[],

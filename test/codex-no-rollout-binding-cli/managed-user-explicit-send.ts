@@ -436,18 +436,21 @@ test("source-less human Send with a stable id makes multiple exact candidate mat
     );
     assert.equal(replay.status, 0, replay.stderr || replay.stdout);
     const replayOutput = JSON.parse(replay.stdout);
+    // The route journal replays its original observation; current acceptance is
+    // queried through Status, never inferred by dispatching this message again.
     assert.equal(replayOutput.replayed, true, replay.stdout);
+    assert.equal(replayOutput.routing.transport, "terminal");
     assert.equal(replayOutput.delivered, true, replay.stdout);
     assert.equal(replayOutput.terminal_input_dispatched, true, replay.stdout);
     assert.equal(replayOutput.agent_acceptance, "unproven", replay.stdout);
     assert.equal(
       replayOutput.status,
-      "submission_pending_acceptance",
+      "submission_uncertain",
       replay.stdout
     );
     assert.equal(
       replayOutput.submission_outcome,
-      "pending_acceptance",
+      "uncertain",
       replay.stdout
     );
     assert.equal(replayOutput.delivery_receipt, "enter_dispatched", replay.stdout);

@@ -35,6 +35,7 @@ function fixture(t: { after(fn: () => void): void }) {
     async updatePermissions(_thread, preset) { updates++; settings = { ...settings, preset }; return settings; }
   };
   const deps: CliCommandDependencies = { cwd: root, env: { HOME: root }, runtimeLog() {},
+    conversationRoutingTerminals: async () => [],
     createCodexNativeRuntime: options => createCodexNativeRuntime({ ...options, clientFactory: async () => client,
       callbackDeliver: async () => { callbacks++; return { disposition: "accepted", accepted_at: new Date().toISOString(), acceptance_id: "fixture" }; } }),
     launchCodexNativeMonitor: async () => { launches++; return 12345; }
@@ -73,7 +74,7 @@ test("native CLI list/status and permission tools preserve native identities wit
   const changed = await f.run("set-permissions", { conversation: f.id, mode: "full-access" });
   assert.equal(changed.outcome, "changed"); assert.equal(changed.effective.mode, "full-access");
   assert.equal(changed.defaults_changed, false); assert.equal(f.sends, 0); assert.equal(f.updates, 1);
-  for (const command of ["cancel", "new-thread", "resume-thread"]) await assert.rejects(f.run(command, { conversation: f.id }), /Unsupported Codex CLI/);
+  for (const command of ["cancel", "new-thread", "resume-thread"]) await assert.rejects(f.run(command, { conversation: f.id }), /no unique verified terminal fallback/);
   await assert.rejects(f.run("status", { conversation: f.id, terminal: "terminal:v2:other" }), /exactly one/);
   assert.equal(f.launches, 0);
 });
@@ -98,4 +99,23 @@ test("Host presentation retains projected native questions and never fabricates 
   assert.equal(presented.turn_id, undefined); assert.equal(presented.session_id, undefined);
   const invalid = structuredClone(nativeStatus); invalid.interaction_state[0].native_thread_id = "wrong-thread";
   assert.equal((toolResult(invalid).details as Record<string, unknown>).interaction_state, undefined);
+});
+
+test("native CLI exact task recovery preserves ownership and management without terminal actions", async t => {
+  const f = fixture(t);
+  const sent = await f.run("send", { conversation: f.id, message: "READY", messageId: "managed-recovery", openclawSession: "controller" });
+  assert.equal(sent.management_state, "managed"); assert.equal(sent.turn_id, sent.watch_id);
+  await f.run("unwatch-terminal", { watch: sent.watch_id, openclawSession: "controller" });
+  const resumed = await f.run("renew", { turn: sent.watch_id, openclawSession: "controller", minutes: 10 });
+  assert.equal(resumed.renewal_count, 1); assert.equal(resumed.observation_state, "watching"); assert.equal(resumed.management_state, "managed");
+  f.finish();
+  const recovered = await f.run("recover", { watch: sent.watch_id, openclawSession: "controller" });
+  assert.equal(recovered.final_text, "NATIVE_EXACT_DONE"); assert.equal(recovered.status, "completed"); assert.equal(f.sends, 1);
+  const closed = await f.run("close", { turn: sent.watch_id, openclawSession: "controller", reason: "Done" });
+  assert.equal(closed.status, "closed"); assert.equal(closed.management_state, "closed"); assert.equal(closed.observation_status, "completed");
+  assert.equal(closed.callback_expected, false); assert.equal(closed.close_reason, "Done");
+  await assert.rejects(f.run("recover", { watch: sent.watch_id, openclawSession: "controller" }), /Closed/);
+  await assert.rejects(f.run("renew", { conversation: f.id, openclawSession: "controller" }), /exact/i);
+  await assert.rejects(f.run("recover", { watch: sent.watch_id, openclawSession: "other" }), /different controller/);
+  assert.equal(f.sends, 1);
 });

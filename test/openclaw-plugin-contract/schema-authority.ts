@@ -177,7 +177,13 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     { required: ["terminal_id"], not: { required: ["conversation_id"] } },
     { required: ["conversation_id"], not: { required: ["terminal_id"] } }
   ]);
-  assert.equal(watchParameters.properties.conversation_id.pattern, "^(?:desktop|codex-cli):v1:[A-Za-z0-9_-]+$");
+  const conversationPattern = new RegExp(watchParameters.properties.conversation_id.pattern, "u");
+  for (const id of ["desktop:v1:opaque", "codex-cli:v1:opaque", "terminal:v2:tmux:codex:work:0.0:1234"]) {
+    assert.match(id, conversationPattern);
+  }
+  for (const id of ["latest", "@a1b2c3d4", "terminal:work", "codex-cli:v1:bad id"]) {
+    assert.doesNotMatch(id, conversationPattern);
+  }
   assert.deepEqual(unwatchParameters.required, ["watch_id"]);
   assert.ok(closeParameters.properties.expected_message_id);
   assert.ok(closeParameters.properties.expected_transition_id);

@@ -184,7 +184,7 @@ export interface DesktopInterruptOptions extends DesktopObserveTarget {
 export interface DesktopInterruptReceipt { interruptedTurnId: string; snapshot: DesktopSnapshot }
 export type DesktopDispatchState = "not_sent" | "unknown" | "accepted";
 export type DesktopIpcErrorCode = "invalid_response" | "incompatible_desktop" | "timeout" | "closed"
-  | "rpc_error" | "owner_changed" | "snapshot_changed" | "thread_not_idle" | "duplicate_submission"
+  | "rpc_error" | "no_live_owner" | "owner_changed" | "snapshot_changed" | "thread_not_idle" | "duplicate_submission"
   | "unexpected_existing_turn" | "invalid_argument" | "unsafe_socket" | "stale_interaction";
 export class DesktopIpcError extends Error {
   constructor(public readonly code: DesktopIpcErrorCode, message: string,

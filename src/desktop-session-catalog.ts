@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createDesktopConversationId } from "./desktop-identity.js";
+import { readDesktopSidebarMetadata, type DesktopSidebarReader } from "./desktop-sidebar-metadata.js";
+import { selectDesktopSidebar, type DesktopSidebarMembership, type DesktopSidebarSummary } from "./desktop-sidebar-selection.js";
 import type { DesktopThreadIdentity } from "./desktop-types.js";
 import {
   readDesktopMetadata,
@@ -32,8 +34,13 @@ export interface DesktopCatalogEntry extends DesktopThreadIdentity {
   /** Directory membership does not establish a current owner, loaded state, or send capability. */
   metadataOnly: true;
   provenance: DesktopCatalogProvenance[];
+  archived?: boolean;
+  threadSectionId?: string | null;
+  sectionPosition?: number;
+  sidebar?: DesktopSidebarMembership;
 }
 export interface DesktopCatalogListOptions {
+  view?: "sidebar" | "history";
   limit?: number;
   cursor?: string;
   search?: string;
@@ -47,18 +54,24 @@ export interface DesktopCatalogPage {
   sources: DesktopMetadataSource[];
   /** All available supported sources were read; not a claim of live or cloud completeness. */
   complete: boolean;
+  view?: "sidebar" | "history";
+  historyTotal?: number;
+  sidebar?: DesktopSidebarSummary;
 }
 export interface DesktopSessionCatalogOptions {
   codexHomes?: string[];
   readMetadata?: DesktopMetadataReader;
+  readSidebar?: DesktopSidebarReader;
 }
 
 export class DesktopSessionCatalog {
   private readonly homes: string[];
   private readonly readMetadata: DesktopMetadataReader;
+  private readonly readSidebar: DesktopSidebarReader;
   constructor(options: DesktopSessionCatalogOptions = {}) {
     this.homes = [...new Set((options.codexHomes ?? [path.join(os.homedir(), ".codex"), ...(process.env.CODEX_HOME ? [process.env.CODEX_HOME] : [])]).map(canonicalHome))];
     this.readMetadata = options.readMetadata ?? readDesktopMetadata;
+    this.readSidebar = options.readSidebar ?? readDesktopSidebarMetadata;
   }
 
   async list(options: DesktopCatalogListOptions = {}): Promise<DesktopCatalogPage> {
@@ -66,27 +79,24 @@ export class DesktopSessionCatalog {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Desktop catalog limit must be 1..500");
     const search = options.search?.trim().toLocaleLowerCase() ?? "";
     const project = options.project?.trim() ?? "";
-    const { sessions, sources } = await this.collect();
+    const view = options.view ?? "history";
+    if (view !== "sidebar" && view !== "history") throw new Error("Desktop view must be sidebar or history");
+    const all = await this.collect();
+    const selection = view === "sidebar" ? selectDesktopSidebar(all.sessions,
+      new Map(await Promise.all(this.homes.map(async home => [home, await this.readSidebar(home)] as const))), all.archivedIds) : undefined;
+    const sessions = selection?.sessions ?? (view === "history" ? all.sessions : []);
+    const sources = all.sources;
     const filtered = sessions.filter((session) => {
-      if (project && session.projectId !== project && (!session.cwd || !path.isAbsolute(session.cwd) || !path.isAbsolute(project) || path.resolve(session.cwd) !== path.resolve(project))) return false;
+      if (project && session.projectId !== project && session.sidebar?.projectId !== project && (!session.cwd || !path.isAbsolute(session.cwd) || !path.isAbsolute(project) || path.resolve(session.cwd) !== path.resolve(project))) return false;
       return !search || [session.title, session.cwd, session.threadId, session.projectId]
         .some((value) => value?.toLocaleLowerCase().includes(search));
     });
-    const queryKey = createHash("sha256").update(JSON.stringify([this.homes, search, project])).digest("hex");
-    let after: { updatedAtMs: number; conversationId: string } | undefined;
-    if (options.cursor) after = decodeCursor(options.cursor, queryKey);
-    const remaining = after ? filtered.filter((entry) =>
-      entry.updatedAtMs < after.updatedAtMs ||
-      entry.updatedAtMs === after.updatedAtMs && entry.conversationId > after.conversationId
-    ) : filtered;
-    const page = remaining.slice(0, limit);
-    const tail = page.at(-1);
+    const queryKey = createHash("sha256").update(JSON.stringify([this.homes, search, project, view, selection?.fingerprint])).digest("hex");
     return {
-      sessions: page,
-      ...(remaining.length > page.length && tail ? { nextCursor: Buffer.from(JSON.stringify({ v: 1, q: queryKey, t: tail.updatedAtMs, id: tail.conversationId })).toString("base64url") } : {}),
-      total: filtered.length,
+      ...paginateCatalog(filtered, { limit, cursor: options.cursor, view, queryKey }),
       sources,
-      complete: sources.every((source) => source.status !== "error")
+      complete: sources.every((source) => source.status !== "error"),
+      view, historyTotal: all.sessions.length, ...(selection ? { sidebar: selection.sidebar } : {})
     };
   }
 
@@ -95,7 +105,7 @@ export class DesktopSessionCatalog {
     return (await this.collect()).sessions.find((entry) => entry.conversationId === conversationId);
   }
 
-  private async collect(): Promise<{ sessions: DesktopCatalogEntry[]; sources: DesktopMetadataSource[] }> {
+  private async collect() {
     const batches: DesktopMetadataBatch[] = [];
     for (const home of this.homes) {
       try { batches.push(...await this.readMetadata(home)); }
@@ -107,9 +117,21 @@ export class DesktopSessionCatalog {
   }
 }
 
+function paginateCatalog(filtered: DesktopCatalogEntry[], options: {
+  limit: number; cursor?: string; view: "sidebar" | "history"; queryKey: string;
+}) {
+  const after = options.cursor ? decodeCursor(options.cursor, options.queryKey) : undefined;
+  if (after && options.view === "sidebar" && !filtered.some(entry => entry.conversationId === after.conversationId)) throw new Error("Invalid Desktop sidebar cursor");
+  const remaining = after && options.view === "sidebar" ? filtered.slice(filtered.findIndex(entry => entry.conversationId === after.conversationId) + 1) : after ? filtered.filter(entry =>
+    entry.updatedAtMs < after.updatedAtMs || entry.updatedAtMs === after.updatedAtMs && entry.conversationId > after.conversationId) : filtered;
+  const page = remaining.slice(0, options.limit), tail = page.at(-1);
+  return { sessions: page, total: filtered.length,
+    ...(remaining.length > page.length && tail ? { nextCursor: Buffer.from(JSON.stringify({ v: 1, q: options.queryKey, t: tail.updatedAtMs, id: tail.conversationId })).toString("base64url") } : {}) };
+}
+
 /** Catalog evidence outranks state evidence; owner availability is deliberately not an input. */
 export function mergeDesktopMetadata(batches: DesktopMetadataBatch[]): {
-  sessions: DesktopCatalogEntry[]; sources: DesktopMetadataSource[];
+  sessions: DesktopCatalogEntry[]; sources: DesktopMetadataSource[]; archivedIds: Set<string>;
 } {
   const entries = new Map<string, DesktopCatalogEntry>();
   const preferredSourceTimes = new Map<string, number>();
@@ -126,7 +148,9 @@ export function mergeDesktopMetadata(batches: DesktopMetadataBatch[]): {
     }
   }
   const catalogIds = new Set(normalized.filter(({ entry }) => entry.catalogMembership === "desktop_catalog").map(({ entry }) => entry.conversationId));
+  const archivedIds = new Set(normalized.filter(({ entry }) => entry.archived).map(({ entry }) => `${entry.codexHome}\0${entry.hostId}\0${entry.threadId}`));
   for (const { entry, stateEligible } of normalized) {
+    if (archivedIds.has(`${entry.codexHome}\0${entry.hostId}\0${entry.threadId}`)) continue;
     if (entry.catalogMembership === "state_metadata" && !stateEligible && !catalogIds.has(entry.conversationId)) continue;
     const previous = entries.get(entry.conversationId);
     if (!previous) {
@@ -138,7 +162,7 @@ export function mergeDesktopMetadata(batches: DesktopMetadataBatch[]): {
     if (preferred === entry) preferredSourceTimes.set(entry.conversationId, entry.updatedAtMs);
     entries.set(entry.conversationId, enrichPreferredEntry(preferred, previous, entry));
   }
-  return { sources, sessions: [...entries.values()].sort((a, b) => b.updatedAtMs - a.updatedAtMs || compare(a.conversationId, b.conversationId)) };
+  return { sources, archivedIds, sessions: [...entries.values()].sort((a, b) => b.updatedAtMs - a.updatedAtMs || compare(a.conversationId, b.conversationId)) };
 }
 
 function preferredEntry(entry: DesktopCatalogEntry, previous: DesktopCatalogEntry,
@@ -160,6 +184,8 @@ function enrichPreferredEntry(preferred: DesktopCatalogEntry, previous: DesktopC
     originator: preferred.originator ?? other.originator,
     projectId: preferred.projectId ?? other.projectId,
     threadSource: preferred.threadSource ?? other.threadSource,
+    threadSectionId: preferred.threadSectionId ?? other.threadSectionId,
+    sectionPosition: preferred.sectionPosition ?? other.sectionPosition,
     provenance: [...previous.provenance, ...entry.provenance]
   };
 }
@@ -181,11 +207,17 @@ function normalizeRow(row: DesktopMetadataRow, batch: DesktopMetadataBatch): { e
       ...identity, conversationId: createDesktopConversationId(identity), title: title.slice(0, 160),
       cwd: optionalText(row.cwd), updatedAtMs, originator: optionalText(row.originator),
       projectId: optionalText(row.project_id), sourceKind, threadSource, catalogMembership, metadataOnly: true,
+      ...(state ? stateSidebarMetadata(row) : {}),
       localVerifiable: identity.hostId === "local" && (state || batch.hosts?.[identity.hostId] === "local") && sourceKind !== "chatgpt",
       provenance: [{ database: batch.source.database, table: state ? "threads" : "local_thread_catalog", sourceKind, threadSource }]
     },
     stateEligible: !state || eligibleStateRow(row, sourceKind, threadSource)
   };
+}
+
+function stateSidebarMetadata(row: DesktopMetadataRow) {
+  return { archived: row.archived === 1 || row.archived === true, threadSectionId: optionalText(row.thread_section_id),
+    ...(typeof row.section_position === "number" && Number.isSafeInteger(row.section_position) ? { sectionPosition: row.section_position } : {}) };
 }
 
 function metadataTitle(row: DesktopMetadataRow, state: boolean): string {

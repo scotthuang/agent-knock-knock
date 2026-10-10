@@ -2,7 +2,7 @@
   "id": "agent-knock-knock",
   "name": "Agent Knock Knock",
   "categories": ["developer-tools"],
-  "description": "Control loaded Codex CLI threads directly through their backend for discovery, tasks, exact completion callbacks, approvals, answers and permission settings without tmux or Herdr. Discover Codex Desktop conversations, send tasks, watch exact completion, approve or reject command/file requests, answer blocking and asynchronous questions, adjust current-conversation permissions and model settings, and cancel exact tasks. Control Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection, model and permission control, compatibility warnings, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
+  "description": "Select a conversation once; AKK prefers its verified backend, coalesces only exact terminal associations and preserves eligible terminal fallback without replaying uncertain input. Control loaded Codex CLI threads directly through their backend for discovery, tasks, exact completion callbacks, approvals, answers and permission settings without tmux or Herdr. Discover Codex Desktop persisted expanded sidebar members or explicitly search history, retain unconnected rows, send tasks to live owners, watch exact completion, approve or reject command/file requests, answer blocking and asynchronous questions, adjust current-conversation permissions and model settings, and cancel exact tasks. Control Codex and Claude Code through shared tmux or Herdr terminals, with closed native status inspection, model and permission control, compatibility warnings, native-thread lifecycle controls, managed monitoring, durable Terminal Watch, approvals, and human takeover.",
   "activation": {
     "onStartup": true,
     "onCommands": ["akk"]
@@ -35,6 +35,7 @@
       "agent_knock_knock_respond",
       "agent_knock_knock_respond_interaction",
       "agent_knock_knock_renew",
+      "agent_knock_knock_recover",
       "agent_knock_knock_retry_callback",
       "agent_knock_knock_cancel",
       "agent_knock_knock_close",
@@ -100,6 +101,9 @@
       "optional": true
     },
     "agent_knock_knock_renew": {
+      "optional": true
+    },
+    "agent_knock_knock_recover": {
       "optional": true
     },
     "agent_knock_knock_retry_callback": {

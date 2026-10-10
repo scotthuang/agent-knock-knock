@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createNativeRecordRepository, type NativeRecordRepository } from "./codex-native-record-store.js";
 import { assertNativeIdentity, assertPersistedNativeInteraction, nonblank, persistNativeInteraction, validTime,
-  type CodexNativeStateRepository, type PersistedNativeInteraction } from "./codex-native-state-store.js";
+  type CodexNativeStateRepository, type CodexNativeTaskRecord, type PersistedNativeInteraction } from "./codex-native-state-store.js";
 import { CodexNativeTaskError, nativeDigest, nativeErrorCode, nativeTurn } from "./codex-native-task-service.js";
 import type { CodexNativeIdentity, CodexNativeReceipt, CodexNativeSnapshot, NativeInteraction, NativeInteractionResponse } from "./codex-native-types.js";
 
@@ -113,6 +113,22 @@ function reserveKnownNotSentRetry(repository: CodexNativeResponseRepository, rec
   record.state = "reserved"; record.attempts = attempted + 1; record.updated_at = date; delete record.error_code;
   return repository.save(record, record.revision);
 }
+function nativeWatchResponseAuthority(tasks: CodexNativeStateRepository, watchId: string, controllerSession: string) {
+  return tasks.withLock(watchId, () => {
+    const current = tasks.load(watchId);
+    if (!current || current.controller_session !== controllerSession) throw new CodexNativeTaskError("codex_native_controller_mismatch", "Watch response requires its owning controller");
+    if (current.closed_at || current.unwatched_at || current.status === "cancelled") throw new CodexNativeTaskError("codex_native_watch_stopped", "Stopped tasks cannot authorize interaction responses", "not_sent");
+    return current;
+  });
+}
+
+function assertWatchInteraction(task: CodexNativeTaskRecord, existing: CodexNativeResponseRecord | undefined, interactionId: string): void {
+  const recordedForTask = existing?.native_id === task.native_id && existing.interaction.turnId === task.native_turn_id;
+  if (!recordedForTask && !task.pending_interactions.some(i => i.id === interactionId && i.turnId === task.native_turn_id)) {
+    throw new CodexNativeTaskError("stale_interaction", "Interaction does not belong to the watched native task");
+  }
+}
+
 export function createCodexNativeResponseService(deps: NativeResponseDependencies) {
   const repo = deps.repository; const now = deps.now ?? (() => new Date()); const uuid = deps.randomUUID ?? randomUUID;
   function status(id: string): CodexNativeResponseRecord {
@@ -142,7 +158,8 @@ export function createCodexNativeResponseService(deps: NativeResponseDependencie
       if (evidence) { record.state = "confirmed"; record.evidence = evidence; delete record.error_code; }
     });
   }
-  async function respond(input: NativeResponseInput): Promise<CodexNativeResponseRecord> {
+  async function respond(input: NativeResponseInput, watchAuthority?: { turnId: string; check(): void }): Promise<CodexNativeResponseRecord> {
+    watchAuthority?.check();
     assertNativeIdentity(input.nativeId, input.target);
     if (!input.responseId?.trim() || !input.interactionId?.trim() || !input.controllerSession?.trim()) throw new CodexNativeTaskError("invalid_argument", "Native response requires controller, interaction and response IDs");
     const id = `codex-cli-response:${nativeDigest([input.target, input.interactionId])}`;
@@ -153,7 +170,8 @@ export function createCodexNativeResponseService(deps: NativeResponseDependencie
     }
     const previous = repo.load(id);
     if (previous) { duplicate(previous); if (previous.state !== "not_sent") return reconcile(id); }
-    const snapshot = await deps.observe(input.target);
+    const snapshot = await deps.observe(input.target, watchAuthority?.turnId);
+    watchAuthority?.check();
     const interactions = snapshot.pendingInteractions.filter(i => i.id === input.interactionId && i.threadId === input.target.threadId);
     const interaction = interactions.length === 1 ? interactions[0] : undefined;
     if (!snapshot.loaded || snapshot.threadId !== input.target.threadId || !interaction || nativeTurn(snapshot, interaction.turnId)?.status !== "inProgress") {
@@ -169,6 +187,7 @@ export function createCodexNativeResponseService(deps: NativeResponseDependencie
       ...(interaction.kind === "async_question" ? { client_user_message_id: uuid() } : {}) };
     let created = false;
     const reserved = repo.withLock(id, () => {
+      watchAuthority?.check();
       const existing = repo.load(id);
       if (existing) {
         duplicate(existing);
@@ -179,6 +198,7 @@ export function createCodexNativeResponseService(deps: NativeResponseDependencie
     });
     if (!created) return reserved;
     // A crashed or disconnected response is observed on recovery, never automatically replayed.
+    watchAuthority?.check();
     update(id, record => { record.state = "uncertain"; });
     try {
       if (interaction.kind === "async_question") {
@@ -198,14 +218,11 @@ export function createCodexNativeResponseService(deps: NativeResponseDependencie
   return {
     respond, reconcile, status, list: () => repo.list(),
     async respondWatch(watchId: string, input: Omit<NativeResponseInput, "target" | "nativeId">) {
-      const task = deps.tasks.load(watchId);
-      if (!task || task.controller_session !== input.controllerSession) throw new CodexNativeTaskError("codex_native_controller_mismatch", "Watch response requires its owning controller");
+      const check = () => nativeWatchResponseAuthority(deps.tasks, watchId, input.controllerSession);
+      const task = check();
       const existing = repo.load(`codex-cli-response:${nativeDigest([task.target, input.interactionId])}`);
-      const recordedForTask = existing?.native_id === task.native_id && existing.interaction.turnId === task.native_turn_id;
-      if (!recordedForTask && !task.pending_interactions.some(i => i.id === input.interactionId && i.turnId === task.native_turn_id)) {
-        throw new CodexNativeTaskError("stale_interaction", "Interaction does not belong to the watched native task");
-      }
-      return respond({ ...input, target: task.target, nativeId: task.native_id });
+      assertWatchInteraction(task, existing, input.interactionId);
+      return respond({ ...input, target: task.target, nativeId: task.native_id }, { turnId: task.native_turn_id!, check });
     }
   };
 }

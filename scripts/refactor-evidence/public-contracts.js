@@ -44,6 +44,7 @@ const PUBLIC_COMMANDS = Object.freeze([
   "approve",
   "cancel",
   "renew",
+  "recover",
   "reconcile-monitors",
   "reconcile-watches",
   "close",
@@ -80,6 +81,7 @@ const PUBLIC_ACTIONS = Object.freeze([
   "approve",
   "cancel",
   "renew",
+  "recover",
   "retry_callback",
   "close"
 ]);
@@ -105,6 +107,7 @@ const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_respond",
   "agent_knock_knock_respond_interaction",
   "agent_knock_knock_renew",
+  "agent_knock_knock_recover",
   "agent_knock_knock_retry_callback",
   "agent_knock_knock_cancel",
   "agent_knock_knock_close",
