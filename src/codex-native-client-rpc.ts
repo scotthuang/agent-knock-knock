@@ -95,8 +95,12 @@ function nativeRpcError(error: Record<string, unknown>, pending: Pending): Codex
   const threadId = pending.params && typeof pending.params === "object" ? (pending.params as Record<string, unknown>).threadId : undefined;
   const unmaterialized = pending.method === "thread/turns/list" && code === -32600 && typeof threadId === "string"
     && error.message === `thread ${threadId} is not materialized yet; thread/turns/list is unavailable before first user message`;
+  const unmaterializedSubscription = pending.method === "thread/resume" && code === -32600 && typeof threadId === "string"
+    && error.message === `no rollout found for thread id ${threadId}`;
   // Raw RPC error messages can contain prompts and private paths. Keep them local to the server.
-  return new CodexNativeError(unmaterialized ? "unmaterialized_thread" : unsupported ? "unsupported_capability" : "rpc_error",
-    unsupported ? "Codex backend does not expose this native capability" : "Codex backend rejected the native request",
+  return new CodexNativeError(unmaterialized ? "unmaterialized_thread" : unmaterializedSubscription ? "unmaterialized_subscription"
+    : unsupported ? "unsupported_capability" : "rpc_error",
+    unmaterializedSubscription ? "Codex native subscription requires materialized task history"
+      : unsupported ? "Codex backend does not expose this native capability" : "Codex backend rejected the native request",
     pending.mutation && code !== -32601 && code !== -32602 ? "unknown" : "not_sent", code);
 }

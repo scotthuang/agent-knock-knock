@@ -87,6 +87,26 @@ test("short native viewport joins captured unique overlap, then restores latest 
   assert.ok(!screen.includes("Back to bottom"));
 });
 
+test("0.162.1 clipped status recovers the new usage preamble through exact history overlap", async () => {
+  const modern = (screen: string) => screen.replace("v0.159.2", "v0.162.1")
+    .replace("https://chatgpt.com/codex/settings/usage", "https://chatgpt.com/settings/usage");
+  // This narrow viewport retains the usage row but clips the command/header.
+  const latest = [HEADER[4]!, ...FIELDS, ...COMPOSER].join("\n");
+  const h = run({ version: "0.162.1", screen: modern(latest),
+    receipt: { ...RECEIPT, behaviorProfile: "codex-tui-0.162.1" },
+    frames: [modern(latest), modern(PAUSED), modern(PAUSED), modern(latest)] });
+  const observed = observeCodexNativeInspection({ operation: { kind: "status" },
+    expectedAgentVersion: "0.162.1", screen: stripTerminalEscapeSequences(await h.result) });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.nativeThreadId, THREAD);
+  assert.deepEqual(h.keys, ["PageUp", "C-End"]);
+  const unknown = run({ version: "0.162.1",
+    receipt: { ...RECEIPT, behaviorProfile: "codex-tui-0.162.1" },
+    screen: modern(latest).replace("https://chatgpt.com/settings/usage", "https://example.test/usage") });
+  await unknown.result;
+  assert.deepEqual(unknown.keys, []);
+});
+
 test("verified and unverified frontends reuse history navigation only with the exact status profile and UI", async () => {
   for (const [version, behaviorProfile] of [
     ["0.159.3", "codex-tui-0.159.3"], ["0.160.0", "codex-tui-0.160.0"],

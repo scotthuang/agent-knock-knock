@@ -16,7 +16,8 @@ export const CODEX_ASYNC_QUESTION_PROFILES: Readonly<Record<string, string>> =
     "0.159.0": "codex/0.159.0/request-user-input-async-v2",
     "0.159.2": "codex/0.159.2/request-user-input-async-v2",
     "0.159.3": "codex/0.159.3/request-user-input-async-v2",
-    "0.160.0": "codex/0.160.0/request-user-input-async-v3"
+    "0.160.0": "codex/0.160.0/request-user-input-async-v3",
+    "0.162.1": "codex/0.162.1/request-user-input-async-v4"
   });
 
 export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
@@ -761,10 +762,12 @@ function collapsedOpenBinding(
   profile: string
 ): CodexAsyncQuestionOpenBinding | undefined {
   const compact = isFullscreenProfile(profile);
-  if (line === (compact ? "    shift+← to answer" : "    shift + ← to answer")) {
+  const macSymbols = profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"];
+  if (line === (macSymbols ? "    ⇧← to answer" : compact
+    ? "    shift+← to answer" : "    shift + ← to answer")) {
     return "shift_left";
   }
-  const altHint = profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"]
+  const altHint = macSymbols || profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"]
     ? "    ⌥↑ to answer" : compact ? "    ⌥+↑ to answer" : "    ⌥ + ↑ to answer";
   return line === altHint
     ? "alt_up" : undefined;
@@ -839,7 +842,12 @@ function parseExpanded(
   }
   // 0.160 key_hint.rs no longer inserts '+' after the macOS Option glyph.
   // Match the complete versioned footer; mixed/unknown keymaps grant no input.
-  const compactFooter = (profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"]
+  // 0.162.1 macOS uses symbol labels for Control and Shift as well. Keep
+  // whole footer grammars separate so mixed or remapped keys never authorize
+  // an answer using the wrong native navigation binding.
+  const compactFooter = (profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"]
+    ? /^enter submit ⌃\] skip (⇧→|⌥↓) (main prompt|prev question)(?: (⌥↑|⇧←) (next question|queued messages))?$/u
+    : profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"]
     ? /^enter submit ctrl\+\] skip (shift\+→|⌥↓) (main prompt|prev question)(?: (⌥↑|shift\+←) (next question|queued messages))?$/u
     : /^enter submit ctrl\+\] skip (shift\+→|⌥\+↓) (main prompt|prev question)(?: (⌥\+↑|shift\+←) (next question|queued messages))?$/u).exec(footer);
   if (isFullscreenProfile(profile) ? !compactFooter :
@@ -906,11 +914,11 @@ function parseExpanded(
     match: exact.match,
     exactLines: lines.slice(exact.start, lines.length),
     ...(isFullscreenProfile(profile) && compactFooter
-      ? { promptStackBack: compactFooter[1] === "shift+→"
+      ? { promptStackBack: ["shift+→", "⇧→"].includes(compactFooter[1]!)
           ? "shift_right" as const : "alt_down" as const }
       : {}),
     ...(isFullscreenProfile(profile) && compactFooter?.[4] === "next question"
-      ? { promptStackForward: compactFooter[3] === "shift+←"
+      ? { promptStackForward: ["shift+←", "⇧←"].includes(compactFooter[3]!)
           ? "shift_left" as const : "alt_up" as const }
       : {})
   };
@@ -1214,5 +1222,6 @@ function isFullscreenProfile(profile: string): boolean {
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.0"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.2"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.3"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"];
 }

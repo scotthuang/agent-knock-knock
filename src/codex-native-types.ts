@@ -43,6 +43,8 @@ export interface CodexNativeSnapshot {
   latestTurnId: string | null;
   turns: CodexNativeTurn[];
   selectedTurn?: CodexNativeTurn;
+  /** False only when the native paginated store explicitly reports a pre-first-message thread. */
+  historyMaterialized?: boolean;
   pendingInteractions: NativeInteraction[];
   canSend: boolean;
 }
@@ -65,7 +67,7 @@ export type CodexNativeDispatchState = "not_sent" | "unknown" | "accepted";
 export class CodexNativeError extends Error {
   constructor(public readonly code: "invalid_response" | "invalid_argument" | "timeout" | "closed" | "rpc_error"
     | "thread_not_loaded" | "thread_not_idle" | "unsupported_thread" | "stale_interaction"
-    | "unsupported_capability" | "pagination_limit" | "duplicate_submission" | "unmaterialized_thread",
+    | "unsupported_capability" | "pagination_limit" | "duplicate_submission" | "unmaterialized_thread" | "unmaterialized_subscription",
   message: string, public readonly dispatchState: CodexNativeDispatchState = "not_sent",
   public readonly rpcCode?: number, public readonly acceptedTurnId?: string) {
     super(message); this.name = "CodexNativeError";

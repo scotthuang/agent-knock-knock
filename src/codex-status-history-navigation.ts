@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { codexNativeInspectionCompatibilityProfile, isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { captureCodexFullscreenComposerFrame } from "./codex-fullscreen-composer-proof.js";
 import type { TerminalViewport } from "./terminal-control-provider.js";
-import { closedCodex159StatusSuffix, observeCodexNativeInspection } from "./codex-terminal-agent-adapter.js";
+import { CODEX_STATUS_INFORMATION_ROWS, closedCodex159StatusSuffix, observeCodexNativeInspection } from "./codex-terminal-agent-adapter.js";
 import {
   exactCodexReadyStyledComposerCapture,
   stripTerminalEscapeSequences
@@ -14,10 +14,6 @@ const PAUSED_FOOTER = /^ {2}(?:New activity · )?enter\/esc latest · \? shortcu
 const HISTORY_GAP = /^ +(?:New activity · )?↓ Back to bottom · esc *$/u;
 const SESSION = /^ {2}Session: {2,}[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u;
 const FIELD = /^ {2}[A-Za-z][^:│]{0,63}: {2,}\S.*$/u;
-const INFO = new Set([
-  "  Visit https://chatgpt.com/codex/settings/usage for up-to-date",
-  "  information on rate limits and credits"
-]);
 
 type Tail = { rows: string[]; plain: string[]; liveChrome: string[]; footer: string };
 type PausedHistory = { rows: string[]; transcriptBottom: number; screenRows: number };
@@ -58,7 +54,7 @@ function clippedTail(screen: string, version: string): Tail | undefined {
   if (session < 0) return undefined;
   for (let index = start; index < end; index += 1) {
     const row = frame.plainLines[index]!.trimEnd();
-    if (!row.trim() || FIELD.test(row) || INFO.has(row) || /^ {4,}\S/u.test(row) ||
+    if (!row.trim() || FIELD.test(row) || CODEX_STATUS_INFORMATION_ROWS.has(row) || /^ {4,}\S/u.test(row) ||
         index === start && row === `  >_ OpenAI Codex (v${version})`) continue;
     if (index <= session) return undefined;
     end = index; // Native working/queue chrome is validated by the complete-card parser later.

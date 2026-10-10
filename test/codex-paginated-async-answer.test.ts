@@ -17,7 +17,7 @@ const NATIVE_ID = JSON.stringify(["request_user_input_async", ITEM, 0]);
 const CLIENT_ID = "b5e512ec-70b1-4f59-b72c-af6d55e6c511";
 const CODEX_VERSION_PAIRS = [["0.158.0", "0.158.0"], ["0.159.0", "0.159.0"],
   ["0.159.0", "0.159.2"], ["0.159.2", "0.159.2"],
-  ["0.159.3", "0.159.3"], ["0.159.3", "0.160.0"], ["0.160.0", "0.160.0"]] as const;
+  ["0.159.3", "0.159.3"], ["0.159.3", "0.160.0"], ["0.160.0", "0.160.0"], ["0.162.1", "0.162.1"]] as const;
 
 for (const [version, serverVersion] of CODEX_VERSION_PAIRS) test("sends one closed native turn CAS and confirms only its exact durable reply for " + version + "/" + serverVersion, async () => {
   const fixture = new AsyncAnswerFixture(version, serverVersion);

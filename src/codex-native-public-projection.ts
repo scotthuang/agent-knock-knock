@@ -141,6 +141,8 @@ export function nativeTurnProjection(turn: CodexNativeTurn | undefined) {
 
 export function codexNativeSessionProjection(identity: CodexNativeIdentity, snapshot: CodexNativeSnapshot, backendVersion: string, interactionsScanned = false) {
   const id = createCodexNativeConversationId(identity);
+  const controlsAvailable = snapshot.loaded && snapshot.historyMaterialized !== false;
+  const canSend = controlsAvailable && snapshot.canSend;
   const active = snapshot.turns.filter(turn => turn.status === "inProgress");
   const watch = snapshot.loaded && active.length === 1 && active[0].id === snapshot.latestTurnId;
   return {
@@ -148,20 +150,22 @@ export function codexNativeSessionProjection(identity: CodexNativeIdentity, snap
     title: snapshot.thread.name ?? snapshot.thread.preview ?? "Codex CLI", cwd: snapshot.thread.cwd,
     native_thread_id: identity.threadId, native_turn_id: snapshot.latestTurnId,
     backend_version: backendVersion, connection_state: snapshot.loaded ? "loaded_backend_verified" : "not_loaded",
+    ...(snapshot.historyMaterialized === false ? { history_state: "unmaterialized",
+      control_limitation: "Complete the first task in this Codex conversation before using native task control." } : {}),
     activity_state: snapshot.thread.status.type,
     active_flags: snapshot.thread.status.type === "active" ? snapshot.thread.status.activeFlags : [],
     interaction_requests_scanned: interactionsScanned,
     pending_interaction_count: interactionsScanned ? snapshot.pendingInteractions.length : null,
     attention_required: snapshot.pendingInteractions.length > 0 || snapshot.thread.status.type === "active" && snapshot.thread.status.activeFlags.length > 0,
-    capabilities: { status: true, send: snapshot.canSend, watch, interaction_notify: watch,
-      interaction_respond: snapshot.loaded, approve: snapshot.loaded, set_permissions: snapshot.loaded },
+    capabilities: { status: true, send: canSend, watch, interaction_notify: watch,
+      interaction_respond: controlsAvailable, approve: controlsAvailable, set_permissions: controlsAvailable },
     interaction_state: snapshot.pendingInteractions.map(item => nativeInteractionProjection(item, id)),
     latest_turn: nativeTurnProjection(snapshot.turns.find(turn => turn.id === snapshot.latestTurnId)),
     available_actions: {
       status: { tool: "agent_knock_knock_status", input: { conversation_id: id } },
-      ...(snapshot.canSend ? { send: { tool: "agent_knock_knock_send", input: { conversation_id: id } } } : {}),
+      ...(canSend ? { send: { tool: "agent_knock_knock_send", input: { conversation_id: id } } } : {}),
       ...(watch ? { watch: { tool: "agent_knock_knock_watch", input: { conversation_id: id } } } : {}),
-      ...(snapshot.loaded ? { permission_options: { tool: "agent_knock_knock_permission_options", input: { conversation_id: id } } } : {})
+      ...(controlsAvailable ? { permission_options: { tool: "agent_knock_knock_permission_options", input: { conversation_id: id } } } : {})
     }
   };
 }

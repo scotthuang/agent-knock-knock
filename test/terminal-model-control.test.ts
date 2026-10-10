@@ -133,7 +133,28 @@ test("Codex 0.159.2 official model catalog keeps GPT-6.1 Sol and the shifted nat
   assert.equal(observed.selectedIndex, 7);
 });
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0"]) {
+test("0.162.1 model catalog without removed default badges retains current model and exact footer", () => {
+  const plan = planTerminalModelControl(probeTerminalModelControl("codex", "0.162.1"));
+  const screen = [
+    "  Select Model and Effort", "",
+    "  1. GPT-6.1-Sol        Workhorse model.",
+    "› 2. GPT-6-Astra (current)  Advanced model.", "",
+    "  enter select · esc back"
+  ].join("\n");
+  const observed = observeTerminalModelControl(plan, screen);
+  assert.equal(observed.state, "codex_model_picker");
+  if (observed.state !== "codex_model_picker") return;
+  assert.equal(observed.currentModel, "gpt-6-astra");
+  assert.equal(observed.rows.some((row) => row.presetDefault), false,
+    "absent default badges cannot manufacture a persisted default");
+  for (const changed of [
+    screen.replace("(current)", ""),
+    screen.replace("GPT-6.1-Sol", "GPT-6.1-Sol (current)"),
+    screen.replace("enter select · esc back", "enter apply everywhere · esc back")
+  ]) assert.equal(observeTerminalModelControl(plan, changed).state, "ambiguous");
+});
+
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1"]) {
   test(`Codex ${version} native display names and compact scope footers retain canonical model ids`, async () => {
     const native = new FakeModelTerminal("codex", {
       currentModel: "gpt-5.2", currentEffort: "high",
@@ -159,7 +180,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0"]) {
   });
 }
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1"]) {
   test(`Codex ${version} picker parser refuses changed or contradictory footer scope`, () => {
     const advanced = [
       "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",

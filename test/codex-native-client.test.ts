@@ -9,6 +9,7 @@ type Message = Record<string, any>;
 class Fixture implements CodexAppServerReadTransport {
   sent: Message[] = [];
   loaded = [THREAD];
+  serverVersion = "0.999.0";
   closed = false;
   handler: (m: Message) => unknown = () => ({});
   private listeners = new Set<(message: string) => void>();
@@ -18,7 +19,7 @@ class Fixture implements CodexAppServerReadTransport {
     if (!m.method || m.id === undefined) return;
     queueMicrotask(() => {
       if (m.method === "initialize") return this.emit({ id: m.id, result: { codexHome: HOME,
-        userAgent: "codex-tui/0.999.0 (Mac OS)", platformFamily: "unix", platformOs: "macos" } });
+        userAgent: `codex-tui/${this.serverVersion} (Mac OS)`, platformFamily: "unix", platformOs: "macos" } });
       if (m.method === "thread/loaded/list") return this.emit({ id: m.id, result: page(this.loaded) });
       const result = this.handler(m);
       if (result !== undefined) this.emit({ id: m.id, result });
@@ -104,6 +105,72 @@ test("native item reads preserve actual per-item timestamps without replacing mi
     assert.equal(items[2].startedAtMs, undefined);
     assert.equal(items[2].completedAtMs, undefined);
   } finally { c.close(); }
+});
+
+test("0.162.1 turn lineage and partial answers retain the exact task identity", async () => {
+  const f = new Fixture(); f.serverVersion = "0.162.1";
+  const rootTurnId = "lineage-root";
+  f.handler = m => {
+    if (m.method === "thread/read") return { thread: thread("active", { cliVersion: "0.162.1" }) };
+    if (m.method === "thread/turns/list") return page([
+      { ...turn("sibling", "completed"), rootTurnId },
+      { ...turn(TURN, "inProgress"), rootTurnId }
+    ]);
+    if (m.method === "thread/items/list") return page([entry(m.params.turnId, {
+      id: `answer-${m.params.turnId}`, type: "agentMessage", phase: "partial_answer",
+      text: m.params.turnId === TURN ? "Public answer so far" : "Another task's answer"
+    })]);
+    throw new Error(`Unexpected ${m.method}`);
+  };
+  const c = await connect(f);
+  try {
+    const result = await c.readSnapshot(THREAD, TURN);
+    assert.equal(c.metadata.serverVersion, "0.162.1");
+    assert.equal(result.latestTurnId, "sibling");
+    assert.equal(result.selectedTurn?.id, TURN);
+    assert.equal(result.selectedTurn?.status, "inProgress");
+    assert.equal(result.selectedTurn?.itemsComplete, true);
+    assert.deepEqual(result.selectedTurn?.items.map(item => [item.phase, item.text]),
+      [["partial_answer", "Public answer so far"]]);
+    assert.equal(result.canSend, false);
+    assert.deepEqual(f.sent.filter(m => m.method === "thread/items/list").map(m => m.params.turnId), ["sibling", TURN]);
+  } finally { c.close(); }
+});
+
+test("unmaterialized history disables native control and only the exact resume rejection has a diagnostic code", async () => {
+  for (const serverVersion of ["0.160.0", "0.162.1"]) {
+    const f = new Fixture(); f.serverVersion = serverVersion;
+    let resumeCode = -32600, resumeMessage = `no rollout found for thread id ${THREAD}`;
+    let wrongReadError = false;
+    f.handler = m => {
+      if (m.method === "thread/read") return { thread: thread() };
+      if (m.method === "thread/turns/list" || m.method === "thread/resume") {
+        f.emit({ id: m.id, error: m.method === "thread/resume" ? { code: resumeCode, message: resumeMessage }
+          : { code: -32600, message: wrongReadError ? `no rollout found for thread id ${THREAD}`
+            : `thread ${THREAD} is not materialized yet; thread/turns/list is unavailable before first user message` } });
+        return undefined;
+      }
+      throw new Error(`Unexpected ${m.method}`);
+    };
+    const c = await connect(f);
+    try {
+      const empty = await c.readSnapshot(THREAD);
+      assert.equal(empty.loaded, true); assert.equal(empty.thread.status.type, "idle");
+      assert.equal(empty.historyMaterialized, false); assert.equal(empty.canSend, false);
+      assert.deepEqual(empty.turns, []);
+      await assert.rejects(c.subscribe(THREAD), (error: CodexNativeError) => error.code === "unmaterialized_subscription");
+      await assert.rejects(c.readPermissions(THREAD), (error: CodexNativeError) => error.code === "unmaterialized_subscription");
+      await assert.rejects(c.start(THREAD, { text: "First task", clientUserMessageId: "first" }),
+        (error: CodexNativeError) => error.code === "thread_not_idle");
+      assert.equal(f.sent.some(m => m.method === "turn/start" || m.method === "thread/settings/update"), false);
+      resumeMessage = "no rollout found for thread id a-different-thread";
+      await assert.rejects(c.subscribe(THREAD), (error: CodexNativeError) => error.code === "rpc_error");
+      resumeMessage = `no rollout found for thread id ${THREAD}`; resumeCode = -32602;
+      await assert.rejects(c.subscribe(THREAD), (error: CodexNativeError) => error.code === "rpc_error");
+      wrongReadError = true;
+      await assert.rejects(c.readSnapshot(THREAD), (error: CodexNativeError) => error.code === "rpc_error");
+    } finally { c.close(); }
+  }
 });
 
 test("native send checks idle state and preserves uncertain dispatch instead of retrying", async () => {
@@ -197,13 +264,15 @@ test("permissions use standalone settings and require effective confirmation wit
   } finally { c.close(); }
 });
 
-test("native async answers use exact expected turn and reject a stale question without a second dispatch", async () => {
-  const f = new Fixture(); let answered = false;
+test("0.162.1 multiline async questions retain their complete title, URL and exact answer identity", async () => {
+  const f = new Fixture(); f.serverVersion = "0.162.1"; let answered = false;
+  const title = "Choose a color\n参考 https://example.test/options?first=blue&second=green";
+  const answer = "Green\n保持绿色";
   f.handler = m => {
     if (m.method === "thread/read") return { thread: thread("active") };
     if (m.method === "thread/turns/list") return page([turn(TURN, "inProgress")]);
-    if (m.method === "thread/items/list") return page([entry(TURN, { id: "question", type: "agentMessage", text: "Color?",
-      delivery: "async", questions: [{ title: "Color?", options: ["Blue", "Green"] }] }),
+    if (m.method === "thread/items/list") return page([entry(TURN, { id: "question", type: "agentMessage", text: title,
+      delivery: "async", questions: [{ title, options: ["Blue", answer] }] }),
     ...(answered ? [entry(TURN, { id: "answer", type: "userMessage", clientId: "answer-client", content: [{ type: "text",
       text: f.sent.find(m => m.method === "turn/steer")!.params.input[0].text }] })] : [])]);
     if (m.method === "turn/steer") { assert.equal(m.params.expectedTurnId, TURN); answered = true; return { turnId: TURN }; }
@@ -212,8 +281,15 @@ test("native async answers use exact expected turn and reject a stale question w
   const c = await connect(f);
   try {
     const interaction = (await c.readSnapshot(THREAD)).pendingInteractions[0];
-    assert.deepEqual(await c.answerAsync(interaction, { answer: "Green", clientUserMessageId: "answer-client" }),
+    assert.equal(interaction.questions[0].title, title);
+    assert.equal(interaction.questions[0].id, JSON.stringify(["request_user_input_async", "question", 0]));
+    assert.deepEqual(interaction.questions[0].options, ["Blue", answer]);
+    assert.deepEqual(await c.answerAsync(interaction, { answer, clientUserMessageId: "answer-client" }),
       { turnId: TURN, clientUserMessageId: "answer-client" });
+    const dispatched = f.sent.find(m => m.method === "turn/steer")!;
+    const reply = /^<send_user_message_question_reply>\n([\s\S]+)\n<\/send_user_message_question_reply>$/u.exec(dispatched.params.input[0].text);
+    assert.ok(reply);
+    assert.deepEqual(JSON.parse(reply[1]), [{ questionItemId: interaction.questions[0].id, question: title, answer }]);
     assert.deepEqual((await c.readSnapshot(THREAD)).pendingInteractions, []);
     await assert.rejects(c.answerAsync(interaction, { answer: "Blue", clientUserMessageId: "other-client" }), /no longer pending/u);
     assert.equal(f.sent.filter(m => m.method === "turn/steer").length, 1);

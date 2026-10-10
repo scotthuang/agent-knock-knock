@@ -12,7 +12,7 @@ export interface TerminalPermissionControlProfile {
 export function terminalPermissionControlProfileFor(
   version: string
 ): TerminalPermissionControlProfile | undefined {
-  return ["0.159.2", "0.159.3", "0.160.0"].includes(version)
+  return ["0.159.2", "0.159.3", "0.160.0", "0.162.1"].includes(version)
     ? { agentVersion: version, behaviorProfile: "codex-permissions-fullscreen-v1", scope: "current_session" }
     : undefined;
 }

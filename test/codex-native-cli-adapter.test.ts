@@ -6,7 +6,7 @@ import test from "node:test";
 import { executeCliCommand } from "../src/cli-core.js";
 import { createCodexNativeRuntime, type CodexNativeClientPort } from "../src/codex-native-runtime.js";
 import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
-import type { CodexNativeSnapshot, CodexNativePermissions } from "../src/codex-native-types.js";
+import { CodexNativeError, type CodexNativeSnapshot, type CodexNativePermissions } from "../src/codex-native-types.js";
 import type { CliCommandDependencies } from "../src/cli-runtime-context.js";
 import { isSubmissionError, toolResult, withTurnIdentity } from "../src/semantic-tool-presentation.js";
 
@@ -43,12 +43,42 @@ function fixture(t: { after(fn: () => void): void }) {
   };
   const run = async (command: string, options: Record<string, unknown> = {}) => JSON.parse((await executeCliCommand(command,
     { storeDir: path.join(root, "store"), ...options }, deps)).stdout);
-  return { run, id, target, snapshot, deps, failReads(after = 0) { readFailure = true; successfulReadsBeforeFailure = after; }, get sends() { return sends; }, get callbacks() { return callbacks; },
+  return { run, id, target, snapshot, client, deps, failReads(after = 0) { readFailure = true; successfulReadsBeforeFailure = after; }, get sends() { return sends; }, get callbacks() { return callbacks; },
     get launches() { return launches; }, get updates() { return updates; },
     finish() { snapshot.thread.status = { type: "idle" }; snapshot.canSend = true; snapshot.turns[0]!.status = "completed";
       snapshot.turns[0]!.items.push({ id: "final", type: "agentMessage", phase: "final_answer", text: "NATIVE_EXACT_DONE" }); }
   };
 }
+
+test("unmaterialized native Status retains fresh identity without claiming requests scanned or send capability", async t => {
+  const f = fixture(t); f.snapshot.historyMaterialized = false; f.snapshot.canSend = false;
+  f.client.subscribe = async () => { throw new CodexNativeError("unmaterialized_subscription", "No materialized history"); };
+  const listed = (await f.run("codex-cli-list")).codex_cli_sessions[0];
+  assert.equal(listed.connection_state, "loaded_backend_verified"); assert.equal(listed.activity_state, "idle");
+  assert.equal(listed.capabilities.send, false); assert.equal(listed.available_actions.send, undefined);
+  assert.equal(listed.capabilities.set_permissions, false); assert.equal(listed.available_actions.permission_options, undefined);
+  for (const command of ["status", "native-inspect"]) {
+    const result = await f.run(command, { conversation: f.id, action: "status" });
+    assert.equal(result.native_thread_id, f.target.threadId); assert.equal(result.native_turn_id, null);
+    assert.equal(result.connection_state, "loaded_backend_verified"); assert.equal(result.activity_state, "idle");
+    assert.equal(result.history_state, "unmaterialized");
+    assert.equal(result.subscription_state, "unavailable_unmaterialized_history");
+    assert.equal(result.observation_error, "native_subscription_unmaterialized");
+    assert.equal(result.interaction_requests_scanned, false); assert.equal(result.pending_interaction_count, null);
+    assert.equal(result.progress.state, "no_public_progress"); assert.equal(result.capabilities.send, false);
+  }
+  await assert.rejects(f.run("send", { conversation: f.id, message: "First task", messageId: "first", openclawSession: "controller" }),
+    (error: CodexNativeError) => error.code === "unmaterialized_subscription");
+  assert.equal(f.sends, 0); assert.equal(f.launches, 0); assert.equal(f.callbacks, 0);
+  f.snapshot.thread.status = { type: "active", activeFlags: ["waitingOnApproval"] };
+  const changed = await f.run("status", { conversation: f.id });
+  assert.equal(changed.connection_state, "unconfirmed"); assert.equal(changed.observation_error, "native_status_read_failed");
+  assert.equal(changed.progress.state, "read_error");
+  f.snapshot.thread.status = { type: "idle" };
+  f.client.subscribe = async () => { throw new CodexNativeError("rpc_error", "Unrelated RPC failure"); };
+  const otherFailure = await f.run("status", { conversation: f.id });
+  assert.equal(otherFailure.connection_state, "unconfirmed"); assert.equal(otherFailure.progress.state, "read_error");
+});
 
 test("native Status public progress stays on the exact selected turn and distinguishes empty from failed reads", async t => {
   const f = fixture(t);

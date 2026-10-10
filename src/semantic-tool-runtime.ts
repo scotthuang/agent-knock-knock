@@ -251,6 +251,7 @@ export function createAkkSemanticToolCatalog(
       semanticToolDescriptions.native_inspect,
     parameters: nativeInspectParameters,
     normalizeTurnIdentity: false,
+    formatCommandError: nativeInspectCommandErrorResult,
     buildArgs: async (params, context) => {
       params = normalizeTerminalConversationTarget(params);
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
@@ -648,6 +649,19 @@ export function createAkkSemanticToolCatalog(
     }
   });
   return finishSemanticToolCatalog(api, command);
+}
+
+function nativeInspectCommandErrorResult(error: unknown): ReturnType<typeof toolResult> {
+  return toolResult({
+    status: "error",
+    inspection: "status",
+    error_code: "AKK_NATIVE_INSPECTION_FAILED",
+    message: modelFacingErrorMessage(error),
+    // A relay failure may follow dispatched terminal input. Do not infer a
+    // safe retry from the absence of a parsed inspection result.
+    do_not_retry: true,
+    safe_to_retry: false
+  }, { normalizeTurnIdentity: false, forceError: true });
 }
 
 function registerBackendRecoveryTool(api): void {
@@ -1795,6 +1809,7 @@ function registerCliTool(
     parameters,
     buildArgs,
     rememberResult = undefined,
+    formatCommandError = undefined,
     timeoutMs = undefined,
     normalizeTurnIdentity = true,
     modelProjection = undefined,
@@ -1814,6 +1829,7 @@ function registerCliTool(
       params: Record<string, unknown>,
       toolContext?: { sessionKey?: unknown; sessionId?: unknown }
     ) => void;
+    formatCommandError?: (error: unknown) => ReturnType<typeof toolResult>;
     timeoutMs?: number;
     normalizeTurnIdentity?: boolean;
     modelProjection?: (value: unknown) => unknown;
@@ -1828,14 +1844,17 @@ function registerCliTool(
     inputSchema: parameters,
     async execute(toolContext, toolCallId, params, signal) {
       return withHostBridgeInvocationSignal(signal, async () => {
+        let commandStarted = false;
         try {
+          const args = await buildArgs(
+            isRecord(params) ? params : {},
+            toolContext,
+            toolCallId
+          );
+          commandStarted = true;
           const result = await runHostAwareCli(
             api,
-            await buildArgs(
-              isRecord(params) ? params : {},
-              toolContext,
-              toolCallId
-            ),
+            args,
             timeoutMs === undefined ? {} : { timeoutMs }
           );
           if (typeof rememberResult === "function") {
@@ -1865,6 +1884,10 @@ function registerCliTool(
           });
           return rendered;
         } catch (error) {
+          if (commandStarted && formatCommandError &&
+              !(error instanceof Error && error.name === "AbortError")) {
+            return formatCommandError(error);
+          }
           throw modelFacingToolError(error);
         }
       });

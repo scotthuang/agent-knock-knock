@@ -50,7 +50,7 @@ export function createTerminalPermissionControlPorts(
     await ports.verifyIdentity();
     const styled = await ports.captureStyled();
     await ports.verifyIdentity();
-    const owned = observeCodexPermissionSurface(styled);
+    const owned = observeCodexPermissionSurface(styled, ports.agentVersion);
     if (owned.state === "picker" || owned.state === "full_access_confirmation") return owned;
     const fingerprint = createHash("sha256").update(styled).digest("hex");
     if (owned.state === "ambiguous") return { state: "blocked", fingerprint };

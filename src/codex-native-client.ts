@@ -55,7 +55,7 @@ export class CodexNativeClient {
     nativeId(threadId); if (exactTurnId !== undefined) nativeId(exactTurnId);
     const thread = await this.readThread(threadId);
     const loaded = thread.status.type !== "notLoaded" && (await this.listLoaded()).includes(threadId);
-    const turns = await this.readTurns(thread, exactTurnId);
+    const { turns, materialized: historyMaterialized } = await this.readTurns(thread, exactTurnId);
     const latestTurnId = turns[0]?.id ?? null;
     const selectedTurn = exactTurnId ? turns.find(t => t.id === exactTurnId) : turns[0];
     const wanted = new Set([latestTurnId, selectedTurn?.id]);
@@ -66,8 +66,8 @@ export class CodexNativeClient {
     const pendingInteractions = [...this.getInteractions(threadId).filter(i => liveIds.has(i.turnId)).map(i =>
       hydrateNativeFileApproval(i, turns, this.liveFileChanges.get(itemKey(i.threadId, i.turnId, i.itemId))?.item)),
       ...turns.flatMap(t => nativeAsyncInteractions(threadId, t))];
-    return { threadId, thread, loaded, latestTurnId, turns, ...(selectedTurn ? { selectedTurn } : {}), pendingInteractions,
-      canSend: loaded && isMainCodexCliThread(thread) && thread.status.type === "idle"
+    return { threadId, thread, loaded, latestTurnId, turns, historyMaterialized, ...(selectedTurn ? { selectedTurn } : {}), pendingInteractions,
+      canSend: loaded && historyMaterialized && isMainCodexCliThread(thread) && thread.status.type === "idle"
         && !turns.some(t => t.status === "inProgress") && pendingInteractions.length === 0 };
   }
   async subscribe(threadId: string): Promise<void> {
@@ -174,11 +174,11 @@ export class CodexNativeClient {
     const result = nativeRecord(await this.rpc.call("thread/resume", { threadId, excludeTurns: true }, true));
     parseNativeThread(result.thread, threadId); return result;
   }
-  private async readTurns(thread: CodexNativeThread, exactTurnId?: string): Promise<CodexNativeTurn[]> {
+  private async readTurns(thread: CodexNativeThread, exactTurnId?: string): Promise<{ turns: CodexNativeTurn[]; materialized: boolean }> {
     if (thread.historyMode === "legacy") {
       const result = nativeRecord(await this.rpc.call("thread/read", { threadId: thread.id, includeTurns: true }));
       const read = parseNativeThread(result.thread, thread.id);
-      return read.turns.map(t => parseNativeTurn({ ...t, itemsView: "full" })).reverse();
+      return { turns: read.turns.map(t => parseNativeTurn({ ...t, itemsView: "full" })).reverse(), materialized: true };
     }
     const turns: CodexNativeTurn[] = [], cursors = new Set<string>(); let cursor: string | undefined;
     for (let index = 0; index < MAX_PAGES; index++) {
@@ -186,13 +186,15 @@ export class CodexNativeClient {
       try { page = nativePage(await this.rpc.call("thread/turns/list", { threadId: thread.id, limit: 100,
         sortDirection: "desc", itemsView: "notLoaded", ...(cursor ? { cursor } : {}) }), parseNativeTurn); }
       catch (error) {
-        if (index === 0 && thread.status.type === "idle" && error instanceof CodexNativeError && error.code === "unmaterialized_thread") return [];
+        if (index === 0 && thread.status.type === "idle" && error instanceof CodexNativeError && error.code === "unmaterialized_thread") {
+          return { turns: [], materialized: false };
+        }
         throw error;
       }
       for (const turn of page.data) {
         if (turns.some(t => t.id === turn.id)) nativeInvalid("Duplicate native turn identity"); turns.push(turn);
       }
-      if (!exactTurnId || turns.some(t => t.id === exactTurnId) || page.nextCursor === null) return turns;
+      if (!exactTurnId || turns.some(t => t.id === exactTurnId) || page.nextCursor === null) return { turns, materialized: true };
       cursor = nextCursor(page.nextCursor, cursors);
     }
     throw new CodexNativeError("pagination_limit", "Exact native task exceeds bounded history lookup");

@@ -43,10 +43,16 @@ interface ParsedRow { number: number; selected: boolean; text: string; line: Lin
 interface ParsedRows { rows: ParsedRow[]; preamble: string }
 const RESET: Style = { bold: false, dim: false, reverse: false };
 
-/** Closed, styled Codex 0.159.2/0.159.3/0.160.0 permission picker grammar. */
-export function observeCodexPermissionSurface(styledScreen: string): CodexPermissionSurface {
+/** Closed built-in picker grammar; supported versions live in terminal-permission-control. */
+export function observeCodexPermissionSurface(
+  styledScreen: string, agentVersion?: string
+): CodexPermissionSurface {
   const rawLines = styledScreen.replace(/\r\n?/gu, "\n").split("\n");
   const plainLines = rawLines.map((line) => line.replace(/\x1b\[[0-9;]*m/gu, ""));
+  if (agentVersion === "0.162.1") {
+    const centered = centeredConfirmation(rawLines, plainLines);
+    if (centered) return centered;
+  }
   const titles = plainLines.flatMap((line, index) =>
     [PICKER_TITLE, CONFIRM_TITLE].includes(line.trim()) ? [index] : []);
   if (!titles.length) return { state: "none" };
@@ -60,6 +66,10 @@ export function observeCodexPermissionSurface(styledScreen: string): CodexPermis
   }
   const lines = decodeStyledLines(rawLines.slice(start, end + 1));
   if (!lines) return ambiguousPermissionSurface("permission surface contains unsupported terminal controls");
+  return inspectPermissionLines(lines, permissionFingerprint(rawLines.slice(start, end + 1)));
+}
+
+function inspectPermissionLines(lines: Line[], fingerprint: string): CodexPermissionSurface {
   if (!visibleCells(lines[0]!).every(({ style }) => style.bold && !style.dim && !style.reverse)) {
     return ambiguousPermissionSurface("permission title lacks native bold styling");
   }
@@ -77,10 +87,60 @@ export function observeCodexPermissionSurface(styledScreen: string): CodexPermis
     .some(({ style }) => style.reverse))) {
     return ambiguousPermissionSurface("multiple permission choices have selection styling");
   }
-  const fingerprint = `sha256:${createHash("sha256")
-    .update(rawLines.slice(start, end + 1).join("\n")).digest("hex")}`;
   return permissionRowsSurface(lines[0]!.plain.trim() === CONFIRM_TITLE,
     parsed, selectedIndex, fingerprint);
+}
+
+/** 0.162.1 confirmation() paints a 72-column dialog over the retained transcript.
+ * Only crop a complete native rectangle; never turn arbitrary indented text into
+ * an input surface. Unknown terminal column widths/controls stay fail-closed.
+ */
+function centeredConfirmation(
+  rawLines: readonly string[], plainLines: readonly string[]
+): CodexPermissionSurface | undefined {
+  const candidates = plainLines.flatMap((line, row) => {
+    const offset = line.indexOf(CONFIRM_TITLE);
+    return offset >= 4 ? [{ row, offset }] : [];
+  });
+  if (!candidates.length) return undefined;
+  if (candidates.length !== 1) return ambiguousPermissionSurface("multiple centered permission confirmations are visible");
+  const { row: start, offset } = candidates[0]!;
+  const left = offset - 2;
+  const width = 72;
+  const ends = plainLines.flatMap((line, row) => row > start && row <= start + 24 &&
+    line.slice(left, left + width).trim() === FOOTER ? [row] : []);
+  if (ends.length !== 1) return ambiguousPermissionSurface("centered permission confirmation has no unique complete footer");
+  const end = ends[0]!;
+  const raw = rawLines.slice(start, end + 1);
+  const decoded = decodeStyledLines(raw);
+  if (!decoded) return ambiguousPermissionSurface("centered permission confirmation has unsupported terminal controls");
+  const lines: Line[] = [];
+  for (const line of decoded) {
+    // The captured transcript may contain arbitrary Unicode. Only known
+    // single-column prefixes establish this crop; do not guess wcwidth.
+    if (line.cells.slice(0, left).some(({ text }) => !/^[\x20-\x7e\u2500-\u259f]$/u.test(text))) {
+      return ambiguousPermissionSurface("centered permission confirmation column geometry is unproven");
+    }
+    const cells = line.cells.slice(left, left + width);
+    if (cells.some(({ text }) => !/^[\x20-\x7e›·]$/u.test(text)) ||
+        cells.slice(width - 2).some(({ text }) => text !== " ")) {
+      return ambiguousPermissionSurface("centered permission confirmation is clipped or has unexpected edge content");
+    }
+    const plain = cells.map(({ text }) => text).join("");
+    if (plain.trim() && !plain.startsWith("  ") && !/^› [12]\. /u.test(plain)) {
+      return ambiguousPermissionSurface("centered permission confirmation row alignment changed");
+    }
+    lines.push({ plain, cells });
+  }
+  if (lines[0]!.plain.trim() !== CONFIRM_TITLE || !lines[0]!.plain.startsWith("  ") ||
+      !lines.at(-1)!.plain.startsWith("  ") || end - start < 7) {
+    return ambiguousPermissionSurface("centered permission confirmation title or geometry is incomplete");
+  }
+  return inspectPermissionLines(lines, permissionFingerprint(raw));
+}
+
+function permissionFingerprint(lines: readonly string[]): string {
+  return `sha256:${createHash("sha256").update(lines.join("\n")).digest("hex")}`;
 }
 
 function permissionRowsSurface(

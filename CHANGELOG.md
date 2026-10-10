@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.14.2 - 2026-10-10
+
+- Adapt Codex CLI 0.162.1 native status to the changed usage-page URL without relaxing exact thread, process, version, composer or freshness checks. A rejected status card no longer hides the underlying diagnostic behind a plain-text semantic tool error: native inspection execution failures return structured JSON with an explicit non-retryable outcome.
+- Add exact 0.162.1 terminal model, permission, blocking-question and asynchronous-question profiles, including the macOS Control/Shift key glyphs. Keep paginated interaction writes bound to the reviewed 0.162.1 frontend/backend pair; unreviewed pairs do not acquire write authority.
+- Recognize 0.162.1's centered Full Access confirmation overlay using exact warning, choice, style and geometry checks; preserve background transcript/composer separation and stop on uncertain input or layout.
+- Preserve exact task ownership across compatible native protocol additions, including turn lineage and partial answers. Partial answers cannot become completion evidence or final callback text.
+- Report a loaded idle CLI thread with no persisted history without confusing unavailable native subscription with absent thread identity. Keep its Send/permission actions unavailable and pending-interaction count unknown until those paths can be verified.
+- Retain the 800-code-point public Status progress budget, shared 720-minute monitoring hard deadline, managed-terminal 60-minute inactivity window, existing deadlines and callback deduplication.
+
+### Validation boundaries
+
+- Verify macOS CLI 0.162.1 + shared app-server 0.162.1 through dedicated live tasks: exact discovery/routing, public progress, automatic/explicit Watch, callbacks, approvals, blocking/async answers, permissions and Recovery. Native terminal model discovery and all four permission modes also pass; model mutation and terminal answer-key injection are not newly exercised live. See the [operation matrix](docs/codex-0.162.1-compatibility.md) for exact route boundaries.
+- Pass 2,836 fast tests and the full 3,351-test release gate, including isolated OpenClaw 2026.9.1 compatibility and ClawHub runtime validation/dry-run. Version admission alone is not a compatibility result or a minimum-version promise.
+- Desktop live verification is explicitly skipped for this release; its regression coverage and exact supported app/build requirement remain unchanged. Paginated native new/resume remains unsupported.
+
 ## 0.14.1 - 2026-10-10
 
 - Add bounded, redacted public progress to Codex CLI backend and Desktop conversation/task Status: the latest commentary and up to two action summaries share an 800-code-point, grapheme-safe budget. Keep exact Watch turn attribution, native timestamps and read failures explicit; List and terminal screen output are unchanged.

@@ -140,6 +140,14 @@ const CODEX_STATUS_MAX_REGION_LENGTH = 8_192;
 const CODEX_STATUS_MAX_FIELDS = 24;
 const CODEX_STATUS_MAX_FIELD_VALUE_LENGTH = 512;
 const CODEX_STATUS_MAX_EXCERPT_LENGTH = 4_000;
+// Exact informational rows shared by complete-card and clipped-history reads.
+// Codex 0.162.1 moved the usage page out of /codex; neither URL is identity
+// evidence, but an unknown prose row must still prevent accepting the card.
+export const CODEX_STATUS_INFORMATION_ROWS: ReadonlySet<string> = new Set([
+  "  Visit https://chatgpt.com/codex/settings/usage for up-to-date",
+  "  Visit https://chatgpt.com/settings/usage for up-to-date",
+  "  information on rate limits and credits"
+]);
 const CODEX_STATUS_EVIDENCE_INVENTORY_MAX_ENTRIES = 32;
 const CODEX_STATUS_EVIDENCE_MAX_OCCURRENCES = 64;
 const CODEX_STATUS_EVIDENCE_SCAN_MAX_LINES = 512;
@@ -777,10 +785,7 @@ function parseCodex159StatusCard(
   let valueColumn: number | undefined;
   for (const line of lines.slice(start + 1, fieldEnd)) {
     if (!line.trim()) continue;
-    if (fields.length === 0 && [
-      "  Visit https://chatgpt.com/codex/settings/usage for up-to-date",
-      "  information on rate limits and credits"
-    ].includes(line.trimEnd())) continue;
+    if (fields.length === 0 && CODEX_STATUS_INFORMATION_ROWS.has(line.trimEnd())) continue;
     const match = /^ {2}([A-Za-z][^:│]{0,63}): {2,}(\S.*)$/u.exec(line.trimEnd());
     if (match) {
       const name = match[1]!.trim();
@@ -855,7 +860,7 @@ export function closedCodex159StatusSuffix(lines: readonly string[]): boolean {
   return summary !== null && (Number(summary[1]) === 1) === (summary[2] === "question") &&
     // Both closed native display spellings are read-only chrome, never input
     // authority. Async navigation separately pins the versioned key grammar.
-    /^ {4}(?:shift\+←|⌥\+?↑) to answer$/u.test(rows[2]!);
+    /^ {4}(?:shift\+←|⇧←|⌥\+?↑) to answer$/u.test(rows[2]!);
 }
 
 type CodexStatusEvidenceInventory =

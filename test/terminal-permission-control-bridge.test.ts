@@ -7,6 +7,7 @@ import {
 } from "../src/terminal-permission-control-bridge.js";
 import { TerminalPermissionInputUncertainError } from "../src/terminal-permission-control.js";
 import { stripTerminalEscapeSequences } from "../src/terminal-native-inspection-bridge.js";
+import { codex1621PermissionConfirmation } from "./fixtures/codex-permission-confirmation-01621.js";
 
 // Actual final command frame from isolated Codex 0.159.3; only cwd redacted.
 const COMMAND = [
@@ -44,15 +45,15 @@ function confirmation(selected: 0 | 1): string {
   ].join("\n");
 }
 
-function terminal(screen: string) {
+function terminal(screen: string, agentVersion = "0.159.3") {
   const sent: Array<string | readonly string[]> = [];
   const events: string[] = [];
   let verifies = 0;
   const state = { screen, failIdentityAt: 0, failTransport: false,
     beforeInput: () => undefined as void };
   const runtime: PermissionBridgeRuntime = {
-    adapter: codexTerminalAgentAdapter, agentVersion: "0.159.3",
-    runtime: { agentVersion: "0.159.3", pid: 101, cwd: "/repo" },
+    adapter: codexTerminalAgentAdapter, agentVersion,
+    runtime: { agentVersion, pid: 101, cwd: "/repo" },
     verifyIdentity: async () => {
       events.push("identity");
       verifies += 1;
@@ -174,4 +175,22 @@ test("permission bridge refuses a mismatched or unreviewed runtime profile befor
   assert.throws(() => createTerminalPermissionControlPorts({ ...native.runtime,
     runtime: { ...native.runtime.runtime, agentVersion: "0.159.2" } }), /matching Codex/u);
   assert.deepEqual(native.events, []);
+});
+
+
+test("0.162.1 centered confirmation sends only on a fresh exact affirmative frame", async () => {
+  const native = terminal(codex1621PermissionConfirmation(), "0.162.1");
+  const yes = await native.ports.capture();
+  assert.equal(yes.state, "full_access_confirmation");
+  await native.ports.input("C-m", yes);
+  assert.deepEqual(native.sent, [["C-m"]]);
+  const changed = terminal(codex1621PermissionConfirmation(), "0.162.1");
+  const expected = await changed.ports.capture();
+  changed.state.beforeInput = () => { changed.state.screen = codex1621PermissionConfirmation(1); };
+  await assert.rejects(changed.ports.input("C-m", expected), /surface changed/u);
+  assert.deepEqual(changed.sent, []);
+  const cancel = await changed.ports.capture();
+  assert.equal(cancel.state, "full_access_confirmation");
+  await assert.rejects(changed.ports.input("C-m", cancel), /not authorized/u);
+  assert.deepEqual(changed.sent, []);
 });

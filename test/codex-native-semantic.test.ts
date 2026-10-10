@@ -22,7 +22,7 @@ const terminalId = "terminal:v2:tmux:codex:test:0.0:1234";
 const response = { interaction_id: "native-question-one", answers: [
   { question_id: "question-one", response_kind: "single_select", selected_option_ids: ["option-green"] }
 ] };
-type Result = { details: Record<string, any>; isError?: boolean };
+type Result = { details: Record<string, any>; content: { type: string; text: string }[]; isError?: boolean };
 
 function harness(t: TestContext) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-native-semantic-"));
@@ -31,7 +31,7 @@ function harness(t: TestContext) {
   fs.writeFileSync(reply, JSON.stringify({ source: "codex_cli", conversation_id: conversationId, watch_id: watchId,
     native_thread_id: identity.threadId, native_turn_id: "turn-one", status: "watching", delivered: true,
     agent_acceptance: "proven", send_state: "accepted", delivery_receipt: "native_task_verified", callback_expected: true }));
-  fs.writeFileSync(relay, `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(process.argv.slice(2))+'\\n');const r=JSON.parse(fs.readFileSync(${JSON.stringify(reply)},'utf8'));process.stdout.write(JSON.stringify(r.__byCommand?.[process.argv[2]]??r));`);
+  fs.writeFileSync(relay, `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(process.argv.slice(2))+'\\n');const r=JSON.parse(fs.readFileSync(${JSON.stringify(reply)},'utf8'));if(r.__error){process.stderr.write(r.__error);process.exit(1);}process.stdout.write(JSON.stringify(r.__byCommand?.[process.argv[2]]??r));`);
   const owner = { pluginConfig: { storeDir: path.join(dir, "store"), codexHome: identity.codexHome,
     openclawBin: "/test/openclaw", agentHardTimeoutMinutes: 60 }, logger: { info() {}, warn() {} } };
   bindSemanticToolRelayPath(owner, relay);
@@ -125,6 +125,29 @@ test("direct CLI permissions use backend presets without demanding terminal UI o
   assert.equal(argument(calls[0], "--action"), "status");
   assert.equal(argument(calls[1], "--action"), "permissions");
   assert.equal(argument(calls[2], "--mode"), "full-access");
+});
+
+test("native inspection relay errors retain a JSON error envelope and never imply a safe retry", async t => {
+  const h = harness(t);
+  const diagnostic = "native status inspection Enter was dispatched exactly once, but a fresh exact status result was not proven; do not retry automatically";
+  h.reply({ __error: diagnostic });
+  const failed = await h.execute("native_inspect", { conversation_id: terminalId, inspection: "status" });
+  assert.equal(failed.isError, true);
+  assert.deepEqual(JSON.parse(failed.content[0].text), failed.details);
+  assert.deepEqual(failed.details, {
+    status: "error", inspection: "status", error_code: "AKK_NATIVE_INSPECTION_FAILED",
+    message: diagnostic, do_not_retry: true, safe_to_retry: false
+  });
+  assert.deepEqual(h.calls().map(args => args[0]), ["native-inspect"]);
+
+  h.reply({ __error: "terminal token private-terminal-authority is invalid" });
+  const privateFailure = await h.execute("native_inspect", { conversation_id: conversationId, inspection: "status" });
+  assert.equal(privateFailure.isError, true);
+  assert.doesNotMatch(privateFailure.content[0].text, /private-terminal-authority/u);
+  assert.match(privateFailure.details.message, /private authority changed/u);
+  assert.equal(privateFailure.details.do_not_retry, true);
+  await assert.rejects(h.execute("native_inspect", { conversation_id: conversationId, inspection: "usage" }), /inspection must be status/u);
+  assert.equal(h.calls().length, 2, "invalid parameters are rejected before relay execution");
 });
 
 test("native response tools distinguish unconfirmed dispatch from failed or uncertain responses", async t => {

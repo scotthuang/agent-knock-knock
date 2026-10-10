@@ -7,6 +7,7 @@ import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, 
 import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
 import { createCodexNativeStateStore } from "../src/codex-native-state-store.js";
 import { createCodexNativeTaskService, codexNativeTaskNeedsReconciliation, type CodexNativeTaskServiceDependencies } from "../src/codex-native-task-service.js";
+import { nativeTurnProjection } from "../src/codex-native-public-projection.js";
 import { CodexNativeError, type CodexNativeSnapshot, type CodexNativeTurn, type NativeInteraction } from "../src/codex-native-types.js";
 
 const target = { codexHome: "/test/codex", threadId: "thread-exact" };
@@ -155,6 +156,31 @@ test("post-receipt reconciliation reads exact old turn even when another task be
   assert.equal(h.state.observations.at(-1), "native-one"); assert.equal(result.final_text, "exact final");
   assert.equal(result.status, "completed"); assert.equal(h.state.notifications.length, 1);
   assert.equal(h.state.notifications[0].envelope.source.kind, "codex_native_watch");
+});
+
+test("0.162.1 partial_answer does not become a final response or a completion callback", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  const active = h.state.snapshot.turns[0];
+  active.items.push({ id: "partial", type: "agentMessage", phase: "partial_answer", text: "Still investigating" });
+  assert.deepEqual(nativeTurnProjection(active), {
+    id: "native-one", status: "inProgress", items_complete: true, response_text: ""
+  });
+  const partial = await h.service.reconcile(sent.id);
+  assert.equal(partial.status, "watching"); assert.equal(partial.final_text, undefined);
+  assert.equal(h.state.notifications.length, 0);
+  active.items.push({ id: "final", type: "agentMessage", phase: "final_answer", text: "Exact task finished" });
+  assert.equal((await h.service.reconcile(sent.id)).status, "watching", "message phases do not settle a running native turn");
+  assert.equal(h.state.notifications.length, 0);
+  active.status = "completed";
+  const completed = await h.service.reconcile(sent.id);
+  assert.equal(completed.status, "completed"); assert.equal(completed.final_text, "Exact task finished");
+  assert.deepEqual(nativeTurnProjection(active), {
+    id: "native-one", status: "completed", items_complete: true, final_text: "Exact task finished"
+  });
+  assert.equal(h.state.notifications.length, 1);
+  assert.doesNotMatch(h.state.notifications[0].envelope.event.body, /Still investigating/u);
+  await createCodexNativeTaskService(h.deps).reconcile(sent.id);
+  assert.equal(h.state.notifications.length, 1);
 });
 
 test("Watch binds one active turn, emits actionable questions once, and omits transient RPC IDs", async t => {
