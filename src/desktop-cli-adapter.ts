@@ -1,3 +1,5 @@
+import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
+import { desktopObservationStopped } from "./desktop-task-recovery.js";
 import { desktopControlForCli } from "./desktop-cli-controls.js";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +16,7 @@ import { desktopTaskNeedsReconciliation } from "./desktop-task-service.js";
 import { listDesktopSessions } from "./desktop-list.js";
 import { launchDesktopMonitor, runDesktopMonitor } from "./desktop-monitor.js";
 import type { DesktopCatalogEntry } from "./desktop-session-catalog.js";
-import type { DesktopInteraction, DesktopRequestResponse, DesktopThreadIdentity, DesktopTurn } from "./desktop-types.js";
+import { DesktopIpcError, type DesktopInteraction, type DesktopRequestResponse, type DesktopThreadIdentity, type DesktopTurn } from "./desktop-types.js";
 
 type Options = Record<string, unknown>;
 interface DesktopConversation {
@@ -23,7 +25,8 @@ interface DesktopConversation {
   entry: DesktopCatalogEntry;
 }
 const NATIVE_COMMANDS = ["desktop-list", "monitor-desktop", "reconcile-desktop-watches"];
-const SUPPORTED_COMMANDS = [...NATIVE_COMMANDS, "send", "status", "watch-terminal", "watch-status", "unwatch-terminal", "respond-interaction", "approve", "native-inspect", "permission-options", "set-permissions", "model-options", "set-model", "cancel"];
+const RECOVERY_COMMANDS = ["close", "renew", "recover", "retry-callback"];
+const SUPPORTED_COMMANDS = [...NATIVE_COMMANDS, ...RECOVERY_COMMANDS, "send", "status", "watch-terminal", "watch-status", "unwatch-terminal", "respond-interaction", "approve", "native-inspect", "permission-options", "set-permissions", "model-options", "set-model", "cancel"];
 const str = (value: unknown): string | undefined => typeof value === "string" && value.trim() ? value : undefined;
 const required = (value: unknown, label: string): string => {
   const result = str(value); if (!result) throw new Error(`Desktop ${label} is required`); return result;
@@ -70,11 +73,12 @@ async function reconcileDesktopWatches(runtime: DesktopRuntime): Promise<void> {
 
 async function inspectOrStopDesktopWatch(runtime: DesktopRuntime, command: string | undefined,
   options: Options, watch: string, target: string | undefined): Promise<void> {
-  if (target || options.turn) throw new Error("Desktop Watch accepts exactly one target");
+  if (target || options.turn && (options.watch !== undefined || options.turn !== watch)) throw new Error("Desktop Watch accepts exactly one target");
   const task = runtime.tasks.status(watch);
   const controller = str(options.openclawSession);
   if (controller && controller !== task.controller_session) throw new Error("Desktop Watch belongs to a different controller");
   if (command === "cancel") {
+    if (desktopObservationStopped(task)) throw new Error("Desktop Watch observation has stopped");
     if (!task.native_turn_id) throw new Error("Desktop Watch has no exact native task to interrupt");
     required(controller, "controller session");
     const result = await desktopControlForCli(runtime, command, { ...options, expectedNativeTurnId: task.native_turn_id },
@@ -118,7 +122,8 @@ async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, e
     output({ ...desktopSessionProjection(entry, snapshot, desktopWritesVerified(runtime.compatibility)),
       source: "codex_desktop", latest_turn: latestTurnProjection(current),
       response_state: await desktopResponseStates(runtime, entry.conversationId, snapshot.latestTurnId ?? undefined, str(options.openclawSession)) });
-  } catch { output(desktopSessionProjection(entry, undefined, false, "live_owner_not_confirmed")); }
+  } catch (error) { output(desktopSessionProjection(entry, undefined, false,
+    error instanceof DesktopIpcError ? error.code : "live_owner_not_confirmed")); }
 }
 
 async function sendOrWatchDesktopTask(runtime: DesktopRuntime, command: "send" | "watch-terminal",
@@ -140,11 +145,22 @@ async function sendOrWatchDesktopTask(runtime: DesktopRuntime, command: "send" |
   output(result);
 }
 
+function desktopCliTarget(command: string | undefined, options: Options) {
+  const target = str(options.conversation ?? options.conversationId ?? options.session ?? options.terminal);
+  const recovery = RECOVERY_COMMANDS.includes(command ?? "");
+  if (recovery) assertBackendRecoveryCliTarget(command, options);
+  const turn = str(options.turn);
+  const taskAlias = recovery || command === "status" || command === "watch-status";
+  const watch = str(options.watch) ?? (taskAlias && turn?.startsWith("desktop-watch:") ? turn : undefined);
+  if (!isDesktopConversationId(target) && !watch?.startsWith("desktop-watch:") && !NATIVE_COMMANDS.includes(command ?? "")) return undefined;
+  return { target, watch, recovery };
+}
+
 /** Return false only for non-Desktop targets. Unsupported Desktop actions never fall through to terminals. */
 export async function dispatchDesktopCli(command: string | undefined, options: Options): Promise<boolean> {
-  const target = str(options.conversation ?? options.conversationId ?? options.session ?? options.terminal);
-  const watch = str(options.watch);
-  if (!isDesktopConversationId(target) && !isDesktopWatchId(watch) && !NATIVE_COMMANDS.includes(command ?? "")) return false;
+  const resolved = desktopCliTarget(command, options);
+  if (!resolved) return false;
+  const { target, watch, recovery } = resolved;
   if (!SUPPORTED_COMMANDS.includes(command ?? "")) {
     throw new Error("Desktop supports List, Send, Status, Watch, typed interactions, current-thread settings and exact task cancellation; new/resume are unsupported.");
   }
@@ -153,6 +169,9 @@ export async function dispatchDesktopCli(command: string | undefined, options: O
   if (command === "monitor-desktop") { await runDesktopMonitor(required(watch, "Watch ID"), config); return true; }
   const runtime = (cliDependencies().createDesktopRuntime ?? createDesktopRuntime)(config);
   try {
+    if (recovery) {
+      await recoverDesktopTaskForCli(runtime, command!, options, config, watch); return true;
+    }
     if (command === "reconcile-desktop-watches") {
       await reconcileDesktopWatches(runtime);
       return true;
@@ -193,6 +212,7 @@ async function desktopResponseSubject(runtime: DesktopRuntime, options: Options,
   }
   const task = runtime.tasks.status(watch);
   if (task.controller_session !== controllerSession) throw new Error("Desktop Watch belongs to a different controller");
+  if (desktopObservationStopped(task)) throw new Error("Desktop Watch observation has stopped");
   return { id: task.desktop_id, identity: task.target };
 }
 
@@ -257,4 +277,23 @@ async function desktopResponseStates(runtime: DesktopRuntime, desktopId: string,
     projections.push(desktopResponseProjection(current));
   }
   return projections;
+}
+
+/** Recovery has an exact persisted task address, never a catalog or latest-turn selector. */
+async function recoverDesktopTaskForCli(runtime: DesktopRuntime, command: string, options: Options,
+  config: DesktopRuntimeOptions, id: string | undefined): Promise<void> {
+  if (!isDesktopWatchId(id) || ["watch", "turn", "conversation", "conversationId", "session", "terminal"]
+    .filter(key => options[key] !== undefined).length !== 1) throw new Error("Desktop recovery accepts exactly one --watch or --turn Desktop Watch ID");
+  const controllerSession = required(options.openclawSession, "controller session");
+  const minutes = options.minutes ?? options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes;
+  const task = command === "close" ? runtime.tasks.close(id, { controllerSession, reason: str(options.reason) })
+    : command === "renew" ? await runtime.tasks.renew(id, { controllerSession, ...(minutes === undefined ? {} : { timeoutMs: Number(minutes) * 60_000 }) })
+    : command === "recover" ? await runtime.tasks.recover(id, { controllerSession })
+    : await runtime.tasks.retryCallback(id, { controllerSession, notificationId: str(options.notificationId) });
+  const result = desktopTaskProjection(task, desktopWritesVerified(runtime.compatibility));
+  if (["renew", "recover", "retry-callback"].includes(command) && desktopTaskNeedsReconciliation(task)) {
+    try { result.monitor_pid = await (cliDependencies().launchDesktopMonitor ?? launchDesktopMonitor)(task.id, config); }
+    catch { result.monitor_error = "desktop_monitor_launch_failed"; result.callback_expected = false; }
+  }
+  output(result);
 }

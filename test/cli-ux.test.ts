@@ -21,6 +21,7 @@ test("global help exits successfully", async () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^Usage:/);
     assert.match(result.stdout, /agent-knock-knock --version/);
+    assert.match(result.stdout, /--desktop-view sidebar\|history/u);
   }
 });
 

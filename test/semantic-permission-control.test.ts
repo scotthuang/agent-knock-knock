@@ -171,7 +171,19 @@ else throw new Error("unexpected CLI operation");
   assert.match(slashMutation.text, /Stop before sending the task/u);
   await assert.rejects(registry.execute("agent_knock_knock_set_permissions", "retry-uncertain", parameters()), /requires current choices/u);
   const calls = fs.readFileSync(callsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
-  assert.deepEqual(calls.map((argv) => argv[0]), ["list", "permission-options", "set-permissions", "list", "permission-options", "set-permissions"]);
+  assert.deepEqual(calls.map((argv) => argv[0]), ["permission-options", "set-permissions", "permission-options", "set-permissions"]);
   assert.equal(calls.some((argv) => argv[0] === "approve" || argv[0] === "send"), false);
-  assert.deepEqual(calls[2].slice(0, 9), ["set-permissions", "--terminal", terminalId, "--expected-binding-token", "binding-private", "--expected-catalog-fingerprint", fingerprint, "--mode", "full_access"]);
+  assert.deepEqual(calls[1].slice(0, 9), ["set-permissions", "--terminal", terminalId, "--expected-binding-token", "binding-private", "--expected-catalog-fingerprint", fingerprint, "--mode", "full_access"]);
+});
+
+
+test("canonical backend presets can route from a terminal alias but never manufacture a UI catalog", async () => {
+  const api = { pluginConfig: { storeDir: "/tmp/permission-route" } };
+  const query = await buildPrivatePermissionOptionsArgs(api, { conversation_id: terminalId }, context);
+  assert.deepEqual(query.slice(0, 3), ["permission-options", "--terminal", terminalId]);
+  assert.equal(query.includes("--expected-binding-token"), false);
+  const args = buildPrivateSetPermissionsArgs(api, { conversation_id: terminalId, mode: "full-access" }, context);
+  assert.deepEqual(args.slice(0, 3), ["set-permissions", "--terminal", terminalId]);
+  assert.equal(args.includes("--expected-catalog-fingerprint"), false, "A unavailable backend cannot reuse fabricated terminal authority");
+  assert.throws(() => buildPrivateSetPermissionsArgs(api, { conversation_id: terminalId, mode: "invented" }, context), /requires current choices/u);
 });

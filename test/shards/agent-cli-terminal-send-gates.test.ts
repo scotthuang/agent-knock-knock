@@ -529,7 +529,9 @@ test("approve supports terminal-controlled conversation ids without AKK state", 
     });
     assert.equal(status.status, 0, status.stderr || status.stdout);
     const statusParsed = JSON.parse(status.stdout);
-    assert.equal(statusParsed.conversation_id, conversationId);
+    assert.equal(statusParsed.conversation_id, "terminal:v2:tmux:codex:codex-work:0.1:33389");
+    assert.equal(statusParsed.routing.transport, "terminal");
+    assert.equal(statusParsed.routing.selected_target, statusParsed.conversation_id);
     assert.equal(statusParsed.source, "terminal_control");
     assert.equal(statusParsed.terminal_status.reachable, true);
     assert.equal(statusParsed.terminal_status.approval_state.approvable, true);
@@ -544,7 +546,9 @@ test("approve supports terminal-controlled conversation ids without AKK state", 
 
     assert.equal(approved.status, 0, approved.stderr || approved.stdout);
     const approvedParsed = JSON.parse(approved.stdout);
-    assert.equal(approvedParsed.conversation_id, conversationId);
+    assert.equal(approvedParsed.conversation_id, "terminal:v2:tmux:codex:codex-work:0.1:33389");
+    assert.equal(approvedParsed.routing.transport, "terminal");
+    assert.equal(approvedParsed.routing.selected_target, approvedParsed.conversation_id);
     assert.equal(approvedParsed.source, "terminal_control");
     assert.equal(approvedParsed.approved, true);
     assert.equal(approvedParsed.key, "y");
@@ -608,7 +612,9 @@ test("raw terminal send requires managed background mode while cancel remains di
 
     assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
     const cancelledParsed = JSON.parse(cancelled.stdout);
-    assert.equal(cancelledParsed.conversation_id, conversationId);
+    assert.equal(cancelledParsed.conversation_id, "terminal:v2:tmux:codex:codex-work:0.1:33389");
+    assert.equal(cancelledParsed.routing.transport, "terminal");
+    assert.equal(cancelledParsed.routing.selected_target, cancelledParsed.conversation_id);
     assert.equal(cancelledParsed.source, "terminal_control");
     assert.equal(cancelledParsed.cancel_requested, true);
     assert.equal(cancelledParsed.key, "C-c");

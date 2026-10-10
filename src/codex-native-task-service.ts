@@ -1,3 +1,5 @@
+import { backendObservationStopped, backendRenewalDeadline, isBackendCallbackRetryable,
+  prepareBackendCallbackRetry, stopBackendObservation, closeBackendManagement } from "./backend-task-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createCallbackEnvelope, parseCallbackRoute, type CallbackRouteV1 } from "./callback-transport.js";
@@ -37,11 +39,19 @@ export interface CodexNativeTaskService {
   reconcile(id: string): Promise<CodexNativeTaskRecord>;
   reconcileAll(): Promise<{ tasks: CodexNativeTaskRecord[]; errors: { id: string; error_code: string }[] }>;
   unwatch(id: string, input: { controllerSession: string }): CodexNativeTaskRecord;
+  close(id: string, input: { controllerSession: string; reason?: string }): CodexNativeTaskRecord;
+  renew(id: string, input: { controllerSession: string; timeoutMs?: number }): Promise<CodexNativeTaskRecord>;
+  recover(id: string, input: { controllerSession: string }): Promise<CodexNativeTaskRecord>;
+  retryCallback(id: string, input: { controllerSession: string; notificationId?: string }): Promise<CodexNativeTaskRecord>;
 }
 export const nativeDigest = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
-const live = (task: CodexNativeTaskRecord) => task.status === "awaiting_acceptance" || task.status === "watching";
+const stopped = backendObservationStopped;
+const live = (task: CodexNativeTaskRecord) => !stopped(task) && (task.status === "awaiting_acceptance" || task.status === "watching");
+const unresolvedSend = (task: CodexNativeTaskRecord) => task.kind === "send" && !task.closed_at &&
+  !task.native_turn_id && ["reserved", "uncertain"].includes(task.send_intent?.state ?? "");
 export function codexNativeTaskNeedsReconciliation(task: CodexNativeTaskRecord): boolean {
-  return live(task) || task.notifications.some(n => ["ready", "retry_wait", "leased"].includes(n.status));
+  return task.notifications.some(n => n.status === "leased") ||
+    !stopped(task) && (live(task) || task.notifications.some(n => ["ready", "retry_wait"].includes(n.status)));
 }
 export function nativeErrorCode(error: unknown): string {
   const code = (error as { code?: unknown })?.code;
@@ -102,7 +112,7 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
     return this.repo.withLock(id, () => { const task = this.status(id); operation(task); task.updated_at = this.now().toISOString(); return this.repo.save(task, task.revision); });
   }
   private notify(task: CodexNativeTaskRecord, key: string, body: string, interaction?: NativeInteraction) {
-    if (!task.callback_route) return;
+    if (!task.callback_route || stopped(task)) return;
     const id = `${task.id}:${key}`; if (task.notifications.some(n => n.id === id)) return;
     task.notifications.push({ id, attempts: 0, status: "ready", envelope: createCallbackEnvelope({ route: task.callback_route,
       source: { kind: "codex_native_watch", watch_id: task.id, native_id: task.native_id },
@@ -143,9 +153,9 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
       }
     }
   }
-  private apply(task: CodexNativeTaskRecord, snapshot: CodexNativeSnapshot) {
+  private apply(task: CodexNativeTaskRecord, snapshot: CodexNativeSnapshot, refresh = false) {
     assertSnapshot(task.target, snapshot); task.observed_at = this.now().toISOString(); delete task.observation_error;
-    if (!live(task)) return;
+    if (task.closed_at || ["completed", "failed", "interrupted"].includes(task.status) || !refresh && !live(task)) return;
     this.bindSubmission(task, snapshot);
     if (!task.native_turn_id) return;
     const turn = nativeTurn(snapshot, task.native_turn_id);
@@ -167,17 +177,18 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
   }
   async reconcile(id: string): Promise<CodexNativeTaskRecord> {
     const previous = this.status(id);
-    const recover = previous.status === "timed_out" && previous.send_intent?.state === "uncertain" && !previous.native_turn_id;
+    const recover = !stopped(previous) && previous.status === "timed_out" && unresolvedSend(previous);
     if (live(previous) || recover) {
       let snapshot: CodexNativeSnapshot | undefined; let error: string | undefined;
       try { snapshot = await this.deps.observe(previous.target, previous.native_turn_id ?? previous.send_intent?.receipt_turn_id); }
       catch (caught) { error = nativeErrorCode(caught); }
       this.update(id, task => {
-        if (!live(task) && !(recover && task.status === "timed_out")) return;
+        if (stopped(task) || !live(task) && !(recover && task.status === "timed_out")) return;
+        if (task.revision !== previous.revision) return;
         if (snapshot) { if (recover) task.status = "awaiting_acceptance"; this.apply(task, snapshot); }
         else task.observation_error = error;
         if (live(task) && this.now().getTime() >= Date.parse(task.deadline_at)) {
-          task.status = "timed_out"; this.notify(task, "timed_out", `Codex CLI Watch ${task.id} reached its deadline. The native task may still run; an uncertain send will not be replayed.`);
+          task.status = "timed_out"; this.notify(task, task.renewal_count ? `timed_out:${task.renewal_count}` : "timed_out", `Codex CLI Watch ${task.id} reached its deadline. The native task may still run; an uncertain send will not be replayed.`);
         }
       });
     }
@@ -190,7 +201,7 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
     const sleep = this.deps.sleep ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
     for (let attempt = 0; attempt < attempts; attempt++) {
       const task = this.status(id);
-      if (task.status !== "awaiting_acceptance" || task.native_turn_id || !task.send_intent?.receipt_turn_id ||
+      if (stopped(task) || task.status !== "awaiting_acceptance" || task.native_turn_id || !task.send_intent?.receipt_turn_id ||
         this.now().getTime() >= Date.parse(task.deadline_at)) return;
       if (attempt > 0) {
         if (this.now().getTime() >= deadline) return;
@@ -198,7 +209,7 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
       }
       try {
         const snapshot = await this.deps.observe(task.target, task.send_intent.receipt_turn_id);
-        this.update(id, current => { if (live(current)) this.apply(current, snapshot); });
+        this.update(id, current => { if (live(current) && current.revision === task.revision) this.apply(current, snapshot); });
       } catch (error) {
         this.update(id, current => { if (live(current)) current.observation_error = nativeErrorCode(error); });
       }
@@ -217,7 +228,7 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
     let created = false;
     const reserved = this.repo.withLock(id, () => {
       const existing = this.repo.load(id); if (existing) return this.duplicate(existing, input);
-      if (this.repo.list().some(other => other.kind === "send" && live(other) && !other.native_turn_id && isDeepStrictEqual(other.target, input.target))) {
+      if (this.repo.list().some(other => unresolvedSend(other) && isDeepStrictEqual(other.target, input.target))) {
         throw new CodexNativeTaskError("codex_native_send_pending", "A previous send to this exact thread is awaiting acceptance");
       }
       created = true; return this.repo.save(task, null);
@@ -229,7 +240,7 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
           assertSnapshot(task.target, fresh);
           if (!fresh.loaded || !fresh.canSend) throw new CodexNativeTaskError("thread_not_idle", "Codex CLI thread became busy before send", "not_sent");
           this.update(id, current => {
-            if (current.status !== "awaiting_acceptance" || current.send_intent?.state !== "reserved") throw new CodexNativeTaskError("codex_native_send_cancelled", "Native send is no longer dispatchable", "not_sent");
+            if (stopped(current) || current.status !== "awaiting_acceptance" || current.send_intent?.state !== "reserved") throw new CodexNativeTaskError("codex_native_send_cancelled", "Native send is no longer dispatchable", "not_sent");
             current.send_intent.state = "uncertain";
           });
         } });
@@ -269,13 +280,120 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
     }
     return result;
   }
+  private owned(id: string, controllerSession: string): CodexNativeTaskRecord {
+    const task = this.status(id); this.assertOwner(task, controllerSession); return task;
+  }
+  private assertOwner(task: CodexNativeTaskRecord, controllerSession: string): void {
+    if (task.controller_session !== controllerSession) throw new CodexNativeTaskError("codex_native_controller_mismatch", "Only the owning controller can manage this task");
+  }
+  private assertOpen(task: CodexNativeTaskRecord): void {
+    if (task.closed_at) throw new CodexNativeTaskError("codex_native_task_closed", "Closed tasks cannot resume observation or callbacks");
+  }
+  private suppress(task: CodexNativeTaskRecord, errorCode: string, timeoutOnly = false): void {
+    for (const n of task.notifications) if ((!timeoutOnly || n.envelope.event.type === "codex_native_watch.timed_out") &&
+      ["ready", "retry_wait", "failed"].includes(n.status) && n.outcome?.disposition !== "permanent_failure") {
+      n.status = "failed"; n.outcome = { disposition: "permanent_failure", error_code: errorCode }; delete n.retry_at;
+    }
+  }
   unwatch(id: string, input: { controllerSession: string }): CodexNativeTaskRecord {
+    this.owned(id, input.controllerSession);
     return this.update(id, task => {
-      if (input.controllerSession !== task.controller_session) throw new CodexNativeTaskError("codex_native_controller_mismatch", "Only the owning controller can cancel Watch");
-      if (live(task)) task.status = "cancelled";
-      for (const n of task.notifications) if (["ready", "retry_wait"].includes(n.status)) {
-        n.status = "failed"; n.outcome = { disposition: "permanent_failure", error_code: "codex_native_watch_cancelled" };
-      }
+      this.assertOwner(task, input.controllerSession);
+      if (task.closed_at) return;
+      stopBackendObservation(task, this.now());
+      this.suppress(task, "codex_native_watch_cancelled");
     });
+  }
+  close(id: string, input: { controllerSession: string; reason?: string }): CodexNativeTaskRecord {
+    this.owned(id, input.controllerSession);
+    if (input.reason !== undefined && !input.reason.trim()) throw new CodexNativeTaskError("invalid_argument", "Close reason must be nonempty");
+    return this.update(id, task => {
+      this.assertOwner(task, input.controllerSession);
+      if (task.kind !== "send") throw new CodexNativeTaskError("codex_native_unmanaged_watch", "Passive Watch must use Unwatch");
+      if (task.closed_at) return;
+      closeBackendManagement(task, input, this.now());
+      this.suppress(task, "codex_native_task_closed");
+    });
+  }
+  async recover(id: string, input: { controllerSession: string }): Promise<CodexNativeTaskRecord> {
+    const previous = this.owned(id, input.controllerSession); this.assertOpen(previous);
+    const snapshot = await this.deps.observe(previous.target, previous.native_turn_id ?? previous.send_intent?.receipt_turn_id);
+    const refreshed = this.update(id, task => {
+      this.assertOwner(task, input.controllerSession); this.assertOpen(task);
+      if (task.revision !== previous.revision) throw new CodexNativeTaskError("codex_native_task_changed", "Task changed during recovery; retry against current state");
+      const priorStatus = task.status;
+      if (priorStatus === "cancelled") task.unwatched_at ??= task.updated_at;
+      this.apply(task, snapshot, true);
+      if (["timed_out", "cancelled"].includes(priorStatus) && task.status === "watching") task.status = priorStatus;
+      if (live(task) && this.now().getTime() >= Date.parse(task.deadline_at)) {
+        task.status = "timed_out"; this.notify(task, task.renewal_count ? `timed_out:${task.renewal_count}` : "timed_out",
+          `Codex CLI Watch ${task.id} reached its deadline. The native task may still run; an uncertain send will not be replayed.`);
+      }
+      task.recovered_at = this.now().toISOString();
+      if (["completed", "failed", "interrupted"].includes(task.status)) this.suppress(task, "codex_native_timeout_superseded", true);
+    });
+    if (!stopped(refreshed)) await this.outbox.deliverPending(id);
+    return this.status(id);
+  }
+  async renew(id: string, input: { controllerSession: string; timeoutMs?: number }): Promise<CodexNativeTaskRecord> {
+    const previous = this.owned(id, input.controllerSession); this.assertOpen(previous);
+    backendRenewalDeadline(previous, this.now(), input.timeoutMs);
+    const snapshot = await this.deps.observe(previous.target, previous.native_turn_id ?? previous.send_intent?.receipt_turn_id);
+    let unavailable = false;
+    const refreshed = this.update(id, task => {
+      this.assertOwner(task, input.controllerSession); this.assertOpen(task);
+      if (task.revision !== previous.revision) throw new CodexNativeTaskError("codex_native_task_changed", "Task changed during renewal; retry against current state");
+      const priorStatus = task.status;
+      if (priorStatus === "cancelled") task.unwatched_at ??= task.updated_at;
+      this.apply(task, snapshot, true);
+      if (["completed", "failed", "interrupted"].includes(task.status)) { this.suppress(task, "codex_native_timeout_superseded", true); return; }
+      const exact = task.native_turn_id ? nativeTurn(snapshot, task.native_turn_id) : undefined;
+      if (!exact || exact.status === "inProgress" && !snapshot.loaded) { task.status = priorStatus; unavailable = true; return; }
+      if (exact.status !== "inProgress") {
+        if (!exact.itemsComplete) unavailable = true;
+        else this.suppress(task, "codex_native_timeout_superseded", true);
+        return;
+      }
+      task.deadline_at = backendRenewalDeadline(task, this.now(), input.timeoutMs);
+      task.renewed_at = this.now().toISOString(); task.renewal_count = (task.renewal_count ?? 0) + 1;
+      delete task.unwatched_at; task.status = "watching";
+      this.suppress(task, "codex_native_timeout_superseded", true);
+      this.apply(task, snapshot);
+    });
+    if (unavailable) throw new CodexNativeTaskError("codex_native_exact_turn_unavailable", "Renew requires proof of the original native task");
+    if (!stopped(refreshed)) await this.outbox.deliverPending(id);
+    return this.status(id);
+  }
+  async retryCallback(id: string, input: { controllerSession: string; notificationId?: string }): Promise<CodexNativeTaskRecord> {
+    const previous = this.owned(id, input.controllerSession); this.assertOpen(previous);
+    if (stopped(previous)) throw new CodexNativeTaskError("codex_native_watch_unwatched", "Renew observation before retrying callbacks");
+    const eligible = (task: CodexNativeTaskRecord) => task.notifications.filter(note =>
+      (!input.notificationId || note.id === input.notificationId) && isBackendCallbackRetryable(task, note));
+    const candidates = eligible(previous);
+    if (candidates.length !== 1) throw new CodexNativeTaskError("codex_native_callback_not_retryable", "Select exactly one callback with a retryable failure");
+    const selected = candidates[0];
+    const interactionId = selected.envelope.event.metadata?.interaction_id;
+    const snapshot = typeof interactionId === "string"
+      ? await this.deps.observe(previous.target, previous.native_turn_id ?? previous.send_intent?.receipt_turn_id) : undefined;
+    let stale = false;
+    this.update(id, task => {
+      this.assertOwner(task, input.controllerSession); this.assertOpen(task);
+      if (stopped(task)) throw new CodexNativeTaskError("codex_native_watch_unwatched", "Renew observation before retrying callbacks");
+      const note = eligible(task).find(candidate => candidate.id === selected.id);
+      if (!note || note.attempts !== selected.attempts) throw new CodexNativeTaskError("codex_native_callback_not_retryable", "Callback changed before retry authorization");
+      if (snapshot) {
+        if (task.revision !== previous.revision) throw new CodexNativeTaskError("codex_native_task_changed", "Task changed while checking callback freshness; retry against current state");
+        const priorStatus = task.status;
+        this.apply(task, snapshot, true);
+        if (priorStatus === "timed_out" && task.status === "watching") task.status = priorStatus;
+        if (!snapshot.loaded || !task.native_turn_id || nativeTurn(snapshot, task.native_turn_id)?.status !== "inProgress" ||
+          !snapshot.pendingInteractions.some(item => item.id === interactionId && item.threadId === task.target.threadId && item.turnId === task.native_turn_id)) {
+          note.status = "failed"; note.outcome = { disposition: "permanent_failure", error_code: "codex_native_interaction_resolved" }; stale = true; return;
+        }
+      }
+      prepareBackendCallbackRetry(task, { ...input, notificationId: selected.id }, this.now());
+    });
+    if (stale) throw new CodexNativeTaskError("codex_native_callback_stale", "The callback interaction is no longer pending on the original task");
+    await this.outbox.deliverPending(id, selected.id); return this.status(id);
   }
 }

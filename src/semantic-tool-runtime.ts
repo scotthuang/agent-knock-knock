@@ -1,11 +1,12 @@
 import { isDesktopConversationId } from "./desktop-identity.js";
+import { backendRecoveryToolArgs, formatBackendRecoveryCommandResult, normalizeBackendStatusTarget } from "./backend-recovery-semantic.js";
 import { desktopControlToolArgs, desktopCancelToolArgs } from "./desktop-control-semantic.js";
 import { semanticCommandGuidance, semanticToolDescriptions } from
   "./semantic-tool-descriptions.js";
 import { createHash, randomUUID } from "node:crypto";
 import { desktopApprovalToolArgs, desktopInteractionToolArgs, isDesktopInteractionResponseError, rememberDisplayedDesktopInteractionOffers, desktopSendToolArgs, desktopWatchTarget, validatedDesktopWatchId } from "./desktop-semantic.js";
 import { isNativeInteractionResponseError, nativeApprovalToolArgs, nativeConversationTarget, nativeInteractionToolArgs,
-  nativePermissionToolArgs, nativeSendToolArgs, validatedNativeWatchId } from "./codex-native-semantic.js";
+  nativePermissionToolArgs, nativeSendToolArgs, validatedNativeWatchId, routedCodexTerminalTarget, routedCodexTerminalControlArgs } from "./codex-native-semantic.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -42,6 +43,7 @@ import {
   nativeInspectParameters,
   newThreadParameters,
   reconcileBindingParameters,
+  recoverParameters,
   repairModelControlParameters,
   renewParameters,
   respondInteractionParameters,
@@ -61,9 +63,8 @@ import {
   semanticToolLabel,
   type SemanticToolCatalog
 } from "./semantic-tool-catalog.js";
-import {
-  normalizedTerminalSendResultContract
-} from "./terminal-dispatch-presenter.js";
+import { normalizeTerminalConversationTarget, normalizeConversationSendResult } from "./semantic-conversation-target.js";
+import { normalizedTerminalSendResultContract } from "./terminal-dispatch-presenter.js";
 import {
   bindSemanticToolAsyncRelay,
   bindSemanticToolRelayEnvironment,
@@ -180,6 +181,7 @@ export function createAkkSemanticToolCatalog(
     parameters: watchParameters,
     normalizeTurnIdentity: false,
     buildArgs: (params, toolContext) => {
+      params = normalizeTerminalConversationTarget(params);
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const desktopId = nativeConversationTarget(params) ?? desktopWatchTarget(params);
       const openclawSession =
@@ -199,7 +201,7 @@ export function createAkkSemanticToolCatalog(
       );
       pushOptional(args, "--openclaw-session", openclawSession);
       pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
-      if (desktopId) pushOptional(args, "--codex-home", stringValue(config.codexHome));
+      pushOptional(args, "--codex-home", stringValue(config.codexHome));
       return args;
     }
   });
@@ -250,12 +252,14 @@ export function createAkkSemanticToolCatalog(
     parameters: nativeInspectParameters,
     normalizeTurnIdentity: false,
     buildArgs: async (params, context) => {
+      params = normalizeTerminalConversationTarget(params);
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       const inspection = requiredString(params.inspection, "inspection");
       if (inspection !== "status") {
         throw new Error("inspection must be status");
       }
-      const nativeArgs = nativePermissionToolArgs(params, config, context ?? {}, "status");
+      const nativeArgs = nativePermissionToolArgs(params, config, context ?? {}, "status")
+        ?? routedCodexTerminalControlArgs(params, config, context ?? {}, "status");
       if (nativeArgs) return nativeArgs;
       const desktopArgs = desktopControlToolArgs(params, config, context ?? {}, "status");
       if (desktopArgs) return desktopArgs;
@@ -279,6 +283,7 @@ export function createAkkSemanticToolCatalog(
       ];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       pushOptional(args, "--codex-home", stringValue(config.codexHome));
+      pushOptional(args, "--openclaw-session", stringValue(context?.sessionKey));
       return args;
     },
     rememberResult: (result, _params, context) => rememberDisplayedDesktopInteractionOffers(api, context ?? {}, result)
@@ -547,7 +552,7 @@ export function createAkkSemanticToolCatalog(
     isErrorResult: result => isNativeInteractionResponseError(result) || isDesktopInteractionResponseError(result),
     buildArgs: (params, toolContext) => nativeApprovalToolArgs(params,
       isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}) ?? desktopApprovalToolArgs(api, params,
-      isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}) ?? buildPrivateApprovalArgs(api, params, {
+      isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}) ?? buildPrivateApprovalArgs(api, normalizeTerminalConversationTarget(params), {
       sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
       sessionId: requiredControllerSessionId(toolContext?.sessionId)
     })
@@ -557,8 +562,13 @@ export function createAkkSemanticToolCatalog(
     name: "agent_knock_knock_renew",
     description: semanticToolDescriptions.renew,
     parameters: renewParameters,
-    buildArgs: (params) => {
+    buildArgs: (params, context) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const backend = backendRecoveryToolArgs("renew", params, context ?? {}, {
+        storeDir: resolvePluginStoreDir(config), codexHome: stringValue(config.codexHome),
+        defaultMinutes: config.agentTimeoutMinutes as number | undefined
+      });
+      if (backend) return backend;
       const args = ["renew"];
       pushTurnTarget(args, params);
       pushOptional(args, "--minutes", numberString(params.minutes) ?? numberString(config.agentTimeoutMinutes));
@@ -567,12 +577,18 @@ export function createAkkSemanticToolCatalog(
     }
   });
 
+  registerBackendRecoveryTool(api);
+
   registerCliTool(api, {
     name: "agent_knock_knock_retry_callback",
     description: semanticToolDescriptions.retry_callback,
     parameters: retryCallbackParameters,
-    buildArgs: (params) => {
+    buildArgs: (params, context) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const backend = backendRecoveryToolArgs("retry-callback", params, context ?? {}, {
+        storeDir: resolvePluginStoreDir(config), codexHome: stringValue(config.codexHome)
+      });
+      if (backend) return backend;
       const args = ["retry-callback"];
       pushTurnTarget(args, params);
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
@@ -603,8 +619,12 @@ export function createAkkSemanticToolCatalog(
       semanticToolDescriptions.close,
     parameters: closeParameters,
     isErrorResult: isBlockedTerminalDispatchResult,
-    buildArgs: (params) => {
+    buildArgs: (params, context) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      const backend = backendRecoveryToolArgs("close", params, context ?? {}, {
+        storeDir: resolvePluginStoreDir(config), codexHome: stringValue(config.codexHome)
+      });
+      if (backend) return backend;
       const args = ["close"];
       assertExclusiveRecoveryFence(params);
       pushTurnTarget(args, params);
@@ -630,6 +650,21 @@ export function createAkkSemanticToolCatalog(
   return finishSemanticToolCatalog(api, command);
 }
 
+function registerBackendRecoveryTool(api): void {
+  registerCliTool(api, {
+    name: "agent_knock_knock_recover",
+    description: semanticToolDescriptions.recover,
+    parameters: recoverParameters,
+    normalizeTurnIdentity: false,
+    buildArgs: (params, context) => {
+      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      return backendRecoveryToolArgs("recover", params, context ?? {}, {
+        storeDir: resolvePluginStoreDir(config), codexHome: stringValue(config.codexHome)
+      })!;
+    }
+  });
+}
+
 function registerSemanticListTool(api): void {
   registerCliTool(api, {
     name: "agent_knock_knock_list",
@@ -650,6 +685,9 @@ function registerSemanticListTool(api): void {
       );
       pushOptional(args, "--agent", stringValue(params.agent));
       pushOptional(args, "--status", stringValue(params.status));
+      const desktopView = params.desktop_view ?? "sidebar";
+      if (desktopView !== "sidebar" && desktopView !== "history") throw new Error("desktop_view must be sidebar or history");
+      pushOptional(args, "--desktop-view", desktopView);
       pushOptional(args, "--desktop-search", stringValue(params.desktopSearch));
       pushOptional(args, "--desktop-project", stringValue(params.desktopProject));
       pushOptional(args, "--desktop-cursor", stringValue(params.desktopCursor));
@@ -674,6 +712,7 @@ function registerModelControlTools(api): void {
     buildArgs: async (params, context) => {
       const desktop = desktopControlToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context ?? {}, "model-options");
       if (desktop) return desktop;
+      params = normalizeTerminalConversationTarget(params);
       assertOnlyModelControlParameters(
         params,
         ["terminal_id"],
@@ -701,15 +740,18 @@ function registerModelControlTools(api): void {
       return args;
     },
     rememberResult: (result, params, toolContext) =>
-      params.conversation_id === undefined && rememberDisplayedModelOptionsOffer(
+      (!isRecord(result) || result.source !== "codex_desktop") && rememberDisplayedModelOptionsOffer(
         api,
         toolContext?.sessionKey,
         toolContext?.sessionId,
-        params.terminal_id,
+        normalizeTerminalConversationTarget(params).terminal_id,
         result
       )
   });
+  registerModelControlMutationTools(api);
+}
 
+function registerModelControlMutationTools(api): void {
   registerCliTool(api, {
     name: "agent_knock_knock_repair_model_control",
     description:
@@ -758,7 +800,7 @@ function registerModelControlTools(api): void {
     buildArgs: (params, toolContext) => desktopControlToolArgs(params,
       isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}, "set-model") ?? buildPrivateSetModelArgs(
       api,
-      params,
+      normalizeTerminalConversationTarget(params),
       {
         sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
         sessionId: requiredControllerSessionId(toolContext?.sessionId)
@@ -798,7 +840,10 @@ function registerForegroundIdentificationTools(api): void {
       return args;
     }
   });
+  registerIdentifyAndSendTool(api);
+}
 
+function registerIdentifyAndSendTool(api): void {
   registerCliTool(api, {
     name: "agent_knock_knock_identify_and_send",
     description:
@@ -1029,14 +1074,16 @@ async function handleAkkCommand(
       case "approve":
         return { text: formatApproveCommandResult(result) };
       case "renew":
-        return { text: formatRenewCommandResult(result) };
+        return { text: formatBackendRecoveryCommandResult(result, "renew") ?? formatRenewCommandResult(result) };
+      case "recover":
+        return { text: formatBackendRecoveryCommandResult(result, "recover") ?? formatStatusCommandResult(result) };
       case "retry-callback":
-        return { text: formatRetryCallbackCommandResult(result) };
+        return { text: formatBackendRecoveryCommandResult(result, "retry-callback") ?? formatRetryCallbackCommandResult(result) };
       case "cancel":
         return { text: formatCancelCommandResult(result) };
       case "close":
         return {
-          text: formatCloseCommandResult(result),
+          text: formatBackendRecoveryCommandResult(result, "close") ?? formatCloseCommandResult(result),
           isError: isBlockedTerminalDispatchResult(result)
         };
     }
@@ -1301,6 +1348,7 @@ async function handleAkkLifecycleCommand(
 
 
 function buildStatusCliArgs(api, params, toolContext) {
+  params = normalizeBackendStatusTarget(params);
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
   if (Object.hasOwn(params, "watch_id")) {
     if (
@@ -1333,7 +1381,7 @@ function buildStatusCliArgs(api, params, toolContext) {
     "--reconcile"
   ];
   pushTurnTarget(args, params);
-  if (nativeConversationTarget(params) ?? (typeof params.conversation_id === "string" && params.conversation_id.startsWith("desktop:v1:") ? params.conversation_id : undefined)) {
+  if (params.conversation_id && (toolContext?.sessionKey || nativeConversationTarget(params) || isDesktopConversationId(params.conversation_id))) {
     pushOptional(args, "--openclaw-session", requiredString(toolContext?.sessionKey, "controller session"));
     pushOptional(args, "--codex-home", stringValue(config.codexHome));
   }
@@ -1377,8 +1425,9 @@ async function runSendRequest(
   toolContext,
   messageId?: string
 ): Promise<Record<string, any>> {
+  params = normalizeTerminalConversationTarget(params);
   const nativeArgs = nativeSendToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}, messageId);
-  if (nativeArgs) return runHostAwareCli(api, nativeArgs);
+  if (nativeArgs) return normalizeConversationSendResult(await runHostAwareCli(api, nativeArgs));
   const desktopArgs = desktopSendToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}, messageId);
   if (desktopArgs) return runHostAwareCli(api, desktopArgs);
   if (Object.hasOwn(params, "turn_id")) {
@@ -1400,10 +1449,7 @@ async function runSendRequest(
     const args = ["send", "--turn", turnId];
     pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
     const result = await runHostAwareCli(api, args);
-    return {
-      ...result,
-      ...normalizedTerminalSendResultContract(result)
-    };
+    return normalizeConversationSendResult(result);
   }
   const requestedType = Object.hasOwn(params, "type")
     ? stringValue(params.type)
@@ -1431,7 +1477,7 @@ async function runSendRequest(
     return runDelegate(api, { ...params, messageId }, toolContext);
   }
 
-  const terminalAction = terminalId
+  const terminalAction = terminalId && !routedCodexTerminalTarget(params)
     ? await privateActionArguments(api, {
         tool: "agent_knock_knock_send",
         terminalId,
@@ -1501,11 +1547,9 @@ async function runSendRequest(
   pushOptional(args, "--gateway-method", CALLBACK_METHOD);
   pushOptional(args, "--gateway-session", openclawSession);
   pushOptional(args, "--openclaw-bin", stringValue(config.openclawBin));
+  pushOptional(args, "--codex-home", stringValue(config.codexHome));
   const result = await runHostAwareCli(api, args);
-  return {
-    ...result,
-    ...normalizedTerminalSendResultContract(result)
-  };
+  return normalizeConversationSendResult(result);
 }
 
 

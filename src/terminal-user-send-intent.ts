@@ -73,6 +73,9 @@ export interface TerminalUserSendIntentRepository {
   ): string;
   load(input: TerminalUserSendIntentBoundary):
     TerminalUserSendIntent | undefined;
+  /** Read-only migration evidence, not authority to dispatch to a terminal. */
+  loadMessage(input: Pick<TerminalUserSendIntentBoundary, "messageId">):
+    TerminalUserSendIntent | undefined;
   reserve(input: TerminalUserSendIntentBoundary):
     TerminalUserSendIntentReserveResult;
   cancelProvenZeroInput(input: TerminalUserSendIntentBoundary): boolean;
@@ -355,15 +358,19 @@ export function createTerminalUserSendIntentRepository(
     }
   }
 
-  function load(
-    input: TerminalUserSendIntentBoundary
+  function loadMessage(
+    input: Pick<TerminalUserSendIntentBoundary, "messageId">
   ): TerminalUserSendIntent | undefined {
     const filePath = pathFor(input);
     try {
       const intent = parseIntent(
         readJsonFileNoFollow(filePath, "terminal user-send intent")
       );
-      assertBoundaryMatches(intent, input);
+      if (intent.message_id !== input.messageId) {
+        throw new TerminalUserSendIntentBoundaryConflictError(
+          "terminal user-send intent message identity does not match"
+        );
+      }
       return intent;
     } catch (error) {
       if (isNodeError(error, "ENOENT")) return undefined;
@@ -375,6 +382,12 @@ export function createTerminalUserSendIntentRepository(
       }
       throw classifyIntentStorageError(error, filePath);
     }
+  }
+
+  function load(input: TerminalUserSendIntentBoundary): TerminalUserSendIntent | undefined {
+    const intent = loadMessage(input);
+    if (intent) assertBoundaryMatches(intent, input);
+    return intent;
   }
 
   function save(intent: TerminalUserSendIntent): void {
@@ -477,5 +490,5 @@ export function createTerminalUserSendIntentRepository(
     });
   }
 
-  return { pathFor, load, reserve, cancelProvenZeroInput, complete };
+  return { pathFor, load, loadMessage, reserve, cancelProvenZeroInput, complete };
 }

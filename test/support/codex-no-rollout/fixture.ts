@@ -249,6 +249,8 @@ export function createNoRolloutFixture(
       ...process.env,
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
       AKK_RUNTIME_DIR: runtimeDir,
+      AKK_NATIVE_CODEX_HOMES: JSON.stringify([codexHome]),
+      AKK_DESKTOP_CODEX_HOMES: JSON.stringify([codexHome]),
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
       AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
     },

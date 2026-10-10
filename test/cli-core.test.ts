@@ -36,6 +36,12 @@ import {
   VirtualClock
 } from "./in-process-cli-fixtures.js";
 
+test("CLI List keeps the selected Desktop view and its pagination filters", () => {
+  assert.deepEqual(parseCliCommand(["list", "--desktop-view", "history", "--desktop-cursor", "page-two", "--desktop-limit", "5"]), {
+    command: "list", options: { desktopView: "history", desktopCursor: "page-two", desktopLimit: "5" }
+  });
+});
+
 test("CLI command execution returns output and exit status without process globals", async () => {
   const originalExitCode = process.exitCode;
   const helpOutput: string[] = [];

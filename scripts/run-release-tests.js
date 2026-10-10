@@ -41,7 +41,9 @@ function runNpmScript(script, forwardedArgs = []) {
     ["run", script, ...(forwardedArgs.length > 0 ? ["--", ...forwardedArgs] : [])],
     {
       cwd: repoRoot,
-      env: testProcessEnvironment(),
+      // The explicitly authorized live smoke must still reach its selected
+      // real backends; ordinary test and package checks remain isolated.
+      env: script === "smoke:lifecycle" ? { ...process.env } : testProcessEnvironment(),
       stdio: "inherit"
     }
   );

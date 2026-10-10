@@ -2,13 +2,13 @@ import { EXECUTOR_KINDS } from "./executors.js";
 import { TERMINAL_INTERACTION_LIMITS } from
   "./terminal-interaction-protocol.js";
 
-const desktopConversationSchema = {
-  type: "string", pattern: "^desktop:v1:[A-Za-z0-9_-]+$",
-  description: "Exact Desktop conversation_id from List; never a CLI or terminal selector."
+const terminalOrDesktopConversationSchema = {
+  type: "string", pattern: "^(?:desktop:v1:[A-Za-z0-9_-]+|terminal:v[0-9]+:\\S+)$",
+  description: "Exact listed Desktop or terminal conversation_id; AKK selects the supported route."
 };
-const nativeOrDesktopConversationSchema = {
-  type: "string", pattern: "^(?:desktop|codex-cli):v1:[A-Za-z0-9_-]+$",
-  description: "Exact Desktop or direct Codex CLI conversation_id from List. Use current live capabilities; never construct an ID."
+const listedConversationSchema = {
+  type: "string", pattern: "^(?:(?:desktop|codex-cli):v1:[A-Za-z0-9_-]+|terminal:v[0-9]+:\\S+)$",
+  description: "Exact conversation_id from List. AKK chooses the available transport; never construct an ID."
 };
 const terminalOrNativeTarget = [
   { required: ["terminal_id"], not: { required: ["conversation_id"] } },
@@ -53,7 +53,8 @@ export const respondInteractionParameters = {
     },
     { required: ["conversation_id"], not: { anyOf: [{ required: ["turn_id"] }, { required: ["watch_id"] }] } }
   ],
-  allOf: [{
+  allOf: [{ if: { required: ["conversation_id"], properties: { conversation_id: { pattern: "^terminal:" } } },
+    then: { properties: { interaction_id: { pattern: "^codex-native-interaction:[0-9a-f]{64}$" } } } }, {
     if: { anyOf: [{ required: ["conversation_id"] }, { required: ["watch_id"] }], properties: {
       conversation_id: { pattern: "^desktop:v1:" }, watch_id: { pattern: "^desktop-watch:" }
     } },
@@ -61,9 +62,9 @@ export const respondInteractionParameters = {
       delivery_mode: { enum: ["steer_current_turn"] },
       answers: { maxItems: 16, items: { properties: { response_kind: { enum: ["single_select", "free_text"] } } } }
     } }
-  }],
+  }] as const,
   properties: {
-    conversation_id: nativeOrDesktopConversationSchema,
+    conversation_id: listedConversationSchema,
     turn_id: {
       ...terminalInteractionIdentifierSchema,
       description:
@@ -175,8 +176,8 @@ export const sendParameters = {
   ] },
   properties: {
     conversation_id: {
-      ...nativeOrDesktopConversationSchema,
-      description: "Exact Desktop or direct Codex CLI conversation_id from List. Send once into the loaded original thread and bind an exact task Watch. Use Status for current Desktop or direct CLI typed approvals and questions. Uncertain sends are not automatically replayed."
+      ...listedConversationSchema,
+      description: "Exact conversation_id from List. AKK prefers the backend when it proves the same live thread; otherwise eligible terminal delivery remains available. Read the actual acceptance and Watch receipt. Never repeat an uncertain send."
     },
     turn_id: {
       type: "string",
@@ -276,9 +277,10 @@ export const listParameters = {
   type: "object",
   additionalProperties: false,
   properties: {
+    desktop_view: { type: "string", enum: ["sidebar", "history"], description: "Desktop discovery scope: sidebar (default) follows persisted expanded sidebar membership, not the current scroll viewport; history searches the broader saved catalog. Unconnected rows remain listed." },
     desktopSearch: { type: "string", description: "Search saved Desktop candidates by title, directory or native thread ID; unconfirmed live connections remain listed." },
     desktopProject: { type: "string", description: "Exact Desktop project ID or absolute directory." },
-    desktopCursor: { type: "string", description: "Opaque next_cursor from the preceding Desktop page for the same filters." },
+    desktopCursor: { type: "string", description: "Opaque next_cursor from the preceding Desktop page for the same view and filters." },
     desktopLimit: { type: "integer", minimum: 1, maximum: 100, description: "Desktop page size (default 30)." },
     agent: {
       type: "string",
@@ -310,16 +312,17 @@ export const watchParameters = {
   oneOf: [{ required: ["terminal_id"], not: { required: ["conversation_id"] } },
     { required: ["conversation_id"], not: { required: ["terminal_id"] } }],
   properties: {
-    conversation_id: { ...nativeOrDesktopConversationSchema,
-      description: "Exact Desktop or direct Codex CLI conversation_id from List. Observe the currently active exact native turn without sending a task." },
+    conversation_id: { ...listedConversationSchema,
+      description: "Exact conversation_id from List. AKK chooses the available backend or terminal observation path. Use the returned watch_id for this observation; activity-only fallback does not prove exact task completion." },
     terminal_id: {
       type: "string",
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
         "Exact full terminal_id selected by the user, normally copied from the " +
-          "current terminal row. Watch is read-only: AKK prefers an exact task anchor " +
-          "and otherwise uses a warning-bearing best-effort terminal-activity fallback."
+          "current terminal row. AKK prefers an exact backend task, resolving an idle alias " +
+          "with a safe native status probe when needed; otherwise eligible terminal " +
+          "observation reports its exact-task or best-effort evidence."
     },
     hardTimeoutMinutes: {
       type: "number",
@@ -367,7 +370,7 @@ export const nativeInspectParameters = {
   required: ["inspection"],
   oneOf: terminalOrNativeTarget,
   properties: {
-    conversation_id: nativeOrDesktopConversationSchema,
+    conversation_id: listedConversationSchema,
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -397,7 +400,7 @@ export const modelOptionsParameters = {
   additionalProperties: false,
   oneOf: terminalOrNativeTarget,
   properties: {
-    conversation_id: desktopConversationSchema,
+    conversation_id: terminalOrDesktopConversationSchema,
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -419,14 +422,14 @@ export const permissionOptionsParameters = {
   additionalProperties: false,
   oneOf: terminalOrNativeTarget,
   properties: {
-    conversation_id: nativeOrDesktopConversationSchema,
+    conversation_id: listedConversationSchema,
     terminal_id: {
       type: "string",
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description: "Exact full terminal_id from the current terminal row's advertised " +
-        "permission_options action. Codex must be idle with an empty Composer; AKK " +
-        "verifies its physical and native thread identities before closed inspection."
+        "permission_options action. AKK prefers the exact backend; terminal fallback requires " +
+        "an idle empty Composer and verified physical/native identities."
     }
   }
 };
@@ -437,7 +440,7 @@ export const setPermissionsParameters = {
   required: ["mode"],
   oneOf: terminalOrNativeTarget,
   properties: {
-    conversation_id: nativeOrDesktopConversationSchema,
+    conversation_id: listedConversationSchema,
     terminal_id: {
       type: "string",
       minLength: 1,
@@ -484,7 +487,7 @@ export const setModelParameters = {
   oneOf: terminalOrNativeTarget,
   allOf: [{ if: { required: ["terminal_id"] }, then: { not: { required: ["collaboration_mode"] } } }],
   properties: {
-    conversation_id: desktopConversationSchema,
+    conversation_id: terminalOrDesktopConversationSchema,
     collaboration_mode: { type: "string", enum: ["plan", "default"],
       description: "Desktop only: optional current-thread collaboration mode. Omit to retain the current mode." },
     terminal_id: {
@@ -643,49 +646,70 @@ export const resumeThreadParameters = {
   }
 };
 
+const backendWatchSchema = {
+  type: "string", pattern: "^(?:desktop-watch|codex-cli-watch):[A-Za-z0-9_-]{8,128}$",
+  description: "Exact persisted Codex CLI or Desktop task watch_id. Never use a conversation or current/latest selector."
+};
+const recoveryTargetChoice = [
+  { required: ["watch_id"], not: { anyOf: [{ required: ["turn_id"] }, { required: ["conversation_id"] }] } },
+  { required: ["turn_id"], not: { anyOf: [{ required: ["watch_id"] }, { required: ["conversation_id"] }] } },
+  { required: ["conversation_id"], not: { anyOf: [{ required: ["watch_id"] }, { required: ["turn_id"] }] } }
+];
+const legacyRecoveryConversation = {
+  type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli)(?:-watch)?:)", deprecated: true,
+  description: "Deprecated legacy terminal Turn alias only. Backend conversation_id cannot target task recovery."
+};
+
 export const renewParameters = {
   type: "object",
   additionalProperties: false,
-  not: { required: ["turn_id", "conversation_id"] },
-  anyOf: [
-    { required: ["turn_id"] },
-    { required: ["conversation_id"] }
-  ],
+  oneOf: recoveryTargetChoice,
   properties: {
+    watch_id: backendWatchSchema,
     turn_id: {
-      type: "string",
-      description: "Authoritative AKK turn id whose monitoring should be renewed."
+      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli):)",
+      description: "Exact managed terminal Turn or send-produced backend turn_id (the original task's Watch ID)."
     },
-    conversation_id: {
-      type: "string",
-      deprecated: true,
-      description: "Deprecated compatibility alias for turn_id."
-    },
+    conversation_id: legacyRecoveryConversation,
     minutes: {
       type: "number",
       exclusiveMinimum: 0,
-      description: "New terminal inactivity timeout in minutes."
+      description: "Positive monitoring extension in minutes: backend task deadline or terminal inactivity timeout."
     }
+  }
+};
+
+export const recoverParameters = {
+  type: "object",
+  additionalProperties: false,
+  oneOf: [
+    { required: ["watch_id"], not: { required: ["turn_id"] } },
+    { required: ["turn_id"], not: { required: ["watch_id"] } }
+  ],
+  properties: {
+    watch_id: backendWatchSchema,
+    turn_id: { ...backendWatchSchema, description: "Exact send-produced backend turn_id, which aliases the original task's Watch ID." }
   }
 };
 
 export const retryCallbackParameters = {
   type: "object",
   additionalProperties: false,
-  not: { required: ["turn_id", "conversation_id"] },
-  anyOf: [
-    { required: ["turn_id"] },
-    { required: ["conversation_id"] }
-  ],
+  oneOf: recoveryTargetChoice,
+  allOf: [{ if: { required: ["notification_id"] }, then: { anyOf: [
+    { required: ["watch_id"] },
+    { required: ["turn_id"], properties: { turn_id: { pattern: "^(?:desktop-watch|codex-cli-watch):[A-Za-z0-9_-]{8,128}$" } } }
+  ] } }],
   properties: {
+    watch_id: backendWatchSchema,
     turn_id: {
-      type: "string",
-      description: "Authoritative AKK turn id whose persisted callback should be retried."
+      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli):)",
+      description: "Exact managed terminal Turn or send-produced backend turn_id whose persisted callback should be retried."
     },
-    conversation_id: {
-      type: "string",
-      deprecated: true,
-      description: "Deprecated compatibility alias for turn_id."
+    conversation_id: legacyRecoveryConversation,
+    notification_id: {
+      type: "string", minLength: 1,
+      description: "Backend only: exact notification_id from Status. Omit only when exactly one notification is eligible; accepted, uncertain, or leased delivery cannot be retried."
     }
   }
 };
@@ -764,24 +788,23 @@ export const cancelParameters = {
 export const closeParameters = {
   type: "object",
   additionalProperties: false,
-  not: {
-    anyOf: [
-      { required: ["turn_id", "conversation_id"] },
-      { required: ["expected_message_id", "expected_transition_id"] }
-    ]
-  },
-  anyOf: [
-    { required: ["turn_id"] },
-    { required: ["conversation_id"] }
-  ],
+  oneOf: recoveryTargetChoice,
+  not: { required: ["expected_message_id", "expected_transition_id"] },
+  allOf: [{
+    if: { anyOf: [
+      { required: ["watch_id"] },
+      { required: ["turn_id"], properties: { turn_id: { pattern: "^(?:desktop-watch|codex-cli-watch):" } } }
+    ] },
+    then: { not: { anyOf: [{ required: ["expected_message_id"] }, { required: ["expected_transition_id"] }] } }
+  }],
   properties: {
+    watch_id: { ...backendWatchSchema, description: "Exact send-managed backend task Watch ID to release from AKK management. Passive Watches use unwatch." },
     turn_id: {
-      type: "string",
-      description: "Authoritative AKK turn id whose managed record should be closed."
+      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli):)",
+      description: "Exact managed terminal Turn or send-produced backend turn_id whose management should be closed."
     },
     conversation_id: {
-      type: "string",
-      deprecated: true,
+      ...legacyRecoveryConversation,
       description:
         "Deprecated legacy Turn alias, or an exact list-prefilled raw-terminal/orphan " +
           "recovery selector. Managed Turn close must use turn_id; never construct or " +
@@ -822,7 +845,7 @@ export const approveParameters = {
     { required: ["watch_id", "interaction_id"] }
   ],
   properties: {
-    conversation_id: nativeOrDesktopConversationSchema,
+    conversation_id: listedConversationSchema,
     watch_id: { type: "string", pattern: "^(?:desktop-watch|codex-cli-watch):[A-Za-z0-9_-]{8,128}$",
       description: "Exact Desktop or direct Codex CLI Watch whose Status advertises this approval." },
     interaction_id: { ...terminalInteractionIdentifierSchema,

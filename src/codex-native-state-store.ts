@@ -1,3 +1,4 @@
+import { assertBackendRecoveryFields, assertBackendRecoveryUpdate, type BackendRecoveryFields, type BackendRetryFields } from "./backend-task-recovery.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   createCallbackEnvelope, parseCallbackAttemptOutcome, parseCallbackRoute,
@@ -20,7 +21,7 @@ export interface CodexNativeSendIntent {
   receipt_turn_id?: string;
   error_code?: string;
 }
-export interface CodexNativeNotification {
+export interface CodexNativeNotification extends BackendRetryFields {
   id: string;
   envelope: CallbackEnvelopeV1;
   status: "ready" | "leased" | "retry_wait" | "accepted" | "failed" | "uncertain";
@@ -32,7 +33,7 @@ export interface CodexNativeNotification {
 }
 /** Connection-local request IDs are deliberately absent from persisted interaction authority. */
 export type PersistedNativeInteraction = Omit<NativeInteraction, "requestId">;
-export interface CodexNativeTaskRecord {
+export interface CodexNativeTaskRecord extends BackendRecoveryFields {
   schema: "agent-knock-knock/codex-native-task";
   version: 1;
   revision: number;
@@ -131,12 +132,14 @@ function assertTaskNotifications(r: CodexNativeTaskRecord): void {
 }
 function assertNotificationDelivery(n: CodexNativeNotification): void {
   if (n.outcome) parseCallbackAttemptOutcome(n.outcome);
+  if (n.retry_budget_until !== undefined && (!Number.isSafeInteger(n.retry_budget_until) || n.retry_budget_until < 1)) throw new Error("Invalid native callback retry budget");
   if (n.status === "leased" && (!nonblank(n.attempt_id) || !validTime(n.lease_expires_at))) throw new Error("Invalid native callback lease");
   if (n.status === "retry_wait" && (!validTime(n.retry_at) || n.outcome?.disposition !== "retryable_failure")) throw new Error("Invalid native callback retry");
 }
 export function assertCodexNativeTaskRecord(value: unknown): asserts value is CodexNativeTaskRecord {
   const record = value as CodexNativeTaskRecord;
   assertTaskSchema(record);
+  assertBackendRecoveryFields(record);
   assertTaskAnchor(record);
   assertTaskIntent(record);
   assertTaskInteractions(record);
@@ -146,8 +149,14 @@ export function createCodexNativeStateStore(storeDir: string, locks: { acquire(l
   return createNativeRecordRepository({ storeDir, directory: "codex-native-tasks", prefix: "codex-cli-watch:",
     acquire: locks.acquire, assert: assertCodexNativeTaskRecord,
     assertUpdate: (previous, next) => {
-      for (const key of ["id", "watch_id", "native_id", "target", "controller_session", "kind", "created_at", "deadline_at", "callback_route"] as const) {
+      for (const key of ["id", "watch_id", "native_id", "target", "controller_session", "kind", "created_at", "callback_route"] as const) {
         if (!isDeepStrictEqual(previous[key], next[key])) throw new Error(`Codex native immutable ${key} changed`);
+      }
+      assertBackendRecoveryUpdate(previous, next);
+      for (const before of previous.notifications) {
+        const after = next.notifications.find(note => note.id === before.id);
+        if (!after || !isDeepStrictEqual(before.envelope, after.envelope) || after.attempts < before.attempts ||
+          (after.retry_budget_until ?? 0) < (before.retry_budget_until ?? 0)) throw new Error("Codex native notification identity or attempts cannot change");
       }
       if (previous.native_turn_id && next.native_turn_id !== previous.native_turn_id) throw new Error("Codex native exact turn anchor cannot change");
       if (previous.send_intent) {

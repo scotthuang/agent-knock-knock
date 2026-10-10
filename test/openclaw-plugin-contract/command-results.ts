@@ -131,7 +131,10 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     });
     const watchTool = tools.get("agent_knock_knock_watch");
     assert.ok(watchTool, "agent_knock_knock_watch must be registered");
-    assert.deepEqual(watchTool.parameters?.required, ["terminal_id"]);
+    assert.deepEqual(watchTool.parameters?.oneOf, [
+      { required: ["terminal_id"], not: { required: ["conversation_id"] } },
+      { required: ["conversation_id"], not: { required: ["terminal_id"] } }
+    ]);
     assert.equal(watchTool.parameters?.additionalProperties, false);
     assert.equal(
       Object.hasOwn(
@@ -142,7 +145,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     );
     assert.match(
       watchTool.description ?? "",
-      /read-only[\s\S]*exact selected[\s\S]*best-effort terminal activity[\s\S]*sends no terminal input/u
+      /read-only[\s\S]*exact selected[\s\S]*best-effort terminal activity[\s\S]*closed native status probe[\s\S]*never adopts or blocks/u
     );
     const unwatchTool = tools.get("agent_knock_knock_unwatch");
     assert.ok(unwatchTool, "agent_knock_knock_unwatch must be registered");
@@ -159,26 +162,15 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       assert.ok(definition, `${name} must be registered`);
       assert.ok(definition.parameters?.properties?.turn_id);
       assert.ok(definition.parameters?.properties?.conversation_id);
-      assert.deepEqual(definition.parameters?.anyOf, [
-        { required: ["turn_id"] },
-        { required: ["conversation_id"] }
-      ]);
-      assert.deepEqual(
-        definition.parameters?.not,
-        name === "agent_knock_knock_close"
-          ? {
-              anyOf: [
-                { required: ["turn_id", "conversation_id"] },
-                {
-                  required: [
-                    "expected_message_id",
-                    "expected_transition_id"
-                  ]
-                }
-              ]
-            }
-          : { required: ["turn_id", "conversation_id"] }
-      );
+      assert.ok(definition.parameters?.properties?.watch_id);
+      const targetNames = ["conversation_id", "turn_id", "watch_id"];
+      const choices = definition.parameters?.oneOf ?? [];
+      assert.deepEqual(choices.map((choice) => choice.required?.[0]).sort(), targetNames);
+      for (const choice of choices) {
+        assert.equal(choice.required?.length, 1);
+        assert.deepEqual(choice.not?.anyOf?.map((item) => item.required?.[0]).sort(),
+          targetNames.filter((target) => target !== choice.required?.[0]));
+      }
     }
     const sendTurnSchema = tools.get("agent_knock_knock_send")
       ?.parameters?.properties?.turn_id;
@@ -189,7 +181,6 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     );
     for (const name of [
       "agent_knock_knock_status",
-      "agent_knock_knock_cancel",
       "agent_knock_knock_close"
     ]) {
       const conversationSchema = tools.get(name)?.parameters?.properties
@@ -200,7 +191,14 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
       assert.match(description, /raw-terminal|raw terminal/u, name);
       assert.match(description, /never construct|never guess/u, name);
     }
+    const cancelProperties = tools.get("agent_knock_knock_cancel")?.parameters?.properties;
+    assert.match(String(cancelProperties?.conversation_id?.description),
+      /Exact Desktop conversation plus expected_native_turn_id[\s\S]*list-prefilled unmanaged terminal cancel selector/u);
+    assert.equal(cancelProperties?.watch_id?.pattern, "^desktop-watch:[A-Za-z0-9_-]{8,128}$");
     const closeTool = tools.get("agent_knock_knock_close");
+    assert.deepEqual(closeTool?.parameters?.not, {
+      required: ["expected_message_id", "expected_transition_id"]
+    });
     assert.equal(closeTool?.parameters?.additionalProperties, false);
     assert.ok(closeTool?.parameters?.properties?.expected_message_id);
     assert.ok(closeTool?.parameters?.properties?.expected_transition_id);
@@ -217,10 +215,16 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
     assert.ok(approveTool);
     assert.deepEqual(approveTool.parameters?.anyOf, [
       { required: ["turn_id"] },
-      { required: ["terminal_id"] }
+      { required: ["terminal_id"] },
+      { required: ["conversation_id", "interaction_id"] },
+      { required: ["watch_id", "interaction_id"] }
     ]);
     assert.deepEqual(approveTool.parameters?.not, {
-      required: ["turn_id", "terminal_id"]
+      anyOf: [
+        { required: ["turn_id", "terminal_id"] }, { required: ["turn_id", "conversation_id"] },
+        { required: ["turn_id", "watch_id"] }, { required: ["terminal_id", "conversation_id"] },
+        { required: ["terminal_id", "watch_id"] }, { required: ["conversation_id", "watch_id"] }
+      ]
     });
     assert.deepEqual(
       approveTool.parameters?.properties?.decision?.enum,
@@ -241,7 +245,7 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
         turn_id: "turn-managed",
         terminal_id: "terminal:v2:tmux:codex:work:0.0:1234"
       }),
-      /approve requires exactly one of turn_id or terminal_id/u
+      /Codex terminal conversation accepts exactly one target/u
     );
     await assert.rejects(
       () => approveTool.execute!("approval-without-offer", {
@@ -288,7 +292,9 @@ test("OpenClaw controls distinguish managed turns from list-prefilled raw termin
           turn_id: "turn-modern",
           conversation_id: "turn-legacy-other"
         }),
-        /only one of turn_id or conversation_id/u,
+        name === "agent_knock_knock_status" || name === "agent_knock_knock_cancel"
+          ? /only one of turn_id or conversation_id/u
+          : /exactly one of watch_id, turn_id or conversation_id/u,
         name
       );
     }

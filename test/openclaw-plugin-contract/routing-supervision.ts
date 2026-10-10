@@ -22,6 +22,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
   const eventLogPath = path.join(tempDir, "events.ndjson");
   const followCurrentTerminalId =
     "terminal:v2:tmux:codex:work:0.0:1234";
+  const claudeTerminalId = "terminal:v2:tmux:claude:work:0.1:5678";
   let sendTool: ToolDefinition | undefined;
   let sendToolFactory: ToolFactory | undefined;
   let respondTool: ToolDefinition | undefined;
@@ -57,12 +58,12 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
           delivered: true,
           background: true
         })};`,
-        `const result = args[0] === "list" ? { terminals: [{`,
+        `const result = args[0] === "list" ? { terminals: [terminalId, ${JSON.stringify(claudeTerminalId)}].map(terminalId => ({`,
         `  id: terminalId, available_actions: { send: {`,
         `    tool: "agent_knock_knock_send",`,
         `    arguments: { selector: terminalId, expected_terminal_token: "terminal-token-current", expected_managed_terminal_token: "managed-terminal-token-current", request: "continue" }`,
         `  } }`,
-        `}] } : sendResult;`,
+        `})) } : sendResult;`,
         "process.stdout.write(JSON.stringify(result));"
       ].join("\n")
     );
@@ -280,22 +281,24 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       terminal_id: followCurrentTerminalId,
       request: "Continue in the human-selected terminal context"
     });
+    await sendTool?.execute?.("tool-call-claude-terminal", {
+      terminal_id: claudeTerminalId,
+      request: "Preserve exact terminal authority on the Claude route"
+    });
     await reconciliationService?.stop?.();
     const allCalls = fs.readFileSync(callsPath, "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
-    const reconciliationCalls = allCalls.filter(
-      ([command]) => command === "reconcile-monitors" ||
-        command === "reconcile-watches"
-    );
+    const reconciliationCommands = ["reconcile-monitors", "reconcile-watches",
+      "reconcile-desktop-watches", "reconcile-codex-native-watches"];
+    const reconciliationCalls = allCalls.filter(([command]) => reconciliationCommands.includes(command!));
     const privateListCalls = allCalls.filter(([command]) => command === "list");
     const calls = allCalls.filter(
-      ([command]) => command !== "reconcile-monitors" &&
-        command !== "reconcile-watches" &&
-        command !== "list"
+      ([command]) => !reconciliationCommands.includes(command!) && command !== "list"
     );
-    assert.equal(privateListCalls.length, 2);
+    assert.equal(privateListCalls.length, 1,
+      "only Claude refreshes its private terminal offer here; Codex aliases defer route selection to the CLI");
     assert.equal(calls[0]?.[0], "delegate");
     assert.equal(calls[0]?.includes("--agent"), false);
     assert.equal(calls[0]?.includes("--workspace"), false);
@@ -340,8 +343,8 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       "send",
       "--conversation",
       followCurrentTerminalId,
-      "--expected-terminal-token",
-      "terminal-token-current"
+      "--message",
+      "Discover the initial terminal"
     ]);
     assert.equal(
       optionValue(calls[3] ?? [], "--message"),
@@ -349,7 +352,8 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.equal(
       optionValue(calls[3] ?? [], "--expected-managed-terminal-token"),
-      "managed-terminal-token-current"
+      undefined,
+      "the selected terminal route obtains its own private fence after routing"
     );
     assert.equal(
       optionValue(calls[3] ?? [], "--message-id"),
@@ -389,10 +393,9 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.deepEqual(
       reconciliationCalls.map(([command]) => command),
-      ["reconcile-monitors", "reconcile-watches"]
+      reconciliationCommands
     );
-    assert.equal(reconciliationCalls[0]?.includes("--workspace"), false);
-    assert.equal(reconciliationCalls[1]?.includes("--workspace"), false);
+    assert.ok(allCalls.every((args) => !args.includes("--workspace")));
     assert.notEqual(
       optionValue(calls[6] ?? [], "--message-id"),
       expectedToolCall1MessageId,
@@ -412,8 +415,8 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       "send",
       "--conversation",
       followCurrentTerminalId,
-      "--expected-terminal-token",
-      "terminal-token-current"
+      "--message",
+      "Continue in the human-selected terminal context"
     ]);
     assert.equal(
       optionValue(calls[9] ?? [], "--message"),
@@ -421,8 +424,21 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
     );
     assert.equal(
       optionValue(calls[9] ?? [], "--expected-managed-terminal-token"),
-      "managed-terminal-token-current"
+      undefined
     );
+    for (const call of [calls[3]!, calls[9]!]) {
+      assert.equal(optionValue(call, "--expected-terminal-token"), undefined);
+      assert.equal(optionValue(call, "--openclaw-session"), "agent:test:main");
+    }
+    assert.deepEqual(calls[10]?.slice(0, 5), [
+      "send", "--conversation", claudeTerminalId,
+      "--expected-terminal-token", "terminal-token-current"
+    ]);
+    assert.equal(optionValue(calls[10]!, "--expected-managed-terminal-token"),
+      "managed-terminal-token-current");
+    assert.equal(optionValue(calls[10]!, "--message"),
+      "Preserve exact terminal authority on the Claude route");
+    assert.equal(optionValue(calls[10]!, "--openclaw-session"), "agent:test:main");
   } finally {
     await reconciliationService?.stop?.();
     fs.rmSync(tempDir, { recursive: true, force: true });

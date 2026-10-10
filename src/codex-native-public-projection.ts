@@ -1,3 +1,4 @@
+import { backendObservationStopped, backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { createHash } from "node:crypto";
 import { createCodexNativeConversationId } from "./codex-native-identity.js";
 import { parseCodexNativeConversationId } from "./codex-native-identity.js";
@@ -167,21 +168,27 @@ export function codexNativeSessionProjection(identity: CodexNativeIdentity, snap
 
 export function codexNativeTaskProjection(task: CodexNativeTaskRecord) {
   const intent = task.send_intent;
-  const active = task.status === "watching" || task.status === "awaiting_acceptance";
-  const notifications = task.notifications.map(note => ({ id: note.id, status: note.status, attempts: note.attempts,
+  const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
+  const stopped = backendObservationStopped(task);
+  const active = !stopped && (task.status === "watching" || task.status === "awaiting_acceptance");
+  const notifications = task.notifications.map(note => ({ id: note.id, notification_id: note.id, status: note.status, attempts: note.attempts,
     ...(note.outcome && "error_code" in note.outcome ? { error_code: note.outcome.error_code } : {}) }));
   return {
-    watch_id: task.id, conversation_id: task.native_id, source: "codex_cli", status: task.status,
+    watch_id: task.id, conversation_id: task.native_id, source: "codex_cli", status: task.closed_at ? "closed" : task.status,
+    ...recovery, observation_status: task.status, observation_active: active,
+    available_actions: recovery_actions,
     native_thread_id: task.target.threadId, native_turn_id: task.native_turn_id ?? null,
     observation_mode: task.native_turn_id ? "exact_task" : "pending_acceptance", anchor_state: task.native_turn_id ? "verified" : "pending",
     created_at: task.created_at, updated_at: task.updated_at, observed_at: task.observed_at,
     observation_error: task.observation_error, final_text: task.final_text,
     pending_interaction_count: task.pending_interactions.length,
     interaction_state: task.pending_interactions.map(item => nativeInteractionProjection(item, task.native_id, task.id)),
-    callback_configured: Boolean(task.callback_route), callback_expected: Boolean(task.callback_route && task.status !== "cancelled" &&
+    callback_configured: Boolean(task.callback_route), callback_expected: Boolean(task.callback_route && !stopped &&
       (active || notifications.some(note => ["ready", "leased", "retry_wait"].includes(note.status)))),
     callback_notifications: notifications,
-    capabilities: { callback: Boolean(task.callback_route), interaction_notify: active && Boolean(task.callback_route),
+    capabilities: { close: task.kind === "send" && !task.closed_at, renew: !task.closed_at, recover: !task.closed_at,
+      retry_callback: !stopped && task.notifications.some(note => ["failed", "retry_wait"].includes(note.status) && note.outcome?.disposition === "retryable_failure"),
+      callback: Boolean(task.callback_route) && !stopped, interaction_notify: active && Boolean(task.callback_route),
       interaction_respond: active, approve: active },
     ...(intent ? { message_id: intent.message_id, delivered: intent.state === "accepted", send_state: intent.state,
       delivery_receipt: intent.state === "accepted" ? "native_task_verified" : intent.state === "not_sent" ? "not_sent" : "acceptance_unproven",

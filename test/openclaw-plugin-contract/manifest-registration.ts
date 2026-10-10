@@ -114,6 +114,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     "agent_knock_knock_respond_interaction",
     "agent_knock_knock_approve",
     "agent_knock_knock_renew",
+    "agent_knock_knock_recover",
     "agent_knock_knock_retry_callback",
     "agent_knock_knock_cancel",
     "agent_knock_knock_close"
@@ -123,7 +124,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "95cf1e0b012bff6ec06e925d1414af959b3cdc5f3691791e5fa92f3ce3ab7a4e"
+    "c87bacbfd7e71b07b6e09e8b7bbe61f00dcbdcb03a271494ef30d819c831a41a"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.match(
@@ -137,11 +138,12 @@ test("OpenClaw runtime registrations match the published manifest", () => {
 
   const listTool = toolDefinitions.get("agent_knock_knock_list");
   assert.ok(listTool);
-  assert.match(listTool.description ?? "", /compact projection/u);
+  assert.match(listTool.description ?? "", /List conversations and Watches/u);
+  assert.match(listTool.description ?? "", /only proven exact terminal\/backend matches/u);
   assert.match(listTool.description ?? "", /available_actions/u);
   assert.match(listTool.description ?? "", /action_inputs/u);
   assert.match(listTool.description ?? "", /agent-knock-knock skill/u);
-  assert.match(listTool.description ?? "", /privately revalidates/u);
+  assert.match(listTool.description ?? "", /mutations revalidate privately/u);
   assert.ok(
     (listTool.description ?? "").length < 500,
     "static List semantics belong in the bundled skill"

@@ -32,8 +32,22 @@ test("catalog-only Desktop conversations remain selectable without claiming live
   const result = desktopSessionProjection(entry);
   assert.equal(result.conversation_id, conversationId); assert.equal(result.creator_originator, "codex-tui");
   assert.equal(result.connection_state, "unconfirmed"); assert.equal(result.activity_state, "unknown");
+  assert.equal(result.can_send_reason, "live_owner_not_confirmed");
   assert.deepEqual(result.capabilities, { status: true, send: false, watch: false, interaction_notify: false, interaction_respond: false, approve: false, set_permissions: false, set_model: false, cancel: false });
   assert.deepEqual(result.available_actions, { status: { tool: "agent_knock_knock_status", input: { conversation_id: conversationId } } });
+});
+
+test("sidebar membership remains visible when Desktop has unloaded its owner", () => {
+  const result = desktopSessionProjection({ ...entry,
+    sidebar: { section: "project", projectId: "project-one", projectName: "Avatar" } }, undefined, false, "no_live_owner");
+  assert.equal(result.sidebar_project_name, "Avatar");
+  assert.equal(result.sidebar_section, "project");
+  assert.equal(result.conversation_id, conversationId);
+  assert.equal(result.observation_error, "no_live_owner");
+  assert.equal(result.can_send_reason, "no_live_owner");
+  assert.match(String(result.manual_action), /Open this conversation in Desktop/);
+  assert.equal((result.capabilities as any).send, false);
+  assert.equal((result.available_actions as any).send, undefined);
 });
 
 test("Desktop send requires a verified write contract; Watch requires a uniquely active exact tail", () => {
@@ -85,4 +99,19 @@ test("completion callback expectation follows its outbox and manual interaction 
   assert.equal((pending.capabilities as any).interaction_respond, false);
   assert.equal((pending.capabilities as any).approve, false);
   assert.equal(desktopTaskProjection(task({ status: "cancelled" })).callback_expected, false);
+});
+
+test("Desktop task projections retain observation evidence while distinguishing management and recovery actions", () => {
+  const stopped = task({ status: "timed_out", unwatched_at: "2026-10-09T02:00:00Z" });
+  const output = desktopTaskProjection(stopped);
+  assert.equal(output.management_state, "managed"); assert.equal(output.observation_state, "stopped");
+  assert.equal(output.status, "timed_out"); assert.equal(output.callback_expected, false);
+  assert.equal(output.turn_id, stopped.id);
+  assert.deepEqual((output.available_actions as any).recover.input, { watch_id: stopped.id });
+  const closed = desktopTaskProjection({ ...stopped, closed_at: "2026-10-09T03:00:00Z", close_reason: "No longer managed" });
+  assert.equal(closed.status, "closed"); assert.equal(closed.observation_status, "timed_out"); assert.equal(closed.management_state, "closed");
+  assert.deepEqual(Object.keys(closed.available_actions as object), ["status"]);
+  const watch = desktopTaskProjection(task({ kind: "watch", send_intent: undefined, status: "watching", native_turn_id: "turn-one" }));
+  assert.equal(watch.management_state, "unmanaged"); assert.equal(watch.turn_id, undefined);
+  assert.equal((watch.available_actions as any).close, undefined);
 });

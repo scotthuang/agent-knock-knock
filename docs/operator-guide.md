@@ -1,15 +1,33 @@
 # AKK Operator Guide
 
-This guide is the day-to-day command and reliability reference for controlling
-Codex or Claude Code processes that are already running in tmux or local Herdr.
-Start with the [five-minute tmux guide](quickstart-tmux.md), the
-[Herdr guide](quickstart-herdr.md), or one of the first-party Host guides for
-[Pi](../connectors/pi/README.md) and
-[DeepSeek Harness](../connectors/deepseek-harness/README.md).
+This guide covers daily use of existing Codex CLI backend conversations,
+Codex Desktop conversations, and Codex or Claude Code terminals. OpenClaw,
+Pi, DeepSeek Harness, or another compatible Host can act as the controller.
+AKK 0.14.0 introduces the backend and Desktop features described here; see the
+[README](../README.md) for installation. Each connector's pinned runtime
+determines its supported capabilities.
 
-AKK never launches a hidden replacement coding agent. The terminal remains
-visible and directly usable by a human while OpenClaw, Pi, DeepSeek Harness, or
-another compatible controller Host observes and controls it through AKK.
+Choose the guide for the coding agent you already use:
+
+| Existing coding-agent environment | Setup and capability guide |
+| --- | --- |
+| Codex CLI connected to its shared backend | [CLI backend guide](codex-cli-native-compatibility.md); no tmux or Herdr required |
+| Codex Desktop | [Desktop guide](codex-desktop-compatibility.md); keep the intended conversation open in the supported app |
+| Codex or Claude Code in a shared terminal | [tmux quick start](quickstart-tmux.md) or [Herdr quick start](quickstart-herdr.md) |
+
+For controller-specific setup, see [OpenClaw operations](openclaw-operations.md),
+the [Pi guide](../connectors/pi/README.md), or the
+[DeepSeek Harness guide](../connectors/deepseek-harness/README.md).
+AKK never launches a hidden replacement coding agent. Human and controller
+continue in the original conversation or shared terminal.
+
+Start with AKK List, choose the intended conversation by title and project,
+then use its advertised Send, Status, Watch, or interaction action. Backend
+tools use the returned `conversation_id`; the controller supplies its own
+session identity. Save the task's returned `watch_id` and, for a managed Send,
+its equivalent `turn_id` for follow-up. A project path or title alone is never
+task identity. [Backend task recovery](backend-task-recovery.md) explains how
+to resume observation or release management for that exact task.
 
 ## Command reference
 
@@ -19,22 +37,35 @@ Direct slash commands are available in every first-party Host integration:
 | --- | --- |
 | `/akk <task>` | Send a task when AKK can prove one unique send-ready terminal. |
 | `/akk <selector>: <message>` | Send to the exact selector returned by the current list. |
-| `/akk list` | Discover live terminals, managed work, Watches, and safe actions. |
+| `/akk list` | Discover conversations, managed work, Watches, and supported actions. |
 | `/akk watch <terminal-id>` | Observe one exact terminal task. |
-| `/akk unwatch <watch-id>` | Stop one Watch. |
+| `/akk unwatch <watch-id>` | Stop observation of one terminal or backend Watch without stopping its native task. |
 | `/akk threads <terminal-id>` | List resumable native threads for one terminal. |
 | `/akk models <terminal-id>` | Inspect the current native model and reasoning choices for one exact idle terminal. |
+| `/akk permissions <terminal-id>` | Inspect the exact Codex terminal's native permission choices. |
+| `/akk set-permissions <terminal-id> <advertised-mode-id>` | Apply the selected native permission mode before a task. |
 | `/akk repair-model-control <terminal-id>` | Clear only an exact advertised stale profiled Codex 0.154.0/0.155.1 `/model` Composer surface or open native picker and prove an empty Composer. |
 | `/akk set-model <terminal-id> <model> <reasoning-effort>` | Select one exact tuple from the immediately preceding model catalog. |
 | `/akk new-thread <terminal-id>` | Start a clean native coding-agent thread. |
 | `/akk clear-thread <terminal-id>` | Alias for the same clean-thread lifecycle action. |
 | `/akk resume-thread <terminal-id> [thread]` | Resume one exact native thread. |
-| `/akk status <turn-or-watch>` | Inspect a managed Turn or Terminal Watch. |
+| `/akk status <turn-or-watch>` | Inspect the original managed terminal Turn or backend/terminal Watch. |
 | `/akk respond <turn-id> <answer>` | Answer a question inside the same managed Turn. |
 | `/akk cancel <turn-id>` | Interrupt one exact active managed Turn. |
 
-`/akk list` is terminal-first. Each live pane appears once in `terminals[]`.
-The optional `managed.current_turn` is active work; `managed.recent_turn` is
+AKK List presents one `conversations[]` collection. It merges terminal/backend
+rows only when their exact current native identities match. A matching project
+or title does not establish that link. Select a conversation and action; AKK
+chooses the supported transport. Bound task and interaction IDs retain their
+original provider, and an uncertain mutation is never retried through another
+transport. The [CLI backend guide](codex-cli-native-compatibility.md#automatic-conversation-routing-2026-10-10)
+describes backend preference and terminal fallback in detail.
+
+The terminal-specific commands in the table require a physical terminal;
+Desktop interaction, model, permission, and cancellation controls use their
+advertised semantic tools. Backend and terminal capabilities are distinct.
+Raw CLI output retains provider arrays, including `terminals[]`, for diagnostics.
+Within a terminal row, the optional `managed.current_turn` is active work; `managed.recent_turn` is
 retained history and does not occupy the terminal. Attention-needed records
 whose pane is unavailable appear in `unavailable_managed_turns[]`.
 
@@ -48,8 +79,8 @@ conservative compatibility projection and can therefore be `unknown` while
 `screen_state` is `idle`. These fields are diagnostic; `available_actions`
 remains the authority for tool calls.
 
-Human-facing selectors are a slash-command convenience. Structured tools use
-semantic identities: `session_id` for strict continuation, `terminal_id` for
+Human-facing terminal selectors are a slash-command convenience. Terminal
+structured tools use semantic identities: `session_id` for strict continuation, `terminal_id` for
 the currently verified physical terminal, `turn_id` for one managed dispatch,
 `watch_id` for read-only observation, and `native_thread_id` for resume. A
 `session_exact` action targets the continuing native context; a
@@ -58,6 +89,13 @@ pane. Except for user-intent-first Watch, always use the exact action and
 prefilled semantic IDs from a fresh list.
 
 ## Reliable Send
+
+Backend Send persists one submission and monitors its original accepted native
+task. Reusing its message ID returns the same record; uncertain submission
+evidence never triggers an automatic resend. See the [CLI backend guide](codex-cli-native-compatibility.md)
+and [Desktop guide](codex-desktop-compatibility.md) for native acceptance and
+interaction capabilities. The remainder of this section covers terminal Send,
+including its physical-input fallback and terminal response adapters.
 
 The v30 `action_contracts` expose model-facing semantic IDs only. The trusted
 adapter privately derives and revalidates terminal, process, binding, native
@@ -169,10 +207,16 @@ uncertain probe boundary stops before the task and is not retried
 automatically. This optional enhancement is not a prerequisite for ordinary
 human Send: ordinary Send retains its user-priority behavior. Codex 0.158.0/0.159.0/0.159.2
 exact Send and active-task Watch use a separate closed `/status` transaction
-to bind the foreground paginated thread. Normal List and Status remain
-observation-only and never probe.
+to bind the foreground paginated thread. List never types an identity probe.
+Status for an exact backend task does not use terminal input. A targeted
+conversation Status for an unbound, idle Codex terminal may use the separate
+closed routing inspection described under [Status](#akk-status-and-native-inspection).
 
 ## Terminal Watch
+
+The [terminal handoff demo](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/assets/akk-tmux-handoff-demo.mp4)
+shows OpenClaw giving Claude Code a task and handing its result to Codex
+through tmux; both terminals remain available for direct human use.
 
 Watch follows the exact terminal selected by the user. Codex 0.158.0/0.159.0/0.159.2 exact
 Watch creation types a closed `/status` command into an available main Composer;
@@ -211,7 +255,7 @@ attribution already exists.
 
 ## Sessions, Turns, and native threads
 
-AKK keeps these identities separate:
+For terminal-managed work, AKK keeps these identities separate:
 
 ```text
 tmux or Herdr terminal / verified process incarnation
@@ -221,6 +265,11 @@ tmux or Herdr terminal / verified process incarnation
 │     └─ Turn (turn_id)
 └─ Terminal Watch (watch_id)
 ```
+
+Backend Send instead returns one persisted task ID as both `watch_id` and
+`turn_id`; a standalone backend Watch has no Send management. These task IDs
+stay bound to the original thread and native task. They do not authorize the
+terminal lifecycle commands below.
 
 New and resume are native lifecycle transitions. They create or activate an
 AKK Session but create no Turn. Run `/akk threads <exact-terminal-id>` to get
@@ -245,7 +294,24 @@ the entire candidate snapshot before terminal input; candidate-set changes
 fail closed. A replaced or changed transcript/rollout cannot be resumed under
 stale metadata.
 
+## Permission settings
+
+Send preserves the selected conversation's existing permission mode. Use an
+explicit advertised permission action to change it before sending a task.
+The [CLI backend](codex-cli-native-compatibility.md) and
+[Desktop](codex-desktop-compatibility.md#settings-and-cancellation) adapters
+apply and verify the selected conversation's native settings. For a Codex
+terminal, [Codex permissions](codex-permissions.md) covers the current native
+choices and exact idle-terminal checks. Full Access is an explicit supported
+choice; AKK handles its native confirmation without an additional prompt.
+
 ## Safe model control
+
+This section describes terminal model control. Desktop settings use the
+[Desktop settings API](codex-desktop-compatibility.md#settings-and-cancellation)
+and do not expose a model catalog; they accept an explicitly requested model
+and effort. The direct CLI backend has no equivalent native model operation.
+Use only the provider capability advertised by the selected conversation.
 
 Model control is a two-step, current-snapshot operation. Start from a fresh
 `/akk list`, copy one complete `terminal_id` whose row advertises
@@ -336,8 +402,20 @@ work.
 
 ## AKK Status and native inspection
 
-`/akk status` reads AKK state and a bounded terminal screen. It does not run the
-coding agent's `/status`. Native inspection is a separate, closed action:
+Status follows its target. An exact backend task's `watch_id` or Send-produced
+`turn_id` reads that original backend's native state without terminal input.
+A backend conversation Status reads the selected native conversation. Bound
+terminal Turns and Watches retain their original observation route. List
+never types into a terminal.
+
+When the selected conversation is an unbound physical Codex terminal, targeted
+Status may use the existing closed `/status` identity inspection if that pane
+is safely idle. It can display a native status card to establish the exact
+backend thread. It does not create a task or disturb a working or blocked
+terminal. This routing inspection is separate from the diagnostic-only
+`identify_foreground` action; see [automatic conversation routing](codex-cli-native-compatibility.md#automatic-conversation-routing-2026-10-10).
+
+Explicit native inspection remains a closed action:
 `native_inspect({terminal_id,inspection:"status"})`. It accepts no arbitrary
 command and creates no AKK Turn, Session, receipt, monitor, or callback.
 
@@ -363,6 +441,11 @@ being blocked by a version allowlist.
 ## Approval boundaries
 
 Approval always requires the current exact prompt and explicit human intent.
+Backend approvals use the exact pending interaction from fresh Status in the
+same controller conversation. See the [CLI backend](codex-cli-native-compatibility.md)
+and [Desktop interaction](codex-desktop-compatibility.md) guides. The prompt,
+screen, and key boundaries below describe terminal approval.
+
 Managed approval uses `approve({turn_id})`; terminal-scoped manual Codex
 approval uses `approve({terminal_id})` when the current list advertises it.
 On an unmanaged raw-terminal row, that action is prefilled with its exact
@@ -385,8 +468,32 @@ optional exact-command auto-approval policy is documented separately in
 
 ## Recovery and advanced controls
 
-Use fresh List and Status before every recovery action. Advanced slash commands
-appear only when the matching state makes them meaningful:
+Recovery is specific to the provider and original task. Use its exact saved ID
+and the applicable actions below; do not substitute the latest conversation.
+
+### Backend task recovery
+
+For Codex CLI backend and Desktop tasks, use the original task's `watch_id`
+from the originating controller; Recover, Renew, Close, and Retry Callback
+also accept its Send-produced `turn_id`. `recover` reconciles
+the original task and supervises eligible monitor work; `renew` verifies that
+task before extending observation. `unwatch` stops observation while retaining
+Send management, and `close` releases managed Send ownership without stopping
+Codex. A standalone Watch uses Unwatch. `retry_callback` retries only a known
+retryable notification with its original identity; select `notification_id`
+when more than one is eligible.
+
+These operations never select the latest task or fall back to a terminal.
+Closed management cannot be reopened, and Recover does not extend deadlines
+or resume an explicitly stopped Watch. For exact inputs, callback uncertainty,
+and observation semantics, use the [backend task recovery reference](backend-task-recovery.md).
+
+### Terminal recovery and diagnostics
+
+The following terminal controls remain available when the corresponding
+state makes them meaningful. `reconcile_binding`, `identify_foreground`, and
+`repair_model_control` retain their physical-terminal requirements; backend
+Recover does not replace them.
 
 | Command | Use |
 | --- | --- |
@@ -397,12 +504,17 @@ appear only when the matching state makes them meaningful:
 | `/akk approve <turn-or-terminal>` | Approve one current prompt after explicit review. |
 | `/akk renew <turn> <minutes>` | Restart monitoring for one still-live stalled Turn without terminal input. |
 | `/akk retry-callback <turn>` | Retry one persisted failed callback with its original identity. |
-| `/akk close <turn>` | Release AKK management without terminal input or stopping the coding agent. |
+| `/akk close <turn>` | Ordinary managed-Turn Close releases AKK management without terminal input or stopping the coding agent; native lifecycle recovery has the exception below. |
 
-Explicit Close is the user's management escape hatch. It has priority over
+Explicit terminal Close is the user's management escape hatch. It has priority over
 broken deferred-transfer or handoff state, closes the selected Turn first, and
 then best-effort releases only linked AKK metadata. Refresh List afterward; if
 the agent is still working, a new Watch can observe it.
+
+Closing an uncertain native new/resume transition is a separate recovery path:
+it may clear an unsubmitted Composer and perform a guarded `/status` inspection
+to establish the actual native identity. Follow that exact advertised recovery
+action. Do not treat every terminal Close variant as a record-only operation.
 
 An uncertain terminal mutation is not a retry instruction. Do not resend,
 approve, cancel, or repeat Enter blindly. Inspect the exact pane and durable
@@ -415,10 +527,11 @@ Pi and DeepSeek Harness verify the Host Adapter capability handshake against
 their actual registrations, so the tool count and names are derived from that
 catalog rather than maintained as connector constants. The current catalog
 includes list, watch, unwatch, list resumable threads, native inspect, model
-options, repair model control, set model, identify foreground, identify and
-send, new thread, reconcile binding, resume thread, status, send, respond,
-typed native interaction response, approve, renew, retry callback, cancel, and
-close. Model-facing mutations contain semantic IDs and user content only.
+options, repair model control, set model, permission options, set permissions,
+identify foreground, identify and send, new thread, reconcile binding, resume
+thread, status, send, respond, typed native interaction response, approve,
+renew, recover, retry callback, cancel, and close. Model-facing mutations
+contain semantic IDs and user content only.
 Connector prereleases that pin an earlier AKK runtime retain the tool surface
 documented by that connector release.
 Selectors, pane routes, draft text, fingerprints, tokens, revisions, candidate

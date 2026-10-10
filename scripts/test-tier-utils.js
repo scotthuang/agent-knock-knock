@@ -295,6 +295,17 @@ export function parseProfileArguments(args) {
   return { tier, output };
 }
 
+let isolatedBackendHomes;
+
+function unavailableTestBackendHomes() {
+  if (!isolatedBackendHomes) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-test-backends-"));
+    isolatedBackendHomes = JSON.stringify([path.join(root, "unavailable")]);
+    process.once("exit", () => fs.rmSync(root, { recursive: true, force: true }));
+  }
+  return isolatedBackendHomes;
+}
+
 export function testProcessEnvironment(extra = {}) {
   const defaultCache = path.join(
     os.tmpdir(),
@@ -303,6 +314,10 @@ export function testProcessEnvironment(extra = {}) {
   return {
     ...process.env,
     NODE_COMPILE_CACHE: process.env.NODE_COMPILE_CACHE || defaultCache,
+    // Ordinary tests and their child CLIs must never discover the user's live
+    // backends. A backend fixture can explicitly override these after setup.
+    AKK_NATIVE_CODEX_HOMES: unavailableTestBackendHomes(),
+    AKK_DESKTOP_CODEX_HOMES: unavailableTestBackendHomes(),
     ...extra
   };
 }

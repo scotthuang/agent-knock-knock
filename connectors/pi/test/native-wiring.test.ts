@@ -29,6 +29,8 @@ import type {
   PiRouteTable,
 } from "../src/routes.js";
 
+// Synthetic dynamic catalog: this exercises registration without claiming that
+// the pinned, published AKK 0.13.3 dependency provides all of these tools.
 const TOOL_NAMES = [
   "agent_knock_knock_list",
   "agent_knock_knock_watch",
@@ -51,12 +53,13 @@ const TOOL_NAMES = [
   "agent_knock_knock_respond_interaction",
   "agent_knock_knock_approve",
   "agent_knock_knock_renew",
+  "agent_knock_knock_recover",
   "agent_knock_knock_retry_callback",
   "agent_knock_knock_cancel",
   "agent_knock_knock_close",
 ] as const;
 
-test("Pi 0.84.4 registers /akk and the complete semantic catalog", async () => {
+test("Pi 0.84.4 registers /akk and the supplied dynamic catalog fixture", async () => {
   const fixture = nativeFixture();
   await fixture.start();
 

@@ -310,6 +310,11 @@ test("architecture checks reject core growth and reverse imports without gating 
   const source = (modulePath: string) =>
     fs.readFileSync(path.join(repoRoot, modulePath), "utf8");
   const ratchet = loadManifest().architecture.cli_core_max_physical_loc;
+  const originalCore = source("src/cli-core.ts");
+  const addedLoc = ratchet + 1 - ownershipModule.physicalLineCount(originalCore);
+  assert.ok(addedLoc > 0);
+  const overBudgetCore = originalCore + "// unapproved growth\n".repeat(addedLoc);
+  assert.equal(ownershipModule.physicalLineCount(overBudgetCore), ratchet + 1);
 
   assert.throws(
     () => ownershipModule.validateProductionArchitecture({
@@ -318,7 +323,7 @@ test("architecture checks reject core growth and reverse imports without gating 
       readSource(modulePath: string) {
         const original = source(modulePath);
         return modulePath === "src/cli-core.ts"
-          ? `${original}// unapproved growth\n`
+          ? overBudgetCore
           : original;
       }
     }),

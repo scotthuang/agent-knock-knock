@@ -1,7 +1,7 @@
 {
   "name": "@scotthuang/agent-knock-knock",
   "version": "0.14.0",
-  "description": "Control local Codex Desktop conversations and Codex or Claude Code terminals from OpenClaw or compatible controller Hosts.",
+  "description": "Control Codex CLI through its shared backend, Codex Desktop through native IPC, and Codex or Claude Code through terminals from OpenClaw or compatible controller Hosts.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/scotthuang/agent-knock-knock#readme",
@@ -79,23 +79,14 @@
     "assets/icon.png",
     "docs/assets/agent-knock-knock-cover.jpg",
     "docs/assets/agent-knock-knock-icon.png",
-    "docs/quickstart-herdr.md",
-    "docs/quickstart-tmux.md",
-    "docs/codex-0.157.1-compatibility.md",
-    "docs/host-bridge-profiles.md",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "docs/codex-0.158.0-compatibility.md",
-    "docs/codex-0.159.0-compatibility.md",
-    "docs/codex-0.159.2-compatibility.md",
-    "docs/claude-2.1.285-compatibility.md",
-    "docs/callback-compatibility.md",
-    "docs/codex-permissions.md",
-    "docs/codex-0.160.0-compatibility.md",
-    "docs/codex-desktop-compatibility.md",
-    "docs/codex-cli-native-compatibility.md"
+    "docs/**/*.md",
+    "CONTRIBUTING.md",
+    "connectors/pi/README.md",
+    "connectors/deepseek-harness/README.md"
   ],
   "publishConfig": {
     "access": "public"

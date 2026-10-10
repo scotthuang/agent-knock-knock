@@ -124,7 +124,7 @@ test("cancelling a reservation before dispatch never sends or revives its Watch"
     throw new Error("must not dispatch");
   };
   const cancelled = await createDesktopTaskService(h.deps).send(input);
-  assert.equal(cancelled.status, "cancelled"); assert.equal(cancelled.send_intent?.state, "not_sent");
+  assert.equal(cancelled.status, "failed"); assert.ok(cancelled.unwatched_at); assert.equal(cancelled.send_intent?.state, "not_sent");
   assert.equal(h.state.starts, 0);
 });
 
@@ -300,7 +300,8 @@ test("an uncertain send can still reconcile after its observation deadline witho
 test("only the owning controller can unwatch and cancellation never interrupts the native task", async t => {
   const h = harness(t); const sent = await h.service.send(input);
   assert.throws(() => h.service.unwatch(sent.id, { controllerSession: "foreign-controller" }), { code: "desktop_controller_mismatch" });
-  assert.equal(h.service.unwatch(sent.id, { controllerSession: input.controllerSession }).status, "cancelled");
+  const unwatched = h.service.unwatch(sent.id, { controllerSession: input.controllerSession });
+  assert.equal(unwatched.status, "watching"); assert.ok(unwatched.unwatched_at);
   assert.equal(h.state.starts, 1); assert.equal(h.state.snapshot.turns[0].status, "inProgress");
 });
 
@@ -396,11 +397,193 @@ test("timeout and Unwatch withdraw queued async offers without changing the nati
   const timeout = await h.service.watch({ ...input, callbackRoute: route, timeoutMs: 1 });
   const cancelled = await h.service.watch({ ...input, callbackRoute: route });
   const stopped = h.service.unwatch(cancelled.id, { controllerSession: input.controllerSession });
-  assert.equal(stopped.status, "cancelled"); assert.deepEqual(stopped.pending_async_interactions, []);
+  assert.equal(stopped.status, "watching"); assert.ok(stopped.unwatched_at); assert.deepEqual(stopped.pending_async_interactions, []);
   assert.equal(stopped.notifications[0].status, "failed");
   h.state.now += 2;
   const expired = await h.service.reconcile(timeout.id);
   assert.equal(expired.status, "timed_out"); assert.deepEqual(expired.pending_async_interactions, []);
   assert.equal(expired.notifications[0].status, "failed");
   assert.equal(h.state.snapshot.turns[0].status, "inProgress"); assert.equal(h.state.starts, 0);
+});
+
+
+const controller = { controllerSession: input.controllerSession };
+test("Desktop unresolved sends retain management across timeout and Unwatch until explicit Close", async t => {
+  const h = harness(t);
+  h.deps.start = async (_target, options) => { await options.beforeDispatch?.(h.state.snapshot); h.state.starts++; throw new DesktopIpcError("timeout", "unknown", "unknown"); };
+  const service = createDesktopTaskService(h.deps);
+  const sent = await service.send({ ...input, timeoutMs: 1 }); h.state.now += 2;
+  assert.equal((await service.reconcile(sent.id)).status, "timed_out");
+  service.unwatch(sent.id, controller);
+  await assert.rejects(service.send({ ...input, messageId: "another-message" }), { code: "desktop_send_pending" });
+  const before = h.state.observes;
+  assert.throws(() => service.close(sent.id, { controllerSession: "other" }), { code: "desktop_controller_mismatch" });
+  await assert.rejects(service.recover(sent.id, { controllerSession: "other" }), { code: "desktop_controller_mismatch" });
+  await assert.rejects(service.renew(sent.id, { controllerSession: "other" }), { code: "desktop_controller_mismatch" });
+  await assert.rejects(service.retryCallback(sent.id, { controllerSession: "other" }), { code: "desktop_controller_mismatch" });
+  assert.equal(h.state.observes, before);
+  const closed = service.close(sent.id, { ...controller, reason: "abandoned by controller" });
+  assert.equal(closed.status, "timed_out"); assert.equal(closed.close_reason, "abandoned by controller"); assert.ok(closed.closed_at);
+  for (const operation of [service.recover, service.renew, service.retryCallback]) await assert.rejects(operation(sent.id, controller), { code: "desktop_task_closed" });
+  assert.equal(h.state.observes, before);
+  assert.equal((await createDesktopTaskService(h.deps).send({ ...input, messageId: "another-message" })).send_intent?.state, "uncertain");
+  assert.equal(h.state.starts, 2);
+});
+
+test("Desktop Recover reads the original send after timeout and Unwatch without adopting the latest turn", async t => {
+  const h = harness(t);
+  h.deps.start = async (_target, options) => { await options.beforeDispatch?.(h.state.snapshot); h.state.starts++; h.state.clientId = options.clientUserMessageId; throw new DesktopIpcError("timeout", "unknown", "unknown"); };
+  const service = createDesktopTaskService(h.deps);
+  const sent = await service.send({ ...input, timeoutMs: 1, callbackRoute: route }); h.state.now += 2;
+  await service.reconcile(sent.id); const stopped = service.unwatch(sent.id, controller);
+  h.state.snapshot = snapshot([turn("unrelated", "inProgress", "human")]);
+  const missing = await createDesktopTaskService(h.deps).recover(sent.id, controller);
+  assert.equal(missing.native_turn_id, undefined); assert.equal(missing.status, "timed_out");
+  const original = turn("original-exact", "completed", h.state.clientId); original.items.push({ id: "final", type: "agentMessage", text: "Original result" });
+  h.state.snapshot = snapshot([original, turn("new-latest", "inProgress", "human")]);
+  const recovered = await createDesktopTaskService(h.deps).recover(sent.id, controller);
+  assert.equal(recovered.native_turn_id, "original-exact"); assert.equal(recovered.status, "completed");
+  assert.equal(recovered.final_text, "Original result"); assert.equal(recovered.deadline_at, stopped.deadline_at);
+  assert.equal(recovered.unwatched_at, stopped.unwatched_at); assert.ok(recovered.recovered_at);
+  assert.equal(desktopTaskNeedsReconciliation(recovered), false); assert.equal(h.state.starts, 1);
+});
+
+test("Desktop Renew extends the same exact task and gives each deadline a distinct timeout notification", async t => {
+  const h = harness(t); delete h.deps.deliver;
+  const sent = await createDesktopTaskService(h.deps).send({ ...input, callbackRoute: route, timeoutMs: 1 });
+  h.state.now += 2;
+  const expired = await h.service.reconcile(sent.id); const first = expired.notifications.find(note => note.envelope.event.type === "desktop_watch.timed_out")!;
+  h.service.unwatch(sent.id, controller);
+  const restarted = createDesktopTaskService(h.deps);
+  const renewed = await restarted.renew(sent.id, { ...controller, timeoutMs: 10 });
+  assert.equal(renewed.status, "watching"); assert.equal(renewed.native_turn_id, sent.native_turn_id);
+  assert.equal(renewed.unwatched_at, undefined); assert.equal(renewed.renewal_count, 1);
+  assert.ok(Date.parse(renewed.deadline_at) > Date.parse(expired.deadline_at));
+  assert.equal(renewed.notifications.find(note => note.id === first.id)?.outcome?.disposition, "permanent_failure");
+  h.state.now += 11;
+  const second = await restarted.reconcile(sent.id);
+  const timeouts = second.notifications.filter(note => note.envelope.event.type === "desktop_watch.timed_out");
+  assert.equal(timeouts.length, 2); assert.notEqual(timeouts[0].id, timeouts[1].id);
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId), turn("new-task", "inProgress", "human")]);
+  const complete = await restarted.renew(sent.id, { ...controller, timeoutMs: 100 });
+  assert.equal(complete.status, "completed"); assert.equal(complete.deadline_at, second.deadline_at);
+  assert.equal(complete.renewal_count, 1); assert.equal(h.state.starts, 1);
+});
+
+test("Desktop recovery refuses stale observations racing with Close and never reopens the task", async t => {
+  const h = harness(t); const sent = await h.service.send(input);
+  let release!: (value: DesktopSnapshot) => void;
+  h.deps.observe = () => new Promise(resolve => { release = resolve; });
+  const service = createDesktopTaskService(h.deps); const pending = service.renew(sent.id, controller);
+  service.close(sent.id, controller); release(h.state.snapshot);
+  await assert.rejects(pending, { code: "desktop_task_closed" });
+  const current = service.status(sent.id); assert.ok(current.closed_at); assert.equal(current.deadline_at, sent.deadline_at);
+  assert.equal(h.state.starts, 1);
+});
+
+test("Desktop retry grants one extra exhausted attempt while retaining notification identity and attempt history", async t => {
+  const h = harness(t); h.deps.maxDeliveryAttempts = 1;
+  h.state.snapshot = snapshot([turn("native-one")]);
+  const service = createDesktopTaskService(h.deps); const watched = await service.watch({ ...input, callbackRoute: route });
+  h.state.snapshot = snapshot([turn("native-one", "completed")]);
+  h.state.outcomes.push({ disposition: "retryable_failure", error_code: "temporary" });
+  const failed = await service.reconcile(watched.id); const note = failed.notifications[0];
+  assert.equal(note.status, "failed"); assert.equal(note.attempts, 1);
+  const retried = await createDesktopTaskService(h.deps).retryCallback(watched.id, { ...controller, notificationId: note.id });
+  assert.equal(retried.notifications[0].status, "accepted"); assert.equal(retried.notifications[0].attempts, 2);
+  assert.deepEqual(retried.notifications[0].envelope, note.envelope); assert.equal(retried.notifications[0].id, note.id);
+  await assert.rejects(service.retryCallback(watched.id, controller), { code: "desktop_callback_not_retryable" });
+  assert.equal(h.state.starts, 0);
+});
+
+test("Desktop Close blocks future retries after an in-flight callback fails", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  let release!: (outcome: CallbackAttemptOutcome) => void; let signal!: () => void;
+  const pending = new Promise<void>(resolve => { signal = resolve; });
+  h.deps.deliver = () => new Promise(resolve => { release = resolve; signal(); });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const service = createDesktopTaskService(h.deps); const settling = service.reconcile(sent.id);
+  await pending; service.close(sent.id, controller);
+  release({ disposition: "retryable_failure", error_code: "temporary" });
+  const closed = await settling; assert.equal(closed.notifications[0].status, "failed");
+  assert.ok(closed.closed_at); assert.equal(desktopTaskNeedsReconciliation(closed), false);
+  assert.equal(h.state.starts, 1);
+});
+
+test("Desktop interaction callback retry requires the original interaction to remain freshly pending", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([asyncQuestionTurn()]); h.deps.maxDeliveryAttempts = 1;
+  h.state.outcomes.push({ disposition: "retryable_failure", error_code: "temporary" });
+  const service = createDesktopTaskService(h.deps); const watched = await service.watch({ ...input, callbackRoute: route });
+  assert.equal(watched.notifications[0].status, "failed");
+  h.state.snapshot.turns[0].items = [];
+  await assert.rejects(service.retryCallback(watched.id, controller), { code: "desktop_interaction_not_pending" });
+  assert.equal(service.status(watched.id).notifications[0].outcome?.disposition, "permanent_failure");
+  await service.reconcile(watched.id); assert.equal(h.state.notifications.length, 1); assert.equal(h.state.starts, 0);
+  assert.throws(() => service.close(watched.id, controller), { code: "desktop_close_requires_send" });
+});
+
+test("Desktop timeout callback cannot rearm after renewal while its first attempt is in flight", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route, timeoutMs: 1 });
+  let release!: (outcome: CallbackAttemptOutcome) => void; let signal!: () => void;
+  const pending = new Promise<void>(resolve => { signal = resolve; });
+  h.deps.deliver = () => new Promise(resolve => { release = resolve; signal(); });
+  const service = createDesktopTaskService(h.deps); h.state.now += 2;
+  const timeout = service.reconcile(sent.id); await pending;
+  const renewed = await service.renew(sent.id, { ...controller, timeoutMs: 1000 });
+  assert.equal(renewed.renewal_count, 1); assert.equal(renewed.notifications[0].id, `${sent.id}:timed_out`);
+  release({ disposition: "retryable_failure", error_code: "temporary" });
+  const final = await timeout; assert.equal(final.status, "watching");
+  assert.equal(final.notifications[0].status, "failed"); assert.equal(final.notifications[0].outcome?.disposition, "permanent_failure");
+  await assert.rejects(service.retryCallback(sent.id, controller), { code: "desktop_callback_not_retryable" });
+});
+
+test("Desktop keeps late callback acceptance after the same attempt lease was marked uncertain", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  let release!: (outcome: CallbackAttemptOutcome) => void; let signal!: () => void;
+  const pending = new Promise<void>(resolve => { signal = resolve; });
+  h.deps.deliver = () => new Promise(resolve => { release = resolve; signal(); });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const service = createDesktopTaskService(h.deps); const settling = service.reconcile(sent.id); await pending;
+  h.state.now += 31_000;
+  assert.equal((await service.reconcile(sent.id)).notifications[0].status, "uncertain");
+  release({ disposition: "accepted", accepted_at: new Date(h.state.now).toISOString(), acceptance_id: "late-accepted" });
+  const accepted = await settling; assert.equal(accepted.notifications[0].status, "accepted"); assert.equal(accepted.notifications[0].attempts, 1);
+});
+
+test("Desktop Recover retains stopped observation for legacy cancelled records", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([turn("native-one")]); delete h.deps.deliver;
+  const service = createDesktopTaskService(h.deps); const watched = await service.watch({ ...input, callbackRoute: route });
+  h.repository.save({ ...watched, status: "cancelled" }, watched.revision);
+  h.state.snapshot = snapshot([turn("native-one", "completed")]);
+  const recovered = await createDesktopTaskService(h.deps).recover(watched.id, controller);
+  assert.equal(recovered.status, "completed"); assert.ok(recovered.unwatched_at);
+  assert.equal(recovered.notifications.length, 0); assert.equal(desktopTaskNeedsReconciliation(recovered), false);
+});
+
+test("stopped Desktop tasks only expire crashed callback leases without observing or dispatching", async t => {
+  const h = harness(t); delete h.deps.deliver;
+  const service = createDesktopTaskService(h.deps); const sent = await service.send({ ...input, callbackRoute: route });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const completed = await service.reconcile(sent.id); const notification = completed.notifications[0];
+  notification.status = "leased"; notification.attempts = 1; notification.attempt_id = "crashed-attempt";
+  notification.lease_expires_at = new Date(h.state.now + 1).toISOString();
+  h.repository.save(completed, completed.revision);
+  const closed = service.close(sent.id, controller); assert.equal(desktopTaskNeedsReconciliation(closed), true);
+  h.state.now += 2; const observes = h.state.observes;
+  h.deps.deliver = async () => { throw new Error("must not dispatch"); };
+  const expired = await createDesktopTaskService(h.deps).reconcile(sent.id);
+  assert.equal(expired.notifications[0].status, "uncertain"); assert.equal(desktopTaskNeedsReconciliation(expired), false);
+  assert.equal(h.state.observes, observes); assert.equal(h.state.starts, 1);
+});
+
+test("Desktop Recover records an overdue active task as timed out without extending its deadline", async t => {
+  const h = harness(t); delete h.deps.deliver;
+  const service = createDesktopTaskService(h.deps);
+  const sent = await service.send({ ...input, callbackRoute: route, timeoutMs: 1 });
+  h.state.now += 2;
+  const recovered = await createDesktopTaskService(h.deps).recover(sent.id, controller);
+  assert.equal(recovered.status, "timed_out"); assert.equal(recovered.deadline_at, sent.deadline_at);
+  assert.equal(recovered.native_turn_id, sent.native_turn_id); assert.ok(recovered.recovered_at);
+  assert.equal(recovered.notifications[0].id, `${sent.id}:timed_out`);
+  assert.equal(recovered.renewal_count, undefined); assert.equal(h.state.starts, 1);
 });

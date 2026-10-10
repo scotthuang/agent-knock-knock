@@ -1,3 +1,4 @@
+import { backendObservationStopped } from "./backend-task-recovery.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { desktopNonblank } from "./desktop-async-state.js";
@@ -93,7 +94,16 @@ export function createDesktopResponseService(deps: DesktopResponseDependencies) 
       return { record: repo.save(record, null), claimed: true };
     });
   }
-  async function dispatch(input: DesktopResponseInput, snapshot: DesktopSnapshot, record: DesktopResponseRecord): Promise<void> {
+  function withWatch<T>(watchId: string | undefined, input: DesktopResponseInput, operation: () => T): T {
+    if (!watchId) return operation();
+    return deps.tasks.withLock(watchId, () => {
+      const task = deps.tasks.load(watchId);
+      if (!task || task.controller_session !== input.controllerSession) throw new DesktopTaskError("desktop_controller_mismatch", "Watch response requires its owning controller", "not_sent");
+      if (backendObservationStopped(task)) throw new DesktopTaskError("desktop_watch_stopped", "Desktop Watch observation has stopped", "not_sent");
+      return operation();
+    });
+  }
+  async function dispatch(input: DesktopResponseInput, snapshot: DesktopSnapshot, record: DesktopResponseRecord, watchId?: string): Promise<void> {
     try {
       const options = { threadId: input.target.threadId, ownerClientId: snapshot.ownerClientId,
         expectedRevision: snapshot.revision, expectedTurnId: record.interaction.turnId, interactionId: record.interaction.id,
@@ -102,10 +112,10 @@ export function createDesktopResponseService(deps: DesktopResponseDependencies) 
           if (fresh.ownerClientId !== snapshot.ownerClientId || fresh.revision < snapshot.revision || question.id !== record.interaction.id) {
             throw new DesktopTaskError("snapshot_changed", "Desktop interaction changed before response dispatch", "not_sent");
           }
-          update(record.id, current => {
+          withWatch(watchId, input, () => update(record.id, current => {
             if (current.state !== "reserved") throw new DesktopTaskError("desktop_response_already_claimed", "Desktop response was already dispatched", "not_sent");
             current.state = "uncertain";
-          });
+          }));
         } };
       await dispatchDesktopResponse(deps, input.target, record, options);
       update(record.id, current => { if (current.state !== "confirmed") current.state = "sent"; });
@@ -117,15 +127,15 @@ export function createDesktopResponseService(deps: DesktopResponseDependencies) 
       });
     }
   }
-  async function respond(input: DesktopResponseInput, expectedTurnId?: string): Promise<DesktopResponseRecord> {
-    assertInput(input);
+  async function respond(input: DesktopResponseInput, expectedTurnId?: string, watchId?: string): Promise<DesktopResponseRecord> {
+    assertInput(input); withWatch(watchId, input, () => undefined);
     const id = desktopResponseId(input.target, input.interactionId); const previous = repo.load(id);
     if (previous) { assertDuplicate(previous, input, expectedTurnId); if (previous.state !== "not_sent") return reconcile(id); }
     const snapshot = await deps.observe(input.target); const interaction = currentInteraction(snapshot, input, expectedTurnId);
     validateDesktopResponseValue(interaction, input);
-    const reserved = reserve(input, interaction, snapshot);
+    const reserved = withWatch(watchId, input, () => reserve(input, interaction, snapshot));
     if (!reserved.claimed) return reserved.record;
-    await dispatch(input, snapshot, reserved.record);
+    await dispatch(input, snapshot, reserved.record, watchId);
     return reconcile(id);
   }
   return {
@@ -133,8 +143,9 @@ export function createDesktopResponseService(deps: DesktopResponseDependencies) 
     async respondWatch(watchId: string, input: Omit<DesktopResponseInput, "target" | "desktopId">) {
       const task = deps.tasks.load(watchId);
       if (!task || task.controller_session !== input.controllerSession) throw new DesktopTaskError("desktop_controller_mismatch", "Watch response requires its owning controller");
+      if (backendObservationStopped(task)) throw new DesktopTaskError("desktop_watch_stopped", "Desktop Watch observation has stopped", "not_sent");
       if (!task.native_turn_id) throw new DesktopTaskError("stale_interaction", "Desktop Watch has no exact task anchor");
-      return respond({ ...input, target: task.target, desktopId: task.desktop_id }, task.native_turn_id);
+      return respond({ ...input, target: task.target, desktopId: task.desktop_id }, task.native_turn_id, watchId);
     }
   };
 }

@@ -1,3 +1,4 @@
+import { backendObservationStopped } from "./backend-task-recovery.js";
 import path from "node:path";
 import { CodexNativeClient } from "./codex-native-client.js";
 import { createCodexNativeConversationId } from "./codex-native-identity.js";
@@ -92,6 +93,7 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions) {
     read: (identity: CodexNativeIdentity, exactTurnId?: string) => run(identity, client => client.readSnapshot(identity.threadId, exactTurnId)),
     async reconcile(watchId: string) {
       const task = await tasks.reconcile(watchId);
+      if (backendObservationStopped(task)) return task;
       for (const response of responseRepository.scanForReconciliation().tasks) {
         if (["reserved", "sent", "uncertain"].includes(response.state) && response.native_id === task.native_id && response.interaction.turnId === task.native_turn_id) {
           try { await responses.reconcile(response.id); }

@@ -563,10 +563,20 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
     schemasSource,
     /export const sendParameters =[\s\S]*?agentTimeoutMinutes:[\s\S]*?agentHardTimeoutMinutes:/u
   );
-  assert.match(
-    schemasSource,
-    /export const approveParameters =[\s\S]*?not: \{ required: \["turn_id", "terminal_id"\] \}[\s\S]*?anyOf: \[[\s\S]*?required: \["turn_id"\][\s\S]*?required: \["terminal_id"\]/u
-  );
+  assert.deepEqual(approveParameters.anyOf, [
+    { required: ["turn_id"] },
+    { required: ["terminal_id"] },
+    { required: ["conversation_id", "interaction_id"] },
+    { required: ["watch_id", "interaction_id"] }
+  ]);
+  assert.deepEqual(approveParameters.not, { anyOf: [
+    { required: ["turn_id", "terminal_id"] },
+    { required: ["turn_id", "conversation_id"] },
+    { required: ["turn_id", "watch_id"] },
+    { required: ["terminal_id", "conversation_id"] },
+    { required: ["terminal_id", "watch_id"] },
+    { required: ["conversation_id", "watch_id"] }
+  ] });
   assert.match(
     schemaAdapterSource,
     /export \* from "\.\/semantic-tool-schemas\.js";/u
@@ -804,13 +814,14 @@ test("OpenClaw plugin instances keep relay paths and config isolated by API", as
   }
 });
 
-test("OpenClaw native inspection is a closed status-only terminal action", async () => {
+test("OpenClaw native inspection keeps status-only routing and terminal authority closed", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-plugin-native-inspect-")
   );
   const fakeCli = path.join(tempDir, "native-inspect.cjs");
   const callsPath = path.join(tempDir, "calls.ndjson");
   const terminalId = "terminal:v2:tmux:codex:work:0.0:1234";
+  const claudeTerminalId = "terminal:v2:tmux:claude:work:0.1:5678";
   const tools = new Map<string, ToolDefinition>();
 
   try {
@@ -820,15 +831,16 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
         `const fs = require("node:fs");`,
         `const args = process.argv.slice(2);`,
         `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
-        `const terminalId = ${JSON.stringify(terminalId)};`,
+        `const terminalId = ${JSON.stringify(claudeTerminalId)};`,
+        `const requestedTerminal = args[args.indexOf("--terminal") + 1];`,
         `const result = args[0] === "list" ? { terminals: [{`,
         `  id: terminalId, available_actions: { native_inspect: {`,
         `    tool: "agent_knock_knock_native_inspect",`,
         `    arguments: { terminal_id: terminalId, expected_binding_token: "fresh-inspection-token" }`,
         `  } }`,
         `}] } : {`,
-        `  status: "observed", inspection: "status", agent: "codex",`,
-        `  agent_version: "0.146.1", terminal_id: terminalId,`,
+        `  status: "observed", inspection: "status", agent: requestedTerminal.includes(":claude:") ? "claude" : "codex",`,
+        `  terminal_id: requestedTerminal,`,
         `  expected_binding_token: "must-not-reach-model",`,
         `  turn_created: false, session_created: false`,
         `};`,
@@ -854,7 +866,9 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
         tool: ToolDefinition | ToolFactory,
         options?: { name?: string }
       ) {
-        const definition = typeof tool === "function" ? tool({}) : tool;
+        const definition = typeof tool === "function"
+          ? tool({ sessionKey: "agent:test:native-inspect", sessionId: "inspection-conversation" } as never)
+          : tool;
         if (options?.name) {
           tools.set(options.name, definition);
         }
@@ -863,13 +877,15 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
 
     const inspectTool = tools.get("agent_knock_knock_native_inspect");
     assert.ok(inspectTool);
-    assert.deepEqual(inspectTool.parameters?.required, [
-      "terminal_id",
-      "inspection"
+    assert.deepEqual(inspectTool.parameters?.required, ["inspection"]);
+    assert.deepEqual(inspectTool.parameters?.oneOf, [
+      { required: ["terminal_id"], not: { required: ["conversation_id"] } },
+      { required: ["conversation_id"], not: { required: ["terminal_id"] } }
     ]);
     assert.equal(inspectTool.parameters?.additionalProperties, false);
     const properties = inspectTool.parameters?.properties ?? {};
     assert.deepEqual(sorted(Object.keys(properties)), [
+      "conversation_id",
       "inspection",
       "terminal_id"
     ]);
@@ -901,18 +917,37 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
       inspection: "status"
     });
     assert.equal(result?.details?.status, "observed");
+    assert.equal(result?.details?.terminal_id, terminalId);
     assert.equal(result?.details?.turn_created, false);
     assertModelToolResultHasNoOpaqueAuthority(result);
+    const terminalResult = await inspectTool.execute?.("claude-native-status", {
+      terminal_id: claudeTerminalId,
+      inspection: "status"
+    });
+    assert.equal(terminalResult?.details?.status, "observed");
+    assert.equal(terminalResult?.details?.terminal_id, claudeTerminalId);
+    assert.equal(terminalResult?.details?.turn_created, false);
+    assertModelToolResultHasNoOpaqueAuthority(terminalResult);
     const calls = fs.readFileSync(callsPath, "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
     assert.deepEqual(
-      calls[1],
+      calls[0],
+      [
+        "native-inspect", "--terminal", terminalId,
+        "--openclaw-session", "agent:test:native-inspect",
+        "--store-dir", "/private/akk-store", "--codex-home", "/private/custom-codex",
+        "--inspection", "status"
+      ]
+    );
+    assert.equal(calls[1]?.[0], "list");
+    assert.deepEqual(
+      calls[2],
       [
         "native-inspect",
         "--terminal",
-        terminalId,
+        claudeTerminalId,
         "--inspection",
         "status",
         "--expected-binding-token",
@@ -920,7 +955,9 @@ test("OpenClaw native inspection is a closed status-only terminal action", async
         "--store-dir",
         "/private/akk-store",
         "--codex-home",
-        "/private/custom-codex"
+        "/private/custom-codex",
+        "--openclaw-session",
+        "agent:test:native-inspect"
       ]
     );
 

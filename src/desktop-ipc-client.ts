@@ -283,6 +283,14 @@ export class DesktopIpcClient {
     const pending = this.pending.get(requestId);
     if (!pending) return;
     this.pending.delete(requestId); clearTimeout(pending.timer);
+    // The router rejects owner discovery before dispatch with no method/version
+    // or handledByClientId. This negative receipt is not a protocol mismatch.
+    if (message.resultType === "error" && message.error === "no-client-found"
+      && message.handledByClientId === undefined
+      && (message.method === undefined || message.method === pending.method)
+      && (message.version === undefined || message.version === pending.version)) {
+      pending.reject(new DesktopIpcError("no_live_owner", "Desktop conversation has no connected owner; open it in Desktop and refresh")); return;
+    }
     if (message.method !== pending.method || (message.version !== undefined && message.version !== pending.version)) {
       pending.reject(new DesktopIpcError("invalid_response", "Desktop RPC response method/version mismatch")); return;
     }

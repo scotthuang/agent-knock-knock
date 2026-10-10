@@ -76,7 +76,11 @@ status UUID is provisional evidence, never durable ownership. Probe or boundary
 uncertainty stops before the task and cannot be retried automatically. This
 operation is optional: ordinary human Send continues to follow its independent
 user-priority contract and is never implicitly redirected through these
-identification actions. List and Status never probe. Codex 0.158.0/0.159.0/0.159.2 physical Send
+identification actions. List never types an identity probe, and exact bound-task
+Status stays read-only. A targeted conversation Status for an unbound, idle
+Codex terminal may use a separate closed routing identity inspection; see
+[Status and native inspection](operator-guide.md#akk-status-and-native-inspection).
+Codex 0.158.0/0.159.0/0.159.2 physical Send
 and exact Watch creation use their separate closed `/status` transaction to
 bind the foreground paginated thread.
 

@@ -92,7 +92,7 @@ function managedStateMachineSendArgs(argv: readonly string[]): readonly string[]
   }
   const exactTerminalTarget = ["--session", "--conversation"]
     .map((option) => argv.indexOf(option))
-    .some((index) => index >= 0 && argv[index + 1]?.startsWith("terminal:v"));
+    .some((index) => index >= 0 && /^(?:terminal:v|terminal:tmux:)/u.test(argv[index + 1] ?? ""));
   return exactTerminalTarget ? [...argv, "--managed-only"] : argv;
 }
 

@@ -163,3 +163,19 @@ test("missing question IDs fail before a durable response reservation or native 
   await assert.rejects(h.service.respond({ ...h.input, response: { answers: { other: ["Green"] } } }), { code: "invalid_argument" });
   assert.equal(h.repository.list().length, 0); assert.equal(h.state.responses, 0);
 });
+
+test("stopped Watch response authority is checked before observation and again after an in-flight read", async t => {
+  const h = harness(t);
+  const tasks = createCodexNativeTaskService({ repository: h.tasks, observe: h.deps.observe,
+    start: async () => { throw new Error("unused"); } });
+  const watched = await tasks.watch({ target, nativeId, controllerSession: h.input.controllerSession });
+  let finish!: (snapshot: CodexNativeSnapshot) => void; let reads = 0;
+  h.deps.observe = async () => { reads++; return new Promise(resolve => { finish = resolve; }); };
+  const service = createCodexNativeResponseService(h.deps);
+  const answering = service.respondWatch(watched.id, h.input);
+  tasks.unwatch(watched.id, { controllerSession: h.input.controllerSession });
+  finish(structuredClone(h.state.snapshot));
+  await assert.rejects(answering, { code: "codex_native_watch_stopped" });
+  await assert.rejects(service.respondWatch(watched.id, h.input), { code: "codex_native_watch_stopped" });
+  assert.equal(reads, 1); assert.equal(h.state.responses, 0); assert.equal(h.repository.list().length, 0);
+});

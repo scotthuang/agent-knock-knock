@@ -10,13 +10,14 @@ import {
   compileAuthoritativeInputValidator,
 } from "../src/schema-adapter.js";
 
-test("adapts every AKK HostAdapter tool schema for Pi 0.84.4", async () => {
+test("adapts every pinned AKK 0.13.3 HostAdapter tool schema for Pi 0.84.4", async () => {
   const adapter = createHostAdapter({
     environmentForContext: () => process.env,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   });
   try {
-    assert.equal(adapter.tools.length, 24);
+    // Contract for the published dependency pinned in this connector's lockfile.
+    assert.equal(adapter.tools.length, 22);
     assert.equal(
       catalogDigest(adapter),
       "f469d4e7320c789a48ca106e3a89a5f81815d4da7c14920bfd11d25fdf598a98"

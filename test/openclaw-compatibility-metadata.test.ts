@@ -55,8 +55,9 @@ test("OpenClaw build metadata matches the installed and verified SDK", () => {
   assert.equal(packageJson.openclaw?.build?.pluginSdkVersion, buildVersion);
 });
 
-test("user-facing installation docs state the supported floor and failing boundary", () => {
+test("README states the supported floor and links installation boundary details", () => {
   const readme = fs.readFileSync(path.join(packageRoot, "README.md"), "utf8");
+  const operations = fs.readFileSync(path.join(packageRoot, "docs/openclaw-operations.md"), "utf8");
   const tmuxQuickstart = fs.readFileSync(
     path.join(packageRoot, "docs", "quickstart-tmux.md"),
     "utf8"
@@ -67,7 +68,8 @@ test("user-facing installation docs state the supported floor and failing bounda
     new RegExp(`OpenClaw.*${escapeRegex(minimumHostVersion)}`)
   );
   assert.match(readme, new RegExp(escapeRegex(minimumApiVersion)));
-  assert.match(readme, new RegExp(escapeRegex(boundaryVersion)));
+  assert.match(readme, /docs\/openclaw-operations\.md/u);
+  assert.match(operations, new RegExp(escapeRegex(boundaryVersion)));
   assert.match(tmuxQuickstart, new RegExp(escapeRegex(minimumHostVersion)));
 });
 

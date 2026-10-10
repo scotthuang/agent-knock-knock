@@ -135,7 +135,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   assert.equal(lifecycleStarts, 1);
   assert.equal(commands.length, 1);
   assert.equal(commands[0]?.name, "akk");
-  assert.equal(tools.length, 24);
+  assert.equal(tools.length, 22);
   assert.deepEqual(capabilityVerifications, [
     undefined,
     tools.map((tool) => tool.name),
@@ -144,7 +144,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   assert.equal(skills[0]?.name, "agent-knock-knock");
   assert.equal(
     skills[0]?.description,
-    "Control local Codex and Claude Code through shared tmux or Herdr terminals with Agent Knock Knock.",
+    "Discover and control loaded Codex CLI threads, existing Codex Desktop conversations, or Codex and Claude Code tmux/Herdr terminals with Agent Knock Knock.",
   );
   assert.equal(skills[0]?.source, "bundled");
   assert.deepEqual(skills[0]?.invocation, {

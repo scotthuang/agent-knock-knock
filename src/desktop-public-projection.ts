@@ -1,3 +1,5 @@
+import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
+import { desktopObservationStopped } from "./desktop-task-recovery.js";
 import { desktopInteractionIsApproval, desktopInteractionProjection } from "./desktop-interaction-projection.js";
 import type { DesktopCatalogEntry } from "./desktop-session-catalog.js";
 import type { DesktopInteraction, DesktopSnapshot } from "./desktop-types.js";
@@ -19,9 +21,12 @@ export function desktopSessionProjection(entry: DesktopCatalogEntry, snapshot?: 
     title: snapshot?.title ?? entry.title, cwd: snapshot?.cwd ?? entry.cwd,
     native_thread_id: entry.threadId, host_id: entry.hostId, updated_at: new Date(entry.updatedAtMs).toISOString(),
     catalog_membership: entry.catalogMembership, creator_originator: entry.originator,
+    ...(entry.sidebar ? { sidebar_section: entry.sidebar.section, sidebar_project_id: entry.sidebar.projectId,
+      sidebar_project_name: entry.sidebar.projectName } : {}),
     connection_state: live ? "live_owner_verified" : "unconfirmed",
     activity_state: snapshot?.runtimeStatus ?? "unknown",
     ...sessionObservation(snapshot, writesVerified),
+    ...sessionSendAvailability(snapshot, writesVerified, observationError),
     ...(observationError ? { observation_error: observationError } : {}), capabilities,
     pending_async_count: interactions.filter(item => item.kind === "async_question").length,
     pending_interaction_count: interactions.length,
@@ -31,15 +36,27 @@ export function desktopSessionProjection(entry: DesktopCatalogEntry, snapshot?: 
   };
 }
 
+function sessionSendAvailability(snapshot: DesktopSnapshot | undefined, writesVerified: boolean, observationError?: string) {
+  if (!snapshot) return { can_send_reason: observationError ?? "live_owner_not_confirmed",
+    ...(observationError === "no_live_owner" ? {
+      manual_action: "Open this conversation in Desktop, then refresh AKK List. It is listed but cannot currently receive tasks."
+    } : {}) };
+  return { can_send_reason: !writesVerified ? "desktop_write_contract_unverified"
+    : snapshot.canSend ? "ready" : snapshot.idleBlockedReason ?? "desktop_not_sendable" };
+}
+
 /** Do not export prompts, internal owner IDs, callback configuration or raw native state. */
 export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified = true): Record<string, unknown> {
-  const terminal = ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
+  const terminal = desktopObservationStopped(task) || ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
   const interactions = writesVerified && !terminal ? actionableTaskInteractions(task) : [];
   const notifications = notificationProjection(task);
   const canCancel = writesVerified && !terminal && Boolean(task.native_turn_id);
+  const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
   return {
     watch_id: task.watch_id, conversation_id: task.desktop_id, source: "codex_desktop",
-    status: task.status, observation_mode: task.native_turn_id ? "exact_task" : "pending_acceptance",
+    status: task.closed_at ? "closed" : task.status, observation_status: task.status,
+    ...recovery,
+    observation_mode: task.native_turn_id ? "exact_task" : "pending_acceptance",
     anchor_state: task.native_turn_id ? "verified" : "pending", native_thread_id: task.target.threadId,
     native_turn_id: task.native_turn_id ?? null, created_at: task.created_at, updated_at: task.updated_at,
     observed_at: task.observed_at, observation_error: task.observation_error,
@@ -50,8 +67,8 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified = 
     callback_configured: Boolean(task.callback_route), callback_notifications: notifications,
     ...desktopSendReceiptProjection(task.send_intent),
     capabilities: { callback: Boolean(task.callback_route), interaction_notify: Boolean(task.callback_route),
-      ...interactionCapabilities(interactions), cancel: canCancel },
-    available_actions: { status: { tool: "agent_knock_knock_status", input: { watch_id: task.watch_id } },
+      ...interactionCapabilities(interactions), cancel: canCancel, ...desktopRecoveryCapabilities(task) },
+    available_actions: { ...recovery_actions, status: { tool: "agent_knock_knock_status", input: { watch_id: task.watch_id } },
       ...(canCancel ? { cancel: { tool: "agent_knock_knock_cancel", input: { watch_id: task.watch_id } } } : {}) },
     ...(task.pending_manual_count ? { manual_action: terminal
       ? "Handle any remaining question or approval in Desktop; this Watch has stopped."
@@ -89,7 +106,7 @@ function sessionObservation(snapshot: DesktopSnapshot | undefined, writesVerifie
   if (!snapshot) return {};
   const actionable = writesVerified ? (snapshot.pendingInteractions ?? []).filter(item => item.kind !== "async_question").length : 0;
   return { native_turn_id: snapshot.latestTurnId, pending_manual_count: Math.max(0, snapshot.pendingRequestCount - actionable),
-    can_send_reason: snapshot.idleBlockedReason, observed_revision: snapshot.revision };
+    observed_revision: snapshot.revision };
 }
 function sessionActions(id: string, capabilities: { live: boolean; send: boolean; watch: boolean; cancel: boolean }, activeTurn?: string) {
   const input = { conversation_id: id };
@@ -102,15 +119,23 @@ function sessionActions(id: string, capabilities: { live: boolean; send: boolean
       model_options: { tool: "agent_knock_knock_model_options", input } } : {}) };
 }
 function notificationProjection(task: DesktopTaskRecord) {
-  return task.notifications.map(note => ({ id: note.id, status: note.status, attempts: note.attempts,
+  return task.notifications.map(note => ({ id: note.id, notification_id: note.id, status: note.status, attempts: note.attempts,
     ...(note.outcome && "error_code" in note.outcome ? { error_code: note.outcome.error_code } : {}) }));
 }
 function callbackExpected(task: DesktopTaskRecord, terminal: boolean): boolean {
-  return Boolean(task.callback_route && task.status !== "cancelled" &&
+  return Boolean(task.callback_route && !desktopObservationStopped(task) &&
     (!terminal || task.notifications.some(note => ["ready", "retry_wait", "leased"].includes(note.status))));
 }
 function taskInteractionCounts(task: DesktopTaskRecord, items: DesktopInteraction[]) {
   return { pending_async_count: task.observation_error ? null : (task.pending_async_interactions ?? []).length,
     async_interactions_state: task.observation_error ? "unknown" : "current",
     pending_interaction_count: task.observation_error ? null : items.length };
+}
+
+function desktopRecoveryCapabilities(task: DesktopTaskRecord) {
+  const stopped = desktopObservationStopped(task);
+  return { close: task.kind === "send" && !task.closed_at, unwatch: !stopped,
+    recover: !task.closed_at, renew: !task.closed_at && !["completed", "failed", "interrupted"].includes(task.status),
+    retry_callback: !stopped && task.notifications.some(notification =>
+      ["failed", "retry_wait"].includes(notification.status) && notification.outcome?.disposition === "retryable_failure") };
 }

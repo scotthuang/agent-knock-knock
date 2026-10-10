@@ -13,8 +13,10 @@ remain private.
 - Durable JSON writes are atomic and do not follow symbolic-link targets.
 - A custom Store must be a dedicated directory. AKK refuses a non-empty
   manifestless directory rather than adopting unknown files.
-- The Store manifest fences incompatible writers before any terminal or
-  callback mutation.
+- The Store manifest fences incompatible managed writers before managed
+  terminal or callback mutations. An eligible explicit physical Send retains
+  its separate runtime receipt and input-safety checks; it cannot mutate an
+  incompatible managed Store.
 
 ## Compatibility manifest
 
@@ -41,8 +43,23 @@ instead of rewriting unknown authority. Legacy schema-v1/v2 Watches are
 normalized to `notify_only`; they never silently acquire terminal response
 authority. Downgrading after v3 records exist is not supported. Core
 Session/Turn data remains readable across a writer-protocol mismatch, while
-explicit reconciliation reports `skipped` and every mutation fails before
-terminal or Host side effects.
+explicit reconciliation reports `skipped` and managed mutations fail before
+terminal or Host side effects. This does not prohibit an independently
+authorized physical Send that leaves managed state untouched.
+
+## Conversation routing journal
+
+Backend-first Send records its chosen provider before task delivery. These
+records live under the private runtime directory (`~/.agent-knock-knock/runtime-v2`
+by default, or `AKK_RUNTIME_DIR`), in `conversation-routing/<store-path-hash>/state`.
+They have their own locks and compatibility manifest; they do not acquire the
+managed Store's writer lock. A reused message ID stays on its original provider,
+even if another route becomes available later.
+
+Development builds that wrote these records under the managed Store are read
+without modifying the old records. Their original route and any recorded outcome
+remain authoritative; conflicting journals stop the request. A replayed receipt
+is the original submission observation. Query Status for current task state.
 
 ## Legacy directory
 

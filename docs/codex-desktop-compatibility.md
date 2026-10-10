@@ -1,10 +1,16 @@
-# Codex Desktop support in AKK 0.14
+# Codex Desktop support in AKK 0.14.0
 
 AKK can discover an existing local Codex Desktop conversation, send a task to
 its original Desktop owner, and monitor the exact native task for completion
 or attention. It can notify and answer asynchronous questions in the same active
 native task. It does not open a second CLI conversation from the same history.
 Command/file approvals, blocking questions, session settings, and exact task interruption use that same original owner. Unsupported native request forms remain manual.
+
+AKK 0.14.0 introduces these Desktop controls. See the [README](../README.md)
+for the first-task workflow and [OpenClaw installation](openclaw-operations.md#choose-one-installation-path)
+for packaged and optional source installation.
+
+## Version and platform evidence
 
 The reviewed application is macOS Codex Desktop `26.1002.52244`, build `13536`,
 bundle ID `com.openai.codex`, installed as `/Applications/ChatGPT.app`. These
@@ -13,11 +19,27 @@ Its bundled Codex metadata identifies `0.162.0-alpha.2`; that embedded metadata
 is not an app-server runtime handshake or a claim that every running process
 uses that version.
 
+A read-only audit on 2026-10-10 reconfirmed those installed bundle values.
+[The runtime](../src/desktop-runtime.ts) currently reads that fixed application
+path on Darwin and requires the correct bundle ID.
+[The IPC client's write profile](../src/desktop-ipc-client.ts) requires both
+the version and build to match exactly. This is **not a minimum version** or a
+promise of compatibility with later builds. An unreviewed build may still
+return a compatible read-only snapshot; that does not authorize native writes.
+
+The app's own `LSMinimumSystemVersion=13.0` metadata is not an AKK-verified
+minimum macOS version. No Desktop Linux/Windows or alternate installation-path
+support is established. The private IPC handshake does not attest the running
+owner's build, so an updated disk bundle with an older app still running remains
+a compatibility limitation. The real task/interaction evidence below is dated
+2026-10-09; the new [backend Recovery work](backend-task-recovery.md#validation-boundary)
+has fast-regression coverage, not a new live Desktop proof.
+
 ## Capability boundary
 
-| Operation | Desktop v1 behavior |
+| Operation | AKK 0.14.0 behavior |
 | --- | --- |
-| List | Merge the local Desktop catalog and supported Codex state metadata; retain unloaded and creator-unknown candidates; support search, project filtering, and pagination |
+| List | Default to persisted expanded sidebar membership; offer the broader saved catalog with explicit `desktop_view: "history"`; retain unconnected rows and support search, project filtering, and pagination |
 | Status | Read a fresh snapshot from the exact local Desktop owner when available; report unknown live state when only metadata is available |
 | Send | Verify a live, idle thread, persist a send intent, submit once to its original owner, and correlate native acceptance |
 | Automatic monitoring | Retain a durable Watch for the accepted native task and reconcile uncertain acceptance without resending |
@@ -38,12 +60,37 @@ their previous checks.
 
 ## Find and select a conversation
 
-Use `agent_knock_knock_list` through the controller Host. Desktop rows are in
-`desktop_sessions[]`; `desktop_scan` carries catalog/pagination diagnostics.
+Use `agent_knock_knock_list` through the controller Host. Select Desktop rows
+from `conversations[]` using their title, project, and `conversation_id`;
+`desktop_scan` carries catalog/pagination diagnostics. Raw CLI output also
+retains `desktop_sessions[]` for operator compatibility. Desktop continues to
+use its original IPC owner; backend-first CLI routing does not turn saved
+Desktop history into a replacement CLI conversation.
+The default `desktop_view: "sidebar"` follows persisted expanded sidebar
+membership (`persisted_expanded_membership`): eligible pinned conversations
+and members of expanded project groups, respecting supported saved layout
+settings. It does not inspect the rendered screen, scrolling, per-window
+temporary state, or a group's live Show More pagination. If the saved layout
+is unsupported or unavailable, inspect the returned limitations; AKK does not
+silently replace this view with all historical candidates.
+
+Use `desktop_view: "history"` explicitly for the broader saved catalog,
+including older or hidden conversations. Sidebar discovery and historical
+discovery both retain unconnected candidates. Show those rows with their
+connection state instead of reporting only conversations with Send enabled.
+
 Narrow the result using `desktopSearch` for a title or path and
 `desktopProject` for an exact project ID or absolute project directory.
 `desktopLimit` bounds a page; pass the returned cursor as `desktopCursor` to
-continue the same query. A page is not the complete catalog.
+continue the same view and filters. A page is not the complete catalog.
+`view` identifies the selected scope; `total_candidates` describes that view
+after filtering. `history_candidates` counts the broader saved pool before
+search filters. `sidebar_selection_scope: "persisted_expanded_membership"` identifies
+the sidebar reconstruction; `sidebar_status` and `limitations` describe its
+evidence boundary. `returned` and `live_count` describe only the returned page
+(`live_probe_scope: "returned_page"`). Four live rows out of thirty
+returned rows means twenty-six candidates are not proven live, not that only
+four Desktop conversations were discovered.
 
 Select the conversation using its title and project, then copy its complete
 `desktop:v1:...` ID from List. This identity encodes the Codex home, host, and
@@ -51,11 +98,11 @@ native thread; it is independent of window position, display title, and the
 current owner's temporary client ID. Do not construct it from a title, use a
 terminal selector, or substitute a conversation with the same project.
 
-Catalog membership does not mean a conversation is currently loaded in
-Desktop. Some entries were created in CLI, some have an unknown creator, and
-some no longer have a live owner. Keeping these rows is deliberate: filtering
-only by creator or currently loaded owners can hide a conversation that a
-person still sees in Desktop. Live capabilities are checked separately.
+Sidebar or historical membership does not mean a conversation is currently
+loaded in Desktop. Some entries were created in CLI, some have an unknown
+creator, and some no longer have a live owner. Membership uses saved Desktop
+project and sidebar state, not an original-creator filter. Live capabilities
+are checked separately.
 
 If the chosen row has no verified live owner, open that exact conversation in
 Desktop and refresh List. AKK does not load it implicitly or resume it through
@@ -83,7 +130,8 @@ does not create a best-effort activity Watch.
 Equivalent CLI commands are:
 
 ```bash
-agent-knock-knock list --desktop-search 'project or title'
+agent-knock-knock list --desktop-view sidebar
+agent-knock-knock list --desktop-view history --desktop-search 'older title'
 agent-knock-knock status --conversation 'desktop:v1:...'
 agent-knock-knock send --conversation 'desktop:v1:...' \
   --message 'Summarize this project.' --message-id 'one-stable-request-id' \
@@ -163,6 +211,12 @@ fresh Status. Both use the native expected-turn interruption contract. An old
 settled task returns its existing outcome without interrupting a newer task.
 Cancellation may race with completion: report the observed native outcome,
 not a promised interruption. `unwatch` only stops monitoring.
+
+Desktop backend tasks also support `recover`, `renew`, managed `close`, and
+manual `retry_callback` using their exact persisted task IDs, without terminal
+fallback. Close ends Send management, while Unwatch leaves that management
+intact. See [backend task recovery](backend-task-recovery.md) for deadline,
+identity, callback retry and stopped-observation semantics.
 
 ## Protocol and persistence
 

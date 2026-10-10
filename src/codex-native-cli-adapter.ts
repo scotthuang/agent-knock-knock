@@ -1,3 +1,4 @@
+import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -15,7 +16,7 @@ type Options = Record<string, unknown>;
 type Runtime = ReturnType<typeof createCodexNativeRuntime>;
 const nativeCommands = new Set(["codex-cli-list", "monitor-codex-native", "reconcile-codex-native-watches"]);
 const supported = new Set([...nativeCommands, "send", "status", "watch-terminal", "watch-status", "unwatch-terminal",
-  "native-inspect", "permission-options", "set-permissions", "approve", "respond-interaction"]);
+  "native-inspect", "permission-options", "set-permissions", "approve", "respond-interaction", "close", "renew", "recover", "retry-callback"]);
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value : undefined;
 const required = (value: unknown, label: string): string => {
   const result = text(value); if (!result) throw new Error(`Codex CLI ${label} is required`); return result;
@@ -166,15 +167,24 @@ async function respond(runtime: Runtime, command: string, options: Options) {
 }
 
 async function watchCommand(runtime: Runtime, command: string, options: Options) {
-  const id = required(options.watch, "Watch ID");
-  if (["conversation", "conversationId", "terminal", "session", "turn"].some(key => options[key] !== undefined)) throw new Error("Use only one Watch target");
+  const id = required(options.watch ?? options.turn, "Watch ID");
+  if (["conversation", "conversationId", "terminal", "session", "watch", "turn"].filter(key => options[key] !== undefined).length !== 1) throw new Error("Use only one exact Watch target");
   const task = runtime.tasks.status(id);
   if (options.openclawSession && options.openclawSession !== task.controller_session) throw new Error("Codex CLI Watch belongs to a different controller");
   if (command === "unwatch-terminal") {
     output(codexNativeTaskProjection(runtime.tasks.unwatch(id, { controllerSession: required(options.openclawSession, "controller session") })));
   } else if (command === "watch-status" || command === "status") {
     output(codexNativeTaskProjection(await runtime.reconcile(id)));
-  } else throw new Error("Codex CLI Watch is only valid for status, response, or unwatch");
+  } else if (["close", "renew", "recover", "retry-callback"].includes(command)) {
+    const controllerSession = required(options.openclawSession, "controller session");
+    const result = command === "close" ? runtime.tasks.close(id, { controllerSession, reason: text(options.reason) })
+      : command === "renew" ? await runtime.tasks.renew(id, { controllerSession,
+        ...((options.minutes ?? options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes) !== undefined
+          ? { timeoutMs: Number(options.minutes ?? options.hardTimeoutMinutes ?? options.agentHardTimeoutMinutes) * 60_000 } : {}) })
+      : command === "recover" ? await runtime.tasks.recover(id, { controllerSession })
+      : await runtime.tasks.retryCallback(id, { controllerSession, notificationId: text(options.notificationId) });
+    output(command === "close" ? codexNativeTaskProjection(result) : await launchIfNeeded(result, options));
+  } else throw new Error("Codex CLI Watch is only valid for status, response, or task management");
 }
 
 async function reconcileWatches(runtime: Runtime) {
@@ -188,7 +198,7 @@ async function reconcileWatches(runtime: Runtime) {
 
 async function dispatchTarget(runtime: Runtime, command: string, options: Options) {
   if (command === "approve" || command === "respond-interaction") await respond(runtime, command, options);
-    else if (options.watch) await watchCommand(runtime, command!, options);
+    else if (options.watch || options.turn) await watchCommand(runtime, command!, options);
     else if (command === "set-permissions" || command === "permission-options" || command === "native-inspect" && options.action === "permissions") {
       await permissionCommand(runtime, command, options);
     } else if (command === "status" || command === "native-inspect" && (options.action === "status" || options.action === undefined)) await inspectConversation(runtime, options);
@@ -196,11 +206,20 @@ async function dispatchTarget(runtime: Runtime, command: string, options: Option
     else throw new Error("Unsupported Codex CLI native inspection");
 }
 
-export async function dispatchCodexNativeCli(command: string | undefined, options: Options): Promise<boolean> {
+function isNativeDispatch(command: string | undefined, options: Options): boolean {
   const target = options.conversation ?? options.conversationId ?? options.terminal ?? options.session;
-  if (!isCodexNativeConversationId(target) && !String(options.watch ?? "").startsWith("codex-cli-watch:") && !nativeCommands.has(command ?? "")) return false;
+  return isCodexNativeConversationId(target) || String(options.watch ?? options.turn ?? "").startsWith("codex-cli-watch:") || nativeCommands.has(command ?? "");
+}
+
+export async function dispatchCodexNativeCli(command: string | undefined, options: Options): Promise<boolean> {
+  if (!isNativeDispatch(command, options)) return false;
+  assertBackendRecoveryCliTarget(command, options);
   if (!supported.has(command ?? "")) throw new Error("Unsupported Codex CLI native action; target was not sent to a terminal");
-  if (options.watch !== undefined && !isCodexNativeWatchId(options.watch)) throw new Error("Invalid Codex CLI Watch ID");
+  if (options.watch !== undefined && !isCodexNativeWatchId(options.watch) ||
+    options.turn !== undefined && !isCodexNativeWatchId(options.turn)) throw new Error("Invalid Codex CLI Watch ID");
+  if (["close", "renew", "recover", "retry-callback"].includes(command ?? "") && !options.watch && !options.turn) {
+    throw new Error("Codex CLI task management requires an exact Watch ID via --watch or --turn");
+  }
   if (command === "codex-cli-list") { output(await codexNativeListForCli(options)); return true; }
   if (command === "monitor-codex-native") { await runCodexNativeMonitor(required(options.watch, "Watch ID"), codexNativeRuntimeOptions(options)); return true; }
   const runtime = runtimeFor(options);

@@ -145,7 +145,8 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
       "terminal-dispatch",
       `terminal-dispatch-${ledgerKey}.json`
     );
-    fs.mkdirSync(path.dirname(malformedLedgerPath), { recursive: true });
+    // Match the owner-private directories created by the production runtime.
+    fs.mkdirSync(path.dirname(malformedLedgerPath), { recursive: true, mode: 0o700 });
     fs.writeFileSync(malformedLedgerPath, `${JSON.stringify({
       version: 1,
       terminal_key: ledgerKey,
@@ -415,6 +416,7 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
       "send",
       "--session",
       terminalId,
+      "--managed-only",
       "--message",
       "Inspect the repository and report the current branch.",
       "--background",
