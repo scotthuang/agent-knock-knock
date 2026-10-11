@@ -48,7 +48,7 @@ AKK chooses the connection for you. Keep the task/Watch ID returned by Send
 to check its status later. To follow a task you already started yourself,
 ask OpenClaw to Watch that conversation.
 
-**For Codex CLI versions earlier than 0.159, or Claude Code, use tmux or Herdr.**
+**For Codex CLI versions earlier than 0.159, or Claude Code terminal controls, use tmux or Herdr.**
 To use tmux, start the coding agent in your project:
 
 ```bash
@@ -111,6 +111,8 @@ Open a Web conversation and enter `/akk list`. The connector gives every convers
 AKK 0.14.0 introduces Codex CLI shared-backend control, Codex Desktop support, and exact-task recovery. Desktop includes discovery, task sending, Status, and exact task Watches. List follows saved Desktop sidebar membership and keeps unconnected entries visible; open a conversation in Desktop before sending to it. Desktop supports command/file approval decisions, blocking and asynchronous answers, per-conversation permissions, explicit model and Plan/default settings, and exact task cancellation. See [Desktop compatibility and usage](docs/codex-desktop-compatibility.md).
 
 Codex CLI sessions connected to a shared backend can also be controlled directly, without tmux or Herdr. Native CLI rows support task sending, exact Watch and callbacks, command/file approvals, blocking and asynchronous answers, and per-thread permission settings. See the [CLI shared-backend guide](docs/codex-cli-native-compatibility.md).
+
+AKK 0.14.3 also adds [Claude Code direct control](docs/claude-cli-direct.md): discover an already-open CLI, send tasks, read progress, and receive completion callbacks without tmux/Herdr, Claude plugins, or hooks. Live-tested on macOS with Claude Code `2.1.296`; requires Python 3 on the AKK side.
 
 The existing terminal workflows remain available for Codex or Claude Code running in tmux or Herdr:
 
@@ -193,13 +195,14 @@ AKK is local-first: there is no hosted control plane or telemetry. It stores onl
 
 Codex CLI shared-backend connections and Codex Desktop work without tmux or Herdr
 when the conditions below are met. Older CLI setups without a direct connection
-can use a supported terminal route; Claude Code still needs tmux or Herdr.
+can use a supported terminal route. Claude Code direct control is available under the separate boundary below.
 
 | Component | Supported boundary |
 | --- | --- |
 | Terminal hosts | tmux; local Herdr `0.8.0` protocol `19` |
 | Codex Desktop | macOS app `26.1002.52244`, build `13536`; this **exact build**, plus an open connected conversation, is required for sending and other controls. Supports Status, exact Watch, approvals/answers, settings, and cancellation. |
 | Codex CLI shared backend | Live-tested on macOS: CLI `0.162.1` + backend `0.162.1`, and previously `0.160.0` + `0.162.0`. Requires a loaded main CLI conversation and compatible live protocol. These are tested combinations, **not a numeric minimum**. |
+| Claude Code direct connection | macOS, live-tested `2.1.296`, compatible native peer protocol `1`, and Python 3 available to AKK. Basic task sending, progress and completion observation; unsupported controls require the original terminal. See the [direct guide](docs/claude-cli-direct.md). |
 | Terminal coding agents | Reviewed Codex profiles include `0.160.0` and `0.162.1`; Claude Code `2.1.285` was tested on macOS. Unknown versions may expose limited capabilities; native controls depend on the reviewed profile and current UI. |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
 | Pi connector | Pi `0.84.4`; connector currently depends on AKK `0.13.3` |
@@ -224,6 +227,7 @@ Choose the guide that matches what you are trying to do:
 | [tmux quick start](docs/quickstart-tmux.md) | First OpenClaw task, multiple panes, and selectors |
 | [Herdr quick start](docs/quickstart-herdr.md) | Local Herdr discovery and exact-version checks |
 | [Codex CLI direct control](docs/codex-cli-native-compatibility.md) | Connect without tmux/Herdr, select conversations, send tasks, and follow exact progress and completion |
+| [Claude Code direct control](docs/claude-cli-direct.md) | Basic tasks without tmux/Herdr or Claude plugins, exact progress and completion, and terminal fallback boundaries |
 | [Codex Desktop](docs/codex-desktop-compatibility.md) | Discover existing Desktop conversations, send and monitor exact tasks, respond to interactions, and change native settings |
 | [Backend Recovery](docs/backend-task-recovery.md) | Recover monitoring, renew deadlines, close management, stop watching, and retry failed callbacks |
 | [Pi connector](connectors/pi/README.md) | Pi installation, semantic tool catalog, bundled skill, native approval, callbacks, upgrade, and uninstall |

@@ -73,6 +73,49 @@ Callback acceptance means that the controller accepted the notification. It
 does not prove that a downstream channel, such as WeChat, delivered a user-visible
 message. Retry Callback is not a repair for a controller-to-channel failure.
 
+Backend Status and compact List report this separately from task completion:
+
+- `status: completed` is native task evidence; `delivered` and `agent_acceptance`
+  refer to the original Send, not its completion notification.
+- `callback_state` reports the notification state. `uncertain` means acceptance
+  is unconfirmed, even when the task is completed or an earlier notification was
+  accepted. `callback_expected: false` alone does not mean success: it can also
+  mean observation expired, delivery stopped, or an uncertain outcome is fenced.
+- `callback_delivery_scope: controller_acceptance_only` and
+  `channel_delivery_state: unknown` make the downstream boundary explicit.
+  An accepted callback is never evidence of user-visible channel delivery.
+- Each notification retains its ID, attempts and error code. When recorded,
+  `request_phase` and `request_dispatched` distinguish a proven pre-submission
+  failure from an uncertain submission; absent fields remain unknown.
+  `next_attempt_at` describes scheduled backoff. `retry_budget_exhausted: true`
+  and `max_delivery_attempts` appear only when the outbox recorded exhaustion;
+  `automatic_retry_stopped` does not itself prove why retry stopped.
+
+Proven pre-submission connection failures may retry with the same notification
+and idempotency key under the bounded outbox policy. Timeouts after submission,
+unknown phases, and historical uncertain records are not permission to replay.
+An unavailable or empty receipt query cannot establish non-acceptance. Upgrading
+AKK neither unfreezes historical uncertain notifications nor sends them again.
+
+The OpenClaw Watch transport reads a structured Gateway error envelope. An
+explicit boolean dispatch marker takes precedence; invalid or conflicting
+metadata stays uncertain. For the reviewed OpenClaw 2026.9.9 CLI contract, the
+exact structured opening-handshake timeout also proves that the primary RPC was
+not submitted. A bare timeout or connection-error string is insufficient.
+Backend outboxes allow four attempts in total with 5/10/20-second backoff, using
+the original notification and idempotency key. A prolonged outage can still
+exhaust that budget; Status reports this failure instead of claiming delivery.
+
+For a new structured failure whose acceptance is uncertain, AKK makes at most
+one read-only `agent.wait` query for the exact idempotency key (`timeoutMs: 0`,
+bounded subprocess time). Only an exact queued receipt or a completed run with
+valid timing evidence confirms controller acceptance. Missing records, expired
+caches, unsupported interfaces and query timeouts leave the outcome uncertain.
+This query neither submits another task nor proves downstream channel delivery.
+If an original attempt returns late after its local lease expired, only its
+matching positive acceptance or fully correlated proof of non-submission may
+settle it; this is not a scan or replay of historical uncertain notifications.
+
 ## Terminal recovery remains separate
 
 Existing terminal `reconcile_binding`, `identify_foreground`, and

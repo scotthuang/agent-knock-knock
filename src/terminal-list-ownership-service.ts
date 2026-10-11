@@ -269,6 +269,7 @@ function observeBindingAuthority(
       _terminal_user_explicit_send_action: terminalUserExplicitSendAction,
       _terminal_status_snapshot: _terminalStatusSnapshot,
       _native_identity_authority: nativeIdentityAuthorityValue,
+      _physical_agent_process_birth: _physicalBirth,
       ...publicTerminal
     } = listedTerminal;
     const terminal = terminalIdentityAuthorityView(

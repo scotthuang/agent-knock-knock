@@ -20,6 +20,8 @@ type CliDependencyOptions = Readonly<Record<string, unknown>>;
  */
 export interface CliCommandDependencies<Options extends CliDependencyOptions = CliDependencyOptions> {
   conversationRoutingTerminals?: (options: Record<string, unknown>, terminalId?: string) => Promise<Record<string, unknown>[]>;
+  createClaudeNativeRuntime?: typeof import("./claude-native-runtime.js").createClaudeNativeRuntime;
+  launchClaudeNativeMonitor?: typeof import("./claude-native-monitor.js").launchClaudeNativeMonitor;
   createCodexNativeRuntime?: typeof import("./codex-native-runtime.js").createCodexNativeRuntime;
   launchCodexNativeMonitor?: typeof import("./codex-native-monitor.js").launchCodexNativeMonitor;
   createDesktopRuntime?: typeof import("./desktop-runtime.js").createDesktopRuntime;

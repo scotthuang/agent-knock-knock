@@ -1,3 +1,5 @@
+import { backendCallbackSummaryLines } from "./backend-callback-public-projection.js";
+import { isClaudeNativeConversationId, parseClaudeNativeConversationId } from "./claude-native-identity.js";
 import { formatDesktopCommandResult } from "./desktop-command-presentation.js";
 import { backendRecoveryTarget, backendRecoveryToolArgs, isBackendTaskWatchId } from "./backend-recovery-semantic.js";
 import path from "node:path";
@@ -287,7 +289,7 @@ function parseAkkLifecycleCommand(
     return { action: "doctor" };
   }
   if (action === "watch") {
-    const usage = "Usage: /akk watch <exact-terminal-id|codex-cli-conversation-id>";
+    const usage = "Usage: /akk watch <exact-terminal-id|native-cli-conversation-id>";
     const { token: terminalId, rest: extra } = takeRequiredToken(rest, usage);
     assertExactTerminalOrNativeId(terminalId, usage);
     if (extra.trim()) {
@@ -654,11 +656,11 @@ function formatAkkTerminalControlLines(terminal: Record<string, unknown>): strin
 
 export function formatAkkListCommandResult(result: Record<string, unknown>): string {
   const conversations = Array.isArray(result.conversations) ? arrayValue(result.conversations) : undefined;
-  const nativeSessions = conversations?.filter(row => row.source === "codex_cli") ?? arrayValue(result.codex_cli_sessions);
-  const nativeWatches = arrayValue(result.codex_cli_watches);
+  const nativeSessions = conversations?.filter(row => row.source === "codex_cli" || row.source === "claude_cli") ?? [...arrayValue(result.codex_cli_sessions), ...arrayValue(result.claude_cli_sessions)];
+  const nativeWatches = [...arrayValue(result.codex_cli_watches), ...arrayValue(result.claude_cli_watches)];
   const desktopSessions = conversations?.filter(row => row.source === "codex_desktop") ?? arrayValue(result.desktop_sessions);
   const desktopWatches = arrayValue(result.desktop_watches);
-  const terminals = conversations?.filter(row => row.source !== "codex_cli" && row.source !== "codex_desktop") ?? arrayValue(result.terminals);
+  const terminals = conversations?.filter(row => row.source !== "codex_cli" && row.source !== "claude_cli" && row.source !== "codex_desktop") ?? arrayValue(result.terminals);
   const terminalWatches = arrayValue(result.terminal_watches);
   const unavailableManagedTurns = arrayValue(result.unavailable_managed_turns);
   if (
@@ -685,13 +687,13 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
 
   return [
     conversations ? `AKK conversations (${conversations.length}); select a conversation_id and AKK chooses the transport:` : heading,
-    ...(nativeSessions.length ? ["Direct Codex CLI conversations:", ...nativeSessions.flatMap(row => [
+    ...(nativeSessions.length ? ["Direct CLI conversations:", ...nativeSessions.flatMap(row => [
       `- ${row.title ?? row.native_thread_id} | ${row.cwd ?? "unknown directory"} | ${row.activity_state ?? "unknown"}`,
       `  conversation_id: ${row.conversation_id}`, ...formatAvailableActions("  actions", row),
       ...arrayValue(row.terminal_controls).flatMap(terminal => ["  associated terminal controls:",
         ...formatAkkTerminalControlLines(terminal).map(line => `  ${line}`)])
     ])] : []),
-    ...(nativeWatches.length ? ["Direct Codex CLI watches:", ...nativeWatches.map(row =>
+    ...(nativeWatches.length ? ["Direct CLI watches:", ...nativeWatches.map(row =>
       `- ${row.watch_id}: ${row.status}`)] : []),
     ...(desktopSessions.length ? ["Desktop conversations:", ...desktopSessions.map(row =>
       `- ${row.title} | ${row.cwd ?? "unknown directory"} | ${row.activity_state} | ${row.connection_state}\n  conversation_id: ${row.conversation_id}`)] : []),
@@ -732,7 +734,7 @@ export { compactAkkListModelProjection } from "./semantic-tool-list-projection.j
 export function formatAkkWatchCommandResult(
   result: Record<string, unknown>
 ): string {
-  if (result.source === "codex_cli") return formatCodexNativeCommandResult(result, "Watch started");
+  if (["codex_cli", "claude_cli"].includes(String(result.source))) return formatCodexNativeCommandResult(result, "Watch started");
   const watch = terminalWatchRecord(result);
   return [
     "AKK Terminal Watch started:",
@@ -755,7 +757,7 @@ export function formatAkkWatchCommandResult(
 export function formatAkkUnwatchCommandResult(
   result: Record<string, unknown>
 ): string {
-  if (result.source === "codex_cli") return formatCodexNativeCommandResult(result, "Watch stopped") +
+  if (["codex_cli", "claude_cli"].includes(String(result.source))) return formatCodexNativeCommandResult(result, "Watch stopped") +
     "\nObservation stopped; the native task was not interrupted.";
   const watch = terminalWatchRecord(result);
   return [
@@ -769,7 +771,7 @@ export function formatAkkUnwatchCommandResult(
 export function formatAkkWatchStatusCommandResult(
   result: Record<string, unknown>
 ): string {
-  if (result.source === "codex_cli") return formatCodexNativeCommandResult(result, "Watch status");
+  if (["codex_cli", "claude_cli"].includes(String(result.source))) return formatCodexNativeCommandResult(result, "Watch status");
   const watch = terminalWatchRecord(result);
   const userExplicitFallback = watch.source ===
     "terminal_user_explicit_fallback_watch";
@@ -821,15 +823,17 @@ export function formatAkkWatchStatusCommandResult(
 }
 
 /** Native thread/task identities are not managed Session/Turn or physical pane IDs. */
+function nativeCliAgentName(source: unknown): string { return source === "claude_cli" ? "Claude" : "Codex"; }
+
 export function formatCodexNativeCommandResult(result: Record<string, unknown>, operation: string): string {
   const latest = recordValue(result.latest_turn);
-  const finalText = nonEmptyString(result.final_text) ?? nonEmptyString(latest?.final_text);
+  const finalText = nonEmptyString(result.final_text) ?? nonEmptyString(result.response_text) ?? nonEmptyString(latest?.final_text);
   const notifications = arrayValue(result.callback_notifications);
   const interactions = arrayValue(result.interaction_state);
   const state = nonEmptyString(result.state);
   const sendState = nonEmptyString(result.send_state);
   return [
-    `AKK Codex CLI ${operation}:`,
+    `AKK ${nativeCliAgentName(result.source)} CLI ${operation}:`,
     `conversation: ${nonEmptyString(result.conversation_id) ?? "unknown"}`,
     ...(nonEmptyString(result.watch_id) ? [`watch: ${result.watch_id}`] : []),
     ...(nonEmptyString(result.native_thread_id) ? [`native thread: ${result.native_thread_id}`] : []),
@@ -838,8 +842,10 @@ export function formatCodexNativeCommandResult(result: Record<string, unknown>, 
     ...(sendState ? [`send: ${sendState}; native acceptance: ${nonEmptyString(result.agent_acceptance) ?? "unproven"}`] : []),
     ...formatNativeResponseState(state, result.evidence),
     ...(typeof result.callback_expected === "boolean" ? [`callback expected: ${result.callback_expected}`] : []),
+    ...backendCallbackSummaryLines(result),
     ...notifications.map(note => `callback: ${nonEmptyString(note.status) ?? "unknown"}`),
     ...(nonEmptyString(result.observation_error) ? [`observation: ${result.observation_error}`] : []),
+    ...(result.manual_required === true ? ["Return to the original Claude Code terminal for this operation or pending interaction."] : []),
     ...(finalText ? [`completion: ${truncateText(finalText, 2000)}`] : []),
     ...interactions.flatMap(interaction => [
       `pending ${nonEmptyString(interaction.kind) ?? "interaction"}: ${interaction.interaction_id}`,
@@ -1262,12 +1268,12 @@ export function buildAkkCommandCliArgs(
       );
     case "watch": {
       const openclawSession =
-        (isCodexNativeConversationId(command.terminalId) ? requiredNativeController(context.sessionKey) : nonEmptyString(context.sessionKey)) ??
+        (isDirectCliConversationId(command.terminalId) ? requiredNativeController(context.sessionKey) : nonEmptyString(context.sessionKey)) ??
         "agent:main:main";
       return withOptionalArgs(
         [
           "watch-terminal",
-          isCodexNativeConversationId(command.terminalId) ? "--conversation" : "--terminal",
+          isDirectCliConversationId(command.terminalId) ? "--conversation" : "--terminal",
           command.terminalId
         ],
         ["--store-dir", storeDir],
@@ -1277,7 +1283,7 @@ export function buildAkkCommandCliArgs(
         ],
         ["--openclaw-session", openclawSession],
         ["--openclaw-bin", nonEmptyString(config.openclawBin)],
-        ["--codex-home", isCodexNativeConversationId(command.terminalId) ? codexHome : undefined]
+        ["--codex-home", isDirectCliConversationId(command.terminalId) ? codexHome : undefined]
       );
     }
     case "unwatch":
@@ -1441,13 +1447,13 @@ export function buildAkkCommandCliArgs(
           "status",
           "--reconcile",
           ...(command.turnId
-            ? [isCodexNativeConversationId(command.turnId) ? "--conversation" : "--turn", command.turnId]
+            ? [isDirectCliConversationId(command.turnId) ? "--conversation" : "--turn", command.turnId]
             : [])
         ],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes],
-        ["--openclaw-session", isCodexNativeConversationId(command.turnId) ? requiredNativeController(context.sessionKey) : undefined],
-        ["--codex-home", isCodexNativeConversationId(command.turnId) ? codexHome : undefined]
+        ["--openclaw-session", isDirectCliConversationId(command.turnId) ? requiredNativeController(context.sessionKey) : undefined],
+        ["--codex-home", isDirectCliConversationId(command.turnId) ? codexHome : undefined]
       );
     case "send": {
       const openclawSession =
@@ -1546,14 +1552,19 @@ function isTerminalWatchId(value: string): boolean {
   return /^terminal-watch-[A-Za-z0-9._:-]+$/u.test(value) || isBackendTaskWatchId(value);
 }
 
+function isDirectCliConversationId(value: unknown): value is string {
+  return isCodexNativeConversationId(value) || isClaudeNativeConversationId(value);
+}
+
 function requiredNativeController(value: unknown): string {
   const key = nonEmptyString(value);
-  if (!key) throw new Error("controller session is required for a direct Codex CLI action");
+  if (!key) throw new Error("controller session is required for a direct CLI action");
   return key;
 }
 
 function assertExactTerminalOrNativeId(value: string, usage: string): void {
   if (isCodexNativeConversationId(value)) parseCodexNativeConversationId(value);
+  else if (isClaudeNativeConversationId(value)) parseClaudeNativeConversationId(value);
   else assertExactTerminalId(value, usage);
 }
 

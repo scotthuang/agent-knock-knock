@@ -1,4 +1,5 @@
 import test from "node:test";
+import { gatewayDispatchEvidence } from "../src/openclaw-callback-evidence.js";
 import assert from "node:assert/strict";
 import {
   createOpenClawCallbackTransport,
@@ -21,6 +22,118 @@ import {
 } from "../src/protocol.js";
 
 const BASE_TIME_MS = Date.parse("2026-08-14T08:00:00.000Z");
+
+function structuredGatewayFailure(error: Record<string, unknown> = {}) {
+  return processResult("", { status: 1, stderr: JSON.stringify({ ok: false, error: {
+    type: "gateway_transport_error", kind: "closed", reason: "Opening handshake has timed out", ...error
+  } }) });
+}
+
+test("only proved structured pre-dispatch failures authorize retry; conflicting metadata stays unknown", () => {
+  for (const extra of [{}, { requestDispatched: false }, { request_dispatched: false, phase: "connection_handshake" }]) {
+    const h = createHarness([structuredGatewayFailure(extra)]);
+    const input = terminalWatchGenericInput();
+    const result = h.transport.deliver(input);
+    assert.equal(result.disposition, "retryable_failure");
+    assert.equal(result.evidence?.request_dispatched, false);
+    assert.equal(result.evidence?.delivery_id, input.envelope.delivery_id);
+    assert.equal(result.evidence?.idempotency_key, input.envelope.idempotency_key);
+    assert.equal(result.evidence?.attempt_id, input.attempt.id);
+    assert.equal(h.spawnCalls.length, 1);
+  }
+  for (const error of [
+    { requestDispatched: true }, { requestDispatched: "false" },
+    { requestDispatched: false, request_dispatched: true }, { phase: "unknown" },
+    { phase: "submitted", requestDispatched: false }, { phase: "new-schema-phase" },
+    { phase: ["before_dispatch"], requestDispatched: false }, { phase: {}, requestDispatched: false },
+    { phase: "before_dispatch", request_phase: "submitted" },
+    { reason: "Request timed out after dispatch" }, { kind: "timeout" }
+  ]) {
+    const h = createHarness([structuredGatewayFailure(error), processResult({ runId: "missing", status: "timeout" })]);
+    const result = h.transport.deliver(terminalWatchGenericInput());
+    assert.equal(result.disposition, "uncertain", JSON.stringify(error));
+    assert.notEqual(result.evidence?.request_dispatched, false);
+    assert.deepEqual(h.spawnCalls.map(call => call.args[2]), ["chat.send", "agent.wait"]);
+  }
+  for (const text of ["Opening handshake has timed out", JSON.stringify({ error: { type: "gateway_transport_error", kind: "closed", reason: "Opening handshake has timed out" } }),
+    JSON.stringify({ ok: false, error: { type: "new_error_schema", kind: "closed", reason: "Opening handshake has timed out" } }),
+    JSON.stringify({ ok: false, error: { type: "gateway_transport_error", kind: ["closed"], reason: "Opening handshake has timed out" } }),
+    JSON.stringify({ ok: false, error: { type: "new_error_schema", kind: "closed", requestDispatched: true, reason: "ECONNREFUSED" } }),
+    JSON.stringify({ ok: false, error: { type: "gateway_transport_error", kind: "unknown", requestDispatched: true, reason: "failed to connect" } })]) {
+    assert.equal(gatewayDispatchEvidence(text), undefined);
+    const h = createHarness([processResult("", { status: 1, stderr: text })]);
+    assert.equal(h.transport.deliver(terminalWatchGenericInput()).disposition, "uncertain");
+    assert.equal(h.spawnCalls.length, 1);
+  }
+});
+
+test("lost ACK uses one exact read-only acceptance check without sending twice", () => {
+  const input = terminalWatchGenericInput();
+  for (const receipt of [
+    { status: "pending", timeoutPhase: "queue", providerStarted: false },
+    { status: "ok", startedAt: 1000, endedAt: 2000 },
+    { status: "error", startedAt: 1000, endedAt: 2000 }
+  ]) {
+    const h = createHarness([structuredGatewayFailure({ kind: "timeout", requestDispatched: true }),
+      processResult({ runId: input.envelope.idempotency_key, ...receipt, terminalReply: "PRIVATE DO NOT RETAIN" })]);
+    const checkpoints: CallbackAttemptOutcome[] = [];
+    const result = h.transport.deliver({ ...input, reportCheckpoint: value => checkpoints.push(value) });
+    assert.equal(result.disposition, "accepted");
+    assert.equal(result.evidence?.acceptance_check, "exact_run_observed");
+    assert.equal(result.evidence?.acceptance_scope, "controller_only");
+    assert.equal(JSON.stringify(result).includes("PRIVATE"), false);
+    assert.equal(checkpoints.length, 1);
+    assert.deepEqual(h.spawnCalls.map(call => call.args[2]), ["chat.send", "agent.wait"]);
+    const query = h.spawnCalls[1];
+    assert.deepEqual(JSON.parse(query.args[query.args.indexOf("--params") + 1]), { runId: input.envelope.idempotency_key, timeoutMs: 0 });
+    assert.equal(query.options.timeout, 2000);
+  }
+});
+
+test("absent, timed-out, failed, malformed, or foreign acceptance query never unlocks an uncertain send", () => {
+  const input = terminalWatchGenericInput();
+  for (const receipt of [
+    processResult({ runId: input.envelope.idempotency_key, status: "timeout" }),
+    processResult({ runId: "foreign-run", status: "ok", startedAt: 1000, endedAt: 2000 }),
+    processResult({ runId: input.envelope.idempotency_key, status: "ok" }),
+    processResult({ runId: input.envelope.idempotency_key, status: "pending" }),
+    processResult("malformed"), processResult("", { status: 1, stderr: "query unavailable" }), new Error("read failed")
+  ]) {
+    const h = createHarness([structuredGatewayFailure({ requestDispatched: true }), receipt]);
+    const result = h.transport.deliver(input);
+    assert.equal(result.disposition, "uncertain");
+    assert.equal(result.evidence?.request_dispatched, true);
+    assert.equal(h.spawnCalls.length, 2);
+  }
+});
+
+test("exact chat.send ACK overrides a structured transport error", () => {
+  const input = terminalWatchGenericInput();
+  const h = createHarness([{ ...structuredGatewayFailure(), stdout: JSON.stringify({ runId: input.envelope.idempotency_key, status: "started" }) }]);
+  assert.equal(h.transport.deliver(input).disposition, "accepted");
+  assert.equal(h.spawnCalls.length, 1);
+});
+
+test("managed initial handshake proof retries, but later wake failures cannot authorize reinjection", () => {
+  const initial = createHarness([structuredGatewayFailure()]);
+  const request = genericInput(initial);
+  const result = initial.transport.deliver(request);
+  assert.equal(result.disposition, "retryable_failure");
+  assert.equal(result.evidence?.method, "agent.callback");
+  assert.equal(result.evidence?.idempotency_key, request.envelope.idempotency_key);
+  assert.equal(initial.spawnCalls.length, 1);
+  for (const enqueued of [true, false, undefined]) {
+    const h = createHarness([processResult(gatewayPlan({ enqueued, injection_id: enqueued ? "exact-injection" : undefined })), structuredGatewayFailure()]);
+    const outcome = h.transport.deliver(genericInput(h));
+    assert.equal(outcome.disposition, enqueued ? "accepted" : "uncertain");
+    assert.deepEqual(h.spawnCalls.map(call => call.args[2]), ["agent.callback", "chat.send"]);
+  }
+  const conflict = createHarness([{ ...structuredGatewayFailure(), stdout: JSON.stringify(gatewayPlan()) }]);
+  assert.equal(conflict.transport.deliver(genericInput(conflict)).disposition, "uncertain");
+  const unknown = createHarness([processResult("", { status: 1, stderr: JSON.stringify({ ok: false,
+    error: { type: "unknown_schema", requestDispatched: true, message: "ECONNREFUSED" } }) })]);
+  assert.equal(unknown.transport.deliver(genericInput(unknown)).disposition, "uncertain");
+});
 
 interface SpawnCall {
   command: string;
@@ -936,13 +1049,13 @@ test("Terminal Watch generic process failures preserve safe retry boundaries", (
       errorCode: "openclaw_callback_configuration_error"
     },
     {
-      name: "connection refused before request dispatch",
+      name: "bare connection refusal does not prove the dispatch phase",
       result: processResult("", {
         status: 1,
         stderr: "connect ECONNREFUSED 127.0.0.1:18789"
       }),
-      disposition: "retryable_failure",
-      errorCode: "openclaw_callback_delivery_failed"
+      disposition: "uncertain",
+      errorCode: "openclaw_callback_acceptance_uncertain"
     },
     {
       name: "unknown nonzero result after invocation",
@@ -1168,7 +1281,7 @@ test("legacy gateway ok without enqueued stays uncertain after wake refusal", ()
   );
 });
 
-test("explicit enqueued false keeps pre-acceptance wake refusal retryable", () => {
+test("explicit enqueued false cannot turn an unstructured wake error into dispatch proof", () => {
   const harness = createHarness([
     processResult(gatewayPlan({
       enqueued: false,
@@ -1183,10 +1296,12 @@ test("explicit enqueued false keeps pre-acceptance wake refusal retryable", () =
   const result = harness.transport.deliver(genericInput(harness));
 
   assert.deepEqual(result, {
-    disposition: "retryable_failure",
-    error_code: "openclaw_callback_delivery_failed",
+    disposition: "uncertain",
+    error_code: "openclaw_callback_acceptance_uncertain",
+    observed_at: "2026-08-14T08:00:02.000Z",
     evidence: {
-      error_message: "connect ECONNREFUSED 127.0.0.1:18789"
+      error_message: "connect ECONNREFUSED 127.0.0.1:18789",
+      request_phase: "unknown"
     }
   });
   assert.deepEqual(

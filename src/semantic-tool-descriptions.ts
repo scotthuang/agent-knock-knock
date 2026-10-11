@@ -1,6 +1,6 @@
 // Model-facing wording is data; execution and authority stay in the tool runtime.
 export const semanticToolDescriptions = {
-  akk: "Choose a conversation from AKK List; AKK prefers a verified backend and uses eligible terminal delivery when unavailable. Control loaded Codex CLI threads through their backend: discover, " +
+  akk: "Claude Code direct connections support discovery, idle task sends, bounded public progress and exact observation without tmux, Herdr, hooks or agent-side plugins. Unsupported controls require the original terminal; do not send ordinary text as approval or cancellation. Choose a conversation from AKK List; AKK prefers a verified backend and uses eligible terminal delivery when unavailable. Control loaded Codex CLI threads through their backend: discover, " +
     "send, watch completion, answer questions, approve requests and set permissions " +
     "without tmux or Herdr. Discover Codex Desktop conversations, send tasks and watch their completion; " +
     "Desktop supports typed asynchronous and blocking answers, approvals, current-thread permissions/model settings and exact task cancellation. Send coding work " +
@@ -8,7 +8,7 @@ export const semanticToolDescriptions = {
     "inspect managed Turns, observe a user-selected terminal with durable " +
     "read-only Terminal Watch, manage native threads, and safely inspect or " +
     "change an idle pane's native model selection or Codex permissions.",
-  watch: "Pass conversation_id from List; AKK prefers the exact backend observation route. Retain the returned watch_id; an existing Watch never changes its task or transport. For direct Codex CLI, watch its exact " +
+  watch: "Claude direct Watch observes one exact native input; idle alone is not success. Send already includes monitoring. Pass conversation_id from List; AKK prefers the exact backend observation route. Retain the returned watch_id; an existing Watch never changes its task or transport. For direct Codex CLI, watch its exact " +
     "task with a default 720-minute hard deadline unless overridden. Send already returns its automatic Watch; do not create a duplicate for the same submission. Observe the " +
     "active task; use the returned codex-cli-watch ID for Status and interactions. " +
     "For Desktop, use the exact conversation_id from List to watch one currently " +
@@ -68,7 +68,7 @@ export const semanticToolDescriptions = {
     "may independently be managed. Automatic terminal_user_explicit fallback " +
     "Watch status describes the exact request AKK physically sent without " +
     "claiming a managed Turn. AKK never starts a coding agent.",
-  send: "Pass request and conversation_id from List. AKK prefers a backend only when the exact same live thread is proven, otherwise retaining eligible terminal delivery. Targeted conversation operations may use the safe native /status identity probe when needed; List sends no input. It never retries uncertain dispatch through another route. Backend busy or blocked state is not transport unavailability. For direct Codex CLI, AKK " +
+  send: "Claude direct Send supports idle sessions only; busy or blocked is not transport unavailability. Preserve any uncertain receipt and inspect Status instead of resending. Pass request and conversation_id from List. AKK prefers a backend only when the exact same live thread is proven, otherwise retaining eligible terminal delivery. Targeted conversation operations may use the safe native /status identity probe when needed; List sends no input. It never retries uncertain dispatch through another route. Backend busy or blocked state is not transport unavailability. For direct Codex CLI, AKK " +
     "uses a shared default 720-minute monitoring hard deadline unless overridden; terminal inactivity remains separate. Do not create another Watch when the receipt already provides automatic monitoring. AKK " +
     "submits once to the loaded backend thread, inherits its settings and binds " +
     "an exact native-task Watch for completion and interaction callbacks; no " +

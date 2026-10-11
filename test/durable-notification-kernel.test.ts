@@ -111,3 +111,16 @@ test("durable notification settlement centralizes retry authorization", () => {
     supersede: true
   }), { state: "superseded", outcome: uncertain });
 });
+
+test("budget exhaustion explains stopped retries without mislabelling revocation or unknown acceptance", () => {
+  const outcome = { disposition: "retryable_failure" as const, error_code: "connection_unavailable",
+    evidence: { request_dispatched: false } };
+  const exhausted = reduceDurableNotificationSettlement({ attempt: 4, outcome, retryEnabled: true, maxRetryAttempts: 3 });
+  assert.equal(exhausted.state, "failed");
+  assert.deepEqual(exhausted.outcome.evidence, { request_dispatched: false, retry_budget_exhausted: true, max_delivery_attempts: 4 });
+  const stopped = reduceDurableNotificationSettlement({ attempt: 4, outcome, retryEnabled: false, maxRetryAttempts: 3 });
+  assert.equal(stopped.outcome.evidence?.retry_budget_exhausted, undefined);
+  const unknown = reduceDurableNotificationSettlement({ attempt: 4, retryEnabled: true, maxRetryAttempts: 3,
+    outcome: { disposition: "uncertain", error_code: "lost_ack", observed_at: NOW } });
+  assert.equal(unknown.outcome.evidence?.retry_budget_exhausted, undefined);
+});

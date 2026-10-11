@@ -651,10 +651,7 @@ function inspectStoreCompatibilityForTerminalList(
   }
 }
 
-function physicalOnlyTerminalProjection(
-  terminals: TerminalListScanEntry[],
-  reason: string
-): TerminalFirstListProjection {
+function physicalOnlyTerminalProjection(terminals: TerminalListScanEntry[], reason: string): TerminalFirstListProjection {
   return {
     terminals: terminals.map((terminal) => {
       const {
@@ -663,7 +660,7 @@ function physicalOnlyTerminalProjection(
         _codex_open_root_rollout_inventory: _inventory,
         _codex_latent_clear_resume: _resume,
         _terminal_user_explicit_send_action: terminalUserExplicitSendAction,
-        _terminal_status_snapshot: _status,
+        _terminal_status_snapshot: _status, _physical_agent_process_birth: _physicalBirth,
         ...publicTerminal
       } = terminal;
       const actions = isRecord(publicTerminal.available_actions)
@@ -1087,6 +1084,9 @@ async function terminalControlledListEntry(
     native_agent_status_card_session_id: statusCardNativeThreadId,
     native_agent_process_uuid: nativeProcessUuid,
     native_agent_process_birth: nativeProcessBirth,
+    // Keep Claude's OS process proof separate from its native lifecycle token inputs.
+    ...(session.agent === "claude" ? {
+      _physical_agent_process_birth: physicalProcessIncarnation?.processBirth } : {}),
     native_agent_rollout: nativeAgentIdentity?.rollout,
     native_agent_identity_evidence: nativeProcessEvidence,
     native_agent_identity_observation: {

@@ -550,6 +550,24 @@ test("Desktop keeps late callback acceptance after the same attempt lease was ma
   const accepted = await settling; assert.equal(accepted.notifications[0].status, "accepted"); assert.equal(accepted.notifications[0].attempts, 1);
 });
 
+test("Desktop expired callback can retry after exact original-attempt proof of no dispatch", async t => {
+  const h = harness(t); const sent = await h.service.send({ ...input, callbackRoute: route });
+  let release!: (outcome: CallbackAttemptOutcome) => void; let signal!: () => void;
+  let request!: CallbackTransportDeliverInput;
+  const pending = new Promise<void>(resolve => { signal = resolve; });
+  h.deps.deliver = delivery => new Promise(resolve => { request = delivery; release = resolve; signal(); });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const service = createDesktopTaskService(h.deps); const settling = service.reconcile(sent.id); await pending;
+  h.state.now += 31_000;
+  assert.equal((await service.reconcile(sent.id)).notifications[0].status, "uncertain");
+  release({ disposition: "retryable_failure", error_code: "connection_unavailable", evidence: { request_dispatched: false,
+    request_phase: "connection_handshake", attempt_id: request.attempt.id, delivery_id: request.envelope.delivery_id,
+    idempotency_key: request.envelope.idempotency_key } });
+  const waiting = await settling;
+  assert.equal(waiting.notifications[0].status, "retry_wait"); assert.equal(waiting.notifications[0].attempts, 1);
+  assert.equal(Date.parse(waiting.notifications[0].retry_at!) - h.state.now, 5000);
+});
+
 test("Desktop Recover retains stopped observation for legacy cancelled records", async t => {
   const h = harness(t); h.state.snapshot = snapshot([turn("native-one")]); delete h.deps.deliver;
   const service = createDesktopTaskService(h.deps); const watched = await service.watch({ ...input, callbackRoute: route });

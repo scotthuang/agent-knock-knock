@@ -368,8 +368,14 @@ test("an uncertain Claude stash-clear returns structured do-not-retry evidence",
       expectedTerminalToken,
       messageId
     );
-    assert.equal(replay.status, 1, fixture.debug(replay));
-    assert.match(replay.stderr, /uncertain|must be resolved/iu);
+    assert.equal(replay.status, 0, fixture.debug(replay));
+    const replayed = JSON.parse(replay.stdout);
+    assert.equal(replayed.replayed, true);
+    assert.equal(replayed.status, "submission_uncertain");
+    assert.equal(replayed.submission_outcome, "uncertain");
+    assert.equal(replayed.do_not_retry, true);
+    assert.equal(replayed.safe_to_retry, false);
+    assert.equal(replayed.message_id, messageId);
     assert.equal(fixture.literalInputs().length, inputsBeforeReplay);
     assert.equal(fixture.keyDispatches().length, keysBeforeReplay);
   } finally {
@@ -548,6 +554,8 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
   ]);
   const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
+    CLAUDE_CONFIG_DIR: claudeHome,
+    AKK_NATIVE_CLAUDE_CONFIG_DIRS: JSON.stringify([claudeHome]),
     AKK_RUNTIME_DIR: runtimeDir,
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
     AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted",
@@ -668,6 +676,7 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
       (entry: Record<string, unknown>) => entry.id === terminalId
     );
     assert.ok(listed, listedResult.stdout);
+    assert.equal("_physical_agent_process_birth" in listed, false);
     assert.equal(listed.handoff_state, "external_handoff_adoptable");
     assert.equal("_automated_input_composer_ready" in listed, false);
     assert.equal(listed.available_actions?.send?.arguments?.selector, terminalId);
@@ -704,7 +713,7 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
       entry.session_id === output.session_id
     );
     assert.equal(sourceAfter?.status, "detached");
-    assert.equal(targetAfter?.status, "bound");
+    assert.equal(targetAfter?.status, "bound", sent.stdout);
     assert.equal(targetAfter?.binding?.native_thread_id, NATIVE_B);
     assert.equal(targetAfter?.binding?.terminal_control.kind, "herdr");
     assert.equal(targetAfter?.lineage.created_by, "human_observed");
@@ -1165,7 +1174,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
     );
     assert.equal(sent.status, 0, fixture.debug(sent));
     assert.equal(JSON.parse(sent.stdout).delivered, true);
-    assert.equal(fixture.transitionCount(), 1);
+    assert.equal(fixture.transitionCount(), 1, fixture.debug(sent));
     assert.deepEqual(fixture.literalInputs(), [
       "Continue only after the human explicitly superseded the old Turn."
     ]);
@@ -3499,6 +3508,8 @@ function createHandoffFixture({
   const clock = new VirtualClock("2026-08-10T12:00:00.000Z");
   const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
+    CLAUDE_CONFIG_DIR: claudeHome,
+    AKK_NATIVE_CLAUDE_CONFIG_DIRS: JSON.stringify([claudeHome]),
     AKK_RUNTIME_DIR: runtimeDir,
     AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
     AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted",

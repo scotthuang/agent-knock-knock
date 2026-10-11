@@ -318,6 +318,7 @@ export function testProcessEnvironment(extra = {}) {
     // backends. A backend fixture can explicitly override these after setup.
     AKK_NATIVE_CODEX_HOMES: unavailableTestBackendHomes(),
     AKK_DESKTOP_CODEX_HOMES: unavailableTestBackendHomes(),
+    AKK_NATIVE_CLAUDE_CONFIG_DIRS: unavailableTestBackendHomes(),
     ...extra
   };
 }

@@ -193,6 +193,8 @@ test("trusted CLI authority is injected only for Turn and Watch creation or reco
     ["reconcile-watches", untrusted],
     ["reconcile-desktop-watches", untrusted],
     ["reconcile-codex-native-watches", untrusted],
+    ["reconcile-claude-native-watches", untrusted],
+    ["monitor-claude-native", untrusted],
     ["monitor-codex-native", { ...untrusted, watch: "codex-cli-watch:fixture" }],
     ["monitor-desktop", { ...untrusted, watch: "desktop-watch:fixture" }]
   ] as const) {

@@ -1,3 +1,4 @@
+import { dispatchClaudeConversationCli } from "./claude-conversation-routing-cli-adapter.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { cliDependencies, cliEnv, cliNow, cliNowMs, cliPid, cliSleepSync, writeCliStdout, runCliCommandExecution, setCliExitCode } from "./cli-runtime-context.js";
@@ -17,21 +18,17 @@ import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.j
 import { selectLegacyConversationRoute } from "./conversation-route-legacy.js";
 import { defaultStoreDir } from "./store.js";
 import { expandHome } from "./cli-command-runtime.js";
-import { conversationCommandPolicy, conversationRoutedOptions, prepareConversationTerminalOptions, routedCommand } from "./conversation-routing-commands.js";
+import { conversationCommandPolicy, conversationRoutedOptions, prepareConversationTerminalOptions, routedCommand, type ConversationRoutingCliPorts } from "./conversation-routing-commands.js";
 
 type Options = Record<string, unknown>;
 type Row = Record<string, unknown>;
 type Selection = ConversationRouteChoice & { reason?: string };
-export interface ConversationRoutingCliPorts {
-  terminals(options: Options, terminalId?: string): Promise<Row[]>;
-  /** Executes the existing command without entering this router again. */
-  execute(command: string, options: Options): Promise<Row>;
-}
+export type { ConversationRoutingCliPorts } from "./conversation-routing-commands.js";
 const preflightUnavailable = new Set(["ENOENT", "ECONNREFUSED", "ECONNRESET", "ENOTSOCK", "ETIMEDOUT", "closed", "timeout", "unsupported_capability", "thread_not_loaded"]);
 
 export async function executeConversationCommand(command: string | undefined, options: Options,
   terminals: ConversationRoutingCliPorts["terminals"], execute: (command: string | undefined, options: Options) => Promise<void>): Promise<void> {
-  if (await dispatchRoutedConversationCli(command, options, {
+  const ports: ConversationRoutingCliPorts = {
     terminals: cliDependencies().conversationRoutingTerminals ?? terminals,
     execute: async (selectedCommand, selectedOptions) => {
       const result = await runCliCommandExecution(selectedCommand, selectedOptions, { ...cliDependencies(), stdout: undefined },
@@ -39,7 +36,8 @@ export async function executeConversationCommand(command: string | undefined, op
       setCliExitCode(result.exitCode);
       return JSON.parse(result.stdout);
     }
-  })) return;
+  };
+  if (await dispatchClaudeConversationCli(command, options, ports) || await dispatchRoutedConversationCli(command, options, ports)) return;
   await execute(command, options);
 }
 

@@ -11,6 +11,26 @@ export interface DurableNotificationLease {
   leaseExpiresAt: string;
 }
 
+/** Only the original expired attempt may supply late, definitive evidence. */
+export function canSettleExpiredNotificationAttempt(input: {
+  status: string;
+  previousOutcome?: CallbackAttemptOutcome;
+  leaseExpiredCode: string;
+  outcome: CallbackAttemptOutcome;
+  attemptId: string;
+  deliveryId: string;
+  idempotencyKey: string;
+}): boolean {
+  if (input.status !== "uncertain" || input.previousOutcome?.disposition !== "uncertain" ||
+    input.previousOutcome.error_code !== input.leaseExpiredCode) return false;
+  if (input.outcome.disposition === "accepted") return true;
+  const evidence = input.outcome.evidence;
+  return input.outcome.disposition === "retryable_failure" && evidence?.request_dispatched === false &&
+    ["connection_handshake", "before_dispatch"].includes(String(evidence.request_phase)) &&
+    evidence.attempt_id === input.attemptId && evidence.delivery_id === input.deliveryId &&
+    evidence.idempotency_key === input.idempotencyKey;
+}
+
 export function createDurableNotificationLease(input: {
   previousAttempts: number;
   attemptId: string;
@@ -140,7 +160,11 @@ export function reduceDurableNotificationSettlement(input: {
   }
   return {
     state: "failed",
-    outcome: input.outcome,
+    outcome: input.outcome.disposition === "retryable_failure" && input.retryEnabled &&
+      input.maxRetryAttempts !== undefined && input.attempt > input.maxRetryAttempts
+      ? { ...input.outcome, evidence: { ...input.outcome.evidence,
+          retry_budget_exhausted: true, max_delivery_attempts: input.maxRetryAttempts + 1 } }
+      : input.outcome,
     retryAuthorized: input.outcome.disposition === "retryable_failure" &&
       input.retryEnabled &&
       (
