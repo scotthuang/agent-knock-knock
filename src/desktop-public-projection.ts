@@ -1,4 +1,5 @@
 import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
+import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
 import { desktopObservationStopped } from "./desktop-task-recovery.js";
 import { desktopInteractionIsApproval, desktopInteractionProjection } from "./desktop-interaction-projection.js";
 import type { DesktopCatalogEntry } from "./desktop-session-catalog.js";
@@ -49,7 +50,7 @@ function sessionSendAvailability(snapshot: DesktopSnapshot | undefined, writesVe
 export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified = true): Record<string, unknown> {
   const terminal = desktopObservationStopped(task) || ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
   const interactions = writesVerified && !terminal ? actionableTaskInteractions(task) : [];
-  const notifications = notificationProjection(task);
+  const callback = backendCallbackPublicProjection(task, !terminal, desktopObservationStopped(task));
   const canCancel = writesVerified && !terminal && Boolean(task.native_turn_id);
   const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
   return {
@@ -64,7 +65,7 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified = 
     ...taskInteractionCounts(task, interactions),
     interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id)),
     callback_expected: callbackExpected(task, terminal),
-    callback_configured: Boolean(task.callback_route), callback_notifications: notifications,
+    callback_configured: Boolean(task.callback_route), ...callback,
     ...desktopSendReceiptProjection(task.send_intent),
     capabilities: { callback: Boolean(task.callback_route), interaction_notify: Boolean(task.callback_route),
       ...interactionCapabilities(interactions), cancel: canCancel, ...desktopRecoveryCapabilities(task) },
@@ -117,10 +118,6 @@ function sessionActions(id: string, capabilities: { live: boolean; send: boolean
     ...(capabilities.live ? { native_inspect: { tool: "agent_knock_knock_native_inspect", input: { ...input, inspection: "status" } },
       permission_options: { tool: "agent_knock_knock_permission_options", input },
       model_options: { tool: "agent_knock_knock_model_options", input } } : {}) };
-}
-function notificationProjection(task: DesktopTaskRecord) {
-  return task.notifications.map(note => ({ id: note.id, notification_id: note.id, status: note.status, attempts: note.attempts,
-    ...(note.outcome && "error_code" in note.outcome ? { error_code: note.outcome.error_code } : {}) }));
 }
 function callbackExpected(task: DesktopTaskRecord, terminal: boolean): boolean {
   return Boolean(task.callback_route && !desktopObservationStopped(task) &&

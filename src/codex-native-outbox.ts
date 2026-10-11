@@ -1,7 +1,7 @@
 import { backendCallbackMaxAttempts, backendObservationStopped } from "./backend-task-recovery.js";
 import { randomUUID } from "node:crypto";
 import { parseCallbackAttemptOutcome, type CallbackAttemptOutcome, type CallbackTransportContextV1, type CallbackTransportDeliverInput } from "./callback-transport.js";
-import { createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
+import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
 import type { CodexNativeNotification, CodexNativeStateRepository, CodexNativeTaskRecord } from "./codex-native-state-store.js";
 
 export interface NativeOutboxDependencies {
@@ -37,15 +37,17 @@ export function createNativeNotificationOutbox(deps: NativeOutboxDependencies) {
     update(id, task => {
       const n = task.notifications.find(candidate => candidate.id === notificationId);
       if (!n || n.attempt_id !== attemptId) return;
-      const lateAcceptance = outcome.disposition === "accepted" && n.status === "uncertain" &&
-        n.outcome?.disposition === "uncertain" && n.outcome.error_code === "codex_native_callback_lease_expired";
-      if (n.status !== "leased" && !lateAcceptance) return;
+      const definitiveLateOutcome = canSettleExpiredNotificationAttempt({ status: n.status, previousOutcome: n.outcome,
+        leaseExpiredCode: "codex_native_callback_lease_expired", outcome, attemptId,
+        deliveryId: n.envelope.delivery_id, idempotencyKey: n.envelope.idempotency_key });
+      if (n.status !== "leased" && !definitiveLateOutcome) return;
       if (outcome.disposition === "retryable_failure" && stale(task, n)) {
         n.status = "failed"; n.outcome = { disposition: "permanent_failure", error_code: "codex_native_callback_stale" }; delete n.retry_at; return;
       }
-      n.outcome = outcome;
+      delete n.retry_at;
       const result = reduceDurableNotificationSettlement({ attempt: n.attempts, outcome, retryEnabled: !backendObservationStopped(task) && !stale(task, n),
         maxRetryAttempts: backendCallbackMaxAttempts(n, maxAttempts) - 1 });
+      n.outcome = result.outcome;
       if (result.state === "accepted") n.status = "accepted";
       else if (result.state === "failed" && result.retryAuthorized) {
         n.status = "retry_wait"; n.retry_at = new Date(now().getTime() + (deps.retryDelayMs ?? 5000) * 2 ** (n.attempts - 1)).toISOString();

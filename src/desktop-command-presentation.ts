@@ -1,4 +1,5 @@
 import { isRecord, nonBlankString } from "./value-guards.js";
+import { backendCallbackSummaryLines } from "./backend-callback-public-projection.js";
 
 /** Desktop commands have native task identities, never fabricated managed Session or Turn ids. */
 export function formatDesktopCommandResult(result: Record<string, unknown>, action: string): string {
@@ -6,7 +7,8 @@ export function formatDesktopCommandResult(result: Record<string, unknown>, acti
   return [`AKK Desktop ${action}: ${state}`,
     `conversation: ${nonBlankString(result.conversation_id) ?? "unknown"}`,
     ...optionalLine(result, "watch_id", "watch"), ...optionalLine(result, "native_turn_id", "native task"),
-    ...modelLines(result), ...effectLines(result, state), ...optionalLine(result, "final_text", "result")].join("\n");
+    ...modelLines(result), ...effectLines(result, state), ...backendCallbackSummaryLines(result),
+    ...optionalLine(result, "final_text", "result")].join("\n");
 }
 function optionalLine(result: Record<string, unknown>, field: string, label: string): string[] {
   const value = nonBlankString(result[field]);

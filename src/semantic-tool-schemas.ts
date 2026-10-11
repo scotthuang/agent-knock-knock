@@ -3,11 +3,11 @@ import { TERMINAL_INTERACTION_LIMITS } from
   "./terminal-interaction-protocol.js";
 
 const terminalOrDesktopConversationSchema = {
-  type: "string", pattern: "^(?:desktop:v1:[A-Za-z0-9_-]+|terminal:v[0-9]+:\\S+)$",
+  type: "string", pattern: "^(?:(?:desktop|claude-cli):v1:[A-Za-z0-9_-]+|terminal:v[0-9]+:\\S+)$",
   description: "Exact listed Desktop or terminal conversation_id; AKK selects the supported route."
 };
 const listedConversationSchema = {
-  type: "string", pattern: "^(?:(?:desktop|codex-cli):v1:[A-Za-z0-9_-]+|terminal:v[0-9]+:\\S+)$",
+  type: "string", pattern: "^(?:(?:desktop|codex-cli|claude-cli):v1:[A-Za-z0-9_-]+|terminal:v[0-9]+:\\S+)$",
   description: "Exact conversation_id from List. AKK chooses the available transport; never construct an ID."
 };
 const terminalOrNativeTarget = [
@@ -328,7 +328,7 @@ export const watchParameters = {
       type: "number",
       exclusiveMinimum: 0,
       description:
-        "Optional maximum lifetime for observing this exact terminal, Desktop, or direct Codex CLI task."
+        "Optional maximum lifetime for observing this exact terminal, Desktop, or direct Codex/Claude CLI task."
     }
   }
 };
@@ -342,7 +342,7 @@ export const unwatchParameters = {
       type: "string",
       minLength: 1,
       description:
-        "Authoritative terminal, Desktop, or direct Codex CLI Watch id returned by watch or prefilled by list/status."
+        "Authoritative terminal, Desktop, or direct Codex/Claude CLI Watch id returned by watch or prefilled by list/status."
     }
   }
 };
@@ -647,8 +647,8 @@ export const resumeThreadParameters = {
 };
 
 const backendWatchSchema = {
-  type: "string", pattern: "^(?:desktop-watch|codex-cli-watch):[A-Za-z0-9_-]{8,128}$",
-  description: "Exact persisted Codex CLI or Desktop task watch_id. Never use a conversation or current/latest selector."
+  type: "string", pattern: "^(?:desktop-watch|codex-cli-watch|claude-cli-watch):[A-Za-z0-9_-]{8,128}$",
+  description: "Exact persisted Claude CLI, Codex CLI or Desktop task watch_id. Never use a conversation or current/latest selector."
 };
 const recoveryTargetChoice = [
   { required: ["watch_id"], not: { anyOf: [{ required: ["turn_id"] }, { required: ["conversation_id"] }] } },
@@ -656,7 +656,7 @@ const recoveryTargetChoice = [
   { required: ["conversation_id"], not: { anyOf: [{ required: ["watch_id"] }, { required: ["turn_id"] }] } }
 ];
 const legacyRecoveryConversation = {
-  type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli)(?:-watch)?:)", deprecated: true,
+  type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli|claude-cli)(?:-watch)?:)", deprecated: true,
   description: "Deprecated legacy terminal Turn alias only. Backend conversation_id cannot target task recovery."
 };
 
@@ -667,7 +667,7 @@ export const renewParameters = {
   properties: {
     watch_id: backendWatchSchema,
     turn_id: {
-      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli):)",
+      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli|claude-cli):)",
       description: "Exact managed terminal Turn or send-produced backend turn_id (the original task's Watch ID)."
     },
     conversation_id: legacyRecoveryConversation,
@@ -698,12 +698,12 @@ export const retryCallbackParameters = {
   oneOf: recoveryTargetChoice,
   allOf: [{ if: { required: ["notification_id"] }, then: { anyOf: [
     { required: ["watch_id"] },
-    { required: ["turn_id"], properties: { turn_id: { pattern: "^(?:desktop-watch|codex-cli-watch):[A-Za-z0-9_-]{8,128}$" } } }
+    { required: ["turn_id"], properties: { turn_id: { pattern: "^(?:desktop-watch|codex-cli-watch|claude-cli-watch):[A-Za-z0-9_-]{8,128}$" } } }
   ] } }],
   properties: {
     watch_id: backendWatchSchema,
     turn_id: {
-      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli):)",
+      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli|claude-cli):)",
       description: "Exact managed terminal Turn or send-produced backend turn_id whose persisted callback should be retried."
     },
     conversation_id: legacyRecoveryConversation,
@@ -737,7 +737,7 @@ export const statusParameters = {
     conversation_id: {
       type: "string",
       description:
-        "Exact direct Codex CLI or Desktop conversation_id from List, or the exact raw-terminal selector " +
+        "Exact direct Codex/Claude CLI or Desktop conversation_id from List, or the exact raw-terminal selector " +
           "prefilled by that terminal row's available status action. Legacy Turn aliases " +
           "remain supported but deprecated; managed Turn status must use turn_id. " +
           "Never construct a Desktop identity; never construct or guess a raw-terminal selector."
@@ -746,7 +746,7 @@ export const statusParameters = {
       type: "string",
       minLength: 1,
       description:
-        "Authoritative terminal, direct Codex CLI, or Desktop Watch id prefilled by a current watch row. This " +
+        "Authoritative terminal, direct Codex/Claude CLI, or Desktop Watch id prefilled by a current watch row. This " +
           "inspects externally started work and is mutually exclusive with Turn " +
           "targets."
     },
@@ -793,14 +793,14 @@ export const closeParameters = {
   allOf: [{
     if: { anyOf: [
       { required: ["watch_id"] },
-      { required: ["turn_id"], properties: { turn_id: { pattern: "^(?:desktop-watch|codex-cli-watch):" } } }
+      { required: ["turn_id"], properties: { turn_id: { pattern: "^(?:desktop-watch|codex-cli-watch|claude-cli-watch):" } } }
     ] },
     then: { not: { anyOf: [{ required: ["expected_message_id"] }, { required: ["expected_transition_id"] }] } }
   }],
   properties: {
     watch_id: { ...backendWatchSchema, description: "Exact send-managed backend task Watch ID to release from AKK management. Passive Watches use unwatch." },
     turn_id: {
-      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli):)",
+      type: "string", minLength: 1, pattern: "^(?!(?:desktop|codex-cli|claude-cli):)",
       description: "Exact managed terminal Turn or send-produced backend turn_id whose management should be closed."
     },
     conversation_id: {
@@ -846,7 +846,7 @@ export const approveParameters = {
   ],
   properties: {
     conversation_id: listedConversationSchema,
-    watch_id: { type: "string", pattern: "^(?:desktop-watch|codex-cli-watch):[A-Za-z0-9_-]{8,128}$",
+    watch_id: { type: "string", pattern: "^(?:desktop-watch|codex-cli-watch|claude-cli-watch):[A-Za-z0-9_-]{8,128}$",
       description: "Exact Desktop or direct Codex CLI Watch whose Status advertises this approval." },
     interaction_id: { ...terminalInteractionIdentifierSchema,
       description: "Required for Desktop or direct CLI approval: exact currently pending interaction_id from Status." },

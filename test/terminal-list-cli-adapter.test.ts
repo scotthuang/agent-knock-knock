@@ -1,3 +1,6 @@
+import { createClaudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
+import { createClaudeNativeConversationId } from "../src/claude-native-identity.js";
+import { exactClaudeTerminal } from "../src/claude-conversation-routing-identity.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -2384,6 +2387,25 @@ async function listCodexRolloutState(
   return fixture.scan.terminalControlled[0] as Record<string, any>;
 }
 
+test("Claude list exposes verified physical birth for native routing without inventing missing process evidence", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-list-birth-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const missing of [false, true]) {
+    const f = await createCodexRolloutListFixture(path.join(root, String(missing)), "pending", false, {}, "human-only", false, false, "❯ ",
+      { agent: "claude", agentVersion: "2.1.296", physicalIncarnationUnavailable: missing });
+    assert.equal(f.scan.terminalControlled.length, 1);
+    const row = f.scan.terminalControlled[0];
+    assert.equal((row.native_agent_identity_observation as Record<string, unknown>).status, "resolved");
+    assert.equal(row.native_agent_process_birth, undefined,
+      "physical routing proof must not change native handoff token inputs");
+    assert.equal(row._physical_agent_process_birth, missing ? undefined : f.processBirth);
+    assert.equal(f.observationCounts.physicalProcessIncarnation, 1);
+    const id = createClaudeNativeConversationId({ configDir: path.join(root, "config"), sessionId: f.nativeThreadId,
+      pid: 4242, processStart: "Sun Oct 11 01:00:00 2026" });
+    assert.equal(exactClaudeTerminal(id, row), !missing);
+  }
+});
+
 async function createCodexRolloutListFixture(
   root: string,
   outcome: "pending" | "completed" | "aborted" | "malformed" | "partial",
@@ -2395,6 +2417,8 @@ async function createCodexRolloutListFixture(
   nativeIdentityHasRollout = true,
   composerScreen = "› ",
   fixtureOptions: {
+    agent?: "codex" | "claude";
+    physicalIncarnationUnavailable?: boolean;
     ambiguousOpenRoots?: boolean;
     nestedCodexDescendant?: boolean;
     rejectedPreferredSessionId?: string;
@@ -2404,6 +2428,7 @@ async function createCodexRolloutListFixture(
     modelControlResidual?: "popup" | "bare" | "surface" | "unsafe";
   } = {}
 ) {
+  const agent = fixtureOptions.agent ?? "codex";
   const nativeThreadId = "019f0000-0000-7000-8000-000000000777";
   const nativeTurnId = "019f0000-0000-7000-8000-000000000778";
   const workspace = path.join(
@@ -2497,7 +2522,8 @@ async function createCodexRolloutListFixture(
     { mode: 0o600 }
   );
   const stat = fs.statSync(rolloutPath);
-  const processBirth = "fixture-process-birth";
+  const date = new Date("2026-10-11T01:00:00Z");
+  const processBirth = agent === "claude" ? date.toString().replace(/^(\w+) (\w+) (\d+) (\d+) (\d+:\d+:\d+).*$/u, "$1 $2 $3 $5 $4") : "fixture-process-birth";
   const processUuid = `codex-pid:4242:birth:${processBirth}`;
   const rolloutIdentity = {
     fd: "12r",
@@ -2558,7 +2584,7 @@ async function createCodexRolloutListFixture(
     window: 0,
     pane: 0,
     panePid: 9000,
-    currentCommand: "codex",
+    currentCommand: agent,
     currentPath: workspace,
     capabilities: ["screen_status" as const, "send_keys" as const]
   };
@@ -2585,15 +2611,15 @@ async function createCodexRolloutListFixture(
       providerRef: terminalControl
     });
   }
-  const terminalId = "terminal:v2:tmux:codex:durable:0.0:4242";
+  const terminalId = `terminal:v2:tmux:${agent}:durable:0.0:4242`;
   const session = {
     pid: 4242,
     ppid: 9000,
-    command: "codex",
+    command: agent,
     cwd: workspace,
     elapsed: "00:30",
-    agent: "codex" as const,
-    kind: "codex_cli",
+    agent,
+    kind: agent === "claude" ? "claude_cli" : "codex_cli",
     confidence: "high" as const,
     reason: "fixture",
     terminalControl
@@ -2634,7 +2660,7 @@ async function createCodexRolloutListFixture(
     physicalProcessIncarnation: 0,
     modelControlResidual: 0
   };
-  const codexAdapter = createCodexTerminalAgentAdapter();
+  const codexAdapter = agent === "claude" ? createClaudeTerminalAgentAdapter() : createCodexTerminalAgentAdapter();
   const registry = new TerminalAgentAdapterRegistry([{
     ...codexAdapter,
     probeThreadLifecycle: (agentVersion) => {
@@ -2669,7 +2695,7 @@ async function createCodexRolloutListFixture(
         : [session],
     terminalConversationId: (value: { pid: number }) => value.pid === 4241
       ? "terminal:v2:tmux:codex:durable:0.1:4241"
-      : `terminal:v2:tmux:codex:durable:0.0:${value.pid}`,
+      : `terminal:v2:tmux:${agent}:durable:0.0:${value.pid}`,
     status: async () => {
       observationCounts.status += 1;
       return {
@@ -2745,6 +2771,7 @@ async function createCodexRolloutListFixture(
       }),
       processIncarnationForPid: (pid: number) => {
         observationCounts.physicalProcessIncarnation += 1;
+        if (fixtureOptions.physicalIncarnationUnavailable) throw new Error("Process birth probe unavailable");
         return {
           processUuid: `process-pid:${pid}:birth:${processBirth}`,
           processBirth,
@@ -2791,13 +2818,13 @@ async function createCodexRolloutListFixture(
           identity: {
             sessionId: nativeThreadId,
             processUuid,
-            processBirth,
+            ...(agent === "claude" ? {} : { processBirth }),
             ...(nativeIdentityHasRollout
               ? {
                   rollout: rolloutIdentity
                 }
               : {}),
-            evidence: "codex_rollout_fd+process_birth"
+            evidence: agent === "claude" ? "claude_agents_exact_pid" : "codex_rollout_fd+process_birth"
           }
         };
       }

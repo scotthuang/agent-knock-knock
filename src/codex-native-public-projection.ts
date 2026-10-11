@@ -1,4 +1,5 @@
 import { backendObservationStopped, backendTaskRecoveryProjection } from "./backend-task-recovery.js";
+import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
 import { createHash } from "node:crypto";
 import { createCodexNativeConversationId } from "./codex-native-identity.js";
 import { parseCodexNativeConversationId } from "./codex-native-identity.js";
@@ -175,8 +176,7 @@ export function codexNativeTaskProjection(task: CodexNativeTaskRecord) {
   const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
   const stopped = backendObservationStopped(task);
   const active = !stopped && (task.status === "watching" || task.status === "awaiting_acceptance");
-  const notifications = task.notifications.map(note => ({ id: note.id, notification_id: note.id, status: note.status, attempts: note.attempts,
-    ...(note.outcome && "error_code" in note.outcome ? { error_code: note.outcome.error_code } : {}) }));
+  const callback = backendCallbackPublicProjection(task, active, stopped);
   return {
     watch_id: task.id, conversation_id: task.native_id, source: "codex_cli", status: task.closed_at ? "closed" : task.status,
     ...recovery, observation_status: task.status, observation_active: active,
@@ -188,8 +188,8 @@ export function codexNativeTaskProjection(task: CodexNativeTaskRecord) {
     pending_interaction_count: task.pending_interactions.length,
     interaction_state: task.pending_interactions.map(item => nativeInteractionProjection(item, task.native_id, task.id)),
     callback_configured: Boolean(task.callback_route), callback_expected: Boolean(task.callback_route && !stopped &&
-      (active || notifications.some(note => ["ready", "leased", "retry_wait"].includes(note.status)))),
-    callback_notifications: notifications,
+      (active || task.notifications.some(note => ["ready", "leased", "retry_wait"].includes(note.status)))),
+    ...callback,
     capabilities: { close: task.kind === "send" && !task.closed_at, renew: !task.closed_at, recover: !task.closed_at,
       retry_callback: !stopped && task.notifications.some(note => ["failed", "retry_wait"].includes(note.status) && note.outcome?.disposition === "retryable_failure"),
       callback: Boolean(task.callback_route) && !stopped, interaction_notify: active && Boolean(task.callback_route),

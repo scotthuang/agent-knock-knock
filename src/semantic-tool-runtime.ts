@@ -1,3 +1,4 @@
+import { isClaudeNativeConversationId } from "./claude-native-identity.js";
 import { isDesktopConversationId } from "./desktop-identity.js";
 import { backendRecoveryToolArgs, formatBackendRecoveryCommandResult, normalizeBackendStatusTarget } from "./backend-recovery-semantic.js";
 import { desktopControlToolArgs, desktopCancelToolArgs } from "./desktop-control-semantic.js";
@@ -726,6 +727,12 @@ function registerModelControlTools(api): void {
     buildArgs: async (params, context) => {
       const desktop = desktopControlToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, context ?? {}, "model-options");
       if (desktop) return desktop;
+      if (isClaudeNativeConversationId(params.conversation_id)) {
+        assertOnlyModelControlParameters(params, ["conversation_id"], "model_options");
+        const args = ["model-options", "--conversation", params.conversation_id];
+        pushOptional(args, "--store-dir", resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {}));
+        return args;
+      }
       params = normalizeTerminalConversationTarget(params);
       assertOnlyModelControlParameters(
         params,
@@ -754,11 +761,11 @@ function registerModelControlTools(api): void {
       return args;
     },
     rememberResult: (result, params, toolContext) =>
-      (!isRecord(result) || result.source !== "codex_desktop") && rememberDisplayedModelOptionsOffer(
+      (!isRecord(result) || result.source !== "codex_desktop" && result.source !== "claude_cli") && rememberDisplayedModelOptionsOffer(
         api,
         toolContext?.sessionKey,
         toolContext?.sessionId,
-        normalizeTerminalConversationTarget(params).terminal_id,
+        isClaudeNativeConversationId(params.conversation_id) && isRecord(result) ? result.terminal_id : normalizeTerminalConversationTarget(params).terminal_id,
         result
       )
   });

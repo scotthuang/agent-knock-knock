@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { callbackAcceptanceObservation, gatewayDispatchEvidence, type GatewayDispatchEvidence } from "./openclaw-callback-evidence.js";
 import type {
   CallbackDeliveryOptions,
   CallbackDeliveryOutcome,
@@ -108,6 +109,8 @@ export interface DeliverChatSendInput {
   params: Record<string, unknown>;
 }
 
+type ObserveAcceptance = (input: Omit<DeliverChatSendInput, "params"> & { runId: string }) => CallbackProcessDelivery;
+
 export interface OpenClawCallbackTransport extends CallbackTransport {
   readonly kind: "openclaw_gateway_v1";
   deliver(input: CallbackTransportDeliverInput): CallbackAttemptOutcome;
@@ -135,6 +138,23 @@ class OpenClawCallbackPlanError extends Error {
     this.disposition = input.disposition;
     this.errorCode = input.errorCode;
   }
+}
+
+class InitialGatewayNotDispatched extends Error {
+  constructor(readonly dispatch: GatewayDispatchEvidence, readonly method: string) {
+    super("Initial OpenClaw callback RPC was not dispatched");
+  }
+}
+
+function throwInitialGatewayFailure(delivery: CallbackProcessDelivery, method: string): never {
+  const detail = delivery.stderr || delivery.stdout || `gateway method delivery failed with status ${delivery.status}`;
+  const dispatch = gatewayDispatchEvidence(detail);
+  // A separate stdout payload might already acknowledge injection. Never let
+  // a nonzero exit/stderr override that possible side effect.
+  if (dispatch?.request_dispatched === false && (!delivery.stdout.trim() || delivery.stdout === detail)) {
+    throw new InitialGatewayNotDispatched(dispatch, method);
+  }
+  throw new Error(detail);
 }
 
 function permanentFailure(errorCode: string): CallbackAttemptOutcome {
@@ -281,11 +301,22 @@ function callbackFailureOutcome(
   };
 }
 
+function unprovenInvocationFailure(error: unknown, observedAt: Date): CallbackAttemptOutcome {
+  const outcome = callbackFailureOutcome(error, observedAt, "uncertain");
+  // Text such as ECONNREFUSED might describe a downstream tool or an unknown
+  // wrapper. Only the structured dispatch adapter may authorize replay here.
+  return outcome.disposition === "retryable_failure"
+    ? { disposition: "uncertain", error_code: "openclaw_callback_acceptance_uncertain",
+        observed_at: observedAt.toISOString(), evidence: { ...outcome.evidence, request_phase: "unknown" } }
+    : outcome;
+}
+
 function deliverGenericOpenClawCallback(input: {
   request: CallbackTransportDeliverInput;
   now(): Date;
   deliverCallback(input: DeliverOpenClawCallbackInput): CallbackDeliveryOutcome;
   deliverChatSend(input: DeliverChatSendInput): CallbackProcessDelivery;
+  observeAcceptance: ObserveAcceptance;
 }): CallbackAttemptOutcome {
   const { request } = input;
   const route = parseCallbackRoute(request.route);
@@ -296,12 +327,13 @@ function deliverGenericOpenClawCallback(input: {
     return permanentFailure("callback_envelope_route_mismatch");
   }
   if (request.envelope.source.kind === "terminal_watch" || request.envelope.source.kind === "desktop_watch" ||
-    request.envelope.source.kind === "codex_native_watch") {
+    request.envelope.source.kind === "codex_native_watch" || request.envelope.source.kind === "claude_native_watch") {
     return deliverGenericTerminalWatchCallback({
       request,
       route,
       now: input.now,
-      deliverChatSend: input.deliverChatSend
+      deliverChatSend: input.deliverChatSend,
+      observeAcceptance: input.observeAcceptance
     });
   }
   if (request.envelope.source.kind !== "managed_turn") {
@@ -378,10 +410,15 @@ function deliverGenericOpenClawCallback(input: {
     return acceptedOutcome(request.envelope, legacyOutcome, input.now());
   } catch (error) {
     if (acceptedCheckpoint) return acceptedCheckpoint;
+    if (error instanceof InitialGatewayNotDispatched) return {
+      disposition: "retryable_failure", error_code: "openclaw_callback_not_dispatched",
+      evidence: { ...error.dispatch, method: error.method, delivery_id: request.envelope.delivery_id,
+        idempotency_key: request.envelope.idempotency_key, attempt_id: request.attempt.id }
+    };
     // deliverCallback is an opaque host invocation boundary. Without an
     // accepted checkpoint, a generic throw still cannot prove that the host
     // did not accept the idempotency key before the observation was lost.
-    return callbackFailureOutcome(error, input.now(), "uncertain");
+    return unprovenInvocationFailure(error, input.now());
   }
 }
 
@@ -390,6 +427,7 @@ function deliverGenericTerminalWatchCallback(input: {
   route: CallbackRouteV1;
   now(): Date;
   deliverChatSend(input: DeliverChatSendInput): CallbackProcessDelivery;
+  observeAcceptance: ObserveAcceptance;
 }): CallbackAttemptOutcome {
   const { request, route } = input;
   const legacyOptions = isRecord(request.context?.legacyOptions)
@@ -442,7 +480,7 @@ function deliverGenericTerminalWatchCallback(input: {
   } catch (error) {
     // deliverChatSend is one opaque invocation boundary. Once entered, an
     // unexpected throw cannot prove that chat.send did not reach the Gateway.
-    return callbackFailureOutcome(error, input.now(), "uncertain");
+    return unprovenInvocationFailure(error, input.now());
   }
 
   let acknowledgement: CallbackWakeAcknowledgement;
@@ -458,10 +496,38 @@ function deliverGenericTerminalWatchCallback(input: {
       const detail = cleanProcessText(delivery.stderr) ??
         cleanProcessText(delivery.stdout) ??
         `chat.send failed with status ${delivery.status}`;
-      return callbackFailureOutcome(
+      const dispatch = gatewayDispatchEvidence(detail);
+      if (dispatch) {
+        const evidence: Record<string, unknown> = { ...dispatch, method: "chat.send",
+          delivery_id: request.envelope.delivery_id, idempotency_key: request.envelope.idempotency_key,
+          attempt_id: request.attempt.id };
+        if (dispatch.request_dispatched === false) return {
+          disposition: "retryable_failure", error_code: "openclaw_callback_not_dispatched", evidence
+        };
+        // One bounded read only check for this new attempt; never replay a send
+        // or reinterpret a missing/timeout result as proof of non-acceptance.
+        try {
+          const observation = input.observeAcceptance({ openclawBin: stringValue(legacyOptions.openclawBin),
+            gatewayUrl: openClawGatewayUrlForInvocation(legacyOptions.gatewayUrl, legacyOptions.token),
+            token: stringValue(legacyOptions.token), runId: request.envelope.idempotency_key });
+          const accepted = observation.status === 0
+            ? callbackAcceptanceObservation(observation.stdout, request.envelope.idempotency_key) : undefined;
+          if (accepted) {
+            const outcome: CallbackAttemptOutcome = { disposition: "accepted", accepted_at: input.now().toISOString(),
+              acceptance_id: request.envelope.idempotency_key,
+              evidence: { ...evidence, acceptance_check: "exact_run_observed", status: accepted,
+                acceptance_scope: "controller_only" } };
+            try { request.reportCheckpoint?.(outcome); } catch { /* The exact positive receipt still wins. */ }
+            return outcome;
+          }
+          evidence.acceptance_check = observation.status === 0 ? "no_positive_evidence" : "unavailable";
+        } catch { evidence.acceptance_check = "unavailable"; }
+        return { disposition: "uncertain", error_code: "openclaw_callback_acceptance_uncertain",
+          observed_at: input.now().toISOString(), evidence };
+      }
+      return unprovenInvocationFailure(
         new Error(detail),
-        input.now(),
-        "uncertain"
+        input.now()
       );
     }
   } else {
@@ -1015,6 +1081,16 @@ export function createOpenClawCallbackTransport(
     return normalizeCallbackProcessDelivery(result);
   }
 
+  const observeAcceptance: ObserveAcceptance = ({ openclawBin, gatewayUrl, token, runId }) => {
+    const args = ["gateway", "call", "agent.wait", "--params", JSON.stringify({ runId, timeoutMs: 0 }),
+      "--json", "--timeout", "1000"];
+    if (gatewayUrl) args.push("--url", gatewayUrl);
+    return normalizeCallbackProcessDelivery(runSync(openclawBin ?? "openclaw", args, {
+      encoding: "utf8", maxBuffer: CALLBACK_PROCESS_MAX_BUFFER, timeout: 2000, killSignal: "SIGKILL",
+      env: openClawGatewayEnvironment(token)
+    }));
+  };
+
   function deliverCallback({
     options,
     statePath,
@@ -1058,11 +1134,7 @@ export function createOpenClawCallbackTransport(
         delivery,
         detail: { method: options.gatewayMethod }
       });
-      throw new Error(
-        delivery.stderr ||
-          delivery.stdout ||
-          `gateway method delivery failed with status ${delivery.status}`
-      );
+      throwInitialGatewayFailure(delivery, options.gatewayMethod);
     }
 
     const gatewayPayload = parseRequiredGatewayDeliveryPayload(delivery.stdout);
@@ -1330,7 +1402,8 @@ export function createOpenClawCallbackTransport(
       request: input,
       now: ports.now,
       deliverCallback,
-      deliverChatSend
+      deliverChatSend,
+      observeAcceptance
     }),
     deliverCallback,
     deliverGatewayMethod,

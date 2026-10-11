@@ -13,6 +13,8 @@ export interface BackendProgressItem {
   delivery?: string | null;
   status?: unknown;
   exitCode?: unknown;
+  /** Fixed public action categories; never raw native tool names or arguments. */
+  actionKind?: "file_read" | "file_search" | "user_question";
   /** Native item times only: never synthesize these from the read or turn time. */
   startedAtMs?: number | null;
   completedAtMs?: number | null;
@@ -97,7 +99,10 @@ function actionTitle(item: BackendProgressItem): string | null {
     interrupted: "interrupted", declined: "declined", pending: "pending" };
   const status = typeof item.status === "string" && Object.hasOwn(statuses, item.status) ? statuses[item.status] : "status unknown";
   const exit = item.type === "commandExecution" && Number.isSafeInteger(item.exitCode) ? ` (exit ${item.exitCode})` : "";
-  return `${titles[item.type]}: ${status}${exit}`;
+  const actionTitles = { file_read: "File read", file_search: "File search", user_question: "User question" };
+  const title = item.type === "dynamicToolCall" && item.actionKind && Object.hasOwn(actionTitles, item.actionKind)
+    ? actionTitles[item.actionKind] : titles[item.type];
+  return `${title}: ${status}${exit}`;
 }
 
 function redactPublicCommentary(text: string): { text: string; omitted: boolean } {

@@ -788,7 +788,11 @@ test("an immutable callback retry survives a later Session binding generation", 
       `#!/usr/bin/env node
 const fs = require("node:fs");
 if (!fs.existsSync(${JSON.stringify(allowDeliveryPath)})) {
-  console.error("connect ECONNREFUSED 127.0.0.1:18789");
+  console.error(JSON.stringify({ ok: false, error: {
+    type: "gateway_transport_error", kind: "closed",
+    message: "Gateway not reachable at ws://127.0.0.1:18789 (ETIMEDOUT).",
+    reason: "Opening handshake has timed out"
+  } }));
   process.exit(1);
 }
 console.log(JSON.stringify({ ok: true }));
@@ -872,12 +876,15 @@ console.log(JSON.stringify({ ok: true }));
       created.paths.statePath,
       fakeOpenClaw
     );
-    assert.match(initial.stderr, /ECONNREFUSED/u);
+    assert.match(initial.stderr, /openclaw_callback_not_dispatched/u);
     const claimed = JSON.parse(
       fs.readFileSync(created.paths.statePath, "utf8")
     );
     assert.equal(claimed.status, "idle");
     assert.equal(claimed.callback_delivery.status, "failed");
+    assert.equal(claimed.callback_delivery.attempt_outcome.disposition, "retryable_failure");
+    assert.equal(claimed.callback_delivery.attempt_outcome.evidence.request_dispatched, false);
+    assert.equal(claimed.callback_delivery.attempt_outcome.evidence.request_phase, "connection_handshake");
     const callbackMessageId = claimed.callback_delivery.message.id;
 
     const secondBinding = terminalBindingFrom({
@@ -950,7 +957,11 @@ if (args[args.indexOf("--url") + 1] !== ${JSON.stringify(gatewayUrl)}) {
   process.exit(97);
 }
 if (!fs.existsSync(${JSON.stringify(allowDeliveryPath)})) {
-  console.error("connect ECONNREFUSED 127.0.0.1:29874");
+  console.error(JSON.stringify({ ok: false, error: {
+    type: "gateway_transport_error", kind: "closed",
+    message: "Gateway not reachable at ws://127.0.0.1:29874 (ETIMEDOUT).",
+    reason: "Opening handshake has timed out"
+  } }));
   process.exit(1);
 }
 console.log(JSON.stringify({ ok: true }));
@@ -995,8 +1006,11 @@ console.log(JSON.stringify({ ok: true }));
       OPENCLAW_GATEWAY_TOKEN: ""
     });
     assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, /ECONNREFUSED/);
+    assert.match(failed.stderr, /openclaw_callback_not_dispatched/u);
     const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(failedState.callback_delivery.attempt_outcome.disposition, "retryable_failure");
+    assert.equal(failedState.callback_delivery.attempt_outcome.evidence.request_dispatched, false);
+    assert.equal(failedState.callback_delivery.attempt_outcome.evidence.request_phase, "connection_handshake");
     assert.equal(failedState.callback_delivery.gateway_url, gatewayUrl);
     assert.equal(failedState.callback_delivery.gateway_token, undefined);
 
@@ -1176,7 +1190,11 @@ if (args.includes("--url")) {
   process.exit(96);
 }
 if (calls.length === 0) {
-  console.error("connect ECONNREFUSED 127.0.0.1:29873");
+  console.error(JSON.stringify({ ok: false, error: {
+    type: "gateway_transport_error", kind: "closed",
+    message: "Gateway not reachable at ws://127.0.0.1:29873 (ETIMEDOUT).",
+    reason: "Opening handshake has timed out"
+  } }));
   process.exit(1);
 }
 console.log(JSON.stringify({ ok: true }));
@@ -1212,6 +1230,9 @@ console.log(JSON.stringify({ ok: true }));
     assert.notEqual(failed.status, 0);
 
     const failedState = JSON.parse(fs.readFileSync(created.paths.statePath, "utf8"));
+    assert.equal(failedState.callback_delivery.attempt_outcome.disposition, "retryable_failure");
+    assert.equal(failedState.callback_delivery.attempt_outcome.evidence.request_dispatched, false);
+    assert.equal(failedState.callback_delivery.attempt_outcome.evidence.request_phase, "connection_handshake");
     assert.equal(
       failedState.callback_delivery.gateway_url,
       configuredGatewayUrl

@@ -7,7 +7,7 @@ import {
   type CallbackAttemptOutcome, type CallbackRouteV1,
   type CallbackTransportContextV1, type CallbackTransportDeliverInput
 } from "./callback-transport.js";
-import { createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
+import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
 import type { DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
 import { findDesktopSubmission } from "./desktop-snapshot.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
@@ -162,11 +162,17 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
   private settleDelivery(id: string, notificationId: string, attemptId: string, outcome: CallbackAttemptOutcome): void {
     this.update(id, task => {
       const notification = task.notifications.find(n => n.id === notificationId);
-      if (!notification || notification.attempt_id !== attemptId || notification.status !== "leased" && !(notification.status === "uncertain" && outcome.disposition === "accepted")) return;
+      if (!notification || notification.attempt_id !== attemptId) return;
+      const definitiveLateOutcome = canSettleExpiredNotificationAttempt({ status: notification.status, previousOutcome: notification.outcome,
+        leaseExpiredCode: "desktop_delivery_lease_expired", outcome, attemptId,
+        deliveryId: notification.envelope.delivery_id, idempotencyKey: notification.envelope.idempotency_key });
+      const lateAcceptance = notification.status === "uncertain" && outcome.disposition === "accepted";
+      if (notification.status !== "leased" && !lateAcceptance && !definitiveLateOutcome) return;
       if (outcome.disposition === "retryable_failure" && desktopNotificationObsolete(task, notification)) outcome = { disposition: "permanent_failure", error_code: "desktop_notification_obsolete" };
       const settlement = reduceDurableNotificationSettlement({ attempt: notification.attempts, outcome,
         retryEnabled: !desktopObservationStopped(task), maxRetryAttempts: backendCallbackMaxAttempts(notification, this.maxAttempts) - 1 });
-      notification.outcome = outcome;
+      notification.outcome = settlement.outcome;
+      delete notification.retry_at;
       if (settlement.state === "accepted") notification.status = "accepted";
       else if (settlement.state === "failed" && settlement.retryAuthorized) {
         notification.status = "retry_wait";

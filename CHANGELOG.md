@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.14.3 - 2026-10-11
+
+- Add direct control of existing Claude Code CLI sessions on macOS without tmux, Herdr, Claude plugins, hooks, special launch flags or a replacement agent. Discover exact live sessions, send idle tasks, read bounded public progress/results and observe exact completion or exit. Requires Python 3 on the controller side; verified with Claude Code 2.1.296.
+- Prefer the Claude native route for supported basic operations. Preserve eligible exact terminal routes for existing special operations; unsupported approvals, questions, model/permission changes, cancellation and lifecycle controls remain unavailable without an appropriate terminal route. Busy or uncertain submissions never silently fall back or resend.
+- Retry a callback only when structured transport evidence proves it was not submitted. Recognize the reviewed OpenClaw opening-handshake failure, retain request-phase evidence and original notification identity, and preserve the existing bounded backend retry budget. Unknown or conflicting error schemas cannot authorize replay.
+- Make one bounded read-only exact-run check after eligible uncertain callback submissions. Only positive acceptance evidence settles the notification; missing records, query timeouts and malformed acknowledgements do not authorize another send. Historical uncertain notifications are not automatically replayed.
+- Preserve callback deduplication across observer restart, concurrent recovery and late definitive receipts. Explain exhausted retry budgets and keep task completion, controller acceptance and downstream channel delivery separate in Status, List and recovery text.
+
+### Validation boundaries
+
+- Claude direct discovery, sending, progress, exact completion and terminal fallback were exercised in isolated local acceptance checks. Native special-control APIs remain outside this first direct adapter; see the [Claude direct guide](docs/claude-cli-direct.md).
+- Callback recovery is verified with isolated transport responses and temporary durable stores. No historical callback was replayed, and this release does not claim a new live WeChat delivery test or a guarantee against arbitrarily long Gateway outages.
+- Existing Codex CLI/Desktop compatibility boundaries, the 800-code-point Status budget, 720-minute monitoring deadline and terminal-managed 60-minute inactivity window are unchanged. Desktop live verification remains intentionally skipped.
+
 ## 0.14.2 - 2026-10-10
 
 - Adapt Codex CLI 0.162.1 native status to the changed usage-page URL without relaxing exact thread, process, version, composer or freshness checks. A rejected status card no longer hides the underlying diagnostic behind a plain-text semantic tool error: native inspection execution failures return structured JSON with an explicit non-retryable outcome.

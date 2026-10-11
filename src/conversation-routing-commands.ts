@@ -2,6 +2,11 @@ import { nonBlankString, recordValue } from "./value-guards.js";
 import { isCodexNativeConversationId } from "./codex-native-identity.js";
 
 type Options = Record<string, unknown>;
+export interface ConversationRoutingCliPorts {
+  terminals(options: Options, terminalId?: string): Promise<Options[]>;
+  /** Executes the selected command without entering conversation routing again. */
+  execute(command: string, options: Options): Promise<Options>;
+}
 const backendCommands = new Set(["send", "status", "watch-terminal", "native-status", "permission-options", "set-permissions"]);
 const terminalCommands = new Set(["model-options", "set-model", "cancel", "new-thread", "clear-thread", "resume-thread",
   "list-resumable-threads", "threads", "identify-foreground", "repair-model-control", "reconcile-binding", "close"]);

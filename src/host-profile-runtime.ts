@@ -200,7 +200,9 @@ export function applyTrustedHostProfileCliOptions(
     commandName === "reconcile-desktop-watches" ||
     commandName === "monitor-desktop" ||
     commandName === "reconcile-codex-native-watches" ||
-    commandName === "monitor-codex-native";
+    commandName === "monitor-codex-native" ||
+    commandName === "reconcile-claude-native-watches" ||
+    commandName === "monitor-claude-native";
   if (!createsManagedTurn && !ownsWatchRoute) {
     return options as Record<string, unknown>;
   }

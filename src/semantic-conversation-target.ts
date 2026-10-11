@@ -15,6 +15,6 @@ export function normalizeTerminalConversationTarget(params: Record<string, any>)
 
 /** A terminal alias may resolve to a backend; never rewrite its exact native receipt. */
 export function normalizeConversationSendResult(result: Record<string, any>): Record<string, any> {
-  return result.source === "codex_cli" || result.source === "codex_desktop"
+  return result.source === "claude_cli" || result.source === "codex_cli" || result.source === "codex_desktop"
     ? result : { ...result, ...normalizedTerminalSendResultContract(result) };
 }

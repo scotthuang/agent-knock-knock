@@ -1,3 +1,4 @@
+import { isClaudeNativeConversationId, parseClaudeNativeConversationId, isClaudeNativeWatchId } from "./claude-native-identity.js";
 import { isCodexNativeConversationId, isCodexNativeWatchId, parseCodexNativeConversationId } from "./codex-native-identity.js";
 import { numberString, pushOptional, requiredString, requiredTerminalInteractionIdentifier } from "./semantic-tool-arguments.js";
 import { resolvePluginStoreDir } from "./semantic-tool-command-helpers.js";
@@ -10,16 +11,17 @@ type Context = { sessionKey?: unknown };
 
 /** A dispatched response is distinct from a subsequently verified native effect. */
 export function isNativeInteractionResponseError(value: unknown): boolean {
-  return isRecord(value) && value.source === "codex_cli" &&
-    ["not_sent", "uncertain", "reserved"].includes(String(value.state));
+  return isRecord(value) && (value.source === "claude_cli" && value.manual_required === true
+    || value.source === "codex_cli" && ["not_sent", "uncertain", "reserved"].includes(String(value.state)));
 }
 
 /** Native targets carry the backend/thread identity, never terminal UI authority. */
 export function nativeConversationTarget(params: Params): string | undefined {
   if (!Object.hasOwn(params, "conversation_id")) return undefined;
   const id = requiredString(params.conversation_id, "conversation_id");
-  if (!isCodexNativeConversationId(id)) return undefined;
-  parseCodexNativeConversationId(id);
+  if (isClaudeNativeConversationId(id)) parseClaudeNativeConversationId(id);
+  else if (isCodexNativeConversationId(id)) parseCodexNativeConversationId(id);
+  else return undefined;
   if (["terminal_id", "session_id", "turn_id", "watch_id"].some(key => Object.hasOwn(params, key))) {
     throw new Error("Codex CLI conversation_id cannot be combined with another target");
   }
@@ -39,7 +41,8 @@ export function routedCodexTerminalTarget(params: Params): string | undefined {
 
 export function routedCodexTerminalControlArgs(params: Params, config: Params, context: Context,
   action: "status" | "permissions" | "set-permissions"): string[] | undefined {
-  const id = routedCodexTerminalTarget(params);
+  const claudeId = params.conversation_id ?? params.terminal_id;
+  const id = routedCodexTerminalTarget(params) ?? (action === "status" && typeof claudeId === "string" && parseTerminalConversationId(claudeId)?.agent === "claude" ? claudeId : undefined);
   if (!id) return undefined;
   const fields = action === "set-permissions" ? ["mode"] : action === "status" ? ["inspection"] : [];
   onlyParameters(params, ["conversation_id", "terminal_id", ...fields]);
@@ -54,6 +57,10 @@ export function routedCodexTerminalControlArgs(params: Params, config: Params, c
 }
 
 export function validatedNativeWatchId(value: unknown): string | undefined {
+  if (typeof value === "string" && value.startsWith("claude-cli-watch:")) {
+    if (!isClaudeNativeWatchId(value)) throw new Error("Invalid Claude CLI Watch ID");
+    return value;
+  }
   if (typeof value !== "string" || !value.startsWith("codex-cli-watch:")) return undefined;
   if (!isCodexNativeWatchId(value)) {
     throw new Error("Invalid Codex CLI Watch ID");

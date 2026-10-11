@@ -464,7 +464,10 @@ export async function executeCliCommand(
       return executeConversationCommand(
         commandName,
         scopedOptions,
-        (request, terminalId) => terminalListCliFacade.buildTerminalListGroup({ options: request, agentFilter: "codex", terminalId }).then(scan => scan.terminalControlled),
+        (request, terminalId) => terminalListCliFacade.buildTerminalListGroup({ options: request, terminalId,
+          agentFilter: /^(?:claude-cli:|terminal:v\d+:.*:claude:)/u.test(
+            String(request.conversation ?? request.conversationId ?? request.terminal ?? request.session)
+          ) ? "claude" : "codex" }).then(scan => scan.terminalControlled),
         dispatchCliCommand
       );
     }

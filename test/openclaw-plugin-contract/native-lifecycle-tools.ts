@@ -831,14 +831,8 @@ test("OpenClaw native inspection keeps status-only routing and terminal authorit
         `const fs = require("node:fs");`,
         `const args = process.argv.slice(2);`,
         `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
-        `const terminalId = ${JSON.stringify(claudeTerminalId)};`,
         `const requestedTerminal = args[args.indexOf("--terminal") + 1];`,
-        `const result = args[0] === "list" ? { terminals: [{`,
-        `  id: terminalId, available_actions: { native_inspect: {`,
-        `    tool: "agent_knock_knock_native_inspect",`,
-        `    arguments: { terminal_id: terminalId, expected_binding_token: "fresh-inspection-token" }`,
-        `  } }`,
-        `}] } : {`,
+        `const result = {`,
         `  status: "observed", inspection: "status", agent: requestedTerminal.includes(":claude:") ? "claude" : "codex",`,
         `  terminal_id: requestedTerminal,`,
         `  expected_binding_token: "must-not-reach-model",`,
@@ -941,25 +935,19 @@ test("OpenClaw native inspection keeps status-only routing and terminal authorit
         "--inspection", "status"
       ]
     );
-    assert.equal(calls[1]?.[0], "list");
     assert.deepEqual(
-      calls[2],
+      calls[1],
       [
-        "native-inspect",
-        "--terminal",
-        claudeTerminalId,
-        "--inspection",
-        "status",
-        "--expected-binding-token",
-        "fresh-inspection-token",
-        "--store-dir",
-        "/private/akk-store",
-        "--codex-home",
-        "/private/custom-codex",
-        "--openclaw-session",
-        "agent:test:native-inspect"
+        "native-inspect", "--terminal", claudeTerminalId,
+        "--openclaw-session", "agent:test:native-inspect",
+        "--store-dir", "/private/akk-store", "--codex-home", "/private/custom-codex",
+        "--inspection", "status"
       ]
     );
+    assert.equal(calls.length, 2,
+      "Codex and Claude status delegate exact backend/terminal selection to the CLI");
+    assert.equal(calls.some(args => args.includes("--expected-binding-token")), false,
+      "the Host must not inject terminal authority before the CLI selects its route");
 
     await assert.rejects(
       () => inspectTool.execute!("unsupported-inspection", {

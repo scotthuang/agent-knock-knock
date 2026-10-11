@@ -92,8 +92,13 @@ test("completion callback expectation follows its outbox and manual interaction 
   record.notifications[0].outcome = { disposition: "accepted", accepted_at: "2026-10-09T00:00:00Z", acceptance_id: "accepted" };
   const complete = desktopTaskProjection(record);
   assert.equal(complete.callback_expected, false); assert.equal(complete.delivered, true);
+  assert.equal(complete.callback_state, "accepted"); assert.equal(complete.channel_delivery_state, "unknown");
   assert.equal(complete.final_text, "Exact task result");
   assert.equal(JSON.stringify(complete).includes("Private callback envelope"), false);
+  record.notifications[0].status = "uncertain";
+  record.notifications[0].outcome = { disposition: "uncertain", observed_at: "2026-10-09T00:00:01Z", error_code: "acceptance_uncertain" };
+  assert.equal(desktopTaskProjection(record).callback_state, "uncertain");
+  assert.equal(desktopTaskProjection(record).status, "completed");
   const pending = desktopTaskProjection(task({ kind: "watch", status: "watching", native_turn_id: "turn-one", send_intent: undefined, pending_manual_count: 1 }));
   assert.match(String(pending.manual_action), /in Desktop/);
   assert.equal((pending.capabilities as any).interaction_respond, false);

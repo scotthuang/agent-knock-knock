@@ -1,12 +1,13 @@
 import { resolveMonitorHardTimeoutMinutes } from "./monitor-deadline-policy.js";
+import { backendCallbackSummaryLines } from "./backend-callback-public-projection.js";
 import { pushOptional, requiredControllerSessionKey, requiredString } from "./semantic-tool-arguments.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 
 export type BackendRecoveryCommand = "renew" | "close" | "recover" | "retry-callback";
 const commands = new Set<string>(["renew", "close", "recover", "retry-callback"]);
-const backendIdentity = /^(?:desktop|codex-cli):/u;
-const backendWatchPrefix = /^(?:desktop-watch|codex-cli-watch):/u;
-const backendWatch = /^(?:desktop-watch|codex-cli-watch):[A-Za-z0-9_-]{8,128}$/u;
+const backendIdentity = /^(?:desktop|codex-cli|claude-cli):/u;
+const backendWatchPrefix = /^(?:desktop-watch|codex-cli-watch|claude-cli-watch):/u;
+const backendWatch = /^(?:desktop-watch|codex-cli-watch|claude-cli-watch):[A-Za-z0-9_-]{8,128}$/u;
 
 export function isBackendTaskWatchId(value: unknown): value is string {
   return typeof value === "string" && backendWatch.test(value);
@@ -101,5 +102,5 @@ export function formatBackendRecoveryCommandResult(result: unknown, command: Bac
       if (id && status) lines.push(`callback ${id}: ${status}`);
     }
   }
-  return [`AKK backend ${command}.`, ...lines].join("\n");
+  return [`AKK backend ${command}.`, ...lines, ...backendCallbackSummaryLines(result)].join("\n");
 }

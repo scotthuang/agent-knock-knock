@@ -43,6 +43,11 @@ export function compactAkkListModelProjection(
       codex_cli_scan: compactAkkListScalars(recordValue(result.codex_cli_scan) ?? {}, [
         "status", "returned", "loaded_count", "complete", "error", "watch_error"])
     } : {}),
+    ...(Array.isArray(result.claude_cli_sessions) || Array.isArray(result.claude_cli_watches) || recordValue(result.claude_cli_scan) ? {
+      ...(!Array.isArray(result.conversations) ? { claude_cli_sessions: arrayValue(result.claude_cli_sessions).map(compactNativeConversation) } : {}),
+      claude_cli_watches: arrayValue(result.claude_cli_watches).map(compactBackendWatch),
+      claude_cli_scan: compactAkkListScalars(recordValue(result.claude_cli_scan) ?? {}, ["status", "returned", "loaded_count", "complete", "watch_error"])
+    } : {}),
     ...(Array.isArray(result.conversations)
       ? { conversations: arrayValue(result.conversations).map(compactConversation),
           conversation_routing: compactAkkListScalars(recordValue(result.conversation_routing) ?? {},
@@ -62,11 +67,13 @@ function compactBackendWatch(row: Record<string, unknown>): Record<string, unkno
     ...compactAkkListScalars(row, ["watch_id", "turn_id", "conversation_id", "source", "status", "task_kind",
       "management_state", "observation_state", "observation_mode", "anchor_state", "native_thread_id",
       "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count",
-      "callback_expected", "callback_in_flight", "observation_error", "observation_status", "observation_active",
+      "callback_configured", "callback_expected", "callback_in_flight", "callback_state", "callback_delivery_scope", "channel_delivery_state",
+      "observation_error", "observation_status", "observation_active",
       "hard_timeout_at", "deadline_at", "closed_at", "unwatched_at", "renewal_count", "renewed_at", "recovered_at"]),
     ...(Array.isArray(row.retryable_callback_ids) ? { retryable_callback_ids: stringArrayValue(row.retryable_callback_ids) } : {}),
     ...(Array.isArray(row.callback_notifications) ? { callback_notifications: arrayValue(row.callback_notifications)
-      .map(item => ({ ...compactAkkListScalars(item, ["id", "notification_id", "kind", "status", "attempts", "next_attempt_at", "retryable", "error_code"]),
+      .map(item => ({ ...compactAkkListScalars(item, ["id", "notification_id", "kind", "status", "attempts", "next_attempt_at", "retryable", "error_code",
+        "controller_acceptance", "request_phase", "request_dispatched", "automatic_retry_stopped", "retry_budget_exhausted", "max_delivery_attempts"]),
         ...compactAkkListActions(item.available_actions) })) } : {}),
     ...compactAkkListActions(row.available_actions, { watch_id: row.watch_id, turn_id: row.turn_id })
   };
@@ -85,7 +92,7 @@ function compactDesktopConversation(row: Record<string, unknown>): Record<string
 function compactNativeConversation(row: Record<string, unknown>): Record<string, unknown> {
   return {
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
-      "native_thread_id", "native_turn_id", "activity_state", "connection_state", "backend_version",
+      "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
       "pending_interaction_count", "interaction_requests_scanned", "attention_required", "updated_at", "observation_error"]),
     ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
     capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, [
@@ -98,7 +105,7 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
 
 function compactConversation(row: Record<string, unknown>): Record<string, unknown> {
   const output = row.source === "codex_desktop" ? compactDesktopConversation(row)
-    : row.source === "codex_cli" ? compactNativeConversation(row) : compactAkkListTerminal(row);
+    : ["codex_cli", "claude_cli"].includes(String(row.source)) ? compactNativeConversation(row) : compactAkkListTerminal(row);
   return { ...output, ...compactAkkListScalars(row, ["conversation_id", "route_preference", "route_status"]),
     ...(Array.isArray(row.terminal_aliases) ? { terminal_aliases: stringArrayValue(row.terminal_aliases) } : {}) };
 }

@@ -1,3 +1,4 @@
+import { isClaudeNativeConversationId, parseClaudeNativeConversationId, isClaudeNativeWatchId } from "./claude-native-identity.js";
 import { formatDesktopCommandResult } from "./desktop-command-presentation.js";
 import { executorDefinitionForKind } from "./executors.js";
 import { isDesktopConversationId, parseDesktopConversationId } from "./desktop-identity.js";
@@ -257,12 +258,16 @@ export function formatRenewCommandResult(result) {
 
 export function formatRetryCallbackCommandResult(result) {
   const { sessionId, turnId } = publicTurnIdentity(result);
+  const delivery = result.conversation?.callback_delivery;
+  const accepted = delivery?.status === "delivered" && delivery?.attempt_outcome?.disposition === "accepted";
   return [
-    "AKK callback delivered.",
+    accepted ? "AKK callback accepted by the controller." : "AKK callback acceptance is not confirmed.",
     `session: ${sessionId}`,
     `turn: ${turnId}`,
     `status: ${result.conversation?.status ?? "unknown"}`,
-    `attempts: ${result.conversation?.callback_delivery?.attempts ?? "unknown"}`
+    `callback status: ${delivery?.status ?? "unknown"}`,
+    `attempts: ${delivery?.attempts ?? "unknown"}`,
+    "This does not prove user-channel delivery."
   ].join("\n");
 }
 
@@ -738,11 +743,12 @@ function desktopResult(result: Record<string, unknown>): boolean {
 }
 
 function codexNativeResult(result: Record<string, unknown>): boolean {
-  return result.source === "codex_cli" || isCodexNativeConversationId(result.conversation_id);
+  return result.source === "codex_cli" || result.source === "claude_cli" || isCodexNativeConversationId(result.conversation_id) || isClaudeNativeConversationId(result.conversation_id);
 }
 
 function codexNativeSubmissionAccepted(result: Record<string, unknown>): boolean {
   try {
+    if (isClaudeNativeConversationId(result.conversation_id)) return claudeNativeSubmissionAccepted(result);
     if (!isCodexNativeConversationId(result.conversation_id)) return false;
     const target = parseCodexNativeConversationId(result.conversation_id);
     return result.source === "codex_cli" && result.agent_acceptance === "proven" && result.delivered === true
@@ -752,6 +758,14 @@ function codexNativeSubmissionAccepted(result: Record<string, unknown>): boolean
       && typeof result.watch_id === "string" && /^codex-cli-watch:[A-Za-z0-9_-]{8,128}$/u.test(result.watch_id)
       && ["watching", "completed", "failed", "interrupted"].includes(String(result.status));
   } catch { return false; }
+}
+
+function claudeNativeSubmissionAccepted(result: Record<string, unknown>): boolean {
+  const target = parseClaudeNativeConversationId(String(result.conversation_id));
+  return result.source === "claude_cli" && result.agent_acceptance === "proven" && result.delivered === true
+    && result.send_state === "accepted" && result.native_thread_id === target.sessionId
+    && typeof result.native_input_id === "string" && /^[0-9a-f-]{36}$/u.test(result.native_input_id)
+    && isClaudeNativeWatchId(result.watch_id);
 }
 
 function desktopSubmissionAccepted(result: Record<string, unknown>): boolean {
