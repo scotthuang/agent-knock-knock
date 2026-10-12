@@ -35,6 +35,23 @@ const terminalAnswerConstraints = {
   items: { properties: { text: { pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" } } }
 };
 
+export const desktopCreateParameters = {
+  type: "object",
+  additionalProperties: false,
+  oneOf: [
+    { not: { required: ["operation_id"] } },
+    { required: ["operation_id"], not: { anyOf: ["project", "cwd", "title", "request", "agentHardTimeoutMinutes"].map(key => ({ required: [key] })) } }
+  ],
+  properties: {
+    project: { type: "string", minLength: 1, description: "Exact existing Desktop project name or native project ID. Ambiguous names fail without creation. Omit for a conversation outside Desktop projects." },
+    cwd: { type: "string", minLength: 1, description: "Existing absolute working directory. Defaults to the selected project's root; without a project, AKK uses its dedicated Desktop working directory." },
+    title: { type: "string", minLength: 1, description: "Optional title for this new Desktop conversation." },
+    request: { type: "string", minLength: 1, description: "Optional first task. Sent only after Desktop owns the created conversation; its exact automatic Watch is returned. Omit to create a zero-message conversation." },
+    agentHardTimeoutMinutes: { type: "number", exclusiveMinimum: 0, description: "First task's monitoring hard lifetime in minutes: explicit value, then plugin configuration, then the shared 720-minute default." },
+    operation_id: { type: "string", pattern: "^desktop-create:[0-9a-f]{64}$", description: "Continue only the exact previously returned creation operation. Supply no other creation parameters; this never creates a replacement thread or replays an uncertain first task." }
+  }
+};
+
 export const respondInteractionParameters = {
   type: "object",
   additionalProperties: false,

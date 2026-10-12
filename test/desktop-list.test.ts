@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { listDesktopSessions } from "../src/desktop-list.js";
 import { createDesktopConversationId } from "../src/desktop-identity.js";
+import { DESKTOP_CREATION_BUILD } from "../src/desktop-compatibility.js";
 import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
 import { DesktopIpcError } from "../src/desktop-types.js";
@@ -69,6 +70,13 @@ test("Desktop List defaults to sidebar and retains an unloaded row and its reaso
   assert.deepEqual(requests[1], { view: "history", limit: 4, cursor: "cursor", search: "avatar", project: undefined });
   await assert.rejects(listDesktopSessions(runtime, { desktopView: "all" }), /desktop-view must be/);
   assert.equal(requests.length, 2);
+  runtime.compatibility = DESKTOP_CREATION_BUILD;
+  const sendOnly = compactAkkListModelProjection(await listDesktopSessions(runtime, {})) as any;
+  assert.equal(sendOnly.desktop_sessions[0].capabilities.send, true);
+  assert.equal(sendOnly.desktop_sessions[0].capabilities.set_permissions, false);
+  assert.equal(sendOnly.desktop_sessions[0].available_actions.model_options, undefined);
+  assert.equal(sendOnly.desktop_scan.write_contract_verified, false);
+  assert.equal(sendOnly.desktop_scan.send_contract_verified, true);
 });
 
 test("unsupported Desktop sidebar metadata remains an explicit incomplete result, not all history or a successful empty sidebar", async () => {

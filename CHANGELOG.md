@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.5 - 2026-10-13
+
+- Add a separate Desktop Create tool for a new conversation in an exact existing project or outside projects, with an optional first task. Create zero-turn metadata, hand the same UUID to Desktop, then use its verified owner for real task submission and automatic monitoring.
+- Persist creation identity and stage receipts. Continue only the same operation after incomplete handoff or uncertain delivery; preserve the original first-task identity and callback route without creating a replacement or replaying uncertain task text.
+- Add a capability-specific macOS Desktop `26.1007.30912` / build `20156` creation/Send profile. Native approval, question-answer, model/permission and cancellation controls remain unavailable on this build; the previously reviewed build `13536` retains its existing controls.
+
+### Validation boundaries
+
+- On macOS Desktop build `20156`, the real semantic tool and built CLI verified project/projectless creation, zero-turn blank ownership, first-task submission through Desktop IPC, exact completion, and one accepted callback to an isolated local receiver. No external chat-delivery claim is made. Desktop applied Read Only/on-request after handoff; creation does not imply write access.
+
 ## 0.14.4 - 2026-10-12
 
 - Send the first task directly to an exactly identified, already loaded, idle Codex CLI thread whose history is still empty. Use the original thread and owner; no manual seed task, replacement process, or terminal input is required.

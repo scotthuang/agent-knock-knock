@@ -106,6 +106,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
     "agent_knock_knock_identify_foreground",
     "agent_knock_knock_identify_and_send",
     "agent_knock_knock_new_thread",
+    "agent_knock_knock_desktop_create",
     "agent_knock_knock_reconcile_binding",
     "agent_knock_knock_resume_thread",
     "agent_knock_knock_status",
@@ -124,7 +125,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "346b135a50ceffb4e792bc1261928f455d3ef98da7f53b1fb945efe676212195"
+    "38574cb6fd582481ffe5d9d361de550bd8f7b285b6a99100c3b9033606dec227"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.match(

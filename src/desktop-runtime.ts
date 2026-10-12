@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "./desktop-ipc-client.js";
+import { DesktopIpcClient } from "./desktop-ipc-client.js";
+import { desktopCapabilityProfile } from "./desktop-compatibility.js";
 import { DesktopSessionCatalog } from "./desktop-session-catalog.js";
 import { createDesktopStateStore } from "./desktop-state-store.js";
 import { createDesktopTaskService } from "./desktop-task-service.js";
@@ -31,7 +32,7 @@ export function installedDesktopCompatibility(): DesktopCompatibility {
 }
 
 export function desktopWritesVerified(version: DesktopCompatibility): boolean {
-  return version.version === VERIFIED_DESKTOP_BUILD.version && version.build === VERIFIED_DESKTOP_BUILD.build;
+  return desktopCapabilityProfile(version).nativeControls;
 }
 
 /** A command owns one connection per thread. No CLI resume or owner acquisition fallback. */
@@ -75,6 +76,7 @@ export function createDesktopRuntime(options: DesktopRuntimeOptions) {
     recordCallbackProcessDelivery: () => { throw new Error("Desktop callbacks use their durable outbox"); } });
   const callbacks = createHostProfileCallbackTransport({ legacyTransport: legacy, environment: cliEnv, cwd: cliCwd(), now: cliNow });
   const tasks = createDesktopTaskService({ repository, ...transport, now: cliNow,
+    interactionResponsesVerified: desktopCapabilityProfile(compatibility).nativeControls,
     deliver: input => callbacks.deliver(input),
     resolveCallbackContext: task => ({ legacyOptions: { gatewayMethod: "chat.send",
       openclawSession: task.controller_session, gatewaySession: task.controller_session, openclawBin: options.openclawBin } }) });

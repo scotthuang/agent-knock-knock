@@ -25,6 +25,9 @@ export interface CliCommandDependencies<Options extends CliDependencyOptions = C
   createCodexNativeRuntime?: typeof import("./codex-native-runtime.js").createCodexNativeRuntime;
   launchCodexNativeMonitor?: typeof import("./codex-native-monitor.js").launchCodexNativeMonitor;
   createDesktopRuntime?: typeof import("./desktop-runtime.js").createDesktopRuntime;
+  createDesktopCreationNative?: typeof import("./desktop-creation-native.js").createDesktopCreationNative;
+  openDesktopThread?: (threadId: string) => Promise<void>;
+  desktopCreationOwnerAttempts?: number;
   launchDesktopMonitor?: typeof import("./desktop-monitor.js").launchDesktopMonitor;
   terminalControlProviderRegistry?: TerminalControlProviderRegistry;
   terminalProcessSource?: TerminalProcessSource;

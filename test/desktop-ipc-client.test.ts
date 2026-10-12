@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
+import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
 import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { DesktopIpcError, type DesktopCompatibility, type DesktopIpcTransport } from "../src/desktop-types.js";
 import { DesktopFrameDecoder, encodeDesktopFrame, readDesktopSocketIdentity } from "../src/desktop-ipc-transport.js";
@@ -370,4 +371,28 @@ test("Desktop IPC trusts only private current-user sockets in a private real dir
     assert.throws(() => readDesktopSocketIdentity("/private-owner/ipc/ipc.sock"),
       (error: unknown) => error instanceof DesktopIpcError && error.code === "unsafe_socket");
   }
+});
+
+
+test("Desktop send-only build admits exact sends but rejects every unverified native write before dispatch", async () => {
+  assert.deepEqual(desktopCapabilityProfile(VERIFIED_DESKTOP_BUILD), { send: true, nativeControls: true });
+  assert.deepEqual(desktopCapabilityProfile(DESKTOP_CREATION_BUILD), { send: true, nativeControls: false });
+  for (const compatibility of [{ ...DESKTOP_CREATION_BUILD, build: "future" }, { ...DESKTOP_CREATION_BUILD, version: "future" }]) {
+    assert.deepEqual(desktopCapabilityProfile(compatibility), { send: false, nativeControls: false });
+  }
+  const fixture = new Fixture(), client = await connect(fixture, DESKTOP_CREATION_BUILD);
+  try {
+    assert.equal((await client.sendTurnOnce(options())).turnId, "accepted-turn");
+    assert.equal(starts(fixture).length, 1);
+    const before = fixture.sent.length;
+    const incompatible = (error: unknown) => error instanceof DesktopIpcError
+      && error.code === "incompatible_desktop" && error.dispatchState === "not_sent";
+    await assert.rejects(client.answerAsyncOnce({ ...target, expectedRevision: 7, expectedTurnId: "active-turn",
+      interactionId: "question", answer: "Green", clientUserMessageId: "answer-only" }), incompatible);
+    await assert.rejects(client.respondRequestOnce({ ...target, expectedRevision: 7, expectedTurnId: "active-turn",
+      interactionId: "approval", operationId: "approve-only", response: { decision: "accept" } }), incompatible);
+    await assert.rejects(client.updateThreadSettingsOnce({ ...target, operationId: "settings-only", settings: { model: "test-model" } }), incompatible);
+    await assert.rejects(client.interruptTurnOnce({ ...target, operationId: "interrupt-only", expectedTurnId: "active-turn" }), incompatible);
+    assert.equal(fixture.sent.length, before);
+  } finally { client.close(); }
 });

@@ -1,10 +1,10 @@
-# Codex Desktop support in AKK 0.14.0
+# Codex Desktop support
 
 AKK can discover an existing local Codex Desktop conversation, send a task to
 its original Desktop owner, and monitor the exact native task for completion
 or attention. It can notify and answer asynchronous questions in the same active
 native task. It does not open a second CLI conversation from the same history.
-Command/file approvals, blocking questions, session settings, and exact task interruption use that same original owner. Unsupported native request forms remain manual.
+On the fully reviewed build, command/file approvals, blocking questions, session settings, and exact task interruption use that same original owner. Other builds have narrower capability profiles; unsupported controls remain manual.
 
 AKK 0.14.0 introduces these Desktop controls. See the [README](../README.md)
 for the first-task workflow and [OpenClaw installation](openclaw-operations.md#choose-one-installation-path)
@@ -12,7 +12,24 @@ for packaged and optional source installation.
 
 ## Version and platform evidence
 
-The reviewed application is macOS Codex Desktop `26.1002.52244`, build `13536`,
+Desktop compatibility is checked per capability against an exact application
+version and build. It is not a minimum-version promise:
+
+| macOS Desktop application | Send to live owner / Status / Watch | Native approvals, answers, model/permission changes, cancellation | New conversation |
+| --- | --- | --- | --- |
+| `26.1002.52244` / `13536` | Existing verified adapter | Existing verified adapter | Not enabled |
+| `26.1007.30912` / `20156` | Send profile for the new-conversation workflow; read-only observation retains exact owner/turn checks | Not enabled: these operations have not been reverified on this build | Available in AKK 0.14.5; see the creation boundary below |
+| Other builds | Compatible read-only observations may work; no native writes are advertised | Not enabled | Not enabled |
+
+The `20156` profile does not inherit the old build's native-control approval.
+List and Status keep pending question/approval content visible when it can be
+read reliably, but expose no executable Respond/Approve action and direct the
+user to Desktop. Watch attention notifications follow the same boundary.
+`desktop_scan.send_contract_verified` reports the Send profile;
+`write_contract_verified` continues to mean the full native-control profile.
+The new profile and creation workflow are available starting in AKK 0.14.5.
+
+The original fully reviewed application is macOS Codex Desktop `26.1002.52244`, build `13536`,
 bundle ID `com.openai.codex`, installed as `/Applications/ChatGPT.app`. These
 values come from the app's `Info.plist`, not the globally installed Codex CLI.
 Its bundled Codex metadata identifies `0.162.0-alpha.2`; that embedded metadata
@@ -22,8 +39,8 @@ uses that version.
 A read-only audit on 2026-10-10 reconfirmed those installed bundle values.
 [The runtime](../src/desktop-runtime.ts) currently reads that fixed application
 path on Darwin and requires the correct bundle ID.
-[The IPC client's write profile](../src/desktop-ipc-client.ts) requires both
-the version and build to match exactly. This is **not a minimum version** or a
+[The capability profiles](../src/desktop-compatibility.ts) require both
+the version and build to match exactly for each operation. This is **not a minimum version** or a
 promise of compatibility with later builds. An unreviewed build may still
 return a compatible read-only snapshot; that does not authorize native writes.
 
@@ -37,7 +54,7 @@ has fast-regression coverage, not a new live Desktop proof.
 
 ## Capability boundary
 
-| Operation | AKK 0.14.0 behavior |
+| Operation | Behavior on the fully reviewed `13536` build |
 | --- | --- |
 | List | Default to persisted expanded sidebar membership; offer the broader saved catalog with explicit `desktop_view: "history"`; retain unconnected rows and support search, project filtering, and pagination |
 | Status | Read a fresh snapshot from the exact local Desktop owner when available; report unknown live state when only metadata is available |
@@ -52,11 +69,42 @@ has fast-regression coverage, not a new live Desktop proof.
 | Model and mode | Read current settings; apply an explicitly requested model/effort and optional Plan/default mode; no model catalog is exposed |
 | Cancellation | Interrupt the exact selected native task; an old task ID never cancels a newer task |
 | Unwatch | Stop observation without cancelling or changing the Desktop task |
-| Cold loading, resume, new conversation | Not supported by the Desktop adapter |
+| Existing-conversation cold loading, resume | Not supported by the Desktop adapter |
+| New conversation | Separate creation workflow on build `20156`; see below |
 
 No Desktop operation types a slash command or uses terminal activity as exact
 completion evidence. Existing terminal capabilities remain separate and retain
 their previous checks.
+
+## New-conversation boundary
+
+Use `agent_knock_knock_desktop_create` or the `desktop-create` CLI command; see
+[Create a Desktop conversation](desktop-create.md) for project selection, optional
+first tasks, operation identity, and recovery.
+
+The creation workflow creates a new, empty native thread using the installed
+Desktop app's bundled backend, closes that temporary connection, and asks
+Desktop to load that exact new UUID using its native deep link. An optional
+Desktop project ID determines project membership; a working directory alone is
+not proof of that membership. It then confirms the original Desktop owner and
+uses the existing Desktop IPC Send and Watch flow for the user's first task.
+A thread created in the temporary backend is not yet proof of Desktop ownership
+or task acceptance.
+
+The 2026-10-13 product acceptance run on build `20156` verified project and
+projectless creation, a blank thread remaining at zero turns, the real first
+task through Desktop IPC, exact completion, and one accepted callback to a local
+isolated receiver. Desktop applied Read Only/on-request after handoff despite
+the metadata creation request specifying workspace-write. Effective permissions
+must be read from Desktop; creating a conversation does not grant write access.
+No external channel delivery or newer-build native controls were exercised.
+
+This route is intentionally separate from loading or replacing an existing
+conversation. A failed or uncertain create/load/send stage must preserve its
+record and exact identities; it must not silently create another conversation
+or replay a task. Native approvals and questions on build `20156` still need
+to be handled in Desktop. The broader native controls remain enabled only for
+build `13536`, where those effects were previously verified.
 
 ## Find and select a conversation
 
@@ -230,8 +278,8 @@ This adapter uses the app's private local IPC socket under the selected Codex
 home. The reviewed route discovers the current thread owner, follows its
 state stream, and submits through that owner. It validates socket ownership,
 message shapes, peer identity, thread identity, revision freshness, pending
-interactions, and the send receipt. Writes require the reviewed Desktop
-version/build. This IPC surface is not an official stable third-party API;
+interactions, and the send receipt. Each write requires its own reviewed Desktop
+version/build capability profile. This IPC surface is not an official stable third-party API;
 an app upgrade may require another compatibility review.
 
 Catalog reads copy supported SQLite database/WAL files to a private temporary
@@ -269,7 +317,7 @@ These observations establish the route and discovery strategy, not universal
 support for every Desktop build, platform, or remote host.
 
 The reviewed boundary does not cover Windows/Linux Desktop, cloud-hosted
-threads, arbitrary installations of the app, automatic conversation loading,
+threads, arbitrary installations of the app, implicit loading of existing conversations,
 automatic model catalog discovery, unsupported approval forms, or atomic
 coordination with simultaneous human input. Completion generation and durable
 delivery state must also be distinguished from successful delivery through an

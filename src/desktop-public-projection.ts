@@ -1,3 +1,4 @@
+import { desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
 import { desktopObservationStopped } from "./desktop-task-recovery.js";
@@ -7,16 +8,17 @@ import type { DesktopInteraction, DesktopSnapshot } from "./desktop-types.js";
 import type { DesktopTaskRecord } from "./desktop-state-store.js";
 
 export function desktopSessionProjection(entry: DesktopCatalogEntry, snapshot?: DesktopSnapshot,
-  writesVerified = false, observationError?: string): Record<string, unknown> {
+  writesVerified: DesktopCapabilityProfile | boolean = false, observationError?: string): Record<string, unknown> {
+  const profile = desktopProjectionCapabilities(writesVerified);
   const live = snapshot !== undefined;
   const activeTurn = activeDesktopTurn(snapshot);
   const watch = Boolean(activeTurn);
-  const send = Boolean(snapshot?.canSend && writesVerified);
-  const interactions = writesVerified && activeTurn ? (snapshot?.pendingInteractions ?? snapshot?.asyncQuestions ?? [])
+  const send = Boolean(snapshot?.canSend && profile.send);
+  const interactions = activeTurn ? (snapshot?.pendingInteractions ?? snapshot?.asyncQuestions ?? [])
     .filter(item => item.turnId === activeTurn) : [];
-  const settings = Boolean(writesVerified && snapshot?.canSend && snapshot.runtimeStatus === "idle");
-  const capabilities = { status: true, send, watch, interaction_notify: watch, ...interactionCapabilities(interactions),
-    set_permissions: settings, set_model: settings, cancel: writesVerified && watch };
+  const settings = Boolean(profile.nativeControls && snapshot?.canSend && snapshot.runtimeStatus === "idle");
+  const capabilities = { status: true, send, watch, interaction_notify: watch, ...interactionCapabilities(profile.nativeControls ? interactions : []),
+    set_permissions: settings, set_model: settings, cancel: profile.nativeControls && watch };
   return {
     id: entry.conversationId, conversation_id: entry.conversationId, source: "codex_desktop", agent: "codex",
     title: snapshot?.title ?? entry.title, cwd: snapshot?.cwd ?? entry.cwd,
@@ -26,13 +28,14 @@ export function desktopSessionProjection(entry: DesktopCatalogEntry, snapshot?: 
       sidebar_project_name: entry.sidebar.projectName } : {}),
     connection_state: live ? "live_owner_verified" : "unconfirmed",
     activity_state: snapshot?.runtimeStatus ?? "unknown",
-    ...sessionObservation(snapshot, writesVerified),
-    ...sessionSendAvailability(snapshot, writesVerified, observationError),
+    ...sessionObservation(snapshot, profile.nativeControls),
+    ...sessionSendAvailability(snapshot, profile.send, observationError),
     ...(observationError ? { observation_error: observationError } : {}), capabilities,
+    ...(!profile.nativeControls && interactions.length ? { manual_action: "Answer the question or approval in Desktop; this build only supports task sends and observation." } : {}),
     pending_async_count: interactions.filter(item => item.kind === "async_question").length,
     pending_interaction_count: interactions.length,
-    interaction_state: interactions.map(item => desktopInteractionProjection(item, entry.conversationId)),
-    available_actions: sessionActions(entry.conversationId, { live, send, watch, cancel: writesVerified && watch }, activeTurn)
+    interaction_state: interactions.map(item => desktopInteractionProjection(item, entry.conversationId, undefined, profile.nativeControls)),
+    available_actions: sessionActions(entry.conversationId, { live, send, watch, nativeControls: profile.nativeControls, cancel: profile.nativeControls && watch }, activeTurn)
 
   };
 }
@@ -47,11 +50,12 @@ function sessionSendAvailability(snapshot: DesktopSnapshot | undefined, writesVe
 }
 
 /** Do not export prompts, internal owner IDs, callback configuration or raw native state. */
-export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified = true): Record<string, unknown> {
+export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: DesktopCapabilityProfile | boolean = true): Record<string, unknown> {
+  const profile = desktopProjectionCapabilities(writesVerified);
   const terminal = desktopObservationStopped(task) || ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
-  const interactions = writesVerified && !terminal ? actionableTaskInteractions(task) : [];
+  const interactions = !terminal ? actionableTaskInteractions(task) : [];
   const callback = backendCallbackPublicProjection(task, !terminal, desktopObservationStopped(task));
-  const canCancel = writesVerified && !terminal && Boolean(task.native_turn_id);
+  const canCancel = profile.nativeControls && !terminal && Boolean(task.native_turn_id);
   const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
   return {
     watch_id: task.watch_id, conversation_id: task.desktop_id, source: "codex_desktop",
@@ -61,17 +65,17 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified = 
     anchor_state: task.native_turn_id ? "verified" : "pending", native_thread_id: task.target.threadId,
     native_turn_id: task.native_turn_id ?? null, created_at: task.created_at, updated_at: task.updated_at,
     observed_at: task.observed_at, observation_error: task.observation_error,
-    pending_manual_count: task.pending_manual_count, final_text: task.final_text,
+    pending_manual_count: task.pending_manual_count + (profile.nativeControls ? 0 : interactions.length), final_text: task.final_text,
     ...taskInteractionCounts(task, interactions),
-    interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id)),
+    interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id, profile.nativeControls)),
     callback_expected: callbackExpected(task, terminal),
     callback_configured: Boolean(task.callback_route), ...callback,
     ...desktopSendReceiptProjection(task.send_intent),
     capabilities: { callback: Boolean(task.callback_route), interaction_notify: Boolean(task.callback_route),
-      ...interactionCapabilities(interactions), cancel: canCancel, ...desktopRecoveryCapabilities(task) },
+      ...interactionCapabilities(profile.nativeControls ? interactions : []), cancel: canCancel, ...desktopRecoveryCapabilities(task) },
     available_actions: { ...recovery_actions, status: { tool: "agent_knock_knock_status", input: { watch_id: task.watch_id } },
       ...(canCancel ? { cancel: { tool: "agent_knock_knock_cancel", input: { watch_id: task.watch_id } } } : {}) },
-    ...(task.pending_manual_count ? { manual_action: terminal
+    ...(task.pending_manual_count || !profile.nativeControls && interactions.length ? { manual_action: terminal
       ? "Handle any remaining question or approval in Desktop; this Watch has stopped."
       : "Answer the question or approval in Desktop; AKK continues watching this task." } : {})
   };
@@ -106,17 +110,18 @@ function interactionCapabilities(interactions: DesktopInteraction[]) {
 function sessionObservation(snapshot: DesktopSnapshot | undefined, writesVerified: boolean) {
   if (!snapshot) return {};
   const actionable = writesVerified ? (snapshot.pendingInteractions ?? []).filter(item => item.kind !== "async_question").length : 0;
-  return { native_turn_id: snapshot.latestTurnId, pending_manual_count: Math.max(0, snapshot.pendingRequestCount - actionable),
+  return { native_turn_id: snapshot.latestTurnId, pending_manual_count: Math.max(0, snapshot.pendingRequestCount - actionable)
+      + (writesVerified ? 0 : (snapshot.pendingInteractions ?? snapshot.asyncQuestions ?? []).filter(item => item.kind === "async_question").length),
     observed_revision: snapshot.revision };
 }
-function sessionActions(id: string, capabilities: { live: boolean; send: boolean; watch: boolean; cancel: boolean }, activeTurn?: string) {
+function sessionActions(id: string, capabilities: { live: boolean; send: boolean; watch: boolean; cancel: boolean; nativeControls: boolean }, activeTurn?: string) {
   const input = { conversation_id: id };
   return { status: { tool: "agent_knock_knock_status", input },
     ...(capabilities.send ? { send: { tool: "agent_knock_knock_send", input } } : {}),
     ...(capabilities.watch ? { watch: { tool: "agent_knock_knock_watch", input } } : {}),
     ...(capabilities.cancel ? { cancel: { tool: "agent_knock_knock_cancel", input: { ...input, expected_native_turn_id: activeTurn } } } : {}),
-    ...(capabilities.live ? { native_inspect: { tool: "agent_knock_knock_native_inspect", input: { ...input, inspection: "status" } },
-      permission_options: { tool: "agent_knock_knock_permission_options", input },
+    ...(capabilities.live ? { native_inspect: { tool: "agent_knock_knock_native_inspect", input: { ...input, inspection: "status" } } } : {}),
+    ...(capabilities.live && capabilities.nativeControls ? { permission_options: { tool: "agent_knock_knock_permission_options", input },
       model_options: { tool: "agent_knock_knock_model_options", input } } : {}) };
 }
 function callbackExpected(task: DesktopTaskRecord, terminal: boolean): boolean {

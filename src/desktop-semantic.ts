@@ -126,6 +126,7 @@ export function rememberDisplayedDesktopInteractionOffers(api: object, context: 
   try { projections = validateDesktopInteractionProjections(result.interaction_state ?? [], result.conversation_id, watch, result.native_turn_id); }
   catch { return; }
   for (const projection of projections) {
+    if (!Object.keys(projection.available_actions).length) continue;
     const fingerprint = projection.interaction_prompt_fingerprint;
     if (!/^[0-9a-f]{64}$/u.test(fingerprint)) continue;
     rememberSemanticPrivateAuthorityOffer(api, semanticInteractionAuthorityOfferKey(context.sessionKey, context.sessionId,

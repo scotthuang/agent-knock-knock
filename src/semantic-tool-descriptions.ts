@@ -2,7 +2,7 @@
 export const semanticToolDescriptions = {
   akk: "Claude Code direct connections support discovery, idle task sends, bounded public progress and exact observation without tmux, Herdr, hooks or agent-side plugins. Unsupported controls require the original terminal; do not send ordinary text as approval or cancellation. Choose a conversation from AKK List; AKK prefers a verified backend and uses eligible terminal delivery when unavailable. Control loaded Codex CLI threads through their backend: discover, " +
     "send, watch completion, answer questions, approve requests and set permissions " +
-    "without tmux or Herdr. Discover Codex Desktop conversations, send tasks and watch their completion; " +
+    "without tmux or Herdr. Discover Codex Desktop conversations, explicitly create new ones, send tasks and watch their completion; " +
     "Desktop supports typed asynchronous and blocking answers, approvals, current-thread permissions/model settings and exact task cancellation. Send coding work " +
     "through existing Codex or Claude Code shared terminals, " +
     "inspect managed Turns, observe a user-selected terminal with durable " +
@@ -39,6 +39,12 @@ export const semanticToolDescriptions = {
     "inspection=status; AKK refreshes binding authority privately. Arbitrary " +
     "slash commands remain unavailable. This creates no AKK Session, Turn, " +
     "receipt, monitor, or callback.",
+  desktop_create: "Create a new Codex Desktop conversation after the user requests it, optionally in an exact existing project. " +
+    "No existing conversation or terminal is required. The default working directory is the project's root, or AKK's dedicated Desktop directory outside projects. " +
+    "Desktop must be running and must take ownership of the same new native thread. An optional request is sent only after ownership is verified, " +
+    "and its returned Watch already monitors completion; do not add another Watch. Without request, creation does not submit any task. " +
+    "Keep operation_id. If opening or uncertain, continue only that operation_id, with no other parameters; never repeat creation with a new key. " +
+    "An unknown or foreign operation is refused. Creation never clears, replaces, or sends into an existing work conversation.",
   new_thread: "Start and verify a clean native coding-agent thread in the exact terminal_id " +
     "after explicit user intent. A valid unverified agent version remains " +
     "callable with a compatibility warning. AKK refreshes lifecycle authority " +
@@ -247,6 +253,7 @@ export const semanticToolDescriptions = {
 } as const;
 
 export const semanticCommandGuidance = [
+  "For a requested new Desktop conversation use agent_knock_knock_desktop_create, optionally with an exact project and first task. Preserve its operation_id and automatic Watch; opening or uncertain operations may only be continued by that same ID. The terminal new_thread tool remains separate and must not be used to replace a Desktop conversation.",
   "Select conversations[] by title and project, then use its conversation_id. AKK prefers the backend for supported commands and uses the exact terminal when that operation has no backend implementation. Bound Watch/Turn operations retain their original provider. Only exact identity evidence merges duplicate representations; same directory is not identity. Keep returned Watch IDs and current interaction actions; never retry uncertain input on another route.",
   "Use /akk permissions on an advertised idle Codex terminal before /akk " +
     "set-permissions. Read the current permission mode and returned built-in " +

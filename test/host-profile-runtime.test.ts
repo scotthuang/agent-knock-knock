@@ -188,6 +188,7 @@ test("trusted CLI authority is injected only for Turn and Watch creation or reco
 
   for (const [command, commandOptions] of [
     ["delegate", untrusted],
+    ["desktop-create", untrusted],
     ["send", untrusted],
     ["watch-terminal", untrusted],
     ["reconcile-watches", untrusted],

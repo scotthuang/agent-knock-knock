@@ -193,7 +193,7 @@ export function applyTrustedHostProfileCliOptions(
 ): Record<string, unknown> {
   const runtime = trustedHostProfileRuntimeFromEnvironment(environment, { cwd });
   if (!runtime) return options as Record<string, unknown>;
-  const createsManagedTurn = commandName === "delegate" ||
+  const createsManagedTurn = commandName === "delegate" || commandName === "desktop-create" ||
     (commandName === "send" && !nonBlankString(options.turn));
   const ownsWatchRoute = commandName === "watch-terminal" ||
     commandName === "reconcile-watches" ||
