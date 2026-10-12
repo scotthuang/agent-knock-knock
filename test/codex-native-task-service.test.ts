@@ -5,9 +5,9 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
 import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
-import { createCodexNativeStateStore } from "../src/codex-native-state-store.js";
+import { assertCodexNativeTaskRecord, createCodexNativeStateStore } from "../src/codex-native-state-store.js";
 import { createCodexNativeTaskService, codexNativeTaskNeedsReconciliation, type CodexNativeTaskServiceDependencies } from "../src/codex-native-task-service.js";
-import { nativeTurnProjection } from "../src/codex-native-public-projection.js";
+import { codexNativeTaskProjection, nativeTurnProjection } from "../src/codex-native-public-projection.js";
 import { CodexNativeError, type CodexNativeSnapshot, type CodexNativeTurn, type NativeInteraction } from "../src/codex-native-types.js";
 
 const target = { codexHome: "/test/codex", threadId: "thread-exact" };
@@ -47,6 +47,121 @@ function pending(kind: NativeInteraction["kind"] = "blocking_question"): NativeI
   return { id: "native-interaction:one", kind, threadId: target.threadId, turnId: "native-one", itemId: "question-item", method: "item/tool/requestUserInput", requestId: 7,
     questions: [{ id: "native-question", title: "Choose a color", options: ["Blue", "Green"] }] };
 }
+
+test("empty-thread preflight failures persist an idempotent not-sent receipt without monitoring or callbacks", async t => {
+  const h = harness(t);
+  h.deps.observe = async () => { throw new CodexNativeError("timeout", "subscription timed out", "unknown"); };
+  const request = { ...input, callbackRoute: route };
+  const failed = await createCodexNativeTaskService(h.deps).send(request);
+  assert.equal(failed.status, "failed"); assert.equal(failed.send_intent?.state, "not_sent");
+  assert.equal(failed.send_intent?.error_code, "timeout"); assert.equal(failed.send_intent?.failure_stage, "native_preflight");
+  assert.equal(failed.native_turn_id, undefined); assert.equal(failed.send_intent?.receipt_turn_id, undefined);
+  assert.equal(codexNativeTaskNeedsReconciliation(failed), false); assert.deepEqual(failed.notifications, []);
+  assert.equal(h.state.starts, 0); assert.equal(h.repository.list().length, 1);
+  assert.equal(h.state.notifications.length, 0);
+  h.deps.observe = async () => structuredClone(h.state.snapshot);
+  const replay = await createCodexNativeTaskService(h.deps).send(request);
+  assert.deepEqual(replay, failed); assert.equal(h.state.starts, 0);
+  assert.equal((await h.service.recover(failed.id, { controllerSession: input.controllerSession })).send_intent?.state, "not_sent");
+  assert.equal(h.state.notifications.length, 0);
+  const invalid = structuredClone(failed); invalid.send_intent!.state = "uncertain";
+  assert.throws(() => assertCodexNativeTaskRecord(invalid), /send intent/u);
+  const changed = structuredClone(failed); delete changed.send_intent!.failure_stage;
+  assert.throws(() => h.repository.save(changed, h.repository.load(failed.id)!.revision), /send intent/u);
+});
+
+test("a preflight failure that wins a concurrent message reservation prevents the competing submission", async t => {
+  const h = harness(t); let reads = 0;
+  let releaseFailure!: () => void, releaseSuccess!: () => void;
+  h.deps.observe = async () => {
+    if (++reads === 1) {
+      await new Promise<void>(resolve => { releaseFailure = resolve; });
+      throw new CodexNativeError("timeout", "subscription failed", "unknown");
+    }
+    await new Promise<void>(resolve => { releaseSuccess = resolve; });
+    return structuredClone(h.state.snapshot);
+  };
+  const request = { ...input, callbackRoute: route };
+  const failedAttempt = h.service.send(request), competingAttempt = createCodexNativeTaskService(h.deps).send(request);
+  releaseFailure(); const failed = await failedAttempt;
+  releaseSuccess(); const competing = await competingAttempt;
+  assert.equal(failed.status, "failed"); assert.equal(failed.send_intent?.state, "not_sent");
+  assert.deepEqual(competing, failed); assert.equal(h.repository.list().length, 1);
+  assert.equal(h.state.starts, 0); assert.equal(h.state.notifications.length, 0);
+});
+
+test("a concurrent successful submission remains authoritative when the other preflight later fails", async t => {
+  const h = harness(t); let reads = 0; let releaseFailure!: () => void;
+  h.deps.observe = async () => {
+    if (++reads === 1) {
+      await new Promise<void>(resolve => { releaseFailure = resolve; });
+      throw new CodexNativeError("timeout", "late subscription failure", "unknown");
+    }
+    return structuredClone(h.state.snapshot);
+  };
+  const request = { ...input, callbackRoute: route };
+  const lateFailure = h.service.send(request), successful = await createCodexNativeTaskService(h.deps).send(request);
+  releaseFailure(); const reconciled = await lateFailure;
+  assert.equal(successful.send_intent?.state, "accepted"); assert.deepEqual(reconciled, successful);
+  assert.equal(reconciled.send_intent?.failure_stage, undefined);
+  assert.equal(h.repository.list().length, 1); assert.equal(h.state.starts, 1); assert.equal(h.state.notifications.length, 0);
+});
+
+for (const acknowledged of [true, false]) test(`empty first task recovers after restart with ${acknowledged ? "delayed subscription" : "lost ACK"}, without replay`, async t => {
+  const h = harness(t); let submitted = false, readable = false;
+  h.state.snapshot = snapshot([], { historyMaterialized: false });
+  h.deps.observe = async (_identity, exact) => {
+    if (submitted && !readable) throw new CodexNativeError("unmaterialized_subscription", "history pending", "unknown");
+    h.state.observations.push(exact); return structuredClone(h.state.snapshot);
+  };
+  h.deps.start = async (_identity, options) => {
+    assert.equal(h.repository.list()[0].send_intent?.baseline_turn_ids.length, 0);
+    await options.beforeDispatch?.(h.state.snapshot);
+    submitted = true; h.state.starts++; h.state.clientId = options.clientUserMessageId;
+    if (!acknowledged) throw new CodexNativeError("timeout", "ACK lost", "unknown");
+    return { turnId: "native-one", clientUserMessageId: options.clientUserMessageId };
+  };
+  const service = createCodexNativeTaskService(h.deps);
+  const sent = await service.send({ ...input, callbackRoute: route });
+  const projected = codexNativeTaskProjection(sent);
+  assert.equal(projected.delivered, false); assert.equal(projected.agent_acceptance, "unproven");
+  assert.equal(projected.submission_state, acknowledged ? "acknowledged" : "unknown");
+  assert.equal(projected.pending_interaction_count, null); assert.equal(projected.capabilities.approve, false);
+  assert.equal(sent.native_turn_id, undefined);
+  assert.equal(sent.send_intent?.receipt_turn_id, acknowledged ? "native-one" : undefined);
+  const restarted = createCodexNativeTaskService(h.deps);
+  assert.equal((await restarted.send({ ...input, callbackRoute: route })).id, sent.id);
+  assert.equal(h.state.starts, 1); assert.equal(h.state.notifications.length, 0);
+  readable = true;
+  h.state.snapshot = snapshot([turn("native-one", "inProgress", h.state.clientId)], { historyMaterialized: true, pendingInteractions: [pending("command_approval")] });
+  const recovered = await restarted.reconcile(sent.id);
+  assert.equal(recovered.native_turn_id, "native-one"); assert.equal(recovered.pending_interactions.length, 1);
+  assert.equal(h.state.notifications.length, 1);
+  await Promise.all([restarted.reconcile(sent.id), service.reconcile(sent.id)]);
+  assert.equal(h.state.notifications.length, 1, "replayed native request must notify once");
+  const completed = turn("native-one", "completed", h.state.clientId);
+  completed.items.push({ id: "result", type: "agentMessage", phase: "final_answer", text: "First task result" });
+  h.state.snapshot = snapshot([turn("later-task", "inProgress", "another-client")], { selectedTurn: completed, historyMaterialized: true });
+  assert.equal((await restarted.reconcile(sent.id)).final_text, "First task result");
+  await service.reconcile(sent.id);
+  assert.equal(h.state.notifications.length, 2); assert.equal(h.state.starts, 1);
+  assert.equal(h.repository.load(sent.id)?.deadline_at, sent.deadline_at);
+});
+
+test("a zero-history task that finishes before subscription still completes once", async t => {
+  const h = harness(t); h.state.snapshot = snapshot([], { historyMaterialized: false });
+  h.deps.start = async (_identity, options) => {
+    await options.beforeDispatch?.(h.state.snapshot); h.state.starts++;
+    const done = turn("native-one", "completed", options.clientUserMessageId);
+    done.items.push({ id: "result", type: "agentMessage", phase: "final_answer", text: "Fast first task" });
+    h.state.snapshot = snapshot([done], { historyMaterialized: true });
+    return { turnId: done.id, clientUserMessageId: options.clientUserMessageId };
+  };
+  const sent = await createCodexNativeTaskService(h.deps).send({ ...input, callbackRoute: route });
+  assert.equal(sent.status, "completed"); assert.equal(sent.final_text, "Fast first task");
+  await h.service.reconcile(sent.id);
+  assert.equal(h.state.notifications.length, 1); assert.equal(h.state.starts, 1);
+});
 
 test("direct CLI send persists once and only binds exact native user-message acceptance", async t => {
   const h = harness(t); const sent = await h.service.send(input);

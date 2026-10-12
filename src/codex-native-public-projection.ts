@@ -1,5 +1,6 @@
 import { backendObservationStopped, backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
+import { isLoadedEmptyCodexCliSnapshot } from "./codex-native-client.js";
 import { createHash } from "node:crypto";
 import { createCodexNativeConversationId } from "./codex-native-identity.js";
 import { parseCodexNativeConversationId } from "./codex-native-identity.js";
@@ -143,7 +144,7 @@ export function nativeTurnProjection(turn: CodexNativeTurn | undefined) {
 export function codexNativeSessionProjection(identity: CodexNativeIdentity, snapshot: CodexNativeSnapshot, backendVersion: string, interactionsScanned = false) {
   const id = createCodexNativeConversationId(identity);
   const controlsAvailable = snapshot.loaded && snapshot.historyMaterialized !== false;
-  const canSend = controlsAvailable && snapshot.canSend;
+  const canSend = snapshot.loaded && snapshot.canSend && (controlsAvailable || isLoadedEmptyCodexCliSnapshot(snapshot));
   const active = snapshot.turns.filter(turn => turn.status === "inProgress");
   const watch = snapshot.loaded && active.length === 1 && active[0].id === snapshot.latestTurnId;
   return {
@@ -152,7 +153,9 @@ export function codexNativeSessionProjection(identity: CodexNativeIdentity, snap
     native_thread_id: identity.threadId, native_turn_id: snapshot.latestTurnId,
     backend_version: backendVersion, connection_state: snapshot.loaded ? "loaded_backend_verified" : "not_loaded",
     ...(snapshot.historyMaterialized === false ? { history_state: "unmaterialized",
-      control_limitation: "Complete the first task in this Codex conversation before using native task control." } : {}),
+      control_limitation: canSend
+        ? "The first task can be sent directly. Approval and permission controls require task history and a verified subscription."
+        : "Native interaction and permission controls require task history and a verified subscription." } : {}),
     activity_state: snapshot.thread.status.type,
     active_flags: snapshot.thread.status.type === "active" ? snapshot.thread.status.activeFlags : [],
     interaction_requests_scanned: interactionsScanned,
@@ -176,26 +179,47 @@ export function codexNativeTaskProjection(task: CodexNativeTaskRecord) {
   const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
   const stopped = backendObservationStopped(task);
   const active = !stopped && (task.status === "watching" || task.status === "awaiting_acceptance");
+  const awaitingAnchor = Boolean(intent && !task.native_turn_id);
+  const preflightFailure = intent?.failure_stage === "native_preflight";
   const callback = backendCallbackPublicProjection(task, active, stopped);
   return {
     watch_id: task.id, conversation_id: task.native_id, source: "codex_cli", status: task.closed_at ? "closed" : task.status,
     ...recovery, observation_status: task.status, observation_active: active,
     available_actions: recovery_actions,
     native_thread_id: task.target.threadId, native_turn_id: task.native_turn_id ?? null,
-    observation_mode: task.native_turn_id ? "exact_task" : "pending_acceptance", anchor_state: task.native_turn_id ? "verified" : "pending",
+    observation_mode: preflightFailure ? "none" : task.native_turn_id ? "exact_task" : "pending_acceptance",
+    anchor_state: preflightFailure ? "absent" : task.native_turn_id ? "verified" : "pending",
     created_at: task.created_at, updated_at: task.updated_at, observed_at: task.observed_at,
     observation_error: task.observation_error, final_text: task.final_text,
-    pending_interaction_count: task.pending_interactions.length,
+    pending_interaction_count: awaitingAnchor ? null : task.pending_interactions.length,
+    ...(awaitingAnchor ? { interaction_requests_scanned: false } : {}),
     interaction_state: task.pending_interactions.map(item => nativeInteractionProjection(item, task.native_id, task.id)),
     callback_configured: Boolean(task.callback_route), callback_expected: Boolean(task.callback_route && !stopped &&
       (active || task.notifications.some(note => ["ready", "leased", "retry_wait"].includes(note.status)))),
     ...callback,
-    capabilities: { close: task.kind === "send" && !task.closed_at, renew: !task.closed_at, recover: !task.closed_at,
-      retry_callback: !stopped && task.notifications.some(note => ["failed", "retry_wait"].includes(note.status) && note.outcome?.disposition === "retryable_failure"),
-      callback: Boolean(task.callback_route) && !stopped, interaction_notify: active && Boolean(task.callback_route),
-      interaction_respond: active, approve: active },
-    ...(intent ? { message_id: intent.message_id, delivered: intent.state === "accepted", send_state: intent.state,
-      delivery_receipt: intent.state === "accepted" ? "native_task_verified" : intent.state === "not_sent" ? "not_sent" : "acceptance_unproven",
-      agent_acceptance: intent.state === "accepted" ? "proven" : "unproven", send_error: intent.error_code, resend_allowed: false } : {})
+    capabilities: nativeTaskCapabilities(task, active, stopped, awaitingAnchor),
+    ...sendReceiptProjection(task, active, awaitingAnchor)
   };
+}
+
+function nativeTaskCapabilities(task: CodexNativeTaskRecord, active: boolean, stopped: boolean, awaitingAnchor: boolean) {
+  return { close: task.kind === "send" && !task.closed_at, renew: !task.closed_at, recover: !task.closed_at,
+    retry_callback: !stopped && task.notifications.some(note => ["failed", "retry_wait"].includes(note.status) && note.outcome?.disposition === "retryable_failure"),
+    callback: Boolean(task.callback_route) && !stopped && task.send_intent?.failure_stage !== "native_preflight",
+    interaction_notify: active && Boolean(task.callback_route), interaction_respond: active && !awaitingAnchor, approve: active && !awaitingAnchor };
+}
+
+function sendReceiptProjection(task: CodexNativeTaskRecord, active: boolean, awaitingAnchor: boolean) {
+  const intent = task.send_intent;
+  if (!intent) return undefined;
+  return { message_id: intent.message_id, delivered: intent.state === "accepted", send_state: intent.state,
+    ...(intent.failure_stage === "native_preflight" ? { failure_stage: intent.failure_stage, request_dispatched: false } : {}),
+    submission_state: intent.state === "accepted" && task.native_turn_id ? "verified" : intent.receipt_turn_id ? "acknowledged"
+      : intent.state === "not_sent" ? "not_sent" : intent.state === "reserved" ? "reserved" : "unknown",
+    ...(awaitingAnchor && intent.receipt_turn_id ? { native_receipt_turn_id: intent.receipt_turn_id,
+      monitor_note: active
+        ? "Codex acknowledged the submission. AKK is verifying the same task's history; do not resend or add another Watch."
+        : "Codex acknowledged the submission, but exact task history is not verified. Do not resend." } : {}),
+    delivery_receipt: intent.state === "accepted" ? "native_task_verified" : intent.state === "not_sent" ? "not_sent" : "acceptance_unproven",
+    agent_acceptance: intent.state === "accepted" ? "proven" : "unproven", send_error: intent.error_code, resend_allowed: false };
 }

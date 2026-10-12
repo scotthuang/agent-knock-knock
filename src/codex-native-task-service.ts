@@ -222,8 +222,21 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
     const id = `codex-cli-watch:${nativeDigest([input.controllerSession, input.messageId])}`;
     const previous = this.repo.load(id); if (previous) return this.duplicate(previous, input);
     const task = this.make(input, id, "send");
-    const snapshot = await this.deps.observe(input.target); assertSnapshot(input.target, snapshot);
-    if (!snapshot.loaded || !snapshot.canSend) throw new CodexNativeTaskError("thread_not_idle", "Codex CLI thread must be loaded and idle before send");
+    let snapshot: CodexNativeSnapshot;
+    try {
+      snapshot = await this.deps.observe(input.target); assertSnapshot(input.target, snapshot);
+      if (!snapshot.loaded || !snapshot.canSend) throw new CodexNativeTaskError("thread_not_idle", "Codex CLI thread must be loaded and idle before send");
+    } catch (error) {
+      // Competing executions of this message must agree before either reports not-sent or submits.
+      return this.repo.withLock(id, () => {
+        const existing = this.repo.load(id); if (existing) return this.duplicate(existing, input);
+        task.status = "failed";
+        task.send_intent = { message_id: input.messageId, client_user_message_id: this.uuid(), text: input.text,
+          baseline_turn_ids: [], state: "not_sent", dispatched_at: this.now().toISOString(),
+          failure_stage: "native_preflight", error_code: nativeErrorCode(error) };
+        return this.repo.save(task, null);
+      });
+    }
     task.send_intent = { message_id: input.messageId, client_user_message_id: this.uuid(), text: input.text,
       baseline_turn_ids: snapshot.turns.map(turn => turn.id), state: "reserved", dispatched_at: this.now().toISOString() };
     let created = false;

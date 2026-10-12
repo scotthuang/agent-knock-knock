@@ -24,7 +24,7 @@ function fixture(t: TestContext) {
   };
   const runtime = createCodexNativeRuntime({ storeDir: dir, codexHomes: [target.codexHome], clientFactory: async () => { state.connects++; return client; } });
   t.after(async () => runtime.close());
-  return { runtime, state, snapshot };
+  return { runtime, state, snapshot, client };
 }
 
 test("native List and read-only Status do not subscribe or load a thread", async t => {
@@ -48,4 +48,59 @@ test("unloaded historical threads stay unloaded and unconfigured homes never cre
   const result = await h.runtime.transport.observe(target); assert.equal(result.loaded, false); assert.equal(h.state.subscriptions, 0);
   await assert.rejects(h.runtime.read({ ...target, codexHome: "/unconfigured/home" }), /configured local home/);
   assert.equal(h.state.connects, 1);
+});
+
+test("first-task observation permits only a fresh exact idle empty owner and retries subscription on subsequent reads", async t => {
+  const h = fixture(t); h.snapshot.historyMaterialized = false;
+  h.client.subscribe = async () => { h.state.subscriptions++; throw new CodexNativeError("unmaterialized_subscription", "No first input history"); };
+  const empty = await h.runtime.transport.observe(target);
+  assert.equal(empty.canSend, true); assert.equal(empty.historyMaterialized, false);
+  assert.equal(h.state.reads, 2); assert.equal(h.state.subscriptions, 1);
+  await h.runtime.transport.observe(target);
+  assert.equal(h.state.subscriptions, 2);
+  h.snapshot.historyMaterialized = true;
+  h.snapshot.latestTurnId = "first-turn";
+  h.snapshot.turns = [{ id: "first-turn", status: "inProgress", items: [], itemsComplete: true }];
+  h.snapshot.selectedTurn = h.snapshot.turns[0]; h.snapshot.canSend = false;
+  h.snapshot.thread.status = { type: "active", activeFlags: ["waitingOnApproval"] };
+  h.client.subscribe = async () => {
+    h.state.subscriptions++;
+    h.snapshot.pendingInteractions = [{ id: "first-approval", kind: "command_approval", threadId: target.threadId,
+      turnId: "first-turn", itemId: "command", method: "item/commandExecution/requestApproval", requestId: 1, questions: [] }];
+  };
+  const observed = await h.runtime.transport.observe(target, "first-turn");
+  assert.equal(observed.selectedTurn?.id, "first-turn");
+  assert.equal(observed.pendingInteractions[0]?.id, "first-approval");
+  assert.equal(h.state.subscriptions, 3);
+});
+
+test("unmaterialized observation never bypasses unknown errors or a changed owner, active task, history or exact-task request", async t => {
+  const h = fixture(t); h.snapshot.historyMaterialized = false;
+  const empty = structuredClone(h.snapshot);
+  const rejection = new CodexNativeError("unmaterialized_subscription", "No first input history");
+  for (const mutate of [
+    () => { h.snapshot.thread.status = { type: "active", activeFlags: [] }; },
+    () => { h.snapshot.loaded = false; },
+    () => { h.snapshot.thread.id = "other-owner"; },
+    () => { h.snapshot.thread.source = { subAgent: {} }; },
+    () => { h.snapshot.thread.historyMode = "legacy"; },
+    () => { h.snapshot.historyMaterialized = true; },
+    () => { h.snapshot.thread.turns = [{ id: "another-turn", status: "completed", items: [], itemsView: "full",
+      error: null, startedAt: null, completedAt: null, durationMs: null }]; },
+    () => { h.snapshot.turns = [{ id: "another-turn", status: "completed", items: [], itemsComplete: true }]; },
+    () => { h.snapshot.latestTurnId = "another-turn"; },
+    () => { h.snapshot.pendingInteractions = [{ id: "approval", kind: "command_approval", threadId: target.threadId,
+      turnId: "another-turn", itemId: "command", method: "item/commandExecution/requestApproval", questions: [] }]; }
+  ]) {
+    Object.assign(h.snapshot, structuredClone(empty));
+    h.client.subscribe = async () => { mutate(); throw rejection; };
+    await assert.rejects(h.runtime.transport.observe(target), error => error === rejection);
+  }
+  Object.assign(h.snapshot, structuredClone(empty));
+  h.client.subscribe = async () => { throw rejection; };
+  await assert.rejects(h.runtime.transport.observe(target, "existing-turn"), error => error === rejection);
+  for (const error of [new CodexNativeError("rpc_error", "Unrelated RPC failure"), new Error("unmaterialized_subscription")]) {
+    h.client.subscribe = async () => { throw error; };
+    await assert.rejects(h.runtime.transport.observe(target), actual => actual === error);
+  }
 });

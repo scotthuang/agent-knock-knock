@@ -57,6 +57,27 @@ For native Watch and response commands, use the exact returned Watch or
 interaction ID. Watch IDs can be UUIDs or deterministic submission hashes;
 they are opaque, not values to construct.
 
+### First task in a new, already open CLI thread (AKK 0.14.4)
+
+AKK 0.14.4 permits Send to an exactly identified, loaded,
+idle main CLI thread before its first task has created paginated history.
+AKK submits to that original thread, then connects its existing Send Watch as
+the task history becomes available. No manual first message or completed round
+is required. This is not support for creating or cold-loading a conversation.
+
+Approval and permission controls still require a usable native subscription;
+before then, Status keeps pending-interaction count unknown rather than claiming
+zero requests. A Send receipt with `submission_state: "acknowledged"` and
+`native_receipt_turn_id` means Codex returned a task receipt but AKK is still
+verifying the exact input in history. Follow the returned Watch, without resending
+the task or adding another Watch. Only verified history produces
+`agent_acceptance: "proven"`. Connection or identity errors do not authorize
+switching transports after a possibly submitted task.
+
+See the [0.162.1 report](codex-0.162.1-compatibility.md#first-task-in-an-existing-empty-thread-akk-0144)
+for the distinction between the earlier released rejection behavior and the
+0.14.4 first-task behavior.
+
 ## Automatic conversation routing (2026-10-10)
 
 For conversation operations, select the conversation and requested action,

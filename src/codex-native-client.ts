@@ -11,6 +11,14 @@ const MAX_PAGES = 100;
 const PRESETS = { "read-only": [":read-only", "on-request"], default: [":workspace", "on-request"],
   "full-access": [":danger-full-access", "never"] } as const;
 
+/** Only an exact, loaded, idle CLI owner can bootstrap its own first turn without a history subscription. */
+export function isLoadedEmptyCodexCliSnapshot(snapshot: CodexNativeSnapshot): boolean {
+  return snapshot.threadId === snapshot.thread.id && snapshot.loaded && isMainCodexCliThread(snapshot.thread)
+    && snapshot.thread.historyMode === "paginated" && snapshot.thread.status.type === "idle"
+    && snapshot.historyMaterialized === false && snapshot.thread.turns.length === 0 && snapshot.turns.length === 0 && snapshot.latestTurnId === null
+    && snapshot.selectedTurn === undefined && snapshot.pendingInteractions.length === 0;
+}
+
 /** Native shared-daemon connection. No terminal ownership inference and no historical thread loading. */
 export class CodexNativeClient {
   readonly metadata: CodexNativeMetadata;
@@ -66,9 +74,12 @@ export class CodexNativeClient {
     const pendingInteractions = [...this.getInteractions(threadId).filter(i => liveIds.has(i.turnId)).map(i =>
       hydrateNativeFileApproval(i, turns, this.liveFileChanges.get(itemKey(i.threadId, i.turnId, i.itemId))?.item)),
       ...turns.flatMap(t => nativeAsyncInteractions(threadId, t))];
-    return { threadId, thread, loaded, latestTurnId, turns, historyMaterialized, ...(selectedTurn ? { selectedTurn } : {}), pendingInteractions,
-      canSend: loaded && historyMaterialized && isMainCodexCliThread(thread) && thread.status.type === "idle"
-        && !turns.some(t => t.status === "inProgress") && pendingInteractions.length === 0 };
+    const snapshot: CodexNativeSnapshot = { threadId, thread, loaded, latestTurnId, turns, historyMaterialized,
+      ...(selectedTurn ? { selectedTurn } : {}), pendingInteractions, canSend: false };
+    snapshot.canSend = loaded && isMainCodexCliThread(thread) && thread.status.type === "idle"
+      && !turns.some(t => t.status === "inProgress") && pendingInteractions.length === 0
+      && (historyMaterialized || isLoadedEmptyCodexCliSnapshot(snapshot));
+    return snapshot;
   }
   async subscribe(threadId: string): Promise<void> {
     await this.requireLoaded(threadId);

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.4 - 2026-10-12
+
+- Send the first task directly to an exactly identified, already loaded, idle Codex CLI thread whose history is still empty. Use the original thread and owner; no manual seed task, replacement process, or terminal input is required.
+- Defer native subscription only for the verified empty-history case, then bind observation and interactions to the accepted task as its history becomes available. Keep acknowledged submissions separate from verified acceptance, and never replay uncertain task text.
+- Keep List Send/Watch capabilities consistent across exact backend and terminal aliases. Persist preflight failures under the same message-identity lock as Send so concurrent failures cannot overwrite an accepted task or trigger a fallback resend.
+- Report proven pre-submission failures as not sent, without starting a monitor or callback. Preserve existing deadlines, idempotent Send, callback deduplication and the public Status progress budget.
+
+### Validation boundaries
+
+- Verified two isolated macOS Codex CLI 0.162.1 + shared app-server 0.162.1 empty-thread tasks: a simple first reply and a first task requiring a harmless command approval. Both used the original CLI thread, verified execution/results and produced one local completion acknowledgement; repeated Send and observer reconnection did not duplicate execution or completion.
+- Delayed history, lost acknowledgements and concurrent preflight failures are covered by regression tests. These checks do not claim a new live WeChat delivery test. Desktop live verification remains intentionally skipped; native new/clear/cold-resume support is unchanged.
+
 ## 0.14.3 - 2026-10-11
 
 - Add direct control of existing Claude Code CLI sessions on macOS without tmux, Herdr, Claude plugins, hooks, special launch flags or a replacement agent. Discover exact live sessions, send idle tasks, read bounded public progress/results and observe exact completion or exit. Requires Python 3 on the controller side; verified with Claude Code 2.1.296.

@@ -20,6 +20,8 @@ export interface CodexNativeSendIntent {
   dispatched_at: string;
   receipt_turn_id?: string;
   error_code?: string;
+  /** Proven before task submission; persisted under the same message reservation lock. */
+  failure_stage?: "native_preflight";
 }
 export interface CodexNativeNotification extends BackendRetryFields {
   id: string;
@@ -103,7 +105,10 @@ function assertTaskIntent(r: CodexNativeTaskRecord): void {
     !Array.isArray(i.baseline_turn_ids) || i.baseline_turn_ids.some(id => !nonblank(id)) ||
     !validTime(i.dispatched_at) || !["reserved", "uncertain", "accepted", "not_sent"].includes(i.state) ||
     i.receipt_turn_id !== undefined && !nonblank(i.receipt_turn_id) ||
-    (i.state === "accepted") !== Boolean(r.native_turn_id)) throw new Error("Invalid Codex native send intent");
+    (i.state === "accepted") !== Boolean(r.native_turn_id) ||
+    i.failure_stage !== undefined && (i.failure_stage !== "native_preflight" || i.state !== "not_sent")) {
+    throw new Error("Invalid Codex native send intent");
+  }
 }
 function assertTaskInteractions(r: CodexNativeTaskRecord): void {
   const interactionIds = new Set<string>();
@@ -160,7 +165,7 @@ export function createCodexNativeStateStore(storeDir: string, locks: { acquire(l
       }
       if (previous.native_turn_id && next.native_turn_id !== previous.native_turn_id) throw new Error("Codex native exact turn anchor cannot change");
       if (previous.send_intent) {
-        for (const key of ["message_id", "client_user_message_id", "text", "baseline_turn_ids", "dispatched_at"] as const) {
+        for (const key of ["message_id", "client_user_message_id", "text", "baseline_turn_ids", "dispatched_at", "failure_stage"] as const) {
           if (!isDeepStrictEqual(previous.send_intent[key], next.send_intent?.[key])) throw new Error("Codex native send intent cannot change");
         }
         if (previous.send_intent.receipt_turn_id && previous.send_intent.receipt_turn_id !== next.send_intent?.receipt_turn_id) throw new Error("Codex native receipt cannot change");

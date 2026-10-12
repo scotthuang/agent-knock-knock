@@ -6,6 +6,10 @@ new numeric minimum or a promise that future Codex versions use the same UI.
 The [CLI direct-control guide](codex-cli-native-compatibility.md) describes the
 separate shared-backend route, which does not need tmux or Herdr.
 
+The empty-thread initialization change below ships in **AKK 0.14.4**. Its dedicated
+2026-10-12 verification is recorded separately from the earlier 0.14.2 release
+matrix.
+
 ## Native status and error contract
 
 Codex changed the `/status` informational usage link from
@@ -92,16 +96,67 @@ envelope, with no automatic duplicate response.
 
 The upstream resume path in both reviewed versions requires persisted history.
 A newly loaded, idle, empty thread may expose live metadata before any rollout
-exists. AKK preserves that verified identity as
-`history_state: "unmaterialized"`, but does not advertise Send or permission
-actions that require a native subscription. Status and native inspection can
-return the fresh idle metadata with
+exists. AKK 0.14.2 preserved that verified identity as
+`history_state: "unmaterialized"` but withheld Send and permission actions because
+its Send preflight required a history subscription. Status and native inspection
+can return the fresh idle metadata with
 `subscription_state: "unavailable_unmaterialized_history"` and
 `observation_error: "native_subscription_unmaterialized"`. Its
 `interaction_requests_scanned: false` and null pending-interaction count mean
 requests were not scanned, rather than proving that no question or approval
 exists. This diagnostic fallback requires the exact missing-rollout condition
 and a fresh same-thread idle/empty read; it does not accept unrelated failures.
+
+### First task in an existing empty thread (AKK 0.14.4)
+
+The direct adapter now distinguishes submission from history subscription.
+An exact, loaded main CLI thread with paginated history, idle state, no turns
+and no pending interactions can accept its first task via `turn/start` on that
+same owner. A typed missing-history subscription error and a fresh empty-thread
+read permit this path; arbitrary subscription failures do not. It does not
+create, resume, fork or cold-load another conversation, and it does not change
+the thread's permissions. Permission and interaction controls remain unavailable
+until their native subscription is usable.
+
+AKK saves the submission identity before dispatch and verifies the returned
+turn against its persisted user input. A native ACK alone is reported as
+`submission_state: "acknowledged"` with `native_receipt_turn_id`, while the exact
+anchor and `agent_acceptance` remain unproven until history is verified. The
+existing Watch observes that same submission; an observation delay is not a
+reason to send again or add another Watch. Unknown acceptance never causes
+automatic redispatch or a terminal fallback. List's linked terminal Send/Watch
+offers now reflect the selected backend's capabilities without removing
+terminal-only model or recovery operations.
+
+Materialization happens when the first user input is recorded, not when its
+task completes. A user does not need to finish a manual first round to initialize
+an already loaded, eligible thread.
+
+Before submission, a failed preflight is persisted under the same message-ID
+lock as the send reservation. Concurrent calls reuse whichever outcome was
+reserved first; a late preflight failure cannot replace an accepted submission.
+The failed record reports `failure_stage: "native_preflight"`,
+`request_dispatched: false`, `delivery_receipt: "not_sent"` and no active
+observation or callback. It is an audit record, not a running native task;
+replaying that message ID never submits it later.
+
+Dedicated live verification on 2026-10-12 used macOS Codex CLI **0.162.1** and
+shared backend **0.162.1**, two new CLI sessions launched through the existing
+proxy wrapper, and an isolated AKK store with a local notification collector:
+
+| Case | Observed result |
+| --- | --- |
+| First task with no previous user input | Verified loaded idle thread, unmaterialized history and null latest turn before Send; the original thread accepted exactly one task, displayed its result in the original CLI and produced one local completion acknowledgement. |
+| First task immediately requesting command approval | The original empty thread accepted the task; AKK identified the exact approval, allowed the dedicated harmless `printf` command once, verified exit code 0 and its output, and produced one interaction notification plus one completion acknowledgement. |
+| Duplicate Send and observer reconnect | Both cases retained the same task ID and deadline, one native turn, and one completion notification after repeating the same message ID and reconnecting observation. |
+
+The PTYs only hosted the dedicated CLIs; tasks and approval responses used the
+native backend. No user work conversation, Gateway or real messaging channel
+was used. Both test CLIs were stopped afterward. The live cases exercised the
+built native runtime, task service and local outbox; terminal-alias routing and
+public tool projections are covered by fast regressions. Lost ACKs, delayed
+history, concurrent preflight failures and pending-request replay also have
+isolated regression coverage; no live fault-injection claim is made.
 
 ## Version and route boundaries
 
@@ -129,7 +184,7 @@ evidence. The formal release gate also passed as recorded below.
 | Earlier 0.14.1 targeted live proof | macOS CLI 0.162.1 + shared app-server 0.162.1: bounded public progress during an active task, 720-minute Send monitoring, one local completion acknowledgement and idempotent Send. |
 | Dedicated frontend/backend pair | macOS CLI 0.162.1 + shared app-server 0.162.1, launched through the existing `mycodes --remote` wrapper in a dedicated test session. |
 | Native status, exact identity and List | Passed: the closed native `/status` transaction proved the exact thread and enabled alias coalescing; subsequent materialized-thread backend Status read the same target. |
-| Unmaterialized empty thread | Passed in a separate dedicated 0.162.1/0.162.1 CLI: List withheld Send/permission offers, Status/native inspection retained verified idle identity with unscanned requests and a null pending count, and an attempted semantic Send was rejected before a native turn, Watch or callback was created. The thread stayed empty and global configuration was unchanged. |
+| Unmaterialized empty thread, 0.14.2 behavior | Passed in a separate dedicated 0.162.1/0.162.1 CLI: List withheld Send/permission offers, Status/native inspection retained verified idle identity with unscanned requests and a null pending count, and an attempted semantic Send was rejected before a native turn, Watch or callback was created. This is historical rejection evidence, not verification of the AKK 0.14.4 first-task initialization path. |
 | Model discovery | Passed: the public model-options operation read seven native models and restored the composer. Model mutation was intentionally not exercised because the existing terminal setter persists defaults; its scope remains covered by source review and regressions. |
 | Backend permissions | Passed: Default, Full Access and Read Only round trips retained the selected native thread. This is backend permission evidence, not a terminal menu round-trip claim. |
 | Routed Send, Status, Watch and completion | Passed: Send through the terminal alias selected the native backend, proved acceptance and a 720-minute deadline; Status using the returned native conversation ID and Watch ID read the same active turn and bounded progress. The exact turn completed with one local callback acknowledgement; idempotent Send retained the original Watch and deadline. Reading the old Watch after later turns still returned its original task's progress without later-task text. |
@@ -174,11 +229,11 @@ monitoring state. Unwatch is not native cancellation or task completion.
 - Direct CLI model control and cancellation still require an eligible verified
   terminal capability. Native new/clear/resume remains unsupported for these
   paginated versions; adding a version profile does not enable lifecycle work.
-- A newly loaded CLI thread with no materialized history is not automatically
-  writable through the direct adapter: upstream `thread/resume` requires stored
-  history. Reading its live metadata is different from acquiring a task/response
-  channel. Such a thread must not be advertised as Send-ready solely because it
-  is loaded and idle.
+- The AKK 0.14.4 first-task path requires an exact loaded main CLI owner and
+  the strict empty-thread conditions above. A title, directory, unloaded history
+  or mere idle indicator is insufficient. Submission and subscription readiness
+  are separate; the initialization path does not enable unsupported lifecycle
+  operations or permission control before a verified subscription.
 - The Status public body remains bounded to 800 Unicode code points, with
   redaction, grapheme-safe truncation and exact-turn freshness/error reporting.
   List gains no progress body or pagination changes in this release.
