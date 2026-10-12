@@ -5,6 +5,23 @@ import { recordValue } from "./value-guards.js";
 type Row = Record<string, unknown>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter(item => recordValue(item)) : [];
 
+/** Send/Watch on a proven alias select this backend; an old physical offer cannot bypass it. */
+function routedTerminalControls(terminal: Row, native: Row): Row {
+  if (native.connection_state !== "loaded_backend_verified") return terminal;
+  const actions = { ...recordValue(terminal.available_actions) };
+  const nativeActions = recordValue(native.available_actions);
+  const nativeCapabilities = recordValue(native.capabilities);
+  const terminalCapabilities = recordValue(terminal.capabilities);
+  const capabilities = terminalCapabilities ? { ...terminalCapabilities } : undefined;
+  for (const name of ["send", "watch"]) {
+    const available = nativeCapabilities?.[name] === true && recordValue(nativeActions?.[name]);
+    if (available) actions[name] = nativeActions![name];
+    else delete actions[name];
+    if (capabilities) capabilities[name] = Boolean(available);
+  }
+  return { ...terminal, available_actions: actions, ...(capabilities ? { capabilities } : {}) };
+}
+
 /** Public conversation inventory; legacy endpoint arrays remain private-action/diagnostic inputs. */
 export function unifiedConversationList(result: Row, terminals: readonly Row[], identityOptions: ConversationRoutingIdentityOptions = {}) {
   const native = rows(result.codex_cli_sessions);
@@ -15,7 +32,8 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
   const conversations: Row[] = native.map(row => ({ ...row, route_preference: "codex_backend",
     route_status: row.connection_state === "loaded_backend_verified" ? "backend_available" : "backend_unavailable",
     terminal_aliases: association.associations.filter(item => item.nativeId === row.conversation_id).map(item => item.terminalId),
-    terminal_controls: rows(result.terminals).filter(terminal => association.associations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id)) }));
+    terminal_controls: rows(result.terminals).filter(terminal => association.associations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id))
+      .map(terminal => routedTerminalControls(terminal, row)) }));
   conversations.push(...claude.map(row => ({ ...row, route_preference: "claude_native", route_status: "backend_available",
     terminal_aliases: claudeAssociations.filter(item => item.nativeId === row.conversation_id).map(item => item.terminalId),
     terminal_controls: rows(result.terminals).filter(terminal => claudeAssociations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id)) })));

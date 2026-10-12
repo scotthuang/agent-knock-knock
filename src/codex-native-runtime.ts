@@ -1,6 +1,6 @@
 import { backendObservationStopped } from "./backend-task-recovery.js";
 import path from "node:path";
-import { CodexNativeClient } from "./codex-native-client.js";
+import { CodexNativeClient, isLoadedEmptyCodexCliSnapshot } from "./codex-native-client.js";
 import { createCodexNativeConversationId } from "./codex-native-identity.js";
 import { createCodexNativeStateStore } from "./codex-native-state-store.js";
 import { createCodexNativeTaskService, nativeErrorCode, type CodexNativeTransportPort } from "./codex-native-task-service.js";
@@ -10,7 +10,7 @@ import { createOpenClawCallbackTransport } from "./openclaw-callback-transport.j
 import { createHostProfileCallbackTransport } from "./host-profile-callback-transport.js";
 import { cliCwd, cliEnv, cliNow, cliNowMs, cliPid, cliSleepSync } from "./cli-runtime-context.js";
 import type { CallbackAttemptOutcome, CallbackTransportDeliverInput } from "./callback-transport.js";
-import type { CodexNativeClientOptions, CodexNativeIdentity, CodexNativeThread } from "./codex-native-types.js";
+import { CodexNativeError, type CodexNativeClientOptions, type CodexNativeIdentity, type CodexNativeThread } from "./codex-native-types.js";
 
 export type CodexNativeClientPort = Pick<CodexNativeClient, "metadata" | "discover" | "readSnapshot" | "subscribe" | "start" |
   "respond" | "answerAsync" | "readPermissions" | "updatePermissions" | "close">;
@@ -54,7 +54,15 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions) {
     observe: (identity, turnId) => run(identity, async client => {
       const snapshot = await client.readSnapshot(identity.threadId, turnId);
       if (!snapshot.loaded) return snapshot;
-      await client.subscribe(identity.threadId);
+      try { await client.subscribe(identity.threadId); }
+      catch (error) {
+        // The owner exists before its first user input creates history. This exception permits only
+        // a first Send preflight, never observation of an existing exact task or permission control.
+        if (turnId !== undefined || !(error instanceof CodexNativeError) || error.code !== "unmaterialized_subscription") throw error;
+        const empty = await client.readSnapshot(identity.threadId);
+        if (empty.threadId !== identity.threadId || !isLoadedEmptyCodexCliSnapshot(empty)) throw error;
+        return empty;
+      }
       return client.readSnapshot(identity.threadId, turnId);
     }),
     start: (identity, input) => run(identity, client => client.start(identity.threadId, input))

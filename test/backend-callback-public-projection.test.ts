@@ -72,6 +72,54 @@ test("completed Codex Watch retains uncertain callback status separately from na
   assert.doesNotMatch(JSON.stringify(projected), /private-/u);
 });
 
+test("a native receipt without verified history exposes pending observation, never task acceptance or interaction authority", () => {
+  const target = { codexHome: "/fixture/codex", threadId: "native-thread" };
+  const id = "codex-cli-watch:fixture-receipt-001";
+  const record: CodexNativeTaskRecord = { schema: "agent-knock-knock/codex-native-task", version: 1, revision: 1,
+    id, watch_id: id, native_id: createCodexNativeConversationId(target), target, controller_session: "controller", kind: "send",
+    status: "awaiting_acceptance", created_at: "2026-10-12T00:00:00Z", updated_at: "2026-10-12T00:00:00Z",
+    deadline_at: "2026-10-12T12:00:00Z", pending_interactions: [], notifications: [],
+    callback_route: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "controller" }),
+    send_intent: { message_id: "message", client_user_message_id: "client", text: "private-prompt", baseline_turn_ids: [],
+      state: "uncertain", dispatched_at: "2026-10-12T00:00:00Z", receipt_turn_id: "receipt-turn" } };
+  const pending = codexNativeTaskProjection(record);
+  assert.equal(pending.submission_state, "acknowledged"); assert.equal(pending.native_receipt_turn_id, "receipt-turn");
+  assert.equal(pending.native_turn_id, null); assert.equal(pending.anchor_state, "pending");
+  assert.equal(pending.delivered, false); assert.equal(pending.agent_acceptance, "unproven");
+  assert.equal(pending.pending_interaction_count, null); assert.equal(pending.interaction_requests_scanned, false);
+  assert.equal(pending.capabilities.approve, false); assert.equal(pending.capabilities.interaction_respond, false);
+  assert.equal(pending.callback_expected, true); assert.equal(pending.resend_allowed, false);
+  assert.match(pending.monitor_note!, /do not resend or add another Watch/u);
+  assert.doesNotMatch(JSON.stringify(pending), /private-prompt/u);
+  const listed = compactAkkListModelProjection({ codex_cli_watches: [pending] }).codex_cli_watches as Record<string, unknown>[];
+  assert.equal(listed[0].submission_state, "acknowledged"); assert.equal(listed[0].native_receipt_turn_id, "receipt-turn");
+  assert.equal(listed[0].monitor_note, undefined);
+  const summary = formatCodexNativeCommandResult(pending, "Send");
+  assert.match(summary, /submission: acknowledged/u); assert.match(summary, /do not resend or add another Watch/u);
+  for (const [state, expected] of [["uncertain", "unknown"], ["not_sent", "not_sent"], ["reserved", "reserved"]] as const) {
+    const next = structuredClone(record); next.send_intent!.state = state; delete next.send_intent!.receipt_turn_id;
+    const projected = codexNativeTaskProjection(next);
+    assert.equal(projected.submission_state, expected); assert.equal(projected.native_receipt_turn_id, undefined);
+  }
+  const failed = structuredClone(record); failed.status = "failed"; failed.send_intent!.state = "not_sent";
+  delete failed.send_intent!.receipt_turn_id;
+  failed.send_intent!.failure_stage = "native_preflight"; failed.send_intent!.error_code = "timeout";
+  const notSent = codexNativeTaskProjection(failed);
+  assert.equal(notSent.failure_stage, "native_preflight"); assert.equal(notSent.request_dispatched, false);
+  assert.equal(notSent.observation_mode, "none"); assert.equal(notSent.anchor_state, "absent");
+  assert.equal(notSent.observation_active, false); assert.equal(notSent.callback_expected, false);
+  assert.equal(notSent.capabilities.callback, false); assert.equal(notSent.capabilities.approve, false);
+  const failureSummary = formatCodexNativeCommandResult(notSent, "Send");
+  assert.match(failureSummary, /Task was not submitted \(timeout\)/u);
+  assert.doesNotMatch(failureSummary, /Acceptance is not proven|refresh Status/u);
+  assert.doesNotMatch(formatCodexNativeCommandResult({ ...notSent, send_error: "private /path" }, "Send"), /private \/path/u);
+  record.send_intent!.state = "accepted"; record.native_turn_id = "receipt-turn"; record.status = "watching";
+  const verified = codexNativeTaskProjection(record);
+  assert.equal(verified.submission_state, "verified"); assert.equal(verified.agent_acceptance, "proven");
+  assert.equal(verified.pending_interaction_count, 0); assert.equal(verified.monitor_note, undefined);
+  assert.equal(verified.capabilities.approve, true); assert.equal(verified.capabilities.interaction_respond, true);
+});
+
 test("bounded retry projections explain waiting and exhausted states without inferring private evidence", () => {
   const waiting: BackendRecoveryNotification = { id: "notice-retry", status: "retry_wait", attempts: 1,
     retry_at: "2026-10-11T00:00:05.000Z", outcome: { disposition: "retryable_failure", error_code: "pre_dispatch_failure",

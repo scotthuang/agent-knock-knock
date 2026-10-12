@@ -137,13 +137,14 @@ test("0.162.1 turn lineage and partial answers retain the exact task identity", 
   } finally { c.close(); }
 });
 
-test("unmaterialized history disables native control and only the exact resume rejection has a diagnostic code", async () => {
+test("an exact idle unmaterialized CLI can start its first task while permission control still requires history", async () => {
   for (const serverVersion of ["0.160.0", "0.162.1"]) {
     const f = new Fixture(); f.serverVersion = serverVersion;
     let resumeCode = -32600, resumeMessage = `no rollout found for thread id ${THREAD}`;
     let wrongReadError = false;
     f.handler = m => {
       if (m.method === "thread/read") return { thread: thread() };
+      if (m.method === "turn/start") return { turn: turn(TURN, "inProgress") };
       if (m.method === "thread/turns/list" || m.method === "thread/resume") {
         f.emit({ id: m.id, error: m.method === "thread/resume" ? { code: resumeCode, message: resumeMessage }
           : { code: -32600, message: wrongReadError ? `no rollout found for thread id ${THREAD}`
@@ -156,13 +157,16 @@ test("unmaterialized history disables native control and only the exact resume r
     try {
       const empty = await c.readSnapshot(THREAD);
       assert.equal(empty.loaded, true); assert.equal(empty.thread.status.type, "idle");
-      assert.equal(empty.historyMaterialized, false); assert.equal(empty.canSend, false);
+      assert.equal(empty.historyMaterialized, false); assert.equal(empty.canSend, true);
       assert.deepEqual(empty.turns, []);
       await assert.rejects(c.subscribe(THREAD), (error: CodexNativeError) => error.code === "unmaterialized_subscription");
       await assert.rejects(c.readPermissions(THREAD), (error: CodexNativeError) => error.code === "unmaterialized_subscription");
-      await assert.rejects(c.start(THREAD, { text: "First task", clientUserMessageId: "first" }),
-        (error: CodexNativeError) => error.code === "thread_not_idle");
-      assert.equal(f.sent.some(m => m.method === "turn/start" || m.method === "thread/settings/update"), false);
+      await assert.rejects(c.updatePermissions(THREAD, "default"), (error: CodexNativeError) => error.code === "unmaterialized_subscription");
+      const receipt = await c.start(THREAD, { text: "First task", clientUserMessageId: "first" });
+      assert.deepEqual(receipt, { turnId: TURN, clientUserMessageId: "first" });
+      const submitted = f.sent.filter(m => m.method === "turn/start");
+      assert.equal(submitted.length, 1); assert.equal(submitted[0].params.threadId, THREAD);
+      assert.equal(f.sent.some(m => m.method === "thread/settings/update"), false);
       resumeMessage = "no rollout found for thread id a-different-thread";
       await assert.rejects(c.subscribe(THREAD), (error: CodexNativeError) => error.code === "rpc_error");
       resumeMessage = `no rollout found for thread id ${THREAD}`; resumeCode = -32602;
@@ -171,6 +175,43 @@ test("unmaterialized history disables native control and only the exact resume r
       await assert.rejects(c.readSnapshot(THREAD), (error: CodexNativeError) => error.code === "rpc_error");
     } finally { c.close(); }
   }
+});
+
+test("first-turn subscription recovery replays only its exact native approval after history materializes", async () => {
+  const f = new Fixture(); let materialized = false;
+  f.handler = m => {
+    if (m.method === "thread/read") return { thread: thread(materialized ? "active" : "idle") };
+    if (m.method === "thread/turns/list") {
+      if (materialized) return page([turn(TURN, "inProgress")]);
+      f.emit({ id: m.id, error: { code: -32600,
+        message: `thread ${THREAD} is not materialized yet; thread/turns/list is unavailable before first user message` } });
+      return undefined;
+    }
+    if (m.method === "thread/resume") {
+      if (!materialized) {
+        f.emit({ id: m.id, error: { code: -32600, message: `no rollout found for thread id ${THREAD}` } }); return undefined;
+      }
+      f.emit({ id: 71, method: "item/commandExecution/requestApproval", params: { threadId: THREAD, turnId: TURN,
+        itemId: "first-command", command: "printf fixture", availableDecisions: ["accept", "decline", "cancel"] } });
+      return { thread: thread("active") };
+    }
+    if (m.method === "turn/start") { materialized = true; return { turn: turn(TURN, "inProgress") }; }
+    return baseHandler(m);
+  };
+  const c = await connect(f);
+  try {
+    await assert.rejects(c.subscribe(THREAD), { code: "unmaterialized_subscription" });
+    const receipt = await c.start(THREAD, { text: "First task", clientUserMessageId: "first-approval" });
+    await c.subscribe(THREAD);
+    const snapshot = await c.readSnapshot(THREAD, receipt.turnId);
+    assert.equal(snapshot.historyMaterialized, true); assert.equal(snapshot.canSend, false);
+    assert.equal(snapshot.pendingInteractions.length, 1);
+    const approval = snapshot.pendingInteractions[0];
+    assert.equal(approval.threadId, THREAD); assert.equal(approval.turnId, receipt.turnId);
+    await c.respond(approval, { decision: "decline" });
+    assert.equal(f.sent.filter(m => m.method === "turn/start").length, 1);
+    assert.deepEqual(f.sent.filter(m => m.id === 71 && !m.method).map(m => m.result), [{ decision: "decline" }]);
+  } finally { c.close(); }
 });
 
 test("native send checks idle state and preserves uncertain dispatch instead of retrying", async () => {

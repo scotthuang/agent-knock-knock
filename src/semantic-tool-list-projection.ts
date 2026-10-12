@@ -66,7 +66,7 @@ function compactBackendWatch(row: Record<string, unknown>): Record<string, unkno
   return {
     ...compactAkkListScalars(row, ["watch_id", "turn_id", "conversation_id", "source", "status", "task_kind",
       "management_state", "observation_state", "observation_mode", "anchor_state", "native_thread_id",
-      "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count",
+      "native_turn_id", "native_receipt_turn_id", "submission_state", "pending_manual_count", "pending_async_count", "pending_interaction_count",
       "callback_configured", "callback_expected", "callback_in_flight", "callback_state", "callback_delivery_scope", "channel_delivery_state",
       "observation_error", "observation_status", "observation_active",
       "hard_timeout_at", "deadline_at", "closed_at", "unwatched_at", "renewal_count", "renewed_at", "recovered_at"]),
@@ -93,7 +93,7 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
   return {
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
       "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
-      "pending_interaction_count", "interaction_requests_scanned", "attention_required", "updated_at", "observation_error"]),
+      "pending_interaction_count", "interaction_requests_scanned", "history_state", "attention_required", "updated_at", "observation_error"]),
     ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
     capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, [
       "status", "send", "watch", "interaction_notify", "interaction_respond", "approve", "set_permissions"]),

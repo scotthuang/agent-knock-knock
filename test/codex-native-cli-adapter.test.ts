@@ -26,6 +26,7 @@ function fixture(t: { after(fn: () => void): void }) {
     async discover() { return [snapshot.thread]; }, async readSnapshot() { if (readFailure && successfulReadsBeforeFailure-- <= 0) throw new Error("private backend failure"); return structuredClone(snapshot); }, async subscribe() {}, close() {},
     async start(_thread, input) {
       await input.beforeDispatch?.(structuredClone(snapshot)); sends++;
+      snapshot.historyMaterialized = true;
       snapshot.thread.status = { type: "active", activeFlags: [] }; snapshot.canSend = false; snapshot.latestTurnId = `native-turn-${sends}`;
       snapshot.turns = [{ id: snapshot.latestTurnId, status: "inProgress", itemsComplete: true,
         items: [{ id: "user-one", type: "userMessage", clientId: input.clientUserMessageId, content: [{ type: "text", text: input.text }] }] }];
@@ -50,13 +51,15 @@ function fixture(t: { after(fn: () => void): void }) {
   };
 }
 
-test("unmaterialized native Status retains fresh identity without claiming requests scanned or send capability", async t => {
-  const f = fixture(t); f.snapshot.historyMaterialized = false; f.snapshot.canSend = false;
+test("unmaterialized native Status offers first Send without claiming subscription or permission authority", async t => {
+  const f = fixture(t); f.snapshot.historyMaterialized = false;
   f.client.subscribe = async () => { throw new CodexNativeError("unmaterialized_subscription", "No materialized history"); };
   const listed = (await f.run("codex-cli-list")).codex_cli_sessions[0];
   assert.equal(listed.connection_state, "loaded_backend_verified"); assert.equal(listed.activity_state, "idle");
-  assert.equal(listed.capabilities.send, false); assert.equal(listed.available_actions.send, undefined);
+  assert.equal(listed.capabilities.send, true); assert.equal(listed.available_actions.send.input.conversation_id, f.id);
   assert.equal(listed.capabilities.set_permissions, false); assert.equal(listed.available_actions.permission_options, undefined);
+  assert.equal(listed.capabilities.approve, false); assert.equal(listed.capabilities.interaction_respond, false);
+  assert.doesNotMatch(listed.control_limitation, /complete the first task/i);
   for (const command of ["status", "native-inspect"]) {
     const result = await f.run(command, { conversation: f.id, action: "status" });
     assert.equal(result.native_thread_id, f.target.threadId); assert.equal(result.native_turn_id, null);
@@ -65,10 +68,8 @@ test("unmaterialized native Status retains fresh identity without claiming reque
     assert.equal(result.subscription_state, "unavailable_unmaterialized_history");
     assert.equal(result.observation_error, "native_subscription_unmaterialized");
     assert.equal(result.interaction_requests_scanned, false); assert.equal(result.pending_interaction_count, null);
-    assert.equal(result.progress.state, "no_public_progress"); assert.equal(result.capabilities.send, false);
+    assert.equal(result.progress.state, "no_public_progress"); assert.equal(result.capabilities.send, true);
   }
-  await assert.rejects(f.run("send", { conversation: f.id, message: "First task", messageId: "first", openclawSession: "controller" }),
-    (error: CodexNativeError) => error.code === "unmaterialized_subscription");
   assert.equal(f.sends, 0); assert.equal(f.launches, 0); assert.equal(f.callbacks, 0);
   f.snapshot.thread.status = { type: "active", activeFlags: ["waitingOnApproval"] };
   const changed = await f.run("status", { conversation: f.id });
@@ -78,6 +79,16 @@ test("unmaterialized native Status retains fresh identity without claiming reque
   f.client.subscribe = async () => { throw new CodexNativeError("rpc_error", "Unrelated RPC failure"); };
   const otherFailure = await f.run("status", { conversation: f.id });
   assert.equal(otherFailure.connection_state, "unconfirmed"); assert.equal(otherFailure.progress.state, "read_error");
+  f.client.subscribe = async () => {
+    if (f.snapshot.historyMaterialized === false) throw new CodexNativeError("unmaterialized_subscription", "No materialized history");
+  };
+  const sent = await f.run("send", { conversation: f.id, message: "First task", messageId: "first", openclawSession: "controller" });
+  assert.equal(sent.delivered, true); assert.equal(sent.submission_state, "verified");
+  assert.equal(sent.native_thread_id, f.target.threadId); assert.equal(sent.native_turn_id, "native-turn-1");
+  assert.equal(f.sends, 1); assert.equal(f.launches, 1); assert.equal(f.callbacks, 0);
+  f.finish();
+  const completed = await f.run("watch-status", { watch: sent.watch_id });
+  assert.equal(completed.status, "completed"); assert.equal(f.callbacks, 1);
 });
 
 test("native Status public progress stays on the exact selected turn and distinguishes empty from failed reads", async t => {
@@ -201,4 +212,20 @@ test("Native CLI Send/Watch defaults and lower-level timeout aliases preserve th
     const watched = await f.run("watch-terminal", { conversation: f.id, openclawSession: "observer", ...options });
     assert.equal(Date.parse(watched.deadline_at) - Date.parse(watched.created_at), expected * 60_000);
   }
+});
+
+test("native Send returns a durable routed not-sent receipt for preflight subscription failure", async t => {
+  const f = fixture(t);
+  f.client.subscribe = async () => { throw new CodexNativeError("timeout", "private subscription path", "unknown"); };
+  const input = { conversation: f.id, message: "READY", messageId: "preflight-failure", openclawSession: "controller" };
+  const result = await f.run("send", input);
+  assert.equal(result.delivered, false); assert.equal(result.delivery_receipt, "not_sent");
+  assert.equal(result.failure_stage, "native_preflight"); assert.equal(result.request_dispatched, false);
+  assert.equal(result.send_error, "timeout"); assert.ok(result.watch_id); assert.equal(result.observation_active, false);
+  assert.equal(result.callback_expected, false); assert.equal(result.routing.transport, "codex_backend");
+  assert.equal(JSON.stringify(result).includes("private subscription path"), false);
+  f.client.subscribe = async () => {};
+  const replay = await f.run("send", input);
+  assert.equal(replay.replayed, true); assert.equal(replay.delivery_receipt, "not_sent");
+  assert.equal(f.sends, 0); assert.equal(f.launches, 0); assert.equal(f.callbacks, 0);
 });

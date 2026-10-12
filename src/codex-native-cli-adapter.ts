@@ -12,6 +12,7 @@ import { codexNativeTaskNeedsReconciliation, nativeDigest, nativeErrorCode } fro
 import { createCodexNativeRuntime, type CodexNativeRuntimeOptions } from "./codex-native-runtime.js";
 import { launchCodexNativeMonitor, runCodexNativeMonitor } from "./codex-native-monitor.js";
 import { codexNativeSessionProjection, codexNativeTaskProjection, nativeQuestionResponse } from "./codex-native-public-projection.js";
+import { isLoadedEmptyCodexCliSnapshot } from "./codex-native-client.js";
 import { CodexNativeError, type CodexNativeIdentity, type CodexNativePermissionPreset, type NativeInteractionResponse } from "./codex-native-types.js";
 
 type Options = Record<string, unknown>;
@@ -110,10 +111,9 @@ async function inspectConversation(runtime: Runtime, options: Options) {
     }
     const snapshot = await client.readSnapshot(target.threadId);
     if (snapshot.threadId !== target.threadId) throw new Error("Native snapshot identity mismatch");
-    if (subscriptionUnavailable && (!snapshot.loaded || snapshot.thread.id !== target.threadId
-      || snapshot.thread.historyMode !== "paginated" || snapshot.thread.status.type !== "idle"
-      || snapshot.historyMaterialized !== false || snapshot.turns.length || snapshot.latestTurnId !== null
-      || snapshot.pendingInteractions.length)) throw new Error("Native subscription failure did not retain an exact empty thread");
+    if (subscriptionUnavailable && !isLoadedEmptyCodexCliSnapshot(snapshot)) {
+      throw new Error("Native subscription failure did not retain an exact empty thread");
+    }
     output({ ...codexNativeSessionProjection(target, snapshot, client.metadata.serverVersion, !subscriptionUnavailable),
       ...(subscriptionUnavailable ? { subscription_state: "unavailable_unmaterialized_history",
         observation_error: "native_subscription_unmaterialized" } : {}),

@@ -39,6 +39,33 @@ test("unified List coalesces exact terminal/backend identity and preserves every
   assert.equal(result.conversation_routing.unresolved_terminals, 0);
 });
 
+test("exact aliases advertise the selected backend Send and Watch while preserving terminal-only actions", () => {
+  const special = { tool: "agent_knock_knock_model_options", arguments: { terminal_id: terminalId, expected_binding_token: "authority" } };
+  const physical = terminal({ capabilities: { send: true, watch: true, cancel: true }, available_actions: {
+    send: { tool: "agent_knock_knock_send", arguments: { terminal_id: terminalId, expected_terminal_token: "old" } },
+    watch: { tool: "agent_knock_knock_watch", arguments: { terminal_id: terminalId } }, model_options: special,
+    permission_options: { tool: "agent_knock_knock_permission_options", arguments: { terminal_id: terminalId } }
+  } });
+  for (const send of [true, false]) {
+    const row = { ...native(), capabilities: { send, watch: false },
+      available_actions: send ? native().available_actions : {} };
+    const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [row] }, [physical]);
+    const alias = (result.conversations[0].terminal_controls as Record<string, any>[])[0];
+    assert.equal(alias.capabilities.send, send); assert.equal(alias.capabilities.watch, false);
+    assert.equal(alias.capabilities.cancel, true); assert.equal(alias.available_actions.watch, undefined);
+    assert.deepEqual(alias.available_actions.send, send ? native().available_actions.send : undefined);
+    assert.equal(alias.available_actions.model_options, special); assert.ok(alias.available_actions.permission_options);
+  }
+  // Legacy physical diagnostics retain their own offers; only exact routed controls are projected.
+  assert.equal((physical.available_actions as Record<string, any>).send.arguments.expected_terminal_token, "old");
+  const unavailable = unifiedConversationList({ terminals: [physical],
+    codex_cli_sessions: [{ ...native(), connection_state: "not_loaded" }] }, [physical]);
+  assert.deepEqual(unavailable.conversations[0].terminal_controls, []);
+  const separate = unavailable.conversations[1].available_actions as Record<string, any>;
+  assert.equal(separate.send.input.conversation_id, terminalId);
+  assert.ok(separate.permission_options);
+});
+
 test("same cwd or matching launch resume UUID does not hide an unresolved terminal beside a loaded backend", () => {
   const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" },
     command: `codex resume ${thread}` });

@@ -839,7 +839,7 @@ export function formatCodexNativeCommandResult(result: Record<string, unknown>, 
     ...(nonEmptyString(result.native_thread_id) ? [`native thread: ${result.native_thread_id}`] : []),
     ...(nonEmptyString(result.native_turn_id) ? [`native task: ${result.native_turn_id}`] : []),
     `status: ${nonEmptyString(result.status) ?? nonEmptyString(result.activity_state) ?? state ?? "unknown"}`,
-    ...(sendState ? [`send: ${sendState}; native acceptance: ${nonEmptyString(result.agent_acceptance) ?? "unproven"}`] : []),
+    ...nativeSendReceiptLines(result, sendState),
     ...formatNativeResponseState(state, result.evidence),
     ...(typeof result.callback_expected === "boolean" ? [`callback expected: ${result.callback_expected}`] : []),
     ...backendCallbackSummaryLines(result),
@@ -853,8 +853,26 @@ export function formatCodexNativeCommandResult(result: Record<string, unknown>, 
       ...arrayValue(interaction.questions).map(question => `  ${question.question_id}: ${question.title}`)
     ]),
     ...(interactions.length ? ["Use the current typed Status actions to answer or approve this exact request."] : []),
-    ...(sendState && sendState !== "accepted" ? ["Acceptance is not proven. Keep this receipt and refresh Status; do not resend automatically."] : [])
+    ...nativeSendFollowupLines(result, sendState)
   ].join("\n");
+}
+
+function nativeSendReceiptLines(result: Record<string, unknown>, sendState: string | undefined): string[] {
+  return [
+    ...(sendState ? [`send: ${sendState}; native acceptance: ${nonEmptyString(result.agent_acceptance) ?? "unproven"}`] : []),
+    ...(nonEmptyString(result.submission_state) ? [`submission: ${result.submission_state}`] : []),
+    ...(nonEmptyString(result.monitor_note) ? [String(result.monitor_note)] : [])
+  ];
+}
+
+function nativeSendFollowupLines(result: Record<string, unknown>, sendState: string | undefined): string[] {
+  if (sendState === "not_sent") {
+    const error = nonEmptyString(result.send_error);
+    const code = error && /^[a-zA-Z0-9_-]{1,100}$/u.test(error) ? ` (${error})` : "";
+    return [`Task was not submitted${code}. This message ID will not be replayed.`];
+  }
+  return sendState && sendState !== "accepted"
+    ? ["Acceptance is not proven. Keep this receipt and refresh Status; do not resend automatically."] : [];
 }
 
 function formatNativeResponseState(state: string | undefined, evidence: unknown): string[] {
