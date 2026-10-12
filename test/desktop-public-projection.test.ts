@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
+import { validateDesktopInteractionProjections } from "../src/desktop-interaction-projection.js";
 import { desktopSessionProjection, desktopTaskProjection } from "../src/desktop-public-projection.js";
 import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { createCallbackEnvelope, createTerminalWatchOpenClawCallbackRoute } from "../src/callback-transport.js";
 import type { DesktopCatalogEntry } from "../src/desktop-session-catalog.js";
-import type { DesktopSnapshot } from "../src/desktop-types.js";
+import type { DesktopAsyncInteraction, DesktopSnapshot } from "../src/desktop-types.js";
 import type { DesktopTaskRecord } from "../src/desktop-state-store.js";
 
 const target = { codexHome: "/fixture/codex", hostId: "local", threadId: "thread-one" };
@@ -119,4 +121,31 @@ test("Desktop task projections retain observation evidence while distinguishing 
   const watch = desktopTaskProjection(task({ kind: "watch", send_intent: undefined, status: "watching", native_turn_id: "turn-one" }));
   assert.equal(watch.management_state, "unmanaged"); assert.equal(watch.turn_id, undefined);
   assert.equal((watch.available_actions as any).close, undefined);
+});
+
+
+test("Desktop send-only profile advertises sends and readable interactions without native response authority", () => {
+  const profile = desktopCapabilityProfile(DESKTOP_CREATION_BUILD);
+  const ready = desktopSessionProjection(entry, snapshot(), profile) as any;
+  assert.equal(ready.capabilities.send, true);
+  for (const capability of ["set_model", "set_permissions", "approve", "interaction_respond", "cancel"]) assert.equal(ready.capabilities[capability], false);
+  assert.equal(ready.available_actions.model_options, undefined);
+  assert.equal(ready.available_actions.permission_options, undefined);
+  const interaction: DesktopAsyncInteraction = { id: `desktop-async-interaction:${"a".repeat(64)}`, kind: "async_question" as const,
+    threadId: target.threadId, turnId: "turn-one", itemId: "question-one", method: "request_user_input_async" as const,
+    questions: [{ id: "question-one", title: "Choose a color", options: ["Green", "Blue"], isOther: true }] };
+  const running = snapshot({ runtimeStatus: "active", canSend: false, latestTurnId: "turn-one",
+    turns: [{ turnId: "turn-one", status: "inProgress", items: [], itemsComplete: true }], pendingInteractions: [interaction] });
+  const current = desktopSessionProjection(entry, running, profile) as any;
+  assert.equal(current.capabilities.watch, true); assert.equal(current.capabilities.interaction_notify, true);
+  assert.equal(current.capabilities.interaction_respond, false); assert.equal(current.capabilities.cancel, false);
+  assert.equal(current.pending_interaction_count, 1); assert.match(current.manual_action, /in Desktop/);
+  assert.equal(current.interaction_state[0].questions[0].title, "Choose a color");
+  assert.deepEqual(current.interaction_state[0].available_actions, {});
+  assert.deepEqual(validateDesktopInteractionProjections(current.interaction_state, conversationId, undefined, "turn-one")[0].available_actions, {});
+  const watched = desktopTaskProjection(task({ status: "watching", native_turn_id: "turn-one", pending_interactions: [interaction] }), profile) as any;
+  assert.equal(watched.capabilities.interaction_notify, true); assert.equal(watched.capabilities.interaction_respond, false);
+  assert.equal(watched.capabilities.cancel, false); assert.equal(watched.pending_manual_count, 1);
+  assert.equal(watched.pending_interaction_count, 1); assert.deepEqual(watched.interaction_state[0].available_actions, {});
+  assert.match(watched.manual_action, /in Desktop/);
 });

@@ -10,14 +10,15 @@ import { createDesktopStateStore } from "../src/desktop-state-store.js";
 import { createDesktopResponseStore } from "../src/desktop-response-store.js";
 import { createDesktopResponseService } from "../src/desktop-response-service.js";
 import { createDesktopTaskService } from "../src/desktop-task-service.js";
+import { DESKTOP_CREATION_BUILD } from "../src/desktop-compatibility.js";
 import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
 import { createDesktopSessionControls } from "../src/desktop-session-controls.js";
 import { DesktopIpcError } from "../src/desktop-types.js";
-import type { DesktopSnapshot, DesktopTransportPort, DesktopTurnItem } from "../src/desktop-types.js";
+import type { DesktopCompatibility, DesktopSnapshot, DesktopTransportPort, DesktopTurnItem } from "../src/desktop-types.js";
 import type { CliCommandDependencies } from "../src/cli-runtime-context.js";
 
-function fixture(t: { after(fn: () => void): void }) {
+function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompatibility = VERIFIED_DESKTOP_BUILD) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-cli-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const target = { codexHome: path.join(root, ".codex"), hostId: "local", threadId: "desktop-thread" };
@@ -82,7 +83,7 @@ function fixture(t: { after(fn: () => void): void }) {
       return { interruptedTurnId: input.expectedTurnId, snapshot };
     }, sleep: async () => {} });
   const deps: CliCommandDependencies = { cwd: root, env: { HOME: root }, runtimeLog: () => {},
-    createDesktopRuntime: () => ({ compatibility: VERIFIED_DESKTOP_BUILD, catalog, transport, tasks, responses, controls,
+    createDesktopRuntime: () => ({ compatibility, catalog, transport, tasks, responses, controls,
       close: async () => { closed++; } }),
     launchDesktopMonitor: async () => { launches++; return 1234; } };
   const run = async (command: string, options: Record<string, unknown> = {}) => JSON.parse((await executeCliCommand(command,
@@ -271,4 +272,22 @@ test("Desktop Send/Watch defaults and lower-level timeout aliases preserve their
     const watched = await f.run("watch-terminal", { conversation: f.id, openclawSession: "observer", ...options });
     assert.equal(Date.parse(watched.deadline_at) - Date.parse(watched.created_at), expected * 60_000);
   }
+});
+
+
+test("Desktop CLI send-only profile remains actionable for tasks, not settings, cancellation or answers", async t => {
+  const f = fixture(t, DESKTOP_CREATION_BUILD);
+  const ready = await f.run("status", { conversation: f.id });
+  assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.set_model, false);
+  for (const command of ["model-options", "permission-options", "set-model", "set-permissions", "cancel"]) {
+    await assert.rejects(f.run(command, { conversation: f.id }), /native controls are unverified/);
+  }
+  const sent = await f.run("send", { conversation: f.id, message: "READY", messageId: "send-only", openclawSession: "controller" });
+  assert.equal(sent.delivered, true); assert.equal(f.sends, 1); assert.equal(sent.capabilities.cancel, false);
+  f.ask();
+  const status = await f.run("watch-status", { watch: sent.watch_id });
+  assert.equal(status.pending_interaction_count, 1); assert.equal(status.capabilities.interaction_respond, false);
+  assert.equal(status.interaction_state[0].questions[0].title, "Pick a color");
+  await assert.rejects(f.run("respond-interaction", { watch: sent.watch_id, openclawSession: "controller" }), /responses are unverified/);
+  assert.equal(f.answers, 0);
 });

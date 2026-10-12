@@ -229,6 +229,7 @@ Choose the guide that matches what you are trying to do:
 | [Codex CLI direct control](docs/codex-cli-native-compatibility.md) | Connect without tmux/Herdr, select conversations, send tasks, and follow exact progress and completion |
 | [Claude Code direct control](docs/claude-cli-direct.md) | Basic tasks without tmux/Herdr or Claude plugins, exact progress and completion, and terminal fallback boundaries |
 | [Codex Desktop](docs/codex-desktop-compatibility.md) | Discover existing Desktop conversations, send and monitor exact tasks, respond to interactions, and change native settings |
+| [Create a Desktop conversation](docs/desktop-create.md) | Create in a project or start a blank conversation |
 | [Backend Recovery](docs/backend-task-recovery.md) | Recover monitoring, renew deadlines, close management, stop watching, and retry failed callbacks |
 | [Pi connector](connectors/pi/README.md) | Pi installation, semantic tool catalog, bundled skill, native approval, callbacks, upgrade, and uninstall |
 | [DeepSeek Harness connector](connectors/deepseek-harness/README.md) | Harness installation, approval contract, callbacks, upgrade, and troubleshooting |

@@ -683,6 +683,10 @@
       "owner": "cli-runtime"
     },
     {
+      "path": "src/cli-usage.ts",
+      "owner": "cli-runtime"
+    },
+    {
       "path": "src/cli.ts",
       "owner": "cli-runtime"
     },
@@ -991,7 +995,35 @@
       "owner": "codex-desktop"
     },
     {
+      "path": "src/desktop-compatibility.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-control-semantic.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-creation-cli.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-creation-native.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-creation-rpc.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-creation-semantic.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-creation-service.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-creation-store.ts",
       "owner": "codex-desktop"
     },
     {

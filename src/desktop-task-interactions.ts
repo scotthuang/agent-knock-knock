@@ -13,7 +13,7 @@ function callbackInteraction(task: DesktopTaskRecord, interaction: DesktopIntera
   return output;
 }
 
-function interactionBody(task: DesktopTaskRecord, interaction: DesktopInteraction): string {
+function interactionBody(task: DesktopTaskRecord, interaction: DesktopInteraction, responsesVerified: boolean): string {
   const approval = interaction.kind === "command_approval" || interaction.kind === "file_approval";
   const summary = approval ? interaction.command ?? interaction.reason ?? "Review the pending file changes."
     : interaction.questions.map(question => `${question.title}${question.options.length ? `\nOptions: ${question.options.join(" / ")}` : ""}`).join("\n");
@@ -21,13 +21,13 @@ function interactionBody(task: DesktopTaskRecord, interaction: DesktopInteractio
     : approval ? "is waiting for approval." : "is waiting for an answer before it can continue.";
   return `Desktop task ${task.id} ${state}\n${summary}\n` +
     `Refresh AKK Status for this exact conversation or Watch to confirm that the interaction is still current, then ask the user. ` +
-    (approval ? "Use AKK Approve only with the user's decision; do not approve automatically.\n"
+    (!responsesVerified ? "Handle this question or approval in Desktop; this build has no verified AKK response control.\n" : approval ? "Use AKK Approve only with the user's decision; do not approve automatically.\n"
       : "Only use AKK Respond after the user supplies an answer; do not choose an answer automatically.\n") +
     JSON.stringify(callbackInteraction(task, interaction));
 }
 
 /** Native pending requests and asynchronous questions have distinct completeness evidence. */
-export function updateDesktopInteractionAttention(task: DesktopTaskRecord, snapshot: DesktopSnapshot): void {
+export function updateDesktopInteractionAttention(task: DesktopTaskRecord, snapshot: DesktopSnapshot, responsesVerified = true): void {
   const turn = snapshot.turns.find(candidate => candidate.turnId === task.native_turn_id);
   // A partial history is missing evidence, not proof that a question was answered.
   if (!turn || turn.status === "unknown") {
@@ -49,10 +49,10 @@ export function updateDesktopInteractionAttention(task: DesktopTaskRecord, snaps
     if (task.notifications.some(notification => notification.id === id)) continue;
     task.notifications.push({ id, attempts: 0, status: "ready", envelope: createCallbackEnvelope({ route: task.callback_route,
       source: { kind: "desktop_watch", watch_id: task.id, desktop_id: task.desktop_id },
-      event: { id, type: "desktop_watch.interaction", body: interactionBody(task, interaction), requires_response: true,
+      event: { id, type: "desktop_watch.interaction", body: interactionBody(task, interaction, responsesVerified), requires_response: true,
         metadata: { watch_id: task.id, desktop_id: task.desktop_id, thread_id: task.target.threadId, turn_id: task.native_turn_id,
           interaction_id: interaction.id, interaction: callbackInteraction(task, interaction),
-          action: interaction.kind.endsWith("approval") ? "approve" : "respond" } }
+          action: !responsesVerified ? "manual_desktop" : interaction.kind.endsWith("approval") ? "approve" : "respond" } }
     }) });
   }
 }

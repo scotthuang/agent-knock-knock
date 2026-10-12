@@ -39,6 +39,7 @@ const EXPECTED_TOOLS = [
   "agent_knock_knock_approve",
   "agent_knock_knock_cancel",
   "agent_knock_knock_close",
+  "agent_knock_knock_desktop_create",
   "agent_knock_knock_identify_and_send",
   "agent_knock_knock_identify_foreground",
   "agent_knock_knock_list",

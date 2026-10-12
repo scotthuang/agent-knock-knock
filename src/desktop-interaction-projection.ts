@@ -17,6 +17,7 @@ export interface ProjectedDesktopInteraction {
   interaction_prompt_fingerprint: string; questions: ProjectedQuestion[];
   command?: string; reason?: string; cwd?: string; network?: { host: string; protocol: string };
   file_changes?: { path: string; kind?: string; diff?: string; diffTruncated?: boolean }[];
+  manual_action?: string;
   available_actions: Record<string, { tool: string; input: Record<string, string> }>;
 }
 export function desktopInteractionIsApproval(item: { kind: string }): boolean {
@@ -28,7 +29,7 @@ export function desktopInteractionFingerprint(item: DesktopInteraction): string 
     item.approvalId, item.nativeApprovalKind, item.networkApprovalContext, item.changes];
   return digest([item.id, item.threadId, item.turnId, item.itemId, item.method, item.questions, ...request]);
 }
-export function desktopInteractionProjection(item: DesktopInteraction, desktopId: string, watchId?: string): ProjectedDesktopInteraction {
+export function desktopInteractionProjection(item: DesktopInteraction, desktopId: string, watchId?: string, responsesVerified = true): ProjectedDesktopInteraction {
   const target: Record<string, string> = watchId ? { watch_id: watchId } : { conversation_id: desktopId };
   const approval = desktopInteractionIsApproval(item);
   return {
@@ -39,9 +40,10 @@ export function desktopInteractionProjection(item: DesktopInteraction, desktopId
     expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
     interaction_prompt_fingerprint: desktopInteractionFingerprint(item),
     questions: item.questions.map(question => desktopQuestionProjection(item, question)),
-    available_actions: { [approval ? "approve" : "respond"]: {
+    ...(!responsesVerified ? { manual_action: "Handle this question or approval in Desktop; native responses are not verified for this build." } : {}),
+    available_actions: responsesVerified ? { [approval ? "approve" : "respond"]: {
       tool: approval ? "agent_knock_knock_approve" : "agent_knock_knock_respond_interaction",
-      input: { ...target, interaction_id: item.id } } }
+      input: { ...target, interaction_id: item.id } } } : {}
   };
 }
 function approvalDetails(item: Exclude<DesktopInteraction, DesktopAsyncInteraction>) {
@@ -73,6 +75,7 @@ export function validateDesktopInteractionProjections(value: unknown, desktopId:
 function copyProjectedInteraction(item: ProjectedDesktopInteraction, desktopId: string, watchId?: string): ProjectedDesktopInteraction {
   const target: Record<string, string> = watchId ? { watch_id: watchId } : { conversation_id: desktopId };
   const approval = desktopInteractionIsApproval(item);
+  const actionable = isRecord(item.available_actions) && isRecord(item.available_actions[approval ? "approve" : "respond"]);
   return { ...copyProjectedApprovalDetails(item), ...target, interaction_id: item.interaction_id, kind: item.kind, status: "pending",
     native_thread_id: item.native_thread_id, native_turn_id: item.native_turn_id,
     ...(item.kind === "async_question" ? { delivery_modes: ["steer_current_turn"] } : {}),
@@ -81,9 +84,10 @@ function copyProjectedInteraction(item: ProjectedDesktopInteraction, desktopId: 
     questions: item.questions.map(q => ({ question_id: q.question_id, title: q.title, response_kind: q.response_kind,
       allow_free_text: q.allow_free_text, ...(q.is_secret ? { is_secret: true } : {}),
       options: q.options.map(o => ({ option_id: o.option_id, label: o.label })) })),
-    available_actions: { [approval ? "approve" : "respond"]: {
+    ...(typeof item.manual_action === "string" ? { manual_action: item.manual_action } : {}),
+    available_actions: actionable ? { [approval ? "approve" : "respond"]: {
       tool: approval ? "agent_knock_knock_approve" : "agent_knock_knock_respond_interaction",
-      input: { ...target, interaction_id: item.interaction_id } } } };
+      input: { ...target, interaction_id: item.interaction_id } } } : {} };
 }
 function copyProjectedApprovalDetails(item: ProjectedDesktopInteraction) {
   const details: Partial<ProjectedDesktopInteraction> = {};

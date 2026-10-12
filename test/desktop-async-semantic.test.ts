@@ -172,3 +172,16 @@ test("Desktop controls route explicit model settings and exact cancellation with
   assert.equal(cancel({ watch_id: watchId, expected_native_turn_id: "turn-one" }).valid, false);
   await assert.rejects(h.execute("set_model", { conversation_id: conversationId, terminal_id: "terminal:v2:wrong", model: "model", reasoning_effort: "high" }), /another target/);
 });
+
+
+test("Desktop manual-only Status exposes questions without granting a Host response offer", async t => {
+  const h = harness(t);
+  h.reply({ ...status(), capabilities: { interaction_respond: false },
+    interaction_state: [desktopInteractionProjection(interaction, conversationId, undefined, false)] });
+  const current = await h.execute("status", { conversation_id: conversationId });
+  assert.equal(current.details.interaction_state[0].questions[0].title, "Choose a color");
+  assert.deepEqual(current.details.interaction_state[0].available_actions, {});
+  const before = h.calls().length;
+  await assert.rejects(h.execute("respond_interaction", answer()), /Refresh AKK Status/);
+  assert.equal(h.calls().length, before);
+});

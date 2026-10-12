@@ -23,9 +23,11 @@ export interface DesktopTaskInput {
   callbackRoute?: CallbackRouteV1;
   timeoutMs?: number;
 }
-export interface DesktopSendInput extends DesktopTaskInput { messageId: string; text: string }
+export interface DesktopSendInput extends DesktopTaskInput { messageId: string; text: string; requireEmptyThread?: boolean }
 export interface DesktopTaskServiceDependencies extends DesktopTransportPort {
   repository: DesktopStateRepository;
+  /** Notification wording follows the installed build; never authorizes dispatch. */
+  interactionResponsesVerified?: boolean;
   deliver?(input: CallbackTransportDeliverInput): CallbackAttemptOutcome | Promise<CallbackAttemptOutcome>;
   resolveCallbackContext?(task: DesktopTaskRecord): CallbackTransportContextV1 | undefined;
   now?(): Date;
@@ -101,6 +103,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
   private readonly leaseMs: number;
   private readonly retryMs: number;
   private readonly maxAttempts: number;
+  private readonly interactionResponsesVerified: boolean;
   private readonly recovery: ReturnType<typeof createDesktopTaskRecovery>;
   constructor(private readonly deps: DesktopTaskServiceDependencies) {
     this.repo = deps.repository;
@@ -109,6 +112,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     this.leaseMs = deps.deliveryLeaseMs ?? 30_000;
     this.retryMs = deps.retryDelayMs ?? 5_000;
     this.maxAttempts = deps.maxDeliveryAttempts ?? 4;
+    this.interactionResponsesVerified = deps.interactionResponsesVerified ?? true;
     this.recovery = createDesktopTaskRecovery({ status: id => this.status(id), update: (id, op) => this.update(id, op),
       observe: target => deps.observe(target), applySnapshot: (task, snapshot, recover) => this.applySnapshot(task, snapshot, recover),
       deliverPending: (id, notificationId) => this.deliverPending(id, notificationId), now: this.now, expire: task => this.expire(task) });
@@ -257,7 +261,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       const turn = matchingTurns.length === 1 ? matchingTurns[0] : undefined;
       if (!turn) task.observation_error = "desktop_exact_turn_unavailable";
       else {
-        if (!desktopObservationStopped(task) && live(task)) updateDesktopInteractionAttention(task, snapshot);
+        if (!desktopObservationStopped(task) && live(task)) updateDesktopInteractionAttention(task, snapshot, this.interactionResponsesVerified);
         const requests = desktopObservationStopped(task) || !live(task) ? [] : desktopManualRequests(task, snapshot);
         task.pending_manual_count = requests.length;
         if (requests.length) {
@@ -314,6 +318,9 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     const task = this.make(input, id, "send");
     const snapshot = await this.deps.observe(input.target); assertSnapshot(task, snapshot);
     if (!idle(snapshot)) throw new DesktopTaskError("thread_not_idle", "Desktop thread must be confirmed idle before send");
+    if (input.requireEmptyThread && (snapshot.latestTurnId !== null || snapshot.turns.length !== 0)) {
+      throw new DesktopTaskError("desktop_creation_thread_changed", "The new conversation already has a task; the initial request was not sent", "not_sent");
+    }
     task.send_intent = { message_id: input.messageId, client_user_message_id: this.uuid(), text: input.text,
       owner_client_id: snapshot.ownerClientId, baseline_turn_ids: snapshot.turns.map(turn => turn.turnId),
       state: "reserved", dispatched_at: this.now().toISOString() };

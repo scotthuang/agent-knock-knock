@@ -1,3 +1,4 @@
+import { desktopCapabilityProfile } from "./desktop-compatibility.js";
 import { monitorMinutesToMs, resolveMonitorHardTimeoutMinutes } from "./monitor-deadline-policy.js";
 import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
 import { backendPublicProgress, backendPublicProgressReadError } from "./backend-public-progress.js";
@@ -9,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { cliCwd, cliEnv, cliDependencies, cliNow, writeCliStdout } from "./cli-runtime-context.js";
 import { isDesktopConversationId, parseDesktopConversationId } from "./desktop-identity.js";
 import { isDesktopWatchId } from "./desktop-semantic.js";
-import { createDesktopRuntime, desktopWritesVerified, type DesktopRuntime, type DesktopRuntimeOptions } from "./desktop-runtime.js";
+import { createDesktopRuntime, type DesktopRuntime, type DesktopRuntimeOptions } from "./desktop-runtime.js";
 import { createTerminalWatchOpenClawCallbackRoute, parseCallbackRoute } from "./callback-transport.js";
 import { desktopResponseId, type DesktopResponseRecord } from "./desktop-response-store.js";
 import { desktopInteractionFingerprint, desktopInteractionIsApproval, desktopQuestionAnswer, desktopQuestionResponse } from "./desktop-interaction-projection.js";
@@ -88,10 +89,10 @@ async function inspectOrStopDesktopWatch(runtime: DesktopRuntime, command: strin
     output(result);
   } else if (command === "unwatch-terminal") {
     output(desktopTaskProjection(runtime.tasks.unwatch(watch,
-      { controllerSession: required(controller, "controller session") })));
+      { controllerSession: required(controller, "controller session") }), desktopCapabilityProfile(runtime.compatibility)));
   } else if (command === "watch-status" || command === "status") {
     const current = await runtime.tasks.reconcile(watch);
-    output({ ...desktopTaskProjection(current, desktopWritesVerified(runtime.compatibility)),
+    output({ ...desktopTaskProjection(current, desktopCapabilityProfile(runtime.compatibility)),
       progress: await desktopWatchProgress(runtime, current),
       response_state: await desktopResponseStates(runtime, current.desktop_id, current.native_turn_id, controller) });
   } else throw new Error("Desktop Watch ID is only valid for status or unwatch");
@@ -133,7 +134,7 @@ async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, e
     const snapshot = await runtime.transport.observe(identity);
     if (snapshot.threadId !== identity.threadId) throw new Error("Desktop snapshot identity mismatch");
     const current = snapshot.turns.find(turn => turn.turnId === snapshot.latestTurnId);
-    output({ ...desktopSessionProjection(entry, snapshot, desktopWritesVerified(runtime.compatibility)),
+    output({ ...desktopSessionProjection(entry, snapshot, desktopCapabilityProfile(runtime.compatibility)),
       source: "codex_desktop", latest_turn: latestTurnProjection(current),
       progress: backendPublicProgress({ nativeTurnId: snapshot.latestTurnId, turn: current, readAt: cliNow().toISOString() }),
       response_state: await desktopResponseStates(runtime, entry.conversationId, snapshot.latestTurnId ?? undefined, str(options.openclawSession)) });
@@ -153,7 +154,7 @@ async function sendOrWatchDesktopTask(runtime: DesktopRuntime, command: "send" |
   const task = command === "send" ? await runtime.tasks.send({ ...input,
     text: required(options.message ?? options.request, "message"), messageId: str(options.messageId) ?? randomUUID() })
     : await runtime.tasks.watch(input);
-  const result = desktopTaskProjection(task, desktopWritesVerified(runtime.compatibility));
+  const result = desktopTaskProjection(task, desktopCapabilityProfile(runtime.compatibility));
   if (desktopTaskNeedsReconciliation(task)) {
     try { result.monitor_pid = await (cliDependencies().launchDesktopMonitor ?? launchDesktopMonitor)(task.id, config); }
     catch { result.monitor_error = "desktop_monitor_launch_failed"; result.callback_expected = false; }
@@ -243,6 +244,7 @@ function desktopResponseFingerprint(interaction: DesktopInteraction, options: Op
 
 async function respondToDesktopInteraction(runtime: DesktopRuntime, options: Options,
   target: string | undefined, watch: string | undefined, command: "respond-interaction" | "approve"): Promise<void> {
+  if (!desktopCapabilityProfile(runtime.compatibility).nativeControls) throw new Error("Desktop interaction responses are unverified for this build; answer in Desktop");
   const controllerSession = required(options.openclawSession, "controller session");
   const subject = await desktopResponseSubject(runtime, options, target, watch, controllerSession);
   const interactionId = required(options.interaction, "interaction ID");
@@ -306,7 +308,7 @@ async function recoverDesktopTaskForCli(runtime: DesktopRuntime, command: string
     : command === "renew" ? await runtime.tasks.renew(id, { controllerSession, ...(minutes === undefined ? {} : { timeoutMs: monitorMinutesToMs(Number(minutes)) }) })
     : command === "recover" ? await runtime.tasks.recover(id, { controllerSession })
     : await runtime.tasks.retryCallback(id, { controllerSession, notificationId: str(options.notificationId) });
-  const result = desktopTaskProjection(task, desktopWritesVerified(runtime.compatibility));
+  const result = desktopTaskProjection(task, desktopCapabilityProfile(runtime.compatibility));
   if (["renew", "recover", "retry-callback"].includes(command) && desktopTaskNeedsReconciliation(task)) {
     try { result.monitor_pid = await (cliDependencies().launchDesktopMonitor ?? launchDesktopMonitor)(task.id, config); }
     catch { result.monitor_error = "desktop_monitor_launch_failed"; result.callback_expected = false; }

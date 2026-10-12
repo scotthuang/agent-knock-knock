@@ -1,3 +1,4 @@
+import { createDesktopCreationSemanticTool } from "./desktop-creation-semantic.js";
 import { isClaudeNativeConversationId } from "./claude-native-identity.js";
 import { isDesktopConversationId } from "./desktop-identity.js";
 import { backendRecoveryToolArgs, formatBackendRecoveryCommandResult, normalizeBackendStatusTarget } from "./backend-recovery-semantic.js";
@@ -326,6 +327,8 @@ export function createAkkSemanticToolCatalog(
       return args;
     }
   });
+
+  defineSemanticCatalogTool(api, createDesktopCreationSemanticTool(api));
 
   registerCliTool(api, {
     name: "agent_knock_knock_reconcile_binding",

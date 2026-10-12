@@ -45,6 +45,7 @@ const TOOL_NAMES = [
   "agent_knock_knock_identify_foreground",
   "agent_knock_knock_identify_and_send",
   "agent_knock_knock_new_thread",
+  "agent_knock_knock_desktop_create",
   "agent_knock_knock_reconcile_binding",
   "agent_knock_knock_resume_thread",
   "agent_knock_knock_status",

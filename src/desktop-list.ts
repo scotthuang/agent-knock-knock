@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { DesktopRuntime } from "./desktop-runtime.js";
-import { desktopWritesVerified } from "./desktop-runtime.js";
+import { desktopCapabilityProfile } from "./desktop-compatibility.js";
 import { desktopSessionProjection, desktopTaskProjection } from "./desktop-public-projection.js";
 import { DesktopIpcError } from "./desktop-types.js";
 
@@ -25,7 +25,7 @@ export async function listDesktopSessions(runtime: DesktopRuntime, options: Reco
       }
       try {
         const snapshot = await runtime.transport.observe(entry);
-        sessions[position] = desktopSessionProjection(entry, snapshot, desktopWritesVerified(runtime.compatibility));
+        sessions[position] = desktopSessionProjection(entry, snapshot, desktopCapabilityProfile(runtime.compatibility));
       } catch (error) {
         sessions[position] = desktopSessionProjection(entry, undefined, false,
           error instanceof DesktopIpcError ? error.code : "live_owner_not_confirmed");
@@ -33,7 +33,7 @@ export async function listDesktopSessions(runtime: DesktopRuntime, options: Reco
     }
   }));
   let watches: Record<string, unknown>[] = []; let watchError: string | undefined;
-  try { watches = runtime.tasks.list().map(task => desktopTaskProjection(task, desktopWritesVerified(runtime.compatibility))); }
+  try { watches = runtime.tasks.list().map(task => desktopTaskProjection(task, desktopCapabilityProfile(runtime.compatibility))); }
   catch { watchError = "desktop_watch_store_unavailable"; }
   return { desktop_sessions: sessions, desktop_watches: watches,
     desktop_scan: { view, total_candidates: page.total, history_candidates: page.historyTotal,
@@ -43,7 +43,8 @@ export async function listDesktopSessions(runtime: DesktopRuntime, options: Reco
       live_probe_scope: "returned_page",
       catalog_complete: page.complete, live_count: sessions.filter(row => row.connection_state === "live_owner_verified").length,
       application_version: runtime.compatibility.version, application_build: runtime.compatibility.build,
-      write_contract_verified: desktopWritesVerified(runtime.compatibility), watch_error: watchError,
+      write_contract_verified: desktopCapabilityProfile(runtime.compatibility).nativeControls,
+      send_contract_verified: desktopCapabilityProfile(runtime.compatibility).send, watch_error: watchError,
       sources: page.sources, membership_is_not_live_identity: true } };
 }
 function text(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }

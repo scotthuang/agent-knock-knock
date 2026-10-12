@@ -132,7 +132,7 @@ function assertNotification(r: DesktopTaskRecord, n: DesktopNotification, ids: S
 function assertInteractionNotification(record: DesktopTaskRecord, notification: DesktopNotification): void {
   const event = notification.envelope.event; const metadata = event.metadata;
   if (event.type !== "desktop_watch.interaction" || !metadata || !nonblank(metadata.interaction_id) ||
-    !["respond", "approve"].includes(String(metadata.action)) || metadata.thread_id !== record.target.threadId || metadata.turn_id !== record.native_turn_id ||
+    !["respond", "approve", "manual_desktop"].includes(String(metadata.action)) || metadata.thread_id !== record.target.threadId || metadata.turn_id !== record.native_turn_id ||
     notification.id !== `${record.id}:interaction:${metadata.interaction_id}` || !metadata.interaction || typeof metadata.interaction !== "object") {
     throw new Error("Desktop response notification requires an exact interaction");
   }
@@ -141,7 +141,10 @@ function assertInteractionNotification(record: DesktopTaskRecord, notification: 
     interaction.native_thread_id !== record.target.threadId || interaction.native_turn_id !== record.native_turn_id) {
     throw new Error("Desktop response notification has a different interaction identity");
   }
-  if (metadata.action !== (String(interaction.kind).endsWith("approval") ? "approve" : "respond")) throw new Error("Desktop notification action does not match its interaction");
+  if (!notificationActionMatches(metadata.action, String(interaction.kind))) throw new Error("Desktop notification action does not match its interaction");
+}
+function notificationActionMatches(action: unknown, kind: string): boolean {
+  return action === "manual_desktop" || action === (kind.endsWith("approval") ? "approve" : "respond");
 }
 function assertAsyncInteractions(record: DesktopTaskRecord): void {
   if (record.pending_async_interactions === undefined) return;

@@ -66,6 +66,7 @@ function validateSemanticSchemasAndCommands(repoRoot, roles) {
     [...schemas.matchAll(/^export const ([A-Za-z]+Parameters) =/gmu)]
       .map((match) => match[1]),
     [
+      "desktopCreateParameters",
       "respondInteractionParameters",
       "sendParameters",
       "respondParameters",

@@ -66,6 +66,7 @@ test("CLI command execution returns output and exit status without process globa
     assert.equal(help.exitCode, 0);
     assert.equal(unknown.exitCode, 1);
     assert.match(help.stdout, /^Usage:/u);
+    assert.match(help.stdout, /desktop-create --operation-id/u);
     assert.equal(help.stdout, helpOutput.join(""));
     assert.equal(unknown.stdout, unknownOutput.join(""));
     assert.equal(process.exitCode, originalExitCode);

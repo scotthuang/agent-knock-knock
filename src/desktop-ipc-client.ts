@@ -11,7 +11,8 @@ import { DesktopIpcError, type DesktopIpcClientOptions, type DesktopIpcTransport
   type DesktopRequestReceipt, type DesktopModelSettings, type DesktopSettingsOptions, type DesktopSettingsReceipt,
   type DesktopInterruptOptions, type DesktopInterruptReceipt } from "./desktop-types.js";
 
-export const VERIFIED_DESKTOP_BUILD = Object.freeze({ version: "26.1002.52244", build: "13536" });
+import { desktopCapabilityProfile } from "./desktop-compatibility.js";
+export { VERIFIED_DESKTOP_BUILD } from "./desktop-compatibility.js";
 const MIN_TIMEOUT_MS = 12_000;
 const DISCOVERY_TIMEOUT_MS = 10_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -191,7 +192,7 @@ export class DesktopIpcClient {
   }
 
   private validateSubmission(options: DesktopSendTurnOptions): void {
-    this.validateWrite(options.clientUserMessageId);
+    this.validateWrite(options.clientUserMessageId, "send");
     if (typeof options.prompt !== "string" || !options.prompt.trim() || Buffer.byteLength(options.prompt) > 1024 * 1024
       || !Number.isSafeInteger(options.expectedRevision) || options.expectedRevision < 0
       || (options.expectedLatestTurnId !== null && typeof options.expectedLatestTurnId !== "string")) {
@@ -199,10 +200,9 @@ export class DesktopIpcClient {
     }
   }
 
-  private validateWrite(clientUserMessageId: string): void {
-    if (this.options.compatibility.version !== VERIFIED_DESKTOP_BUILD.version
-      || this.options.compatibility.build !== VERIFIED_DESKTOP_BUILD.build) {
-      throw new DesktopIpcError("incompatible_desktop", "Desktop write capability requires the verified version and build");
+  private validateWrite(clientUserMessageId: string, capability: "send" | "nativeControls" = "nativeControls"): void {
+    if (!desktopCapabilityProfile(this.options.compatibility)[capability]) {
+      throw new DesktopIpcError("incompatible_desktop", `Desktop ${capability} capability requires a verified version and build; handle this operation in Desktop`);
     }
     id(clientUserMessageId, "user message identity");
     if (this.sending || this.sentMessageIds.has(clientUserMessageId)) {

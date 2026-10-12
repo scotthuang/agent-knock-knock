@@ -1,3 +1,4 @@
+import { desktopCapabilityProfile } from "./desktop-compatibility.js";
 import type { DesktopRuntime } from "./desktop-runtime.js";
 import type { DesktopThreadIdentity } from "./desktop-types.js";
 
@@ -9,6 +10,7 @@ const required = (value: unknown, label: string): string => {
 /** Typed controls operate on the original Desktop owner; they never launch or resume a CLI. */
 export async function desktopControlForCli(runtime: DesktopRuntime, command: string, options: Options,
   subject: { id: string; identity: DesktopThreadIdentity }, watchId?: string): Promise<Record<string, unknown> | undefined> {
+  assertNativeControlCapability(runtime, command, options);
   let result: Record<string, unknown>;
   if (command === "permission-options" || command === "native-inspect" && options.action === "permissions") {
     result = await runtime.controls.permissionOptions(subject.identity);
@@ -36,4 +38,11 @@ export async function desktopControlForCli(runtime: DesktopRuntime, command: str
 function desktopMode(value: unknown): "plan" | "default" {
   if (value !== "plan" && value !== "default") throw new Error("Desktop collaboration_mode must be plan or default");
   return value;
+}
+
+function assertNativeControlCapability(runtime: DesktopRuntime, command: string, options: Options): void {
+  if (["permission-options", "set-permissions", "model-options", "set-model", "cancel"].includes(command)
+    || command === "native-inspect" && options.action === "permissions") {
+    if (!desktopCapabilityProfile(runtime.compatibility).nativeControls) throw new Error("Desktop native controls are unverified for this build; handle this operation in Desktop");
+  }
 }
