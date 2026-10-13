@@ -1,4 +1,4 @@
-import { desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
+import { desktopInteractionResponseVerified, desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
 import { desktopObservationStopped } from "./desktop-task-recovery.js";
@@ -16,8 +16,9 @@ export function desktopSessionProjection(entry: DesktopCatalogEntry, snapshot?: 
   const send = Boolean(snapshot?.canSend && profile.send);
   const interactions = activeTurn ? (snapshot?.pendingInteractions ?? snapshot?.asyncQuestions ?? [])
     .filter(item => item.turnId === activeTurn) : [];
+  const supportedInteractions = interactions.filter(item => desktopInteractionResponseVerified(profile, item.kind));
   const settings = Boolean(profile.nativeControls && snapshot?.canSend && snapshot.runtimeStatus === "idle");
-  const capabilities = { status: true, send, watch, interaction_notify: watch, ...interactionCapabilities(profile.nativeControls ? interactions : []),
+  const capabilities = { status: true, send, watch, interaction_notify: watch, ...interactionCapabilities(supportedInteractions),
     set_permissions: settings, set_model: settings, cancel: profile.nativeControls && watch };
   return {
     id: entry.conversationId, conversation_id: entry.conversationId, source: "codex_desktop", agent: "codex",
@@ -28,13 +29,13 @@ export function desktopSessionProjection(entry: DesktopCatalogEntry, snapshot?: 
       sidebar_project_name: entry.sidebar.projectName } : {}),
     connection_state: live ? "live_owner_verified" : "unconfirmed",
     activity_state: snapshot?.runtimeStatus ?? "unknown",
-    ...sessionObservation(snapshot, profile.nativeControls),
+    ...sessionObservation(snapshot, profile),
     ...sessionSendAvailability(snapshot, profile.send, observationError),
     ...(observationError ? { observation_error: observationError } : {}), capabilities,
-    ...(!profile.nativeControls && interactions.length ? { manual_action: "Answer the question or approval in Desktop; this build only supports task sends and observation." } : {}),
+    ...(supportedInteractions.length < interactions.length ? { manual_action: "Handle interactions without an available AKK action in Desktop; their response control is not verified for this build." } : {}),
     pending_async_count: interactions.filter(item => item.kind === "async_question").length,
     pending_interaction_count: interactions.length,
-    interaction_state: interactions.map(item => desktopInteractionProjection(item, entry.conversationId, undefined, profile.nativeControls)),
+    interaction_state: interactions.map(item => desktopInteractionProjection(item, entry.conversationId, undefined, profile)),
     available_actions: sessionActions(entry.conversationId, { live, send, watch, nativeControls: profile.nativeControls, cancel: profile.nativeControls && watch }, activeTurn)
 
   };
@@ -54,6 +55,8 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
   const profile = desktopProjectionCapabilities(writesVerified);
   const terminal = desktopObservationStopped(task) || ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
   const interactions = !terminal ? actionableTaskInteractions(task) : [];
+  const supportedInteractions = interactions.filter(item => desktopInteractionResponseVerified(profile, item.kind));
+  const manualCount = task.pending_manual_count + interactions.length - supportedInteractions.length;
   const callback = backendCallbackPublicProjection(task, !terminal, desktopObservationStopped(task));
   const canCancel = profile.nativeControls && !terminal && Boolean(task.native_turn_id);
   const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
@@ -65,19 +68,19 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
     anchor_state: task.native_turn_id ? "verified" : "pending", native_thread_id: task.target.threadId,
     native_turn_id: task.native_turn_id ?? null, created_at: task.created_at, updated_at: task.updated_at,
     observed_at: task.observed_at, observation_error: task.observation_error,
-    pending_manual_count: task.pending_manual_count + (profile.nativeControls ? 0 : interactions.length), final_text: task.final_text,
+    pending_manual_count: manualCount, final_text: task.final_text,
     ...taskInteractionCounts(task, interactions),
-    interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id, profile.nativeControls)),
+    interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id, profile)),
     callback_expected: callbackExpected(task, terminal),
     callback_configured: Boolean(task.callback_route), ...callback,
     ...desktopSendReceiptProjection(task.send_intent),
     capabilities: { callback: Boolean(task.callback_route), interaction_notify: Boolean(task.callback_route),
-      ...interactionCapabilities(profile.nativeControls ? interactions : []), cancel: canCancel, ...desktopRecoveryCapabilities(task) },
+      ...interactionCapabilities(supportedInteractions), cancel: canCancel, ...desktopRecoveryCapabilities(task) },
     available_actions: { ...recovery_actions, status: { tool: "agent_knock_knock_status", input: { watch_id: task.watch_id } },
       ...(canCancel ? { cancel: { tool: "agent_knock_knock_cancel", input: { watch_id: task.watch_id } } } : {}) },
-    ...(task.pending_manual_count || !profile.nativeControls && interactions.length ? { manual_action: terminal
+    ...(manualCount ? { manual_action: terminal
       ? "Handle any remaining question or approval in Desktop; this Watch has stopped."
-      : "Answer the question or approval in Desktop; AKK continues watching this task." } : {})
+      : "Handle interactions without an available AKK action in Desktop; AKK continues watching this task." } : {})
   };
 }
 
@@ -107,11 +110,11 @@ function interactionCapabilities(interactions: DesktopInteraction[]) {
   return { interaction_respond: interactions.some(item => !desktopInteractionIsApproval(item)),
     approve: interactions.some(desktopInteractionIsApproval) };
 }
-function sessionObservation(snapshot: DesktopSnapshot | undefined, writesVerified: boolean) {
+function sessionObservation(snapshot: DesktopSnapshot | undefined, profile: DesktopCapabilityProfile) {
   if (!snapshot) return {};
-  const actionable = writesVerified ? (snapshot.pendingInteractions ?? []).filter(item => item.kind !== "async_question").length : 0;
+  const actionable = (snapshot.pendingInteractions ?? []).filter(item => item.kind !== "async_question" && desktopInteractionResponseVerified(profile, item.kind)).length;
   return { native_turn_id: snapshot.latestTurnId, pending_manual_count: Math.max(0, snapshot.pendingRequestCount - actionable)
-      + (writesVerified ? 0 : (snapshot.pendingInteractions ?? snapshot.asyncQuestions ?? []).filter(item => item.kind === "async_question").length),
+      + (profile.nativeControls ? 0 : (snapshot.pendingInteractions ?? snapshot.asyncQuestions ?? []).filter(item => item.kind === "async_question").length),
     observed_revision: snapshot.revision };
 }
 function sessionActions(id: string, capabilities: { live: boolean; send: boolean; watch: boolean; cancel: boolean; nativeControls: boolean }, activeTurn?: string) {

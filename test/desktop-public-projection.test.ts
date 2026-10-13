@@ -6,7 +6,7 @@ import { desktopSessionProjection, desktopTaskProjection } from "../src/desktop-
 import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { createCallbackEnvelope, createTerminalWatchOpenClawCallbackRoute } from "../src/callback-transport.js";
 import type { DesktopCatalogEntry } from "../src/desktop-session-catalog.js";
-import type { DesktopAsyncInteraction, DesktopSnapshot } from "../src/desktop-types.js";
+import type { DesktopAsyncInteraction, DesktopRequestInteraction, DesktopSnapshot } from "../src/desktop-types.js";
 import type { DesktopTaskRecord } from "../src/desktop-state-store.js";
 
 const target = { codexHome: "/fixture/codex", hostId: "local", threadId: "thread-one" };
@@ -124,7 +124,7 @@ test("Desktop task projections retain observation evidence while distinguishing 
 });
 
 
-test("Desktop send-only profile advertises sends and readable interactions without native response authority", () => {
+test("Desktop approval profile keeps questions, settings and cancellation unavailable", () => {
   const profile = desktopCapabilityProfile(DESKTOP_CREATION_BUILD);
   const ready = desktopSessionProjection(entry, snapshot(), profile) as any;
   assert.equal(ready.capabilities.send, true);
@@ -148,4 +148,35 @@ test("Desktop send-only profile advertises sends and readable interactions witho
   assert.equal(watched.capabilities.cancel, false); assert.equal(watched.pending_manual_count, 1);
   assert.equal(watched.pending_interaction_count, 1); assert.deepEqual(watched.interaction_state[0].available_actions, {});
   assert.match(watched.manual_action, /in Desktop/);
+});
+
+test("Desktop mixed approval/question projections agree across conversation and exact Watch status", () => {
+  const profile = desktopCapabilityProfile(DESKTOP_CREATION_BUILD);
+  const approvals: DesktopRequestInteraction[] = (["command_approval", "file_approval"] as const).map((kind, index) => ({
+    id: `desktop-request-interaction:${String(index + 1).repeat(64)}`, kind,
+    threadId: target.threadId, turnId: "turn-one", itemId: `item-${index}`, requestId: index,
+    method: kind === "command_approval" ? "item/commandExecution/requestApproval" : "item/fileChange/requestApproval", questions: [] }));
+  const question: DesktopRequestInteraction = { ...approvals[0], kind: "blocking_question",
+    id: `desktop-request-interaction:${"3".repeat(64)}`, requestId: 2, itemId: "question-one", method: "item/tool/requestUserInput",
+    questions: [{ id: "color", title: "Choose a color", options: ["Green"] }] };
+  const interactions = [...approvals, question];
+  const running = snapshot({ runtimeStatus: "active", canSend: false, latestTurnId: "turn-one",
+    turns: [{ turnId: "turn-one", status: "inProgress", items: [], itemsComplete: true }],
+    pendingRequestCount: 3, pendingInteractions: interactions });
+  const watched = task({ status: "watching", native_turn_id: "turn-one", pending_interactions: interactions });
+  for (const output of [desktopSessionProjection(entry, running, profile), desktopTaskProjection(watched, profile)] as any[]) {
+    assert.equal(output.capabilities.approve, true); assert.equal(output.capabilities.interaction_respond, false);
+    assert.equal(output.capabilities.cancel, false); assert.equal(output.pending_manual_count, 1);
+    assert.equal(output.pending_interaction_count, 3);
+    for (const approval of output.interaction_state.slice(0, 2)) {
+      assert.equal(approval.available_actions.approve.tool, "agent_knock_knock_approve");
+      assert.equal(approval.manual_action, undefined);
+    }
+    assert.deepEqual(output.interaction_state[2].available_actions, {});
+    assert.match(output.interaction_state[2].manual_action, /in Desktop/);
+  }
+  const approvalOnly = desktopSessionProjection(entry, { ...running, pendingRequestCount: 2, pendingInteractions: approvals }, profile) as any;
+  assert.equal(approvalOnly.pending_manual_count, 0); assert.equal(approvalOnly.manual_action, undefined);
+  const unknown = desktopTaskProjection(watched, desktopCapabilityProfile({ ...DESKTOP_CREATION_BUILD, build: "future" })) as any;
+  assert.equal(unknown.capabilities.approve, false); assert.equal(unknown.pending_manual_count, 3);
 });

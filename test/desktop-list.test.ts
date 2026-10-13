@@ -77,6 +77,7 @@ test("Desktop List defaults to sidebar and retains an unloaded row and its reaso
   assert.equal(sendOnly.desktop_sessions[0].available_actions.model_options, undefined);
   assert.equal(sendOnly.desktop_scan.write_contract_verified, false);
   assert.equal(sendOnly.desktop_scan.send_contract_verified, true);
+  assert.equal(sendOnly.desktop_scan.approval_contract_verified, true);
 });
 
 test("unsupported Desktop sidebar metadata remains an explicit incomplete result, not all history or a successful empty sidebar", async () => {

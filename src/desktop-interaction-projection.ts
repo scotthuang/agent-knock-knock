@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { desktopInteractionResponseVerified, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
 import type { DesktopAsyncInteraction, DesktopInteraction, DesktopQuestion, DesktopRequestResponse } from "./desktop-types.js";
 import { isRecord } from "./value-guards.js";
@@ -29,9 +30,10 @@ export function desktopInteractionFingerprint(item: DesktopInteraction): string 
     item.approvalId, item.nativeApprovalKind, item.networkApprovalContext, item.changes];
   return digest([item.id, item.threadId, item.turnId, item.itemId, item.method, item.questions, ...request]);
 }
-export function desktopInteractionProjection(item: DesktopInteraction, desktopId: string, watchId?: string, responsesVerified = true): ProjectedDesktopInteraction {
+export function desktopInteractionProjection(item: DesktopInteraction, desktopId: string, watchId?: string, capabilities: DesktopCapabilityProfile | boolean = true): ProjectedDesktopInteraction {
   const target: Record<string, string> = watchId ? { watch_id: watchId } : { conversation_id: desktopId };
   const approval = desktopInteractionIsApproval(item);
+  const responsesVerified = desktopInteractionResponseVerified(capabilities, item.kind);
   return {
     ...target, interaction_id: item.id, kind: item.kind, status: "pending",
     native_thread_id: item.threadId, native_turn_id: item.turnId,

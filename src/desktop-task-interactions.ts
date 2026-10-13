@@ -1,4 +1,5 @@
 import { createCallbackEnvelope } from "./callback-transport.js";
+import { desktopInteractionResponseVerified, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { desktopInteractions } from "./desktop-request-interactions.js";
 import { persistDesktopInteraction } from "./desktop-interaction-state.js";
 import { desktopInteractionProjection } from "./desktop-interaction-projection.js";
@@ -27,7 +28,7 @@ function interactionBody(task: DesktopTaskRecord, interaction: DesktopInteractio
 }
 
 /** Native pending requests and asynchronous questions have distinct completeness evidence. */
-export function updateDesktopInteractionAttention(task: DesktopTaskRecord, snapshot: DesktopSnapshot, responsesVerified = true): void {
+export function updateDesktopInteractionAttention(task: DesktopTaskRecord, snapshot: DesktopSnapshot, capabilities: DesktopCapabilityProfile | boolean = true): void {
   const turn = snapshot.turns.find(candidate => candidate.turnId === task.native_turn_id);
   // A partial history is missing evidence, not proof that a question was answered.
   if (!turn || turn.status === "unknown") {
@@ -45,6 +46,7 @@ export function updateDesktopInteractionAttention(task: DesktopTaskRecord, snaps
   revokeInteractionNotifications(task, pending, "desktop_interaction_resolved");
   if (!task.callback_route) return;
   for (const interaction of pending) {
+    const responsesVerified = desktopInteractionResponseVerified(capabilities, interaction.kind);
     const id = `${task.id}:interaction:${interaction.id}`;
     if (task.notifications.some(notification => notification.id === id)) continue;
     task.notifications.push({ id, attempts: 0, status: "ready", envelope: createCallbackEnvelope({ route: task.callback_route,

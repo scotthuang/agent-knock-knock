@@ -1,4 +1,5 @@
 import { resolveMonitorHardTimeoutMs } from "./monitor-deadline-policy.js";
+import type { DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { backendCallbackMaxAttempts } from "./backend-task-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -27,7 +28,7 @@ export interface DesktopSendInput extends DesktopTaskInput { messageId: string; 
 export interface DesktopTaskServiceDependencies extends DesktopTransportPort {
   repository: DesktopStateRepository;
   /** Notification wording follows the installed build; never authorizes dispatch. */
-  interactionResponsesVerified?: boolean;
+  interactionResponsesVerified?: DesktopCapabilityProfile | boolean;
   deliver?(input: CallbackTransportDeliverInput): CallbackAttemptOutcome | Promise<CallbackAttemptOutcome>;
   resolveCallbackContext?(task: DesktopTaskRecord): CallbackTransportContextV1 | undefined;
   now?(): Date;
@@ -103,7 +104,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
   private readonly leaseMs: number;
   private readonly retryMs: number;
   private readonly maxAttempts: number;
-  private readonly interactionResponsesVerified: boolean;
+  private readonly interactionResponsesVerified: DesktopCapabilityProfile | boolean;
   private readonly recovery: ReturnType<typeof createDesktopTaskRecovery>;
   constructor(private readonly deps: DesktopTaskServiceDependencies) {
     this.repo = deps.repository;

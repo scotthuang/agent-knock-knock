@@ -18,16 +18,19 @@ version and build. It is not a minimum-version promise:
 | macOS Desktop application | Send to live owner / Status / Watch | Native approvals, answers, model/permission changes, cancellation | New conversation |
 | --- | --- | --- | --- |
 | `26.1002.52244` / `13536` | Existing verified adapter | Existing verified adapter | Not enabled |
-| `26.1007.30912` / `20156` | Send profile for the new-conversation workflow; read-only observation retains exact owner/turn checks | Not enabled: these operations have not been reverified on this build | Available in AKK 0.14.5; see the creation boundary below |
+| `26.1007.30912` / `20156` | Send profile for the new-conversation workflow; read-only observation retains exact owner/turn checks | AKK 0.14.7 adds command/file approvals: allow once or reject. Answers, model/permission changes, and cancellation remain unavailable | Available in AKK 0.14.5; see the creation boundary below |
 | Other builds | Compatible read-only observations may work; no native writes are advertised | Not enabled | Not enabled |
 
-The `20156` profile does not inherit the old build's native-control approval.
-List and Status keep pending question/approval content visible when it can be
-read reliably, but expose no executable Respond/Approve action and direct the
-user to Desktop. Watch attention notifications follow the same boundary.
+The `20156` profile does not inherit the old build's full native controls.
+AKK 0.14.6 exposes pending interactions but requires handling them in
+Desktop. AKK 0.14.7 adds an Approve action for recognized
+command/file requests, with explicit `approve_once` or `reject` decisions.
+Question replies and other unsupported controls still direct the user to
+Desktop. Watch attention notifications follow the same per-operation boundary.
 `desktop_scan.send_contract_verified` reports the Send profile;
+`approval_contract_verified` reports the per-build approval profile;
 `write_contract_verified` continues to mean the full native-control profile.
-The new profile and creation workflow are available starting in AKK 0.14.5.
+The Send profile and creation workflow are available starting in AKK 0.14.5.
 
 The original fully reviewed application is macOS Codex Desktop `26.1002.52244`, build `13536`,
 bundle ID `com.openai.codex`, installed as `/Applications/ChatGPT.app`. These
@@ -76,6 +79,40 @@ No Desktop operation types a slash command or uses terminal activity as exact
 completion evidence. Existing terminal capabilities remain separate and retain
 their previous checks.
 
+## Approval validation on build 20156
+
+The 2026-10-14 validation for AKK 0.14.7 uses macOS Desktop `26.1007.30912`,
+build `20156`, and one dedicated test conversation.
+
+Real semantic Send, Status and Approve calls passed four cases:
+
+- Command allowed once: the original item completed with exit code 0 and the
+  expected output marker.
+- Command rejected: the original item became `declined`; its target file was
+  never created.
+- File change allowed once: the original item completed and the dedicated file
+  contained exactly the expected text.
+- File change rejected: the original item became `declined`; its target file
+  was never created.
+
+All four responses reached `confirmed` with `exact_approval_item_advanced` and
+one dispatch attempt. Both conversation and exact Watch targets were exercised.
+Repeated consumed semantic approval actions were rejected without another
+dispatch. Approval-attention and completion callbacks were accepted once each by
+an isolated local receiver. The conversation finished idle, with no pending
+interaction and its original read-only/on-request settings unchanged.
+An IPC acknowledgement alone is not confirmation.
+
+Approval responses retain exact thread, turn, owner, and typed request identity
+checks. A repeated response uses its durable record; a possibly submitted
+response is observed without resending. The supported decisions do not grant
+persistent permission or change the conversation's permission mode. This run
+does not establish support for question replies, settings, cancellation, or
+external-channel notification delivery on this build. Network-form command
+approvals share the existing typed request path but were not separately
+live-tested; persistent approvals and permission-request approvals remain
+outside this operation's supported decisions.
+
 ## New-conversation boundary
 
 Use `agent_knock_knock_desktop_create` or the `desktop-create` CLI command; see
@@ -102,9 +139,10 @@ No external channel delivery or newer-build native controls were exercised.
 This route is intentionally separate from loading or replacing an existing
 conversation. A failed or uncertain create/load/send stage must preserve its
 record and exact identities; it must not silently create another conversation
-or replay a task. Native approvals and questions on build `20156` still need
-to be handled in Desktop. The broader native controls remain enabled only for
-build `13536`, where those effects were previously verified.
+or replay a task. AKK 0.14.7 supports the command/file approvals described
+above on build `20156`; question replies and the broader native controls remain
+unavailable there. Those remain
+enabled only for build `13536`, where their effects were previously verified.
 
 ## Find and select a conversation
 
