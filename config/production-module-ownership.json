@@ -887,6 +887,10 @@
       "owner": "host-bridge"
     },
     {
+      "path": "src/conversation-list-presentation.ts",
+      "owner": "codex-native"
+    },
+    {
       "path": "src/conversation-list.ts",
       "owner": "codex-native"
     },

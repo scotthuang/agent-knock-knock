@@ -619,7 +619,7 @@ async function runList(options: TerminalListCliOptions) {
       ...terminalScan.summary,
       terminal_count: projected.terminals.length
     }
-  }, terminalScan.terminalControlled));
+  }, terminalScan.terminalControlled, {}, { diagnostics: options.terminalDebug === true }));
   runtimeLog("info", "terminals_listed", {
     store_dir: storeDir,
     terminal_count: projected.terminals.length,

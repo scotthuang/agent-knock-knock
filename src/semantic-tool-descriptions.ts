@@ -182,11 +182,11 @@ export const semanticToolDescriptions = {
     "Session, ledger, and callback cleanup is best-effort and cannot veto closing " +
     "the Turn; warnings identify metadata AKK preserved. Refresh list afterward " +
     "and use Watch if the coding agent is still working.",
-  list: "List conversations and Watches. Choose conversation_id; AKK selects the available " +
-    "route and merges only proven exact terminal/backend matches. Desktop defaults to saved expanded " +
-    "sidebar membership, not the viewport; desktop_view=history selects saved history. Keep unconnected " +
-    "rows and limitations. live_count covers this page; desktopSearch/desktopProject/desktopCursor " +
-    "filter/page. Use available_actions/action_inputs and the agent-knock-knock skill; mutations revalidate privately.",
+  list: "List CLI/Desktop conversations and separate Watches. Use surface/agent and conversation_id; " +
+    "AKK selects transport. Same-project grouping is display only; terminalDebug expands connections. " +
+    "Desktop defaults to saved expanded sidebar, not viewport; desktop_view=history and " +
+    "desktopSearch/desktopProject/desktopCursor filter/page. Keep unconnected rows/limitations; " +
+    "live_count covers this page. Use available_actions/action_inputs and agent-knock-knock skill; mutations revalidate privately.",
   model_options: "For a Desktop conversation_id, read current model/effort/collaboration mode; " +
     "the owner exposes no model catalog (catalog_available=false), so use only a model explicitly requested by the user. " +
     "For terminal_id, inspect the exact current native model catalog for one explicitly selected " +
@@ -254,7 +254,7 @@ export const semanticToolDescriptions = {
 
 export const semanticCommandGuidance = [
   "For a requested new Desktop conversation use agent_knock_knock_desktop_create, optionally with an exact project and first task. Preserve its operation_id and automatic Watch; opening or uncertain operations may only be continued by that same ID. The terminal new_thread tool remains separate and must not be used to replace a Desktop conversation.",
-  "Select conversations[] by title and project, then use its conversation_id. AKK prefers the backend for supported commands and uses the exact terminal when that operation has no backend implementation. Bound Watch/Turn operations retain their original provider. Only exact identity evidence merges duplicate representations; same directory is not identity. Keep returned Watch IDs and current interaction actions; never retry uncertain input on another route.",
+  "Present conversations[] as CLI or Desktop using surface, with Codex/Claude as agent types. Select its displayed conversation_id and advertised action; AKK chooses the connection. Do not add raw discovery arrays to the list or count them or Watches as independent tasks. Same-project display grouping never proves session identity. Use terminalDebug for complete connection diagnostics. Bound Watch/Turn operations retain their original provider; never retry uncertain input on another route.",
   "Use /akk permissions on an advertised idle Codex terminal before /akk " +
     "set-permissions. Read the current permission mode and returned built-in " +
     "choices, then apply the requested or authorized mode. Full Access is an " +
