@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.6 - 2026-10-13
+
+- Present CLI and Desktop conversations together, with Codex/Claude Code as the agent type. Keep transport details in diagnostics instead of showing backend and terminal connections as separate user-facing categories.
+- Group one-to-one same-agent/project discovery candidates into the original terminal display row without copying native identity, status or permissions. Preserve separate rows for known conflicts and multiple candidates, and retain direct-only CLI discovery. Expand all unassociated connections with `terminalDebug` / `list --terminal-debug`.
+- Preserve exact special-control targets, managed recovery records and independent Watch receipts in the compact list. Display grouping never changes backend-first routing, task ownership, uncertain-send handling or callback deduplication.
+
 ## 0.14.5 - 2026-10-13
 
 - Add a separate Desktop Create tool for a new conversation in an exact existing project or outside projects, with an optional first task. Create zero-turn metadata, hand the same UUID to Desktop, then use its verified owner for real task submission and automatic monitoring.

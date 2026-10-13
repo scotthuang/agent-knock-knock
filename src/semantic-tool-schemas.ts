@@ -315,7 +315,7 @@ export const listParameters = {
     },
     terminalDebug: {
       type: "boolean",
-      description: "When true, include terminal-provider discovery diagnostics for debugging Gateway environment issues."
+      description: "When true, expand CLI connection details and ungrouped discovery candidates, plus terminal-provider diagnostics. Project grouping is presentation only, never session identity."
     },
     idleTimeoutMinutes: {
       type: "number"

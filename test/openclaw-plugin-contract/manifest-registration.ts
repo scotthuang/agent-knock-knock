@@ -125,7 +125,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "38574cb6fd582481ffe5d9d361de550bd8f7b285b6a99100c3b9033606dec227"
+    "0f439fb0fe4ee2af13b0d6f25b1193774bc60b40eba8ff506efe50d10663a01e"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.match(
@@ -139,8 +139,8 @@ test("OpenClaw runtime registrations match the published manifest", () => {
 
   const listTool = toolDefinitions.get("agent_knock_knock_list");
   assert.ok(listTool);
-  assert.match(listTool.description ?? "", /List conversations and Watches/u);
-  assert.match(listTool.description ?? "", /only proven exact terminal\/backend matches/u);
+  assert.match(listTool.description ?? "", /List CLI\/Desktop conversations and separate Watches/u);
+  assert.match(listTool.description ?? "", /Same-project grouping is display only/u);
   assert.match(listTool.description ?? "", /available_actions/u);
   assert.match(listTool.description ?? "", /action_inputs/u);
   assert.match(listTool.description ?? "", /agent-knock-knock skill/u);

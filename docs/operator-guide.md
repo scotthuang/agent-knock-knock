@@ -53,13 +53,19 @@ Direct slash commands are available in every first-party Host integration:
 | `/akk respond <turn-id> <answer>` | Answer a question inside the same managed Turn. |
 | `/akk cancel <turn-id>` | Interrupt one exact active managed Turn. |
 
-AKK List presents one `conversations[]` collection. It merges terminal/backend
-rows only when their exact current native identities match. A matching project
-or title does not establish that link. Select a conversation and action; AKK
-chooses the supported transport. Bound task and interaction IDs retain their
-original provider, and an uncertain mutation is never retried through another
-transport. The [CLI backend guide](codex-cli-native-compatibility.md#automatic-conversation-routing-2026-10-10)
-describes backend preference and terminal fallback in detail.
+AKK List presents **CLI** and **Desktop** in one `conversations[]` collection,
+with Codex/Claude Code as the agent type. Choose the displayed conversation and
+action; AKK selects the connection. The default view groups a one-to-one
+same-agent/project terminal and direct candidate without changing the terminal's
+identity, status, actions or dispatch checks. Multiple candidates and known
+identity conflicts stay separate; direct-only CLI conversations remain visible.
+Use `terminalDebug: true` or `list --terminal-debug` for all unassociated
+connections and routing details. A display group is not proof that its candidates
+are the same native session, and neither rows nor Watches are a task count.
+Bound task and interaction IDs retain their original provider; uncertain input
+is never retried through another transport. The
+[CLI backend guide](codex-cli-native-compatibility.md#automatic-conversation-routing-2026-10-10)
+describes routing evidence and presentation boundaries.
 
 The terminal-specific commands in the table require a physical terminal;
 Desktop interaction, model, permission, and cancellation controls use their

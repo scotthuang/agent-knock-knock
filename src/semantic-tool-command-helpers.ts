@@ -5,6 +5,7 @@ import { backendRecoveryTarget, backendRecoveryToolArgs, isBackendTaskWatchId } 
 import path from "node:path";
 import { isCodexNativeConversationId, parseCodexNativeConversationId } from "./codex-native-identity.js";
 import { recordValue } from "./value-guards.js";
+import { compactAkkScopedConversationControls } from "./semantic-tool-list-projection.js";
 import {
   isTerminalApprovalDecision,
   type TerminalApprovalDecision
@@ -655,6 +656,7 @@ function formatAkkTerminalControlLines(terminal: Record<string, unknown>): strin
 }
 
 export function formatAkkListCommandResult(result: Record<string, unknown>): string {
+  if (Array.isArray(result.conversations)) return formatAkkConversationList(result);
   const conversations = Array.isArray(result.conversations) ? arrayValue(result.conversations) : undefined;
   const nativeSessions = conversations?.filter(row => row.source === "codex_cli" || row.source === "claude_cli") ?? [...arrayValue(result.codex_cli_sessions), ...arrayValue(result.claude_cli_sessions)];
   const nativeWatches = [...arrayValue(result.codex_cli_watches), ...arrayValue(result.claude_cli_watches)];
@@ -718,6 +720,69 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
         ]
       : [])
   ].join("\n");
+}
+
+function formatAkkConversationList(result: Record<string, unknown>): string {
+  const conversations = arrayValue(result.conversations);
+  const cli = conversations.filter(row => row.surface !== "desktop" && row.source !== "codex_desktop");
+  const desktop = conversations.filter(row => row.surface === "desktop" || row.source === "codex_desktop");
+  const diagnostics = recordValue(result.conversation_presentation)?.mode === "diagnostics";
+  const watches = [...arrayValue(result.codex_cli_watches), ...arrayValue(result.claude_cli_watches),
+    ...arrayValue(result.desktop_watches), ...arrayValue(result.terminal_watches)];
+  const unavailable = arrayValue(result.unavailable_managed_turns);
+  return [
+    `AKK conversations (${conversations.length}; ${cli.length} CLI, ${desktop.length} Desktop):`,
+    ...(cli.length ? ["CLI conversations:", ...cli.flatMap(row => formatAkkConversationLines(row, diagnostics))] : []),
+    ...(desktop.length ? ["Desktop conversations:", ...desktop.flatMap(row => formatAkkConversationLines(row, diagnostics))] : []),
+    ...(recordValue(result.desktop_scan)?.next_cursor ? [`Desktop next_cursor: ${recordValue(result.desktop_scan)?.next_cursor}`] : []),
+    ...(watches.length ? [`Watches (${watches.length}; observations, not additional conversations):`, ...watches.flatMap(row => [
+      `- ${row.watch_id}: ${row.status}`, ...formatAvailableActions("  actions", row)
+    ])] : []),
+    ...(unavailable.length ? ["unavailable managed turns:", ...unavailable.slice(0, 20).flatMap(row => [
+      `- ${formatManagedTurnLine(row)}`, ...formatAvailableActions("  actions", row)
+    ])] : [])
+  ].join("\n");
+}
+
+function formatAkkConversationLines(row: Record<string, unknown>, diagnostics: boolean): string[] {
+  const controls = arrayValue(row.terminal_controls);
+  return [
+    `- ${row.title ?? row.native_thread_id ?? row.conversation_id} | ${row.agent ?? "unknown agent"} | ${row.cwd ?? "unknown directory"} | ${row.activity_state ?? "unknown"}`,
+    `  conversation_id: ${row.conversation_id}`,
+    ...formatAvailableActions("  actions", row),
+    ...compatibilityWarningLines(row),
+    ...(nonEmptyString(row.manual_action) ? [`  ${row.manual_action}`] : []),
+    ...[row, ...controls].flatMap(formatAkkConversationManagedLines),
+    ...compactAkkScopedConversationControls(row).map(control =>
+      `  scoped actions (conversation_id: ${control.conversation_id}): ${Object.keys(recordValue(control.available_actions) ?? {}).sort().join(", ")}`),
+    ...(diagnostics ? [
+      `  connection: ${row.source ?? "unknown"}; route: ${row.route_status ?? row.connection_state ?? "unknown"}`,
+      ...controls.map(control => `  terminal connection: ${control.id}`)
+    ] : [])
+  ];
+}
+
+function formatAkkConversationManagedLines(row: Record<string, unknown>): string[] {
+  const managed = recordValue(row.managed) ?? {};
+  const current = recordValue(managed.current_turn);
+  const recent = recordValue(managed.recent_turn);
+  const conflict = recordValue(row.management_conflict);
+  const recovery = orphanedTerminalDispatchRecovery(row);
+  const sessionId = nonEmptyString(managed.session_short_ref) ?? nonEmptyString(managed.session_id);
+  return [
+    ...(sessionId ? [`  AKK session: ${sessionId}`] : []),
+    ...(current ? [`  current turn: ${formatManagedTurnLine(current)}`, ...formatAvailableActions("  current turn actions", current)] : []),
+    ...(recent ? [`  recent turn: ${formatManagedTurnLine(recent)}`, ...formatAvailableActions("  recent turn actions", recent)] : []),
+    ...arrayValue(managed.history).slice(0, 20).flatMap(turn => [
+      `  history: ${formatManagedTurnLine(turn)}`, ...formatAvailableActions("  history actions", turn)
+    ]),
+    ...(Number(managed.hidden_turn_count) > 0 && arrayValue(managed.history).length === 0
+      ? [`  older managed turns: ${managed.hidden_turn_count} (use all=true to include)`] : []),
+    ...arrayValue(row.blocking_turns).map(turn => `  blocking turn: ${turn.turn_id} | ${turn.status}`),
+    ...(conflict ? [`  management conflict: ${conflict.reason ?? "current ownership is unresolved"}`,
+      ...(nonEmptyString(conflict.recovery) ? [`  recovery: ${conflict.recovery}`] : [])] : []),
+    ...(recovery ? [`  recovery: ${recovery}`] : [])
+  ];
 }
 
 /**

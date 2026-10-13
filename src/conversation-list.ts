@@ -1,9 +1,34 @@
 import { associateClaudeConversationRoutes } from "./claude-conversation-routing-identity.js";
 import { associateConversationRoutes, type ConversationRoutingIdentityOptions } from "./conversation-routing-identity.js";
+import { presentConversationList, type ConversationListPresentationOptions } from "./conversation-list-presentation.js";
 import { recordValue } from "./value-guards.js";
 
 type Row = Record<string, unknown>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter(item => recordValue(item)) : [];
+const terminalOnlyActions = new Set(["native_inspect", "model_options", "set_model", "cancel", "new_thread", "clear_thread",
+  "resume_thread", "list_resumable_threads", "identify_foreground", "repair_model_control", "reconcile_binding", "close"]);
+const claudeSpecialActions = new Set(["approve", "respond", "respond_interaction", "permission_options", "set_permissions"]);
+
+export function isTerminalSpecificConversationAction(agent: unknown, name: string): boolean {
+  return terminalOnlyActions.has(name) || agent === "claude" && claudeSpecialActions.has(name);
+}
+
+/** A single proven terminal may offer its own special controls; its exact action targets stay unchanged. */
+function withExactTerminalActions(native: Row): Row {
+  if (!["codex_cli", "claude_cli"].includes(String(native.source))) return native;
+  const controls = rows(native.terminal_controls);
+  if (controls.length !== 1) return native;
+  const actions = { ...recordValue(native.available_actions) };
+  const capabilities = { ...recordValue(native.capabilities) };
+  for (const [name, action] of Object.entries(recordValue(controls[0].available_actions) ?? {})) {
+    const special = isTerminalSpecificConversationAction(native.agent, name);
+    if (special && !Object.hasOwn(actions, name) && recordValue(action)) {
+      actions[name] = action;
+      capabilities[name === "respond_interaction" ? "interaction_respond" : name] = true;
+    }
+  }
+  return { ...native, available_actions: actions, capabilities };
+}
 
 /** Send/Watch on a proven alias select this backend; an old physical offer cannot bypass it. */
 function routedTerminalControls(terminal: Row, native: Row): Row {
@@ -23,7 +48,8 @@ function routedTerminalControls(terminal: Row, native: Row): Row {
 }
 
 /** Public conversation inventory; legacy endpoint arrays remain private-action/diagnostic inputs. */
-export function unifiedConversationList(result: Row, terminals: readonly Row[], identityOptions: ConversationRoutingIdentityOptions = {}) {
+export function unifiedConversationList(result: Row, terminals: readonly Row[], identityOptions: ConversationRoutingIdentityOptions = {},
+  presentationOptions: ConversationListPresentationOptions = {}) {
   const native = rows(result.codex_cli_sessions);
   const association = associateConversationRoutes(terminals, native, identityOptions);
   const claude = rows(result.claude_cli_sessions);
@@ -49,6 +75,7 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
       route_preference: terminal.agent === "codex" ? "codex_backend" : "terminal", route_status: terminal.agent === "codex" ? "identity_unresolved" : "terminal_only", available_actions: actions });
   }
   conversations.push(...rows(result.desktop_sessions).map(row => ({ ...row, route_preference: "desktop_ipc" })));
-  return { ...result, conversations, conversation_routing: { policy: "backend_first", exact_associations: association.associations.length + claudeAssociations.length,
+  return { ...result, ...presentConversationList(conversations.map(withExactTerminalActions), terminals, presentationOptions),
+    conversation_routing: { policy: "backend_first", exact_associations: association.associations.length + claudeAssociations.length,
     unresolved_terminals: association.unassociated.filter(item => terminals.some(t => t.id === item.terminalId && t.agent === "codex")).length } };
 }

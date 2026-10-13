@@ -88,16 +88,26 @@ proves that backend thread is the selected live conversation. Existing opaque
 `codex-cli:v1:...` and `terminal:v...` IDs remain accepted; the Host tools also
 accept a terminal ID as `conversation_id` for these operations.
 
-A physical terminal and a backend thread are coalesced only with exact current
-thread identity, the verified Codex home of the live process, and the physical
-terminal/process incarnation. A configured default home, matching cwd, title,
-launch `resume` UUID or frontend version alone does not establish that link.
-Home evidence comes from the observed process and its open resources, including
-the Codex arg0 lock when available. Missing or conflicting evidence leaves the
-representations separate. `terminal_aliases[]` records proven associations;
-`terminal_controls[]` retains their managed Turns, recovery and terminal-only
-actions inside the same conversation row. These nested controls are not extra
-tasks or permission to bypass their existing checks.
+The default List presents CLI and Desktop, with Codex/Claude as the agent type.
+In AKK 0.14.6, one unresolved terminal and one loaded direct candidate with the
+same agent and normalized absolute project path share the original terminal's
+display row. This presentation grouping does not copy the candidate's native ID,
+status, permissions or actions, and does not establish a routing association.
+Known thread/home/process conflicts or multiple candidates remain separate.
+A direct-only CLI remains listed. If an embedded CLI and an independent direct
+CLI have the same directory and unknown identities, this default grouping can
+also fold those records; `terminalDebug: true` / `list --terminal-debug` expands
+all unassociated records. Raw CLI discovery arrays remain available for diagnosis.
+
+Actual routing association still requires the exact current thread, verified
+Codex home and physical process incarnation. A configured home, matching cwd,
+title, startup `resume` UUID or version is not enough. `terminal_aliases` and
+`terminal_controls` are diagnostic evidence for proven matches, not display
+candidates. Normal results retain safe special actions and managed recovery
+records without repeating the endpoint as another conversation. When several
+exact endpoints offer a special operation, scoped controls retain their distinct
+targets; no endpoint is chosen implicitly. Public display counts do not assert
+unique tasks, and Watches remain separate monitoring records.
 
 List does not type into terminals. A targeted conversation operation, including
 ordinary Status, can use the existing advertised idle-only `/status` inspection

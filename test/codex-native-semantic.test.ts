@@ -288,13 +288,14 @@ test("unified terminal conversation targets reject competing identities before a
 });
 
 
-test("unified List presents each supplied conversation once while retaining offline rows, Watches and diagnostics", () => {
+test("unified List presents CLI and Desktop once while retaining actions, offline rows and Watches", () => {
   const otherTerminal = "terminal:v2:herdr:claude:default:w1:p4:5678";
   const terminal = { id: otherTerminal, conversation_id: otherTerminal, source: "terminal", agent: "claude",
     route_preference: "terminal", route_status: "terminal_only", available_actions: {
       send: { tool: "agent_knock_knock_send", arguments: { selector: otherTerminal, expected_terminal_token: "PRIVATE_SEND" }, missing_required: ["request"] }
     } };
-  const native = { id: conversationId, conversation_id: conversationId, source: "codex_cli", title: "Shared work",
+  const native = { id: conversationId, conversation_id: conversationId, source: "codex_cli", agent: "codex", title: "Shared work",
+    backend_version: "0.162.1", connection_state: "loaded_backend_verified",
     route_preference: "codex_backend", route_status: "backend_available", terminal_aliases: [terminalId],
     capabilities: { status: true, send: true }, terminal_controls: [{ id: terminalId, agent: "codex",
       managed: { session_id: "managed-session", current_turn: { turn_id: "managed-turn", status: "working" } },
@@ -305,7 +306,9 @@ test("unified List presents each supplied conversation once while retaining offl
         native_inspect: { tool: "agent_knock_knock_native_inspect", input: { conversation_id: terminalId, inspection: "status", expected_binding_token: "PRIVATE_BINDING" } },
         new_thread: { tool: "agent_knock_knock_new_thread", arguments: { terminal_id: terminalId, expected_binding_token: "PRIVATE_BINDING" } }
       } }], available_actions: {
-      send: { tool: "agent_knock_knock_send", arguments: { conversation_id: conversationId }, missing_required: ["request"] }
+      send: { tool: "agent_knock_knock_send", arguments: { conversation_id: conversationId }, missing_required: ["request"] },
+      native_inspect: { tool: "agent_knock_knock_native_inspect", input: { conversation_id: conversationId, inspection: "status" } },
+      new_thread: { tool: "agent_knock_knock_new_thread", arguments: { terminal_id: terminalId, expected_binding_token: "PRIVATE_BINDING" } }
     }, process_incarnation: "PRIVATE_NATIVE" };
   const desktop = { id: "desktop:v1:opaque", conversation_id: "desktop:v1:opaque", source: "codex_desktop", title: "Unloaded sidebar member",
     route_preference: "desktop_ipc", connection_state: "no_live_owner", can_send_reason: "no_live_owner",
@@ -324,16 +327,20 @@ test("unified List presents each supplied conversation once while retaining offl
   const result = compactAkkListModelProjection(raw) as Record<string, any>;
   assert.deepEqual(result.conversations.map(row => row.conversation_id), [conversationId, otherTerminal, desktop.conversation_id]);
   for (const legacy of ["terminals", "codex_cli_sessions", "desktop_sessions"]) assert.equal(legacy in result, false);
-  assert.deepEqual(result.conversations[0].terminal_aliases, [terminalId]);
-  assert.equal(result.conversations[0].route_status, "backend_available");
-  const controls = result.conversations[0].terminal_controls;
-  assert.equal(controls.length, 1);
-  assert.equal(controls[0].id, terminalId);
-  assert.equal(controls[0].managed.session_id, "managed-session");
-  assert.equal(controls[0].managed.current_turn.turn_id, "managed-turn");
-  assert.equal(controls[0].available_actions.new_thread, true);
-  assert.deepEqual(controls[0].blocking_turns[0].recovery_action, { name: "close", arguments: { turn_id: "prior-turn" } });
-  assert.deepEqual(controls[0].action_inputs.native_inspect, { arguments: { inspection: "status" } });
+  assert.deepEqual(result.conversations.map(row => row.surface), ["cli", "cli", "desktop"]);
+  assert.equal(result.conversations[0].agent, "codex");
+  assert.equal(result.projection.version, 2);
+  assert.equal(result.conversations[0].connected, true);
+  assert.equal(result.conversations[2].connection_state, "no_live_owner");
+  for (const field of ["source", "route_preference", "route_status", "terminal_aliases", "terminal_controls", "backend_version", "connection_state"]) {
+    assert.equal(field in result.conversations[0], false, `${field} is reserved for connection diagnostics`);
+  }
+  assert.equal(result.conversations[0].managed.session_id, "managed-session");
+  assert.equal(result.conversations[0].managed.current_turn.turn_id, "managed-turn");
+  assert.equal(result.conversations[0].available_actions.new_thread, true);
+  assert.deepEqual(result.conversations[0].blocking_turns[0].recovery_action, { name: "close", arguments: { turn_id: "prior-turn" } });
+  assert.deepEqual(result.conversations[0].action_inputs.native_inspect, { arguments: { inspection: "status" } });
+  assert.deepEqual(result.conversations[0].action_inputs.new_thread, { arguments: { terminal_id: terminalId } });
   assert.equal(result.conversations[1].available_actions.send, true);
   assert.deepEqual(result.conversations[1].action_inputs.send, { missing_required: ["request"] });
   assert.equal(result.conversations[2].capabilities.send, false);
@@ -344,17 +351,109 @@ test("unified List presents each supplied conversation once while retaining offl
   assert.equal(result.codex_cli_watches[0].watch_id, watchId);
   assert.equal(result.desktop_watches.length, 1);
   assert.equal(result.terminal_watches.length, 1);
-  assert.deepEqual(result.conversation_routing, { policy: "backend_first", exact_associations: 1, unresolved_terminals: 0 });
+  assert.equal("conversation_routing" in result, false);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_/u);
   const command = formatAkkListCommandResult(raw);
-  assert.match(command, /AKK conversations \(3\)/u);
+  assert.match(command, /AKK conversations \(3; 2 CLI, 1 Desktop\)/u);
+  assert.match(command, /CLI conversations:/u);
+  assert.match(command, /Desktop conversations:/u);
+  assert.match(command, /Watches \(3; observations, not additional conversations\)/u);
   assert.equal(command.split("Shared work").length - 1, 1);
   assert.match(command, /Unloaded sidebar member/u);
-  assert.match(command, /associated terminal controls/u);
+  assert.doesNotMatch(command, /associated terminal controls|Direct CLI|live terminals|codex_backend|terminal connection/u);
   assert.match(command, /managed-turn/u);
+  const diagnosticRaw = { ...raw, conversation_presentation: { mode: "diagnostics" } };
+  const diagnostic = compactAkkListModelProjection(diagnosticRaw) as Record<string, any>;
+  assert.deepEqual(diagnostic.conversations[0].terminal_aliases, [terminalId]);
+  assert.equal(diagnostic.conversations[0].route_status, "backend_available");
+  assert.equal(diagnostic.conversations[0].backend_version, "0.162.1");
+  assert.equal(diagnostic.conversations[0].terminal_controls[0].managed.current_turn.turn_id, "managed-turn");
+  assert.deepEqual(diagnostic.conversation_routing, { policy: "backend_first", exact_associations: 1, unresolved_terminals: 0 });
+  assert.doesNotMatch(JSON.stringify(diagnostic), /PRIVATE_/u);
+  assert.match(formatAkkListCommandResult(diagnosticRaw), /terminal connection:/u);
   const emptyUnified = compactAkkListModelProjection({ conversations: [], terminals: [terminal] });
   assert.deepEqual(emptyUnified.conversations, [], "An intentionally empty unified view never widens to the diagnostic pool");
   assert.equal("terminals" in emptyUnified, false);
+});
+
+
+test("compact unified CLI connections preserve truthful connectivity and each managed recovery target", () => {
+  const row = (suffix: string, fields: Record<string, unknown>) => ({ conversation_id: `${conversationId}-${suffix}`,
+    source: "codex_cli", agent: "codex", ...fields });
+  const projected = compactAkkListModelProjection({ conversations: [
+    row("unloaded", { connection_state: "not_loaded", capabilities: { send: false }, available_actions: {} }),
+    row("unknown", { connection_state: "unconfirmed", activity_state: "unknown" }),
+    row("terminal", { source: "terminal", process_state: "active", terminal_control: { kind: "herdr", target: "pane" } }),
+    row("shared", { connection_state: "loaded_backend_verified", terminal_controls: [
+      { managed: { session_id: "session-one", current_turn: { turn_id: "turn-one", status: "stalled" } } },
+      { managed: { session_id: "session-two", current_turn: { turn_id: "turn-two", status: "blocked" } } }
+    ] })
+  ] }) as Record<string, any>;
+  assert.equal(projected.conversations[0].connected, false);
+  assert.equal(projected.conversations[0].capabilities.send, false);
+  assert.equal("connected" in projected.conversations[1], false, "An unknown connection never becomes connected by presentation");
+  assert.equal(projected.conversations[2].connected, true);
+  assert.equal("terminal_control" in projected.conversations[2], false);
+  assert.deepEqual(projected.conversations[3].control_records.map(record => record.managed.current_turn.turn_id), ["turn-one", "turn-two"]);
+  assert.equal("terminal_controls" in projected.conversations[3], false);
+  assert.equal("available_actions" in projected.conversations[3], false, "Presentation does not infer or union connection actions");
+});
+
+
+test("unified CLI scoped controls preserve exact special targets without advertising another conversation or bypass", () => {
+  const second = "terminal:v2:tmux:codex:second:0.0:2233";
+  const action = (name: string, target: string, args: Record<string, unknown> = {}) => ({ tool: `agent_knock_knock_${name}`,
+    arguments: { terminal_id: target, expected_binding_token: "PRIVATE_SCOPE", ...args } });
+  const control = (id: string) => ({ id, permission_control: { status: "supported", scope: "current_session" }, available_actions: {
+    model_options: action("model_options", id), native_inspect: action("native_inspect", id, { inspection: "status" }),
+    permission_options: action("permission_options", id), send: action("send", id), status: action("status", id),
+    watch: action("watch", id), approve: action("approve", id), respond_interaction: action("respond_interaction", id),
+    set_permissions: action("set_permissions", id, { mode: "full_access" })
+  } });
+  const native = { conversation_id: conversationId, source: "codex_cli", agent: "codex", title: "One CLI",
+    terminal_aliases: [terminalId, second], terminal_controls: [control(terminalId), control(second), control("not-an-exact-alias")],
+    capabilities: { send: true, approve: false }, available_actions: {
+      send: { tool: "agent_knock_knock_send", input: { conversation_id: conversationId } }
+    } };
+  const raw = { conversations: [native] };
+  const result = compactAkkListModelProjection(raw) as Record<string, any>;
+  assert.equal(result.conversations.length, 1);
+  const displayed = result.conversations[0];
+  assert.equal(displayed.available_actions.model_options, undefined, "Multiple targets are never promoted to one ambiguous action");
+  assert.equal(displayed.capabilities.approve, false);
+  assert.deepEqual(displayed.scoped_controls.map(row => row.conversation_id), [terminalId, second]);
+  for (const scoped of displayed.scoped_controls) {
+    assert.deepEqual(scoped.available_actions, { model_options: true, native_inspect: true, permission_options: true });
+    assert.deepEqual(scoped.action_inputs.native_inspect, { arguments: { inspection: "status" } });
+    assert.deepEqual(scoped.permission_control, { status: "supported", scope: "current_session" });
+  }
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SCOPE|not-an-exact-alias/u);
+  const text = formatAkkListCommandResult(raw);
+  assert.match(text, /AKK conversations \(1; 1 CLI, 0 Desktop\)/u);
+  assert.equal(text.split("One CLI").length - 1, 1);
+  assert.match(text, /scoped actions \(conversation_id: terminal:v2:tmux:codex:second:0\.0:2233\): model_options, native_inspect, permission_options/u);
+});
+
+test("single exact CLI controls avoid promoted duplicates but retain different permission scope and truthful capabilities", () => {
+  const model = { tool: "agent_knock_knock_model_options", input: { terminal_id: terminalId } };
+  const permissions = { tool: "agent_knock_knock_permission_options", input: { terminal_id: terminalId }, scope: "current_session" };
+  const codex = { conversation_id: conversationId, source: "codex_cli", agent: "codex", terminal_aliases: [terminalId],
+    terminal_controls: [{ id: terminalId, available_actions: { model_options: model, permission_options: permissions,
+      set_permissions: { tool: "agent_knock_knock_set_permissions", input: { terminal_id: terminalId, mode: "approve_for_me" } } } }],
+    capabilities: { model_options: false, set_permissions: false }, available_actions: { model_options: model,
+      permission_options: { tool: "agent_knock_knock_permission_options", input: { conversation_id: conversationId }, scope: "native_thread" } } };
+  const claude = { conversation_id: "claude-cli:fixture", source: "claude_cli", agent: "claude",
+    capabilities: { approve: false, interaction_respond: false }, available_actions: {
+      approve: { tool: "agent_knock_knock_approve", arguments: { terminal_id: terminalId } },
+      respond_interaction: { tool: "agent_knock_knock_respond_interaction", arguments: { turn_id: "exact-turn" } }
+    } };
+  const result = compactAkkListModelProjection({ conversations: [codex, claude] }) as Record<string, any>;
+  assert.equal(result.conversations[0].capabilities.model_options, true);
+  assert.equal(result.conversations[0].capabilities.set_permissions, false, "A scoped offer never becomes an unqualified capability");
+  assert.deepEqual(result.conversations[0].scoped_controls[0].available_actions, { permission_options: true, set_permissions: true });
+  assert.deepEqual(result.conversations[0].scoped_controls[0].action_inputs.set_permissions, { arguments: { mode: "approve_for_me" } });
+  assert.equal(result.conversations[1].capabilities.approve, true);
+  assert.equal(result.conversations[1].capabilities.interaction_respond, true);
 });
 
 

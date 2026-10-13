@@ -44,7 +44,10 @@ test("Claude associations require exact process incarnation and resolved native 
   assert.deepEqual(listed.conversations[0].terminal_aliases, [terminalId]);
   assert.equal(listed.conversations[0].route_preference, "claude_native");
   const compact = compactAkkListModelProjection(listed);
-  assert.ok(JSON.stringify(compact).includes('"source":"claude_cli"'));
+  const displayed = (compact.conversations as Record<string, unknown>[])[0];
+  assert.equal(displayed.surface, "cli");
+  assert.equal(displayed.agent, "claude");
+  assert.equal("source" in displayed, false);
   assert.ok(JSON.stringify(compact).includes('"claude_cli_watches":[]'));
 });
 

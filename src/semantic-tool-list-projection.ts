@@ -3,6 +3,7 @@ import { isAkkModelFacingPrivateAuthorityField } from
 import { arrayValue, finiteNumber, nonEmptyString, stringArrayValue,
   truncateText } from "./semantic-tool-value-helpers.js";
 import { recordValue } from "./value-guards.js";
+import { isTerminalSpecificConversationAction } from "./conversation-list.js";
 
 /**
  * Keep every structured controller-Host List result below its model-output
@@ -17,13 +18,14 @@ export function compactAkkListModelProjection(
   value: unknown
 ): Record<string, unknown> {
   const result = recordValue(value) ?? {};
+  const routingDiagnostics = recordValue(result.conversation_presentation)?.mode === "diagnostics";
   const actionContracts = recordValue(result.action_contracts);
   const diagnostics = compactAkkListDiagnostics(result);
   const recovery = compactAkkListControlState(result.recovery);
   return {
     projection: {
       schema: "agent-knock-knock/host-list-compact",
-      version: 1,
+      version: Array.isArray(result.conversations) ? 2 : 1,
       skill: "agent-knock-knock",
       ...(finiteNumber(actionContracts?.version) !== undefined
         ? { action_contract_version: finiteNumber(actionContracts?.version) }
@@ -49,9 +51,11 @@ export function compactAkkListModelProjection(
       claude_cli_scan: compactAkkListScalars(recordValue(result.claude_cli_scan) ?? {}, ["status", "returned", "loaded_count", "complete", "watch_error"])
     } : {}),
     ...(Array.isArray(result.conversations)
-      ? { conversations: arrayValue(result.conversations).map(compactConversation),
-          conversation_routing: compactAkkListScalars(recordValue(result.conversation_routing) ?? {},
-            ["policy", "exact_associations", "unresolved_terminals"]) }
+      ? { conversations: arrayValue(result.conversations).map(row => compactConversation(row, routingDiagnostics)),
+          conversation_presentation: compactAkkListScalars(recordValue(result.conversation_presentation) ?? { mode: "default" },
+            ["mode", "workspace_grouped_connections"]),
+          ...(routingDiagnostics ? { conversation_routing: compactAkkListScalars(recordValue(result.conversation_routing) ?? {},
+            ["policy", "exact_associations", "unresolved_terminals"]) } : {}) }
       : { terminals: arrayValue(result.terminals).map(compactAkkListTerminal) }),
     terminal_watches: arrayValue(result.terminal_watches)
       .map(compactAkkListWatch),
@@ -103,11 +107,75 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
   };
 }
 
-function compactConversation(row: Record<string, unknown>): Record<string, unknown> {
+function compactConversation(row: Record<string, unknown>, diagnostics: boolean): Record<string, unknown> {
   const output = row.source === "codex_desktop" ? compactDesktopConversation(row)
     : ["codex_cli", "claude_cli"].includes(String(row.source)) ? compactNativeConversation(row) : compactAkkListTerminal(row);
-  return { ...output, ...compactAkkListScalars(row, ["conversation_id", "route_preference", "route_status"]),
+  output.surface = row.surface ?? (row.source === "codex_desktop" ? "desktop" : "cli");
+  if (diagnostics) return { ...output, ...compactAkkListScalars(row, ["conversation_id", "route_preference", "route_status"]),
     ...(Array.isArray(row.terminal_aliases) ? { terminal_aliases: stringArrayValue(row.terminal_aliases) } : {}) };
+  const controls = arrayValue(output.terminal_controls);
+  const management = controls.map(compactConversationControlRecord).filter(control => Object.keys(control).length > 0);
+  if (management.length === 1) Object.assign(output, management[0]);
+  else if (management.length > 1) output.control_records = management;
+  if (output.surface === "cli") projectCliConnection(output, row);
+  for (const field of ["source", "backend_version", "terminal_controls", "terminal_control", "command", "pid",
+    "process_state", "screen_state", "durable_activity_state", "native_identity_state"]) delete output[field];
+  return output;
+}
+
+function projectCliConnection(output: Record<string, unknown>, row: Record<string, unknown>): void {
+  if (["loaded_backend_verified", "native_registry_verified"].includes(String(row.connection_state)) || row.process_state === "active") {
+    output.connected = true;
+  } else if (row.connection_state === "not_loaded") output.connected = false;
+  delete output.connection_state;
+  const scoped = compactAkkScopedConversationControls(row);
+  if (scoped.length) output.scoped_controls = scoped;
+  const actions = recordValue(output.available_actions) ?? {};
+  const capabilities = { ...recordValue(output.capabilities) };
+  for (const name of ["status", "send", "watch", "approve", "set_permissions", "permission_options", "model_options", "set_model", "cancel"]) {
+    if (actions[name] === true) capabilities[name] = true;
+  }
+  if (actions.respond_interaction === true) capabilities.interaction_respond = true;
+  if (Object.keys(capabilities).length) output.capabilities = capabilities;
+}
+
+/** Exact connection-scoped controls remain selectable without becoming extra conversations. */
+export function compactAkkScopedConversationControls(row: Record<string, unknown>): Record<string, unknown>[] {
+  const aliases = new Set(stringArrayValue(row.terminal_aliases));
+  const nativeActions = recordValue(row.available_actions) ?? {};
+  return arrayValue(row.terminal_controls).flatMap(control => {
+    const id = nonEmptyString(control.conversation_id ?? control.id);
+    if (!id || !aliases.has(id)) return [];
+    const actions: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(recordValue(control.available_actions) ?? {})) {
+      const action = recordValue(value);
+      if (!action || !isScopedConversationAction(row.agent, name, action)) continue;
+      const promoted = recordValue(nativeActions[name]);
+      if (promoted && JSON.stringify(compactAkkListActionInput(name, promoted)) === JSON.stringify(compactAkkListActionInput(name, action))) continue;
+      actions[name] = action;
+    }
+    if (Object.keys(actions).length === 0) return [];
+    const permission = Object.hasOwn(actions, "permission_options") || Object.hasOwn(actions, "set_permissions")
+      ? recordValue(control.permission_control) : undefined;
+    return [{ conversation_id: id, ...compactAkkListActions(actions, { conversation_id: id, terminal_id: id }),
+      ...(permission ? { permission_control: compactAkkListScalars(permission, ["status", "scope"]) } : {}) }];
+  });
+}
+
+function isScopedConversationAction(agent: unknown, name: string, action: Record<string, unknown>): boolean {
+  if (isTerminalSpecificConversationAction(agent, name)) return true;
+  if (agent !== "codex") return false;
+  if (name === "permission_options") return true;
+  return name === "set_permissions" && recordValue(action.arguments ?? action.input)?.mode === "approve_for_me";
+}
+
+/** Keep actionable managed records without presenting another endpoint as a conversation. */
+function compactConversationControlRecord(control: Record<string, unknown>): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  for (const field of ["managed", "management_conflict", "management_unavailable", "handoff_decision", "blocking_turns"]) {
+    if (control[field] !== undefined) output[field] = control[field];
+  }
+  return output;
 }
 
 function compactAkkListTerminal(
