@@ -164,7 +164,8 @@ export class DesktopIpcClient {
   }
 
   respondRequestOnce(options: DesktopRequestOptions): Promise<DesktopRequestReceipt> {
-    return this.nativeOperation(options.operationId, port => respondDesktopRequest(options, port));
+    return this.nativeOperation(options.operationId,
+      port => respondDesktopRequest(options, port, desktopCapabilityProfile(this.options.compatibility)), "approvals");
   }
   readModelSettings(target: DesktopObserveTarget): Promise<DesktopModelSettings> {
     return readDesktopModelSettings(target, this.nativePort());
@@ -184,10 +185,10 @@ export class DesktopIpcClient {
         this.sentMessageIds.add(operationKey);
       } };
   }
-  private async nativeOperation<T>(operationId: string, operation: (port: DesktopNativeOperationPort) => Promise<T>): Promise<T> {
+  private async nativeOperation<T>(operationId: string, operation: (port: DesktopNativeOperationPort) => Promise<T>, capability: "approvals" | "nativeControls" = "nativeControls"): Promise<T> {
     if (typeof operationId !== "string" || !operationId.trim() || operationId.length > 512) throw new DesktopIpcError("invalid_argument", "Invalid Desktop operation identity");
     const key = crypto.createHash("sha256").update(`desktop-operation:${operationId}`).digest("hex");
-    this.assertOpen(); this.validateWrite(key); this.sending = true;
+    this.assertOpen(); this.validateWrite(key, capability); this.sending = true;
     try { return await operation(this.nativePort(key)); } finally { this.sending = false; }
   }
 
@@ -200,7 +201,7 @@ export class DesktopIpcClient {
     }
   }
 
-  private validateWrite(clientUserMessageId: string, capability: "send" | "nativeControls" = "nativeControls"): void {
+  private validateWrite(clientUserMessageId: string, capability: "send" | "approvals" | "nativeControls" = "nativeControls"): void {
     if (!desktopCapabilityProfile(this.options.compatibility)[capability]) {
       throw new DesktopIpcError("incompatible_desktop", `Desktop ${capability} capability requires a verified version and build; handle this operation in Desktop`);
     }

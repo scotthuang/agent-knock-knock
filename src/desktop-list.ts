@@ -44,6 +44,7 @@ export async function listDesktopSessions(runtime: DesktopRuntime, options: Reco
       catalog_complete: page.complete, live_count: sessions.filter(row => row.connection_state === "live_owner_verified").length,
       application_version: runtime.compatibility.version, application_build: runtime.compatibility.build,
       write_contract_verified: desktopCapabilityProfile(runtime.compatibility).nativeControls,
+      approval_contract_verified: desktopCapabilityProfile(runtime.compatibility).approvals,
       send_contract_verified: desktopCapabilityProfile(runtime.compatibility).send, watch_error: watchError,
       sources: page.sources, membership_is_not_live_identity: true } };
 }

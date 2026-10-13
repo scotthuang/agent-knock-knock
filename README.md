@@ -200,7 +200,7 @@ can use a supported terminal route. Claude Code direct control is available unde
 | Component | Supported boundary |
 | --- | --- |
 | Terminal hosts | tmux; local Herdr `0.8.0` protocol `19` |
-| Codex Desktop | macOS app `26.1002.52244`, build `13536`; this **exact build**, plus an open connected conversation, is required for sending and other controls. Supports Status, exact Watch, approvals/answers, settings, and cancellation. |
+| Codex Desktop | macOS, exact app/build profiles: `26.1002.52244` / `13536` supports the reviewed full controls; `26.1007.30912` / `20156` supports creation and Send/Status/Watch. AKK 0.14.7 adds command/file approvals (allow once or reject) on `20156`; answers, settings, and cancellation remain unavailable there. See the [operation matrix](docs/codex-desktop-compatibility.md#version-and-platform-evidence). |
 | Codex CLI shared backend | Live-tested on macOS: CLI `0.162.1` + backend `0.162.1`, and previously `0.160.0` + `0.162.0`. Requires a loaded main CLI conversation and compatible live protocol. These are tested combinations, **not a numeric minimum**. |
 | Claude Code direct connection | macOS, live-tested `2.1.296`, compatible native peer protocol `1`, and Python 3 available to AKK. Basic task sending, progress and completion observation; unsupported controls require the original terminal. See the [direct guide](docs/claude-cli-direct.md). |
 | Terminal coding agents | Reviewed Codex profiles include `0.160.0` and `0.162.1`; Claude Code `2.1.285` was tested on macOS. Unknown versions may expose limited capabilities; native controls depend on the reviewed profile and current UI. |

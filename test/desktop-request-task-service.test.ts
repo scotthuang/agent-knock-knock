@@ -8,11 +8,12 @@ import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { desktopRequestInteractionId, parseDesktopRequestInteraction } from "../src/desktop-request-interactions.js";
 import { createDesktopStateStore } from "../src/desktop-state-store.js";
 import { createDesktopTaskService } from "../src/desktop-task-service.js";
+import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile, type DesktopCapabilityProfile } from "../src/desktop-compatibility.js";
 import type { DesktopRequestInteraction, DesktopSnapshot } from "../src/desktop-types.js";
 
 const target = { codexHome: "/test/codex", hostId: "local", threadId: "thread-exact" };
 const desktopId = createDesktopConversationId(target);
-function harness(t: TestContext, kind: DesktopRequestInteraction["kind"] = "command_approval", interactionResponsesVerified = true) {
+function harness(t: TestContext, kind: DesktopRequestInteraction["kind"] = "command_approval", interactionResponsesVerified: DesktopCapabilityProfile | boolean = true) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-request-watch-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const method = kind === "blocking_question" ? "item/tool/requestUserInput"
@@ -111,6 +112,21 @@ test("send-only Desktop builds retain one question/approval notification that di
     assert.equal(event.metadata?.action, "manual_desktop");
     assert.match(event.body, /Handle this question or approval in Desktop/);
     assert.doesNotMatch(event.body, /Use AKK Approve|use AKK Respond/);
+    assert.equal((await h.service.reconcile(task.id)).notifications.length, 1);
+  }
+});
+
+test("Desktop approval-enabled build notifies approvals as actionable while questions remain manual and deduplicated", async t => {
+  for (const kind of ["command_approval", "file_approval", "blocking_question"] as const) {
+    const h = harness(t, kind, desktopCapabilityProfile(DESKTOP_CREATION_BUILD));
+    const task = await h.service.watch(h.input), event = task.notifications[0].envelope.event;
+    assert.equal(event.metadata?.action, kind === "blocking_question" ? "manual_desktop" : "approve");
+    assert.equal(event.metadata?.interaction_id, h.request.id);
+    if (kind === "blocking_question") assert.match(event.body, /Handle this question or approval in Desktop/);
+    else {
+      assert.match(event.body, /Use AKK Approve only with the user's decision/);
+      assert.doesNotMatch(event.body, /no verified AKK response control/);
+    }
     assert.equal((await h.service.reconcile(task.id)).notifications.length, 1);
   }
 });

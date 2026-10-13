@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.7 - 2026-10-14
+
+- Enable explicit command and file approvals on macOS Codex Desktop `26.1007.30912` / build `20156`: allow once or reject from the controller, through the original Desktop conversation.
+- Advertise approvals independently from broader native controls across List, Status, Watch and interaction notifications. Question answers, model/permission changes and cancellation remain unavailable on this build; the reviewed build `13536` retains its existing controls.
+- Preserve exact owner, task and pending-request checks, one-dispatch response records and effect verification. An IPC acknowledgement alone does not confirm approval; consumed or uncertain responses are not blindly replayed.
+
+### Validation boundaries
+
+- A dedicated Desktop conversation verified real semantic Send/Status/Approve for command allow/reject and file allow/reject, including successful execution or file changes after approval and absent side effects after rejection. Local attention/completion callbacks were accepted once each; no external chat-delivery claim is made.
+- This release adds no persistent authorization rules or full-access mode changes.
+
 ## 0.14.6 - 2026-10-13
 
 - Present CLI and Desktop conversations together, with Codex/Claude Code as the agent type. Keep transport details in diagnostics instead of showing backend and terminal connections as separate user-facing categories.

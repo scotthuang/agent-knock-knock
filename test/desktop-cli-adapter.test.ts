@@ -10,7 +10,8 @@ import { createDesktopStateStore } from "../src/desktop-state-store.js";
 import { createDesktopResponseStore } from "../src/desktop-response-store.js";
 import { createDesktopResponseService } from "../src/desktop-response-service.js";
 import { createDesktopTaskService } from "../src/desktop-task-service.js";
-import { DESKTOP_CREATION_BUILD } from "../src/desktop-compatibility.js";
+import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
+import { parseDesktopRequestInteraction } from "../src/desktop-request-interactions.js";
 import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
 import { createDesktopSessionControls } from "../src/desktop-session-controls.js";
@@ -34,6 +35,7 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
     runtimeStatus: "idle", pendingRequests: [], pendingRequestCount: 0, unconfirmedSubmissionCount: 0,
     tailKnown: true, latestTurnId: null, turns: [], canSend: true };
   let sends = 0, callbacks = 0, launches = 0, closed = 0, answers = 0;
+  const approvalDecisions: string[] = [];
   let deferredAnswer: DesktopTurnItem | undefined;
   let deferAnswer = false;
   let readFailure = false;
@@ -49,6 +51,17 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
       snapshot.turns[0].items.push(item); snapshot.asyncQuestions = desktopAsyncQuestions(snapshot);
       return { turnId: input.expectedTurnId, clientUserMessageId: input.clientUserMessageId, revision: ++snapshot.revision, atomicTurnPrecondition: false };
     },
+    async respondRequest(_identity, input) {
+      await input.beforeDispatch?.(snapshot);
+      const pending = snapshot.pendingInteractions?.find(item => item.id === input.interactionId)!;
+      assert.notEqual(pending.kind, "async_question");
+      assert.ok("decision" in input.response);
+      approvalDecisions.push(input.response.decision);
+      const item = snapshot.turns[0].items.find(item => item.id === pending.itemId)!;
+      item.status = input.response.decision === "accept" ? "completed" : "declined";
+      snapshot.pendingInteractions = []; snapshot.pendingRequests = []; snapshot.pendingRequestCount = 0;
+      return { turnId: pending.turnId, interactionId: pending.id, requestId: "request-approval", revision: ++snapshot.revision, acknowledged: true };
+    },
     async start(_identity, input) {
       await input.beforeDispatch?.(snapshot); sends++;
       snapshot = { ...snapshot, runtimeStatus: "active", revision: 2, canSend: false, latestTurnId: "turn-one",
@@ -62,12 +75,12 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
     source: { codexHome: target.codexHome, database: "/fixture/catalog", kind: "desktop_catalog", status: "ok" },
     rows: [{ thread_id: target.threadId, host_id: "local", display_title: "Desktop test", source_updated_at: 1 }]
   }] });
-  const tasks = createDesktopTaskService({ repository, ...transport, deliver: () => {
+  const tasks = createDesktopTaskService({ repository, ...transport, interactionResponsesVerified: desktopCapabilityProfile(compatibility), deliver: () => {
     callbacks++; return { disposition: "accepted", accepted_at: new Date().toISOString(), acceptance_id: "callback-accepted" };
   } });
   const responses = createDesktopResponseService({ tasks: repository,
     repository: createDesktopResponseStore(storeDir, { acquire: () => () => {} }), observe: transport.observe,
-    answerAsync: transport.answerAsync! });
+    answerAsync: transport.answerAsync!, respondRequest: transport.respondRequest! });
   const controls = createDesktopSessionControls({ observe: transport.observe,
     readModelSettings: async () => ({ model: snapshot.latestModel ?? null, reasoningEffort: snapshot.latestReasoningEffort ?? null }),
     updateSettings: async (_identity, input) => {
@@ -89,7 +102,16 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
   const run = async (command: string, options: Record<string, unknown> = {}) => JSON.parse((await executeCliCommand(command,
     { storeDir, ...options }, deps)).stdout);
   return { id, tasks, run, deps, get snapshot() { return snapshot; }, failReads() { readFailure = true; }, get sends() { return sends; }, get callbacks() { return callbacks; },
-    get launches() { return launches; }, get closed() { return closed; }, get answers() { return answers; },
+    get launches() { return launches; }, get closed() { return closed; }, get answers() { return answers; }, approvalDecisions,
+    requestApproval(kind: "command" | "file") {
+      const method = kind === "command" ? "item/commandExecution/requestApproval" : "item/fileChange/requestApproval";
+      snapshot.turns[0].items.push({ id: "approval-item", type: kind === "command" ? "commandExecution" : "fileChange", status: "inProgress" });
+      const pending = parseDesktopRequestInteraction({ id: "request-approval", method, params: { threadId: target.threadId,
+        turnId: "turn-one", itemId: "approval-item", command: "printf isolated" } }, target.threadId, snapshot.turns)!;
+      snapshot.pendingRequests = [{ kind: "approval", method, requestId: "request-approval", turnId: "turn-one" }];
+      snapshot.pendingRequestCount = 1; snapshot.pendingInteractions = [pending];
+      return pending;
+    },
     ask(delayed = false) {
       deferAnswer = delayed;
       snapshot.turns[0].items.push({ id: "question-one", type: "agentMessage", phase: "final_answer", delivery: "async",
@@ -275,7 +297,7 @@ test("Desktop Send/Watch defaults and lower-level timeout aliases preserve their
 });
 
 
-test("Desktop CLI send-only profile remains actionable for tasks, not settings, cancellation or answers", async t => {
+test("Desktop CLI approval profile remains unavailable for settings, cancellation and answers", async t => {
   const f = fixture(t, DESKTOP_CREATION_BUILD);
   const ready = await f.run("status", { conversation: f.id });
   assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.set_model, false);
@@ -290,4 +312,25 @@ test("Desktop CLI send-only profile remains actionable for tasks, not settings, 
   assert.equal(status.interaction_state[0].questions[0].title, "Pick a color");
   await assert.rejects(f.run("respond-interaction", { watch: sent.watch_id, openclawSession: "controller" }), /responses are unverified/);
   assert.equal(f.answers, 0);
+});
+
+test("Desktop CLI command/file approvals confirm exact effects and replay their receipt without redispatch", async t => {
+  for (const kind of ["command", "file"] as const) for (const decision of ["approve_once", "reject"] as const) {
+    const f = fixture(t, DESKTOP_CREATION_BUILD);
+    const sent = await f.run("send", { conversation: f.id, message: "Isolated approval", messageId: "approval-task", openclawSession: "controller" });
+    const interaction = f.requestApproval(kind);
+    const current = await f.run("status", { conversation: f.id });
+    const watched = await f.run("watch-status", { watch: sent.watch_id });
+    assert.equal(current.capabilities.approve, true); assert.equal(watched.capabilities.approve, true);
+    assert.equal(watched.pending_manual_count, 0);
+    const selection = kind === "command" ? { conversation: f.id } : { watch: sent.watch_id };
+    const input = { ...selection, interaction: interaction.id, decision, openclawSession: "controller" };
+    const approved = await f.run("approve", input);
+    assert.equal(approved.state, "confirmed"); assert.equal(approved.evidence, "exact_approval_item_advanced");
+    assert.equal(approved.native_turn_id, sent.native_turn_id);
+    assert.equal((await f.run("approve", input)).response_id, approved.response_id);
+    assert.deepEqual(f.approvalDecisions, [decision === "approve_once" ? "accept" : "decline"]);
+    await assert.rejects(f.run("approve", { ...input, openclawSession: "different-controller" }), /different controller/);
+    assert.equal(f.approvalDecisions.length, 1);
+  }
 });

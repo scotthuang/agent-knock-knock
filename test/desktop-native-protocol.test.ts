@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
+import { DESKTOP_CREATION_BUILD } from "../src/desktop-compatibility.js";
 import { reduceDesktopSnapshot } from "../src/desktop-snapshot.js";
 import { desktopInteractions, desktopRequestResponse, findDesktopRequestEffect } from "../src/desktop-request-interactions.js";
-import { DesktopIpcError, type DesktopIpcTransport, type DesktopRequestInteraction } from "../src/desktop-types.js";
+import { DesktopIpcError, type DesktopCompatibility, type DesktopIpcTransport, type DesktopRequestInteraction } from "../src/desktop-types.js";
 
 type Wire = Record<string, any>;
 const target = { threadId: "thread-one", ownerClientId: "owner-one" };
@@ -51,7 +52,7 @@ class Fixture implements DesktopIpcTransport {
   onDisconnect(listener: (error: Error) => void) { this.disconnects.add(listener); return () => { this.disconnects.delete(listener); }; }
   close(): void {}
 }
-const connect = (fixture: Fixture) => DesktopIpcClient.connect({ socketPath: "/tmp/desktop-protocol-not-real", compatibility: VERIFIED_DESKTOP_BUILD,
+const connect = (fixture: Fixture, compatibility: DesktopCompatibility = VERIFIED_DESKTOP_BUILD) => DesktopIpcClient.connect({ socketPath: "/tmp/desktop-protocol-not-real", compatibility,
   transportFactory: async () => fixture });
 const interaction = (raw: Wire) => desktopInteractions(reduceDesktopSnapshot(raw, identity))[0] as DesktopRequestInteraction;
 
@@ -66,9 +67,9 @@ test("Desktop request identity retains number versus string IDs and successive a
   assert.deepEqual(desktopRequestResponse(one, { decision: "decline" }), { decision: "decline" });
 });
 
-test("Desktop native approval dispatch preserves request ID and never treats ok as proof", async () => {
-  for (const kind of ["command", "file"]) {
-    const fixture = new Fixture(); fixture.raw = state(request(kind)); const client = await connect(fixture);
+test("verified Desktop builds preserve exact approval dispatch and never treat ok as proof", async () => {
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) for (const kind of ["command", "file"]) {
+    const fixture = new Fixture(); fixture.raw = state(request(kind)); const client = await connect(fixture, compatibility);
     const pending = interaction(fixture.raw);
     try {
       const receipt = await client.respondRequestOnce({ ...target, expectedRevision: 1, expectedTurnId: "turn-one",
@@ -78,6 +79,27 @@ test("Desktop native approval dispatch preserves request ID and never treats ok 
       const wire = fixture.sent.find(message => message.method === `thread-follower-${kind}-approval-decision`)!;
       assert.equal(wire.version, 1); assert.equal(wire.params.requestId, 17); assert.equal(wire.params.decision, "decline");
       assert.equal(findDesktopRequestEffect(reduceDesktopSnapshot(fixture.raw, identity), { interaction: pending, response: { decision: "decline" } }), null);
+    } finally { client.close(); }
+  }
+});
+
+test("Desktop approval capability cannot dispatch blocking answers or unlock unknown app builds", async () => {
+  for (const [compatibility, kind] of [
+    [DESKTOP_CREATION_BUILD, "blocking"],
+    [{ ...DESKTOP_CREATION_BUILD, build: "unverified" }, "command"],
+    [{ ...DESKTOP_CREATION_BUILD, version: "unverified" }, "file"]
+  ] as const) {
+    const fixture = new Fixture(); fixture.raw = state(request(kind));
+    const client = await connect(fixture, compatibility), pending = interaction(fixture.raw);
+    let durableDispatches = 0;
+    try {
+      await assert.rejects(client.respondRequestOnce({ ...target, expectedRevision: 1, expectedTurnId: "turn-one",
+        interactionId: pending.id, operationId: "not-authorized",
+        response: kind === "blocking" ? { answers: { color: ["Green"] } } : { decision: "accept" },
+        beforeDispatch: async () => { durableDispatches++; } }),
+      (error: unknown) => error instanceof DesktopIpcError && error.code === "incompatible_desktop" && error.dispatchState === "not_sent");
+      assert.equal(durableDispatches, 0);
+      assert.equal(fixture.sent.some(message => message.method.startsWith("thread-follower-")), false);
     } finally { client.close(); }
   }
 });
@@ -111,8 +133,8 @@ test("Desktop approval effects distinguish accept progression from decline and i
 });
 
 test("Desktop stale request cannot dispatch and post-dispatch loss cannot replay", async () => {
-  for (const mode of ["stale", "lost"] as const) {
-    const fixture = new Fixture(), client = await connect(fixture), pending = interaction(fixture.raw);
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) for (const mode of ["stale", "lost"] as const) {
+    const fixture = new Fixture(), client = await connect(fixture, compatibility), pending = interaction(fixture.raw);
     if (mode === "lost") fixture.handler = message => {
       if (message.method !== "thread-follower-command-approval-decision") return false;
       fixture.disconnect(); return true;

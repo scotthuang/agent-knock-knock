@@ -76,7 +76,7 @@ export function createDesktopRuntime(options: DesktopRuntimeOptions) {
     recordCallbackProcessDelivery: () => { throw new Error("Desktop callbacks use their durable outbox"); } });
   const callbacks = createHostProfileCallbackTransport({ legacyTransport: legacy, environment: cliEnv, cwd: cliCwd(), now: cliNow });
   const tasks = createDesktopTaskService({ repository, ...transport, now: cliNow,
-    interactionResponsesVerified: desktopCapabilityProfile(compatibility).nativeControls,
+    interactionResponsesVerified: desktopCapabilityProfile(compatibility),
     deliver: input => callbacks.deliver(input),
     resolveCallbackContext: task => ({ legacyOptions: { gatewayMethod: "chat.send",
       openclawSession: task.controller_session, gatewaySession: task.controller_session, openclawBin: options.openclawBin } }) });
