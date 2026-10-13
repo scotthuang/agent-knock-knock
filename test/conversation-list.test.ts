@@ -60,7 +60,7 @@ test("exact aliases advertise the selected backend Send and Watch while preservi
     const actions = result.conversations[0].available_actions as Record<string, unknown>;
     assert.equal(actions.model_options, special);
     assert.equal(actions.permission_options, undefined);
-    assert.deepEqual(result.conversations[0].capabilities, { send, watch: false });
+    assert.deepEqual(result.conversations[0].capabilities, { send, watch: false, model_options: true });
   }
   // Legacy physical diagnostics retain their own offers; only exact routed controls are projected.
   assert.equal((physical.available_actions as Record<string, any>).send.arguments.expected_terminal_token, "old");
