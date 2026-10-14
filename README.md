@@ -101,9 +101,9 @@ Open a Web conversation and enter `/akk list`. The connector gives every convers
 
 ## See It in Action
 
-[![AKK controlling Codex Desktop from a phone](docs/assets/akk-codex-desktop-demo.gif)](docs/assets/akk-codex-desktop-demo.mp4)
+https://github.com/user-attachments/assets/cc20a609-7907-4996-977e-0b88d8ba6388
 
-*Send a task from your phone. AKK creates a Codex Desktop conversation, handles approvals with your permission, and brings the result back to chat. Click the preview to watch the full-quality video.*
+*Send a task from your phone. AKK creates a Codex Desktop conversation, handles approvals with your permission, and brings the result back to chat.*
 
 ## What AKK Gives You
 
