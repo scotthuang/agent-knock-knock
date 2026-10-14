@@ -101,9 +101,9 @@ Open a Web conversation and enter `/akk list`. The connector gives every convers
 
 ## See It in Action
 
-[![AKK orchestrating a Claude Code-to-Codex handoff through tmux](https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/docs/assets/akk-tmux-handoff-demo.gif)](https://github.com/scotthuang/agent-knock-knock/blob/main/docs/assets/akk-tmux-handoff-demo.mp4)
+[![AKK controlling Codex Desktop from a phone](docs/assets/akk-codex-desktop-demo.gif)](docs/assets/akk-codex-desktop-demo.mp4)
 
-*OpenClaw asks Claude Code to write a file, waits for AKK to report completion, then hands the result to Codex. Both terminals remain available for direct human control. This demo uses tmux; supported Codex CLI and Desktop connections no longer need it. Click the preview for the full-quality video.*
+*Send a task from your phone. AKK creates a Codex Desktop conversation, handles approvals with your permission, and brings the result back to chat. Click the preview to watch the full-quality video.*
 
 ## What AKK Gives You
 
