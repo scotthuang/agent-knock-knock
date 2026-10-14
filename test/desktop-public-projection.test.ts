@@ -124,7 +124,7 @@ test("Desktop task projections retain observation evidence while distinguishing 
 });
 
 
-test("Desktop approval profile keeps questions, settings and cancellation unavailable", () => {
+test("Desktop question capabilities expose async answers while session controls stay unavailable", () => {
   const profile = desktopCapabilityProfile(DESKTOP_CREATION_BUILD);
   const ready = desktopSessionProjection(entry, snapshot(), profile) as any;
   assert.equal(ready.capabilities.send, true);
@@ -138,16 +138,18 @@ test("Desktop approval profile keeps questions, settings and cancellation unavai
     turns: [{ turnId: "turn-one", status: "inProgress", items: [], itemsComplete: true }], pendingInteractions: [interaction] });
   const current = desktopSessionProjection(entry, running, profile) as any;
   assert.equal(current.capabilities.watch, true); assert.equal(current.capabilities.interaction_notify, true);
-  assert.equal(current.capabilities.interaction_respond, false); assert.equal(current.capabilities.cancel, false);
-  assert.equal(current.pending_interaction_count, 1); assert.match(current.manual_action, /in Desktop/);
+  assert.equal(current.capabilities.interaction_respond, true); assert.equal(current.capabilities.cancel, false);
+  assert.equal(current.pending_interaction_count, 1); assert.equal(current.pending_manual_count, 0);
+  assert.equal(current.manual_action, undefined);
   assert.equal(current.interaction_state[0].questions[0].title, "Choose a color");
-  assert.deepEqual(current.interaction_state[0].available_actions, {});
-  assert.deepEqual(validateDesktopInteractionProjections(current.interaction_state, conversationId, undefined, "turn-one")[0].available_actions, {});
+  assert.equal(current.interaction_state[0].available_actions.respond.tool, "agent_knock_knock_respond_interaction");
+  assert.deepEqual(validateDesktopInteractionProjections(current.interaction_state, conversationId, undefined, "turn-one")[0].available_actions,
+    current.interaction_state[0].available_actions);
   const watched = desktopTaskProjection(task({ status: "watching", native_turn_id: "turn-one", pending_interactions: [interaction] }), profile) as any;
-  assert.equal(watched.capabilities.interaction_notify, true); assert.equal(watched.capabilities.interaction_respond, false);
-  assert.equal(watched.capabilities.cancel, false); assert.equal(watched.pending_manual_count, 1);
-  assert.equal(watched.pending_interaction_count, 1); assert.deepEqual(watched.interaction_state[0].available_actions, {});
-  assert.match(watched.manual_action, /in Desktop/);
+  assert.equal(watched.capabilities.interaction_notify, true); assert.equal(watched.capabilities.interaction_respond, true);
+  assert.equal(watched.capabilities.cancel, false); assert.equal(watched.pending_manual_count, 0);
+  assert.equal(watched.pending_interaction_count, 1); assert.equal(watched.interaction_state[0].available_actions.respond.tool, "agent_knock_knock_respond_interaction");
+  assert.equal(watched.manual_action, undefined);
 });
 
 test("Desktop mixed approval/question projections agree across conversation and exact Watch status", () => {
@@ -159,24 +161,37 @@ test("Desktop mixed approval/question projections agree across conversation and 
   const question: DesktopRequestInteraction = { ...approvals[0], kind: "blocking_question",
     id: `desktop-request-interaction:${"3".repeat(64)}`, requestId: 2, itemId: "question-one", method: "item/tool/requestUserInput",
     questions: [{ id: "color", title: "Choose a color", options: ["Green"] }] };
-  const interactions = [...approvals, question];
+  const async: DesktopAsyncInteraction = { id: `desktop-async-interaction:${"4".repeat(64)}`, kind: "async_question",
+    threadId: target.threadId, turnId: "turn-one", itemId: "async-one", method: "request_user_input_async",
+    questions: [{ id: "async-color", title: "Choose another color", options: ["Blue"], isOther: true }] };
+  const interactions = [...approvals, question, async];
   const running = snapshot({ runtimeStatus: "active", canSend: false, latestTurnId: "turn-one",
     turns: [{ turnId: "turn-one", status: "inProgress", items: [], itemsComplete: true }],
     pendingRequestCount: 3, pendingInteractions: interactions });
   const watched = task({ status: "watching", native_turn_id: "turn-one", pending_interactions: interactions });
-  for (const output of [desktopSessionProjection(entry, running, profile), desktopTaskProjection(watched, profile)] as any[]) {
-    assert.equal(output.capabilities.approve, true); assert.equal(output.capabilities.interaction_respond, false);
-    assert.equal(output.capabilities.cancel, false); assert.equal(output.pending_manual_count, 1);
-    assert.equal(output.pending_interaction_count, 3);
-    for (const approval of output.interaction_state.slice(0, 2)) {
-      assert.equal(approval.available_actions.approve.tool, "agent_knock_knock_approve");
-      assert.equal(approval.manual_action, undefined);
+  for (const enabled of ["all", "approvals", "blockingAnswers", "asyncAnswers", "none"] as const) {
+    const selected = enabled === "all" ? profile : { ...profile, approvals: enabled === "approvals",
+      blockingAnswers: enabled === "blockingAnswers", asyncAnswers: enabled === "asyncAnswers" };
+    const supported = [selected.approvals, selected.approvals, selected.blockingAnswers, selected.asyncAnswers];
+    for (const output of [desktopSessionProjection(entry, running, selected), desktopTaskProjection(watched, selected)] as any[]) {
+      assert.equal(output.capabilities.approve, selected.approvals);
+      assert.equal(output.capabilities.interaction_respond, selected.blockingAnswers || selected.asyncAnswers);
+      assert.equal(output.capabilities.cancel, false); assert.equal(output.pending_manual_count, supported.filter(value => !value).length);
+      assert.equal(output.pending_interaction_count, 4);
+      for (const [index, interaction] of output.interaction_state.entries()) {
+        const action = index < 2 ? "approve" : "respond";
+        if (supported[index]) {
+          assert.equal(interaction.available_actions[action].tool, `agent_knock_knock_${action === "respond" ? "respond_interaction" : action}`);
+          assert.equal(interaction.manual_action, undefined);
+        } else {
+          assert.deepEqual(interaction.available_actions, {}); assert.match(interaction.manual_action, /in Desktop/);
+        }
+      }
     }
-    assert.deepEqual(output.interaction_state[2].available_actions, {});
-    assert.match(output.interaction_state[2].manual_action, /in Desktop/);
   }
   const approvalOnly = desktopSessionProjection(entry, { ...running, pendingRequestCount: 2, pendingInteractions: approvals }, profile) as any;
   assert.equal(approvalOnly.pending_manual_count, 0); assert.equal(approvalOnly.manual_action, undefined);
   const unknown = desktopTaskProjection(watched, desktopCapabilityProfile({ ...DESKTOP_CREATION_BUILD, build: "future" })) as any;
-  assert.equal(unknown.capabilities.approve, false); assert.equal(unknown.pending_manual_count, 3);
+  assert.equal(unknown.capabilities.approve, false); assert.equal(unknown.capabilities.interaction_respond, false);
+  assert.equal(unknown.pending_manual_count, 4);
 });

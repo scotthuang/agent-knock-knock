@@ -245,7 +245,7 @@ function desktopResponseFingerprint(interaction: DesktopInteraction, options: Op
 async function respondToDesktopInteraction(runtime: DesktopRuntime, options: Options,
   target: string | undefined, watch: string | undefined, command: "respond-interaction" | "approve"): Promise<void> {
   const profile = desktopCapabilityProfile(runtime.compatibility);
-  if (!(command === "approve" ? profile.approvals : profile.nativeControls)) throw new Error("Desktop interaction responses are unverified for this build; answer in Desktop");
+  if (!(command === "approve" ? profile.approvals : profile.blockingAnswers || profile.asyncAnswers)) throw new Error("Desktop interaction responses are unverified for this build; answer in Desktop");
   const controllerSession = required(options.openclawSession, "controller session");
   const subject = await desktopResponseSubject(runtime, options, target, watch, controllerSession);
   const interactionId = required(options.interaction, "interaction ID");

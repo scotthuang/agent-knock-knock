@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
-import { DESKTOP_CREATION_BUILD } from "../src/desktop-compatibility.js";
+import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
+import { respondDesktopRequest } from "../src/desktop-ipc-native-operations.js";
 import { reduceDesktopSnapshot } from "../src/desktop-snapshot.js";
 import { desktopInteractions, desktopRequestResponse, findDesktopRequestEffect } from "../src/desktop-request-interactions.js";
 import { DesktopIpcError, type DesktopCompatibility, type DesktopIpcTransport, type DesktopRequestInteraction } from "../src/desktop-types.js";
@@ -83,9 +84,9 @@ test("verified Desktop builds preserve exact approval dispatch and never treat o
   }
 });
 
-test("Desktop approval capability cannot dispatch blocking answers or unlock unknown app builds", async () => {
+test("Desktop question and approval writes reject unknown app versions and builds before dispatch", async () => {
   for (const [compatibility, kind] of [
-    [DESKTOP_CREATION_BUILD, "blocking"],
+    [{ ...DESKTOP_CREATION_BUILD, build: "unverified" }, "blocking"],
     [{ ...DESKTOP_CREATION_BUILD, build: "unverified" }, "command"],
     [{ ...DESKTOP_CREATION_BUILD, version: "unverified" }, "file"]
   ] as const) {
@@ -105,21 +106,45 @@ test("Desktop approval capability cannot dispatch blocking answers or unlock unk
 });
 
 test("Desktop blocking answer requires exact completed response item, same typed request ID and all answers", async () => {
-  const fixture = new Fixture(); fixture.raw = state(request("blocking")); const client = await connect(fixture);
-  const pending = interaction(fixture.raw), response = { answers: { color: ["Green"] } };
-  try {
-    await client.respondRequestOnce({ ...target, expectedRevision: 1, expectedTurnId: "turn-one", interactionId: pending.id,
-      operationId: "blocking-one", response });
-    const sent = fixture.sent.find(message => message.method === "thread-follower-submit-user-input")!;
-    assert.deepEqual(JSON.parse(JSON.stringify(sent.params)), { conversationId: target.threadId, requestId: 17,
-      response: { answers: { color: { answers: ["Green"] } } } });
-    fixture.raw.requests = [];
-    fixture.raw.turns[0].items = [{ id: "response-17", type: "userInputResponse", requestId: "17", turnId: "turn-one", completed: true, answers: { color: ["Green"] } }];
-    assert.equal(findDesktopRequestEffect(reduceDesktopSnapshot(fixture.raw, identity), { interaction: pending, response }), null);
-    fixture.raw.turns[0].items[0].requestId = 17;
-    assert.equal(findDesktopRequestEffect(reduceDesktopSnapshot(fixture.raw, identity), { interaction: pending, response })?.evidence, "exact_blocking_answer_observed");
-    assert.equal(findDesktopRequestEffect(reduceDesktopSnapshot(fixture.raw, identity), { interaction: pending, response: { answers: { color: ["Blue"] } } }), null);
-  } finally { client.close(); }
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) {
+    const fixture = new Fixture(); fixture.raw = state(request("blocking")); const client = await connect(fixture, compatibility);
+    const pending = interaction(fixture.raw), response = { answers: { color: ["Green"] } };
+    try {
+      await client.respondRequestOnce({ ...target, expectedRevision: 1, expectedTurnId: "turn-one", interactionId: pending.id,
+        operationId: "blocking-one", response });
+      const sent = fixture.sent.find(message => message.method === "thread-follower-submit-user-input")!;
+      assert.deepEqual(JSON.parse(JSON.stringify(sent.params)), { conversationId: target.threadId, requestId: 17,
+        response: { answers: { color: { answers: ["Green"] } } } });
+      fixture.raw.requests = [];
+      fixture.raw.turns[0].items = [{ id: "response-17", type: "userInputResponse", requestId: "17", turnId: "turn-one", completed: true, answers: { color: ["Green"] } }];
+      assert.equal(findDesktopRequestEffect(reduceDesktopSnapshot(fixture.raw, identity), { interaction: pending, response }), null);
+      fixture.raw.turns[0].items[0].requestId = 17;
+      assert.equal(findDesktopRequestEffect(reduceDesktopSnapshot(fixture.raw, identity), { interaction: pending, response })?.evidence, "exact_blocking_answer_observed");
+      assert.equal(findDesktopRequestEffect(reduceDesktopSnapshot(fixture.raw, identity), { interaction: pending, response: { answers: { color: ["Blue"] } } }), null);
+    } finally { client.close(); }
+  }
+});
+
+test("Desktop native request dispatch checks the observed kind independently of other response capabilities", async () => {
+  for (const enabled of ["approvals", "blockingAnswers", "asyncAnswers"] as const) for (const kind of ["command", "blocking"] as const) {
+    const raw = state(request(kind)), pending = interaction(raw);
+    const profile = { ...desktopCapabilityProfile({ version: "unknown", build: "unknown" }), [enabled]: true };
+    let barriers = 0, dispatches = 0, requests = 0;
+    const operation = respondDesktopRequest({ ...target, expectedRevision: 1, expectedTurnId: "turn-one",
+      interactionId: pending.id, operationId: "independent-kind",
+      response: kind === "blocking" ? { answers: { color: ["Green"] } } : { decision: "accept" },
+      beforeDispatch: async () => { barriers++; } }, {
+      discoverOwner: async () => ({ ownerClientId: target.ownerClientId, supportsUntrustedAppInput: true }),
+      observeThread: async () => reduceDesktopSnapshot(raw, identity),
+      markDispatched: () => { dispatches++; },
+      request: async () => { requests++; return { result: { ok: true } }; }
+    }, profile);
+    const allowed = enabled === (kind === "blocking" ? "blockingAnswers" : "approvals");
+    if (allowed) assert.equal((await operation).acknowledged, true);
+    else await assert.rejects(operation, (error: unknown) => error instanceof DesktopIpcError
+      && error.code === "incompatible_desktop" && error.dispatchState === "not_sent");
+    assert.equal(barriers, Number(allowed)); assert.equal(dispatches, Number(allowed)); assert.equal(requests, Number(allowed));
+  }
 });
 
 test("Desktop approval effects distinguish accept progression from decline and ignore missing-item completion", () => {

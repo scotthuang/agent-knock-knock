@@ -54,13 +54,18 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
     async respondRequest(_identity, input) {
       await input.beforeDispatch?.(snapshot);
       const pending = snapshot.pendingInteractions?.find(item => item.id === input.interactionId)!;
-      assert.notEqual(pending.kind, "async_question");
-      assert.ok("decision" in input.response);
-      approvalDecisions.push(input.response.decision);
-      const item = snapshot.turns[0].items.find(item => item.id === pending.itemId)!;
-      item.status = input.response.decision === "accept" ? "completed" : "declined";
+      assert.ok(pending.kind !== "async_question");
+      if ("answers" in input.response) {
+        assert.equal(pending.kind, "blocking_question"); answers++;
+        snapshot.turns[0].items.push({ id: "blocking-answer", type: "userInputResponse", requestId: pending.requestId,
+          turnId: pending.turnId, completed: true, answers: structuredClone(input.response.answers) });
+      } else {
+        approvalDecisions.push(input.response.decision);
+        const item = snapshot.turns[0].items.find(item => item.id === pending.itemId)!;
+        item.status = input.response.decision === "accept" ? "completed" : "declined";
+      }
       snapshot.pendingInteractions = []; snapshot.pendingRequests = []; snapshot.pendingRequestCount = 0;
-      return { turnId: pending.turnId, interactionId: pending.id, requestId: "request-approval", revision: ++snapshot.revision, acknowledged: true };
+      return { turnId: pending.turnId, interactionId: pending.id, requestId: pending.requestId, revision: ++snapshot.revision, acknowledged: true };
     },
     async start(_identity, input) {
       await input.beforeDispatch?.(snapshot); sends++;
@@ -117,6 +122,16 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
       snapshot.turns[0].items.push({ id: "question-one", type: "agentMessage", phase: "final_answer", delivery: "async",
         text: "Pick a color", questions: [{ title: "Pick a color", options: ["Green", "Blue"] }] });
       snapshot.asyncQuestions = desktopAsyncQuestions(snapshot);
+    },
+    askBlocking() {
+      const method = "item/tool/requestUserInput", requestId = 27;
+      const pending = parseDesktopRequestInteraction({ id: requestId, method, params: { threadId: target.threadId,
+        turnId: "turn-one", itemId: "blocking-item", questions: [
+          { id: "color", question: "Choose a color", options: [{ label: "Green" }, { label: "Blue" }] },
+          { id: "notes", question: "Add a note", options: [], isOther: true }
+        ] } }, target.threadId, snapshot.turns)!;
+      snapshot.pendingRequests = [{ kind: "user_input", method, requestId, turnId: "turn-one" }];
+      snapshot.pendingRequestCount = 1; snapshot.pendingInteractions = [pending];
     },
     revealAnswer() {
       if (deferredAnswer) snapshot.turns[0].items.push(deferredAnswer);
@@ -208,33 +223,63 @@ test("Desktop CLI keeps a persisted Watch but reports monitor launch failure wit
 
 
 test("Desktop CLI fresh Watch questions use typed answers and Status reconciles unknown acceptance without resend", async t => {
-  const f = fixture(t);
-  const sent = await f.run("send", { conversation: f.id, message: "Ask for a color", messageId: "async-task", openclawSession: "controller" });
-  f.ask(true);
-  const status = await f.run("watch-status", { watch: sent.watch_id, openclawSession: "controller" });
-  assert.equal(status.pending_async_count, 1);
-  const question = status.interaction_state[0];
-  const response = { interaction_id: question.interaction_id, answers: [{ question_id: question.questions[0].question_id,
-    response_kind: "single_select", selected_option_ids: [question.questions[0].options[0].option_id] }] };
-  const input = { watch: sent.watch_id, openclawSession: "controller", interaction: question.interaction_id,
-    responseJson: JSON.stringify(response), expectedInteractionFingerprint: question.interaction_prompt_fingerprint,
-    expectedInteractionExpiresAt: "2000-01-01T00:00:00.000Z" };
-  await assert.rejects(f.run("respond-interaction", { ...input, expectedInteractionFingerprint: "f".repeat(64) }), /question changed/);
-  assert.equal(f.answers, 0);
-  const uncertain = await f.run("respond-interaction", input);
-  assert.equal(uncertain.state, "uncertain"); assert.equal(f.answers, 1);
-  f.revealAnswer();
-  const recovered = await f.run("watch-status", { watch: sent.watch_id, openclawSession: "controller" });
-  assert.equal(recovered.interaction_state.length, 0);
-  assert.equal(recovered.response_state[0].state, "confirmed");
-  assert.equal(recovered.response_state[0].evidence, "exact_async_answer_observed");
-  assert.equal(f.answers, 1);
-  const same = await f.run("respond-interaction", input);
-  assert.equal(same.response_id, uncertain.response_id); assert.equal(same.state, "confirmed"); assert.equal(f.answers, 1);
-  const conversation = await f.run("status", { conversation: f.id, openclawSession: "controller" });
-  assert.equal(conversation.response_state[0].state, "confirmed");
-  assert.equal(conversation.latest_turn.response_text.includes("Pick a color"), false);
-  await assert.rejects(f.run("respond-interaction", { ...input, openclawSession: "other" }), /different controller/);
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) {
+    const f = fixture(t, compatibility);
+    const sent = await f.run("send", { conversation: f.id, message: "Ask for a color", messageId: "async-task", openclawSession: "controller" });
+    f.ask(true);
+    const status = await f.run("watch-status", { watch: sent.watch_id, openclawSession: "controller" });
+    assert.equal(status.pending_async_count, 1);
+    const question = status.interaction_state[0];
+    const response = { interaction_id: question.interaction_id, answers: [{ question_id: question.questions[0].question_id,
+      response_kind: "single_select", selected_option_ids: [question.questions[0].options[0].option_id] }] };
+    const input = { watch: sent.watch_id, openclawSession: "controller", interaction: question.interaction_id,
+      responseJson: JSON.stringify(response), expectedInteractionFingerprint: question.interaction_prompt_fingerprint,
+      expectedInteractionExpiresAt: "2000-01-01T00:00:00.000Z" };
+    await assert.rejects(f.run("respond-interaction", { ...input, expectedInteractionFingerprint: "f".repeat(64) }), /question changed/);
+    assert.equal(f.answers, 0);
+    const uncertain = await f.run("respond-interaction", input);
+    assert.equal(uncertain.state, "uncertain"); assert.equal(f.answers, 1);
+    f.revealAnswer();
+    const recovered = await f.run("watch-status", { watch: sent.watch_id, openclawSession: "controller" });
+    assert.equal(recovered.interaction_state.length, 0);
+    assert.equal(recovered.response_state[0].state, "confirmed");
+    assert.equal(recovered.response_state[0].evidence, "exact_async_answer_observed");
+    assert.equal(f.answers, 1);
+    const same = await f.run("respond-interaction", input);
+    assert.equal(same.response_id, uncertain.response_id); assert.equal(same.state, "confirmed"); assert.equal(f.answers, 1);
+    const conversation = await f.run("status", { conversation: f.id, openclawSession: "controller" });
+    assert.equal(conversation.response_state[0].state, "confirmed");
+    assert.equal(conversation.latest_turn.response_text.includes("Pick a color"), false);
+    await assert.rejects(f.run("respond-interaction", { ...input, openclawSession: "other" }), /different controller/);
+  }
+});
+
+test("Desktop CLI answers every blocking question through conversation or Watch and confirms one exact response", async t => {
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) for (const useWatch of [false, true]) {
+    const f = fixture(t, compatibility);
+    const sent = await f.run("send", { conversation: f.id, message: "Ask two questions", messageId: "blocking-task", openclawSession: "controller" });
+    f.askBlocking();
+    const subject = useWatch ? { watch: sent.watch_id } : { conversation: f.id };
+    const statusCommand = useWatch ? "watch-status" : "status";
+    const status = await f.run(statusCommand, { ...subject, openclawSession: "controller" });
+    assert.equal(status.pending_manual_count, 0); assert.equal(status.capabilities.interaction_respond, true);
+    const question = status.interaction_state[0];
+    assert.equal(question.kind, "blocking_question"); assert.equal(question.questions.length, 2);
+    const response = { interaction_id: question.interaction_id, answers: [
+      { question_id: question.questions[0].question_id, response_kind: "single_select", selected_option_ids: [question.questions[0].options[0].option_id] },
+      { question_id: question.questions[1].question_id, response_kind: "free_text", text: "Two lines\naccepted" }
+    ] };
+    const input = { ...subject, openclawSession: "controller", interaction: question.interaction_id,
+      responseJson: JSON.stringify(response), expectedInteractionFingerprint: question.interaction_prompt_fingerprint,
+      expectedInteractionExpiresAt: question.expires_at };
+    const answered = await f.run("respond-interaction", input);
+    assert.equal(answered.state, "confirmed"); assert.equal(answered.evidence, "exact_blocking_answer_observed");
+    assert.equal(answered.attempts, 1); assert.equal(f.answers, 1);
+    const recovered = await f.run(statusCommand, { ...subject, openclawSession: "controller" });
+    assert.deepEqual(recovered.interaction_state, []); assert.equal(recovered.response_state[0].state, "confirmed");
+    assert.equal((await f.run("respond-interaction", input)).response_id, answered.response_id);
+    assert.equal(f.answers, 1); assert.equal(f.sends, 1);
+  }
 });
 
 test("Desktop CLI exposes honest model settings and cancels only the exact selected native task", async t => {
@@ -297,7 +342,7 @@ test("Desktop Send/Watch defaults and lower-level timeout aliases preserve their
 });
 
 
-test("Desktop CLI approval profile remains unavailable for settings, cancellation and answers", async t => {
+test("Desktop CLI task-interaction profile keeps settings and cancellation unavailable", async t => {
   const f = fixture(t, DESKTOP_CREATION_BUILD);
   const ready = await f.run("status", { conversation: f.id });
   assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.set_model, false);
@@ -308,9 +353,9 @@ test("Desktop CLI approval profile remains unavailable for settings, cancellatio
   assert.equal(sent.delivered, true); assert.equal(f.sends, 1); assert.equal(sent.capabilities.cancel, false);
   f.ask();
   const status = await f.run("watch-status", { watch: sent.watch_id });
-  assert.equal(status.pending_interaction_count, 1); assert.equal(status.capabilities.interaction_respond, false);
+  assert.equal(status.pending_interaction_count, 1); assert.equal(status.capabilities.interaction_respond, true);
+  assert.equal(status.pending_manual_count, 0);
   assert.equal(status.interaction_state[0].questions[0].title, "Pick a color");
-  await assert.rejects(f.run("respond-interaction", { watch: sent.watch_id, openclawSession: "controller" }), /responses are unverified/);
   assert.equal(f.answers, 0);
 });
 

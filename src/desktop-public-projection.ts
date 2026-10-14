@@ -114,7 +114,8 @@ function sessionObservation(snapshot: DesktopSnapshot | undefined, profile: Desk
   if (!snapshot) return {};
   const actionable = (snapshot.pendingInteractions ?? []).filter(item => item.kind !== "async_question" && desktopInteractionResponseVerified(profile, item.kind)).length;
   return { native_turn_id: snapshot.latestTurnId, pending_manual_count: Math.max(0, snapshot.pendingRequestCount - actionable)
-      + (profile.nativeControls ? 0 : (snapshot.pendingInteractions ?? snapshot.asyncQuestions ?? []).filter(item => item.kind === "async_question").length),
+      + (snapshot.pendingInteractions ?? snapshot.asyncQuestions ?? []).filter(item => item.kind === "async_question"
+        && !desktopInteractionResponseVerified(profile, item.kind)).length,
     observed_revision: snapshot.revision };
 }
 function sessionActions(id: string, capabilities: { live: boolean; send: boolean; watch: boolean; cancel: boolean; nativeControls: boolean }, activeTurn?: string) {
