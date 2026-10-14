@@ -1,5 +1,15 @@
 # Changelog
 
+## Connector releases - 2026-10-14
+
+- Publish Pi connector `0.1.0-poc.3` and DeepSeek Harness connector `0.1.0-rc.5` independently under npm `next`; neither changes the core `0.14.7` version or promotes a connector to stable `latest`.
+- Pin both connectors to published AKK `0.14.7`, aligning the installed HostAdapter, lockfiles, 26 registered tools and canonical Skill handshake. The connectors now expose that core's direct CLI/Desktop capabilities under the existing per-target limits.
+- Support Pi `1.2.0`, retaining the reviewed `0.84.4` runtime. Use the actual Host version in the callback profile, adapt the tool execution context, and support exact conversation/Watch approval confirmations with explicit allow/reject labels.
+- Adapt DSH `0.2.0-rc.2` and separately reviewed `0.2.1-alpha.2` package contracts: coherent Host/Cordis peers, AKK-specific message source typing, and current schema/Skill validation. DSH `latest` remains a release candidate, not a stable release.
+- Preserve exact live controller ownership, callback deduplication and conservative recovery: an accepted callback is not a model-consumption or external-chat-delivery guarantee; old routes do not migrate automatically to a restarted Host.
+
+See [connector compatibility and validation](docs/pi-dsh-compatibility.md) for the version matrix and evidence boundaries.
+
 ## 0.14.7 - 2026-10-14
 
 - Enable explicit command and file approvals on macOS Codex Desktop `26.1007.30912` / build `20156`: allow once or reject from the controller, through the original Desktop conversation.

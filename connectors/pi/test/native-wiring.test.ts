@@ -4,6 +4,7 @@ import test from "node:test";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ExtensionToolContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type {
@@ -30,7 +31,7 @@ import type {
 } from "../src/routes.js";
 
 // Synthetic dynamic catalog: this exercises registration without claiming that
-// the pinned, published AKK 0.13.3 dependency provides all of these tools.
+// any future pinned AKK dependency provides all of these tools.
 const TOOL_NAMES = [
   "agent_knock_knock_list",
   "agent_knock_knock_watch",
@@ -60,7 +61,7 @@ const TOOL_NAMES = [
   "agent_knock_knock_close",
 ] as const;
 
-test("Pi 0.84.4 registers /akk and the supplied dynamic catalog fixture", async () => {
+test("Pi 1.2.0 registers /akk and the supplied dynamic catalog fixture", async () => {
   const fixture = nativeFixture();
   await fixture.start();
 
@@ -213,6 +214,35 @@ test("managed approval may be explicitly rejected by cancelling the exact turn",
   assert.match(fixture.state.timeline.join("\n"), /ui:confirm:true/u);
 
   await fixture.shutdown();
+});
+
+test("direct approvals refresh their exact conversation or Watch and preserve the reviewed decision", async () => {
+  for (const target of [
+    { conversation_id: "desktop:v1:reviewed_thread" },
+    { watch_id: "codex-cli-watch:reviewed_watch" },
+  ]) {
+    for (const decision of ["approve_once", "reject"] as const) {
+      const choice = decision === "reject" ? "Reject request" : "Approve once";
+      const fixture = nativeFixture({ selectChoices: [choice] });
+      await fixture.start();
+      const args = { ...target, interaction_id: "exact-interaction", decision };
+      await executeRegisteredTool(
+        fixture.pi.tool("agent_knock_knock_approve"),
+        `direct-${decision}`,
+        args,
+        undefined,
+        fixture.context,
+      );
+      const [status, action] = fixture.state.toolCalls.slice(-2);
+      assert.deepEqual(status?.args, target);
+      assert.equal(action?.name, "agent_knock_knock_approve");
+      assert.deepEqual(action?.args, args);
+      if (decision === "reject") {
+        assert.deepEqual(fixture.pi.selectOptions.at(-1), ["Reject request", "Keep pending"]);
+      }
+      await fixture.shutdown();
+    }
+  }
 });
 
 test("terminal-scoped approval never advertises an inferred cancel action", async () => {
@@ -407,12 +437,20 @@ test("unsupported Pi fails before allocating connector resources", async () => {
 
   await assert.rejects(
     fixture.start(),
-    /requires Pi 0\.84\.4; received 0\.84\.5/u,
+    /requires tested Pi 1\.2\.0 or 0\.84\.4; received 0\.84\.5/u,
   );
   assert.equal(fixture.state.profileCreates, 0);
   assert.equal(fixture.state.serverStarts, 0);
   assert.equal(fixture.pi.tools.size, 0);
   assert.equal(fixture.pi.commands.size, 0);
+});
+
+test("previous verified Pi 0.84.4 retains registration and shutdown", async () => {
+  const fixture = nativeFixture({ piVersion: "0.84.4" });
+  await fixture.start();
+  assert.deepEqual([...fixture.pi.tools.keys()], TOOL_NAMES);
+  await fixture.shutdown();
+  assert.equal(fixture.state.resourceRemoves, 1);
 });
 
 interface NativeFixtureOptions {
@@ -524,7 +562,7 @@ function nativeFixture(options: NativeFixtureOptions = {}) {
   const adapter = fakeHostAdapter(state, options);
 
   const dependencies: Partial<ConnectorDependencies> = {
-    piVersion: options.piVersion ?? "0.84.4",
+    piVersion: options.piVersion ?? "1.2.0",
     createConnectorProfileResources() {
       state.profileCreates += 1;
       return resources;
@@ -836,7 +874,14 @@ function executeRegisteredTool(
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
 ) {
-  return tool.execute(toolCallId, args, signal, undefined, ctx);
+  const toolContext: ExtensionToolContext = {
+    ...ctx,
+    tools: [],
+    executeTool: async () => {
+      throw new Error("AKK tools must dispatch through HostAdapter, not nested Pi tools");
+    },
+  };
+  return tool.execute(toolCallId, args, signal, undefined, toolContext);
 }
 
 function callbackRequest(controllerId: string, suffix: string): CallbackRequest {

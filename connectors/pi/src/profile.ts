@@ -19,6 +19,7 @@ import {
   CONTROLLER_ID_ENV,
   PI_HOST_ID,
   SUPPORTED_PI_VERSION,
+  SUPPORTED_PI_VERSIONS,
 } from "./constants.js";
 
 const HOST_PROFILE_SCHEMA_URL =
@@ -41,7 +42,11 @@ export interface ConnectorProfileResources {
 /** Create one Pi-runtime-private route-bound Host Profile and IPC authority. */
 export function createConnectorProfileResources(
   baseEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+  piVersion: string = SUPPORTED_PI_VERSION,
 ): ConnectorProfileResources {
+  if (!SUPPORTED_PI_VERSIONS.includes(piVersion)) {
+    throw new Error(`Unsupported Pi Host Profile version: ${piVersion}`);
+  }
   if (process.platform === "win32") {
     throw new Error(
       "agent-knock-knock-pi POC requires a POSIX Unix socket",
@@ -67,7 +72,7 @@ export function createConnectorProfileResources(
     revision,
     compatibility: {
       host: PI_HOST_ID,
-      range: `=${SUPPORTED_PI_VERSION}`,
+      range: `=${piVersion}`,
     },
     controllerContext: {
       driver: "environment_v1",
@@ -135,7 +140,7 @@ export function createConnectorProfileResources(
     const runtime = createTrustedHostProfileRuntime({
       selection: profilePath,
       host: PI_HOST_ID,
-      hostVersion: SUPPORTED_PI_VERSION,
+      hostVersion: piVersion,
       environment: base,
     });
     return hostProfileRelayEnvironment(runtime, base);

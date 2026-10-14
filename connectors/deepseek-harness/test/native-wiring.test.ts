@@ -144,7 +144,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
   assert.equal(skills[0]?.name, "agent-knock-knock");
   assert.equal(
     skills[0]?.description,
-    "Discover and control loaded Codex CLI threads, existing Codex Desktop conversations, or Codex and Claude Code tmux/Herdr terminals with Agent Knock Knock.",
+    "Use Agent Knock Knock to discover and control Codex CLI, Codex Desktop, or Claude Code conversations, and create Desktop conversations when its creation tool is available.",
   );
   assert.equal(skills[0]?.source, "bundled");
   assert.deepEqual(skills[0]?.invocation, {

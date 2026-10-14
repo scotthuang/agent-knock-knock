@@ -42,8 +42,7 @@ test("routes idle callbacks to followup and running callbacks to inject", () => 
   };
   assert.deepEqual(message.content, [{ type: "text", text: "body-idle" }]);
   assert.deepEqual(message.source, {
-    kind: "plugin",
-    plugin: "agent-knock-knock",
+    kind: "agent-knock-knock",
     form: "notice",
     summary: "AKK terminal update",
   });

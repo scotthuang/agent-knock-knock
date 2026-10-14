@@ -1,26 +1,26 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { createHostAdapter } from "@scotthuang/agent-knock-knock/host-adapter";
 import { Compile } from "typebox/compile";
+import { loadBundledAkkSkillDocument } from "../src/bundled-skill.js";
 
 import {
   adaptHostToolInputSchema,
   compileAuthoritativeInputValidator,
 } from "../src/schema-adapter.js";
 
-test("adapts every pinned AKK 0.13.3 HostAdapter tool schema for Pi 0.84.4", async () => {
+test("pinned AKK verifies the bundled Skill and every Pi tool schema", async () => {
   const adapter = createHostAdapter({
     environmentForContext: () => process.env,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   });
   try {
-    // Contract for the published dependency pinned in this connector's lockfile.
-    assert.equal(adapter.tools.length, 22);
-    assert.equal(
-      catalogDigest(adapter),
-      "f469d4e7320c789a48ca106e3a89a5f81815d4da7c14920bfd11d25fdf598a98"
+    // Exercise the actual pinned package, not the native-wiring mock. A stale
+    // dependency without the handshake must fail before this connector ships.
+    adapter.verifyCapabilityHandshake(
+      loadBundledAkkSkillDocument(),
+      adapter.tools.map((tool) => tool.name),
     );
     for (const metadata of adapter.tools) {
       const schema = adaptHostToolInputSchema(metadata.inputSchema);
@@ -34,21 +34,6 @@ test("adapts every pinned AKK 0.13.3 HostAdapter tool schema for Pi 0.84.4", asy
     await adapter.lifecycle.stop();
   }
 });
-
-function catalogDigest(adapter: ReturnType<typeof createHostAdapter>): string {
-  return createHash("sha256").update(JSON.stringify({
-    command: [
-      adapter.command.name,
-      adapter.command.description,
-      adapter.command.acceptsArgs
-    ],
-    tools: adapter.tools.map((tool) => [
-      tool.name,
-      tool.description,
-      tool.inputSchema
-    ])
-  })).digest("hex");
-}
 
 test("keeps the original AKK schema authoritative at execution time", () => {
   const validate = compileAuthoritativeInputValidator({

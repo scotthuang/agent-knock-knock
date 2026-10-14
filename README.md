@@ -74,24 +74,23 @@ That is the terminal first-task flow. For terminal setup and multiple panes, see
 
 ## Install for Pi
 
-Pi can be the controller Host without OpenClaw. The current connector targets Pi `0.84.4`:
-
-This connector currently depends on AKK `0.13.3`; the new 0.14 direct CLI and Desktop capabilities described above apply to the OpenClaw plugin. Follow the connector guide for its supported features.
+Pi can be the controller Host without OpenClaw. The connector supports Pi `1.2.0`
+and retains `0.84.4` compatibility. It includes AKK `0.14.7`, with direct CLI and
+Desktop capabilities governed by the same target-specific boundaries above.
 
 ```bash
-npm install -g @earendil-works/pi-coding-agent@0.84.4
+npm install -g @earendil-works/pi-coding-agent@1.2.0
 pi install npm:@scotthuang/agent-knock-knock-pi@next
 pi
 ```
 
-Pi should show `AKK ready`. With Codex or Claude Code already running in tmux or Herdr, enter `/akk list`. The connector provides `/akk`, the complete capability-handshake-verified semantic tool catalog, the bundled `agent-knock-knock` skill, callbacks to the initiating Pi session, and native approval dialogs. See the [Pi connector guide](connectors/pi/README.md).
+Pi should show `AKK ready`. With a supported coding-agent conversation open, enter `/akk list`. The connector provides `/akk`, the complete capability-handshake-verified semantic tool catalog, the bundled `agent-knock-knock` skill, callbacks to the initiating Pi session, and native approval dialogs. See the [Pi connector guide](connectors/pi/README.md).
 
 ## Install for DeepSeek Harness
 
-The connector supports DeepSeek Harness Web `0.1.1-rc.2`, `0.1.2-alpha.1`, and
-`0.1.5-rc.2`:
-
-This connector currently depends on AKK `0.13.3`; its supported features are documented separately from the OpenClaw plugin's 0.14 direct CLI and Desktop capabilities.
+The connector targets DeepSeek Harness Web `0.2.0-rc.2` (upstream `latest`,
+**still a release candidate**). It includes AKK `0.14.7`. See the connector guide
+for the separate alpha and older-version validation boundaries.
 
 ```bash
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -205,11 +204,11 @@ can use a supported terminal route. Claude Code direct control is available unde
 | Claude Code direct connection | macOS, live-tested `2.1.296`, compatible native peer protocol `1`, and Python 3 available to AKK. Basic task sending, progress and completion observation; unsupported controls require the original terminal. See the [direct guide](docs/claude-cli-direct.md). |
 | Terminal coding agents | Reviewed Codex profiles include `0.160.0` and `0.162.1`; Claude Code `2.1.285` was tested on macOS. Unknown versions may expose limited capabilities; native controls depend on the reviewed profile and current UI. |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
-| Pi connector | Pi `0.84.4`; connector currently depends on AKK `0.13.3` |
-| DeepSeek Harness connector | `0.1.1-rc.2`, `0.1.2-alpha.1`, and `0.1.5-rc.2`; connector currently depends on AKK `0.13.3` |
+| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.3` (`next`), pinned AKK `0.14.7` |
+| DeepSeek Harness connector | Web `0.2.0-rc.2` (RC); connector `0.1.0-rc.5` (`next`), pinned AKK `0.14.7`. See its guide for alpha and legacy coverage. |
 | Runtime | Node.js `22.19.0`+ on macOS or Linux |
 
-The adjacent OpenClaw boundary `2026.5.10-beta.2` is intentionally unsupported. Herdr and Desktop controls depend on reviewed private protocol versions. Desktop catalog presence alone does not prove the conversation is open or controllable. See each connector guide and the Desktop guide for tested boundaries and limitations.
+The adjacent OpenClaw boundary `2026.5.10-beta.2` is intentionally unsupported. Herdr and Desktop controls depend on reviewed private protocol versions. Desktop catalog presence alone does not prove the conversation is open or controllable. See each connector guide, the [Pi/DSH validation matrix](docs/pi-dsh-compatibility.md), and the Desktop guide for tested boundaries and limitations.
 
 Codex CLI model changes and cancellation still require an eligible terminal.
 New/clear/resume operations for paginated Codex CLI `0.158+`, and creating or

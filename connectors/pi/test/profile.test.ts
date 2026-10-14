@@ -9,6 +9,7 @@ import {
   CALLBACK_TOKEN_ENV,
   CONNECTOR_STATE_DIR_ENV,
   CONTROLLER_ID_ENV,
+  SUPPORTED_PI_VERSIONS,
 } from "../src/constants.js";
 import { createConnectorProfileResources } from "../src/profile.js";
 
@@ -37,6 +38,27 @@ test("creates a private route-bound Pi Host Profile without persisting its token
     assert.equal(typeof environment.AKK_HOST_PROFILE_FINGERPRINT, "string");
   } finally {
     resources.remove();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Host Profile carries each verified Pi runtime without broad version claims", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-pi-profile-versions-"));
+  try {
+    for (const piVersion of SUPPORTED_PI_VERSIONS) {
+      const resources = createConnectorProfileResources({
+        [CONNECTOR_STATE_DIR_ENV]: path.join(root, piVersion),
+      }, piVersion);
+      try {
+        const profile = JSON.parse(fs.readFileSync(resources.profilePath, "utf8"));
+        assert.equal(profile.compatibility.range, `=${piVersion}`);
+        assert.equal(typeof resources.environment("verified-version").AKK_HOST_PROFILE_FINGERPRINT, "string");
+      } finally {
+        resources.remove();
+      }
+    }
+    assert.throws(() => createConnectorProfileResources({}, "1.2.1"), /Unsupported Pi/u);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

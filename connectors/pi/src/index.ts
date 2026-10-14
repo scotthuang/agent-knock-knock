@@ -21,7 +21,7 @@ import {
   CONNECTOR_STORE_DIR_ENV,
   CONNECTOR_NAME,
   LIFECYCLE_INTERVAL_MS,
-  SUPPORTED_PI_VERSION,
+  SUPPORTED_PI_VERSIONS,
 } from "./constants.js";
 import { CallbackInbox } from "./callback-inbox.js";
 import { loadBundledAkkSkillDocument } from "./bundled-skill.js";
@@ -141,6 +141,7 @@ async function startConnector(
   const skillDocument = loadBundledAkkSkillDocument();
   const resources = dependencies.createConnectorProfileResources(
     relayEnvironment(process.env),
+    dependencies.piVersion,
   );
   let inbox: CallbackInbox | undefined;
   let routes: PiRouteTable | undefined;
@@ -334,7 +335,10 @@ async function executeApproval(
 
   const statusText = truncateForDialog(hostToolResultText(status));
   const turnId = nonBlankString(args.turn_id);
-  const choices = turnId
+  const rejecting = args.decision === "reject";
+  const choices = rejecting
+    ? ["Reject request", "Keep pending"]
+    : turnId
     ? ["Approve once", "Reject and cancel task", "Keep pending"]
     : ["Approve once", "Keep pending"];
   const choice = await ctx.ui.select(
@@ -342,7 +346,7 @@ async function executeApproval(
     choices,
     signal ? { signal } : undefined,
   );
-  if (choice === "Approve once") {
+  if (choice === (rejecting ? "Reject request" : "Approve once")) {
     return connector.adapter.executeTool(
       controller,
       APPROVE_TOOL,
@@ -440,6 +444,8 @@ function createTarget(
         },
       }, {
         triggerTurn: true,
+        // Pi 1.2 also reports busy while before_agent_start is running. Queue
+        // there just as during generation; never steer into the active task.
         ...(ctx.isIdle() ? {} : { deliverAs: "followUp" as const }),
       });
     },
@@ -513,7 +519,11 @@ function approvalStatusArguments(
   if (turnId) return { turn_id: turnId };
   const terminalId = nonBlankString(args.terminal_id);
   if (terminalId) return { conversation_id: terminalId };
-  throw new Error("AKK approval requires turn_id or terminal_id");
+  const conversationId = nonBlankString(args.conversation_id);
+  if (conversationId) return { conversation_id: conversationId };
+  const watchId = nonBlankString(args.watch_id);
+  if (watchId) return { watch_id: watchId };
+  throw new Error("AKK approval requires an exact Turn, terminal, conversation, or Watch target");
 }
 
 function approvalCancelArguments(
@@ -525,9 +535,9 @@ function approvalCancelArguments(
 }
 
 function assertSupportedPiVersion(version: string): void {
-  if (version !== SUPPORTED_PI_VERSION) {
+  if (!SUPPORTED_PI_VERSIONS.includes(version)) {
     throw new Error(
-      `agent-knock-knock-pi POC requires Pi ${SUPPORTED_PI_VERSION}; ` +
+      `agent-knock-knock-pi POC requires tested Pi ${SUPPORTED_PI_VERSIONS.join(" or ")}; ` +
       `received ${version || "unknown"}`,
     );
   }

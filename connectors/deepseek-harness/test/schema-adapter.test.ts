@@ -8,23 +8,38 @@ import {
 } from "@deepseek-ai/dsh-tools";
 import { createHostAdapter } from "@scotthuang/agent-knock-knock/host-adapter";
 
+import { loadBundledAkkSkillBundle } from "../src/bundled-skill.js";
+
 import {
   adaptHostToolInputSchema,
   compileAuthoritativeInputValidator,
 } from "../src/schema-adapter.js";
 
-test("all pinned AKK 0.13.3 schemas pass the shared supported DSH validator", async () => {
+test("all pinned AKK 0.14.7 schemas pass the shared supported DSH validator", async () => {
   const adapter = createHostAdapter({
     environmentForContext: () => ({}),
     lifecycleEnvironment: {},
     logger: { info() {}, warn() {} },
   });
   try {
+    const document = loadBundledAkkSkillBundle().document;
+    const registeredNames = adapter.tools.map((tool) => tool.name);
+    const handshake = adapter.verifyCapabilityHandshake(document, registeredNames);
+    assert.equal(handshake.toolCount, registeredNames.length);
+    assert.deepEqual(handshake.toolNames, registeredNames);
+    assert.throws(
+      () => adapter.verifyCapabilityHandshake(document, registeredNames.slice(1)),
+      /registered tool names/u,
+    );
+    assert.throws(
+      () => adapter.verifyCapabilityHandshake(`${document}drift`, registeredNames),
+      /capability handshake/u,
+    );
     // Contract for the published dependency pinned in this connector's lockfile.
-    assert.equal(adapter.tools.length, 22);
+    assert.equal(adapter.tools.length, 26);
     assert.equal(
       catalogDigest(adapter),
-      "f469d4e7320c789a48ca106e3a89a5f81815d4da7c14920bfd11d25fdf598a98"
+      "c4dcd80e2ca9d9aa59c4d2e659ae376c644dba558f939b66d101cf332140ac4d"
     );
     for (const tool of adapter.tools) {
       const discovery = adaptHostToolInputSchema(

@@ -56,7 +56,8 @@ export interface PiCallbackRoute {
  *
  * Admission is durable before an accepted ACK is returned. Delivery into Pi
  * is then at-least-once across the narrow `sendMessage()`/inbox-state window,
- * because Pi 0.84.4 does not expose an admission receipt for that API.
+ * because the supported Pi versions do not expose an admission receipt for
+ * that API.
  */
 export class PiRouteTable {
   private readonly routeByAuthority = new WeakMap<object, PiCallbackRoute>();
