@@ -116,18 +116,29 @@ test("send-only Desktop builds retain one question/approval notification that di
   }
 });
 
-test("Desktop approval-enabled build notifies approvals as actionable while questions remain manual and deduplicated", async t => {
+test("Desktop task-interaction build notifies approvals and questions as actionable and deduplicated", async t => {
   for (const kind of ["command_approval", "file_approval", "blocking_question"] as const) {
     const h = harness(t, kind, desktopCapabilityProfile(DESKTOP_CREATION_BUILD));
     const task = await h.service.watch(h.input), event = task.notifications[0].envelope.event;
-    assert.equal(event.metadata?.action, kind === "blocking_question" ? "manual_desktop" : "approve");
+    assert.equal(event.metadata?.action, kind === "blocking_question" ? "respond" : "approve");
     assert.equal(event.metadata?.interaction_id, h.request.id);
-    if (kind === "blocking_question") assert.match(event.body, /Handle this question or approval in Desktop/);
+    if (kind === "blocking_question") assert.match(event.body, /Only use AKK Respond after the user supplies an answer/);
     else {
       assert.match(event.body, /Use AKK Approve only with the user's decision/);
       assert.doesNotMatch(event.body, /no verified AKK response control/);
     }
     assert.equal((await h.service.reconcile(task.id)).notifications.length, 1);
+  }
+});
+
+test("Desktop blocking question notifications do not borrow approval or async response authority", async t => {
+  for (const blockingAnswers of [true, false]) {
+    const profile = { ...desktopCapabilityProfile(DESKTOP_CREATION_BUILD), approvals: !blockingAnswers,
+      asyncAnswers: !blockingAnswers, blockingAnswers };
+    const h = harness(t, "blocking_question", profile);
+    const watched = await h.service.watch(h.input);
+    assert.equal(watched.notifications[0].envelope.event.metadata?.action, blockingAnswers ? "respond" : "manual_desktop");
+    assert.equal((await h.service.reconcile(watched.id)).notifications.length, 1);
   }
 });
 

@@ -111,26 +111,28 @@ function asyncFixture() {
 }
 
 test("Desktop async answer uses one exact-owner steer and permits ordinary progress during durable persistence", async () => {
-  const { fixture, answer } = asyncFixture(), client = await connect(fixture);
-  try {
-    const receipt = await client.answerAsyncOnce({ ...answer, beforeDispatch: async () => {
-      fixture.revision++;
-      fixture.state.turns[0].items.push({ id: "progress", type: "agentMessage", text: "Still working", phase: "commentary" });
-    } });
-    assert.equal(receipt.turnId, "active-turn");
-    assert.equal(receipt.revision, 8);
-    assert.equal(receipt.atomicTurnPrecondition, false);
-    assert.equal(starts(fixture).length, 0);
-    const request = steers(fixture)[0];
-    assert.equal(request.targetClientId, target.ownerClientId);
-    assert.equal(request.version, 1);
-    assert.equal(request.params.clientUserMessageId, answer.clientUserMessageId);
-    assert.equal(request.params.restoreMessage.cwd, "/tmp/desktop-test");
-    assert.deepEqual(request.params.restoreMessage.context.commentAttachments, []);
-    assert.match(request.params.input[0].text, /request_user_input_async/u);
-    await assert.rejects(client.answerAsyncOnce(answer), (error: unknown) => error instanceof DesktopIpcError && error.code === "duplicate_submission");
-    assert.equal(steers(fixture).length, 1);
-  } finally { client.close(); }
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) {
+    const { fixture, answer } = asyncFixture(), client = await connect(fixture, compatibility);
+    try {
+      const receipt = await client.answerAsyncOnce({ ...answer, beforeDispatch: async () => {
+        fixture.revision++;
+        fixture.state.turns[0].items.push({ id: "progress", type: "agentMessage", text: "Still working", phase: "commentary" });
+      } });
+      assert.equal(receipt.turnId, "active-turn");
+      assert.equal(receipt.revision, 8);
+      assert.equal(receipt.atomicTurnPrecondition, false);
+      assert.equal(starts(fixture).length, 0);
+      const request = steers(fixture)[0];
+      assert.equal(request.targetClientId, target.ownerClientId);
+      assert.equal(request.version, 1);
+      assert.equal(request.params.clientUserMessageId, answer.clientUserMessageId);
+      assert.equal(request.params.restoreMessage.cwd, "/tmp/desktop-test");
+      assert.deepEqual(request.params.restoreMessage.context.commentAttachments, []);
+      assert.match(request.params.input[0].text, /request_user_input_async/u);
+      await assert.rejects(client.answerAsyncOnce(answer), (error: unknown) => error instanceof DesktopIpcError && error.code === "duplicate_submission");
+      assert.equal(steers(fixture).length, 1);
+    } finally { client.close(); }
+  }
 });
 
 test("Desktop async answers reject completed tasks, changed questions and human answers before dispatch", async () => {
@@ -374,11 +376,11 @@ test("Desktop IPC trusts only private current-user sockets in a private real dir
 });
 
 
-test("Desktop approval-capable build admits sends without authorizing other native controls", async () => {
-  assert.deepEqual(desktopCapabilityProfile(VERIFIED_DESKTOP_BUILD), { send: true, approvals: true, nativeControls: true });
-  assert.deepEqual(desktopCapabilityProfile(DESKTOP_CREATION_BUILD), { send: true, approvals: true, nativeControls: false });
+test("Desktop task-interaction build admits sends and answers without authorizing session controls", async () => {
+  assert.deepEqual(desktopCapabilityProfile(VERIFIED_DESKTOP_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: true });
+  assert.deepEqual(desktopCapabilityProfile(DESKTOP_CREATION_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: false });
   for (const compatibility of [{ ...DESKTOP_CREATION_BUILD, build: "future" }, { ...DESKTOP_CREATION_BUILD, version: "future" }]) {
-    assert.deepEqual(desktopCapabilityProfile(compatibility), { send: false, approvals: false, nativeControls: false });
+    assert.deepEqual(desktopCapabilityProfile(compatibility), { send: false, approvals: false, blockingAnswers: false, asyncAnswers: false, nativeControls: false });
   }
   const fixture = new Fixture(), client = await connect(fixture, DESKTOP_CREATION_BUILD);
   try {
@@ -387,8 +389,6 @@ test("Desktop approval-capable build admits sends without authorizing other nati
     const before = fixture.sent.length;
     const incompatible = (error: unknown) => error instanceof DesktopIpcError
       && error.code === "incompatible_desktop" && error.dispatchState === "not_sent";
-    await assert.rejects(client.answerAsyncOnce({ ...target, expectedRevision: 7, expectedTurnId: "active-turn",
-      interactionId: "question", answer: "Green", clientUserMessageId: "answer-only" }), incompatible);
     await assert.rejects(client.updateThreadSettingsOnce({ ...target, operationId: "settings-only", settings: { model: "test-model" } }), incompatible);
     await assert.rejects(client.interruptTurnOnce({ ...target, operationId: "interrupt-only", expectedTurnId: "active-turn" }), incompatible);
     assert.equal(fixture.sent.length, before);

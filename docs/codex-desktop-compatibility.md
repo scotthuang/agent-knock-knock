@@ -18,19 +18,22 @@ version and build. It is not a minimum-version promise:
 | macOS Desktop application | Send to live owner / Status / Watch | Native approvals, answers, model/permission changes, cancellation | New conversation |
 | --- | --- | --- | --- |
 | `26.1002.52244` / `13536` | Existing verified adapter | Existing verified adapter | Not enabled |
-| `26.1007.30912` / `20156` | Send profile for the new-conversation workflow; read-only observation retains exact owner/turn checks | AKK 0.14.7 adds command/file approvals: allow once or reject. Answers, model/permission changes, and cancellation remain unavailable | Available in AKK 0.14.5; see the creation boundary below |
+| `26.1007.30912` / `20156` | Send profile for the new-conversation workflow; read-only observation retains exact owner/turn checks | Command/file approvals in AKK 0.14.7; blocking and asynchronous answers in AKK 0.14.8. Model/permission changes and cancellation remain unavailable | Available in AKK 0.14.5; see the creation boundary below |
 | Other builds | Compatible read-only observations may work; no native writes are advertised | Not enabled | Not enabled |
 
 The `20156` profile does not inherit the old build's full native controls.
 AKK 0.14.6 exposes pending interactions but requires handling them in
 Desktop. AKK 0.14.7 adds an Approve action for recognized
 command/file requests, with explicit `approve_once` or `reject` decisions.
-Question replies and other unsupported controls still direct the user to
-Desktop. Watch attention notifications follow the same per-operation boundary.
+AKK 0.14.8 enables blocking and asynchronous
+answers through separate `blockingAnswers` and `asyncAnswers` capability checks.
+Settings, model/permission changes, and cancellation still require Desktop.
+Watch attention notifications follow the same per-operation boundary.
 `desktop_scan.send_contract_verified` reports the Send profile;
 `approval_contract_verified` reports the per-build approval profile;
 `write_contract_verified` continues to mean the full native-control profile.
 The Send profile and creation workflow are available starting in AKK 0.14.5.
+These question capabilities do not change the existing `13536` full-control profile or enable writes on unknown builds.
 
 The original fully reviewed application is macOS Codex Desktop `26.1002.52244`, build `13536`,
 bundle ID `com.openai.codex`, installed as `/Applications/ChatGPT.app`. These
@@ -51,9 +54,10 @@ The app's own `LSMinimumSystemVersion=13.0` metadata is not an AKK-verified
 minimum macOS version. No Desktop Linux/Windows or alternate installation-path
 support is established. The private IPC handshake does not attest the running
 owner's build, so an updated disk bundle with an older app still running remains
-a compatibility limitation. The real task/interaction evidence below is dated
-2026-10-09; the new [backend Recovery work](backend-task-recovery.md#validation-boundary)
-has fast-regression coverage, not a new live Desktop proof.
+a compatibility limitation. The original `13536` task/interaction evidence is
+dated 2026-10-09; the `20156` creation, approval, and question evidence is dated
+2026-10-13/14 below. The [backend Recovery work](backend-task-recovery.md#validation-boundary)
+has fast-regression coverage, not a separate live Desktop proof.
 
 ## Capability boundary
 
@@ -113,6 +117,45 @@ approvals share the existing typed request path but were not separately
 live-tested; persistent approvals and permission-request approvals remain
 outside this operation's supported decisions.
 
+## Question validation on build 20156 — AKK 0.14.8
+
+The 2026-10-14 validation exercised the AKK 0.14.8 question implementation on
+macOS Desktop `26.1007.30912`, build `20156`. Real semantic Send, Status,
+Respond and exact Watch monitoring passed three tasks in a dedicated test
+conversation:
+
+- An asynchronous choice question was answered through its exact Watch.
+- An asynchronous free-text question was answered through its conversation.
+  Chinese text, emoji, combining characters, and a newline were preserved.
+- A Plan-mode request containing two questions was answered in one response
+  through its exact Watch: one offered choice and one free-text answer containing
+  Chinese text, emoji, and a newline.
+
+All three original native tasks completed with their supplied answers in the
+final results. The asynchronous responses reached `confirmed` with
+`exact_async_answer_observed`; the two-question response reached `confirmed`
+with `exact_blocking_answer_observed`. Each response had one dispatch attempt.
+Repeated consumed semantic response actions were rejected without another
+dispatch. Each task's attention and completion callbacks were accepted once by
+an isolated local receiver. This establishes local callback handling, not
+delivery to WeChat or another external channel.
+
+The Plan-mode change was dedicated test setup through native IPC, not evidence
+that AKK model/settings controls are enabled on this build. Permissions remained
+Read Only/on-request and the model was unchanged. The test conversation was
+restored to Default mode and left idle with no pending interaction. These question changes enable
+only the separately checked answer operations; settings and cancellation retain
+their existing build restrictions. The original isolated validation did not
+install the package or send notifications to external chat channels.
+
+The native typed `item/tool/requestUserInput` form may have `isBlocking: false`.
+Desktop can automatically submit an empty answer after its inactivity timeout,
+so refresh Status immediately before responding; a notification does not keep
+the request pending. This behavior is separate from asynchronous
+`agentMessage.delivery = "async"` questions, whose explicit replies steer the
+same active native task. An IPC acknowledgement alone does not confirm either
+answer type, and an expired or uncertain response must not be replayed.
+
 ## New-conversation boundary
 
 Use `agent_knock_knock_desktop_create` or the `desktop-create` CLI command; see
@@ -140,9 +183,9 @@ This route is intentionally separate from loading or replacing an existing
 conversation. A failed or uncertain create/load/send stage must preserve its
 record and exact identities; it must not silently create another conversation
 or replay a task. AKK 0.14.7 supports the command/file approvals described
-above on build `20156`; question replies and the broader native controls remain
-unavailable there. Those remain
-enabled only for build `13536`, where their effects were previously verified.
+above on build `20156`; AKK 0.14.8 adds blocking
+and asynchronous question replies. Model/permission changes and cancellation
+remain enabled only for build `13536`, where their effects were previously verified.
 
 ## Find and select a conversation
 

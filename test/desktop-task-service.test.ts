@@ -7,6 +7,7 @@ import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, 
 import { createDesktopStateStore } from "../src/desktop-state-store.js";
 import { createDesktopTaskService, desktopTaskNeedsReconciliation, type DesktopTaskServiceDependencies } from "../src/desktop-task-service.js";
 import { DesktopIpcError, type DesktopSnapshot, type DesktopTurn } from "../src/desktop-types.js";
+import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
 import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
 
@@ -347,6 +348,20 @@ test("Desktop async question notifies once with public answer IDs while the same
   assert.doesNotMatch(JSON.stringify(event), /interaction_prompt_fingerprint|expires_at|available_actions/);
   await createDesktopTaskService(h.deps).reconcile(watched.id);
   assert.equal(h.state.notifications.length, 1); assert.equal(h.service.status(watched.id).notifications.length, 1);
+});
+
+test("Desktop async question notifications use their own capability independently of blocking answers", async t => {
+  for (const asyncAnswers of [true, false]) {
+    const h = harness(t); h.state.snapshot = snapshot([asyncQuestionTurn()]);
+    const service = createDesktopTaskService({ ...h.deps, interactionResponsesVerified: {
+      ...desktopCapabilityProfile(DESKTOP_CREATION_BUILD), blockingAnswers: !asyncAnswers, asyncAnswers } });
+    const watched = await service.watch({ ...input, callbackRoute: route });
+    assert.equal(watched.pending_async_interactions?.length, 1);
+    const event = h.state.notifications[0].envelope.event;
+    assert.equal(event.metadata?.action, asyncAnswers ? "respond" : "manual_desktop");
+    await service.reconcile(watched.id);
+    assert.equal(h.state.notifications.length, 1);
+  }
 });
 
 test("incomplete Desktop history retains a pending question and retry instead of resolving and losing its notification", async t => {

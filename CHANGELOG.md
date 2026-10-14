@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.14.8 - 2026-10-14
+
+- Enable blocking and asynchronous question answers on macOS Codex Desktop `26.1007.30912` / build `20156`, independently of model/permission settings and cancellation. Use the advertised Respond action from fresh conversation or exact Watch Status.
+- Preserve exact task/request identity, one-dispatch response records and native answer confirmation. Real Desktop validation covered an asynchronous choice, free text, and a two-question Plan request; original tasks consumed the answers and completed. Local attention/completion callbacks were verified, not external chat delivery.
+
 ## Connector releases - 2026-10-14
 
 - Publish Pi connector `0.1.0-poc.3` and DeepSeek Harness connector `0.1.0-rc.5` independently under npm `next`; neither changes the core `0.14.7` version or promotes a connector to stable `latest`.

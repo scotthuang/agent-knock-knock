@@ -120,10 +120,16 @@ joining unrelated work.
 The 0.14.5 profile enables new-conversation creation and Desktop Send on
 macOS Desktop `26.1007.30912`, build `20156`. It preserves exact owner and task
 checks for Status/Watch. AKK 0.14.7 adds command/file approvals with explicit
-allow-once or reject decisions. Question replies,
-permission/model changes, and cancellation remain unavailable on this build;
-handle those actions in Desktop. Approval does not change the permissions
-inherited when the conversation was created.
+allow-once or reject decisions. AKK 0.14.8 adds
+blocking and asynchronous question replies through the advertised Respond
+action. Permission/model changes and cancellation remain unavailable on this
+build; handle those actions in Desktop. Approval and question replies do not
+change the permissions inherited when the conversation was created.
+
+The question changes passed dedicated real Desktop choice, free-text, and
+two-question validation on 2026-10-14, with exact native answer evidence and
+original-task completion.
+Local callback acceptance does not establish external chat-channel delivery.
 
 The existing full native-control profile for Desktop `26.1002.52244`, build
 `13536`, is unchanged; it does not enable this new creation workflow. These are
