@@ -50,13 +50,13 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
   assert.deepEqual(lock.packages[""].peerDependencies, manifest.peerDependencies);
   assert.deepEqual(lock.packages[""].dependencies, manifest.dependencies);
   assert.equal(manifest.dsh.bundle.patch, "./cordis.patch.yml");
-  assert.equal(manifest.peerDependencies["@deepseek-ai/cordis"], "4.0.1 || 4.0.2");
+  assert.equal(manifest.peerDependencies["@deepseek-ai/cordis"], "4.0.1 || 4.0.2 || 4.0.4 || 4.0.5-alpha.1");
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-agent"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-commands"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-llm"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-skill"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-tools"], supportedRange);
-  assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.13.3");
+  assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.14.7");
   assert.equal(manifest.dependencies["@deepseek-ai/schemastery"], "3.18.2");
   for (const packageName of [
     "@deepseek-ai/dsh-agent",
@@ -65,9 +65,9 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
     "@deepseek-ai/dsh-skill",
     "@deepseek-ai/dsh-tools",
   ]) {
-    assert.equal(manifest.devDependencies[packageName], "0.1.5-rc.2");
+    assert.equal(manifest.devDependencies[packageName], "0.2.0-rc.2");
   }
-  assert.equal(manifest.devDependencies["@deepseek-ai/cordis"], "4.0.2");
+  assert.equal(manifest.devDependencies["@deepseek-ai/cordis"], "4.0.4");
   assert.ok(manifest.files.includes("skills/**/*.md"));
 
   const bundledSkill = fs.readFileSync(
@@ -282,7 +282,7 @@ test("loads runtime helpers from the launcher-owned set instead of connector dev
       requireFromConnector.resolve("@deepseek-ai/dsh-llm/package.json"),
       "utf8",
     ));
-    assert.equal(connectorLlm.version, "0.1.5-rc.2");
+    assert.ok((SUPPORTED_DSH_VERSIONS as readonly string[]).includes(connectorLlm.version));
 
     const runtime = await loadSupportedDeepSeekHarnessRuntime(
       createDeepSeekHarnessManifestResolver(launcherEntry),

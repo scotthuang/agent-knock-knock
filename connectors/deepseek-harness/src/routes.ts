@@ -2,6 +2,18 @@ import { createHash, randomBytes } from "node:crypto";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
 
+// DSH 0.2 removed the catch-all plugin source. Each producer owns one kind;
+// declaration merging is also supported by the older reviewed Host releases.
+declare module "@deepseek-ai/dsh-llm" {
+  interface MessageSourceMap {
+    "agent-knock-knock": {
+      readonly kind: "agent-knock-knock";
+      readonly form: "notice";
+      readonly summary: string;
+    };
+  }
+}
+
 export type CreateUserMessage =
   typeof import("@deepseek-ai/dsh-llm")["createUserMessage"];
 
@@ -116,8 +128,7 @@ export class AgentRouteTable {
     const message = this.createUserMessage({
       content: [{ type: "text", text: request.body }],
       source: {
-        kind: "plugin",
-        plugin: "agent-knock-knock",
+        kind: "agent-knock-knock",
         form: "notice",
         summary: "AKK terminal update",
       },

@@ -1,9 +1,10 @@
 export const CONNECTOR_NAME = "agent-knock-knock-pi";
 export const CONNECTOR_PACKAGE = "@scotthuang/agent-knock-knock-pi";
-export const CONNECTOR_VERSION = "0.1.0-poc.2";
+export const CONNECTOR_VERSION = "0.1.0-poc.3";
 
 export const PI_HOST_ID = "pi-coding-agent";
-export const SUPPORTED_PI_VERSION = "0.84.4";
+export const SUPPORTED_PI_VERSION = "1.2.0";
+export const SUPPORTED_PI_VERSIONS: readonly string[] = [SUPPORTED_PI_VERSION, "0.84.4"];
 
 export const CONTROLLER_ID_ENV = "AKK_PI_CONTROLLER_ID";
 export const CALLBACK_SOCKET_ENV = "AKK_PI_CALLBACK_SOCKET";

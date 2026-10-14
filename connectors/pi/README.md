@@ -2,7 +2,8 @@
 
 This Pi Extension makes Pi an Agent Knock Knock (AKK) orchestration Host. Pi
 can use `/akk` and AKK's capability-handshake-verified semantic tools to control Codex and Claude Code
-terminals that are already running in tmux or Herdr.
+sessions that are already running, including supported Codex Desktop conversations.
+AKK selects the available connection; supported direct connections do not need tmux or Herdr.
 
 The connector does not modify Pi, launch or authenticate a coding agent, or
 depend on an OpenClaw Gateway. It uses AKK's public HostAdapter and returns
@@ -11,11 +12,12 @@ socket.
 
 ## Status and compatibility
 
-This connector's pinned AKK 0.13.3 runtime provides terminal control. The
-[root README](../../README.md) describes the newer AKK 0.14.0 CLI direct,
-Desktop, and Recovery features; installing this connector does not select that
-runtime automatically. The AKK core release does not upgrade this connector's
-pinned dependency.
+This connector pins AKK **0.14.7**, including CLI direct connections, Codex
+Desktop, and Recovery. Its generated Skill and registered tools are verified
+against that exact core package at startup. See the [root compatibility
+summary](../../README.md#compatibility) for the coding-agent versions and
+operation-specific limits. Updating AKK core elsewhere does not update this
+connector's pinned dependency.
 
 This is a POC prerelease distributed on npm as
 `@scotthuang/agent-knock-knock-pi`. Prereleases use the `next` dist-tag:
@@ -26,21 +28,23 @@ pi install npm:@scotthuang/agent-knock-knock-pi@next
 
 The current compatibility contract is intentionally exact:
 
-- Pi `0.84.4`, installed from the official
+- Pi **`1.2.0`** (recommended), with **`0.84.4`** retained as an explicitly
+  supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.13.3`, pinned by this connector's package and lockfile. Running
+- AKK `0.14.7`, pinned by this connector's package and lockfile. Running
   `npm ci` in `connectors/pi` installs that exact AKK runtime; a different
   version at the repository root is not substituted automatically.
 - macOS or Linux. The POC requires a POSIX Unix socket and does not support
   Windows named pipes.
-- At least one authenticated Codex or Claude Code process already running in a
-  supported tmux or Herdr terminal under the same OS user.
+- At least one authenticated, supported Codex CLI, Claude Code CLI, or Codex
+  Desktop session under the same OS user. Terminal-only operations still require
+  a verified tmux or Herdr target; capability fields describe each exact target.
 - A configured Pi model/provider. Pi model authentication is separate from
   AKK and is not performed by this connector.
 
-The connector rejects a Pi runtime other than `0.84.4` before it creates a
-socket or starts AKK lifecycle work. Pi's own packages remain `*` peer
+The connector accepts exactly `1.2.0` and `0.84.4`, and rejects other Pi
+runtimes before it creates a socket or starts AKK lifecycle work. Pi's own packages remain `*` peer
 dependencies as required by Pi's package contract; the runtime check is the
 compatibility authority.
 
@@ -49,7 +53,7 @@ compatibility authority.
 ### 1. Install the accepted Pi version
 
 ```sh
-npm install -g @earendil-works/pi-coding-agent@0.84.4
+npm install -g @earendil-works/pi-coding-agent@1.2.0
 node --version
 pi --version
 ```
@@ -57,9 +61,11 @@ pi --version
 Configure a model using Pi's normal `/login`, provider environment variable,
 or settings flow before continuing.
 
-### 2. Start a coding agent in a shared terminal
+### 2. Open a coding-agent session
 
-AKK discovers an existing process; it never starts one for you. For example:
+Open a supported Codex CLI, Claude Code CLI, or Codex Desktop session in your
+project. A supported direct connection needs no terminal container. For
+terminal fallback or a terminal-only operation, you can instead start:
 
 ```sh
 tmux new-session -s akk-pi-work -c "$(pwd -P)" codex
@@ -78,7 +84,7 @@ pi list
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
 build instead, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.2`; exact versions are pinned
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.3`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -101,22 +107,28 @@ In Pi, list the live targets:
 /akk list
 ```
 
-If exactly one terminal is send-ready, submit a small task:
+For direct CLI or Desktop targets, ask Pi to use the fresh List row's
+advertised **`agent_knock_knock_send`** action and its exact `conversation_id`.
+For example: "Use AKK to send a small read-only task to the Codex conversation
+I selected, and wait for its existing completion callback."
+
+The `/akk <task>` shorthand below is a **terminal-managed shortcut**, not a
+direct CLI/Desktop Send. If exactly one terminal is send-ready:
 
 ```text
 /akk reply with exactly AKK_PI_OK after inspecting the current workspace
 ```
 
-If multiple targets are present, use the fresh selector printed by
+For multiple terminal targets, use the fresh terminal selector printed by
 `/akk list`:
 
 ```text
 /akk @a1b2c3d4: reply with exactly AKK_PI_OK after inspecting the current workspace
 ```
 
-A managed Send returns a `turn_id`; when the coding agent settles, its callback
-is injected into the same Pi session. Inspect it at any time with the exact
-turn selector printed by AKK:
+Send returns its managed `turn_id` or direct-connection `watch_id`; when the
+coding agent settles, its callback is injected into the same Pi session.
+Inspect the exact selector from the Send receipt:
 
 ```text
 /akk status <turn-selector>
@@ -141,11 +153,12 @@ and returns its `watch_id`.
 
 The usual product loop is:
 
-1. **List** to discover live terminals and their current `available_actions`.
-2. **Send** using the fresh action's prefilled `session_id` or `terminal_id`.
+1. **List** to discover live CLI/Desktop sessions and their current `available_actions`.
+2. **Send** using the fresh action's prefilled `conversation_id`, `session_id`, or `terminal_id`.
    Do not invent semantic IDs or retry an uncertain terminal mutation.
-3. Wait for the managed **Callback**. An unmanaged user-priority fallback may
-   return a Terminal Watch callback instead of a managed Turn callback.
+3. Wait for the automatic **Callback**. Direct CLI/Desktop Send returns its
+   own Watch; terminal-managed Send uses a managed Turn. A terminal fallback may
+   also return a Watch. Do not add a duplicate observer to a successful Send.
 4. Use **Status** with the exact `turn_id` or `watch_id` when the callback is
    delayed or the Pi route changed.
 5. Use **Respond** for a question in that same Turn. Use **Approve** only after
@@ -158,25 +171,28 @@ also registered for model-driven orchestration:
 
 | Tool | Purpose |
 | --- | --- |
-| `agent_knock_knock_list` | List verified Codex/Claude terminals, managed work, Watches, and currently available semantic actions. |
-| `agent_knock_knock_watch` | Start a durable, read-only Watch for one exact `terminal_id`. |
+| `agent_knock_knock_list` | List verified CLI/Desktop sessions, managed work, Watches, and currently available semantic actions. |
+| `agent_knock_knock_watch` | Start a durable, read-only Watch for one exact advertised conversation or terminal. |
 | `agent_knock_knock_unwatch` | Stop observation by exact `watch_id`; it does not interrupt the coding agent. |
 | `agent_knock_knock_list_resumable_threads` | List structurally verified native threads that can be resumed in one terminal. |
 | `agent_knock_knock_native_inspect` | Run the closed native `status` inspection for one exact terminal. Arbitrary slash commands are not accepted. |
 | `agent_knock_knock_model_options` | Read one exact idle terminal's native model and reasoning catalog and create a single-use typed offer. |
 | `agent_knock_knock_repair_model_control` | Dismiss only an exactly recognized stale model-control surface; it never selects a model or submits a task. |
 | `agent_knock_knock_set_model` | Consume the current catalog offer to select one advertised semantic model and reasoning effort. |
+| `agent_knock_knock_permission_options` / `agent_knock_knock_set_permissions` | Inspect and change permissions only where the exact target advertises support. |
+| `agent_knock_knock_desktop_create` | Create a Codex Desktop conversation in a selected project or explicit directory. |
 | `agent_knock_knock_identify_foreground` | Run a bounded diagnostic native identity probe without creating durable model-control authority. |
 | `agent_knock_knock_identify_and_send` | Keep one terminal lock across identity observation and one explicit Send when the normal foreground identity is ambiguous. |
 | `agent_knock_knock_new_thread` | Start and verify a clean native coding-agent thread after explicit user intent. |
 | `agent_knock_knock_reconcile_binding` | Detach one exact conflicting AKK Session binding after explicit confirmation, without adopting another thread. |
 | `agent_knock_knock_resume_thread` | Resume one exact complete `native_thread_id` returned by the current discovery result. |
-| `agent_knock_knock_status` | Inspect one exact managed Turn or Terminal Watch. |
-| `agent_knock_knock_send` | Send a new task through the exact currently advertised Session or terminal action. |
+| `agent_knock_knock_status` | Inspect one exact conversation, managed Turn, or Watch. |
+| `agent_knock_knock_send` | Send a new task through the exact currently advertised conversation, Session, or terminal action. |
 | `agent_knock_knock_respond` | Answer a question or blocked callback in one existing Turn; it does not start a new Turn. |
 | `agent_knock_knock_respond_interaction` | Answer the current typed native questionnaire step for one exact response-capable Turn or Watch. |
 | `agent_knock_knock_approve` | Approve one current permission request after Pi presents a native user-decision gate. |
-| `agent_knock_knock_renew` | Renew monitoring for one stalled but still-live Turn without terminal input. |
+| `agent_knock_knock_renew` | Renew the exact supported Watch or managed Turn observation window. |
+| `agent_knock_knock_recover` | Perform only the recovery action advertised by the exact target. |
 | `agent_knock_knock_retry_callback` | Retry one persisted managed callback with its original message identity. |
 | `agent_knock_knock_cancel` | Interrupt one exact task after Pi obtains native confirmation; the shared pane stays open. |
 | `agent_knock_knock_close` | Release AKK management for one Turn without sending terminal input or stopping the coding agent. |
@@ -199,13 +215,20 @@ shows the current prompt in Pi's native UI, and requires a selection:
   confirmation, then invokes AKK Cancel.
 
 A terminal-scoped approval has no terminal-scoped Cancel authority, so its
-dialog offers only Approve or Keep pending. A separately advertised Cancel
-action gets its own Pi confirmation dialog.
+dialog offers only Approve or Keep pending. Direct CLI/Desktop approvals
+refresh the exact `conversation_id` or `watch_id` and retain its
+`interaction_id`. An explicitly requested native `reject` decision instead
+shows **Reject request** / **Keep pending**, then sends that same reviewed
+decision. A separately advertised Cancel action gets its own Pi confirmation
+dialog.
 
 `agent_knock_knock_respond` answers an ordinary question in the exact
-in-flight Turn; it is not an approval denial. AKK currently has no generic
-"select the target's No option and continue this Turn" tool. Reject-and-cancel
-interrupts the task instead.
+in-flight task; it is not an approval denial. A native rejection is available
+only where Status advertises it. The separate **Reject and cancel task**
+choice interrupts a managed Turn; it is not a native deny-and-continue action.
+A native rejection may also end the coding-agent turn when its current
+request offers cancellation. Status reports the observed outcome, including
+`interrupted`; denial does not promise that the same turn continues.
 
 The native confirmation flow requires an interactive Pi UI. In a context where
 `ctx.hasUI` is false, the connector refuses model-facing Approve and Cancel
@@ -231,11 +254,16 @@ AKK callback outbox
 When Pi is idle, the callback is injected with `triggerTurn: true` and starts a
 new Pi turn. When Pi is already producing a response, the connector uses Pi's
 follow-up queue so the callback is not mixed into the current model turn.
+Pi 1.2.0 also reports busy while `before_agent_start` is running, so callbacks
+arriving during startup use that same follow-up queue. Idle callback turns now
+run Pi's `before_agent_start` handlers with `messageType: "custom"`; other
+extensions that inspect user prompts must handle that upstream distinction.
 
 An `accepted` callback acknowledgement means that the connector durably
 admitted the exact delivery to its local inbox and returned an acceptance ID.
-It does **not** mean the Pi model consumed the message: Pi `0.84.4` exposes a
-synchronous `sendMessage()` call without a model-consumption receipt. The last
+It does **not** mean the Pi model consumed the message: both supported Pi
+versions expose a synchronous `sendMessage()` call without a model-consumption
+receipt. The last
 hop is therefore at-least-once or uncertain if Pi crashes between
 `sendMessage()` and recording the inbox entry as delivered. Delivery and
 idempotency IDs let the connector reject collisions and suppress known exact
@@ -249,8 +277,9 @@ For a missing callback:
    Status is the authoritative manual recovery path and does not need the
    callback to have reached the model.
 3. If a still-live task has no managed callback route, start a new read-only
-   Watch on its exact current `terminal_id` and retain the returned `watch_id`.
-4. Use `agent_knock_knock_retry_callback` only when the current managed Turn
+   Watch using its exact advertised conversation/terminal target and retain the
+   returned `watch_id`.
+4. Use `agent_knock_knock_retry_callback` only when the current task
    advertises it and the original Pi callback route is still live. Never retry
    an uncertain terminal Send to recover a callback.
 
@@ -258,7 +287,7 @@ The POC owns one live Pi runtime and one branch epoch. Explicit session-tree
 navigation rotates the controller route; Pi shutdown removes the socket and
 invalidates that runtime's route. The durable inbox does not migrate callbacks
 from an old random controller identity into a new Pi runtime or branch. After a
-restart or branch change, use fresh List/Status and, for still-running terminal
+restart or branch change, use fresh List/Status and, for still-running
 work, a fresh Watch. Do not expect the old route's callback to jump to the new
 conversation automatically.
 
@@ -306,10 +335,10 @@ Security and retention boundaries:
 
 | Symptom | Check and recovery |
 | --- | --- |
-| `requires Pi 0.84.4` | Run `pi --version`, then reinstall the exact accepted release with `npm install -g @earendil-works/pi-coding-agent@0.84.4`. Newer Pi releases are not silently accepted by this POC. |
+| `requires tested Pi` | Run `pi --version`; this connector accepts `1.2.0` and `0.84.4`. Use `npm install -g @earendil-works/pi-coding-agent@1.2.0` for the current verified release. Other releases are not silently accepted. |
 | Pi never shows `AKK ready` | Confirm Node is at least 22.19, run `pi list`, update or reinstall `npm:@scotthuang/agent-knock-knock-pi@next`, and fully restart Pi. For a source checkout, follow the local-development build commands below. |
 | Module or `lib/index.js` not found | Remove and reinstall the npm package. For a source checkout, confirm Pi was given `connectors/pi`, not the repository root, and rebuild with the documented cwd-specific command. |
-| `/akk list` finds no terminal | Start authenticated `codex` or `claude` inside supported tmux/Herdr under the same OS user and leave the process running. The connector never launches it. |
+| `/akk list` finds no target | Open an authenticated supported CLI/Desktop session under the same OS user. For terminal-only paths, use tmux/Herdr and leave the process running. |
 | Send says the target is ambiguous | Run a fresh `/akk list` and use the exact displayed selector for `/akk`, or the prefilled semantic ID from that row's current tool action. |
 | Callback does not appear immediately | Pi may be busy, so the callback is queued as a follow-up. Wait for the current turn, then use fresh List and Status. After a Pi restart or branch change, the old callback route is intentionally not migrated. |
 | Approval or cancellation says an interactive UI is required | Use Pi's interactive TUI. The POC deliberately blocks model-facing Approve/Cancel when `ctx.hasUI` is false. |
@@ -328,8 +357,8 @@ pi list
 pi update npm:@scotthuang/agent-knock-knock-pi
 ```
 
-Keep Pi at exactly `0.84.4` until this README declares another accepted
-version. Do not use an unverified Pi upgrade as a connector update.
+Use one of the explicitly verified Pi versions (`1.2.0` or `0.84.4`) until
+this README declares another accepted version. Do not use an unverified Pi upgrade as a connector update.
 
 Remove the npm package by its package identity:
 
@@ -413,7 +442,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.2
+npm run release:check -- --publish --confirm-version 0.1.0-poc.3
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -432,9 +461,24 @@ acceptance record on 2026-08-30 included:
   `agent_accepted`, exact marker execution, Unix Socket callback into Pi, and
   durable high-confidence delivered Status.
 
+The 2026-10-14 compatibility check additionally verified the packaged connector
+loads in isolated Pi `1.2.0` and `0.84.4` installations with AKK `0.14.7`. A
+real Pi `1.2.0` SDK session with a deterministic local provider verified idle,
+`before_agent_start`, and busy-generation callback delivery, native session
+recording, duplicate suppression, and rejection of a retired branch route.
+This fixture uses the real Pi event loop and connector IPC; it does not claim
+a cloud-model or human-driven TUI test. An isolated Codex CLI/backend `0.162.1`
+round trip also verified Send, Status, allow-once execution, rejected command
+with no file side effect, and typed asynchronous question/answer. The question
+completion callback was recorded in the original Pi session and consumed by
+the local provider; duplicate delivery added no second message. Approval UI
+choices were driven by the authorized test script, not a person clicking the
+TUI. The earlier `0.84.4` runtime was package-load checked this round; its full
+real coding-task acceptance is the historical record above.
+
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.2` is an npm prerelease and is distributed through the
+`0.1.0-poc.3` is an npm prerelease and is distributed through the
 `next` dist-tag; it does not change the AKK main package or ClawHub artifact.
 
 ## Deliberate POC limits
@@ -442,5 +486,6 @@ future Pi, Codex, Claude Code, tmux, or Herdr release. Version
 The POC intentionally does not provide a standalone Supervisor, multi-Host
 leader election, cross-session or cross-branch callback migration, remote
 terminal access, Windows named pipes, configuration-driven auto-approval, or
-coding-agent `--yolo` adaptation. It controls only the Codex and Claude Code
-terminal surfaces already supported by AKK.
+automatic changes to coding-agent permission settings. Available actions come
+from AKK's verified target capabilities; installing this connector does not
+make an unsupported operation available.
