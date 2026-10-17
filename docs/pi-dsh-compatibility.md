@@ -1,10 +1,55 @@
 # Pi and DeepSeek Harness connector compatibility
 
 These are independently versioned controller connectors. Installing an AKK
-core/OpenClaw release does not update an already installed connector. Both
-connectors below pin the published AKK core `0.14.7` and carry its identical
-canonical Skill and 26-tool capability handshake. No new core release is
-required for this update.
+core/OpenClaw release does not update an already installed connector. The
+published 2026-10-14 connectors pin AKK core `0.14.7`; DSH connector `0.1.0-rc.6`
+pins `0.14.8`. Each carries its runtime's canonical Skill and 26-tool
+capability handshake. Neither connector update requires a new core release.
+
+## DSH 0.2.1-rc.2 compatibility — 2026-10-17
+
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.6` is an independent
+**prerelease on npm `next`**, built against DSH `0.2.1-rc.2`, Cordis `4.0.5` and published
+AKK core `0.14.8`. At verification time DSH npm `next` was `0.2.1-rc.2`, while
+`latest` remained `0.2.0-rc.2`; neither is a stable release. The connector's
+npm `latest` remains `0.1.0-rc.1`. Pi and core are unchanged by this release.
+
+The [official DSH release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.2)
+adds DeepSeek-V4.1-Flash-1017 support. Comparing its actual packages with the
+previous RC and alpha shows that AKK's command, Skill, message-source,
+Agent Inbox and ordinary tool contracts remain compatible. PTC cancellation
+and tool-mode changes do not affect the interfaces used by this connector.
+The update aligns exact peers, SDK dependencies, the runtime version check,
+lockfile and core dependency; it does not bypass Host compatibility preflight.
+
+| Verification | Result and evidence boundary |
+| --- | --- |
+| Current RC SDK | Typecheck, 39 fast tests and package/Skill checks passed. |
+| Previous `0.2.0-rc.2` SDK / Cordis `4.0.4` | Final Store patch: isolated typecheck, 39 fast tests and actual coherent launcher/helper resolution passed. |
+| Retained `0.1.5-rc.2` / Cordis `4.0.2` and preview `0.2.1-alpha.2` / Cordis `4.0.5-alpha.1` | Each passed typecheck, 39 fast tests and actual coherent launcher/helper resolution with the final product sources. Old Web/model acceptance was not repeated; `0.1.1-rc.2` and `0.1.2-alpha.1` retain historical policy only. |
+| Actual `0.2.1-rc.2` launcher and native registries | Official peer preflight, coherent runtime resolution and registration of all 26 tools passed. |
+| Native Agent loop and callback helper | Busy injection and idle followup were consumed by a deterministic local provider. Duplicate notifications retained one message/acceptance ID; collisions, disposed/replaced Agents and closed routes were rejected. |
+| Approval and typed-question tool contracts | Real upstream ToolRuntime preserved decisions, exact identifiers and Unicode answers. The downstream coding-agent results in these checks were fixtures, not new live approval/question acceptance tests. |
+
+A real account-backed Web task also passed: the DSH model called Send, the
+dedicated Codex task completed, its callback was accepted once by the DSH
+Inbox, and the DSH model consumed it and replied. This used Codex CLI
+`0.162.1` with the already running backend `0.163.0`; neither that backend nor
+other business sessions were restarted. No external chat delivery was tested.
+
+The live check exposed a separate shared-Store hazard: another Host can claim
+a native callback without the owning DSH profile. An isolated actual-core
+reproduction confirmed this failure mode. The connector now defaults tools
+and lifecycle workers to one stable DSH-specific Store. Explicit Store paths
+are preserved, and old records are neither migrated nor replayed. Parallel
+DSH Hosts/profiles still need distinct explicit Store paths; cross-Host
+ownership filtering in core is outside this change.
+
+The independent connector publication gate runs typecheck, `test:fast`, and
+package/Skill checks on clean synchronized `main`, then publishes to `next`.
+The root OpenClaw release suite is not this connector's publication gate.
+Callback admission, model consumption and external-chat delivery remain separate facts. Old process-owned callback
+routes are not transferred to a restarted Web Host.
 
 ## Upstream versions checked on 2026-10-14
 

@@ -35,6 +35,24 @@ export interface ConnectorProfileResources {
   remove(): void;
 }
 
+/** Keep DSH monitors out of another Host's global callback reconciliation. */
+export function resolveConnectorPluginConfig(
+  configured: Readonly<Record<string, unknown>> = {},
+  homeDirectory: string = os.homedir(),
+): Readonly<Record<string, unknown>> {
+  if (configured.storeDir !== undefined) {
+    if (typeof configured.storeDir !== "string" || !configured.storeDir.trim()) {
+      throw new Error("DeepSeek Harness AKK pluginConfig.storeDir must be a non-empty path");
+    }
+    // Preserve deliberate relative paths and all other core options exactly.
+    return Object.freeze({ ...configured });
+  }
+  return Object.freeze({
+    ...configured,
+    storeDir: path.join(homeDirectory, ".agent-knock-knock", "hosts", "deepseek-harness", "store"),
+  });
+}
+
 /**
  * Create one Host-instance-private, route-bound Profile and its IPC authority.
  *
