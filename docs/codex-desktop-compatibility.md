@@ -19,6 +19,7 @@ version and build. It is not a minimum-version promise:
 | --- | --- | --- | --- |
 | `26.1002.52244` / `13536` | Existing verified adapter | Existing verified adapter | Not enabled |
 | `26.1007.30912` / `20156` | Send profile for the new-conversation workflow; read-only observation retains exact owner/turn checks | Command/file approvals in AKK 0.14.7; blocking and asynchronous answers in AKK 0.14.8. Model/permission changes and cancellation remain unavailable | Available in AKK 0.14.5; see the creation boundary below |
+| `26.1007.71326` / `20398` | AKK 0.14.9: exact owner, Send, public progress and exact-task completion | Command/file approvals, blocking/asynchronous answers, effective model/permission settings and exact cancellation | Available in AKK 0.14.9; projectless creation and first-task handoff verified |
 | Other builds | Compatible read-only observations may work; no native writes are advertised | Not enabled | Not enabled |
 
 The `20156` profile does not inherit the old build's full native controls.
@@ -27,7 +28,7 @@ Desktop. AKK 0.14.7 adds an Approve action for recognized
 command/file requests, with explicit `approve_once` or `reject` decisions.
 AKK 0.14.8 enables blocking and asynchronous
 answers through separate `blockingAnswers` and `asyncAnswers` capability checks.
-Settings, model/permission changes, and cancellation still require Desktop.
+On `20156`, settings, model/permission changes, and cancellation still require Desktop.
 Watch attention notifications follow the same per-operation boundary.
 `desktop_scan.send_contract_verified` reports the Send profile;
 `approval_contract_verified` reports the per-build approval profile;
@@ -59,9 +60,66 @@ dated 2026-10-09; the `20156` creation, approval, and question evidence is dated
 2026-10-13/14 below. The [backend Recovery work](backend-task-recovery.md#validation-boundary)
 has fast-regression coverage, not a separate live Desktop proof.
 
+## Build 20398 validation — AKK 0.14.9
+
+The 2026-10-18 local bundle audit identifies macOS Desktop `26.1007.71326`,
+build `20398`, with bundled Codex `0.162.0-alpha.17.2`. The app's package and
+`Info.plist` agree. This bundled version is separate from the globally installed
+CLI and is not a running-backend handshake. The official update feeds returned
+HTTP 403 during the read-only check, so this record establishes the installed
+build, not the latest build available to every account.
+
+The bundled owner/follower IPC still uses the existing exact Send, approval,
+typed input, asynchronous steer, settings and interruption contracts. AKK adds
+an exact application/build profile; it does not permit future builds or remove
+the private socket, owner, revision, task or interaction checks. Creation also
+checks the installed app and bundled backend as one verified tuple. Mixing a
+known application version with another build or backend is rejected before the
+creation process starts.
+
+The dedicated real Desktop acceptance run verified:
+
+- Projectless creation, handoff to the original Desktop owner, and the first
+  benign task completing in that same exact native turn. The initial uncertain
+  acceptance was resolved by read-only reconciliation, without sending again.
+- Current model lookup, an effective reasoning-effort change to `medium`, and
+  model changes from `gpt-6-astra` to `gpt-6.1-sol` and back with native readback.
+- Plan/default collaboration-mode changes with effective native readback.
+- Permission lookup and Default, Read Only and Full Access preset changes with
+  native effective-state readback. Full Access was returned to Read Only before
+  another task; no task was executed under Full Access in this round. These
+  changes apply only to the dedicated test conversation, not global defaults
+  or user work.
+- Command approval allowed once, with exit code 0 and the expected output;
+  command rejection, with the exact native item `declined` and its proposed
+  file absent. File approval produced the exact expected contents, while file
+  rejection left its proposed file absent.
+- An asynchronous free-text answer preserved Chinese, emoji, a combining
+  character and a newline. A Plan-mode two-question request consumed both its
+  choice and free-text answer in the same original native task.
+- Exact cancellation interrupted a task executing a bounded sleep. A subsequent
+  new task completed normally, and an older Watch retained its original turn
+  and completion rather than following the new task.
+
+Approval response records reached `confirmed` with
+`exact_approval_item_advanced`; question records reached
+`exact_async_answer_observed` or `exact_blocking_answer_observed`. Each response
+had one dispatch attempt. Repeated consumed actions were rejected without
+another dispatch. Nine tasks settled: eight completed and one was intentionally
+interrupted. All 15 attention/completion notifications had unique IDs and one
+accepted attempt at an isolated local receiver. These checks establish native
+effects and local callback acceptance, not delivery to WeChat or another
+external channel. Effective model settings do not prove availability for every
+account or validate task execution under every model.
+
+The dedicated conversation finished idle in Default mode, with `gpt-6-astra`,
+`medium` effort and Read Only permissions. The explicit model-control API does
+not restore an inherited `null` effort; no user conversation or global default
+was changed to perform this validation.
+
 ## Capability boundary
 
-| Operation | Behavior on the fully reviewed `13536` build |
+| Operation | Behavior on full-control builds `13536` and `20398` |
 | --- | --- |
 | List | Default to persisted expanded sidebar membership; offer the broader saved catalog with explicit `desktop_view: "history"`; retain unconnected rows and support search, project filtering, and pagination |
 | Status | Read a fresh snapshot from the exact local Desktop owner when available; report unknown live state when only metadata is available |
@@ -77,7 +135,7 @@ has fast-regression coverage, not a separate live Desktop proof.
 | Cancellation | Interrupt the exact selected native task; an old task ID never cancels a newer task |
 | Unwatch | Stop observation without cancelling or changing the Desktop task |
 | Existing-conversation cold loading, resume | Not supported by the Desktop adapter |
-| New conversation | Separate creation workflow on build `20156`; see below |
+| New conversation | Separate creation workflow; supported application/backend combinations are listed above |
 
 No Desktop operation types a slash command or uses terminal activity as exact
 completion evidence. Existing terminal capabilities remain separate and retain
@@ -185,7 +243,7 @@ record and exact identities; it must not silently create another conversation
 or replay a task. AKK 0.14.7 supports the command/file approvals described
 above on build `20156`; AKK 0.14.8 adds blocking
 and asynchronous question replies. Model/permission changes and cancellation
-remain enabled only for build `13536`, where their effects were previously verified.
+remain unavailable on `20156`; the separate `20398` validation is recorded above.
 
 ## Find and select a conversation
 
@@ -202,6 +260,13 @@ settings. It does not inspect the rendered screen, scrolling, per-window
 temporary state, or a group's live Show More pagination. If the saved layout
 is unsupported or unavailable, inspect the returned limitations; AKK does not
 silently replace this view with all historical candidates.
+
+AKK 0.14.9 distinguishes a missing sidebar file from invalid, unreadable or
+oversized layout data. An additional CLI-only Codex home does not downgrade the
+Desktop sidebar when its layout is missing and both supported Desktop catalog
+databases are conclusively absent. This exception never hides a missing primary
+layout, a damaged layout, or a present/failed catalog. Historical candidates in
+that additional home remain available through the explicit history view.
 
 Use `desktop_view: "history"` explicitly for the broader saved catalog,
 including older or hidden conversations. Sidebar discovery and historical

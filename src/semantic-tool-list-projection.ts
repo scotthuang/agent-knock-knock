@@ -1,3 +1,4 @@
+import { paginateHostList } from "./semantic-tool-list-budget.js";
 import { isAkkModelFacingPrivateAuthorityField } from
   "./semantic-tool-model-facing-field-policy.js";
 import { arrayValue, finiteNumber, nonEmptyString, stringArrayValue,
@@ -6,8 +7,8 @@ import { recordValue } from "./value-guards.js";
 import { isTerminalSpecificConversationAction } from "./conversation-list.js";
 
 /**
- * Keep every structured controller-Host List result below its model-output
- * budget without weakening the private action-authority path.
+ * Bound structured controller-Host List output before Host serialization,
+ * without weakening the private action-authority path.
  *
  * The CLI remains the complete operator/debug contract. The controller
  * receives current resource identities and state, action names, and only the
@@ -15,17 +16,18 @@ import { isTerminalSpecificConversationAction } from "./conversation-list.js";
  * live in the bundled agent-knock-knock skill.
  */
 export function compactAkkListModelProjection(
-  value: unknown
+  value: unknown,
+  params: Record<string, unknown> = {}
 ): Record<string, unknown> {
   const result = recordValue(value) ?? {};
   const routingDiagnostics = recordValue(result.conversation_presentation)?.mode === "diagnostics";
   const actionContracts = recordValue(result.action_contracts);
   const diagnostics = compactAkkListDiagnostics(result);
   const recovery = compactAkkListControlState(result.recovery);
-  return {
+  const projected = {
     projection: {
       schema: "agent-knock-knock/host-list-compact",
-      version: Array.isArray(result.conversations) ? 2 : 1,
+      version: 3,
       skill: "agent-knock-knock",
       ...(finiteNumber(actionContracts?.version) !== undefined
         ? { action_contract_version: finiteNumber(actionContracts?.version) }
@@ -64,6 +66,7 @@ export function compactAkkListModelProjection(
     ...(recovery ? { recovery } : {}),
     ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {})
   };
+  return paginateHostList(projected, params);
 }
 
 function compactBackendWatch(row: Record<string, unknown>): Record<string, unknown> {
@@ -309,6 +312,8 @@ function compactAkkListTurn(
     "updated_at",
     "response_rounds_used"
   ]);
+  compactAkkListNested(output, "callback_delivery", turn.callback_delivery,
+    ["status", "attempts", "attempt_state", "next_attempt_at"]);
   const turnId = nonEmptyString(
     turn.turn_id ?? turn.conversation_id ?? turn.id
   );

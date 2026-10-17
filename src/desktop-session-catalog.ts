@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createDesktopConversationId } from "./desktop-identity.js";
-import { readDesktopSidebarMetadata, type DesktopSidebarReader } from "./desktop-sidebar-metadata.js";
+import { readDesktopSidebarMetadata, type DesktopSidebarMetadata, type DesktopSidebarReader } from "./desktop-sidebar-metadata.js";
 import { selectDesktopSidebar, type DesktopSidebarMembership, type DesktopSidebarSummary } from "./desktop-sidebar-selection.js";
 import type { DesktopThreadIdentity } from "./desktop-types.js";
 import {
@@ -83,7 +83,7 @@ export class DesktopSessionCatalog {
     if (view !== "sidebar" && view !== "history") throw new Error("Desktop view must be sidebar or history");
     const all = await this.collect();
     const selection = view === "sidebar" ? selectDesktopSidebar(all.sessions,
-      new Map(await Promise.all(this.homes.map(async home => [home, await this.readSidebar(home)] as const))), all.archivedIds) : undefined;
+      await this.sidebarLayouts(all.sources), all.archivedIds) : undefined;
     const sessions = selection?.sessions ?? (view === "history" ? all.sessions : []);
     const sources = all.sources;
     const filtered = sessions.filter((session) => {
@@ -103,6 +103,19 @@ export class DesktopSessionCatalog {
   async get(identity: DesktopThreadIdentity): Promise<DesktopCatalogEntry | undefined> {
     const conversationId = createDesktopConversationId({ ...identity, codexHome: canonicalHome(identity.codexHome) });
     return (await this.collect()).sessions.find((entry) => entry.conversationId === conversationId);
+  }
+
+  private async sidebarLayouts(sources: DesktopMetadataSource[]): Promise<Map<string, DesktopSidebarMetadata>> {
+    const layouts = await Promise.all(this.homes.map(async (home, index) => {
+      const layout = await this.readSidebar(home);
+      // An auxiliary CLI-only home has no Desktop layout to reconstruct. Do not
+      // suppress a missing primary layout, a damaged layout, or uncertain catalogs.
+      const catalogs = sources.filter(source => source.codexHome === home && source.kind === "desktop_catalog");
+      const absentCatalogs = catalogs.length === 2 && catalogs.every(source => source.status === "absent")
+        && ["codex.db", "codex-dev.db"].every(name => catalogs.some(source => source.database === path.join(home, "sqlite", name)));
+      return index > 0 && layout.failureReason === "missing" && absentCatalogs ? undefined : [home, layout] as const;
+    }));
+    return new Map(layouts.filter((entry): entry is readonly [string, DesktopSidebarMetadata] => entry !== undefined));
   }
 
   private async collect() {

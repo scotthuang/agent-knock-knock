@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.9 - 2026-10-18
+
+- Support macOS Codex Desktop `26.1007.71326` / build `20398` through its original IPC owner: creation, Send, bounded public Status progress, exact Watch, command/file approvals, blocking/asynchronous answers, model/permission settings and exact interruption. Retain the separately reviewed `13536` and `20156` capability profiles; unknown builds remain read-only.
+- Require a coherent Desktop application/build/bundled-backend tuple for creation. Preserve owner, task, request, freshness and one-dispatch checks; reconcile uncertain acceptance without resending.
+- Stop reporting a missing sidebar in an additional CLI-only Codex home as a broken Desktop layout. Actual missing, invalid or unreadable Desktop layouts remain explicit, and saved sidebar membership does not imply a live owner.
+- Bound controller-facing List output before JSON serialization. Compact projection v3/action contract 31 puts conversations first, retains active or unresolved attention, and summarizes healthy ended history. Add `listView`, `listCursor` and `listLimit` for complete history/all access; preserve raw CLI diagnostics. Every page retains exact IDs, continuation and attention counts under a whole-response budget. See [List output and history](docs/list-output.md).
+- Leave existing Watch deadlines, callback records, idempotent Send and recovery semantics unchanged. This release does not publish or upgrade the independent Pi/DSH connectors.
+
+### Validation boundaries
+
+- Dedicated Desktop real-task checks covered creation, public progress, command/file allow and reject, Unicode asynchronous answers, a two-question Plan request, settings readback, exact cancellation and a subsequent successful task. Nine original native tasks produced fifteen unique local attention/completion acknowledgements, each accepted once. No existing business conversation was used, and no external chat delivery is claimed.
+- List validation used thousands of synthetic ended/attention records and actual local discovery through the installed OpenClaw Codex harness at its minimum 16,000 weighted-character budget. Current/history/all pages remained valid JSON without lost or duplicate IDs. This bounds returned context, not native discovery cost; callers must follow the returned pagination arguments.
+
 ## DeepSeek Harness connector 0.1.0-rc.6 — 2026-10-17
 
 - Support DeepSeek Harness `0.2.1-rc.2`, with its actual Cordis `4.0.5` and SDK dependencies. Preserve the previously reviewed Host versions and reject unknown or mixed runtime package sets.

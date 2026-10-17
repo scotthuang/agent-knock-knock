@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
-import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
+import { DESKTOP_20398_BUILD, DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
 import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { DesktopIpcError, type DesktopCompatibility, type DesktopIpcTransport } from "../src/desktop-types.js";
 import { DesktopFrameDecoder, encodeDesktopFrame, readDesktopSocketIdentity } from "../src/desktop-ipc-transport.js";
@@ -111,7 +111,7 @@ function asyncFixture() {
 }
 
 test("Desktop async answer uses one exact-owner steer and permits ordinary progress during durable persistence", async () => {
-  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) {
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD, DESKTOP_20398_BUILD]) {
     const { fixture, answer } = asyncFixture(), client = await connect(fixture, compatibility);
     try {
       const receipt = await client.answerAsyncOnce({ ...answer, beforeDispatch: async () => {
@@ -378,8 +378,10 @@ test("Desktop IPC trusts only private current-user sockets in a private real dir
 
 test("Desktop task-interaction build admits sends and answers without authorizing session controls", async () => {
   assert.deepEqual(desktopCapabilityProfile(VERIFIED_DESKTOP_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: true });
+  assert.deepEqual(desktopCapabilityProfile(DESKTOP_20398_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: true });
   assert.deepEqual(desktopCapabilityProfile(DESKTOP_CREATION_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: false });
-  for (const compatibility of [{ ...DESKTOP_CREATION_BUILD, build: "future" }, { ...DESKTOP_CREATION_BUILD, version: "future" }]) {
+  for (const compatibility of [{ ...DESKTOP_CREATION_BUILD, build: "future" }, { ...DESKTOP_CREATION_BUILD, version: "future" },
+    { ...DESKTOP_20398_BUILD, build: DESKTOP_CREATION_BUILD.build }, { ...DESKTOP_20398_BUILD, version: DESKTOP_CREATION_BUILD.version }]) {
     assert.deepEqual(desktopCapabilityProfile(compatibility), { send: false, approvals: false, blockingAnswers: false, asyncAnswers: false, nativeControls: false });
   }
   const fixture = new Fixture(), client = await connect(fixture, DESKTOP_CREATION_BUILD);

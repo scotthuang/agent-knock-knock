@@ -119,16 +119,13 @@ test("OpenClaw plugin CLI relay leaves the Gateway event loop responsive", async
 
   const listTool = registerOpenClawListTool(relayPath);
   const result = await listTool.execute("tool-call-async", {});
-  assert.deepEqual(result.details, {
-    projection: {
-      schema: "agent-knock-knock/host-list-compact",
-      version: 1,
-      skill: "agent-knock-knock"
-    },
-    terminals: [],
-    terminal_watches: [],
-    unavailable_managed_turns: []
+  const listed = result.details as Record<string, any>;
+  assert.deepEqual(listed.projection, {
+    schema: "agent-knock-knock/host-list-compact", version: 3, skill: "agent-knock-knock"
   });
+  for (const field of ["terminals", "terminal_watches", "unavailable_managed_turns"]) assert.deepEqual(listed[field], []);
+  assert.equal(listed.pagination.has_more, false);
+  assert.equal(listed.watch_summary.total, 0);
 });
 
 test("OpenClaw plugin aborts its asynchronous CLI relay", async (t) => {

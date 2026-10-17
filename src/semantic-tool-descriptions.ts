@@ -182,11 +182,11 @@ export const semanticToolDescriptions = {
     "Session, ledger, and callback cleanup is best-effort and cannot veto closing " +
     "the Turn; warnings identify metadata AKK preserved. Refresh list afterward " +
     "and use Watch if the coding agent is still working.",
-  list: "List CLI/Desktop conversations and separate Watches. Use surface/agent and conversation_id; " +
-    "AKK selects transport. Same-project grouping is display only; terminalDebug expands connections. " +
-    "Desktop defaults to saved expanded sidebar, not viewport; desktop_view=history and " +
-    "desktopSearch/desktopProject/desktopCursor filter/page. Keep unconnected rows/limitations; " +
-    "live_count covers this page. Use available_actions/action_inputs and agent-knock-knock skill; mutations revalidate privately.",
+  list: "List CLI/Desktop conversations and separate Watches in bounded pages. Default: current/unresolved; " +
+    "listView=history/all or all=true includes ended records. Follow pagination.next_args. Select " +
+    "conversation_id; AKK chooses transport. Same-project grouping is display only; terminalDebug expands " +
+    "connections. Keep unconnected rows and limitations. Desktop defaults to saved sidebar. Use " +
+    "available_actions/action_inputs and agent-knock-knock skill; mutations revalidate privately.",
   model_options: "For a Desktop conversation_id, read current model/effort/collaboration mode; " +
     "the owner exposes no model catalog (catalog_available=false), so use only a model explicitly requested by the user. " +
     "For terminal_id, inspect the exact current native model catalog for one explicitly selected " +

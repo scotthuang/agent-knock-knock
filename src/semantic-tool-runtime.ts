@@ -1,3 +1,4 @@
+import { parseHostListPageOptions } from "./semantic-tool-list-budget.js";
 import { createDesktopCreationSemanticTool } from "./desktop-creation-semantic.js";
 import { isClaudeNativeConversationId } from "./claude-native-identity.js";
 import { isDesktopConversationId } from "./desktop-identity.js";
@@ -693,7 +694,10 @@ function registerSemanticListTool(api): void {
     compactText: true,
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      const args = ["list", "--reconcile"];
+      parseHostListPageOptions(params);
+      // Read retained records so failed/uncertain managed callbacks cannot be hidden
+      // by the CLI's active-only default; the Host projection selects and pages them.
+      const args = ["list", "--reconcile", "--all"];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       pushOptional(
         args,
@@ -711,7 +715,6 @@ function registerSemanticListTool(api): void {
       pushOptional(args, "--desktop-cursor", stringValue(params.desktopCursor));
       pushOptional(args, "--desktop-limit", numberString(params.desktopLimit));
       pushOptional(args, "--codex-home", stringValue(config.codexHome));
-      if (params.all === true) args.push("--all");
       if (params.noApprovalScan === true) args.push("--no-approval-scan");
       if (params.terminalDebug === true) args.push("--terminal-debug");
       return args;
@@ -1842,7 +1845,7 @@ function registerCliTool(
     formatCommandError?: (error: unknown) => ReturnType<typeof toolResult>;
     timeoutMs?: number;
     normalizeTurnIdentity?: boolean;
-    modelProjection?: (value: unknown) => unknown;
+    modelProjection?: (value: unknown, params: Record<string, unknown>) => unknown;
     compactText?: boolean;
     isErrorResult?: (result: unknown) => boolean;
   }
@@ -1887,7 +1890,7 @@ function registerCliTool(
               name === "agent_knock_knock_respond" ||
               name === "agent_knock_knock_identify_and_send",
             normalizeTurnIdentity,
-            modelProjection,
+            modelProjection: modelProjection ? value => modelProjection(value, isRecord(params) ? params : {}) : undefined,
             compactText,
             forceError:
               typeof isErrorResult === "function" && isErrorResult(result) === true
