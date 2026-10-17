@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import os from "node:os";
+import path from "node:path";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Context } from "@deepseek-ai/cordis";
@@ -106,6 +108,8 @@ test("mounts native command/tools and routes every call through the exact Agent"
       };
     },
     createHostAdapter(options) {
+      assert.equal(options.pluginConfig?.storeDir, path.join(os.homedir(), ".agent-knock-knock", "hosts", "deepseek-harness", "store"));
+      assert.equal(options.lifecycleEnvironment?.AKK_DSH_CONTROLLER_ID, "akk-dsh:host-instance:lifecycle");
       return fakeAdapter(options, {
         contexts,
         environments,

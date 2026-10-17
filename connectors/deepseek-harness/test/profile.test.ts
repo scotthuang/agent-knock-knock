@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -11,7 +12,7 @@ import {
   HOST_PROFILE_SELECTION_ENV,
   SUPPORTED_DSH_VERSIONS,
 } from "../src/constants.js";
-import { createConnectorProfileResources } from "../src/profile.js";
+import { createConnectorProfileResources, resolveConnectorPluginConfig } from "../src/profile.js";
 
 test("creates a private route-bound Host Profile and environment", () => {
   const resources = createConnectorProfileResources(
@@ -80,5 +81,22 @@ test("projects each supported Harness version into its exact Host Profile", () =
     } finally {
       resources.remove();
     }
+  }
+});
+
+
+test("uses a stable DSH-owned Store without mutating or overriding explicit configuration", () => {
+  const configured = { agentHardTimeoutMinutes: 720 };
+  const defaultConfig = resolveConnectorPluginConfig(configured, "/test/home");
+  assert.equal(defaultConfig.storeDir, "/test/home/.agent-knock-knock/hosts/deepseek-harness/store");
+  assert.notEqual(defaultConfig.storeDir, path.join("/test/home", ".agent-knock-knock", "store"));
+  assert.deepEqual(configured, { agentHardTimeoutMinutes: 720 });
+  assert.equal(defaultConfig.agentHardTimeoutMinutes, 720);
+  for (const storeDir of ["/private/explicit-store", "relative-explicit-store"]) {
+    const explicit = { ...configured, storeDir };
+    assert.deepEqual(resolveConnectorPluginConfig(explicit, "/other/home"), explicit);
+  }
+  for (const storeDir of ["", "   ", null, false]) {
+    assert.throws(() => resolveConnectorPluginConfig({ storeDir }), /non-empty path/u);
   }
 });

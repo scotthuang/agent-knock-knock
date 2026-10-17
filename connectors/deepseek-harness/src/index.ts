@@ -27,7 +27,7 @@ import {
   type SupportedDeepSeekHarnessVersion,
 } from "./constants.js";
 import { createCallbackIpcServer } from "./ipc.js";
-import { createConnectorProfileResources } from "./profile.js";
+import { createConnectorProfileResources, resolveConnectorPluginConfig } from "./profile.js";
 import {
   AgentRouteTable,
   type CreateUserMessage,
@@ -92,6 +92,7 @@ export async function applyWithDependencies(
   const resolved = { ...DEFAULT_DEPENDENCIES, ...dependencies };
   const harnessRuntime = await resolved.loadSupportedDeepSeekHarnessRuntime();
 
+  const pluginConfig = resolveConnectorPluginConfig(config.pluginConfig);
   const resources = resolved.createConnectorProfileResources(
     harnessRuntime.version,
   );
@@ -125,7 +126,7 @@ export async function applyWithDependencies(
       },
       lifecycleEnvironment: resources.environment(lifecycleControllerId),
       lifecycleIntervalMs: config.lifecycleIntervalMs,
-      pluginConfig: config.pluginConfig ?? {},
+      pluginConfig,
       logger: {
         debug: (message) => ctx.logger.debug(message),
         info: (message) => ctx.logger.info(message),

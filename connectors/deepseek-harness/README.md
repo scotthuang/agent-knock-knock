@@ -13,15 +13,17 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-This connector pins AKK **0.14.7** in its package and lockfile. It exposes
+This connector pins AKK **0.14.8** in its package and lockfile. It exposes
 that runtime's 26 semantic tools, including Codex CLI backend and Desktop
 operations when the selected conversation advertises them. A newer root
 checkout does not silently replace this published dependency.
 
-The development baseline is DeepSeek Harness **0.2.0-rc.2** (the upstream
-`latest` channel). **0.2.1-alpha.2** is separately reviewed preview support.
-Neither is a stable release. The older reviewed Hosts `0.1.1-rc.2`,
-`0.1.2-alpha.1`, and `0.1.5-rc.2` remain accepted. Use a resident POSIX Web Host
+The development baseline is DeepSeek Harness **0.2.1-rc.2** with Cordis
+**4.0.5**. This is a release candidate, not a stable release; as checked on
+2026-10-17, npm `next` points here while `latest` still points to
+**0.2.0-rc.2**. Do not downgrade a newer installed RC just to follow `latest`.
+Previously reviewed Hosts `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.5-rc.2`,
+`0.2.0-rc.2`, and preview `0.2.1-alpha.2` remain accepted. Use a resident POSIX Web Host
 and Node.js `>=22.19.0`.
 
 Activation locates the real `@deepseek-ai/dsh` launcher and requires the
@@ -67,6 +69,10 @@ particular prerelease is present in every configured npm registry. Connector
 prereleases use the `next` tag when published.
 
 ### 2. Add the connector to the Web profile
+
+DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
+explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
+Use `next`, or pin `@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.6`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -280,7 +286,21 @@ configuration object:
 
 `lifecycleIntervalMs` must be at least 50 milliseconds. Use an absolute
 `storeDir`; a relative value is resolved from the Web Host's working directory.
-When omitted, AKK uses `~/.agent-knock-knock/store`.
+When omitted, this connector uses
+`~/.agent-knock-knock/hosts/deepseek-harness/store` for both tools and lifecycle
+reconciliation. Keep a custom Store separate from OpenClaw, Pi, and other DSH
+Host processes: the pinned core does not isolate every native callback claim
+by Host authority when several Hosts share one Store. An unrelated reconciler
+can otherwise claim a callback that it cannot deliver.
+
+The default separates DSH from other Host types, not from another DSH process.
+If running multiple DSH Hosts or profiles concurrently, configure a distinct
+`pluginConfig.storeDir` for each.
+
+This update does not move or replay records from the older shared
+`~/.agent-knock-knock/store`. Existing records remain there unchanged. An
+explicit `pluginConfig.storeDir` is preserved; sharing that directory still
+has the limitation above.
 
 The optional bundle patch mounts only the Host plugin:
 
@@ -367,17 +387,17 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned published AKK runtime `0.14.7`; building the current
+tests against its pinned published AKK runtime `0.14.8`; building the current
 repository root does not silently replace that dependency. Testing connector
 changes against another AKK runtime requires an explicit dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
 
-The package manifest is currently `0.1.0-rc.5`, so this remains a prerelease and
-is published under `next`; `latest` remains on the earlier `0.1.0-rc.1` tag.
-Registry state can change independently of this source file, so the `npm view`
-commands above remain authoritative.
+Connector **`0.1.0-rc.6`** is the DSH `0.2.1-rc.2` compatibility release,
+published as a prerelease on `next`; it does not promote `latest`. Registry
+state can change independently of this source file, so the `npm view` commands
+above remain authoritative.
 
 From `connectors/deepseek-harness`, the normal development gate is:
 
@@ -390,9 +410,14 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.5` lockfile uses the published DeepSeek Harness `0.2.0-rc.2`
-SDK packages. The same source is checked separately against preview
-`0.2.1-alpha.2` and retained `0.1.5-rc.2`. The older `0.1.1-rc.2` and
+`0.1.0-rc.6` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
+canonical result rendering, exact Agent ownership, typed questionnaire payloads,
+and rejection before dispatch when targets are ambiguous or stale. This is
+an isolated registry test, not a live-model acceptance claim. The final product
+sources also passed typecheck, 39 fast tests and coherent launcher/helper
+resolution with `0.2.0-rc.2`, retained `0.1.5-rc.2`, and preview
+`0.2.1-alpha.2`. Old-version Web/model acceptance was not repeated. The older `0.1.1-rc.2` and
 `0.1.2-alpha.1` compatibility policy is retained; it is not a new full Web
 acceptance claim for those releases. Deterministic Host-loop checks use the
 real upstream registries and Inbox with a scripted model provider; they are
@@ -426,7 +451,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.5
+npm run release:check -- --publish --confirm-version 0.1.0-rc.6
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags

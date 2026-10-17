@@ -1,5 +1,12 @@
 # Changelog
 
+## DeepSeek Harness connector 0.1.0-rc.6 — 2026-10-17
+
+- Support DeepSeek Harness `0.2.1-rc.2`, with its actual Cordis `4.0.5` and SDK dependencies. Preserve the previously reviewed Host versions and reject unknown or mixed runtime package sets.
+- Pin AKK core `0.14.8`, keeping the installed runtime, canonical Skill and capability handshake aligned, including Desktop question answers.
+- Isolate the default DSH Store from other Hosts so a foreign worker cannot claim its native callbacks. Preserve explicit Store paths and existing records without migration or replay.
+- Verify current and previous SDK fast tests, native tool execution and callback consumption/deduplication. Publish only the independent DSH connector on npm `next`; core, Pi and npm `latest` are unchanged. See the [compatibility record](docs/pi-dsh-compatibility.md#dsh-021-rc2-compatibility--2026-10-17).
+
 ## 0.14.8 - 2026-10-14
 
 - Enable blocking and asynchronous question answers on macOS Codex Desktop `26.1007.30912` / build `20156`, independently of model/permission settings and cancellation. Use the advertised Respond action from fresh conversation or exact Watch Status.
