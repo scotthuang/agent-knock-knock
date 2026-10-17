@@ -93,7 +93,7 @@ delivery to WeChat or another downstream channel. See
 
 ## How creation reaches Desktop
 
-Desktop must already be running locally as the same OS user as AKK. On the
+Desktop must already be running locally as the same OS user as AKK. On a
 supported macOS build, AKK:
 
 1. Connects to a temporary app-server process using the installed Desktop app's
@@ -116,6 +116,25 @@ before the first-task dispatch, AKK refuses to send into it rather than silently
 joining unrelated work.
 
 ## Compatibility and evidence boundary
+
+AKK 0.14.9 adds macOS Desktop `26.1007.71326`, build `20398`,
+with bundled backend `0.162.0-alpha.17.2`. The 2026-10-18 dedicated test verified
+projectless creation, the original Desktop owner, first-task acceptance and
+completion of that exact native turn. An initially uncertain acceptance was
+resolved by observation without another Send. Effective model/effort and
+permission updates, command/file approvals, blocking/asynchronous answers and
+exact cancellation were also verified in the isolated test conversation.
+Attention/completion callbacks were accepted once by a local receiver; this is
+not a new external-channel delivery claim. See the
+[validation record](codex-desktop-compatibility.md#build-20398-validation--akk-0149)
+for the exact effects and remaining limits.
+
+Creation requires one coherent application version/build/bundled-backend
+combination. A later version is not implicitly supported, and a metadata
+creation receipt cannot substitute for a live Desktop owner. The private IPC
+is not a stable public third-party interface; alternate installation paths,
+Windows/Linux and a running owner different from the installed bundle remain
+outside the verified boundary.
 
 The 0.14.5 profile enables new-conversation creation and Desktop Send on
 macOS Desktop `26.1007.30912`, build `20156`. It preserves exact owner and task

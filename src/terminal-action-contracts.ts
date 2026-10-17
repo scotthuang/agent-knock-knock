@@ -10,7 +10,7 @@ export const TERMINAL_WATCH_ACTION_USE =
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 30,
+    version: 31,
     instructions: actionContractInstructions(),
     field_semantics: actionFieldSemantics(),
     actions: terminalActionCatalog()

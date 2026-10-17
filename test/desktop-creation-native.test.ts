@@ -4,11 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createDesktopCreationNative, DesktopCreationNativeError, VERIFIED_DESKTOP_CREATION_BUILD,
-  type DesktopCreationNativeOptions } from "../src/desktop-creation-native.js";
+  VERIFIED_DESKTOP_CREATION_BUILDS, type DesktopCreationNativeOptions } from "../src/desktop-creation-native.js";
 import { DesktopCreationRpcError, type DesktopCreationRpc } from "../src/desktop-creation-rpc.js";
 
 const THREAD = "00000000-0000-4000-8000-000000000001", PROJECT = "00000000-0000-4000-8000-000000000002";
-function fixture(t: { after(fn: () => void): void }) {
+function fixture(t: { after(fn: () => void): void },
+  build: (typeof VERIFIED_DESKTOP_CREATION_BUILDS)[number] = VERIFIED_DESKTOP_CREATION_BUILD) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-create-"));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const canonicalCwd = fs.realpathSync(cwd);
@@ -24,7 +25,7 @@ function fixture(t: { after(fn: () => void): void }) {
       catch { throw new DesktopCreationRpcError("dispatch_barrier_failed", "barrier failed", false, method); }
       requests.push({ method, params });
       if (state.intercept) { const response = state.intercept(method, params); if (response !== undefined) return response; }
-      if (method === "initialize") return { userAgent: `agent-knock-knock-desktop-create/${VERIFIED_DESKTOP_CREATION_BUILD.backendVersion} (Mac OS)`, codexHome: canonicalCwd };
+      if (method === "initialize") return { userAgent: `agent-knock-knock-desktop-create/${build.backendVersion} (Mac OS)`, codexHome: canonicalCwd };
       if (method === "project/list") return { data: [state.project], nextCursor: null };
       if (method === "project/read") return { project: state.project };
       if (method === "thread/start") { selectedProject = params.projectId as string | null; return resultThread(); }
@@ -35,15 +36,15 @@ function fixture(t: { after(fn: () => void): void }) {
     notifyInitialized() { state.initialized = true; },
     async close() { state.closed = true; }
   };
-  const options: DesktopCreationNativeOptions = { codexHome: cwd, compatibility: VERIFIED_DESKTOP_CREATION_BUILD,
+  const options: DesktopCreationNativeOptions = { codexHome: cwd, compatibility: build,
     inspectApplication: appPath => ({ appPath, binaryPath: `${appPath}/bundled/codex`,
-      appVersion: VERIFIED_DESKTOP_CREATION_BUILD.version, appBuild: VERIFIED_DESKTOP_CREATION_BUILD.build,
-      backendVersion: VERIFIED_DESKTOP_CREATION_BUILD.backendVersion }), rpcFactory: () => rpc };
+      appVersion: build.version, appBuild: build.build,
+      backendVersion: build.backendVersion }), rpcFactory: () => rpc };
   return { cwd: canonicalCwd, state, requests, options };
 }
 
-test("creates a projectless zero-turn thread once, with dispatch and acknowledged-identity barriers", async t => {
-  const f = fixture(t), client = await createDesktopCreationNative(f.options);
+for (const build of VERIFIED_DESKTOP_CREATION_BUILDS) test(`Desktop ${build.build} creates a projectless zero-turn thread once with identity barriers`, async t => {
+  const f = fixture(t, build), client = await createDesktopCreationNative(f.options);
   const phases: string[] = [];
   const result = await client.create({ cwd: f.cwd, title: "New fixture",
     beforeDispatch: () => { assert.equal(f.requests.some(r => r.method === "thread/start"), false); phases.push("before"); },
@@ -55,6 +56,26 @@ test("creates a projectless zero-turn thread once, with dispatch and acknowledge
   assert.equal(f.requests.some(r => r.method === "turn/start"), false);
   await assert.rejects(client.create({ cwd: f.cwd }), /already attempted/u);
   await client.close(); assert.equal(f.state.closed, true);
+});
+
+test("creation requires one coherent application/build/backend tuple before starting the RPC process", async t => {
+  for (const build of VERIFIED_DESKTOP_CREATION_BUILDS) {
+    const f = fixture(t, build);
+    let starts = 0;
+    const original = f.options.inspectApplication!("/fixture.app");
+    const other = VERIFIED_DESKTOP_CREATION_BUILDS.find(candidate => candidate.build !== build.build)!;
+    for (const mismatch of [
+      { appVersion: "future" }, { appBuild: "future" }, { backendVersion: "0.162.0-alpha.17.3" },
+      { appVersion: other.version, appBuild: other.build }
+    ]) {
+      await assert.rejects(createDesktopCreationNative({ ...f.options,
+        inspectApplication: () => ({ ...original, ...mismatch }),
+        rpcFactory: () => { starts++; throw new Error("Must reject before RPC launch"); }
+      }), (error: unknown) => error instanceof DesktopCreationNativeError
+        && error.code === "incompatible_desktop" && error.dispatchState === "not_sent");
+    }
+    assert.equal(starts, 0);
+  }
 });
 
 test("resolves exact projects across pages, verifies roots, and rejects ambiguity or outside directories before creation", async t => {

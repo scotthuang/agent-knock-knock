@@ -21,9 +21,17 @@ test("sidebar metadata reads only layout projection and preserves original file 
     assert.equal(await fs.readFile(file, "utf8"), value);
     assert.equal((await fs.stat(file)).mtimeMs, before.mtimeMs);
     await fs.writeFile(file, "{broken");
-    assert.equal((await readDesktopSidebarMetadata(home)).available, false);
+    assert.equal((await readDesktopSidebarMetadata(home)).failureReason, "invalid");
     await fs.unlink(file);
-    assert.equal((await readDesktopSidebarMetadata(home)).available, false);
+    assert.equal((await readDesktopSidebarMetadata(home)).failureReason, "missing");
+    await fs.writeFile(file, "");
+    await fs.truncate(file, 16 * 1024 * 1024 + 1);
+    assert.equal((await readDesktopSidebarMetadata(home)).failureReason, "oversized");
+    await fs.unlink(file);
+    await fs.mkdir(file);
+    const unreadable = await readDesktopSidebarMetadata(home);
+    assert.equal(unreadable.failureReason, "unreadable");
+    assert.equal(JSON.stringify(unreadable).includes(home), false, "diagnostics never expose local paths or raw filesystem errors");
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
 

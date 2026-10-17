@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DesktopSessionCatalog, mergeDesktopMetadata } from "../src/desktop-session-catalog.js";
-import { parseDesktopSidebarMetadata } from "../src/desktop-sidebar-metadata.js";
+import { parseDesktopSidebarMetadata, type DesktopSidebarMetadata } from "../src/desktop-sidebar-metadata.js";
 import { selectDesktopSidebar, DESKTOP_PINNED_SECTION_ID } from "../src/desktop-sidebar-selection.js";
 import type { DesktopMetadataBatch, DesktopMetadataRow } from "../src/desktop-metadata-reader.js";
 
@@ -155,4 +155,47 @@ test("sidebar parser discards unrelated sensitive global state and keeps migrati
   assert.equal(JSON.stringify(layout).includes("PRIVATE_DRAFT"), false);
   assert.deepEqual(layout.migratedPinnedIds, ["pinned"]);
   assert.deepEqual(parseDesktopSidebarMetadata(raw, "/different/home").migratedPinnedIds, []);
+});
+
+test("missing auxiliary CLI-only layout does not downgrade the Desktop sidebar or remove history candidates", async () => {
+  const secondary = "/fixture/cli-only";
+  const missing: DesktopSidebarMetadata = { ...parseDesktopSidebarMetadata({}, secondary), available: false,
+    failureReason: "missing", limitations: ["Desktop persisted sidebar layout is missing."] };
+  const sources = ["codex.db", "codex-dev.db"].map(name => ({
+    source: { codexHome: secondary, database: `${secondary}/sqlite/${name}`, kind: "desktop_catalog" as const, status: "absent" as const }, rows: []
+  }));
+  const provider = new DesktopSessionCatalog({ codexHomes: [home, secondary],
+    readMetadata: async current => current === home ? [batch(rows())] : [...sources,
+      { source: { codexHome: secondary, database: `${secondary}/state.sqlite`, kind: "state", status: "ok" }, rows: [state("cli-secondary")] }],
+    readSidebar: async current => current === home ? parseDesktopSidebarMetadata(globalState(), home) : missing });
+  const sidebar = await provider.list({ view: "sidebar" });
+  assert.equal(sidebar.sidebar?.status, "supported");
+  assert.equal(sidebar.total, 6);
+  assert.deepEqual(sidebar.sidebar?.limitations, []);
+  assert.equal(sidebar.historyTotal, 9);
+  const history = await provider.list({ view: "history", search: "cli-secondary" });
+  assert.equal(history.total, 1);
+  assert.equal((await provider.get(history.sessions[0]))?.threadId, "cli-secondary");
+});
+
+test("missing or broken real Desktop sources stay visible instead of being treated as CLI-only", async () => {
+  const secondary = "/fixture/other-desktop";
+  for (const mode of ["present", "error", "incomplete-scan", "invalid", "unreadable", "oversized", "primary-missing"] as const) {
+    const broken: DesktopSidebarMetadata = { ...parseDesktopSidebarMetadata({}, secondary), available: false,
+      failureReason: ["invalid", "unreadable", "oversized"].includes(mode) ? mode as "invalid" | "unreadable" | "oversized" : "missing",
+      limitations: ["Desktop persisted sidebar layout needs attention."] };
+    const catalogs: DesktopMetadataBatch[] = ["codex.db", "codex-dev.db"].map((name, index) => ({
+      source: { codexHome: secondary, database: `${secondary}/sqlite/${name}`, kind: "desktop_catalog",
+        status: index === 0 && mode === "present" ? "ok" : index === 0 && mode === "error" ? "error" : "absent" }, rows: []
+    }));
+    if (mode === "incomplete-scan") catalogs.pop();
+    const provider = new DesktopSessionCatalog({ codexHomes: [home, secondary],
+      readMetadata: async current => current === home ? [batch(rows())] : [...catalogs,
+        { source: { codexHome: secondary, database: `${secondary}/state.sqlite`, kind: "state", status: "ok" }, rows: rows() }],
+      readSidebar: async current => (mode === "primary-missing" ? current === home : current === secondary)
+        ? broken : parseDesktopSidebarMetadata(globalState(), current) });
+    const result = await provider.list({ view: "sidebar" });
+    assert.equal(result.sidebar?.status, "partial", mode);
+    assert.ok(result.sidebar?.limitations.includes("Desktop persisted sidebar layout needs attention."), mode);
+  }
 });

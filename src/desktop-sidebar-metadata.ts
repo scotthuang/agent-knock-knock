@@ -3,6 +3,7 @@ import path from "node:path";
 
 export interface DesktopSidebarMetadata {
   available: boolean;
+  failureReason?: "missing" | "invalid" | "unreadable" | "oversized";
   mode?: string;
   collapsed: Record<string, boolean>;
   expanded: Record<string, boolean>;
@@ -24,14 +25,19 @@ export type DesktopSidebarReader = (codexHome: string) => Promise<DesktopSidebar
 export async function readDesktopSidebarMetadata(home: string): Promise<DesktopSidebarMetadata> {
   try {
     const file = path.join(home, ".codex-global-state.json");
-    if ((await fs.stat(file)).size > 16 * 1024 * 1024) throw new Error("oversized layout");
+    if ((await fs.stat(file)).size > 16 * 1024 * 1024) return unavailableSidebar("oversized");
     return parseDesktopSidebarMetadata(JSON.parse(await fs.readFile(file, "utf8")), home);
-  } catch {
-    return { available: false, collapsed: {}, expanded: {}, projects: {}, assignments: {}, projectOrder: [],
-      pinnedIds: [], migratedPinnedIds: [], nativePinnedOrder: [], projectIdMappings: {},
-      projectlessIds: [], rootHints: {}, customSectionThreadIds: [],
-      limitations: ["Desktop persisted sidebar layout is unavailable or invalid."] };
+  } catch (error) {
+    return unavailableSidebar(error instanceof SyntaxError ? "invalid"
+      : (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "missing" : "unreadable");
   }
+}
+
+function unavailableSidebar(failureReason: NonNullable<DesktopSidebarMetadata["failureReason"]>): DesktopSidebarMetadata {
+  return { available: false, failureReason, collapsed: {}, expanded: {}, projects: {}, assignments: {}, projectOrder: [],
+    pinnedIds: [], migratedPinnedIds: [], nativePinnedOrder: [], projectIdMappings: {},
+    projectlessIds: [], rootHints: {}, customSectionThreadIds: [],
+    limitations: [`Desktop persisted sidebar layout is ${failureReason}.`] };
 }
 
 export function parseDesktopSidebarMetadata(value: unknown, home: string): DesktopSidebarMetadata {

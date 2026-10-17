@@ -294,6 +294,9 @@ export const listParameters = {
   type: "object",
   additionalProperties: false,
   properties: {
+    listView: { type: "string", enum: ["current", "history", "all"], description: "Host List scope: current (default) returns conversations and active/unresolved observations; history returns healthy ended Watches and managed Turns; all includes both. all=true also selects all unless listView is explicit. Always follow pagination.next_args; omitted history does not mean no Watch." },
+    listCursor: { type: "string", maxLength: 512, description: "Opaque pagination.next_cursor; use pagination.next_args unchanged for the next page with the same filters. This is independent of Desktop catalog pagination." },
+    listLimit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum total rows in one Host List page (default 40). The whole response byte budget may return fewer. Exact Status returns selected task details." },
     desktop_view: { type: "string", enum: ["sidebar", "history"], description: "Desktop discovery scope: sidebar (default) follows persisted expanded sidebar membership, not the current scroll viewport; history searches the broader saved catalog. Unconnected rows remain listed." },
     desktopSearch: { type: "string", description: "Search saved Desktop candidates by title, directory or native thread ID; unconfirmed live connections remain listed." },
     desktopProject: { type: "string", description: "Exact Desktop project ID or absolute directory." },

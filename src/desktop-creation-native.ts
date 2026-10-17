@@ -3,10 +3,15 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createDesktopCreationRpc, DesktopCreationRpcError, type DesktopCreationRpc } from "./desktop-creation-rpc.js";
 import type { DesktopCompatibility } from "./desktop-types.js";
+import { DESKTOP_20398_BUILD, DESKTOP_CREATION_BUILD } from "./desktop-compatibility.js";
 
 export const VERIFIED_DESKTOP_CREATION_BUILD = Object.freeze({
-  version: "26.1007.30912", build: "20156", backendVersion: "0.162.0-alpha.17.2"
+  ...DESKTOP_CREATION_BUILD, backendVersion: "0.162.0-alpha.17.2"
 });
+export const VERIFIED_DESKTOP_CREATION_BUILDS = Object.freeze([
+  VERIFIED_DESKTOP_CREATION_BUILD,
+  Object.freeze({ ...DESKTOP_20398_BUILD, backendVersion: "0.162.0-alpha.17.2" })
+]);
 export type DesktopCreationDispatchState = "not_sent" | "unknown" | "created";
 export class DesktopCreationNativeError extends Error {
   constructor(public readonly code: string, message: string,
@@ -106,10 +111,10 @@ function thread(value: unknown, expectedId?: string): DesktopCreatedThread {
 export async function createDesktopCreationNative(options: DesktopCreationNativeOptions): Promise<DesktopCreationNative> {
   const codexHome = directory(options.codexHome, "Codex home");
   const inspected = (options.inspectApplication ?? inspectApplication)(options.appPath ?? "/Applications/ChatGPT.app");
-  const verified = VERIFIED_DESKTOP_CREATION_BUILD;
-  if (options.compatibility.version !== verified.version || options.compatibility.build !== verified.build
-    || inspected.appVersion !== verified.version || inspected.appBuild !== verified.build
-    || inspected.backendVersion !== verified.backendVersion) {
+  const verified = VERIFIED_DESKTOP_CREATION_BUILDS.find(build => options.compatibility.version === build.version
+    && options.compatibility.build === build.build && inspected.appVersion === build.version
+    && inspected.appBuild === build.build && inspected.backendVersion === build.backendVersion);
+  if (!verified) {
     fail("incompatible_desktop", "Desktop creation requires the verified application build and bundled backend");
   }
   const metadata = { ...inspected, codexHome };

@@ -329,7 +329,7 @@ test("unified List presents CLI and Desktop once while retaining actions, offlin
   for (const legacy of ["terminals", "codex_cli_sessions", "desktop_sessions"]) assert.equal(legacy in result, false);
   assert.deepEqual(result.conversations.map(row => row.surface), ["cli", "cli", "desktop"]);
   assert.equal(result.conversations[0].agent, "codex");
-  assert.equal(result.projection.version, 2);
+  assert.equal(result.projection.version, 3);
   assert.equal(result.conversations[0].connected, true);
   assert.equal(result.conversations[2].connection_state, "no_live_owner");
   for (const field of ["source", "route_preference", "route_status", "terminal_aliases", "terminal_controls", "backend_version", "connection_state"]) {
@@ -389,14 +389,15 @@ test("compact unified CLI connections preserve truthful connectivity and each ma
       { managed: { session_id: "session-two", current_turn: { turn_id: "turn-two", status: "blocked" } } }
     ] })
   ] }) as Record<string, any>;
-  assert.equal(projected.conversations[0].connected, false);
-  assert.equal(projected.conversations[0].capabilities.send, false);
-  assert.equal("connected" in projected.conversations[1], false, "An unknown connection never becomes connected by presentation");
-  assert.equal(projected.conversations[2].connected, true);
-  assert.equal("terminal_control" in projected.conversations[2], false);
-  assert.deepEqual(projected.conversations[3].control_records.map(record => record.managed.current_turn.turn_id), ["turn-one", "turn-two"]);
-  assert.equal("terminal_controls" in projected.conversations[3], false);
-  assert.equal("available_actions" in projected.conversations[3], false, "Presentation does not infer or union connection actions");
+  const bySuffix = (suffix: string) => projected.conversations.find((entry: Record<string, any>) => entry.conversation_id === `${conversationId}-${suffix}`);
+  assert.equal(bySuffix("unloaded").connected, false);
+  assert.equal(bySuffix("unloaded").capabilities.send, false);
+  assert.equal("connected" in bySuffix("unknown"), false, "An unknown connection never becomes connected by presentation");
+  assert.equal(bySuffix("terminal").connected, true);
+  assert.equal("terminal_control" in bySuffix("terminal"), false);
+  assert.deepEqual(bySuffix("shared").control_records.map(record => record.managed.current_turn.turn_id), ["turn-one", "turn-two"]);
+  assert.equal("terminal_controls" in bySuffix("shared"), false);
+  assert.equal("available_actions" in bySuffix("shared"), false, "Presentation does not infer or union connection actions");
 });
 
 

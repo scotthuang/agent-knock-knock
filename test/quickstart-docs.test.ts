@@ -57,7 +57,7 @@ test("quickstarts install AKK 0.14 and distinguish backend from terminal require
   assert.match(tmux, /`managed\.recent_turn`/u);
   assert.match(
     tmux,
-    /refresh `\/akk list`[\s\S]*listed v30 `send` action[\s\S]*semantic IDs/u
+    /refresh `\/akk list`[\s\S]*listed v31 `send` action[\s\S]*semantic IDs/u
   );
   assert.match(
     tmux,
@@ -279,7 +279,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
       /(?:managed )?`approve\(\{turn_id\}\)`|`approve\(\{terminal_id\}\)`/u
     );
   }
-  assert.match(operatorContract, /v30 `action_contracts`/u);
+  assert.match(operatorContract, /v31 `action_contracts`/u);
   assert.match(
     quickstart,
     /terminal_user_explicit_composer_policy=replace_current_composer_and_submit[\s\S]*Codex-named field remains a compatibility alias/u
@@ -318,7 +318,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
   );
   assert.match(
     skill,
-    /compact projection v1[\s\S]*CLI keeps the complete operator\/debug action contract/u
+    /compact projection v3[\s\S]*CLI keeps the complete operator\/debug action contract/u
   );
   assert.match(
     skill,

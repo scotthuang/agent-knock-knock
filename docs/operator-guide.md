@@ -29,6 +29,11 @@ its equivalent `turn_id` for follow-up. A project path or title alone is never
 task identity. [Backend task recovery](backend-task-recovery.md) explains how
 to resume observation or release management for that exact task.
 
+Host List returns bounded pages with current conversations first. Follow
+`pagination.next_args` for the rest; use `listView: "history"` for ended
+observations. See [List output and history](list-output.md) for attention
+counts, compatibility and the separate Desktop catalog cursor.
+
 ## Command reference
 
 Direct slash commands are available in every first-party Host integration:
@@ -111,7 +116,7 @@ to obtain completion callbacks. Expiry ends observation, not the native task.
 Existing saved deadlines and repeated message IDs are not extended by an upgrade.
 Managed terminal inactivity remains a separate 60-minute default.
 
-The v30 `action_contracts` expose model-facing semantic IDs only. The trusted
+The v31 `action_contracts` expose model-facing semantic IDs only. The trusted
 adapter privately derives and revalidates terminal, process, binding, native
 thread, composer, approval, handoff, revision, and compare-and-swap evidence.
 Callers never supply those opaque fences.

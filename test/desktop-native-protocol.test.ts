@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
-import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
+import { DESKTOP_20398_BUILD, DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
 import { respondDesktopRequest } from "../src/desktop-ipc-native-operations.js";
 import { reduceDesktopSnapshot } from "../src/desktop-snapshot.js";
 import { desktopInteractions, desktopRequestResponse, findDesktopRequestEffect } from "../src/desktop-request-interactions.js";
@@ -69,7 +69,7 @@ test("Desktop request identity retains number versus string IDs and successive a
 });
 
 test("verified Desktop builds preserve exact approval dispatch and never treat ok as proof", async () => {
-  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) for (const kind of ["command", "file"]) {
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD, DESKTOP_20398_BUILD]) for (const kind of ["command", "file"]) {
     const fixture = new Fixture(); fixture.raw = state(request(kind)); const client = await connect(fixture, compatibility);
     const pending = interaction(fixture.raw);
     try {
@@ -106,7 +106,7 @@ test("Desktop question and approval writes reject unknown app versions and build
 });
 
 test("Desktop blocking answer requires exact completed response item, same typed request ID and all answers", async () => {
-  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) {
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD, DESKTOP_20398_BUILD]) {
     const fixture = new Fixture(); fixture.raw = state(request("blocking")); const client = await connect(fixture, compatibility);
     const pending = interaction(fixture.raw), response = { answers: { color: ["Green"] } };
     try {
@@ -158,7 +158,7 @@ test("Desktop approval effects distinguish accept progression from decline and i
 });
 
 test("Desktop stale request cannot dispatch and post-dispatch loss cannot replay", async () => {
-  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD]) for (const mode of ["stale", "lost"] as const) {
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD, DESKTOP_20398_BUILD]) for (const mode of ["stale", "lost"] as const) {
     const fixture = new Fixture(), client = await connect(fixture, compatibility), pending = interaction(fixture.raw);
     if (mode === "lost") fixture.handler = message => {
       if (message.method !== "thread-follower-command-approval-decision") return false;
@@ -177,24 +177,26 @@ test("Desktop stale request cannot dispatch and post-dispatch loss cannot replay
 });
 
 test("Desktop settings preserve native details, update only idle threads and expose acknowledgement separately", async () => {
-  const fixture = new Fixture(); fixture.raw.requests = []; fixture.raw.threadRuntimeStatus = { type: "idle" }; fixture.raw.turns[0].status = "completed";
-  const client = await connect(fixture);
-  fixture.handler = message => {
-    if (message.method !== "thread-follower-update-thread-settings") return false;
-    assert.equal(message.version, 2); assert.equal(message.params.activeTurnId, undefined);
-    fixture.reply(message, { applied: true }); return true;
-  };
-  try {
-    const before = await client.observeThread(target);
-    assert.equal(before.currentPermissions?.activePermissionProfile?.id, ":workspace");
-    assert.equal(before.latestCollaborationMode?.settings.developer_instructions, null);
-    const receipt = await client.updateThreadSettingsOnce({ ...target, operationId: "settings-one", settings: { model: "new-model", effort: "low" } });
-    assert.equal(receipt.applied, true);
-    // An acknowledged update is not claimed effective when native readback still shows the previous value.
-    assert.equal(receipt.modelSettings.model, "model-one");
-    fixture.raw.threadRuntimeStatus = { type: "active" }; fixture.raw.turns[0].status = "inProgress"; fixture.revision++;
-    await assert.rejects(client.updateThreadSettingsOnce({ ...target, operationId: "settings-two", settings: { permissions: ":read-only" } }), /idle/u);
-  } finally { client.close(); }
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_20398_BUILD]) {
+    const fixture = new Fixture(); fixture.raw.requests = []; fixture.raw.threadRuntimeStatus = { type: "idle" }; fixture.raw.turns[0].status = "completed";
+    const client = await connect(fixture, compatibility);
+    fixture.handler = message => {
+      if (message.method !== "thread-follower-update-thread-settings") return false;
+      assert.equal(message.version, 2); assert.equal(message.params.activeTurnId, undefined);
+      fixture.reply(message, { applied: true }); return true;
+    };
+    try {
+      const before = await client.observeThread(target);
+      assert.equal(before.currentPermissions?.activePermissionProfile?.id, ":workspace");
+      assert.equal(before.latestCollaborationMode?.settings.developer_instructions, null);
+      const receipt = await client.updateThreadSettingsOnce({ ...target, operationId: "settings-one", settings: { model: "new-model", effort: "low" } });
+      assert.equal(receipt.applied, true);
+      // An acknowledged update is not claimed effective when native readback still shows the previous value.
+      assert.equal(receipt.modelSettings.model, "model-one");
+      fixture.raw.threadRuntimeStatus = { type: "active" }; fixture.raw.turns[0].status = "inProgress"; fixture.revision++;
+      await assert.rejects(client.updateThreadSettingsOnce({ ...target, operationId: "settings-two", settings: { permissions: ":read-only" } }), /idle/u);
+    } finally { client.close(); }
+  }
 });
 
 test("Desktop snapshot keeps next-turn permission defaults separate from the previous turn permissions", () => {
@@ -212,8 +214,8 @@ test("Desktop snapshot keeps next-turn permission defaults separate from the pre
 });
 
 test("Desktop interrupt always includes exact expected turn and rejects wrong native acknowledgement", async () => {
-  for (const correct of [true, false]) {
-    const fixture = new Fixture(); fixture.raw.requests = []; const client = await connect(fixture);
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_20398_BUILD]) for (const correct of [true, false]) {
+    const fixture = new Fixture(); fixture.raw.requests = []; const client = await connect(fixture, compatibility);
     fixture.handler = message => {
       if (message.method !== "thread-follower-interrupt-turn") return false;
       assert.equal(message.version, 4); assert.equal(message.params.expectedTurnId, "turn-one");

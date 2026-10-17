@@ -165,7 +165,7 @@ test("host bridge List uses the compact skill-backed model projection", async (t
   fs.writeFileSync(relayPath, `
 process.stdout.write(JSON.stringify({
   action_contracts: {
-    version: 30,
+    version: 31,
     instructions: [${JSON.stringify(repeatedGuidance)}],
     actions: { send: { use: ${JSON.stringify(repeatedGuidance)} } }
   },
@@ -220,9 +220,9 @@ process.stdout.write(JSON.stringify({
   };
   assert.deepEqual(details.projection, {
     schema: "agent-knock-knock/host-list-compact",
-    version: 1,
+    version: 3,
     skill: "agent-knock-knock",
-    action_contract_version: 30
+    action_contract_version: 31
   });
   assert.deepEqual(details.terminals[0]?.available_actions, {
     status: true,
@@ -235,7 +235,7 @@ process.stdout.write(JSON.stringify({
     }
   });
   const encoded = JSON.stringify(result);
-  assert.ok(encoded.length < 3_000, `compact Host List was ${encoded.length} chars`);
+  assert.ok(encoded.length < 4_000, `compact Host List was ${encoded.length} chars`);
   assert.doesNotMatch(encoded, /static action explanation|private-list-authority|\/private\/store/u);
   assert.equal(result.content?.[0]?.text, JSON.stringify(details));
 });
@@ -503,16 +503,13 @@ test("host bridge relay leaves the embedding Host event loop responsive", async 
 
   assert.equal(eventLoopAdvanced, true);
   const result = await resultPromise;
-  assert.deepEqual(result.details, {
-    projection: {
-      schema: "agent-knock-knock/host-list-compact",
-      version: 1,
-      skill: "agent-knock-knock"
-    },
-    terminals: [],
-    terminal_watches: [],
-    unavailable_managed_turns: []
+  const listed = result.details as Record<string, any>;
+  assert.deepEqual(listed.projection, {
+    schema: "agent-knock-knock/host-list-compact", version: 3, skill: "agent-knock-knock"
   });
+  for (const field of ["terminals", "terminal_watches", "unavailable_managed_turns"]) assert.deepEqual(listed[field], []);
+  assert.equal(listed.pagination.has_more, false);
+  assert.equal(listed.watch_summary.total, 0);
 });
 
 function createRegistry(
