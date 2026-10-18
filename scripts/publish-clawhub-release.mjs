@@ -116,7 +116,8 @@ async function main() {
   const validated = schema.validateOpenClawExternalCodePluginPackageContents(parsed.packageJson, paths);
   requireThat(validated.issues.length === 0, 'official_package_validation_failed');
   const payload = {
-    name: release.name, displayName: 'Agent Knock Knock', ownerHandle: 'scotthuang', family: 'code-plugin',
+    // Ownership comes from the existing OIDC binding; an ownerHandle override is rejected.
+    name: release.name, displayName: 'Agent Knock Knock', family: 'code-plugin',
     version: release.version, changelog: release.changelog, tags: ['latest'],
     topics: ['tmux', 'herdr', 'codex', 'claude-code', 'agent-orchestration'],
     // ClawHub requires source SHA/ref to match the OIDC job. The allowlisted diff
