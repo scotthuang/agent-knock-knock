@@ -1153,7 +1153,6 @@ test("active candidate transfer protects expired idle source history from reconc
     const listed = await runCli([
       "list",
       "--reconcile",
-      "--all",
       ...codexNoRolloutStoreArgs(fixture),
       "--idle-timeout-minutes",
       "1",

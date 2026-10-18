@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { collectExpiredWatchHistory } from "../src/watch-history-retention.js";
 import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
 import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
 import { assertCodexNativeTaskRecord, createCodexNativeStateStore } from "../src/codex-native-state-store.js";
@@ -47,6 +48,23 @@ function pending(kind: NativeInteraction["kind"] = "blocking_question"): NativeI
   return { id: "native-interaction:one", kind, threadId: target.threadId, turnId: "native-one", itemId: "question-item", method: "item/tool/requestUserInput", requestId: 7,
     questions: [{ id: "native-question", title: "Choose a color", options: ["Blue", "Green"] }] };
 }
+
+test("expired Codex Send history preserves a same-message guard across fresh service instances", async t => {
+  const h = harness(t), request = { ...input, callbackRoute: route };
+  const sent = await h.service.send(request);
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  assert.equal((await h.service.reconcile(sent.id)).status, "completed");
+  const before = { starts: h.state.starts, observations: h.state.observations.length, deliveries: h.state.notifications.length };
+  h.state.now += 48 * 3_600_000;
+  assert.equal(collectExpiredWatchHistory({ storeDir: h.dir, now: new Date(h.state.now) }).deleted, 1);
+  assert.deepEqual(h.repository.list(), []);
+  const restored = createCodexNativeTaskService(h.deps);
+  assert.throws(() => restored.status(sent.id), { code: "watch_history_expired", replay_forbidden: true });
+  await assert.rejects(restored.send(request), { code: "watch_history_expired", replay_forbidden: true });
+  await assert.rejects(restored.send({ ...request, text: "Changed replay must also stop" }), { code: "watch_history_expired" });
+  await assert.rejects(restored.renew(sent.id, { controllerSession: input.controllerSession }), { code: "watch_history_expired" });
+  assert.deepEqual({ starts: h.state.starts, observations: h.state.observations.length, deliveries: h.state.notifications.length }, before);
+});
 
 test("empty-thread preflight failures persist an idempotent not-sent receipt without monitoring or callbacks", async t => {
   const h = harness(t);

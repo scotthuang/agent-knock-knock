@@ -350,17 +350,17 @@ export async function runLifecycleScenario(
       const initialList = await invoke(
         dependencies.client,
         "list",
-        ["--all", "--terminal-debug"],
+        ["--terminal-debug"],
         { kind: "read", timeoutMs: timeouts.readMs }
       );
       return {
         timeouts,
-        start: selectTerminalSnapshot(initialList, config, {
+        start: await selectObservedTerminalSnapshot(initialList, config, {
           requireNewThread: true,
           requireListResumable: true,
           requireSend: false,
           allowUnmanagedCodexNativeProbe: true
-        })
+        }, dependencies.client, timeouts.readMs)
       };
     });
     const { timeouts, start } = prepared;
@@ -404,15 +404,15 @@ export async function runLifecycleScenario(
       const listed = await invoke(
         dependencies.client,
         "list",
-        ["--all", "--terminal-debug"],
+        ["--terminal-debug"],
         { kind: "read", timeoutMs: timeouts.readMs }
       );
-      const snapshot = selectTerminalSnapshot(listed, config, {
+      const snapshot = await selectObservedTerminalSnapshot(listed, config, {
         requireNewThread: false,
         requireListResumable: true,
         requireSend: true,
         allowUnmanagedCodexNativeProbe: false
-      });
+      }, dependencies.client, timeouts.readMs);
       assertSameTerminalIncarnation(start, snapshot);
       const snapshotEvidence = terminalEvidence(
         snapshot,
@@ -526,15 +526,22 @@ export async function runLifecycleScenario(
       const listed = await invoke(
         dependencies.client,
         "list",
-        ["--all", "--terminal-debug"],
+        ["--terminal-debug"],
         { kind: "read", timeoutMs: timeouts.readMs }
       );
-      const snapshot = selectTerminalSnapshot(listed, config, {
+      const snapshot = await selectObservedTerminalSnapshot(listed, config, {
         requireNewThread: false,
         requireListResumable: true,
         requireSend: true,
         allowUnmanagedCodexNativeProbe: false
-      });
+      }, dependencies.client, timeouts.readMs);
+      const taskStatus = recordValue(await invoke(dependencies.client, "status", ["--turn", sent.turnId],
+        { kind: "read", timeoutMs: timeouts.readMs }), "turn_verification_failed");
+      const exactTurn = recordValue(taskStatus.conversation, "turn_verification_failed");
+      if (exactTurn.session_id !== sent.sessionId || (exactTurn.turn_id ?? exactTurn.conversation_id) !== sent.turnId) {
+        abort("turn_verification_failed");
+      }
+      snapshot.recentTurn = exactTurn;
       assertSameTerminalIncarnation(afterNew, snapshot);
       const snapshotEvidence = terminalEvidence(
         snapshot,
@@ -614,15 +621,15 @@ export async function runLifecycleScenario(
       const listed = await invoke(
         dependencies.client,
         "list",
-        ["--all", "--terminal-debug"],
+        ["--terminal-debug"],
         { kind: "read", timeoutMs: timeouts.readMs }
       );
-      const snapshot = selectTerminalSnapshot(listed, config, {
+      const snapshot = await selectObservedTerminalSnapshot(listed, config, {
         requireNewThread: true,
         requireListResumable: true,
         requireSend: true,
         allowUnmanagedCodexNativeProbe: false
-      });
+      }, dependencies.client, timeouts.readMs);
       assertSameTerminalIncarnation(start, snapshot);
       const snapshotEvidence = terminalEvidence(
         snapshot,
@@ -797,6 +804,36 @@ interface TerminalSnapshotRequirements {
   requireListResumable: boolean;
   requireSend: boolean;
   allowUnmanagedCodexNativeProbe: boolean;
+}
+
+/** Conversation discovery carries current authority; retained monitoring has its own bounded query. */
+async function selectObservedTerminalSnapshot(value: unknown, config: LifecycleScenarioConfig,
+  requirements: TerminalSnapshotRequirements, client: AkkClient, timeoutMs: number): Promise<InternalTerminalSnapshot> {
+  const snapshot = selectTerminalSnapshot(value, config, requirements);
+  const sessionId = snapshot.evidence.session_id;
+  if (!sessionId) return snapshot;
+  let cursor: string | undefined;
+  const seen = new Set<string>();
+  for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
+    const page = recordValue(await invoke(client, "watches", ["--conversation", sessionId, "--limit", "100",
+      ...(cursor ? ["--cursor", cursor] : [])], { kind: "read", timeoutMs }), "preflight_unresolved_turn");
+    if (!Array.isArray(page.managed_turns) || !Array.isArray(page.diagnostics) ||
+      !page.diagnostics.some(item => isRecord(item) && item.provider === "managed_turns" && item.status === "ok")) {
+      abort("preflight_unresolved_turn");
+    }
+    for (const turn of page.managed_turns) {
+      if (!isRecord(turn) || turn.session_id !== sessionId) abort("preflight_unresolved_turn");
+      const id = requiredString(turn.turn_id, "preflight_unresolved_turn");
+      if (seen.has(id)) abort("preflight_unresolved_turn");
+      seen.add(id);
+      if (isSessionSendBlockingStatus(requiredString(turn.status, "preflight_unresolved_turn"))) abort("preflight_unresolved_turn");
+    }
+    const pagination = recordValue(page.pagination, "preflight_unresolved_turn");
+    if (pagination.has_more === false) return snapshot;
+    if (pagination.has_more !== true) abort("preflight_unresolved_turn");
+    cursor = requiredString(pagination.next_cursor, "preflight_unresolved_turn");
+  }
+  abort("preflight_unresolved_turn");
 }
 
 function selectTerminalSnapshot(
@@ -1031,7 +1068,10 @@ function selectTerminalManagement(
   if (!("current_turn" in managed) || managed.current_turn !== null) {
     abort("preflight_unresolved_turn");
   }
-  assertNoUnresolvedManagedTurns(managed);
+  if (row.blocking_turns !== undefined &&
+    (!Array.isArray(row.blocking_turns) || row.blocking_turns.length > 0)) {
+    abort("preflight_unresolved_turn");
+  }
   // The public list contract always names the Session slot explicitly. Treat
   // an absent value as schema drift instead of silently normalizing it to the
   // unmanaged state.
@@ -1253,36 +1293,6 @@ function sendActionFor(
     };
   }
   abort("preflight_action");
-}
-
-function assertNoUnresolvedManagedTurns(
-  managed: Record<string, unknown>
-): void {
-  const recent = managed.recent_turn;
-  if (recent !== null && recent !== undefined && !isRecord(recent)) {
-    abort("preflight_unresolved_turn");
-  }
-  const history = managed.history;
-  if (!Array.isArray(history)) {
-    // Every smoke list uses --all, whose public contract includes history.
-    abort("preflight_unresolved_turn");
-  }
-  const visible = [
-    ...(isRecord(recent) ? [recent] : []),
-    ...history
-  ];
-  for (const candidate of visible) {
-    if (!isRecord(candidate)) {
-      abort("preflight_unresolved_turn");
-    }
-    const status = requiredString(
-      candidate.status,
-      "preflight_unresolved_turn"
-    );
-    if (isSessionSendBlockingStatus(status)) {
-      abort("preflight_unresolved_turn");
-    }
-  }
 }
 
 function parseTransition(

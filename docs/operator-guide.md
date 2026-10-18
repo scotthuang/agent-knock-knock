@@ -29,10 +29,12 @@ its equivalent `turn_id` for follow-up. A project path or title alone is never
 task identity. [Backend task recovery](backend-task-recovery.md) explains how
 to resume observation or release management for that exact task.
 
-Host List returns bounded pages with current conversations first. Follow
-`pagination.next_args` for the rest; use `listView: "history"` for ended
-observations. See [List output and history](list-output.md) for attention
-counts, compatibility and the separate Desktop catalog cursor.
+Host List returns bounded pages of currently discoverable conversations. Follow
+`pagination.next_args` for remaining conversations. Use `agent_knock_knock_watches`
+or `/akk watches` for recent monitoring and unresolved callbacks; absence of Watch
+fields in List does not mean Send had no monitoring. See
+[List and Watch inventory](list-output.md) for the 24-hour query window,
+48-hour eligible-history retention and separate Desktop catalog cursor.
 
 ## Command reference
 
@@ -42,7 +44,8 @@ Direct slash commands are available in every first-party Host integration:
 | --- | --- |
 | `/akk <task>` | Send a task when AKK can prove one unique send-ready terminal. |
 | `/akk <selector>: <message>` | Send to the exact selector returned by the current list. |
-| `/akk list` | Discover conversations, managed work, Watches, and supported actions. |
+| `/akk list` | Discover conversations and their supported actions. |
+| `/akk watches` | Read recent monitoring and unresolved records; follow pagination for more. |
 | `/akk watch <terminal-id>` | Observe one exact terminal task. |
 | `/akk unwatch <watch-id>` | Stop observation of one terminal or backend Watch without stopping its native task. |
 | `/akk threads <terminal-id>` | List resumable native threads for one terminal. |
@@ -78,9 +81,9 @@ The terminal-specific commands in the table require a physical terminal;
 Desktop interaction, model, permission, and cancellation controls use their
 advertised semantic tools. Backend and terminal capabilities are distinct.
 Raw CLI output retains provider arrays, including `terminals[]`, for diagnostics.
-Within a terminal row, the optional `managed.current_turn` is active work; `managed.recent_turn` is
-retained history and does not occupy the terminal. Attention-needed records
-whose pane is unavailable appear in `unavailable_managed_turns[]`.
+Within a terminal row, `managed.current_turn` is current managed work. Retained
+managed Turn history, including records whose pane is unavailable, is queried
+separately through `watches` and exact Status.
 
 Terminal status has three independent evidence axes. `screen_state` describes
 the bounded live TUI (`idle`, `working`, `awaiting_approval`, or `unknown`);

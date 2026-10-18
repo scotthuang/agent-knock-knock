@@ -137,7 +137,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.equal("delegated" in listed, false);
     assert.equal("terminal_controlled" in listed, false);
     assert.equal("native" in listed, false);
-    assert.deepEqual(listed.unavailable_managed_turns, []);
+    assert.equal(listed.unavailable_managed_turns, undefined);
     assert.equal(listed.terminals.length, 1);
     const terminal = listed.terminals[0];
     assert.equal(terminal.id, "terminal:v2:tmux:codex:codex-work:0.0:2222");
@@ -155,12 +155,9 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       session_id: null,
       session_short_ref: null,
       current_turn: null,
-      recent_turn: null,
-      turn_count: 0,
-      hidden_turn_count: 0,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 31);
+    assert.equal(listed.action_contracts.version, 32);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -616,7 +613,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         cwd: nativeWorkspace
       }])
     ]);
-    assert.deepEqual(managedOnly.unavailable_managed_turns, []);
+    assert.equal(managedOnly.unavailable_managed_turns, undefined);
     assert.equal("native" in managedOnly, false);
     assert.deepEqual(managedOnly.terminals, []);
     assert.equal(managedOnly.terminal_scan.enabled, false);

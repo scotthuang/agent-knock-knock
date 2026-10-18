@@ -20,6 +20,7 @@ const PUBLIC_CONTRACT_SCHEMA =
 const PUBLIC_COMMANDS = Object.freeze([
   "delegate",
   "list",
+  "watches",
   "watch-terminal",
   "watch-status",
   "unwatch-terminal",
@@ -88,6 +89,7 @@ const PUBLIC_ACTIONS = Object.freeze([
 
 const OPENCLAW_TOOLS = Object.freeze([
   "agent_knock_knock_list",
+  "agent_knock_knock_watches",
   "agent_knock_knock_watch",
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
@@ -401,8 +403,8 @@ function validateListActionContract(contracts, { repoRoot, witnesses, usedWitnes
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 31) {
-    fail("list action contract version must remain 31");
+  if (actions.version !== 32) {
+    fail("list action contract version must remain 32");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -419,8 +421,8 @@ function validateListActionContract(contracts, { repoRoot, witnesses, usedWitnes
   assertSourcePattern(
     repoRoot,
     "src/terminal-action-contracts.ts",
-    /version:\s*31\b/u,
-    "list action contract version 31"
+    /version:\s*32\b/u,
+    "list action contract version 32"
   );
   assertSourcePattern(
     repoRoot,
@@ -481,7 +483,7 @@ function validateStoreContract(contracts, { repoRoot, witnesses, usedWitnesses }
     "witnesses"
   ], "Store protocol contract");
   if (store.format_version !== 1 ||
-      store.current_writer_protocol !== 9 ||
+      store.current_writer_protocol !== 10 ||
       store.session_authority_protocol !== 3) {
     fail("Store format/writer/session-authority protocol contract changed");
   }
@@ -491,7 +493,7 @@ function validateStoreContract(contracts, { repoRoot, witnesses, usedWitnesses }
   }
   assertExactArray(
     store.upgradeable_writer_protocols,
-    [1, 2, 3, 4, 5, 6, 7, 8],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9],
     "Store upgradeable_writer_protocols"
   );
   validateAuthorityPaths(store.authority_paths, "Store authority_paths", repoRoot);
@@ -502,14 +504,14 @@ function validateStoreContract(contracts, { repoRoot, witnesses, usedWitnesses }
     usedWitnesses
   );
   if (!Array.isArray(store.protocol_witnesses) ||
-      store.protocol_witnesses.length !== 9) {
-    fail("Store protocol_witnesses must cover writer protocols 1 through 9");
+      store.protocol_witnesses.length !== 10) {
+    fail("Store protocol_witnesses must cover writer protocols 1 through 10");
   }
   for (const [index, valueEntry] of store.protocol_witnesses.entries()) {
     const entry = assertExactKeys(valueEntry, ["protocol", "witness"],
       `Store protocol witness ${index}`);
     if (entry.protocol !== index + 1) {
-      fail("Store protocol_witnesses must be ordered 1 through 9");
+      fail("Store protocol_witnesses must be ordered 1 through 10");
     }
     validateWitnessReferences(
       [entry.witness],
@@ -521,14 +523,14 @@ function validateStoreContract(contracts, { repoRoot, witnesses, usedWitnesses }
   const storeSource = readRepositoryFile(repoRoot, "src/store.ts");
   for (const [name, expected] of [
     ["STORE_FORMAT_VERSION", 1],
-    ["STORE_WRITER_PROTOCOL", 9],
+    ["STORE_WRITER_PROTOCOL", 10],
     ["STORE_SESSION_AUTHORITY_PROTOCOL", 3]
   ]) {
     if (!new RegExp(`export const ${name} = ${expected};`, "u").test(storeSource)) {
       fail(`${name}=${expected} is missing from src/store.ts`);
     }
   }
-  if (!/STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set\(\[1, 2, 3, 4, 5, 6, 7, 8\]\)/u
+  if (!/STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set\(\[1, 2, 3, 4, 5, 6, 7, 8, 9\]\)/u
     .test(storeSource)) {
     fail("Store upgradeable writer protocol set changed");
   }

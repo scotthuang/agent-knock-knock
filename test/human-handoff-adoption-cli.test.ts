@@ -1205,8 +1205,10 @@ test("a generic close cached before a human thread switch still releases AKK man
     const beforeSwitch = await fixture.listTerminal();
     assert.equal(beforeSwitch.management_state, "managed");
     assert.equal(beforeSwitch.handoff_decision, undefined);
-    const cachedClose = beforeSwitch.managed?.recent_turn
-      ?.available_actions?.close;
+    const monitoring = await fixture.listMonitoring();
+    const cachedClose = monitoring.managed_turns.find(
+      (entry: Record<string, unknown>) => entry.turn_id === oldTurn.conversation_id
+    )?.available_actions?.close;
     assert.equal(cachedClose?.tool, "agent_knock_knock_close");
     assert.equal(
       cachedClose?.arguments?.turn_id,
@@ -1271,9 +1273,10 @@ test("a cached generic close remains available as Store-only recovery after its 
     const turn = fixture.persistBlockingTurn(source);
     fixture.setCurrentNativeThreadId(NATIVE_A);
 
-    const listed = await fixture.listTerminal();
-    const cachedClose = listed.managed?.recent_turn
-      ?.available_actions?.close;
+    const listed = await fixture.listMonitoring();
+    const cachedClose = listed.managed_turns.find(
+      (entry: Record<string, unknown>) => entry.turn_id === turn.conversation_id
+    )?.available_actions?.close;
     assert.equal(cachedClose?.tool, "agent_knock_knock_close");
     assert.equal(cachedClose?.arguments?.turn_id, turn.conversation_id);
 
@@ -1373,8 +1376,8 @@ for (const agent of ["codex", "claude"] as const) {
       const keyDispatchesBeforeClose = fixture.keyDispatches();
       fixture.setAgentProcessAbsent();
 
-      const listed = await fixture.listManagedOnly();
-      const unavailableTurn = listed.unavailable_managed_turns?.find(
+      const listed = await fixture.listMonitoring();
+      const unavailableTurn = listed.managed_turns?.find(
         (entry: Record<string, unknown>) => entry.conversation_id === turnId
       );
       assert.ok(unavailableTurn, JSON.stringify(listed, null, 2));
@@ -1447,9 +1450,10 @@ test("an explicit Close is not vetoed when process death cannot be verified", as
     const turn = fixture.persistBlockingTurn(source);
     fixture.setCurrentNativeThreadId(NATIVE_A);
 
-    const listed = await fixture.listTerminal();
-    const cachedClose = listed.managed?.recent_turn
-      ?.available_actions?.close;
+    const listed = await fixture.listMonitoring();
+    const cachedClose = listed.managed_turns.find(
+      (entry: Record<string, unknown>) => entry.turn_id === turn.conversation_id
+    )?.available_actions?.close;
     assert.equal(cachedClose?.tool, "agent_knock_knock_close");
 
     const sourcePaths = pathsForManagedSession(
@@ -1742,8 +1746,8 @@ test("reconciliation stalls a verified-dead accepted Turn once and keeps it clos
       "repeated reconciliation must not duplicate death evidence"
     );
 
-    const managedOnly = await fixture.listManagedOnly();
-    const stalledEntry = managedOnly.unavailable_managed_turns?.find(
+    const managedOnly = await fixture.listMonitoring();
+    const stalledEntry = managedOnly.managed_turns?.find(
       (entry: Record<string, unknown>) => entry.conversation_id === turnId
     );
     assert.ok(stalledEntry, JSON.stringify(managedOnly, null, 2));
@@ -2396,9 +2400,10 @@ test("a cached generic Close is not vetoed by agent process identity drift", asy
     const turn = fixture.persistBlockingTurn(source);
     fixture.setCurrentNativeThreadId(NATIVE_A);
 
-    const listed = await fixture.listTerminal();
-    const cachedClose = listed.managed?.recent_turn
-      ?.available_actions?.close;
+    const listed = await fixture.listMonitoring();
+    const cachedClose = listed.managed_turns.find(
+      (entry: Record<string, unknown>) => entry.turn_id === turn.conversation_id
+    )?.available_actions?.close;
     assert.equal(cachedClose?.tool, "agent_knock_knock_close");
 
     fixture.setAgentProcessIntegrityDrift();
@@ -3076,7 +3081,7 @@ interface HandoffFixture {
   terminalControl: TerminalControlRef;
   persistSession(options: PersistSessionOptions): ManagedSessionState;
   listTerminal(): Promise<Record<string, any>>;
-  listManagedOnly(): Promise<Record<string, any>>;
+  listMonitoring(): Promise<Record<string, any>>;
   reconcileMonitors(options?: {
     terminalMonitorsOnly?: boolean;
     env?: NodeJS.ProcessEnv;
@@ -3674,9 +3679,9 @@ function createHandoffFixture({
       assert.ok(terminal, result.stdout);
       return terminal;
     },
-    async listManagedOnly() {
+    async listMonitoring() {
       const result = await runInProcessCli(
-        ["list", "--managed-only", ...storeArgs],
+        ["watches", ...storeArgs],
         dependencies(baseEnv)
       );
       assert.equal(result.status, 0, result.stderr || result.stdout);

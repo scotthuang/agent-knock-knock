@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { assertWatchHistoryNotExpired, loadWatchHistoryReceipt } from "./watch-history-receipt.js";
 import {
   assertRealDirectory,
   atomicSaveJsonFile,
@@ -141,14 +142,11 @@ export interface TerminalWatchReconciliationScan {
 
 export class TerminalWatchConflictError extends Error {
   readonly code = "AKK_TERMINAL_WATCH_CONFLICT";
-  readonly watchId: string;
-  readonly expectedRevision: number | null;
-  readonly actualRevision: number | null;
 
   constructor(
-    watchId: string,
-    expectedRevision: number | null,
-    actualRevision: number | null,
+    readonly watchId: string,
+    readonly expectedRevision: number | null,
+    readonly actualRevision: number | null,
     detail?: string
   ) {
     super(
@@ -158,9 +156,6 @@ export class TerminalWatchConflictError extends Error {
       (detail ? `: ${detail}` : "")
     );
     this.name = "TerminalWatchConflictError";
-    this.watchId = watchId;
-    this.expectedRevision = expectedRevision;
-    this.actualRevision = actualRevision;
   }
 }
 
@@ -316,6 +311,7 @@ export function loadTerminalWatch(
 ): TerminalWatch {
   assertStoreReadable(storeDir);
   const paths = pathsForTerminalWatch(watchId, storeDir);
+  assertWatchHistoryNotExpired(storeDir, "terminal", watchId);
   assertOwnerPrivateDirectory(paths.root, "terminal Watch root");
   assertOwnerPrivateFile(paths.statePath, "terminal Watch state");
   const value = readJsonFileNoFollow(paths.statePath, "terminal Watch state");
@@ -388,6 +384,7 @@ function scanTerminalWatchDirectory(
     }
     const watchId = entry.name.slice(0, -".json".length);
     assertRecordId(watchId, "terminal Watch id");
+    if (loadWatchHistoryReceipt(storeDir, "terminal", watchId)) continue;
     if (!isolateInvalidRecord) {
       watches.push(loadTerminalWatch(storeDir, watchId));
       continue;

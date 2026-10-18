@@ -319,9 +319,9 @@ test("managed Turn action projection preserves exact JSON bytes across eligibili
   }
 });
 
-test("the public action contract v31 exposes semantic arguments only", () => {
+test("the public action contract v32 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 31);
+  assert.equal(contracts.version, 32);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [

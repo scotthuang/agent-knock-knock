@@ -225,7 +225,6 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
       "list",
       "--store-dir",
       storeDir,
-      "--all",
       "--processes-json",
       JSON.stringify([{
         pid: 33389,
@@ -250,10 +249,11 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
     assert.equal(listedParsed.terminals.length, 1);
     const terminal = listedParsed.terminals[0];
     assert.equal(terminal.managed.session_id, modernState.conversation_id);
-    assert.equal(
-      terminal.managed.recent_turn.conversation_id,
-      modernState.conversation_id
-    );
+    assert.equal(terminal.managed.recent_turn, undefined);
+    const monitoringResult = await runAgentCliInProcess(["watches", "--store-dir", storeDir], testEnv, physicalProcessDependencies);
+    assert.equal(monitoringResult.status, 0, monitoringResult.stderr || monitoringResult.stdout);
+    const monitoring = JSON.parse(monitoringResult.stdout);
+    assert.ok(monitoring.managed_turns.some((turn: Record<string, unknown>) => turn.conversation_id === modernState.conversation_id));
     const sendAction = terminal.available_actions.send;
     assert.equal(sendAction.scope, "terminal_user_explicit");
     assert.equal(sendAction.arguments.selector, rawConversationId);

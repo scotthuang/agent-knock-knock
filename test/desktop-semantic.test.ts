@@ -148,7 +148,7 @@ test("Desktop semantic List routes filters and keeps public candidates while str
   assert.equal(argument(args, "--codex-home"), target.codexHome);
   assert.equal(result.details.desktop_sessions[0].conversation_id, desktopId);
   assert.equal(result.details.desktop_sessions[0].connection_state, "unconfirmed");
-  assert.equal(result.details.desktop_watches[0].watch_id, watchId);
+  assert.equal(result.details.desktop_watches, undefined);
   assert.equal(result.details.desktop_scan.next_cursor, "next-desktop-page");
   assert.equal(result.details.desktop_scan.view, "history");
   assert.equal(result.details.desktop_scan.total_candidates, 31);

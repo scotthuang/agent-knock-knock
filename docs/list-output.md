@@ -1,79 +1,77 @@
-# List output and history
+# Conversations and Watch inventory
 
-AKK 0.14.9 bounds the entire controller-facing List result before serializing
-JSON. Current conversations come first; healthy ended Watches no longer crowd
-them out. Failed or uncertain callbacks, pending interactions and active
-observations remain in the current view. This changes presentation, not Watch
-deadlines, callback delivery or persisted history.
+Since 0.14.13, discovery is separate from monitoring. `agent_knock_knock_list`,
+`/akk list` and CLI `list` return currently discoverable conversations. They do
+not include Watch inventories or retained managed Turn history. Current managed
+ownership, pending approvals and blocking conditions remain on the conversation.
+Desktop sidebar entries whose live owner is unconfirmed remain visible with
+their actual connection status; visibility does not authorize Send.
 
-Starting in 0.14.12, the default view prefers a verified backend as the project's
-CLI entry when discovery finds one same-agent terminal and one loaded backend
-with no known identity conflict. Its original conversation ID, title, status
-and advertised actions are retained. The terminal candidate is available in
-`terminalDebug` / `list --terminal-debug`; callers do not choose a transport.
-Proven exact aliases still combine their verified capabilities. Display
-preference alone neither proves an alias nor copies terminal permissions or
-management into the backend. A matching cwd or startup `resume` argument never
-redirects an existing terminal selector.
+Use `agent_knock_knock_watches`, `/akk watches` or CLI `watches` to inspect
+monitoring. This is a read-only Store query: it does not create or renew a Watch,
+reconcile callbacks, reconnect a native session or send notifications.
 
-Multiple candidates, identity conflicts and terminal records needing attention
-or management recovery remain visible. Direct-only and terminal-only CLI
-sessions remain available. Rows and connections are not a count of independent
-tasks. AKK still verifies the exact target before terminal fallback; backend
-busy/blocked states and uncertain sends never authorize a second route.
+## Conversation selection
 
-| Request | Included records |
-| --- | --- |
-| `{}` or `{"listView":"current"}` | Conversations and current/attention-needed observations |
-| `{"listView":"history"}` | Healthy ended Watches and retained managed Turns |
-| `{"listView":"all"}` or `{"all":true}` | Both, still paged |
+Since 0.14.12 the default view prefers a verified backend as the project's CLI
+entry when discovery finds one same-agent terminal and one loaded backend with
+no known identity conflict. Its original conversation ID, title, status and
+actions are retained. Terminal candidates remain in `terminalDebug` /
+`list --terminal-debug`. Proven exact aliases combine verified capabilities;
+display grouping alone does not copy terminal permissions or redirect selectors.
+Multiple candidates, conflicts and terminals needing management recovery remain
+visible. Rows and connections are not a count of independent tasks.
 
-An explicit `listView` takes precedence over the view selected by `all`.
-`all` continues to control underlying terminal-history discovery; it does not
-mean an unlimited Host response. Raw CLI `list --json` and `list --all --json`
-retain their operator/debug behavior.
+Host List uses `agent-knock-knock/host-list-compact` v4. Follow
+`pagination.next_args` while `has_more` is true. `listLimit` defaults to 40 and
+accepts 1–100. Pages are fresh discoveries, not a frozen snapshot; restart if
+membership changes invalidate a cursor. Legacy `listView=history/all`, `all=true`
+and CLI `list --all` return a migration error directing callers to `watches`.
 
-Follow `pagination.next_args` unchanged while `pagination.has_more` is true.
-Every page is a fresh read, not a frozen snapshot. If the cursor is invalid
-after membership changes, restart List. `listLimit` defaults to 40 rows and
-accepts 1–100; the output budget may produce a smaller page. Counts describe
-all records observed by that discovery, not only the returned page.
+Each Host page is capped at 24 KiB of UTF-8 JSON and 12,000 weighted characters
+(ASCII 1, other code points 16), including metadata. This is not a token budget.
+Oversized rows retain exact IDs and a Status entry point; omitted actions do not
+mean unsupported capabilities. Read exact Status for current questions, approvals
+and bounded public progress. List contains no progress body.
 
-The compact contract is `agent-knock-knock/host-list-compact`, version 3,
-action contract 31. It retains exact conversation, native task and Watch IDs
-and usable action inputs. A very large row becomes a Status reference with
-`details_omitted=true`; omitted actions do not mean unsupported capabilities.
-Refresh exact Status to obtain pending questions, approvals and current actions.
-No progress body is added to List.
+Desktop catalog pagination remains separate: finish Host pages for one catalog
+page, then pass `desktop_scan.next_cursor` as `desktopCursor` with the same filters
+and no previous Host cursor. Explicit Desktop catalog history is a separate
+native discovery view, not AKK Watch history.
 
-`watch_summary` distinguishes current observations from healthy history.
-`pagination.attention_counts` reports failed/uncertain/pending delivery and
-pending interactions even when their rows appear on a later page. Categories
-can overlap. Watches are observations, not extra conversations or independent
-tasks. `callback_expected=false` alone does not mean missing or failed delivery;
-completed notifications and unresolved delivery have different states.
+## Monitoring and retention
 
-Each page is limited to 24 KiB of UTF-8 JSON and 12,000 conservative weighted
-characters (ASCII costs 1, other Unicode code points cost 16), including its
-metadata. These are not token counts or a guarantee for every custom Host's
-smaller output allowance. The current OpenClaw Codex harness was checked at
-its lowest 16,000-character budget. The limits reduce returned context, not the
-cost of reading the underlying local records.
+`watches` defaults to a 24-hour lookback, 40 rows per page (maximum 100) and the
+same whole-response output limits. The lookback may be set from 1 to 48 hours.
+Continuation freezes the query's `as_of` and filters, not the underlying Store;
+refresh before acting. Active or unresolved observations remain visible even
+outside the lookback, marked `outside_window`. Retained terminal managed Turns
+are listed separately from Watches so offline recovery is still discoverable.
+Use each row's exact Status input to inspect it; managed rows retain the existing
+pane-independent Close / callback-retry actions where permitted; these records are
+observations, not additional conversations or a count of independent tasks.
 
-Desktop catalog pagination is separate: finish the Host pages for one catalog
-page, then use `desktop_scan.next_cursor` as `desktopCursor` with the same
-Desktop filters and no previous Host cursor. Sidebar membership and a saved
-history row still do not prove a live Desktop owner.
+Healthy completed Watch bodies become eligible for cleanup 48 hours after
+settlement and callback completion. Cleanup is bounded and performed by Host
+maintenance, at most once per hour and up to 100 records per pass. Active,
+failed, uncertain, pending-interaction or otherwise unresolved records are
+retained. Managed Turns, Sessions and native coding-agent history are not deleted.
 
-See [the operator guide](operator-guide.md), [Desktop discovery](codex-desktop-compatibility.md#find-and-select-a-conversation),
-and [task recovery](backend-task-recovery.md) for the related workflows.
+Cleanup writes a minimal durable tombstone before removing the body. It retains
+the provider, exact Watch ID, settlement/prune time and record fingerprint, not
+prompts, results or callback payloads. Old deterministic Send IDs cannot recreate
+a task after cleanup. An exact request for pruned history returns
+`watch_history_expired` with replay forbidden, not a misleading missing-record
+success. Tombstones are retained for deduplication; this is not a promise that
+all AKK metadata disappears after 48 hours. Writer protocol 10 prevents older processes from recreating pruned requests;
+rolling back requires a coherent pre-upgrade Store backup, not lowering the manifest.
+Nothing is cleaned merely by reading
+`list` or `watches`.
 
-Terminal Send routing uses the same authoritative action projection as List,
-then revalidates the current process, endpoint, approval and input ownership at
-dispatch. A displayed action is not permission to bypass a changed terminal.
-New route journals record a preparation rejection with `request_dispatched:false`
-only when no executor has started. The v1 `reserved` route remains pinned;
-this is neither task acceptance nor uncertain delivery. An explicit retry with
-the same message ID can prepare that same route again, never switch transports.
-Executor failures retain uncertain semantics. Legacy records without phase
-proof are left conservative; upgrades do not replay or rewrite old outcomes.
+`callback_expected=false` alone is not a delivery failure or proof of delivery.
+Native completion, controller callback acceptance and delivery to an external
+chat remain separate states. Missing Watch fields in List are intentional, not
+proof that Send lacked monitoring. Query `watches` or the exact returned Watch ID.
+
+See [the operator guide](operator-guide.md), [Desktop discovery](codex-desktop-compatibility.md#find-and-select-a-conversation)
+and [task recovery](backend-task-recovery.md).

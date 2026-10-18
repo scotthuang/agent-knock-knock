@@ -48,9 +48,10 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   : 0;
 
 export const STORE_FORMAT_VERSION = 1;
-export const STORE_WRITER_PROTOCOL = 9;
+// Protocol 10 readers honor expired Watch receipts before any same-key creation.
+export const STORE_WRITER_PROTOCOL = 10;
 export const STORE_SESSION_AUTHORITY_PROTOCOL = 3;
-const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);
+const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
 export interface StoreManifest {
   schema: typeof STORE_SCHEMA;
@@ -1496,7 +1497,7 @@ function upgradeStoreWriterProtocolWhileLocked(storeDir: string): void {
   const previous = readStoreManifestSnapshot(manifestPath);
   assertUpgradeableStoreManifest(previous.manifest, storeDir);
 
-  // Protocol 3 already has authoritative Session state. Protocols 3 through 6 only
+  // Protocol 3 already has authoritative Session state. Protocols 3 through 9 only
   // publish the newer writer fence atomically; protocols 1/2 still need the
   // one-time Session materialization before publication.
   const requiresSessionMaterialization = previous.manifest.writer_protocol <

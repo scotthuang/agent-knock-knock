@@ -1,3 +1,5 @@
+import { runWatchHistoryMaintenanceForCli } from "./watch-history-maintenance-cli-adapter.js";
+import { runWatchList } from "./watch-list-cli-adapter.js";
 import { usage } from "./cli-usage.js";
 import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES } from "./monitor-deadline-policy.js";
 import { dispatchLocalCodexCli, localCodexListForCli } from "./local-codex-cli-adapter.js";
@@ -387,6 +389,7 @@ const SESSION_SELECTOR_COMMANDS = new Set([
   "close"
 ]);
 const STORE_MUTATION_COMMANDS = new Set([
+  "prune-watch-history",
   "delegate",
   "send",
   "respond",
@@ -482,12 +485,26 @@ export async function executeCliCommand(
   );
 }
 
-async function dispatchCliCommand(commandName, options) {
-  if (await dispatchLocalCodexCli(commandName, options)) return;
+function dispatchAuxiliaryCli(commandName: string | undefined, options: CliCommandOptions): boolean {
   if (commandName === "host-profile") {
     runHostProfileCommand(options);
-    return;
+    return true;
   }
+  if (commandName === "watches") {
+    runWatchList(options, () => terminalListCliFacade.listManagedMonitoringRecords(options));
+    return true;
+  }
+  if (commandName === "prune-watch-history") {
+    preflightStoreWriter(commandName, options);
+    runWatchHistoryMaintenanceForCli(options);
+    return true;
+  }
+  return false;
+}
+
+async function dispatchCliCommand(commandName, options) {
+  if (dispatchAuxiliaryCli(commandName, options)) return;
+  if (await dispatchLocalCodexCli(commandName, options)) return;
   if (commandName === "host-bridge") {
     const { runHostBridgeCli } = await import("./host-bridge.js");
     await runHostBridgeCli(options);

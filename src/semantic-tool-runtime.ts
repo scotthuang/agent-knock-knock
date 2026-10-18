@@ -1,3 +1,4 @@
+import { parseWatchListOptions } from "./watch-list-projection.js";
 import { parseHostListPageOptions } from "./semantic-tool-list-budget.js";
 import { createDesktopCreationSemanticTool } from "./desktop-creation-semantic.js";
 import { isClaudeNativeConversationId } from "./claude-native-identity.js";
@@ -20,6 +21,7 @@ import {
   buildAkkCommandCliArgs,
   compactAkkListModelProjection,
   formatAkkListCommandResult,
+  formatAkkWatchesCommandResult,
   formatAkkModelOptionsCommandResult,
   formatAkkRepairModelControlCommandResult,
   formatAkkRespondCommandResult,
@@ -57,7 +59,8 @@ import {
   setModelParameters,
   statusParameters,
   unwatchParameters,
-  watchParameters
+  watchParameters,
+  watchesParameters
 } from "./semantic-tool-schemas.js";
 import {
   beginSemanticToolCatalog,
@@ -176,6 +179,7 @@ export function createAkkSemanticToolCatalog(
   };
 
   registerSemanticListTool(api);
+  registerSemanticWatchesTool(api);
 
   registerCliTool(api, {
     name: "agent_knock_knock_watch",
@@ -694,10 +698,11 @@ function registerSemanticListTool(api): void {
     compactText: true,
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+      if (params.all === true || params.listView === "history" || params.listView === "all") {
+        throw new Error("List now returns conversations only. Use agent_knock_knock_watches (CLI: watches) for monitoring and history.");
+      }
       parseHostListPageOptions(params);
-      // Read retained records so failed/uncertain managed callbacks cannot be hidden
-      // by the CLI's active-only default; the Host projection selects and pages them.
-      const args = ["list", "--reconcile", "--all"];
+      const args = ["list"];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       pushOptional(
         args,
@@ -717,6 +722,22 @@ function registerSemanticListTool(api): void {
       pushOptional(args, "--codex-home", stringValue(config.codexHome));
       if (params.noApprovalScan === true) args.push("--no-approval-scan");
       if (params.terminalDebug === true) args.push("--terminal-debug");
+      return args;
+    }
+  });
+}
+
+function registerSemanticWatchesTool(api): void {
+  registerCliTool(api, {
+    name: "agent_knock_knock_watches", description: semanticToolDescriptions.watches,
+    parameters: watchesParameters, normalizeTurnIdentity: false, compactText: true,
+    buildArgs: (params) => {
+      parseWatchListOptions(params);
+      const args = ["watches"];
+      pushOptional(args, "--store-dir", resolvePluginStoreDir(isRecord(api.pluginConfig) ? api.pluginConfig : {}));
+      for (const key of ["hours", "limit"]) pushOptional(args, `--${key}`, numberString(params[key]));
+      for (const key of ["cursor", "agent", "status"]) pushOptional(args, `--${key}`, stringValue(params[key]));
+      pushOptional(args, "--conversation", stringValue(params.conversation_id));
       return args;
     }
   });
@@ -1085,6 +1106,8 @@ async function handleAkkCommand(
         };
       case "list":
         return { text: formatAkkListCommandResult(result) };
+      case "watches":
+        return { text: formatAkkWatchesCommandResult(result) };
       case "watch":
         return { text: formatAkkWatchCommandResult(result) };
       case "unwatch":

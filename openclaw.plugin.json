@@ -16,6 +16,7 @@
   "contracts": {
     "tools": [
       "agent_knock_knock_list",
+      "agent_knock_knock_watches",
       "agent_knock_knock_watch",
       "agent_knock_knock_unwatch",
       "agent_knock_knock_list_resumable_threads",
@@ -45,6 +46,9 @@
   },
   "toolMetadata": {
     "agent_knock_knock_list": {
+      "optional": true
+    },
+    "agent_knock_knock_watches": {
       "optional": true
     },
     "agent_knock_knock_watch": {

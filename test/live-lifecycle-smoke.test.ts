@@ -34,6 +34,14 @@ class ScriptedAkkClient implements AkkClient {
     options: AkkInvocationOptions;
   }> = [];
   private readonly script: ScriptedCall[];
+  private lastSessionId: string | null = null;
+  private monitoringRows: Array<Record<string, unknown>> = [];
+  watchPageOverride?: Record<string, unknown>;
+  statusReplyOverride?: unknown;
+
+  get primaryCallCount(): number {
+    return this.calls.filter(call => call.command !== "watches" && call.command !== "status").length;
+  }
 
   constructor(script: readonly ScriptedCall[]) {
     this.script = [...script];
@@ -44,6 +52,19 @@ class ScriptedAkkClient implements AkkClient {
     args: readonly string[],
     options: AkkInvocationOptions
   ): Promise<unknown> {
+    if (command === "watches" || command === "status") {
+      this.calls.push({ command, args: [...args], options: { ...options } });
+      assert.deepEqual(options, { kind: "read", timeoutMs: 60_000 });
+      if (command === "watches") {
+        assert.deepEqual([...args], ["--conversation", this.lastSessionId, "--limit", "100"]);
+        return structuredClone(this.watchPageOverride ?? { managed_turns: this.monitoringRows, watches: [],
+          diagnostics: [{ provider: "managed_turns", status: "ok" }], pagination: { has_more: false, next_cursor: null } });
+      }
+      assert.deepEqual([...args], ["--turn", TURN_B]);
+      const turn = this.monitoringRows.find(row => row.turn_id === TURN_B);
+      assert.ok(turn, "exact Status must refer to the task found in the isolated Store fixture");
+      return structuredClone(this.statusReplyOverride ?? { conversation: turn });
+    }
     const expected = this.script.shift();
     assert.ok(expected, `unexpected AKK call: ${command} ${args.join(" ")}`);
     assert.equal(command, expected.command);
@@ -53,7 +74,17 @@ class ScriptedAkkClient implements AkkClient {
     if (expected.error) {
       throw expected.error;
     }
-    return structuredClone(expected.result);
+    const result = structuredClone(expected.result);
+    if (command === "list") {
+      const managed = (result as { terminals: Array<Record<string, any>> }).terminals[0].managed;
+      this.lastSessionId = managed.session_id;
+      this.monitoringRows = [...(managed.history ?? []), ...(managed.recent_turn ? [managed.recent_turn] : [])].map(turn => ({
+        ...turn, turn_id: turn.turn_id ?? turn.conversation_id, session_id: this.lastSessionId
+      }));
+      // Real discovery no longer returns historical bodies, even in diagnostic mode.
+      delete managed.history; delete managed.recent_turn;
+    }
+    return result;
   }
 
   assertComplete(): void {
@@ -147,7 +178,7 @@ function scenarioFixture(
   const calls: ScriptedCall[] = [
     {
       command: "list",
-      args: ["--all", "--terminal-debug"],
+      args: ["--terminal-debug"],
       options: read,
       result: { terminals: [start] }
     },
@@ -175,7 +206,7 @@ function scenarioFixture(
     },
     {
       command: "list",
-      args: ["--all", "--terminal-debug"],
+      args: ["--terminal-debug"],
       options: read,
       result: { terminals: [afterNew] }
     },
@@ -247,7 +278,7 @@ function scenarioFixture(
     },
     {
       command: "list",
-      args: ["--all", "--terminal-debug"],
+      args: ["--terminal-debug"],
       options: read,
       result: { terminals: [afterTurn] }
     },
@@ -310,7 +341,7 @@ function scenarioFixture(
     },
     {
       command: "list",
-      args: ["--all", "--terminal-debug"],
+      args: ["--terminal-debug"],
       options: read,
       result: { terminals: [final] }
     }
@@ -515,6 +546,10 @@ test("runs the strict Codex lifecycle chain once and emits only allowlisted evid
   assert.equal(client.calls.filter((call) => call.command === "monitor").length, 1);
   assert.equal(client.calls.filter((call) => call.command === "new-thread").length, 1);
   assert.equal(client.calls.filter((call) => call.command === "resume-thread").length, 1);
+  assert.equal(client.calls.filter((call) => call.command === "watches").length, 3);
+  assert.equal(client.calls.filter((call) => call.command === "status").length, 1);
+  assert.ok(client.calls.filter(call => call.command === "watches" || call.command === "status")
+    .every(call => call.options.kind === "read"));
   const serialized = JSON.stringify(result);
   assert.equal(serialized.includes(fixture.nonce), false);
   assert.equal(serialized.includes(STATE_PATH), false);
@@ -539,6 +574,38 @@ test("accepts the exact-Session send action without weakening result checks", as
 
   assert.equal(result.status, "passed");
   assert.equal(JSON.stringify(result).includes("terminal-fence-b-1"), false);
+  client.assertComplete();
+});
+
+test("lifecycle preflight reads unresolved historical callbacks from Watches before mutation", async () => {
+  const fixture = scenarioFixture("claude", { managedStart: true });
+  rowFrom(fixture.calls[0]).managed.history = [{ conversation_id: "failed-old-turn", status: "callback_failed" }];
+  const client = new ScriptedAkkClient([fixture.calls[0]]);
+  const result = await runLifecycleScenario(fixture.config, dependencies(client, []));
+  assert.equal(result.status, "failed"); assert.equal(result.error_code, "preflight_unresolved_turn");
+  assert.deepEqual(client.calls.map(call => call.command), ["list", "watches"]);
+  assert.ok(client.calls.every(call => call.options.kind === "read"));
+  client.assertComplete();
+});
+
+test("lifecycle preflight fails closed when the separate managed inventory cannot be read", async () => {
+  const fixture = scenarioFixture("claude", { managedStart: true });
+  const client = new ScriptedAkkClient([fixture.calls[0]]);
+  client.watchPageOverride = { managed_turns: [], diagnostics: [{ provider: "managed_turns", status: "unavailable" }],
+    pagination: { has_more: false } };
+  const result = await runLifecycleScenario(fixture.config, dependencies(client, []));
+  assert.equal(result.status, "failed"); assert.equal(result.error_code, "preflight_unresolved_turn");
+  assert.equal(client.calls.some(call => call.options.kind === "mutation"), false);
+  client.assertComplete();
+});
+
+test("lifecycle completion verifies the exact task through Status and rejects another Turn", async () => {
+  const fixture = scenarioFixture("codex");
+  const client = new ScriptedAkkClient(fixture.calls.slice(0, 6));
+  client.statusReplyOverride = { conversation: { session_id: SESSION_B, turn_id: "other-turn", conversation_id: "other-turn", status: "idle" } };
+  const result = await runLifecycleScenario(fixture.config, dependencies(client, [fixture.nonce]));
+  assert.equal(result.status, "uncertain"); assert.equal(result.error_code, "turn_verification_failed");
+  assert.equal(client.calls.some(call => call.command === "resume-thread"), false);
   client.assertComplete();
 });
 
@@ -813,7 +880,7 @@ test("requires Resume to name the managed B source Session", async () => {
   assert.equal(result.status, "uncertain");
   assert.equal(result.error_code, "resume_thread_invalid");
   assert.equal(result.resume_thread, undefined);
-  assert.equal(client.calls.length, 8);
+  assert.equal(client.primaryCallCount, 8);
   assert.equal(client.calls.at(-1)?.command, "resume-thread");
   client.assertComplete();
 });
@@ -902,10 +969,10 @@ test("preflight rejects unsafe or incomplete pane state before mutation", async 
       mutate: (row) => { row.managed.current_turn = { status: "running" }; }
     },
     {
-      name: "failed callback in history",
+      name: "failed callback in current blockers",
       errorCode: "preflight_unresolved_turn",
       mutate: (row) => {
-        row.managed.history = [{ status: "callback_failed" }];
+        row.blocking_turns = [{ turn_id: "failed-callback", status: "callback_failed" }];
       }
     },
     {
@@ -955,7 +1022,7 @@ test("preflight rejects unsafe or incomplete pane state before mutation", async 
       assert.equal(result.status, "failed");
       assert.equal(result.error_code, entry.errorCode);
       assert.deepEqual(result.steps.map((step) => step.name), ["preflight"]);
-      assert.equal(client.calls.length, 1);
+      assert.equal(client.primaryCallCount, 1);
       client.assertComplete();
     });
   }
@@ -984,7 +1051,7 @@ test("preflight rejects every residual unmanaged binding field", async (t) => {
       assert.equal(result.status, "failed");
       assert.equal(result.error_code, "preflight_management");
       assert.deepEqual(result.steps.map((step) => step.name), ["preflight"]);
-      assert.equal(client.calls.length, 1);
+      assert.equal(client.primaryCallCount, 1);
       client.assertComplete();
     });
   }
@@ -1017,7 +1084,7 @@ test("a mutation failure is uncertain, is never retried, and stops that pane", a
         client.calls.filter((call) => call.command === entry.name).length,
         1
       );
-      assert.equal(client.calls.length, entry.index + 1);
+      assert.equal(client.primaryCallCount, entry.index + 1);
       client.assertComplete();
     });
   }
@@ -1203,6 +1270,6 @@ test("matrix refuses duplicate pane selectors before touching either pane", asyn
     ),
     true
   );
-  assert.equal(client.calls.length, 0);
+  assert.equal(client.primaryCallCount, 0);
   client.assertComplete();
 });

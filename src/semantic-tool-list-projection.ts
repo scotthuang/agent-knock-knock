@@ -10,7 +10,7 @@ import { isTerminalSpecificConversationAction } from "./conversation-list.js";
  * Bound structured controller-Host List output before Host serialization,
  * without weakening the private action-authority path.
  *
- * The CLI remains the complete operator/debug contract. The controller
+ * Watch inventory and retained history use the separate watches command. The controller
  * receives current resource identities and state, action names, and only the
  * dynamic semantic inputs needed to invoke those actions. Static explanations
  * live in the bundled agent-knock-knock skill.
@@ -27,29 +27,26 @@ export function compactAkkListModelProjection(
   const projected = {
     projection: {
       schema: "agent-knock-knock/host-list-compact",
-      version: 3,
+      version: 4,
       skill: "agent-knock-knock",
       ...(finiteNumber(actionContracts?.version) !== undefined
         ? { action_contract_version: finiteNumber(actionContracts?.version) }
         : {})
     },
-    ...(Array.isArray(result.desktop_sessions) || Array.isArray(result.desktop_watches) || recordValue(result.desktop_scan) ? {
+    ...(Array.isArray(result.desktop_sessions) || recordValue(result.desktop_scan) ? {
       ...(!Array.isArray(result.conversations) ? { desktop_sessions: arrayValue(result.desktop_sessions).map(compactDesktopConversation) } : {}),
-      desktop_watches: arrayValue(result.desktop_watches).map(compactBackendWatch),
       desktop_scan: { ...compactAkkListScalars(recordValue(result.desktop_scan) ?? {}, [
         "view", "total_candidates", "history_candidates", "returned", "next_cursor", "catalog_complete", "live_count", "application_version", "application_build", "write_contract_verified", "approval_contract_verified", "send_contract_verified", "watch_error", "membership_is_not_live_identity",
         "sidebar_status", "sidebar_mode", "sidebar_selection_scope", "live_probe_scope"]),
         limitations: stringArrayValue(recordValue(result.desktop_scan)?.limitations) }
     } : {}),
-    ...(Array.isArray(result.codex_cli_sessions) || Array.isArray(result.codex_cli_watches) || recordValue(result.codex_cli_scan) ? {
+    ...(Array.isArray(result.codex_cli_sessions) || recordValue(result.codex_cli_scan) ? {
       ...(!Array.isArray(result.conversations) ? { codex_cli_sessions: arrayValue(result.codex_cli_sessions).map(compactNativeConversation) } : {}),
-      codex_cli_watches: arrayValue(result.codex_cli_watches).map(compactBackendWatch),
       codex_cli_scan: compactAkkListScalars(recordValue(result.codex_cli_scan) ?? {}, [
         "status", "returned", "loaded_count", "complete", "error", "watch_error"])
     } : {}),
-    ...(Array.isArray(result.claude_cli_sessions) || Array.isArray(result.claude_cli_watches) || recordValue(result.claude_cli_scan) ? {
+    ...(Array.isArray(result.claude_cli_sessions) || recordValue(result.claude_cli_scan) ? {
       ...(!Array.isArray(result.conversations) ? { claude_cli_sessions: arrayValue(result.claude_cli_sessions).map(compactNativeConversation) } : {}),
-      claude_cli_watches: arrayValue(result.claude_cli_watches).map(compactBackendWatch),
       claude_cli_scan: compactAkkListScalars(recordValue(result.claude_cli_scan) ?? {}, ["status", "returned", "loaded_count", "complete", "watch_error"])
     } : {}),
     ...(Array.isArray(result.conversations)
@@ -59,40 +56,10 @@ export function compactAkkListModelProjection(
           ...(routingDiagnostics ? { conversation_routing: compactAkkListScalars(recordValue(result.conversation_routing) ?? {},
             ["policy", "exact_associations", "unresolved_terminals"]) } : {}) }
       : { terminals: arrayValue(result.terminals).map(compactAkkListTerminal) }),
-    terminal_watches: arrayValue(result.terminal_watches)
-      .map(compactAkkListWatch),
-    unavailable_managed_turns: arrayValue(result.unavailable_managed_turns)
-      .map((turn) => compactAkkListTurn(turn, true)),
     ...(recovery ? { recovery } : {}),
     ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {})
   };
-  return paginateHostList(projected, params, hiddenTerminalHistorySources(result));
-}
-
-/** Default display preference removes a connection row, not its independently owned managed history. */
-function hiddenTerminalHistorySources(result: Record<string, unknown>): Record<string, unknown>[] {
-  if (!Array.isArray(result.conversations)) return [];
-  const represented = new Set(arrayValue(result.conversations).flatMap(row => [
-    row.conversation_id, ...stringArrayValue(row.terminal_aliases)
-  ]));
-  return arrayValue(result.terminals).filter(row => !represented.has(row.id)).map(compactAkkListTerminal);
-}
-
-function compactBackendWatch(row: Record<string, unknown>): Record<string, unknown> {
-  return {
-    ...compactAkkListScalars(row, ["watch_id", "turn_id", "conversation_id", "source", "status", "task_kind",
-      "management_state", "observation_state", "observation_mode", "anchor_state", "native_thread_id",
-      "native_turn_id", "native_receipt_turn_id", "submission_state", "pending_manual_count", "pending_async_count", "pending_interaction_count",
-      "callback_configured", "callback_expected", "callback_in_flight", "callback_state", "callback_delivery_scope", "channel_delivery_state",
-      "observation_error", "observation_status", "observation_active",
-      "hard_timeout_at", "deadline_at", "closed_at", "unwatched_at", "renewal_count", "renewed_at", "recovered_at"]),
-    ...(Array.isArray(row.retryable_callback_ids) ? { retryable_callback_ids: stringArrayValue(row.retryable_callback_ids) } : {}),
-    ...(Array.isArray(row.callback_notifications) ? { callback_notifications: arrayValue(row.callback_notifications)
-      .map(item => ({ ...compactAkkListScalars(item, ["id", "notification_id", "kind", "status", "attempts", "next_attempt_at", "retryable", "error_code",
-        "controller_acceptance", "request_phase", "request_dispatched", "automatic_retry_stopped", "retry_budget_exhausted", "max_delivery_attempts"]),
-        ...compactAkkListActions(item.available_actions) })) } : {}),
-    ...compactAkkListActions(row.available_actions, { watch_id: row.watch_id, turn_id: row.turn_id })
-  };
+  return paginateHostList(projected, params);
 }
 
 function compactDesktopConversation(row: Record<string, unknown>): Record<string, unknown> {
@@ -293,18 +260,10 @@ function compactAkkListManaged(
     "session_short_ref",
     "native_thread_id",
     "binding_status",
-    "turn_count",
-    "hidden_turn_count",
     "session_count"
   ]);
   const currentTurn = recordValue(managed.current_turn);
-  const recentTurn = recordValue(managed.recent_turn);
   output.current_turn = currentTurn ? compactAkkListTurn(currentTurn) : null;
-  output.recent_turn = recentTurn ? compactAkkListTurn(recentTurn) : null;
-  const history = arrayValue(managed.history).map((turn) =>
-    compactAkkListTurn(turn)
-  );
-  if (history.length > 0) output.history = history;
   return output;
 }
 
@@ -354,53 +313,6 @@ function compactAkkListTurn(
     conversation_id: turnId
   }));
   addAkkListWarningFlags(output, turn);
-  return output;
-}
-
-function compactAkkListWatch(
-  watch: Record<string, unknown>
-): Record<string, unknown> {
-  const output = compactAkkListScalars(watch, [
-    "watch_id",
-    "short_ref",
-    "source",
-    "watch_mode",
-    "confidence",
-    "interaction_policy",
-    "agent",
-    "terminal_id",
-    "native_thread_id",
-    "workspace",
-    "status",
-    "activity_state",
-    "created_at",
-    "deadline_at",
-    "updated_at",
-    "last_activity_at"
-  ]);
-  compactAkkListNested(output, "capabilities", watch.capabilities, [
-    "interaction_notify", "interaction_respond"
-  ]);
-  compactAkkListNested(output, "callback", watch.callback, [
-    "pending", "delivered", "failed", "superseded", "last_error_code"
-  ]);
-  const interaction = compactAkkListInteraction(watch.interaction_state);
-  if (interaction) output.interaction_state = interaction;
-  const settlement = recordValue(watch.settlement);
-  if (settlement) {
-    const compactSettlement = compactAkkListScalars(settlement, [
-      "kind", "observed_at", "reason_code", "completion_id",
-      "completion_timestamp"
-    ]);
-    if (Object.keys(compactSettlement).length > 0) {
-      output.settlement = compactSettlement;
-    }
-  }
-  Object.assign(output, compactAkkListActions(watch.available_actions, {
-    terminal_id: watch.terminal_id,
-    watch_id: watch.watch_id
-  }));
-  addAkkListWarningFlags(output, watch);
   return output;
 }
 

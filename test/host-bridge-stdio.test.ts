@@ -61,7 +61,8 @@ const EXPECTED_TOOLS = [
   "agent_knock_knock_set_permissions",
   "agent_knock_knock_status",
   "agent_knock_knock_unwatch",
-  "agent_knock_knock_watch"
+  "agent_knock_knock_watch",
+  "agent_knock_knock_watches"
 ] as const;
 
 test(

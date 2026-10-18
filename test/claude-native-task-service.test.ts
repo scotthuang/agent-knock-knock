@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { collectExpiredWatchHistory } from "../src/watch-history-retention.js";
 import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
 import { createClaudeNativeTaskService, type ClaudeNativeTaskDependencies } from "../src/claude-native-task-service.js";
 import { createClaudeNativeStateStore } from "../src/claude-native-state-store.js";
@@ -64,6 +65,22 @@ function harness(t: TestContext) {
   };
   return { dir, repository, state, deps, snapshot, accepted, service: createClaudeNativeTaskService(deps) };
 }
+
+test("expired Claude Send history rejects repeated messages before inspecting or sending to the native CLI", async t => {
+  const h = harness(t), request = { ...input, callbackRoute: route };
+  const sent = await h.service.send(request);
+  h.state.selected!.state = "completed";
+  assert.equal((await h.service.reconcile(sent.id)).status, "completed");
+  const before = { sends: h.state.sends, inspections: h.state.inspections, observations: h.state.observations, deliveries: h.state.deliveries.length };
+  h.state.now += 48 * 3_600_000;
+  assert.equal(collectExpiredWatchHistory({ storeDir: h.dir, now: new Date(h.state.now) }).deleted, 1);
+  assert.deepEqual(h.repository.list(), []);
+  const restored = createClaudeNativeTaskService(h.deps);
+  assert.throws(() => restored.status(sent.id), { code: "watch_history_expired", replay_forbidden: true });
+  await assert.rejects(restored.send(request), { code: "watch_history_expired" });
+  await assert.rejects(restored.send({ ...request, text: "Changed replay" }), { code: "watch_history_expired" });
+  assert.deepEqual({ sends: h.state.sends, inspections: h.state.inspections, observations: h.state.observations, deliveries: h.state.deliveries.length }, before);
+});
 
 test("Claude Send persists exact sender provenance; restart replay preserves the original deadline and never resends", async t => {
   const h = harness(t), sent = await h.service.send(input);

@@ -12,6 +12,7 @@
       "commands": [
         "delegate",
         "list",
+        "watches",
         "watch-terminal",
         "watch-status",
         "unwatch-terminal",
@@ -66,7 +67,7 @@
       "version": 1,
       "transport": "mcp_stdio",
       "callback_driver": "command_json_v1",
-      "tool_count": 26,
+      "tool_count": 27,
       "authority_paths": [
         "schemas/host-profile-v1.schema.json",
         "src/command-json-callback-transport.ts",
@@ -106,7 +107,7 @@
       ]
     },
     "list_action": {
-      "version": 31,
+      "version": 32,
       "actions": [
         "send",
         "retry_submission",
@@ -138,7 +139,7 @@
         "src/terminal-list-renderer.ts"
       ],
       "witnesses": [
-        "action-v31-unit",
+        "action-v32-unit",
         "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
@@ -148,6 +149,7 @@
       "slash_command": "akk",
       "tools": [
         "agent_knock_knock_list",
+        "agent_knock_knock_watches",
         "agent_knock_knock_watch",
         "agent_knock_knock_unwatch",
         "agent_knock_knock_list_resumable_threads",
@@ -205,7 +207,7 @@
     },
     "store_protocols": {
       "format_version": 1,
-      "current_writer_protocol": 9,
+      "current_writer_protocol": 10,
       "session_authority_protocol": 3,
       "terminal_watch_schema": "agent-knock-knock/terminal-watch",
       "terminal_watch_version": 3,
@@ -217,7 +219,8 @@
         5,
         6,
         7,
-        8
+        8,
+        9
       ],
       "authority_paths": [
         "src/session-store.ts",
@@ -260,6 +263,10 @@
         {
           "protocol": 9,
           "witness": "store-protocol-9-boundary"
+        },
+        {
+          "protocol": 10,
+          "witness": "store-protocol-10-boundary"
         }
       ],
       "witnesses": [
@@ -270,10 +277,10 @@
   },
   "witnesses": [
     {
-      "id": "action-v31-unit",
+      "id": "action-v32-unit",
       "path": "test/terminal-list-renderer.test.ts",
       "tier": "fast",
-      "needle": "the public action contract v31 exposes semantic arguments only"
+      "needle": "the public action contract v32 exposes semantic arguments only"
     },
     {
       "id": "callback-cli-boundary",
@@ -648,6 +655,12 @@
       "needle": "an empty protocol 1 Store is reported upgradeable and upgrades in place"
     },
     {
+      "id": "store-protocol-10-boundary",
+      "path": "test/watch-history-retention.test.ts",
+      "tier": "fast",
+      "needle": "writer protocol upgrade fences predecessor writers without changing records, deadlines or callback receipts"
+    },
+    {
       "id": "store-protocol-2-boundary",
       "path": "test/store.test.ts",
       "tier": "integration",
@@ -934,13 +947,13 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The imported command service and pure renderer preserve action-contract v31 ordering, semantic model-facing arguments including status-bound blocking and asynchronous interaction responses with explicit delivery modes, exact model-option discovery, exact one-shot Codex model-control residue repair, and set-model offers, explicit foreground identification, version compatibility warnings without version-based action vetoes, agent-neutral user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, proven input-owner suppression, best-effort exact fallback Watch callbacks that never revoke Send, independent screen/native-identity/durable-activity evidence, managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v32 ordering, semantic model-facing arguments including status-bound blocking and asynchronous interaction responses with explicit delivery modes, exact model-option discovery, exact one-shot Codex model-control residue repair, and set-model offers, explicit foreground identification, version compatibility warnings without version-based action vetoes, agent-neutral user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, proven input-owner suppression, best-effort exact fallback Watch callbacks that never revoke Send, independent screen/native-identity/durable-activity evidence, managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
         "management-list-in-process",
         "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
-        "action-v31-unit"
+        "action-v32-unit"
       ],
       "retained_boundary_witnesses": [
         "codex-binding-boundary",

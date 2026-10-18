@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { collectExpiredWatchHistory } from "../src/watch-history-retention.js";
 import {
   createCallbackEnvelope,
   createLegacyOpenClawCallbackRoute,
@@ -345,6 +346,27 @@ function tempStore(t: test.TestContext): string {
   return path.join(directory, "store");
 }
 
+test("completed Terminal Watch bodies expire only after delivered callbacks; the exact ID stays non-reusable", (t) => {
+  const storeDir = tempStore(t), id = "terminal-watch-expired-history", evidence = "c".repeat(64);
+  const created = saveTerminalWatch(storeDir, watch(id), { expectedRevision: null });
+  const notificationId = terminalWatchNotificationId(id, "completed", evidence);
+  const completed: TerminalWatch = { ...created, status: "completed",
+    settlement: { kind: "completed", evidence_fingerprint: evidence, observed_at: CREATED_AT, completion_text: "Private terminal result" },
+    notification_outbox: [{ notification_id: notificationId,
+      idempotency_key: terminalWatchNotificationIdempotencyKey(id, notificationId), kind: "completed", evidence_fingerprint: evidence,
+      status: "delivered", attempts: 1, created_at: CREATED_AT, last_attempt_at: CREATED_AT, delivered_at: CREATED_AT }] };
+  assertTerminalWatch(completed);
+  const statePath = pathsForTerminalWatch(id, storeDir).statePath;
+  fs.writeFileSync(statePath, JSON.stringify(completed));
+  const expiredAt = new Date(Date.parse(CREATED_AT) + 48 * 3_600_000);
+  assert.equal(collectExpiredWatchHistory({ storeDir, now: expiredAt }).deleted, 1);
+  assert.equal(fs.existsSync(statePath), false);
+  assert.deepEqual(listTerminalWatches(storeDir), []);
+  assert.deepEqual(scanTerminalWatchesForReconciliation(storeDir), { watches: [], errors: [] });
+  assert.throws(() => loadTerminalWatch(storeDir, id), { code: "watch_history_expired", replay_forbidden: true });
+  assert.throws(() => saveTerminalWatch(storeDir, watch(id), { expectedRevision: null }), { code: "watch_history_expired" });
+});
+
 function writePredecessorCallbackWatchFixture(
   storeDir: string,
   version: 1 | 2,
@@ -470,7 +492,7 @@ test("protocol 8 upgrades to the capability-aware writer without rewriting an ex
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, writer_protocol: 8 }));
   assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
-  assert.equal(ensureStoreWritable(storeDir).writer_protocol, 9);
+  assert.equal(ensureStoreWritable(storeDir).writer_protocol, 10);
   assert.deepEqual(fs.readFileSync(statePath), original);
   assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
 });

@@ -12,6 +12,7 @@ import type { DesktopAsyncInteraction, DesktopInteraction, DesktopThreadIdentity
 import { parseDesktopConversationId } from "./desktop-identity.js";
 import { assertDesktopAsyncInteraction } from "./desktop-async-state.js";
 import { assertDesktopInteraction } from "./desktop-interaction-state.js";
+import { assertWatchHistoryNotExpired, loadWatchHistoryReceipt } from "./watch-history-receipt.js";
 
 export const DESKTOP_TASKS_DIRECTORY = "desktop-tasks";
 export type DesktopTaskStatus = "awaiting_acceptance" | "watching" | "completed" |
@@ -196,6 +197,7 @@ export function createDesktopStateStore(storeDir: string, locks: { acquire(lockP
     const filePath = statePath(id);
     if (!fs.existsSync(storeDir)) return undefined;
     assertStoreReadable(storeDir);
+    assertWatchHistoryNotExpired(storeDir, "desktop", id);
     try {
       assertRealDirectory(root, "Desktop tasks"); assertPrivate(root, true); assertPrivate(filePath, false);
       const record = readJsonFileNoFollow(filePath, "Desktop task"); assertDesktopTaskRecord(record);
@@ -222,6 +224,7 @@ export function createDesktopStateStore(storeDir: string, locks: { acquire(lockP
         /^\.desktop-watch:[a-zA-Z0-9_-]{8,128}\.json\..+\.tmp$/.test(entry.name)) continue;
       if (!entry.name.endsWith(".json")) throw new Error("unknown Desktop state file");
       const id = entry.name.slice(0, -5); assertId(id);
+      if (loadWatchHistoryReceipt(storeDir, "desktop", id)) continue;
       // Security checks are outside content isolation: symlinks and access failures abort the scan.
       let value: unknown;
       try { value = readJsonFileNoFollow(filePath, "Desktop task"); }

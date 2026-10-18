@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.13 - 2026-10-18
+
+- Separate conversation discovery from monitoring: List retains currently discoverable CLI/Desktop entries and current action authority, while `watches` provides bounded recent monitoring and unresolved records.
+- Default Watch queries to 24 hours with pagination. Keep active and unresolved observations visible outside the window; list retained managed Turns separately for recovery.
+- Add bounded 48-hour cleanup for healthy completed Watch bodies, preserving minimal durable deduplication tombstones, pending delivery/interactions, existing deadlines and native history.
+- Advance the Store writer fence to protocol 10 so older writers cannot recreate pruned requests. This changes the writer manifest, not existing tasks or deadlines; rollback requires a coherent backup or a compatible writer.
+
 ## 0.14.12 - 2026-10-18
 
 - Prefer the verified backend as the default CLI entry for a unique same-agent/project discovery pair. Keep its exact conversation ID, title, status and actions so controllers can use one entry without choosing a transport. Terminal candidates remain available in diagnostics.

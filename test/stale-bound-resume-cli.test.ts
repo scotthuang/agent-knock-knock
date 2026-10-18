@@ -591,7 +591,6 @@ test("live-gate New requires a persisted unmanaged Claude origin before preparin
     };
     const listed = runCli([
       "list",
-      "--all",
       "--terminal-debug",
       "--no-approval-scan",
       ...commonArgs

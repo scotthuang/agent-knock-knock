@@ -607,6 +607,7 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   );
   assert.match(semanticRuntimeSource, /name: "agent_knock_knock_renew"/u);
   assert.match(semanticRuntimeSource, /name: "agent_knock_knock_watch"/u);
+  assert.match(semanticRuntimeSource, /name: "agent_knock_knock_watches"/u);
   assert.match(semanticRuntimeSource, /name: "agent_knock_knock_unwatch"/u);
   assert.match(semanticRuntimeSource, /name: "agent_knock_knock_new_thread"/u);
   assert.match(semanticRuntimeSource, /name: "agent_knock_knock_reconcile_binding"/u);
@@ -702,8 +703,9 @@ test("OpenClaw split authorities retain approval, lifecycle, and supervisor cont
   );
   assert.match(
     terminalListSource,
-    /terminals: projection\.terminals,\s*terminalWatches,/u
+    /printJson\(withoutListHistory\(unifiedConversationList\([\s\S]*?terminals: projected\.terminals/u
   );
+  assert.doesNotMatch(terminalListSource, /terminalWatches,/u);
   assert.doesNotMatch(
     terminalListSource,
     /activeWatchedTerminals|withoutTerminalWatchAuthority/u

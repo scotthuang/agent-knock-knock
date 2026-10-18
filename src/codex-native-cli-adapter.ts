@@ -44,7 +44,7 @@ export function codexNativeRuntimeOptions(options: Options): CodexNativeRuntimeO
 const runtimeFor = (options: Options) => (cliDependencies().createCodexNativeRuntime ?? createCodexNativeRuntime)(codexNativeRuntimeOptions(options));
 
 export async function codexNativeListForCli(options: Options): Promise<Record<string, unknown>> {
-  if (options.agent && options.agent !== "codex") return { codex_cli_sessions: [], codex_cli_watches: [], codex_cli_scan: { status: "filtered" } };
+  if (options.agent && options.agent !== "codex") return { codex_cli_sessions: [], codex_cli_scan: { status: "filtered" } };
   const runtime = runtimeFor(options);
   try {
     const discovery = await runtime.catalog.discover();
@@ -59,12 +59,9 @@ export async function codexNativeListForCli(options: Options): Promise<Record<st
         rows.push(codexNativeSessionProjection(entry, snapshot, entry.backendVersion));
       } catch (error) { errors.push({ codexHome: entry.codexHome, error_code: nativeErrorCode(error) }); }
     }
-    let watches: ReturnType<typeof codexNativeTaskProjection>[] = []; let watchError: string | undefined;
-    try { watches = runtime.tasks.list().map(codexNativeTaskProjection); }
-    catch { watchError = "codex_native_watch_store_unavailable"; }
-    return { codex_cli_sessions: rows, codex_cli_watches: watches,
+    return { codex_cli_sessions: rows,
       codex_cli_scan: { status: errors.length ? "partial" : "ok", returned: rows.length,
-        loaded_count: discovery.sessions.length, complete: errors.length === 0, diagnostics: errors, watch_error: watchError } };
+        loaded_count: discovery.sessions.length, complete: errors.length === 0, diagnostics: errors } };
   } finally { await runtime.close(); }
 }
 

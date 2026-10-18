@@ -182,11 +182,13 @@ export const semanticToolDescriptions = {
     "Session, ledger, and callback cleanup is best-effort and cannot veto closing " +
     "the Turn; warnings identify metadata AKK preserved. Refresh list afterward " +
     "and use Watch if the coding agent is still working.",
-  list: "List CLI/Desktop conversations and separate Watches in bounded pages. Default: current/unresolved; " +
-    "listView=history/all or all=true includes ended records. Follow pagination.next_args. Select " +
-    "conversation_id; AKK chooses transport. Only exact aliases coalesce; unassociated targets stay selectable. terminalDebug adds " +
-    "details. Keep unconnected rows and limitations. Desktop defaults to saved sidebar. Use " +
-    "available_actions/action_inputs and agent-knock-knock skill; mutations revalidate privately.",
+  list: "List currently discoverable CLI/Desktop conversations only, in bounded pages. No Watch or managed history is included. " +
+    "Use agent_knock_knock_watches to inspect monitoring. Follow pagination.next_args. Select conversation_id; AKK chooses transport. " +
+    "Keep unconnected Desktop rows and limitations. Use available_actions/action_inputs; mutations revalidate privately.",
+  watches: "Read retained Watches and separately identified managed Turns, without native discovery, reconciliation or callback replay. " +
+    "Default: last 24 hours plus active/unresolved records, bounded to 40 rows and a whole-response budget. Follow pagination.next_args. " +
+    "Use exact Status for details and recovery actions. Missing history is not proof of missing monitoring. " +
+    "Task completion, controller callback acceptance and user-channel delivery are distinct.",
   model_options: "For a Desktop conversation_id, read current model/effort/collaboration mode; " +
     "the owner exposes no model catalog (catalog_available=false), so use only a model explicitly requested by the user. " +
     "For terminal_id, inspect the exact current native model catalog for one explicitly selected " +

@@ -9,6 +9,7 @@ import { pushOptional } from "./semantic-tool-arguments.js";
 import { runCliAsync } from "./semantic-tool-relay.js";
 import { resolvePluginStoreDir } from "./semantic-tool-command-helpers.js";
 import { isRecord } from "./value-guards.js";
+import { WATCH_HISTORY_MAINTENANCE_INTERVAL_MS } from "./watch-history-policy.js";
 
 export const HOST_MONITOR_RECONCILIATION_INTERVAL_MS =
   HOST_LIFECYCLE_INTERVAL_MS;
@@ -18,6 +19,7 @@ const TERMINAL_WATCH_PHASE = "terminal_watches";
 const DESKTOP_WATCH_PHASE = "desktop_watches";
 const CODEX_NATIVE_WATCH_PHASE = "codex_native_watches";
 const CLAUDE_NATIVE_WATCH_PHASE = "claude_native_watches";
+const WATCH_HISTORY_PHASE = "watch_history_maintenance";
 
 const scheduleUnref: HostLifecycleSchedule = (callback, delayMs) => {
   const timer = setTimeout(callback, delayMs);
@@ -29,6 +31,7 @@ export function createHostMonitorReconciliationService(
   api,
   configuredIntervalMs: number
 ) {
+  let nextHistoryMaintenanceAt = 0;
   const reconciliationArgs = (reason: string): string[] => {
     const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
     const args = ["reconcile-monitors", "--reason", reason];
@@ -98,6 +101,10 @@ export function createHostMonitorReconciliationService(
     error
   }: HostLifecyclePhaseError): void => {
     const message = error instanceof Error ? error.message : String(error);
+    if (phase === WATCH_HISTORY_PHASE) {
+      api.logger.warn?.(`agent-knock-knock Watch history maintenance deferred after error: ${message}`);
+      return;
+    }
     if (phase === MANAGED_MONITOR_PHASE) {
       api.logger.warn?.(
         reason === "startup"
@@ -166,6 +173,18 @@ export function createHostMonitorReconciliationService(
         async run({ reason }) {
           const result = await runCliAsync(api, nativeWatchReconciliationArgs("reconcile-claude-native-watches"));
           reportWatches(result, watchReason(reason), "Claude CLI Watch");
+        }
+      },
+      {
+        name: WATCH_HISTORY_PHASE,
+        async run() {
+          if (Date.now() < nextHistoryMaintenanceAt) return;
+          nextHistoryMaintenanceAt = Date.now() + WATCH_HISTORY_MAINTENANCE_INTERVAL_MS;
+          // The child follows Store writer compatibility and shares a persisted throttle with other generations.
+          const result = await runCliAsync(api, nativeWatchReconciliationArgs("prune-watch-history"));
+          if (Number(result.deleted) > 0 || Number(result.errors) > 0) {
+            api.logger.info?.(`agent-knock-knock Watch history maintenance: checked=${result.checked ?? 0} deleted=${result.deleted ?? 0} errors=${result.errors ?? 0}`);
+          }
         }
       }
     ]

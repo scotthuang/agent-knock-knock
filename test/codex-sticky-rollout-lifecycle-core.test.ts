@@ -246,7 +246,7 @@ test("B send rejects drafts and wrong status, then materializes only B", async (
     assert.equal(closed.status, 0, closed.stderr);
     assert.equal(JSON.parse(closed.stdout).terminal_dispatch_resolved, true);
     fixture.setScreen("Ready\n› \ngpt-5.4 default · 100% left");
-    const listed = await fixture.action(["list", "--all", "--terminal-debug"]);
+    const listed = await fixture.action(["list", "--terminal-debug"]);
     assert.equal(listed.status, 0, listed.stderr);
     const terminal = JSON.parse(listed.stdout).terminals[0];
     assert.equal(terminal.activity_state, "idle");
@@ -487,7 +487,7 @@ test("an unknown fourth open rollout preserves managed display but only advertis
     fixture.writeRollout("unknown");
     fixture.setScreen("Ready\n› ");
 
-    const listed = await fixture.action(["list", "--all", "--terminal-debug"]);
+    const listed = await fixture.action(["list", "--terminal-debug"]);
     assert.equal(listed.status, 0, listed.stderr);
     const terminal = JSON.parse(listed.stdout).terminals[0];
     assert.equal(terminal.managed.session_id, c.session_id);

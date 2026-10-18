@@ -233,7 +233,10 @@
     "test/claude-native-semantic.test.ts",
     "test/claude-conversation-routing.test.ts",
     "test/native-callback-recovery.test.ts",
-    "test/backend-callback-public-projection.test.ts"
+    "test/backend-callback-public-projection.test.ts",
+    "test/list-discovery-isolation.test.ts",
+    "test/watch-list.test.ts",
+    "test/watch-history-retention.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",

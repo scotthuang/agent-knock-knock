@@ -7,18 +7,18 @@ import { recordValue } from "./value-guards.js";
 export const HOST_LIST_MAX_BYTES = 24 * 1024;
 export const HOST_LIST_MAX_WEIGHTED_CHARS = 12_000;
 const ROW_MAX_BYTES = 8_000;
-const FIELDS = ["conversations", "terminals", "codex_cli_sessions", "claude_cli_sessions", "desktop_sessions",
-  "managed_turns", "unavailable_managed_turns", "terminal_watches", "codex_cli_watches", "claude_cli_watches", "desktop_watches"] as const;
+const FIELDS = ["conversations", "terminals", "codex_cli_sessions", "claude_cli_sessions", "desktop_sessions"] as const;
 const FILTERS = ["agent", "status", "all", "noApprovalScan", "terminalDebug", "desktop_view", "desktopSearch", "desktopProject", "desktopCursor", "desktopLimit", "idleTimeoutMinutes"];
 const ENDED = new Set(["idle", "completed", "timed_out", "unwatched", "closed", "cancelled", "interrupted", "exited", "settled"]);
 const UNRESOLVED_CALLBACK = new Set(["uncertain", "failed", "pending", "ready", "leased", "retry_wait", "in_flight"]);
 type Row = Record<string, unknown>;
-type Entry = { field: string; row: Row; key: string; order: string; history: boolean };
-type View = "current" | "history" | "all";
+type Entry = { field: string; row: Row; key: string; order: string };
 
 export function parseHostListPageOptions(params: Row = {}) {
-  const view = params.listView ?? (params.all === true ? "all" : "current");
-  if (!["current", "history", "all"].includes(String(view))) throw new Error("listView must be current, history or all");
+  if (params.all === true || (params.listView !== undefined && params.listView !== "current")) {
+    throw new Error("List now returns conversations only; use agent_knock_knock_watches or akk watches for monitoring and history");
+  }
+  const view = "current";
   const limit = params.listLimit ?? 40;
   if (!Number.isSafeInteger(limit) || Number(limit) < 1 || Number(limit) > 100) throw new Error("listLimit must be between 1 and 100");
   const filters = Object.fromEntries(FILTERS.filter(key => params[key] !== undefined).map(key => [key, params[key]]));
@@ -28,11 +28,11 @@ export function parseHostListPageOptions(params: Row = {}) {
     try {
       if (typeof params.listCursor !== "string" || params.listCursor.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(params.listCursor)) throw new Error();
       const cursor = JSON.parse(Buffer.from(params.listCursor, "base64url").toString("utf8"));
-      if (cursor.version !== 1 || cursor.scope !== scope || typeof cursor.after !== "string" || !/^[0-9]:[a-f0-9]{64}$/u.test(cursor.after)) throw new Error();
+      if (cursor.version !== 2 || cursor.scope !== scope || typeof cursor.after !== "string" || !/^[0-9]:[a-f0-9]{64}$/u.test(cursor.after)) throw new Error();
       after = cursor.after;
     } catch { throw new Error("Invalid List cursor or changed filters; restart List without listCursor"); }
   }
-  return { view: view as View, limit: Number(limit), scope, after, filters };
+  return { view, limit: Number(limit), scope, after, filters };
 }
 
 /** Healthy ended observations are history. Unknown/failed delivery and pending interaction stay current. */
@@ -60,23 +60,16 @@ function hasPendingInteraction(row: Row): boolean {
 }
 
 /** Limit the whole model-facing result before serialization, never truncate JSON text. */
-export function paginateHostList(projected: Row, params: Row = {}, additionalManagedSources: readonly Row[] = []): Row {
+export function paginateHostList(projected: Row, params: Row = {}): Row {
   const options = parseHostListPageOptions(params);
-  extractManagedHistory(projected, additionalManagedSources);
-  const { entries, watchCounts, managedCounts, attention, categoryCounts } = collectHostListEntries(projected);
-  const selected = entries.filter(entry => options.view === "all" || (options.view === "history" ? entry.history : !entry.history));
+  const { entries: selected, categoryCounts } = collectHostListEntries(projected);
   const position = options.after ? selected.findIndex(entry => entry.key === options.after) : -1;
   if (options.after && position < 0) throw new Error("List changed since this cursor; restart List without listCursor");
   const remaining = selected.slice(position + 1);
   const output = createHostListEnvelope(projected);
-  output.watch_summary = { ...watchCounts, history_included: options.view !== "current",
-    history_query: { ...options.filters, listView: "history" }, note: "Watches are observations, not additional conversations. Omitted history is not missing monitoring; use exact Status for details." };
   const page: Row = { view: options.view, limit: options.limit, total_available: selected.length, returned: 0,
     has_more: false, next_cursor: null, counts: categoryCounts, max_output_bytes: HOST_LIST_MAX_BYTES,
     live_snapshot: true, note: "Follow next_args for remaining rows; refresh before acting. Counts describe this live discovery, not a frozen snapshot." };
-  page.managed_turns = managedCounts;
-  page.attention_counts = attention;
-  page.attention_counts_scope = "all observed Watches and separate managed rows; categories may overlap";
   page.max_output_weighted_chars = HOST_LIST_MAX_WEIGHTED_CHARS;
   output.pagination = page;
   let returned = 0;
@@ -100,7 +93,7 @@ export function paginateHostList(projected: Row, params: Row = {}, additionalMan
     const hasMore = count < remaining.length;
     page.returned = count; page.has_more = hasMore;
     page.remaining = remaining.length - count;
-    page.next_cursor = hasMore && after ? Buffer.from(JSON.stringify({ version: 1, scope: options.scope, after })).toString("base64url") : null;
+    page.next_cursor = hasMore && after ? Buffer.from(JSON.stringify({ version: 2, scope: options.scope, after })).toString("base64url") : null;
     page.next_args = page.next_cursor ? { ...options.filters, listView: options.view, listLimit: options.limit, listCursor: page.next_cursor } : null;
   }
 }
@@ -108,11 +101,12 @@ export function paginateHostList(projected: Row, params: Row = {}, additionalMan
 /** Keep non-resource metadata bounded separately from paged rows. */
 function createHostListEnvelope(projected: Row): Row {
   const output: Row = {};
-  // Conversations are always the first resource field, ahead of observation records.
+  // List contains discoverable conversations; observation inventory has a separate command.
   if (projected.projection !== undefined) output.projection = projected.projection;
   for (const field of FIELDS) if (projected[field] !== undefined) output[field] = [];
   for (const [field, value] of Object.entries(projected)) {
-    if (field !== "projection" && !FIELDS.includes(field as typeof FIELDS[number])) output[field] = value;
+    if (field !== "projection" && !FIELDS.includes(field as typeof FIELDS[number]) &&
+        !field.endsWith("_watches") && !["managed_turns", "unavailable_managed_turns", "watch_summary"].includes(field)) output[field] = value;
   }
   // Diagnostic text is not an identity/action field; exceptionally large diagnostics are summarized.
   for (const key of Object.keys(output)) {
@@ -122,75 +116,23 @@ function createHostListEnvelope(projected: Row): Row {
   return output;
 }
 
-/** Build complete inventory/attention counts independently of page and output budgets. */
+/** Bound the entire conversation inventory, independent of retained observation count. */
 function collectHostListEntries(projected: Row) {
   const entries: Entry[] = [];
-  const watchCounts = { total: 0, current: 0, history: 0 };
-  const managedCounts = { total: 0, current: 0, history: 0 };
-  const attention = { failed_callback: 0, uncertain_callback: 0, pending_callback: 0, pending_interaction: 0, observation_error: 0 };
   const categoryCounts: Record<string, number> = {};
   for (const field of FIELDS) {
     const rows = arrayValue(projected[field]);
     if (projected[field] !== undefined) categoryCounts[field] = rows.length;
-    const watch = field.endsWith("_watches");
-    const managed = field === "managed_turns" || field === "unavailable_managed_turns";
     for (const row of rows) {
-      const history = (watch || managed) && !hostListWatchNeedsAttention(row);
-      if (managed) { managedCounts.total++; managedCounts[history ? "history" : "current"]++; }
-      if (watch) { watchCounts.total++; watchCounts[history ? "history" : "current"]++; }
-      if (watch || managed) recordAttentionCounts(row, attention);
-      entries.push(hostListEntry(field, row, history));
+      const identity = String(row.conversation_id ?? row.id ?? JSON.stringify(row));
+      const surface = row.surface === "desktop" || row.source === "codex_desktop" ? 1 : 0;
+      const agent = row.agent === "codex" ? 0 : row.agent === "claude" ? 1 : 2;
+      entries.push({ field, row, key: `0:${digest(`${field}:${identity}`)}`,
+        order: `${String(FIELDS.indexOf(field)).padStart(2, "0")}:${surface}:${agent}:${identity}` });
     }
   }
   entries.sort((a, b) => a.order.localeCompare(b.order));
-  return { entries, watchCounts, managedCounts, attention, categoryCounts };
-}
-
-function recordAttentionCounts(row: Row, attention: Record<string, number>): void {
-  const callback = recordValue(row.callback), delivery = recordValue(row.callback_delivery);
-  const states = [String(row.callback_state), String(delivery?.status), String(delivery?.attempt_state),
-    ...arrayValue(row.callback_notifications).map(note => String(note.status))];
-  if (states.includes("failed") || Number(callback?.failed) > 0) attention.failed_callback++;
-  if (states.includes("uncertain")) attention.uncertain_callback++;
-  if (states.some(state => ["pending", "ready", "leased", "retry_wait", "in_flight"].includes(state)) || Number(callback?.pending) > 0) attention.pending_callback++;
-  if (["pending_manual_count", "pending_async_count", "pending_interaction_count"].some(key => Number(row[key]) > 0) ||
-      recordValue(row.interaction_state)?.state === "pending") attention.pending_interaction++;
-  if (row.observation_error) attention.observation_error++;
-}
-
-function hostListEntry(field: typeof FIELDS[number], row: Row, history: boolean): Entry {
-  const id = row.watch_id ?? row.turn_id ?? row.conversation_id ?? row.id;
-  const rank = field === "conversations" || field === "terminals" || field.endsWith("_sessions") ? 0 : history ? 2 : 1;
-  const identity = String(id ?? JSON.stringify(row));
-  const surface = row.surface === "desktop" || row.source === "codex_desktop" ? 1 : 0;
-  const agent = row.agent === "codex" ? 0 : row.agent === "claude" ? 1 : 2;
-  return { field, row, history, key: `${rank}:${digest(`${field}:${identity}`)}`,
-    order: `${rank}:${String(FIELDS.indexOf(field)).padStart(2, "0")}:${surface}:${agent}:${identity}` };
-}
-
-function extractManagedHistory(projected: Row, additionalSources: readonly Row[]): void {
-  const turns = new Map<string, Row>();
-  function visit(row: Row, parentId?: unknown) {
-    const managed = recordValue(row.managed);
-    if (managed) {
-      const history = arrayValue(managed.history);
-      const recent = recordValue(managed.recent_turn);
-      for (const turn of [...(recent ? [recent] : []), ...history]) {
-        const id = turn.turn_id ?? turn.conversation_id ?? turn.id;
-        if (typeof id === "string") turns.set(id, { ...turn, parent_conversation_id: parentId });
-      }
-      managed.history_count = history.length;
-      managed.history_details = "managed_turns pages";
-      delete managed.history;
-    }
-    for (const field of ["terminal_controls", "control_records"]) for (const control of arrayValue(row[field])) visit(control, parentId);
-  }
-  for (const field of ["conversations", "terminals", "codex_cli_sessions", "claude_cli_sessions"]) {
-    for (const row of arrayValue(projected[field])) visit(row, row.conversation_id ?? row.id);
-  }
-  // A hidden display connection remains the owner of its history; never assign it to the preferred backend.
-  for (const row of additionalSources) visit(row, row.conversation_id ?? row.id);
-  if (turns.size) projected.managed_turns = [...turns.values()];
+  return { entries, categoryCounts };
 }
 
 function statusReference(row: Row): Row {

@@ -1251,6 +1251,10 @@
       "owner": "codex-native"
     },
     {
+      "path": "src/managed-monitoring-list.ts",
+      "owner": "terminal-list-application"
+    },
+    {
       "path": "src/managed-session.ts",
       "owner": "state-store"
     },
@@ -2041,6 +2045,30 @@
     {
       "path": "src/verified-dead-agent-policy.ts",
       "owner": "orphan-reconciliation"
+    },
+    {
+      "path": "src/watch-history-maintenance-cli-adapter.ts",
+      "owner": "cli-runtime"
+    },
+    {
+      "path": "src/watch-history-policy.ts",
+      "owner": "state-store"
+    },
+    {
+      "path": "src/watch-history-receipt.ts",
+      "owner": "state-store"
+    },
+    {
+      "path": "src/watch-history-retention.ts",
+      "owner": "state-store"
+    },
+    {
+      "path": "src/watch-list-cli-adapter.ts",
+      "owner": "cli-runtime"
+    },
+    {
+      "path": "src/watch-list-projection.ts",
+      "owner": "host-bridge"
     }
   ]
 }

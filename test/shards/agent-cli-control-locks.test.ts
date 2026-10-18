@@ -602,8 +602,7 @@ fs.closeSync = function(fd, ...args) {
       storeDir,
       "--idle-timeout-minutes",
       "1",
-      "--managed-only",
-      "--all"
+      "--managed-only"
     ], {
       NODE_OPTIONS: [
         process.env.NODE_OPTIONS,
@@ -647,11 +646,12 @@ fs.closeSync = function(fd, ...args) {
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const listed = JSON.parse(result.stdout);
     assert.equal(listed.reconciliation.closed, 0);
-    assert.equal(listed.unavailable_managed_turns.length, 1);
-    assert.equal(
-      listed.unavailable_managed_turns[0].status,
-      "waiting_for_agent"
-    );
+    assert.equal(listed.unavailable_managed_turns, undefined);
+    const monitoringResult = await runAgentCliInProcess(["watches", "--store-dir", storeDir]);
+    assert.equal(monitoringResult.status, 0, monitoringResult.stderr || monitoringResult.stdout);
+    const monitoring = JSON.parse(monitoringResult.stdout);
+    assert.equal(monitoring.managed_turns.length, 1);
+    assert.equal(monitoring.managed_turns[0].status, "waiting_for_agent");
 
     const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(finalState.status, "waiting_for_agent");

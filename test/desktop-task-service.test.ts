@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { collectExpiredWatchHistory } from "../src/watch-history-retention.js";
 import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
 import { createDesktopStateStore } from "../src/desktop-state-store.js";
 import { createDesktopTaskService, desktopTaskNeedsReconciliation, type DesktopTaskServiceDependencies } from "../src/desktop-task-service.js";
@@ -48,6 +49,22 @@ function harness(t: TestContext) {
   };
   return { dir, repository, state, deps, service: createDesktopTaskService(deps) };
 }
+
+test("expired Desktop Send history cannot become another native task or callback", async t => {
+  const h = harness(t), request = { ...input, callbackRoute: route };
+  const sent = await h.service.send(request);
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  assert.equal((await h.service.reconcile(sent.id)).status, "completed");
+  const before = { starts: h.state.starts, observes: h.state.observes, deliveries: h.state.notifications.length };
+  h.state.now += 48 * 3_600_000;
+  assert.equal(collectExpiredWatchHistory({ storeDir: h.dir, now: new Date(h.state.now) }).deleted, 1);
+  assert.deepEqual(h.repository.list(), []);
+  const restored = createDesktopTaskService(h.deps);
+  assert.throws(() => restored.status(sent.id), { code: "watch_history_expired", replay_forbidden: true });
+  await assert.rejects(restored.send(request), { code: "watch_history_expired" });
+  await assert.rejects(restored.send({ ...request, text: "Changed replay" }), { code: "watch_history_expired" });
+  assert.deepEqual({ starts: h.state.starts, observes: h.state.observes, deliveries: h.state.notifications.length }, before);
+});
 
 test("Desktop send persists its intent, binds exact native turn, and never replays a message ID", async t => {
   const h = harness(t);

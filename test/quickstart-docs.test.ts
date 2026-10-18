@@ -176,8 +176,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     );
     assert.match(document, /`terminals\[\]`/u);
     assert.match(document, /`managed\.current_turn`/u);
-    assert.match(document, /`managed\.recent_turn`/u);
-    assert.match(document, /`unavailable_managed_turns\[\]`/u);
+    assert.match(document, /watches/u);
     assert.match(document, /`session_id`/u);
     assert.match(document, /`turn_id`/u);
     assert.match(document, /`respond`/u);
@@ -318,7 +317,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
   );
   assert.match(
     skill,
-    /compact projection v3[\s\S]*CLI keeps the complete operator\/debug action contract/u
+    /compact projection v4[\s\S]*CLI keeps the complete operator\/debug action contract/u
   );
   assert.match(
     skill,
@@ -352,14 +351,14 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     interactionDesign,
     /not a published package contract|local POC implemented/u
   );
-  assert.match(storageContract, /current writer protocol is 9/u);
+  assert.match(storageContract, /current writer protocol is 10/u);
   assert.match(
     storageContract,
-    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 9/u
+    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 10/u
   );
   assert.match(
     storageContract,
-    /Protocols 3 through 8 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
+    /Protocols 3 through 9 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
   );
   assert.match(
     operatorContract,

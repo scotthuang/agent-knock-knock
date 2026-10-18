@@ -1,7 +1,8 @@
 // Infrastructure composition for terminal list discovery and selector projection.
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
-import { unifiedConversationList } from "./conversation-list.js";
+import { listManagedMonitoringRecords } from "./managed-monitoring-list.js";
+import { unifiedConversationList, withoutListHistory } from "./conversation-list.js";
 import { withConversationRoutingHome } from "./conversation-routing-home.js";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import { listDeferredForegroundTransfers } from
@@ -408,6 +409,7 @@ export interface TerminalListCliDependencies {
 
 export interface TerminalListCliFacade {
   runList(options: TerminalListCliOptions): Promise<void>;
+  listManagedMonitoringRecords(options: TerminalListCliOptions): JsonObject[];
   buildTerminalListGroup(request: {
     options: TerminalListCliOptions;
     agentFilter?: ExecutorKind;
@@ -531,6 +533,7 @@ export function createTerminalListCliFacade(
 
   return {
     runList: (options) => call(() => runList(options)),
+    listManagedMonitoringRecords: (options) => call(() => listManagedMonitoringRecords(options, projectionService, runtime.isDiscoverableTmuxConversation)),
     buildTerminalListGroup: (request) => call(() => buildTerminalListGroup(request)),
     observeExactTerminal: (request) =>
       call(() => observeExactTerminal(request)),
@@ -573,6 +576,7 @@ function projectSelectorCandidate(
 }
 
 async function runList(options: TerminalListCliOptions) {
+  if (options.all === true) throw new Error("List now returns conversations only; use agent-knock-knock watches for monitoring and history");
   const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(cliCwd()));
   const store = inspectStoreCompatibilityForTerminalList(storeDir);
   let reconciliation: Record<string, unknown>;
@@ -606,20 +610,18 @@ async function runList(options: TerminalListCliOptions) {
     agentFilter,
     statusFilter
   });
-  printJson(unifiedConversationList({
+  printJson(withoutListHistory(unifiedConversationList({
     ...await terminalListRuntime().localCodexList?.(options),
     store_dir: storeDir,
     store,
     reconciliation,
     action_contracts: listActionContracts(),
     terminals: projected.terminals,
-    terminal_watches: projected.terminalWatches,
-    unavailable_managed_turns: projected.unavailableManagedTurns,
     terminal_scan: {
       ...terminalScan.summary,
       terminal_count: projected.terminals.length
     }
-  }, terminalScan.terminalControlled, {}, { diagnostics: options.terminalDebug === true }));
+  }, terminalScan.terminalControlled, {}, { diagnostics: options.terminalDebug === true }), options.terminalDebug === true));
   runtimeLog("info", "terminals_listed", {
     store_dir: storeDir,
     terminal_count: projected.terminals.length,
@@ -700,7 +702,6 @@ function projectTerminalListScan(input: {
   terminalScan: TerminalListScan;
   agentFilter?: ExecutorKind;
   statusFilter?: string;
-  tolerateInvalidWatchRecords?: boolean;
 }) {
   const {
     options,
@@ -708,8 +709,7 @@ function projectTerminalListScan(input: {
     store,
     terminalScan,
     agentFilter,
-    statusFilter,
-    tolerateInvalidWatchRecords
+    statusFilter
   } = input;
   const includeAll = Boolean(options.all);
   const managementErrors: string[] = [];
@@ -797,43 +797,9 @@ function projectTerminalListScan(input: {
       managementErrors.join("; ")
     );
   }
-  const exactWatchScan = terminalListRuntime()
-    .scanTerminalWatchesForExactObservation;
-  let watchObservation: {
-    watches: JsonObject[];
-    activeOverlayTrusted: boolean;
-  };
-  try {
-    watchObservation = tolerateInvalidWatchRecords && exactWatchScan
-      ? exactWatchScan(storeDir, { includeAll })
-      : {
-          watches: terminalListRuntime().listTerminalWatches?.(
-            storeDir,
-            { includeAll }
-          ) ?? [],
-          activeOverlayTrusted: true
-        };
-  } catch (error) {
-    runtimeLog("warn", "terminal_watch_inventory_unavailable", {
-      store_dir: storeDir,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    watchObservation = { watches: [], activeOverlayTrusted: false };
-  }
-  const observedTerminalWatches = watchObservation.watches;
-  const terminalWatches = options.managedOnly
-    ? []
-    : observedTerminalWatches
-      .filter((watch) => !agentFilter || watch.agent === agentFilter)
-      .filter((watch) => terminalListRuntime().matchesConfiguredWorkspace(
-        options.workspace,
-        watch.workspace
-      ))
-      .filter((watch) => !statusFilter || watch.status === statusFilter);
   return {
     includeAll,
     terminals: projection.terminals,
-    terminalWatches,
     unavailableManagedTurns: projection.unavailableManagedTurns
   };
 }
@@ -872,8 +838,7 @@ async function observeExactTerminal(request: {
     options,
     storeDir,
     store,
-    terminalScan: scan,
-    tolerateInvalidWatchRecords: true
+    terminalScan: scan
   });
   const projectedMatches = projected.terminals.filter(
     (terminal) => stringValue(terminal.id) === terminalId

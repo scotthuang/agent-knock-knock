@@ -35,15 +35,13 @@ export function claudeNativeRuntimeOptions(options: Options): ClaudeNativeRuntim
 const runtimeFor = (options: Options) => (cliDependencies().createClaudeNativeRuntime ?? createClaudeNativeRuntime)(claudeNativeRuntimeOptions(options));
 
 export async function claudeNativeListForCli(options: Options): Promise<Record<string, unknown>> {
-  if (options.agent && options.agent !== "claude") return { claude_cli_sessions: [], claude_cli_watches: [], claude_cli_scan: { status: "filtered" } };
+  if (options.agent && options.agent !== "claude") return { claude_cli_sessions: [], claude_cli_scan: { status: "filtered" } };
   const runtime = runtimeFor(options);
   try {
     const discovery = await runtime.catalog.discover();
     const sessions = discovery.sessions.filter(entry => !options.status || entry.status === options.status).map(entry => claudeNativeSessionProjection(entry));
-    let watches: ReturnType<typeof claudeNativeTaskProjection>[] = [], watchError: string | undefined;
-    try { watches = runtime.tasks.list().map(task => { const projected = claudeNativeTaskProjection(task); delete projected.progress; return projected; }); } catch { watchError = "claude_native_watch_store_unavailable"; }
-    return { claude_cli_sessions: sessions, claude_cli_watches: watches, claude_cli_scan: { status: discovery.errors.length ? "partial" : "ok",
-      returned: sessions.length, loaded_count: discovery.sessions.length, complete: !discovery.errors.length, diagnostics: discovery.errors, watch_error: watchError } };
+    return { claude_cli_sessions: sessions, claude_cli_scan: { status: discovery.errors.length ? "partial" : "ok",
+      returned: sessions.length, loaded_count: discovery.sessions.length, complete: !discovery.errors.length, diagnostics: discovery.errors } };
   } finally { await runtime.close(); }
 }
 function conversation(options: Options) {

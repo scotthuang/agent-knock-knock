@@ -54,7 +54,10 @@ test("standalone list and status leave persisted conversation files and runtime 
       storeDir
     ], { runtimeDir });
     assert.equal(listed.reconciliation.status, "disabled");
-    assert.equal(listed.unavailable_managed_turns.length, 1);
+    assert.equal(listed.unavailable_managed_turns, undefined);
+    const monitoring = runCli(["watches", "--store-dir", storeDir], { runtimeDir });
+    assert.equal(monitoring.managed_turns.length, 1);
+    assert.equal(monitoring.managed_turns[0].turn_id, fixture.conversation.turn_id);
 
     const status = runCli([
       "status",
@@ -106,7 +109,6 @@ test("list --reconcile remains readable and skips writes for a newer writer prot
       "list",
       "--reconcile",
       "--managed-only",
-      "--all",
       "--store-dir",
       storeDir
     ], { runtimeDir });
@@ -116,8 +118,10 @@ test("list --reconcile remains readable and skips writes for a newer writer prot
     assert.equal(listed.store.writable, false);
     assert.equal(listed.reconciliation.status, "skipped");
     assert.match(listed.reconciliation.reason, /writer protocol/iu);
-    assert.equal(listed.unavailable_managed_turns.length, 1);
-    const listedTurn = listed.unavailable_managed_turns[0];
+    assert.equal(listed.unavailable_managed_turns, undefined);
+    const monitoring = runCli(["watches", "--store-dir", storeDir], { runtimeDir });
+    assert.equal(monitoring.managed_turns.length, 1);
+    const listedTurn = monitoring.managed_turns[0];
     assert.deepEqual(
       Object.keys(listedTurn.available_actions),
       ["status"]

@@ -164,7 +164,7 @@ test("compact Host List keeps every terminal and moves static prose to the skill
 
   assert.deepEqual(projected.projection, {
     schema: "agent-knock-knock/host-list-compact",
-    version: 3,
+    version: 4,
     skill: "agent-knock-knock",
     action_contract_version: 31
   });
@@ -188,11 +188,7 @@ test("compact Host List keeps every terminal and moves static prose to the skill
   assert.equal(Object.hasOwn(first, "screen_reason"), false);
   assert.equal(Object.hasOwn(first, "activity_reason"), false);
   const managed = first.managed as Record<string, unknown>;
-  const recent = managed.recent_turn as Record<string, unknown>;
-  assert.equal(Object.hasOwn(recent, "request"), false);
-  assert.equal(Object.hasOwn(recent, "completion"), false);
-  assert.equal(Object.hasOwn(recent, "terminal_screen"), false);
-  assert.equal(Object.hasOwn(recent, "event_log_path"), false);
+  assert.equal(managed.recent_turn, undefined);
   const encoded = JSON.stringify(projected);
   assert.ok(encoded.length < 8_000, `compact List was ${encoded.length} chars`);
   assert.equal(encoded.includes("repeated operator explanation"), false);
@@ -1475,7 +1471,7 @@ test("/akk list renders each live terminal once with its managed-turn context", 
     }]
   });
 
-  assert.match(text, /AKK terminals \(1 live, 0 unavailable managed turns\)/u);
+  assert.match(text, /AKK terminals \(1 live\)/u);
   assert.match(text, /@terminal1 \| codex \| active \| idle \| tmux work:0\.0/u);
   assert.doesNotMatch(text, /AKK Watch available:/u);
   assert.match(text, /AKK session: @session1/u);
@@ -1484,14 +1480,12 @@ test("/akk list renders each live terminal once with its managed-turn context", 
     text,
     /terminal actions: list_resumable_threads, new_thread, repair_model_control, resume_thread/u
   );
-  assert.match(text, /recent turn: @managed1 \| codex \| idle \| Review the repository/u);
-  assert.match(text, /recent turn actions: status/u);
-  assert.match(text, /older managed turns: 2/u);
+  assert.doesNotMatch(text, /recent turn:|recent turn actions:|older managed turns:/u);
   assert.doesNotMatch(text, /managed-1/u);
   assert.doesNotMatch(text, /delegated|terminal-controlled/u);
 });
 
-test("/akk list renders watchable terminals and durable watch rows", () => {
+test("/akk list preserves Watch creation actions but omits durable Watch inventory", () => {
   const text = formatAkkListCommandResult({
     terminals: [{
       id: exactTerminalId,
@@ -1526,7 +1520,7 @@ test("/akk list renders watchable terminals and durable watch rows", () => {
     unavailable_managed_turns: []
   });
 
-  assert.match(text, /1 live, 1 terminal watches/u);
+  assert.match(text, /AKK terminals \(1 live\)/u);
   assert.match(
     text,
     new RegExp(
@@ -1539,12 +1533,10 @@ test("/akk list renders watchable terminals and durable watch rows", () => {
     text,
     /observe this exact terminal without input; exact task evidence is preferred and terminal-activity fallback is best-effort/u
   );
-  assert.match(text, /terminal watches:/u);
-  assert.match(text, /terminal-watch-durable-1 \| codex \| watching/u);
-  assert.match(text, /actions: status, unwatch/u);
+  assert.doesNotMatch(text, /terminal watches:|terminal-watch-durable-1|actions: status, unwatch/u);
   assert.equal(
     text.match(/compatibility warning: Codex 0\.150\.0 has not been regression-tested by AKK/gu)?.length,
-    2
+    1
   );
 });
 
@@ -1768,7 +1760,7 @@ test("/akk list explains a terminal management conflict and its recovery", () =>
   );
 });
 
-test("/akk list renders current, expanded history, and unavailable managed turns", () => {
+test("/akk list renders current ownership without expanded history or offline managed inventory", () => {
   const text = formatAkkListCommandResult({
     terminals: [{
       id: "terminal:v2:tmux:claude:work:0.1:5678",
@@ -1811,12 +1803,11 @@ test("/akk list renders current, expanded history, and unavailable managed turns
     }]
   });
 
-  assert.match(text, /AKK terminals \(1 live, 1 unavailable managed turns\)/u);
+  assert.match(text, /AKK terminals \(1 live\)/u);
   assert.match(text, /AKK session: @session2/u);
   assert.match(text, /current turn: @current123/u);
   assert.match(text, /current turn actions: respond, status/u);
-  assert.match(text, /history: @history123/u);
-  assert.match(text, /unavailable managed turns:\n- @unavail123/u);
+  assert.doesNotMatch(text, /history:|@history123|unavailable managed turns:|@unavail123/u);
   assert.doesNotMatch(text, /managed-(?:current|history|unavailable)-long-id/u);
   assert.doesNotMatch(text, /follow_up/u);
 });
@@ -1824,7 +1815,7 @@ test("/akk list renders current, expanded history, and unavailable managed turns
 test("/akk list reports an empty terminal-first view", () => {
   assert.equal(
     formatAkkListCommandResult({ terminals: [], unavailable_managed_turns: [] }),
-    "AKK found no live terminals or unavailable managed turns."
+    "AKK found no currently discoverable conversations."
   );
 });
 
