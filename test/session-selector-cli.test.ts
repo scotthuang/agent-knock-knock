@@ -1609,7 +1609,7 @@ function unavailableDesktopRuntime(): DesktopRuntime {
     catalog: new DesktopSessionCatalog({ codexHomes: [] }),
     tasks: { list: () => [] },
     close: async () => {}
-  } as DesktopRuntime;
+  } as unknown as DesktopRuntime;
 }
 
 function codexTerminalStaticArgs(options: {
