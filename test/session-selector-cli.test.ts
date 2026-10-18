@@ -969,7 +969,7 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
   }
 });
 
-test("a cross-store terminal owner is visible but never advertised as locally actionable", async () => {
+test("a cross-store terminal owner stays conflicted while exposing only fresh physical Send authority", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-cross-store-owner-")
   );
@@ -1002,6 +1002,8 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
       ...runtimeArgs
     ]);
     const ownerId = sent.conversation.conversation_id;
+    const ownerStatePath = pathsForConversation(ownerId, ownerStoreDir).statePath;
+    const ownerStateBefore = fs.readFileSync(ownerStatePath, "utf8");
 
     const listed = await runCli([
       "list",
@@ -1017,7 +1019,16 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
       ownerId
     );
     assert.equal(terminal.managed.current_turn, null);
-    assert.deepEqual(Object.keys(terminal.available_actions), ["status"]);
+    assert.deepEqual(Object.keys(terminal.available_actions), ["status", "send"]);
+    const sendAction = terminal.available_actions.send;
+    assert.equal(sendAction.scope, "terminal_user_explicit");
+    assert.equal(sendAction.composer_policy, "replace_current_composer_and_submit");
+    assert.equal(sendAction.arguments.selector, terminal.id);
+    assert.equal(typeof sendAction.arguments.expected_terminal_token, "string");
+    assert.ok(sendAction.arguments.expected_terminal_token.length > 0);
+    assert.equal(sendAction.arguments.expected_managed_terminal_token, undefined);
+    assert.equal(sendAction.arguments.session_id, undefined);
+    assert.equal(sendAction.arguments.turn_id, undefined);
     assert.deepEqual(
       terminal.available_actions.status.arguments,
       { conversation_id: terminal.id }
@@ -1033,6 +1044,7 @@ test("a cross-store terminal owner is visible but never advertised as locally ac
     ]);
     assert.equal(status.source, "terminal_control");
     assert.equal(status.conversation_id, terminal.id);
+    assert.equal(fs.readFileSync(ownerStatePath, "utf8"), ownerStateBefore);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
