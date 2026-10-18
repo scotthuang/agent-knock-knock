@@ -140,7 +140,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   const listTool = toolDefinitions.get("agent_knock_knock_list");
   assert.ok(listTool);
   assert.match(listTool.description ?? "", /List CLI\/Desktop conversations and separate Watches/u);
-  assert.match(listTool.description ?? "", /Same-project grouping is display only/u);
+  assert.match(listTool.description ?? "", /Only exact aliases coalesce; unassociated targets stay selectable/u);
   assert.match(listTool.description ?? "", /available_actions/u);
   assert.match(listTool.description ?? "", /action_inputs/u);
   assert.match(listTool.description ?? "", /agent-knock-knock skill/u);
