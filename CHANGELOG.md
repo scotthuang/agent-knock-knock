@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.14 - 2026-10-18
+
+- Attempt all implemented Codex Desktop operations after an app update instead of blocking writes on an exact version allowlist. Preserve tested-build metadata separately from current action availability.
+- Apply the same policy to conversation creation through the installed bundled backend; retain bundle provenance, real initialization, exact owner/task/request/revision checks and explicit protocol errors.
+- Keep uncertain outcomes unreplayed, expired interactions rejected and existing Watch/callback identities intact. This does not add unsupported cold-loading/resume operations or claim future protocols are verified.
+
 ## 0.14.13 - 2026-10-18
 
 - Separate conversation discovery from monitoring: List retains currently discoverable CLI/Desktop entries and current action authority, while `watches` provides bounded recent monitoring and unresolved records.

@@ -1,4 +1,4 @@
-import { desktopCapabilityProfile, desktopInteractionResponseVerified } from "./desktop-compatibility.js";
+import { desktopCapabilityProfile, desktopInteractionResponseAttemptable } from "./desktop-compatibility.js";
 import { monitorMinutesToMs, resolveMonitorHardTimeoutMinutes } from "./monitor-deadline-policy.js";
 import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
 import { backendPublicProgress, backendPublicProgressReadError } from "./backend-public-progress.js";
@@ -244,8 +244,6 @@ function desktopResponseFingerprint(interaction: DesktopInteraction, options: Op
 
 async function respondToDesktopInteraction(runtime: DesktopRuntime, options: Options,
   target: string | undefined, watch: string | undefined, command: "respond-interaction" | "approve"): Promise<void> {
-  const profile = desktopCapabilityProfile(runtime.compatibility);
-  if (!(command === "approve" ? profile.approvals : profile.blockingAnswers || profile.asyncAnswers)) throw new Error("Desktop interaction responses are unverified for this build; answer in Desktop");
   const controllerSession = required(options.openclawSession, "controller session");
   const subject = await desktopResponseSubject(runtime, options, target, watch, controllerSession);
   const interactionId = required(options.interaction, "interaction ID");
@@ -255,7 +253,8 @@ async function respondToDesktopInteraction(runtime: DesktopRuntime, options: Opt
   const freshInteraction = (snapshot?.pendingInteractions ?? snapshot?.asyncQuestions)?.find(item => item.id === interactionId);
   const interaction = previous?.state === "not_sent" ? freshInteraction : previous?.interaction ?? freshInteraction;
   if (!interaction) throw new Error("Desktop interaction is no longer pending; refresh Status");
-  if (!desktopInteractionResponseVerified(profile, interaction.kind)) throw new Error("Desktop interaction responses are unverified for this build; answer in Desktop");
+  if (runtime.compatibility.applicationIdentityVerified === false) throw new Error("Desktop application identity could not be verified; no response was sent");
+  if (!desktopInteractionResponseAttemptable(interaction.kind)) throw new Error("Desktop interaction kind is unsupported; answer in Desktop");
   desktopResponseFingerprint(interaction, options);
   const response = desktopTypedResponse(interaction, command, options);
   const responseId = str(options.responseId) ?? previous?.response_id ?? createHash("sha256").update(JSON.stringify([controllerSession, subject.id, interactionId, response])).digest("hex");

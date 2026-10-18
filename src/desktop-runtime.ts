@@ -24,11 +24,11 @@ export interface DesktopRuntimeOptions {
 /** Read the installed application, never substitute the globally installed CLI version. */
 export function installedDesktopCompatibility(): DesktopCompatibility {
   const plist = "/Applications/ChatGPT.app/Contents/Info.plist";
-  if (process.platform !== "darwin" || !fs.existsSync(plist)) return { version: "unavailable", build: "unavailable" };
+  if (process.platform !== "darwin" || !fs.existsSync(plist)) return { version: "unavailable", build: "unavailable", applicationIdentityVerified: false };
   const read = (key: string) => execFileSync("/usr/libexec/PlistBuddy", ["-c", `Print :${key}`, plist],
     { encoding: "utf8", timeout: 3000 }).trim();
-  if (read("CFBundleIdentifier") !== "com.openai.codex") return { version: "unavailable", build: "unavailable" };
-  return { version: read("CFBundleShortVersionString"), build: read("CFBundleVersion") };
+  if (read("CFBundleIdentifier") !== "com.openai.codex") return { version: "unavailable", build: "unavailable", applicationIdentityVerified: false };
+  return { version: read("CFBundleShortVersionString"), build: read("CFBundleVersion"), applicationIdentityVerified: true };
 }
 
 export function desktopWritesVerified(version: DesktopCompatibility): boolean {

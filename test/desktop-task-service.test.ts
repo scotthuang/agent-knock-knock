@@ -359,6 +359,7 @@ test("Desktop async question notifies once with public answer IDs while the same
   assert.equal(watched.pending_async_interactions?.length, 1); assert.equal(h.state.notifications.length, 1);
   const event = h.state.notifications[0].envelope.event;
   assert.equal(event.requires_response, true); assert.equal(event.type, "desktop_watch.interaction");
+  assert.equal(event.metadata?.response_contract_verified, false);
   assert.match(event.body, /may continue working/); assert.match(event.body, /Refresh AKK Status/);
   assert.match(event.body, /after the user supplies an answer/); assert.match(event.body, /q:[a-f0-9]{64}/);
   assert.match(event.body, /o:[a-f0-9]{64}/);
@@ -367,7 +368,7 @@ test("Desktop async question notifies once with public answer IDs while the same
   assert.equal(h.state.notifications.length, 1); assert.equal(h.service.status(watched.id).notifications.length, 1);
 });
 
-test("Desktop async question notifications use their own capability independently of blocking answers", async t => {
+test("Desktop async question notifications retain per-kind verification without suppressing response attempts", async t => {
   for (const asyncAnswers of [true, false]) {
     const h = harness(t); h.state.snapshot = snapshot([asyncQuestionTurn()]);
     const service = createDesktopTaskService({ ...h.deps, interactionResponsesVerified: {
@@ -375,7 +376,8 @@ test("Desktop async question notifications use their own capability independentl
     const watched = await service.watch({ ...input, callbackRoute: route });
     assert.equal(watched.pending_async_interactions?.length, 1);
     const event = h.state.notifications[0].envelope.event;
-    assert.equal(event.metadata?.action, asyncAnswers ? "respond" : "manual_desktop");
+    assert.equal(event.metadata?.action, "respond");
+    assert.equal(event.metadata?.response_contract_verified, asyncAnswers);
     await service.reconcile(watched.id);
     assert.equal(h.state.notifications.length, 1);
   }

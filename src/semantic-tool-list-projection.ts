@@ -37,7 +37,7 @@ export function compactAkkListModelProjection(
       ...(!Array.isArray(result.conversations) ? { desktop_sessions: arrayValue(result.desktop_sessions).map(compactDesktopConversation) } : {}),
       desktop_scan: { ...compactAkkListScalars(recordValue(result.desktop_scan) ?? {}, [
         "view", "total_candidates", "history_candidates", "returned", "next_cursor", "catalog_complete", "live_count", "application_version", "application_build", "write_contract_verified", "approval_contract_verified", "send_contract_verified", "watch_error", "membership_is_not_live_identity",
-        "sidebar_status", "sidebar_mode", "sidebar_selection_scope", "live_probe_scope"]),
+        "sidebar_status", "sidebar_mode", "sidebar_selection_scope", "live_probe_scope", "compatibility_policy", "application_identity_verified"]),
         limitations: stringArrayValue(recordValue(result.desktop_scan)?.limitations) }
     } : {}),
     ...(Array.isArray(result.codex_cli_sessions) || recordValue(result.codex_cli_scan) ? {
@@ -66,7 +66,9 @@ function compactDesktopConversation(row: Record<string, unknown>): Record<string
   return {
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent", "native_thread_id",
       "host_id", "updated_at", "catalog_membership", "creator_originator", "connection_state", "activity_state", "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count",
-      "sidebar_section", "sidebar_project_id", "sidebar_project_name", "observation_error", "can_send_reason", "manual_action"]),
+      "sidebar_section", "sidebar_project_id", "sidebar_project_name", "observation_error", "can_send_reason", "manual_action", "compatibility_policy", "compatibility_warning", "application_identity_verified"]),
+    ...(recordValue(row.capability_verification) ? { capability_verification: compactAkkListScalars(recordValue(row.capability_verification)!,
+      ["send", "approvals", "blockingAnswers", "asyncAnswers", "nativeControls"]) } : {}),
     capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, ["send", "watch", "status", "interaction_notify", "interaction_respond", "approve", "set_permissions", "set_model", "cancel"]),
     ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
   };

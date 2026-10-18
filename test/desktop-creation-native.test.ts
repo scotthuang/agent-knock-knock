@@ -6,10 +6,11 @@ import test from "node:test";
 import { createDesktopCreationNative, DesktopCreationNativeError, VERIFIED_DESKTOP_CREATION_BUILD,
   VERIFIED_DESKTOP_CREATION_BUILDS, type DesktopCreationNativeOptions } from "../src/desktop-creation-native.js";
 import { DesktopCreationRpcError, type DesktopCreationRpc } from "../src/desktop-creation-rpc.js";
+import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-compatibility.js";
 
 const THREAD = "00000000-0000-4000-8000-000000000001", PROJECT = "00000000-0000-4000-8000-000000000002";
 function fixture(t: { after(fn: () => void): void },
-  build: (typeof VERIFIED_DESKTOP_CREATION_BUILDS)[number] = VERIFIED_DESKTOP_CREATION_BUILD) {
+  build: { version: string; build: string; backendVersion: string } = VERIFIED_DESKTOP_CREATION_BUILD) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-create-"));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const canonicalCwd = fs.realpathSync(cwd);
@@ -51,6 +52,7 @@ for (const build of VERIFIED_DESKTOP_CREATION_BUILDS) test(`Desktop ${build.buil
     onCreated: receipt => { assert.equal(receipt.threadId, THREAD); assert.equal(f.requests.some(r => r.method === "thread/name/set"), false); phases.push("created"); } });
   assert.deepEqual(phases, ["before", "created"]);
   assert.deepEqual(result, { threadId: THREAD, cwd: f.cwd, projectId: null, title: "New fixture" });
+  assert.equal(client.metadata.testedBuild, true);
   assert.deepEqual(f.requests.find(r => r.method === "thread/start")?.params,
     { cwd: f.cwd, projectId: null, threadSource: "user", ephemeral: false });
   assert.equal(f.requests.some(r => r.method === "turn/start"), false);
@@ -58,23 +60,62 @@ for (const build of VERIFIED_DESKTOP_CREATION_BUILDS) test(`Desktop ${build.buil
   await client.close(); assert.equal(f.state.closed, true);
 });
 
-test("creation requires one coherent application/build/backend tuple before starting the RPC process", async t => {
-  for (const build of VERIFIED_DESKTOP_CREATION_BUILDS) {
+test("untested and previously excluded app/backend tuples attempt the same verified creation protocol", async t => {
+  for (const build of [
+    { version: "27.2000.1", build: "90000", backendVersion: "0.200.0" },
+    { ...VERIFIED_DESKTOP_BUILD, backendVersion: "0.160.0" },
+    { ...VERIFIED_DESKTOP_CREATION_BUILD, backendVersion: "0.162.0-alpha.17.3" }
+  ]) {
     const f = fixture(t, build);
-    let starts = 0;
-    const original = f.options.inspectApplication!("/fixture.app");
-    const other = VERIFIED_DESKTOP_CREATION_BUILDS.find(candidate => candidate.build !== build.build)!;
-    for (const mismatch of [
-      { appVersion: "future" }, { appBuild: "future" }, { backendVersion: "0.162.0-alpha.17.3" },
-      { appVersion: other.version, appBuild: other.build }
-    ]) {
-      await assert.rejects(createDesktopCreationNative({ ...f.options,
-        inspectApplication: () => ({ ...original, ...mismatch }),
-        rpcFactory: () => { starts++; throw new Error("Must reject before RPC launch"); }
-      }), (error: unknown) => error instanceof DesktopCreationNativeError
-        && error.code === "incompatible_desktop" && error.dispatchState === "not_sent");
-    }
-    assert.equal(starts, 0);
+    // Discovery may predate an application upgrade. Its version is diagnostic,
+    // while the bundled process must identify itself using its actual version.
+    const client = await createDesktopCreationNative({ ...f.options, compatibility: VERIFIED_DESKTOP_CREATION_BUILD });
+    assert.equal(client.metadata.testedBuild, false);
+    assert.equal(client.metadata.backendVersion, build.backendVersion);
+    assert.equal((await client.create({ cwd: f.cwd })).threadId, THREAD);
+    assert.deepEqual(f.requests.map(request => request.method), ["initialize", "thread/start", "thread/read"]);
+    assert.equal(f.state.initialized, true);
+    await client.close();
+  }
+});
+
+test("unverified application provenance still rejects before any creation process starts", async t => {
+  const f = fixture(t);
+  let starts = 0;
+  await assert.rejects(createDesktopCreationNative({ ...f.options,
+    inspectApplication: () => { throw new DesktopCreationNativeError("incompatible_desktop", "Application identity is not Codex"); },
+    rpcFactory: () => { starts++; throw new Error("Must not launch an unverified binary"); }
+  }), (error: unknown) => error instanceof DesktopCreationNativeError
+    && error.code === "incompatible_desktop" && error.dispatchState === "not_sent");
+  assert.equal(starts, 0);
+});
+
+test("unsupported initialization is explicit and closes the child without creating a thread", async t => {
+  const f = fixture(t, { version: "27.2000.1", build: "90000", backendVersion: "0.200.0" });
+  f.state.intercept = method => { throw new DesktopCreationRpcError("rpc_rejected", "Unsupported protocol", true, method, 1, -32602); };
+  await assert.rejects(createDesktopCreationNative(f.options), (error: unknown) =>
+    error instanceof DesktopCreationNativeError && error.code === "incompatible_desktop_protocol"
+    && error.dispatchState === "not_sent" && error.method === "initialize" && error.rpcCode === -32602);
+  assert.deepEqual(f.requests.map(request => request.method), ["initialize"]);
+  assert.equal(f.state.closed, true);
+});
+
+test("actual unsupported creation and malformed receipts are not replayed on untested builds", async t => {
+  for (const result of ["unsupported", "unknown_receipt"] as const) {
+    const f = fixture(t, { version: "27.2000.1", build: "90000", backendVersion: "0.200.0" });
+    const client = await createDesktopCreationNative(f.options);
+    f.state.intercept = method => {
+      if (method !== "thread/start") return;
+      if (result === "unsupported") throw new DesktopCreationRpcError("rpc_rejected", "Unsupported method", true, method, 2, -32601);
+      return { accepted: true };
+    };
+    await assert.rejects(client.create({ cwd: f.cwd }), (error: unknown) =>
+      error instanceof DesktopCreationNativeError && error.dispatchState === "unknown"
+      && error.code === (result === "unsupported" ? "incompatible_desktop_protocol" : "invalid_response")
+      && (result !== "unsupported" || error.method === "thread/start" && error.rpcCode === -32601));
+    await assert.rejects(client.create({ cwd: f.cwd }), /already attempted/u);
+    assert.deepEqual(f.requests.map(request => request.method), ["initialize", "thread/start"]);
+    await client.close();
   }
 });
 
@@ -134,11 +175,20 @@ test("failed durable barrier proves not sent and malformed target readback retai
 
 test("refuses mismatched application/backend/home identities and nonadvancing project pagination", async t => {
   const f = fixture(t);
-  await assert.rejects(createDesktopCreationNative({ ...f.options, compatibility: { version: "other", build: "20156" } }), /verified application/u);
+  await assert.rejects(createDesktopCreationNative({ ...f.options, inspectApplication: () => {
+    throw new DesktopCreationNativeError("incompatible_desktop", "Desktop bundled binary escapes its application");
+  } }), /bundled binary escapes/u);
   assert.equal(f.requests.length, 0);
-  f.state.intercept = method => method === "initialize" ? { userAgent: "other/0.162.1 (Mac OS)", codexHome: f.cwd } : undefined;
-  await assert.rejects(createDesktopCreationNative(f.options), /identity or Codex home/u);
-  assert.equal(f.state.closed, true);
+  for (const response of [
+    { userAgent: "other/0.162.1 (Mac OS)", codexHome: f.cwd },
+    { userAgent: "agent-knock-knock-desktop-create/0.200.0 (Mac OS)", codexHome: f.cwd },
+    { userAgent: `agent-knock-knock-desktop-create/${VERIFIED_DESKTOP_CREATION_BUILD.backendVersion} (Mac OS)`, codexHome: os.tmpdir() }
+  ]) {
+    f.state.intercept = method => method === "initialize" ? response : undefined;
+    await assert.rejects(createDesktopCreationNative(f.options), /identity or Codex home/u);
+    assert.equal(f.state.closed, true);
+    assert.equal(f.requests.some(request => request.method === "thread/start"), false);
+  }
   f.state.intercept = undefined;
   const client = await createDesktopCreationNative(f.options);
   f.state.intercept = method => method === "project/list" ? { data: [], nextCursor: "stuck" } : undefined;

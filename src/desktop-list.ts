@@ -40,6 +40,8 @@ export async function listDesktopSessions(runtime: DesktopRuntime, options: Reco
       live_probe_scope: "returned_page",
       catalog_complete: page.complete, live_count: sessions.filter(row => row.connection_state === "live_owner_verified").length,
       application_version: runtime.compatibility.version, application_build: runtime.compatibility.build,
+      application_identity_verified: runtime.compatibility.applicationIdentityVerified,
+      compatibility_policy: "attempt_native_contract",
       write_contract_verified: desktopCapabilityProfile(runtime.compatibility).nativeControls,
       approval_contract_verified: desktopCapabilityProfile(runtime.compatibility).approvals,
       send_contract_verified: desktopCapabilityProfile(runtime.compatibility).send,

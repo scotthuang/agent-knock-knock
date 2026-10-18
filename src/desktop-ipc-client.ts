@@ -11,7 +11,6 @@ import { DesktopIpcError, type DesktopIpcClientOptions, type DesktopIpcTransport
   type DesktopRequestReceipt, type DesktopModelSettings, type DesktopSettingsOptions, type DesktopSettingsReceipt,
   type DesktopInterruptOptions, type DesktopInterruptReceipt } from "./desktop-types.js";
 
-import { desktopCapabilityProfile, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 export { VERIFIED_DESKTOP_BUILD } from "./desktop-compatibility.js";
 const MIN_TIMEOUT_MS = 12_000;
 const DISCOVERY_TIMEOUT_MS = 10_000;
@@ -152,7 +151,7 @@ export class DesktopIpcClient {
   }
 
   async answerAsyncOnce(options: DesktopAsyncAnswerOptions): Promise<DesktopAsyncAnswerReceipt> {
-    this.assertOpen(); this.validateWrite(options.clientUserMessageId, "asyncAnswers"); this.sending = true;
+    this.assertOpen(); this.validateWrite(options.clientUserMessageId); this.sending = true;
     try {
       return await sendDesktopAsyncAnswer(options, {
         discoverOwner: (threadId, ownerId) => this.discoverOwner(threadId, ownerId),
@@ -164,11 +163,9 @@ export class DesktopIpcClient {
   }
 
   respondRequestOnce(options: DesktopRequestOptions): Promise<DesktopRequestReceipt> {
-    // The typed response permits an early build check; the freshly observed native
-    // interaction is independently checked before the durable dispatch barrier.
+    // The freshly observed native interaction is checked before the durable dispatch barrier.
     return this.nativeOperation(options.operationId,
-      port => respondDesktopRequest(options, port, desktopCapabilityProfile(this.options.compatibility)),
-      "answers" in options.response ? "blockingAnswers" : "approvals");
+      port => respondDesktopRequest(options, port));
   }
   readModelSettings(target: DesktopObserveTarget): Promise<DesktopModelSettings> {
     return readDesktopModelSettings(target, this.nativePort());
@@ -188,15 +185,15 @@ export class DesktopIpcClient {
         this.sentMessageIds.add(operationKey);
       } };
   }
-  private async nativeOperation<T>(operationId: string, operation: (port: DesktopNativeOperationPort) => Promise<T>, capability: keyof DesktopCapabilityProfile = "nativeControls"): Promise<T> {
+  private async nativeOperation<T>(operationId: string, operation: (port: DesktopNativeOperationPort) => Promise<T>): Promise<T> {
     if (typeof operationId !== "string" || !operationId.trim() || operationId.length > 512) throw new DesktopIpcError("invalid_argument", "Invalid Desktop operation identity");
     const key = crypto.createHash("sha256").update(`desktop-operation:${operationId}`).digest("hex");
-    this.assertOpen(); this.validateWrite(key, capability); this.sending = true;
+    this.assertOpen(); this.validateWrite(key); this.sending = true;
     try { return await operation(this.nativePort(key)); } finally { this.sending = false; }
   }
 
   private validateSubmission(options: DesktopSendTurnOptions): void {
-    this.validateWrite(options.clientUserMessageId, "send");
+    this.validateWrite(options.clientUserMessageId);
     if (typeof options.prompt !== "string" || !options.prompt.trim() || Buffer.byteLength(options.prompt) > 1024 * 1024
       || !Number.isSafeInteger(options.expectedRevision) || options.expectedRevision < 0
       || (options.expectedLatestTurnId !== null && typeof options.expectedLatestTurnId !== "string")) {
@@ -204,9 +201,9 @@ export class DesktopIpcClient {
     }
   }
 
-  private validateWrite(clientUserMessageId: string, capability: keyof DesktopCapabilityProfile = "nativeControls"): void {
-    if (!desktopCapabilityProfile(this.options.compatibility)[capability]) {
-      throw new DesktopIpcError("incompatible_desktop", `Desktop ${capability} capability requires a verified version and build; handle this operation in Desktop`);
+  private validateWrite(clientUserMessageId: string): void {
+    if (this.options.compatibility.applicationIdentityVerified === false) {
+      throw new DesktopIpcError("incompatible_desktop", "Desktop application identity could not be verified; no native write was attempted");
     }
     id(clientUserMessageId, "user message identity");
     if (this.sending || this.sentMessageIds.has(clientUserMessageId)) {

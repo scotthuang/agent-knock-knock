@@ -1,4 +1,5 @@
-import { desktopInteractionResponseVerified, desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
+import { desktopAttemptCapabilities, desktopCompatibilityProjection, desktopInteractionResponseAttemptable,
+  desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
 import { desktopObservationStopped } from "./desktop-task-recovery.js";
@@ -10,16 +11,17 @@ import type { DesktopTaskRecord } from "./desktop-state-store.js";
 export function desktopSessionProjection(entry: DesktopCatalogEntry, snapshot?: DesktopSnapshot,
   writesVerified: DesktopCapabilityProfile | boolean = false, observationError?: string): Record<string, unknown> {
   const profile = desktopProjectionCapabilities(writesVerified);
+  const attempts = desktopAttemptCapabilities(profile);
   const live = snapshot !== undefined;
   const activeTurn = activeDesktopTurn(snapshot);
   const watch = Boolean(activeTurn);
-  const send = Boolean(snapshot?.canSend && profile.send);
+  const send = Boolean(snapshot?.canSend && attempts.send);
   const interactions = activeTurn ? (snapshot?.pendingInteractions ?? snapshot?.asyncQuestions ?? [])
     .filter(item => item.turnId === activeTurn) : [];
-  const supportedInteractions = interactions.filter(item => desktopInteractionResponseVerified(profile, item.kind));
-  const settings = Boolean(profile.nativeControls && snapshot?.canSend && snapshot.runtimeStatus === "idle");
+  const supportedInteractions = interactions.filter(item => desktopInteractionResponseAttemptable(item.kind, profile));
+  const settings = Boolean(attempts.nativeControls && snapshot?.canSend && snapshot.runtimeStatus === "idle");
   const capabilities = { status: true, send, watch, interaction_notify: watch, ...interactionCapabilities(supportedInteractions),
-    set_permissions: settings, set_model: settings, cancel: profile.nativeControls && watch };
+    set_permissions: settings, set_model: settings, cancel: attempts.nativeControls && watch };
   return {
     id: entry.conversationId, conversation_id: entry.conversationId, source: "codex_desktop", agent: "codex",
     title: snapshot?.title ?? entry.title, cwd: snapshot?.cwd ?? entry.cwd,
@@ -29,41 +31,41 @@ export function desktopSessionProjection(entry: DesktopCatalogEntry, snapshot?: 
       sidebar_project_name: entry.sidebar.projectName } : {}),
     connection_state: live ? "live_owner_verified" : "unconfirmed",
     activity_state: snapshot?.runtimeStatus ?? "unknown",
-    ...sessionObservation(snapshot, profile),
-    ...sessionSendAvailability(snapshot, profile.send, observationError),
+    ...desktopCompatibilityProjection(profile), ...sessionObservation(snapshot, profile),
+    ...sessionSendAvailability(snapshot, profile, observationError),
     ...(observationError ? { observation_error: observationError } : {}), capabilities,
-    ...(supportedInteractions.length < interactions.length ? { manual_action: "Handle interactions without an available AKK action in Desktop; their response control is not verified for this build." } : {}),
+    ...(supportedInteractions.length < interactions.length ? { manual_action: "Handle unsupported native interactions in Desktop." } : {}),
     pending_async_count: interactions.filter(item => item.kind === "async_question").length,
     pending_interaction_count: interactions.length,
     interaction_state: interactions.map(item => desktopInteractionProjection(item, entry.conversationId, undefined, profile)),
-    available_actions: sessionActions(entry.conversationId, { live, send, watch, nativeControls: profile.nativeControls, cancel: profile.nativeControls && watch }, activeTurn)
+    available_actions: sessionActions(entry.conversationId, { live, send, watch, nativeControls: attempts.nativeControls, cancel: attempts.nativeControls && watch }, activeTurn)
 
   };
 }
 
-function sessionSendAvailability(snapshot: DesktopSnapshot | undefined, writesVerified: boolean, observationError?: string) {
+function sessionSendAvailability(snapshot: DesktopSnapshot | undefined, profile: DesktopCapabilityProfile, observationError?: string) {
   if (!snapshot) return { can_send_reason: observationError ?? "live_owner_not_confirmed",
     ...(observationError === "no_live_owner" ? {
       manual_action: "Open this conversation in Desktop, then refresh AKK List. It is listed but cannot currently receive tasks."
     } : {}) };
-  return { can_send_reason: !writesVerified ? "desktop_write_contract_unverified"
-    : snapshot.canSend ? "ready" : snapshot.idleBlockedReason ?? "desktop_not_sendable" };
+  if (profile.applicationIdentityVerified === false) return { can_send_reason: "desktop_application_identity_unverified" };
+  return { can_send_reason: snapshot.canSend ? "ready" : snapshot.idleBlockedReason ?? "desktop_not_sendable" };
 }
 
 /** Do not export prompts, internal owner IDs, callback configuration or raw native state. */
-export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: DesktopCapabilityProfile | boolean = true): Record<string, unknown> {
+export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: DesktopCapabilityProfile | boolean = false): Record<string, unknown> {
   const profile = desktopProjectionCapabilities(writesVerified);
   const terminal = desktopObservationStopped(task) || ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
   const interactions = !terminal ? actionableTaskInteractions(task) : [];
-  const supportedInteractions = interactions.filter(item => desktopInteractionResponseVerified(profile, item.kind));
+  const supportedInteractions = interactions.filter(item => desktopInteractionResponseAttemptable(item.kind, profile));
   const manualCount = task.pending_manual_count + interactions.length - supportedInteractions.length;
   const callback = backendCallbackPublicProjection(task, !terminal, desktopObservationStopped(task));
-  const canCancel = profile.nativeControls && !terminal && Boolean(task.native_turn_id);
+  const canCancel = desktopAttemptCapabilities(profile).nativeControls && !terminal && Boolean(task.native_turn_id);
   const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
   return {
     watch_id: task.watch_id, conversation_id: task.desktop_id, source: "codex_desktop",
     status: task.closed_at ? "closed" : task.status, observation_status: task.status,
-    ...recovery,
+    ...recovery, ...desktopCompatibilityProjection(profile),
     observation_mode: task.native_turn_id ? "exact_task" : "pending_acceptance",
     anchor_state: task.native_turn_id ? "verified" : "pending", native_thread_id: task.target.threadId,
     native_turn_id: task.native_turn_id ?? null, created_at: task.created_at, updated_at: task.updated_at,
@@ -112,10 +114,10 @@ function interactionCapabilities(interactions: DesktopInteraction[]) {
 }
 function sessionObservation(snapshot: DesktopSnapshot | undefined, profile: DesktopCapabilityProfile) {
   if (!snapshot) return {};
-  const actionable = (snapshot.pendingInteractions ?? []).filter(item => item.kind !== "async_question" && desktopInteractionResponseVerified(profile, item.kind)).length;
+  const actionable = (snapshot.pendingInteractions ?? []).filter(item => item.kind !== "async_question" && desktopInteractionResponseAttemptable(item.kind, profile)).length;
   return { native_turn_id: snapshot.latestTurnId, pending_manual_count: Math.max(0, snapshot.pendingRequestCount - actionable)
       + (snapshot.pendingInteractions ?? snapshot.asyncQuestions ?? []).filter(item => item.kind === "async_question"
-        && !desktopInteractionResponseVerified(profile, item.kind)).length,
+        && !desktopInteractionResponseAttemptable(item.kind, profile)).length,
     observed_revision: snapshot.revision };
 }
 function sessionActions(id: string, capabilities: { live: boolean; send: boolean; watch: boolean; cancel: boolean; nativeControls: boolean }, activeTurn?: string) {

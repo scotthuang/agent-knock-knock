@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
-import { DESKTOP_20398_BUILD, DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
+import { DESKTOP_20398_BUILD, DESKTOP_CREATION_BUILD, desktopCapabilityProfile, desktopAttemptCapabilities } from "../src/desktop-compatibility.js";
 import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { DesktopIpcError, type DesktopCompatibility, type DesktopIpcTransport } from "../src/desktop-types.js";
 import { DesktopFrameDecoder, encodeDesktopFrame, readDesktopSocketIdentity } from "../src/desktop-ipc-transport.js";
 import { reduceDesktopSnapshot } from "../src/desktop-snapshot.js";
 
+const UNKNOWN_BUILD = { version: "future", build: "future", applicationIdentityVerified: true };
 const target = { threadId: "thread-one", ownerClientId: "owner-one" };
 const baseline = () => ({ id: target.threadId, hostId: "local", mode: "default", resumeState: "resumed",
   threadRuntimeStatus: { type: "idle" }, requests: [], turns: [{ turnId: "previous-turn", status: "completed", items: [] }] });
@@ -111,7 +112,7 @@ function asyncFixture() {
 }
 
 test("Desktop async answer uses one exact-owner steer and permits ordinary progress during durable persistence", async () => {
-  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD, DESKTOP_20398_BUILD]) {
+  for (const compatibility of [VERIFIED_DESKTOP_BUILD, DESKTOP_CREATION_BUILD, DESKTOP_20398_BUILD, UNKNOWN_BUILD]) {
     const { fixture, answer } = asyncFixture(), client = await connect(fixture, compatibility);
     try {
       const receipt = await client.answerAsyncOnce({ ...answer, beforeDispatch: async () => {
@@ -170,11 +171,11 @@ test("Desktop async post-dispatch disconnect or wrong-task acknowledgement stays
   }
 });
 
-test("Desktop async response preserves exact owner and verified-build write boundaries", async () => {
+test("Desktop async response attempts unknown builds while preserving exact owner boundaries", async () => {
   const { fixture, answer } = asyncFixture(), client = await connect(fixture, { version: "future", build: "future" });
   try {
-    await assert.rejects(client.answerAsyncOnce(answer), (error: unknown) => error instanceof DesktopIpcError && error.code === "incompatible_desktop");
-    assert.equal(steers(fixture).length, 0);
+    assert.equal((await client.answerAsyncOnce(answer)).turnId, "active-turn");
+    assert.equal(steers(fixture).length, 1);
   } finally { client.close(); }
   const second = asyncFixture(), secondClient = await connect(second.fixture);
   second.fixture.ownerHandler = request => second.fixture.respond(request, {
@@ -273,12 +274,13 @@ test("Desktop rejects spoofed targets and unsupported snapshot versions before a
   assert.equal(starts(fixture).length, 0);
 });
 
-test("Desktop write gate checks exact build while compatible-shaped snapshots remain readable", async () => {
+test("Desktop unknown build can read and send through the same exact-owner contract", async () => {
   const fixture = new Fixture(), client = await connect(fixture, { version: VERIFIED_DESKTOP_BUILD.version, build: "future" });
   try {
     assert.equal((await client.observeThread(target)).threadId, target.threadId);
-    await assert.rejects(client.sendTurnOnce(options()), (error: unknown) => error instanceof DesktopIpcError && error.code === "incompatible_desktop");
-    assert.equal(starts(fixture).length, 0);
+    assert.equal((await client.sendTurnOnce(options())).turnId, "accepted-turn");
+    assert.equal(starts(fixture).length, 1);
+    assert.equal(desktopCapabilityProfile({ version: VERIFIED_DESKTOP_BUILD.version, build: "future" }).send, false);
   } finally { client.close(); }
 });
 
@@ -376,7 +378,7 @@ test("Desktop IPC trusts only private current-user sockets in a private real dir
 });
 
 
-test("Desktop task-interaction build admits sends and answers without authorizing session controls", async () => {
+test("Desktop historical verification profiles remain separate from attemptable implemented capabilities", async () => {
   assert.deepEqual(desktopCapabilityProfile(VERIFIED_DESKTOP_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: true });
   assert.deepEqual(desktopCapabilityProfile(DESKTOP_20398_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: true });
   assert.deepEqual(desktopCapabilityProfile(DESKTOP_CREATION_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: false });
@@ -388,11 +390,37 @@ test("Desktop task-interaction build admits sends and answers without authorizin
   try {
     assert.equal((await client.sendTurnOnce(options())).turnId, "accepted-turn");
     assert.equal(starts(fixture).length, 1);
-    const before = fixture.sent.length;
-    const incompatible = (error: unknown) => error instanceof DesktopIpcError
-      && error.code === "incompatible_desktop" && error.dispatchState === "not_sent";
-    await assert.rejects(client.updateThreadSettingsOnce({ ...target, operationId: "settings-only", settings: { model: "test-model" } }), incompatible);
-    await assert.rejects(client.interruptTurnOnce({ ...target, operationId: "interrupt-only", expectedTurnId: "active-turn" }), incompatible);
-    assert.equal(fixture.sent.length, before);
+    assert.deepEqual(desktopAttemptCapabilities(), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: true });
+  } finally { client.close(); }
+});
+
+test("Desktop unknown build reports native RPC rejection and never retries the possibly dispatched send", async () => {
+  const fixture = new Fixture(), client = await connect(fixture, UNKNOWN_BUILD);
+  fixture.startHandler = request => fixture.respond(request, { handledByClientId: target.ownerClientId,
+    resultType: "error", error: "method-not-supported" });
+  try {
+    await assert.rejects(client.sendTurnOnce(options()), (error: unknown) => error instanceof DesktopIpcError
+      && error.code === "rpc_error" && error.dispatchState === "unknown");
+    await assert.rejects(client.sendTurnOnce(options()));
+    assert.equal(starts(fixture).length, 1);
+  } finally { client.close(); }
+});
+
+test("explicitly unverified Desktop application identity keeps reads but blocks all native writes before dispatch", async () => {
+  const fixture = new Fixture(), client = await connect(fixture, { ...UNKNOWN_BUILD, applicationIdentityVerified: false });
+  const notSent = (error: unknown) => error instanceof DesktopIpcError && error.code === "incompatible_desktop"
+    && error.dispatchState === "not_sent" && /application identity/.test(error.message);
+  try {
+    assert.equal((await client.observeThread(target)).threadId, target.threadId);
+    let barriers = 0;
+    await assert.rejects(client.sendTurnOnce({ ...options(), beforeDispatch: async () => { barriers++; } }), notSent);
+    await assert.rejects(client.answerAsyncOnce({ ...target, expectedRevision: 7, expectedTurnId: "active-turn",
+      interactionId: "question-one", answer: "Green", clientUserMessageId: "answer-one" }), notSent);
+    await assert.rejects(client.respondRequestOnce({ ...target, expectedRevision: 7, expectedTurnId: "active-turn",
+      interactionId: "approval-one", operationId: "approve-one", response: { decision: "accept" } }), notSent);
+    await assert.rejects(client.updateThreadSettingsOnce({ ...target, operationId: "settings-one", settings: { model: "test-model" } }), notSent);
+    await assert.rejects(client.interruptTurnOnce({ ...target, operationId: "cancel-one", expectedTurnId: "active-turn" }), notSent);
+    assert.equal(fixture.sent.some(message => message.method.startsWith("thread-follower-")), false);
+    assert.equal(barriers, 0);
   } finally { client.close(); }
 });
