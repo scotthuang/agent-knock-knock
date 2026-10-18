@@ -125,13 +125,20 @@ test("OpenClaw compatibility npm retry policy remains bounded and network-only",
   assert.equal(statusCalls, 2);
 });
 
-test("GitHub workflows stay suspended while Issue 126 refactoring is active", () => {
+test("automatic CI stays suspended while reviewed ClawHub publication requires manual dispatch", () => {
   const workflowsDirectory = path.join(packageRoot, ".github", "workflows");
   const workflowFiles = fs.existsSync(workflowsDirectory)
     ? fs.readdirSync(workflowsDirectory).filter((name) => /\.ya?ml$/u.test(name))
     : [];
 
-  assert.deepEqual(workflowFiles, []);
+  assert.deepEqual(workflowFiles, ["clawhub-publish.yml"]);
+  const workflow = readPackageFile(".github/workflows/clawhub-publish.yml");
+  const triggers = /^on:\n([\s\S]*?)(?=^\S)/mu.exec(workflow)?.[1];
+  assert.ok(triggers, "Publication workflow must declare its triggers");
+  assert.match(triggers, /^  workflow_dispatch:/mu);
+  assert.doesNotMatch(triggers, /^  (?:push|pull_request|pull_request_target|schedule|workflow_run):/mu);
+  assert.match(triggers, /publish:[\s\S]*?default: false/u);
+  assert.match(workflow, /if: github\.ref == 'refs\/heads\/main'/u);
 });
 
 test("live tmux smoke refuses to run without both opt-ins", async () => {
