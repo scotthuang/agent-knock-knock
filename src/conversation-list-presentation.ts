@@ -7,18 +7,15 @@ type Row = Record<string, unknown>;
 export interface ConversationListPresentationOptions { diagnostics?: boolean }
 type WorkspaceGroup = { terminal_conversation_id: string; native_conversation_id: string };
 
-/** Workspace grouping changes only the inventory presentation, never routing identity or authority. */
+/** Exact aliases are already coalesced upstream; workspace similarity must not hide another selectable target. */
 export function presentConversationList(conversations: readonly Row[], physicalTerminals: readonly Row[],
   options: ConversationListPresentationOptions = {}) {
-  const groups = workspaceGroups(conversations, physicalTerminals);
-  const hidden = new Set(options.diagnostics ? [] : groups.map(group => group.native_conversation_id));
   return {
-    conversations: conversations.filter(row => !hidden.has(String(row.conversation_id)))
-      .map((row): Row => ({ ...row, surface: row.source === "codex_desktop" ? "desktop" : "cli" })),
+    conversations: conversations.map((row): Row => ({ ...row, surface: row.source === "codex_desktop" ? "desktop" : "cli" })),
     conversation_presentation: {
       mode: options.diagnostics ? "diagnostics" : "default",
-      workspace_grouped_connections: hidden.size,
-      ...(options.diagnostics ? { workspace_groups: groups } : {})
+      workspace_grouped_connections: 0,
+      ...(options.diagnostics ? { workspace_groups: workspaceGroups(conversations, physicalTerminals) } : {})
     }
   };
 }

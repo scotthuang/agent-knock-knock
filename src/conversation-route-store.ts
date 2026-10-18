@@ -27,10 +27,20 @@ export interface ConversationRouteRecord {
   state: "reserved" | "uncertain" | "recorded";
   receipt?: Record<string, unknown>;
   error_code?: string;
+  /** Absent on older journals: a reserved record alone never proves no execution. */
+  preparation_tracked?: true;
+  execution_started_at?: string;
+  preparation_rejection?: {
+    stage: "route_preparation";
+    request_dispatched: false;
+    error_code: string;
+  };
 }
 export interface ConversationRouteStore {
   load(input: ConversationRouteInput): ConversationRouteRecord | undefined;
-  reserve(input: ConversationRouteInput, choice: ConversationRouteChoice): { record: ConversationRouteRecord; created: boolean };
+  reserve(input: ConversationRouteInput, choice: ConversationRouteChoice, options?: { trackPreparation?: boolean }): { record: ConversationRouteRecord; created: boolean };
+  markPreparationRejected(input: ConversationRouteInput, choice: ConversationRouteChoice, errorCode?: string): ConversationRouteRecord;
+  beginExecution(input: ConversationRouteInput, choice: ConversationRouteChoice): ConversationRouteRecord;
   recordReceipt(input: ConversationRouteInput, choice: ConversationRouteChoice, receipt: Record<string, unknown>): ConversationRouteRecord;
   markUncertain(input: ConversationRouteInput, choice: ConversationRouteChoice, errorCode?: string): ConversationRouteRecord;
 }
@@ -71,6 +81,20 @@ function assertRecord(value: unknown): asserts value is ConversationRouteRecord 
   assertChoice({ route: r.route, targetId: r.target_id });
   if ((r.state === "recorded") !== (r.receipt !== undefined) || r.receipt !== undefined && !recordValue(r.receipt) ||
     r.error_code !== undefined && !/^[a-zA-Z0-9_-]{1,100}$/.test(r.error_code)) invalid("Invalid conversation route outcome");
+  assertExecutionPhase(r);
+}
+
+/** Phase evidence is optional on legacy records, but must be internally consistent when present. */
+function assertExecutionPhase(r: ConversationRouteRecord): void {
+  if (r.preparation_tracked !== undefined && r.preparation_tracked !== true ||
+    r.execution_started_at !== undefined && !validTime(r.execution_started_at)) invalid("Invalid conversation route execution phase");
+  const rejection = r.preparation_rejection;
+  if (rejection !== undefined && (!recordValue(rejection) || r.preparation_tracked !== true ||
+    r.state !== "reserved" || r.execution_started_at !== undefined || rejection.stage !== "route_preparation" ||
+    rejection.request_dispatched !== false || typeof rejection.error_code !== "string" ||
+    !/^[a-zA-Z0-9_-]{1,100}$/.test(rejection.error_code))) {
+    invalid("Invalid conversation route preparation rejection");
+  }
 }
 function assertUpdate(previous: ConversationRouteRecord, next: ConversationRouteRecord): void {
   for (const key of ["id", "controller_session", "message_id", "request_text", "canonical_target", "route", "target_id", "created_at"] as const) {
@@ -78,6 +102,8 @@ function assertUpdate(previous: ConversationRouteRecord, next: ConversationRoute
   }
   if (previous.receipt && !isDeepStrictEqual(previous.receipt, next.receipt)) conflict();
   if (previous.state !== "reserved" && next.state === "reserved") conflict();
+  if (previous.preparation_tracked !== next.preparation_tracked ||
+    previous.execution_started_at !== undefined && previous.execution_started_at !== next.execution_started_at) conflict();
 }
 
 /** Select once after preflight; crashes and uncertain delivery never authorize a different route.
@@ -107,7 +133,7 @@ export function createConversationRouteStore(storeDir: string, locks: { acquire(
   };
   return {
     load,
-    reserve(input, choice) {
+    reserve(input, choice, reservationOptions) {
       assertInput(input); assertChoice(choice);
       return repository.withLock(conversationRouteId(input.controllerSession, input.messageId), () => {
         const previous = load(input);
@@ -116,7 +142,23 @@ export function createConversationRouteStore(storeDir: string, locks: { acquire(
         return { created: true, record: repository.save({ schema: "agent-knock-knock/conversation-route", version: 1,
           revision: 1, id: conversationRouteId(input.controllerSession, input.messageId), controller_session: input.controllerSession,
           message_id: input.messageId, request_text: input.requestText, canonical_target: input.canonicalTarget,
-          route: choice.route, target_id: choice.targetId, created_at: date, updated_at: date, state: "reserved" }, null) };
+          route: choice.route, target_id: choice.targetId, created_at: date, updated_at: date, state: "reserved",
+          ...(reservationOptions?.trackPreparation ? { preparation_tracked: true as const } : {}) }, null) };
+      });
+    },
+    markPreparationRejected(input, choice, errorCode = "route_preparation_rejected") {
+      if (!/^[a-zA-Z0-9_-]{1,100}$/.test(errorCode)) invalid("Invalid conversation route error code");
+      return update(input, choice, current => {
+        if (current.state !== "reserved" || current.preparation_tracked !== true || current.execution_started_at) return current;
+        const rejection = { stage: "route_preparation" as const, request_dispatched: false as const, error_code: errorCode };
+        return isDeepStrictEqual(current.preparation_rejection, rejection) ? current : { ...current, preparation_rejection: rejection };
+      });
+    },
+    beginExecution(input, choice) {
+      return update(input, choice, current => {
+        if (current.receipt || current.execution_started_at) return current;
+        const { preparation_rejection: _rejection, ...record } = current;
+        return { ...record, execution_started_at: now().toISOString() };
       });
     },
     recordReceipt(input, choice, receipt) {
@@ -125,13 +167,17 @@ export function createConversationRouteStore(storeDir: string, locks: { acquire(
       if (!recordValue(saved)) invalid("Conversation route receipt must serialize to an object");
       return update(input, choice, current => {
         if (current.receipt) { if (!isDeepStrictEqual(current.receipt, saved)) conflict(); return current; }
-        return { ...current, state: "recorded", receipt: saved };
+        const { preparation_rejection: _rejection, ...record } = current;
+        return { ...record, state: "recorded", receipt: saved };
       });
     },
     markUncertain(input, choice, errorCode) {
       if (errorCode !== undefined && !/^[a-zA-Z0-9_-]{1,100}$/.test(errorCode)) invalid("Invalid conversation route error code");
-      return update(input, choice, current => current.state !== "reserved" ? current :
-        { ...current, state: "uncertain", ...(errorCode ? { error_code: errorCode } : {}) });
+      return update(input, choice, current => {
+        if (current.state !== "reserved") return current;
+        const { preparation_rejection: _rejection, ...record } = current;
+        return { ...record, state: "uncertain", ...(errorCode ? { error_code: errorCode } : {}) };
+      });
     }
   };
 }

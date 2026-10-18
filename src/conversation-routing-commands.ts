@@ -2,6 +2,14 @@ import { nonBlankString, recordValue } from "./value-guards.js";
 import { isCodexNativeConversationId } from "./codex-native-identity.js";
 
 type Options = Record<string, unknown>;
+
+/** Preserve physical identity while using the same authoritative action projection as List. */
+export function withConversationSendAuthority(raw: Options, projected: Options): Options {
+  if (raw.id !== projected.id) throw new Error("Terminal Send authority does not match its physical observation");
+  const { send: _rawSend, ...actions } = recordValue(raw.available_actions) ?? {};
+  const send = recordValue(recordValue(projected.available_actions)?.send);
+  return { ...raw, available_actions: { ...actions, ...(send ? { send } : {}) } };
+}
 export interface ConversationRoutingCliPorts {
   terminals(options: Options, terminalId?: string): Promise<Options[]>;
   /** Executes the selected command without entering conversation routing again. */

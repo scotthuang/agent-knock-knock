@@ -8,6 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import { conversationRoutedOptions, prepareConversationTerminalOptions, withConversationSendAuthority } from
+  "../src/conversation-routing-commands.js";
 import { createCodexTerminalAgentAdapter } from
   "../src/codex-terminal-agent-adapter.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
@@ -2085,6 +2087,68 @@ test("corrupt managed inventory cannot hide exact terminal user Send", async (t)
   );
 });
 
+test("unified Send consumes List's fresh explicit authority without promoting unresolved native identity", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-routed-user-send-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = await createCodexRolloutListFixture(root, "completed", false, {}, "human-only", true, false,
+    "Historical status output\nNew activity\nBack to bottom", {
+      agentVersion: "0.162.1", nativeIdentityObservation: "verified_absent", screenActivityState: "unknown"
+    });
+  const options = { storeDir: fixture.storeDir };
+  const listResult = await runCliCommandExecution("list", options, { runtimeLog: () => undefined }, () => fixture.facade.runList(options));
+  assert.equal(listResult.exitCode, 0);
+  const listed = JSON.parse(listResult.stdout).terminals.find((row: Record<string, unknown>) => row.id === fixture.terminalId);
+  const observed = await fixture.facade.observeExactTerminal({ options, terminalId: fixture.terminalId });
+  assert.equal(observed.state, "available");
+  if (observed.state !== "available") return;
+  const rawActions = observed.rawTerminal.available_actions as Record<string, any>;
+  assert.equal(observed.rawTerminal.activity_state, "unknown");
+  assert.equal(observed.rawTerminal.native_identity_state, "verified_absent");
+  assert.equal(rawActions.send, undefined, "The original router consumed this unprojected row and rejected the advertised action");
+  const send = listed.available_actions.send;
+  assert.equal(send.scope, "terminal_user_explicit");
+  assert.equal(typeof send.arguments.expected_terminal_token, "string");
+  assert.throws(() => prepareConversationTerminalOptions("send", {}, observed.rawTerminal), /Exact terminal fallback cannot currently accept this task/u);
+  const routed = withConversationSendAuthority(observed.rawTerminal, observed.terminal);
+  assert.equal(routed.native_identity_state, "verified_absent");
+  assert.equal(routed.native_agent_session_id, undefined);
+  assert.equal(routed.native_agent_process_uuid, observed.rawTerminal.native_agent_process_uuid);
+  assert.equal(routed.native_agent_process_birth, observed.rawTerminal.native_agent_process_birth);
+  for (const target of [{ conversation: fixture.terminalId }, { conversationId: fixture.terminalId }, { terminal: fixture.terminalId }]) {
+    const selected = conversationRoutedOptions("send", { ...options, ...target }, "terminal", fixture.terminalId);
+    prepareConversationTerminalOptions("send", selected, routed);
+    assert.equal(selected.conversation, fixture.terminalId);
+    assert.equal(selected.expectedTerminalToken, send.arguments.expected_terminal_token);
+    assert.equal(selected.expectedManagedTerminalToken, undefined, "Physical authority is not managed task authority");
+  }
+  assert.equal((observed.rawTerminal.available_actions as Record<string, any>).send, undefined, "Projection must not mutate the raw observation");
+});
+
+test("routed Send does not recycle a raw offer when authoritative projection withdraws it or names another target", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-routed-withdrawn-send-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = await createCodexRolloutListFixture(root, "completed", false, {}, "human-only", true);
+  const observed = await fixture.facade.observeExactTerminal({ options: { storeDir: fixture.storeDir }, terminalId: fixture.terminalId });
+  assert.equal(observed.state, "available");
+  if (observed.state !== "available") return;
+  for (const oldSend of [
+    { tool: "agent_knock_knock_send", arguments: { selector: fixture.terminalId } },
+    { tool: "agent_knock_knock_send", arguments: { selector: fixture.terminalId, expected_terminal_token: "stale-raw-token" } }
+  ]) {
+    const raw = { ...observed.rawTerminal, available_actions: { send: oldSend } };
+    for (const available_actions of [undefined, {}, { send: null }]) {
+      const routed = withConversationSendAuthority(raw, { ...observed.terminal, available_actions });
+      assert.equal((routed.available_actions as Record<string, unknown>).send, undefined);
+      assert.throws(() => prepareConversationTerminalOptions("send", {}, routed), /Exact terminal fallback cannot currently accept this task/u);
+    }
+  }
+  assert.throws(() => withConversationSendAuthority(observed.rawTerminal, { ...observed.terminal, id: "terminal:v2:tmux:codex:other:0.0:4243" }),
+    /Terminal Send authority does not match its physical observation/u);
+  const projectedIdentity = { ...observed.terminal, native_agent_session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", native_identity_state: "resolved" };
+  assert.equal(withConversationSendAuthority(observed.rawTerminal, projectedIdentity).native_agent_session_id,
+    observed.rawTerminal.native_agent_session_id, "Managed projection cannot overwrite current physical identity evidence");
+});
+
 test("exact no-token Send discovery binds fresh physical user authority", async (t) => {
   const root = fs.mkdtempSync(path.join(
     os.tmpdir(),
@@ -2422,7 +2486,7 @@ async function createCodexRolloutListFixture(
     ambiguousOpenRoots?: boolean;
     nestedCodexDescendant?: boolean;
     rejectedPreferredSessionId?: string;
-    screenActivityState?: "working" | "idle";
+    screenActivityState?: "working" | "idle" | "unknown";
     agentVersion?: string;
     nativeIdentityObservation?: "resolved" | "verified_absent";
     modelControlResidual?: "popup" | "bare" | "surface" | "unsafe";
@@ -2708,7 +2772,9 @@ async function createCodexRolloutListFixture(
         activity_state: fixtureOptions.screenActivityState ?? "idle",
         activity_reason: fixtureOptions.screenActivityState === "working"
           ? "working fixture screen"
-          : "idle-looking fixture screen",
+          : fixtureOptions.screenActivityState === "unknown"
+            ? "historical viewport does not prove current terminal activity"
+            : "idle-looking fixture screen",
         screen: { excerpt: composerScreen }
       };
     },

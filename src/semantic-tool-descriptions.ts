@@ -184,8 +184,8 @@ export const semanticToolDescriptions = {
     "and use Watch if the coding agent is still working.",
   list: "List CLI/Desktop conversations and separate Watches in bounded pages. Default: current/unresolved; " +
     "listView=history/all or all=true includes ended records. Follow pagination.next_args. Select " +
-    "conversation_id; AKK chooses transport. Same-project grouping is display only; terminalDebug expands " +
-    "connections. Keep unconnected rows and limitations. Desktop defaults to saved sidebar. Use " +
+    "conversation_id; AKK chooses transport. Only exact aliases coalesce; unassociated same-project targets stay selectable. terminalDebug adds " +
+    "routing details. Keep unconnected rows and limitations. Desktop defaults to saved sidebar. Use " +
     "available_actions/action_inputs and agent-knock-knock skill; mutations revalidate privately.",
   model_options: "For a Desktop conversation_id, read current model/effort/collaboration mode; " +
     "the owner exposes no model catalog (catalog_available=false), so use only a model explicitly requested by the user. " +

@@ -3,6 +3,7 @@ import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES } from "./monitor-deadline-policy.
 import { dispatchLocalCodexCli, localCodexListForCli } from "./local-codex-cli-adapter.js";
 import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
 import { executeConversationCommand } from "./conversation-routing-cli-adapter.js";
+import { withConversationSendAuthority } from "./conversation-routing-commands.js";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -464,10 +465,17 @@ export async function executeCliCommand(
       return executeConversationCommand(
         commandName,
         scopedOptions,
-        (request, terminalId) => terminalListCliFacade.buildTerminalListGroup({ options: request, terminalId,
+        async (request, terminalId) => {
+          if (commandName === "send" && terminalId) {
+            const observation = await terminalListCliFacade.observeExactTerminal({ options: request, terminalId });
+            return observation.state === "available"
+              ? [withConversationSendAuthority(observation.rawTerminal, observation.terminal)] : [];
+          }
+          return terminalListCliFacade.buildTerminalListGroup({ options: request, terminalId,
           agentFilter: /^(?:claude-cli:|terminal:v\d+:.*:claude:)/u.test(
             String(request.conversation ?? request.conversationId ?? request.terminal ?? request.session)
-          ) ? "claude" : "codex" }).then(scan => scan.terminalControlled),
+          ) ? "claude" : "codex" }).then(scan => scan.terminalControlled);
+        },
         dispatchCliCommand
       );
     }

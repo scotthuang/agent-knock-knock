@@ -6,6 +6,8 @@ export interface ConversationRouteDispatchOptions {
   command: string;
   input?: ConversationRouteInput;
   select(): Promise<ConversationRouteSelection>;
+  /** Pre-executor authority checks only; must never submit input to a provider. */
+  prepare?(choice: ConversationRouteSelection): Promise<void>;
   execute(choice: ConversationRouteSelection): Promise<Record<string, unknown>>;
   store?: ConversationRouteStore;
 }
@@ -44,6 +46,7 @@ function saveReceipt(store: ConversationRouteStore, input: ConversationRouteInpu
 export async function dispatchConversationRoute(options: ConversationRouteDispatchOptions): Promise<Record<string, unknown>> {
   if (options.command !== "send") {
     const choice = await options.select();
+    await options.prepare?.(choice);
     return resultWithRoute(await options.execute(choice), choice, options.input);
   }
   const { input, store } = options;
@@ -54,10 +57,19 @@ export async function dispatchConversationRoute(options: ConversationRouteDispat
   if (record) choice = choiceFromRecord(record);
   else {
     const selected = await options.select();
-    record = store.reserve(input, selected).record;
+    record = store.reserve(input, selected, { trackPreparation: true }).record;
     choice = sameChoice(selected, choiceFromRecord(record)) ? selected : choiceFromRecord(record);
     if (record.receipt) return resultWithRoute(record.receipt, choice, input, true);
   }
+  try { await options.prepare?.(choice); }
+  catch (error) {
+    // This proof is only valid before any execution of this message. The Store
+    // preserves old/uncertain and concurrent in-flight outcomes conservatively.
+    store.markPreparationRejected(input, choice, errorCode(error));
+    throw error;
+  }
+  const executing = store.beginExecution(input, choice);
+  if (executing.receipt) return resultWithRoute(executing.receipt, choice, input, true);
   try {
     // The executor must pass the original stable message ID to its selected provider's dispatch ledger.
     const result = await options.execute(choice);

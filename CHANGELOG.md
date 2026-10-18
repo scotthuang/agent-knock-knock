@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.11 - 2026-10-18
+
+- Keep independently verified Codex CLI backends selectable in default List when a same-project terminal has no proven exact alias. Preserve CLI/Desktop presentation, exact identity rules and bounded pagination; connection counts do not imply independent tasks.
+- Use List's authoritative Send projection for unified terminal routing, preserving its explicit user authority and final process, endpoint, approval and input checks. Do not force input into history views or redirect by cwd.
+- Separate proven pre-executor preparation rejection from uncertain execution in route journals. Keep the original route/message identity, retain concurrent or legacy uncertainty, and never replay old notifications or automatically retry across transports.
+- Validate with isolated Host/List/router/Store regressions and the formal release gate. No existing user thread is used for test sending; this release does not install itself locally or publish Pi/DSH connectors.
+
 ## 0.14.10 - 2026-10-18
 
 - Fix explicit Watch creation when backend-first routing selects an exact terminal: preserve the terminal argument required by the Watch adapter. This covers Host `conversation_id` / `terminal_id` inputs and CLI `watch-terminal --terminal`, including Codex and Claude terminal fallback.
