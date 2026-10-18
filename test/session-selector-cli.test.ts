@@ -38,6 +38,8 @@ import {
   type TerminalControlRef
 } from "../src/terminal-control-ref.js";
 import { runInProcessCli } from "./in-process-cli-fixtures.js";
+import { DesktopSessionCatalog } from "../src/desktop-session-catalog.js";
+import type { DesktopRuntime } from "../src/desktop-runtime.js";
 
 const testRuntimeDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "akk-selector-cli-runtime-")
@@ -63,6 +65,8 @@ test("CLI omission and short refs resolve one actionable managed session", async
       storeDir
     ]);
     assert.deepEqual(listed.terminals, []);
+    assert.deepEqual(listed.desktop_sessions, []);
+    assert.equal(listed.desktop_scan.application_version, "unavailable");
     assert.equal(listed.unavailable_managed_turns.length, 1);
     const managedTurn = listed.unavailable_managed_turns[0];
     assert.equal(managedTurn.source, "managed_turn");
@@ -1571,6 +1575,7 @@ async function runCliWithCodexInventory(
     }
   };
   const result = await runInProcessCli(args, {
+    createDesktopRuntime: unavailableDesktopRuntime,
     codexLocalSessionAdapter: adapter,
     codexProcessBirthForPid: (pid) => {
       assert.equal(pid, options.codexPid);
@@ -1588,12 +1593,23 @@ async function runCliWithCodexInventory(
 
 function runCliResult(args: string[]) {
   return runInProcessCli(args, {
+    createDesktopRuntime: unavailableDesktopRuntime,
     env: {
       ...process.env,
       AKK_TEST_ALLOW_SYNTHETIC_TERMINAL_ACCEPTANCE: "1",
       AKK_TEST_TERMINAL_ACCEPTANCE_OUTCOME: "accepted"
     }
   });
+}
+
+/** Selector fixtures have no Desktop target; never probe the developer's installed application. */
+function unavailableDesktopRuntime(): DesktopRuntime {
+  return {
+    compatibility: { version: "unavailable", build: "unavailable" },
+    catalog: new DesktopSessionCatalog({ codexHomes: [] }),
+    tasks: { list: () => [] },
+    close: async () => {}
+  } as DesktopRuntime;
 }
 
 function codexTerminalStaticArgs(options: {
