@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { stripTypeScriptTypes } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -10,8 +11,14 @@ const registry = 'https://clawhub.ai';
 const release = JSON.parse(await readFile('.github/clawhub-release.json', 'utf8'));
 const toolRoot = path.resolve(process.env.CLAWHUB_TOOL_ROOT ?? 'node_modules/clawhub/dist');
 const loadTool = (file) => import(pathToFileURL(path.join(toolRoot, file)).href);
-const [http, schema, { parseClawPack }] = await Promise.all([
-  loadTool('http.js'), loadTool('schema/index.js'), loadTool('clawpack.js'),
+// npm 0.23.3 ignores timeoutMs. Use the actual merged upstream implementation,
+// pinned by commit and digest, beside its compatible npm schema/dependencies.
+const upstreamHttpCommit = 'd118f17fd366e5cdc3ad9c8abcea51941b97636f';
+const upstreamHttpSha256 = '04e80921c619c57f24b1cd45e3464952b98e28537d473e2f6ad05aedd6e8e7f6';
+const PACKAGE_PUBLISH_REQUEST_TIMEOUT_MS = 300_000;
+let http;
+const [schema, { parseClawPack }] = await Promise.all([
+  loadTool('schema/index.js'), loadTool('clawpack.js'),
 ]);
 const receipt = { version: release.version, started_at: new Date().toISOString(), package_post_count: 0 };
 const out = '.clawhub-publication';
@@ -33,12 +40,23 @@ function failure(error) {
   detail = detail.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[redacted-jwt]')
     .replace(/https?:\/\/\S+/g, '[url]').slice(0, 1200);
-  return { error_type: error?.name ?? 'Error', http_status: http.getHttpErrorStatus(error) ?? null, error_detail: detail };
+  return { error_type: error?.name ?? 'Error', http_status: http?.getHttpErrorStatus(error) ?? null, error_detail: detail };
 }
 async function fetchBytes(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
   requireThat(response.ok, `artifact_http_${response.status}`);
   return Buffer.from(await response.arrayBuffer());
+}
+async function loadUpstreamTransport() {
+  const source = await fetchBytes(`https://raw.githubusercontent.com/openclaw/clawhub/${upstreamHttpCommit}/packages/clawhub/src/http.ts`);
+  requireThat(sha256(source) === upstreamHttpSha256, 'upstream_transport_digest_mismatch');
+  await writeFile(path.join(toolRoot, 'http-upstream.js'), stripTypeScriptTypes(source.toString('utf8'), { mode: 'strip' }));
+  http = await loadTool('http-upstream.js');
+  await record('transport_verified', {
+    tooling_npm_version: '0.23.3', transport_commit: upstreamHttpCommit,
+    transport_source_sha256: upstreamHttpSha256,
+    package_publish_request_timeout_ms: PACKAGE_PUBLISH_REQUEST_TIMEOUT_MS,
+  });
 }
 async function mintToken() {
   requireThat(process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_EVENT_NAME === 'workflow_dispatch', 'manual_actions_run_required');
@@ -91,6 +109,7 @@ async function verifyPublicArtifact() {
   await record('published_verified', { public_version: result.version, public_sha256: sha256(bytes), latest: release.version, scan_status: detail.package.scanStatus, herdr_topic: true });
 }
 async function main() {
+  await loadUpstreamTransport();
   requireThat(release.name === '@scotthuang/agent-knock-knock' && release.repository === 'scotthuang/agent-knock-knock', 'unexpected_package');
   requireThat(/^\d+\.\d+\.\d+$/.test(release.version) && /^[a-f0-9]{40}$/.test(release.commit) && /^[a-f0-9]{64}$/.test(release.sha256), 'invalid_release_manifest');
   requireThat(release.asset === `scotthuang-agent-knock-knock-${release.version}.tgz`, 'invalid_asset_name');
@@ -142,7 +161,7 @@ async function main() {
     form.set('clawpack', new Blob([archive], { type: 'application/octet-stream' }), release.asset);
     await record('upload_dispatched', { package_post_count: 1 });
     try {
-      const accepted = await http.apiRequestForm(registry, { method: 'POST', path: schema.ApiRoutes.packages, token, form, retryCount: 0 }, schema.ApiV1PackagePublishResponseSchema);
+      const accepted = await http.apiRequestForm(registry, { method: 'POST', path: schema.ApiRoutes.packages, token, form, retryCount: 0, timeoutMs: PACKAGE_PUBLISH_REQUEST_TIMEOUT_MS }, schema.ApiV1PackagePublishResponseSchema);
       await record('upload_acknowledged', { attempt_id: accepted.attemptId ?? null, acknowledged_publication: accepted.publicationStatus ?? null });
     } catch (error) {
       const status = http.getHttpErrorStatus(error);

@@ -22,7 +22,18 @@ they cannot be substituted into an old immutable version.
 3. Run with `-f publish=true` to publish after the release gates have passed.
 
 All actions are pinned to full commit SHAs. Runs are serialized. The helper uses
-the pinned official ClawHub schema and transport, but disables package POST
+the npm `clawhub@0.23.3` schema and dependencies. Its HTTP transport comes from
+the merged upstream [PR #3586](https://github.com/openclaw/clawhub/pull/3586),
+fixed at commit `d118f17fd366e5cdc3ad9c8abcea51941b97636f` with a checked SHA-256.
+Node 24 removes TypeScript types into the temporary tooling directory; this does
+not modify the release archive or replace the installed AKK. The npm 0.23.3
+transport itself does not support the upstream per-request timeout option.
+
+Only the package upload uses the upstream 300-second request timeout. Ordinary
+API reads retain their 15-second default. This timeout covers waiting for response
+headers; it is not a total response-body deadline. The overall job still has a
+40-minute limit. The receipt records the transport commit/digest and upload budget.
+The helper disables package POST
 retries: an upload timeout is not proof that nothing was accepted. It first reads
 the exact version's publication state; published versions are verified, pending
 versions are observed, and failed versions require inspection. Only an absent
