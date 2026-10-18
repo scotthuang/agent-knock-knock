@@ -7,8 +7,9 @@ and workflow filename. No stored ClawHub token or manual override is required.
 The reviewed `.github/clawhub-release.json` identifies the already-tested GitHub
 Release TGZ, original source commit, version, size and SHA-256. The workflow never
 rebuilds it, publishes to npm, installs AKK locally, or changes the publisher binding.
-For 0.14.13, the existing release gate passed 3,548 tests plus isolated OpenClaw,
-runtime Inspector and package dry-run checks before this archive was released.
+For 0.14.14, the existing release gate passed 3,557 tests plus isolated OpenClaw
+2026.9.1, runtime Inspector (zero breakages or warnings) and package dry-run checks
+before this archive was released.
 
 ClawHub requires the trusted source SHA/ref to match the running workflow. The
 workflow therefore checks that its commit descends from the artifact's original
