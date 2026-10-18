@@ -32,6 +32,9 @@ and current remote state before deliberately starting a new run.
 After upload, it polls read-only for at most 30 minutes and then checks public
 version/latest, clean scan, the `herdr` topic and the downloaded TGZ's SHA-256.
 Pending, unknown or failed outcomes are not reported as successful publication.
+An explicit HTTP 4xx followed by an absent publication stops with a bounded,
+credential-redacted server diagnostic, rather than waiting for a nonexistent
+scan. Transport-unknown outcomes still receive read-only reconciliation.
 The uploaded receipt contains no tokens. Do not use a workflow rerun to bypass a
 failed or uncertain publication; inspect its exact remote state first.
 

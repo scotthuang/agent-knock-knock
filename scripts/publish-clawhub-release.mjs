@@ -19,15 +19,21 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const requireThat = (condition, code) => { if (!condition) throw new Error(code); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let token;
+const secrets = [process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN].filter(Boolean);
 await mkdir(out, { recursive: true });
 async function record(phase, details = {}) {
   Object.assign(receipt, details, { phase, updated_at: new Date().toISOString() });
   await writeFile(path.join(out, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
   console.log(JSON.stringify({ phase, ...details }));
 }
-// Never log upstream error bodies: authentication errors can include credential details.
+// Preserve a bounded diagnostic without exposing credentials from remote errors.
 function failure(error) {
-  return { error_type: error?.name ?? 'Error', http_status: http.getHttpErrorStatus(error) ?? null };
+  let detail = String(error?.message ?? '');
+  for (const secret of secrets) detail = detail.split(secret).join('[redacted]');
+  detail = detail.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[redacted-jwt]')
+    .replace(/https?:\/\/\S+/g, '[url]').slice(0, 1200);
+  return { error_type: error?.name ?? 'Error', http_status: http.getHttpErrorStatus(error) ?? null, error_detail: detail };
 }
 async function fetchBytes(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
@@ -46,12 +52,14 @@ async function mintToken() {
   requireThat(response.ok, 'github_oidc_request_failed');
   const oidc = await response.json();
   requireThat(typeof oidc.value === 'string' && oidc.value.length > 0, 'github_oidc_missing');
+  secrets.push(oidc.value);
   console.log(`::add-mask::${oidc.value}`);
   const minted = await http.apiRequest(registry, {
     method: 'POST', path: schema.ApiRoutes.publishTokenMint, retryCount: 0,
     body: { packageName: release.name, version: release.version, githubOidcToken: oidc.value },
   }, schema.ApiV1PublishTokenMintResponseSchema);
   token = minted.token;
+  secrets.push(token);
   console.log(`::add-mask::${token}`);
 }
 const packagePath = `/api/v1/packages/${encodeURIComponent(release.name)}`;
@@ -124,6 +132,7 @@ async function main() {
   await record('publication_checked', { publication: before });
   if (before.state === 'published') return verifyPublicArtifact();
   requireThat(before.state === 'absent' || before.state === 'pending', 'existing_failed_publication_requires_review');
+  let rejectedStatus;
   if (before.state === 'absent') {
     requireThat(process.env.GITHUB_RUN_ATTEMPT === '1', 'rerun_is_read_only_dispatch_after_reconciliation');
     await mintToken();
@@ -135,7 +144,9 @@ async function main() {
       const accepted = await http.apiRequestForm(registry, { method: 'POST', path: schema.ApiRoutes.packages, token, form, retryCount: 0 }, schema.ApiV1PackagePublishResponseSchema);
       await record('upload_acknowledged', { attempt_id: accepted.attemptId ?? null, acknowledged_publication: accepted.publicationStatus ?? null });
     } catch (error) {
-      await record('upload_outcome_unknown_no_replay', failure(error));
+      const status = http.getHttpErrorStatus(error);
+      if (status >= 400 && status < 500) rejectedStatus = status;
+      await record(status ? 'upload_http_error_no_replay' : 'upload_outcome_unknown_no_replay', { upload_failure: failure(error) });
     }
   }
   // Read-only reconciliation after any POST outcome; never post again in this run.
@@ -150,6 +161,7 @@ async function main() {
       previous = JSON.stringify(publication);
     }
     if (publication.state === 'published') return verifyPublicArtifact();
+    requireThat(!(publication.state === 'absent' && rejectedStatus), `upload_rejected_http_${rejectedStatus}`);
     requireThat(publication.state !== 'failed', 'publication_failed_requires_review');
     await sleep(15_000);
   }
