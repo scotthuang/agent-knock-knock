@@ -31,7 +31,7 @@ test("semantic catalog freezes the exact ordered tool metadata digest", () => {
   );
   assert.equal(
     publicMetadataDigest(catalog.command, catalog.tools),
-    "9714f4d8700af9a251e9567ee4b0f886c4bca9270de353c7dd757e6b26355cf0"
+    "4f053f8c431cbf5ce1f56a4b21715ccb79a8e4cbdfa7887bc4081ce18eed2d9d"
   );
   assert.equal(Object.isFrozen(catalog), true);
   assert.equal(Object.isFrozen(catalog.command), true);

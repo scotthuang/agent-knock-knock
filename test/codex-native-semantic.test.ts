@@ -16,6 +16,9 @@ import { parseCliCommand } from "../src/cli-core.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 import { dispatchRoutedConversationCli } from "../src/conversation-routing-cli-adapter.js";
 import { createCodexNativeRuntime } from "../src/codex-native-runtime.js";
+import { withConversationSendAuthority } from "../src/conversation-routing-commands.js";
+import { renderTerminalPhysicalEntry } from "../src/terminal-list-renderer.js";
+import { selectTerminalAvailableActions } from "../src/terminal-action-projection.js";
 import { CodexNativeError } from "../src/codex-native-types.js";
 import { createTerminalWatchCliAdapter } from "../src/terminal-watch-cli-adapter.js";
 import { loadTerminalWatch } from "../src/terminal-watch-store.js";
@@ -55,6 +58,45 @@ function harness(t: TestContext, pluginConfig: Record<string, unknown> = {}) {
   };
 }
 const argument = (args: string[], flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
+
+test("default Host List Send consumes projected authority without claiming an unresolved backend alias", async t => {
+  const fixture = createFixture(t);
+  const codexHome = path.join(fixture.terminal.cwd, ".codex");
+  const h = harness(t, { storeDir: fixture.storeDir, codexHome });
+  const action = { tool: "agent_knock_knock_send", scope: "terminal_user_explicit",
+    arguments: { selector: terminalId, expected_terminal_token: "isolated-explicit-authority" } };
+  const raw = renderTerminalPhysicalEntry({ ...fixture.terminal, id: terminalId,
+    activity_state: "unknown", native_agent_session_id: undefined, native_agent_status_card_session_id: undefined,
+    native_agent_identity_observation: { status: "verified_absent" } }, {}, action);
+  const projected = { ...raw, available_actions: selectTerminalAvailableActions({ ownership: "none",
+    currentActions: {}, sessionAwareRawActions: {}, nonOwnerRawActions: {}, terminalUserExplicitSendAction: action }) };
+  const list = compactAkkListModelProjection(unifiedConversationList({ terminals: [projected] }, [raw]));
+  const listed = (list.conversations as Array<Record<string, any>>)[0];
+  assert.equal(listed.capabilities.send, true);
+  await h.execute("send", { conversation_id: listed.conversation_id, request: "Isolated task" });
+  const { command, options } = parseCliCommand(h.calls()[0]);
+  const executions: Record<string, unknown>[] = [];
+  const run = () => runCliCommandExecution(command, options, {
+    cwd: fixture.terminal.cwd, env: { HOME: fixture.terminal.cwd }, runtimeLog() {},
+    createCodexNativeRuntime: configuration => createCodexNativeRuntime({ ...configuration,
+      clientFactory: async () => { throw new CodexNativeError("closed", "isolated backend unavailable"); } })
+  }, async () => {
+    assert.equal(await dispatchRoutedConversationCli(command, options, {
+      terminals: async () => [withConversationSendAuthority(raw, projected)],
+      async execute(selectedCommand, selected) {
+        assert.equal(selectedCommand, "send");
+        assert.equal(selected.conversation, terminalId);
+        assert.equal(selected.expectedTerminalToken, action.arguments.expected_terminal_token);
+        executions.push(selected);
+        return { delivered: true, agent_acceptance: "unproven" };
+      }
+    }), true);
+  });
+  const result = JSON.parse((await run()).stdout);
+  assert.equal(result.routing.transport, "terminal");
+  assert.equal(JSON.parse((await run()).stdout).replayed, true);
+  assert.equal(executions.length, 1, "the original Host message ID is preserved through route replay");
+});
 
 test("Host terminal Watch selectors and CLI --terminal survive routing into exact persistent observation", async t => {
   const fixture = createFixture(t);

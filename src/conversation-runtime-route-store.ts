@@ -46,7 +46,11 @@ function reconcileRecords(legacy?: ConversationRouteRecord, current?: Conversati
   }
   if (legacy.receipt) return legacy;
   if (current.receipt || current.state === "uncertain") return current;
-  return legacy.state === "uncertain" ? legacy : current;
+  if (legacy.state === "uncertain") return legacy;
+  // An older reservation has no pre-execution phase evidence. Never combine it
+  // with a newer rejection to claim the message could not have been submitted.
+  if (!legacy.preparation_tracked || legacy.execution_started_at) return legacy;
+  return current;
 }
 
 const choiceOf = (record: ConversationRouteRecord): ConversationRouteChoice => ({ route: record.route, targetId: record.target_id });
@@ -72,10 +76,12 @@ export function createConversationRuntimeRouteStore(storeDir: string, runtimeDir
   };
   const copyPin = (input: ConversationRouteInput, record: ConversationRouteRecord): void => {
     const choice = choiceOf(record);
-    current.reserve(input, choice);
+    current.reserve(input, choice, { trackPreparation: record.preparation_tracked === true });
     read(input); // Never overwrite a conflicting reservation or a newly observed legacy outcome.
     if (record.receipt) current.recordReceipt(input, choice, record.receipt);
     else if (record.state === "uncertain") current.markUncertain(input, choice, record.error_code);
+    else if (record.execution_started_at) current.beginExecution(input, choice);
+    else if (record.preparation_rejection) current.markPreparationRejected(input, choice, record.preparation_rejection.error_code);
   };
   const update = (input: ConversationRouteInput, action: () => ConversationRouteRecord): ConversationRouteRecord => locked(input, () => {
     const record = read(input);
@@ -90,15 +96,24 @@ export function createConversationRuntimeRouteStore(storeDir: string, runtimeDir
       if (record && !record.receipt) copyPin(input, record);
       return read(input);
     }),
-    reserve: (input, choice) => locked(input, () => {
+    reserve: (input, choice, reservationOptions) => locked(input, () => {
       const previous = read(input);
       if (previous) {
         if (!previous.receipt) copyPin(input, previous);
         return { record: read(input)!, created: false };
       }
-      const result = current.reserve(input, choice);
+      const result = current.reserve(input, choice, reservationOptions);
       return { record: read(input)!, created: result.created };
     }),
+    markPreparationRejected: (input, choice, errorCode) => update(input, () => {
+      const previous = read(input);
+      if (previous && (previous.route !== choice.route || previous.target_id !== choice.targetId)) {
+        throw new ConversationRouteError("conversation_route_conflict", "Preparation rejection must retain the reserved conversation route");
+      }
+      return previous && (!previous.preparation_tracked || previous.state !== "reserved" || previous.execution_started_at)
+        ? previous : current.markPreparationRejected(input, choice, errorCode);
+    }),
+    beginExecution: (input, choice) => update(input, () => current.beginExecution(input, choice)),
     recordReceipt: (input, choice, receipt) => update(input, () => current.recordReceipt(input, choice, receipt)),
     markUncertain: (input, choice, errorCode) => update(input, () => current.markUncertain(input, choice, errorCode))
   };

@@ -62,6 +62,7 @@ export async function dispatchRoutedConversationCli(command: string | undefined,
   } : undefined;
   const terminalRuntimeDir = cliEnv().AKK_RUNTIME_DIR ? path.resolve(expandHome(cliEnv().AKK_RUNTIME_DIR)!) : path.join(path.dirname(defaultStoreDir()), "runtime-v2");
   const locks = createFileLockCliAdapter({ now: cliNow, nowMs: cliNowMs, pid: cliPid, sleepSync: cliSleepSync });
+  let prepared: { command: string; options: Options } | undefined;
   try {
     const result = await dispatchConversationRoute({ command, input,
       store: input ? createConversationRuntimeRouteStore(configuration.storeDir, terminalRuntimeDir, locks, { now: cliNow }) : undefined,
@@ -69,11 +70,15 @@ export async function dispatchRoutedConversationCli(command: string | undefined,
         expectedTerminalToken: nonBlankString(options.expectedTerminalToken), managedOnly: options.managedOnly === true,
         terminalRuntimeDir }) : undefined)
         ?? selectConversationRoute({ command, target, options, runtime, ports, identityOptions }))),
-      execute: async choice => {
+      prepare: async choice => {
         const selectedOptions = conversationRoutedOptions(command, options, choice.route, choice.targetId);
         const selectedCommand = routedCommand(command, options, choice.route);
         if (choice.route === "terminal") await prepareTerminalFallback({ command: selectedCommand, target, choice, selectedOptions, options, ports, identityOptions });
-        return ports.execute(selectedCommand, selectedOptions);
+        prepared = { command: selectedCommand, options: selectedOptions };
+      },
+      execute: async () => {
+        if (!prepared) throw new Error("Conversation route preparation is missing");
+        return ports.execute(prepared.command, prepared.options);
       }
     });
     writeCliStdout(JSON.stringify(result, null, 2) + "\n");

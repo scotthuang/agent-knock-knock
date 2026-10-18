@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { unifiedConversationList } from "../src/conversation-list.js";
 import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
 import { createClaudeNativeConversationId } from "../src/claude-native-identity.js";
+import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
+import { HOST_LIST_MAX_BYTES, HOST_LIST_MAX_WEIGHTED_CHARS, hostListWeightedChars } from "../src/semantic-tool-list-budget.js";
 
 const home = "/fixture/codex", thread = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const nativeId = createCodexNativeConversationId({ codexHome: home, threadId: thread });
@@ -72,27 +74,38 @@ test("exact aliases advertise the selected backend Send and Watch while preservi
   assert.ok(separate.permission_options);
 });
 
-test("one CLI workspace entry preserves terminal identity and authority without promoting a same-cwd backend candidate", () => {
+test("default List keeps a usable same-cwd backend independently selectable when terminal identity is unknown", () => {
   const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" },
-    command: `codex resume ${thread}`, activity_state: "working", capabilities: { send: false, watch: false },
+    command: `codex resume ${thread}`, activity_state: "unknown", capabilities: { send: false, watch: false },
     available_actions: { status: { tool: "agent_knock_knock_status", arguments: { terminal_id: terminalId } } } });
   const backend = native();
   const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [backend] }, [physical]);
-  assert.deepEqual(result.conversations.map(row => row.conversation_id), [terminalId]);
-  const shown = result.conversations[0];
+  assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId, terminalId]);
+  const shown = result.conversations[1];
   assert.equal(shown.surface, "cli");
-  assert.equal(shown.activity_state, "working");
+  assert.equal(shown.activity_state, "unknown");
   assert.deepEqual(shown.capabilities, { send: false, watch: false });
   assert.deepEqual(shown.available_actions, { status: { tool: "agent_knock_knock_status", input: { conversation_id: terminalId } } });
   assert.equal(shown.terminal_aliases, undefined);
   assert.equal(shown.native_thread_id, undefined);
   assert.equal(shown.route_status, "identity_unresolved");
   assert.equal(shown.route_preference, "codex_backend");
-  assert.deepEqual(result.conversation_presentation, { mode: "default", workspace_grouped_connections: 1 });
+  assert.deepEqual(result.conversation_presentation, { mode: "default", workspace_grouped_connections: 0 });
   assert.equal(result.conversation_routing.exact_associations, 0);
   assert.equal(result.conversation_routing.unresolved_terminals, 1);
   assert.deepEqual((result as Record<string, unknown>).codex_cli_sessions, [backend]);
   assert.deepEqual((result as Record<string, unknown>).terminals, [physical]);
+  const selectedBackend = result.conversations[0];
+  assert.deepEqual(selectedBackend.terminal_aliases, []);
+  assert.deepEqual(selectedBackend.terminal_controls, []);
+  assert.deepEqual(selectedBackend.available_actions, backend.available_actions);
+  const host = compactAkkListModelProjection(result) as Record<string, any>;
+  assert.deepEqual(new Set(host.conversations.map((row: Record<string, unknown>) => row.conversation_id)), new Set([nativeId, terminalId]));
+  const hostBackend = host.conversations.find((row: Record<string, unknown>) => row.conversation_id === nativeId);
+  assert.equal(hostBackend.capabilities.send, true);
+  assert.equal(hostBackend.available_actions.send, true);
+  assert.equal(hostBackend.native_thread_id, thread);
+  assert.equal(hostBackend.scoped_controls, undefined, "No terminal action or alias is invented by workspace similarity");
 });
 
 test("diagnostics retains both unresolved CLI connections and their display-only grouping candidate", () => {
@@ -105,7 +118,7 @@ test("diagnostics retains both unresolved CLI connections and their display-only
   assert.equal(result.conversation_routing.exact_associations, 0);
 });
 
-test("known thread and Codex home conflicts prevent workspace display grouping", () => {
+test("known thread and Codex home conflicts keep separate default targets and exclude diagnostic grouping", () => {
   for (const evidence of [
     { native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
     { native_agent_status_card_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
@@ -117,6 +130,8 @@ test("known thread and Codex home conflicts prevent workspace display grouping",
     const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [native()] }, [physical]);
     assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId, terminalId]);
     assert.equal(result.conversation_presentation.workspace_grouped_connections, 0);
+    const diagnostics = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [native()] }, [physical], {}, { diagnostics: true });
+    assert.deepEqual(diagnostics.conversation_presentation.workspace_groups, []);
   }
 });
 
@@ -137,6 +152,44 @@ test("multiple same-workspace CLI connections stay individually selectable inste
   }
 });
 
+test("unresolved CLI targets remain reachable through bounded Host List pages alongside ended Watch history", () => {
+  const terminals: Record<string, unknown>[] = [], backends: Record<string, unknown>[] = [];
+  for (let index = 0; index < 45; index++) {
+    const threadId = `aaaaaaaa-aaaa-4aaa-8aaa-${index.toString(16).padStart(12, "0")}`;
+    const id = createCodexNativeConversationId({ codexHome: home, threadId });
+    const cwd = `/fixture/project-${index}`;
+    terminals.push(terminal({ id: `terminal:v2:tmux:codex:fixture:${index}.0:${1000 + index}`, cwd, pid: 1000 + index,
+      native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" }, activity_state: "unknown" }));
+    backends.push({ ...native(), id, conversation_id: id, native_thread_id: threadId, cwd,
+      available_actions: { send: { tool: "agent_knock_knock_send", input: { conversation_id: id } } } });
+  }
+  const result = unifiedConversationList({ terminals, codex_cli_sessions: backends,
+    codex_cli_watches: Array.from({ length: 300 }, (_, index) => ({ watch_id: `codex-cli-watch:ended-${index}`,
+      status: "completed", callback_state: "accepted", callback_expected: false })) }, terminals);
+  assert.equal(result.conversation_routing.exact_associations, 0);
+  const seen = new Set<string>();
+  let params: Record<string, unknown> | null = {};
+  let pageCount = 0;
+  do {
+    const page = compactAkkListModelProjection(result, params!) as Record<string, any>;
+    const json = JSON.stringify(page);
+    assert.doesNotThrow(() => JSON.parse(json));
+    assert.ok(Buffer.byteLength(json) <= HOST_LIST_MAX_BYTES);
+    assert.ok(hostListWeightedChars(json) <= HOST_LIST_MAX_WEIGHTED_CHARS);
+    assert.deepEqual(page.codex_cli_watches, [], "Healthy history must not displace current selection targets");
+    for (const row of page.conversations) {
+      assert.equal(seen.has(row.conversation_id), false);
+      seen.add(row.conversation_id);
+      if (row.conversation_id.startsWith("codex-cli:")) assert.equal(row.available_actions.send, true);
+    }
+    params = page.pagination.next_args;
+    pageCount++;
+  } while (params && pageCount < 50);
+  assert.equal(params, null);
+  assert.ok(pageCount > 1);
+  assert.deepEqual(seen, new Set([...terminals.map(row => String(row.id)), ...backends.map(row => String(row.conversation_id))]));
+});
+
 test("workspace presentation retains backend-only CLI sessions and never groups different agents", () => {
   const only = unifiedConversationList({ codex_cli_sessions: [native()] }, []);
   assert.deepEqual(only.conversations.map(row => [row.conversation_id, row.surface]), [[nativeId, "cli"]]);
@@ -147,17 +200,19 @@ test("workspace presentation retains backend-only CLI sessions and never groups 
   assert.equal(mixed.conversation_presentation.workspace_grouped_connections, 0);
 });
 
-test("workspace grouping normalizes absolute paths but does not guess missing or relative directories", () => {
+test("diagnostic workspace candidates normalize paths without hiding unresolved default targets", () => {
   const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" } });
   const normalized = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [{ ...native(), cwd: "/project/sub/.." }] }, [physical]);
-  assert.equal(normalized.conversations.length, 1);
+  assert.equal(normalized.conversations.length, 2);
+  const diagnostic = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [{ ...native(), cwd: "/project/sub/.." }] }, [physical], {}, { diagnostics: true });
+  assert.deepEqual(diagnostic.conversation_presentation.workspace_groups, [{ terminal_conversation_id: terminalId, native_conversation_id: nativeId }]);
   for (const cwd of [undefined, "project", "/other", "/project\n"]) {
     const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [{ ...native(), cwd }] }, [physical]);
     assert.equal(result.conversations.length, 2);
   }
 });
 
-test("Claude workspace display grouping requires a matching process and rejects a different live CLI in the same cwd", () => {
+test("Claude process similarity never hides either target without an exact native association", () => {
   const processStart = "Mon Oct 12 01:02:03 2026";
   const claudeId = createClaudeNativeConversationId({ configDir: "/fixture/claude", sessionId: thread, pid: 123, processStart });
   const backend = { conversation_id: claudeId, source: "claude_cli", agent: "claude", cwd: "/project",
@@ -165,7 +220,7 @@ test("Claude workspace display grouping requires a matching process and rejects 
   const physical = terminal({ id: "terminal:v2:tmux:claude:akk:0.0:123", agent: "claude",
     native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" }, native_agent_process_birth: undefined });
   const grouped = unifiedConversationList({ terminals: [physical], claude_cli_sessions: [backend] }, [physical]);
-  assert.deepEqual(grouped.conversations.map(row => row.conversation_id), [physical.id]);
+  assert.deepEqual(grouped.conversations.map(row => row.conversation_id), [claudeId, physical.id]);
   assert.equal(grouped.conversation_routing.exact_associations, 0);
   for (const changes of [{ pid: 456 }, { native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
     { native_agent_process_birth: "Wed Oct 14 01:02:03 2026" }]) {

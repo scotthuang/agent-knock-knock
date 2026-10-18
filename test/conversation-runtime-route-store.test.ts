@@ -120,3 +120,24 @@ test("runtime scope canonicalizes parent aliases and separates managed stores an
   assert.equal(h.create().reserve({ ...input, controllerSession: "controller-two" }, terminal).created, true);
   assert.throws(() => h.create().load({ ...input, canonicalTarget: "different-conversation" }), { code: "conversation_route_conflict" });
 });
+
+test("runtime recovery preserves preparation rejection and excludes legacy unknown or uncertain history", t => {
+  const h = fixture(t), store = h.create();
+  store.reserve(input, terminal, { trackPreparation: true });
+  store.markPreparationRejected(input, terminal, "authority_missing");
+  assert.equal(h.create().load(input)?.preparation_rejection?.request_dispatched, false);
+  assert.equal(h.create().reserve(input, native).record.route, "terminal");
+  const executing = h.create().beginExecution(input, terminal);
+  assert.ok(executing.execution_started_at); assert.equal(executing.preparation_rejection, undefined);
+  assert.equal(h.create().markPreparationRejected(input, terminal).preparation_rejection, undefined);
+  for (const state of ["reserved", "uncertain"] as const) {
+    const request = { ...input, messageId: state };
+    h.legacy.reserve(request, native);
+    if (state === "uncertain") h.legacy.markUncertain(request, native, "timeout");
+    const before = snapshot(h.storeDir);
+    assert.throws(() => h.create().markPreparationRejected(request, terminal), { code: "conversation_route_conflict" });
+    assert.equal(h.create().markPreparationRejected(request, native).state, state);
+    assert.equal(h.create().load(request)?.preparation_rejection, undefined);
+    assert.deepEqual(snapshot(h.storeDir), before);
+  }
+});
