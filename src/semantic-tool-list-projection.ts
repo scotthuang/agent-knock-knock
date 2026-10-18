@@ -66,7 +66,16 @@ export function compactAkkListModelProjection(
     ...(recovery ? { recovery } : {}),
     ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {})
   };
-  return paginateHostList(projected, params);
+  return paginateHostList(projected, params, hiddenTerminalHistorySources(result));
+}
+
+/** Default display preference removes a connection row, not its independently owned managed history. */
+function hiddenTerminalHistorySources(result: Record<string, unknown>): Record<string, unknown>[] {
+  if (!Array.isArray(result.conversations)) return [];
+  const represented = new Set(arrayValue(result.conversations).flatMap(row => [
+    row.conversation_id, ...stringArrayValue(row.terminal_aliases)
+  ]));
+  return arrayValue(result.terminals).filter(row => !represented.has(row.id)).map(compactAkkListTerminal);
 }
 
 function compactBackendWatch(row: Record<string, unknown>): Record<string, unknown> {

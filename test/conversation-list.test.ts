@@ -74,34 +74,31 @@ test("exact aliases advertise the selected backend Send and Watch while preservi
   assert.ok(separate.permission_options);
 });
 
-test("default List keeps a usable same-cwd backend independently selectable when terminal identity is unknown", () => {
+test("default List prefers the original verified backend without inventing a terminal alias", () => {
   const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" },
-    command: `codex resume ${thread}`, activity_state: "unknown", capabilities: { send: false, watch: false },
-    available_actions: { status: { tool: "agent_knock_knock_status", arguments: { terminal_id: terminalId } } } });
-  const backend = native();
+    command: `codex resume ${thread}`, activity_state: "unknown", capabilities: { send: false, watch: false, model_options: true },
+    available_actions: { model_options: { tool: "agent_knock_knock_model_options", arguments: { terminal_id: terminalId } } } });
+  const backend = { ...native(), activity_state: "idle", native_turn_id: "backend-turn" };
   const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [backend] }, [physical]);
-  assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId, terminalId]);
-  const shown = result.conversations[1];
-  assert.equal(shown.surface, "cli");
-  assert.equal(shown.activity_state, "unknown");
-  assert.deepEqual(shown.capabilities, { send: false, watch: false });
-  assert.deepEqual(shown.available_actions, { status: { tool: "agent_knock_knock_status", input: { conversation_id: terminalId } } });
-  assert.equal(shown.terminal_aliases, undefined);
-  assert.equal(shown.native_thread_id, undefined);
-  assert.equal(shown.route_status, "identity_unresolved");
-  assert.equal(shown.route_preference, "codex_backend");
-  assert.deepEqual(result.conversation_presentation, { mode: "default", workspace_grouped_connections: 0 });
+  assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId]);
+  const selectedBackend = result.conversations[0];
+  assert.equal(selectedBackend.surface, "cli");
+  assert.equal(selectedBackend.activity_state, "idle");
+  assert.equal(selectedBackend.title, backend.title);
+  assert.equal(selectedBackend.native_thread_id, thread);
+  assert.equal(selectedBackend.native_turn_id, "backend-turn");
+  assert.deepEqual(selectedBackend.capabilities, backend.capabilities);
+  assert.deepEqual(selectedBackend.available_actions, backend.available_actions);
+  assert.deepEqual(selectedBackend.terminal_aliases, []);
+  assert.deepEqual(selectedBackend.terminal_controls, []);
+  assert.deepEqual(result.conversation_presentation, { mode: "default", workspace_grouped_connections: 1 });
   assert.equal(result.conversation_routing.exact_associations, 0);
   assert.equal(result.conversation_routing.unresolved_terminals, 1);
   assert.deepEqual((result as Record<string, unknown>).codex_cli_sessions, [backend]);
   assert.deepEqual((result as Record<string, unknown>).terminals, [physical]);
-  const selectedBackend = result.conversations[0];
-  assert.deepEqual(selectedBackend.terminal_aliases, []);
-  assert.deepEqual(selectedBackend.terminal_controls, []);
-  assert.deepEqual(selectedBackend.available_actions, backend.available_actions);
   const host = compactAkkListModelProjection(result) as Record<string, any>;
-  assert.deepEqual(new Set(host.conversations.map((row: Record<string, unknown>) => row.conversation_id)), new Set([nativeId, terminalId]));
-  const hostBackend = host.conversations.find((row: Record<string, unknown>) => row.conversation_id === nativeId);
+  assert.deepEqual(host.conversations.map((row: Record<string, unknown>) => row.conversation_id), [nativeId]);
+  const hostBackend = host.conversations[0];
   assert.equal(hostBackend.capabilities.send, true);
   assert.equal(hostBackend.available_actions.send, true);
   assert.equal(hostBackend.native_thread_id, thread);
@@ -116,6 +113,88 @@ test("diagnostics retains both unresolved CLI connections and their display-only
   assert.deepEqual(result.conversation_presentation, { mode: "diagnostics", workspace_grouped_connections: 0,
     workspace_groups: [{ terminal_conversation_id: terminalId, native_conversation_id: nativeId }] });
   assert.equal(result.conversation_routing.exact_associations, 0);
+});
+
+test("busy and blocked preferred backends do not borrow an idle terminal's Send authority", () => {
+  const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" },
+    capabilities: { send: true, model_options: true }, available_actions: {
+      send: { tool: "agent_knock_knock_send", arguments: { terminal_id: terminalId, expected_terminal_token: "terminal-authority" } },
+      model_options: { tool: "agent_knock_knock_model_options", arguments: { terminal_id: terminalId } }
+    } });
+  for (const activity_state of ["working", "blocked", "unknown"]) {
+    const backend = { ...native(), activity_state, capabilities: { send: false, status: true },
+      available_actions: { status: { tool: "agent_knock_knock_status", input: { conversation_id: nativeId } } } };
+    const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [backend] }, [physical]);
+    assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId]);
+    assert.equal(result.conversations[0].activity_state, activity_state);
+    assert.deepEqual(result.conversations[0].capabilities, backend.capabilities);
+    assert.deepEqual(result.conversations[0].available_actions, backend.available_actions);
+    assert.deepEqual(result.conversations[0].terminal_aliases, []);
+    const host = compactAkkListModelProjection(result) as Record<string, any>;
+    assert.equal(host.conversations[0].capabilities.send, false);
+    assert.equal(host.conversations[0].available_actions.send, undefined);
+    assert.equal(host.conversations[0].scoped_controls, undefined);
+  }
+});
+
+test("terminal-owned management and interactions keep their exact entry and actions visible", () => {
+  const close = { tool: "agent_knock_knock_close", input: { turn_id: "terminal-owned-turn" } };
+  const base = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" },
+    available_actions: { close } });
+  for (const attention of [
+    { managed: { current_turn: { turn_id: "terminal-owned-turn", status: "active" } } },
+    { managed: { recent_turn: { turn_id: "terminal-owned-turn", status: "completed", callback_delivery: { status: "uncertain" } } } },
+    { managed: { history: [{ turn_id: "terminal-owned-turn", status: "closed", callback_delivery: { status: "failed" } }] } },
+    { management_state: "conflict" }, { management_unavailable: { reason: "unavailable" } },
+    { blocking_turns: [{ turn_id: "terminal-owned-turn" }] }, { handoff_state: "external_handoff_blocked" },
+    { approval_state: { scanned: true, blocked: true } }, { approval_state: { approvable: true } },
+    { interaction_state: { state: "pending" } }, { pending_interaction_count: 1 }
+  ]) {
+    // Attention can be added by ownership projection without appearing in the physical discovery row.
+    const shown = { ...base, ...attention };
+    const result = unifiedConversationList({ terminals: [shown], codex_cli_sessions: [native()] }, [base]);
+    assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId, terminalId]);
+    assert.equal((result.conversations[1].available_actions as Record<string, unknown>).close, close);
+    assert.equal((result.conversations[0].available_actions as Record<string, unknown>).close, undefined);
+    assert.equal(result.conversation_presentation.workspace_grouped_connections, 0);
+  }
+});
+
+test("hidden healthy terminal history stays separately paged with its original owner", () => {
+  const history = Array.from({ length: 90 }, (_, index) => ({ turn_id: `terminal-history-${index}`,
+    status: "closed", callback_delivery: { status: "delivered" },
+    available_actions: { status: { tool: "agent_knock_knock_status", input: { turn_id: `terminal-history-${index}` } } } }));
+  const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" },
+    management_state: "managed", managed: { current_turn: null, recent_turn: history[0], history } });
+  const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [native()] }, [physical]);
+  assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId]);
+  assert.equal(result.conversations[0].managed, undefined);
+  const current = compactAkkListModelProjection(result) as Record<string, any>;
+  assert.deepEqual(current.managed_turns, []);
+  assert.equal(current.pagination.managed_turns.history, history.length);
+  for (const listView of ["history", "all"]) {
+    let params: Record<string, unknown> | null = { listView };
+    const seen = new Set<string>();
+    let pages = 0;
+    do {
+      const page = compactAkkListModelProjection(result, params!) as Record<string, any>;
+      const serialized = JSON.stringify(page);
+      assert.doesNotThrow(() => JSON.parse(serialized));
+      assert.ok(Buffer.byteLength(serialized) <= HOST_LIST_MAX_BYTES);
+      assert.ok(hostListWeightedChars(serialized) <= HOST_LIST_MAX_WEIGHTED_CHARS);
+      for (const turn of page.managed_turns) {
+        assert.equal(turn.parent_conversation_id, terminalId);
+        assert.equal(seen.has(turn.turn_id), false);
+        seen.add(turn.turn_id);
+      }
+      params = page.pagination.next_args;
+      pages++;
+    } while (params && pages < 30);
+    assert.equal(params, null);
+    assert.ok(pages > 1);
+    assert.deepEqual(seen, new Set(history.map(turn => turn.turn_id)));
+  }
+  assert.equal((physical.managed as { history: unknown[] }).history.length, history.length, "Projection does not mutate stored history");
 });
 
 test("known thread and Codex home conflicts keep separate default targets and exclude diagnostic grouping", () => {
@@ -133,6 +212,26 @@ test("known thread and Codex home conflicts keep separate default targets and ex
     const diagnostics = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [native()] }, [physical], {}, { diagnostics: true });
     assert.deepEqual(diagnostics.conversation_presentation.workspace_groups, []);
   }
+  const raw = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" } });
+  const conflictingProjection = { ...raw, native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
+  assert.equal(unifiedConversationList({ terminals: [conflictingProjection], codex_cli_sessions: [native()] }, [raw])
+    .conversation_presentation.workspace_grouped_connections, 0);
+});
+
+test("unverified or malformed backends do not replace a terminal and inactive terminals are not grouped", () => {
+  const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" } });
+  for (const backend of [
+    { ...native(), connection_state: "not_loaded" }, { ...native(), conversation_id: "codex-cli:invalid" },
+    { ...native(), native_thread_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }
+  ]) {
+    const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [backend] }, [physical]);
+    assert.equal(result.conversations.length, 2);
+    assert.equal(result.conversation_presentation.workspace_grouped_connections, 0);
+  }
+  const inactive = { ...physical, process_state: "exited" };
+  const result = unifiedConversationList({ terminals: [inactive], codex_cli_sessions: [native()] }, [inactive]);
+  assert.equal(result.conversations.length, 2);
+  assert.equal(result.conversation_presentation.workspace_grouped_connections, 0);
 });
 
 test("multiple same-workspace CLI connections stay individually selectable instead of being paired arbitrarily", () => {
@@ -152,7 +251,7 @@ test("multiple same-workspace CLI connections stay individually selectable inste
   }
 });
 
-test("unresolved CLI targets remain reachable through bounded Host List pages alongside ended Watch history", () => {
+test("preferred CLI targets remain reachable through bounded Host List pages alongside ended Watch history", () => {
   const terminals: Record<string, unknown>[] = [], backends: Record<string, unknown>[] = [];
   for (let index = 0; index < 45; index++) {
     const threadId = `aaaaaaaa-aaaa-4aaa-8aaa-${index.toString(16).padStart(12, "0")}`;
@@ -187,7 +286,8 @@ test("unresolved CLI targets remain reachable through bounded Host List pages al
   } while (params && pageCount < 50);
   assert.equal(params, null);
   assert.ok(pageCount > 1);
-  assert.deepEqual(seen, new Set([...terminals.map(row => String(row.id)), ...backends.map(row => String(row.conversation_id))]));
+  assert.deepEqual(seen, new Set(backends.map(row => String(row.conversation_id))));
+  assert.equal(result.conversation_presentation.workspace_grouped_connections, 45);
 });
 
 test("workspace presentation retains backend-only CLI sessions and never groups different agents", () => {
@@ -200,10 +300,10 @@ test("workspace presentation retains backend-only CLI sessions and never groups 
   assert.equal(mixed.conversation_presentation.workspace_grouped_connections, 0);
 });
 
-test("diagnostic workspace candidates normalize paths without hiding unresolved default targets", () => {
+test("workspace preference normalizes paths but requires matching absolute project paths", () => {
   const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" } });
   const normalized = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [{ ...native(), cwd: "/project/sub/.." }] }, [physical]);
-  assert.equal(normalized.conversations.length, 2);
+  assert.deepEqual(normalized.conversations.map(row => row.conversation_id), [nativeId]);
   const diagnostic = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [{ ...native(), cwd: "/project/sub/.." }] }, [physical], {}, { diagnostics: true });
   assert.deepEqual(diagnostic.conversation_presentation.workspace_groups, [{ terminal_conversation_id: terminalId, native_conversation_id: nativeId }]);
   for (const cwd of [undefined, "project", "/other", "/project\n"]) {
@@ -212,7 +312,7 @@ test("diagnostic workspace candidates normalize paths without hiding unresolved 
   }
 });
 
-test("Claude process similarity never hides either target without an exact native association", () => {
+test("Claude workspace preference also requires the registry process and rejects birth or session conflicts", () => {
   const processStart = "Mon Oct 12 01:02:03 2026";
   const claudeId = createClaudeNativeConversationId({ configDir: "/fixture/claude", sessionId: thread, pid: 123, processStart });
   const backend = { conversation_id: claudeId, source: "claude_cli", agent: "claude", cwd: "/project",
@@ -220,7 +320,9 @@ test("Claude process similarity never hides either target without an exact nativ
   const physical = terminal({ id: "terminal:v2:tmux:claude:akk:0.0:123", agent: "claude",
     native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" }, native_agent_process_birth: undefined });
   const grouped = unifiedConversationList({ terminals: [physical], claude_cli_sessions: [backend] }, [physical]);
-  assert.deepEqual(grouped.conversations.map(row => row.conversation_id), [claudeId, physical.id]);
+  assert.deepEqual(grouped.conversations.map(row => row.conversation_id), [claudeId]);
+  assert.deepEqual(grouped.conversations[0].terminal_aliases, []);
+  assert.deepEqual(grouped.conversations[0].terminal_controls, []);
   assert.equal(grouped.conversation_routing.exact_associations, 0);
   for (const changes of [{ pid: 456 }, { native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
     { native_agent_process_birth: "Wed Oct 14 01:02:03 2026" }]) {

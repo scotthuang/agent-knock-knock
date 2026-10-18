@@ -89,15 +89,15 @@ proves that backend thread is the selected live conversation. Existing opaque
 accept a terminal ID as `conversation_id` for these operations.
 
 The default List presents CLI and Desktop, with Codex/Claude as the agent type.
-In AKK 0.14.6, one unresolved terminal and one loaded direct candidate with the
-same agent and normalized absolute project path share the original terminal's
-display row. This presentation grouping does not copy the candidate's native ID,
-status, permissions or actions, and does not establish a routing association.
-Known thread/home/process conflicts or multiple candidates remain separate.
-A direct-only CLI remains listed. If an embedded CLI and an independent direct
-CLI have the same directory and unknown identities, this default grouping can
-also fold those records; `terminalDebug: true` / `list --terminal-debug` expands
-all unassociated records. Raw CLI discovery arrays remain available for diagnosis.
+In AKK 0.14.12, a one-to-one same-agent/project discovery pair uses the verified
+loaded backend as its default CLI entry. Its original exact ID, title, status
+and actions stay unchanged; the terminal candidate is omitted from this view.
+This does not establish an alias, copy terminal capabilities or redirect old
+terminal selectors. Multiple candidates, known thread/home/process conflicts,
+and terminal records needing attention or management recovery remain visible.
+Direct-only and terminal-only CLIs remain listed. `terminalDebug: true` /
+`list --terminal-debug` expands all connections. Raw CLI discovery arrays also
+remain available for diagnosis.
 
 Actual routing association still requires the exact current thread, verified
 Codex home and physical process incarnation. A configured home, matching cwd,

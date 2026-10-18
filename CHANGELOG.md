@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.12 - 2026-10-18
+
+- Prefer the verified backend as the default CLI entry for a unique same-agent/project discovery pair. Keep its exact conversation ID, title, status and actions so controllers can use one entry without choosing a transport. Terminal candidates remain available in diagnostics.
+- Preserve proven alias controls, direct-only/terminal-only discovery, multiple native sessions and known identity conflicts. Keep terminal attention and management/recovery records visible; never copy unverified terminal authority into a backend or redirect an existing terminal selector by cwd.
+- Retain bounded List pagination, backend-first routing, busy/blocked/uncertain protections, existing Watch deadlines and callback receipts. This release does not change coding-agent compatibility profiles or publish independent Pi/DSH connectors.
+
 ## 0.14.11 - 2026-10-18
 
 - Keep independently verified Codex CLI backends selectable in default List when a same-project terminal has no proven exact alias. Preserve CLI/Desktop presentation, exact identity rules and bounded pagination; connection counts do not imply independent tasks.

@@ -6,13 +6,21 @@ them out. Failed or uncertain callbacks, pending interactions and active
 observations remain in the current view. This changes presentation, not Watch
 deadlines, callback delivery or persisted history.
 
-Starting in 0.14.11, default CLI rows combine only proven exact aliases. A
-verified backend stays selectable when a same-project terminal is unresolved,
-including an unknown/history viewport. These are separately addressable
-connections, not a count of independent tasks. Hosts may group them by project,
-but must preserve each exact target and its actions. `terminalDebug` adds routing
-evidence; it is no longer needed to reveal an unassociated backend. Neither cwd
-nor a startup `resume` argument authorizes redirecting a terminal target.
+Starting in 0.14.12, the default view prefers a verified backend as the project's
+CLI entry when discovery finds one same-agent terminal and one loaded backend
+with no known identity conflict. Its original conversation ID, title, status
+and advertised actions are retained. The terminal candidate is available in
+`terminalDebug` / `list --terminal-debug`; callers do not choose a transport.
+Proven exact aliases still combine their verified capabilities. Display
+preference alone neither proves an alias nor copies terminal permissions or
+management into the backend. A matching cwd or startup `resume` argument never
+redirects an existing terminal selector.
+
+Multiple candidates, identity conflicts and terminal records needing attention
+or management recovery remain visible. Direct-only and terminal-only CLI
+sessions remain available. Rows and connections are not a count of independent
+tasks. AKK still verifies the exact target before terminal fallback; backend
+busy/blocked states and uncertain sends never authorize a second route.
 
 | Request | Included records |
 | --- | --- |

@@ -60,9 +60,9 @@ function hasPendingInteraction(row: Row): boolean {
 }
 
 /** Limit the whole model-facing result before serialization, never truncate JSON text. */
-export function paginateHostList(projected: Row, params: Row = {}): Row {
+export function paginateHostList(projected: Row, params: Row = {}, additionalManagedSources: readonly Row[] = []): Row {
   const options = parseHostListPageOptions(params);
-  extractManagedHistory(projected);
+  extractManagedHistory(projected, additionalManagedSources);
   const { entries, watchCounts, managedCounts, attention, categoryCounts } = collectHostListEntries(projected);
   const selected = entries.filter(entry => options.view === "all" || (options.view === "history" ? entry.history : !entry.history));
   const position = options.after ? selected.findIndex(entry => entry.key === options.after) : -1;
@@ -168,7 +168,7 @@ function hostListEntry(field: typeof FIELDS[number], row: Row, history: boolean)
     order: `${rank}:${String(FIELDS.indexOf(field)).padStart(2, "0")}:${surface}:${agent}:${identity}` };
 }
 
-function extractManagedHistory(projected: Row): void {
+function extractManagedHistory(projected: Row, additionalSources: readonly Row[]): void {
   const turns = new Map<string, Row>();
   function visit(row: Row, parentId?: unknown) {
     const managed = recordValue(row.managed);
@@ -188,6 +188,8 @@ function extractManagedHistory(projected: Row): void {
   for (const field of ["conversations", "terminals", "codex_cli_sessions", "claude_cli_sessions"]) {
     for (const row of arrayValue(projected[field])) visit(row, row.conversation_id ?? row.id);
   }
+  // A hidden display connection remains the owner of its history; never assign it to the preferred backend.
+  for (const row of additionalSources) visit(row, row.conversation_id ?? row.id);
   if (turns.size) projected.managed_turns = [...turns.values()];
 }
 
