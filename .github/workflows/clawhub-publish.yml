@@ -1,0 +1,48 @@
+name: Publish verified ClawHub package
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the reviewed release artifact (false validates only)
+        type: boolean
+        default: false
+
+concurrency:
+  group: clawhub-agent-knock-knock-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
+      - name: Install pinned publication tooling only
+        run: npm install --prefix "$RUNNER_TEMP/clawhub-tools" --ignore-scripts --no-audit --no-fund clawhub@0.23.3
+      - name: Validate or publish existing release artifact
+        env:
+          CLAWHUB_TOOL_ROOT: ${{ runner.temp }}/clawhub-tools/node_modules/clawhub/dist
+          CLAWHUB_PUBLISH: ${{ inputs.publish }}
+        run: node scripts/publish-clawhub-release.mjs
+      - name: Preserve publication receipt (no credentials)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: clawhub-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .clawhub-publication/receipt.json
+          include-hidden-files: true
+          if-no-files-found: warn
