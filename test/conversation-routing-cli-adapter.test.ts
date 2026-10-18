@@ -73,6 +73,7 @@ test("backend-first sends and reads a proven terminal alias without terminal inp
   for (const command of ["send", "status", "watch-terminal"]) {
     const result = await f.run(command, f.terminalId);
     assert.equal(f.calls.at(-1)!.options.conversation, f.nativeId);
+    assert.equal(f.calls.at(-1)!.options.terminal, undefined);
     assert.equal(result.routing.transport, "codex_backend");
   }
   assert.equal(f.calls.length, 3);
@@ -222,7 +223,9 @@ test("Status and Watch do not inspect a working or blocked terminal to acquire i
   f.row.activity_state = "idle"; f.row.approval_state = { blocked: true };
   await f.run("watch-terminal", f.terminalId);
   assert.deepEqual(f.calls.map(call => call.command), ["status", "watch-terminal"]);
-  assert.ok(f.calls.every(call => call.options.conversation === f.terminalId));
+  assert.equal(f.calls[0].options.conversation, f.terminalId);
+  assert.equal(f.calls[1].options.terminal, f.terminalId);
+  assert.equal(f.calls[1].options.conversation, undefined);
 });
 
 test("Send may reuse the advertised closed idle status transaction to resolve the exact backend", async t => {

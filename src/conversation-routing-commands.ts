@@ -67,7 +67,10 @@ export function prepareConversationTerminalOptions(command: string, selected: Op
 export function conversationRoutedOptions(command: string, options: Options, route: "native" | "terminal", targetId: string): Options {
   const result = { ...options };
   for (const key of ["conversation", "conversationId", "terminal", "session", "routingRequireNative"]) delete result[key];
-  result.conversation = targetId;
+  // Terminal Watch consumes --terminal; native Watch consumes --conversation.
+  // Forward the exact selected target using the destination adapter's contract.
+  if (route === "terminal" && command === "watch-terminal") result.terminal = targetId;
+  else result.conversation = targetId;
   if (route === "native") {
     for (const key of ["expectedTerminalToken", "expectedManagedTerminalToken", "expectedBindingToken", "expectedCatalogFingerprint"]) delete result[key];
     result.openclawSession ??= "agent:main:main";
