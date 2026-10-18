@@ -1,0 +1,10 @@
+{
+  "name": "@scotthuang/agent-knock-knock",
+  "version": "0.14.13",
+  "repository": "scotthuang/agent-knock-knock",
+  "commit": "8081fd22e4c0f299257fda2f4cca67e841c4ff0c",
+  "asset": "scotthuang-agent-knock-knock-0.14.13.tgz",
+  "sha256": "0784aa63e9f16ac42428bbec83375b4acda58257ddbbefa24117e45dff0d5504",
+  "bytes": 3789416,
+  "changelog": "Keep List focused on discoverable CLI and Desktop conversations. Add a separate bounded Watches command with a 24-hour history window, preserved active and unresolved attention items, and conservative 48-hour cleanup of healthy settled history. Preserve exact recovery targets, notification receipts and replay protection."
+}
