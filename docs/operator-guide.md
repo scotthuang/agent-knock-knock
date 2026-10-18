@@ -60,13 +60,15 @@ Direct slash commands are available in every first-party Host integration:
 
 AKK List presents **CLI** and **Desktop** in one `conversations[]` collection,
 with Codex/Claude Code as the agent type. Choose the displayed conversation and
-action; AKK selects the connection. The default view groups a one-to-one
-same-agent/project terminal and direct candidate without changing the terminal's
-identity, status, actions or dispatch checks. Multiple candidates and known
-identity conflicts stay separate; direct-only CLI conversations remain visible.
-Use `terminalDebug: true` or `list --terminal-debug` for all unassociated
-connections and routing details. A display group is not proof that its candidates
-are the same native session, and neither rows nor Watches are a task count.
+action; AKK selects the connection. The default view prefers the verified backend
+entry for a one-to-one same-agent/project discovery pair, preserving the
+backend's exact ID, status and actions. A terminal candidate does not donate
+unverified capabilities or management to that entry. Multiple candidates,
+known identity conflicts and terminal attention/recovery records stay visible;
+direct-only and terminal-only CLI conversations remain available.
+Use `terminalDebug: true` or `list --terminal-debug` for all connections and
+routing details. A display group is not proof that its candidates are the same
+native session, and neither rows nor Watches are a task count.
 Bound task and interaction IDs retain their original provider; uncertain input
 is never retried through another transport. The
 [CLI backend guide](codex-cli-native-compatibility.md#automatic-conversation-routing-2026-10-10)

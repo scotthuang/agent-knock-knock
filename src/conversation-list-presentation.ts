@@ -2,20 +2,25 @@ import path from "node:path";
 import { claudeProcessBirthMatches } from "./claude-conversation-routing-identity.js";
 import { parseClaudeNativeConversationId } from "./claude-native-identity.js";
 import { parseCodexNativeConversationId } from "./codex-native-identity.js";
+import { hostListWatchNeedsAttention } from "./semantic-tool-list-budget.js";
+import { recordValue } from "./value-guards.js";
 
 type Row = Record<string, unknown>;
 export interface ConversationListPresentationOptions { diagnostics?: boolean }
 type WorkspaceGroup = { terminal_conversation_id: string; native_conversation_id: string };
 
-/** Exact aliases are already coalesced upstream; workspace similarity must not hide another selectable target. */
+/** Prefer a verified backend for an unambiguous project display, without creating a routing alias. */
 export function presentConversationList(conversations: readonly Row[], physicalTerminals: readonly Row[],
   options: ConversationListPresentationOptions = {}) {
+  const groups = workspaceGroups(conversations, physicalTerminals);
+  const hidden = new Set(options.diagnostics ? [] : groups.map(group => group.terminal_conversation_id));
   return {
-    conversations: conversations.map((row): Row => ({ ...row, surface: row.source === "codex_desktop" ? "desktop" : "cli" })),
+    conversations: conversations.filter(row => !hidden.has(String(row.conversation_id)))
+      .map((row): Row => ({ ...row, surface: row.source === "codex_desktop" ? "desktop" : "cli" })),
     conversation_presentation: {
       mode: options.diagnostics ? "diagnostics" : "default",
-      workspace_grouped_connections: 0,
-      ...(options.diagnostics ? { workspace_groups: workspaceGroups(conversations, physicalTerminals) } : {})
+      workspace_grouped_connections: hidden.size,
+      ...(options.diagnostics ? { workspace_groups: groups } : {})
     }
   };
 }
@@ -28,16 +33,34 @@ function workspaceGroups(conversations: readonly Row[], physicalTerminals: reado
     if (!key || terminal.process_state !== "active") continue;
     const terminalId = String(terminal.id ?? "");
     const visible = conversations.find(row => row.conversation_id === terminalId);
-    if (!visible || !terminalId.startsWith("terminal:") || workspaceKey(visible) !== key) continue;
+    if (!visible || !terminalId.startsWith("terminal:") || workspaceKey(visible) !== key ||
+      needsOwnTerminalEntry(terminal) || needsOwnTerminalEntry(visible)) continue;
     // Count all observed connections, including already-associated ones, rather than arbitrarily pairing a subset.
     if (physicalTerminals.filter(row => workspaceKey(row) === key).length !== 1) continue;
     const candidates = nativeRows.filter(row => workspaceKey(row) === key);
     if (candidates.length !== 1) continue;
     const native = candidates[0];
-    if ((Array.isArray(native.terminal_aliases) && native.terminal_aliases.length > 0) || !canGroup(terminal, native)) continue;
+    if ((Array.isArray(native.terminal_aliases) && native.terminal_aliases.length > 0) ||
+      !canGroup(terminal, native) || !canGroup(visible, native)) continue;
     groups.push({ terminal_conversation_id: terminalId, native_conversation_id: String(native.conversation_id) });
   }
   return groups;
+}
+
+/** Workspace preference cannot hide an independently owned turn or a terminal-only decision. */
+function needsOwnTerminalEntry(row: Row): boolean {
+  const managed = recordValue(row.managed);
+  const approval = recordValue(row.approval_state);
+  const interaction = recordValue(row.interaction_state);
+  const managedHistory = [managed?.recent_turn, ...(Array.isArray(managed?.history) ? managed.history : [])]
+    .map(recordValue).filter((turn): turn is Row => Boolean(turn));
+  return row.management_state === "conflict" || row.management_state === "unavailable" ||
+    Boolean(managed?.current_turn || row.management_conflict || row.management_unavailable || row.handoff_state || row.handoff_decision) ||
+    managedHistory.some(hostListWatchNeedsAttention) ||
+    Array.isArray(row.blocking_turns) && row.blocking_turns.length > 0 ||
+    approval?.blocked === true || approval?.approvable === true || row.attention_required === true ||
+    ["pending_manual_count", "pending_async_count", "pending_interaction_count"].some(key => Number(row[key]) > 0) ||
+    Boolean(interaction && !["none", "resolved", "answered", "closed"].includes(String(interaction.state)));
 }
 
 function workspaceKey(row: Row): string | undefined {
