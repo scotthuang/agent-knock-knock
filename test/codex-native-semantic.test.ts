@@ -12,6 +12,14 @@ import { buildAkkCommandCliArgs, parseAkkCommand, formatAkkListCommandResult,
 import { formatStatusCommandResult, formatSendCommandResult, formatApproveCommandResult } from "../src/semantic-tool-presentation.js";
 import { unifiedConversationList } from "../src/conversation-list.js";
 import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
+import { parseCliCommand } from "../src/cli-core.js";
+import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import { dispatchRoutedConversationCli } from "../src/conversation-routing-cli-adapter.js";
+import { createCodexNativeRuntime } from "../src/codex-native-runtime.js";
+import { CodexNativeError } from "../src/codex-native-types.js";
+import { createTerminalWatchCliAdapter } from "../src/terminal-watch-cli-adapter.js";
+import { loadTerminalWatch } from "../src/terminal-watch-store.js";
+import { createFixture, exactTerminalObservation, record, TASK_ID } from "./terminal-watch-cli-adapter/fixtures.js";
 import { approveParameters, respondInteractionParameters, sendParameters, watchParameters, nativeInspectParameters, permissionOptionsParameters, setPermissionsParameters, modelOptionsParameters, setModelParameters } from "../src/semantic-tool-schemas.js";
 
 const identity = { codexHome: "/test/codex-home", threadId: "01a11faa-fe88-7491-80ee-41842ac032e3" };
@@ -24,7 +32,7 @@ const response = { interaction_id: "native-question-one", answers: [
 ] };
 type Result = { details: Record<string, any>; content: { type: string; text: string }[]; isError?: boolean };
 
-function harness(t: TestContext) {
+function harness(t: TestContext, pluginConfig: Record<string, unknown> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-native-semantic-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const relay = path.join(dir, "relay.cjs"), calls = path.join(dir, "calls.jsonl"), reply = path.join(dir, "reply.json");
@@ -33,7 +41,7 @@ function harness(t: TestContext) {
     agent_acceptance: "proven", send_state: "accepted", delivery_receipt: "native_task_verified", callback_expected: true }));
   fs.writeFileSync(relay, `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(process.argv.slice(2))+'\\n');const r=JSON.parse(fs.readFileSync(${JSON.stringify(reply)},'utf8'));if(r.__error){process.stderr.write(r.__error);process.exit(1);}process.stdout.write(JSON.stringify(r.__byCommand?.[process.argv[2]]??r));`);
   const owner = { pluginConfig: { storeDir: path.join(dir, "store"), codexHome: identity.codexHome,
-    openclawBin: "/test/openclaw", agentHardTimeoutMinutes: 60 }, logger: { info() {}, warn() {} } };
+    openclawBin: "/test/openclaw", agentHardTimeoutMinutes: 60, ...pluginConfig }, logger: { info() {}, warn() {} } };
   bindSemanticToolRelayPath(owner, relay);
   const catalog = createAkkSemanticToolCatalog(owner, new Map());
   return {
@@ -47,6 +55,66 @@ function harness(t: TestContext) {
   };
 }
 const argument = (args: string[], flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
+
+test("Host terminal Watch selectors and CLI --terminal survive routing into exact persistent observation", async t => {
+  const fixture = createFixture(t);
+  fixture.terminal.id = terminalId;
+  const codexHome = path.join(fixture.terminal.cwd, ".codex");
+  const h = harness(t, { storeDir: fixture.storeDir, codexHome });
+  // Capture the actual Host buildArgs boundary; execute those same arguments below
+  // with isolated discovery and the real terminal Watch adapter/Store.
+  for (const target of [{ conversation_id: terminalId }, { terminal_id: terminalId }]) {
+    await h.execute("watch", { ...target, hardTimeoutMinutes: 37 });
+  }
+  const invocations = [...h.calls(), ["watch-terminal", "--terminal", terminalId,
+    "--store-dir", fixture.storeDir, "--codex-home", codexHome,
+    "--openclaw-session", controller.sessionKey, "--openclaw-bin", "/test/openclaw",
+    "--hard-timeout-minutes", "37"]];
+  const printed: unknown[] = [];
+  let callbacks = 0;
+  const facade = createTerminalWatchCliAdapter({
+    acquireFileLock: () => () => {}, acquireTerminalLock: () => () => {},
+    observeExactTerminal: async ({ terminalId: target }) => exactTerminalObservation([fixture.terminal], target),
+    loadClaudeAgentRows: () => [], now: fixture.now,
+    randomUUID: () => "00000000-0000-4000-8000-000000000251",
+    storeDirFromOptions: () => fixture.storeDir,
+    terminalDispatchOwnership: () => ({ state: "none" }), terminalIncarnationBlockingTurns: () => [],
+    printJson: value => printed.push(value),
+    callback: { deliver() { callbacks++; throw new Error("creating an active Watch must not send a notification"); } }
+  });
+  const watchIds: string[] = [];
+  for (const args of invocations) {
+    assert.equal(argument(args, "--terminal"), terminalId);
+    assert.equal(args.includes("--conversation"), false);
+    const { command, options } = parseCliCommand(args);
+    const result = await runCliCommandExecution(command, options, {
+      cwd: fixture.terminal.cwd, env: { HOME: fixture.terminal.cwd }, runtimeLog() {},
+      createCodexNativeRuntime: configuration => createCodexNativeRuntime({ ...configuration,
+        clientFactory: async () => { throw new CodexNativeError("closed", "isolated backend unavailable"); } })
+    }, async () => {
+      assert.equal(await dispatchRoutedConversationCli(command, options, {
+        terminals: async () => [fixture.terminal],
+        async execute(selectedCommand, selectedOptions) {
+          assert.equal(selectedCommand, "watch-terminal");
+          await facade.runWatch(selectedOptions);
+          return record(printed.at(-1));
+        }
+      }), true);
+    });
+    const routed = JSON.parse(result.stdout);
+    assert.equal(routed.routing.transport, "terminal");
+    const watch = loadTerminalWatch(fixture.storeDir, routed.watch.watch_id);
+    watchIds.push(watch.watch_id);
+    assert.equal(watch.status, "active");
+    assert.equal(watch.terminal.terminal_id, terminalId);
+    assert.equal(record(watch.anchor).turn_id, TASK_ID);
+    assert.equal(watch.openclaw_session, controller.sessionKey);
+    assert.equal(Date.parse(watch.deadline_at) - Date.parse(watch.created_at), 37 * 60_000);
+  }
+  assert.equal(new Set(watchIds).size, 1, "same controller and exact task reuse the existing Watch");
+  assert.equal(facade.listPublicWatches(fixture.storeDir).length, 1);
+  assert.equal(callbacks, 0);
+});
 
 test("direct CLI Host send/watch/status retain backend identity and stable message routing without terminal discovery", async t => {
   const h = harness(t);

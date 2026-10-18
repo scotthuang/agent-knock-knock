@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.10 - 2026-10-18
+
+- Fix explicit Watch creation when backend-first routing selects an exact terminal: preserve the terminal argument required by the Watch adapter. This covers Host `conversation_id` / `terminal_id` inputs and CLI `watch-terminal --terminal`, including Codex and Claude terminal fallback.
+- Keep available native backends preferred and preserve terminal/process identity checks, controller ownership, exact task anchors, callback routing and duplicate-observation handling. Existing Watch records and deadlines are unchanged.
+- Include the Desktop build 20398 compatibility and bounded, paginated Host List improvements introduced in 0.14.9. No independent Pi/DSH connector release is required.
+
 ## 0.14.9 - 2026-10-18
 
 - Support macOS Codex Desktop `26.1007.71326` / build `20398` through its original IPC owner: creation, Send, bounded public Status progress, exact Watch, command/file approvals, blocking/asynchronous answers, model/permission settings and exact interruption. Retain the separately reviewed `13536` and `20156` capability profiles; unknown builds remain read-only.

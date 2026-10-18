@@ -255,6 +255,7 @@ export const testSupportImpactByPath = Object.freeze({
     "test/terminal-watch-cli-adapter.test.ts"
   ],
   "test/terminal-watch-cli-adapter/fixtures.ts": [
+    "test/codex-native-semantic.test.ts",
     "test/terminal-watch-cli-adapter/accepted-fallback-interactions.ts",
     "test/terminal-watch-cli-adapter/activity-fallback.ts",
     "test/terminal-watch-cli-adapter/claude-fallback.ts",
