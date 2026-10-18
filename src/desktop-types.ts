@@ -1,6 +1,6 @@
-/** AKK projections of local, version-gated Desktop private IPC. Never expose raw snapshots. */
+/** AKK projections of identity-checked Desktop private IPC. Never expose raw snapshots. */
 export interface DesktopThreadIdentity { codexHome: string; hostId: string; threadId: string }
-export interface DesktopCompatibility { version: string; build: string }
+export interface DesktopCompatibility { version: string; build: string; applicationIdentityVerified?: boolean }
 export interface DesktopTurnItem {
   id: string;
   type: string;

@@ -103,15 +103,15 @@ test("Desktop manual attention keeps numeric and string native request IDs disti
 });
 
 
-test("send-only Desktop builds retain one question/approval notification that directs the user to Desktop", async t => {
+test("unknown Desktop builds retain actionable deduplicated question and approval notifications with unverified metadata", async t => {
   for (const kind of ["command_approval", "file_approval", "blocking_question"] as const) {
     const h = harness(t, kind, false);
     const task = await h.service.watch(h.input);
     assert.equal(task.pending_interactions?.length, 1); assert.equal(task.notifications.length, 1);
     const event = task.notifications[0].envelope.event;
-    assert.equal(event.metadata?.action, "manual_desktop");
-    assert.match(event.body, /Handle this question or approval in Desktop/);
-    assert.doesNotMatch(event.body, /Use AKK Approve|use AKK Respond/);
+    assert.equal(event.metadata?.action, kind === "blocking_question" ? "respond" : "approve");
+    assert.equal(event.metadata?.response_contract_verified, false);
+    assert.match(event.body, /Use AKK Approve|use AKK Respond/);
     assert.equal((await h.service.reconcile(task.id)).notifications.length, 1);
   }
 });
@@ -131,19 +131,20 @@ test("Desktop task-interaction build notifies approvals and questions as actiona
   }
 });
 
-test("Desktop blocking question notifications do not borrow approval or async response authority", async t => {
+test("Desktop blocking question notifications retain per-kind verification without suppressing response attempts", async t => {
   for (const blockingAnswers of [true, false]) {
     const profile = { ...desktopCapabilityProfile(DESKTOP_CREATION_BUILD), approvals: !blockingAnswers,
       asyncAnswers: !blockingAnswers, blockingAnswers };
     const h = harness(t, "blocking_question", profile);
     const watched = await h.service.watch(h.input);
-    assert.equal(watched.notifications[0].envelope.event.metadata?.action, blockingAnswers ? "respond" : "manual_desktop");
+    assert.equal(watched.notifications[0].envelope.event.metadata?.action, "respond");
+    assert.equal(watched.notifications[0].envelope.event.metadata?.response_contract_verified, blockingAnswers);
     assert.equal((await h.service.reconcile(watched.id)).notifications.length, 1);
   }
 });
 
 
-test("manual Desktop notifications retain exact identity and reject unknown or mismatched action kinds", async t => {
+test("unverified Desktop notifications retain exact identity and reject unknown or mismatched action kinds", async t => {
   const h = harness(t, "command_approval", false);
   const watched = await h.service.watch(h.input);
   const original = watched.notifications[0].envelope;
@@ -164,5 +165,14 @@ test("manual Desktop notifications retain exact identity and reject unknown or m
       source: original.source, event: { ...original.event, metadata: invalid } });
     assert.throws(() => h.repository.save(corrupt, watched.revision), /Desktop (?:response notification|notification action)/u);
   }
-  assert.equal(h.repository.load(watched.id)?.notifications[0].envelope.event.metadata?.action, "manual_desktop");
+  assert.equal(h.repository.load(watched.id)?.notifications[0].envelope.event.metadata?.action, "approve");
+});
+
+test("Desktop explicit application identity failure notifies without offering an approval mutation", async t => {
+  const profile = desktopCapabilityProfile({ version: "future", build: "unverified", applicationIdentityVerified: false });
+  const h = harness(t, "command_approval", profile);
+  const watched = await h.service.watch(h.input), event = watched.notifications[0].envelope.event;
+  assert.equal(event.metadata?.action, "manual_desktop"); assert.equal(event.metadata?.response_contract_verified, false);
+  assert.doesNotMatch(event.body, /Use AKK Approve/);
+  assert.equal((await h.service.reconcile(watched.id)).notifications.length, 1);
 });

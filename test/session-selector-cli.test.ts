@@ -968,6 +968,11 @@ test("a cross-store terminal owner stays conflicted while exposing only fresh ph
   const workspace = path.join(tempDir, "workspace");
   const terminalTarget = `codex-cross-store-${process.pid}:0.0`;
   const codexPid = 3222;
+  let physicalIdentityProbes = 0;
+  const dependencies = { processBirthForPid: (pid: number) => {
+    assert.equal(pid, codexPid); physicalIdentityProbes++;
+    return `fixture-process-birth-${pid}`;
+  } };
   const runtimeArgs = codexTerminalStaticArgs({
     workspace,
     terminalTarget,
@@ -990,7 +995,7 @@ test("a cross-store terminal owner stays conflicted while exposing only fresh ph
       "/usr/bin/true",
       "--disable-terminal-bridge-monitor",
       ...runtimeArgs
-    ]);
+    ], dependencies);
     const ownerId = sent.conversation.conversation_id;
     const ownerStatePath = pathsForConversation(ownerId, ownerStoreDir).statePath;
     const ownerStateBefore = fs.readFileSync(ownerStatePath, "utf8");
@@ -1000,7 +1005,7 @@ test("a cross-store terminal owner stays conflicted while exposing only fresh ph
       "--store-dir",
       observerStoreDir,
       ...runtimeArgs
-    ]);
+    ], dependencies);
     assert.equal(listed.terminals.length, 1);
     const terminal = listed.terminals[0];
     assert.equal(terminal.management_state, "conflict");
@@ -1031,9 +1036,19 @@ test("a cross-store terminal owner stays conflicted while exposing only fresh ph
       "--store-dir",
       observerStoreDir,
       ...runtimeArgs
-    ]);
+    ], dependencies);
     assert.equal(status.source, "terminal_control");
     assert.equal(status.conversation_id, terminal.id);
+    assert.equal(fs.readFileSync(ownerStatePath, "utf8"), ownerStateBefore);
+    assert.ok(physicalIdentityProbes > 0);
+    const warnings: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const missingPhysicalIdentity = await runCli(["list", "--store-dir", observerStoreDir, ...runtimeArgs], {
+      processBirthForPid: () => { throw new Error("fixture physical incarnation unavailable"); },
+      runtimeLog: (_level, event, fields) => { warnings.push({ event, fields: fields ?? {} }); }
+    });
+    assert.deepEqual(Object.keys(missingPhysicalIdentity.terminals[0].available_actions), ["status"]);
+    assert.ok(warnings.some(warning => warning.event === "terminal_physical_process_incarnation_unavailable"
+      && warning.fields.pid === codexPid && warning.fields.error === "fixture physical incarnation unavailable"));
     assert.equal(fs.readFileSync(ownerStatePath, "utf8"), ownerStateBefore);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1506,8 +1521,8 @@ function storeConversationFixture(options: {
   return { conversation, paths };
 }
 
-async function runCli(args: string[]): Promise<Record<string, any>> {
-  const result = await runCliResult(args);
+async function runCli(args: string[], dependencies: Parameters<typeof runInProcessCli>[1] = {}): Promise<Record<string, any>> {
+  const result = await runCliResult(args, dependencies);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
 }
@@ -1573,8 +1588,9 @@ async function runCliWithCodexInventory(
   return JSON.parse(result.stdout);
 }
 
-function runCliResult(args: string[]) {
+function runCliResult(args: string[], dependencies: Parameters<typeof runInProcessCli>[1] = {}) {
   return runInProcessCli(args, {
+    ...dependencies,
     ...(args[0] === "watches" ? { now: () => new Date("2026-07-28T03:00:00.000Z") } : {}),
     createDesktopRuntime: unavailableDesktopRuntime,
     env: {

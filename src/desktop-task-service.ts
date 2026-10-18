@@ -113,7 +113,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     this.leaseMs = deps.deliveryLeaseMs ?? 30_000;
     this.retryMs = deps.retryDelayMs ?? 5_000;
     this.maxAttempts = deps.maxDeliveryAttempts ?? 4;
-    this.interactionResponsesVerified = deps.interactionResponsesVerified ?? true;
+    this.interactionResponsesVerified = deps.interactionResponsesVerified ?? false;
     this.recovery = createDesktopTaskRecovery({ status: id => this.status(id), update: (id, op) => this.update(id, op),
       observe: target => deps.observe(target), applySnapshot: (task, snapshot, recover) => this.applySnapshot(task, snapshot, recover),
       deliverPending: (id, notificationId) => this.deliverPending(id, notificationId), now: this.now, expire: task => this.expire(task) });

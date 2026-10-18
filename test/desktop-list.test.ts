@@ -73,11 +73,22 @@ test("Desktop List defaults to sidebar and retains an unloaded row and its reaso
   runtime.compatibility = DESKTOP_CREATION_BUILD;
   const sendOnly = compactAkkListModelProjection(await listDesktopSessions(runtime, {})) as any;
   assert.equal(sendOnly.desktop_sessions[0].capabilities.send, true);
-  assert.equal(sendOnly.desktop_sessions[0].capabilities.set_permissions, false);
-  assert.equal(sendOnly.desktop_sessions[0].available_actions.model_options, undefined);
+  assert.equal(sendOnly.desktop_sessions[0].capabilities.set_permissions, true);
+  assert.equal(sendOnly.desktop_sessions[0].available_actions.model_options, true);
+  assert.equal(sendOnly.desktop_sessions[0].capability_verification.nativeControls, false);
   assert.equal(sendOnly.desktop_scan.write_contract_verified, false);
   assert.equal(sendOnly.desktop_scan.send_contract_verified, true);
   assert.equal(sendOnly.desktop_scan.approval_contract_verified, true);
+  runtime.compatibility = { version: "future", build: "unverified" };
+  const unknown = compactAkkListModelProjection(await listDesktopSessions(runtime, {})) as any;
+  const ready = unknown.desktop_sessions[0];
+  assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.set_model, true);
+  assert.equal(ready.compatibility_warning, true); assert.equal(ready.compatibility_policy, "attempt_native_contract");
+  assert.equal(Object.values(ready.capability_verification).every(value => value === false), true);
+  assert.equal(unknown.desktop_scan.compatibility_policy, "attempt_native_contract");
+  assert.equal(unknown.desktop_scan.write_contract_verified, false); assert.equal(unknown.desktop_scan.send_contract_verified, false);
+  assert.equal(unknown.desktop_scan.approval_contract_verified, false);
+  assert.equal(unknown.desktop_sessions[1].capabilities.send, false);
 });
 
 test("unsupported Desktop sidebar metadata remains an explicit incomplete result, not all history or a successful empty sidebar", async () => {

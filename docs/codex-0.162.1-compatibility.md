@@ -165,7 +165,7 @@ isolated regression coverage; no live fault-injection claim is made.
 | Direct shared-backend CLI | Live identity and method/response contracts govern availability; no exact-version allowlist or numeric minimum is introduced. |
 | Terminal paginated interaction writes | Add only the audited **frontend 0.162.1 / app-server 0.162.1** pair. Existing older audited pairs remain; 0.162.1/0.162.0 and 0.162.1/0.162.2 are not admitted as write pairs. |
 | Terminal native status and controls | The observed process version selects the appropriate profile; exact process, pane, native thread, composer and current UI checks still apply. |
-| Desktop | No new Desktop profile. Native writes retain the exact macOS **26.1002.52244 / build 13536** requirement and verified live owner. |
+| Desktop | This CLI validation did not add Desktop evidence. See the [current Desktop policy and tested builds](codex-desktop-compatibility.md#version-and-platform-evidence); app versions no longer gate attempts in AKK 0.14.14. |
 
 A thread's stored `cliVersion` is creation metadata. It cannot prove the
 version of a currently attached frontend. Same-directory history cannot

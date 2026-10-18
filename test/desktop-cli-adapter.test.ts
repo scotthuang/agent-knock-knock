@@ -342,21 +342,26 @@ test("Desktop Send/Watch defaults and lower-level timeout aliases preserve their
 });
 
 
-test("Desktop CLI task-interaction profile keeps settings and cancellation unavailable", async t => {
-  const f = fixture(t, DESKTOP_CREATION_BUILD);
-  const ready = await f.run("status", { conversation: f.id });
-  assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.set_model, false);
-  for (const command of ["model-options", "permission-options", "set-model", "set-permissions", "cancel"]) {
-    await assert.rejects(f.run(command, { conversation: f.id }), /native controls are unverified/);
+test("Desktop CLI unknown and partially verified builds attempt native controls and expose their evidence separately", async t => {
+  for (const compatibility of [DESKTOP_CREATION_BUILD, { version: "future", build: "unverified" }]) {
+    const f = fixture(t, compatibility);
+    const ready = await f.run("status", { conversation: f.id });
+    assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.set_model, true);
+    assert.equal(ready.capability_verification.nativeControls, false); assert.equal(ready.compatibility_warning, true);
+    assert.equal((await f.run("model-options", { conversation: f.id })).catalog_available, false);
+    assert.ok(await f.run("permission-options", { conversation: f.id }));
+    assert.equal((await f.run("set-model", { conversation: f.id, model: "test-model", reasoningEffort: "high" })).outcome, "changed");
+    const sent = await f.run("send", { conversation: f.id, message: "READY", messageId: "attempt-native", openclawSession: "controller" });
+    assert.equal(sent.delivered, true); assert.equal(f.sends, 1); assert.equal(sent.capabilities.cancel, true);
+    f.ask();
+    const status = await f.run("watch-status", { watch: sent.watch_id });
+    assert.equal(status.pending_interaction_count, 1); assert.equal(status.capabilities.interaction_respond, true);
+    assert.equal(status.pending_manual_count, 0);
+    assert.equal(status.interaction_state[0].response_contract_verified, desktopCapabilityProfile(compatibility).asyncAnswers);
+    assert.equal(status.interaction_state[0].questions[0].title, "Pick a color");
+    assert.equal(f.answers, 0);
+    assert.equal((await f.run("cancel", { watch: sent.watch_id, openclawSession: "controller" })).state, "interrupted");
   }
-  const sent = await f.run("send", { conversation: f.id, message: "READY", messageId: "send-only", openclawSession: "controller" });
-  assert.equal(sent.delivered, true); assert.equal(f.sends, 1); assert.equal(sent.capabilities.cancel, false);
-  f.ask();
-  const status = await f.run("watch-status", { watch: sent.watch_id });
-  assert.equal(status.pending_interaction_count, 1); assert.equal(status.capabilities.interaction_respond, true);
-  assert.equal(status.pending_manual_count, 0);
-  assert.equal(status.interaction_state[0].questions[0].title, "Pick a color");
-  assert.equal(f.answers, 0);
 });
 
 test("Desktop CLI command/file approvals confirm exact effects and replay their receipt without redispatch", async t => {

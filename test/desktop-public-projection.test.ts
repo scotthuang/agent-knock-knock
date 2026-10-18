@@ -52,10 +52,12 @@ test("sidebar membership remains visible when Desktop has unloaded its owner", (
   assert.equal((result.available_actions as any).send, undefined);
 });
 
-test("Desktop send requires a verified write contract; Watch requires a uniquely active exact tail", () => {
-  assert.equal((desktopSessionProjection(entry, snapshot(), false).capabilities as any).send, false);
+test("Desktop attempts supported controls independently of build verification; Watch requires an exact active tail", () => {
+  assert.equal((desktopSessionProjection(entry, snapshot(), false).capabilities as any).send, true);
+  assert.equal((desktopSessionProjection(entry, snapshot(), false).capability_verification as any).send, false);
+  assert.equal(desktopSessionProjection(entry, snapshot(), false).compatibility_warning, true);
   assert.equal((desktopSessionProjection(entry, snapshot(), true).capabilities as any).send, true);
-  assert.equal((desktopSessionProjection(entry, snapshot(), false).capabilities as any).set_permissions, false);
+  assert.equal((desktopSessionProjection(entry, snapshot(), false).capabilities as any).set_permissions, true);
   assert.equal((desktopSessionProjection(entry, snapshot(), true).capabilities as any).set_permissions, true);
   const running = snapshot({ runtimeStatus: "active", canSend: false, latestTurnId: "turn-one",
     turns: [{ turnId: "turn-one", status: "inProgress", items: [], itemsComplete: true }] });
@@ -76,6 +78,7 @@ test("uncertain Desktop receipts never claim acceptance or disclose internal sen
   assert.equal(result.delivered, false); assert.equal(result.agent_acceptance, "unproven");
   assert.equal(result.delivery_receipt, "acceptance_unproven"); assert.equal(result.native_turn_id, null);
   assert.equal(result.resend_allowed, false); assert.equal(result.callback_expected, true);
+  assert.equal((result.capability_verification as any).send, false);
   const text = JSON.stringify(result);
   for (const privateText of ["private prompt", "client-private", "owner-private", "controller-private", route.profile_revision]) {
     assert.equal(text.includes(privateText), false);
@@ -124,13 +127,15 @@ test("Desktop task projections retain observation evidence while distinguishing 
 });
 
 
-test("Desktop question capabilities expose async answers while session controls stay unavailable", () => {
+test("Desktop question and native controls are attemptable even where historical verification is absent", () => {
   const profile = desktopCapabilityProfile(DESKTOP_CREATION_BUILD);
   const ready = desktopSessionProjection(entry, snapshot(), profile) as any;
   assert.equal(ready.capabilities.send, true);
-  for (const capability of ["set_model", "set_permissions", "approve", "interaction_respond", "cancel"]) assert.equal(ready.capabilities[capability], false);
-  assert.equal(ready.available_actions.model_options, undefined);
-  assert.equal(ready.available_actions.permission_options, undefined);
+  for (const capability of ["approve", "interaction_respond", "cancel"]) assert.equal(ready.capabilities[capability], false);
+  assert.equal(ready.capabilities.set_model, true); assert.equal(ready.capabilities.set_permissions, true);
+  assert.equal(ready.capability_verification.nativeControls, false);
+  assert.equal(ready.available_actions.model_options.tool, "agent_knock_knock_model_options");
+  assert.equal(ready.available_actions.permission_options.tool, "agent_knock_knock_permission_options");
   const interaction: DesktopAsyncInteraction = { id: `desktop-async-interaction:${"a".repeat(64)}`, kind: "async_question" as const,
     threadId: target.threadId, turnId: "turn-one", itemId: "question-one", method: "request_user_input_async" as const,
     questions: [{ id: "question-one", title: "Choose a color", options: ["Green", "Blue"], isOther: true }] };
@@ -138,7 +143,7 @@ test("Desktop question capabilities expose async answers while session controls 
     turns: [{ turnId: "turn-one", status: "inProgress", items: [], itemsComplete: true }], pendingInteractions: [interaction] });
   const current = desktopSessionProjection(entry, running, profile) as any;
   assert.equal(current.capabilities.watch, true); assert.equal(current.capabilities.interaction_notify, true);
-  assert.equal(current.capabilities.interaction_respond, true); assert.equal(current.capabilities.cancel, false);
+  assert.equal(current.capabilities.interaction_respond, true); assert.equal(current.capabilities.cancel, true);
   assert.equal(current.pending_interaction_count, 1); assert.equal(current.pending_manual_count, 0);
   assert.equal(current.manual_action, undefined);
   assert.equal(current.interaction_state[0].questions[0].title, "Choose a color");
@@ -147,7 +152,7 @@ test("Desktop question capabilities expose async answers while session controls 
     current.interaction_state[0].available_actions);
   const watched = desktopTaskProjection(task({ status: "watching", native_turn_id: "turn-one", pending_interactions: [interaction] }), profile) as any;
   assert.equal(watched.capabilities.interaction_notify, true); assert.equal(watched.capabilities.interaction_respond, true);
-  assert.equal(watched.capabilities.cancel, false); assert.equal(watched.pending_manual_count, 0);
+  assert.equal(watched.capabilities.cancel, true); assert.equal(watched.pending_manual_count, 0);
   assert.equal(watched.pending_interaction_count, 1); assert.equal(watched.interaction_state[0].available_actions.respond.tool, "agent_knock_knock_respond_interaction");
   assert.equal(watched.manual_action, undefined);
 });
@@ -174,24 +179,33 @@ test("Desktop mixed approval/question projections agree across conversation and 
       blockingAnswers: enabled === "blockingAnswers", asyncAnswers: enabled === "asyncAnswers" };
     const supported = [selected.approvals, selected.approvals, selected.blockingAnswers, selected.asyncAnswers];
     for (const output of [desktopSessionProjection(entry, running, selected), desktopTaskProjection(watched, selected)] as any[]) {
-      assert.equal(output.capabilities.approve, selected.approvals);
-      assert.equal(output.capabilities.interaction_respond, selected.blockingAnswers || selected.asyncAnswers);
-      assert.equal(output.capabilities.cancel, false); assert.equal(output.pending_manual_count, supported.filter(value => !value).length);
+      assert.equal(output.capabilities.approve, true);
+      assert.equal(output.capabilities.interaction_respond, true);
+      assert.equal(output.capabilities.cancel, true); assert.equal(output.pending_manual_count, 0);
       assert.equal(output.pending_interaction_count, 4);
       for (const [index, interaction] of output.interaction_state.entries()) {
         const action = index < 2 ? "approve" : "respond";
-        if (supported[index]) {
-          assert.equal(interaction.available_actions[action].tool, `agent_knock_knock_${action === "respond" ? "respond_interaction" : action}`);
-          assert.equal(interaction.manual_action, undefined);
-        } else {
-          assert.deepEqual(interaction.available_actions, {}); assert.match(interaction.manual_action, /in Desktop/);
-        }
+        assert.equal(interaction.response_contract_verified, supported[index]);
+        assert.equal(interaction.available_actions[action].tool, `agent_knock_knock_${action === "respond" ? "respond_interaction" : action}`);
+        assert.equal(interaction.manual_action, undefined);
       }
     }
   }
   const approvalOnly = desktopSessionProjection(entry, { ...running, pendingRequestCount: 2, pendingInteractions: approvals }, profile) as any;
   assert.equal(approvalOnly.pending_manual_count, 0); assert.equal(approvalOnly.manual_action, undefined);
   const unknown = desktopTaskProjection(watched, desktopCapabilityProfile({ ...DESKTOP_CREATION_BUILD, build: "future" })) as any;
-  assert.equal(unknown.capabilities.approve, false); assert.equal(unknown.capabilities.interaction_respond, false);
-  assert.equal(unknown.pending_manual_count, 4);
+  assert.equal(unknown.capabilities.approve, true); assert.equal(unknown.capabilities.interaction_respond, true);
+  assert.equal(unknown.pending_manual_count, 0);
+  assert.equal(unknown.compatibility_policy, "attempt_native_contract");
+  assert.equal(unknown.interaction_state.every((value: any) => value.response_contract_verified === false), true);
+});
+
+test("Desktop explicit application identity failure keeps readable state without granting write actions", () => {
+  const profile = desktopCapabilityProfile({ version: "future", build: "unverified", applicationIdentityVerified: false });
+  const result = desktopSessionProjection(entry, snapshot(), profile) as any;
+  assert.equal(result.connection_state, "live_owner_verified"); assert.equal(result.capabilities.status, true);
+  assert.equal(result.application_identity_verified, false); assert.equal(result.can_send_reason, "desktop_application_identity_unverified");
+  for (const key of ["send", "set_model", "set_permissions", "cancel"]) assert.equal(result.capabilities[key], false);
+  assert.equal(result.available_actions.send, undefined);
+  assert.equal(desktopTaskProjection(task({ status: "watching", native_turn_id: "turn-one" }), profile).application_identity_verified, false);
 });

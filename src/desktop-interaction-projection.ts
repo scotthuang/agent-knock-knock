@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { desktopInteractionResponseVerified, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
+import { desktopInteractionResponseAttemptable, desktopInteractionResponseVerified, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
 import type { DesktopAsyncInteraction, DesktopInteraction, DesktopQuestion, DesktopRequestResponse } from "./desktop-types.js";
 import { isRecord } from "./value-guards.js";
@@ -19,6 +19,7 @@ export interface ProjectedDesktopInteraction {
   command?: string; reason?: string; cwd?: string; network?: { host: string; protocol: string };
   file_changes?: { path: string; kind?: string; diff?: string; diffTruncated?: boolean }[];
   manual_action?: string;
+  response_contract_verified?: boolean;
   available_actions: Record<string, { tool: string; input: Record<string, string> }>;
 }
 export function desktopInteractionIsApproval(item: { kind: string }): boolean {
@@ -30,10 +31,11 @@ export function desktopInteractionFingerprint(item: DesktopInteraction): string 
     item.approvalId, item.nativeApprovalKind, item.networkApprovalContext, item.changes];
   return digest([item.id, item.threadId, item.turnId, item.itemId, item.method, item.questions, ...request]);
 }
-export function desktopInteractionProjection(item: DesktopInteraction, desktopId: string, watchId?: string, capabilities: DesktopCapabilityProfile | boolean = true): ProjectedDesktopInteraction {
+export function desktopInteractionProjection(item: DesktopInteraction, desktopId: string, watchId?: string, capabilities: DesktopCapabilityProfile | boolean = false): ProjectedDesktopInteraction {
   const target: Record<string, string> = watchId ? { watch_id: watchId } : { conversation_id: desktopId };
   const approval = desktopInteractionIsApproval(item);
   const responsesVerified = desktopInteractionResponseVerified(capabilities, item.kind);
+  const attemptable = desktopInteractionResponseAttemptable(item.kind, capabilities);
   return {
     ...target, interaction_id: item.id, kind: item.kind, status: "pending",
     native_thread_id: item.threadId, native_turn_id: item.turnId,
@@ -41,9 +43,10 @@ export function desktopInteractionProjection(item: DesktopInteraction, desktopId
     ...(item.kind === "async_question" ? {} : approvalDetails(item)),
     expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
     interaction_prompt_fingerprint: desktopInteractionFingerprint(item),
+    response_contract_verified: responsesVerified,
     questions: item.questions.map(question => desktopQuestionProjection(item, question)),
-    ...(!responsesVerified ? { manual_action: "Handle this question or approval in Desktop; native responses are not verified for this build." } : {}),
-    available_actions: responsesVerified ? { [approval ? "approve" : "respond"]: {
+    ...(!attemptable ? { manual_action: "Handle this unsupported native question or approval in Desktop." } : {}),
+    available_actions: attemptable ? { [approval ? "approve" : "respond"]: {
       tool: approval ? "agent_knock_knock_approve" : "agent_knock_knock_respond_interaction",
       input: { ...target, interaction_id: item.id } } } : {}
   };
@@ -83,6 +86,7 @@ function copyProjectedInteraction(item: ProjectedDesktopInteraction, desktopId: 
     ...(item.kind === "async_question" ? { delivery_modes: ["steer_current_turn"] } : {}),
     expires_at: item.expires_at,
     interaction_prompt_fingerprint: item.interaction_prompt_fingerprint,
+    ...(typeof item.response_contract_verified === "boolean" ? { response_contract_verified: item.response_contract_verified } : {}),
     questions: item.questions.map(q => ({ question_id: q.question_id, title: q.title, response_kind: q.response_kind,
       allow_free_text: q.allow_free_text, ...(q.is_secret ? { is_secret: true } : {}),
       options: q.options.map(o => ({ option_id: o.option_id, label: o.label })) })),

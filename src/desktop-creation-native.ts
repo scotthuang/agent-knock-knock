@@ -5,6 +5,7 @@ import { createDesktopCreationRpc, DesktopCreationRpcError, type DesktopCreation
 import type { DesktopCompatibility } from "./desktop-types.js";
 import { DESKTOP_20398_BUILD, DESKTOP_CREATION_BUILD } from "./desktop-compatibility.js";
 
+/** Recorded test evidence only; creation authorization comes from the live bundled protocol. */
 export const VERIFIED_DESKTOP_CREATION_BUILD = Object.freeze({
   ...DESKTOP_CREATION_BUILD, backendVersion: "0.162.0-alpha.17.2"
 });
@@ -16,7 +17,8 @@ export type DesktopCreationDispatchState = "not_sent" | "unknown" | "created";
 export class DesktopCreationNativeError extends Error {
   constructor(public readonly code: string, message: string,
     public readonly dispatchState: DesktopCreationDispatchState = "not_sent",
-    public readonly threadId?: string, public readonly requestId?: number, public readonly method?: string) {
+    public readonly threadId?: string, public readonly requestId?: number, public readonly method?: string,
+    public readonly rpcCode?: number) {
     super(message); this.name = "DesktopCreationNativeError";
   }
 }
@@ -24,9 +26,12 @@ export interface DesktopCreationProject { id: string; name: string; roots: strin
 export interface DesktopCreatedThread { threadId: string; cwd: string; projectId: string | null; title: string | null }
 export interface DesktopCreationMetadata {
   appPath: string; binaryPath: string; codexHome: string; backendVersion: string; appVersion: string; appBuild: string;
+  /** Historical test evidence, never permission to create a thread. */
+  testedBuild?: boolean;
 }
 export interface DesktopCreationNativeOptions {
   codexHome: string;
+  /** Discovery snapshot; the bundled process supplies the live identity evidence. */
   compatibility: DesktopCompatibility;
   appPath?: string;
   timeoutMs?: number;
@@ -107,22 +112,33 @@ function thread(value: unknown, expectedId?: string): DesktopCreatedThread {
     title: typeof t.name === "string" ? t.name : null };
 }
 
+async function requestProtocol(rpc: DesktopCreationRpc, method: string, params: Record<string, unknown>,
+  options?: { beforeDispatch?: () => void | Promise<void> }): Promise<unknown> {
+  try { return await rpc.request(method, params, options); }
+  catch (error) {
+    if (error instanceof DesktopCreationRpcError && error.code === "rpc_rejected"
+      && (error.rpcCode === -32601 || error.rpcCode === -32602)) {
+      throw new DesktopCreationNativeError("incompatible_desktop_protocol",
+        `Desktop ${method} does not support the required creation protocol; it will not be retried`,
+        method === "thread/start" && error.requestDispatched ? "unknown" : "not_sent",
+        undefined, error.requestId, error.method ?? method, error.rpcCode);
+    }
+    throw error;
+  }
+}
+
 /** Creates metadata only. A user task must be sent through the original Desktop owner after handoff. */
 export async function createDesktopCreationNative(options: DesktopCreationNativeOptions): Promise<DesktopCreationNative> {
   const codexHome = directory(options.codexHome, "Codex home");
   const inspected = (options.inspectApplication ?? inspectApplication)(options.appPath ?? "/Applications/ChatGPT.app");
-  const verified = VERIFIED_DESKTOP_CREATION_BUILDS.find(build => options.compatibility.version === build.version
-    && options.compatibility.build === build.build && inspected.appVersion === build.version
+  const testedBuild = VERIFIED_DESKTOP_CREATION_BUILDS.some(build => inspected.appVersion === build.version
     && inspected.appBuild === build.build && inspected.backendVersion === build.backendVersion);
-  if (!verified) {
-    fail("incompatible_desktop", "Desktop creation requires the verified application build and bundled backend");
-  }
-  const metadata = { ...inspected, codexHome };
+  const metadata = { ...inspected, codexHome, testedBuild };
   let rpc: DesktopCreationRpc;
   try { rpc = (options.rpcFactory ?? createDesktopCreationRpc)({ binaryPath: metadata.binaryPath, codexHome, timeoutMs: options.timeoutMs }); }
   catch { return fail("connection_failed", "Could not start the dedicated Desktop creation process"); }
   try {
-    const initialized = await rpc.request("initialize", { clientInfo: {
+    const initialized = await requestProtocol(rpc, "initialize", { clientInfo: {
       name: "agent-knock-knock-desktop-create", title: "AKK Desktop creation", version: "1"
     }, capabilities: { experimentalApi: true } });
     if (!record(initialized) || typeof initialized.codexHome !== "string"
@@ -144,7 +160,7 @@ class DesktopCreationConnection implements DesktopCreationNative {
     const all: DesktopCreationProject[] = [], cursors = new Set<string>(), ids = new Set<string>();
     let cursor: string | undefined;
     for (let page = 0; page < 20; page++) {
-      const result = await this.rpc.request("project/list", { limit: 100, ...(cursor ? { cursor } : {}) });
+      const result = await requestProtocol(this.rpc, "project/list", { limit: 100, ...(cursor ? { cursor } : {}) });
       if (!record(result) || !Array.isArray(result.data)
         || !(result.nextCursor == null || typeof result.nextCursor === "string" && !!result.nextCursor)) {
         fail("invalid_response", "Invalid Desktop project page");
@@ -168,7 +184,7 @@ class DesktopCreationConnection implements DesktopCreationNative {
     const matches = (await this.projects()).filter(entry => (!selector.projectId || entry.id === selector.projectId)
       && (!selector.projectName || entry.name === selector.projectName));
     if (matches.length !== 1) fail(matches.length ? "ambiguous_project" : "project_not_found", "Desktop project must match exactly one result");
-    const listed = matches[0], response = await this.rpc.request("project/read", { projectId: listed.id });
+    const listed = matches[0], response = await requestProtocol(this.rpc, "project/read", { projectId: listed.id });
     const exact = project(record(response) ? response.project : undefined);
     if (exact.id !== listed.id || exact.name !== listed.name
       || JSON.stringify([...exact.roots].sort()) !== JSON.stringify([...listed.roots].sort())) {
@@ -183,7 +199,7 @@ class DesktopCreationConnection implements DesktopCreationNative {
   }
   async read(threadId: string) {
     if (!uuid(threadId)) fail("invalid_argument", "A precise Desktop thread UUID is required");
-    return thread(await this.rpc.request("thread/read", { threadId, includeTurns: false }), threadId);
+    return thread(await requestProtocol(this.rpc, "thread/read", { threadId, includeTurns: false }), threadId);
   }
   close(): Promise<void> { return this.rpc.close(); }
   async create(input: DesktopCreationInput): Promise<DesktopCreatedThread> {
@@ -194,7 +210,7 @@ class DesktopCreationConnection implements DesktopCreationNative {
       const cwd = directory(input.cwd, "Working directory");
       validateCreationInput(input);
       if (input.projectId !== undefined) await this.resolveProject({ projectId: input.projectId, cwd });
-      const result = await this.rpc.request("thread/start", { cwd, projectId: input.projectId ?? null,
+      const result = await requestProtocol(this.rpc, "thread/start", { cwd, projectId: input.projectId ?? null,
         threadSource: "user", ephemeral: false,
         ...(input.approvalPolicy ? { approvalPolicy: input.approvalPolicy } : {}),
         ...(input.sandbox ? { sandbox: input.sandbox } : {})
@@ -204,7 +220,7 @@ class DesktopCreationConnection implements DesktopCreationNative {
       // Persist the acknowledged identity before naming/readback can fail or this process exits.
       await input.onCreated?.(created);
       if (created.cwd !== cwd || created.projectId !== (input.projectId ?? null)) fail("thread_target_mismatch", "Created Desktop thread has an unexpected project or working directory");
-      if (input.title) await this.rpc.request("thread/name/set", { threadId: created.threadId, name: input.title });
+      if (input.title) await requestProtocol(this.rpc, "thread/name/set", { threadId: created.threadId, name: input.title });
       const confirmed = await this.read(created.threadId);
       verifyReadback(confirmed, cwd, created.projectId, input.title);
       return confirmed;
@@ -232,10 +248,11 @@ function creationError(error: unknown, attempted: boolean, createdId?: string): 
   const dispatched = error instanceof DesktopCreationRpcError ? error.requestDispatched : attempted;
   const state: DesktopCreationDispatchState = createdId ? "created" : dispatched ? "unknown" : "not_sent";
   if (error instanceof DesktopCreationNativeError) {
-    return new DesktopCreationNativeError(error.code, error.message, state, createdId);
+    return new DesktopCreationNativeError(error.code, error.message, state, createdId, error.requestId, error.method, error.rpcCode);
   }
   return new DesktopCreationNativeError(error instanceof DesktopCreationRpcError ? error.code : "creation_failed",
     "Desktop creation did not complete; inspect the dispatch state before taking any further action", state, createdId,
     error instanceof DesktopCreationRpcError ? error.requestId : undefined,
-    error instanceof DesktopCreationRpcError ? error.method : undefined);
+    error instanceof DesktopCreationRpcError ? error.method : undefined,
+    error instanceof DesktopCreationRpcError ? error.rpcCode : undefined);
 }

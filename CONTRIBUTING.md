@@ -4,7 +4,7 @@ Thanks for taking the time to improve Agent Knock Knock.
 
 ## Development Setup
 
-Use Node.js 22.19 or newer; Node.js 24 is recommended. GitHub Actions runners are intentionally disabled during the current rapid-iteration phase, so pull requests must include the local verification results described below. The supported Node.js boundary remains part of release compatibility even though GitHub does not currently run a hosted matrix.
+Use Node.js 22.19 or newer; Node.js 24 is recommended. Automatic pull-request CI is intentionally disabled during the current rapid-iteration phase, so pull requests must include the local verification results described below. The separately reviewed ClawHub publication workflow runs only by manual dispatch. The supported Node.js boundary remains part of release compatibility even though GitHub does not currently run a hosted matrix.
 
 ```bash
 npm ci

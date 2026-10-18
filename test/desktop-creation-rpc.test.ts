@@ -67,6 +67,20 @@ test("creation transport fails closed on malformed output and unexpected server 
   }
 });
 
+test("creation RPC preserves native unsupported-method evidence without replaying the request", async () => {
+  const f = fixture();
+  const request = f.rpc.request("thread/start", { cwd: "/fixture" });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.sent.length, 1);
+  f.child.stdout.write(`${JSON.stringify({ id: f.sent[0].id,
+    error: { code: -32601, message: "Method not found" } })}\n`);
+  await assert.rejects(request, (error: unknown) => error instanceof DesktopCreationRpcError
+    && error.code === "rpc_rejected" && error.rpcCode === -32601
+    && error.requestDispatched && error.method === "thread/start" && error.requestId === f.sent[0].id);
+  assert.equal(f.sent.length, 1);
+  await f.rpc.close();
+});
+
 
 test("creation close cannot mistake its cleanup deadline for a confirmed child exit", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });

@@ -5,6 +5,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { createDesktopConversationId } from "../src/desktop-identity.js";
+import { desktopCapabilityProfile } from "../src/desktop-compatibility.js";
 import { desktopInteractionProjection } from "../src/desktop-interaction-projection.js";
 import { createAkkSemanticToolCatalog } from "../src/semantic-tool-runtime.js";
 import { bindSemanticToolRelayPath } from "../src/semantic-tool-relay.js";
@@ -174,13 +175,29 @@ test("Desktop controls route explicit model settings and exact cancellation with
 });
 
 
-test("Desktop manual-only Status exposes questions without granting a Host response offer", async t => {
+test("Desktop unverified application identity exposes questions without granting a Host response offer", async t => {
   const h = harness(t);
   h.reply({ ...status(), capabilities: { interaction_respond: false },
-    interaction_state: [desktopInteractionProjection(interaction, conversationId, undefined, false)] });
+    interaction_state: [desktopInteractionProjection(interaction, conversationId, undefined,
+      desktopCapabilityProfile({ version: "future", build: "unverified", applicationIdentityVerified: false }))] });
   const current = await h.execute("status", { conversation_id: conversationId });
   assert.equal(current.details.interaction_state[0].questions[0].title, "Choose a color");
   assert.deepEqual(current.details.interaction_state[0].available_actions, {});
+  const before = h.calls().length;
+  await assert.rejects(h.execute("respond_interaction", answer()), /Refresh AKK Status/);
+  assert.equal(h.calls().length, before);
+});
+
+test("Desktop unknown build exposes an unverified Host response offer but unknown interaction schemas remain unavailable", async t => {
+  const h = harness(t);
+  h.reply({ ...status(), interaction_state: [desktopInteractionProjection(interaction, conversationId, undefined, false)] });
+  const current = await h.execute("status", { conversation_id: conversationId });
+  assert.equal(current.details.interaction_state[0].response_contract_verified, false);
+  assert.equal(current.details.interaction_state[0].available_actions.respond.tool, "agent_knock_knock_respond_interaction");
+  h.reply({ source: "codex_desktop", conversation_id: conversationId, state: "sent" });
+  assert.equal((await h.execute("respond_interaction", answer())).isError, undefined);
+  h.reply({ ...status(), interaction_state: [{ ...status().interaction_state[0], kind: "unknown_question" }] });
+  assert.equal((await h.execute("status", { conversation_id: conversationId })).details.interaction_state, undefined);
   const before = h.calls().length;
   await assert.rejects(h.execute("respond_interaction", answer()), /Refresh AKK Status/);
   assert.equal(h.calls().length, before);

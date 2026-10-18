@@ -4,7 +4,7 @@ AKK can discover an existing local Codex Desktop conversation, send a task to
 its original Desktop owner, and monitor the exact native task for completion
 or attention. It can notify and answer asynchronous questions in the same active
 native task. It does not open a second CLI conversation from the same history.
-On the fully reviewed build, command/file approvals, blocking questions, session settings, and exact task interruption use that same original owner. Other builds have narrower capability profiles; unsupported controls remain manual.
+Command/file approvals, blocking questions, session settings, and exact task interruption use that same original owner. Starting in AKK 0.14.14, an application update alone does not disable these operations: AKK attempts its implemented native contracts and reports actual incompatibility.
 
 AKK 0.14.0 introduces these Desktop controls. See the [README](../README.md)
 for the first-task workflow and [OpenClaw installation](openclaw-operations.md#choose-one-installation-path)
@@ -12,29 +12,33 @@ for packaged and optional source installation.
 
 ## Version and platform evidence
 
-Desktop compatibility is checked per capability against an exact application
-version and build. It is not a minimum-version promise:
+The following matrix records tested combinations, not an allowlist or a minimum
+version. Starting in AKK 0.14.14, all implemented Desktop operations may be
+attempted on an unreviewed application/build. Actual application identity, protocol, owner, task,
+revision, input and interaction checks still apply. A connection or incompatible
+response fails explicitly; AKK does not switch to UI typing or blindly retry a
+possibly submitted operation.
 
-| macOS Desktop application | Send to live owner / Status / Watch | Native approvals, answers, model/permission changes, cancellation | New conversation |
-| --- | --- | --- | --- |
-| `26.1002.52244` / `13536` | Existing verified adapter | Existing verified adapter | Not enabled |
-| `26.1007.30912` / `20156` | Send profile for the new-conversation workflow; read-only observation retains exact owner/turn checks | Command/file approvals in AKK 0.14.7; blocking and asynchronous answers in AKK 0.14.8. Model/permission changes and cancellation remain unavailable | Available in AKK 0.14.5; see the creation boundary below |
-| `26.1007.71326` / `20398` | AKK 0.14.9: exact owner, Send, public progress and exact-task completion | Command/file approvals, blocking/asynchronous answers, effective model/permission settings and exact cancellation | Available in AKK 0.14.9; projectless creation and first-task handoff verified |
-| Other builds | Compatible read-only observations may work; no native writes are advertised | Not enabled | Not enabled |
+| macOS Desktop application | Existing-conversation evidence | Creation evidence |
+| --- | --- | --- |
+| `26.1002.52244` / `13536` | Send, Status, Watch, approvals, answers, model/permission settings and exact cancellation | Not live-verified |
+| `26.1007.30912` / `20156` | Send/Status/Watch, command/file approvals, blocking and asynchronous answers; settings and cancellation not live-verified | Project and projectless creation, original-owner first task |
+| `26.1007.71326` / `20398` | Send, public progress, exact completion, approvals, both answer forms, effective model/permission settings and cancellation | Projectless creation and original-owner first task |
+| Other builds | Attempt the implemented contracts; not claimed as live-verified | Attempt with verified bundle identity and a compatible real backend handshake; not claimed as live-verified |
 
-The `20156` profile does not inherit the old build's full native controls.
-AKK 0.14.6 exposes pending interactions but requires handling them in
-Desktop. AKK 0.14.7 adds an Approve action for recognized
-command/file requests, with explicit `approve_once` or `reject` decisions.
-AKK 0.14.8 enables blocking and asynchronous
-answers through separate `blockingAnswers` and `asyncAnswers` capability checks.
-On `20156`, settings, model/permission changes, and cancellation still require Desktop.
-Watch attention notifications follow the same per-operation boundary.
-`desktop_scan.send_contract_verified` reports the Send profile;
-`approval_contract_verified` reports the per-build approval profile;
-`write_contract_verified` continues to mean the full native-control profile.
-The Send profile and creation workflow are available starting in AKK 0.14.5.
-These question capabilities do not change the existing `13536` full-control profile or enable writes on unknown builds.
+`compatibility_policy: "attempt_native_contract"` describes this policy.
+Per-conversation `capability_verification` and `desktop_scan` fields
+`send_contract_verified`, `approval_contract_verified` and `write_contract_verified`
+remain evidence about the installed build, not permission to dispatch. In
+particular, a contract-verification value of `false` does not by itself make Send
+or another supported action unavailable. `application_identity_verified: false`
+is different: AKK could not verify the installed Codex application, so writes
+remain disabled. Use fresh action availability and the actual operation result.
+
+An operation can still be unavailable because no live owner is verified, the
+conversation is busy, a request has expired, or the native contract is not
+recognized. Missing API support is reported, not invented. Arbitrary cold
+loading/resume and a Desktop model catalog remain unsupported.
 
 The original fully reviewed application is macOS Codex Desktop `26.1002.52244`, build `13536`,
 bundle ID `com.openai.codex`, installed as `/Applications/ChatGPT.app`. These
@@ -46,10 +50,10 @@ uses that version.
 A read-only audit on 2026-10-10 reconfirmed those installed bundle values.
 [The runtime](../src/desktop-runtime.ts) currently reads that fixed application
 path on Darwin and requires the correct bundle ID.
-[The capability profiles](../src/desktop-compatibility.ts) require both
-the version and build to match exactly for each operation. This is **not a minimum version** or a
-promise of compatibility with later builds. An unreviewed build may still
-return a compatible read-only snapshot; that does not authorize native writes.
+[The capability profiles](../src/desktop-compatibility.ts) retain exact
+application/build matches as verification metadata. Dispatch uses the actual
+contract checks, independently of that historical matrix. This does not promise
+compatibility with every later protocol.
 
 The app's own `LSMinimumSystemVersion=13.0` metadata is not an AKK-verified
 minimum macOS version. No Desktop Linux/Windows or alternate installation-path
@@ -71,11 +75,11 @@ build, not the latest build available to every account.
 
 The bundled owner/follower IPC still uses the existing exact Send, approval,
 typed input, asynchronous steer, settings and interruption contracts. AKK adds
-an exact application/build profile; it does not permit future builds or remove
-the private socket, owner, revision, task or interaction checks. Creation also
-checks the installed app and bundled backend as one verified tuple. Mixing a
-known application version with another build or backend is rejected before the
-creation process starts.
+an exact application/build evidence profile. In 0.14.9 this was also a write
+allowlist; 0.14.14 removes that version gate while retaining the private socket,
+owner, revision, task and interaction checks. Creation verifies the actual
+bundled binary and its initialized backend identity instead of requiring a
+previously recorded version tuple.
 
 The dedicated real Desktop acceptance run verified:
 
@@ -117,9 +121,29 @@ The dedicated conversation finished idle in Default mode, with `gpt-6-astra`,
 not restore an inherited `null` effort; no user conversation or global default
 was changed to perform this validation.
 
+## Version-policy validation — AKK 0.14.14
+
+Isolated protocol regressions cover unreviewed app/build values for Send,
+creation, approvals, both answer forms, settings and cancellation, while keeping
+verification metadata false. They also cover actual unsupported responses,
+explicit application-identity failure, stale or mismatched identity, and zero
+replay after uncertain dispatch. These fixtures do not establish compatibility
+with a future installed Desktop version.
+
+A dedicated real run on build `20398` exercised creation and first-task handoff,
+Send/public progress/exact completion, command approval with native execution,
+Unicode asynchronous answers, a two-question typed answer, permission and
+model/effort/mode readback, exact interruption and a subsequent successful task.
+Six exact tasks settled: five completed and one intentionally interrupted.
+All nine attention/completion notifications were accepted once at an isolated
+local receiver. No user work conversation or external chat channel was used.
+The new test conversation finished idle in Default mode, with `gpt-6-astra`,
+`medium` effort and Read Only permissions. The initially inherited null effort
+is not restored by the explicit settings API; no user default was changed.
+
 ## Capability boundary
 
-| Operation | Behavior on full-control builds `13536` and `20398` |
+| Operation | Implemented behavior, subject to the actual native contract and state |
 | --- | --- |
 | List | Default to persisted expanded sidebar membership; offer the broader saved catalog with explicit `desktop_view: "history"`; retain unconnected rows and support search, project filtering, and pagination |
 | Status | Read a fresh snapshot from the exact local Desktop owner when available; report unknown live state when only metadata is available |
@@ -135,7 +159,7 @@ was changed to perform this validation.
 | Cancellation | Interrupt the exact selected native task; an old task ID never cancels a newer task |
 | Unwatch | Stop observation without cancelling or changing the Desktop task |
 | Existing-conversation cold loading, resume | Not supported by the Desktop adapter |
-| New conversation | Separate creation workflow; supported application/backend combinations are listed above |
+| New conversation | Separate creation workflow; bundle/backend identity, compatible initialization and original-owner handoff are required |
 
 No Desktop operation types a slash command or uses terminal activity as exact
 completion evidence. Existing terminal capabilities remain separate and retain
@@ -202,8 +226,8 @@ The Plan-mode change was dedicated test setup through native IPC, not evidence
 that AKK model/settings controls are enabled on this build. Permissions remained
 Read Only/on-request and the model was unchanged. The test conversation was
 restored to Default mode and left idle with no pending interaction. These question changes enable
-only the separately checked answer operations; settings and cancellation retain
-their existing build restrictions. The original isolated validation did not
+only the separately checked answer operations in AKK 0.14.8; the version
+restrictions on settings and cancellation were removed in 0.14.14. The original isolated validation did not
 install the package or send notifications to external chat channels.
 
 The native typed `item/tool/requestUserInput` form may have `isBlocking: false`.
@@ -242,8 +266,9 @@ conversation. A failed or uncertain create/load/send stage must preserve its
 record and exact identities; it must not silently create another conversation
 or replay a task. AKK 0.14.7 supports the command/file approvals described
 above on build `20156`; AKK 0.14.8 adds blocking
-and asynchronous question replies. Model/permission changes and cancellation
-remain unavailable on `20156`; the separate `20398` validation is recorded above.
+and asynchronous question replies. From AKK 0.14.14, model/permission changes
+and cancellation can also be attempted on `20156`, but this is not a new
+live-validation claim; the separate `20398` evidence is recorded above.
 
 ## Find and select a conversation
 
@@ -424,9 +449,10 @@ This adapter uses the app's private local IPC socket under the selected Codex
 home. The reviewed route discovers the current thread owner, follows its
 state stream, and submits through that owner. It validates socket ownership,
 message shapes, peer identity, thread identity, revision freshness, pending
-interactions, and the send receipt. Each write requires its own reviewed Desktop
-version/build capability profile. This IPC surface is not an official stable third-party API;
-an app upgrade may require another compatibility review.
+interactions, and the send receipt. Application/build profiles record tested
+evidence without blocking attempts on newer versions. This IPC surface is not an
+official stable third-party API; an incompatible protocol can still require an
+adapter update after an app upgrade.
 
 Catalog reads copy supported SQLite database/WAL files to a private temporary
 directory, validate the copy, and query it without opening the user's source

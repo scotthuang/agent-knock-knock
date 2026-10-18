@@ -1,5 +1,5 @@
 import { desktopInteractions, desktopObject, desktopRequestResponse } from "./desktop-request-interactions.js";
-import { desktopInteractionResponseVerified, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
+import { desktopInteractionResponseAttemptable } from "./desktop-compatibility.js";
 import { desktopCollaborationMode } from "./desktop-snapshot-details.js";
 import { DesktopIpcError, type DesktopObserveTarget, type DesktopOwner, type DesktopSnapshot,
   type DesktopRequestOptions, type DesktopRequestReceipt, type DesktopRequestInteraction, type DesktopModelSettings,
@@ -42,12 +42,11 @@ function unknown(error: unknown): never {
 const methods = { command_approval: "thread-follower-command-approval-decision", file_approval: "thread-follower-file-approval-decision",
   blocking_question: "thread-follower-submit-user-input" } as const;
 
-export async function respondDesktopRequest(options: DesktopRequestOptions, port: DesktopNativeOperationPort,
-  capabilities: DesktopCapabilityProfile | boolean = true): Promise<DesktopRequestReceipt> {
+export async function respondDesktopRequest(options: DesktopRequestOptions, port: DesktopNativeOperationPort): Promise<DesktopRequestReceipt> {
   const baseline = await observeOwner(options, port);
   const interaction = requestInteraction(baseline, options);
-  if (!desktopInteractionResponseVerified(capabilities, interaction.kind)) {
-    throw new DesktopIpcError("incompatible_desktop", "Desktop interaction responses are unverified for this build; answer in Desktop");
+  if (!desktopInteractionResponseAttemptable(interaction.kind)) {
+    throw new DesktopIpcError("invalid_response", "Desktop native request kind is unsupported; handle it in Desktop");
   }
   const response = desktopRequestResponse(interaction, options.response);
   await options.beforeDispatch?.(structuredClone(baseline));

@@ -129,9 +129,12 @@ not a new external-channel delivery claim. See the
 [validation record](codex-desktop-compatibility.md#build-20398-validation--akk-0149)
 for the exact effects and remaining limits.
 
-Creation requires one coherent application version/build/bundled-backend
-combination. A later version is not implicitly supported, and a metadata
-creation receipt cannot substitute for a live Desktop owner. The private IPC
+From AKK 0.14.14, creation attempts the installed Desktop’s bundled backend
+without requiring an exact tested version tuple. It verifies bundle identity,
+binary provenance and the real initialized backend identity/home, then checks
+the native creation response. Unsupported methods/parameters produce an
+explicit protocol error. A metadata creation receipt cannot substitute for
+a live Desktop owner, and an uncertain creation is never blindly replayed. The private IPC
 is not a stable public third-party interface; alternate installation paths,
 Windows/Linux and a running owner different from the installed bundle remain
 outside the verified boundary.
@@ -141,8 +144,8 @@ macOS Desktop `26.1007.30912`, build `20156`. It preserves exact owner and task
 checks for Status/Watch. AKK 0.14.7 adds command/file approvals with explicit
 allow-once or reject decisions. AKK 0.14.8 adds
 blocking and asynchronous question replies through the advertised Respond
-action. Permission/model changes and cancellation remain unavailable on this
-build; handle those actions in Desktop. Approval and question replies do not
+action. From AKK 0.14.14, permission/model changes and cancellation can also be
+attempted on this build; they have not been independently live-verified there. Approval and question replies do not
 change the permissions inherited when the conversation was created.
 
 The question changes passed dedicated real Desktop choice, free-text, and
@@ -151,8 +154,9 @@ original-task completion.
 Local callback acceptance does not establish external chat-channel delivery.
 
 The existing full native-control profile for Desktop `26.1002.52244`, build
-`13536`, is unchanged; it does not enable this new creation workflow. These are
-per-capability profiles, not a minimum version or future-version promise.
+`13536`, remains recorded. Creation can now be attempted there too, but is
+not live-verified on that build. These are evidence profiles, not a minimum
+version or a guarantee of future protocol compatibility.
 [Desktop compatibility](codex-desktop-compatibility.md) is the authoritative
 operation matrix.
 
