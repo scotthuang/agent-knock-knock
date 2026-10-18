@@ -95,8 +95,7 @@ test("CLI command execution uses scoped terminal and process dependencies", asyn
 
   try {
     const result = await executeCliCommand("list", {
-      all: true,
-      noApprovalScan: true,
+        noApprovalScan: true,
       storeDir: path.join(root, "store")
     }, {
       terminalControlProviderRegistry:

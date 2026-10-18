@@ -160,7 +160,7 @@ test("terminal-owned management and interactions keep their exact entry and acti
   }
 });
 
-test("hidden healthy terminal history stays separately paged with its original owner", () => {
+test("hidden terminal history is excluded from conversation List without mutating ownership", () => {
   const history = Array.from({ length: 90 }, (_, index) => ({ turn_id: `terminal-history-${index}`,
     status: "closed", callback_delivery: { status: "delivered" },
     available_actions: { status: { tool: "agent_knock_knock_status", input: { turn_id: `terminal-history-${index}` } } } }));
@@ -170,30 +170,9 @@ test("hidden healthy terminal history stays separately paged with its original o
   assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId]);
   assert.equal(result.conversations[0].managed, undefined);
   const current = compactAkkListModelProjection(result) as Record<string, any>;
-  assert.deepEqual(current.managed_turns, []);
-  assert.equal(current.pagination.managed_turns.history, history.length);
-  for (const listView of ["history", "all"]) {
-    let params: Record<string, unknown> | null = { listView };
-    const seen = new Set<string>();
-    let pages = 0;
-    do {
-      const page = compactAkkListModelProjection(result, params!) as Record<string, any>;
-      const serialized = JSON.stringify(page);
-      assert.doesNotThrow(() => JSON.parse(serialized));
-      assert.ok(Buffer.byteLength(serialized) <= HOST_LIST_MAX_BYTES);
-      assert.ok(hostListWeightedChars(serialized) <= HOST_LIST_MAX_WEIGHTED_CHARS);
-      for (const turn of page.managed_turns) {
-        assert.equal(turn.parent_conversation_id, terminalId);
-        assert.equal(seen.has(turn.turn_id), false);
-        seen.add(turn.turn_id);
-      }
-      params = page.pagination.next_args;
-      pages++;
-    } while (params && pages < 30);
-    assert.equal(params, null);
-    assert.ok(pages > 1);
-    assert.deepEqual(seen, new Set(history.map(turn => turn.turn_id)));
-  }
+  assert.equal(current.managed_turns, undefined);
+  assert.equal(current.pagination.total_available, 1);
+  assert.throws(() => compactAkkListModelProjection(result, { listView: "history" }), /watches/u);
   assert.equal((physical.managed as { history: unknown[] }).history.length, history.length, "Projection does not mutate stored history");
 });
 
@@ -275,7 +254,7 @@ test("preferred CLI targets remain reachable through bounded Host List pages alo
     assert.doesNotThrow(() => JSON.parse(json));
     assert.ok(Buffer.byteLength(json) <= HOST_LIST_MAX_BYTES);
     assert.ok(hostListWeightedChars(json) <= HOST_LIST_MAX_WEIGHTED_CHARS);
-    assert.deepEqual(page.codex_cli_watches, [], "Healthy history must not displace current selection targets");
+    assert.equal(page.codex_cli_watches, undefined, "Watch inventory belongs to the separate command");
     for (const row of page.conversations) {
       assert.equal(seen.has(row.conversation_id), false);
       seen.add(row.conversation_id);

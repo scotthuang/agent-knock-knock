@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { assertRealDirectory, atomicSaveJsonFile, isNodeError, readJsonFileNoFollow } from "./durable-json-file.js";
 import { assertStoreReadable, ensureDir, withStoreWriterLease } from "./store.js";
+import { assertWatchHistoryNotExpired, loadWatchHistoryReceipt, type WatchHistoryProvider } from "./watch-history-receipt.js";
 
 export interface NativeDurableRecord { id: string; revision: number; created_at: string }
 export interface NativeRecordRepository<T extends NativeDurableRecord> {
@@ -25,6 +26,7 @@ export function createNativeRecordRepository<T extends NativeDurableRecord>(opti
   acquire(lockPath: string): () => void;
   assert(value: unknown): asserts value is T;
   assertUpdate(previous: T, next: T): void;
+  historyProvider?: WatchHistoryProvider;
 }): NativeRecordRepository<T> {
   const root = path.join(options.storeDir, options.directory);
   const validId = new RegExp(`^${options.prefix}[a-zA-Z0-9_-]{8,128}$`);
@@ -36,6 +38,7 @@ export function createNativeRecordRepository<T extends NativeDurableRecord>(opti
     const file = statePath(id);
     if (!fs.existsSync(options.storeDir)) return undefined;
     assertStoreReadable(options.storeDir);
+    if (options.historyProvider) assertWatchHistoryNotExpired(options.storeDir, options.historyProvider, id);
     try {
       assertRealDirectory(root, "Codex native state"); privatePath(root, true); privatePath(file, false);
       const record = readJsonFileNoFollow(file, "Codex native state"); options.assert(record);
@@ -55,6 +58,7 @@ export function createNativeRecordRepository<T extends NativeDurableRecord>(opti
       if (entry.endsWith(".json.lock") || entry.endsWith(".json.lock.reclaim") || entry.startsWith(".") && entry.endsWith(".tmp")) continue;
       if (!entry.endsWith(".json")) throw new Error("Unknown Codex native state file");
       const id = entry.slice(0, -5); statePath(id);
+      if (options.historyProvider && loadWatchHistoryReceipt(options.storeDir, options.historyProvider, id)) continue;
       try {
         const record = readJsonFileNoFollow(file, "Codex native state"); options.assert(record);
         if (record.id !== id) throw new Error("Codex native record filename identity mismatch");

@@ -398,7 +398,7 @@ test("unified terminal conversation targets reject competing identities before a
 });
 
 
-test("unified List presents CLI and Desktop once while retaining actions, offline rows and Watches", () => {
+test("unified List presents CLI and Desktop once with actions and offline rows but no Watches", () => {
   const otherTerminal = "terminal:v2:herdr:claude:default:w1:p4:5678";
   const terminal = { id: otherTerminal, conversation_id: otherTerminal, source: "terminal", agent: "claude",
     route_preference: "terminal", route_status: "terminal_only", available_actions: {
@@ -439,7 +439,7 @@ test("unified List presents CLI and Desktop once while retaining actions, offlin
   for (const legacy of ["terminals", "codex_cli_sessions", "desktop_sessions"]) assert.equal(legacy in result, false);
   assert.deepEqual(result.conversations.map(row => row.surface), ["cli", "cli", "desktop"]);
   assert.equal(result.conversations[0].agent, "codex");
-  assert.equal(result.projection.version, 3);
+  assert.equal(result.projection.version, 4);
   assert.equal(result.conversations[0].connected, true);
   assert.equal(result.conversations[2].connection_state, "no_live_owner");
   for (const field of ["source", "route_preference", "route_status", "terminal_aliases", "terminal_controls", "backend_version", "connection_state"]) {
@@ -458,16 +458,16 @@ test("unified List presents CLI and Desktop once while retaining actions, offlin
   assert.match(result.conversations[2].manual_action, /Open this conversation/u);
   assert.equal(result.desktop_scan.history_candidates, 341);
   assert.deepEqual(result.desktop_scan.limitations, raw.desktop_scan.limitations);
-  assert.equal(result.codex_cli_watches[0].watch_id, watchId);
-  assert.equal(result.desktop_watches.length, 1);
-  assert.equal(result.terminal_watches.length, 1);
+  assert.equal(result.codex_cli_watches, undefined);
+  assert.equal(result.desktop_watches, undefined);
+  assert.equal(result.terminal_watches, undefined);
   assert.equal("conversation_routing" in result, false);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_/u);
   const command = formatAkkListCommandResult(raw);
   assert.match(command, /AKK conversations \(3; 2 CLI, 1 Desktop\)/u);
   assert.match(command, /CLI conversations:/u);
   assert.match(command, /Desktop conversations:/u);
-  assert.match(command, /Watches \(3; observations, not additional conversations\)/u);
+  assert.doesNotMatch(command, /Watches \(/u);
   assert.equal(command.split("Shared work").length - 1, 1);
   assert.match(command, /Unloaded sidebar member/u);
   assert.doesNotMatch(command, /associated terminal controls|Direct CLI|live terminals|codex_backend|terminal connection/u);

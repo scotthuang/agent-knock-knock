@@ -94,6 +94,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.deepEqual(sorted(registeredTools), sorted(contractedTools));
   assert.deepEqual(registeredTools, [
     "agent_knock_knock_list",
+    "agent_knock_knock_watches",
     "agent_knock_knock_watch",
     "agent_knock_knock_unwatch",
     "agent_knock_knock_list_resumable_threads",
@@ -125,7 +126,7 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "5826c85ec127a68bcf4de336d1d4440e0fbf6652d8340facd8c86938c4454dd1"
+    "e088b62731c1d5bdd815f59af60cd74930869b49982b6039c7a524f0461208b5"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.match(
@@ -139,11 +140,12 @@ test("OpenClaw runtime registrations match the published manifest", () => {
 
   const listTool = toolDefinitions.get("agent_knock_knock_list");
   assert.ok(listTool);
-  assert.match(listTool.description ?? "", /List CLI\/Desktop conversations and separate Watches/u);
-  assert.match(listTool.description ?? "", /Only exact aliases coalesce; unassociated targets stay selectable/u);
+  assert.match(listTool.description ?? "", /List currently discoverable CLI\/Desktop conversations only/u);
+  assert.match(listTool.description ?? "", /No Watch or managed history is included/u);
+  assert.match(listTool.description ?? "", /agent_knock_knock_watches/u);
+  assert.match(listTool.description ?? "", /Keep unconnected Desktop rows and limitations/u);
   assert.match(listTool.description ?? "", /available_actions/u);
   assert.match(listTool.description ?? "", /action_inputs/u);
-  assert.match(listTool.description ?? "", /agent-knock-knock skill/u);
   assert.match(listTool.description ?? "", /mutations revalidate privately/u);
   assert.ok(
     (listTool.description ?? "").length < 500,

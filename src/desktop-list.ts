@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { DesktopRuntime } from "./desktop-runtime.js";
 import { desktopCapabilityProfile } from "./desktop-compatibility.js";
-import { desktopSessionProjection, desktopTaskProjection } from "./desktop-public-projection.js";
+import { desktopSessionProjection } from "./desktop-public-projection.js";
 import { DesktopIpcError } from "./desktop-types.js";
 
 export async function listDesktopSessions(runtime: DesktopRuntime, options: Record<string, unknown>) {
@@ -32,10 +32,7 @@ export async function listDesktopSessions(runtime: DesktopRuntime, options: Reco
       }
     }
   }));
-  let watches: Record<string, unknown>[] = []; let watchError: string | undefined;
-  try { watches = runtime.tasks.list().map(task => desktopTaskProjection(task, desktopCapabilityProfile(runtime.compatibility))); }
-  catch { watchError = "desktop_watch_store_unavailable"; }
-  return { desktop_sessions: sessions, desktop_watches: watches,
+  return { desktop_sessions: sessions,
     desktop_scan: { view, total_candidates: page.total, history_candidates: page.historyTotal,
       returned: sessions.length, next_cursor: page.nextCursor,
       sidebar_status: page.sidebar?.status, sidebar_mode: page.sidebar?.mode,
@@ -45,7 +42,7 @@ export async function listDesktopSessions(runtime: DesktopRuntime, options: Reco
       application_version: runtime.compatibility.version, application_build: runtime.compatibility.build,
       write_contract_verified: desktopCapabilityProfile(runtime.compatibility).nativeControls,
       approval_contract_verified: desktopCapabilityProfile(runtime.compatibility).approvals,
-      send_contract_verified: desktopCapabilityProfile(runtime.compatibility).send, watch_error: watchError,
+      send_contract_verified: desktopCapabilityProfile(runtime.compatibility).send,
       sources: page.sources, membership_is_not_live_identity: true } };
 }
 function text(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }

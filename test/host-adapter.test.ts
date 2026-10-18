@@ -13,6 +13,7 @@ import { listParameters } from "../src/semantic-tool-schemas.js";
 
 const expectedToolNames = [
   "agent_knock_knock_list",
+  "agent_knock_knock_watches",
   "agent_knock_knock_watch",
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
@@ -285,7 +286,8 @@ process.stdout.write("{}");
       "reconcile-watches:lifecycle-original",
       "reconcile-desktop-watches:lifecycle-original",
       "reconcile-codex-native-watches:lifecycle-original",
-      "reconcile-claude-native-watches:lifecycle-original"
+      "reconcile-claude-native-watches:lifecycle-original",
+      "prune-watch-history:lifecycle-original"
     ]
   );
 });

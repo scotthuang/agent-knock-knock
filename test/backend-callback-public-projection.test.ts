@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { backendCallbackPublicProjection } from "../src/backend-callback-public-projection.js";
 import type { BackendRecoveryNotification } from "../src/backend-task-recovery.js";
-import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
+import { projectWatchList } from "../src/watch-list-projection.js";
 import { formatRetryCallbackCommandResult } from "../src/semantic-tool-presentation.js";
 import { formatDesktopCommandResult } from "../src/desktop-command-presentation.js";
 import { formatCodexNativeCommandResult } from "../src/semantic-tool-command-helpers.js";
@@ -30,12 +30,11 @@ test("uncertain callback remains distinct from task completion, earlier acceptan
   assert.equal(result.callback_notifications[1].request_phase, "submitted");
   assert.equal(result.channel_delivery_state, "unknown");
   for (const state of [result, project([accepted, uncertain], false, true)]) assert.equal(state.callback_state, "uncertain");
-  const listed = compactAkkListModelProjection({ codex_cli_watches: [result], desktop_watches: [result], claude_cli_watches: [result] });
-  for (const key of ["codex_cli_watches", "desktop_watches", "claude_cli_watches"]) {
-    const row = (listed[key] as Record<string, any>[])[0];
-    assert.equal(row.callback_state, "uncertain"); assert.equal(row.channel_delivery_state, "unknown");
-    assert.equal(row.callback_notifications[1].request_dispatched, true);
-  }
+  const listed = projectWatchList({ watches: [result], managed_turns: [] });
+  const row = (listed.watches as Record<string, any>[])[0];
+  assert.equal(row.callback_state, "uncertain"); assert.equal(row.channel_delivery_state, "unknown");
+  assert.deepEqual(row.callback_notifications.statuses, { accepted: 1, uncertain: 1 });
+  assert.deepEqual(row.action_inputs.status.arguments, { watch_id: result.watch_id });
   for (const text of [JSON.stringify(result), JSON.stringify(listed)]) assert.doesNotMatch(text, /private-/u);
   for (const text of [formatCodexNativeCommandResult(result, "status"), formatDesktopCommandResult(result, "status")]) {
     assert.match(text, /callback state: uncertain/u);
@@ -91,7 +90,7 @@ test("a native receipt without verified history exposes pending observation, nev
   assert.equal(pending.callback_expected, true); assert.equal(pending.resend_allowed, false);
   assert.match(pending.monitor_note!, /do not resend or add another Watch/u);
   assert.doesNotMatch(JSON.stringify(pending), /private-prompt/u);
-  const listed = compactAkkListModelProjection({ codex_cli_watches: [pending] }).codex_cli_watches as Record<string, unknown>[];
+  const listed = projectWatchList({ watches: [pending], managed_turns: [] }).watches as Record<string, unknown>[];
   assert.equal(listed[0].submission_state, "acknowledged"); assert.equal(listed[0].native_receipt_turn_id, "receipt-turn");
   assert.equal(listed[0].monitor_note, undefined);
   const summary = formatCodexNativeCommandResult(pending, "Send");

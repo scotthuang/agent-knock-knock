@@ -12,6 +12,7 @@ import {
 
 const expectedToolNames = [
   "agent_knock_knock_list",
+  "agent_knock_knock_watches",
   "agent_knock_knock_watch",
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",
@@ -220,7 +221,7 @@ process.stdout.write(JSON.stringify({
   };
   assert.deepEqual(details.projection, {
     schema: "agent-knock-knock/host-list-compact",
-    version: 3,
+    version: 4,
     skill: "agent-knock-knock",
     action_contract_version: 31
   });
@@ -505,11 +506,13 @@ test("host bridge relay leaves the embedding Host event loop responsive", async 
   const result = await resultPromise;
   const listed = result.details as Record<string, any>;
   assert.deepEqual(listed.projection, {
-    schema: "agent-knock-knock/host-list-compact", version: 3, skill: "agent-knock-knock"
+    schema: "agent-knock-knock/host-list-compact", version: 4, skill: "agent-knock-knock"
   });
-  for (const field of ["terminals", "terminal_watches", "unavailable_managed_turns"]) assert.deepEqual(listed[field], []);
+  assert.deepEqual(listed.terminals, []);
+  assert.equal(listed.terminal_watches, undefined);
+  assert.equal(listed.unavailable_managed_turns, undefined);
   assert.equal(listed.pagination.has_more, false);
-  assert.equal(listed.watch_summary.total, 0);
+  assert.equal(listed.watch_summary, undefined);
 });
 
 function createRegistry(

@@ -1,3 +1,4 @@
+import { withoutListHistory } from "./conversation-list.js";
 import { backendCallbackSummaryLines } from "./backend-callback-public-projection.js";
 import { isClaudeNativeConversationId, parseClaudeNativeConversationId } from "./claude-native-identity.js";
 import { formatDesktopCommandResult } from "./desktop-command-presentation.js";
@@ -216,6 +217,7 @@ export type AkkCommand =
   | { action: "help" }
   | { action: "doctor" }
   | { action: "list" }
+  | { action: "watches" }
   | { action: "watch"; terminalId: string }
   | { action: "unwatch"; watchId: string }
   | { action: "list-resumable-threads"; terminalId: string }
@@ -281,7 +283,12 @@ function parseAkkLifecycleCommand(
   rest: string
 ): AkkCommand | undefined {
   if (action === "list" || action === "ls" || action === "tasks") {
+    if (rest.trim()) throw new Error("Usage: /akk list; use /akk watches for monitoring and history");
     return { action: "list" };
+  }
+  if (action === "watches") {
+    if (rest.trim()) throw new Error("Usage: /akk watches (use agent_knock_knock_watches for filters and pagination)");
+    return { action: "watches" };
   }
   if (action === "doctor" || action === "check") {
     if (rest.trim()) {
@@ -578,6 +585,7 @@ export function akkUsageText(): string {
     "/akk clear-thread <exact-terminal-id>",
     "/akk resume-thread <exact-terminal-id> [uuid|previous|number|@short-id]",
     "/akk doctor",
+    "/akk watches",
     "/akk status [turn-selector|terminal-watch-id]",
     "/akk respond <turn-selector>: <answer>",
     "/akk approve <turn-selector> [approve_once|reject]",
@@ -656,6 +664,7 @@ function formatAkkTerminalControlLines(terminal: Record<string, unknown>): strin
 }
 
 export function formatAkkListCommandResult(result: Record<string, unknown>): string {
+  result = withoutListHistory(result);
   if (Array.isArray(result.conversations)) return formatAkkConversationList(result);
   const conversations = Array.isArray(result.conversations) ? arrayValue(result.conversations) : undefined;
   const nativeSessions = conversations?.filter(row => row.source === "codex_cli" || row.source === "claude_cli") ?? [...arrayValue(result.codex_cli_sessions), ...arrayValue(result.claude_cli_sessions)];
@@ -672,7 +681,7 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
     terminalWatches.length === 0 &&
     unavailableManagedTurns.length === 0
   ) {
-    return "AKK found no live terminals or unavailable managed turns.";
+    return "AKK found no currently discoverable conversations.";
   }
 
   const terminalLines = terminals.slice(0, 20).flatMap(formatAkkTerminalControlLines);
@@ -685,7 +694,7 @@ export function formatAkkListCommandResult(result: Record<string, unknown>): str
 
   const heading = terminalWatches.length > 0
     ? `AKK terminals (${terminals.length} live, ${terminalWatches.length} terminal watches, ${unavailableManagedTurns.length} unavailable managed turns):`
-    : `AKK terminals (${terminals.length} live, ${unavailableManagedTurns.length} unavailable managed turns):`;
+    : `AKK terminals (${terminals.length} live):`;
 
   return [
     conversations ? `AKK conversations (${conversations.length}); select a conversation_id and AKK chooses the transport:` : heading,
@@ -1345,10 +1354,12 @@ export function buildAkkCommandCliArgs(
   switch (command.action) {
     case "list":
       return withOptionalArgs(
-        ["list", "--reconcile"],
+        ["list"],
         ["--store-dir", storeDir],
         ["--idle-timeout-minutes", idleTimeoutMinutes]
       );
+    case "watches":
+      return withOptionalArgs(["watches"], ["--store-dir", storeDir]);
     case "watch": {
       const openclawSession =
         (isDirectCliConversationId(command.terminalId) ? requiredNativeController(context.sessionKey) : nonEmptyString(context.sessionKey)) ??
@@ -1956,4 +1967,18 @@ function orphanedTerminalDispatchRecovery(
   return orphaned
     ? nonEmptyString(orphaned.recovery)
     : undefined;
+}
+
+/** Bounded Watch list text; exact Status retains the detailed recovery contract. */
+export function formatAkkWatchesCommandResult(result: Record<string, unknown>): string {
+  const rows = [...arrayValue(result.watches), ...arrayValue(result.managed_turns)];
+  const window = recordValue(result.window);
+  const pagination = recordValue(result.pagination);
+  return [
+    `AKK monitoring (last ${window?.hours ?? 24} hours, plus older unresolved records):`,
+    ...rows.map(row => `${row.kind === "managed_turn" ? "Managed Turn" : "Watch"} ${row.watch_id ?? row.turn_id}: ${row.status ?? "unknown"}${row.callback_state ? `; callback=${row.callback_state}` : ""}${row.outside_window ? "; older unresolved" : ""}`),
+    ...(!rows.length ? ["No matching retained observations."] : []),
+    ...(pagination?.has_more ? [`More records: agent_knock_knock_watches ${JSON.stringify(pagination.next_args)}`] : []),
+    "Read exact Status for actions. Task completion and controller callback acceptance do not prove channel delivery."
+  ].join("\n");
 }

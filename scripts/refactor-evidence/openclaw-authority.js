@@ -71,6 +71,7 @@ function validateSemanticSchemasAndCommands(repoRoot, roles) {
       "sendParameters",
       "respondParameters",
       "listParameters",
+      "watchesParameters",
       "watchParameters",
       "unwatchParameters",
       "listResumableThreadsParameters",
@@ -351,7 +352,8 @@ function validateSemanticPrivateAuthority(repoRoot, roles) {
       "setModelParameters",
       "statusParameters",
       "unwatchParameters",
-      "watchParameters"
+      "watchParameters",
+      "watchesParameters"
     ],
     "semantic tool-runtime role"
   );

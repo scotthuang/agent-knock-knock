@@ -42,11 +42,13 @@ they are not converted into a permissive activity fallback.
 Ordinary List/Status remains observation-only and does not create either Watch.
 Existing managed tasks and user terminals are not restarted by this policy.
 
-The store writer protocol is 9. Outer Terminal Watch schema remains 3; new
+The store writer protocol is 10. Outer Terminal Watch schema remains 3; new
 paginated anchors and request-correlated activity anchors use version 2. Earlier
 anchors remain readable. The store upgrade changes the writer fence without
 rewriting existing private Watch records, and older writers cannot mutate the
-upgraded store.
+upgraded store. Protocol 10 also fences Watch deletion receipts: a pruned
+completed request cannot be recreated by an older writer. Uncertain or pending
+notifications are never eligible for history cleanup.
 
 Read errors expose only the operation stage and parsed actual/expected backend
 versions. Full server responses, task text and raw RPC errors are not copied into

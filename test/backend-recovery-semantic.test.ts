@@ -10,7 +10,7 @@ import { createAkkSemanticToolCatalog } from "../src/semantic-tool-runtime.js";
 import { bindSemanticToolRelayPath } from "../src/semantic-tool-relay.js";
 import { buildAkkCommandCliArgs, parseAkkCommand } from "../src/semantic-tool-command-helpers.js";
 import { closeParameters, recoverParameters, renewParameters, retryCallbackParameters } from "../src/semantic-tool-schemas.js";
-import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
+import { projectWatchList } from "../src/watch-list-projection.js";
 
 const watches = ["codex-cli-watch:original-task-123", "desktop-watch:original-task-123"];
 const context = { sessionKey: "originating-controller", sessionId: "controller-incarnation" };
@@ -155,26 +155,23 @@ test("raw backend recovery rejects conversation mutation before any backend disc
   assert.equal(discoveries, 0);
 });
 
-test("compact backend watches retain manual recovery state and notification identity without private authority", () => {
+test("Watch inventory retains recovery state and exact Status references without private authority", () => {
   const row = { watch_id: watches[0], turn_id: watches[0], task_kind: "send", status: "blocked", management_state: "managed", observation_state: "unreachable",
     renewal_count: 2, callback_in_flight: false, retryable_callback_ids: ["notification-one", "notification-two"],
     callback_notifications: [{ id: "notification-one", status: "failed", retryable: true, attempts: 1, callback_route: { secret: "private" } }],
     available_actions: { recover: { tool: "agent_knock_knock_recover", arguments: { watch_id: watches[0] } },
       retry_callback: { tool: "agent_knock_knock_retry_callback", arguments: { watch_id: watches[0], notification_id: "notification-one" } } } };
-  const result = compactAkkListModelProjection({ codex_cli_watches: [row], desktop_watches: [{ ...row, watch_id: watches[1], turn_id: watches[1] }] });
-  for (const key of ["codex_cli_watches", "desktop_watches"]) {
-    const projected = (result[key] as Record<string, any>[])[0];
+  const result = projectWatchList({ watches: [row, { ...row, watch_id: watches[1], turn_id: watches[1] }], managed_turns: [] });
+  for (const projected of result.watches as Record<string, any>[]) {
     assert.equal(projected.management_state, "managed");
     assert.equal(projected.observation_state, "unreachable");
     assert.ok(projected.turn_id);
     assert.equal(projected.task_kind, "send");
     assert.equal(projected.renewal_count, 2);
     assert.equal(projected.callback_in_flight, false);
-    assert.deepEqual(projected.retryable_callback_ids, ["notification-one", "notification-two"]);
-    assert.equal(projected.available_actions.recover, true);
-    assert.equal(projected.action_inputs.retry_callback.arguments.notification_id, "notification-one");
-    assert.equal(projected.callback_notifications[0].id, "notification-one");
-    assert.equal(projected.callback_notifications[0].retryable, true);
+    assert.deepEqual(projected.available_actions, { status: true });
+    assert.deepEqual(projected.action_inputs.status.arguments, { watch_id: projected.watch_id });
+    assert.deepEqual(projected.callback_notifications.statuses, { failed: 1 });
     assert.equal(JSON.stringify(projected).includes("private"), false);
   }
   const text = formatBackendRecoveryCommandResult({ ...row, callback_notifications: [{ notification_id: "notification-one", status: "retryable_failure" }] }, "retry-callback")!;

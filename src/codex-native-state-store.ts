@@ -151,7 +151,7 @@ export function assertCodexNativeTaskRecord(value: unknown): asserts value is Co
   assertTaskNotifications(record);
 }
 export function createCodexNativeStateStore(storeDir: string, locks: { acquire(lockPath: string): () => void }): CodexNativeStateRepository {
-  return createNativeRecordRepository({ storeDir, directory: "codex-native-tasks", prefix: "codex-cli-watch:",
+  return createNativeRecordRepository({ storeDir, directory: "codex-native-tasks", prefix: "codex-cli-watch:", historyProvider: "codex",
     acquire: locks.acquire, assert: assertCodexNativeTaskRecord,
     assertUpdate: (previous, next) => {
       for (const key of ["id", "watch_id", "native_id", "target", "controller_session", "kind", "created_at", "callback_route"] as const) {

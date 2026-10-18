@@ -76,7 +76,7 @@ function assertNotificationIdentity(r: ClaudeNativeTaskRecord, n: CodexNativeNot
     envelope.source.watch_id !== r.id || envelope.source.native_id !== r.native_id || envelope.event.id !== n.id) throw new Error("Claude callback identity mismatch");
 }
 export function createClaudeNativeStateStore(storeDir: string, locks: { acquire(lock: string): () => void }): ClaudeNativeStateRepository {
-  return createNativeRecordRepository({ storeDir, directory: "claude-native-tasks", prefix: "claude-cli-watch:",
+  return createNativeRecordRepository({ storeDir, directory: "claude-native-tasks", prefix: "claude-cli-watch:", historyProvider: "claude",
     acquire: locks.acquire, assert: assertClaudeNativeTaskRecord,
     assertUpdate(previous, next) {
       for (const key of ["id", "watch_id", "native_id", "target", "controller_session", "kind", "created_at", "callback_route"] as const) {

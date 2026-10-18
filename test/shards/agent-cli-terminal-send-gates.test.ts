@@ -781,7 +781,7 @@ test("background send to raw terminal id creates managed callback conversation",
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const listedParsed = JSON.parse(listed.stdout);
     assert.equal(listedParsed.reconciliation.closed, 1);
-    assert.deepEqual(listedParsed.unavailable_managed_turns, []);
+    assert.equal(listedParsed.unavailable_managed_turns, undefined);
     const closedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(closedState.status, "closed");
     assert.equal(closedState.close_reason, "idle timeout after 1 minutes");

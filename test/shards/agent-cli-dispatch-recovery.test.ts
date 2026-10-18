@@ -1252,7 +1252,6 @@ test("monitor supervision repairs only an exact legacy idle collateral stall whi
       "list",
       "--store-dir",
       storeDir,
-      "--all",
       ...terminalFixtures
     ], testEnv);
     assert.equal(before.status, 0, before.stderr || before.stdout);
@@ -1385,7 +1384,6 @@ test("monitor supervision repairs only an exact legacy idle collateral stall whi
       "list",
       "--store-dir",
       storeDir,
-      "--all",
       ...terminalFixtures
     ], testEnv);
     assert.equal(after.status, 0, after.stderr || after.stdout);

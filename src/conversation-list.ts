@@ -79,3 +79,19 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
     conversation_routing: { policy: "backend_first", exact_associations: association.associations.length + claudeAssociations.length,
     unresolved_terminals: association.unassociated.filter(item => terminals.some(t => t.id === item.terminalId && t.agent === "codex")).length } };
 }
+
+/** Remove historical output only after exact association and blocking checks have run. */
+export function withoutListHistory(value: Row, keepManagedCounts = false): Row {
+  const result = { ...value };
+  for (const key of ["terminal_watches", "codex_cli_watches", "claude_cli_watches", "desktop_watches", "unavailable_managed_turns", "managed_turns", "watch_summary"]) delete result[key];
+  for (const field of ["conversations", "terminals", "codex_cli_sessions", "claude_cli_sessions", "terminal_controls", "control_records"]) {
+    if (Array.isArray(result[field])) result[field] = (result[field] as Row[]).map(row => withoutListHistory(row, keepManagedCounts));
+  }
+  if (result.managed && typeof result.managed === "object" && !Array.isArray(result.managed)) {
+    const managed = { ...result.managed as Row };
+    for (const key of ["recent_turn", "history", "hidden_turn_count"]) delete managed[key];
+    if (!keepManagedCounts) delete managed.turn_count;
+    result.managed = managed;
+  }
+  return result;
+}

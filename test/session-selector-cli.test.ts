@@ -59,16 +59,14 @@ test("CLI omission and short refs resolve one actionable managed session", async
       agent: "codex"
     });
     const listed = await runCli([
-      "list",
+      "watches",
       "--managed-only",
       "--store-dir",
       storeDir
     ]);
-    assert.deepEqual(listed.terminals, []);
-    assert.deepEqual(listed.desktop_sessions, []);
-    assert.equal(listed.desktop_scan.application_version, "unavailable");
-    assert.equal(listed.unavailable_managed_turns.length, 1);
-    const managedTurn = listed.unavailable_managed_turns[0];
+    assert.deepEqual(listed.watches, []);
+    assert.equal(listed.managed_turns.length, 1);
+    const managedTurn = listed.managed_turns[0];
     assert.equal(managedTurn.source, "managed_turn");
     assert.match(managedTurn.short_ref, /^@[0-9a-f]{10}$/u);
     assert.equal(
@@ -179,18 +177,17 @@ test("unavailable managed turns expose only pane-independent actions", async () 
       saveState(created.paths.statePath, state);
 
       const listed = await runCli([
-        "list",
-        "--all",
+        "watches",
         "--managed-only",
         "--store-dir",
         storeDir
       ]);
       assert.equal(
-        listed.unavailable_managed_turns.length,
+        listed.managed_turns.length,
         1,
         testCase.status
       );
-      const entry = listed.unavailable_managed_turns[0];
+      const entry = listed.managed_turns[0];
       assert.equal(entry.source, "managed_turn", testCase.status);
       assert.deepEqual(
         Object.keys(entry.available_actions),
@@ -311,12 +308,12 @@ test("unavailable managed Claude turns never advertise terminal approval", async
       saveState(created.paths.statePath, state);
 
       const listed = await runCli([
-        "list",
+        "watches",
         "--managed-only",
         "--store-dir",
         storeDir
       ]);
-      const entry = listed.unavailable_managed_turns[0];
+      const entry = listed.managed_turns[0];
       assert.deepEqual(
         Object.keys(entry.available_actions),
         ["status", "close"],
@@ -477,7 +474,6 @@ test("legacy unsupported executors do not break live terminal short refs", async
     const managedOnly = await runCli([
       "list",
       "--reconcile",
-      "--all",
       "--managed-only",
       "--idle-timeout-minutes",
       "1",
@@ -486,18 +482,17 @@ test("legacy unsupported executors do not break live terminal short refs", async
     ]);
     assert.equal(managedOnly.reconciliation.closed, 1);
     assert.deepEqual(managedOnly.terminals, []);
-    assert.deepEqual(managedOnly.unavailable_managed_turns, []);
+    assert.equal(managedOnly.unavailable_managed_turns, undefined);
     assert.equal("delegated" in managedOnly, false);
     assert.equal("tasks" in managedOnly, false);
 
     const listed = await runCliWithCodexInventory([
       "list",
-      "--all",
       "--store-dir",
       storeDir,
       ...runtimeArgs
     ], { codexPid, nativeIdentity, workspace });
-    assert.deepEqual(listed.unavailable_managed_turns, []);
+    assert.equal(listed.unavailable_managed_turns, undefined);
     assert.equal(listed.terminals.length, 1);
     assert.match(listed.terminals[0].short_ref, /^@[0-9a-f]{10}$/u);
     const sendAction = listed.terminals[0].available_actions.send;
@@ -602,7 +597,6 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
 
     const listed = await runCliWithCodexInventory([
       "list",
-      "--all",
       "--store-dir",
       storeDir,
       ...runtimeArgs
@@ -613,11 +607,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
       session_id: null,
       session_short_ref: null,
       current_turn: null,
-      recent_turn: null,
-      turn_count: 0,
-      hidden_turn_count: 0,
-      session_count: 0,
-      history: []
+      session_count: 0
     });
     const sendAction = listed.terminals[0].available_actions.send;
     assert.equal(sendAction.scope, "terminal_user_explicit");
@@ -627,7 +617,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
       "string"
     );
     assert.equal(sendAction.arguments.session_id, undefined);
-    assert.deepEqual(listed.unavailable_managed_turns, []);
+    assert.equal(listed.unavailable_managed_turns, undefined);
 
     const sent = await runCliWithCodexInventory([
       "send",
@@ -712,9 +702,9 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
     assert.equal(terminal.management_state, "managed");
     assert.equal(terminal.managed.current_turn.id, managedId);
     assert.equal(terminal.managed.current_turn.source, "managed_turn");
-    assert.equal(terminal.managed.recent_turn, null);
-    assert.equal(terminal.managed.turn_count, 1);
-    assert.equal(terminal.managed.hidden_turn_count, 0);
+    assert.equal(terminal.managed.recent_turn, undefined);
+    assert.equal(terminal.managed.turn_count, undefined);
+    assert.equal(terminal.managed.hidden_turn_count, undefined);
     assert.equal(terminal.available_actions.send, undefined);
     assert.deepEqual(
       terminal.available_actions.status.arguments,
@@ -724,7 +714,7 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
       terminal.available_actions.cancel.arguments,
       { turn_id: managedId }
     );
-    assert.deepEqual(listed.unavailable_managed_turns, []);
+    assert.equal(listed.unavailable_managed_turns, undefined);
 
     const approvalListed = await runCli([
       "list",
@@ -940,7 +930,7 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
     ]);
 
     assert.equal(listed.terminals.length, 1);
-    assert.equal(listed.unavailable_managed_turns.length, 0);
+    assert.equal(listed.unavailable_managed_turns, undefined);
     const terminal = listed.terminals[0];
     assert.equal(terminal.id, `terminal:v2:tmux:codex:${renamedTarget}:${codexPid}`);
     assert.equal(terminal.management_state, "managed");
@@ -962,8 +952,8 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
     assert.equal(status.summary.conversation_id, managedId);
     assert.equal(status.terminal_status.target, renamedTarget);
 
-    assert.equal(terminal.managed.turn_count, 1);
-    assert.equal(terminal.managed.hidden_turn_count, 0);
+    assert.equal(terminal.managed.turn_count, undefined);
+    assert.equal(terminal.managed.hidden_turn_count, undefined);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1178,23 +1168,14 @@ test("multiple idle turns stay terminal history while user-priority Send keeps i
       workspace
     });
     assert.equal(listed.terminals.length, 1);
-    assert.deepEqual(listed.unavailable_managed_turns, []);
+    assert.equal(listed.unavailable_managed_turns, undefined);
     const terminal = listed.terminals[0];
     assert.equal(terminal.management_state, "managed");
     assert.equal(terminal.managed.current_turn, null);
-    assert.equal(
-      terminal.managed.recent_turn.conversation_id,
-      newer.conversation.conversation_id
-    );
-    assert.equal(terminal.managed.recent_turn.source, "managed_turn");
+    assert.equal(terminal.managed.recent_turn, undefined);
     assert.equal(terminal.managed.session_id, managedSessionId);
-    assert.equal(
-      terminal.managed.recent_turn.available_actions.follow_up,
-      undefined
-    );
-    assert.equal(terminal.managed.turn_count, 2);
-    assert.equal(terminal.managed.hidden_turn_count, 1);
-    assert.equal("history" in terminal.managed, false);
+    assert.equal(terminal.managed.history, undefined);
+    assert.equal(terminal.managed.turn_count, undefined);
     assert.equal(
       terminal.available_actions.send.arguments.selector,
       terminal.id
@@ -1240,14 +1221,7 @@ test("multiple idle turns stay terminal history while user-priority Send keeps i
       nativeIdentity: restartedNativeIdentity,
       workspace
     });
-    assert.equal(
-      restarted.terminals[0].managed.recent_turn.conversation_id,
-      newer.conversation.conversation_id
-    );
-    assert.equal(
-      restarted.terminals[0].managed.recent_turn.available_actions.follow_up,
-      undefined
-    );
+    assert.equal(restarted.terminals[0].managed.recent_turn, undefined);
     assert.notEqual(
       restarted.terminals[0].available_actions.send,
       undefined,
@@ -1269,7 +1243,6 @@ test("multiple idle turns stay terminal history while user-priority Send keeps i
 
     const listedAll = await runCliWithCodexInventory([
       "list",
-      "--all",
       "--store-dir",
       storeDir,
       ...runtimeArgs
@@ -1279,15 +1252,12 @@ test("multiple idle turns stay terminal history while user-priority Send keeps i
       workspace
     });
     const terminalAll = listedAll.terminals[0];
-    assert.equal(terminalAll.managed.hidden_turn_count, 0);
-    assert.deepEqual(
-      terminalAll.managed.history.map((turn: any) => turn.conversation_id),
-      [older.conversation.conversation_id]
-    );
-    assert.equal(
-      terminalAll.managed.history[0].available_actions.follow_up,
-      undefined
-    );
+    assert.equal(terminalAll.managed.history, undefined);
+    const monitoring = await runCli(["watches", "--store-dir", storeDir]);
+    assert.deepEqual(monitoring.managed_turns.map((turn: any) => turn.conversation_id),
+      [newer.conversation.conversation_id, older.conversation.conversation_id]);
+    const olderManaged = monitoring.managed_turns.find((turn: any) => turn.conversation_id === older.conversation.conversation_id);
+    assert.equal(olderManaged.available_actions.follow_up, undefined);
 
     const rejectedTurnTarget = await runCliResult([
       "send",
@@ -1375,7 +1345,7 @@ test("multiple idle turns stay terminal history while user-priority Send keeps i
     const historicalStatus = await runCli([
       "status",
       "--conversation",
-      terminalAll.managed.history[0].short_ref,
+      olderManaged.short_ref,
       "--managed-only",
       "--store-dir",
       storeDir
@@ -1450,13 +1420,13 @@ test("CLI approve only and short refs stay on the managed Claude approval path",
     ]);
     const managedId = sent.conversation.conversation_id;
     const listed = await runCli([
-      "list",
+      "watches",
       "--managed-only",
       "--store-dir",
       storeDir
     ]);
-    assert.equal(listed.unavailable_managed_turns.length, 1);
-    const managedTurn = listed.unavailable_managed_turns[0];
+    assert.equal(listed.managed_turns.length, 1);
+    const managedTurn = listed.managed_turns[0];
     assert.equal(managedTurn.conversation_id, managedId);
 
     for (const selector of ["only", managedTurn.short_ref]) {
@@ -1605,6 +1575,7 @@ async function runCliWithCodexInventory(
 
 function runCliResult(args: string[]) {
   return runInProcessCli(args, {
+    ...(args[0] === "watches" ? { now: () => new Date("2026-07-28T03:00:00.000Z") } : {}),
     createDesktopRuntime: unavailableDesktopRuntime,
     env: {
       ...process.env,

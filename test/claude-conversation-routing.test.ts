@@ -48,7 +48,7 @@ test("Claude associations require exact process incarnation and resolved native 
   assert.equal(displayed.surface, "cli");
   assert.equal(displayed.agent, "claude");
   assert.equal("source" in displayed, false);
-  assert.ok(JSON.stringify(compact).includes('"claude_cli_watches":[]'));
+  assert.equal(compact.claude_cli_watches, undefined);
 });
 
 function fixture(t: { after(fn: () => void): void }) {

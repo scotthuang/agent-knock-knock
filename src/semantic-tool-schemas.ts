@@ -294,7 +294,7 @@ export const listParameters = {
   type: "object",
   additionalProperties: false,
   properties: {
-    listView: { type: "string", enum: ["current", "history", "all"], description: "Host List scope: current (default) returns conversations and active/unresolved observations; history returns healthy ended Watches and managed Turns; all includes both. all=true also selects all unless listView is explicit. Always follow pagination.next_args; omitted history does not mean no Watch." },
+    listView: { type: "string", enum: ["current", "history", "all"], description: "Conversation-only scope. current is the default. Legacy history/all values are rejected with a migration message: use agent_knock_knock_watches for monitoring records." },
     listCursor: { type: "string", maxLength: 512, description: "Opaque pagination.next_cursor; use pagination.next_args unchanged for the next page with the same filters. This is independent of Desktop catalog pagination." },
     listLimit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum total rows in one Host List page (default 40). The whole response byte budget may return fewer. Exact Status returns selected task details." },
     desktop_view: { type: "string", enum: ["sidebar", "history"], description: "Desktop discovery scope: sidebar (default) follows persisted expanded sidebar membership, not the current scroll viewport; history searches the broader saved catalog. Unconnected rows remain listed." },
@@ -323,6 +323,17 @@ export const listParameters = {
     idleTimeoutMinutes: {
       type: "number"
     }
+  }
+};
+
+export const watchesParameters = {
+  type: "object", additionalProperties: false, properties: {
+    hours: { type: "integer", minimum: 1, maximum: 48, description: "Recent history window in hours (default 24, maximum 48). Active and unresolved records are also returned outside this window." },
+    limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum rows per page (default 40); the whole response budget may return fewer." },
+    cursor: { type: "string", maxLength: 512, description: "Use pagination.next_args unchanged; the cursor fixes the time window and filters." },
+    agent: { type: "string", enum: ["codex", "claude"] },
+    status: { type: "string", maxLength: 128 },
+    conversation_id: { type: "string", maxLength: 2048, description: "Exact owning conversation/session/terminal ID. This filters retained records without connecting to the coding agent." }
   }
 };
 

@@ -291,7 +291,7 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
     const reconciliationCommands = ["reconcile-monitors", "reconcile-watches",
-      "reconcile-desktop-watches", "reconcile-codex-native-watches", "reconcile-claude-native-watches"];
+      "reconcile-desktop-watches", "reconcile-codex-native-watches", "reconcile-claude-native-watches", "prune-watch-history"];
     const reconciliationCalls = allCalls.filter(([command]) => reconciliationCommands.includes(command!));
     const privateListCalls = allCalls.filter(([command]) => command === "list");
     const calls = allCalls.filter(
@@ -630,7 +630,7 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     while (
       (!fs.existsSync(callsPath) ||
         readSupervisorCalls(callsPath).filter((entry) => entry.phase === "start")
-          .length < 10) &&
+          .length < 11) &&
       Date.now() < deadline
     ) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -638,7 +638,7 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     await service?.stop?.();
     const stoppedCalls = readSupervisorCalls(callsPath);
     assert.equal(
-      stoppedCalls.filter((entry) => entry.phase === "start").length >= 10,
+      stoppedCalls.filter((entry) => entry.phase === "start").length >= 11,
       true
     );
     assert.equal(
@@ -649,25 +649,30 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
     assert.equal(starts[0]?.args[0], "reconcile-monitors");
     assert.equal(starts[1]?.args[0], "reconcile-watches");
     assert.equal(starts[2]?.args[0], "reconcile-desktop-watches");
-    assert.equal(starts[5]?.args[0], "reconcile-monitors");
-    assert.equal(starts[6]?.args[0], "reconcile-watches");
-    assert.equal(starts[7]?.args[0], "reconcile-desktop-watches");
+    assert.equal(starts[5]?.args[0], "prune-watch-history");
+    assert.equal(starts[6]?.args[0], "reconcile-monitors");
+    assert.equal(starts[7]?.args[0], "reconcile-watches");
+    assert.equal(starts[8]?.args[0], "reconcile-desktop-watches");
     assert.equal(starts[3]?.args[0], "reconcile-codex-native-watches");
     assert.equal(starts[4]?.args[0], "reconcile-claude-native-watches");
-    assert.equal(starts[9]?.args[0], "reconcile-claude-native-watches");
-    assert.equal(starts[8]?.args[0], "reconcile-codex-native-watches");
+    assert.equal(starts[10]?.args[0], "reconcile-claude-native-watches");
+    assert.equal(starts[9]?.args[0], "reconcile-codex-native-watches");
+    assert.equal(starts.filter(entry => entry.args[0] === "prune-watch-history").length, 1,
+      "history maintenance is throttled independently of monitor sweeps");
     assert.equal(optionAfter(starts[0]?.args ?? [], "--reason"), "startup_reconciliation");
-    assert.equal(optionAfter(starts[5]?.args ?? [], "--reason"), "monitor_supervision");
+    assert.equal(optionAfter(starts[6]?.args ?? [], "--reason"), "monitor_supervision");
     assert.equal(starts[1]?.args.includes("--reason"), false);
     assert.equal(starts[2]?.args.includes("--reason"), false);
-    assert.equal(starts[6]?.args.includes("--reason"), false);
     assert.equal(starts[7]?.args.includes("--reason"), false);
+    assert.equal(starts[8]?.args.includes("--reason"), false);
+    assert.equal(starts[5]?.args.includes("--reason"), false);
     assert.equal(starts[0]?.args.includes("--terminal-monitors-only"), false);
     assert.equal(starts[1]?.args.includes("--terminal-monitors-only"), false);
     assert.equal(starts[2]?.args.includes("--terminal-monitors-only"), false);
-    assert.equal(starts[5]?.args.includes("--terminal-monitors-only"), true);
-    assert.equal(starts[6]?.args.includes("--terminal-monitors-only"), false);
+    assert.equal(starts[6]?.args.includes("--terminal-monitors-only"), true);
     assert.equal(starts[7]?.args.includes("--terminal-monitors-only"), false);
+    assert.equal(starts[8]?.args.includes("--terminal-monitors-only"), false);
+    assert.equal(starts[5]?.args.includes("--terminal-monitors-only"), false);
     const countAfterStop = stoppedCalls.length;
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
     assert.equal(readSupervisorCalls(callsPath).length, countAfterStop);
@@ -677,9 +682,9 @@ test("OpenClaw monitor supervisor reconciles repeatedly without overlap and stop
   }
 });
 
-test("OpenClaw supervisor isolates managed monitor, Terminal Watch, and Desktop Watch failures", async () => {
+test("OpenClaw supervisor isolates monitor, Watch, and history maintenance failures", async () => {
   const runFailureCase = async (
-    failingCommand: "reconcile-monitors" | "reconcile-watches" | "reconcile-desktop-watches" | "reconcile-codex-native-watches" | "reconcile-claude-native-watches"
+    failingCommand: "reconcile-monitors" | "reconcile-watches" | "reconcile-desktop-watches" | "reconcile-codex-native-watches" | "reconcile-claude-native-watches" | "prune-watch-history"
   ): Promise<void> => {
     const tempDir = fs.mkdtempSync(
       path.join(os.tmpdir(), `akk-plugin-supervisor-${failingCommand}-`)
@@ -731,7 +736,7 @@ test("OpenClaw supervisor isolates managed monitor, Terminal Watch, and Desktop 
       const deadline = Date.now() + 2_000;
       while (
         (!fs.existsSync(callsPath) ||
-          fs.readFileSync(callsPath, "utf8").trim().split("\n").length < 10) &&
+          fs.readFileSync(callsPath, "utf8").trim().split("\n").length < 11) &&
         Date.now() < deadline
       ) {
         await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -741,11 +746,12 @@ test("OpenClaw supervisor isolates managed monitor, Terminal Watch, and Desktop 
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as string[]);
-      assert.deepEqual(calls.slice(0, 10).map((args) => args[0]), [
+      assert.deepEqual(calls.slice(0, 11).map((args) => args[0]), [
         "reconcile-monitors",
         "reconcile-watches",
         "reconcile-desktop-watches",
         "reconcile-codex-native-watches", "reconcile-claude-native-watches",
+        "prune-watch-history",
         "reconcile-monitors",
         "reconcile-watches",
         "reconcile-desktop-watches",
@@ -763,7 +769,9 @@ test("OpenClaw supervisor isolates managed monitor, Terminal Watch, and Desktop 
                 ? message.includes("Desktop Watch supervision deferred") || message.includes("Desktop Watch reconciliation skipped")
                 : failingCommand === "reconcile-codex-native-watches"
                   ? message.includes("Codex CLI Watch supervision deferred") || message.includes("Codex CLI Watch reconciliation skipped")
-                  : message.includes("Claude CLI Watch supervision deferred") || message.includes("Claude CLI Watch reconciliation skipped")
+                  : failingCommand === "reconcile-claude-native-watches"
+                    ? message.includes("Claude CLI Watch supervision deferred") || message.includes("Claude CLI Watch reconciliation skipped")
+                    : message.includes("Watch history maintenance deferred")
         ),
         true
       );
@@ -778,4 +786,5 @@ test("OpenClaw supervisor isolates managed monitor, Terminal Watch, and Desktop 
   await runFailureCase("reconcile-desktop-watches");
   await runFailureCase("reconcile-codex-native-watches");
   await runFailureCase("reconcile-claude-native-watches");
+  await runFailureCase("prune-watch-history");
 });
