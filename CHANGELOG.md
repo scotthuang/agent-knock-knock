@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.14.15 - 2026-10-21
+
+- Determine local Herdr capabilities per operation instead of rejecting unfamiliar versions. Retain `0.8.0` / protocol `19` and `0.9.5` / protocol `22` as tested baselines, with socket, terminal and process identity checks before input.
+- Probe read capabilities without terminal input; require a matching CLI schema declaration or verified baseline behavior for writes. Keep untested servers without input evidence read-only, reject incompatible declarations without fallback, and preserve uncertainty after dispatch. Doctor reports installation readiness separately from unprobed live capabilities.
+
 ## 0.14.14 - 2026-10-18
 
 - Attempt all implemented Codex Desktop operations after an app update instead of blocking writes on an exact version allowlist. Preserve tested-build metadata separately from current action availability.

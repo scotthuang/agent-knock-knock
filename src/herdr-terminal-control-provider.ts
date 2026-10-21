@@ -3,6 +3,25 @@ import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "./value-guards.js";
 import {
+  matchesHerdrCompatibilityProfile,
+  observeHerdrServer,
+  type HerdrOperationCapability,
+  type HerdrOperationCapabilities,
+  type HerdrServerObservation
+} from "./herdr-compatibility.js";
+import {
+  assertInputEndpointCapability,
+  assertOperationAvailable,
+  declaredHerdrInputCapabilities,
+  herdrControlCapabilities,
+  selectHerdrReadOperation,
+  type HerdrCliObservation
+} from "./herdr-operation-capabilities.js";
+export {
+  HERDR_EXACT_PROTOCOL,
+  HERDR_EXACT_VERSION
+} from "./herdr-compatibility.js";
+import {
   TERMINAL_HISTORY_SCROLL_DOWN_BYTES,
   TerminalControlInputNotSentError,
   TerminalControlUnavailableError,
@@ -47,9 +66,6 @@ export {
   type HerdrSocketIdentity,
   type HerdrWireRequest
 } from "./herdr-socket-transport.js";
-
-export const HERDR_EXACT_VERSION = "0.8.0";
-export const HERDR_EXACT_PROTOCOL = 19;
 
 const HERDR_MAX_READ_LINES = 1_000;
 const HERDR_MAX_TTY_PATH_BYTES = 1_024;
@@ -129,7 +145,14 @@ interface HerdrPaneProcessInfo {
   foregroundProcesses: HerdrForegroundProcess[];
 }
 
+interface HerdrEndpointObservation {
+  socketIdentity: HerdrSocketIdentity;
+  server: HerdrServerObservation;
+  capabilities: HerdrOperationCapabilities;
+}
+
 interface HerdrSessionInspection {
+  server: HerdrServerObservation;
   session: HerdrSessionInfo;
   endpoints: TerminalEndpointRef[];
   skippedWithoutShellPid: string[];
@@ -137,20 +160,20 @@ interface HerdrSessionInspection {
 
 interface ResolvedHerdrControl {
   control: HerdrTerminalControlRef;
-  socketIdentity: HerdrSocketIdentity;
+  observation: HerdrEndpointObservation;
 }
 
 export interface HerdrTerminalControlDiagnostics {
   commands: string[];
   selectedCommand?: string;
-  expectedVersion: string;
-  expectedProtocol: number;
   sessions: HerdrSessionInfo[];
   attempts: Array<{
     session: string;
     socketPath: string;
     status: "ok" | "error";
     paneCount?: number;
+    server?: HerdrServerObservation;
+    capabilities?: Array<{ paneId: string; operations: HerdrOperationCapabilities }>;
     skippedWithoutShellPid?: string[];
     error?: string;
   }>;
@@ -197,8 +220,8 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
   private readonly statSocket: (socketPath: string) => HerdrSocketIdentity;
   private readonly inspectTtyViewport: HerdrTtyViewportInspector;
   private readonly diagnosticLog?: TerminalDiscoveryDiagnosticLog;
-  private readonly endpointSocketIdentities =
-    new WeakMap<TerminalEndpointRef, HerdrSocketIdentity>();
+  private readonly endpointObservations =
+    new WeakMap<TerminalEndpointRef, HerdrEndpointObservation>();
   private requestSequence = 0;
 
   constructor(options: {
@@ -230,15 +253,14 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     const diagnostics: HerdrTerminalControlDiagnostics = {
       commands: [...this.commands],
       selectedCommand: this.selectedCommand,
-      expectedVersion: HERDR_EXACT_VERSION,
-      expectedProtocol: HERDR_EXACT_PROTOCOL,
       sessions: [],
       attempts: [],
       terminalCount: 0
     };
     let sessions: HerdrSessionInfo[];
+    let cli: HerdrCliObservation;
     try {
-      sessions = this.discoverSessions();
+      ({ sessions, cli } = this.discoverSessions());
       diagnostics.selectedCommand = this.selectedCommand;
       diagnostics.sessions = sessions;
     } catch (error) {
@@ -254,13 +276,18 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
 
     for (const session of sessions.filter((candidate) => candidate.running)) {
       try {
-        const inspection = await this.inspectSession(session);
+        const inspection = await this.inspectSession(session, cli);
         diagnostics.terminalCount += inspection.endpoints.length;
         diagnostics.attempts.push({
           session: session.name,
           socketPath: session.socketPath,
           status: "ok",
           paneCount: inspection.endpoints.length,
+          server: inspection.server,
+          capabilities: inspection.endpoints.map((endpoint) => ({
+            paneId: herdrControlFromEndpoint(endpoint).paneId,
+            operations: this.requireEndpointObservation(endpoint).capabilities
+          })),
           skippedWithoutShellPid: inspection.skippedWithoutShellPid
         });
       } catch (error) {
@@ -282,8 +309,10 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       selected_command: this.selectedCommand
     });
     let sessions: HerdrSessionInfo[];
+    let cli: HerdrCliObservation;
     try {
-      sessions = this.discoverSessions().filter((session) => session.running);
+      ({ sessions, cli } = this.discoverSessions());
+      sessions = sessions.filter((session) => session.running);
     } catch (error) {
       if (error instanceof HerdrProviderUnavailableError) {
         this.logDiagnostic("herdr_terminal_discovery", {
@@ -316,11 +345,11 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     });
     const inspections = await Promise.all(sessions.map(async (session) => {
       try {
-        return await this.inspectSession(session);
+        return await this.inspectSession(session, cli);
       } catch (error) {
-        // A session running an incompatible Herdr release is unavailable to
-        // this exact-gated provider, but must not break discovery by another
-        // provider in the registry. Other live API failures remain fail-closed.
+        // Malformed or changing server observations cannot authorize endpoints.
+        // Other providers in the registry may still discover their own terminals.
+        // Other live API failures remain fail-closed.
         if (error instanceof HerdrCompatibilityError) {
           this.logDiagnostic("herdr_terminal_discovery", {
             stage: "session_inspection",
@@ -390,10 +419,8 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         this.supportedCapabilities
       )
     );
-    const socketIdentity = this.endpointSocketIdentities.get(terminal);
-    if (socketIdentity) {
-      this.endpointSocketIdentities.set(this.endpoint(next), socketIdentity);
-    }
+    const observation = this.endpointObservations.get(terminal);
+    if (observation) this.endpointObservations.set(this.endpoint(next), observation);
     return next;
   }
 
@@ -416,8 +443,8 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         `Herdr terminal resource ${terminal.route.label} is ambiguous`
       );
     }
-    const expectedSocketIdentity = this.endpointSocketIdentities.get(terminal);
-    const candidateSocketIdentity = this.endpointSocketIdentities.get(matches[0]);
+    const expectedSocketIdentity = this.endpointObservations.get(terminal)?.socketIdentity;
+    const candidateSocketIdentity = this.endpointObservations.get(matches[0])?.socketIdentity;
     if (
       expectedSocketIdentity &&
       (!candidateSocketIdentity || !sameHerdrSocketIdentity(
@@ -431,7 +458,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     }
     const resolved = endpointWithCapabilities(
       matches[0],
-      intersectCapabilities(terminal.capabilities, this.supportedCapabilities)
+      intersectCapabilities(terminal.capabilities, matches[0].capabilities)
     );
     const socketIdentity = candidateSocketIdentity;
     if (!socketIdentity) {
@@ -439,7 +466,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         `Herdr terminal resource ${terminal.route.label} is missing socket-incarnation evidence`
       );
     }
-    this.endpointSocketIdentities.set(resolved, socketIdentity);
+    this.endpointObservations.set(resolved, this.requireEndpointObservation(matches[0]));
     return resolved;
   }
 
@@ -485,7 +512,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       );
     }
     const control = herdrControlFromEndpoint(resolved);
-    const socketIdentity = this.requireEndpointSocketIdentity(resolved);
+    const socketIdentity = this.requireEndpointObservation(resolved).socketIdentity;
     const result = await this.invoke(
       control.socketPath!,
       "session.snapshot",
@@ -497,13 +524,10 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         `Herdr session ${control.session} returned an unexpected viewport snapshot`
       );
     }
-    if (
-      result.snapshot.version !== HERDR_EXACT_VERSION ||
-      result.snapshot.protocol !== HERDR_EXACT_PROTOCOL
-    ) {
+    const server = this.requireEndpointObservation(resolved).server;
+    if (!matchesHerdrCompatibilityProfile(result.snapshot, server)) {
       throw new HerdrCompatibilityError(
-        `Herdr session ${control.session} viewport snapshot is not exact ` +
-        `${HERDR_EXACT_VERSION}/protocol ${HERDR_EXACT_PROTOCOL}`
+        `Herdr session ${control.session} viewport snapshot changed server compatibility`
       );
     }
     if (!Array.isArray(result.snapshot.panes)) {
@@ -692,7 +716,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       );
     }
     const control = herdrControlFromEndpoint(resolved);
-    const socketIdentity = this.requireEndpointSocketIdentity(resolved);
+    const socketIdentity = this.requireEndpointObservation(resolved).socketIdentity;
     const requestedLines = Number.isFinite(options.scrollbackLines)
       ? Math.max(0, Math.floor(options.scrollbackLines ?? 200))
       : 200;
@@ -705,8 +729,12 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     // means zero returned lines; an unbounded visible-source read instead
     // returns the viewport alone, still within the transport response limit.
     const viewportOnly = requestedLines === 0;
-    const source = options.preserveEscapes || viewportOnly ? "visible" : "detection";
-    const format = options.preserveEscapes ? "ansi" : "text";
+    const observation = this.requireEndpointObservation(resolved);
+    const { source, format, operation } = selectHerdrReadOperation(
+      observation.capabilities, viewportOnly, options.preserveEscapes === true
+    );
+    assertEndpointCapability(resolved, "screen_status");
+    assertOperationAvailable(observation.capabilities, operation);
     const result = await this.invoke(
       control.socketPath!,
       "pane.read",
@@ -741,7 +769,8 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     assertInputEndpointCapability(
       terminal,
       this.providerCapabilities,
-      "text_delivery"
+      "text_delivery",
+      this.endpointObservations.get(terminal)?.capabilities
     );
     if (text.length === 0) {
       return;
@@ -757,7 +786,8 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     assertInputEndpointCapability(
       terminal,
       this.providerCapabilities,
-      "key_delivery"
+      "key_delivery",
+      this.endpointObservations.get(terminal)?.capabilities
     );
     let translated: string[];
     try {
@@ -780,7 +810,8 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
   }
 
   async scrollHistoryDown(terminal: TerminalEndpointRef): Promise<void> {
-    assertInputEndpointCapability(terminal, this.providerCapabilities, "key_delivery");
+    assertInputEndpointCapability(terminal, this.providerCapabilities, "key_delivery",
+      this.endpointObservations.get(terminal)?.capabilities);
     const resolved = await this.resolveForInput(terminal);
     await this.sendInput(resolved, { navigation: "history-down" });
   }
@@ -796,7 +827,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     }
   }
 
-  private discoverSessions(): HerdrSessionInfo[] {
+  private discoverSessions(): { sessions: HerdrSessionInfo[]; cli: HerdrCliObservation } {
     try {
       const { command, version } = this.probeCommand();
       if (version.status !== 0) {
@@ -805,21 +836,21 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
           `failed to run ${command} --version`
         );
       }
-      const reportedVersion = version.stdout.trim();
-      if (reportedVersion !== `herdr ${HERDR_EXACT_VERSION}`) {
-        throw new HerdrProviderUnavailableError(
-          `Herdr provider requires exact CLI ${HERDR_EXACT_VERSION}; ` +
-          `found ${reportedVersion || "unknown"}`
-        );
-      }
-
       const result = this.runCommand(command, ["session", "list", "--json"]);
       if (result.status !== 0) {
         throw new HerdrProviderUnavailableError(
           result.stderr || result.error?.message || "herdr session list failed"
         );
       }
-      return parseHerdrSessionList(result.stdout);
+      const sessions = parseHerdrSessionList(result.stdout);
+      const cli: HerdrCliObservation = {
+        version: /^herdr\s+(\S+)$/u.exec(version.stdout.trim())?.[1],
+        schemaState: "unavailable"
+      };
+      if (sessions.some((session) => session.running)) {
+        this.inspectCliSchema(command, cli);
+      }
+      return { sessions, cli };
     } catch (error) {
       if (error instanceof HerdrProviderUnavailableError) {
         throw error;
@@ -828,6 +859,25 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         `Herdr provider is unavailable: ${describeError(error)}`,
         { cause: error }
       );
+    }
+  }
+
+  private inspectCliSchema(command: string, cli: HerdrCliObservation): void {
+    let result: CommandResult;
+    try {
+      result = this.runCommand(command, ["api", "schema", "--json"]);
+    } catch {
+      return;
+    }
+    if (result.status !== 0) return;
+    // Successful but unreadable declarations must not be masked by a baseline.
+    cli.schemaState = "malformed";
+    if (Buffer.byteLength(result.stdout) > 10 * 1024 * 1024) return;
+    try {
+      cli.schema = JSON.parse(result.stdout);
+      cli.schemaState = "available";
+    } catch {
+      // Keep discovery and independently probed reads available.
     }
   }
 
@@ -848,7 +898,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         lastError = result.error;
         continue;
       }
-      // Once a candidate starts, pin it. A version mismatch or any later
+      // Once a candidate starts, pin it. Any later
       // failure must not silently switch to a different installation.
       this.selectedCommand = command;
       return { command, version: result };
@@ -860,7 +910,8 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
   }
 
   private async inspectSession(
-    session: HerdrSessionInfo
+    session: HerdrSessionInfo,
+    cli: HerdrCliObservation
   ): Promise<HerdrSessionInspection> {
     let socketIdentity: HerdrSocketIdentity;
     try {
@@ -885,13 +936,16 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       });
       throw error;
     }
+    let profile: HerdrServerObservation;
     try {
-      await this.assertCompatibleServer(session, socketIdentity);
+      profile = await this.assertCompatibleServer(session, socketIdentity);
       this.logDiagnostic("herdr_session_observation", {
         session: session.name,
         socket_path: session.socketPath,
         stage: "ping",
-        status: "available"
+        status: "available",
+        version: profile.version,
+        protocol: profile.protocol
       });
     } catch (error) {
       this.logDiagnostic("herdr_session_observation", {
@@ -928,13 +982,10 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         `Herdr session ${session.name} returned an unexpected session.snapshot result`
       );
     }
-    if (
-      result.snapshot.version !== HERDR_EXACT_VERSION ||
-      result.snapshot.protocol !== HERDR_EXACT_PROTOCOL
-    ) {
+    if (!matchesHerdrCompatibilityProfile(result.snapshot, profile)) {
       throw new HerdrCompatibilityError(
         `Herdr session ${session.name} snapshot is not exact ` +
-        `${HERDR_EXACT_VERSION}/protocol ${HERDR_EXACT_PROTOCOL}`
+        `${profile.version}/protocol ${profile.protocol}`
       );
     }
     if (!Array.isArray(result.snapshot.panes)) {
@@ -1019,6 +1070,17 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       }
     }));
 
+    const inputCapabilities = declaredHerdrInputCapabilities(cli, profile);
+    const operations = await Promise.all(panes.map(async (pane, index) => {
+      if (!positiveInteger(processInfos[index]?.shellPid)) return undefined;
+      const [visibleText, visibleAnsi, detectionText] = await Promise.all([
+        this.probeReadCapability(session, pane, socketIdentity, "visible", "text"),
+        this.probeReadCapability(session, pane, socketIdentity, "visible", "ansi"),
+        this.probeReadCapability(session, pane, socketIdentity, "detection", "text")
+      ]);
+      return { visibleText, visibleAnsi, detectionText, ...inputCapabilities };
+    }));
+
     // A server restart can reuse a public pane route while representing a new
     // PTY. Re-read the authoritative snapshot after process inspection and
     // only join process data to a pane whose stable terminal identity and
@@ -1045,8 +1107,7 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     if (
       verifiedSnapshotResult.type !== "session_snapshot" ||
       !isRecord(verifiedSnapshotResult.snapshot) ||
-      verifiedSnapshotResult.snapshot.version !== HERDR_EXACT_VERSION ||
-      verifiedSnapshotResult.snapshot.protocol !== HERDR_EXACT_PROTOCOL ||
+      !matchesHerdrCompatibilityProfile(verifiedSnapshotResult.snapshot, profile) ||
       !Array.isArray(verifiedSnapshotResult.snapshot.panes)
     ) {
       throw new Error(
@@ -1114,9 +1175,11 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         session,
         verifiedPane,
         processInfo,
-        this.supportedCapabilities
+        herdrControlCapabilities(operations[index]!)
       );
-      this.endpointSocketIdentities.set(endpoint, socketIdentity);
+      this.endpointObservations.set(endpoint, {
+        socketIdentity, server: profile, capabilities: operations[index]!
+      });
       endpoints.push(endpoint);
       this.logDiagnostic("herdr_pane_endpoint_observation", {
         session: session.name,
@@ -1138,13 +1201,52 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       endpoint_count: endpoints.length,
       skipped_without_shell_pid: skippedWithoutShellPid
     });
-    return { session, endpoints, skippedWithoutShellPid };
+    return { session, server: profile, endpoints, skippedWithoutShellPid };
+  }
+
+  private async probeReadCapability(
+    session: HerdrSessionInfo,
+    pane: HerdrPaneInfo,
+    socketIdentity: HerdrSocketIdentity,
+    source: "visible" | "detection",
+    format: "text" | "ansi"
+  ): Promise<HerdrOperationCapability> {
+    try {
+      const result = await this.invoke(session.socketPath, "pane.read", {
+        pane_id: pane.paneId, source, format, lines: 0
+      }, { expectedSocketIdentity: socketIdentity });
+      const read = result.read;
+      if (result.type !== "pane_read" || !isRecord(read) ||
+          read.pane_id !== pane.paneId || read.workspace_id !== pane.workspaceId ||
+          read.tab_id !== pane.tabId || read.source !== source || read.format !== format ||
+          read.text !== "" || !Number.isSafeInteger(read.revision) ||
+          (read.revision as number) < 0 || typeof read.truncated !== "boolean") {
+        return { state: "unknown", reason: "zero-line read returned invalid pane data", evidence: "none" };
+      }
+      return {
+        state: "available",
+        reason: `pane.read accepted zero-line ${source}/${format} response`,
+        evidence: "runtime_probe"
+      };
+    } catch (error) {
+      const unsupported = error instanceof HerdrApiError && [
+        "invalid_request", "unknown_method", "method_not_found", "unsupported_method",
+        "unsupported_source", "unsupported_format"
+      ].includes(error.code);
+      return {
+        state: unsupported ? "unsupported" : "unknown",
+        reason: error instanceof HerdrApiError
+          ? `pane.read rejected ${source}/${format}: ${error.code}`
+          : `pane.read ${source}/${format} probe failed`,
+        evidence: unsupported ? "runtime_probe" : "none"
+      };
+    }
   }
 
   private async assertCompatibleServer(
     session: HerdrSessionInfo,
     socketIdentity: HerdrSocketIdentity
-  ): Promise<void> {
+  ): Promise<HerdrServerObservation> {
     let result: JsonRecord;
     try {
       result = await this.invoke(
@@ -1156,23 +1258,18 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     } catch (error) {
       if (error instanceof HerdrApiError && error.code === "protocol_mismatch") {
         throw new HerdrCompatibilityError(
-          `Herdr session ${session.name} rejected protocol ${HERDR_EXACT_PROTOCOL}`
+          `Herdr session ${session.name} rejected the API protocol`
         );
       }
       throw error;
     }
-    if (
-      result.type !== "pong" ||
-      result.version !== HERDR_EXACT_VERSION ||
-      result.protocol !== HERDR_EXACT_PROTOCOL
-    ) {
+    const profile = observeHerdrServer(result);
+    if (result.type !== "pong" || !profile) {
       throw new HerdrCompatibilityError(
-        `Herdr session ${session.name} requires exact server ` +
-        `${HERDR_EXACT_VERSION}/protocol ${HERDR_EXACT_PROTOCOL}; found ` +
-        `${String(result.version ?? "unknown")}/protocol ` +
-        `${String(result.protocol ?? "unknown")}`
+        `Herdr session ${session.name} returned malformed server version/protocol metadata`
       );
     }
+    return profile;
   }
 
   private async invoke(
@@ -1217,9 +1314,13 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
           "Herdr terminal stable resource or process anchor changed before input"
         );
       }
+      const observation = this.requireEndpointObservation(resolved);
+      assertOperationAvailable(observation.capabilities, "textInput");
+      assertOperationAvailable(observation.capabilities, "keyInput");
+      assertEndpointCapability(resolved, "send_keys");
       return {
         control: herdrControlFromEndpoint(resolved),
-        socketIdentity: this.requireEndpointSocketIdentity(resolved)
+        observation
       };
     } catch (error) {
       // No terminal input method has been attempted at this point, including
@@ -1234,10 +1335,17 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
     resolved: ResolvedHerdrControl,
     params: { text: string } | { keys: string[] } | { navigation: HerdrNavigationKey }
   ): Promise<void> {
-    const { control, socketIdentity } = resolved;
+    const { control, observation } = resolved;
+    const { socketIdentity } = observation;
     // pane.send_input.text is bracketed paste. Only closed fixed navigation
     // uses pane.send_text's direct PTY bytes; callers cannot supply raw data.
     const method = "navigation" in params ? "pane.send_text" : "pane.send_input";
+    try {
+      assertOperationAvailable(observation.capabilities, "navigation" in params ? "rawTextInput" :
+        "text" in params ? "textInput" : "keyInput");
+    } catch (error) {
+      throw new TerminalControlInputNotSentError(describeError(error));
+    }
     const input = "navigation" in params
       ? { text: HERDR_NAVIGATION_KEY_BYTES[params.navigation] } : params;
     try {
@@ -1256,29 +1364,30 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         throw new Error(`Herdr ${method} returned an unexpected result`);
       }
     } catch (error) {
-      if (inputDefinitelyNotSent(error)) {
+      if (inputDefinitelyNotSent(error, observation.server.baselineKnown)) {
         throw new TerminalControlInputNotSentError(
           `Herdr input was not sent: ${describeError(error)}`
         );
       }
-      // Request ids are correlation only. Herdr 0.8.0 has no idempotency key,
-      // so a post-connect timeout, EOF, malformed response, or lost ACK must
+      // Request ids provide correlation, not replay authority. A post-connect
+      // timeout, EOF, malformed response, or lost ACK must
       // remain uncertain and must never be retried here.
       throw error;
     }
   }
 
-  private requireEndpointSocketIdentity(
+  private requireEndpointObservation(
     terminal: TerminalEndpointRef
-  ): HerdrSocketIdentity {
-    const identity = this.endpointSocketIdentities.get(terminal);
-    if (!identity) {
+  ): HerdrEndpointObservation {
+    const observation = this.endpointObservations.get(terminal);
+    if (!observation) {
       throw new Error(
         `Herdr terminal resource ${terminal.route.label} is missing socket-incarnation evidence`
       );
     }
-    return identity;
+    return observation;
   }
+
 }
 
 export function parseHerdrSessionList(output: string): HerdrSessionInfo[] {
@@ -1551,23 +1660,6 @@ function assertEndpointCapability(
   }
 }
 
-function assertInputEndpointCapability(
-  terminal: TerminalEndpointRef,
-  providerCapabilities: readonly TerminalProviderCapability[],
-  providerCapability: "text_delivery" | "key_delivery"
-): void {
-  try {
-    assertEndpointCapability(terminal, "send_keys");
-  } catch (error) {
-    throw new TerminalControlInputNotSentError(describeError(error));
-  }
-  if (!providerCapabilities.includes(providerCapability)) {
-    throw new TerminalControlInputNotSentError(
-      `Herdr provider does not support ${providerCapability}`
-    );
-  }
-}
-
 function assertProviderCapability(
   capabilities: readonly TerminalProviderCapability[],
   capability: TerminalProviderCapability
@@ -1577,11 +1669,13 @@ function assertProviderCapability(
   }
 }
 
-function inputDefinitelyNotSent(error: unknown): boolean {
+function inputDefinitelyNotSent(error: unknown, baselineKnown: boolean): boolean {
   if (error instanceof HerdrTransportError) {
     return error.definitelyNotSent;
   }
-  return error instanceof HerdrApiError && new Set([
+  // Unknown releases may reuse an error code after an input effect. A schema
+  // declaration does not establish the server's failure/queue semantics.
+  return baselineKnown && error instanceof HerdrApiError && new Set([
     "invalid_request",
     "invalid_key",
     "pane_not_found",

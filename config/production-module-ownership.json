@@ -1179,6 +1179,18 @@
       "owner": "file-lock-infrastructure"
     },
     {
+      "path": "src/herdr-api-contract.ts",
+      "owner": "terminal-control"
+    },
+    {
+      "path": "src/herdr-compatibility.ts",
+      "owner": "terminal-control"
+    },
+    {
+      "path": "src/herdr-operation-capabilities.ts",
+      "owner": "terminal-control"
+    },
+    {
       "path": "src/herdr-socket-transport.ts",
       "owner": "terminal-control"
     },

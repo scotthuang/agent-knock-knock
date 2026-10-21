@@ -42,6 +42,7 @@ export function createFixtureHerdrProvider(
     runCommand: (_command, args) =>
       args[0] === "--version"
         ? successfulCommand(`herdr ${HERDR_EXACT_VERSION}\n`)
+        : args[0] === "api" ? { status: 1, stdout: "", stderr: "no schema" }
         : successfulCommand(sessionList),
     statSocket: () => ({
       device: "1",
@@ -153,7 +154,7 @@ export function createFixtureHerdrProvider(
             tab_id: control.tabId,
             source: request.params.source,
             format: request.params.format,
-            text: preserveEscapes
+            text: request.params.lines === 0 ? "" : preserveEscapes
               ? screen
               : screen.replace(/\u001b\[[0-9;]*m/gu, ""),
             revision: 1,

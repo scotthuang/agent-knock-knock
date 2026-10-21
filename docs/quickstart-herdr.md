@@ -1,6 +1,6 @@
 # Quick Start with Herdr
 
-AKK supports local Herdr `0.8.0` (socket protocol 19) as a terminal provider alongside tmux. AKK does not start Herdr or a coding agent.
+Starting in AKK `0.14.15`, local Herdr works alongside tmux according to the capabilities available for each operation. Herdr `0.8.0` (socket protocol 19) and `0.9.5` (socket protocol 22) are tested baselines, not a version allowlist. AKK `0.14.14` supported only `0.8.0`. AKK does not start Herdr or a coding agent.
 
 Install and open Herdr, then start Codex or Claude Code in a pane:
 
@@ -40,10 +40,22 @@ This creates an independent Terminal Watch schema-v3 record, not an AKK Session 
 
 Herdr's raw `pane send-text` command is not used for task delivery. AKK uses the Unix-socket `pane.send_input` method so multiline text follows Herdr's bracketed-paste-aware path, persists the text-injected stage, resolves the stable terminal again, and then dispatches one separate Enter.
 
-Current boundary:
+## Current boundary
 
 - local Unix-domain sockets only;
-- exact Herdr `0.8.0`, protocol 19;
+- Herdr version and protocol are observed and must remain consistent during each operation; an unfamiliar pair alone does not prevent discovery;
 - the Codex and Claude Code versions in the main compatibility matrix are regression-tested; other complete `x.y.z` versions use the generic runtime protocol with a warning;
 - remote/SSH Herdr sessions and Windows named pipes are not yet supported;
 - Herdr's agent status is diagnostic only—AKK's existing screen, transcript, rollout, and native identity fences remain authoritative.
+
+Discovery must still prove the current socket, stable pane identity and process anchor. Zero-line, read-only probes independently check each pane's visible text, visible ANSI and detection text response contracts, including their source and format. A failed read capability is unavailable without disabling the other valid capabilities. No discovery or capability probe sends terminal input.
+
+For input, AKK checks `herdr api schema --json` from a CLI whose version matches the live server, requires the schema's protocol to match, and validates the request payload and acknowledgement declarations used by each input operation. The resulting `matching_cli_schema` evidence is a declaration of compatibility, not runtime negotiation or proof of atomic, single-enqueue input. An untested server without a matching declaration can expose only its verified read capabilities. Tested baselines may fall back to their reviewed input behavior when a matching schema is unavailable; an explicitly incompatible or malformed matching schema, including a protocol mismatch, does not use that fallback.
+
+Every operation revalidates current identity and capabilities. Dispatch acknowledgements do not prove that a coding agent accepted a task. For an untested server, an API error after input dispatch remains uncertain, including `pane_send_failed`; AKK does not assume it rejected input before enqueueing. Lost or unknown acknowledgements are never retried automatically.
+
+Doctor checks whether the installed Herdr command is a usable candidate without rejecting an unfamiliar version. It leaves live capabilities `not_probed`; installation readiness does not establish that a live pane can be read or controlled.
+
+The tested baselines include the official [Herdr `0.9.5` release](https://github.com/herdrdev/herdr/releases/tag/v0.9.5) of 2026-10-14 and its [protocol `22` declaration](https://github.com/herdrdev/herdr/blob/v0.9.5/src/protocol/wire.rs#L20). This does not claim live end-to-end Send/Watch validation for untested releases or every coding-agent version.
+
+Herdr's [live server handoff](https://github.com/herdrdev/herdr/blob/v0.9.5/docs/next/website/src/content/docs/session-state.mdx#L127) is experimental. This adapter does not promise uninterrupted tasks across an upgrade or restart. After a server change, refresh discovery so AKK can revalidate the current socket, terminal and process identities before further input.
