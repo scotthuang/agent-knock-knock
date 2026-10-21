@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
+import { herdrApiSchemaFixture } from "./support/herdr-api-schema.js";
+import type { HerdrOperationCapabilities } from "../src/herdr-compatibility.js";
 import {
   HERDR_EXACT_PROTOCOL,
   HERDR_EXACT_VERSION,
@@ -68,9 +70,15 @@ interface HerdrHarness {
     options?: HerdrRequestOptions;
   }>;
   inputFailure?: Error;
+  inputApiError?: { code: string; message: string };
   inputResult?: Record<string, unknown>;
   serverVersion: string;
   serverProtocol: number;
+  cliVersion: string;
+  schemaResult?: CommandResult;
+  readBehaviors: Record<string, "unsupported" | "invalid" | "transport" | undefined>;
+  extraPanes: PaneState[];
+  snapshotProfiles: Partial<Record<number, { version: string; protocol: number }>>;
   socketIdentity: HerdrSocketIdentity;
   viewportColumns: number;
   viewportRows: number;
@@ -132,7 +140,24 @@ function response(
   return { id: request.id, result };
 }
 
-function createHarness(): HerdrHarness {
+const SUPPORTED_RELEASES = [
+  { version: "0.8.0", protocol: 19 },
+  { version: "0.9.5", protocol: 22 }
+] as const;
+
+function testSupportedHerdr(
+  name: string,
+  run: (profile: typeof SUPPORTED_RELEASES[number]) => Promise<void>
+): void {
+  for (const profile of SUPPORTED_RELEASES) {
+    test(`${name} (${profile.version}/protocol ${profile.protocol})`, () => run(profile));
+  }
+}
+
+function createHarness(profile: { version: string; protocol: number } = {
+  version: HERDR_EXACT_VERSION,
+  protocol: HERDR_EXACT_PROTOCOL
+}): HerdrHarness {
   const harness: HerdrHarness = {
     state: {
       paneId: "w1:p1",
@@ -145,8 +170,12 @@ function createHarness(): HerdrHarness {
     },
     requests: [],
     diagnostics: [],
-    serverVersion: HERDR_EXACT_VERSION,
-    serverProtocol: HERDR_EXACT_PROTOCOL,
+    serverVersion: profile.version,
+    serverProtocol: profile.protocol,
+    cliVersion: profile.version,
+    readBehaviors: {},
+    extraPanes: [],
+    snapshotProfiles: {},
     socketIdentity: SOCKET_IDENTITY,
     viewportColumns: 132,
     viewportRows: 41,
@@ -168,7 +197,8 @@ function createHarness(): HerdrHarness {
     options
   ) => {
     harness.requests.push({ socketPath, request: wireRequest, options });
-    const pane = harness.state;
+    const pane = harness.extraPanes.find((value) =>
+      value.paneId === wireRequest.params.pane_id) ?? harness.state;
     switch (wireRequest.method) {
       case "ping":
         return response(wireRequest, {
@@ -192,7 +222,8 @@ function createHarness(): HerdrHarness {
           snapshot: {
             version: harness.serverVersion,
             protocol: harness.serverProtocol,
-            panes: [{
+            ...harness.snapshotProfiles[snapshotOrdinal],
+            panes: [snapshotPane, ...harness.extraPanes].map((snapshotPane) => ({
               pane_id: snapshotPane.paneId,
               terminal_id: snapshotPane.terminalId,
               workspace_id: snapshotPane.workspaceId,
@@ -201,7 +232,7 @@ function createHarness(): HerdrHarness {
               focused: true,
               agent_status: null,
               revision: 0
-            }],
+            })),
             ...(harness.includeViewportLayout ? {
               layouts: [{
                 workspace_id: pane.workspaceId,
@@ -242,14 +273,19 @@ function createHarness(): HerdrHarness {
             }]
           }
         });
-      case "pane.read":
+      case "pane.read": {
+        const behavior = harness.readBehaviors[`${pane.paneId}/${wireRequest.params.source}/${wireRequest.params.format}`];
+        if (behavior === "transport") throw new HerdrTransportError("read unavailable", true);
+        if (behavior === "unsupported") return {
+          id: wireRequest.id, error: { code: "invalid_request", message: "unsupported read format" }
+        };
         return response(wireRequest, {
           type: "pane_read",
           read: {
             pane_id: pane.paneId,
             workspace_id: pane.workspaceId,
             tab_id: pane.tabId,
-            source: wireRequest.params.source,
+            source: behavior === "invalid" ? "wrong" : wireRequest.params.source,
             format: wireRequest.params.format,
             text: wireRequest.params.lines === 0
               ? ""
@@ -261,8 +297,10 @@ function createHarness(): HerdrHarness {
             truncated: wireRequest.params.lines === 0
           }
         });
+      }
       case "pane.send_input":
       case "pane.send_text":
+        if (harness.inputApiError) return { id: wireRequest.id, error: harness.inputApiError };
         if (harness.inputFailure) {
           throw harness.inputFailure;
         }
@@ -276,8 +314,11 @@ function createHarness(): HerdrHarness {
     command: "herdr-test",
     runCommand: (_command, args) => {
       if (args.length === 1 && args[0] === "--version") {
-        return commandSuccess(`herdr ${HERDR_EXACT_VERSION}\n`);
+        return commandSuccess(`herdr ${harness.cliVersion}\n`);
       }
+      if (args[0] === "api") return harness.schemaResult ?? {
+        status: 1, stdout: "", stderr: "schema command unavailable in fixture"
+      };
       assert.deepEqual(args, ["session", "list", "--json"]);
       return commandSuccess(sessionListJson());
     },
@@ -381,28 +422,29 @@ test("Herdr command fallback only advances when an executable definitely did not
   assert.equal(diagnostics.selectedCommand, "/opt/homebrew/bin/herdr");
 });
 
-test("Herdr pins the first started executable and treats CLI mismatch as unavailable", async () => {
+test("Herdr pins the first started executable when an unfamiliar CLI fails discovery", async () => {
   const calls: string[] = [];
   const provider = new HerdrTerminalControlProvider({
     runCommand: (command, args) => {
       calls.push(`${command} ${args.join(" ")}`);
-      return commandSuccess("herdr 0.9.0\n");
+      return args[0] === "--version" ? commandSuccess("herdr 0.9.0\n")
+        : { status: 1, stdout: "", stderr: "session discovery unavailable" };
     }
   });
 
   assert.deepEqual(await provider.listTerminals(), []);
-  assert.deepEqual(calls, ["herdr --version"]);
+  assert.deepEqual(calls, ["herdr --version", "herdr session list --json"]);
   const diagnostics = await provider.diagnostics();
   assert.equal(diagnostics.selectedCommand, "herdr");
-  assert.match(
+  assert.equal(
     String((diagnostics.attempts as Array<{ error?: string }>)[0]?.error),
-    /requires exact CLI 0\.8\.0/u
+    "session discovery unavailable"
   );
   assert.equal(calls.some((call) => call.startsWith("/opt/homebrew")), false);
 });
 
-test("Herdr discovery uses socket plus terminal_id as stable identity", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr discovery uses socket plus terminal_id as stable identity", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
   assert.deepEqual(terminal.identity, {
@@ -465,7 +507,7 @@ test("Herdr control refs retain socket-incarnation evidence across capture and i
   );
   assert.equal(
     harness.requests.some((entry) =>
-      entry.request.method === "pane.read" ||
+      (entry.request.method === "pane.read" && entry.request.params.lines !== 0) ||
       entry.request.method === "pane.send_input"
     ),
     false
@@ -495,9 +537,286 @@ test("Herdr resolve refreshes a moved pane route without changing identity", asy
   assert.equal(control.tabId, "w2:t3");
 });
 
-test("Herdr skips an incompatible protocol but fails closed on live API errors", async () => {
+testSupportedHerdr("Herdr resolves a supported server independently of the installed CLI", async (profile) => {
+  const harness = createHarness(profile);
+  harness.cliVersion = profile.version === "0.8.0" ? "0.9.5" : "0.8.0";
+  assert.equal((await harness.provider.listTerminals()).length, 1);
+  const diagnostics = await harness.provider.diagnostics();
+  const attempts = diagnostics.attempts as Array<{ server: { version: string; protocol: number; baselineKnown: boolean } }>;
+  assert.deepEqual(attempts[0].server, { ...profile, baselineKnown: true });
+  assert.equal(diagnostics.terminalCount, 1);
+});
+
+test("Herdr discovers unfamiliar releases and protocols with independently verified read capability", async () => {
+  for (const profile of [
+    { version: "0.8.0", protocol: 22 },
+    { version: "0.9.5", protocol: 19 },
+    { version: "0.9.5", protocol: 1 },
+    { version: "0.9.6", protocol: 22 }
+  ]) {
+    const harness = createHarness();
+    harness.serverVersion = profile.version;
+    harness.serverProtocol = profile.protocol;
+    harness.cliVersion = "0.99.1-preview";
+    const [terminal] = await harness.provider.listTerminals();
+    assert.ok(terminal);
+    assert.ok(terminal.capabilities.includes("screen_status"));
+    assert.equal(terminal.capabilities.includes("send_keys"), false);
+    assert.equal(await harness.provider.capture(terminal), "placeholder");
+    await assert.rejects(harness.provider.sendText(terminal, "do not send"), (error: unknown) => {
+      assert.ok(error instanceof TerminalControlInputNotSentError);
+      assert.match(error.message, /textInput is unknown: no matching CLI schema/u);
+      return true;
+    });
+    assert.equal(harness.requests.some((entry) => entry.request.method.startsWith("pane.send")), false);
+  }
+});
+
+async function operationDiagnostics(harness: HerdrHarness): Promise<HerdrOperationCapabilities[]> {
+  const diagnostics = await harness.provider.diagnostics();
+  const attempts = diagnostics.attempts as Array<{
+    capabilities: Array<{ operations: HerdrOperationCapabilities }>;
+  }>;
+  return attempts.flatMap((attempt) => attempt.capabilities.map((pane) => pane.operations));
+}
+
+test("Herdr accepts matching input declarations for unfamiliar versions without probing writes", async () => {
+  const harness = createHarness({ version: "0.99.0-preview", protocol: 73 });
+  harness.schemaResult = commandSuccess(JSON.stringify(herdrApiSchemaFixture(73)));
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal.capabilities.includes("send_keys"));
+  assert.equal(harness.requests.some((entry) => entry.request.method.startsWith("pane.send")), false);
+  const [operations] = await operationDiagnostics(harness);
+  for (const operation of [operations.textInput, operations.keyInput, operations.rawTextInput]) {
+    assert.equal(operation.state, "available");
+    assert.equal(operation.evidence, "matching_cli_schema");
+  }
+  assert.equal(operations.visibleAnsi.evidence, "runtime_probe");
+  await harness.provider.sendText(terminal, "one literal payload");
+  await harness.provider.sendKeys(terminal, ["Enter"]);
+  await harness.provider.sendKeys(terminal, ["PageUp"]);
+  const sends = harness.requests.filter((entry) => entry.request.method.startsWith("pane.send"));
+  assert.deepEqual(sends.map((entry) => entry.request.params), [
+    { pane_id: "w1:p1", text: "one literal payload" },
+    { pane_id: "w1:p1", keys: ["enter"] },
+    { pane_id: "w1:p1", text: "\x1b[5~" }
+  ]);
+});
+
+test("Herdr retains ordinary input when only fixed navigation is undeclared", async () => {
+  const harness = createHarness({ version: "0.99.0", protocol: 73 });
+  const schema = herdrApiSchemaFixture(73);
+  schema.schemas.request.oneOf = schema.schemas.request.oneOf.filter((method) =>
+    method.properties.method.const !== "pane.send_text");
+  harness.schemaResult = commandSuccess(JSON.stringify(schema));
+  const [terminal] = await harness.provider.listTerminals();
+  assert.ok(terminal.capabilities.includes("send_keys"));
+  const [operations] = await operationDiagnostics(harness);
+  assert.equal(operations.rawTextInput.state, "unsupported");
+  await harness.provider.sendText(terminal, "ordinary input");
+  await harness.provider.sendKeys(terminal, ["Enter"]);
+  await assert.rejects(harness.provider.sendKeys(terminal, ["PageUp"]), TerminalControlInputNotSentError);
+  await assert.rejects(harness.provider.scrollHistoryDown(terminal), TerminalControlInputNotSentError);
+  assert.equal(harness.requests.some((entry) => entry.request.method === "pane.send_text"), false);
+});
+
+test("Herdr reports partial text/key declarations without advertising a composite Send", async () => {
+  for (const missing of ["text", "keys"] as const) {
+    const harness = createHarness({ version: "0.99.0", protocol: 73 });
+    const schema = herdrApiSchemaFixture(73);
+    Object.assign(schema.schemas.request.oneOf[0].properties.params.properties, {
+      [missing]: { type: "integer" }
+    });
+    harness.schemaResult = commandSuccess(JSON.stringify(schema));
+    const [terminal] = await harness.provider.listTerminals();
+    const [operations] = await operationDiagnostics(harness);
+    assert.equal(operations[missing === "text" ? "textInput" : "keyInput"].state, "unsupported");
+    assert.equal(operations[missing === "text" ? "keyInput" : "textInput"].state, "available");
+    for (const capability of ["send_keys", "terminal_approval", "terminal_cancel"] as const) {
+      assert.equal(terminal.capabilities.includes(capability), false);
+    }
+    assert.equal(await harness.provider.capture(terminal), "placeholder");
+    await assert.rejects(harness.provider.sendText(terminal, "do not send"), TerminalControlInputNotSentError);
+    await assert.rejects(harness.provider.sendKeys(terminal, ["Enter"]), TerminalControlInputNotSentError);
+  }
+});
+
+testSupportedHerdr("Herdr does not mask a matching incomplete or malformed schema with its baseline", async (profile) => {
+  const missingMethod = herdrApiSchemaFixture(profile.protocol);
+  missingMethod.schemas.request.oneOf = [];
+  const unknownEnvelope = Object.assign(herdrApiSchemaFixture(profile.protocol), { schema_version: 99 });
+  const conflictingProtocol = herdrApiSchemaFixture(profile.protocol + 1);
+  for (const [schemaText, state] of [
+    [JSON.stringify(missingMethod), "unsupported"],
+    [JSON.stringify(unknownEnvelope), "unknown"],
+    [JSON.stringify(conflictingProtocol), "unknown"],
+    ["{invalid json", "unknown"]
+  ]) {
+    const harness = createHarness(profile);
+    harness.schemaResult = commandSuccess(schemaText);
+    const [terminal] = await harness.provider.listTerminals();
+    const [operations] = await operationDiagnostics(harness);
+    assert.equal(operations.textInput.state, state);
+    assert.equal(operations.textInput.evidence, state === "unsupported" ? "matching_cli_schema" : "none");
+    assert.equal(terminal.capabilities.includes("send_keys"), false);
+    assert.equal(await harness.provider.capture(terminal), "placeholder");
+  }
+});
+
+test("Herdr does not borrow an unmatched CLI schema to authorize unknown server input", async () => {
+  for (const mismatch of ["version", "protocol"] as const) {
+    const harness = createHarness({ version: "0.99.0", protocol: 73 });
+    if (mismatch === "version") harness.cliVersion = "0.99.1";
+    harness.schemaResult = commandSuccess(JSON.stringify(herdrApiSchemaFixture(mismatch === "protocol" ? 74 : 73)));
+    const [terminal] = await harness.provider.listTerminals();
+    assert.equal(terminal.capabilities.includes("send_keys"), false);
+    assert.equal((await operationDiagnostics(harness))[0].textInput.state, "unknown");
+  }
+});
+
+test("Herdr read failures disable only their operation and do not hide healthy panes", async () => {
+  const harness = createHarness({ version: "0.99.0", protocol: 73 });
+  harness.extraPanes.push({ ...harness.state, paneId: "w1:p2", terminalId: "terminal-8", shellPid: 7_002 });
+  harness.readBehaviors["w1:p1/visible/ansi"] = "unsupported";
+  harness.readBehaviors["w1:p1/detection/text"] = "transport";
+  const terminals = await harness.provider.listTerminals();
+  assert.equal(terminals.length, 2);
+  const [partial, healthy] = terminals;
+  const [partialOps, healthyOps] = await operationDiagnostics(harness);
+  assert.equal(partialOps.visibleText.state, "available");
+  assert.equal(partialOps.visibleAnsi.state, "unsupported");
+  assert.equal(partialOps.detectionText.state, "unknown");
+  assert.equal(healthyOps.visibleAnsi.state, "available");
+  assert.equal(await harness.provider.capture(partial, { scrollbackLines: 0 }), "placeholder");
+  assert.equal(await harness.provider.capture(partial), "placeholder");
+  const statusRead = harness.requests.filter((entry) => entry.request.method === "pane.read" &&
+    entry.request.params.lines !== 0).at(-1);
+  assert.equal(statusRead?.request.params.source, "visible");
+  await assert.rejects(harness.provider.capture(partial, { preserveEscapes: true }), /visibleAnsi is unsupported/u);
+  assert.match(await harness.provider.capture(healthy, { preserveEscapes: true }), /\x1b\[2m/u);
+  assert.ok(harness.requests.filter((entry) => entry.request.method === "pane.read" && entry.request.params.lines === 0)
+    .every((entry) => entry.options?.expectedSocketIdentity === harness.socketIdentity));
+});
+
+test("Herdr does not advertise general screen status from an ANSI-only declaration", async () => {
+  const harness = createHarness({ version: "0.99.0", protocol: 73 });
+  harness.readBehaviors["w1:p1/visible/text"] = "unsupported";
+  harness.readBehaviors["w1:p1/detection/text"] = "unsupported";
+  const [terminal] = await harness.provider.listTerminals();
+  const [operations] = await operationDiagnostics(harness);
+  assert.equal(operations.visibleAnsi.state, "available");
+  assert.equal(terminal.capabilities.includes("screen_status"), false);
+  assert.equal(terminal.capabilities.includes("screen_completion"), false);
+  await assert.rejects(harness.provider.capture(terminal), /does not permit screen_status/u);
+});
+
+test("Herdr rechecks same-socket input and read capabilities before every operation", async () => {
+  const harness = createHarness({ version: "0.99.0", protocol: 73 });
+  const schema = herdrApiSchemaFixture(73);
+  harness.schemaResult = commandSuccess(JSON.stringify(schema));
+  const [terminal] = await harness.provider.listTerminals();
+  const control = harness.provider.toControlRef(terminal);
+  schema.schemas.request.oneOf = [];
+  harness.schemaResult = commandSuccess(JSON.stringify(schema));
+  const fresh = await harness.provider.resolve(terminal);
+  assert.equal(fresh.capabilities.includes("send_keys"), false);
+  await assert.rejects(harness.provider.sendText(harness.provider.endpoint(control), "revoked"), (error: unknown) => {
+    assert.ok(error instanceof TerminalControlInputNotSentError);
+    assert.match(error.message, /textInput is unsupported: cli_schema_pane\.send_input_text_method_missing/u);
+    return true;
+  });
+  harness.readBehaviors["w1:p1/visible/ansi"] = "invalid";
+  await assert.rejects(harness.provider.capture(terminal, { preserveEscapes: true }), /visibleAnsi is unknown/u);
+  assert.equal(harness.requests.some((entry) => entry.request.method.startsWith("pane.send")), false);
+  assert.equal(harness.requests.some((entry) => entry.request.method === "pane.read" && entry.request.params.lines !== 0), false);
+});
+
+test("Herdr capability explanations never reopen a caller-restricted input permission", async () => {
+  const harness = createHarness();
+  const [terminal] = await harness.provider.listTerminals();
+  const readOnly = harness.provider.endpoint(harness.provider.toControlRef(terminal, ["screen_status"]));
+  harness.requests.length = 0;
+  await assert.rejects(harness.provider.sendText(readOnly, "do not send"), (error: unknown) => {
+    assert.ok(error instanceof TerminalControlInputNotSentError);
+    assert.equal(error.message, "Herdr terminal does not permit send_keys");
+    return true;
+  });
+  assert.deepEqual(harness.requests, []);
+});
+
+test("Herdr cannot reuse declared input authority on a replacement socket", async () => {
+  const harness = createHarness({ version: "0.99.0", protocol: 73 });
+  harness.schemaResult = commandSuccess(JSON.stringify(herdrApiSchemaFixture(73)));
+  const [terminal] = await harness.provider.listTerminals();
+  harness.socketIdentity = { ...SOCKET_IDENTITY, inode: "new-socket" };
+  harness.schemaResult = undefined;
+  await assert.rejects(harness.provider.sendText(terminal, "do not send"), /server socket changed/u);
+  const [replacement] = await harness.provider.listTerminals();
+  assert.equal(replacement.capabilities.includes("send_keys"), false);
+  assert.equal(harness.requests.some((entry) => entry.request.method.startsWith("pane.send")), false);
+});
+
+test("Herdr unknown-release input failures remain uncertain and are never repeated", async () => {
+  for (const failure of [
+    "pane_send_failed", "invalid_key", "invalid_request", "pane_not_found",
+    "protocol_mismatch", "lost_ack", "unexpected_ack"
+  ] as const) {
+    const harness = createHarness({ version: "0.99.0", protocol: 73 });
+    harness.schemaResult = commandSuccess(JSON.stringify(herdrApiSchemaFixture(73)));
+    const [terminal] = await harness.provider.listTerminals();
+    if (failure !== "lost_ack" && failure !== "unexpected_ack") {
+      harness.inputApiError = { code: failure, message: "queue behavior is unverified" };
+    }
+    if (failure === "lost_ack") harness.inputFailure = new HerdrTransportError("lost ACK", false);
+    if (failure === "unexpected_ack") harness.inputResult = { type: "unexpected" };
+    await assert.rejects(harness.provider.sendText(terminal, "once"), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error instanceof TerminalControlInputNotSentError, false);
+      return true;
+    });
+    assert.equal(harness.requests.filter((entry) => entry.request.method === "pane.send_input").length, 1);
+  }
+});
+
+test("Herdr can prove a pre-dispatch transport failure on an unfamiliar release", async () => {
+  const harness = createHarness({ version: "0.99.0", protocol: 73 });
+  harness.schemaResult = commandSuccess(JSON.stringify(herdrApiSchemaFixture(73)));
+  const [terminal] = await harness.provider.listTerminals();
+  harness.inputFailure = new HerdrTransportError("not connected", true);
+  await assert.rejects(harness.provider.sendText(terminal, "once"), TerminalControlInputNotSentError);
+  assert.equal(harness.requests.filter((entry) => entry.request.method === "pane.send_input").length, 1);
+});
+
+testSupportedHerdr("Herdr requires each discovery and viewport snapshot to match its server profile", async (profile) => {
+  const otherProfile = SUPPORTED_RELEASES.find((value) => value.version !== profile.version)!;
+  const initial = createHarness(profile);
+  initial.snapshotProfiles[1] = otherProfile;
+  assert.deepEqual(await initial.provider.listTerminals(), []);
+  assert.equal(initial.requests.some((entry) => entry.request.method === "pane.process_info"), false);
+
+  const verified = createHarness(profile);
+  verified.snapshotProfiles[2] = otherProfile;
+  await assert.rejects(verified.provider.listTerminals(), /changed during terminal discovery/u);
+
+  const viewport = createHarness(profile);
+  const [terminal] = await viewport.provider.listTerminals();
+  assert.ok(terminal);
+  // Initial discovery and resolve each take two snapshots before the viewport read.
+  viewport.snapshotProfiles[5] = otherProfile;
+  await assert.rejects(viewport.provider.inspectViewport(terminal), /changed server compatibility/u);
+  assert.deepEqual(viewport.ttyViewportCalls, []);
+
+  const input = createHarness(profile);
+  const [inputTerminal] = await input.provider.listTerminals();
+  assert.ok(inputTerminal);
+  input.snapshotProfiles[3] = otherProfile;
+  await assert.rejects(input.provider.sendText(inputTerminal, "do not send"), TerminalControlInputNotSentError);
+  assert.equal(input.requests.some((entry) => entry.request.method === "pane.send_input"), false);
+});
+
+test("Herdr rejects malformed server metadata but fails closed on live API errors", async () => {
   const incompatible = createHarness();
-  incompatible.serverProtocol = HERDR_EXACT_PROTOCOL + 1;
+  incompatible.serverProtocol = Number.NaN;
   assert.deepEqual(await incompatible.provider.listTerminals(), []);
   assert.equal(
     incompatible.requests.some((entry) => entry.request.method === "session.snapshot"),
@@ -511,6 +830,7 @@ test("Herdr skips an incompatible protocol but fails closed on live API errors",
     command: "herdr-test",
     runCommand: (_command, args) => args[0] === "--version"
       ? commandSuccess(`herdr ${HERDR_EXACT_VERSION}\n`)
+      : args[0] === "api" ? { status: 1, stdout: "", stderr: "no schema" }
       : commandSuccess(sessionListJson()),
     request: async (_socketPath, request) => {
       if (request.method === "ping") {
@@ -524,8 +844,8 @@ test("Herdr skips an incompatible protocol but fails closed on live API errors",
   await assert.rejects(failed.provider.listTerminals(), /socket reset/u);
 });
 
-test("Herdr capture resolves freshly and selects a style-preserving source", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr capture resolves freshly and selects a style-preserving source", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
   harness.requests.length = 0;
@@ -537,7 +857,7 @@ test("Herdr capture resolves freshly and selects a style-preserving source", asy
     "placeholder"
   );
   let read = harness.requests.find((entry) =>
-    entry.request.method === "pane.read");
+    entry.request.method === "pane.read" && entry.request.params.lines !== 0);
   assert.ok(read);
   assert.deepEqual(read.request.params, {
     pane_id: "w1:p1",
@@ -555,7 +875,7 @@ test("Herdr capture resolves freshly and selects a style-preserving source", asy
     "\u001b[2mplaceholder\u001b[0m"
   );
   read = harness.requests.find((entry) =>
-    entry.request.method === "pane.read");
+    entry.request.method === "pane.read" && entry.request.params.lines !== 0);
   assert.ok(read);
   assert.deepEqual(read.request.params, {
     pane_id: "w1:p1",
@@ -565,8 +885,8 @@ test("Herdr capture resolves freshly and selects a style-preserving source", asy
   });
 });
 
-test("Herdr zero-scrollback capture reads the current viewport in text and ANSI", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr zero-scrollback capture reads the current viewport in text and ANSI", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
   for (const preserveEscapes of [false, true]) {
@@ -579,7 +899,7 @@ test("Herdr zero-scrollback capture reads the current viewport in text and ANSI"
       ? "\u001b[2mplaceholder\u001b[0m"
       : "placeholder");
     const read = harness.requests.find((entry) =>
-      entry.request.method === "pane.read");
+      entry.request.method === "pane.read" && entry.request.params.lines !== 0);
     assert.ok(read);
     assert.deepEqual(read.request.params, {
       pane_id: "w1:p1",
@@ -611,8 +931,8 @@ test("Herdr viewport inspection uses a fresh same-incarnation snapshot", async (
   );
 });
 
-test("Herdr viewport inspection prefers exact PTY size over zoomed layout area", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr viewport inspection prefers exact PTY size over zoomed layout area", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
   harness.requests.length = 0;
@@ -1083,8 +1403,8 @@ test("Herdr viewport inspection returns unknown when layout geometry is missing"
   assert.equal(await harness.provider.inspectViewport(terminal), undefined);
 });
 
-test("Herdr sends literal text and translated keys in separate single requests", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr sends literal text and translated keys in separate single requests", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
 
@@ -1110,8 +1430,8 @@ test("Herdr sends literal text and translated keys in separate single requests",
   assert.deepEqual(inputs[0].options?.expectedSocketIdentity, SOCKET_IDENTITY);
 });
 
-test("Herdr input refuses process-anchor and server-socket drift before dispatch", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr input refuses process-anchor and server-socket drift before dispatch", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
 
@@ -1142,8 +1462,8 @@ test("Herdr input refuses process-anchor and server-socket drift before dispatch
   );
 });
 
-test("Herdr sends singleton navigation as fixed non-paste PTY bytes with socket authority", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr sends singleton navigation as fixed non-paste PTY bytes with socket authority", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
   for (const [key, text] of [
@@ -1206,8 +1526,8 @@ test("Herdr rejects every unsupported key before discovery or dispatch", async (
   assert.equal(translateHerdrKey("S-Tab"), "shift+tab");
 });
 
-test("Herdr classifies explicit pre-enqueue input rejection as definitely not sent", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr classifies explicit pre-enqueue input rejection as definitely not sent", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
   harness.requests.length = 0;
@@ -1215,33 +1535,46 @@ test("Herdr classifies explicit pre-enqueue input rejection as definitely not se
   harness.inputFailure = undefined;
 
   let sendAttempts = 0;
+  const text = profile.version === "0.9.5" ? "x".repeat(2048) : "hello";
+  const rejection = profile.version === "0.9.5"
+    ? "input contains a 2048-byte line but the terminal is in canonical mode with a 1024-byte limit; wait for the shell prompt and retry"
+    : "queue rejected input";
   const rejectingProvider = new HerdrTerminalControlProvider({
     command: "herdr-test",
     runCommand: (_command, args) => args[0] === "--version"
-      ? commandSuccess(`herdr ${HERDR_EXACT_VERSION}\n`)
+      ? commandSuccess(`herdr ${profile.version}\n`)
+      : args[0] === "api" ? { status: 1, stdout: "", stderr: "no schema" }
       : commandSuccess(sessionListJson()),
     request: async (socketPath, request) => {
       if (request.method === "pane.send_input") {
         sendAttempts += 1;
+        assert.deepEqual(request.params, { pane_id: harness.state.paneId, text });
         return {
           id: request.id,
-          error: { code: "pane_send_failed", message: "queue rejected input" }
+          error: {
+            code: "pane_send_failed",
+            message: rejection
+          }
         };
       }
-      return discoveryResponse(socketPath, request, harness.state);
+      return discoveryResponse(socketPath, request, harness.state, profile);
     },
     statSocket: () => SOCKET_IDENTITY
   });
 
   await assert.rejects(
-    rejectingProvider.sendText(terminal, "hello"),
-    TerminalControlInputNotSentError
+    rejectingProvider.sendText(terminal, text),
+    (error: unknown) => {
+      assert.ok(error instanceof TerminalControlInputNotSentError);
+      assert.ok(error.message.includes(rejection));
+      return true;
+    }
   );
   assert.equal(sendAttempts, 1);
 });
 
-test("Herdr never converts a post-connect lost ACK into a retryable no-send error", async () => {
-  const harness = createHarness();
+testSupportedHerdr("Herdr never converts a post-connect lost ACK into a retryable no-send error", async (profile) => {
+  const harness = createHarness(profile);
   const [terminal] = await harness.provider.listTerminals();
   assert.ok(terminal);
   harness.requests.length = 0;
@@ -1386,21 +1719,22 @@ test("raw Herdr Unix client writes one NDJSON request and correlates its respons
 function discoveryResponse(
   _socketPath: string,
   request: HerdrWireRequest,
-  pane: PaneState
+  pane: PaneState,
+  profile: { version: string; protocol: number }
 ): Record<string, unknown> {
   switch (request.method) {
     case "ping":
       return response(request, {
         type: "pong",
-        version: HERDR_EXACT_VERSION,
-        protocol: HERDR_EXACT_PROTOCOL
+        version: profile.version,
+        protocol: profile.protocol
       });
     case "session.snapshot":
       return response(request, {
         type: "session_snapshot",
         snapshot: {
-          version: HERDR_EXACT_VERSION,
-          protocol: HERDR_EXACT_PROTOCOL,
+          version: profile.version,
+          protocol: profile.protocol,
           panes: [{
             pane_id: pane.paneId,
             terminal_id: pane.terminalId,

@@ -178,33 +178,26 @@ test("doctor reports known paginated Codex protocols as installed with native ac
   }
 });
 
-test("Herdr probe marks only exact 0.8.0 as version supported", () => {
+test("Herdr probe separates tested releases from runtime capability availability", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-doctor-herdr-version-"));
   try {
-    const exact = probeDoctorCommand("herdr", {
-      executables: {
-        herdr: writeFakeExecutable(
-          tempDir,
-          "herdr-exact",
-          `process.stdout.write("herdr 0.8.0");`
-        )
-      }
-    });
-    const newer = probeDoctorCommand("herdr", {
-      executables: {
-        herdr: writeFakeExecutable(
-          tempDir,
-          "herdr-newer",
-          `process.stdout.write("herdr 0.8.1");`
-        )
-      }
-    });
-
-    assert.equal(exact.status, "ok");
-    assert.equal(exact.version_supported, true);
-    assert.equal(newer.status, "ok");
-    assert.equal(newer.available, true);
-    assert.equal(newer.version_supported, false);
+    for (const [version, supported] of [
+      ["0.8.0", true], ["0.9.5", true], ["0.8.1", false], ["0.9.6", false]
+    ] as const) {
+      const probe = probeDoctorCommand("herdr", {
+        executables: {
+          herdr: writeFakeExecutable(
+            tempDir,
+            `herdr-${version}`,
+            `process.stdout.write("herdr ${version}");`
+          )
+        }
+      });
+      assert.equal(probe.status, "ok");
+      assert.equal(probe.available, true);
+      assert.equal(probe.version_supported, true, version);
+      assert.equal(probe.version_tested, supported, version);
+    }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

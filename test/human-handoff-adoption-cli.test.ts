@@ -505,7 +505,7 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
               tab_id: "w1:t1",
               source: wireRequest.params.source,
               format: wireRequest.params.format,
-              text: screen,
+              text: wireRequest.params.lines === 0 ? "" : screen,
               revision,
               truncated: false
             }

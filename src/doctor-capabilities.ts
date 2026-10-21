@@ -1,5 +1,10 @@
 import { spawnSync } from "node:child_process";
 import {
+  HERDR_EXACT_VERSION,
+  HERDR_SUPPORTED_VERSIONS,
+  herdrCompatibilityProfile
+} from "./herdr-compatibility.js";
+import {
   claudeNativeInspectionBehaviorProfile,
   claudeRuntimeCompatibilityWarning,
   claudeRuntimeLifecycleCompatibilityProfile
@@ -33,6 +38,7 @@ export interface DoctorCommandCheck {
   command: string;
   available: boolean;
   version_supported?: boolean;
+  version_tested?: boolean;
   native_profile_supported?: boolean;
   native_profile?: string;
   native_actions_available?: boolean;
@@ -79,8 +85,12 @@ interface DoctorTmuxCapability extends DoctorModeCapability {
 }
 
 interface DoctorHerdrCapability extends DoctorModeCapability {
+  /** Legacy diagnostic: a valid CLI is not excluded by its release number. */
   version_supported: boolean;
-  required_version: typeof DOCTOR_SUPPORTED_HERDR_VERSION;
+  version_tested: boolean;
+  tested_versions: readonly string[];
+  compatibility_policy: "capability_probe";
+  runtime_capability_state: "not_probed";
 }
 
 export interface DoctorCapabilitySummary {
@@ -94,7 +104,9 @@ export interface DoctorCapabilitySummary {
   herdr: DoctorHerdrCapability;
 }
 
-export const DOCTOR_SUPPORTED_HERDR_VERSION = "0.8.0" as const;
+export const DOCTOR_SUPPORTED_HERDR_VERSION = HERDR_EXACT_VERSION;
+
+const HERDR_VERSION_REQUIREMENT = "herdr (runtime capabilities checked per operation)";
 
 const DEFAULT_PROBE_TIMEOUT_MS = 3_000;
 const MAX_PROBE_TIMEOUT_MS = 30_000;
@@ -261,8 +273,6 @@ export function evaluateDoctorCapabilities(
   const tmuxTransportOk = isUsable(checkByCommand.get("tmux"));
   const herdrCheck = checkByCommand.get("herdr");
   const herdrExecutableOk = isUsable(herdrCheck);
-  const herdrVersionSupported =
-    herdrExecutableOk && herdrCheck?.version_supported === true;
 
   const tmux = {
     available: tmuxTransportOk && agentsOk,
@@ -277,30 +287,29 @@ export function evaluateDoctorCapabilities(
     ]
   };
   const herdr = {
-    available: herdrVersionSupported && agentsOk,
-    status: readinessFromParts([coreOk, herdrVersionSupported, agentsOk]),
-    version_supported: herdrVersionSupported,
-    required_version: DOCTOR_SUPPORTED_HERDR_VERSION,
+    available: herdrExecutableOk && agentsOk,
+    status: readinessFromParts([coreOk, herdrExecutableOk, agentsOk]),
+    version_supported: herdrExecutableOk,
+    version_tested: herdrCheck?.version_tested === true,
+    tested_versions: HERDR_SUPPORTED_VERSIONS,
+    compatibility_policy: "capability_probe" as const,
+    runtime_capability_state: "not_probed" as const,
     agents: availableAgents,
     requires: [
       "node",
       "openclaw",
-      `herdr ${DOCTOR_SUPPORTED_HERDR_VERSION}`,
+      HERDR_VERSION_REQUIREMENT,
       "codex or claude"
     ],
     missing: [
       ...missingCore,
-      ...(!herdrExecutableOk
-        ? ["herdr"]
-        : !herdrVersionSupported
-          ? [`herdr ${DOCTOR_SUPPORTED_HERDR_VERSION}`]
-          : []),
+      ...(!herdrExecutableOk ? ["herdr"] : []),
       ...(!agentsOk ? ["codex or claude"] : [])
     ]
   };
   const availableTransports: Array<"tmux" | "herdr"> = [
     ...(tmuxTransportOk ? ["tmux" as const] : []),
-    ...(herdrVersionSupported ? ["herdr" as const] : [])
+    ...(herdrExecutableOk ? ["herdr" as const] : [])
   ];
   const anyTransportOk = availableTransports.length > 0;
 
@@ -383,7 +392,8 @@ function buildProbeResult({
     ...(command === "herdr"
       ? {
           version_supported:
-            status === "ok" && version === DOCTOR_SUPPORTED_HERDR_VERSION
+            status === "ok",
+          version_tested: herdrCompatibilityProfile(version) !== undefined
         }
       : {}),
     found: status !== "not_found",

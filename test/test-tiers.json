@@ -53,6 +53,7 @@
     "test/doctor-capabilities.test.ts",
     "test/executors.test.ts",
     "test/file-lock-cli-adapter.test.ts",
+    "test/herdr-api-contract.test.ts",
     "test/herdr-terminal-control-provider.test.ts",
     "test/host-adapter-capabilities.test.ts",
     "test/host-adapter.test.ts",

@@ -121,7 +121,7 @@ test("reviewed Codex paginated versions have verified profiles while older and u
   );
 });
 
-test("doctor accepts exact Herdr 0.8.0 as the only terminal transport", () => {
+test("doctor reports a tested Herdr CLI without claiming live capability verification", () => {
   const result = evaluateDoctorCapabilities([
     { command: "node", available: true, version_supported: true },
     { command: "openclaw", available: true, status: "ok" },
@@ -130,7 +130,8 @@ test("doctor accepts exact Herdr 0.8.0 as the only terminal transport", () => {
       command: "herdr",
       available: true,
       status: "ok",
-      version_supported: true
+      version_supported: true,
+      version_tested: true
     },
     { command: "codex", available: true, status: "ok" }
   ]);
@@ -140,13 +141,17 @@ test("doctor accepts exact Herdr 0.8.0 as the only terminal transport", () => {
   assert.equal(result.tmux.available, false);
   assert.equal(result.herdr.available, true);
   assert.equal(result.herdr.version_supported, true);
+  assert.equal(result.herdr.version_tested, true);
+  assert.deepEqual(result.herdr.tested_versions, ["0.9.5", "0.8.0"]);
+  assert.equal(result.herdr.compatibility_policy, "capability_probe");
+  assert.equal(result.herdr.runtime_capability_state, "not_probed");
   assert.deepEqual(result.herdr.missing, []);
   assert.deepEqual(result.available_transports, ["herdr"]);
   assert.equal(result.mode, "tmux");
   assert.equal(result.readiness, "ready");
 });
 
-test("doctor fails closed for a non-exact Herdr version", () => {
+test("doctor does not treat an untested release as an unavailable Herdr CLI", () => {
   const result = evaluateDoctorCapabilities([
     { command: "node", available: true, version_supported: true },
     { command: "openclaw", available: true, status: "ok" },
@@ -159,13 +164,15 @@ test("doctor fails closed for a non-exact Herdr version", () => {
     { command: "claude", available: true, status: "ok" }
   ]);
 
-  assert.equal(result.transportOk, false);
-  assert.equal(result.herdr.available, false);
-  assert.equal(result.herdr.version_supported, false);
-  assert.equal(result.herdr.status, "partially_ready");
-  assert.deepEqual(result.herdr.missing, ["herdr 0.8.0"]);
-  assert.deepEqual(result.available_transports, []);
-  assert.equal(result.readiness, "partially_ready");
+  assert.equal(result.transportOk, true);
+  assert.equal(result.herdr.available, true);
+  assert.equal(result.herdr.version_supported, true);
+  assert.equal(result.herdr.status, "ready");
+  assert.deepEqual(result.herdr.missing, []);
+  assert.deepEqual(result.available_transports, ["herdr"]);
+  assert.equal(result.readiness, "ready");
+  assert.equal(result.herdr.version_tested, false);
+  assert.equal(result.herdr.runtime_capability_state, "not_probed");
 });
 
 test("doctor rejects missing tmux or a missing supported coding agent", () => {

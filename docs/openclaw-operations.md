@@ -20,7 +20,7 @@ backend, Desktop, and backend Recovery support described here.
 | --- | --- |
 | Codex CLI shared backend | An authenticated, loaded main CLI conversation on a compatible local backend; [CLI backend guide](codex-cli-native-compatibility.md). No tmux or Herdr required. |
 | Codex Desktop | The supported local app and the intended conversation open in its original owner; [Desktop guide](codex-desktop-compatibility.md). No tmux or Herdr required. |
-| Codex or Claude Code terminal | An authenticated CLI in tmux or local Herdr `0.8.0` using socket protocol 19; [tmux](quickstart-tmux.md) or [Herdr](quickstart-herdr.md) setup. |
+| Codex or Claude Code terminal | An authenticated CLI in tmux or local Herdr with the required operation capabilities; [tmux](quickstart-tmux.md) or [Herdr](quickstart-herdr.md#current-boundary) setup. |
 
 OpenClaw and AKK inspect local processes, private backend endpoints, and any
 selected terminal provider. Workspace is not a routing boundary: exact current

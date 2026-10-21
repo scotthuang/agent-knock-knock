@@ -12,6 +12,7 @@ import {
 } from "./cli-command-runtime.js";
 import { setCliExitCode } from "./cli-runtime-context.js";
 import { evaluateDoctorCapabilities, runDoctorCapabilityProbes } from "./doctor-capabilities.js";
+import { HERDR_COMPATIBILITY_PROFILES } from "./herdr-compatibility.js";
 import { runOpenClawChainDiagnostics } from "./openclaw-doctor.js";
 import type { UnknownRecord } from "./value-guards.js";
 
@@ -193,7 +194,7 @@ function buildDoctorReport(options: InstallDoctorCommandOptions) {
       checked: false,
       required_for_install_readiness: false,
       detail:
-        "Installation readiness checks tmux or exact-version Herdr and at least one supported CLI. " +
+        "Installation readiness checks tmux or a usable Herdr CLI and at least one supported coding-agent CLI. " +
         "AKK verifies a live eligible pane when delegation begins."
     },
     package_root: root,
@@ -207,7 +208,9 @@ function buildDoctorReport(options: InstallDoctorCommandOptions) {
       "Coding-agent checks report exact native lifecycle/status profiles separately. A merely unprofiled complete version keeps native actions available through optimistic runtime validation with a compatibility warning; a known incompatible protocol reports native_actions_available=false while ordinary terminal Send and terminal-activity Watch remain available subject to native UI safety checks.",
       "Doctor does not require a live coding-agent pane; delegation discovers and verifies one at send time.",
       "Claude terminal completion is hook-free and fails closed unless the local transcript schema is verified.",
-      "Herdr support is exact-version gated to 0.8.0/protocol 19 and uses local Unix sockets."
+      `Herdr uses per-operation runtime capability checks; tested baselines are ${HERDR_COMPATIBILITY_PROFILES
+        .map((profile) => `${profile.version}/protocol ${profile.protocol}`)
+        .join(" and ")}. An untested version is not rejected by version number. This installation check does not verify live read/write capabilities; discovery and operations validate the current local Unix-socket endpoint.`
     ]
   };
 }

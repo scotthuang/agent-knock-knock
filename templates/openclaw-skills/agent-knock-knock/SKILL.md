@@ -7,7 +7,9 @@ description: Use Agent Knock Knock to discover and control Codex CLI, Codex Desk
 
 Use this skill when the user explicitly invokes `AKK`, `akk`, or `Agent Knock Knock`, or asks a supported controller Host to inspect or control a coding-agent conversation listed by AKK.
 
-AKK supports loaded local Codex CLI threads through their shared backend, local Codex Desktop conversations (with explicit creation when the Desktop Create tool is available), compatible already-open Claude Code CLIs through their native inbox, and Codex or Claude Code already running inside tmux or local Herdr `0.8.0`. It never launches a replacement coding agent. The controller Host, AKK, the coding agent, and its Desktop app or terminal host must run as the same OS user.
+AKK supports loaded local Codex CLI threads through their shared backend, local Codex Desktop conversations (with explicit creation when the Desktop Create tool is available), compatible already-open Claude Code CLIs through their native inbox, and Codex or Claude Code already running inside tmux or local Herdr with the required operation capabilities. It never launches a replacement coding agent. The controller Host, AKK, the coding agent, and its Desktop app or terminal host must run as the same OS user.
+
+Herdr `0.8.0` / protocol `19` and `0.9.5` / protocol `22` are tested baselines, not a version allowlist. Use fresh discovery and advertised actions: each pane's read capabilities are probed without input, while input requires a matching CLI schema declaration or verified baseline behavior. `matching_cli_schema` is declarative evidence from the same CLI version and server protocol, not runtime negotiation or proof of single-enqueue behavior. An untested server without that declaration exposes only verified reads; an incompatible declaration does not fall back to baseline behavior. Doctor installation readiness leaves live capabilities `not_probed`. Once input may have been dispatched, an uncertain response must not be retried automatically.
 
 Treat `AKK` and `akk` the same way.
 
