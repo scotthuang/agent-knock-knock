@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.14.14",
+  "version": "0.14.15",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "2a961d29016b629a78a7cb06200bbca12a1682e1",
-  "asset": "scotthuang-agent-knock-knock-0.14.14.tgz",
-  "sha256": "af5bb49a5fcffb69120fe29891dfd46be0423d97cf5d9ffb3a1b7365deb7aaa0",
-  "bytes": 3791003,
-  "changelog": "Attempt implemented Codex Desktop operations after app updates without exact-version authorization gates. Keep tested-build evidence separate from current capability availability. Preserve application identity, bundled-backend provenance, exact owner/task/request checks, protocol validation and no replay of uncertain writes."
+  "commit": "89b4d841022b2c3f7f52d42d2eed2e8709158b53",
+  "asset": "scotthuang-agent-knock-knock-0.14.15.tgz",
+  "sha256": "e2a9cc3cb77159040365f060014568a94549526792abb01476c71711da02aa50",
+  "bytes": 3801120,
+  "changelog": "Support Herdr 0.9.5 and probe operation contracts before rejecting unfamiliar releases or protocols. Retain usable reads when input evidence is absent, bind local CLI schema declarations to observed server identity, and preserve process/socket, approval, input ownership and uncertain-send no-replay protections. Tested baselines: 0.8.0/protocol19 and 0.9.5/protocol22; unfamiliar versions are fixture-verified only."
 }
