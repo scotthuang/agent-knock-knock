@@ -12,7 +12,7 @@ socket.
 
 ## Status and compatibility
 
-This connector pins AKK **0.14.7**, including CLI direct connections, Codex
+This connector pins AKK **0.14.15**, including CLI direct connections, Codex
 Desktop, and Recovery. Its generated Skill and registered tools are verified
 against that exact core package at startup. See the [root compatibility
 summary](../../README.md#compatibility) for the coding-agent versions and
@@ -32,7 +32,7 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.14.7`, pinned by this connector's package and lockfile. Running
+- AKK `0.14.15`, pinned by this connector's package and lockfile. Running
   `npm ci` in `connectors/pi` installs that exact AKK runtime; a different
   version at the repository root is not substituted automatically.
 - macOS or Linux. The POC requires a POSIX Unix socket and does not support
@@ -84,7 +84,7 @@ pi list
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
 build instead, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.3`; exact versions are pinned
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.4`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -131,8 +131,14 @@ coding agent settles, its callback is injected into the same Pi session.
 Inspect the exact selector from the Send receipt:
 
 ```text
-/akk status <turn-selector>
+/akk status <turn-selector-or-watch-id>
 ```
+
+List returns conversations only. Query monitoring records separately with
+`/akk watches` or `agent_knock_knock_watches`; do not add another Watch just to
+find the observer already returned by Send. Fully settled, resolved records
+can be pruned after 48 hours; unresolved records and deduplication receipts are
+retained by AKK.
 
 To observe work that you started manually in the terminal, copy the complete
 `terminal_id` from a fresh list and start a read-only Watch:
@@ -171,7 +177,8 @@ also registered for model-driven orchestration:
 
 | Tool | Purpose |
 | --- | --- |
-| `agent_knock_knock_list` | List verified CLI/Desktop sessions, managed work, Watches, and currently available semantic actions. |
+| `agent_knock_knock_list` | List discoverable CLI/Desktop conversations and their current capabilities/actions; a visible Desktop entry is not proof of a live connection. |
+| `agent_knock_knock_watches` | Inspect recent monitoring records separately (default 24 hours, bounded pagination); active and unresolved records remain visible outside the history window. |
 | `agent_knock_knock_watch` | Start a durable, read-only Watch for one exact advertised conversation or terminal. |
 | `agent_knock_knock_unwatch` | Stop observation by exact `watch_id`; it does not interrupt the coding agent. |
 | `agent_knock_knock_list_resumable_threads` | List structurally verified native threads that can be resumed in one terminal. |
@@ -442,7 +449,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.3
+npm run release:check -- --publish --confirm-version 0.1.0-poc.4
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -476,9 +483,18 @@ choices were driven by the authorized test script, not a person clicking the
 TUI. The earlier `0.84.4` runtime was package-load checked this round; its full
 real coding-task acceptance is the historical record above.
 
+The 2026-10-21 core refresh pins AKK `0.14.15` and verifies its capability
+handshake, the full dynamic tool catalog (including the separate Watches
+query), every tool schema, and conversation-only List projection. Connector
+regressions also retain callback deduplication, busy delivery, and exact route
+retirement checks. The real Pi `1.2.0` RPC CLI also loaded the connector in an
+isolated home and registered `/akk`, without submitting a model task. These
+isolated tests do not repeat the historical live
+Codex/Claude task or real-channel delivery acceptance above.
+
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.3` is an npm prerelease and is distributed through the
+`0.1.0-poc.4` is an npm prerelease and is distributed through the
 `next` dist-tag; it does not change the AKK main package or ClawHub artifact.
 
 ## Deliberate POC limits

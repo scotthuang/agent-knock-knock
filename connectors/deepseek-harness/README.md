@@ -13,10 +13,12 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-This connector pins AKK **0.14.8** in its package and lockfile. It exposes
-that runtime's 26 semantic tools, including Codex CLI backend and Desktop
-operations when the selected conversation advertises them. A newer root
-checkout does not silently replace this published dependency.
+This connector pins AKK **0.14.15** in its package and lockfile. It exposes
+that runtime's 27 semantic tools, including Codex CLI backend and Desktop
+operations when the selected conversation advertises them. `list` returns
+current discoverable conversations; `watches` separately returns recent
+monitoring records (24 hours by default), plus active or unresolved records.
+A newer root checkout does not silently replace this published dependency.
 
 The development baseline is DeepSeek Harness **0.2.1-rc.2** with Cordis
 **4.0.5**. This is a release candidate, not a stable release; as checked on
@@ -72,7 +74,7 @@ prereleases use the `next` tag when published.
 
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
-Use `next`, or pin `@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.6`.
+Use `next`, or pin `@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.7`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -156,7 +158,8 @@ behavior through the complete capability-handshake-verified tool catalog:
 
 | Tool | Purpose |
 | --- | --- |
-| `agent_knock_knock_list` | List CLI/Desktop conversations, monitoring records, and each row's currently available actions. |
+| `agent_knock_knock_list` | List current CLI/Desktop conversations and each row's currently available actions, without Watch history. |
+| `agent_knock_knock_watches` | Read bounded recent monitoring records (24 hours by default) plus active/unresolved records; follow returned pagination. |
 | `agent_knock_knock_watch` | Observe one advertised conversation or terminal, preserving its exact task anchor when available. |
 | `agent_knock_knock_unwatch` | Stop one exact `watch_id` without sending terminal input. |
 | `agent_knock_knock_list_resumable_threads` | List structurally verified native threads for one terminal. |
@@ -387,17 +390,20 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned published AKK runtime `0.14.8`; building the current
+tests against its pinned published AKK runtime `0.14.15`; building the current
 repository root does not silently replace that dependency. Testing connector
 changes against another AKK runtime requires an explicit dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
 
-Connector **`0.1.0-rc.6`** is the DSH `0.2.1-rc.2` compatibility release,
-published as a prerelease on `next`; it does not promote `latest`. Registry
-state can change independently of this source file, so the `npm view` commands
-above remain authoritative.
+Connector **`0.1.0-rc.7`** updates the pinned core from `0.14.8` to `0.14.15`
+and validates the complete 27-tool catalog, generated Skill handshake, and
+separate List/Watches routes. It retains the DSH Host compatibility policy
+introduced in `0.1.0-rc.6`; it does not add a new Host version. Prerelease
+publication uses `next` and does not promote `latest`. Registry state can
+change independently of this source file, so the `npm view` commands above
+remain authoritative.
 
 From `connectors/deepseek-harness`, the normal development gate is:
 
@@ -410,12 +416,16 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.6` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.7` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
-an isolated registry test, not a live-model acceptance claim. The final product
-sources also passed typecheck, 39 fast tests and coherent launcher/helper
+an isolated registry test, not a live-model acceptance claim. The `rc.7`
+regression also uses the real DSH ToolRuntime and pinned HostAdapter to verify
+List/Watches separation, filter forwarding, pagination preservation, and
+pre-dispatch rejection of invalid history/window requests. The CLI executor
+is a fixture, so this does not contact live coding sessions or deliver callbacks.
+The earlier `0.1.0-rc.6` sources also passed typecheck, 39 fast tests and coherent launcher/helper
 resolution with `0.2.0-rc.2`, retained `0.1.5-rc.2`, and preview
 `0.2.1-alpha.2`. Old-version Web/model acceptance was not repeated. The older `0.1.1-rc.2` and
 `0.1.2-alpha.1` compatibility policy is retained; it is not a new full Web
@@ -451,7 +461,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.6
+npm run release:check -- --publish --confirm-version 0.1.0-rc.7
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags

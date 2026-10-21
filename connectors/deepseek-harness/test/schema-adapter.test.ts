@@ -15,7 +15,7 @@ import {
   compileAuthoritativeInputValidator,
 } from "../src/schema-adapter.js";
 
-test("all pinned AKK 0.14.8 schemas pass the shared supported DSH validator", async () => {
+test("all pinned AKK 0.14.15 schemas pass the shared supported DSH validator", async () => {
   const adapter = createHostAdapter({
     environmentForContext: () => ({}),
     lifecycleEnvironment: {},
@@ -36,10 +36,10 @@ test("all pinned AKK 0.14.8 schemas pass the shared supported DSH validator", as
       /capability handshake/u,
     );
     // Contract for the published dependency pinned in this connector's lockfile.
-    assert.equal(adapter.tools.length, 26);
+    assert.equal(adapter.tools.length, 27);
     assert.equal(
       catalogDigest(adapter),
-      "c4dcd80e2ca9d9aa59c4d2e659ae376c644dba558f939b66d101cf332140ac4d"
+      "87a07b77e0a344e4da9f87f510adc5f8c6d68e9c271c96164ed1ef681457b1c5"
     );
     for (const tool of adapter.tools) {
       const discovery = adaptHostToolInputSchema(

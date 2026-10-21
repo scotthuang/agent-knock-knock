@@ -1,10 +1,51 @@
 # Pi and DeepSeek Harness connector compatibility
 
 These are independently versioned controller connectors. Installing an AKK
-core/OpenClaw release does not update an already installed connector. The
-published 2026-10-14 connectors pin AKK core `0.14.7`; DSH connector `0.1.0-rc.6`
-pins `0.14.8`. Each carries its runtime's canonical Skill and 26-tool
-capability handshake. Neither connector update requires a new core release.
+core/OpenClaw release does not update an already installed connector. Select
+npm `next` or the exact connector version below; their `latest` tags remain
+unchanged. Neither connector update requires a new core release.
+
+## Core 0.14.15 alignment — 2026-10-21
+
+| Connector | Version on `next` | Exact core dependency | Retained Host boundary |
+| --- | --- | --- | --- |
+| Pi | `0.1.0-poc.4` | `0.14.15` | Pi `1.2.0` and `0.84.4` |
+| DeepSeek Harness | `0.1.0-rc.7` | `0.14.15` | DSH `0.2.1-rc.2` / Cordis `4.0.5`; earlier reviewed RC/alpha/legacy sets below |
+
+This update aligns manifests, lockfiles, runtime version constants and
+regression checks with the published core. Both connectors dynamically
+register all **27 tools**, including `agent_knock_knock_watches`, and verify
+the bundled canonical Skill against the actual runtime capability handshake.
+The HostAdapter and handshake APIs remain compatible; this update does not
+broaden the supported Host versions or change callback admission policy.
+
+`/akk list` now returns discoverable conversations only. Use `/akk watches`
+for the separate, paginated observation inventory (recent 24 hours by default;
+older active or unresolved records remain visible). The core's lifecycle
+maintenance removes eligible healthy completed observations after 48 hours,
+while preserving unresolved records and deduplication receipts. Existing
+absolute deadlines, Store locations and callback routes are not migrated.
+The DSH-specific Store and Pi's existing Store configuration remain in effect.
+Core `0.14.13` introduced Store writer protocol 10; an older writer cannot
+continue writing that Store after activation. A downgrade requires a coherent
+backup or a compatible writer, rather than only changing the connector version.
+
+Validation uses the actual pinned core and real Host SDK dependencies in
+isolated installations: typecheck, connector fast tests (Pi 30; DSH 40),
+package/Skill parity, 27-tool registration and List/Watches command/schema
+checks. Pi `1.2.0` also passed an isolated real RPC startup and `/akk`
+registration check without a model task. Publication
+repeats each connector's own release gate on clean synchronized `main`, followed
+by a clean install of the public artifacts. The checks do not send tasks to
+business sessions or external chat channels. Full live task/model-consumption
+results below are dated historical evidence, not repeated claims for this
+core-only update. Daily Host installations are not upgraded by publication.
+
+## Historical verification
+
+The following dated records describe the Host compatibility work behind the
+retained support boundary. Their connector/core versions and test counts are
+kept as recorded at the time.
 
 ## DSH 0.2.1-rc.2 compatibility — 2026-10-17
 
