@@ -34,6 +34,7 @@ import type {
 // any future pinned AKK dependency provides all of these tools.
 const TOOL_NAMES = [
   "agent_knock_knock_list",
+  "agent_knock_knock_watches",
   "agent_knock_knock_watch",
   "agent_knock_knock_unwatch",
   "agent_knock_knock_list_resumable_threads",

@@ -22,6 +22,7 @@ test("pinned AKK verifies the bundled Skill and every Pi tool schema", async () 
       loadBundledAkkSkillDocument(),
       adapter.tools.map((tool) => tool.name),
     );
+    assert.ok(adapter.tools.some((tool) => tool.name === "agent_knock_knock_watches"));
     for (const metadata of adapter.tools) {
       const schema = adaptHostToolInputSchema(metadata.inputSchema);
       assert.doesNotThrow(() => Compile(schema), metadata.name);

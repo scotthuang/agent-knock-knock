@@ -1,5 +1,11 @@
 # Changelog
 
+## Pi connector 0.1.0-poc.4 / DeepSeek Harness connector 0.1.0-rc.7 — 2026-10-21
+
+- Pin both independent connectors to published AKK core `0.14.15`, replacing Pi `0.14.7` and DSH `0.14.8`; align lockfiles, runtime versions and the canonical Skill/27-tool handshake. Publish on `next` without moving either `latest` tag.
+- Expose conversation-only List and the separate bounded Watches query; inherit the core's protected 48-hour completed-observation cleanup and Store writer protocol 10. Do not migrate callback routes or existing observation deadlines.
+- Retain the established Pi and DSH Host compatibility policies, DSH-specific Store, approval boundaries and callback deduplication. Validate the actual pinned core, native Host tool/schema wiring and isolated List/Watches forwarding; no new live-model or external-chat delivery claim.
+
 ## 0.14.15 - 2026-10-21
 
 - Determine local Herdr capabilities per operation instead of rejecting unfamiliar versions. Retain `0.8.0` / protocol `19` and `0.9.5` / protocol `22` as tested baselines, with socket, terminal and process identity checks before input.
