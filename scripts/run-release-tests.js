@@ -1,9 +1,17 @@
 import { spawnSync } from "node:child_process";
+import { checkCoordinatedCoreRelease } from "./connector-release-check.js";
 import { repoRoot, testProcessEnvironment } from "./test-tier-utils.js";
 
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const invocation = parseInvocation(process.argv.slice(2));
+for (const connector of checkCoordinatedCoreRelease({ repoRoot })) {
+  process.stdout.write(
+    `Coordinated release: ${connector.packageName}@${connector.version} pins core ` +
+    `${connector.coreVersion} (${connector.registryState}, dist-tag ${connector.distTag}).\n`
+  );
+}
 const scripts = [
+  "connectors:verify",
   "test:full",
   "compat:openclaw:current",
   "clawhub:validate",

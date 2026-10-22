@@ -12,7 +12,7 @@ socket.
 
 ## Status and compatibility
 
-This connector pins AKK **0.14.15**, including CLI direct connections, Codex
+This connector pins AKK **0.14.16**, including CLI direct connections, Codex
 Desktop, and Recovery. Its generated Skill and registered tools are verified
 against that exact core package at startup. See the [root compatibility
 summary](../../README.md#compatibility) for the coding-agent versions and
@@ -20,7 +20,8 @@ operation-specific limits. Updating AKK core elsewhere does not update this
 connector's pinned dependency.
 
 This is a POC prerelease distributed on npm as
-`@scotthuang/agent-knock-knock-pi`. Prereleases use the `next` dist-tag:
+`@scotthuang/agent-knock-knock-pi`. Prereleases use the `next` dist-tag;
+installing without `@next` can select an older `latest` build:
 
 ```sh
 pi install npm:@scotthuang/agent-knock-knock-pi@next
@@ -32,7 +33,7 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.14.15`, pinned by this connector's package and lockfile. Running
+- AKK `0.14.16`, pinned by this connector's package and lockfile. Running
   `npm ci` in `connectors/pi` installs that exact AKK runtime; a different
   version at the repository root is not substituted automatically.
 - macOS or Linux. The POC requires a POSIX Unix socket and does not support
@@ -84,7 +85,7 @@ pi list
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
 build instead, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.4`; exact versions are pinned
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.5`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -449,7 +450,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.4
+npm run release:check -- --publish --confirm-version 0.1.0-poc.5
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -492,9 +493,16 @@ isolated home and registered `/akk`, without submitting a model task. These
 isolated tests do not repeat the historical live
 Codex/Claude task or real-channel delivery acceptance above.
 
+The 2026-10-23 coordinated release pins AKK `0.14.16` and bundles its updated
+Skill. Default List folds unnamed, unstarted Codex candidates beside an
+established conversation; diagnostic List retains their exact IDs. This is
+a presentation change, not evidence that a candidate is disconnected, and it
+does not change Send routing or callback ownership. Sole empty conversations
+and exact frontend associations remain visible.
+
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.4` is an npm prerelease and is distributed through the
+`0.1.0-poc.5` is an npm prerelease and is distributed through the
 `next` dist-tag; it does not change the AKK main package or ClawHub artifact.
 
 ## Deliberate POC limits

@@ -27,7 +27,7 @@ synchronization have explicit non-regression budgets. See
 | `npm run test:affected` | Complete fast tier plus mapped integration tests; unknown or shared-core changes run the full tier | Maintainer/release diagnostics only; not an ordinary development command |
 | `npm run test:full` | The exact union of fast and integration tests | Immediate pre-publication gate for an actual npm or ClawHub release |
 | `npm test` | Compatibility alias for `test:full` | Same release-only boundary as `test:full` |
-| `npm run test:release` | Full suite, isolated current-build OpenClaw compatibility check, ClawHub runtime validation, and ClawHub publish dry-run | Immediate pre-publication gate for an actual npm or ClawHub release |
+| `npm run test:release` | Coordinated core/Pi/DSH version preflight and connector gates, full suite, isolated current-build OpenClaw compatibility check, ClawHub runtime validation, and ClawHub publish dry-run | Immediate pre-publication gate for an actual npm or ClawHub release |
 | `npm run test:release:live` | The release tier plus credentialed native Codex and Claude lifecycle smoke/attestation | Optional release-time diagnostic with dedicated prepared tmux panes |
 | `npm run compat:openclaw` | Full minimum/current/API-boundary OpenClaw compatibility matrix | Periodic maintainer check and any change to declared compatibility floors; not required for every package release |
 

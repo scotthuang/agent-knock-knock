@@ -151,6 +151,7 @@ export function codexNativeSessionProjection(identity: CodexNativeIdentity, snap
     id, conversation_id: id, source: "codex_cli", agent: "codex",
     title: snapshot.thread.name ?? snapshot.thread.preview ?? "Codex CLI", cwd: snapshot.thread.cwd,
     native_thread_id: identity.threadId, native_turn_id: snapshot.latestTurnId,
+    ...unstartedThreadProjection(snapshot),
     backend_version: backendVersion, connection_state: snapshot.loaded ? "loaded_backend_verified" : "not_loaded",
     ...(snapshot.historyMaterialized === false ? { history_state: "unmaterialized",
       control_limitation: canSend
@@ -172,6 +173,13 @@ export function codexNativeSessionProjection(identity: CodexNativeIdentity, snap
       ...(controlsAvailable ? { permission_options: { tool: "agent_knock_knock_permission_options", input: { conversation_id: id } } } : {})
     }
   };
+}
+
+/** Empty history is a display fact, never proof that a frontend abandoned the thread. */
+function unstartedThreadProjection(snapshot: CodexNativeSnapshot) {
+  const unstarted = isLoadedEmptyCodexCliSnapshot(snapshot) && [snapshot.thread.name, snapshot.thread.preview]
+    .every(value => value == null || typeof value === "string" && value.trim() === "");
+  return unstarted ? { unstarted_thread: true } : {};
 }
 
 export function codexNativeTaskProjection(task: CodexNativeTaskRecord) {

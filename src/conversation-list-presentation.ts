@@ -12,17 +12,74 @@ type WorkspaceGroup = { terminal_conversation_id: string; native_conversation_id
 /** Prefer a verified backend for an unambiguous project display, without creating a routing alias. */
 export function presentConversationList(conversations: readonly Row[], physicalTerminals: readonly Row[],
   options: ConversationListPresentationOptions = {}) {
-  const groups = workspaceGroups(conversations, physicalTerminals);
-  const hidden = new Set(options.diagnostics ? [] : groups.map(group => group.terminal_conversation_id));
+  const unstarted = unstartedDisplayCandidates(conversations, physicalTerminals);
+  const candidates = new Set(unstarted.map(row => String(row.conversation_id)));
+  const preferred = conversations.filter(row => !candidates.has(String(row.conversation_id)));
+  const groups = workspaceGroups(preferred, physicalTerminals);
+  const hidden = new Set(options.diagnostics ? [] : [...candidates, ...groups.map(group => group.terminal_conversation_id)]);
   return {
     conversations: conversations.filter(row => !hidden.has(String(row.conversation_id)))
-      .map((row): Row => ({ ...row, surface: row.source === "codex_desktop" ? "desktop" : "cli" })),
+      .map((row): Row => ({ ...row, surface: row.source === "codex_desktop" ? "desktop" : "cli",
+        ...(options.diagnostics && candidates.has(String(row.conversation_id))
+          ? { classification: "unstarted_candidate", frontend_presence: "unverified" } : {}) })),
     conversation_presentation: {
       mode: options.diagnostics ? "diagnostics" : "default",
-      workspace_grouped_connections: hidden.size,
+      workspace_grouped_connections: options.diagnostics ? 0 : groups.length,
+      ...(unstarted.length ? { unstarted_candidates_count: unstarted.length,
+        unstarted_candidates_omitted: options.diagnostics ? 0 : unstarted.length,
+        ...(!options.diagnostics ? { diagnostic_query: { tool: "agent_knock_knock_list", arguments: { terminalDebug: true } } } : {}) } : {}),
       ...(options.diagnostics ? { workspace_groups: groups } : {})
     }
   };
+}
+
+/** A display preference, never proof that an unstarted thread is orphaned or a routing alias. */
+function unstartedDisplayCandidates(conversations: readonly Row[], terminals: readonly Row[]): Row[] {
+  const native = conversations.filter(row => row.source === "codex_cli" && row.agent === "codex");
+  return native.filter(candidate => {
+    if (!unstartedCandidate(candidate)) return false;
+    const identity = codexDisplayIdentity(candidate), key = workspaceKey(candidate);
+    if (!identity || !key) return false;
+    const peers = native.filter(row => workspaceKey(row) === key);
+    if (peers.some(row => codexDisplayIdentity(row)?.codexHome !== identity.codexHome)
+      || peers.filter(row => row.conversation_id === candidate.conversation_id).length !== 1) return false;
+    const established = peers.filter(hasEstablishedTask);
+    if (established.length !== 1) return false;
+    const physical = terminals.filter(row => workspaceKey(row) === key);
+    if (physical.length > 1 || physical.some(row => row.process_state !== "active")) return false;
+    const projected = conversations.filter(row => String(row.conversation_id).startsWith("terminal:") && workspaceKey(row) === key);
+    if ([...physical, ...projected].some(row => !canGroup(row, established[0]) || needsOwnTerminalEntry(row))) return false;
+    return ![...terminals, ...projected].some(row => terminalNamesThread(row, identity.threadId));
+  });
+}
+
+function unstartedCandidate(row: Row): boolean {
+  return row.unstarted_thread === true && row.history_state === "unmaterialized"
+    && row.native_turn_id === null && row.latest_turn === null && row.activity_state === "idle"
+    && row.observation_error === undefined && !needsOwnTerminalEntry(row)
+    && emptyArray(row.terminal_aliases) && emptyArray(row.terminal_controls)
+    && emptyArray(row.active_flags) && emptyArray(row.interaction_state);
+}
+
+function emptyArray(value: unknown): boolean { return value === undefined || Array.isArray(value) && value.length === 0; }
+
+function hasEstablishedTask(row: Row): boolean {
+  const turn = recordValue(row.latest_turn);
+  return row.history_state !== "unmaterialized" && row.observation_error === undefined
+    && typeof row.native_turn_id === "string" && row.native_turn_id.length > 0 && turn?.id === row.native_turn_id;
+}
+
+function codexDisplayIdentity(row: Row): ReturnType<typeof parseCodexNativeConversationId> | undefined {
+  if (row.connection_state !== "loaded_backend_verified") return undefined;
+  try {
+    const identity = parseCodexNativeConversationId(String(row.conversation_id ?? ""));
+    return row.native_thread_id === identity.threadId ? identity : undefined;
+  } catch { return undefined; }
+}
+
+function terminalNamesThread(row: Row, threadId: string): boolean {
+  return [row.native_agent_session_id, row.native_agent_status_card_session_id, row._routing_inspection_thread_id]
+    .some(value => typeof value === "string" && value.toLowerCase() === threadId.toLowerCase());
 }
 
 function workspaceGroups(conversations: readonly Row[], physicalTerminals: readonly Row[]): WorkspaceGroup[] {

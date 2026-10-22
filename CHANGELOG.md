@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.16 / Pi 0.1.0-poc.5 / DeepSeek Harness 0.1.0-rc.8 — 2026-10-23
+
+- Fold unnamed Codex CLI threads with no materialized task history from default List when one established same-project thread is available and identity/attention guards permit it. Keep exact IDs and first-task actions in diagnostics, and restore ordinary display when a task starts. This is a display preference, not proof that an empty thread is abandoned or authorization to redirect a message.
+- Keep sole empty threads, named threads, exact terminal attachments, multiple established sessions and identity conflicts visible. Report folded candidate counts and a diagnostic query; distinguish backend reachability from unverified frontend presence.
+- Publish Pi and DeepSeek Harness connectors alongside core, with both dependencies pinned to `0.14.16`. Keep the connectors on npm `next` and the existing Host compatibility boundaries; no tclaude preview changes are included.
+- Require coordinated core/Pi/DSH release preparation and registry verification for future core releases. Updating core alone does not upgrade an already-installed connector; install or update the connector's `@next` release to receive its new bundled core dependency.
+
 ## Pi connector 0.1.0-poc.4 / DeepSeek Harness connector 0.1.0-rc.7 — 2026-10-21
 
 - Pin both independent connectors to published AKK core `0.14.15`, replacing Pi `0.14.7` and DSH `0.14.8`; align lockfiles, runtime versions and the canonical Skill/27-tool handshake. Publish on `next` without moving either `latest` tag.

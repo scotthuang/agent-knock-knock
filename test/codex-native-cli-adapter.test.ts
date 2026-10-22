@@ -55,6 +55,7 @@ test("unmaterialized native Status offers first Send without claiming subscripti
   const f = fixture(t); f.snapshot.historyMaterialized = false;
   f.client.subscribe = async () => { throw new CodexNativeError("unmaterialized_subscription", "No materialized history"); };
   const listed = (await f.run("codex-cli-list")).codex_cli_sessions[0];
+  assert.equal(listed.unstarted_thread, true);
   assert.equal(listed.connection_state, "loaded_backend_verified"); assert.equal(listed.activity_state, "idle");
   assert.equal(listed.capabilities.send, true); assert.equal(listed.available_actions.send.input.conversation_id, f.id);
   assert.equal(listed.capabilities.set_permissions, false); assert.equal(listed.available_actions.permission_options, undefined);
@@ -85,10 +86,30 @@ test("unmaterialized native Status offers first Send without claiming subscripti
   const sent = await f.run("send", { conversation: f.id, message: "First task", messageId: "first", openclawSession: "controller" });
   assert.equal(sent.delivered, true); assert.equal(sent.submission_state, "verified");
   assert.equal(sent.native_thread_id, f.target.threadId); assert.equal(sent.native_turn_id, "native-turn-1");
+  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, undefined);
   assert.equal(f.sends, 1); assert.equal(f.launches, 1); assert.equal(f.callbacks, 0);
   f.finish();
   const completed = await f.run("watch-status", { watch: sent.watch_id });
   assert.equal(completed.status, "completed"); assert.equal(f.callbacks, 1);
+});
+
+test("only a verified unnamed pre-first-task snapshot is marked as an unstarted display candidate", async t => {
+  const f = fixture(t);
+  for (const history of [undefined, true, false]) {
+    f.snapshot.historyMaterialized = history;
+    assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, history === false ? true : undefined);
+  }
+  for (const field of ["name", "preview"] as const) {
+    f.snapshot.thread[field] = "A deliberately named new session";
+    const row = (await f.run("codex-cli-list")).codex_cli_sessions[0];
+    assert.equal(row.unstarted_thread, undefined);
+    assert.equal(row.capabilities.send, true);
+    delete f.snapshot.thread[field];
+  }
+  f.snapshot.pendingInteractions.push({ id: "pending", kind: "blocking_question", threadId: f.target.threadId,
+    turnId: "pending-turn", itemId: "pending-item", method: "item/tool/requestUserInput", questions: [] });
+  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, undefined);
+  assert.equal(f.sends, 0); assert.equal(f.launches, 0); assert.equal(f.callbacks, 0);
 });
 
 test("native Status public progress stays on the exact selected turn and distinguishes empty from failed reads", async t => {

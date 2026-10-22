@@ -15,7 +15,7 @@ import {
   compileAuthoritativeInputValidator,
 } from "../src/schema-adapter.js";
 
-test("all pinned AKK 0.14.15 schemas pass the shared supported DSH validator", async () => {
+test("all pinned AKK schemas pass the shared supported DSH validator", async () => {
   const adapter = createHostAdapter({
     environmentForContext: () => ({}),
     lifecycleEnvironment: {},

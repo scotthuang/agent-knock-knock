@@ -51,8 +51,7 @@ export function compactAkkListModelProjection(
     } : {}),
     ...(Array.isArray(result.conversations)
       ? { conversations: arrayValue(result.conversations).map(row => compactConversation(row, routingDiagnostics)),
-          conversation_presentation: compactAkkListScalars(recordValue(result.conversation_presentation) ?? { mode: "default" },
-            ["mode", "workspace_grouped_connections"]),
+          conversation_presentation: compactConversationPresentation(result.conversation_presentation),
           ...(routingDiagnostics ? { conversation_routing: compactAkkListScalars(recordValue(result.conversation_routing) ?? {},
             ["policy", "exact_associations", "unresolved_terminals"]) } : {}) }
       : { terminals: arrayValue(result.terminals).map(compactAkkListTerminal) }),
@@ -60,6 +59,16 @@ export function compactAkkListModelProjection(
     ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {})
   };
   return paginateHostList(projected, params);
+}
+
+function compactConversationPresentation(value: unknown): Record<string, unknown> {
+  const row = recordValue(value) ?? { mode: "default" };
+  return { ...compactAkkListScalars(row, ["mode", "workspace_grouped_connections",
+    "unstarted_candidates_count", "unstarted_candidates_omitted"]),
+    ...(Number(row.unstarted_candidates_omitted) > 0 ? {
+      diagnostic_query: { tool: "agent_knock_knock_list", arguments: { terminalDebug: true } },
+      note: "Unnamed, unstarted candidates are folded for display only; frontend attachment is unverified. Exact IDs remain usable."
+    } : {}) };
 }
 
 function compactDesktopConversation(row: Record<string, unknown>): Record<string, unknown> {
@@ -78,7 +87,8 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
   return {
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
       "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
-      "pending_interaction_count", "interaction_requests_scanned", "history_state", "attention_required", "updated_at", "observation_error"]),
+      "pending_interaction_count", "interaction_requests_scanned", "history_state", "unstarted_thread", "classification", "frontend_presence",
+      "attention_required", "updated_at", "observation_error"]),
     ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
     capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, [
       "status", "send", "watch", "interaction_notify", "interaction_respond", "approve", "set_permissions"]),
@@ -105,7 +115,10 @@ function compactConversation(row: Record<string, unknown>, diagnostics: boolean)
 }
 
 function projectCliConnection(output: Record<string, unknown>, row: Record<string, unknown>): void {
-  if (["loaded_backend_verified", "native_registry_verified"].includes(String(row.connection_state)) || row.process_state === "active") {
+  if (row.unstarted_thread === true && stringArrayValue(row.terminal_aliases).length === 0) {
+    output.backend_reachable = row.connection_state === "loaded_backend_verified";
+    output.frontend_presence = "unverified";
+  } else if (["loaded_backend_verified", "native_registry_verified"].includes(String(row.connection_state)) || row.process_state === "active") {
     output.connected = true;
   } else if (row.connection_state === "not_loaded") output.connected = false;
   delete output.connection_state;
