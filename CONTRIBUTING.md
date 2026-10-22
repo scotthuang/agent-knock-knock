@@ -62,6 +62,49 @@ turns.
 
 If your change touches logging, callbacks, or trace output, also review the output for secrets and local-only data. Trace output must not expose agent thinking text, raw callback payloads, gateway tokens, API keys, passwords, or proxy credentials.
 
+## Coordinated package releases
+
+Every core release includes fresh Pi and DeepSeek Harness connector releases,
+even when their only runtime change is the core dependency. Both connectors
+must pin the exact core version being released in their manifests and locks.
+They keep independent version numbers: stable connector versions use `latest`,
+and prerelease versions use `next`. A stable core release does not promote a
+prerelease DSH connector to `latest`.
+
+1. Check npm for all three candidate versions. Bump both connector versions and
+   constants, align their exact core dependencies and lockfiles, update release
+   notes, and run `npm run skill:sync`. Test against the candidate core tarball
+   in isolation when it is not published yet; do not commit local file dependencies.
+2. Immediately before publication run `npm run test:release`, type checking,
+   architecture validation, and package-content checks. The release runner
+   checks both connector dependencies against the core version, rejects reused
+   npm versions with stale core pins, and runs both connector offline gates
+   (`typecheck`, `test:fast`, `pack:check`) before the core release checks.
+3. Merge the reviewed versioned source onto clean, synchronized `main`. Publish
+   and verify the core first. Then publish each connector through its shared gate:
+
+   ```bash
+   npm run pi:release:check -- --publish --confirm-version <pi-version>
+   npm run deepseek:release:check -- --publish --confirm-version <dsh-version>
+   ```
+
+   These wrappers require unused npm versions and connector repository tags;
+   create `pi-v<version>` and `deepseek-harness-v<version>` after publication,
+   alongside the core `v<version>` tag/Release. Preserve the tested core tarball
+   for the existing ClawHub publication workflow.
+4. Read back each exact version, dist-tag and dependency from npm, download the
+   published artifacts, and perform clean-install/tool-registration checks.
+   Verify that connector installations resolve the new core, not merely that
+   the connector's own version changed. Report ClawHub independently.
+
+An interrupted release can leave some versions published. The release preflight
+allows an existing connector only when its registry dependency already matches
+the candidate core, so the remaining checks can be rerun. This does not authorize
+republishing it or prove its artifact matches: compare the existing tarball and
+integrity before resuming only the missing publication. Network/authentication
+errors are inconclusive, not proof that a version is free. Do not declare the
+release complete while either connector remains on the previous core.
+
 ## Native Lifecycle Live-Smoke Diagnostic
 
 This optional diagnostic runs a fresh real-agent check in addition to the

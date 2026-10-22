@@ -98,6 +98,9 @@ and terminal records needing attention or management recovery remain visible.
 Direct-only and terminal-only CLIs remain listed. `terminalDebug: true` /
 `list --terminal-debug` expands all connections. Raw CLI discovery arrays also
 remain available for diagnosis.
+AKK `0.14.16` adds display-only folding of unstarted, unnamed
+candidates beside an established conversation. Exact-ID first Send remains
+available; see [candidate selection and its frontend-identity limits](list-output.md#conversation-selection).
 
 Actual routing association still requires the exact current thread, verified
 Codex home and physical process incarnation. A configured home, matching cwd,

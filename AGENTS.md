@@ -12,3 +12,9 @@ not change the test execution policy below.
 - Run the full/release test suite only as the immediate pre-publication gate for an actual npm or ClawHub package release.
 - A local install is not a package release and must not trigger the full test suite.
 - If full-suite evidence would otherwise be useful outside a release, report that it was skipped under this policy instead of running it.
+
+## Coordinated package releases
+
+- Every core release must also publish updated Pi and DeepSeek Harness connector packages. Update both exact core dependencies, lockfiles, connector versions/constants, generated Skills, and release notes; connector version numbers remain independent.
+- Do not reuse a published connector version that pins an older core. Verify all candidate versions before publishing, publish core first, then Pi and DSH with their existing stable/prerelease dist-tags, and verify registry metadata plus clean-install artifacts for all three.
+- A core-only publication is a partial release, not a completed coordinated release. Report channel failures separately and resume from registry evidence without republishing immutable versions. See [CONTRIBUTING.md](CONTRIBUTING.md#coordinated-package-releases).

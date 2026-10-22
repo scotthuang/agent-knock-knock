@@ -98,7 +98,7 @@ export function checkConnectorRelease({
   });
 }
 
-/** Execute the fixed offline gate for both connectors without version coupling. */
+/** Execute the fixed offline gate for both independently versioned connectors. */
 export function checkAllConnectorsOffline({
   repoRoot = defaultRepoRoot,
   runner = createSystemRunner(),
@@ -110,6 +110,50 @@ export function checkAllConnectorsOffline({
       offline: true,
       runner,
     })));
+}
+
+/**
+ * Preflight a core release before publishing any package. Published versions may
+ * be encountered while resuming a partial release; they must already pin this
+ * exact core. This is read-only and never treats a registry lookup as an artifact
+ * verification or permission to republish an immutable version.
+ */
+export function checkCoordinatedCoreRelease({
+  repoRoot = defaultRepoRoot,
+  runner = createSystemRunner(),
+} = {}) {
+  const root = fs.realpathSync(path.resolve(repoRoot));
+  const candidates = CONNECTOR_RELEASE_TARGETS.map((target) => {
+    const packageDirectory = path.join(root, target.packagePath);
+    return { packageDirectory, metadata: verifyRepositoryParity({ root, packageDirectory, target }) };
+  });
+  return Object.freeze(candidates.map(({ packageDirectory, metadata }) => {
+    const lookup = runCommand(runner, "npm", [
+      "view", `${metadata.packageName}@${metadata.version}`, "version", "dependencies", "--json",
+      "--fetch-retries=0", "--fetch-timeout=30000",
+    ], { cwd: packageDirectory });
+    if (lookup.error) {
+      throw releaseFailure([`npm registry lookup failed for ${metadata.packageName}`]);
+    }
+    if (lookup.status !== 0) {
+      if (!/E404|404 Not Found|No match found/u.test(`${lookup.stderr}\n${lookup.stdout}`)) {
+        throw releaseFailure([`npm registry lookup is inconclusive for ${metadata.packageName}`]);
+      }
+      return Object.freeze({ ...metadata, registryState: "unpublished" });
+    }
+    let published;
+    try { published = JSON.parse(lookup.stdout); } catch {
+      throw releaseFailure([`npm registry returned invalid JSON for ${metadata.packageName}`]);
+    }
+    if (published?.version !== metadata.version ||
+        published?.dependencies?.[ROOT_PACKAGE_NAME] !== metadata.coreVersion) {
+      throw releaseFailure([
+        `${metadata.packageName}@${metadata.version} is already published without the exact ` +
+        `${ROOT_PACKAGE_NAME}@${metadata.coreVersion} dependency; choose a new connector version`,
+      ]);
+    }
+    return Object.freeze({ ...metadata, registryState: "published_matching_dependency" });
+  }));
 }
 
 /** System command boundary, injectable so policy and ordering are unit-testable. */
@@ -210,6 +254,12 @@ function verifyRepositoryParity({ root, packageDirectory, target }) {
       `${ROOT_PACKAGE_NAME} dependency must be one exact supported SemVer`,
     );
   }
+  const coreVersion = readJson(path.join(root, "package.json"), "core package manifest").version;
+  if (coreDependency !== coreVersion) {
+    failures.push(
+      `${ROOT_PACKAGE_NAME} dependency must match the current core version ${String(coreVersion)}`,
+    );
+  }
   const lockedCore = lock.packages?.[`node_modules/${ROOT_PACKAGE_NAME}`]?.version;
   if (lockedCore !== coreDependency) {
     failures.push(
@@ -241,6 +291,7 @@ function verifyRepositoryParity({ root, packageDirectory, target }) {
   return Object.freeze({
     packageName: manifest.name,
     version: manifest.version,
+    coreVersion,
     distTag,
     repositoryTag: `${target.tagPrefix}${manifest.version}`,
     skillSha256,

@@ -5,6 +5,20 @@ core/OpenClaw release does not update an already installed connector. Select
 npm `next` or the exact connector version below; their `latest` tags remain
 unchanged. Neither connector update requires a new core release.
 
+## Core 0.14.16 alignment — 2026-10-23
+
+| Connector | Release (`next`) | Exact core dependency | Host scope |
+| --- | --- | --- | --- |
+| Pi | `0.1.0-poc.5` | `0.14.16` | Pi `1.2.0` and `0.84.4` |
+| DeepSeek Harness | `0.1.0-rc.8` | `0.14.16` | Existing reviewed DSH/Cordis sets, including `0.2.1-rc.2` / `4.0.5` |
+
+Both connectors inherit the bounded List candidate-folding fix and unchanged
+exact Send/Watch identity rules. Core and both connectors now form one release
+set; see [the release procedure](../CONTRIBUTING.md). The connectors remain
+prereleases on `next`: installing without that tag may select an older `latest`.
+Upgrading a standalone core does not change a connector's installed dependency.
+This alignment adds no new Host compatibility claim or tclaude preview support.
+
 ## Core 0.14.15 alignment — 2026-10-21
 
 | Connector | Version on `next` | Exact core dependency | Retained Host boundary |

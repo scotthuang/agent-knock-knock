@@ -741,6 +741,7 @@ function formatAkkConversationList(result: Record<string, unknown>): string {
   const unavailable = arrayValue(result.unavailable_managed_turns);
   return [
     `AKK conversations (${conversations.length}; ${cli.length} CLI, ${desktop.length} Desktop):`,
+    ...formatUnstartedCandidates(result),
     ...(cli.length ? ["CLI conversations:", ...cli.flatMap(row => formatAkkConversationLines(row, diagnostics))] : []),
     ...(desktop.length ? ["Desktop conversations:", ...desktop.flatMap(row => formatAkkConversationLines(row, diagnostics))] : []),
     ...(recordValue(result.desktop_scan)?.next_cursor ? [`Desktop next_cursor: ${recordValue(result.desktop_scan)?.next_cursor}`] : []),
@@ -753,13 +754,19 @@ function formatAkkConversationList(result: Record<string, unknown>): string {
   ].join("\n");
 }
 
+function formatUnstartedCandidates(result: Record<string, unknown>): string[] {
+  const count = Number(recordValue(result.conversation_presentation)?.unstarted_candidates_omitted ?? 0);
+  return count > 0 ? [`${count} unnamed, unstarted CLI candidate(s) folded; frontend attachment is unverified. Use /akk list --terminal-debug or agent-knock-knock list --terminal-debug to inspect exact IDs.`] : [];
+}
+
 function formatAkkConversationLines(row: Record<string, unknown>, diagnostics: boolean): string[] {
   const controls = arrayValue(row.terminal_controls);
   return [
-    `- ${row.title ?? row.native_thread_id ?? row.conversation_id} | ${row.agent ?? "unknown agent"} | ${row.cwd ?? "unknown directory"} | ${row.activity_state ?? "unknown"}`,
+    `- ${nonEmptyString(row.title) ?? (row.unstarted_thread === true ? "New Codex session (no tasks)" : row.native_thread_id ?? row.conversation_id)} | ${row.agent ?? "unknown agent"} | ${row.cwd ?? "unknown directory"} | ${row.activity_state ?? "unknown"}`,
     `  conversation_id: ${row.conversation_id}`,
     ...formatAvailableActions("  actions", row),
     ...compatibilityWarningLines(row),
+    ...(row.classification === "unstarted_candidate" ? ["  unstarted candidate: frontend attachment unverified; not an additional confirmed task"] : []),
     ...(nonEmptyString(row.manual_action) ? [`  ${row.manual_action}`] : []),
     ...[row, ...controls].flatMap(formatAkkConversationManagedLines),
     ...compactAkkScopedConversationControls(row).map(control =>
