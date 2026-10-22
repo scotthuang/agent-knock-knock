@@ -84,8 +84,8 @@ prerelease DSH connector to `latest`.
    and verify the core first. Then publish each connector through its shared gate:
 
    ```bash
-   npm run pi:release:check -- --publish --confirm-version <pi-version>
-   npm run deepseek:release:check -- --publish --confirm-version <dsh-version>
+   npm --prefix connectors/pi run release:check -- --publish --confirm-version <pi-version>
+   npm --prefix connectors/deepseek-harness run release:check -- --publish --confirm-version <dsh-version>
    ```
 
    These wrappers require unused npm versions and connector repository tags;
