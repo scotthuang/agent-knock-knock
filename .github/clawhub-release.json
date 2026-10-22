@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.14.15",
+  "version": "0.14.16",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "89b4d841022b2c3f7f52d42d2eed2e8709158b53",
-  "asset": "scotthuang-agent-knock-knock-0.14.15.tgz",
-  "sha256": "e2a9cc3cb77159040365f060014568a94549526792abb01476c71711da02aa50",
-  "bytes": 3801120,
-  "changelog": "Support Herdr 0.9.5 and probe operation contracts before rejecting unfamiliar releases or protocols. Retain usable reads when input evidence is absent, bind local CLI schema declarations to observed server identity, and preserve process/socket, approval, input ownership and uncertain-send no-replay protections. Tested baselines: 0.8.0/protocol19 and 0.9.5/protocol22; unfamiliar versions are fixture-verified only."
+  "commit": "8428ff225894e1026112348a0bd97f205d2abdae",
+  "asset": "scotthuang-agent-knock-knock-0.14.16.tgz",
+  "sha256": "47c43e687eab8f1979aa5db8951da621d3e33d76db946896648233e5fcce8851",
+  "bytes": 3808728,
+  "changelog": "Fold unnamed, unstarted Codex CLI candidates from default List when one established same-project thread and identity/attention guards permit it. Retain exact IDs and first-task actions in diagnostics; never delete threads, infer abandonment or redirect messages. Preserve sole/named/attached threads and conflicts. Coordinate Pi 0.1.0-poc.5 and DeepSeek Harness 0.1.0-rc.8 releases with exact core 0.14.16 dependencies; both connectors remain on next. No tclaude preview changes are included."
 }
