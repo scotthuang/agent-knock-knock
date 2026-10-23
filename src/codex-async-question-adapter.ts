@@ -17,7 +17,8 @@ export const CODEX_ASYNC_QUESTION_PROFILES: Readonly<Record<string, string>> =
     "0.159.2": "codex/0.159.2/request-user-input-async-v2",
     "0.159.3": "codex/0.159.3/request-user-input-async-v2",
     "0.160.0": "codex/0.160.0/request-user-input-async-v3",
-    "0.162.1": "codex/0.162.1/request-user-input-async-v4"
+    "0.162.1": "codex/0.162.1/request-user-input-async-v4",
+    "0.164.0": "codex/0.164.0/request-user-input-async-v5"
   });
 
 export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
@@ -149,6 +150,7 @@ export type CodexAsyncQuestionInspection =
         | "pending_count_mismatch"
         | "question_match_missing"
         | "question_match_ambiguous"
+        | "unproven_title_rendering"
         | "clipped_question"
         | "unsupported_keymap"
         | "existing_answer_draft";
@@ -358,8 +360,8 @@ export function codexAsyncQuestionMainComposerVisible(input: {
   }
   const footer = captured.lines.at(-1)?.trim() ?? "";
   if (isCodexPaginatedVersion(input.version)) {
-    return captureCodexFullscreenComposerFrame(input.screen, input.version)
-      ?.hasShortcutFooter === true;
+    const frame = captureCodexFullscreenComposerFrame(input.screen, input.version);
+    return frame?.hasShortcutFooter === true || frame?.hasContextFooter === true;
   }
   return /^(?:gpt-[\w.-]+(?:\s+\S+)?|[-\w.]+ default)\s+·\s+\S.*$/u
     .test(footer) && captured.lines.slice(0, -1).some(
@@ -762,7 +764,7 @@ function collapsedOpenBinding(
   profile: string
 ): CodexAsyncQuestionOpenBinding | undefined {
   const compact = isFullscreenProfile(profile);
-  const macSymbols = profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"];
+  const macSymbols = usesMacSymbolKeyHints(profile);
   if (line === (macSymbols ? "    ⇧← to answer" : compact
     ? "    shift+← to answer" : "    shift + ← to answer")) {
     return "shift_left";
@@ -790,6 +792,7 @@ type ExpandedParse =
         | "partial_or_unknown_surface"
         | "question_match_missing"
         | "question_match_ambiguous"
+        | "unproven_title_rendering"
         | "clipped_question"
         | "unsupported_keymap"
         | "existing_answer_draft";
@@ -845,7 +848,7 @@ function parseExpanded(
   // 0.162.1 macOS uses symbol labels for Control and Shift as well. Keep
   // whole footer grammars separate so mixed or remapped keys never authorize
   // an answer using the wrong native navigation binding.
-  const compactFooter = (profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"]
+  const compactFooter = (usesMacSymbolKeyHints(profile)
     ? /^enter submit ⌃\] skip (⇧→|⌥↓) (main prompt|prev question)(?: (⌥↑|⇧←) (next question|queued messages))?$/u
     : profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"]
     ? /^enter submit ctrl\+\] skip (shift\+→|⌥↓) (main prompt|prev question)(?: (⌥↑|shift\+←) (next question|queued messages))?$/u
@@ -857,6 +860,13 @@ function parseExpanded(
   if (evidence.length === 0) {
     return { status: "ambiguous", reason: "question_match_missing" };
   }
+  // An unsupported title may render identically to another pending question.
+  // Dropping it from the candidates would falsely prove that other identity.
+  if (profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"] &&
+      evidence.some((source) => source.questions.some((question) =>
+        asyncQuestionRenderedTitle(question.title, profile) === undefined))) {
+    return { status: "ambiguous", reason: "unproven_title_rendering" };
+  }
 
   const matches: ExpandedCandidateMatch[] = [];
   const content = lines.slice(0, footerStart);
@@ -866,12 +876,14 @@ function parseExpanded(
   );
   for (const source of evidence) {
     for (const question of source.questions) {
+      const renderedTitle = asyncQuestionRenderedTitle(question.title, profile);
+      if (!renderedTitle) continue;
       for (let start = 0; start < content.length; start += 1) {
         if (!lineCanStartText(content[start]!)) continue;
         const consumed = consumeWrappedText(
           content,
           start,
-          question.normalizedTitle
+          renderedTitle
         );
         if (consumed < 0) continue;
         const parsed = parseQuestionBody(
@@ -1223,5 +1235,26 @@ function isFullscreenProfile(profile: string): boolean {
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.2"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.3"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"];
+}
+
+function usesMacSymbolKeyHints(profile: string): boolean {
+  return profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"];
+}
+
+/** 0.164 renders titles as Markdown. Only single-line plain text whose
+ * rendering is unchanged can prove a terminal question identity. Unknown
+ * titles must remain in the ambiguity set; native structured replies do not
+ * use this screen matcher. The reviewed upstream parser does not enable smart
+ * punctuation, but does enable strikethrough, tables and math preprocessing.
+ */
+function asyncQuestionRenderedTitle(title: string, profile: string): string | undefined {
+  if (profile !== CODEX_ASYNC_QUESTION_PROFILES["0.164.0"]) return normalizeText(title);
+  if (/[\r\n\t*_`~\[\]<>\\&|$]/u.test(title) ||
+      /^(?:#{1,6}(?:\s|$)|[-+](?:\s|$)|\d+[.)](?:\s|$)|[-=]{3,}\s*$)/u.test(title)) {
+    return undefined;
+  }
+  return normalizeText(title);
 }

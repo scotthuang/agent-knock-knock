@@ -49,7 +49,7 @@ export function observeCodexPermissionSurface(
 ): CodexPermissionSurface {
   const rawLines = styledScreen.replace(/\r\n?/gu, "\n").split("\n");
   const plainLines = rawLines.map((line) => line.replace(/\x1b\[[0-9;]*m/gu, ""));
-  if (agentVersion === "0.162.1") {
+  if (agentVersion === "0.162.1" || agentVersion === "0.164.0") {
     const centered = centeredConfirmation(rawLines, plainLines);
     if (centered) return centered;
   }
@@ -91,7 +91,7 @@ function inspectPermissionLines(lines: Line[], fingerprint: string): CodexPermis
     parsed, selectedIndex, fingerprint);
 }
 
-/** 0.162.1 confirmation() paints a 72-column dialog over the retained transcript.
+/** 0.162.1/0.164.0 confirmation() paints a 72-column dialog over the retained transcript.
  * Only crop a complete native rectangle; never turn arbitrary indented text into
  * an input surface. Unknown terminal column widths/controls stay fail-closed.
  */
@@ -118,7 +118,7 @@ function centeredConfirmation(
   for (const line of decoded) {
     // The captured transcript may contain arbitrary Unicode. Only known
     // single-column prefixes establish this crop; do not guess wcwidth.
-    if (line.cells.slice(0, left).some(({ text }) => !/^[\x20-\x7e\u2500-\u259f]$/u.test(text))) {
+    if (line.cells.slice(0, left).some(({ text }) => !/^[\x20-\x7e\u2500-\u259f›»·]$/u.test(text))) {
       return ambiguousPermissionSurface("centered permission confirmation column geometry is unproven");
     }
     const cells = line.cells.slice(left, left + width);

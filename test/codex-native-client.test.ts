@@ -107,34 +107,44 @@ test("native item reads preserve actual per-item timestamps without replacing mi
   } finally { c.close(); }
 });
 
-test("0.162.1 turn lineage and partial answers retain the exact task identity", async () => {
-  const f = new Fixture(); f.serverVersion = "0.162.1";
-  const rootTurnId = "lineage-root";
-  f.handler = m => {
-    if (m.method === "thread/read") return { thread: thread("active", { cliVersion: "0.162.1" }) };
-    if (m.method === "thread/turns/list") return page([
-      { ...turn("sibling", "completed"), rootTurnId },
-      { ...turn(TURN, "inProgress"), rootTurnId }
-    ]);
-    if (m.method === "thread/items/list") return page([entry(m.params.turnId, {
-      id: `answer-${m.params.turnId}`, type: "agentMessage", phase: "partial_answer",
-      text: m.params.turnId === TURN ? "Public answer so far" : "Another task's answer"
-    })]);
-    throw new Error(`Unexpected ${m.method}`);
-  };
-  const c = await connect(f);
-  try {
-    const result = await c.readSnapshot(THREAD, TURN);
-    assert.equal(c.metadata.serverVersion, "0.162.1");
-    assert.equal(result.latestTurnId, "sibling");
-    assert.equal(result.selectedTurn?.id, TURN);
-    assert.equal(result.selectedTurn?.status, "inProgress");
-    assert.equal(result.selectedTurn?.itemsComplete, true);
-    assert.deepEqual(result.selectedTurn?.items.map(item => [item.phase, item.text]),
-      [["partial_answer", "Public answer so far"]]);
-    assert.equal(result.canSend, false);
-    assert.deepEqual(f.sent.filter(m => m.method === "thread/items/list").map(m => m.params.turnId), ["sibling", TURN]);
-  } finally { c.close(); }
+test("turn lineage and 0.164.0 read receipts never replace exact task identity or completion", async () => {
+  for (const fixture of [
+    { version: "0.162.1", extra: {} },
+    { version: "0.164.0", extra: { readState: null } },
+    { version: "0.164.0", extra: { readState: { firstUnread: null, revision: "all-read" } } },
+    { version: "0.164.0", extra: { readState: { firstUnread: { type: "turn", turnId: "unrelated-unread" }, revision: "unread" } } }
+  ]) {
+    const f = new Fixture(); f.serverVersion = fixture.version;
+    const rootTurnId = "lineage-root";
+    f.handler = m => {
+      if (m.method === "thread/read") return { thread: thread("active", { cliVersion: fixture.version }), ...fixture.extra };
+      if (m.method === "thread/turns/list") return page([
+        { ...turn("sibling", "completed"), rootTurnId },
+        { ...turn(TURN, "inProgress"), rootTurnId }
+      ]);
+      if (m.method === "thread/items/list") return page([entry(m.params.turnId, {
+        id: `answer-${m.params.turnId}`, type: "agentMessage", phase: "partial_answer",
+        text: m.params.turnId === TURN ? "Public answer so far" : "Another task's answer"
+      })]);
+      throw new Error(`Unexpected ${m.method}`);
+    };
+    const c = await connect(f);
+    try {
+      const result = await c.readSnapshot(THREAD, TURN);
+      assert.equal(c.metadata.serverVersion, fixture.version);
+      assert.equal(result.latestTurnId, "sibling");
+      assert.equal(result.selectedTurn?.id, TURN);
+      assert.equal(result.selectedTurn?.status, "inProgress");
+      assert.equal(result.selectedTurn?.itemsComplete, true);
+      assert.deepEqual(result.selectedTurn?.items.map(item => [item.phase, item.text]),
+        [["partial_answer", "Public answer so far"]]);
+      assert.equal(result.canSend, false);
+      assert.deepEqual(f.sent.filter(m => m.method === "thread/items/list").map(m => m.params.turnId), ["sibling", TURN]);
+      assert.equal(f.sent.some(m => m.method && ![
+        "initialize", "initialized", "thread/loaded/list", "thread/read", "thread/turns/list", "thread/items/list"
+      ].includes(m.method)), false);
+    } finally { c.close(); }
+  }
 });
 
 test("an exact idle unmaterialized CLI can start its first task while permission control still requires history", async () => {

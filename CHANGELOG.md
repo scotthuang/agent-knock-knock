@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.17 / Pi 0.1.0-poc.6 / DeepSeek Harness 0.1.0-rc.9 — 2026-10-23
+
+- Adapt Codex CLI 0.164.0 terminal controls to the observed `default` effort label and single-row contextual composer footer without treating an unset effort as a known model setting. Add reviewed status, permission and question profiles while retaining exact identity, input ownership and uncertainty guards.
+- Keep 0.164.0 terminal asynchronous-question selection limited to proven plain-text titles. Unproven Markdown candidates remain ambiguous instead of being excluded from identity matching; native structured answers remain available independently.
+- Verify the 0.164.0 CLI/backend pair in isolated sessions. Keep exact-turn selection independent of new native read receipts, and preserve bounded public progress, monitoring deadlines and notification deduplication. See the [operation-specific review](docs/codex-0.164.0-compatibility.md) for live evidence and retained limits.
+- Release Pi `0.1.0-poc.6` and DeepSeek Harness `0.1.0-rc.9` with exact core `0.14.17` dependencies and synchronized Skills. Both connectors remain on `next`; existing Host compatibility boundaries are unchanged.
+
 ## 0.14.16 / Pi 0.1.0-poc.5 / DeepSeek Harness 0.1.0-rc.8 — 2026-10-23
 
 - Fold unnamed Codex CLI threads with no materialized task history from default List when one established same-project thread is available and identity/attention guards permit it. Keep exact IDs and first-task actions in diagnostics, and restore ordinary display when a task starts. This is a display preference, not proof that an empty thread is abandoned or authorization to redirect a message.

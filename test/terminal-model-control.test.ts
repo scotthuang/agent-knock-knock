@@ -16,6 +16,8 @@ import {
   terminalModelCatalogFingerprint
 } from "../src/terminal-model-control.js";
 
+import { observeCodexIdleModel } from "../src/terminal-model-control-surface.js";
+
 const CODEX_PLAN = planTerminalModelControl(
   probeTerminalModelControl("codex", "0.154.0")
 );
@@ -133,8 +135,8 @@ test("Codex 0.159.2 official model catalog keeps GPT-6.1 Sol and the shifted nat
   assert.equal(observed.selectedIndex, 7);
 });
 
-test("0.162.1 model catalog without removed default badges retains current model and exact footer", () => {
-  const plan = planTerminalModelControl(probeTerminalModelControl("codex", "0.162.1"));
+for (const version of ["0.162.1", "0.164.0"]) test(`${version} model catalog without default badges retains current model and exact footer`, () => {
+  const plan = planTerminalModelControl(probeTerminalModelControl("codex", version));
   const screen = [
     "  Select Model and Effort", "",
     "  1. GPT-6.1-Sol        Workhorse model.",
@@ -154,7 +156,7 @@ test("0.162.1 model catalog without removed default badges retains current model
   ]) assert.equal(observeTerminalModelControl(plan, changed).state, "ambiguous");
 });
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0"]) {
   test(`Codex ${version} native display names and compact scope footers retain canonical model ids`, async () => {
     const native = new FakeModelTerminal("codex", {
       currentModel: "gpt-5.2", currentEffort: "high",
@@ -180,7 +182,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0
   });
 }
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0"]) {
   test(`Codex ${version} picker parser refuses changed or contradictory footer scope`, () => {
     const advanced = [
       "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",
@@ -1607,3 +1609,14 @@ class FakeModelTerminal {
     ).join("\n");
   }
 }
+
+
+test("0.164 single-line footer reads explicit effort but never treats default as low", () => {
+  const plan = planTerminalModelControl(probeTerminalModelControl("codex", "0.164.0"));
+  const ready = "› Ask Codex to do anything\n\n  GPT-6.1-Sol high · /repo";
+  assert.deepEqual(observeCodexIdleModel(ready, plan), {
+    model: "gpt-6.1-sol", reasoningEffort: "high", planMode: false
+  });
+  assert.equal(observeCodexIdleModel(ready.replace(" high ", " default "), plan), undefined);
+  assert.equal(observeCodexIdleModel(ready.replace("Ask Codex to do anything", "draft"), plan), undefined);
+});

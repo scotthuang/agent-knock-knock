@@ -178,13 +178,13 @@ test("permission bridge refuses a mismatched or unreviewed runtime profile befor
 });
 
 
-test("0.162.1 centered confirmation sends only on a fresh exact affirmative frame", async () => {
-  const native = terminal(codex1621PermissionConfirmation(), "0.162.1");
+for (const version of ["0.162.1", "0.164.0"]) test(`${version} centered confirmation sends only on a fresh exact affirmative frame`, async () => {
+  const native = terminal(codex1621PermissionConfirmation(), version);
   const yes = await native.ports.capture();
   assert.equal(yes.state, "full_access_confirmation");
   await native.ports.input("C-m", yes);
   assert.deepEqual(native.sent, [["C-m"]]);
-  const changed = terminal(codex1621PermissionConfirmation(), "0.162.1");
+  const changed = terminal(codex1621PermissionConfirmation(), version);
   const expected = await changed.ports.capture();
   changed.state.beforeInput = () => { changed.state.screen = codex1621PermissionConfirmation(1); };
   await assert.rejects(changed.ports.input("C-m", expected), /surface changed/u);
@@ -193,4 +193,36 @@ test("0.162.1 centered confirmation sends only on a fresh exact affirmative fram
   assert.equal(cancel.state, "full_access_confirmation");
   await assert.rejects(changed.ports.input("C-m", cancel), /not authorized/u);
   assert.deepEqual(changed.sent, []);
+});
+
+
+test("0.164 one-line ready footer still rejects working, owned draft and new approval before input", async () => {
+  const ready = "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n" +
+    "  GPT-6.1-Sol default · /repo                     ⚠ 3 warnings · f2 to view";
+  const native = terminal(ready, "0.164.0");
+  const frame = await native.ports.capture();
+  assert.equal(frame.state, "idle");
+  for (const changed of ["• Working (2s • esc to interrupt)\n" + ready,
+    ready.replace("Ask Codex to do anything", "existing draft"),
+    "  Would you like to run the following command?\n" + ready]) {
+    native.state.screen = changed;
+    await assert.rejects(native.ports.input("command", frame));
+    assert.deepEqual(native.sent, []);
+  }
+});
+
+
+test("0.164 centered permission overlay accepts known single-column Composer prefix and rejects unknown widths", async () => {
+  const original = codex1621PermissionConfirmation();
+  const prefix = "› GPT-6.1-Sol · /repo".padEnd("Previous public update    ".length);
+  const screen = original.replaceAll("Previous public update    ", prefix);
+  const native = terminal(screen, "0.164.0");
+  const confirmation = await native.ports.capture();
+  assert.equal(confirmation.state, "full_access_confirmation");
+  await native.ports.input("C-m", confirmation);
+  assert.deepEqual(native.sent, [["C-m"]]);
+  for (const changed of [screen.replaceAll(prefix, "界" + prefix.slice(1)),
+    screen.replace("Apply full access for this session", "Apply full access for every session")]) {
+    assert.equal((await terminal(changed, "0.164.0").ports.capture()).state, "blocked");
+  }
 });
