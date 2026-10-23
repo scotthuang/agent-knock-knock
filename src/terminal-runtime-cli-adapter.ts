@@ -1,3 +1,4 @@
+import { claudeTerminalObservationFailure, normalizeClaudeAgentRows, readClaudeTerminalAgents } from "./claude-terminal-agent-observation.js";
 import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
 import { spawnSync } from "node:child_process";
 import { assertCodexPaginatedProcess } from "./codex-paginated-thread-binding.js";
@@ -304,87 +305,26 @@ function claudeAgentRows(
   if (injected) {
     return injected(input.options, observation);
   }
-  const value = readClaudeAgentRowsValue(input.options, observation);
-  const rows = Array.isArray(value)
-    ? value
-    : isRecord(value) && Array.isArray(value.agents)
-      ? value.agents
-      : undefined;
-  if (!rows) {
-    if (observation.required) {
-      throw new Error("Claude agent session observation returned an unsupported " +
-        "result shape; refusing to treat the process as a virgin session");
+  const options = input.options;
+  if (options.claudeAgentsJson === undefined) {
+    if (options.processesJson || options.terminalsJson || options.terminalScreensJson) return [];
+    const result = readClaudeTerminalAgents(options);
+    if (observation.required && result.errors.length) {
+      throw new Error(claudeTerminalObservationFailure(result));
     }
+    return result.rows;
+  }
+  const value: unknown = typeof options.claudeAgentsJson === "string"
+    ? parseJsonOption(options.claudeAgentsJson, "--claude-agents-json") : options.claudeAgentsJson;
+  const rows = Array.isArray(value) ? value : isRecord(value) && Array.isArray(value.agents) ? value.agents : undefined;
+  if (!rows) {
+    if (observation.required) throw new Error("Claude agent session observation returned an unsupported " +
+      "result shape; refusing to treat the process as a virgin session");
     return [];
   }
   return normalizeClaudeAgentRows(rows);
 }
-function readClaudeAgentRowsValue(
-  options: TerminalRuntimeCliOptions,
-  observation: { required?: boolean }
-): unknown {
-  if (options.claudeAgentsJson !== undefined) {
-    return typeof options.claudeAgentsJson === "string"
-      ? parseJsonOption(options.claudeAgentsJson, "--claude-agents-json")
-      : options.claudeAgentsJson;
-  }
-  if (options.processesJson || options.terminalsJson || options.terminalScreensJson) {
-    return [];
-  }
-  const claudeExecutable = resolveOptionalExecutable("claude");
-  if (!claudeExecutable) {
-    if (observation.required) {
-      throw new Error("Claude agent session observation is unavailable because " +
-        "the Claude CLI could not be resolved");
-    }
-    return [];
-  }
-  const result = spawnSync(claudeExecutable, ["agents", "--json", "--all"], {
-    encoding: "utf8", maxBuffer: 1024 * 1024 * 10, timeout: 10_000
-  });
-  if (result.error || result.status !== 0) {
-    cliRuntimeLog("warn", "claude_agents_list_failed", {
-      status: result.status ?? null,
-      error: result.error?.message,
-      stderr: textSummary(cleanProcessText(result.stderr))
-    });
-    if (observation.required) {
-      throw new Error("Claude agent session observation failed; refusing to " +
-        "treat the process as a virgin session");
-    }
-    return [];
-  }
-  try {
-    return JSON.parse(result.stdout);
-  } catch {
-    cliRuntimeLog("warn", "claude_agents_list_invalid_json",
-      { stdout: textSummary(result.stdout) });
-    if (observation.required) {
-      throw new Error("Claude agent session observation returned invalid JSON; " +
-        "refusing to treat the process as a virgin session");
-    }
-    return [];
-  }
-}
-function normalizeClaudeAgentRows(rows: readonly unknown[]): ClaudeAgentRow[] {
-  return rows.flatMap((row): ClaudeAgentRow[] => {
-    if (!isRecord(row) || !Number.isInteger(Number(row.pid))) {
-      return [];
-    }
-    return [{
-      pid: Number(row.pid),
-      ...(nonBlankString(row.cwd) ? { cwd: nonBlankString(row.cwd) } : {}),
-      ...(nonBlankString(row.kind) ? { kind: nonBlankString(row.kind) } : {}),
-      ...(nonBlankString(row.sessionId) ? { sessionId: nonBlankString(row.sessionId) } : {}),
-      ...(Number.isSafeInteger(Number(row.startedAt)) && Number(row.startedAt) > 0
-        ? { startedAt: Number(row.startedAt) }
-        : {}),
-      ...(nonBlankString(row.status) ? { status: nonBlankString(row.status) } : {}),
-      ...(nonBlankString(row.waitingFor) ?
-        { waitingFor: nonBlankString(row.waitingFor) } : {})
-    }];
-  });
-}
+
 function terminalAgentRegistry(
   input: CreateTerminalRuntimeCliAdapterInput,
   loadClaudeAgentRows: (observation?: { required?: boolean }) => ClaudeAgentRow[]
@@ -656,6 +596,14 @@ function runningAgentVersion(
     // Keep executable version lookup inside the same explicitly static
     // observation boundary instead of inspecting an unrelated host PID.
     return undefined;
+  }
+  if (agent === "claude") {
+    const observation = readClaudeTerminalAgents(input.options);
+    if (observation.rejectedPids.includes(pid)) return undefined;
+    const versions = [...new Set(observation.rows.filter(row => row.pid === pid)
+      .flatMap(row => row.version ? [row.version] : []))];
+    if (versions.length === 1) return versions[0];
+    if (versions.length > 1) return undefined;
   }
   const executables = runningAgentExecutables(agent, pid);
   const versions = [...new Set(executables.map((entry) => entry.version))];

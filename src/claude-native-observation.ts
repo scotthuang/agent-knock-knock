@@ -221,7 +221,9 @@ function analyzeChain(chain: RecordValue[]) {
   let stopRecord: RecordValue | undefined, errorRecord: RecordValue | undefined, duration: RecordValue | undefined;
   let unsafe = false, unknownStopReason = false;
   for (const record of chain.slice(1)) {
-    if (record.subtype === "stop_hook_summary" || record.type === "progress" || hasBackgroundWork(record)) unsafe = true;
+    const blockingStopHook = record.subtype === "stop_hook_summary" && (record.preventedContinuation === true
+      || Array.isArray(record.hookErrors) && record.hookErrors.length > 0);
+    if (blockingStopHook || record.type === "progress" || hasBackgroundWork(record)) unsafe = true;
     if (interrupted(record)) stopRecord = record;
     if (record.type === "system" && record.subtype === "turn_duration") duration = record;
     const assistant = addAssistantItems(record, tools, items);

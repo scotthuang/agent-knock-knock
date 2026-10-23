@@ -59,6 +59,7 @@ import {
   type TerminalControlProviderRegistry
 } from "./terminal-control-provider.js";
 import {
+  parseTerminalConversationId,
   type TerminalControlRef,
   type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
@@ -468,21 +469,43 @@ export async function executeCliCommand(
       return executeConversationCommand(
         commandName,
         scopedOptions,
-        async (request, terminalId) => {
-          if (commandName === "send" && terminalId) {
-            const observation = await terminalListCliFacade.observeExactTerminal({ options: request, terminalId });
-            return observation.state === "available"
-              ? [withConversationSendAuthority(observation.rawTerminal, observation.terminal)] : [];
-          }
-          return terminalListCliFacade.buildTerminalListGroup({ options: request, terminalId,
-          agentFilter: /^(?:claude-cli:|terminal:v\d+:.*:claude:)/u.test(
-            String(request.conversation ?? request.conversationId ?? request.terminal ?? request.session)
-          ) ? "claude" : "codex" }).then(scan => scan.terminalControlled);
-        },
+        (request, terminalId) => conversationTerminals(commandName, request, terminalId),
         dispatchCliCommand
       );
     }
   );
+}
+
+async function conversationTerminals(commandName: string | undefined, request: CliCommandOptions, terminalId?: string) {
+  const agentFilter = /^(?:claude-cli:|terminal:v\d+:.*:claude:)/u.test(
+    String(request.conversation ?? request.conversationId ?? request.terminal ?? request.session)
+  ) ? "claude" : "codex";
+  if (commandName === "send" && terminalId && agentFilter === "codex") {
+    const observation = await terminalListCliFacade.observeExactTerminal({ options: request, terminalId });
+    return observation.state === "available" ? [withConversationSendAuthority(observation.rawTerminal, observation.terminal)] : [];
+  }
+  return terminalListCliFacade.buildTerminalListGroup({ options: request, terminalId, agentFilter,
+    includeManagedActions: agentFilter === "claude" && ["send", "status", "native-status", "native-inspect"].includes(commandName ?? "")
+  }).then(scan => scan.terminalControlled);
+}
+
+async function sendDelegateConversation(options: CliCommandOptions): Promise<void> {
+  if (parseTerminalConversationId(String(options.conversation))?.agent !== "claude") return terminalCommandCliFacade.runSend(options);
+  await executeConversationCommand("send", options,
+    (request, terminalId) => conversationTerminals("send", request, terminalId), dispatchCliCommand);
+}
+
+async function resolveClaudeSendAlias(commandName: string | undefined, options: CliCommandOptions): Promise<boolean> {
+  if (commandName === "send" && options.turn) return false;
+  const unresolvedSend = commandName === "send" && !parseTerminalConversationId(String(options.session ?? options.conversation ?? options.conversationId));
+  const suppliedToken = options.expectedTerminalToken;
+  await terminalListCliFacade.resolveConversationSelectorOption(commandName ?? "", options);
+  if (!unresolvedSend || parseTerminalConversationId(String(options.session))?.agent !== "claude") return false;
+  if (suppliedToken) throw new Error("Claude physical Send authority requires the original exact terminal selector");
+  options.conversation = options.session;
+  delete options.session; delete options.conversationId; delete options.terminal;
+  await sendDelegateConversation(options);
+  return true;
 }
 
 function dispatchAuxiliaryCli(commandName: string | undefined, options: CliCommandOptions): boolean {
@@ -522,9 +545,7 @@ async function dispatchCliCommand(commandName, options) {
     // Reject native slash input before terminal discovery; runSend repeats this fence.
     terminalSubmissionPayload(options.message ?? options.request);
   }
-  if (!(commandName === "send" && options.turn)) {
-    await terminalListCliFacade.resolveConversationSelectorOption(commandName, options);
-  }
+  if (await resolveClaudeSendAlias(commandName, options)) return;
   preflightStoreWriter(commandName, options);
   if (commandName === "help" || commandName === "--help" || commandName === "-h") {
     usage();
@@ -1813,5 +1834,5 @@ const terminalDelegateCliFacade = createTerminalDelegateCliFacade({
     observeExactTerminal: terminalListCliFacade.observeExactTerminal
   },
   sendBinding: terminalDelegateSendBindingRepository,
-  terminalCommand: { runSend: terminalCommandCliFacade.runSend }
+  terminalCommand: { runSend: sendDelegateConversation }
 });

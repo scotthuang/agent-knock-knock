@@ -807,7 +807,7 @@ test("Codex custom navigation is one non-retryable key dispatch", async () => {
   );
 });
 
-for (const version of ["2.1.263", "2.1.266", "2.1.267"] as const) {
+for (const version of ["2.1.263", "2.1.266", "2.1.267", "2.1.296"] as const) {
   test(`Claude ${version} custom choice retains its exact direct-digit transition`, async () => {
     const { bridge, provider, control } = await fixture(CLAUDE_SINGLE_SELECT, {
       agent: "claude"
@@ -844,7 +844,7 @@ test("Claude interaction offers cannot cross an exact client-version change", as
   const { bridge, provider, control } = await fixture(CLAUDE_SINGLE_SELECT, {
     agent: "claude"
   });
-  const originalRuntime = { ...RUNTIME, agentVersion: "2.1.266" };
+  const originalRuntime = { ...RUNTIME, agentVersion: "2.1.295" };
   const offered = await bridge.status("claude", control, {
     runtime: originalRuntime
   });
@@ -854,13 +854,13 @@ test("Claude interaction offers cannot cross an exact client-version change", as
   assert.ok(fingerprint);
   provider.clearOperations();
 
-  const changedRuntime = { ...RUNTIME, agentVersion: "2.1.267" };
+  const changedRuntime = { ...RUNTIME, agentVersion: "2.1.296" };
   const result = await bridge.respondInteraction(
     "claude",
     control,
     selectResponse(projection),
     {
-      agentVersion: "2.1.267",
+      agentVersion: "2.1.296",
       expectedFingerprint: fingerprint,
       expectedExpiresAt: projection.expires_at,
       runtime: changedRuntime

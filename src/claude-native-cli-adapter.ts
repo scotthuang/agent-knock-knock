@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { claudeReaderConfiguration, claudeReaderDiagnostic, claudeReaderNextAction } from "./claude-reader-configuration.js";
 import { randomUUID } from "node:crypto";
 import { cliCwd, cliDependencies, cliEnv, writeCliStdout } from "./cli-runtime-context.js";
 import { createTerminalWatchOpenClawCallbackRoute, parseCallbackRoute } from "./callback-transport.js";
@@ -22,14 +23,10 @@ const commands = new Set(["claude-cli-list", "monitor-claude-native", "reconcile
 export function claudeNativeRuntimeOptions(options: Options): ClaudeNativeRuntimeOptions {
   const env = cliEnv(), home = env.HOME ?? os.homedir();
   const resolve = (value: string) => path.resolve(cliCwd(), value.startsWith("~/") ? path.join(home, value.slice(2)) : value);
-  let dirs = [env.CLAUDE_CONFIG_DIR ?? path.join(home, ".claude")];
-  if (env.AKK_NATIVE_CLAUDE_CONFIG_DIRS) {
-    const configured: unknown = JSON.parse(env.AKK_NATIVE_CLAUDE_CONFIG_DIRS);
-    if (!Array.isArray(configured) || !configured.length || configured.some(dir => typeof dir !== "string" || !path.isAbsolute(dir))) throw new Error("Invalid Claude native config directories");
-    dirs = configured;
-  }
+  const reader = claudeReaderConfiguration(options);
   return { storeDir: resolve(text(options.storeDir ?? options.logDir) ?? path.join(home, ".agent-knock-knock", "store")),
-    claudeConfigDirs: [...new Set(dirs.map(resolve))], claudeBin: text(options.claudeBin) ?? text(env.AKK_NATIVE_CLAUDE_BIN),
+    claudeConfigDirs: reader.configDirs, claudeBin: reader.reader,
+    senderPermissionClass: env.AKK_NATIVE_CLAUDE_SENDER_PERMISSION_CLASS,
     pythonBin: text(options.pythonBin) ?? text(env.AKK_NATIVE_CLAUDE_PYTHON), openclawBin: text(options.openclawBin) };
 }
 const runtimeFor = (options: Options) => (cliDependencies().createClaudeNativeRuntime ?? createClaudeNativeRuntime)(claudeNativeRuntimeOptions(options));
@@ -40,8 +37,13 @@ export async function claudeNativeListForCli(options: Options): Promise<Record<s
   try {
     const discovery = await runtime.catalog.discover();
     const sessions = discovery.sessions.filter(entry => !options.status || entry.status === options.status).map(entry => claudeNativeSessionProjection(entry));
+    const codes = [...new Set(discovery.errors.map(error => error.code))];
+    const nextAction = claudeReaderNextAction(codes);
     return { claude_cli_sessions: sessions, claude_cli_scan: { status: discovery.errors.length ? "partial" : "ok",
-      returned: sessions.length, loaded_count: discovery.sessions.length, complete: !discovery.errors.length, diagnostics: discovery.errors } };
+      returned: sessions.length, loaded_count: discovery.sessions.length, complete: !discovery.errors.length, diagnostics: discovery.errors,
+      reader: claudeReaderDiagnostic(claudeReaderConfiguration(options)),
+      ...(discovery.errors.length ? {
+        error_codes: codes.slice(0, 8), error_count: discovery.errors.length, ...(nextAction ? { next_action: nextAction } : {}) } : {}) } };
   } finally { await runtime.close(); }
 }
 function conversation(options: Options) {

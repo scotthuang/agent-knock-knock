@@ -263,6 +263,7 @@ function observeBindingAuthority(
     } = context;
     const {
       _automated_input_composer_ready: automatedInputComposerReady,
+      _claude_managed_send_eligible: _claudeManagedSendEligible,
       _user_explicit_composer_ready: _userExplicitComposerReady,
       _codex_open_root_rollout_inventory: codexOpenRootRolloutInventoryValue,
       _codex_latent_clear_resume: codexLatentClearResumeValue,

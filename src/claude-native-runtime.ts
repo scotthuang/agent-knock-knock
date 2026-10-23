@@ -14,6 +14,8 @@ import type { CallbackAttemptOutcome, CallbackTransportDeliverInput } from "./ca
 
 export interface ClaudeNativeRuntimeOptions {
   storeDir: string; claudeConfigDirs: string[]; claudeBin?: string; pythonBin?: string; openclawBin?: string;
+  /** Validated only for a new Send; bad configuration must not prevent read-only observation. */
+  senderPermissionClass?: string;
   client?: Pick<ClaudeNativeClient, "discover" | "inspect" | "send" | "close">;
   callbackDeliver?(input: CallbackTransportDeliverInput): Promise<CallbackAttemptOutcome> | CallbackAttemptOutcome;
   processCheck?(identity: ClaudeNativeIdentity): Promise<void>;
@@ -50,7 +52,7 @@ export function createClaudeNativeRuntime(options: ClaudeNativeRuntimeOptions) {
     redactConversation: () => { throw new Error("Claude native callbacks use exact task records"); },
     recordCallbackProcessDelivery: () => { throw new Error("Claude native callbacks use their durable outbox"); } });
   const callbacks = createHostProfileCallbackTransport({ legacyTransport: legacy, environment: cliEnv, cwd: cliCwd(), now: cliNow });
-  const tasks = createClaudeNativeTaskService({ repository, inspect, now: cliNow,
+  const tasks = createClaudeNativeTaskService({ repository, inspect, now: cliNow, senderPermissionClass: options.senderPermissionClass,
     send: (identity, input) => { assertConfigured(identity); return client.send(identity, input); },
     observe: async (entry, observation) => {
       const current = await inspect(entry);

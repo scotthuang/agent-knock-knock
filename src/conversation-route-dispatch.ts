@@ -13,17 +13,18 @@ export interface ConversationRouteDispatchOptions {
 }
 
 function choiceFromRecord(record: ConversationRouteRecord): ConversationRouteChoice {
-  return { route: record.route, targetId: record.target_id };
+  return { route: record.route, targetId: record.target_id, ...(record.terminal_mode ? { terminalMode: record.terminal_mode, terminalToken: record.terminal_token } : {}) };
 }
 function sameChoice(left: ConversationRouteChoice, right: ConversationRouteChoice): boolean {
-  return left.route === right.route && left.targetId === right.targetId;
+  return left.route === right.route && left.targetId === right.targetId && left.terminalMode === right.terminalMode && left.terminalToken === right.terminalToken;
 }
 function resultWithRoute(result: Record<string, unknown>, choice: ConversationRouteSelection,
   input?: ConversationRouteInput, replayed = false): Record<string, unknown> {
   return { ...result, ...(replayed ? { replayed: true } : {}),
     ...(input ? { message_id: input.messageId, requested_conversation_id: input.canonicalTarget } : {}),
     routing: { policy: "backend_first", transport: choice.route === "native" ? "codex_backend" : "terminal",
-      selected_target: choice.targetId, ...(choice.reason ? { reason: choice.reason } : {}) } };
+      selected_target: choice.targetId, ...(choice.terminalMode ? { terminal_mode: choice.terminalMode } : {}),
+      ...(choice.reason ? { reason: choice.reason } : {}) } };
 }
 function errorCode(error: unknown): string | undefined {
   const code = error && typeof error === "object" && "code" in error ? error.code : undefined;

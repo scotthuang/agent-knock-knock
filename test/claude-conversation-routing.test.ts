@@ -9,6 +9,7 @@ import { dispatchClaudeConversationCli } from "../src/claude-conversation-routin
 import { runCliCommandExecution, type CliCommandDependencies } from "../src/cli-runtime-context.js";
 import { unifiedConversationList } from "../src/conversation-list.js";
 import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
+import { createConversationRouteStore, type ConversationRouteChoice } from "../src/conversation-route-store.js";
 
 const target = { configDir: "/fixture/.claude", sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", pid: 123,
   processStart: "Sun Oct 11 01:00:00 2026" };
@@ -21,7 +22,11 @@ function localPsTime(utc: string) {
 const terminal = { id: terminalId, agent: "claude", source: "terminal", process_state: "active", pid: 123,
   native_agent_process_birth: localPsTime(target.processStart), native_agent_session_id: target.sessionId,
   native_agent_identity_observation: { status: "resolved" }, cwd: "/project",
-  available_actions: { send: { arguments: { expected_terminal_token: "existing-authority" } },
+  terminal_control: { kind: "tmux", capabilities: ["screen_status", "send_keys", "terminal_approval", "durable_completion"] },
+  activity_state: "idle", approval_state: { scanned: true, blocked: false },
+  _claude_managed_send_eligible: true,
+  available_actions: { send: { tool: "agent_knock_knock_send", arguments: { selector: terminalId, expected_terminal_token: "existing-authority" } },
+    cancel: { tool: "agent_knock_knock_cancel", arguments: { conversation_id: terminalId } },
     model_options: { arguments: { expected_binding_token: "existing-binding" } } } };
 
 test("Claude associations require exact process incarnation and resolved native session, never cwd", () => {
@@ -42,13 +47,38 @@ test("Claude associations require exact process incarnation and resolved native 
   const listed = unifiedConversationList({ terminals: [terminal], claude_cli_sessions: [native], claude_cli_watches: [] }, [terminal]);
   assert.equal(listed.conversations.length, 1);
   assert.deepEqual(listed.conversations[0].terminal_aliases, [terminalId]);
-  assert.equal(listed.conversations[0].route_preference, "claude_native");
+  assert.equal(listed.conversations[0].route_preference, "managed_terminal");
   const compact = compactAkkListModelProjection(listed);
   const displayed = (compact.conversations as Record<string, unknown>[])[0];
   assert.equal(displayed.surface, "cli");
   assert.equal(displayed.agent, "claude");
   assert.equal("source" in displayed, false);
   assert.equal(compact.claude_cli_watches, undefined);
+});
+
+test("UTC Claude identity and a local-time physical birth form one exact CLI row", () => {
+  const previousTimezone = process.env.TZ;
+  try {
+    process.env.TZ = "Asia/Shanghai";
+    const physical = { ...terminal, _physical_agent_process_birth: "Sun Oct 11 09:00:00 2026" };
+    const native = { id, conversation_id: id, source: "claude_cli", agent: "claude",
+      activity_state: "idle", capabilities: { send: true } };
+    const listed = unifiedConversationList({ terminals: [physical], claude_cli_sessions: [native],
+      claude_cli_watches: [] }, [physical]);
+    assert.equal(claudeProcessBirthMatches(target.processStart, physical._physical_agent_process_birth), true);
+    assert.equal(listed.conversations.length, 1);
+    assert.equal(listed.conversations[0].conversation_id, id);
+    assert.deepEqual(listed.conversations[0].terminal_aliases, [terminalId]);
+    for (const change of [
+      { pid: 124 },
+      { _physical_agent_process_birth: "Sun Oct 11 09:00:01 2026" },
+      { _physical_agent_process_birth: "日 10月 11 09:00:00 2026" },
+      { native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }
+    ]) assert.equal(exactClaudeTerminal(id, { ...physical, ...change }), false);
+  } finally {
+    if (previousTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimezone;
+  }
 });
 
 function fixture(t: { after(fn: () => void): void }) {
@@ -64,12 +94,18 @@ function fixture(t: { after(fn: () => void): void }) {
         terminals: async () => rows,
         execute: async (selectedCommand, selectedOptions) => { calls.push({ command: selectedCommand, options: selectedOptions });
           if (executeError) throw executeError;
-          return { source: String(selectedOptions.conversation).startsWith("claude-cli:") ? "claude_cli" : "terminal", status: "observed" }; }
+          return { source: String(selectedOptions.conversation).startsWith("claude-cli:") ? "claude_cli" : "terminal",
+            agent: "claude", conversation_id: selectedOptions.conversation, status: "observed",
+            capabilities: { status: true, cancel: false, set_model: false } }; }
       }), true);
     });
     return JSON.parse(result.stdout);
   };
-  return { run, calls, noTerminal() { rows = []; }, noNative() { entries = []; },
+  return { run, calls, noTerminal() { rows = []; }, terminals(value: Record<string, unknown>[]) { rows = value; }, noNative() { entries = []; },
+    pin(messageId: string, canonicalTarget: string, choice: ConversationRouteChoice) {
+      createConversationRouteStore(path.join(root, "store"), { acquire: () => () => {} }).reserve({
+        controllerSession: "agent:main:main", messageId, requestText: "task", canonicalTarget }, choice);
+    },
     inspectFailure(code: string) { inspectError = Object.assign(new Error(code), { code }); },
     executeFailure() { executeError = new Error("uncertain transport result"); } };
 }
@@ -88,6 +124,27 @@ test("Claude terminal selectors prefer direct core operations and keep special o
   assert.equal(f.calls.at(-1)!.options.conversation, terminalId);
 });
 
+test("Claude native status exposes the same exact terminal controls as List and drops ambiguous counterparts", async t => {
+  const f = fixture(t);
+  const status = await f.run("status", { conversation: id });
+  assert.equal(status.capabilities.cancel, true);
+  assert.equal(status.capabilities.model_options, true);
+  assert.equal(status.capabilities.set_model, true);
+  assert.deepEqual(status.available_actions.cancel, terminal.available_actions.cancel);
+  assert.deepEqual(status.terminal_aliases, [terminalId]);
+  assert.equal(status.terminal_controls, undefined, "Status must not expose raw terminal discovery or historical screen evidence");
+  assert.equal(status.routing.transport, "claude_native");
+  for (const rows of [[], [terminal, { ...terminal, id: "terminal:v2:tmux:claude:akk:0.1:123" }],
+    [{ ...terminal, native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }]]) {
+    f.terminals(rows);
+    const unpaired = await f.run("status", { conversation: id });
+    assert.equal(unpaired.status, "observed");
+    assert.equal(unpaired.capabilities.cancel, false);
+    assert.equal(unpaired.capabilities.set_model, false);
+    assert.equal(unpaired.terminal_aliases, undefined);
+  }
+});
+
 test("direct-only special operations remain native unavailable results instead of selecting another cwd terminal", async t => {
   const f = fixture(t); f.noTerminal();
   const result = await f.run("model-options", { conversation: id });
@@ -96,38 +153,96 @@ test("direct-only special operations remain native unavailable results instead o
   assert.equal(f.calls[0].options.conversation, id);
 });
 
-test("busy, blocked and unknown verification failures never fall back to PTY", async t => {
+test("native-only Send preserves busy, blocked and unknown verification failures", async t => {
   for (const code of ["busy", "blocked", "peer_identity_mismatch", "unknown_schema"]) {
-    const f = fixture(t); f.inspectFailure(code);
+    const f = fixture(t); f.noTerminal(); f.inspectFailure(code);
     await assert.rejects(f.run("send", { conversation: id, message: "task", messageId: code }), new RegExp(code));
     assert.equal(f.calls.length, 0);
   }
 });
 
-test("successful Send retries replay the selected receipt even after native inventory disappears", async t => {
+test("successful managed Send retries replay the selected receipt after terminal inventory disappears", async t => {
   const f = fixture(t);
   const input = { terminal: terminalId, message: "one task", messageId: "stable-one", openclawSession: "controller" };
-  const sent = await f.run("send", input); assert.equal(sent.routing.transport, "claude_native");
-  f.noNative();
+  const sent = await f.run("send", input); assert.equal(sent.routing.transport, "terminal");
+  assert.equal(sent.routing.terminal_mode, "managed");
+  assert.equal(sent.requested_conversation_id, terminalId);
+  f.noTerminal();
   const retry = await f.run("send", input);
-  assert.equal(retry.replayed, true); assert.equal(retry.routing.transport, "claude_native"); assert.equal(f.calls.length, 1);
+  assert.equal(retry.replayed, true); assert.equal(retry.routing.transport, "terminal"); assert.equal(f.calls.length, 1);
   await assert.rejects(f.run("send", { ...input, message: "different" }), /different immutable/u);
 });
 
 test("uncertain native Send pins the original route on retry and never sends through terminal", async t => {
-  const f = fixture(t); f.executeFailure();
-  const input = { terminal: terminalId, message: "task", messageId: "uncertain-one" };
+  const f = fixture(t); f.noTerminal(); f.executeFailure();
+  const input = { conversation: id, message: "task", messageId: "uncertain-one" };
   await assert.rejects(f.run("send", input), /uncertain transport/u);
-  f.noNative();
+  f.terminals([terminal]);
   await assert.rejects(f.run("send", input), /uncertain transport/u);
   assert.equal(f.calls.length, 2);
   assert.ok(f.calls.every(call => call.options.conversation === id));
 });
 
-test("missing peer helper before dispatch preserves an exact supported terminal fallback", async t => {
+test("ordinary Claude Send prefers a managed terminal independently of native helper availability", async t => {
   const f = fixture(t); f.inspectFailure("peer_helper_unavailable");
   const result = await f.run("send", { conversation: id, message: "one task", messageId: "helper-unavailable" });
   assert.equal(result.routing.transport, "terminal");
   assert.equal(f.calls[0].options.conversation, terminalId);
   assert.equal(f.calls[0].options.expectedTerminalToken, "existing-authority");
+  assert.equal(f.calls[0].options.routingRequireManagedTurn, true);
+  assert.equal(f.calls[0].options.background, true);
+  assert.equal(result.requested_conversation_id, id);
+  assert.equal(result.routing.policy, "managed_terminal_first");
+  assert.equal(result.routing.terminal_mode, "managed");
+  f.noNative();
+  const terminalOnly = await f.run("send", { terminal: terminalId, message: "task", messageId: "terminal-only" });
+  assert.equal(terminalOnly.routing.terminal_mode, "managed");
+});
+
+test("corresponding Claude terminals with busy, blocked, ambiguous or conflicting identity cannot bypass through native Send", async t => {
+  for (const rows of [
+    [{ ...terminal, activity_state: "working" }],
+    [{ ...terminal, approval_state: { scanned: true, blocked: true } }],
+    [{ ...terminal, native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }],
+    [{ ...terminal, native_agent_identity_observation: { status: "unknown" } }],
+    [{ ...terminal, native_agent_process_birth: "Sun Oct 11 02:00:00 2026" }],
+    [{ ...terminal, available_actions: {} }],
+    [{ ...terminal, _claude_managed_send_eligible: false }],
+    [{ ...terminal, _claude_managed_send_eligible: undefined }],
+    [terminal, { ...terminal, id: "terminal:v2:tmux:claude:akk:0.1:123" }]
+  ]) {
+    const f = fixture(t); f.terminals(rows);
+    await assert.rejects(f.run("send", { conversation: id, message: "task" }), /Claude managed Send blocked/u);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("uncertain managed Send retains its mode across retries and never falls back when its terminal vanishes", async t => {
+  const f = fixture(t); f.executeFailure();
+  const input = { conversation: id, message: "task", messageId: "managed-uncertain" };
+  await assert.rejects(f.run("send", input), /uncertain transport/u);
+  await assert.rejects(f.run("send", { ...input, expectedTerminalToken: "replacement-process-token" }),
+    { code: "conversation_route_conflict" });
+  assert.equal(f.calls.length, 1, "a replacement physical token cannot override the selected process incarnation");
+  f.terminals([{ ...terminal, activity_state: "waiting", approval_state: { scanned: true, blocked: true },
+    _claude_managed_send_eligible: false, available_actions: {} }]);
+  await assert.rejects(f.run("send", input), /uncertain transport/u);
+  assert.equal(f.calls.length, 2);
+  assert.ok(f.calls.every(call => call.options.routingRequireManagedTurn === true && call.options.conversation === terminalId));
+  assert.ok(f.calls.every(call => call.options.expectedTerminalToken === "existing-authority"));
+  f.noTerminal();
+  await assert.rejects(f.run("send", input), /identity changed/u);
+  assert.equal(f.calls.length, 2);
+});
+
+test("preexisting native and physical terminal reservations keep their original execution mode", async t => {
+  for (const choice of [{ route: "native", targetId: id }, { route: "terminal", targetId: terminalId }] as const) {
+    const f = fixture(t), messageId = `legacy-${choice.route}`;
+    f.pin(messageId, id, choice);
+    const result = await f.run("send", { conversation: id, message: "task", messageId });
+    assert.equal(result.routing.transport, choice.route === "native" ? "claude_native" : "terminal");
+    assert.equal(result.routing.terminal_mode, undefined);
+    assert.equal(f.calls[0].options.routingRequireManagedTurn, undefined);
+    assert.equal(f.calls[0].options.conversation, choice.targetId);
+  }
 });

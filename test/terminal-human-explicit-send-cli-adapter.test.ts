@@ -113,8 +113,13 @@ test("Send receipt distinguishes exact callbacks, activity notifications, and no
   assert.match(absent.summary, /No callback Watch/u);
 });
 
-test(
-  "human-explicit Send never falls back after managed input may have started",
+for (const scenario of [
+  { name: "human-explicit Send never falls back after managed input may have started", agent: "codex" as const,
+    started: true, requireManaged: false },
+  { name: "Claude managed-first Send refuses unmanaged fallback after a zero-input failure", agent: "claude" as const,
+    started: false, requireManaged: true }
+]) test(
+  scenario.name,
   async (t) => {
     const sandbox = fs.mkdtempSync(
       path.join(os.tmpdir(), "akk-human-explicit-send-")
@@ -134,8 +139,8 @@ test(
       capabilities: ["screen_status" as const, "send_keys" as const]
     };
     const terminal = {
-      conversationId: "terminal:v2:tmux:codex:human-explicit:0.0:42",
-      agent: "codex" as const,
+      conversationId: `terminal:v2:tmux:${scenario.agent}:human-explicit:0.0:42`,
+      agent: scenario.agent,
       pid: 42,
       legacy: false,
       adapter: {},
@@ -146,7 +151,7 @@ test(
     const expectedTerminalToken = unmanagedTerminalBindingToken({
       terminalId: terminal.conversationId,
       terminalControl,
-      agent: "codex",
+      agent: scenario.agent,
       pid: 42,
       workspace,
       processUuid,
@@ -192,8 +197,8 @@ test(
       },
       managedSendAttempt: async (_options, _message, _terminal, _defer, attempt) => {
         managedAttempts += 1;
-        attempt.terminalControlSendInvoked = true;
-        throw new Error("input outcome unknown");
+        attempt.terminalControlSendInvoked = scenario.started;
+        throw new Error(scenario.started ? "input outcome unknown" : "managed Turn is unavailable");
       }
     };
 
@@ -202,15 +207,14 @@ test(
         dependencies,
         {
           expectedTerminalToken,
-          messageId: "message-possible-input"
+          messageId: "message-possible-input",
+          routingRequireManagedTurn: scenario.requireManaged
         },
         "human request",
         terminal
       ),
-      new RegExp(
-        "managed terminal Send may already have started input; refusing an " +
-        "automatic unmanaged fallback: input outcome unknown"
-      )
+      scenario.started ? /managed terminal Send may already have started input; refusing an automatic unmanaged fallback: input outcome unknown/u
+        : /managed Turn is unavailable/u
     );
     assert.equal(managedAttempts, 1);
     assert.deepEqual(accessedPorts, []);

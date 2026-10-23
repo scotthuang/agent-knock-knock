@@ -84,6 +84,7 @@ function terminalRow(): Record<string, any> {
     activity_state: "idle",
     approval_state: { scanned: true, blocked: false, approvable: false },
     _automated_input_composer_ready: true,
+    _claude_managed_send_eligible: true,
     available_actions: {
       send: {
         tool: "agent_knock_knock_send",
@@ -176,6 +177,8 @@ test("exact managed Session claim is projected as ownership facts", () => {
   assert.deepEqual(observation.matchingSessions, [session]);
   assert.deepEqual(observation.conflictingBoundSessionClaims, []);
   assert.equal(observation.ownership.state, "none");
+  assert.equal(observation.publicTerminal._claude_managed_send_eligible, undefined,
+    "Managed Send observation facts stay private after ownership projection");
   assert.equal(observation.sessionAwareRawActions.send.tool,
     "agent_knock_knock_send");
 });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { exactDispatchKeys } from "../src/terminal-model-control-input.js";
 
 import {
   classifyTerminalModelControlSurface,
@@ -29,7 +30,7 @@ const CLAUDE_PLAN = planTerminalModelControl(
   probeTerminalModelControl("claude", "2.1.266")
 );
 
-test("model control is closed to exact regression-tested agent versions", () => {
+test("model control retains Codex profiles and permits structurally verified Claude compatibility", () => {
   assert.deepEqual(
     {
       status: probeTerminalModelControl("codex", "0.155.1").status,
@@ -61,7 +62,7 @@ test("model control is closed to exact regression-tested agent versions", () => 
   assert.equal(probeTerminalModelControl("codex", "0.155.2").status, "unsupported");
   assert.equal(probeTerminalModelControl("codex", "0.159.1").status, "unsupported");
   assert.equal(probeTerminalModelControl("codex", "0.160.1").status, "unsupported");
-  assert.equal(probeTerminalModelControl("claude", "2.1.267").status, "unsupported");
+  assert.equal(probeTerminalModelControl("claude", "2.1.267").status, "supported");
   assert.throws(
     () => planTerminalModelControl(
       probeTerminalModelControl("codex", undefined)
@@ -442,6 +443,28 @@ test("model-control parsers reject skipped or duplicate native numbering", () =>
     "   ● High effort ←/→ to adjust",
     "   Enter to set as default · s to use this session only · Esc to cancel"
   ].join("\n")).state, "ambiguous");
+});
+
+test("best-effort Claude model control refuses changed scope, rows or trailing content before a key", async () => {
+  const plan = planTerminalModelControl(probeTerminalModelControl("claude", "2.1.295"));
+  const exact = ["▔".repeat(80), "   Select model",
+    "   ❯ 1. Claude Opus 4.6 ✔  Claude Opus 4.6 model",
+    "     2. Claude Sonnet 4.6  Claude Sonnet 4.6 model", "   ● High effort ←/→ to adjust",
+    "   Enter to set as default · s to use this session only · Esc to cancel"].join("\n");
+  const observed = observeTerminalModelControl(plan, exact);
+  assert.equal(observed.state, "claude_model_picker");
+  for (const screen of [exact.replace("s to use this session only", "s to set all sessions"),
+    exact.replace("2. Claude Sonnet", "1. Claude Sonnet"), `${exact}\nUnrecognized active input`]) {
+    let writes = 0;
+    const ports: TerminalModelControlPorts = {
+      beforeInput: async () => {},
+      capture: async () => ({ terminalControl: "control", screen, activityState: "idle", approvalBlocked: false,
+        exactEmptyComposer: false, exactCommandReady: false, exactCommandComposer: false }),
+      sendText: async () => { writes++; }, sendKeys: async () => { writes++; }, sleep: async () => {}
+    };
+    await assert.rejects(exactDispatchKeys({ plan, ports }, "control", observed, ["s"]), /frame changed before key dispatch/u);
+    assert.equal(writes, 0);
+  }
 });
 
 test("Codex catalog parser keeps live visible namespaced models and closed efforts", () => {
@@ -981,7 +1004,7 @@ test("Codex commit receipt uncertainty is never retried after the native commit"
   assert.equal(native.phase, "idle");
 });
 
-for (const version of ["2.1.266", "2.1.285"] as const) {
+for (const version of ["2.1.266", "2.1.285", "2.1.295", "3.0.1"] as const) {
   test(`Claude ${version} switch uses literal session-only s and never mutates defaults`, async () => {
     const plan = planTerminalModelControl(probeTerminalModelControl("claude", version));
     const native = new FakeModelTerminal("claude", {

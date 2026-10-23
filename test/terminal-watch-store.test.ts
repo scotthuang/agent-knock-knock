@@ -61,6 +61,7 @@ import {
   type CodexHumanStartedActiveTaskAnchor
 } from "../src/terminal-submission-acceptance.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
+import { sameManualWatchTarget } from "../src/terminal-watch-terminal-identity.js";
 import { ensureStoreWritable, inspectStoreCompatibility, storeManifestPath } from "../src/store.js";
 
 const THREAD_ID = "11111111-1111-4111-8111-111111111111";
@@ -1852,6 +1853,17 @@ test("Claude terminal Watch anchor and legacy checkpoint round-trip", (t) => {
     anchor,
     observation_checkpoint: initialTerminalWatchObservationCheckpoint(anchor)
   };
+  const rooted = (configDir: string): ClaudeHumanStartedActiveTaskAnchor => {
+    const rootedBase = { ...base, config_dir: configDir };
+    return { ...rootedBase, anchor_fingerprint: digest(rootedBase) };
+  };
+  const rootedAnchor = rooted("/private/vendor-home");
+  assert.equal(sameManualWatchTarget(value, "claude", identity, rootedAnchor), true,
+    "legacy anchors retain their exact process and file deduplication");
+  const rootedWatch = { ...value, anchor: rootedAnchor };
+  assert.equal(sameManualWatchTarget(rootedWatch, "claude", identity, rootedAnchor), true);
+  assert.equal(sameManualWatchTarget(rootedWatch, "claude", identity,
+    rooted("/private/other-home")), false, "conflicting verified roots are distinct targets");
   assert.doesNotThrow(() =>
     assertTerminalWatch(value, value.watch_id, { allowMissingRevision: true })
   );
@@ -1880,6 +1892,7 @@ test("Claude terminal Watch anchor and legacy checkpoint round-trip", (t) => {
 test("Claude fallback Watch persists and freezes its accepted prompt identity", (t) => {
   const transcriptAnchor: ClaudeTranscriptAnchor = {
     schema_version: 1,
+    config_dir: "/private/vendor-claude-home",
     session_id: THREAD_ID,
     cwd: "/workspace/project",
     pid: 701,
@@ -1905,6 +1918,21 @@ test("Claude fallback Watch persists and freezes its accepted prompt identity", 
   const saved = saveTerminalWatch(storeDir, candidate, {
     expectedRevision: null
   });
+  const reloaded = loadTerminalWatch(storeDir, saved.watch_id);
+  assert.equal(
+    reloaded?.anchor.schema === "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+      ? reloaded.anchor.transcript_anchor.config_dir : undefined,
+    transcriptAnchor.config_dir
+  );
+  const differentRoot = createClaudeUserExplicitFallbackWatchAnchor({
+    transcriptAnchor: { ...transcriptAnchor, config_dir: "/private/other-claude-home" },
+    requestHash: SHA_B,
+    claudeVersion: "2.1.237"
+  });
+  assert.notEqual(differentRoot.anchor_fingerprint, anchor.anchor_fingerprint);
+  assert.throws(() => saveTerminalWatch(storeDir, {
+    ...saved, anchor: differentRoot
+  }, { expectedRevision: terminalWatchRevision(saved) }), /immutable|anchor/u);
 
   const acceptance = claudeAcceptanceEvidence(
     transcriptAnchor,

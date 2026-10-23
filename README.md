@@ -111,7 +111,9 @@ AKK 0.14.0 introduces Codex CLI shared-backend control, Codex Desktop support, a
 
 Codex CLI sessions connected to a shared backend can also be controlled directly, without tmux or Herdr. Native CLI rows support task sending, exact Watch and callbacks, command/file approvals, blocking and asynchronous answers, and per-thread permission settings. See the [CLI shared-backend guide](docs/codex-cli-native-compatibility.md).
 
-AKK 0.14.3 also adds [Claude Code direct control](docs/claude-cli-direct.md): discover an already-open CLI, send tasks, read progress, and receive completion callbacks without tmux/Herdr, Claude plugins, or hooks. Live-tested on macOS with Claude Code `2.1.296`; requires Python 3 on the AKK side.
+AKK provides [Claude Code direct control](docs/claude-cli-direct.md): discover an already-open CLI, send tasks, read progress, and receive completion callbacks without tmux/Herdr, Claude plugins, or hooks. Standard `claude` and configured wrappers such as `tclaude` use the same adapter; no wrapper is required. Live observations include Claude Code `2.1.295` and `2.1.296` on macOS, not a minimum-version requirement. The native connection requires Python 3 on the AKK side.
+
+Starting with AKK 0.15.0, new Claude Code sends automatically prefer a managed Turn through an exact controllable tmux/Herdr terminal, so supported approvals follow the returned `turn_id`. Without that terminal, AKK uses the native inbox and returns a Watch with completion and notify-only waiting callbacks. Existing task receipts keep their original route; native Watches do not gain approval authority when a terminal later becomes available. Codex CLI continues to prefer its shared backend.
 
 The existing terminal workflows remain available for Codex or Claude Code running in tmux or Herdr:
 
@@ -201,8 +203,8 @@ can use a supported terminal route. Claude Code direct control is available unde
 | Terminal hosts | tmux; local Herdr with per-operation capability checks (AKK `0.14.15`+). Tested Herdr baselines: `0.8.0` / protocol `19` and `0.9.5` / protocol `22`. See the [Herdr guide](docs/quickstart-herdr.md#current-boundary). |
 | Codex Desktop | macOS with a compatible live connection; app updates alone do not disable controls. See the [tested versions and operation matrix](docs/codex-desktop-compatibility.md#version-and-platform-evidence). |
 | Codex CLI shared backend | Live-tested on macOS: CLI `0.162.1` + backend `0.162.1`, and previously `0.160.0` + `0.162.0`. Requires a loaded main CLI conversation and compatible live protocol. These are tested combinations, **not a numeric minimum**. |
-| Claude Code direct connection | macOS, live-tested `2.1.296`, compatible native peer protocol `1`, and Python 3 available to AKK. Basic task sending, progress and completion observation; unsupported controls require the original terminal. See the [direct guide](docs/claude-cli-direct.md). |
-| Terminal coding agents | Reviewed Codex profiles include `0.160.0` and `0.162.1`; Claude Code `2.1.285` was tested on macOS. Unknown versions may expose limited capabilities; native controls depend on the reviewed profile and current UI. |
+| Claude Code direct connection | macOS, compatible native peer protocol `1`, and Python 3 available to AKK. Live observations include `2.1.295` and `2.1.296`; these are not minimum versions. Standard `claude` and configured wrappers use the same adapter. See the [direct guide](docs/claude-cli-direct.md) for task and interaction boundaries. |
+| Terminal coding agents | Reviewed Codex profiles include `0.160.0` and `0.162.1`; Claude fixtures include `2.1.285`, with live observations on `2.1.295`/`2.1.296`. An otherwise eligible, complete `x.y.z` Claude version may attempt supported controls through runtime validation even without an exact regression profile. Actual identity, protocol and UI evidence determine availability; unknown dialogs are not guessed. |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
 | Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.4` (`next`), pinned AKK `0.14.15` |
 | DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); connector `0.1.0-rc.7` (`next`), pinned AKK `0.14.15`. See its guide for previous RC, alpha and legacy coverage. |

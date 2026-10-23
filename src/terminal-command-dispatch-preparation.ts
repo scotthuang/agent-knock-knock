@@ -309,8 +309,8 @@ export async function prepareTerminalControlSend(
   let preSendScreenFingerprint: string | undefined;
   let codexRolloutAcceptanceAnchor: CodexRolloutAcceptanceAnchor | undefined;
   let claudeTranscriptAnchor: ClaudeTranscriptAnchor | undefined;
-  const claudeHome = executor.kind === "claude"
-    ? path.resolve(expandHome(options.claudeHome) ?? defaultClaudeHome())
+  let claudeHome = executor.kind === "claude"
+    ? expandHome(options.claudeHome)
     : undefined;
   try {
     const status = await terminalBridge.status(executor.kind, terminalControl, {
@@ -409,6 +409,8 @@ export async function prepareTerminalControlSend(
             "the completion monitor could not bind an owner-private Claude transcript boundary"
           );
         }
+        claudeHome = claudeTranscriptAnchor.config_dir ??
+          path.resolve(claudeHome ?? defaultClaudeHome());
       }
     }
   } catch (error) {
@@ -443,6 +445,7 @@ export async function prepareTerminalControlSend(
     preSendScreenFingerprint,
     codexRolloutAcceptanceAnchor,
     claudeTranscriptAnchor,
-    claudeHome
+    claudeHome: executor.kind === "claude"
+      ? path.resolve(claudeHome ?? defaultClaudeHome()) : undefined
   };
 }

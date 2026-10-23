@@ -52,6 +52,7 @@ import {
 import { validTerminalMonitorTimestampMs as validTimestampMs } from
   "./terminal-monitor-decision-policy.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
+import { managedInteractionListAction } from "./terminal-managed-interaction-list-action.js";
 
 export interface TerminalListProjectionPorts {
   approvalTtlMs: number;
@@ -275,6 +276,9 @@ function currentManagedTurnForTerminal(
       conversation
     }
   );
+  const interactionAction = ports.terminalBridgeEnabled(conversation)
+    ? managedInteractionListAction(conversation, ports.nowMs()) : undefined;
+  if (interactionAction) managedTurn.available_actions.respond_interaction = interactionAction;
   const rawApproval = isRecord(rawTerminalActions.approve)
     ? rawTerminalActions.approve
     : undefined;

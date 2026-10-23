@@ -1,4 +1,6 @@
 import { associateClaudeConversationRoutes } from "./claude-conversation-routing-identity.js";
+import { claudeNativeControlCapabilities } from "./claude-native-public-projection.js";
+import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason, withClaudeManagedSendAuthority } from "./claude-managed-send-route.js";
 import { associateConversationRoutes, type ConversationRoutingIdentityOptions } from "./conversation-routing-identity.js";
 import { presentConversationList, type ConversationListPresentationOptions } from "./conversation-list-presentation.js";
 import { recordValue } from "./value-guards.js";
@@ -13,8 +15,49 @@ export function isTerminalSpecificConversationAction(agent: unknown, name: strin
   return terminalOnlyActions.has(name) || agent === "claude" && claudeSpecialActions.has(name);
 }
 
+/** Ordinary Claude Send keeps its canonical selector while choosing a managed terminal first. */
+export function withClaudeSendRouteProjection(native: Row, terminals: readonly Row[]): Row {
+  if (native.source !== "claude_cli") return native;
+  const id = String(native.conversation_id ?? native.id ?? "");
+  const route = claudeManagedSendRoute(id, terminals);
+  if (route.kind === "native") return { ...native, route_preference: "claude_native", route_status: "backend_available" };
+  const actions = { ...recordValue(native.available_actions) };
+  const send = route.kind === "managed";
+  if (send) actions.send = { tool: "agent_knock_knock_send", input: { conversation_id: id } };
+  else delete actions.send;
+  return { ...native, route_preference: "managed_terminal", route_status: send ? "terminal_available" : "terminal_blocked",
+    capabilities: { ...recordValue(native.capabilities), send }, available_actions: actions,
+    ...(route.kind === "blocked" ? { send_blocked_reason: route.reason } : {}) };
+}
+
+/** Use the physical incarnation with the Store-filtered action offers from the same scan. */
+function claudeSendTerminals(physical: readonly Row[], projected: readonly Row[], writable: boolean): Row[] {
+  return physical.map(terminal => {
+    const matches = projected.filter(row => row.id === terminal.id);
+    return withClaudeManagedSendAuthority(terminal, matches.length === 1 ? matches[0] : undefined, writable);
+  });
+}
+
+function standaloneConversation(terminal: Row, physical?: Row): Row {
+  const actions = { ...recordValue(terminal.available_actions) };
+  const claude = terminal.agent === "claude", codex = terminal.agent === "codex";
+  const blocked = claude ? claudeManagedTerminalSendBlockReason({ ...(physical ?? terminal),
+    available_actions: terminal.available_actions }) : undefined;
+  if (blocked) delete actions.send;
+  for (const name of ["send", "status", "watch", "native_inspect", "permission_options", "model_options"]) {
+    const action = recordValue(actions[name]);
+    if (action) actions[name] = { tool: action.tool, input: { conversation_id: terminal.id,
+      ...(name === "native_inspect" ? { inspection: "status" } : {}) } };
+  }
+  return { ...terminal, conversation_id: terminal.id, title: terminal.workspace ?? terminal.cwd ?? terminal.id,
+    route_preference: codex ? "codex_backend" : claude ? "managed_terminal" : "terminal",
+    route_status: codex ? "identity_unresolved" : "terminal_only", available_actions: actions,
+    ...(claude ? { capabilities: { ...recordValue(terminal.capabilities), send: !blocked } } : {}),
+    ...(blocked ? { send_blocked_reason: blocked } : {}) };
+}
+
 /** A single proven terminal may offer its own special controls; its exact action targets stay unchanged. */
-function withExactTerminalActions(native: Row): Row {
+export function withExactTerminalActions(native: Row): Row {
   if (!["codex_cli", "claude_cli"].includes(String(native.source))) return native;
   const controls = rows(native.terminal_controls);
   if (controls.length !== 1) return native;
@@ -27,7 +70,13 @@ function withExactTerminalActions(native: Row): Row {
       capabilities[name === "respond_interaction" ? "interaction_respond" : name] = true;
     }
   }
-  return { ...native, available_actions: actions, capabilities };
+  if (native.source === "claude_cli") Object.assign(capabilities, claudeNativeControlCapabilities(actions, controls[0]));
+  const actionable = capabilities.interaction_respond === true || capabilities.approve === true;
+  return { ...native, available_actions: actions, capabilities,
+    ...(native.source === "claude_cli" && native.attention_required === true && actionable ? {
+      manual_required: false, next_action: "respond_to_interaction",
+      interaction_hint: { ...recordValue(native.interaction_hint), actionable: true, source: "verified_terminal" }
+    } : {}) };
 }
 
 /** Send/Watch on a proven alias select this backend; an old physical offer cannot bypass it. */
@@ -60,23 +109,18 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
     terminal_aliases: association.associations.filter(item => item.nativeId === row.conversation_id).map(item => item.terminalId),
     terminal_controls: rows(result.terminals).filter(terminal => association.associations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id))
       .map(terminal => routedTerminalControls(terminal, row)) }));
-  conversations.push(...claude.map(row => ({ ...row, route_preference: "claude_native", route_status: "backend_available",
+  const claudeSendTargets = claudeSendTerminals(terminals, rows(result.terminals), recordValue(result.store)?.writable !== false);
+  conversations.push(...claude.map(row => withClaudeSendRouteProjection({ ...row,
     terminal_aliases: claudeAssociations.filter(item => item.nativeId === row.conversation_id).map(item => item.terminalId),
-    terminal_controls: rows(result.terminals).filter(terminal => claudeAssociations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id)) })));
+    terminal_controls: rows(result.terminals).filter(terminal => claudeAssociations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id)) }, claudeSendTargets)));
   for (const terminal of rows(result.terminals)) {
     if (linked.has(String(terminal.id))) continue;
-    const actions = { ...recordValue(terminal.available_actions) };
-    for (const name of ["send", "status", "watch", "native_inspect", "permission_options", "model_options"]) {
-      const action = recordValue(actions[name]);
-      if (action) actions[name] = { tool: action.tool, input: { conversation_id: terminal.id,
-        ...(name === "native_inspect" ? { inspection: "status" } : {}) } };
-    }
-    conversations.push({ ...terminal, conversation_id: terminal.id, title: terminal.workspace ?? terminal.cwd ?? terminal.id,
-      route_preference: terminal.agent === "codex" ? "codex_backend" : "terminal", route_status: terminal.agent === "codex" ? "identity_unresolved" : "terminal_only", available_actions: actions });
+    conversations.push(standaloneConversation(terminal, claudeSendTargets.find(row => row.id === terminal.id)));
   }
   conversations.push(...rows(result.desktop_sessions).map(row => ({ ...row, route_preference: "desktop_ipc" })));
   return { ...result, ...presentConversationList(conversations.map(withExactTerminalActions), terminals, presentationOptions),
-    conversation_routing: { policy: "backend_first", exact_associations: association.associations.length + claudeAssociations.length,
+    conversation_routing: { policy: "agent_specific", codex: "backend_first", claude: "managed_terminal_first",
+    exact_associations: association.associations.length + claudeAssociations.length,
     unresolved_terminals: association.unassociated.filter(item => terminals.some(t => t.id === item.terminalId && t.agent === "codex")).length } };
 }
 

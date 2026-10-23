@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isValidClaudeSemanticVersion } from "./claude-lifecycle-compatibility.js";
 
 export const CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
   Record<string, string>
@@ -34,9 +35,11 @@ export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
 export function claudeNativeQuestionnaireProfile(
   version: string
 ): string | undefined {
-  return Object.hasOwn(CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES, version)
-    ? CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES[version]
-    : undefined;
+  if (!isValidClaudeSemanticVersion(version)) return undefined;
+  // A known UI shape authorizes its closed action plan. An untested version
+  // still gets its own profile so fingerprints cannot cross client upgrades.
+  return CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES[version] ??
+    `claude-code/${version}/ask-user-question-generic-v1`;
 }
 
 export function codexNativeQuestionnaireProfile(
@@ -272,20 +275,18 @@ export function inspectNativeQuestionnaire(
 ): NativeQuestionnaireInspection {
   const screen = normalizedScreenLines(options.screen);
   return options.agent === "claude"
-    ? inspectClaudeQuestionnaire(options, claudeQuestionnaireContentScreen(screen, options.version))
+    ? inspectClaudeQuestionnaire(options, claudeQuestionnaireContentScreen(screen))
     : inspectCodexQuestionnaire(options, screen);
 }
 
 function claudeQuestionnaireContentScreen(
-  screen: ScreenLines,
-  version: string
+  screen: ScreenLines
 ): ScreenLines {
-  // Named Claude 2.1.285 sessions append their main Composer border below
+  // Named Claude sessions append their main Composer border below
   // the questionnaire footer. The display name is decoration, not question
   // identity. Remove exactly that final row only after a complete known footer.
   const footer = screen.lines.at(-2) ?? "";
-  if (version !== "2.1.285" ||
-      !/^─{8,} [^\u0000-\u001F\u007F]{1,128} ─+$/u.test(screen.lines.at(-1) ?? "") ||
+  if (!/^─{8,} [^\u0000-\u001F\u007F]{1,128} ─+$/u.test(screen.lines.at(-1) ?? "") ||
       ![
         CLAUDE_SELECTION_FOOTER,
         CLAUDE_SINGLE_SELECTION_FOOTER,

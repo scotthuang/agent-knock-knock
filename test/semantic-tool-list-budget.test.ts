@@ -99,6 +99,24 @@ test("Unicode diagnostics and all metadata are included in the whole response li
   assert.equal(result.codex_cli_scan.details_omitted, true);
 });
 
+test("Claude compact diagnostics allow only bounded codes and reader selection, never private discovery details", () => {
+  const result = compactAkkListModelProjection({ conversations, claude_cli_scan: {
+    status: "partial", returned: 0, loaded_count: 0, complete: false, error_count: 100,
+    error_codes: [...Array(50).fill("claude_reader_unavailable"), ...Array.from({ length: 20 }, (_, i) => `fixture_error_${i}`)],
+    next_action: "check_claude_reader_in_host_environment",
+    reader: { executable: "tclaude", source: "environment", path_omitted: true, resolved_path: "/private/install/tclaude" },
+    diagnostics: [{ configDir: "/private/session/root", code: "claude_reader_unavailable" }], raw_stderr: "private credentials"
+  } }) as Row;
+  bounded(result);
+  assert.equal(result.claude_cli_scan.error_codes.length, 8);
+  assert.equal(result.claude_cli_scan.error_codes[0], "claude_reader_unavailable");
+  assert.equal(result.claude_cli_scan.error_count, 100);
+  assert.deepEqual(result.claude_cli_scan.reader, { executable: "tclaude", source: "environment", path_omitted: true });
+  assert.equal(result.claude_cli_scan.next_action, "check_claude_reader_in_host_environment");
+  assert.equal(result.claude_cli_scan.diagnostics, undefined);
+  assert.equal(JSON.stringify(result).includes("private"), false);
+});
+
 
 test("conversation pagination is stable when discovery is reordered and retains unconfirmed Desktop entries", () => {
   const rows = Array.from({ length: 20 }, (_, i) => ({ ...conversations[1], conversation_id: `desktop-${i}`, connection_state: "live_owner_not_confirmed" }));

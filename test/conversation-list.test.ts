@@ -21,6 +21,23 @@ function native() {
     available_actions: { send: { tool: "agent_knock_knock_send", input: { conversation_id: nativeId } } } };
 }
 
+function claudePair() {
+  const processStart = "Mon Oct 12 01:02:03 2026";
+  const id = createClaudeNativeConversationId({ configDir: "/fixture/claude", sessionId: thread, pid: 123, processStart });
+  const [weekday, month, day, year, time] = new Date(`${processStart} GMT`).toString().split(" ");
+  const physical = terminal({ id: "terminal:v2:tmux:claude:akk:0.0:123", agent: "claude",
+    native_agent_process_birth: [weekday, month, day, time, year].join(" "),
+    _claude_managed_send_eligible: true,
+    terminal_control: { capabilities: ["send_keys"] }, approval_state: { scanned: true, blocked: false },
+    available_actions: { send: { tool: "agent_knock_knock_send", scope: "terminal_user_explicit",
+      arguments: { terminal_id: "terminal:v2:tmux:claude:akk:0.0:123", expected_terminal_token: "physical-authority" } } } });
+  const backend = { id, conversation_id: id, source: "claude_cli", agent: "claude", cwd: "/project", pid: 123,
+    native_thread_id: thread, connection_state: "native_registry_verified", capabilities: { status: true, send: true, watch: false },
+    available_actions: { send: { tool: "agent_knock_knock_send", input: { conversation_id: id } },
+      status: { tool: "agent_knock_knock_status", input: { conversation_id: id } } } };
+  return { physical, backend };
+}
+
 test("unified List coalesces exact terminal/backend identity and preserves every Desktop sidebar row", () => {
   const physical = terminal();
   const desktops = [
@@ -37,6 +54,9 @@ test("unified List coalesces exact terminal/backend identity and preserves every
   assert.deepEqual(result.conversations[0].terminal_aliases, [terminalId]);
   assert.equal(result.conversations[0].conversation_id, nativeId);
   assert.equal(result.conversations[0].route_preference, "codex_backend");
+  assert.equal(result.conversation_routing.policy, "agent_specific");
+  assert.equal(result.conversation_routing.codex, "backend_first");
+  assert.equal(result.conversation_routing.claude, "managed_terminal_first");
   assert.deepEqual(result.conversations.slice(1), desktops.map(row => ({ ...row, route_preference: "desktop_ipc", surface: "desktop" })));
   assert.equal(result.conversations[0].surface, "cli");
   assert.equal(result.conversation_routing.exact_associations, 1);
@@ -113,6 +133,7 @@ test("diagnostics retains both unresolved CLI connections and their display-only
   assert.deepEqual(result.conversation_presentation, { mode: "diagnostics", workspace_grouped_connections: 0,
     workspace_groups: [{ terminal_conversation_id: terminalId, native_conversation_id: nativeId }] });
   assert.equal(result.conversation_routing.exact_associations, 0);
+  assert.deepEqual(compactAkkListModelProjection(result).conversation_routing, result.conversation_routing);
 });
 
 test("busy and blocked preferred backends do not borrow an idle terminal's Send authority", () => {
@@ -361,8 +382,14 @@ test("an exact Claude connection keeps advertised terminal approvals and managed
   const [weekday, month, day, year, time] = new Date(`${processStart} GMT`).toString().split(" ");
   const birth = [weekday, month, day, time, year].join(" ");
   const physical = terminal({ id: "terminal:v2:tmux:claude:akk:0.0:123", agent: "claude", native_agent_process_birth: birth,
+    native_thread_lifecycle: { status: "supported", newThread: true, resumeExact: true },
     available_actions: {
       approve: { tool: "agent_knock_knock_approve", arguments: { turn_id: "claude-managed-turn" } },
+      respond_interaction: { tool: "agent_knock_knock_respond_interaction", arguments: { turn_id: "claude-managed-turn", interaction_id: "current-question" } },
+      cancel: { tool: "agent_knock_knock_cancel", arguments: { conversation_id: "terminal:v2:tmux:claude:akk:0.0:123" } },
+      new_thread: { tool: "agent_knock_knock_new_thread", arguments: { terminal_id: "terminal:v2:tmux:claude:akk:0.0:123", expected_binding_token: "binding" } },
+      list_resumable_threads: { tool: "agent_knock_knock_list_resumable_threads", arguments: { terminal_id: "terminal:v2:tmux:claude:akk:0.0:123" } },
+      model_options: { tool: "agent_knock_knock_model_options", arguments: { terminal_id: "terminal:v2:tmux:claude:akk:0.0:123", expected_binding_token: "binding" } },
       native_inspect: { tool: "agent_knock_knock_native_inspect", arguments: { terminal_id: "terminal:v2:tmux:claude:akk:0.0:123" } },
       send: { tool: "agent_knock_knock_send", arguments: { terminal_id: "terminal:v2:tmux:claude:akk:0.0:123" } }
     } });
@@ -377,8 +404,95 @@ test("an exact Claude connection keeps advertised terminal approvals and managed
   assert.equal(actions.native_inspect, original.native_inspect);
   assert.equal(actions.send, undefined);
   assert.equal(actions.status, backend.available_actions.status);
-  assert.deepEqual(result.conversations[0].capabilities, { ...backend.capabilities, approve: true, native_inspect: true });
+  const expected = { ...backend.capabilities, approve: true, native_inspect: true, interaction_respond: true,
+    cancel: true, new_thread: true, clear_thread: true, resume_thread: true, list_resumable_threads: true,
+    model_options: true, set_model: true, permission_options: false, set_permissions: false };
+  assert.deepEqual(result.conversations[0].capabilities, expected);
+  const compact = compactAkkListModelProjection(result);
+  const visible = (compact.conversations as Record<string, unknown>[])[0];
+  assert.deepEqual(visible.capabilities, { ...expected, status: true }, "Host compaction must preserve lifecycle, cancellation and catalog capabilities");
+  const actionInputs = visible.action_inputs as Record<string, any>;
+  assert.equal(actionInputs.approve.arguments.turn_id, "claude-managed-turn");
+  assert.equal(actionInputs.respond_interaction.arguments.interaction_id, "current-question");
+  assert.equal(actionInputs.new_thread.arguments.terminal_id, physical.id);
+  assert.doesNotMatch(JSON.stringify(compact), /expected_binding_token/u);
   assert.equal(backend.capabilities.approve, false, "Original connection diagnostics keep their native scope");
+  const idle = { ...physical, activity_state: "idle", terminal_control: { capabilities: ["send_keys", "terminal_cancel"] },
+    available_actions: {} };
+  const idleList = unifiedConversationList({ terminals: [idle], claude_cli_sessions: [backend] }, [idle]);
+  const idleCapabilities = idleList.conversations[0].capabilities as Record<string, unknown>;
+  assert.equal(idleCapabilities.cancel, true, "An idle Claude still supports adapter cancellation without a current cancel offer");
+  assert.equal((idleList.conversations[0].available_actions as Record<string, unknown>).cancel, undefined);
+  for (const capabilities of [["send_keys"], ["terminal_cancel"], []]) {
+    const missing = { ...idle, terminal_control: { capabilities } };
+    const unavailable = unifiedConversationList({ terminals: [missing], claude_cli_sessions: [backend] }, [missing]);
+    assert.equal((unavailable.conversations[0].capabilities as Record<string, unknown>).cancel, false);
+  }
+});
+
+test("Claude List follows managed Send eligibility while preserving canonical selectors and native-only fallback", () => {
+  const { physical, backend } = claudePair();
+  const changed = (values: Record<string, unknown>) => [{ ...physical, ...values }];
+  const cases = [
+    { name: "eligible", physical: [physical], route: "managed_terminal", send: true },
+    { name: "busy", physical: changed({ activity_state: "working" }), route: "managed_terminal", send: false },
+    { name: "approval blocked", physical: changed({ approval_state: { scanned: true, blocked: true } }), route: "managed_terminal", send: false },
+    { name: "unscanned", physical: changed({ approval_state: { scanned: false, blocked: false } }), route: "managed_terminal", send: false },
+    { name: "managed prerequisites unavailable", physical: changed({ _claude_managed_send_eligible: false }), route: "managed_terminal", send: false },
+    { name: "managed prerequisites unobserved", physical: changed({ _claude_managed_send_eligible: undefined }), route: "managed_terminal", send: false },
+    { name: "Store-filtered Send", physical: [physical], projected: changed({ available_actions: {} }), route: "managed_terminal", send: false },
+    { name: "Store read-only", physical: [physical], writable: false, route: "managed_terminal", send: false },
+    { name: "Store unavailable", physical: [physical], projected: changed({ management_state: "unavailable" }), route: "managed_terminal", send: false },
+    { name: "management conflict", physical: [physical], projected: changed({ management_state: "conflict" }), route: "managed_terminal", send: false },
+    { name: "session conflict", physical: changed({ native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }), route: "managed_terminal", send: false },
+    { name: "birth conflict", physical: changed({ native_agent_process_birth: "Mon Oct 12 01:02:04 2026" }), route: "managed_terminal", send: false },
+    { name: "ambiguous", physical: [physical, { ...physical, id: "terminal:v2:tmux:claude:akk:0.1:123" }], route: "managed_terminal", send: false },
+    { name: "no terminal", physical: [], route: "claude_native", send: true },
+    { name: "unrelated process", physical: changed({ pid: 999 }), route: "claude_native", send: true },
+  ];
+  for (const scenario of cases) {
+    const listed = unifiedConversationList({ terminals: scenario.projected ?? scenario.physical, store: { writable: scenario.writable ?? true },
+      claude_cli_sessions: [backend] }, scenario.physical, {}, { diagnostics: true });
+    const row = listed.conversations.find(item => item.conversation_id === backend.id)!;
+    assert.equal(row.route_preference, scenario.route, scenario.name);
+    assert.equal((row.capabilities as Record<string, unknown>).send, scenario.send, scenario.name);
+    const actions = row.available_actions as Record<string, any>;
+    if (scenario.send) assert.deepEqual(actions.send.input, { conversation_id: backend.id }, scenario.name);
+    else {
+      assert.equal(actions.send, undefined, scenario.name);
+      assert.equal(row.route_status, "terminal_blocked", scenario.name);
+      assert.equal(typeof row.send_blocked_reason, "string", scenario.name);
+    }
+    assert.equal(actions.status, backend.available_actions.status, "Status retains the native identity");
+    const compact = compactAkkListModelProjection(listed) as Record<string, any>;
+    const visible = compact.conversations.find((item: Record<string, unknown>) => item.conversation_id === backend.id);
+    assert.equal(visible.route_preference, scenario.route, scenario.name);
+    assert.equal(visible.capabilities.send, scenario.send, scenario.name);
+    assert.equal(visible.available_actions.send, scenario.send ? true : undefined, scenario.name);
+    assert.doesNotMatch(JSON.stringify(compact), /physical-authority|expected_terminal_token|_claude_managed_send_eligible/u);
+  }
+  assert.equal(backend.capabilities.send, true, "Projection must not rewrite native diagnostics");
+});
+
+test("Claude terminal-only Send uses the same managed guard and retains approval Turn targets", () => {
+  const { physical } = claudePair();
+  const approve = { tool: "agent_knock_knock_approve", arguments: { turn_id: "existing-claude-turn" } };
+  for (const activity_state of ["idle", "working"]) {
+    const row = { ...physical, activity_state,
+      available_actions: { ...(physical.available_actions as Record<string, unknown>), approve } };
+    const listed = unifiedConversationList({ terminals: [row] }, [row], {}, { diagnostics: true });
+    const conversation = listed.conversations[0];
+    assert.equal(conversation.route_preference, "managed_terminal");
+    assert.equal(conversation.route_status, "terminal_only");
+    assert.equal((conversation.capabilities as Record<string, unknown>).send, activity_state === "idle");
+    const actions = conversation.available_actions as Record<string, any>;
+    assert.equal(actions.approve, approve);
+    if (activity_state === "idle") assert.deepEqual(actions.send.input, { conversation_id: physical.id });
+    else assert.equal(actions.send, undefined);
+    const compact = compactAkkListModelProjection(listed) as Record<string, any>;
+    assert.equal(compact.conversations[0].action_inputs.approve.arguments.turn_id, "existing-claude-turn");
+    assert.equal(compact.conversations[0].available_actions.send, activity_state === "idle" ? true : undefined);
+  }
 });
 
 test("Claude terminal-only conversation remains visible alongside Codex and disabled Desktop", () => {

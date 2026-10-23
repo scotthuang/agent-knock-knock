@@ -83,3 +83,23 @@ test("corrupt durable route cannot be treated as absent and silently choose a ne
   assert.throws(() => h.create().load(input), { code: "conversation_route_invalid" });
   assert.throws(() => h.create().reserve(input, terminal), { code: "conversation_route_invalid" });
 });
+
+test("managed terminal mode is versioned and immutable while legacy physical records retain version one", t => {
+  const h = fixture(t), managed = { ...terminal, terminalMode: "managed" as const, terminalToken: "original-physical-token" };
+  const saved = h.store.reserve(input, managed).record;
+  assert.equal(saved.version, 2);
+  assert.equal(h.create().load(input)?.terminal_mode, "managed");
+  assert.equal(h.create().load(input)?.terminal_token, managed.terminalToken);
+  assert.throws(() => h.store.beginExecution(input, { ...managed, terminalToken: "changed" }), { code: "conversation_route_conflict" });
+  assert.equal(h.create().reserve(input, terminal).record.terminal_mode, "managed");
+  assert.throws(() => h.store.beginExecution(input, terminal), { code: "conversation_route_conflict" });
+  assert.throws(() => h.store.recordReceipt(input, terminal, { delivered: true }), { code: "conversation_route_conflict" });
+  h.store.markUncertain(input, managed, "timeout");
+  assert.equal(h.create().load(input)?.terminal_mode, "managed");
+  const legacy = { ...input, messageId: "legacy-physical" };
+  assert.equal(h.store.reserve(legacy, terminal).record.version, 1);
+  assert.throws(() => h.store.beginExecution(legacy, managed), { code: "conversation_route_conflict" });
+  const file = path.join(h.directory, "conversation-routes", `${saved.id}.json`);
+  fs.writeFileSync(file, JSON.stringify({ ...saved, version: 1 }));
+  assert.throws(() => h.create().load(input), { code: "conversation_route_invalid" });
+});

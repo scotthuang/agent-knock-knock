@@ -187,7 +187,7 @@ test("unverified Claude native inspection succeeds when the latest safe modal sh
   assert.equal(observed.observedAgentVersion, "2.1.238");
 });
 
-for (const version of ["2.1.282", "2.1.285"] as const) {
+for (const version of ["2.1.282", "2.1.285", "2.1.295", "3.0.0"] as const) {
   test(`Claude ${version} parses its status row and omits bounded telemetry diagnostics`, () => {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
     const diagnostics = [
@@ -195,10 +195,10 @@ for (const version of ["2.1.282", "2.1.285"] as const) {
       "   ⚠ .claude/settings.json turns telemetry off: PRIVATE-DIAGNOSTIC-MARKER",
       "     values unless managed settings set the same variable."
     ].join("\n");
-    const screen = claudeStatusPanel(nativeThreadId, version);
+    const screen = claudeStatusPanel(nativeThreadId, "2.1.285").replace("2.1.285", version);
     assert.equal(
       probeClaudeNativeInspection(version).versionCompatibility,
-      version === "2.1.282" ? "unverified" : "verified"
+      version === "2.1.285" ? "verified" : "unverified"
     );
     for (const panel of [
       screen,
@@ -225,7 +225,7 @@ for (const version of ["2.1.282", "2.1.285"] as const) {
 
   test(`Claude ${version} diagnostics reject unknown, repeated, misplaced, and incomplete rows`, () => {
     const nativeThreadId = "40ce9ddb-6de3-45d1-be57-7684808712a0";
-    const screen = claudeStatusPanel(nativeThreadId, version);
+    const screen = claudeStatusPanel(nativeThreadId, "2.1.285").replace("2.1.285", version);
     const diagnostic = "  System diagnostics\n   ⚠ telemetry warning";
     const withDiagnostic = screen.replace(
       "  Esc to cancel",
@@ -256,7 +256,7 @@ for (const version of ["2.1.282", "2.1.285"] as const) {
         "   ⚠ telemetry warning",
         "     unanchored continuation"
       ),
-      claudeStatusPanel(nativeThreadId, "2.1.281").replace(
+      claudeStatusPanel(nativeThreadId, "invalid-version").replace(
         "  Esc to cancel",
         `${diagnostic}\n  Esc to cancel`
       )

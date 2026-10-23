@@ -4,7 +4,7 @@ import { TERMINAL_INTERACTION_LIMITS } from
 
 const terminalOrDesktopConversationSchema = {
   type: "string", pattern: "^(?:(?:desktop|claude-cli):v1:[A-Za-z0-9_-]+|terminal:v[0-9]+:\\S+)$",
-  description: "Exact listed Desktop or terminal conversation_id; AKK selects the supported route."
+  description: "Exact listed Desktop, Claude CLI or terminal conversation_id; AKK selects the supported operation route."
 };
 const listedConversationSchema = {
   type: "string", pattern: "^(?:(?:desktop|codex-cli|claude-cli):v1:[A-Za-z0-9_-]+|terminal:v[0-9]+:\\S+)$",
@@ -85,13 +85,13 @@ export const respondInteractionParameters = {
     turn_id: {
       ...terminalInteractionIdentifierSchema,
       description:
-        "Exact authoritative Turn id from the current interaction_state projection."
+        "Exact authoritative managed Turn id from the current interaction_state projection. For Claude managed Sends, retain the original returned turn_id and refresh its Status before answering."
     },
     watch_id: {
       ...terminalInteractionIdentifierSchema,
       description:
         "Exact terminal, Desktop, or direct Codex CLI Watch id from the current interaction_state " +
-          "projection. Supply exactly one of turn_id, watch_id, or Desktop/direct CLI conversation_id."
+          "projection. Claude native Watches are notify-only and cannot respond. Supply exactly one of turn_id, watch_id, or Desktop/Codex CLI conversation_id."
     },
     interaction_id: {
       ...terminalInteractionIdentifierSchema,
@@ -194,7 +194,7 @@ export const sendParameters = {
   properties: {
     conversation_id: {
       ...listedConversationSchema,
-      description: "Exact conversation_id from List. AKK prefers the backend when it proves the same live thread; otherwise eligible terminal delivery remains available. Read the actual acceptance and Watch receipt. Never repeat an uncertain send."
+      description: "Exact conversation_id from List. Claude automatically uses a managed Turn through a unique controllable exact terminal, or a native Watch when no such terminal exists; Codex prefers its verified shared backend. Read and retain the returned turn_id or watch_id. Busy/blocked, ownership or Store conflicts never authorize route bypass. Never repeat an uncertain send."
     },
     turn_id: {
       type: "string",
@@ -223,7 +223,9 @@ export const sendParameters = {
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current terminal-scoped send action. Codex " +
+        "Exact full terminal_id from the current terminal-scoped send action. New ordinary Claude sends use managed terminal delivery; " +
+          "a Store or ownership failure cannot silently become unmanaged work. The following physical fallback rules describe " +
+          "retained legacy routes/receipts and other explicitly advertised terminal_user_explicit paths, not that Claude default. Codex " +
           "and Claude Code terminal_user_explicit identify one exact live physical " +
           "terminal/process with a scanned, non-blocked approval state and no proven " +
           "input-owning questionnaire, editor, menu, or read-only viewer. Composer " +

@@ -852,7 +852,8 @@ async function prepareRawTerminalDispatchAuthority(input: {
     postSend: postSendCodexCandidateAnchor
   });
   const freshSendAuthority = decideTerminalSendAuthority({
-    ownership: "conflict",
+    ownership: routedClaudeSessionMatches({ options, terminal, currentNativeIdentity, claimedSession, storeDir })
+      ? "current" : "conflict",
     verifiedEmpty: Boolean(verifiedEmptyHandoff),
     externalHandoff: handoff.adopted,
     deferred: Boolean(deferredCodexForegroundBinding)
@@ -892,6 +893,20 @@ async function prepareRawTerminalDispatchAuthority(input: {
     postSendCodexCandidateAnchor,
     postSendCodexDetachedSessionClaims
   };
+}
+
+/** Physical authority was checked under lock; allow exact Claude attachment or continuation. */
+function routedClaudeSessionMatches(input: {
+  options: Record<string, any>;
+  terminal: TerminalCommandTarget;
+  currentNativeIdentity?: NativeAgentSessionIdentity;
+  claimedSession?: ManagedSessionState;
+  storeDir: string;
+}): boolean {
+  if (input.options.routingRequireManagedTurn !== true || input.terminal.agent !== "claude" || !input.currentNativeIdentity) return false;
+  return !input.claimedSession || bindingMatchesLiveTerminal(
+    input.claimedSession, input.terminal, input.currentNativeIdentity, input.storeDir
+  );
 }
 
 async function runManagedRawTerminalSendAttemptInContext(

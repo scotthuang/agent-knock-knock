@@ -1,9 +1,11 @@
 import type {
   ExecutorKind
 } from "./executors.js";
+import { isValidClaudeSemanticVersion } from "./claude-lifecycle-compatibility.js";
 
 /**
- * Verified native model-control behavior profiles.
+ * Native model-control behavior profiles with exact tested versions and a
+ * structurally verified, best-effort Claude fallback.
  *
  * Keep every version/profile pairing here. Callers must consume this registry
  * instead of independently deciding that a running TUI is compatible.
@@ -23,7 +25,7 @@ export const TERMINAL_MODEL_CONTROL_PROFILE_IDS = Object.freeze({
 
 export type TerminalModelControlBehaviorProfile =
   typeof TERMINAL_MODEL_CONTROL_PROFILE_IDS[keyof
-    typeof TERMINAL_MODEL_CONTROL_PROFILE_IDS];
+    typeof TERMINAL_MODEL_CONTROL_PROFILE_IDS] | `claude-model-control-best-effort-${string}`;
 
 export type TerminalModelControlScope =
   | "current_session"
@@ -257,18 +259,38 @@ export function terminalModelControlProfileFor(
 ): TerminalModelControlProfile | undefined {
   const version = nonBlank(agentVersion);
   if (!version) return undefined;
-  return MODEL_CONTROL_PROFILES.find((profile) =>
+  const verified = MODEL_CONTROL_PROFILES.find((profile) =>
     profile.agent === agent && profile.agentVersion === version
   );
+  return verified ?? (agent === "claude" ? claudeBestEffortModelControlProfile(version) : undefined);
+}
+
+/** A version does not prove the UI. Every input still requires the live, exact
+ * Claude picker/footer and empty-composer evidence enforced by the transaction. */
+function claudeBestEffortModelControlProfile(version: string): TerminalModelControlProfile | undefined {
+  if (!isValidClaudeSemanticVersion(version)) return undefined;
+  const tested = MODEL_CONTROL_PROFILES.find(profile => profile.behaviorProfile === TERMINAL_MODEL_CONTROL_PROFILE_IDS.claude21285)!;
+  const behaviorProfile = `claude-model-control-best-effort-${version}` as const;
+  return { ...tested, agentVersion: version, behaviorProfile,
+    plan: { ...tested.plan, behaviorProfile },
+    reason: `Claude Code ${version} has not been regression-tested for model control; ` +
+      "use the session-only path only when the live picker, choices and scope footer are verified" };
+}
+
+function profileForBehavior(behaviorProfile: string): TerminalModelControlProfile | undefined {
+  const verified = MODEL_CONTROL_PROFILES.find(profile => profile.behaviorProfile === behaviorProfile);
+  if (verified) return verified;
+  const prefix = "claude-model-control-best-effort-";
+  if (!behaviorProfile.startsWith(prefix)) return undefined;
+  const profile = terminalModelControlProfileFor("claude", behaviorProfile.slice(prefix.length));
+  return profile?.behaviorProfile === behaviorProfile ? profile : undefined;
 }
 
 export function terminalModelControlProfileForPlan(
   plan: TerminalModelControlPlan
 ): TerminalModelControlProfile | undefined {
-  return MODEL_CONTROL_PROFILES.find((profile) =>
-    profile.behaviorProfile === plan.behaviorProfile &&
-    samePlan(profile.plan, plan)
-  );
+  const profile = profileForBehavior(plan.behaviorProfile);
+  return profile && samePlan(profile.plan, plan) ? profile : undefined;
 }
 
 export function terminalModelControlPlanConforms(input: {
@@ -353,13 +375,9 @@ export function planTerminalModelControlProfile(
   ) {
     throw new Error(capabilities.reason);
   }
-  const profile = MODEL_CONTROL_PROFILES.find((candidate) =>
-    (!capabilities.agentVersion ||
-      candidate.agentVersion === capabilities.agentVersion.trim()) &&
-    candidate.behaviorProfile === capabilities.behaviorProfile &&
-    candidate.plan.scope === capabilities.scope
-  );
-  if (!profile) {
+  const profile = profileForBehavior(capabilities.behaviorProfile);
+  if (!profile || capabilities.agentVersion && profile.agentVersion !== capabilities.agentVersion.trim()
+    || profile.plan.scope !== capabilities.scope) {
     throw new Error("refusing an unprofiled terminal model-control plan");
   }
   return profile.plan;

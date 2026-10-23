@@ -205,6 +205,7 @@ function sameClaudeWatchTask(
   right: typeof left
 ): boolean {
     return left.prompt_uuid === right.prompt_uuid &&
+      optionalIdentityCompatible(left.config_dir, right.config_dir) &&
       left.pid === right.pid &&
       left.agent_started_at_ms === right.agent_started_at_ms &&
       left.device === right.device &&

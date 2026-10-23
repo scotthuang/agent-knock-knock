@@ -6,9 +6,10 @@ import test, { type TestContext } from "node:test";
 import { collectExpiredWatchHistory } from "../src/watch-history-retention.js";
 import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
 import { createClaudeNativeTaskService, type ClaudeNativeTaskDependencies } from "../src/claude-native-task-service.js";
-import { createClaudeNativeStateStore } from "../src/claude-native-state-store.js";
+import { assertClaudeNativeTaskRecord, createClaudeNativeStateStore } from "../src/claude-native-state-store.js";
 import { ClaudeNativeError, createClaudeNativeConversationId, type ClaudeNativeCatalogEntry } from "../src/claude-native-identity.js";
 import { createClaudeNativeRuntime } from "../src/claude-native-runtime.js";
+import { parseClaudeNativeSenderPermissionClass, type ClaudeNativeSenderPermissionClass } from "../src/claude-native-sender-policy.js";
 import type { ClaudeNativeInputObservation, ClaudeNativeSnapshot } from "../src/claude-native-observation.js";
 
 const target = { configDir: "/test/claude", sessionId: "11111111-1111-4111-8111-111111111111", pid: 321,
@@ -29,6 +30,7 @@ function harness(t: TestContext) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const repository = createClaudeNativeStateStore(dir, { acquire: () => () => {} });
   const state = { now: Date.parse("2026-10-11T00:00:00Z"), sequence: 0, sends: 0, inspections: 0, observations: 0,
+    senderClasses: [] as (ClaudeNativeSenderPermissionClass | undefined)[],
     entry: structuredClone(entry), selected: undefined as ClaudeNativeInputObservation | undefined,
     latest: undefined as string | undefined, inspectError: undefined as Error | undefined,
     outcomes: [] as CallbackAttemptOutcome[], deliveries: [] as CallbackTransportDeliverInput[] };
@@ -56,8 +58,10 @@ function harness(t: TestContext) {
     send: async (_identity, options) => {
       assert.ok(repository.list().some(task => task.send_intent?.client_user_message_id === options.inputUuid), "intent exists before mutation");
       await options.beforeDispatch?.(state.entry, 654); state.sends++;
+      state.senderClasses.push(options.senderPermissionClass);
       const saved = repository.list().find(task => task.send_intent?.client_user_message_id === options.inputUuid)!;
       assert.equal(saved.send_intent?.state, "uncertain"); assert.equal(saved.send_intent?.sender_pid, 654);
+      assert.equal(options.senderPermissionClass, saved.send_intent?.sender_permission_class, "dispatch uses the persisted sender assertion");
       state.selected = selected(options.inputUuid, options.messageId);
       return { dispatchState: "written", senderPid: 654 };
     },
@@ -92,6 +96,74 @@ test("Claude Send persists exact sender provenance; restart replay preserves the
   await assert.rejects(h.service.send({ ...input, text: "A different task" }), { code: "idempotency_conflict" });
 });
 
+test("sender permission class is explicit, bounded and absent by default", async t => {
+  for (const value of [undefined, "", " \t\n"]) assert.equal(parseClaudeNativeSenderPermissionClass(value), undefined);
+  for (const value of ["prompting", "bypass"] as const) assert.equal(parseClaudeNativeSenderPermissionClass(` ${value} `), value);
+  for (const value of [null, 1, {}, "auto", "BYPASS", "bypassPermissions"]) {
+    assert.throws(() => parseClaudeNativeSenderPermissionClass(value), { code: "invalid_sender_permission_class" });
+  }
+  const h = harness(t), sent = await h.service.send(input);
+  assert.equal(Object.hasOwn(sent.send_intent!, "sender_permission_class"), false);
+  assert.deepEqual(h.state.senderClasses, [undefined]);
+});
+
+test("new Claude Send pins the configured sender assertion before asynchronous inspection and dispatch", async t => {
+  for (const permissionClass of ["prompting", "bypass"] as const) {
+    const h = harness(t), inspect = h.deps.inspect;
+    h.deps.senderPermissionClass = permissionClass;
+    h.deps.inspect = async identity => {
+      h.deps.senderPermissionClass = permissionClass === "bypass" ? "prompting" : "bypass";
+      return inspect(identity);
+    };
+    const sent = await h.service.send(input);
+    assert.equal(sent.send_intent?.sender_permission_class, permissionClass);
+    assert.deepEqual(h.state.senderClasses, [permissionClass]);
+    assert.equal(h.repository.load(sent.id)?.send_intent?.sender_permission_class, permissionClass);
+  }
+});
+
+test("invalid sender configuration refuses a new Send before inspection, reservation or native input", async t => {
+  const h = harness(t); h.deps.senderPermissionClass = "infer-from-target";
+  await assert.rejects(h.service.send(input), { code: "invalid_sender_permission_class" });
+  assert.equal(h.state.inspections, 0); assert.equal(h.state.observations, 0); assert.equal(h.state.sends, 0);
+  assert.deepEqual(h.repository.list(), []);
+});
+
+test("idempotent Send retains old or absent sender assertions after configuration changes without resending", async t => {
+  for (const initial of [undefined, "prompting", "bypass"] as const) {
+    const h = harness(t); h.deps.senderPermissionClass = initial;
+    const sent = await h.service.send(input), inspections = h.state.inspections;
+    for (const changed of ["bypass", "prompting", "invalid-now"]) {
+      const restarted = createClaudeNativeTaskService({ ...h.deps, senderPermissionClass: changed });
+      const replay = await restarted.send(input);
+      assert.equal(replay.id, sent.id); assert.equal(replay.send_intent?.sender_permission_class, initial);
+      assert.equal(replay.deadline_at, sent.deadline_at);
+    }
+    assert.equal(h.state.inspections, inspections); assert.equal(h.state.sends, 1);
+  }
+});
+
+test("persisted sender assertions cannot be added, changed or removed after reservation", async t => {
+  for (const initial of [undefined, "prompting", "bypass"] as const) {
+    const h = harness(t); h.deps.senderPermissionClass = initial;
+    const sent = await h.service.send(input);
+    for (const changed of [undefined, "prompting", "bypass"] as const) {
+      if (changed === initial) continue;
+      const rewritten = structuredClone(sent);
+      if (changed === undefined) delete rewritten.send_intent!.sender_permission_class;
+      else rewritten.send_intent!.sender_permission_class = changed;
+      assert.throws(() => h.repository.save(rewritten, sent.revision), /Claude send intent changed/u);
+    }
+    for (const invalid of ["auto", " bypass ", null, 1]) {
+      const malformed = structuredClone(sent);
+      Object.assign(malformed.send_intent!, { sender_permission_class: invalid });
+      assert.throws(() => h.repository.save(malformed, sent.revision), /Claude send intent changed/u);
+      assert.throws(() => assertClaudeNativeTaskRecord(malformed), /Invalid Claude send intent/u);
+    }
+    assert.equal(h.repository.load(sent.id)?.send_intent?.sender_permission_class, initial);
+  }
+});
+
 test("uncertain acceptance survives restart without a resend and can bind only the saved message UUID and peer PID", async t => {
   const h = harness(t);
   h.deps.send = async (_target, options) => { await options.beforeDispatch?.(entry, 654); h.state.sends++; throw new Error("connection lost after write"); };
@@ -107,6 +179,46 @@ test("uncertain acceptance survives restart without a resend and can bind only t
   h.state.selected.messageId = sent.send_intent!.native_message_id; h.state.selected.state = "completed"; h.state.selected.responseText = "Exact result";
   const resolved = await createClaudeNativeTaskService(h.deps).reconcile(sent.id);
   assert.equal(resolved.status, "completed"); assert.equal(resolved.response_text, "Exact result"); assert.equal(h.state.sends, 1);
+});
+
+test("a held message is not replayed after configuration changes and completes only after exact native acceptance", async t => {
+  const h = harness(t), request = { ...input, callbackRoute: route };
+  h.deps.send = async (_identity, options) => {
+    await options.beforeDispatch?.(entry, 654); h.state.sends++;
+    assert.equal(options.senderPermissionClass, undefined);
+    h.state.entry.status = "waiting";
+    return { dispatchState: "written", deliveryStatus: "held", senderPid: 654 };
+  };
+  const held = await h.service.send(request);
+  assert.equal(held.status, "awaiting_acceptance"); assert.equal(held.send_intent?.state, "held");
+  assert.equal(held.native_input_id, undefined); assert.equal(h.state.deliveries.length, 0);
+  const restarted = createClaudeNativeTaskService({ ...h.deps, senderPermissionClass: "bypass" });
+  const replay = await restarted.send(request);
+  assert.equal(replay.send_intent?.state, "held"); assert.equal(replay.send_intent?.sender_permission_class, undefined);
+  assert.equal((await restarted.recover(held.id, owner)).send_intent?.state, "held");
+  assert.equal(h.state.sends, 1); assert.equal(h.state.deliveries.length, 0);
+
+  // Simulate the receiver releasing that same input; no AKK approval or resend occurs.
+  h.state.entry.status = "working";
+  h.state.selected = selected(held.send_intent!.client_user_message_id, held.send_intent!.native_message_id);
+  h.state.selected.verifiedPeerPid = 999;
+  const foreign = await restarted.reconcile(held.id);
+  assert.equal(foreign.send_intent?.state, "held"); assert.equal(foreign.observation_error, "input_provenance_mismatch");
+  h.state.selected.verifiedPeerPid = 654;
+  const accepted = await restarted.reconcile(held.id);
+  assert.equal(accepted.status, "watching"); assert.equal(accepted.send_intent?.state, "accepted");
+  assert.equal(accepted.native_input_id, held.send_intent!.client_user_message_id);
+  assert.equal(accepted.send_intent?.sender_permission_class, undefined);
+  assert.equal(h.state.deliveries.length, 0);
+
+  h.state.selected.state = "completed"; h.state.selected.responseText = "Released exact fixture result";
+  const completed = await restarted.reconcile(held.id);
+  assert.equal(completed.status, "completed"); assert.equal(completed.notifications[0].status, "accepted");
+  assert.match(h.state.deliveries[0].envelope.event.body, /Released exact fixture result/u);
+  await createClaudeNativeTaskService({ ...h.deps, senderPermissionClass: "prompting" }).recover(held.id, owner);
+  await restarted.reconcile(held.id);
+  assert.equal(h.state.sends, 1); assert.equal(h.state.deliveries.length, 1);
+  assert.equal(restarted.status(held.id).deadline_at, held.deadline_at);
 });
 
 test("concurrent same-key reservations send once; another key cannot enter the unresolved target", async t => {
@@ -179,6 +291,81 @@ test("old task status is tied to its exact input even when a later native task i
   const completed = await h.service.reconcile(sent.id);
   assert.equal(completed.native_input_id, sent.native_input_id); assert.equal(completed.response_text, "Old exact answer");
   assert.equal(completed.status, "completed"); assert.equal(h.state.deliveries.length, 1);
+});
+
+test("Claude waiting notifications reuse Send's Watch and deduplicate polls and restarts without inventing responses", async t => {
+  const h = harness(t), sent = await h.service.send({ ...input, callbackRoute: route });
+  h.state.entry.status = "working";
+  assert.equal((await h.service.watch({ ...input, callbackRoute: route })).id, sent.id);
+  // Upgrade a pre-notification Watch that already persisted its registry hint.
+  const legacy = h.repository.load(sent.id)!; legacy.waiting_for = "permission prompt";
+  h.repository.save(legacy, legacy.revision);
+  h.state.entry.status = "waiting";
+  for (const [waitingFor, kind, waiting] of [["permission prompt", "approval", "permission prompt"],
+    ["input needed", "input", "input needed"], ["PRIVATE_UNKNOWN_PROMPT", "unknown", "unknown"]]) {
+    h.state.entry.waitingFor = waitingFor;
+    const before = h.state.deliveries.length;
+    const task = await h.service.reconcile(sent.id);
+    assert.equal(task.waiting_for, waiting);
+    assert.equal(h.state.deliveries.length, before + 1);
+    const event = h.state.deliveries.at(-1)!.envelope.event;
+    assert.equal(event.type, "claude_native_watch.interaction");
+    assert.equal(event.metadata?.watch_id, sent.id);
+    assert.equal(event.metadata?.native_input_id, sent.native_input_id);
+    assert.deepEqual(event.metadata?.interaction_hint, { kind, actionable: false, source: "native_registry" });
+    assert.equal(event.requires_response, false);
+    assert.equal(event.metadata?.interaction_id, undefined);
+    assert.doesNotMatch(JSON.stringify(event), /PRIVATE_UNKNOWN_PROMPT/u);
+    const restarted = createClaudeNativeTaskService(h.deps);
+    await restarted.reconcile(sent.id);
+    assert.equal((await restarted.watch({ ...input, callbackRoute: route })).id, sent.id);
+    assert.equal(h.state.deliveries.length, before + 1);
+  }
+  h.state.entry.status = "working";
+  assert.equal((await h.service.reconcile(sent.id)).waiting_for, undefined);
+  h.state.entry.status = "waiting"; h.state.entry.waitingFor = "permission prompt";
+  await h.service.reconcile(sent.id);
+  assert.equal(h.state.deliveries.length, 4);
+  assert.equal(new Set(h.state.deliveries.map(delivery => delivery.envelope.event.id)).size, 4);
+  assert.equal(h.repository.list().length, 1); assert.equal(h.state.sends, 1);
+  h.state.selected!.state = "completed";
+  const completed = await h.service.reconcile(sent.id);
+  assert.equal(completed.waiting_for, undefined); assert.equal(completed.waiting_notification_id, undefined);
+  assert.equal(h.state.deliveries.at(-1)!.envelope.event.type, "claude_native_watch.settled");
+  await h.service.reconcile(sent.id); assert.equal(h.state.deliveries.length, 5);
+});
+
+test("watching an existing waiting task notifies immediately and retires callbacks once that wait is resolved", async t => {
+  const h = harness(t); h.state.entry.status = "waiting"; h.state.entry.waitingFor = "permission prompt";
+  h.state.selected = selected(uuid(900)); h.state.selected.origin = "human";
+  h.state.outcomes.push({ disposition: "retryable_failure", error_code: "temporarily_unavailable" });
+  const watched = await h.service.watch({ ...input, callbackRoute: route });
+  assert.equal(watched.waiting_for, "permission prompt");
+  assert.equal(watched.notifications[0].status, "retry_wait"); assert.equal(h.state.deliveries.length, 1);
+  const observe = h.deps.observe;
+  h.deps.observe = async (...args) => ({ ...await observe(...args), readError: "read_failed" });
+  h.state.now += 5001;
+  const unreadable = await h.service.reconcile(watched.id);
+  assert.equal(unreadable.notifications[0].status, "retry_wait");
+  assert.equal(unreadable.waiting_notification_id, watched.waiting_notification_id);
+  assert.equal(h.state.deliveries.length, 1, "unreadable current state pauses reminders without losing the retry");
+  h.deps.observe = observe; h.state.entry.status = "working";
+  const resumed = await createClaudeNativeTaskService(h.deps).reconcile(watched.id);
+  assert.equal(resumed.waiting_for, undefined); assert.equal(resumed.notifications[0].status, "failed");
+  assert.deepEqual(resumed.notifications[0].outcome, { disposition: "permanent_failure", error_code: "claude_native_callback_stale" });
+  assert.equal(h.state.deliveries.length, 1);
+  await assert.rejects(h.service.retryCallback(watched.id, { ...owner, notificationId: watched.notifications[0].id }),
+    { code: "backend_callback_not_retryable" });
+  h.state.entry.status = "waiting";
+  h.state.outcomes.push({ disposition: "retryable_failure", error_code: "temporarily_unavailable" });
+  const next = await h.service.reconcile(watched.id);
+  assert.notEqual(next.waiting_notification_id, watched.waiting_notification_id);
+  h.state.selected.state = "completed"; h.state.now += 5001;
+  const completed = await h.service.reconcile(watched.id);
+  assert.equal(completed.notifications[1].status, "failed");
+  assert.equal(h.state.deliveries.length, 3);
+  assert.equal(h.state.deliveries[2].envelope.event.type, "claude_native_watch.settled");
+  assert.equal(h.repository.list().length, 1); assert.equal(h.state.sends, 0);
 });
 
 test("original process exit wins over a completed-looking resumed transcript", async t => {
@@ -302,6 +489,23 @@ test("runtime blocks an exited original before touching a resumed client's snaps
     assert.equal(reads, 0); assert.equal(sends, 0);
   } finally { await runtime.close(); }
   assert.equal(closed, true);
+});
+
+test("invalid runtime sender configuration leaves discovery and inspection available but prevents new input", async t => {
+  const h = harness(t); let inspections = 0, processChecks = 0, sends = 0;
+  const runtime = createClaudeNativeRuntime({ storeDir: h.dir, claudeConfigDirs: [target.configDir],
+    senderPermissionClass: "invalid-policy", processCheck: async () => { processChecks++; },
+    client: { discover: async () => ({ sessions: [entry], errors: [] }),
+      inspect: async () => { inspections++; return entry; },
+      send: async () => { sends++; return { dispatchState: "written" }; }, close: () => {} } });
+  try {
+    assert.equal((await runtime.catalog.discover()).sessions.length, 1);
+    assert.equal((await runtime.inspect(target)).nativeId, input.nativeId);
+    assert.equal(inspections, 1); assert.equal(processChecks, 1);
+    await assert.rejects(runtime.tasks.send(input), { code: "invalid_sender_permission_class" });
+    assert.equal(inspections, 1); assert.equal(processChecks, 1); assert.equal(sends, 0);
+    assert.deepEqual(runtime.tasks.list(), []);
+  } finally { await runtime.close(); }
 });
 
 test("a configured symlink home admits the canonical identity returned by native discovery", async t => {

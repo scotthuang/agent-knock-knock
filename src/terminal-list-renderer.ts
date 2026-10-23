@@ -586,7 +586,7 @@ export function exactTerminalWatchAction(
 }
 
 const CURRENT_TURN_ACTIONS = [
-  "status", "respond", "approve", "cancel", "renew", "retry_callback",
+  "status", "respond", "respond_interaction", "approve", "cancel", "renew", "retry_callback",
   "retry_submission", "close"
 ] as const;
 

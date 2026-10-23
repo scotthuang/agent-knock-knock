@@ -22,6 +22,14 @@ display grouping alone does not copy terminal permissions or redirect selectors.
 Multiple candidates, conflicts and terminals needing management recovery remain
 visible. Rows and connections are not a count of independent tasks.
 
+Presentation does not choose the Send transport. New Codex sends prefer the
+verified shared backend. New Claude sends automatically prefer a managed Turn
+through a unique controllable terminal with the same native session and process;
+without that exact terminal they use the native inbox and return a Watch.
+Busy/blocked state, identity conflicts and management failures do not authorize
+bypassing an existing terminal through native delivery. Follow the returned
+`turn_id` or `watch_id`; old tasks and receipts retain their original provider.
+
 Host List uses `agent-knock-knock/host-list-compact` v4. Follow
 `pagination.next_args` while `has_more` is true. `listLimit` defaults to 40 and
 accepts 1–100. Pages are fresh discoveries, not a frozen snapshot; restart if

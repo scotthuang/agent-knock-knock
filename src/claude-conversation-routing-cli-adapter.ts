@@ -16,6 +16,9 @@ import { expandHome } from "./cli-command-runtime.js";
 import { createFileLockCliAdapter } from "./file-lock-cli-adapter.js";
 import { conversationRoutedOptions, prepareConversationTerminalOptions } from "./conversation-routing-commands.js";
 import type { ConversationRoutingCliPorts } from "./conversation-routing-commands.js";
+import { withClaudeSendRouteProjection, withExactTerminalActions } from "./conversation-list.js";
+import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason } from "./claude-managed-send-route.js";
+import { recordValue } from "./value-guards.js";
 
 const core = new Set(["send", "status", "watch-terminal", "native-status"]);
 const special = new Set(["model-options", "set-model", "permission-options", "set-permissions", "cancel", "new-thread", "clear-thread", "resume-thread", "list-resumable-threads", "threads", "native-inspect", "approve", "respond-interaction", "reconcile-binding"]);
@@ -35,23 +38,48 @@ export async function dispatchClaudeConversationCli(command: string | undefined,
     messageId: String(options.messageId), requestText: String(options.message ?? options.request ?? ""), canonicalTarget: target } : undefined;
   const terminalRuntimeDir = cliEnv().AKK_RUNTIME_DIR ? path.resolve(expandHome(cliEnv().AKK_RUNTIME_DIR)!) : path.join(path.dirname(defaultStoreDir()), "runtime-v2");
   const locks = createFileLockCliAdapter({ now: cliNow, nowMs: cliNowMs, pid: cliPid, sleepSync: cliSleepSync });
+  let selected: Record<string, unknown>;
+  const selectedCommand = command === "native-status" ? "native-inspect" : command;
   try {
     const result = await dispatchConversationRoute({ command, input,
       store: input ? createConversationRuntimeRouteStore(configuration.storeDir, terminalRuntimeDir, locks, { now: cliNow }) : undefined,
       select: () => selectClaudeRoute({ command, target, native, options, ports, runtime, input, terminalRuntimeDir }),
-      execute: async (choice: ConversationRouteChoice) => {
-        const selected = conversationRoutedOptions(command, options, choice.route, choice.targetId);
-        const selectedCommand = command === "native-status" ? "native-inspect" : command;
+      prepare: async (choice: ConversationRouteChoice) => {
+        selected = conversationRoutedOptions(command, options, choice.route, choice.targetId);
         if (choice.route === "terminal") {
           const rows = await ports.terminals(options, choice.targetId);
           if (rows.length !== 1 || rows[0].id !== choice.targetId || native && !exactClaudeTerminal(target, rows[0])) throw new Error("Claude terminal identity changed; no input was sent");
+          if (choice.terminalMode === "managed") {
+            if (selected.expectedTerminalToken !== undefined && selected.expectedTerminalToken !== choice.terminalToken) {
+              throw new ConversationRouteError("conversation_route_conflict", "Managed Send retry requires its original physical terminal authority");
+            }
+            selected.routingRequireManagedTurn = true;
+            selected.background ??= true;
+            selected.expectedTerminalToken = choice.terminalToken;
+          }
           prepareConversationTerminalOptions(selectedCommand, selected, rows[0]);
         }
-        return ports.execute(selectedCommand, selected);
+      },
+      execute: async (choice: ConversationRouteChoice) => {
+        const result = await ports.execute(selectedCommand, selected);
+        if (choice.route !== "native" || !["status", "native-status", "native-inspect"].includes(command)) return result;
+        // Native status and List must describe the same exact terminal controls. Discovery
+        // is read-only and optional: a missing terminal never invalidates native status.
+        let terminals: Record<string, unknown>[];
+        try { terminals = await ports.terminals(options); } catch { return result; }
+        const projected = withClaudeSendRouteProjection(result, terminals);
+        const exact = terminals.filter(row => exactClaudeTerminal(choice.targetId, row));
+        if (exact.length !== 1) return projected;
+        const { terminal_controls: _controls, ...projection } = withExactTerminalActions({
+          ...projected, terminal_aliases: [exact[0].id], terminal_controls: exact });
+        return projection;
       }
     });
     const routing = result.routing as Record<string, unknown> | undefined;
-    if (routing?.transport === "codex_backend") routing.transport = "claude_native";
+    if (routing) {
+      if (routing.transport === "codex_backend") routing.transport = "claude_native";
+      if (command === "send") routing.policy = "managed_terminal_first";
+    }
     writeCliStdout(JSON.stringify(result, null, 2) + "\n");
     return true;
   } finally { await runtime.close(); }
@@ -78,6 +106,7 @@ async function selectClaudeRoute(context: ClaudeRouteContext): Promise<Conversat
   const { command, target, native, options, ports, runtime, input, terminalRuntimeDir } = context;
   const legacy = input ? legacyClaudeTerminalRoute(input, options, terminalRuntimeDir) : undefined;
   if (legacy) return legacy;
+  if (command === "send") return selectClaudeSendRoute(context);
   if (native && isCore(command, options)) {
     try { await runtime.inspect(parseClaudeNativeConversationId(target)); return { route: "native", targetId: target }; }
     catch (error) { if (!unavailable.has(code(error))) throw error; }
@@ -103,6 +132,29 @@ async function selectClaudeRoute(context: ClaudeRouteContext): Promise<Conversat
   }
   return { route: "terminal", targetId: String(exact[0].id) };
 
+}
+
+async function selectClaudeSendRoute(context: ClaudeRouteContext): Promise<ConversationRouteChoice> {
+  const { target, native, options, ports, runtime } = context;
+  const terminals = await ports.terminals(options, native ? undefined : target);
+  if (native) {
+    const selection = claudeManagedSendRoute(target, terminals);
+    if (selection.kind === "blocked") throw new Error(`Claude managed Send blocked: ${selection.reason}; no input was sent`);
+    if (selection.kind === "managed") return managedTerminalChoice(selection.terminal);
+    await runtime.inspect(parseClaudeNativeConversationId(target));
+    return { route: "native", targetId: target };
+  }
+  const exact = terminals.filter(row => row.id === target);
+  if (exact.length !== 1) throw new Error("Exact Claude terminal is unavailable or ambiguous; no input was sent");
+  const reason = claudeManagedTerminalSendBlockReason(exact[0]);
+  if (reason) throw new Error(`Claude managed Send blocked: ${reason}; no input was sent`);
+  return managedTerminalChoice(exact[0]);
+}
+
+function managedTerminalChoice(terminal: Record<string, unknown>): ConversationRouteChoice {
+  const action = recordValue(recordValue(terminal.available_actions)?.send);
+  const args = recordValue(action?.arguments);
+  return { route: "terminal", targetId: String(terminal.id), terminalMode: "managed", terminalToken: String(args?.expected_terminal_token) };
 }
 
 function claudeRoutingTarget(command: string | undefined, original: Record<string, unknown>): string | undefined {

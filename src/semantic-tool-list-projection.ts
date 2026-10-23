@@ -47,19 +47,33 @@ export function compactAkkListModelProjection(
     } : {}),
     ...(Array.isArray(result.claude_cli_sessions) || recordValue(result.claude_cli_scan) ? {
       ...(!Array.isArray(result.conversations) ? { claude_cli_sessions: arrayValue(result.claude_cli_sessions).map(compactNativeConversation) } : {}),
-      claude_cli_scan: compactAkkListScalars(recordValue(result.claude_cli_scan) ?? {}, ["status", "returned", "loaded_count", "complete", "watch_error"])
+      claude_cli_scan: compactClaudeListScan(recordValue(result.claude_cli_scan) ?? {})
     } : {}),
     ...(Array.isArray(result.conversations)
       ? { conversations: arrayValue(result.conversations).map(row => compactConversation(row, routingDiagnostics)),
           conversation_presentation: compactAkkListScalars(recordValue(result.conversation_presentation) ?? { mode: "default" },
             ["mode", "workspace_grouped_connections"]),
           ...(routingDiagnostics ? { conversation_routing: compactAkkListScalars(recordValue(result.conversation_routing) ?? {},
-            ["policy", "exact_associations", "unresolved_terminals"]) } : {}) }
+            ["policy", "codex", "claude", "exact_associations", "unresolved_terminals"]) } : {}) }
       : { terminals: arrayValue(result.terminals).map(compactAkkListTerminal) }),
     ...(recovery ? { recovery } : {}),
     ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {})
   };
   return paginateHostList(projected, params);
+}
+
+function compactClaudeListScan(scan: Record<string, unknown>): Record<string, unknown> {
+  const output = compactAkkListScalars(scan, ["status", "returned", "loaded_count", "complete", "watch_error", "error_count"]);
+  const codes = [...new Set(stringArrayValue(scan.error_codes).filter(code => /^[a-z][a-z0-9_]{0,79}$/u.test(code)))].slice(0, 8);
+  if (codes.length) output.error_codes = codes;
+  const reader = recordValue(scan.reader);
+  if (reader && ["option", "environment", "default"].includes(String(reader.source)) &&
+      typeof reader.executable === "string" && !/[\\/\u0000-\u001f\u007f]/u.test(reader.executable)) {
+    output.reader = { executable: truncateText(reader.executable, 128), source: reader.source,
+      path_omitted: reader.path_omitted === true };
+  }
+  if (scan.next_action === "check_claude_reader_in_host_environment") output.next_action = scan.next_action;
+  return output;
 }
 
 function compactDesktopConversation(row: Record<string, unknown>): Record<string, unknown> {
@@ -78,10 +92,12 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
   return {
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
       "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
-      "pending_interaction_count", "interaction_requests_scanned", "history_state", "attention_required", "updated_at", "observation_error"]),
+      "pending_interaction_count", "interaction_requests_scanned", "history_state", "attention_required", "updated_at", "observation_error", "send_blocked_reason"]),
     ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
     capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, [
-      "status", "send", "watch", "interaction_notify", "interaction_respond", "approve", "set_permissions"]),
+      "status", "send", "watch", "interaction_notify", "interaction_respond", "approve", "set_permissions",
+      "permission_options", "model_options", "set_model", "cancel", "new_thread", "clear_thread",
+      "resume_thread", "list_resumable_threads", "native_inspect"]),
     ...(Array.isArray(row.terminal_controls)
       ? { terminal_controls: arrayValue(row.terminal_controls).map(compactAkkListTerminal) } : {}),
     ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
@@ -113,7 +129,8 @@ function projectCliConnection(output: Record<string, unknown>, row: Record<strin
   if (scoped.length) output.scoped_controls = scoped;
   const actions = recordValue(output.available_actions) ?? {};
   const capabilities = { ...recordValue(output.capabilities) };
-  for (const name of ["status", "send", "watch", "approve", "set_permissions", "permission_options", "model_options", "set_model", "cancel"]) {
+  for (const name of ["status", "send", "watch", "approve", "set_permissions", "permission_options", "model_options", "set_model", "cancel",
+    "new_thread", "clear_thread", "resume_thread", "list_resumable_threads", "native_inspect"]) {
     if (actions[name] === true) capabilities[name] = true;
   }
   if (actions.respond_interaction === true) capabilities.interaction_respond = true;
@@ -179,6 +196,7 @@ function compactAkkListTerminal(
     "native_identity_state",
     "native_agent_session_id",
     "management_state",
+    "send_blocked_reason",
     "handoff_state",
     "confidence"
   ]);
