@@ -13,7 +13,7 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-This connector pins AKK **0.14.17** in its package and lockfile. It exposes
+This connector pins AKK **0.15.0** in its package and lockfile. It exposes
 that runtime's 27 semantic tools, including Codex CLI backend and Desktop
 operations when the selected conversation advertises them. `list` returns
 current discoverable conversations; `watches` separately returns recent
@@ -75,7 +75,7 @@ can select an older `latest` build.
 
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
-Use `next`, or pin `@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.9`.
+Use `next`, or pin `@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.10`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -363,7 +363,7 @@ Update to the registry's current prerelease, or pin an exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.9
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.10
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -391,12 +391,23 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned published AKK runtime `0.14.17`; building the current
+tests against its pinned published AKK runtime `0.15.0`; building the current
 repository root does not silently replace that dependency. Testing connector
 changes against another AKK runtime requires an explicit dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.10`** pins AKK **`0.15.0`** and bundles its updated
+Skill. Claude Code and configured wrappers such as `tclaude` share the same
+adapter. New Claude Sends prefer an exact eligible terminal with managed
+completion monitoring and supported approval controls; native inbox fallback
+remains available when no controllable terminal counterpart exists. Codex stays
+backend-first. Existing task routes, interaction authority, the DSH Host/peer
+policy, independent Store and callback ownership remain unchanged. This
+dependency update does not claim a new DSH live-model or external-channel
+delivery test. See the [Claude direct-control guide](../../docs/claude-cli-direct.md)
+for prerequisites and operation-specific limits. The connector remains on `next`.
 
 Connector **`0.1.0-rc.9`** pins AKK **`0.14.17`** and carries its Codex CLI
 `0.164.0` compatibility changes and reviewed Skill. The DSH Host/peer version
@@ -430,7 +441,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.9` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.10` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -475,7 +486,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.9
+npm run release:check -- --publish --confirm-version 0.1.0-rc.10
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags

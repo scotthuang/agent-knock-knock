@@ -491,7 +491,7 @@ async function conversationTerminals(commandName: string | undefined, request: C
 
 async function sendDelegateConversation(options: CliCommandOptions): Promise<void> {
   if (parseTerminalConversationId(String(options.conversation))?.agent !== "claude") return terminalCommandCliFacade.runSend(options);
-  await executeConversationCommand("send", options,
+  await executeConversationCommand("send", { ...options, routingDiscoveredTerminalAuthority: true },
     (request, terminalId) => conversationTerminals("send", request, terminalId), dispatchCliCommand);
 }
 

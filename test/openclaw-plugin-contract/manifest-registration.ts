@@ -131,7 +131,11 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.match(
     manifest.description ?? "",
-    /closed native status inspection/u
+    /native inspection, model and thread lifecycle operations/u
+  );
+  assert.match(
+    manifest.description ?? "",
+    /Availability follows exact identity, runtime evidence and current action authority/u
   );
   assert.deepEqual(
     sorted(registeredCommands),

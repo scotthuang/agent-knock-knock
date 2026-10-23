@@ -12,7 +12,7 @@ socket.
 
 ## Status and compatibility
 
-This connector pins AKK **0.14.17**, including CLI direct connections, Codex
+This connector pins AKK **0.15.0**, including CLI direct connections, Codex
 Desktop, and Recovery. Its generated Skill and registered tools are verified
 against that exact core package at startup. See the [root compatibility
 summary](../../README.md#compatibility) for the coding-agent versions and
@@ -33,7 +33,7 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.14.17`, pinned by this connector's package and lockfile. Running
+- AKK `0.15.0`, pinned by this connector's package and lockfile. Running
   `npm ci` in `connectors/pi` installs that exact AKK runtime; a different
   version at the repository root is not substituted automatically.
 - macOS or Linux. The POC requires a POSIX Unix socket and does not support
@@ -85,7 +85,7 @@ pi list
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
 build instead, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.6`; exact versions are pinned
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.7`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -450,7 +450,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.6
+npm run release:check -- --publish --confirm-version 0.1.0-poc.7
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -500,6 +500,17 @@ a presentation change, not evidence that a candidate is disconnected, and it
 does not change Send routing or callback ownership. Sole empty conversations
 and exact frontend associations remain visible.
 
+Connector **`0.1.0-poc.7`** pins AKK **`0.15.0`** and bundles its updated
+Skill. Claude Code and configured wrappers such as `tclaude` share the same
+adapter. New Claude Sends prefer an exact eligible terminal with managed
+completion monitoring and supported approval controls; native inbox fallback
+remains available when no controllable terminal counterpart exists. Codex stays
+backend-first. Existing task routes, interaction authority, Pi Host compatibility
+and callback ownership remain unchanged. This dependency update does not claim
+a new Pi live-model or external-channel delivery test. See the
+[Claude direct-control guide](../../docs/claude-cli-direct.md) for prerequisites
+and operation-specific limits.
+
 Connector **`0.1.0-poc.6`** pins AKK **`0.14.17`** and carries its Codex CLI
 `0.164.0` compatibility changes and reviewed Skill. It preserves the Pi Host
 version policy, tool protocol and callback ownership. The core
@@ -510,7 +521,7 @@ or external-channel delivery run.
 
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.6` is an npm prerelease and is distributed through the
+`0.1.0-poc.7` is an npm prerelease and is distributed through the
 `next` dist-tag; it does not change the AKK main package or ClawHub artifact.
 
 ## Deliberate POC limits

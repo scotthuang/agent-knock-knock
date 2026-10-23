@@ -1,12 +1,14 @@
 # Changelog
 
-## 0.15.0 - Unreleased
+## 0.15.0 / Pi 0.1.0-poc.7 / DeepSeek Harness 0.1.0-rc.10 — 2026-10-23
 
 - Prefer an exact controllable terminal for new Claude Code Sends, automatically creating a managed Turn with completion monitoring and supported approval actions. Use the native inbox when no controllable counterpart exists; keep Codex backend-first and preserve existing task routes, receipts and pending interactions. Busy terminals, conflicting ownership and Store failures never authorize a second send through another connection.
 - Expose Claude's eligible cancellation, inspection, thread lifecycle, model and managed interaction controls through unified List and Status. Preserve the original Turn for approvals and answers, exact process and prompt checks, and single-use response authority. Claude permission-mode switching remains unavailable.
 - Recognize successful Stop hook summaries without discarding independently proven task completion. Keep hook errors, prevented continuation, background work and ambiguous task chains unproven; native Watches notify about exact-task waiting changes without gaining approval authority.
 - Support the standard `claude` executable and configured wrappers such as `tclaude` through the same adapter. Document explicit native sender permission classes, agent-side command-line verification and `from-mode` envelopes; this metadata neither changes receiver permissions nor resends held messages. Claude Code `2.1.295` and `2.1.296` are live-tested observations, not minimum-version requirements.
 - Let complete, unlisted Claude versions attempt compatible transcript, status, model and questionnaire contracts instead of rejecting them solely for lacking a regression profile. Preserve actual-version identity, runtime schema/UI checks, fresh prompt/catalog authority and verified postconditions; missing versions and unknown or incompatible structures remain unavailable.
+- Preserve explicit physical-terminal Claude Sends, including draft replacement and human handoff, while ordinary new Sends prefer managed delivery. Keep exact terminal-token revalidation and original-route deduplication.
+- Publish Pi `0.1.0-poc.7` and DeepSeek Harness `0.1.0-rc.10` with exact core `0.15.0` dependencies and synchronized Skills. Both remain on `next`; Host compatibility requirements are unchanged.
 
 ## 0.14.17 / Pi 0.1.0-poc.6 / DeepSeek Harness 0.1.0-rc.9 — 2026-10-23
 

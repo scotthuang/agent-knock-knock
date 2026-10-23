@@ -199,6 +199,36 @@ test("ordinary Claude Send prefers a managed terminal independently of native he
   assert.equal(terminalOnly.routing.terminal_mode, "managed");
 });
 
+test("explicit physical Claude Send retains its token and original executor semantics", async t => {
+  const f = fixture(t);
+  f.terminals([{ ...terminal, _claude_managed_send_eligible: false,
+    available_actions: {} }]);
+  const input = { conversation: terminalId, message: "Replace the explicitly selected draft",
+    messageId: "physical-claude", expectedTerminalToken: "caller-physical-authority" };
+  const sent = await f.run("send", input);
+  assert.equal(sent.routing.transport, "terminal");
+  assert.equal(sent.routing.terminal_mode, undefined);
+  assert.equal(f.calls[0].options.conversation, terminalId);
+  assert.equal(f.calls[0].options.routingRequireManagedTurn, undefined);
+  assert.equal(f.calls[0].options.expectedTerminalToken, input.expectedTerminalToken,
+    "the locked terminal executor, not route discovery, must validate the original physical token");
+  f.noTerminal();
+  assert.equal((await f.run("send", input)).replayed, true);
+  assert.equal(f.calls.length, 1);
+});
+
+test("a physical token cannot bypass managed eligibility through a native Claude selector", async t => {
+  for (const options of [{ conversation: id, expectedTerminalToken: "existing-authority" },
+    { conversation: terminalId },
+    { conversation: terminalId, expectedTerminalToken: "existing-authority", routingDiscoveredTerminalAuthority: true }]) {
+    const f = fixture(t);
+    f.terminals([{ ...terminal, _claude_managed_send_eligible: false }]);
+    await assert.rejects(f.run("send", { ...options, message: "task", messageId: "no-bypass" }),
+      /Claude managed Send blocked/u);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
 test("corresponding Claude terminals with busy, blocked, ambiguous or conflicting identity cannot bypass through native Send", async t => {
   for (const rows of [
     [{ ...terminal, activity_state: "working" }],

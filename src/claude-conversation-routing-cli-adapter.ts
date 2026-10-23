@@ -18,7 +18,7 @@ import { conversationRoutedOptions, prepareConversationTerminalOptions } from ".
 import type { ConversationRoutingCliPorts } from "./conversation-routing-commands.js";
 import { withClaudeSendRouteProjection, withExactTerminalActions } from "./conversation-list.js";
 import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason } from "./claude-managed-send-route.js";
-import { recordValue } from "./value-guards.js";
+import { nonBlankString, recordValue } from "./value-guards.js";
 
 const core = new Set(["send", "status", "watch-terminal", "native-status"]);
 const special = new Set(["model-options", "set-model", "permission-options", "set-permissions", "cancel", "new-thread", "clear-thread", "resume-thread", "list-resumable-threads", "threads", "native-inspect", "approve", "respond-interaction", "reconcile-binding"]);
@@ -146,6 +146,12 @@ async function selectClaudeSendRoute(context: ClaudeRouteContext): Promise<Conve
   }
   const exact = terminals.filter(row => row.id === target);
   if (exact.length !== 1) throw new Error("Exact Claude terminal is unavailable or ambiguous; no input was sent");
+  // A caller-selected physical Send offer retains its established draft and
+  // human-handoff semantics. The terminal executor revalidates this token under
+  // lock; ordinary no-token Sends still require an eligible managed Turn.
+  if (nonBlankString(options.expectedTerminalToken) && options.routingDiscoveredTerminalAuthority !== true) {
+    return { route: "terminal", targetId: target };
+  }
   const reason = claudeManagedTerminalSendBlockReason(exact[0]);
   if (reason) throw new Error(`Claude managed Send blocked: ${reason}; no input was sent`);
   return managedTerminalChoice(exact[0]);
