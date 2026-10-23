@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.14.17",
+  "version": "0.15.0",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "dbcd13783c4ccb03f1c049b07d51f728107ade2e",
-  "asset": "scotthuang-agent-knock-knock-0.14.17.tgz",
-  "sha256": "4f12d9f22f2ad47291c395cbba4ec9d34f7953dabfd3f3810d9f034ee450a6b8",
-  "bytes": 3813857,
-  "changelog": "Adapt Codex CLI 0.164.0 contextual composer footer, default effort label, status/model/permission surfaces and question profiles. Keep exact process/thread/input ownership and uncertain-send protection. Refuse unproven terminal Markdown question identities; structured backend answers remain available. Preserve exact-task progress, 720-minute monitoring and callback deduplication. Coordinate Pi 0.1.0-poc.6 and DeepSeek Harness 0.1.0-rc.9, pinned to core 0.14.17 on next. No tclaude preview changes included."
+  "commit": "defdca588782ab9feee61b1537336cd910e30858",
+  "asset": "scotthuang-agent-knock-knock-0.15.0.tgz",
+  "sha256": "d5423bb8ffcd7930e1baee7f6f960820f3efe92d798c01f261737e9d36017d64",
+  "bytes": 3844622,
+  "changelog": "Support standard Claude Code and configured wrappers such as tclaude with exact native identity, successful Stop-hook completion evidence and compatible runtime contracts. Prefer managed terminals for ordinary new Claude Sends, retain native inbox delivery when no controllable counterpart exists, and preserve explicit physical-terminal draft replacement/handoff. Keep original task routes, input authority and uncertain-send protections. Claude permission-mode switching and native peer approval/question responses remain unavailable. Coordinate Pi 0.1.0-poc.7 and DeepSeek Harness 0.1.0-rc.10, pinned to core 0.15.0 on next."
 }
