@@ -679,3 +679,35 @@ test("native Send and explicit Watch preserve request over plugin hard-timeout c
   assert.equal(argument(calls[2], "--hard-timeout-minutes"), "60");
   assert.equal(argument(calls[3], "--hard-timeout-minutes"), "23");
 });
+
+test("List explains folded empty candidates and preserves precise diagnostic access without claiming a frontend", () => {
+  const candidate = { id: conversationId, conversation_id: conversationId, source: "codex_cli", agent: "codex", title: "",
+    unstarted_thread: true, history_state: "unmaterialized", native_turn_id: null, activity_state: "idle",
+    connection_state: "loaded_backend_verified", terminal_aliases: [], capabilities: { status: true, send: true },
+    available_actions: { send: { tool: "agent_knock_knock_send", input: { conversation_id: conversationId } } } };
+  const solo = compactAkkListModelProjection({ conversations: [candidate] }) as Record<string, any>;
+  assert.equal(solo.conversations[0].connected, undefined);
+  assert.equal(solo.conversations[0].backend_reachable, true);
+  assert.equal(solo.conversations[0].frontend_presence, "unverified");
+  assert.equal(solo.conversations[0].available_actions.send, true);
+  assert.match(formatAkkListCommandResult({ conversations: [candidate] }), /New Codex session \(no tasks\)/u);
+  const bound = compactAkkListModelProjection({ conversations: [{ ...candidate, terminal_aliases: [terminalId] }] }) as Record<string, any>;
+  assert.equal(bound.conversations[0].connected, true);
+  const folded = { conversations: [], conversation_presentation: { mode: "default", unstarted_candidates_count: 2,
+    unstarted_candidates_omitted: 2, diagnostic_query: { private: "DO_NOT_COPY" } } };
+  const compact = compactAkkListModelProjection(folded) as Record<string, any>;
+  assert.equal(compact.conversation_presentation.unstarted_candidates_omitted, 2);
+  assert.deepEqual(compact.conversation_presentation.diagnostic_query,
+    { tool: "agent_knock_knock_list", arguments: { terminalDebug: true } });
+  assert.doesNotMatch(JSON.stringify(compact), /DO_NOT_COPY/u);
+  assert.match(formatAkkListCommandResult(folded), /2 unnamed, unstarted CLI candidate\(s\) folded/u);
+  assert.match(formatAkkListCommandResult(folded), /--terminal-debug/u);
+  const diagnosticRow = { ...candidate, classification: "unstarted_candidate", frontend_presence: "unverified" };
+  const diagnostic = { conversations: [diagnosticRow], conversation_presentation: { mode: "diagnostics" } };
+  const expanded = compactAkkListModelProjection(diagnostic, { terminalDebug: true }) as Record<string, any>;
+  assert.equal(expanded.conversations[0].conversation_id, conversationId);
+  assert.equal(expanded.conversations[0].classification, "unstarted_candidate");
+  assert.equal(expanded.conversations[0].capabilities.send, true);
+  assert.equal(expanded.conversations[0].connected, undefined);
+  assert.match(formatAkkListCommandResult(diagnostic), /not an additional confirmed task/u);
+});

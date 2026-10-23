@@ -1606,7 +1606,7 @@ function codexFullscreenIdlePromptLine(
   }
   if (isCodexPaginatedReadCandidate(agentVersion)) {
     const frame = captureCodexFullscreenComposerFrame(lines.join("\n"), agentVersion);
-    return frame?.hasShortcutFooter &&
+    return frame && (frame.hasShortcutFooter || frame.hasContextFooter) &&
       ["", "Ask Codex to do anything"].includes(frame.composerText)
       ? frame.plainLines[frame.composerIndex]
       : undefined;

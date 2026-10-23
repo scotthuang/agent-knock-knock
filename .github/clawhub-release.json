@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.14.15",
+  "version": "0.14.17",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "89b4d841022b2c3f7f52d42d2eed2e8709158b53",
-  "asset": "scotthuang-agent-knock-knock-0.14.15.tgz",
-  "sha256": "e2a9cc3cb77159040365f060014568a94549526792abb01476c71711da02aa50",
-  "bytes": 3801120,
-  "changelog": "Support Herdr 0.9.5 and probe operation contracts before rejecting unfamiliar releases or protocols. Retain usable reads when input evidence is absent, bind local CLI schema declarations to observed server identity, and preserve process/socket, approval, input ownership and uncertain-send no-replay protections. Tested baselines: 0.8.0/protocol19 and 0.9.5/protocol22; unfamiliar versions are fixture-verified only."
+  "commit": "dbcd13783c4ccb03f1c049b07d51f728107ade2e",
+  "asset": "scotthuang-agent-knock-knock-0.14.17.tgz",
+  "sha256": "4f12d9f22f2ad47291c395cbba4ec9d34f7953dabfd3f3810d9f034ee450a6b8",
+  "bytes": 3813857,
+  "changelog": "Adapt Codex CLI 0.164.0 contextual composer footer, default effort label, status/model/permission surfaces and question profiles. Keep exact process/thread/input ownership and uncertain-send protection. Refuse unproven terminal Markdown question identities; structured backend answers remain available. Preserve exact-task progress, 720-minute monitoring and callback deduplication. Coordinate Pi 0.1.0-poc.6 and DeepSeek Harness 0.1.0-rc.9, pinned to core 0.14.17 on next. No tclaude preview changes included."
 }

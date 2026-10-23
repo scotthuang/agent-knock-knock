@@ -504,3 +504,143 @@ test("Claude terminal-only conversation remains visible alongside Codex and disa
   assert.equal(result.conversation_routing.unresolved_terminals, 0);
   assert.deepEqual(result.conversations[2].capabilities, { send: false });
 });
+
+function unstartedFixture(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const emptyThread = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const emptyId = createCodexNativeConversationId({ codexHome: home, threadId: emptyThread });
+  return { ...native(), id: emptyId, conversation_id: emptyId, native_thread_id: emptyThread, title: "",
+    unstarted_thread: true, history_state: "unmaterialized", native_turn_id: null, latest_turn: null,
+    activity_state: "idle", active_flags: [], pending_interaction_count: null, attention_required: false, interaction_state: [],
+    available_actions: { status: { tool: "agent_knock_knock_status", input: { conversation_id: emptyId } },
+      send: { tool: "agent_knock_knock_send", input: { conversation_id: emptyId } } }, ...extra };
+}
+
+function establishedFixture(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ...native(), native_turn_id: "existing-task", latest_turn: { id: "existing-task", status: "completed" },
+    activity_state: "idle", ...extra };
+}
+
+test("default List folds a provably unstarted same-project candidate without changing routes or native inventory", () => {
+  const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" } });
+  const real = establishedFixture(), empty = unstartedFixture();
+  const input = { terminals: [physical], codex_cli_sessions: [real, empty] };
+  const before = structuredClone(input);
+  const result = unifiedConversationList(input, [physical]);
+  assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId]);
+  assert.deepEqual(result.conversation_presentation, { mode: "default", workspace_grouped_connections: 1,
+    unstarted_candidates_count: 1, unstarted_candidates_omitted: 1,
+    diagnostic_query: { tool: "agent_knock_knock_list", arguments: { terminalDebug: true } } });
+  assert.deepEqual(result.conversations[0].terminal_aliases, []);
+  assert.deepEqual(result.conversations[0].terminal_controls, []);
+  assert.equal(result.conversation_routing.exact_associations, 0);
+  assert.equal(result.conversation_routing.unresolved_terminals, 1);
+  assert.deepEqual(result.conversations[0].available_actions, real.available_actions);
+  assert.deepEqual(input, before, "Presentation does not mutate native rows, capability or exact Send targets");
+  assert.equal((result as Record<string, any>).codex_cli_sessions[1], empty);
+
+  const diagnostic = unifiedConversationList(input, [physical], {}, { diagnostics: true });
+  assert.deepEqual(diagnostic.conversations.map(row => row.conversation_id), [nativeId, empty.conversation_id, terminalId]);
+  const shown = diagnostic.conversations.find(row => row.conversation_id === empty.conversation_id)!;
+  assert.equal(shown.classification, "unstarted_candidate");
+  assert.equal(shown.frontend_presence, "unverified");
+  assert.deepEqual(shown.available_actions, empty.available_actions);
+  assert.deepEqual(shown.capabilities, empty.capabilities);
+  assert.equal(diagnostic.conversation_presentation.unstarted_candidates_omitted, 0);
+  assert.equal(diagnostic.conversation_presentation.unstarted_candidates_count, 1);
+});
+
+test("unstarted display folding requires a positive empty snapshot and never suppresses actionable or uncertain rows", () => {
+  const real = establishedFixture();
+  for (const evidence of [
+    { unstarted_thread: undefined }, { unstarted_thread: false }, { history_state: undefined },
+    { history_state: "materialized" }, { native_turn_id: undefined }, { native_turn_id: "started" },
+    { latest_turn: undefined }, { latest_turn: { id: "started" } }, { activity_state: "active" }, { activity_state: "unknown" },
+    { observation_error: "read_failed" }, { active_flags: ["waitingOnApproval"] }, { attention_required: true },
+    { pending_interaction_count: 1 }, { pending_async_count: 1 }, { pending_manual_count: 1 },
+    { interaction_state: [{ id: "question" }] }, { approval_state: { blocked: true } },
+    { managed: { current_turn: { turn_id: "owned", status: "active" } } },
+    { managed: { recent_turn: { turn_id: "owned", status: "completed", callback_delivery: { status: "uncertain" } } } },
+    { management_state: "conflict" }, { handoff_state: "blocked" }, { blocking_turns: [{ turn_id: "owned" }] }
+  ]) {
+    const empty = unstartedFixture(evidence);
+    const result = unifiedConversationList({ codex_cli_sessions: [real, empty] }, []);
+    assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId, empty.conversation_id], JSON.stringify(evidence));
+    assert.equal(result.conversation_presentation.unstarted_candidates_omitted, undefined);
+  }
+});
+
+test("empty-only CLI sessions remain selectable and a first task restores normal same-project display", () => {
+  const empty = unstartedFixture();
+  const alone = unifiedConversationList({ codex_cli_sessions: [empty] }, []);
+  assert.equal(alone.conversations[0].conversation_id, empty.conversation_id);
+  assert.deepEqual(alone.conversations[0].available_actions, empty.available_actions);
+  assert.equal(alone.conversation_presentation.unstarted_candidates_count, undefined);
+  const first = terminal(), real = establishedFixture();
+  const before = unifiedConversationList({ terminals: [first], codex_cli_sessions: [real, empty] }, [first]);
+  assert.deepEqual(before.conversations.map(row => row.conversation_id), [nativeId]);
+  const started = { ...empty, unstarted_thread: false, history_state: "materialized", native_turn_id: "new-task",
+    latest_turn: { id: "new-task", status: "inProgress" }, activity_state: "active" };
+  const after = unifiedConversationList({ terminals: [first], codex_cli_sessions: [real, started] }, [first]);
+  assert.deepEqual(after.conversations.map(row => row.conversation_id), [nativeId, empty.conversation_id]);
+  assert.equal(after.conversation_presentation.unstarted_candidates_count, undefined);
+});
+
+test("real multiple same-project tasks and multiple physical CLI sessions prevent empty candidate folding", () => {
+  const real = establishedFixture(), empty = unstartedFixture();
+  const otherThread = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const otherId = createCodexNativeConversationId({ codexHome: home, threadId: otherThread });
+  const other = establishedFixture({ id: otherId, conversation_id: otherId, native_thread_id: otherThread });
+  const many = unifiedConversationList({ codex_cli_sessions: [real, other, empty] }, []);
+  assert.deepEqual(many.conversations.map(row => row.conversation_id), [nativeId, otherId, empty.conversation_id]);
+  const first = terminal({ native_agent_session_id: undefined });
+  const second = terminal({ id: "terminal:v2:tmux:codex:other:0.0:456", pid: 456, native_agent_session_id: undefined });
+  const physical = unifiedConversationList({ terminals: [first, second], codex_cli_sessions: [real, empty] }, [first, second]);
+  assert.equal(physical.conversations.length, 4);
+  assert.equal(physical.conversation_presentation.unstarted_candidates_count, undefined);
+});
+
+test("an exact terminal attached to an empty thread keeps that new session visible", () => {
+  const empty = unstartedFixture(), real = establishedFixture();
+  for (const cwd of ["/project", "/other-project"]) {
+    const physical = terminal({ native_agent_session_id: empty.native_thread_id, cwd });
+    const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [real, empty] }, [physical]);
+    assert.deepEqual(result.conversations.map(row => row.conversation_id), [nativeId, empty.conversation_id]);
+    assert.deepEqual(result.conversations[1].terminal_aliases, [terminalId]);
+    assert.equal(result.conversation_presentation.unstarted_candidates_count, undefined);
+  }
+  for (const evidence of ["native_agent_status_card_session_id", "_routing_inspection_thread_id"]) {
+    const physical = terminal({ native_agent_session_id: undefined, [evidence]: empty.native_thread_id,
+      activity_state: "unknown", native_agent_identity_observation: { status: "verified_absent" } });
+    const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [real, empty] }, [physical]);
+    assert.equal(result.conversations.some(row => row.conversation_id === empty.conversation_id), true);
+    assert.equal(result.conversation_presentation.unstarted_candidates_count, undefined);
+  }
+});
+
+test("empty candidates require matching canonical project and Codex home without malformed identity or conflicts", () => {
+  const real = establishedFixture();
+  const empty = unstartedFixture();
+  const foreignHome = "/fixture/other-codex";
+  const foreignId = createCodexNativeConversationId({ codexHome: foreignHome, threadId: String(empty.native_thread_id) });
+  for (const evidence of [
+    { cwd: "/other-project" }, { cwd: "project" }, { cwd: "/project\n" },
+    { id: foreignId, conversation_id: foreignId }, { conversation_id: "codex-cli:invalid" },
+    { native_thread_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }, { connection_state: "not_loaded" }
+  ]) {
+    const candidate = { ...empty, ...evidence };
+    const result = unifiedConversationList({ codex_cli_sessions: [real, candidate] }, []);
+    assert.equal(result.conversations.length, 2, JSON.stringify(evidence));
+    assert.equal(result.conversation_presentation.unstarted_candidates_count, undefined);
+  }
+  const normalized = unifiedConversationList({ codex_cli_sessions: [real, { ...empty, cwd: "/project/sub/.." }] }, []);
+  assert.deepEqual(normalized.conversations.map(row => row.conversation_id), [nativeId]);
+  for (const evidence of [
+    { codex_home: foreignHome }, { native_agent_session_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" },
+    { approval_state: { blocked: true } }, { managed: { current_turn: { turn_id: "terminal-work" } } }
+  ]) {
+    const physical = terminal({ native_agent_session_id: undefined, ...evidence });
+    const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [real, empty] }, [physical]);
+    assert.equal(result.conversations.some(row => row.conversation_id === empty.conversation_id), true);
+    assert.equal(result.conversation_presentation.unstarted_candidates_count, undefined);
+  }
+});

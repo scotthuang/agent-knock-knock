@@ -30,6 +30,29 @@ Busy/blocked state, identity conflicts and management failures do not authorize
 bypassing an existing terminal through native delivery. Follow the returned
 `turn_id` or `watch_id`; old tasks and receipts retain their original provider.
 
+Starting in AKK `0.14.16`, default List also folds unnamed, unstarted Codex
+candidates when there is exactly one established conversation in the same Codex
+home and project, no conflicting identity, and no evidence of multiple physical
+terminals. This uses an explicitly unmaterialized native history, not an empty
+title or an unavailable read alone. Named threads, sole new sessions, exact
+terminal aliases, active/blocked resources and multiple established threads
+remain visible. An omitted candidate remains in the raw native discovery array
+and `terminalDebug: true` / `list --terminal-debug`, with its original ID and
+first-Send capability. The default view reports `unstarted_candidates_omitted`
+and a diagnostic query. Starting its first task restores ordinary presentation
+on the next List; nothing is unloaded, deleted, migrated or redirected.
+
+This is display folding, **not proof of an abandoned or duplicate thread**.
+The native loaded-list API does not expose which frontend is currently attached;
+`startup-thread-start` also creates legitimate new sessions. Consequently, a
+second unnamed empty frontend in the same project may require the diagnostic
+view when no exact frontend identity is available. Empty candidates without an
+exact terminal alias report backend reachability and unverified frontend presence,
+rather than claiming a separate confirmed online CLI. Counts are not task counts.
+List still does not scan persisted Watches: an uncertain first Send may have no
+native task history yet and can remain folded. Inspect its original Watch or
+`watches`; folding never proves that a request was not submitted or permits a retry.
+
 Host List uses `agent-knock-knock/host-list-compact` v4. Follow
 `pagination.next_args` while `has_more` is true. `listLimit` defaults to 40 and
 accepts 1–100. Pages are fresh discoveries, not a frozen snapshot; restart if

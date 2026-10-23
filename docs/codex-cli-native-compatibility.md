@@ -98,6 +98,9 @@ and terminal records needing attention or management recovery remain visible.
 Direct-only and terminal-only CLIs remain listed. `terminalDebug: true` /
 `list --terminal-debug` expands all connections. Raw CLI discovery arrays also
 remain available for diagnosis.
+AKK `0.14.16` adds display-only folding of unstarted, unnamed
+candidates beside an established conversation. Exact-ID first Send remains
+available; see [candidate selection and its frontend-identity limits](list-output.md#conversation-selection).
 
 Actual routing association still requires the exact current thread, verified
 Codex home and physical process incarnation. A configured home, matching cwd,
@@ -199,6 +202,7 @@ permit automatic replay of `sent` or `uncertain` responses.
 | Live-tested combination, 2026-10-09 | **macOS: Codex CLI 0.160.0 + shared app-server 0.162.0**; production-adapter operations and limits are recorded below. |
 | Additional targeted live proof, 2026-10-10 | **macOS: Codex CLI 0.162.1 + shared app-server 0.162.1**. Verified public Status progress while a task was in progress through the running OpenClaw plugin, an actual 720-minute Send deadline, one isolated local completion acknowledgement, and repeated Send retaining the original task/deadline. No new WeChat delivery or full native-operation matrix is claimed. |
 | 0.14.2 compatibility review, 2026-10-10 | **macOS: Codex CLI 0.162.1 + shared app-server 0.162.1**. Expanded dedicated-session validation, native UI fixes and retained limits are recorded in the [operation matrix](codex-0.162.1-compatibility.md#verification-record). |
+| 0.14.17 review, 2026-10-23 | **macOS: Codex CLI 0.164.0 + app-server 0.164.0**. Dedicated native-task checks and version-specific terminal changes are recorded in the [0.164.0 review](codex-0.164.0-compatibility.md). The release includes the corresponding terminal adaptation. |
 | Runtime admission | A loaded main CLI thread, the selected local Codex home, valid stable `x.y.z` backend metadata, and the required live protocol shapes/methods. There is **no established numeric minimum** or exact version allowlist for direct control. |
 | Platform evidence | The live proof was on macOS. It does not establish a Linux/Windows direct-control validation matrix. |
 

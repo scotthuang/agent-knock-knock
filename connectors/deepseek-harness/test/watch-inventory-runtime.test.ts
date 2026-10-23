@@ -29,7 +29,10 @@ test("published DSH and core separate current List from retained Watches", async
     `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");`,
     `const row = { conversation_id: ${JSON.stringify(conversationId)}, source: "codex_cli", surface: "cli", agent: "codex", activity_state: "idle", connection_state: "loaded_backend_verified", available_actions: { status: { tool: "agent_knock_knock_status", arguments: { conversation_id: ${JSON.stringify(conversationId)} } } } };`,
     `const watch = ${JSON.stringify(watch)};`,
-    'if (args[0] === "list") process.stdout.write(JSON.stringify({ conversations: [row], codex_cli_watches: [watch], desktop_watches: [watch], terminal_watches: [watch] }));',
+    'const diagnostic = args.includes("--terminal-debug");',
+    'const empty = { ...row, conversation_id: "fixture-empty", native_thread_id: "fixture-empty-thread", unstarted_thread: true, classification: "unstarted_candidate", frontend_presence: "unverified", history_state: "unmaterialized", native_turn_id: null, available_actions: { status: { tool: "agent_knock_knock_status", arguments: { conversation_id: "fixture-empty" } } } };',
+    'const presentation = diagnostic ? { mode: "diagnostics" } : { mode: "default", unstarted_candidates_count: 1, unstarted_candidates_omitted: 1 };',
+    'if (args[0] === "list") process.stdout.write(JSON.stringify({ conversations: diagnostic ? [empty] : [row], conversation_presentation: presentation, codex_cli_watches: [watch], desktop_watches: [watch], terminal_watches: [watch] }));',
     'else if (args[0] === "watches") process.stdout.write(JSON.stringify({ records: [watch], pagination: { has_more: true, next_args: { hours: 24, limit: 1, cursor: "inventory-next" } } }));',
     'else throw new Error("unexpected command: " + args[0]);',
   ].join("\n"));
@@ -70,6 +73,11 @@ test("published DSH and core separate current List from retained Watches", async
     assert.deepEqual((details.conversations as Record<string, unknown>[])[0]?.available_actions, { status: true });
     for (const key of ["codex_cli_watches", "desktop_watches", "terminal_watches"]) assert.equal(key in details, false);
     assert.doesNotMatch(JSON.stringify(list.content), /codex-cli-watch:fixture/u);
+    const presentation = details.conversation_presentation as Record<string, unknown>;
+    assert.equal(presentation.unstarted_candidates_omitted, 1);
+    assert.deepEqual(presentation.diagnostic_query, {
+      tool: "agent_knock_knock_list", arguments: { terminalDebug: true },
+    });
 
     const watches = await invoke("agent_knock_knock_watches", { hours: 24, limit: 1, conversation_id: conversationId }, "watches-recent");
     assert.equal(watches.isError, false);
@@ -89,6 +97,17 @@ test("published DSH and core separate current List from retained Watches", async
     assert.equal(legacy.isError, true);
     assert.match(JSON.stringify(legacy), /agent_knock_knock_watches/u);
     assert.equal(fs.readFileSync(callsPath, "utf8").trim().split("\n").length, 2, "invalid inventory requests must not reach the executor");
+    const diagnostic = await invoke("agent_knock_knock_list", { terminalDebug: true }, "list-diagnostic");
+    assert.equal(diagnostic.isError, false);
+    const diagnosticDetails = (diagnostic.value as { details: Record<string, unknown> }).details;
+    const empty = (diagnosticDetails.conversations as Record<string, unknown>[])[0]!;
+    assert.equal(empty.conversation_id, "fixture-empty");
+    assert.equal(empty.unstarted_thread, true);
+    assert.equal(empty.frontend_presence, "unverified");
+    assert.equal(empty.classification, "unstarted_candidate");
+    assert.equal(empty.connected, undefined);
+    const diagnosticCall = JSON.parse(fs.readFileSync(callsPath, "utf8").trim().split("\n").at(-1)!) as string[];
+    assert.ok(diagnosticCall.includes("--terminal-debug"));
     detach();
   } finally {
     await cleanup?.();

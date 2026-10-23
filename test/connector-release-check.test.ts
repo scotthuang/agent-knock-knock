@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 const {
   checkAllConnectorsOffline,
+  checkCoordinatedCoreRelease,
   checkConnectorRelease,
   runConnectorReleaseCheckCli,
 } = await import(
@@ -137,6 +138,71 @@ test("repository parity rejects constants, lock, dependency, and Skill drift bef
     },
   );
   assert.equal(runner.calls.length, 0);
+});
+
+test("coordinated release rejects stale core pins even when each connector lock is internally consistent", (t) => {
+  const fixture = createFixture(t);
+  writeJson(path.join(fixture.root, "package.json"), {
+    name: "@scotthuang/agent-knock-knock",
+    version: "0.13.4",
+  });
+  const runner = fakeRunner();
+  assert.throws(() => checkCoordinatedCoreRelease({ repoRoot: fixture.root, runner }),
+    /dependency must match the current core version 0\.13\.4/u);
+  assert.equal(runner.calls.length, 0, "local drift must fail before registry checks or publishing");
+});
+
+test("coordinated release preflights both package versions and rejects reused registry versions with stale core", (t) => {
+  const fixture = createFixture(t);
+  const fresh = fakeRunner();
+  const candidates = checkCoordinatedCoreRelease({ repoRoot: fixture.root, runner: fresh });
+  assert.deepEqual(candidates.map(({ packageName, coreVersion, registryState }) => ({
+    packageName, coreVersion, registryState,
+  })), [
+    { packageName: "@scotthuang/agent-knock-knock-deepseek-harness", coreVersion: "0.13.3", registryState: "unpublished" },
+    { packageName: "@scotthuang/agent-knock-knock-pi", coreVersion: "0.13.3", registryState: "unpublished" },
+  ]);
+  assert.equal(fresh.calls.length, 2);
+  assert.ok(fresh.calls.every((call) => call.command === "npm" && call.arguments[0] === "view"));
+
+  const stale = fakeRunner((call) => {
+    if (call.command === "npm" && call.arguments[0] === "view") {
+      return { status: 0, stdout: JSON.stringify({
+        version: "0.1.0-rc.4",
+        dependencies: { "@scotthuang/agent-knock-knock": "0.13.2" },
+      }) };
+    }
+    return undefined;
+  });
+  assert.throws(() => checkCoordinatedCoreRelease({ repoRoot: fixture.root, runner: stale }),
+    /choose a new connector version/u);
+  assert.equal(stale.calls.some((call) => call.arguments[0] === "publish"), false);
+});
+
+test("coordinated release can resume matching publications without replay and treats lookup failures as unknown", (t) => {
+  const fixture = createFixture(t);
+  const resumed = fakeRunner((call) => {
+    if (call.command === "npm" && call.arguments[1]?.includes("deepseek-harness@")) {
+      return { status: 0, stdout: JSON.stringify({
+        version: "0.1.0-rc.4",
+        dependencies: { "@scotthuang/agent-knock-knock": "0.13.3" },
+      }) };
+    }
+    return undefined;
+  });
+  const report = checkCoordinatedCoreRelease({ repoRoot: fixture.root, runner: resumed });
+  assert.deepEqual(report.map((item) => item.registryState), ["published_matching_dependency", "unpublished"]);
+  assert.equal(resumed.calls.some((call) => call.arguments[0] === "publish"), false);
+
+  for (const reply of [
+    { status: 1, stderr: "ETIMEDOUT" },
+    { status: 0, stdout: "invalid JSON" },
+    { status: 0, stdout: JSON.stringify({ version: "0.1.0-rc.4" }) },
+  ]) {
+    const runner = fakeRunner((call) => call.command === "npm" ? reply : undefined);
+    assert.throws(() => checkCoordinatedCoreRelease({ repoRoot: fixture.root, runner }),
+      /inconclusive|invalid JSON|choose a new connector version/u);
+  }
 });
 
 test("release check proves clean synchronized main and unused npm and repository tags", (t) => {
