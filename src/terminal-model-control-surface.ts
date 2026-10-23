@@ -74,7 +74,7 @@ export function observeCodexIdleModel(screen: string, plan?: TerminalModelContro
   const modern = isCodexPaginatedVersion(version);
   const frame = modern ? captureCodexFullscreenComposerFrame(screen, version) : undefined;
   const footer = modern
-    ? frame?.hasShortcutFooter ? frame.plainLines[frame.footerIndex] : undefined
+    ? frame && (frame.hasShortcutFooter || frame.hasContextFooter) ? frame.plainLines[frame.footerIndex] : undefined
     : lines.at(-1);
   const match = footer
     ? /^\s{2,}([A-Za-z0-9][A-Za-z0-9._:/+\-]{0,127})\s+(low|medium|high|xhigh|max|ultra)(?:\s+fast)?(?:\s+·.*|\s+Plan mode(?:\s+\([^)]*\))?)?\s*$/u

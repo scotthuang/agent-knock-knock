@@ -320,7 +320,7 @@ export function exactCodexReadyStyledComposerCapture(
 ): { digest: string } | undefined {
   if (isCodexPaginatedReadCandidate(agentVersion)) {
     const frame = captureCodexFullscreenComposerFrame(screen, agentVersion);
-    if (!frame || !frame.hasShortcutFooter ||
+    if (!frame || !(frame.hasShortcutFooter || frame.hasContextFooter) ||
         !["", "Ask Codex to do anything"].includes(frame.composerText)) {
       return undefined;
     }

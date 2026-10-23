@@ -18,7 +18,7 @@ import {
 import {
   inspectCodexAsyncQuestionInputMode as inspectCodexAsyncQuestionInputModeFromBridge
 } from "../src/terminal-agent-bridge.js";
-import { exactCodexFullscreenSlashComposerCapture } from
+import { captureCodexFullscreenComposerFrame, exactCodexFullscreenSlashComposerCapture } from
   "../src/codex-fullscreen-composer-proof.js";
 
 const FULLSCREEN_IDLE = [
@@ -413,4 +413,34 @@ test("Claude stash-clear proof accepts known footers and rejects unknown overlay
     failure(["  Unknown overlay still owns input"]) ?? "",
     /did not prove/u
   );
+});
+
+
+test("0.164 contextual footer closes the default-effort Composer without inventing idle or effort authority", () => {
+  // Layout from the owned 0.164 CLI: no separate shortcut row; warning shares
+  // the model/path row. Only synthetic path and transcript are retained.
+  const ready = "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n" +
+    "  GPT-6.1-Sol default · /repo                     ⚠ 3 warnings · f2 to view";
+  const frame = captureCodexFullscreenComposerFrame(ready, "0.164.0");
+  assert.equal(frame?.hasContextFooter, true);
+  assert.equal(frame?.hasShortcutFooter, false);
+  assert.equal(currentCodexComposerCapture(ready, "task", false, false,
+    undefined, false, "0.164.0")?.state, "exact_empty");
+  for (const changed of [ready.replace("default", "unknown"),
+    ready + "\n  unknown input owner",
+    ready + "\n  New activity · Back to bottom",
+    ready + "\n  enter/esc latest · ? shortcuts", ready.replace("Ask Codex to do anything", "pending draft")]) {
+    assert.notEqual(currentCodexComposerCapture(changed, "task", false, false,
+      undefined, false, "0.164.0")?.state, "exact_empty");
+  }
+  assert.equal(captureCodexFullscreenComposerFrame(ready, "0.162.1")?.hasContextFooter, false,
+    "new passive footer does not silently authorize older versions");
+  const rows = ["› /status      show current session configuration and token usage",
+    "  /statusline  configure which items appear in the status line"];
+  const popup = "\x1b[1;7m" + rows[0] + "\x1b[0m\n" + rows[1] + "\n\n" +
+    ready.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "/status");
+  assert.equal(captureCodexFullscreenComposerFrame(popup, "0.164.0")?.hasContextFooter, false);
+  assert.ok(exactCodexFullscreenSlashComposerCapture(popup, "/status", rows, true, "0.164.0"));
+  assert.equal(exactCodexFullscreenSlashComposerCapture(popup.replace("\x1b[1;7m", "\x1b[1m"),
+    "/status", rows, true, "0.164.0"), undefined);
 });

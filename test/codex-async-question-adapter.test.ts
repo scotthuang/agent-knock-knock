@@ -48,7 +48,8 @@ test("Codex async-question profiles are exact and do not float to unknown versio
     "0.159.2",
     "0.159.3",
     "0.160.0",
-    "0.162.1"
+    "0.162.1",
+    "0.164.0"
   ]);
   assert.equal(
     codexAsyncQuestionProfile("0.155.1"),
@@ -161,7 +162,7 @@ test("0.160 Option question hints retain the exact native tuple and reject old o
   assert.equal(inspectCodexAsyncQuestion({ version: "0.160.0", screen }).state, "ambiguous");
 });
 
-test("0.162.1 macOS symbol key hints keep question identity and exact navigation bindings", () => {
+for (const version of ["0.162.1", "0.164.0"]) test(`${version} macOS symbol key hints keep question identity and exact navigation bindings`, () => {
   // Public rust-v0.162.1 key_hint.rs and question_queue_hint_{Left,Up}
   // snapshots use Control/Shift symbols without '+' on macOS.
   for (const [back, forward, backAction, forwardAction] of [
@@ -173,12 +174,12 @@ test("0.162.1 macOS symbol key hints keep question identity and exact navigation
       `enter submit   ⌃] skip   ${back} main prompt   ${forward} next question`
     );
     const inspect = (candidate: string) => inspectCodexAsyncQuestion({
-      version: "0.162.1", screen: candidate, evidence: EVIDENCE
+      version: version, screen: candidate, evidence: EVIDENCE
     });
     const observed = inspect(screen);
     assert.equal(observed.state, "expanded");
     if (observed.state !== "expanded") continue;
-    assert.equal(observed.profile, "codex/0.162.1/request-user-input-async-v4");
+    assert.equal(observed.profile, CODEX_ASYNC_QUESTION_PROFILES[version]);
     assert.equal(observed.match.native_question_id,
       '["request_user_input_async","async-message-call",0]');
     assert.equal(observed.owner_private_action_plan.kind, "answer_async_question");
@@ -196,7 +197,7 @@ test("0.162.1 macOS symbol key hints keep question identity and exact navigation
     ]) assert.equal(inspect(changed).state, "ambiguous");
     assert.equal(inspectCodexAsyncQuestion({ version: "0.160.0", screen,
       evidence: EVIDENCE }).state, "ambiguous");
-    assert.equal(inspectCodexAsyncQuestion({ version: "0.162.1", screen }).state, "ambiguous");
+    assert.equal(inspectCodexAsyncQuestion({ version: version, screen }).state, "ambiguous");
   }
 });
 
@@ -768,4 +769,57 @@ test("duplicate semantic questions remain ambiguous instead of guessing a source
     reason: "question_match_ambiguous",
     profile: "codex/0.155.1/request-user-input-async-v1"
   });
+});
+
+
+test("0.164 async plain title retains native identity and rejects Markdown rendering", () => {
+  const screen = EXPANDED_OPTIONS.replace("Which environment should I use?", "Which environment and file should I use?")
+    .replace("enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
+      "enter submit   ⌃] skip   ⇧→ main prompt   ⇧← next question");
+  const evidence = [{ ...EVIDENCE[0]!, questions: [
+    { title: "Which environment and file should I use?", options: ["Staging", "Production"] },
+    { title: "What deadline should I use?" }
+  ] }];
+  const observed = inspectCodexAsyncQuestion({ version: "0.164.0", screen, evidence });
+  assert.equal(observed.state, "expanded");
+  if (observed.state !== "expanded") return;
+  assert.equal(observed.match.native_question_id, '["request_user_input_async","async-message-call",0]');
+  assert.equal(observed.match.question.prompt, evidence[0]!.questions[0]!.title);
+  assert.equal(inspectCodexAsyncQuestion({ version: "0.162.1", screen, evidence }).state, "expanded");
+  for (const title of ["Which [environment](https://example.test) and file should I use?",
+    "Which **environment** and file should I use?", "Which `environment` and file should I use?",
+    "Which ***environment*** and file should I use?", "# Which environment and file should I use?"]) {
+    const unsupported = [{ ...evidence[0]!, questions: [{ ...evidence[0]!.questions[0]!, title }, evidence[0]!.questions[1]!] }];
+    assert.equal(inspectCodexAsyncQuestion({ version: "0.164.0", screen, evidence: unsupported }).state, "ambiguous");
+  }
+  const duplicate = { ...evidence[0]!, itemId: "another-item", remainingCount: 1, questions: [
+    { title: "Which environment and file should I use?", options: ["Staging", "Production"] }
+  ] };
+  const conflicting = inspectCodexAsyncQuestion({ version: "0.164.0", screen,
+    evidence: [...evidence, duplicate] });
+  assert.equal(conflicting.state, "ambiguous",
+    "equal rendered titles from two native requests do not choose an arbitrary identity");
+  if (conflicting.state === "ambiguous") assert.equal(conflicting.reason, "question_match_ambiguous");
+});
+
+test("0.164 never drops an unproven rendered title to authorize a different pending question", () => {
+  const title = "Which environment should I use?";
+  const screen = EXPANDED_OPTIONS.replace(
+    "enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
+    "enter submit   ⌃] skip   ⇧→ main prompt   ⇧← next question");
+  const plain = { itemId: "plain-question", turnId: "same-turn", currentIndex: 0,
+    remainingCount: 1, questions: [{ title, options: ["Staging", "Production"] }] };
+  for (const unprovenTitle of [`***${title}***`, `[${title}](https://example.test)`,
+    `${title}\n---`, title.replace("Which", "Wh&#105;ch"), `\`${title}\``, `**${title}**`,
+    `~~${title}~~`, title.replace("environment ", "environment\n"), `$${title}$`,
+    `# ${title}`, `- ${title}`, `1. ${title}`]) {
+    const unproven = { ...plain, itemId: "unproven-question",
+      questions: [{ ...plain.questions[0]!, title: unprovenTitle }] };
+    for (const evidence of [[plain, unproven], [unproven, plain]]) {
+      assert.deepEqual(inspectCodexAsyncQuestion({ version: "0.164.0", screen, evidence }), {
+        state: "ambiguous", reason: "unproven_title_rendering",
+        profile: CODEX_ASYNC_QUESTION_PROFILES["0.164.0"]
+      });
+    }
+  }
 });

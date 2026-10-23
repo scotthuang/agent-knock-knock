@@ -115,10 +115,10 @@ AKK 0.14.3 also adds [Claude Code direct control](docs/claude-cli-direct.md): di
 
 The existing terminal workflows remain available for Codex or Claude Code running in tmux or Herdr:
 
-Codex CLI 0.158.0/0.159.0/0.159.2/0.159.3/0.160.0/0.162.1 supports exact paginated task Watches for ordinary terminal
+Codex CLI 0.158.0/0.159.0/0.159.2/0.159.3/0.160.0/0.162.1/0.164.0 supports exact paginated task Watches for ordinary terminal
 Send, native question responses, and durable completion callbacks. The adapter
 checks the foreground thread and required backend protocol before attaching; uncertain
-answers are never automatically replayed. See the [0.162.1 review](docs/codex-0.162.1-compatibility.md)
+answers are never automatically replayed. See the [0.164.0 review](docs/codex-0.164.0-compatibility.md), [0.162.1 review](docs/codex-0.162.1-compatibility.md)
 and [earlier compatibility review](docs/codex-0.160.0-compatibility.md) for managed-session and already-open
 question boundaries. Codex 0.157.x retains its [partial compatibility](docs/codex-0.157.1-compatibility.md).
 
@@ -200,12 +200,12 @@ can use a supported terminal route. Claude Code direct control is available unde
 | --- | --- |
 | Terminal hosts | tmux; local Herdr with per-operation capability checks (AKK `0.14.15`+). Tested Herdr baselines: `0.8.0` / protocol `19` and `0.9.5` / protocol `22`. See the [Herdr guide](docs/quickstart-herdr.md#current-boundary). |
 | Codex Desktop | macOS with a compatible live connection; app updates alone do not disable controls. See the [tested versions and operation matrix](docs/codex-desktop-compatibility.md#version-and-platform-evidence). |
-| Codex CLI shared backend | Live-tested on macOS: CLI `0.162.1` + backend `0.162.1`, and previously `0.160.0` + `0.162.0`. Requires a loaded main CLI conversation and compatible live protocol. These are tested combinations, **not a numeric minimum**. |
+| Codex CLI shared backend | Live-tested on macOS: CLI/backend `0.164.0` in the [0.14.17 review](docs/codex-0.164.0-compatibility.md), `0.162.1` + `0.162.1`, and previously `0.160.0` + `0.162.0`. Requires a loaded main CLI conversation and compatible live protocol. These are tested combinations, **not a numeric minimum**. |
 | Claude Code direct connection | macOS, live-tested `2.1.296`, compatible native peer protocol `1`, and Python 3 available to AKK. Basic task sending, progress and completion observation; unsupported controls require the original terminal. See the [direct guide](docs/claude-cli-direct.md). |
-| Terminal coding agents | Reviewed Codex profiles include `0.160.0` and `0.162.1`; Claude Code `2.1.285` was tested on macOS. Unknown versions may expose limited capabilities; native controls depend on the reviewed profile and current UI. |
+| Terminal coding agents | Reviewed Codex profiles include `0.160.0`, `0.162.1` and `0.164.0`; Claude Code `2.1.285` was tested on macOS. Unknown versions may expose limited capabilities; native controls depend on the reviewed profile and current UI. |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
-| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.4` (`next`), pinned AKK `0.14.15` |
-| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); connector `0.1.0-rc.7` (`next`), pinned AKK `0.14.15`. See its guide for previous RC, alpha and legacy coverage. |
+| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.6` (`next`), pinned AKK `0.14.17` |
+| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); connector `0.1.0-rc.9` (`next`), pinned AKK `0.14.17`. See its guide for previous RC, alpha and legacy coverage. |
 | Runtime | Node.js `22.19.0`+ on macOS or Linux |
 
 The adjacent OpenClaw boundary `2026.5.10-beta.2` is intentionally unsupported. Herdr versions are observations, not an allowlist: discovery verifies live identity and read capabilities, while input requires a matching CLI schema declaration or verified baseline behavior. An untested server without input evidence exposes only verified read capabilities. Desktop controls validate the live native contract. Desktop catalog presence alone does not prove the conversation is open or controllable. See each connector guide, the [Pi/DSH validation matrix](docs/pi-dsh-compatibility.md), and the Desktop guide for tested boundaries and limitations.
