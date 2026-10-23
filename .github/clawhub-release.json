@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.14.16",
+  "version": "0.14.17",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "8428ff225894e1026112348a0bd97f205d2abdae",
-  "asset": "scotthuang-agent-knock-knock-0.14.16.tgz",
-  "sha256": "47c43e687eab8f1979aa5db8951da621d3e33d76db946896648233e5fcce8851",
-  "bytes": 3808728,
-  "changelog": "Fold unnamed, unstarted Codex CLI candidates from default List when one established same-project thread and identity/attention guards permit it. Retain exact IDs and first-task actions in diagnostics; never delete threads, infer abandonment or redirect messages. Preserve sole/named/attached threads and conflicts. Coordinate Pi 0.1.0-poc.5 and DeepSeek Harness 0.1.0-rc.8 releases with exact core 0.14.16 dependencies; both connectors remain on next. No tclaude preview changes are included."
+  "commit": "dbcd13783c4ccb03f1c049b07d51f728107ade2e",
+  "asset": "scotthuang-agent-knock-knock-0.14.17.tgz",
+  "sha256": "4f12d9f22f2ad47291c395cbba4ec9d34f7953dabfd3f3810d9f034ee450a6b8",
+  "bytes": 3813857,
+  "changelog": "Adapt Codex CLI 0.164.0 contextual composer footer, default effort label, status/model/permission surfaces and question profiles. Keep exact process/thread/input ownership and uncertain-send protection. Refuse unproven terminal Markdown question identities; structured backend answers remain available. Preserve exact-task progress, 720-minute monitoring and callback deduplication. Coordinate Pi 0.1.0-poc.6 and DeepSeek Harness 0.1.0-rc.9, pinned to core 0.14.17 on next. No tclaude preview changes included."
 }
