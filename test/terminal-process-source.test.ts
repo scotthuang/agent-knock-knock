@@ -1,5 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { processIncarnationRelationship } from "../src/terminal-authority-policy.js";
+import { codexProcessBirthForLifecycle } from "../src/codex-process-incarnation.js";
+import type { ManagedTerminalBinding } from "../src/managed-session.js";
 import {
   isProcessAlive,
   parseProcessElapsedSeconds,
@@ -38,6 +44,64 @@ test("physical process incarnation distinguishes PID reuse by process birth", ()
     () => terminalProcessIncarnationForPid(4242, () => ""),
     /cannot verify process incarnation/u
   );
+});
+
+test("OS process probes fix the locale without changing the local timezone or birth format", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-process-locale-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const birth = "Mon Aug 24 10:00:00 2026", probeLog = path.join(root, "probes.jsonl");
+  fs.writeFileSync(path.join(root, "ps"), `#!${process.execPath}
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(probeLog)}, JSON.stringify({
+  locale: process.env.LC_ALL, timezone: process.env.TZ ?? null
+}) + "\\n");
+if (process.env.LC_ALL !== "C") { process.stderr.write("unexpected localized probe"); process.exit(1); }
+process.stdout.write(process.argv.includes("-axo")
+  ? "  PID  PPID ELAPSED COMMAND\\n 4242 1 00:12 fixture-agent\\n"
+  : ${JSON.stringify(birth + "\n")});
+`, { mode: 0o700 });
+  const keys = ["PATH", "LANG", "LC_ALL", "LC_TIME", "TZ"] as const;
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, { PATH: root, LANG: "zh_CN.UTF-8", LC_ALL: "zh_CN.UTF-8", LC_TIME: "zh_CN.UTF-8" });
+    for (const timezone of ["Asia/Shanghai", undefined]) {
+      if (timezone === undefined) delete process.env.TZ;
+      else process.env.TZ = timezone;
+      fs.writeFileSync(probeLog, "");
+      const physical = terminalProcessIncarnationForPid(4242);
+      assert.equal(physical.processBirth, birth);
+      assert.equal(physical.processUuid, `process-pid:4242:birth:${birth}`);
+      assert.equal(codexProcessBirthForLifecycle(4242), birth);
+      const rows = await new SystemTerminalProcessSource().listProcessSnapshots(undefined, { includeCwd: false });
+      assert.deepEqual(rows, [{ pid: 4242, ppid: 1, elapsed: "00:12", command: "fixture-agent" }]);
+      const probes = fs.readFileSync(probeLog, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.deepEqual(probes, Array.from({ length: 3 }, () => ({ locale: "C", timezone: timezone ?? null })));
+    }
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test("locale repair retains exact legacy binding checks rather than accepting translated births", () => {
+  const birth = "Mon Aug 24 10:00:00 2026";
+  const current = terminalProcessIncarnationForPid(4242, () => birth);
+  const binding: ManagedTerminalBinding = {
+    binding_id: "fixture", generation: 1, terminal_id: "terminal:v2:tmux:claude:fixture:0.0:4242",
+    terminal_control: { kind: "tmux", target: "fixture:0.0", session: "fixture", window: 0, pane: 0,
+      panePid: 4242, capabilities: [] },
+    native_process: { pid: 4242, process_uuid: current.processUuid, process_birth: birth, evidence: "process_birth" },
+    bound_at: "2026-08-24T10:00:00Z", last_verified_at: "2026-08-24T10:00:00Z"
+  };
+  const live = { livePid: 4242, liveProcessUuid: current.processUuid, liveProcessBirth: current.processBirth };
+  assert.equal(processIncarnationRelationship({ binding, ...live }), "same");
+  const translated = "一 8月 24 10:00:00 2026";
+  assert.equal(processIncarnationRelationship({ binding: { ...binding, native_process: {
+    ...binding.native_process, process_birth: translated, process_uuid: `process-pid:4242:birth:${translated}`
+  } }, ...live }), "different");
+  assert.equal(binding.native_process.process_birth, birth, "no stored identity is rewritten");
 });
 
 test("only the system process source advertises complete inventory authority", () => {

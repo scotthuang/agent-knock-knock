@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { listManagedMonitoringRecords } from "./managed-monitoring-list.js";
 import { unifiedConversationList, withoutListHistory } from "./conversation-list.js";
+import { withClaudeManagedSendAuthority } from "./claude-managed-send-route.js";
 import { withConversationRoutingHome } from "./conversation-routing-home.js";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import { listDeferredForegroundTransfers } from
@@ -415,6 +416,8 @@ export interface TerminalListCliFacade {
     agentFilter?: ExecutorKind;
     statusFilter?: string;
     terminalId?: string;
+    /** Combine current managed action offers with the same raw physical observation. */
+    includeManagedActions?: boolean;
   }): Promise<TerminalListScan>;
   observeExactTerminal(request: {
     options: TerminalListCliOptions;
@@ -658,6 +661,7 @@ function physicalOnlyTerminalProjection(terminals: TerminalListScanEntry[], reas
     terminals: terminals.map((terminal) => {
       const {
         _automated_input_composer_ready: _composer,
+        _claude_managed_send_eligible: _claudeManagedSendEligible,
         _user_explicit_composer_ready: _userComposer,
         _codex_open_root_rollout_inventory: _inventory,
         _codex_latent_clear_resume: _resume,
@@ -914,15 +918,17 @@ async function buildTerminalListGroup({
   options,
   agentFilter,
   statusFilter: _statusFilter,
-  terminalId
+  terminalId,
+  includeManagedActions
 }: {
   options: TerminalListCliOptions;
   agentFilter?: ExecutorKind;
   statusFilter?: string;
   terminalId?: string;
+  includeManagedActions?: boolean;
 }): Promise<TerminalListScan> {
   const runtime = terminalListRuntime();
-  return collectTerminalListInventory({
+  const scan = await collectTerminalListInventory({
     options,
     agentFilter,
     terminalId,
@@ -945,6 +951,18 @@ async function buildTerminalListGroup({
       log: runtimeLog
     }
   });
+  return includeManagedActions ? withManagedTerminalActions(scan, options) : scan;
+}
+
+/** Reuse one scan so managed controls cannot be paired with a different process incarnation. */
+function withManagedTerminalActions(scan: TerminalListScan, options: TerminalListCliOptions): TerminalListScan {
+  const storeDir = expandHome(options.storeDir ?? options.logDir ?? defaultStoreDir(cliCwd()));
+  const store = inspectStoreCompatibilityForTerminalList(storeDir);
+  const projected = projectTerminalListScan({ options, storeDir, store, terminalScan: scan });
+  return { ...scan, terminalControlled: scan.terminalControlled.map(raw => {
+    const matches = projected.terminals.filter(row => row.id === raw.id);
+    return withClaudeManagedSendAuthority(raw, matches.length === 1 ? matches[0] : undefined, store.writable === true) as TerminalListScanEntry;
+  }) };
 }
 
 async function terminalControlledListEntry(
@@ -1092,6 +1110,9 @@ async function terminalControlledListEntry(
     // service strips this field after gating every automated-input action that
     // can follow a human native-thread switch.
     _automated_input_composer_ready: automatedInputComposerReady,
+    ...(session.agent === "claude" ? {
+      _claude_managed_send_eligible: commands.send && automatedInputComposerReady && !facts.store.hasOrphanedDispatch
+    } : {}),
     _user_explicit_composer_ready: userExplicitComposerReady,
     _native_identity_authority: {
       observation: authorityNativeIdentityObservation,

@@ -18,7 +18,9 @@ export function codexProcessBirthForLifecycle(pid: number): string {
   const result = spawnSync(ps, ["-o", "lstart=", "-p", String(pid)], {
     encoding: "utf8",
     timeout: 5000,
-    maxBuffer: 1024 * 1024
+    maxBuffer: 1024 * 1024,
+    // Match terminal-process-source while preserving the timezone used by birth consumers.
+    env: { ...process.env, LC_ALL: "C" }
   });
   const processBirth = String(result.stdout ?? "").trim();
   if (result.error || result.status !== 0 || !processBirth) {

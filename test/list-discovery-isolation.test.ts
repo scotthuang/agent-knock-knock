@@ -12,6 +12,7 @@ import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import type { DesktopRuntime } from "../src/desktop-runtime.js";
 import { createTerminalListCliFacade, type TerminalListCliDependencies } from "../src/terminal-list-cli-adapter.js";
+import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
 
 type Row = Record<string, any>;
 function isolatedHome(t: { after(callback: () => void): void }): string {
@@ -63,10 +64,51 @@ test("Claude conversation discovery never enumerates retained Watches and preser
   }, async () => { result = await claudeNativeListForCli({}); });
   assert.equal(watchReads, 0); assert.equal(closes, 1);
   assert.equal(result.claude_cli_scan.status, "ok");
+  assert.deepEqual(result.claude_cli_scan.reader, { executable: "claude", source: "default", path_omitted: false });
   assert.equal(result.claude_cli_watches, undefined);
   assert.equal(result.claude_cli_sessions[0].attention_required, true);
   assert.equal(result.claude_cli_sessions[0].capabilities.send, false);
   assert.equal(result.claude_cli_sessions[0].next_action, "return_to_claude_terminal");
+});
+
+test("Claude reader failures survive raw List and Host compact projection even with no sessions", async t => {
+  const home = isolatedHome(t), errors = [
+    { configDir: path.join(home, "private-root-a"), code: "claude_reader_unavailable" },
+    { configDir: path.join(home, "private-root-b"), code: "claude_reader_unavailable" }
+  ];
+  const runtime = { catalog: { async discover() { return { sessions: [], errors }; } }, async close() {} };
+  for (const configured of [false, true]) {
+    const options = { storeDir: path.join(home, "store") };
+    const dependencies = {
+      discovery: {
+        createRuntimeTerminalAgentRegistry: () => ({ get: () => undefined, list: () => [] }),
+        createTerminalControlProvider: () => ({}),
+        createTerminalAgentBridge: () => ({ listProcesses: async () => [] }),
+        createTerminalProcessSource: () => ({ listProcessSnapshots: async () => [] }),
+        localCodexList: claudeNativeListForCli
+      },
+      reconciliation: {}, store: { isDiscoverableTmuxConversation: () => true, matchesConfiguredWorkspace: () => true },
+      authority: {}, policy: { approvalTtlMs: 60_000, selectorCommands: new Set(), rememberOriginalExpectedTerminalSelector() {} }
+    } as unknown as TerminalListCliDependencies;
+    const output = await runCliCommandExecution("list", options, {
+      cwd: home, env: { HOME: home, ...(configured ? { AKK_NATIVE_CLAUDE_BIN: path.join(home, "private-install", "tclaude") } : {}) },
+      runtimeLog() {}, createClaudeNativeRuntime: (() => runtime) as unknown as CliCommandDependencies["createClaudeNativeRuntime"]
+    }, () => createTerminalListCliFacade(dependencies).runList(options));
+    const raw = JSON.parse(output.stdout), compact = compactAkkListModelProjection(raw) as Row;
+    for (const result of [raw, compact]) {
+      assert.deepEqual(result.conversations, []);
+      assert.equal(result.claude_cli_scan.status, "partial");
+      assert.equal(result.claude_cli_scan.complete, false);
+      assert.deepEqual(result.claude_cli_scan.reader, { executable: configured ? "tclaude" : "claude",
+        source: configured ? "environment" : "default", path_omitted: configured });
+      assert.deepEqual(result.claude_cli_scan.error_codes, ["claude_reader_unavailable"]);
+      assert.equal(result.claude_cli_scan.error_count, 2);
+      assert.equal(result.claude_cli_scan.next_action, "check_claude_reader_in_host_environment");
+    }
+    assert.deepEqual(raw.claude_cli_scan.diagnostics, errors);
+    assert.equal(compact.claude_cli_scan.diagnostics, undefined);
+    assert.equal(JSON.stringify(compact).includes(home), false);
+  }
 });
 
 test("Desktop discovery retains an unconfirmed sidebar entry without reading Watch history or loading an owner", async t => {

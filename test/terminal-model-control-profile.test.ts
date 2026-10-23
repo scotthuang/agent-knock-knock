@@ -222,7 +222,7 @@ test("probe, planning, slash conformance, and execution conformance share the re
   assert.equal(probeTerminalModelControl("codex", "0.155.2").status,
     "unsupported");
   assert.equal(probeTerminalModelControl("claude", "2.1.267").status,
-    "unsupported");
+    "supported");
   assert.equal(probeTerminalModelControl("codex", "  ").status, "unknown");
   const { agentVersion: _agentVersion, ...legacyCapabilities } =
     probeTerminalModelControl("codex", CODEX_MODEL_CONTROL_AGENT_VERSION);
@@ -243,6 +243,26 @@ test("probe, planning, slash conformance, and execution conformance share the re
     } satisfies TerminalModelControlCapabilities),
     /unprofiled terminal model-control plan/u
   );
+});
+
+test("untested Claude versions retain version-bound plans and exact session-only structural requirements", () => {
+  for (const version of ["2.1.267", "2.1.295", "3.0.1"]) {
+    const capability = probeTerminalModelControl("claude", version);
+    const plan = planTerminalModelControl(capability);
+    assert.equal(capability.status, "supported");
+    assert.match(capability.reason, /not been regression-tested/u);
+    assert.equal(plan.scope, "current_session");
+    assert.equal(plan.requiresIdle, true);
+    assert.equal(plan.requiresExactEmptyComposer, true);
+    assert.equal(isTerminalModelControlPlanForAgent(plan, "claude"), true);
+    assert.equal(terminalModelControlPlanConforms({ agent: "claude", agentVersion: version, plan }), true);
+    assert.equal(terminalModelControlPlanConforms({ agent: "claude", agentVersion: "2.1.285", plan }), false);
+    assert.equal(isTerminalModelControlPlanForAgent({ ...plan, scope: "current_and_new_sessions" }, "claude"), false);
+    assert.throws(() => planTerminalModelControl({ ...capability, agentVersion: "2.1.285" }), /unprofiled/u);
+  }
+  for (const version of [undefined, "", "2.1", "latest", "2.1.295 unexpected"]) {
+    assert.notEqual(probeTerminalModelControl("claude", version).status, "supported");
+  }
 });
 
 test("canonical model-control subject normalizes projection and mutation identity", () => {

@@ -1351,6 +1351,19 @@ async function runRawTerminalSend(
     ...options,
     messageId: stringValue(options.messageId) ?? `user-send-${randomUUID()}`
   };
+  const managedOptions = {
+    ...explicitOptions,
+    expectedUserExplicitTerminalToken: suppliedExpectedTerminalToken,
+    expectedTerminalToken: stringValue(explicitOptions.expectedManagedTerminalToken),
+    expectedManagedTerminalToken: undefined
+  };
+  if (options.routingRequireManagedTurn === true) {
+    // The versioned route journal pins this message to a managed Turn. Let the
+    // managed ledger replay its full Turn receipt, including after completion;
+    // the physical intent's delivery-mode-only replay would lose that identity.
+    await runManagedRawTerminalSend(managedOptions, messageBody, terminalConversation);
+    return;
+  }
   const reservation = reserveUserExplicitSendIntent(
     explicitOptions,
     messageBody,
@@ -1366,14 +1379,7 @@ async function runRawTerminalSend(
     );
   }
   const managedResult = await runManagedRawTerminalSend(
-    {
-      ...explicitOptions,
-      expectedUserExplicitTerminalToken: suppliedExpectedTerminalToken,
-      expectedTerminalToken: stringValue(
-        explicitOptions.expectedManagedTerminalToken
-      ),
-      expectedManagedTerminalToken: undefined
-    },
+    managedOptions,
     messageBody,
     terminalConversation,
     true

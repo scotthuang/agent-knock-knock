@@ -126,12 +126,16 @@ test("OpenClaw runtime registrations match the published manifest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "e088b62731c1d5bdd815f59af60cd74930869b49982b6039c7a524f0461208b5"
+    "cba249524b4567cb1affa07f8856d56850725533fde611e18bc9f87730240323"
   );
   assert.deepEqual(sorted(metadataTools), sorted(contractedTools));
   assert.match(
     manifest.description ?? "",
-    /closed native status inspection/u
+    /native inspection, model and thread lifecycle operations/u
+  );
+  assert.match(
+    manifest.description ?? "",
+    /Availability follows exact identity, runtime evidence and current action authority/u
   );
   assert.deepEqual(
     sorted(registeredCommands),

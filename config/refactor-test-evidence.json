@@ -40,7 +40,7 @@
       "counts": {
         "cli_process": 12,
         "fake_node_process": 7,
-        "other_process_or_adapter": 12
+        "other_process_or_adapter": 14
       },
       "diagnostic_counts": {
         "cli_process": 0,

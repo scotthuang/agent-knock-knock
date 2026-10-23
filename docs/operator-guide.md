@@ -73,9 +73,16 @@ Use `terminalDebug: true` or `list --terminal-debug` for all connections and
 routing details. A display group is not proof that its candidates are the same
 native session, and neither rows nor Watches are a task count.
 Bound task and interaction IDs retain their original provider; uncertain input
-is never retried through another transport. The
+is never retried through another transport. For new Sends, Codex prefers the
+verified shared backend; Claude automatically uses a managed Turn through a
+unique controllable exact terminal, or a native inbox Watch when no such
+terminal exists. Claude approvals follow the managed Send's original `turn_id`
+after fresh Status. Native Claude Watches provide notify-only waiting hints,
+without approval authority. A terminal's busy/blocked state, ownership or Store
+conflict does not authorize native bypass. The
 [CLI backend guide](codex-cli-native-compatibility.md#automatic-conversation-routing-2026-10-10)
-describes routing evidence and presentation boundaries.
+and [Claude control guide](claude-cli-direct.md) describe the respective routing
+evidence and presentation boundaries.
 
 The terminal-specific commands in the table require a physical terminal;
 Desktop interaction, model, permission, and cancellation controls use their
@@ -329,6 +336,11 @@ terminal, [Codex permissions](codex-permissions.md) covers the current native
 choices and exact idle-terminal checks. Full Access is an explicit supported
 choice; AKK handles its native confirmation without an additional prompt.
 
+Claude Code currently has no AKK `permission_options` or `set_permissions`
+operation. Supported managed approvals decide one current request; they do not
+change the session's permission mode. The native sender's `bypass` or
+`prompting` declaration is message metadata, not a permission-setting API.
+
 ## Safe model control
 
 This section describes terminal model control. Desktop settings use the
@@ -390,11 +402,18 @@ requires one exact current native Session. The pane
 must remain safely idle with an exactly empty Composer, except for the exact
 Codex residual continuation described above. An active Turn, working
 agent, approval, questionnaire or editor, read-only viewer, non-empty Composer,
-ambiguous or multi-rollout Codex identity, stale physical snapshot, unsupported
-version, or changed catalog fails closed
+ambiguous or multi-rollout Codex identity, stale physical snapshot, incompatible
+runtime contract, or changed catalog fails closed
 with no model-selection input. The private multi-step native sequence
 revalidates each frame and must return to the main Composer without submitting
 a task or answering a prompt.
+
+Claude Code model controls do not require an exact regression-tested version.
+Other complete `x.y.z` versions may attempt the supported picker contract, and
+`model_control.reason` identifies an unverified profile. The live picker,
+closed choices and session-scope footer must still be recognized. Missing or
+malformed versions and unknown UI layouts do not authorize model selection.
+Standard `claude` and configured wrappers such as `tclaude` share this behavior.
 
 Provider scope is explicit in both results:
 

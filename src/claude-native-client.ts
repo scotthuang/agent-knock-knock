@@ -2,6 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { CLAUDE_NATIVE_PEER_HELPER } from "./claude-native-peer-helper.js";
+import { buildClaudeNativePeerContent } from "./claude-native-peer-envelope.js";
+import { parseClaudeNativeSenderPermissionClass, type ClaudeNativeSenderPermissionClass } from "./claude-native-sender-policy.js";
 import { discoverClaudeNativeSessions, inspectClaudeNativeSession,
   type ClaudeNativeDiscoveryOptions, type ClaudeNativeDiscoveryResult } from "./claude-native-discovery.js";
 import { ClaudeNativeError, createClaudeNativeConversationId, isClaudeNativeUuid, type ClaudeNativeCatalogEntry, type ClaudeNativeIdentity } from "./claude-native-identity.js";
@@ -137,10 +139,14 @@ export class ClaudeNativeClient {
     await this.peer.probe(entry); return entry;
   }
   async send(identity: ClaudeNativeIdentity, input: { text: string; inputUuid: string; messageId: string;
+    senderPermissionClass?: ClaudeNativeSenderPermissionClass;
     beforeDispatch?: (entry: ClaudeNativeCatalogEntry, senderPid?: number) => Promise<void> }): Promise<ClaudeNativeSendReceipt> {
     this.assertOpen();
     if (typeof input.text !== "string" || !input.text.trim() || Buffer.byteLength(input.text) > 256 * 1024
       || !isClaudeNativeUuid(input.inputUuid) || !isClaudeNativeUuid(input.messageId)) throw new ClaudeNativeError("invalid_input", "Claude native message requires bounded text and UUID identifiers");
+    // The operator declaration is metadata, never inferred from the receiver or task text.
+    const senderPermissionClass = parseClaudeNativeSenderPermissionClass(input.senderPermissionClass);
+    const content = buildClaudeNativePeerContent(input.text, senderPermissionClass);
     const key = `${identity.configDir}:${identity.pid}:${identity.processStart}:${identity.sessionId}`;
     if (this.inFlight.has(key)) return { dispatchState: "not_sent", errorCode: "send_in_flight" };
     this.inFlight.add(key);
@@ -152,7 +158,7 @@ export class ClaudeNativeClient {
       entry = await this.inspect(identity);
       if (entry.status !== "idle") return { dispatchState: "not_sent", errorCode: "session_not_idle" };
       dispatchAttempted = true;
-      const result = await this.peer.send(entry, input);
+      const result = await this.peer.send(entry, { text: content, inputUuid: input.inputUuid, messageId: input.messageId });
       return { ...result, ...(this.peer.senderPid === undefined ? {} : { senderPid: this.peer.senderPid }) };
     } catch (error) {
       return { dispatchState: dispatchAttempted ? "uncertain" : "not_sent",

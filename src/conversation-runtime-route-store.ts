@@ -39,7 +39,7 @@ function privateDirectory(directory: string): void {
 
 function reconcileRecords(legacy?: ConversationRouteRecord, current?: ConversationRouteRecord): ConversationRouteRecord | undefined {
   if (!legacy || !current) return legacy ?? current;
-  const immutable = ["id", "controller_session", "message_id", "request_text", "canonical_target", "route", "target_id"] as const;
+  const immutable = ["id", "controller_session", "message_id", "request_text", "canonical_target", "route", "target_id", "terminal_mode", "terminal_token"] as const;
   if (immutable.some(key => legacy[key] !== current[key]) ||
     legacy.receipt !== undefined && current.receipt !== undefined && !isDeepStrictEqual(legacy.receipt, current.receipt)) {
     throw new ConversationRouteError("conversation_route_conflict", "Managed Store and runtime journals disagree on this message's immutable route or receipt");
@@ -53,7 +53,8 @@ function reconcileRecords(legacy?: ConversationRouteRecord, current?: Conversati
   return current;
 }
 
-const choiceOf = (record: ConversationRouteRecord): ConversationRouteChoice => ({ route: record.route, targetId: record.target_id });
+const choiceOf = (record: ConversationRouteRecord): ConversationRouteChoice => ({ route: record.route, targetId: record.target_id,
+  ...(record.terminal_mode ? { terminalMode: record.terminal_mode, terminalToken: record.terminal_token } : {}) });
 
 /** New reservations never acquire the managed Store writer lease. Existing development
  * journals remain read-only authority; migration preserves their provider and outcome.
@@ -107,7 +108,8 @@ export function createConversationRuntimeRouteStore(storeDir: string, runtimeDir
     }),
     markPreparationRejected: (input, choice, errorCode) => update(input, () => {
       const previous = read(input);
-      if (previous && (previous.route !== choice.route || previous.target_id !== choice.targetId)) {
+      if (previous && (previous.route !== choice.route || previous.target_id !== choice.targetId || previous.terminal_mode !== choice.terminalMode
+        || previous.terminal_token !== choice.terminalToken)) {
         throw new ConversationRouteError("conversation_route_conflict", "Preparation rejection must retain the reserved conversation route");
       }
       return previous && (!previous.preparation_tracked || previous.state !== "reserved" || previous.execution_started_at)

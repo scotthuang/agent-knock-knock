@@ -34,6 +34,7 @@ export type TerminalActionName =
   | "resume_thread"
   | "reconcile_binding"
   | "respond"
+  | "respond_interaction"
   | "approve"
   | "cancel"
   | "renew"

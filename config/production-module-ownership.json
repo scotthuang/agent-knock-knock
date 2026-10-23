@@ -615,6 +615,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-managed-send-route.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/claude-native-cli-adapter.ts",
       "owner": "agent-session-core"
     },
@@ -643,6 +647,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-native-peer-envelope.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/claude-native-peer-helper.ts",
       "owner": "agent-session-core"
     },
@@ -655,6 +663,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-native-sender-policy.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/claude-native-state-store.ts",
       "owner": "agent-session-core"
     },
@@ -663,8 +675,24 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-reader-configuration.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/claude-terminal-agent-adapter.ts",
       "owner": "terminal-agent-core"
+    },
+    {
+      "path": "src/claude-terminal-agent-observation.ts",
+      "owner": "terminal-runtime-composition"
+    },
+    {
+      "path": "src/claude-terminal-registry-observation.ts",
+      "owner": "agent-session-core"
+    },
+    {
+      "path": "src/claude-transcript-config.ts",
+      "owner": "agent-session-core"
     },
     {
       "path": "src/claude-transcript-record-order.ts",
@@ -1713,6 +1741,10 @@
     {
       "path": "src/terminal-maintenance-cli-adapter.ts",
       "owner": "terminal-command-adapter"
+    },
+    {
+      "path": "src/terminal-managed-interaction-list-action.ts",
+      "owner": "terminal-list-application"
     },
     {
       "path": "src/terminal-managed-send-cli-adapter.ts",

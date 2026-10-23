@@ -311,6 +311,39 @@ test("in-process delegates isolate durable bindings by scoped runtime env", asyn
   }
 });
 
+test("omitted-target and alias Claude Send enter managed conversation routing before terminal input", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cli-claude-delegate-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace"); fs.mkdirSync(workspace);
+  const pid = 6513, panePid = 9513, target = "claude-delegate:0.0";
+  const terminalId = `terminal:v2:tmux:claude:${target}:${pid}`;
+  let routed = 0;
+  for (const command of ["delegate", "send"]) await assert.rejects(executeCliCommand(command, {
+    agent: "claude", request: "One controlled task", messageId: "claude-delegate-managed", workspace,
+    ...(command === "send" ? { conversation: "claude", message: "One controlled task" } : {}),
+    storeDir: path.join(root, "store"), background: true, disableTerminalBridgeMonitor: true,
+    processesJson: JSON.stringify([{ pid, ppid: panePid, elapsed: "00:20", command: "claude", cwd: workspace }]),
+    terminalsJson: JSON.stringify([{ kind: "tmux", target, session: "claude-delegate", window: 0, pane: 0,
+      panePid, currentCommand: "node", currentPath: workspace }]),
+    terminalScreensJson: JSON.stringify({ [target]: ["────────────────────────────────────────────────", "❯ ",
+      "────────────────────────────────────────────────", "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"].join("\n") }),
+    claudeAgentsJson: JSON.stringify([{ pid, cwd: workspace, sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", version: "2.1.295" }])
+  }, {
+    env: { HOME: root, AKK_RUNTIME_DIR: path.join(root, "runtime") }, cwd: workspace, runtimeLog() {},
+    codexProcessBirthForPid: () => "Fri Oct 23 01:00:00 2026",
+    createClaudeNativeRuntime: (() => ({ close: async () => {} })) as any,
+    conversationRoutingTerminals: async (_options, selected) => {
+      routed++;
+      assert.equal(selected, terminalId);
+      return [{ id: terminalId, agent: "claude", process_state: "active", pid,
+        native_agent_session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", native_identity_state: "resolved",
+        terminal_control: { capabilities: ["send_keys"] }, activity_state: "idle",
+        approval_state: { scanned: true, blocked: false }, _claude_managed_send_eligible: false }];
+    }
+  }), /Claude managed Send blocked: terminal_managed_send_unavailable/u);
+  assert.equal(routed, 2, "delegate and aliases must enter the same managed policy as a selected Claude conversation");
+});
+
 test("terminal mutation CLI wiring preserves canonical lock order", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-cli-mutation-"));
   const storeDir = path.join(root, "store");

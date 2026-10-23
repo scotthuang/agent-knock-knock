@@ -2122,6 +2122,16 @@ test("unified Send consumes List's fresh explicit authority without promoting un
     assert.equal(selected.expectedManagedTerminalToken, undefined, "Physical authority is not managed task authority");
   }
   assert.equal((observed.rawTerminal.available_actions as Record<string, any>).send, undefined, "Projection must not mutate the raw observation");
+  const controls = await fixture.facade.buildTerminalListGroup({ options, terminalId: fixture.terminalId,
+    includeManagedActions: true });
+  assert.equal(controls.terminalControlled.length, 1);
+  const control = controls.terminalControlled[0];
+  assert.deepEqual(control.available_actions, observed.terminal.available_actions,
+    "Native Status must consume the same authoritative action projection as List");
+  assert.equal(control.native_identity_state, observed.rawTerminal.native_identity_state);
+  assert.equal(control.native_agent_session_id, observed.rawTerminal.native_agent_session_id);
+  assert.equal(control.native_agent_process_birth, observed.rawTerminal.native_agent_process_birth,
+    "Managed actions must not replace the physical identity used for exact association");
 });
 
 test("routed Send does not recycle a raw offer when authoritative projection withdraws it or names another target", async (t) => {
@@ -2467,6 +2477,23 @@ test("Claude list exposes verified physical birth for native routing without inv
     const id = createClaudeNativeConversationId({ configDir: path.join(root, "config"), sessionId: f.nativeThreadId,
       pid: 4242, processStart: "Sun Oct 11 01:00:00 2026" });
     assert.equal(exactClaudeTerminal(id, row), !missing);
+  }
+});
+
+test("Claude managed Send eligibility uses the observed empty composer and remains private", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-managed-send-facts-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const modelControlResidual of [undefined, "bare"] as const) {
+    const f = await createCodexRolloutListFixture(path.join(root, modelControlResidual ?? "empty"), "pending", false,
+      {}, "human-only", false, false, "❯ ", { agent: "claude", agentVersion: "2.1.296", modelControlResidual });
+    assert.equal(f.scan.terminalControlled.length, 1);
+    const raw = f.scan.terminalControlled[0];
+    assert.equal(raw._claude_managed_send_eligible, modelControlResidual === undefined);
+    const observed = await f.facade.observeExactTerminal({ options: { storeDir: f.storeDir }, terminalId: f.terminalId });
+    assert.equal(observed.state, "available");
+    if (observed.state !== "available") continue;
+    assert.equal(observed.rawTerminal._claude_managed_send_eligible, modelControlResidual === undefined);
+    assert.equal(observed.terminal._claude_managed_send_eligible, undefined);
   }
 });
 

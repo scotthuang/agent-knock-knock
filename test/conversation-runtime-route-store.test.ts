@@ -141,3 +141,20 @@ test("runtime recovery preserves preparation rejection and excludes legacy unkno
     assert.deepEqual(snapshot(h.storeDir), before);
   }
 });
+
+test("managed route migration preserves execution mode and rejects legacy physical disagreement", t => {
+  const h = fixture(t), managed = { ...terminal, terminalMode: "managed" as const, terminalToken: "original-physical-token" };
+  h.legacy.reserve(input, managed);
+  h.legacy.markUncertain(input, managed, "timeout");
+  const migrated = h.create().load(input)!;
+  assert.equal(migrated.version, 2);
+  assert.equal(migrated.terminal_mode, "managed");
+  assert.equal(migrated.terminal_token, managed.terminalToken);
+  assert.equal(migrated.state, "uncertain");
+  h.create().recordReceipt(input, managed, { turn_id: "original-managed-turn" });
+  assert.equal(h.create().load(input)?.receipt?.turn_id, "original-managed-turn");
+  const conflicting = { ...input, messageId: "mixed-mode" };
+  h.create().reserve(conflicting, managed);
+  h.legacy.reserve(conflicting, terminal);
+  assert.throws(() => h.create().load(conflicting), { code: "conversation_route_conflict" });
+});

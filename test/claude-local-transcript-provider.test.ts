@@ -38,6 +38,94 @@ const CAPTURED_AT = "2026-07-24T02:00:00.100Z";
 const PROMPT_AT = "2026-07-24T02:00:00.200Z";
 const COMPLETED_AT = "2026-07-24T02:00:00.400Z";
 
+test("Claude anchors bind the selected reader root and survive detached observation", (t) => {
+  const selected = createFixture(t);
+  const other = createFixture(t, 2);
+  selected.agentRows[0].configDir = fs.realpathSync(selected.claudeHome);
+  const rows = [
+    { ...other.agentRows[0], pid: PID + 1, configDir: fs.realpathSync(other.claudeHome) },
+    ...selected.agentRows
+  ];
+  const anchor = captureClaudeTranscriptAnchor({
+    sessionId: selected.sessionId, cwd: selected.workspace, pid: PID,
+    agentRows: rows, now: new Date(CAPTURED_AT)
+  });
+  assert.ok(anchor);
+  assert.equal(anchor.config_dir, fs.realpathSync(selected.claudeHome));
+  const request = "Complete only the exact selected root";
+  selected.write(turnRecords({ request, assistantText: "Selected root done", ids: 6200 }));
+  const observation = observeClaudeUserExplicitFallbackTranscript({
+    sessionId: selected.sessionId, cwd: selected.workspace,
+    requestHash: fingerprint(request), startedAt: STARTED_AT,
+    context: { pid: PID, claudeTranscriptAnchor: anchor }
+  }, {});
+  assert.equal(observation.status, "completed");
+  if (observation.status === "completed") {
+    assert.equal(observation.completion.text, "Selected root done");
+  }
+  const conflict = observeClaudeUserExplicitFallbackTranscript({
+    sessionId: selected.sessionId, cwd: selected.workspace,
+    requestHash: fingerprint(request), startedAt: STARTED_AT,
+    context: { pid: PID, claudeTranscriptAnchor: anchor }
+  }, { claudeHome: other.claudeHome });
+  assert.equal(conflict.status, "unavailable");
+  if (conflict.status === "unavailable") assert.match(conflict.reason, /config directory conflicts/u);
+});
+
+test("Claude transcript root conflicts and duplicate process rows fail closed", (t) => {
+  const selected = createFixture(t);
+  const other = createFixture(t, 2);
+  selected.agentRows[0].configDir = fs.realpathSync(selected.claudeHome);
+  const capture = (agentRows: readonly ClaudeAgentRow[], claudeHome?: string) =>
+    captureClaudeTranscriptAnchor({
+      sessionId: selected.sessionId, cwd: selected.workspace, pid: PID,
+      agentRows, claudeHome, now: new Date(CAPTURED_AT)
+    });
+  assert.throws(() => capture(selected.agentRows, other.claudeHome), /config directory conflicts/u);
+  assert.equal(capture([
+    ...selected.agentRows,
+    { ...selected.agentRows[0], configDir: other.claudeHome }
+  ]), undefined);
+  assert.throws(() => capture([{ ...selected.agentRows[0], configDir: "relative-home" }]),
+    /config directory is invalid/u);
+  for (const configDir of ["/private/claude\n", "/" + "a".repeat(2048)]) {
+    assert.throws(() => capture([{ ...selected.agentRows[0], configDir }]), /config directory is invalid/u);
+  }
+  const alias = path.join(selected.root, "vendor-root-alias");
+  fs.symlinkSync(selected.claudeHome, alias, "dir");
+  const aliased = capture(selected.agentRows, alias);
+  assert.equal(aliased?.config_dir, fs.realpathSync(selected.claudeHome),
+    "an explicit alias of the verified root is not a different session directory");
+  const anchor = capture(selected.agentRows);
+  assert.ok(anchor);
+  selected.write(turnRecords({ request: "Bound root", assistantText: "Done", ids: 6300 }));
+  selected.agentRows[0].configDir = fs.realpathSync(other.claudeHome);
+  assert.throws(() => selected.detect(anchor, "Bound root"), /config directory conflicts/u);
+});
+
+test("human-started Claude Watch root persists and participates in its fingerprint", (t) => {
+  const fixture = createFixture(t);
+  fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working", configDir: fs.realpathSync(fixture.claudeHome) };
+  const records = fixture.normalizeRecords(turnRecords({
+    request: "Observe the rooted task", assistantText: "Rooted task done", ids: 6400
+  }));
+  fixture.writeRaw(jsonLine(records[0]));
+  const anchor = captureClaudeHumanStartedActiveTaskAnchor({
+    sessionId: fixture.sessionId, cwd: fixture.workspace, pid: PID,
+    agentRows: fixture.agentRows, now: new Date(CAPTURED_AT)
+  });
+  assert.ok(anchor);
+  assert.equal(anchor.config_dir, fs.realpathSync(fixture.claudeHome));
+  assert.equal(validateClaudeHumanStartedActiveTaskAnchor(anchor), anchor);
+  assert.throws(() => validateClaudeHumanStartedActiveTaskAnchor({
+    ...anchor, config_dir: path.join(fixture.root, "different-root")
+  }), /fingerprint does not match/u);
+  fixture.appendRaw(records.slice(1).map(jsonLine).join(""));
+  const observed = observeClaudeHumanStartedActiveTask({ anchor, agentRows: [] });
+  assert.equal(observed.status, "completed");
+  if (observed.status === "completed") assert.equal(observed.completion.text, "Rooted task done");
+});
+
 test("captures and completes one exact human-started Claude task without persisting its prompt", (t) => {
   const fixture = createFixture(t);
   const request = "Human started this exact Claude task";
@@ -474,7 +562,7 @@ test("human-started Claude checkpoint carries only privacy-safe unresolved tool 
   }
 });
 
-test("human-started Claude watch keeps the end-turn append gap pending", (t) => {
+test("human-started Claude watch checkpoints a successful Stop hook before the duration append", (t) => {
   const fixture = createFixture(t, 73);
   const records = fixture.normalizeRecords(turnRecords({
     request: "Observe the canonical completion append gap",
@@ -537,18 +625,64 @@ test("human-started Claude watch keeps the end-turn append gap pending", (t) => 
   }).status, "invalidated");
   fixture.agentRows.push(agent);
 
-  fixture.appendRaw(jsonLine(records[records.length - 1]));
+  const summaryUuid = uuid(6499);
+  fixture.append([{
+    ...baseRecord(summaryUuid, uuid(6402), COMPLETED_AT, fixture.sessionId, VERSION),
+    type: "system", subtype: "stop_hook_summary", hookCount: 1, hookErrors: [],
+    preventedContinuation: false, stopReason: "", hasOutput: false, durationMs: 43
+  }]);
+  const hookPending = observeClaudeHumanStartedActiveTask({
+    anchor, claudeHome: fixture.claudeHome, agentRows: fixture.agentRows,
+    checkpoint: textPending.checkpoint, resumeOffsetBytes: textPending.safeResumeOffsetBytes
+  });
+  assert.equal(hookPending.status, "pending");
+  assert.ok(hookPending.status === "pending");
+  assert.equal(hookPending.checkpoint.last_record_uuid, summaryUuid);
+  assert.equal(hookPending.checkpoint.end_turn_message_id, textPending.checkpoint.end_turn_message_id);
+  const restartedHookCheckpoint = validateClaudeHumanStartedActiveTaskCheckpoint(
+    JSON.parse(JSON.stringify(hookPending.checkpoint)), anchor
+  );
+  fixture.appendRaw(jsonLine({ ...records[records.length - 1], parentUuid: summaryUuid }));
   fixture.agentRows.splice(0);
   const completed = observeClaudeHumanStartedActiveTask({
     anchor,
     claudeHome: fixture.claudeHome,
     agentRows: fixture.agentRows,
-    checkpoint: textPending.checkpoint,
-    resumeOffsetBytes: textPending.safeResumeOffsetBytes
+    checkpoint: restartedHookCheckpoint,
+    resumeOffsetBytes: hookPending.safeResumeOffsetBytes
   });
   assert.equal(completed.status, "completed");
   if (completed.status === "completed") {
     assert.equal(completed.completion.text, "The duration record arrived later");
+  }
+});
+
+test("human-started Claude watch rejects Stop hook errors and prevented continuation", t => {
+  for (const [index, hook] of [{ hookErrors: ["hook failed"], preventedContinuation: false },
+    { hookErrors: [], preventedContinuation: true }].entries()) {
+    const fixture = createFixture(t, 85 + index);
+    const records = fixture.normalizeRecords(turnRecords({
+      request: "Observe a blocked Stop hook", assistantText: "Must remain unproven", ids: 6500,
+      sessionId: fixture.sessionId
+    }));
+    fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+    fixture.writeRaw(jsonLine(records[0]));
+    const anchor = captureClaudeHumanStartedActiveTaskAnchor({
+      sessionId: fixture.sessionId, cwd: fixture.workspace, pid: PID,
+      claudeHome: fixture.claudeHome, agentRows: fixture.agentRows
+    });
+    assert.ok(anchor);
+    const summaryUuid = uuid(6599);
+    fixture.appendRaw(records.slice(1, -1).map(jsonLine).join(""));
+    fixture.append([{
+      ...baseRecord(summaryUuid, uuid(6502), COMPLETED_AT, fixture.sessionId, VERSION),
+      type: "system", subtype: "stop_hook_summary", ...hook
+    }, { ...records[records.length - 1], parentUuid: summaryUuid }]);
+    const observed = observeClaudeHumanStartedActiveTask({
+      anchor, claudeHome: fixture.claudeHome, agentRows: fixture.agentRows
+    });
+    assert.equal(observed.status, "invalidated");
+    if (observed.status === "invalidated") assert.match(observed.reason, /stop-hook work/u);
   }
 });
 
@@ -1354,6 +1488,23 @@ test("detects one anchored foreground Bash tool use waiting for approval", (t) =
   );
 });
 
+test("pending approval accepts unlisted versions with the same anchored tool schema", (t) => {
+  for (const [index, version] of ["2.0.999", "3.0.0"].entries()) {
+    const fixture = createFixture(t, index + 1);
+    const anchor = fixture.capture();
+    fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
+    const request = `Inspect compatible approval ${version}`;
+    fixture.write(pendingBashRecords({
+      request, command: "git status --short", version
+    }));
+    const evidence = fixture.detectPending(anchor, request);
+    assert.equal(evidence?.command, "git status --short");
+    assert.equal(evidence?.claudeVersion, version);
+    assert.equal(evidence?.promptUuid, uuid(700));
+    assert.equal(fixture.detect(anchor, request), undefined);
+  }
+});
+
 test("pending approval evidence honors the existing transcript byte anchor", (t) => {
   const fixture = createFixture(t);
   fixture.write(turnRecords({
@@ -1492,6 +1643,7 @@ test("pending approval requires an unchanged process and a private transcript", 
 test("pending approval rejects completed, background, ambiguous, and unsafe tool uses", (t) => {
   const cases: Array<{
     name: string;
+    expectedError?: RegExp;
     mutate: (
       records: Record<string, unknown>[],
       fixture: ReturnType<typeof createFixture>
@@ -1624,16 +1776,17 @@ test("pending approval rejects completed, background, ambiguous, and unsafe tool
       }
     },
     {
-      name: "unverified future transcript schema",
+      name: "malformed transcript version",
+      expectedError: /unsupported schema or identity/u,
       mutate: (records) => {
         for (const record of records) {
-          record.version = "3.0.0";
+          record.version = "3.0";
         }
       }
     }
   ];
 
-  cases.forEach(({ name, mutate }, index) => {
+  cases.forEach(({ name, mutate, expectedError }, index) => {
     const fixture = createFixture(t, 20 + index);
     const anchor = fixture.capture();
     fixture.agentRows[0] = { ...fixture.agentRows[0], status: "working" };
@@ -1646,11 +1799,11 @@ test("pending approval rejects completed, background, ambiguous, and unsafe tool
     });
     mutate(records, fixture);
     fixture.write(records);
-    assert.equal(
-      fixture.detectPending(anchor, request),
-      undefined,
-      name
-    );
+    if (expectedError) {
+      assert.throws(() => fixture.detectPending(anchor, request), expectedError, name);
+    } else {
+      assert.equal(fixture.detectPending(anchor, request), undefined, name);
+    }
   });
 });
 
@@ -2156,20 +2309,20 @@ test("accepts verified and forward-compatible Claude transcript versions", (t) =
   assert.equal(legacyCompletion?.text, "Legacy schema accepted");
   assert.equal(legacyCompletion?.metadata?.claude_version, LEGACY_VERSION);
 
-  const future = createFixture(t, 3);
-  const futureAnchor = future.capture();
-  future.write(turnRecords({
-    request: "Validate a future compatible transcript schema",
-    assistantText: "Future compatible schema accepted",
-    sessionId: future.sessionId,
-    version: "2.1.219"
-  }));
-  const futureCompletion = future.detect(
-    futureAnchor,
-    "Validate a future compatible transcript schema"
-  );
-  assert.equal(futureCompletion?.text, "Future compatible schema accepted");
-  assert.equal(futureCompletion?.metadata?.claude_version, "2.1.219");
+  for (const [index, version] of ["2.1.219", "2.0.999", "3.0.0"].entries()) {
+    const compatible = createFixture(t, 3 + index);
+    const anchor = compatible.capture();
+    const request = `Validate compatible transcript ${version}`;
+    compatible.write(turnRecords({
+      request,
+      assistantText: "Compatible schema accepted",
+      sessionId: compatible.sessionId,
+      version
+    }));
+    const completion = compatible.detect(anchor, request);
+    assert.equal(completion?.text, "Compatible schema accepted");
+    assert.equal(completion?.metadata?.claude_version, version);
+  }
 });
 
 test("anchors the first Claude turn before the projects directory exists", (t) => {
@@ -2320,7 +2473,7 @@ test("fails closed on duplicate prompts, unsupported schemas, and multiple durat
   unsupported.write(turnRecords({
     request: "Unsupported version",
     assistantText: "Must not complete",
-    version: "2.0.999"
+    version: "2.0.invalid"
   }));
   assert.throws(
     () => unsupported.detect(unsupportedAnchor, "Unsupported version"),
@@ -2338,7 +2491,7 @@ test("fails closed on duplicate prompts, unsupported schemas, and multiple durat
   changedMidTurn.write(changedRecords);
   assert.throws(
     () => changedMidTurn.detect(changedMidTurnAnchor, "Schema changed mid-turn"),
-    /unsupported schema/u
+    /changed schema versions/u
   );
 
   const mixedCompatible = createFixture(t, 5);

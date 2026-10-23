@@ -3,12 +3,26 @@ import { backendCallbackPublicProjection } from "./backend-callback-public-proje
 import { createClaudeNativeConversationId, type ClaudeNativeCatalogEntry } from "./claude-native-identity.js";
 import type { ClaudeNativeSnapshot, ClaudeNativePublicProgress } from "./claude-native-observation.js";
 import type { ClaudeNativeTaskRecord } from "./claude-native-state-store.js";
+import { recordValue } from "./value-guards.js";
 
-const specialCapabilities = {
-  interaction_notify: false, interaction_respond: false, approve: false,
-  model_options: false, set_model: false, permission_options: false, set_permissions: false,
-  cancel: false, new_thread: false, clear_thread: false, resume_thread: false, list_resumable_threads: false
-} as const;
+/** Consume the verified terminal's current offers; adapter support alone is not input authority. */
+export function claudeNativeControlCapabilities(actions: Record<string, unknown> = {}, terminal?: Record<string, unknown>) {
+  const offered = (name: string) => Boolean(recordValue(actions[name]));
+  const lifecycle = recordValue(terminal?.native_thread_lifecycle);
+  const control = recordValue(terminal?.terminal_control);
+  const transport = Array.isArray(control?.capabilities) ? control.capabilities : [];
+  const cancellable = terminal?.process_state === "active" && transport.includes("terminal_cancel") && transport.includes("send_keys");
+  const model = offered("model_options"), permissions = offered("permission_options");
+  return {
+    interaction_respond: offered("respond_interaction") || recordValue(actions.respond)?.tool === "agent_knock_knock_respond_interaction",
+    approve: offered("approve"), model_options: model, set_model: offered("set_model") || model,
+    permission_options: permissions, set_permissions: offered("set_permissions") || permissions,
+    cancel: offered("cancel") || cancellable, new_thread: offered("new_thread"),
+    clear_thread: offered("clear_thread") || offered("new_thread"),
+    resume_thread: offered("resume_thread") || offered("new_thread") && offered("list_resumable_threads") && lifecycle?.resumeExact === true,
+    list_resumable_threads: offered("list_resumable_threads"), native_inspect: offered("native_inspect")
+  };
+}
 const activeStatus = (status: string) => status === "watching" || status === "awaiting_acceptance";
 const settledStatus = (status: string) => ["completed", "failed", "interrupted", "exited"].includes(status);
 function waitingProjection(waitingFor: string | undefined, waiting: boolean) {
@@ -34,9 +48,11 @@ export function claudeNativeSessionProjection(entry: ClaudeNativeCatalogEntry, s
     native_thread_id: entry.sessionId, pid: entry.pid, agent_version: entry.version,
     connection_state: "native_registry_verified", activity_state: entry.status, observed_at: entry.observedAt,
     ...waitingProjection(entry.waitingFor, entry.status === "waiting"),
-    capabilities: { status: true, send: canSend, watch: canWatch, ...specialCapabilities },
+    capabilities: { status: true, send: canSend, watch: canWatch, interaction_notify: canWatch,
+      ...claudeNativeControlCapabilities(), native_inspect: true },
     available_actions: {
       status: { tool: "agent_knock_knock_status", input: { conversation_id: id } },
+      native_inspect: { tool: "agent_knock_knock_native_inspect", input: { conversation_id: id, inspection: "status" } },
       ...(canSend ? { send: { tool: "agent_knock_knock_send", input: { conversation_id: id } } } : {}),
       ...(canWatch ? { watch: { tool: "agent_knock_knock_watch", input: { conversation_id: id } } } : {})
     },
@@ -71,12 +87,10 @@ export function claudeNativeTaskProjection(task: ClaudeNativeTaskRecord, include
     created_at: task.created_at, updated_at: task.updated_at, observed_at: task.observed_at,
     observation_error: task.observation_error,
     ...waitingProjection(task.waiting_for, active && Boolean(task.waiting_for)),
+    ...heldMessageProjection(task, active),
     callback_configured: Boolean(task.callback_route), callback_expected: callbackExpected(task, active, stopped),
     ...backendCallbackPublicProjection(task, active, stopped),
-    capabilities: { status: true, close: task.kind === "send" && !task.closed_at, unwatch: !stopped,
-      renew: canRenew, recover: !task.closed_at,
-      retry_callback: task.notifications.some(note => isBackendCallbackRetryable(task, note)),
-      callback: Boolean(task.callback_route) && !stopped, ...specialCapabilities },
+    capabilities: taskCapabilities(task, { active, stopped, canRenew }),
     available_actions: {
       status: { tool: "agent_knock_knock_status", input: { watch_id: task.id } }, ...recoveryActions
     },
@@ -84,12 +98,30 @@ export function claudeNativeTaskProjection(task: ClaudeNativeTaskRecord, include
   };
 }
 
+function taskCapabilities(task: ClaudeNativeTaskRecord, state: { active: boolean; stopped: boolean; canRenew: boolean }) {
+  return { status: true, close: task.kind === "send" && !task.closed_at, unwatch: !state.stopped,
+    renew: state.canRenew, recover: !task.closed_at,
+    retry_callback: task.notifications.some(note => isBackendCallbackRetryable(task, note)),
+    callback: Boolean(task.callback_route) && !state.stopped,
+    interaction_notify: state.active && Boolean(task.callback_route),
+    ...claudeNativeControlCapabilities() };
+}
+
+function heldMessageProjection(task: ClaudeNativeTaskRecord, active: boolean) {
+  if (!active || task.native_input_id || task.send_intent?.state !== "held") return {};
+  return { attention_required: true, manual_required: true, next_action: "return_to_claude_terminal",
+    interaction_hint: { kind: "peer_message_review", actionable: false, source: "native_peer_receipt" } };
+}
+
 function sendProjection(task: ClaudeNativeTaskRecord) {
   const intent = task.send_intent;
   if (!intent) return {};
   const accepted = intent.state === "accepted";
   return { message_id: intent.message_id, delivered: accepted, send_state: intent.state,
-    delivery_receipt: accepted ? "native_task_verified" : intent.state === "not_sent" ? "not_sent" : "acceptance_unproven",
+    delivery_receipt: accepted ? "native_task_verified" : intent.state === "not_sent" ? "not_sent"
+      : intent.state === "held" ? "native_message_held" : "acceptance_unproven",
+    sender_permission_class: intent.sender_permission_class ?? null,
+    sender_permission_class_source: intent.sender_permission_class ? "operator_configured" : "unspecified",
     agent_acceptance: accepted ? "proven" : "unproven", send_error: intent.error_code, resend_allowed: false };
 }
 function bodyProjection(task: ClaudeNativeTaskRecord, includeProgress: boolean) {

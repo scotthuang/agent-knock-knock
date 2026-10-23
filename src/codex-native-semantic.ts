@@ -1,7 +1,7 @@
 import { isClaudeNativeConversationId, parseClaudeNativeConversationId, isClaudeNativeWatchId } from "./claude-native-identity.js";
 import { isCodexNativeConversationId, isCodexNativeWatchId, parseCodexNativeConversationId } from "./codex-native-identity.js";
 import { numberString, pushOptional, requiredString, requiredTerminalInteractionIdentifier } from "./semantic-tool-arguments.js";
-import { resolvePluginStoreDir } from "./semantic-tool-command-helpers.js";
+import { AKK_CALLBACK_METHOD, resolvePluginStoreDir } from "./semantic-tool-command-helpers.js";
 import { isRecord } from "./value-guards.js";
 import { parseTerminalConversationId } from "./terminal-agent-adapter.js";
 import { TERMINAL_INTERACTION_LIMITS } from "./terminal-interaction-protocol.js";
@@ -90,6 +90,7 @@ function scopedArgs(command: string, target: string[], config: Params, context: 
   const args = [command, ...target, "--openclaw-session", requiredString(context.sessionKey, "controller session")];
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(args, "--codex-home", config.codexHome);
+  pushOptional(args, "--claude-home", config.claudeHome);
   return args;
 }
 
@@ -101,13 +102,20 @@ function onlyParameters(params: Params, names: string[]): void {
 export function nativeSendToolArgs(params: Params, config: Params, context: Context, messageId?: string): string[] | undefined {
   const id = nativeConversationTarget(params);
   if (!id) return undefined;
-  onlyParameters(params, ["conversation_id", "request", "type", "agentHardTimeoutMinutes"]);
+  const claude = isClaudeNativeConversationId(id);
+  onlyParameters(params, ["conversation_id", "request", "type", "agentHardTimeoutMinutes",
+    ...(claude ? ["idleTimeoutMinutes", "agentTimeoutMinutes"] : [])]);
   if (params.type !== undefined && params.type !== "task") throw new Error("Codex CLI Send accepts tasks only");
   const args = scopedArgs("send", ["--conversation", id], config, context);
   args.push("--message", requiredString(params.request, "request"), "--background",
     "--message-id", requiredString(messageId, "stable Codex CLI tool call identity"));
   pushOptional(args, "--openclaw-bin", config.openclawBin);
   pushOptional(args, "--agent-hard-timeout-minutes", numberString(params.agentHardTimeoutMinutes) ?? numberString(config.agentHardTimeoutMinutes));
+  if (claude) {
+    args.push("--gateway-method", AKK_CALLBACK_METHOD, "--gateway-session", requiredString(context.sessionKey, "controller session"));
+    pushOptional(args, "--idle-timeout-minutes", numberString(params.idleTimeoutMinutes) ?? numberString(config.idleTimeoutMinutes));
+    pushOptional(args, "--agent-timeout-minutes", numberString(params.agentTimeoutMinutes) ?? numberString(config.agentTimeoutMinutes));
+  }
   return args;
 }
 

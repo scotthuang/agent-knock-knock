@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { validatedClaudeConfigDir } from "./claude-transcript-config.js";
 import {
   callbackEnvelopeMatchesRoute,
   createCallbackEnvelope,
@@ -1241,6 +1242,7 @@ export function validatedClaudeTranscriptAnchor(
     relative_path: assertNonEmptyString,
     offset_bytes: NON_NEGATIVE_INTEGER,
     file_existed: oneOfGuard([true, false]),
+    config_dir: optionalGuard((value) => { validatedClaudeConfigDir(value); }),
     device: optionalGuard(assertNonEmptyString),
     inode: optionalGuard(assertNonEmptyString)
   });

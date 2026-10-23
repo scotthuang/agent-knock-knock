@@ -7,12 +7,14 @@ import type { CodexNativeNotification } from "./codex-native-state-store.js";
 import { createClaudeNativeConversationId, isClaudeNativeWatchId, isClaudeNativeUuid,
   type ClaudeNativeIdentity, type ClaudeNativeCatalogEntry } from "./claude-native-identity.js";
 import type { ClaudeNativeTranscriptSource, ClaudeNativePublicProgress } from "./claude-native-observation.js";
+import type { ClaudeNativeSenderPermissionClass } from "./claude-native-sender-policy.js";
 
 export type ClaudeNativeTaskStatus = "awaiting_acceptance" | "watching" | "completed" | "failed" |
   "interrupted" | "exited" | "timed_out" | "cancelled";
 export interface ClaudeNativeSendIntent {
   message_id: string; client_user_message_id: string; native_message_id: string; text: string;
   sender_pid?: number; state: "reserved" | "uncertain" | "accepted" | "not_sent" | "held" | "refused" | "attached";
+  sender_permission_class?: ClaudeNativeSenderPermissionClass;
   dispatched_at: string; error_code?: string;
 }
 export interface ClaudeNativeTaskRecord extends BackendRecoveryFields {
@@ -23,7 +25,7 @@ export interface ClaudeNativeTaskRecord extends BackendRecoveryFields {
   native_input_id?: string; source?: ClaudeNativeTranscriptSource; send_intent?: ClaudeNativeSendIntent;
   callback_route?: CallbackRouteV1; observed_at?: string; observation_error?: string;
   response_text?: string; response_truncated?: boolean; progress?: ClaudeNativePublicProgress;
-  waiting_for?: string; notifications: CodexNativeNotification[];
+  waiting_for?: string; waiting_notification_id?: string; notifications: CodexNativeNotification[];
 }
 export type ClaudeNativeStateRepository = NativeRecordRepository<ClaudeNativeTaskRecord>;
 const time = (v: unknown): v is string => typeof v === "string" && Number.isFinite(Date.parse(v));
@@ -37,15 +39,22 @@ export function assertClaudeNativeTaskRecord(value: unknown): asserts value is C
     ![r.created_at, r.updated_at, r.deadline_at].every(time) || !Array.isArray(r.notifications)) throw new Error("Invalid Claude native task");
   assertTaskIdentity(r);
   assertSendIntent(r);
-  if (r.source && (!text(r.source.relativePath) || !/^\d+$/u.test(r.source.device) || !/^\d+$/u.test(r.source.inode))) throw new Error("Invalid Claude transcript anchor");
-  if (r.callback_route && parseCallbackRoute(r.callback_route).controller_session_id !== r.controller_session) throw new Error("Claude callback owner mismatch");
   assertNotifications(r);
+  assertWaitingNotification(r);
+}
+function assertWaitingNotification(r: ClaudeNativeTaskRecord): void {
+  if (r.waiting_notification_id !== undefined && (!r.waiting_for || !r.notifications.some(note =>
+    note.id === r.waiting_notification_id && note.envelope.event.type === "claude_native_watch.interaction"))) {
+    throw new Error("Invalid Claude waiting notification");
+  }
 }
 function assertTaskIdentity(r: ClaudeNativeTaskRecord): void {
   if (createClaudeNativeConversationId(r.target) !== r.native_id || createClaudeNativeConversationId(r.entry) !== r.native_id) throw new Error("Claude task identity mismatch");
   assertBackendRecoveryFields(r);
   if (r.native_input_id !== undefined && !isClaudeNativeUuid(r.native_input_id)) throw new Error("Invalid Claude input anchor");
   if (r.kind === "watch" && (!r.native_input_id || r.send_intent)) throw new Error("Claude Watch requires exact input");
+  if (r.source && (!text(r.source.relativePath) || !/^\d+$/u.test(r.source.device) || !/^\d+$/u.test(r.source.inode))) throw new Error("Invalid Claude transcript anchor");
+  if (r.callback_route && parseCallbackRoute(r.callback_route).controller_session_id !== r.controller_session) throw new Error("Claude callback owner mismatch");
 }
 function assertSendIntent(r: ClaudeNativeTaskRecord): void {
   if (r.kind === "send") {
@@ -53,9 +62,15 @@ function assertSendIntent(r: ClaudeNativeTaskRecord): void {
     if (!i || !text(i.message_id) || !text(i.text) || !isClaudeNativeUuid(i.client_user_message_id) ||
       !isClaudeNativeUuid(i.native_message_id) || !time(i.dispatched_at) ||
       !["reserved", "uncertain", "accepted", "not_sent", "held", "refused", "attached"].includes(i.state) ||
-      i.sender_pid !== undefined && (!Number.isSafeInteger(i.sender_pid) || i.sender_pid < 1) ||
       r.native_input_id && r.native_input_id !== i.client_user_message_id) throw new Error("Invalid Claude send intent");
+    assertSender(i);
     if (i.state === "accepted" && (!r.native_input_id || !i.sender_pid)) throw new Error("Claude acceptance requires exact native provenance");
+  }
+}
+function assertSender(intent: ClaudeNativeSendIntent): void {
+  if (intent.sender_permission_class !== undefined && !["prompting", "bypass"].includes(intent.sender_permission_class) ||
+    intent.sender_pid !== undefined && (!Number.isSafeInteger(intent.sender_pid) || intent.sender_pid < 1)) {
+    throw new Error("Invalid Claude send intent");
   }
 }
 function assertNotifications(r: ClaudeNativeTaskRecord): void {
@@ -86,7 +101,7 @@ export function createClaudeNativeStateStore(storeDir: string, locks: { acquire(
       if (previous.native_input_id && previous.native_input_id !== next.native_input_id) throw new Error("Claude input anchor changed");
       if (previous.source && !isDeepStrictEqual(previous.source, next.source)) throw new Error("Claude transcript anchor changed");
       if (previous.send_intent) {
-        for (const key of ["message_id", "client_user_message_id", "native_message_id", "text", "dispatched_at"] as const) {
+        for (const key of ["message_id", "client_user_message_id", "native_message_id", "text", "dispatched_at", "sender_permission_class"] as const) {
           if (previous.send_intent[key] !== next.send_intent?.[key]) throw new Error("Claude send intent changed");
         }
         if (previous.send_intent.sender_pid && previous.send_intent.sender_pid !== next.send_intent?.sender_pid) throw new Error("Claude sender changed");

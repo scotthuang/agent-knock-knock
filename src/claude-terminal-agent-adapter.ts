@@ -53,6 +53,10 @@ export interface ClaudeAgentRow {
   startedAt?: number;
   status?: string;
   waitingFor?: string;
+  /** Registry metadata bound to this exact PID/session/process incarnation by the reader. */
+  configDir?: string;
+  version?: string;
+  processStart?: string;
 }
 
 export interface CreateClaudeTerminalAgentAdapterOptions {
@@ -801,7 +805,7 @@ function parseCurrentClaudeStatusPanel(
     if (line === CLAUDE_STATUS_PANEL_DIAGNOSTICS_HEADING) {
       if (
         inDiagnostics ||
-        !["2.1.282", "2.1.285"].includes(rawFields.get("Version") ?? "") ||
+        !claudeRuntimeLifecycleCompatibilityProfile(rawFields.get("Version")) ||
         !rawFields.has("Session ID") ||
         rawFields.get("Session kind") !== "interactive" ||
         !rawFields.has("cwd") ||

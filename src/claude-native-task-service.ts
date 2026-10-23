@@ -10,12 +10,14 @@ import type { ClaudeNativeClient } from "./claude-native-client.js";
 import type { ClaudeNativeSnapshot, ClaudeNativeObservationOptions } from "./claude-native-observation.js";
 import { createClaudeNativeNotificationOutbox, type ClaudeNativeOutboxDependencies } from "./claude-native-outbox.js";
 import type { ClaudeNativeTaskRecord } from "./claude-native-state-store.js";
+import { parseClaudeNativeSenderPermissionClass } from "./claude-native-sender-policy.js";
 
 export interface ClaudeNativeTaskInput {
   target: ClaudeNativeIdentity; nativeId: string; controllerSession: string;
   callbackRoute?: CallbackRouteV1; timeoutMs?: number;
 }
 export interface ClaudeNativeTaskDependencies extends ClaudeNativeOutboxDependencies {
+  senderPermissionClass?: string;
   inspect(identity: ClaudeNativeIdentity): Promise<ClaudeNativeCatalogEntry>;
   observe(entry: ClaudeNativeCatalogEntry, options: ClaudeNativeObservationOptions): Promise<ClaudeNativeSnapshot>;
   send: ClaudeNativeClient["send"];
@@ -72,14 +74,30 @@ export class ClaudeNativeTasks {
       created_at: timestamp, updated_at: timestamp, deadline_at: new Date(this.now().getTime() + timeout).toISOString(),
       ...(route ? { callback_route: route } : {}), notifications: [] };
   }
-  private notify(task: ClaudeNativeTaskRecord, key: string, message: string) {
+  private notify(task: ClaudeNativeTaskRecord, key: string, message: string, metadata: Record<string, unknown> = {}) {
     if (!task.callback_route || backendObservationStopped(task)) return;
-    const id = `${task.id}:${key}`; if (task.notifications.some(n => n.id === id)) return;
+    const id = `${task.id}:${key}`; if (task.notifications.some(n => n.id === id)) return id;
     task.notifications.push({ id, attempts: 0, status: "ready", envelope: createCallbackEnvelope({ route: task.callback_route,
       source: { kind: "claude_native_watch", watch_id: task.id, native_id: task.native_id },
       event: { id, type: `claude_native_watch.${key.split(":")[0]}`, body: message, requires_response: false,
         metadata: { watch_id: task.id, conversation_id: task.native_id, session_id: task.target.sessionId,
-          ...(task.native_input_id ? { native_input_id: task.native_input_id } : {}), status: task.status } } }) });
+          ...(task.native_input_id ? { native_input_id: task.native_input_id } : {}), status: task.status, ...metadata } } }) });
+    return id;
+  }
+  private setWaiting(task: ClaudeNativeTaskRecord, waitingFor: string | undefined) {
+    const waiting = waitingFor === undefined ? undefined : ["permission prompt", "input needed"].includes(waitingFor) ? waitingFor : "unknown";
+    if (task.waiting_for === waiting && (!waiting || task.waiting_notification_id || !task.callback_route)) return;
+    for (const note of task.notifications) {
+      if (note.envelope.event.type !== "claude_native_watch.interaction" || !["ready", "retry_wait"].includes(note.status)) continue;
+      note.status = "failed"; note.outcome = { disposition: "permanent_failure", error_code: "claude_native_callback_stale" };
+      delete note.retry_at;
+    }
+    task.waiting_for = waiting; delete task.waiting_notification_id;
+    if (!waiting) return;
+    const kind = waiting === "permission prompt" ? "approval" : waiting === "input needed" ? "input" : "unknown";
+    task.waiting_notification_id = this.notify(task, `interaction:${task.notifications.length}`,
+      `Claude task is waiting: ${waiting}. Inspect the current terminal interaction before responding; registry status alone does not identify a response.\nwatch_id: ${task.id}\nnative_input_id: ${task.native_input_id}`,
+      { waiting_for: waiting, manual_required: true, interaction_hint: { kind, actionable: false, source: "native_registry" } });
   }
   private sameSend(old: ClaudeNativeTaskRecord, input: ClaudeNativeTaskInput & { messageId: string; text: string }) {
     if (old.kind !== "send" || old.native_id !== input.nativeId || old.controller_session !== input.controllerSession ||
@@ -93,6 +111,7 @@ export class ClaudeNativeTasks {
     if (!input.messageId?.trim() || !input.text?.trim() || Buffer.byteLength(input.text) > 256 * 1024) throw new ClaudeNativeError("invalid_argument", "Claude Send requires bounded text and a message ID");
     const id = `claude-cli-watch:${digest([input.controllerSession, input.messageId])}`;
     const previous = this.deps.repository.load(id); if (previous) return this.sameSend(previous, input);
+    const senderPermissionClass = parseClaudeNativeSenderPermissionClass(this.deps.senderPermissionClass);
     const entry = await this.deps.inspect(input.target);
     if (entry.status !== "idle") throw new ClaudeNativeError("session_not_idle", "Claude is busy, waiting, or unknown; a standalone task cannot be sent");
     for (const old of this.list().filter(t => t.native_id === input.nativeId && active(t))) await this.reconcile(old.id);
@@ -104,7 +123,8 @@ export class ClaudeNativeTasks {
       }
       const task = this.make(input, id, "send", entry);
       task.send_intent = { message_id: input.messageId, text: input.text, client_user_message_id: this.uuid(),
-        native_message_id: this.uuid(), state: "reserved", dispatched_at: task.created_at };
+        native_message_id: this.uuid(), state: "reserved", dispatched_at: task.created_at,
+        ...(senderPermissionClass ? { sender_permission_class: senderPermissionClass } : {}) };
       const saved = this.deps.repository.save(task, null); created = true; return saved;
     });
     if (!created) return reserved;
@@ -112,6 +132,7 @@ export class ClaudeNativeTasks {
     try {
       receipt = await this.deps.send(input.target, { text: input.text, inputUuid: reserved.send_intent!.client_user_message_id,
         messageId: reserved.send_intent!.native_message_id,
+        ...(reserved.send_intent!.sender_permission_class ? { senderPermissionClass: reserved.send_intent!.sender_permission_class } : {}),
         beforeDispatch: async (current, senderPid) => {
           if (current.nativeId !== input.nativeId || current.status !== "idle" || !Number.isSafeInteger(senderPid) || senderPid! < 1) {
             throw new ClaudeNativeError("sender_identity_unavailable", "Exact Claude sender identity must be persisted before input");
@@ -152,7 +173,7 @@ export class ClaudeNativeTasks {
     if (snapshot.readError || !selected || selected.inputUuid !== snapshot.latestInputUuid || selected.kind !== "root_user" || selected.state !== "inProgress") {
       throw new ClaudeNativeError("task_anchor_unavailable", "Current Claude input is not a verified active root task");
     }
-    return this.deps.repository.withLock(`claude-cli-watch:target-${digest(input.target)}`, () => {
+    const watched = this.deps.repository.withLock(`claude-cli-watch:target-${digest(input.target)}`, () => {
       const old = this.list().find(t => t.native_id === input.nativeId && t.controller_session === input.controllerSession &&
         t.native_input_id === selected.inputUuid && active(t));
       if (old) {
@@ -162,8 +183,10 @@ export class ClaudeNativeTasks {
       const task = this.make(input, `claude-cli-watch:${this.uuid()}`, "watch", entry);
       task.native_input_id = selected.inputUuid; task.source = snapshot.source;
       task.progress = snapshot.progress; task.observed_at = snapshot.readAt;
+      this.setWaiting(task, entry.status === "waiting" ? entry.waitingFor ?? "unknown" : undefined);
       return this.deps.repository.save(task, null);
     });
+    await this.outbox.deliverPending(watched.id); return this.status(watched.id);
   }
   private apply(task: ClaudeNativeTaskRecord, snapshot: ClaudeNativeSnapshot) {
     if (createClaudeNativeConversationId(snapshot.identity) !== task.native_id) { task.observation_error = "identity_mismatch"; return; }
@@ -188,7 +211,7 @@ export class ClaudeNativeTasks {
     task.response_text = selected.responseText; task.response_truncated = selected.responseTruncated;
     if (["completed", "failed", "interrupted"].includes(selected.state)) {
       task.status = selected.state as "completed" | "failed" | "interrupted";
-      delete task.waiting_for;
+      this.setWaiting(task, undefined);
       this.notify(task, "settled", `Claude task ${task.status}.\nwatch_id: ${task.id}\nnative_input_id: ${task.native_input_id}\n${task.response_text ?? ""}`);
     } else if (selected.state === "unknown") task.observation_error = selected.reason ?? "native_result_unknown";
   }
@@ -206,15 +229,17 @@ export class ClaudeNativeTasks {
         if (!active(task)) return;
         if (error === "process_exited" || error === "process_changed") {
           task.status = "exited"; task.observation_error = error;
+          this.setWaiting(task, undefined);
           this.notify(task, "settled", `Original Claude process exited or changed. Task completion is unproven. Watch: ${task.id}`);
         } else if (error) task.observation_error = error;
         else if (snapshot) {
           this.apply(task, snapshot);
-          task.waiting_for = active(task) && entry?.status === "waiting" && snapshot.latestInputUuid === task.native_input_id
-            ? entry.waitingFor ?? "manual_interaction" : undefined;
+          if (!snapshot.readError) this.setWaiting(task, active(task) && !task.observation_error && entry?.status === "waiting"
+            && snapshot.latestInputUuid === task.native_input_id ? entry.waitingFor ?? "unknown" : undefined);
         }
         if (active(task) && Date.parse(task.deadline_at) <= this.now().getTime()) {
           task.status = "timed_out";
+          this.setWaiting(task, undefined);
           this.notify(task, `timed_out${task.renewal_count ? `:${task.renewal_count}` : ""}`, `Claude Watch expired; the native task may still be running. Watch: ${task.id}`);
         }
       });

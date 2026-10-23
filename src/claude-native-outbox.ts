@@ -27,12 +27,19 @@ export function createClaudeNativeNotificationOutbox(deps: ClaudeNativeOutboxDep
     });
   }
   function stale(task: ClaudeNativeTaskRecord, note: CodexNativeNotification): boolean {
+    // Registry hints never authorize an actionable native interaction.
+    if (typeof note.envelope.event.metadata?.interaction_id === "string") return true;
+    if (note.envelope.event.type === "claude_native_watch.interaction") {
+      return task.status !== "watching" || !task.waiting_for || note.id !== task.waiting_notification_id;
+    }
     if (note.envelope.event.type === "claude_native_watch.timed_out") {
       const expected = `${task.id}:timed_out${task.renewal_count ? `:${task.renewal_count}` : ""}`;
       if (task.status !== "timed_out" || note.id !== expected) return true;
     }
-    const interactionId = note.envelope.event.metadata?.interaction_id;
-    return typeof interactionId === "string"; // This route never publishes actionable native interactions.
+    return false;
+  }
+  function observationUnavailable(task: ClaudeNativeTaskRecord, note: CodexNativeNotification): boolean {
+    return note.envelope.event.type === "claude_native_watch.interaction" && Boolean(task.observation_error);
   }
   function settle(id: string, notificationId: string, attemptId: string, outcome: CallbackAttemptOutcome) {
     update(id, task => {
@@ -64,7 +71,7 @@ export function createClaudeNativeNotificationOutbox(deps: ClaudeNativeOutboxDep
           if (n.status === "leased" && Date.parse(n.lease_expires_at!) <= now().getTime()) {
             n.status = "uncertain"; n.outcome = { disposition: "uncertain", error_code: "claude_native_callback_lease_expired", observed_at: now().toISOString() }; continue;
           }
-          if (backendObservationStopped(task) || !deps.deliver) continue;
+          if (backendObservationStopped(task) || !deps.deliver || observationUnavailable(task, n)) continue;
           if (["ready", "retry_wait"].includes(n.status) && stale(task, n)) {
             n.status = "failed"; n.outcome = { disposition: "permanent_failure", error_code: "claude_native_callback_stale" }; delete n.retry_at; continue;
           }
@@ -88,6 +95,9 @@ export function createClaudeNativeNotificationOutbox(deps: ClaudeNativeOutboxDep
         const current = deps.repository.load(id);
         if (!current || backendObservationStopped(current) || stale(current, n)) {
           settle(id, n.id, n.attempt_id!, { disposition: "permanent_failure", error_code: "claude_native_callback_stopped" }); return;
+        }
+        if (observationUnavailable(current, n)) {
+          settle(id, n.id, n.attempt_id!, { disposition: "retryable_failure", error_code: "claude_native_observation_unavailable" }); return;
         }
         outcome = parseCallbackAttemptOutcome(await deps.deliver!({ route: task.callback_route!, envelope: n.envelope,
           attempt: { number: n.attempts, id: n.attempt_id! }, context,

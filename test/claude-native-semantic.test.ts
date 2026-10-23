@@ -6,17 +6,40 @@ import { nativeConversationTarget, nativeSendToolArgs, nativePermissionToolArgs,
 import { backendRecoveryToolArgs, normalizeBackendStatusTarget, assertBackendRecoveryCliTarget } from "../src/backend-recovery-semantic.js";
 import { normalizeConversationSendResult } from "../src/semantic-conversation-target.js";
 import { sendCommandResultIsError } from "../src/semantic-tool-presentation.js";
+import { claudeNativeRuntimeOptions } from "../src/claude-native-cli-adapter.js";
+import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 const target = { configDir: "/fixture/.claude", sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", pid: 123,
   processStart: "Sun Oct 11 01:00:00 2026" };
 const id = createClaudeNativeConversationId(target), watch = "claude-cli-watch:12345678abc";
 
+test("Claude sender class comes only from the Host environment, never from model or CLI options", async () => {
+  const options = { senderPermissionClass: "bypass", sender_permission_class: "bypass" };
+  for (const configured of [undefined, "prompting", "invalid-host-configuration"]) {
+    await runCliCommandExecution("sender-policy-boundary", options, {
+      cwd: "/fixture", env: { HOME: "/fixture", AKK_NATIVE_CLAUDE_SENDER_PERMISSION_CLASS: configured }, runtimeLog() {}
+    }, async () => {
+      // Raw configuration remains readable even when invalid; only a new Send validates it.
+      assert.equal(claudeNativeRuntimeOptions(options).senderPermissionClass, configured);
+    });
+  }
+  assert.throws(() => nativeSendToolArgs({ conversation_id: id, request: "one task", ...options }, {},
+    { sessionKey: "controller" }, "policy-boundary"), /Unexpected Codex CLI parameters/u);
+});
+
 test("Claude semantic Send and native Status preserve exact native IDs and controller scope", () => {
   assert.equal(nativeConversationTarget({ conversation_id: id }), id);
   assert.throws(() => nativeConversationTarget({ conversation_id: id, terminal_id: "terminal" }), /another target/u);
-  const args = nativeSendToolArgs({ conversation_id: id, request: "one task" }, { agentHardTimeoutMinutes: 721 }, { sessionKey: "controller" }, "stable-tool-call")!;
+  const args = nativeSendToolArgs({ conversation_id: id, request: "one task", agentTimeoutMinutes: 7 },
+    { agentHardTimeoutMinutes: 721, agentTimeoutMinutes: 60, idleTimeoutMinutes: 5, claudeHome: "/fixture/.tclaude" },
+    { sessionKey: "controller" }, "stable-tool-call")!;
   assert.deepEqual(args.slice(0, 5), ["send", "--conversation", id, "--openclaw-session", "controller"]);
   assert.equal(args[args.indexOf("--message-id") + 1], "stable-tool-call");
   assert.equal(args[args.indexOf("--agent-hard-timeout-minutes") + 1], "721");
+  assert.equal(args[args.indexOf("--claude-home") + 1], "/fixture/.tclaude");
+  assert.equal(args[args.indexOf("--agent-timeout-minutes") + 1], "7");
+  assert.equal(args[args.indexOf("--idle-timeout-minutes") + 1], "5");
+  assert.equal(args[args.indexOf("--gateway-method") + 1], "agent-knock-knock.callback");
+  assert.equal(args[args.indexOf("--gateway-session") + 1], "controller");
   assert.ok(nativePermissionToolArgs({ conversation_id: id, inspection: "status" }, {}, { sessionKey: "controller" }, "status")?.includes(id));
   assert.ok(routedCodexTerminalControlArgs({ terminal_id: "terminal:v2:tmux:claude:akk:0.0:123", inspection: "status" }, {}, { sessionKey: "controller" }, "status")?.includes("native-inspect"));
 });

@@ -62,6 +62,32 @@ test("idle and private end_turn blocks do not establish completion or leak hidde
   assert.equal((await readClaudeNativeSnapshot(f.entry)).selectedInput?.state, "completed");
 });
 
+test("successful Stop hooks preserve durable completion while errors, blocked continuation and missing duration do not", async t => {
+  const f = await fixture(t, []);
+  for (const scenario of [
+    { name: "successful hook", hook: {}, includeDuration: true, state: "completed", reason: undefined },
+    { name: "hook error", hook: { hookErrors: ["PRIVATE_HOOK_ERROR"] }, includeDuration: true,
+      state: "unknown", reason: "unsupported_or_incomplete_task_chain" },
+    { name: "blocked continuation", hook: { preventedContinuation: true }, includeDuration: true,
+      state: "unknown", reason: "unsupported_or_incomplete_task_chain" },
+    { name: "missing durable completion", hook: {}, includeDuration: false,
+      state: "unknown", reason: "awaiting_durable_completion" },
+  ]) {
+    const hook = record("system", 3, 2, { subtype: "stop_hook_summary", hookCount: 1,
+      hookErrors: [], preventedContinuation: false, stopReason: "", hasOutput: false, durationMs: 43, ...scenario.hook });
+    await f.write([user(1), assistant(2, 1, "AKK-446-PROBE-OK"), hook,
+      ...(scenario.includeDuration ? [duration(4, 3)] : [])]);
+    const snapshot = await readClaudeNativeSnapshot(f.entry, { exactInputUuid: uuid(1), messageId: uuid(101) });
+    const observation = snapshot.selectedInput;
+    assert.equal(snapshot.readError, undefined, scenario.name);
+    assert.equal(observation?.state, scenario.state, scenario.name);
+    assert.equal(observation?.reason, scenario.reason, scenario.name);
+    assert.equal(observation?.completionRecordUuid, scenario.state === "completed" ? uuid(4) : undefined, scenario.name);
+    assert.equal(observation?.responseText, scenario.state === "completed" ? "AKK-446-PROBE-OK" : "", scenario.name);
+    assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_HOOK_ERROR/u);
+  }
+});
+
 test("public progress is bounded, redacted and excludes tool parameters and raw outputs", async t => {
   const text = "Progress token=private-secret " + "👨‍👩‍👧‍👦e\u0301中".repeat(1000);
   const tool = record("assistant", 3, 2, { message: { role: "assistant", id: "tool-message", stop_reason: "tool_use",

@@ -60,7 +60,7 @@ test("final refactor evidence reproduces startup counts and historical selection
     {
       cli_process: 12,
       fake_node_process: 7,
-      other_process_or_adapter: 12
+      other_process_or_adapter: 14
     }
   );
   assert.equal(

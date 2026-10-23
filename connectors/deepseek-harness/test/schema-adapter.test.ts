@@ -35,11 +35,13 @@ test("all pinned AKK schemas pass the shared supported DSH validator", async () 
       () => adapter.verifyCapabilityHandshake(`${document}drift`, registeredNames),
       /capability handshake/u,
     );
-    // Contract for the published dependency pinned in this connector's lockfile.
+    // Contract for core 0.15.0 pinned in this connector's lockfile.
+    // This release changes Claude routing/managed-interaction descriptions;
+    // the 27 tool names and their validation constraints remain unchanged.
     assert.equal(adapter.tools.length, 27);
     assert.equal(
       catalogDigest(adapter),
-      "87a07b77e0a344e4da9f87f510adc5f8c6d68e9c271c96164ed1ef681457b1c5"
+      "803fdfeaac3ea3f226dd2ce31c13f18467f0858ed93618946cf69aec3233c6b1"
     );
     for (const tool of adapter.tools) {
       const discovery = adaptHostToolInputSchema(

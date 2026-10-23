@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { defaultClaudeHome, claudeTranscriptAnchorFingerprint,
+  type ClaudeTranscriptAnchor,
+  claudeTranscriptFileId as transcriptFileId,
+  resolveClaudeTranscriptHome, validatedClaudeConfigDir } from
+  "./claude-transcript-config.js";
+export { defaultClaudeHome, claudeTranscriptAnchorFingerprint } from "./claude-transcript-config.js";
+export type { ClaudeTranscriptAnchor } from "./claude-transcript-config.js";
 import {
   isClaudeAgentIdleState,
   type ClaudeAgentRow
@@ -38,27 +44,12 @@ const CLAUDE_TRANSCRIPT_ANCHOR_VERSION = 1;
 const CLAUDE_TRANSCRIPT_MAX_TURN_BYTES = 64 * 1024 * 1024;
 const CLAUDE_SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-const MINIMUM_CLAUDE_TRANSCRIPT_VERSION = [2, 1, 198] as const;
 const CLAUDE_TRANSCRIPT_VERSION_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
   ? fs.constants.O_NOFOLLOW
   : 0;
 const CLAUDE_HISTORICAL_METADATA_MAX_BYTES = 1024 * 1024;
-
-export interface ClaudeTranscriptAnchor {
-  schema_version: 1;
-  session_id: string;
-  cwd: string;
-  pid: number;
-  agent_started_at_ms: number;
-  captured_at: string;
-  relative_path: string;
-  offset_bytes: number;
-  file_existed: boolean;
-  device?: string;
-  inode?: string;
-}
 
 export interface CaptureClaudeTranscriptAnchorOptions {
   sessionId?: string;
@@ -92,6 +83,8 @@ export interface ClaudeHumanStartedActiveTaskAnchor {
   turn_start_offset_bytes: number;
   observed_end_offset_bytes: number;
   anchor_fingerprint: string;
+  /** Verified reader root, included in the anchor fingerprint. */
+  config_dir?: string;
 }
 
 export interface CaptureClaudeHumanStartedActiveTaskOptions
@@ -265,11 +258,6 @@ interface ClaudeTranscriptTurnSnapshot {
   records: readonly TranscriptRecord[];
   transcriptFileId: string;
   observedEndOffsetBytes: number;
-}
-
-export function defaultClaudeHome(): string {
-  const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
-  return configured || path.join(os.homedir(), ".claude");
 }
 
 /** List exact, root-interactive Claude sessions from owner-private transcripts. */
@@ -706,7 +694,10 @@ export function captureClaudeTranscriptAnchor(
     return undefined;
   }
 
-  const claudeHome = path.resolve(options.claudeHome ?? defaultClaudeHome());
+  const claudeHome = resolveClaudeTranscriptHome({
+    claudeHome: options.claudeHome, configDir: agent.configDir
+  });
+  const configDir = agent.configDir ? { config_dir: claudeHome } : {};
   const projectsRoot = projectsRootPath(claudeHome);
   if (!isRealDirectory(projectsRoot)) {
     if (
@@ -717,6 +708,7 @@ export function captureClaudeTranscriptAnchor(
     }
     return {
       schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
+      ...configDir,
       session_id: sessionId,
       cwd: path.resolve(cwd),
       pid,
@@ -733,6 +725,7 @@ export function captureClaudeTranscriptAnchor(
   if (!located) {
     return {
       schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
+      ...configDir,
       session_id: sessionId,
       cwd: path.resolve(cwd),
       pid,
@@ -756,6 +749,7 @@ export function captureClaudeTranscriptAnchor(
     }
     return {
       schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
+      ...configDir,
       session_id: sessionId,
       cwd: path.resolve(cwd),
       pid,
@@ -794,9 +788,11 @@ export function captureClaudeHumanStartedActiveTaskAnchor(
     return undefined;
   }
 
-  const projectsRoot = projectsRootPath(
-    path.resolve(options.claudeHome ?? defaultClaudeHome())
-  );
+  const claudeHome = resolveClaudeTranscriptHome({
+    claudeHome: options.claudeHome, configDir: agent.configDir
+  });
+  const configDir = agent.configDir ? { config_dir: claudeHome } : {};
+  const projectsRoot = projectsRootPath(claudeHome);
   if (!isRealDirectory(projectsRoot)) {
     return undefined;
   }
@@ -850,6 +846,7 @@ export function captureClaudeHumanStartedActiveTaskAnchor(
     const fileId = transcriptFileId(sessionId, `${device}:${inode}`);
     const transcriptAnchor: ClaudeTranscriptAnchor = {
       schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
+      ...configDir,
       session_id: sessionId,
       cwd: path.resolve(cwd),
       pid,
@@ -885,6 +882,7 @@ export function captureClaudeHumanStartedActiveTaskAnchor(
     const base = {
       schema: "agent-knock-knock/claude-human-started-active-task-anchor" as const,
       version: 1 as const,
+      ...configDir,
       session_id: sessionId,
       cwd: path.resolve(cwd),
       pid,
@@ -919,9 +917,11 @@ export function observeClaudeHumanStartedActiveTask(
     const anchor = validateClaudeHumanStartedActiveTaskAnchor(options.anchor);
     const checkpoint = claudeActiveTaskObservationCheckpoint(anchor, options);
     const resumeOffsetBytes = checkpoint.safe_resume_offset_bytes;
-    const projectsRoot = projectsRootPath(
-      path.resolve(options.claudeHome ?? defaultClaudeHome())
-    );
+    const projectsRoot = projectsRootPath(resolveClaudeTranscriptHome({
+      claudeHome: options.claudeHome,
+      anchoredConfigDir: anchor.config_dir,
+      configDir: exactInteractiveAgent(options.agentRows, anchor.pid)?.configDir
+    }));
     if (!isRealDirectory(projectsRoot)) {
       return claudeActiveTaskUnavailable(
         "Claude transcript projects directory is unavailable"
@@ -1059,12 +1059,14 @@ export function validateClaudeHumanStartedActiveTaskAnchor(
     "schema", "version", "session_id", "cwd", "pid", "agent_started_at_ms",
     "captured_at", "relative_path", "device", "inode", "prompt_uuid",
     "request_hash", "claude_version", "transcript_file_id",
-    "turn_start_offset_bytes", "observed_end_offset_bytes", "anchor_fingerprint"
+    "turn_start_offset_bytes", "observed_end_offset_bytes", "anchor_fingerprint",
+    "config_dir"
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
     throw new Error("Claude human-started active-task anchor has unsupported fields");
   }
   const sessionId = uuidValue(value.session_id);
+  validatedClaudeConfigDir(value.config_dir);
   const promptUuid = uuidValue(value.prompt_uuid);
   const cwd = nonEmptyString(value.cwd);
   const pid = positiveInteger(value.pid);
@@ -1134,6 +1136,7 @@ function claudeTranscriptAnchorForHumanStartedTask(
 ): ClaudeTranscriptAnchor {
   return {
     schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
+    ...(anchor.config_dir ? { config_dir: anchor.config_dir } : {}),
     session_id: anchor.session_id,
     cwd: anchor.cwd,
     pid: anchor.pid,
@@ -1455,7 +1458,7 @@ function advanceClaudeHumanStartedActiveTaskCheckpoint(
     }
     if (
       hasUnresolvedBackgroundWork(record) ||
-      record.subtype === "stop_hook_summary"
+      hasBlockingStopSummary(record)
     ) {
       throw new Error(
         "Claude anchored task acquired unsupported background or stop-hook work"
@@ -2170,9 +2173,12 @@ function readClaudeTranscriptTurnSnapshot(
     }
   }
 
-  const projectsRoot = projectsRootPath(
-    path.resolve(options.claudeHome ?? defaultClaudeHome())
-  );
+  const projectsRoot = projectsRootPath(resolveClaudeTranscriptHome({
+    claudeHome: options.claudeHome,
+    anchoredConfigDir: anchor.config_dir,
+    configDir: readMode === "durable_fallback" ? undefined
+      : exactInteractiveAgent(options.agentRows, anchor.pid)?.configDir
+  }));
   if (!isRealDirectory(projectsRoot)) {
     return unavailable("Claude transcript projects directory is unavailable");
   }
@@ -2778,7 +2784,7 @@ function pendingApprovalEvidence(
   if (!claudeVersion) {
     throw new Error("Claude pending Bash tool use has no compatible version");
   }
-  if (!isCompatiblePendingApprovalClaudeVersion(claudeVersion)) {
+  if (!isCompatibleClaudeVersion(claudeVersion)) {
     return undefined;
   }
 
@@ -2840,6 +2846,7 @@ function transcriptAnchorFromContext(context: unknown): ClaudeTranscriptAnchor |
   const device = nonEmptyString(value.device);
   const inode = nonEmptyString(value.inode);
   const fileExisted = value.file_existed;
+  const configDir = validatedClaudeConfigDir(value.config_dir);
   if (
     schemaVersion !== CLAUDE_TRANSCRIPT_ANCHOR_VERSION ||
     !sessionId ||
@@ -2861,6 +2868,7 @@ function transcriptAnchorFromContext(context: unknown): ClaudeTranscriptAnchor |
   }
   return {
     schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
+    ...(configDir ? { config_dir: configDir } : {}),
     session_id: sessionId,
     cwd,
     pid,
@@ -3342,31 +3350,9 @@ function isCompatibleClaudeVersion(value: unknown): boolean {
   if (!match) {
     return false;
   }
-  const parsed = match.slice(1).map(Number);
-  if (!parsed.every(Number.isSafeInteger)) {
-    return false;
-  }
-  for (let index = 0; index < parsed.length; index += 1) {
-    if (parsed[index] !== MINIMUM_CLAUDE_TRANSCRIPT_VERSION[index]) {
-      return parsed[index] > MINIMUM_CLAUDE_TRANSCRIPT_VERSION[index];
-    }
-  }
-  return true;
-}
-
-function isCompatiblePendingApprovalClaudeVersion(value: unknown): boolean {
-  const version = nonEmptyString(value);
-  const match = version === undefined
-    ? undefined
-    : CLAUDE_TRANSCRIPT_VERSION_PATTERN.exec(version);
-  if (!match) {
-    return false;
-  }
-  const [major, minor, patch] = match.slice(1).map(Number);
-  return major === MINIMUM_CLAUDE_TRANSCRIPT_VERSION[0] &&
-    minor === MINIMUM_CLAUDE_TRANSCRIPT_VERSION[1] &&
-    Number.isSafeInteger(patch) &&
-    patch >= MINIMUM_CLAUDE_TRANSCRIPT_VERSION[2];
+  // The version binds evidence; the actual record shape and task chain prove
+  // compatibility. A release number alone must not reject an otherwise valid turn.
+  return match.slice(1).map(Number).every(Number.isSafeInteger);
 }
 
 function assertSameClaudeVersion(...records: readonly TranscriptRecord[]): void {
@@ -3458,34 +3444,11 @@ function exactRequestFingerprint(value: unknown): string | undefined {
   return text ? createHash("sha256").update(text).digest("hex") : undefined;
 }
 
-export function claudeTranscriptAnchorFingerprint(
-  anchor: ClaudeTranscriptAnchor
-): string {
-  return sha256Hex(JSON.stringify({
-    schema: "agent-knock-knock/claude-transcript-acceptance-anchor",
-    version: 1,
-    session_id: anchor.session_id,
-    cwd: anchor.cwd,
-    pid: anchor.pid,
-    agent_started_at_ms: anchor.agent_started_at_ms,
-    captured_at: anchor.captured_at,
-    relative_path: anchor.relative_path,
-    offset_bytes: anchor.offset_bytes,
-    file_existed: anchor.file_existed,
-    device: anchor.device ?? null,
-    inode: anchor.inode ?? null
-  }));
-}
-
 function exactPromptText(value: unknown): string | undefined {
   const text = String(value ?? "")
     .replace(/\r\n/gu, "\n")
     .replace(/[\r\n]+$/u, "");
   return text.length > 0 ? text : undefined;
-}
-
-function transcriptFileId(sessionId: string, fileIdentity: string): string {
-  return sha256Hex(`${sessionId}\0${fileIdentity}`).slice(0, 24);
 }
 
 function sha256Hex(value: string): string {

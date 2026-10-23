@@ -248,19 +248,13 @@ const CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE:
       CLAUDE_UNVERIFIED_NATIVE_INSPECTION_BEHAVIOR_PROFILE,
     nativeInspectionComposerStableMs: 80,
     nativeInspectionComposerSettleTimeoutMs: 5_000,
-    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_261,
+    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_282,
     nativeStatusPanelRequiredValues: Object.freeze({
       "Session kind": "interactive"
     }),
     // Runtime candidate compatibility is structural and semver-based below;
     // this exact-version registry field remains only as historical evidence.
     resumableSourceVersions: Object.freeze([])
-  });
-
-const CLAUDE_2_1_282_UNVERIFIED_LIFECYCLE_PROFILE:
-  ClaudeLifecycleCompatibilityProfile = Object.freeze({
-    ...CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE,
-    nativeStatusPanelFields: CLAUDE_STATUS_PANEL_FIELDS_2_1_282
   });
 
 // Preserve the historical optional-call default. Production discovery always
@@ -296,9 +290,7 @@ export function claudeRuntimeLifecycleCompatibilityProfile(
     return undefined;
   }
   return claudeLifecycleCompatibilityProfile(agentVersion) ??
-    (agentVersion === "2.1.282"
-      ? CLAUDE_2_1_282_UNVERIFIED_LIFECYCLE_PROFILE
-      : CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE);
+    CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE;
 }
 
 export function claudeRuntimeCompatibilityWarning(
@@ -343,10 +335,7 @@ export function claudeLifecycleSourceVersionSupported(
 export function profiledClaudeNativeStatusPanelFields(): readonly string[] {
   return [...new Set(
     Object.values(CLAUDE_LIFECYCLE_PROFILES)
-      .concat(
-        CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE,
-        CLAUDE_2_1_282_UNVERIFIED_LIFECYCLE_PROFILE
-      )
+      .concat(CLAUDE_UNVERIFIED_LIFECYCLE_PROFILE)
       .flatMap((profile) => profile.nativeStatusPanelFields)
   )];
 }

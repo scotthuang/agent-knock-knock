@@ -22,6 +22,19 @@ export async function runClaudeNativeCommand(file: string, args: string[], env?:
   const result = await execFile(file, args, { env, timeout: 10_000, maxBuffer: 2 * 1024 * 1024, encoding: "utf8" });
   return result.stdout;
 }
+/** Only an executable launch failure establishes that the configured reader is unavailable. */
+async function readClaudeNativeAgentOutput(configDir: string, options: ClaudeNativeDiscoveryOptions): Promise<string> {
+  const run = options.run ?? runClaudeNativeCommand;
+  try {
+    return await run(options.claudePath ?? "claude", ["agents", "--json", "--all"],
+      { ...process.env, CLAUDE_CONFIG_DIR: configDir });
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "EACCES") {
+      throw new ClaudeNativeError("claude_reader_unavailable", "The configured Claude reader could not be executed");
+    }
+    throw error;
+  }
+}
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ClaudeNativeError("invalid_registry", "Invalid native session metadata");
   return value as Record<string, unknown>;
@@ -80,13 +93,11 @@ export async function discoverClaudeNativeSessions(options: ClaudeNativeDiscover
   const errors: ClaudeNativeDiscoveryResult["errors"] = [], sessions: ClaudeNativeCatalogEntry[] = [];
   const configDirs = [...new Set(options.configDirs ?? [process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude")])];
   if ((options.platform ?? process.platform) !== "darwin") return { sessions, errors: [{ configDir: "", code: "unsupported_platform" }] };
-  const run = options.run ?? runClaudeNativeCommand;
   for (const configured of configDirs.slice(0, 16)) {
     let configDir = path.resolve(configured);
     try {
       configDir = await realpath(configDir);
-      const raw: unknown = JSON.parse(await run(options.claudePath ?? "claude", ["agents", "--json", "--all"],
-        { ...process.env, CLAUDE_CONFIG_DIR: configDir }));
+      const raw: unknown = JSON.parse(await readClaudeNativeAgentOutput(configDir, options));
       if (!Array.isArray(raw) || raw.length > 4096) throw new ClaudeNativeError("invalid_agent_list", "Invalid Claude agents list");
       for (const value of raw) {
         const row = record(value); if (row.kind !== "interactive") continue;

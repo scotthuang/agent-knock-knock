@@ -293,7 +293,9 @@ export function parseLsofCwdMap(output: string): Map<number, string> {
 export function runProcessCommand(command: string, args: string[]): ProcessCommandResult {
   const result = spawnSync(command, args, {
     encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10
+    maxBuffer: 1024 * 1024 * 10,
+    // Identity consumers interpret lstart in the host timezone; only fix its language.
+    env: { ...process.env, LC_ALL: "C" }
   });
   return {
     status: result.status,

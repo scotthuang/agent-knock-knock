@@ -838,10 +838,11 @@ test("Claude 2.1.285 observed native question keeps the proven numeric single di
   }
 });
 
-for (const version of ["2.1.266", "2.1.267", "2.1.285"] as const) {
+for (const version of ["2.1.266", "2.1.267", "2.1.285", "2.1.296", "3.0.0"] as const) {
   test(`Claude ${version} keeps the exact questionnaire state machine under a version-bound profile`, () => {
     const profile = claudeNativeQuestionnaireProfile(version);
-    assert.equal(profile, CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES[version]);
+    assert.equal(profile, CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES[version] ??
+      `claude-code/${version}/ask-user-question-generic-v1`);
     assert.notEqual(profile, NATIVE_QUESTIONNAIRE_PROFILES.claude);
 
     const choice = actionable(inspectNativeQuestionnaire({
@@ -874,39 +875,39 @@ for (const version of ["2.1.266", "2.1.267", "2.1.285"] as const) {
       screen: CLAUDE_SINGLE_SELECT
     }));
     assert.notEqual(choice.question.question_id, previous.question.question_id);
+    assert.notEqual(choice.prompt_evidence.sha256, previous.prompt_evidence.sha256);
   });
 }
 
-test("Claude 2.1.285 named-session bottom border cannot hide a native questionnaire", () => {
+test("Claude named-session bottom border is recognized by its exact UI shape", () => {
   const border = "─".repeat(121) + " AKK-CC285-compat ─";
-  for (const fixture of [CLAUDE_SINGLE_SELECT, CLAUDE_CUSTOM_TEXT_EDIT, CLAUDE_FINAL_REVIEW]) {
-    const plain = actionable(inspectNativeQuestionnaire({
-      agent: "claude", version: "2.1.285", screen: fixture
-    }));
-    const named = actionable(inspectNativeQuestionnaire({
-      agent: "claude", version: "2.1.285", screen: `${fixture.trimEnd()}\n${border}\n\n`
-    }));
-    assert.deepEqual(named.action_plan, plain.action_plan);
-    assert.deepEqual(named.question, plain.question);
-    assert.equal(named.prompt_evidence.sha256, plain.prompt_evidence.sha256,
-      "session display names are not question identity");
+  for (const version of ["2.1.267", "2.1.285", "2.1.296"]) {
+    for (const fixture of [CLAUDE_SINGLE_SELECT, CLAUDE_CUSTOM_TEXT_EDIT, CLAUDE_FINAL_REVIEW]) {
+      const plain = actionable(inspectNativeQuestionnaire({
+        agent: "claude", version, screen: fixture
+      }));
+      const named = actionable(inspectNativeQuestionnaire({
+        agent: "claude", version, screen: `${fixture.trimEnd()}\n${border}\n\n`
+      }));
+      assert.deepEqual(named.action_plan, plain.action_plan);
+      assert.deepEqual(named.question, plain.question);
+      assert.equal(named.prompt_evidence.sha256, plain.prompt_evidence.sha256,
+        "session display names are not question identity");
+    }
+    for (const changed of [
+      `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border}\nNew overlay owns input`,
+      `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border}\n${border}`,
+      `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border.slice(0, -2)}`,
+      `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${"─".repeat(8)} ${"x".repeat(129)} ─`,
+      `${CLAUDE_SINGLE_SELECT.trimEnd().replace("Esc to cancel", "Esc to close")}\n${border}`,
+      `${CLAUDE_SINGLE_SELECT.trimEnd().replace("  2. Blue", "  3. Blue")}\n${border}`,
+      `${CLAUDE_SINGLE_SELECT.trimEnd().replace("❯ 1. Red", "  1. Red")}\n${border}`
+    ]) {
+      assert.notEqual(inspectNativeQuestionnaire({
+        agent: "claude", version, screen: changed
+      }).status, "actionable");
+    }
   }
-  for (const changed of [
-    `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border}\nNew overlay owns input`,
-    `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border}\n${border}`,
-    `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border.slice(0, -2)}`,
-    `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${"─".repeat(8)} ${"x".repeat(129)} ─`,
-    `${CLAUDE_SINGLE_SELECT.trimEnd().replace("Esc to cancel", "Esc to close")}\n${border}`,
-    `${CLAUDE_SINGLE_SELECT.trimEnd().replace("  2. Blue", "  3. Blue")}\n${border}`,
-    `${CLAUDE_SINGLE_SELECT.trimEnd().replace("❯ 1. Red", "  1. Red")}\n${border}`
-  ]) {
-    assert.notEqual(inspectNativeQuestionnaire({
-      agent: "claude", version: "2.1.285", screen: changed
-    }).status, "actionable");
-  }
-  assert.notEqual(inspectNativeQuestionnaire({
-    agent: "claude", version: "2.1.267", screen: `${CLAUDE_SINGLE_SELECT.trimEnd()}\n${border}`
-  }).status, "actionable");
 });
 
 test("Claude exact multi-select is detected but mutation fails closed", () => {
@@ -1009,26 +1010,31 @@ test("Claude custom-text edit keeps explicit and visible secret input manual", (
   assert.deepEqual(visibleSecret.action_plan, { kind: "manual_only" });
 });
 
-test("Claude selection rejects changed footer, frame, numbering, and cursor state", () => {
-  for (const changed of [
-    CLAUDE_SINGLE_SELECT.replace("Esc to cancel", "Esc to close"),
-    CLAUDE_SINGLE_SELECT.replace("────────────────────────────────", "--------"),
-    CLAUDE_SINGLE_SELECT.replace("  2. Blue", "  3. Blue"),
-    CLAUDE_SINGLE_SELECT.replace("❯ 1. Red", "  1. Red")
-  ]) {
-    assert.equal(manual(inspectNativeQuestionnaire({
-      agent: "claude",
-      version: "2.1.263",
-      screen: changed
-    })).reason, "changed_shape");
+test("Claude selection rejects changed footer, frame, numbering, and cursor state even on untested versions", () => {
+  for (const version of ["2.1.263", "2.1.296"]) {
+    for (const changed of [
+      CLAUDE_SINGLE_SELECT.replace("Esc to cancel", "Esc to close"),
+      CLAUDE_SINGLE_SELECT.replace("────────────────────────────────", "--------"),
+      CLAUDE_SINGLE_SELECT.replace("  2. Blue", "  3. Blue"),
+      CLAUDE_SINGLE_SELECT.replace("❯ 1. Red", "  1. Red"),
+      CLAUDE_SINGLE_SELECT.replace("Which color", "\u0000Which color")
+    ]) {
+      assert.equal(manual(inspectNativeQuestionnaire({
+        agent: "claude",
+        version,
+        screen: changed
+      })).reason, "changed_shape");
+    }
   }
 });
 
-test("Claude unsupported versions and secret questions fail closed", () => {
+test("Claude invalid versions and secret questions fail closed", () => {
   for (const version of [
-    "2.1.264",
-    "2.1.265",
-    "2.1.268",
+    "",
+    "2.1",
+    "02.1.296",
+    "2.1.296-preview",
+    "v2.1.296",
     "constructor",
     "toString",
     "__proto__"
@@ -1041,15 +1047,21 @@ test("Claude unsupported versions and secret questions fail closed", () => {
     assert.equal(claudeNativeQuestionnaireProfile(version), undefined);
   }
 
-  const secret = CLAUDE_SINGLE_SELECT.replace(
-    "Which color do you prefer?",
-    "Which API key should be used?"
-  );
-  assert.equal(manual(inspectNativeQuestionnaire({
-    agent: "claude",
-    version: "2.1.263",
-    screen: secret
-  })).reason, "secret_input");
+  for (const version of ["2.1.263", "2.1.296"]) {
+    for (const screen of [CLAUDE_SINGLE_SELECT, CLAUDE_CUSTOM_TEXT_EDIT, CLAUDE_FINAL_REVIEW]) {
+      const secret = screen.replace("Which color do you prefer?", "Which API key should be used?");
+      const parsed = manual(inspectNativeQuestionnaire({ agent: "claude", version, screen: secret }));
+      assert.equal(parsed.reason, "secret_input");
+      assert.deepEqual(parsed.action_plan, { kind: "manual_only" });
+      assert.equal(manual(inspectNativeQuestionnaire({ agent: "claude", version, screen, secret: true })).reason,
+        "secret_input");
+    }
+  }
+  const multi = manual(inspectNativeQuestionnaire({
+    agent: "claude", version: "2.1.296", screen: CLAUDE_MULTI_SELECT
+  }));
+  assert.equal(multi.reason, "unsupported_multi_select");
+  assert.deepEqual(multi.action_plan, { kind: "manual_only" });
 });
 
 test("ANSI is stripped before exact evidence and unrelated Claude text stays absent", () => {
