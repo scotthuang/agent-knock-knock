@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "defdca588782ab9feee61b1537336cd910e30858",
-  "asset": "scotthuang-agent-knock-knock-0.15.0.tgz",
-  "sha256": "d5423bb8ffcd7930e1baee7f6f960820f3efe92d798c01f261737e9d36017d64",
-  "bytes": 3844622,
-  "changelog": "Support standard Claude Code and configured wrappers such as tclaude with exact native identity, successful Stop-hook completion evidence and compatible runtime contracts. Prefer managed terminals for ordinary new Claude Sends, retain native inbox delivery when no controllable counterpart exists, and preserve explicit physical-terminal draft replacement/handoff. Keep original task routes, input authority and uncertain-send protections. Claude permission-mode switching and native peer approval/question responses remain unavailable. Coordinate Pi 0.1.0-poc.7 and DeepSeek Harness 0.1.0-rc.10, pinned to core 0.15.0 on next."
+  "commit": "a5fb36461600c96ea3a1f28dc777f8e478a84099",
+  "asset": "scotthuang-agent-knock-knock-0.16.0.tgz",
+  "sha256": "3629c6eeb4ad458581aa70a4671566cb648bea3db5119c811c86149a228dc3b2",
+  "bytes": 3881272,
+  "changelog": "Recover settled native-thread Store authority through verified owner/process identity and a durable transfer journal without terminal input or replaying old callbacks. Preserve per-call agent configuration during recovery checks. Remove the generic 90-second text-submission relay deadline while retaining transport/acceptance deadlines, explicit timeouts and Host cancellation. Store writer protocol 11, action contract 33 and List projection v4 retain identity and approval boundaries. Coordinate Pi 0.1.0-poc.8 and DeepSeek Harness 0.1.0-rc.11 with exact core 0.16.0 pins on next."
 }
