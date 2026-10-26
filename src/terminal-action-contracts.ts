@@ -10,7 +10,7 @@ export const TERMINAL_WATCH_ACTION_USE =
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 32,
+    version: 33,
     instructions: actionContractInstructions(),
     field_semantics: actionFieldSemantics(),
     actions: terminalActionCatalog()
@@ -47,7 +47,9 @@ function actionContractInstructions() {
         "owns input; parsed working activity and Codex rollout ambiguity do not veto " +
         "it; Composer visibility, stability, exactness, or existing draft contents do " +
         "not veto it; and AKK Turn, Session, deferred-transfer, transition, ledger, " +
-        "and Store health are not eligibility vetoes. Codex clears the current " +
+        "and Store health are not eligibility vetoes. A native thread owned by another " +
+        "Store is a separate authority fence: use only its displayed transfer_store_authority " +
+        "recovery, or the advertised automatic transfer before an eligible managed Send. Codex clears the current " +
         "Composer once with C-u; Claude Code uses a sentinel-backed native C-s " +
         "stash-clear transaction that is independent of the cursor position and does " +
         "not interrupt an active turn, then proves the main Composer empty. Each then " +
@@ -604,6 +606,20 @@ function terminalActionCatalog() {
         requires_user_intent: true,
         effect:
           "Detach one exactly listed conflicting Session binding without adopting the live replacement thread."
+      },
+      transfer_store_authority: {
+        tool: "agent_knock_knock_reconcile_binding",
+        operation: "transfer_store_authority",
+        target_argument: "terminal_id",
+        required: ["operation", "terminal_id"],
+        optional: ["maintenance_acknowledgement"],
+        creates_turn: false,
+        sends_terminal_input: false,
+        requires_user_intent: true,
+        candidate_source: "available_actions.transfer_store_authority",
+        effect: "Transfer settled native-thread Store authority under the shared terminal lock. " +
+          "Legacy owners require explicit acknowledgement that every previous Host or writer is stopped. " +
+          "A resolved dispatch alone does not release its Session authority."
       },
       respond: {
         tool: "agent_knock_knock_respond",

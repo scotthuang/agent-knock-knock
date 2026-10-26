@@ -20,6 +20,16 @@ import {
   type TerminalEndpointRef,
   type TerminalProviderTextOptions
 } from "../support/terminal-agent-bridge-contract-support.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createHash } from "node:crypto";
+import { createClaudeTerminalAgentAdapter } from
+  "../../src/claude-terminal-agent-adapter.js";
+import {
+  captureClaudeTranscriptAnchor,
+  detectClaudeTranscriptAcceptance
+} from "../../src/claude-local-transcript-provider.js";
 import {
   CLAUDE_DRAFT_REPLACEMENT_SENTINEL,
   TerminalUserExplicitClearUncertainError
@@ -1616,51 +1626,143 @@ test("managed user Send recaptures exact empty immediately before text", async (
     );
   });
 
-  await t.test("exact-empty Claude manual mode proceeds once", async () => {
-    const divider = "────────────────────────────────────────────────";
-    const idleFooter = "  ⏸ manual mode on · ? for shortcuts · ← for agents";
-    const injectedFooter = "  ⏸ manual mode on";
-    class ManualModeClaudeProvider extends RecordingTerminalProvider {
-      override async sendText(
-        target: TerminalEndpointRef | string,
-        text: string,
-        options: TerminalProviderTextOptions = {}
-      ): Promise<void> {
-        await super.sendText(target, text, options);
-        this.setScreen(
-          target,
-          [divider, `❯ ${text}`, divider, injectedFooter].join("\n")
+  await t.test("Claude default permission mode submits once and proves native acceptance", async (t) => {
+    for (const userExplicitEnterAfterTextWithoutComposerVeto of [false, true]) {
+      await t.test(userExplicitEnterAfterTextWithoutComposerVeto
+        ? "managed explicit Enter" : "strict Composer proof", async (t) => {
+        const divider = "────────────────────────────────────────────────";
+        const idleFooter = "  ⏸ manual mode on";
+        const injectedFooter = "  ⏸ manual mode on";
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-manual-send-"));
+        t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+        const claudeHome = path.join(root, ".claude");
+        const workspace = path.join(root, "workspace");
+        const sessionId = "11111111-1111-4111-8111-111111111111";
+        const promptUuid = "22222222-2222-4222-8222-222222222222";
+        const startedAt = "2026-10-26T06:03:45.000Z";
+        const acceptedAt = "2026-10-26T06:03:46.000Z";
+        const projectDirectory = path.join(
+          claudeHome, "projects", workspace.replace(/[^A-Za-z0-9]/gu, "-")
         );
-      }
+        const transcriptPath = path.join(projectDirectory, `${sessionId}.jsonl`);
+        fs.mkdirSync(projectDirectory, { recursive: true, mode: 0o700 });
+        fs.mkdirSync(workspace);
+        fs.writeFileSync(transcriptPath, JSON.stringify({
+          type: "permission-mode", permissionMode: "default", sessionId
+        }) + "\n", { mode: 0o600 });
+        const agentRows = [{
+          pid: MANAGED_CLAUDE_RUNTIME.pid,
+          cwd: workspace,
+          kind: "interactive",
+          sessionId,
+          startedAt: Date.parse("2026-10-23T07:00:00.000Z"),
+          status: "idle"
+        }];
+        const anchor = captureClaudeTranscriptAnchor({
+          sessionId, cwd: workspace, pid: MANAGED_CLAUDE_RUNTIME.pid,
+          claudeHome, agentRows, now: new Date(startedAt)
+        });
+        assert.ok(anchor);
+        const requestHash = createHash("sha256").update(request).digest("hex");
+        const detectAcceptance = () => detectClaudeTranscriptAcceptance({
+          sessionId, cwd: workspace, requestText: request, requestHash, startedAt,
+          context: {
+            pid: MANAGED_CLAUDE_RUNTIME.pid,
+            sessionId,
+            nativeTakeover: { claude_transcript_anchor: anchor }
+          }
+        }, { claudeHome, agentRows });
+        assert.equal(detectAcceptance(), undefined);
+        class ManualModeClaudeProvider extends RecordingTerminalProvider {
+          private injectedText: string | undefined;
+
+          override async sendText(
+            target: TerminalEndpointRef | string,
+            text: string,
+            options: TerminalProviderTextOptions = {}
+          ): Promise<void> {
+            await super.sendText(target, text, options);
+            this.injectedText = text;
+            this.setScreen(
+              target,
+              [divider, `❯ ${text}`, divider, injectedFooter].join("\n")
+            );
+            assert.equal(detectAcceptance(), undefined,
+              "text in the manual Composer is not native acceptance");
+          }
+
+          override async sendKeys(
+            target: TerminalEndpointRef | string,
+            keys: readonly string[],
+            options: { socketPath?: string } = {}
+          ): Promise<void> {
+            await super.sendKeys(target, keys, options);
+            if (!keys.includes("C-m")) return;
+            assert.equal(this.injectedText, request);
+            fs.appendFileSync(transcriptPath, JSON.stringify({
+              type: "user",
+              uuid: promptUuid,
+              parentUuid: null,
+              isSidechain: false,
+              entrypoint: "cli",
+              timestamp: acceptedAt,
+              sessionId,
+              cwd: workspace,
+              version: "2.1.295",
+              permissionMode: "default",
+              message: { role: "user", content: this.injectedText }
+            }) + "\n");
+            agentRows[0].status = "working";
+          }
+        }
+        const provider = new ManualModeClaudeProvider([{ ...PANE, currentPath: workspace }], {
+          [PANE.target]: [divider, "❯ ", divider, idleFooter].join("\n")
+        });
+        const adapter = createClaudeTerminalAgentAdapter({ agentRows });
+        const bridge = createBridge(adapter, provider);
+        const stages: string[] = [];
+
+        const result = await bridge.send(
+          "claude",
+          { ...terminalControl(adapter), currentPath: workspace },
+          request,
+          {
+            runtime: { ...MANAGED_CLAUDE_RUNTIME, cwd: workspace, agentVersion: "2.1.295" },
+            requireExactEmptyComposerBeforeText: true,
+            requireExactComposerBeforeEnter: true,
+            userExplicitEnterAfterTextWithoutComposerVeto,
+            beforeEnter() {
+              assert.equal(detectAcceptance(), undefined,
+                "acceptance requires the native root user row after Enter");
+            },
+            onTransportStage({ stage }) {
+              stages.push(stage);
+            }
+          }
+        );
+
+        assert.equal(result.stage, "enter_dispatched");
+        assert.deepEqual(stages, ["text_injected", "enter_dispatched"]);
+        assert.deepEqual(
+          provider.operations.flatMap((operation) =>
+            operation.kind === "capture"
+              ? []
+              : operation.kind === "text"
+                ? ["text"]
+                : [`keys:${operation.keys.join(",")}`]
+          ),
+          ["text", "keys:C-m"]
+        );
+        const acceptance = detectAcceptance();
+        assert.ok(acceptance);
+        assert.equal(acceptance.source, "claude_transcript");
+        assert.equal(acceptance.kind, "native_user_turn");
+        assert.equal(acceptance.nativeThreadId, sessionId);
+        assert.equal(acceptance.acceptanceId, promptUuid);
+        assert.equal(acceptance.requestHash, requestHash);
+        assert.equal(acceptance.acceptedAt, acceptedAt);
+      });
     }
-    const provider = new ManualModeClaudeProvider([PANE], {
-      [PANE.target]: [divider, "❯ ", divider, idleFooter].join("\n")
-    });
-    const adapter = createTestClaudeAdapter();
-    const bridge = createBridge(adapter, provider);
-
-    const result = await bridge.send(
-      "claude",
-      terminalControl(adapter),
-      request,
-      {
-        runtime: MANAGED_CLAUDE_RUNTIME,
-        requireExactEmptyComposerBeforeText: true,
-        requireExactComposerBeforeEnter: true
-      }
-    );
-
-    assert.equal(result.stage, "enter_dispatched");
-    assert.deepEqual(
-      provider.operations.flatMap((operation) =>
-        operation.kind === "capture"
-          ? []
-          : operation.kind === "text"
-            ? ["text"]
-            : [`keys:${operation.keys.join(",")}`]
-      ),
-      ["text", "keys:C-m"]
-    );
   });
 
   await t.test(

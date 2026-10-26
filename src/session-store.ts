@@ -202,6 +202,9 @@ export function saveManagedSession(
       );
     }
     if (current) {
+      if (current.authority_transfer) {
+        throw new Error(`managed Session ${state.session_id} retired by Store authority transfer ${current.authority_transfer.transfer_id}; refresh AKK list in the destination Store`);
+      }
       assertImmutableSessionFields(current, state);
       assertSafeBindingReplacement(current, state);
     }
@@ -471,7 +474,8 @@ function assertImmutableSessionFields(
     ["agent", current.agent, candidate.agent],
     ["workspace", current.workspace, candidate.workspace],
     ["created_at", current.created_at, candidate.created_at],
-    ["lineage", current.lineage, candidate.lineage]
+    ["lineage", current.lineage, candidate.lineage],
+    ["authority_received", current.authority_received, candidate.authority_received]
   ];
   const changed = immutablePairs.find(([, left, right]) =>
     JSON.stringify(left) !== JSON.stringify(right)

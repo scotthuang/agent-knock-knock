@@ -59,6 +59,64 @@ function harness(t: TestContext, pluginConfig: Record<string, unknown> = {}) {
 }
 const argument = (args: string[], flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
 
+test("shared recovery tool refreshes Store transfer authority and requires a separate legacy maintenance confirmation", async t => {
+  const h = harness(t, { claudeHome: "/fixture/.tclaude" });
+  const target = "terminal:v2:tmux:claude:transfer:0.0:1234";
+  const params = { operation: "transfer_store_authority", terminal_id: target };
+  const publish = (token: string, legacy = false) => h.reply({ __byCommand: {
+    list: { terminals: [{ id: target, agent: "claude", available_actions: {
+      reconcile_binding: { tool: "agent_knock_knock_reconcile_binding", arguments: {
+        terminal_id: target, conflicting_session_id: "session-old", expected_session_revision: 7,
+        expected_binding_token: "binding-private", expected_terminal_token: "terminal-private"
+      } },
+      transfer_store_authority: { tool: "agent_knock_knock_reconcile_binding",
+        arguments: { ...params, expected_authority_token: token },
+        ...(legacy ? { missing_required: ["maintenance_acknowledgement"] } : {}) }
+    } }] },
+    "transfer-store-authority": { status: "transferred", terminal_id: target, terminal_input_sent: false, turn_created: false },
+    "reconcile-binding": { status: "reconciled", terminal_id: target, terminal_input_sent: false, turn_created: false }
+  } });
+  const transfers = () => h.calls().filter(args => args[0] === "transfer-store-authority");
+  publish("first-private-authority");
+  await assert.rejects(h.execute("reconcile_binding", params), /current action shown/u);
+  await assert.rejects(h.execute("reconcile_binding", { ...params, expected_authority_token: "first-private-authority" }), /semantic fields/u);
+  await h.execute("list", {});
+  await h.execute("reconcile_binding", { terminal_id: target, conflicting_session_id: "session-old" });
+  const detached = h.calls().find(args => args[0] === "reconcile-binding")!;
+  assert.equal(argument(detached, "--expected-session-revision"), "7");
+  assert.equal(argument(detached, "--expected-binding-token"), "binding-private");
+  const transferred = await h.execute("reconcile_binding", params);
+  assert.equal(transferred.details.status, "transferred");
+  assert.equal(transferred.details.terminal_input_sent, false);
+  assert.equal(transferred.details.turn_created, false);
+  assert.equal(argument(transfers()[0], "--expected-authority-token"), "first-private-authority");
+  assert.equal(argument(transfers()[0], "--terminal"), target);
+  assert.equal(argument(transfers()[0], "--claude-home"), "/fixture/.tclaude");
+  assert.equal(transfers()[0].includes("--maintenance-acknowledgement"), false);
+  await assert.rejects(h.execute("reconcile_binding", params), /current action shown/u);
+
+  await h.execute("list", {});
+  publish("changed-private-authority");
+  await assert.rejects(h.execute("reconcile_binding", params), /authority changed after it was shown/u);
+  assert.equal(transfers().length, 1, "stale private authority cannot reach the transfer CLI");
+  await h.execute("list", {});
+  publish("changed-private-authority", true);
+  await assert.rejects(h.execute("reconcile_binding", { ...params, maintenance_acknowledgement: true }),
+    /authority changed after it was shown/u);
+  assert.equal(transfers().length, 1, "a changed maintenance requirement also invalidates the displayed offer");
+
+  publish("legacy-private-authority", true);
+  const listed = await h.execute("list", {});
+  assert.doesNotMatch(JSON.stringify(listed), /legacy-private-authority/u);
+  await assert.rejects(h.execute("reconcile_binding", params), /maintenance_acknowledgement.*stopping every associated Host/u);
+  assert.equal(transfers().length, 1);
+  await h.execute("list", {});
+  await h.execute("reconcile_binding", { ...params, maintenance_acknowledgement: true });
+  assert.equal(transfers().length, 2);
+  assert.equal(argument(transfers()[1], "--expected-authority-token"), "legacy-private-authority");
+  assert.equal(transfers()[1].includes("--maintenance-acknowledgement"), true);
+});
+
 test("default Host List Send consumes projected authority without claiming an unresolved backend alias", async t => {
   const fixture = createFixture(t);
   const codexHome = path.join(fixture.terminal.cwd, ".codex");

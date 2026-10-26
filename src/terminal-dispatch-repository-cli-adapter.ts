@@ -36,6 +36,7 @@ import {
   type TerminalDispatchLedgerDocument
 } from "./terminal-dispatch-ledger-codec.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
+import { stampNativeStoreAuthority } from "./native-store-authority-ledger.js";
 
 export interface TerminalDispatchResolveRequest {
   conversation: Readonly<{ conversation_id: string }>;
@@ -56,7 +57,8 @@ export interface TerminalDispatchRepositoryCliAdapter {
   ): TerminalDispatchLedgerDocument | undefined;
   save(
     terminalControl: TerminalControlRef,
-    ledger: TerminalDispatchLedgerDocument
+    ledger: TerminalDispatchLedgerDocument,
+    options?: { authorityTransfer: true }
   ): void;
   restore(input: {
     terminalControl: TerminalControlRef;
@@ -603,7 +605,8 @@ export function createTerminalDispatchRepositoryCliAdapter(
 
   function save(
     terminalControl: TerminalControlRef,
-    ledger: TerminalDispatchLedgerDocument
+    ledger: TerminalDispatchLedgerDocument,
+    options?: { authorityTransfer: true }
   ): void {
     const selection = selectLedger(terminalControl);
     const selected = selection.selected;
@@ -616,7 +619,7 @@ export function createTerminalDispatchRepositoryCliAdapter(
       hasCanonicalTerminalEndpoint(terminalControl) && !preserveLegacyFormat;
     const nextLedger = constructTerminalDispatchLedgerDocument({
       previousLedger,
-      incomingLedger: ledger,
+      incomingLedger: stampNativeStoreAuthority(previousLedger, ledger, options?.authorityTransfer === true),
       version: useCanonicalFormat ? 2 : 1,
       terminalKey: preserveLegacyFormat
         ? legacyRuntimeKey(terminalControl)

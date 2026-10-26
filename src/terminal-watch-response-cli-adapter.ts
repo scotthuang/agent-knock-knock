@@ -47,6 +47,8 @@ import {
   sha256
 } from "./terminal-watch-terminal-identity.js";
 import { terminalWatchResponseDecision } from "./terminal-watch-response-authority.js";
+import { assertNativeStoreAuthorityCurrent } from "./native-store-authority.js";
+import { createTerminalDispatchRepositoryCliAdapter } from "./terminal-dispatch-repository-cli-adapter.js";
 
 export function createTerminalWatchInteractionResponder(
   dependencies: TerminalWatchCliDependencies,
@@ -108,6 +110,13 @@ export function createTerminalWatchInteractionResponder(
       terminalControl
     );
     try {
+      assertNativeStoreAuthorityCurrent({
+        ledger: createTerminalDispatchRepositoryCliAdapter().load(terminalControl),
+        terminalControl,
+        nativeThreadId: typeof exact.rawTerminal.native_agent_session_id === "string"
+          ? exact.rawTerminal.native_agent_session_id : undefined,
+        storeDir
+      });
       const withWriterLease = dependencies.withStoreWriterLeaseAsync ??
         (async <Result>(
           _storeDir: string,

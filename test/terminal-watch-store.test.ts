@@ -62,7 +62,7 @@ import {
 } from "../src/terminal-submission-acceptance.js";
 import { terminalControlEvidence } from "../src/terminal-control-ref.js";
 import { sameManualWatchTarget } from "../src/terminal-watch-terminal-identity.js";
-import { ensureStoreWritable, inspectStoreCompatibility, storeManifestPath } from "../src/store.js";
+import { STORE_WRITER_PROTOCOL, ensureStoreWritable, inspectStoreCompatibility, storeManifestPath } from "../src/store.js";
 
 const THREAD_ID = "11111111-1111-4111-8111-111111111111";
 const TASK_ID = "22222222-2222-4222-8222-222222222222";
@@ -493,7 +493,7 @@ test("protocol 8 upgrades to the capability-aware writer without rewriting an ex
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, writer_protocol: 8 }));
   assert.equal(inspectStoreCompatibility(storeDir).status, "upgradeable");
-  assert.equal(ensureStoreWritable(storeDir).writer_protocol, 10);
+  assert.equal(ensureStoreWritable(storeDir).writer_protocol, STORE_WRITER_PROTOCOL);
   assert.deepEqual(fs.readFileSync(statePath), original);
   assert.deepEqual(loadTerminalWatch(storeDir, saved.watch_id), saved);
 });

@@ -48,6 +48,7 @@ test("public Host adapter registers metadata once and isolates exact owners", as
   fs.writeFileSync(relayPath, `
 process.stdout.write(JSON.stringify({
   controller: process.env.AKK_TEST_CONTROLLER,
+  store_owner: JSON.parse(process.env.AKK_STORE_OWNER_HOST_IDENTITY),
   argv: process.argv.slice(2)
 }));
 `, "utf8");
@@ -100,6 +101,11 @@ process.stdout.write(JSON.stringify({
   ]);
   assert.equal(detail(resultA).controller, "controller-a");
   assert.equal(detail(resultB).controller, "controller-b");
+  const firstStoreOwner = detail(resultA).store_owner as Record<string, unknown>;
+  const secondStoreOwner = detail(resultB).store_owner as Record<string, unknown>;
+  assert.equal(firstStoreOwner.pid, process.pid, "the embedding Host owns the Store, not its CLI child");
+  assert.equal(firstStoreOwner.owner_scope, "host");
+  assert.equal(secondStoreOwner.instance_nonce, firstStoreOwner.instance_nonce);
   assert.notEqual(
     argumentValue(detail(resultA).argv, "--message-id"),
     argumentValue(detail(resultB).argv, "--message-id")
@@ -260,7 +266,8 @@ test("public Host adapter owns one shared monitor lifecycle", async (t) => {
 import fs from "node:fs";
 fs.appendFileSync(
   process.env.AKK_TEST_LOG,
-  process.argv[2] + ":" + process.env.AKK_TEST_VALUE + "\\n"
+  JSON.stringify({command: process.argv[2], value: process.env.AKK_TEST_VALUE,
+    owner: JSON.parse(process.env.AKK_STORE_OWNER_HOST_IDENTITY)}) + "\\n"
 );
 process.stdout.write("{}");
 `, "utf8");
@@ -279,8 +286,9 @@ process.stdout.write("{}");
 
   adapter.lifecycle.start();
   await adapter.lifecycle.stop();
+  const lifecycleCalls = fs.readFileSync(logPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
   assert.deepEqual(
-    fs.readFileSync(logPath, "utf8").trim().split("\n"),
+    lifecycleCalls.map(call => `${call.command}:${call.value}`),
     [
       "reconcile-monitors:lifecycle-original",
       "reconcile-watches:lifecycle-original",
@@ -290,6 +298,8 @@ process.stdout.write("{}");
       "prune-watch-history:lifecycle-original"
     ]
   );
+  assert.ok(lifecycleCalls.every(call => call.owner.pid === process.pid && call.owner.owner_scope === "host"));
+  assert.equal(new Set(lifecycleCalls.map(call => call.owner.instance_nonce)).size, 1);
 });
 
 test("the packed public subpath resolves to the stable Host adapter facade", async () => {
@@ -341,14 +351,15 @@ function logger() {
 
 function detail(result: { readonly details?: unknown }): {
   controller: string;
+  store_owner: Record<string, unknown>;
   argv: string[];
 } {
   assert.ok(result.details && typeof result.details === "object");
-  const value = result.details as { controller?: unknown; argv?: unknown };
+  const value = result.details as { controller?: unknown; argv?: unknown; store_owner?: unknown };
   assert.equal(typeof value.controller, "string");
   assert.ok(Array.isArray(value.argv));
   assert.ok(value.argv.every((item) => typeof item === "string"));
-  return value as { controller: string; argv: string[] };
+  return value as { controller: string; argv: string[]; store_owner: Record<string, unknown> };
 }
 
 function argumentValue(argv: readonly string[], name: string): string {

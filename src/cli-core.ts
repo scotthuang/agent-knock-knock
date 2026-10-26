@@ -1,4 +1,5 @@
 import { runWatchHistoryMaintenanceForCli } from "./watch-history-maintenance-cli-adapter.js";
+import { recoverNativeStoreAuthorityForCli, runNativeStoreAuthorityTransferCli } from "./native-store-authority-cli-adapter.js";
 import { runWatchList } from "./watch-list-cli-adapter.js";
 import { usage } from "./cli-usage.js";
 import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES } from "./monitor-deadline-policy.js";
@@ -250,6 +251,7 @@ const {
 } = createTerminalMutationCliRuntime({
   acquireFileLock,
   acquireTerminalBridgeSendLock,
+  beforeStoreWriter: (storeDir, terminalControl) => recoverNativeStoreAuthorityForCli({ storeDir, terminalControl }, { createBridge: createTerminalAgentBridge, identity: resolveCurrentNativeAgentSessionIdentity, repository: terminalDispatchRepository }),
   terminalBridgeRuntimeKey, withStoreWriterLeaseAsync
 });
 const loadTerminalBridgeDispatchLedger = terminalDispatchRepository.load;
@@ -411,7 +413,7 @@ const STORE_MUTATION_COMMANDS = new Set([
   "new-thread",
   "clear-thread",
   "resume-thread",
-  "reconcile-binding"
+  "reconcile-binding", "transfer-store-authority"
 ]);
 
 export type CliCommandOptions = Record<string, unknown>;
@@ -485,7 +487,7 @@ async function conversationTerminals(commandName: string | undefined, request: C
     return observation.state === "available" ? [withConversationSendAuthority(observation.rawTerminal, observation.terminal)] : [];
   }
   return terminalListCliFacade.buildTerminalListGroup({ options: request, terminalId, agentFilter,
-    includeManagedActions: agentFilter === "claude" && ["send", "status", "native-status", "native-inspect"].includes(commandName ?? "")
+    includeManagedActions: ["send", "status", "native-status", "native-inspect", "set-permissions", "approve", "respond-interaction"].includes(commandName ?? "")
   }).then(scan => scan.terminalControlled);
 }
 
@@ -1164,10 +1166,8 @@ const nativeThreadLifecycleFacade = Object.freeze({
   ...nativeThreadLifecycleQueryFacade, ...nativeThreadTransitionApplication
 });
 const runListResumableThreads = nativeThreadLifecycleFacade.runList;
-const nativeInspectionCommands: Readonly<Record<
-  string,
-  typeof nativeThreadLifecycleFacade.runInspect
->> = Object.freeze({
+const nativeInspectionCommands: Readonly<Record<string, typeof nativeThreadLifecycleFacade.runInspect>> = Object.freeze({
+  "transfer-store-authority": (options) => runNativeStoreAuthorityTransferCli(options, { storeDir: storeDirFromOptions, createBridge: createTerminalAgentBridge, identity: resolveCurrentNativeAgentSessionIdentity, repository: terminalDispatchRepository }),
   "native-inspect": nativeThreadLifecycleFacade.runInspect,
   "native-status": nativeThreadLifecycleFacade.runInspect,
   "identify-foreground": nativeThreadLifecycleFacade.runIdentifyForeground,

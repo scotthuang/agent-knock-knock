@@ -338,6 +338,7 @@ async function runTerminalControlStatus(
     store: inspectStoreCompatibility(storeDir),
     reconciliation,
     ...context,
+    ...terminalListObservation?.storeAuthorityProjection,
     terminal_control: terminalConversation.terminalControl,
     terminal_status: terminalStatus,
     terminal_screen: terminalStatus.screen,

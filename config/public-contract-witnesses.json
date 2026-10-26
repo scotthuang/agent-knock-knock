@@ -32,6 +32,7 @@
         "set-permissions",
         "resume-thread",
         "reconcile-binding",
+        "transfer-store-authority",
         "respond",
         "respond-interaction",
         "approve",
@@ -107,7 +108,7 @@
       ]
     },
     "list_action": {
-      "version": 32,
+      "version": 33,
       "actions": [
         "send",
         "retry_submission",
@@ -125,6 +126,7 @@
         "identify_and_send",
         "resume_thread",
         "reconcile_binding",
+        "transfer_store_authority",
         "respond",
         "respond_interaction",
         "status",
@@ -139,7 +141,7 @@
         "src/terminal-list-renderer.ts"
       ],
       "witnesses": [
-        "action-v32-unit",
+        "action-v33-unit",
         "management-list-in-process",
         "openclaw-plugin-boundary"
       ]
@@ -207,7 +209,7 @@
     },
     "store_protocols": {
       "format_version": 1,
-      "current_writer_protocol": 10,
+      "current_writer_protocol": 11,
       "session_authority_protocol": 3,
       "terminal_watch_schema": "agent-knock-knock/terminal-watch",
       "terminal_watch_version": 3,
@@ -220,7 +222,8 @@
         6,
         7,
         8,
-        9
+        9,
+        10
       ],
       "authority_paths": [
         "src/session-store.ts",
@@ -267,6 +270,10 @@
         {
           "protocol": 10,
           "witness": "store-protocol-10-boundary"
+        },
+        {
+          "protocol": 11,
+          "witness": "store-protocol-11-boundary"
         }
       ],
       "witnesses": [
@@ -277,10 +284,10 @@
   },
   "witnesses": [
     {
-      "id": "action-v32-unit",
+      "id": "action-v33-unit",
       "path": "test/terminal-list-renderer.test.ts",
       "tier": "fast",
-      "needle": "the public action contract v32 exposes semantic arguments only"
+      "needle": "the public action contract v33 exposes semantic arguments only"
     },
     {
       "id": "callback-cli-boundary",
@@ -661,6 +668,12 @@
       "needle": "writer protocol upgrade fences predecessor writers without changing records, deadlines or callback receipts"
     },
     {
+      "id": "store-protocol-11-boundary",
+      "path": "test/native-store-authority-transfer.test.ts",
+      "tier": "fast",
+      "needle": "legacy authority needs acknowledgement, upgrades the writer fence and retires the source irreversibly"
+    },
+    {
       "id": "store-protocol-2-boundary",
       "path": "test/store.test.ts",
       "tier": "integration",
@@ -947,13 +960,13 @@
     },
     {
       "id": "terminal-list-renderer",
-      "invariant": "The imported command service and pure renderer preserve action-contract v32 ordering, semantic model-facing arguments including status-bound blocking and asynchronous interaction responses with explicit delivery modes, exact model-option discovery, exact one-shot Codex model-control residue repair, and set-model offers, explicit foreground identification, version compatibility warnings without version-based action vetoes, agent-neutral user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, proven input-owner suppression, best-effort exact fallback Watch callbacks that never revoke Send, independent screen/native-identity/durable-activity evidence, managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
+      "invariant": "The imported command service and pure renderer preserve action-contract v33 ordering, semantic model-facing arguments including status-bound blocking and asynchronous interaction responses with explicit delivery modes, exact model-option discovery, exact one-shot Codex model-control residue repair, and set-model offers, explicit foreground identification, version compatibility warnings without version-based action vetoes, agent-neutral user-priority replace-current-Composer delivery without visibility/exactness or post-text Composer vetoes, proven input-owner suppression, best-effort exact fallback Watch callbacks that never revoke Send, independent screen/native-identity/durable-activity evidence, managed pre-input boundaries, private freshness authority, Terminal Watch authority, ambiguity failures, and read-only projection for CLI and OpenClaw.",
       "old_executable_witnesses": [
         "management-list-in-process",
         "session-selector-in-process"
       ],
       "service_invariant_witnesses": [
-        "action-v32-unit"
+        "action-v33-unit"
       ],
       "retained_boundary_witnesses": [
         "codex-binding-boundary",

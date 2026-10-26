@@ -107,11 +107,11 @@ test("final refactor evidence reproduces startup counts and historical selection
 
   assert.deepEqual(evidence.publicContracts, {
     contractCount: 5,
-    witnessCount: 80,
+    witnessCount: 81,
     migrationCount: 11,
     hostBridgeToolCount: 27,
     openclawToolCount: 27,
-    storeProtocolCount: 10
+    storeProtocolCount: 11
   });
 });
 
@@ -1096,11 +1096,11 @@ test("public contract evidence fails closed on missing witnesses and protocol dr
   actionContractDrift.contracts.list_action.version = 28;
   assert.throws(
     () => validate(actionContractDrift),
-    /list action contract version must remain 32/u
+    /list action contract version must remain 33/u
   );
 
   const protocolDrift = loadJson("config/public-contract-witnesses.json");
-  protocolDrift.contracts.store_protocols.current_writer_protocol = 11;
+  protocolDrift.contracts.store_protocols.current_writer_protocol = 12;
   assert.throws(
     () => validate(protocolDrift),
     /Store format\/writer\/session-authority protocol contract changed/u

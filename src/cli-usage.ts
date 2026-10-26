@@ -30,6 +30,7 @@ export function usage() {
   agent-knock-knock resume-thread --terminal <exact-terminal-id> --native-thread <uuid> --expected-binding-token <token> --candidate-token <token>
   agent-knock-knock resume-thread --terminal <exact-terminal-id> (--selection-handle <handle> | --selection-snapshot <id> (--selection-number <n> | --selection-short-id <@id>)) --selection-scope <opaque-scope>
   agent-knock-knock reconcile-binding --terminal <exact-terminal-id> --conflicting-session <session-id> --expected-session-revision <n> --expected-binding-token <token> --expected-terminal-token <token>
+  agent-knock-knock transfer-store-authority --terminal <exact-terminal-id> --expected-authority-token <fresh-list-token> [--maintenance-acknowledgement]
   agent-knock-knock respond --turn <turn-id|selector> --message <text> [--conversation <selector>]
   agent-knock-knock respond-interaction (--turn <turn-id|selector> | --watch <watch-id>) --interaction <id> --response-json <json> --expected-interaction-fingerprint <fingerprint> --expected-interaction-expires-at <timestamp>  # async_question defaults to advertised steer_current_turn (delivery_mode may select queue_next_turn); questionnaire forbids it; never use raw keys or menu indexes
   agent-knock-knock approve [--turn <turn-id|selector>] [--conversation <selector>] [--decision approve_once|reject] [--expected-terminal-token <token>] --expected-approval-fingerprint <fingerprint>

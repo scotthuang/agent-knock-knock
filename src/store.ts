@@ -49,15 +49,19 @@ const NO_FOLLOW_FLAG = typeof fs.constants.O_NOFOLLOW === "number"
 
 export const STORE_FORMAT_VERSION = 1;
 // Protocol 10 readers honor expired Watch receipts before any same-key creation.
-export const STORE_WRITER_PROTOCOL = 10;
+// Protocol 11 understands irreversible cross-Store Session retirement. Older
+// writers must not reattach a Session after its authority has been transferred.
+export const STORE_WRITER_PROTOCOL = 11;
 export const STORE_SESSION_AUTHORITY_PROTOCOL = 3;
-const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+const STORE_UPGRADEABLE_WRITER_PROTOCOLS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
 export interface StoreManifest {
   schema: typeof STORE_SCHEMA;
   format_version: number;
   writer_protocol: number;
   created_at: string;
+  /** Only newly initialized protocol-11 Stores have complete writer-era coverage. */
+  owner_registration?: "required";
 }
 
 interface StoreManifestSnapshot {
@@ -1447,6 +1451,7 @@ function createStoreManifest(storeDir: string): void {
     schema: STORE_SCHEMA,
     format_version: STORE_FORMAT_VERSION,
     writer_protocol: STORE_WRITER_PROTOCOL,
+    owner_registration: "required",
     created_at: new Date().toISOString()
   };
   const tempPath = path.join(

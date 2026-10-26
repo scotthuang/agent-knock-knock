@@ -27,6 +27,7 @@ export interface TerminalMutationCliRuntimePorts {
     options?: FileLockAcquisitionOptions
   ): () => void;
   terminalBridgeRuntimeKey(terminalControl: TerminalControlRef): string;
+  beforeStoreWriter?(storeDir: string, terminalControl: TerminalControlRef): void | Promise<void>;
   withStoreWriterLeaseAsync<Result>(
     storeDir: string,
     operation: () => Promise<Result>,
@@ -70,9 +71,10 @@ export function createTerminalMutationCliRuntime(
           retryMs: options.retryMs
         }
       ),
-      ...(options.afterTerminalAcquired
-        ? { afterTerminalAcquired: options.afterTerminalAcquired }
-        : {}),
+      afterTerminalAcquired: async () => {
+        await options.afterTerminalAcquired?.();
+        await ports.beforeStoreWriter?.(canonicalStoreDir, terminalControl);
+      },
       withStoreWriter: <Result>(operation: () => Promise<Result>) =>
         ports.withStoreWriterLeaseAsync(canonicalStoreDir, operation, {
           timeoutMs: options.storeWriterTimeoutMs ?? options.timeoutMs

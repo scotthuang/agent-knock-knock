@@ -16,22 +16,23 @@ remain private.
 - The Store manifest fences incompatible managed writers before managed
   terminal or callback mutations. An eligible explicit physical Send retains
   its separate runtime receipt and input-safety checks; it cannot mutate an
-  incompatible managed Store.
+  incompatible managed Store. Conflicting or unfinished cross-Store authority
+  also blocks physical fallback; a physical Send token cannot bypass that fence.
 
 ## Compatibility manifest
 
 The manifest checks storage format and writer behavior separately. An unknown
-`format_version` is not read. The current writer protocol is 10; writer
-protocols 1 through 9 are supported predecessors and inspection reports them
+`format_version` is not read. The current writer protocol is 11; writer
+protocols 1 through 10 are supported predecessors and inspection reports them
 as `upgradeable`.
 
 Upgrading protocol 1 or 2 validates predecessor Turn records,
 deterministically derives and durably materializes authoritative Session
 records, quarantines ambiguous Session bindings, and finishes by atomically
-publishing protocol 10. Existing Turn state, event logs, and the original
+publishing protocol 11. Existing Turn state, event logs, and the original
 manifest `created_at` remain unchanged.
 
-Protocols 3 through 9 already have Session authority, so their upgrade is an
+Protocols 3 through 10 already have Session authority, so their upgrade is an
 atomic manifest-only writer fence with no data migration. Protocol 6 prevents
 older writers from rejecting or damaging schema-v2 Terminal Watch records.
 Protocol 7 fences the `interaction_manual_required` notification kind from
@@ -44,6 +45,10 @@ normalized to `notify_only`; they never silently acquire terminal response
 authority. Downgrading after v3 records exist is not supported. Protocol 10 additionally requires deletion receipts before pruning completed Watch
 bodies, preventing older writers from recreating an expired Send. Do not manually
 lower the manifest for rollback: restore a coherent pre-upgrade backup instead.
+Protocol 11 additionally fences retired Session authority after a Store transfer.
+The source Session keeps a durable retirement record, and predecessor writers
+are refused before they can revive it. Store authority transfer uses a shared
+terminal lock and a resumable journal; it does not replay terminal input.
 Core
 Session/Turn data remains readable across a writer-protocol mismatch, while
 explicit reconciliation reports `skipped` and managed mutations fail before

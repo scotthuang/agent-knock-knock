@@ -9,9 +9,12 @@ export type ClaudeManagedSendRoute = { kind: "native" } | { kind: "managed"; ter
 
 /** Preserve physical proof while applying Store eligibility from that scan's public action projection. */
 export function withClaudeManagedSendAuthority(raw: Row, projected: Row | undefined, writable: boolean): Row {
-  const blocked = !projected || ["conflict", "unavailable"].includes(String(projected.management_state))
-    || Boolean(projected.management_conflict || projected.management_unavailable);
-  return { ...raw, available_actions: projected?.available_actions ?? {},
+  const automaticTransfer = recordValue(projected?.native_store_authority)?.send_after_transfer === true;
+  const blocked = !projected || !automaticTransfer && (["conflict", "unavailable"].includes(String(projected.management_state))
+    || Boolean(projected.management_conflict || projected.management_unavailable));
+  const authority = Object.fromEntries(["native_store_authority", "management_state", "management_conflict", "management_unavailable"]
+    .filter(key => projected?.[key] !== undefined).map(key => [key, projected![key]]));
+  return { ...raw, ...authority, available_actions: projected?.available_actions ?? {},
     ...(raw.agent === "claude" ? { _claude_managed_send_eligible: raw._claude_managed_send_eligible === true && writable && !blocked } : {}) };
 }
 

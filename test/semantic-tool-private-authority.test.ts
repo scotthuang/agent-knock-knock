@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 
 import {
-  assertOnlyModelControlParameters
+  assertOnlyModelControlParameters,
+  buildPrivateReconcileBindingArgs,
+  rememberDisplayedPrivateAuthorityOffers,
+  RECONCILE_BINDING_AUTHORITY_KIND
 } from "../src/semantic-tool-private-authority.js";
+import { consumeSemanticPrivateAuthorityOffer } from "../src/semantic-private-authority-offers.js";
+import { reconcileBindingParameters } from "../src/semantic-tool-schemas.js";
 import {
   authoritativeManagedId,
   pushOptional,
@@ -28,6 +34,56 @@ test("semantic private authority accepts only typed model-control inputs", () =>
     ),
     /accepts only typed semantic fields/u
   );
+});
+
+test("binding recovery schema distinguishes legacy detach from explicit Store authority transfer", () => {
+  const validate = new AjvJsonSchemaValidator().getValidator(reconcileBindingParameters);
+  const terminal_id = "terminal:v2:tmux:claude:recovery:0.0:123";
+  const transfer = { operation: "transfer_store_authority", terminal_id };
+  for (const params of [{ terminal_id, conflicting_session_id: "session-old" }, transfer,
+    { ...transfer, maintenance_acknowledgement: true }]) {
+    assert.equal(validate(params).valid, true, JSON.stringify(params));
+  }
+  for (const params of [{ terminal_id }, { ...transfer, conflicting_session_id: "session-old" },
+    { ...transfer, maintenance_acknowledgement: false }, { ...transfer, expected_authority_token: "forged" },
+    { ...transfer, store_dir: "/caller/selected/store" }, { ...transfer, operation: "detach_binding" },
+    { terminal_id, conflicting_session_id: "session-old", maintenance_acknowledgement: true }]) {
+    assert.equal(validate(params).valid, false, JSON.stringify(params));
+  }
+});
+
+test("Store transfer offers remain controller-scoped and do not replace displayed detach authority", async () => {
+  const api = {}, context = { sessionKey: "controller", sessionId: "incarnation" };
+  const terminal_id = "terminal:v2:tmux:claude:recovery:0.0:123";
+  const transfer = { operation: "transfer_store_authority", terminal_id };
+  for (const params of [{ ...transfer, expected_authority_token: "forged" },
+    { ...transfer, maintenance_acknowledgement: "true" }, { ...transfer, conflicting_session_id: "session-old" }]) {
+    await assert.rejects(buildPrivateReconcileBindingArgs(api, params, context), /semantic fields|explicit true/u);
+  }
+  await assert.rejects(buildPrivateReconcileBindingArgs(api, transfer, context), /current action shown/u);
+  const detach = { terminal_id, conflicting_session_id: "session-old", expected_session_revision: 2,
+    expected_binding_token: "binding-private", expected_terminal_token: "terminal-private" };
+  rememberDisplayedPrivateAuthorityOffers(api, context.sessionKey, context.sessionId, { terminals: [{
+    id: terminal_id, available_actions: {
+      reconcile_binding: { tool: "agent_knock_knock_reconcile_binding", arguments: detach },
+      transfer_store_authority: { tool: "agent_knock_knock_reconcile_binding",
+        arguments: { ...transfer, expected_authority_token: "store-private" },
+        missing_required: ["maintenance_acknowledgement"] }
+    }
+  }] });
+  await assert.rejects(buildPrivateReconcileBindingArgs(api, transfer,
+    { ...context, sessionId: "other-incarnation" }), /current action shown/u);
+  const target = { type: "terminal_id", id: terminal_id };
+  const transferOffer = consumeSemanticPrivateAuthorityOffer(api,
+    { ...context, kind: "transfer_store_authority", target });
+  assert.deepEqual(transferOffer?.args, { ...transfer, expected_authority_token: "store-private",
+    maintenance_acknowledgement_required: true });
+  assert.equal(Object.hasOwn(transferOffer?.args ?? {}, "maintenance_acknowledgement"), false,
+    "the displayed action cannot assert user maintenance confirmation");
+  assert.deepEqual(consumeSemanticPrivateAuthorityOffer(api,
+    { ...context, kind: RECONCILE_BINDING_AUTHORITY_KIND, target })?.args, detach);
+  assert.equal(consumeSemanticPrivateAuthorityOffer(api,
+    { ...context, kind: "transfer_store_authority", target }), undefined);
 });
 
 test("semantic argument encoding preserves public validation boundaries", () => {

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import { PassThrough } from "node:stream";
+import test, { type TestContext } from "node:test";
 
 import {
   bindSemanticToolAsyncRelay,
@@ -65,6 +69,107 @@ test("semantic relay preserves invocation-scoped AbortSignal semantics", async (
       error.message === "agent-knock-knock Host invocation was aborted"
   );
 });
+
+test("semantic text submission relay preserves a slow dispatcher until its receipt or Host cancellation", async (t) => {
+  const scenarios = ["send", "delegate", "respond"].flatMap(command =>
+    (["receipt", "abort"] as const).map(completion => ({ command, completion }))
+  );
+  for (const { command, completion } of scenarios) {
+    await t.test(`${command}: ${completion}`, async (t) => {
+      const { owner, child } = mockedAsyncRelay(t);
+      const controller = new AbortController();
+      const pending = withHostBridgeInvocationSignal(controller.signal, () =>
+        runHostAwareCli(owner, [command, "--conversation-id", "claude-fixture"])
+      );
+      // Capture rejection immediately so the pre-fix timeout is a clean
+      // assertion failure rather than an unhandled rejection after teardown.
+      const outcome = pending.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error })
+      );
+      t.mock.timers.tick(90_001);
+      assert.deepEqual(child.signals, [],
+        "the generic read-command deadline must not kill an in-progress send");
+      if (completion === "receipt") {
+        const receipt = {
+          delivered: true,
+          terminal_input_dispatched: true,
+          agent_acceptance: "proven"
+        };
+        child.complete(receipt);
+        assert.deepEqual(await outcome, { value: receipt });
+      } else {
+        controller.abort();
+        const result = await outcome;
+        assert.deepEqual(child.signals, ["SIGKILL"]);
+        assert.ok("error" in result && result.error instanceof Error);
+        assert.equal(result.error.name, "AbortError");
+      }
+      t.mock.timers.tick(90_000);
+      assert.deepEqual(child.signals, completion === "receipt" ? [] : ["SIGKILL"]);
+    });
+  }
+});
+
+test("semantic relay retains read-command deadlines and explicit submission timeout overrides", async (t) => {
+  for (const scenario of [
+    { command: "list", deadline: 90_000, options: {} },
+    { command: "status", deadline: 90_000, options: {} },
+    { command: "send", deadline: 250, options: { timeoutMs: 250 } },
+    { command: "delegate", deadline: 250, options: { timeoutMs: 250 } },
+    { command: "respond", deadline: 250, options: { timeoutMs: 250 } }
+  ]) {
+    await t.test(scenario.command, async (t) => {
+      const { owner, child } = mockedAsyncRelay(t);
+      const pending = runHostAwareCli(owner, [scenario.command], scenario.options);
+      const rejected = assert.rejects(pending,
+        new RegExp(`agent-knock-knock ${scenario.command} timed out`, "u"));
+      t.mock.timers.tick(scenario.deadline - 1);
+      assert.deepEqual(child.signals, []);
+      t.mock.timers.tick(1);
+      await rejected;
+      assert.deepEqual(child.signals, ["SIGKILL"]);
+    });
+  }
+});
+
+class MockRelayChild extends EventEmitter {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly signals: string[] = [];
+
+  kill(signal: string): boolean {
+    this.signals.push(signal);
+    queueMicrotask(() => this.emit("close", null, signal));
+    return true;
+  }
+
+  complete(receipt: Record<string, unknown>): void {
+    this.stdout.write(JSON.stringify(receipt));
+    this.emit("close", 0);
+  }
+}
+
+function mockedAsyncRelay(t: TestContext): {
+  owner: object;
+  child: MockRelayChild;
+} {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const child = new MockRelayChild();
+  const spawn = t.mock.method(childProcess, "spawn", () =>
+    child as unknown as ReturnType<typeof childProcess.spawn>
+  );
+  syncBuiltinESMExports();
+  t.after(() => {
+    spawn.mock.restore();
+    syncBuiltinESMExports();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  });
+  const owner = {};
+  bindSemanticToolAsyncRelay(owner);
+  return { owner, child };
+}
 
 function writeFixtureCli(filePath: string, script: string): void {
   fs.writeFileSync(

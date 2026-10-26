@@ -52,6 +52,7 @@ export interface TerminalStatusListObservation {
   durableActivityReason?: string;
   watchActionAvailable: boolean;
   terminalStatus?: TerminalBridgeStatus;
+  storeAuthorityProjection?: TerminalStatusJsonObject;
 }
 
 function terminalActivityState(value: unknown): TerminalActivityState | undefined {
@@ -84,13 +85,19 @@ export function terminalStatusListObservationFromProjection(input: {
   watchActionAvailable: boolean;
 }): TerminalStatusListObservation {
   const { terminal, rawTerminal } = input;
+  const storeAuthority = isRecord(terminal.native_store_authority) ? terminal.native_store_authority : undefined;
+  const storeAuthorityProjection = storeAuthority && ["conflict", "transferring"].includes(String(storeAuthority.state))
+    ? Object.fromEntries(["native_store_authority", "management_state", "management_conflict", "send_blocked_reason",
+      "next_action", "capabilities", "available_actions"].filter(key => terminal[key] !== undefined).map(key => [key, terminal[key]]))
+    : undefined;
   const activityState = terminalActivityState(terminal.activity_state);
   const activityReason = stringValue(terminal.activity_reason);
   if (!activityState || !activityReason) {
     return {
       activityState: "unknown",
       activityReason: "authoritative terminal activity evidence is incomplete",
-      watchActionAvailable: false
+      watchActionAvailable: false,
+      ...(storeAuthorityProjection ? { storeAuthorityProjection } : {})
     };
   }
   const terminalStatus = isRecord(rawTerminal._terminal_status_snapshot)
@@ -124,6 +131,7 @@ export function terminalStatusListObservationFromProjection(input: {
       terminalStatus?.durable_activity_reason ??
       "durable terminal activity evidence is unavailable",
     watchActionAvailable: input.watchActionAvailable,
+    ...(storeAuthorityProjection ? { storeAuthorityProjection } : {}),
     ...(terminalStatus ? { terminalStatus } : {})
   };
 }

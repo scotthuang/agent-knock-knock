@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import { runCliCommandExecution } from "../../src/cli-runtime-context.js";
+import { createTerminalDispatchRepositoryCliAdapter } from "../../src/terminal-dispatch-repository-cli-adapter.js";
+import { withStoreWriterLease } from "../../src/store.js";
 import {
   createTerminalWatchCliAdapter
 } from "../../src/terminal-watch-cli-adapter.js";
@@ -34,76 +38,96 @@ import {
   record
 } from "./fixtures.js";
 
-test("Watch respond_interaction live-revalidates an expired offer and consumes one reservation", async (t) => {
+test("Watch response fences transferred Store authority before live-revalidating and consuming one reservation", async (t) => {
   const fixture = createFixture(t, "human-only", "0.153.4");
-  const printed: unknown[] = [];
-  let terminal: Record<string, any> = fixture.terminal;
-  let watchId = "";
-  let terminalInputs = 0;
-  let terminalLocks = 0;
-  const facade = createTerminalWatchCliAdapter({
-    acquireFileLock: () => () => {},
-    acquireTerminalLock: () => {
-      terminalLocks += 1;
-      return () => {};
-    },
-    createBridge: () => watchInteractionBridge({
+  await runCliCommandExecution("watch-response", {}, {
+    env: { ...process.env, AKK_RUNTIME_DIR: path.join(path.dirname(fixture.storeDir), "runtime") },
+    runtimeLog: () => undefined
+  }, async () => {
+    const printed: unknown[] = [];
+    let terminal: Record<string, any> = fixture.terminal;
+    let watchId = "";
+    let terminalInputs = 0;
+    let terminalLocks = 0;
+    let authorityStore: string | undefined;
+    const dispatchRepository = createTerminalDispatchRepositoryCliAdapter();
+    const facade = createTerminalWatchCliAdapter({
+      acquireFileLock: () => () => {},
+      acquireTerminalLock: (_storeDir, terminalControl) => {
+        terminalLocks += 1;
+        if (authorityStore) withStoreWriterLease(fixture.storeDir, () => {
+          dispatchRepository.save(terminalControl, {
+            status: "resolved", store_dir: authorityStore,
+            native_thread_id: terminal.native_agent_session_id,
+            session_id: "session-transferred-watch", resolved_at: fixture.now().toISOString()
+          }, { authorityTransfer: true });
+        });
+        return () => {};
+      },
+      createBridge: () => watchInteractionBridge({
+        storeDir: fixture.storeDir,
+        watchId: () => watchId,
+        mode: "success",
+        onTerminalInput: () => {
+          terminalInputs += 1;
+        }
+      }),
+      observeExactTerminal: async ({ terminalId }) =>
+        exactTerminalObservation([terminal], terminalId),
+      loadClaudeAgentRows: () => [],
+      now: fixture.now,
+      randomUUID: () => "00000000-0000-4000-8000-000000000273",
+      storeDirFromOptions: () => fixture.storeDir,
+      terminalDispatchOwnership: () => ({ state: "none" }),
+      terminalIncarnationBlockingTurns: () => [],
+      printJson: (value) => printed.push(value)
+    });
+    const controller = "agent:main:watch-response-success";
+    await facade.runWatch({
+      terminal: fixture.terminal.id as string,
+      openclawSession: controller
+    });
+    watchId = String(record(record(printed.at(-1)).watch).watch_id);
+    terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
+    fixture.advance();
+    await facade.runWatchStatus({
       storeDir: fixture.storeDir,
-      watchId: () => watchId,
-      mode: "success",
-      onTerminalInput: () => {
-        terminalInputs += 1;
-      }
-    }),
-    observeExactTerminal: async ({ terminalId }) =>
-      exactTerminalObservation([terminal], terminalId),
-    loadClaudeAgentRows: () => [],
-    now: fixture.now,
-    randomUUID: () => "00000000-0000-4000-8000-000000000273",
-    storeDirFromOptions: () => fixture.storeDir,
-    terminalDispatchOwnership: () => ({ state: "none" }),
-    terminalIncarnationBlockingTurns: () => [],
-    printJson: (value) => printed.push(value)
+      watch: watchId,
+      openclawSession: controller
+    });
+    const offered = loadTerminalWatch(fixture.storeDir, watchId)
+      .current_interaction!.projection;
+    fixture.setNow("2026-08-21T01:11:30.000Z");
+    const responseOptions = {
+      storeDir: fixture.storeDir,
+      watch: watchId,
+      interaction: offered.interaction_id,
+      expectedInteractionFingerprint: offered.prompt_fingerprint,
+      expectedInteractionExpiresAt: offered.expires_at,
+      responseJson: watchInteractionResponse(offered),
+      openclawSession: controller
+    };
+    authorityStore = path.join(fixture.storeDir, "foreign-store");
+    await assert.rejects(() => facade.runRespondInteraction(responseOptions), /authoritative in another Store/u);
+    assert.equal(terminalInputs, 0, "authority changed after preflight must reject before any terminal input");
+    assert.equal(loadTerminalWatch(fixture.storeDir, watchId).current_interaction?.aggregate.reservation, undefined);
+    authorityStore = fixture.storeDir;
+    await facade.runRespondInteraction(responseOptions);
+    assert.equal(terminalInputs, 1);
+    assert.equal(terminalLocks, 2);
+    const consumed = loadTerminalWatch(fixture.storeDir, watchId);
+    assert.equal(consumed.current_interaction?.aggregate.state, "consumed");
+    assert.equal(
+      consumed.current_interaction?.aggregate.reservation?.response_hash.length,
+      64
+    );
+    assert.equal(
+      consumed.current_interaction?.projection.expires_at === offered.expires_at,
+      false,
+      "live status recapture must refresh stale offer freshness"
+    );
+    assert.equal(record(printed.at(-1)).responded, true);
   });
-  const controller = "agent:main:watch-response-success";
-  await facade.runWatch({
-    terminal: fixture.terminal.id as string,
-    openclawSession: controller
-  });
-  watchId = String(record(record(printed.at(-1)).watch).watch_id);
-  terminal = withTerminalWatchScreen(terminal, CODEX_FALLBACK_QUESTION_ONE);
-  fixture.advance();
-  await facade.runWatchStatus({
-    storeDir: fixture.storeDir,
-    watch: watchId,
-    openclawSession: controller
-  });
-  const offered = loadTerminalWatch(fixture.storeDir, watchId)
-    .current_interaction!.projection;
-  fixture.setNow("2026-08-21T01:11:30.000Z");
-  await facade.runRespondInteraction({
-    storeDir: fixture.storeDir,
-    watch: watchId,
-    interaction: offered.interaction_id,
-    expectedInteractionFingerprint: offered.prompt_fingerprint,
-    expectedInteractionExpiresAt: offered.expires_at,
-    responseJson: watchInteractionResponse(offered),
-    openclawSession: controller
-  });
-  assert.equal(terminalInputs, 1);
-  assert.equal(terminalLocks, 1);
-  const consumed = loadTerminalWatch(fixture.storeDir, watchId);
-  assert.equal(consumed.current_interaction?.aggregate.state, "consumed");
-  assert.equal(
-    consumed.current_interaction?.aggregate.reservation?.response_hash.length,
-    64
-  );
-  assert.equal(
-    consumed.current_interaction?.projection.expires_at === offered.expires_at,
-    false,
-    "live status recapture must refresh stale offer freshness"
-  );
-  assert.equal(record(printed.at(-1)).responded, true);
 });
 
 test("Watch response rejects controller mismatch and managed precedence before terminal input", async (t) => {

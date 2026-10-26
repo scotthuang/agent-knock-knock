@@ -4,11 +4,12 @@ import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason, withClaud
 import { associateConversationRoutes, type ConversationRoutingIdentityOptions } from "./conversation-routing-identity.js";
 import { presentConversationList, type ConversationListPresentationOptions } from "./conversation-list-presentation.js";
 import { recordValue } from "./value-guards.js";
+import { withNativeStoreAuthorityConflict } from "./native-store-authority-projection.js";
 
 type Row = Record<string, unknown>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter(item => recordValue(item)) : [];
 const terminalOnlyActions = new Set(["native_inspect", "model_options", "set_model", "cancel", "new_thread", "clear_thread",
-  "resume_thread", "list_resumable_threads", "identify_foreground", "repair_model_control", "reconcile_binding", "close"]);
+  "resume_thread", "list_resumable_threads", "identify_foreground", "repair_model_control", "reconcile_binding", "transfer_store_authority", "close"]);
 const claudeSpecialActions = new Set(["approve", "respond", "respond_interaction", "permission_options", "set_permissions"]);
 
 export function isTerminalSpecificConversationAction(agent: unknown, name: string): boolean {
@@ -60,7 +61,7 @@ function standaloneConversation(terminal: Row, physical?: Row): Row {
 export function withExactTerminalActions(native: Row): Row {
   if (!["codex_cli", "claude_cli"].includes(String(native.source))) return native;
   const controls = rows(native.terminal_controls);
-  if (controls.length !== 1) return native;
+  if (controls.length !== 1) return withExactStoreAuthority(native, controls);
   const actions = { ...recordValue(native.available_actions) };
   const capabilities = { ...recordValue(native.capabilities) };
   for (const [name, action] of Object.entries(recordValue(controls[0].available_actions) ?? {})) {
@@ -72,11 +73,22 @@ export function withExactTerminalActions(native: Row): Row {
   }
   if (native.source === "claude_cli") Object.assign(capabilities, claudeNativeControlCapabilities(actions, controls[0]));
   const actionable = capabilities.interaction_respond === true || capabilities.approve === true;
-  return { ...native, available_actions: actions, capabilities,
+  return withExactStoreAuthority({ ...native, available_actions: actions, capabilities,
     ...(native.source === "claude_cli" && native.attention_required === true && actionable ? {
       manual_required: false, next_action: "respond_to_interaction",
       interaction_hint: { ...recordValue(native.interaction_hint), actionable: true, source: "verified_terminal" }
-    } : {}) };
+    } : {}) }, controls);
+}
+
+function withExactStoreAuthority(native: Row, controls: readonly Row[]): Row {
+  const conflicted = controls.find(control => ["conflict", "transferring"].includes(
+    String(recordValue(control.native_store_authority)?.state)));
+  if (!conflicted) return native;
+  const transfer = recordValue(recordValue(conflicted.available_actions)?.transfer_store_authority);
+  const authority = native.source === "codex_cli"
+    ? { ...recordValue(conflicted.native_store_authority), send_after_transfer: false } : conflicted.native_store_authority;
+  return withNativeStoreAuthorityConflict(native, authority,
+    controls.length === 1 && transfer ? { transfer_store_authority: transfer } : {});
 }
 
 /** Send/Watch on a proven alias select this backend; an old physical offer cannot bypass it. */
@@ -93,7 +105,10 @@ function routedTerminalControls(terminal: Row, native: Row): Row {
     else delete actions[name];
     if (capabilities) capabilities[name] = Boolean(available);
   }
-  return { ...terminal, available_actions: actions, ...(capabilities ? { capabilities } : {}) };
+  const transfer = recordValue(recordValue(terminal.available_actions)?.transfer_store_authority);
+  return withNativeStoreAuthorityConflict({ ...terminal, available_actions: actions, ...(capabilities ? { capabilities } : {}) },
+    recordValue(terminal.native_store_authority) ? { ...recordValue(terminal.native_store_authority), send_after_transfer: false } : undefined,
+    transfer ? { transfer_store_authority: transfer } : {});
 }
 
 /** Public conversation inventory; legacy endpoint arrays remain private-action/diagnostic inputs. */

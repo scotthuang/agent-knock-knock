@@ -157,7 +157,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       current_turn: null,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 32);
+    assert.equal(listed.action_contracts.version, 33);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u

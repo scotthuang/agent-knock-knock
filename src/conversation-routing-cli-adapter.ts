@@ -19,12 +19,15 @@ import { selectLegacyConversationRoute } from "./conversation-route-legacy.js";
 import { defaultStoreDir } from "./store.js";
 import { expandHome } from "./cli-command-runtime.js";
 import { conversationCommandPolicy, conversationRoutedOptions, prepareConversationTerminalOptions, routedCommand, type ConversationRoutingCliPorts } from "./conversation-routing-commands.js";
+import { withExactTerminalActions } from "./conversation-list.js";
+import { assertNativeRuntimeStoreAuthority, withNativeRuntimeStoreAuthority } from "./native-store-authority-runtime.js";
 
 type Options = Record<string, unknown>;
 type Row = Record<string, unknown>;
 type Selection = ConversationRouteChoice & { reason?: string };
 export type { ConversationRoutingCliPorts } from "./conversation-routing-commands.js";
 const preflightUnavailable = new Set(["ENOENT", "ECONNREFUSED", "ECONNRESET", "ENOTSOCK", "ETIMEDOUT", "closed", "timeout", "unsupported_capability", "thread_not_loaded"]);
+const nativeAuthorityMutations = new Set(["send", "set-permissions", "approve", "respond-interaction"]);
 
 export async function executeConversationCommand(command: string | undefined, options: Options,
   terminals: ConversationRoutingCliPorts["terminals"], execute: (command: string | undefined, options: Options) => Promise<void>): Promise<void> {
@@ -52,6 +55,9 @@ export async function dispatchRoutedConversationCli(command: string | undefined,
   const target = routingTarget(command, original);
   if (!target || !command) return false;
   const options = { ...original };
+  let observedTerminals: Row[] | undefined;
+  const sourcePorts = ports;
+  ports = { ...ports, terminals: async (...args) => observedTerminals = await sourcePorts.terminals(...args) };
   if (command === "send") options.messageId ??= randomUUID();
   const configuration = codexNativeRuntimeOptions(options);
   const runtime = (cliDependencies().createCodexNativeRuntime ?? createCodexNativeRuntime)(configuration);
@@ -71,19 +77,57 @@ export async function dispatchRoutedConversationCli(command: string | undefined,
         terminalRuntimeDir }) : undefined)
         ?? selectConversationRoute({ command, target, options, runtime, ports, identityOptions }))),
       prepare: async choice => {
+        if (choice.route === "native" && nativeAuthorityMutations.has(command)) {
+          assertNativeRuntimeStoreAuthority({ nativeThreadId: parseCodexNativeConversationId(choice.targetId).threadId,
+            storeDir: configuration.storeDir, runtimeDir: terminalRuntimeDir });
+          assertNativeMutationStoreAuthority(choice.targetId, observedTerminals ?? await ports.terminals(options));
+        }
         const selectedOptions = conversationRoutedOptions(command, options, choice.route, choice.targetId);
         const selectedCommand = routedCommand(command, options, choice.route);
         if (choice.route === "terminal") await prepareTerminalFallback({ command: selectedCommand, target, choice, selectedOptions, options, ports, identityOptions });
         prepared = { command: selectedCommand, options: selectedOptions };
       },
-      execute: async () => {
+      execute: async choice => {
         if (!prepared) throw new Error("Conversation route preparation is missing");
-        return ports.execute(prepared.command, prepared.options);
+        const execution = prepared;
+        const invoke = () => ports.execute(execution.command, execution.options);
+        const result = choice.route === "native" && nativeAuthorityMutations.has(command)
+          ? await withNativeRuntimeStoreAuthority({ nativeThreadId: parseCodexNativeConversationId(choice.targetId).threadId,
+              storeDir: configuration.storeDir, runtimeDir: terminalRuntimeDir }, invoke)
+          : await invoke();
+        return projectNativeStatusStoreAuthority({ command, choice, result, ports, options, observedTerminals });
       }
     });
     writeCliStdout(JSON.stringify(result, null, 2) + "\n");
     return true;
   } finally { await runtime.close(); }
+}
+
+function assertNativeMutationStoreAuthority(targetId: string, terminals: readonly Row[]): void {
+  for (const terminal of terminals) {
+    if (proveNativeTerminalRoute(targetId, terminal).status !== "exact") continue;
+    const authority = recordValue(terminal.native_store_authority);
+    if (!authority || !["conflict", "transferring"].includes(String(authority.state))) continue;
+    throw new Error("Native thread authority belongs to another Store or has an incomplete transfer; " +
+      "refresh AKK list and use its transfer_store_authority recovery before this native mutation");
+  }
+}
+
+async function projectNativeStatusStoreAuthority(input: {
+  command: string; choice: ConversationRouteChoice; result: Row; ports: ConversationRoutingCliPorts;
+  options: Options; observedTerminals?: Row[];
+}): Promise<Row> {
+  if (input.choice.route !== "native" || input.result.source !== "codex_cli" ||
+    !["status", "native-status", "native-inspect"].includes(input.command)) return input.result;
+  let terminals: Row[];
+  try { terminals = input.observedTerminals ?? await input.ports.terminals(input.options); }
+  catch { return input.result; }
+  const exact = terminals.filter(row => proveNativeTerminalRoute(input.choice.targetId, row).status === "exact");
+  if (exact.length !== 1) return input.result;
+  const { terminal_controls: _controls, ...projection } = withExactTerminalActions({
+    ...input.result, terminal_aliases: [exact[0].id], terminal_controls: exact
+  });
+  return projection;
 }
 
 function canonicalRouteSelection(choice: Selection): Selection {

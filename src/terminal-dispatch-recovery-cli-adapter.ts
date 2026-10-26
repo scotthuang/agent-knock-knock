@@ -1,4 +1,5 @@
 import path from "node:path";
+import { assertNativeStoreAuthorityCurrent } from "./native-store-authority.js";
 
 import {
   callbackExpectedForConversation,
@@ -484,30 +485,7 @@ class TerminalDispatchRecoveryCliApplication {
         `terminal ${input.terminalControl.target} dispatch ledger selector is invalid`
       );
     }
-    const binding = isRecord(ledger.binding) ? ledger.binding : undefined;
-    const authorityIds = new Set([
-      nonBlankString(ledger.native_thread_id),
-      nonBlankString(binding?.native_thread_id),
-      nonBlankString(ledger.before_native_thread_id),
-      nonBlankString(ledger.target_native_thread_id)
-    ].filter((value): value is string => Boolean(value))
-      .map((value) => value.toLowerCase()));
-    const nativeThreadId = input.nativeThreadId.toLowerCase();
-    if (!authorityIds.has(nativeThreadId)) return;
-    const authorityStoreDir = this.#ledgerStoreDir(ledger);
-    if (!authorityStoreDir) {
-      throw new Error(
-        `terminal ${input.terminalControl.target} has native-thread authority ` +
-        `${nativeThreadId} whose Store cannot be verified`
-      );
-    }
-    if (path.resolve(authorityStoreDir) !== path.resolve(input.storeDir)) {
-      throw new Error(
-        `terminal ${input.terminalControl.target} native thread ` +
-        `${nativeThreadId} is authoritative in another Store ` +
-        `${path.resolve(authorityStoreDir)}`
-      );
-    }
+    assertNativeStoreAuthorityCurrent({ ...input, ledger });
   }
 
   orphanedForRecovery(

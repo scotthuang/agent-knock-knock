@@ -480,6 +480,10 @@ test("terminal mutation CLI forwards work between terminal and writer locks", as
     terminalBridgeRuntimeKey() {
       return "terminal:test:0.0";
     },
+    async beforeStoreWriter() {
+      await Promise.resolve();
+      effects.push("authority-recovery");
+    },
     async withStoreWriterLeaseAsync(_storeDir, operation) {
       effects.push("writer-lock");
       try {
@@ -504,6 +508,7 @@ test("terminal mutation CLI forwards work between terminal and writer locks", as
     assert.deepEqual(effects, [
       "terminal-lock",
       "after-terminal",
+      "authority-recovery",
       "writer-lock",
       "operation",
       "writer-unlock",

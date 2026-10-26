@@ -103,11 +103,13 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
       "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
       "pending_interaction_count", "interaction_requests_scanned", "history_state", "unstarted_thread", "classification", "frontend_presence",
       "attention_required", "updated_at", "observation_error", "send_blocked_reason"]),
+    ...(recordValue(row.native_store_authority)
+      ? { native_store_authority: compactNativeStoreAuthority(row.native_store_authority) } : {}),
     ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
     capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, [
       "status", "send", "watch", "interaction_notify", "interaction_respond", "approve", "set_permissions",
       "permission_options", "model_options", "set_model", "cancel", "new_thread", "clear_thread",
-      "resume_thread", "list_resumable_threads", "native_inspect"]),
+      "resume_thread", "list_resumable_threads", "native_inspect", "transfer_store_authority"]),
     ...(Array.isArray(row.terminal_controls)
       ? { terminal_controls: arrayValue(row.terminal_controls).map(compactAkkListTerminal) } : {}),
     ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
@@ -183,7 +185,7 @@ function isScopedConversationAction(agent: unknown, name: string, action: Record
 /** Keep actionable managed records without presenting another endpoint as a conversation. */
 function compactConversationControlRecord(control: Record<string, unknown>): Record<string, unknown> {
   const output: Record<string, unknown> = {};
-  for (const field of ["managed", "management_conflict", "management_unavailable", "handoff_decision", "blocking_turns"]) {
+  for (const field of ["managed", "management_conflict", "management_unavailable", "native_store_authority", "handoff_decision", "blocking_turns"]) {
     if (control[field] !== undefined) output[field] = control[field];
   }
   return output;
@@ -234,6 +236,9 @@ function compactAkkListTerminal(
     terminal.management_conflict
   );
   if (managementConflict) output.management_conflict = managementConflict;
+  if (recordValue(terminal.native_store_authority)) {
+    output.native_store_authority = compactNativeStoreAuthority(terminal.native_store_authority);
+  }
   const managementUnavailable = recordValue(terminal.management_unavailable);
   if (managementUnavailable) output.management_unavailable = true;
   const handoffDecision = compactAkkListHandoffDecision(
@@ -407,7 +412,7 @@ function compactAkkListActionInput(
   if (missingRequired.length > 0) {
     output.missing_required = missingRequired;
   }
-  for (const key of ["scope", "decision_mode"] as const) {
+  for (const key of ["scope", "decision_mode", "requires_user_intent"] as const) {
     const item = action[key];
     if (
       typeof item === "string" ||
@@ -537,6 +542,12 @@ function compactAkkListNamedAction(
     name,
     ...(Object.keys(input).length > 0 ? input : {})
   };
+}
+
+function compactNativeStoreAuthority(value: unknown): Record<string, unknown> {
+  return compactAkkListScalars(recordValue(value) ?? {}, [
+    "state", "reason", "session_id", "owner_status", "transfer_eligible", "automatic_eligible", "send_after_transfer"
+  ]);
 }
 
 function compactAkkListControlState(

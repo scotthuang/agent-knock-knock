@@ -50,11 +50,11 @@ export const semanticToolDescriptions = {
     "callable with a compatibility warning. AKK refreshes lifecycle authority " +
     "privately. Never send /clear as ordinary task text. This creates a new AKK " +
     "Session but no Turn.",
-  reconcile_binding: "Detach one exact conflicting managed Session binding without adopting the " +
-    "live replacement thread. Pass only the advertised terminal_id and " +
-    "conflicting_session_id after explicit user confirmation; AKK refreshes all " +
-    "revision and binding authority privately. This sends no coding-agent input " +
-    "and creates no Turn.",
+  reconcile_binding: "Recover only the exact action advertised by fresh List after explicit user confirmation. " +
+    "The original terminal_id + conflicting_session_id form detaches that binding without adopting the live thread. " +
+    "For transfer_store_authority, pass operation: transfer_store_authority and the advertised terminal_id to move settled native-thread Store authority to this Host's Store. " +
+    "If the action requires maintenance_acknowledgement, pass true only after the user confirms every associated source-Store Host and old writer has stopped; idle Claude/Codex does not prove this. " +
+    "AKK consumes the displayed offer, refreshes private fences, and refuses active or unverifiable owners. Never supply tokens or Store paths. This sends no coding-agent input and creates no Turn; refresh List afterward.",
   resume_thread: "Resume one exact structurally verified historical native thread after " +
     "explicit user intent. A valid unverified agent version remains callable with " +
     "a compatibility warning. Pass only terminal_id and one complete " +

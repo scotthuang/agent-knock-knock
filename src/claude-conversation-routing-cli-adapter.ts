@@ -19,6 +19,7 @@ import type { ConversationRoutingCliPorts } from "./conversation-routing-command
 import { withClaudeSendRouteProjection, withExactTerminalActions } from "./conversation-list.js";
 import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason } from "./claude-managed-send-route.js";
 import { nonBlankString, recordValue } from "./value-guards.js";
+import { withNativeRuntimeStoreAuthority } from "./native-store-authority-runtime.js";
 
 const core = new Set(["send", "status", "watch-terminal", "native-status"]);
 const special = new Set(["model-options", "set-model", "permission-options", "set-permissions", "cancel", "new-thread", "clear-thread", "resume-thread", "list-resumable-threads", "threads", "native-inspect", "approve", "respond-interaction", "reconcile-binding"]);
@@ -61,7 +62,10 @@ export async function dispatchClaudeConversationCli(command: string | undefined,
         }
       },
       execute: async (choice: ConversationRouteChoice) => {
-        const result = await ports.execute(selectedCommand, selected);
+        const result = await (choice.route === "native" && ["send", "set-permissions", "set-model", "approve", "respond-interaction", "cancel", "new-thread", "resume-thread", "clear-thread"].includes(command)
+          ? withNativeRuntimeStoreAuthority({ nativeThreadId: parseClaudeNativeConversationId(choice.targetId).sessionId,
+              storeDir: configuration.storeDir, runtimeDir: terminalRuntimeDir }, () => ports.execute(selectedCommand, selected))
+          : ports.execute(selectedCommand, selected));
         if (choice.route !== "native" || !["status", "native-status", "native-inspect"].includes(command)) return result;
         // Native status and List must describe the same exact terminal controls. Discovery
         // is read-only and optional: a missing terminal never invalidates native status.

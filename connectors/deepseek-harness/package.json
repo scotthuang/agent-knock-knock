@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock-deepseek-harness",
-  "version": "0.1.0-rc.10",
+  "version": "0.1.0-rc.11",
   "description": "Native Agent Knock Knock connector for DeepSeek Harness",
   "license": "MIT",
   "type": "module",
@@ -64,7 +64,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.2",
-    "@scotthuang/agent-knock-knock": "0.15.0",
+    "@scotthuang/agent-knock-knock": "0.16.0",
     "ajv": "8.20.0"
   },
   "devDependencies": {

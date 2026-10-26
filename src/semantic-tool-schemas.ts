@@ -632,23 +632,35 @@ export const newThreadParameters = {
 export const reconcileBindingParameters = {
   type: "object",
   additionalProperties: false,
-  required: [
-    "terminal_id",
-    "conflicting_session_id"
+  required: ["terminal_id"],
+  oneOf: [
+    { required: ["conflicting_session_id"],
+      not: { anyOf: [{ required: ["operation"] }, { required: ["maintenance_acknowledgement"] }] } },
+    { required: ["operation"], not: { required: ["conflicting_session_id"] } }
   ],
   properties: {
+    operation: {
+      type: "string",
+      enum: ["transfer_store_authority"],
+      description: "Use only the freshly advertised transfer_store_authority action after explicit user confirmation. Omit for the original binding-detach operation."
+    },
     terminal_id: {
       type: "string",
       minLength: 1,
       pattern: "^terminal:v[0-9]+:\\S+$",
       description:
-        "Exact full terminal_id from the current reconcile_binding action."
+        "Exact full terminal_id from the current reconcile_binding or transfer_store_authority action."
     },
     conflicting_session_id: {
       type: "string",
       minLength: 1,
       description:
         "Exact conflicting managed Session id prefilled by AKK list. Never choose or construct one independently."
+    },
+    maintenance_acknowledgement: {
+      type: "boolean",
+      const: true,
+      description: "Only for a transfer action that requires it: the user explicitly confirms all Hosts and old writers associated with the source Store have been stopped. Never infer this from an idle coding-agent terminal or prefill it automatically."
     }
   }
 };

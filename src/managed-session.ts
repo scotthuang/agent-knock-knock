@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
 import { executorForConversation, type Conversation } from "./protocol.js";
 import type { ExecutorKind } from "./executors.js";
 import type {
@@ -86,6 +87,9 @@ export interface ManagedSessionState {
   detached_at?: string;
   quarantine_reason?: string;
   last_transition_id?: string;
+  /** Irreversible retirement; a transferred Session can never reacquire its binding. */
+  authority_transfer?: { transfer_id: string; target_store_dir: string; transferred_at: string };
+  authority_received?: { transfer_id: string; source_store_dir: string; received_at: string };
 }
 
 export type NativeThreadTransitionStatus =
@@ -445,7 +449,7 @@ export function assertManagedSessionState(
     "updated_at",
     "detached_at",
     "quarantine_reason",
-    "last_transition_id"
+    "last_transition_id", "authority_transfer", "authority_received"
   ], "managed session state");
   if (
     value.schema !== MANAGED_SESSION_SCHEMA ||
@@ -494,6 +498,27 @@ export function assertManagedSessionState(
   }
   if (value.status === "quarantined" && value.quarantine_reason === undefined) {
     throw new Error("a quarantined managed session requires quarantine_reason");
+  }
+  assertSessionAuthorityTransfers(value);
+}
+
+function assertSessionAuthorityTransfers(value: Record<string, unknown>): void {
+  for (const [field, storeKey, timestamp] of [
+    ["authority_transfer", "target_store_dir", "transferred_at"],
+    ["authority_received", "source_store_dir", "received_at"]
+  ] as const) {
+    const marker = value[field];
+    if (marker === undefined) continue;
+    if (!isRecord(marker)) throw new Error(`managed session ${field} must be an object`);
+    assertOnlyKeys(marker, ["transfer_id", storeKey, timestamp], `managed session ${field}`);
+    assertStorageRecordId(marker.transfer_id, "Store authority transfer id");
+    if (typeof marker[storeKey] !== "string" || !path.isAbsolute(marker[storeKey] as string)) {
+      throw new Error(`managed session ${field} requires an absolute Store path`);
+    }
+    assertTimestamp(marker[timestamp], `managed session ${field} time`);
+    if (field === "authority_transfer" && value.status !== "quarantined") {
+      throw new Error("a retired Store authority Session must remain quarantined");
+    }
   }
 }
 

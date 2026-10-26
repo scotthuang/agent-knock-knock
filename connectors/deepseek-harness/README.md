@@ -13,12 +13,15 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-This connector pins AKK **0.15.0** in its package and lockfile. It exposes
+This connector pins AKK **0.16.0** in its package and lockfile. It exposes
 that runtime's 27 semantic tools, including Codex CLI backend and Desktop
 operations when the selected conversation advertises them. `list` returns
 current discoverable conversations; `watches` separately returns recent
 monitoring records (24 hours by default), plus active or unresolved records.
-A newer root checkout does not silently replace this published dependency.
+A newer root checkout does not silently replace this pinned dependency. This
+checkout prepares connector `0.1.0-rc.11` with core `0.16.0`; publication is a
+separate step. Until then, `@next` continues to resolve the registry's
+previously published release.
 
 The development baseline is DeepSeek Harness **0.2.1-rc.2** with Cordis
 **4.0.5**. This is a release candidate, not a stable release; as checked on
@@ -75,7 +78,8 @@ can select an older `latest` build.
 
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
-Use `next`, or pin `@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.10`.
+Use `next`, or after publication pin
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.11`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -359,11 +363,12 @@ npm view @scotthuang/agent-knock-knock-deepseek-harness versions --json
 npm view @scotthuang/agent-knock-knock-deepseek-harness dist-tags --json
 ```
 
-Update to the registry's current prerelease, or pin an exact reviewed version:
+Update to the registry's current prerelease, or after publication pin this
+exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.10
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.11
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -391,12 +396,35 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned published AKK runtime `0.15.0`; building the current
-repository root does not silently replace that dependency. Testing connector
-changes against another AKK runtime requires an explicit dependency change and
+tests against its pinned AKK runtime `0.16.0`; building the current repository
+root does not silently replace that dependency. Before core publication, test
+the candidate core tarball in isolation as described in the
+[coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases);
+the registry-based `npm ci` above requires that exact core to be published.
+Testing connector changes against another AKK runtime requires an explicit
+dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.11`** is prepared with exact AKK **`0.16.0`** and
+its synchronized Skill. Core separates managed binding reconciliation from
+native Store authority transfer, records Store owner process identities, and
+uses a durable transfer journal with evidence-based automatic recovery. Store
+writer protocol advances to **11** (format **1**), action contract to **33**,
+and List projection to **v4**. The relay's generic 90-second deadline no longer
+kills `send`, `delegate`, or `respond` while they are proving text submission;
+phase deadlines, explicit timeouts, and Host cancellation remain effective.
+
+Live acceptance on DSH `0.2.1-rc.2` with Claude Code `2.1.295` covered both
+managed-terminal and native-backend Send, exact Watch completion callbacks,
+and native Store authority transfer without terminal input. Two consecutive
+managed Sends in `permissionMode=default` (`manual mode`) proved text injection,
+Enter dispatch, and agent acceptance; the second also completed callback
+delivery. Permission mode is not an input-delivery gate. This does not claim
+native Claude approval/question responses, permission-mode switching, or new
+Host-version compatibility. The prepared connector retains the existing DSH
+Host/peer policy and is intended for `next`; publication is still pending.
 
 Connector **`0.1.0-rc.10`** pins AKK **`0.15.0`** and bundles its updated
 Skill. Claude Code and configured wrappers such as `tclaude` share the same
@@ -441,7 +469,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.10` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.11` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -486,7 +514,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.10
+npm run release:check -- --publish --confirm-version 0.1.0-rc.11
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags

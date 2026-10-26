@@ -33,6 +33,7 @@ export type TerminalActionName =
   | "identify_and_send"
   | "resume_thread"
   | "reconcile_binding"
+  | "transfer_store_authority"
   | "respond"
   | "respond_interaction"
   | "approve"
