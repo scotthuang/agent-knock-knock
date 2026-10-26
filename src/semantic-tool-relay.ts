@@ -1,10 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { withStoreOwnerHostEnvironment } from "./store-owner-identity.js";
 
 export interface SemanticToolRelayOptions {
   readonly cwd?: string;
   readonly allowNonzeroJson?: boolean;
+  /** Explicit relay deadline; text submissions otherwise use domain timeouts. */
   readonly timeoutMs?: number;
 }
 
@@ -15,6 +17,10 @@ export const defaultSemanticToolRelayPath = fileURLToPath(
 const relayPathByOwner = new WeakMap<object, string>();
 const relayEnvironmentByOwner = new WeakMap<object, NodeJS.ProcessEnv>();
 const asyncRelayOwners = new WeakSet<object>();
+// These commands use lock, transport, and acceptance deadlines. A generic
+// relay deadline can kill their dispatcher between text and Enter. Explicit
+// relay deadlines and Host cancellation remain authoritative.
+const textSubmissionCommands = new Set(["send", "delegate", "respond"]);
 const invocationStorage = new AsyncLocalStorage<{
   readonly signal?: AbortSignal;
 }>();
@@ -33,7 +39,7 @@ export function bindSemanticToolRelayEnvironment(
 ): void {
   relayEnvironmentByOwner.set(
     owner,
-    Object.freeze({ ...environment }) as NodeJS.ProcessEnv
+    Object.freeze(withStoreOwnerHostEnvironment(environment)) as NodeJS.ProcessEnv
   );
 }
 
@@ -98,7 +104,9 @@ export function runCliAsync(
   {
     cwd = process.cwd(),
     allowNonzeroJson = false,
-    timeoutMs = 90_000
+    timeoutMs = textSubmissionCommands.has(cliArgs[0] ?? "")
+      ? undefined
+      : 90_000
   }: SemanticToolRelayOptions = {}
 ): Promise<Record<string, unknown>> {
   const binPath = relayPathForOwner(owner);
@@ -147,11 +155,11 @@ export function runCliAsync(
       stderr = append(stderr, chunk);
     });
 
-    const timeout = setTimeout(() => {
+    const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
     }, timeoutMs);
-    timeout.unref();
+    timeout?.unref();
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) {
       onAbort();
@@ -230,7 +238,7 @@ function relayPathForOwner(owner: object): string {
 }
 
 function relayEnvironmentForOwner(owner: object): NodeJS.ProcessEnv {
-  return relayEnvironmentByOwner.get(owner) ?? process.env;
+  return relayEnvironmentByOwner.get(owner) ?? withStoreOwnerHostEnvironment(process.env);
 }
 
 function parseJson(text: string): Record<string, unknown> {

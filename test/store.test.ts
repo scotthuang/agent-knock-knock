@@ -4,6 +4,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+/** Real competing writers share process setup; each test still owns its result and cleanup. */
+function spawnStoreWriter(script: string, args: string[]) {
+  return spawn(process.execPath, ["--input-type=module", "--eval", script, ...args],
+    { stdio: ["ignore", "ignore", "pipe"] });
+}
 import { createConversation, createMessage } from "../src/protocol.js";
 import {
   appendEvent,
@@ -1632,11 +1638,7 @@ test("concurrent first writers publish one complete manifest", async () => {
   `;
   try {
     await Promise.all(Array.from({ length: 4 }, (_, worker) => new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        ["--input-type=module", "--eval", childScript, storeDir],
-        { stdio: ["ignore", "ignore", "pipe"] }
-      );
+      const child = spawnStoreWriter(childScript, [storeDir]);
       let stderr = "";
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk) => {
@@ -1680,11 +1682,7 @@ test("concurrent writers serialize one protocol 1 manifest upgrade", async () =>
   try {
     writeStoreManifest(storeDir, { createdAt });
     await Promise.all(Array.from({ length: 4 }, (_, worker) => new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        ["--input-type=module", "--eval", childScript, storeDir],
-        { stdio: ["ignore", "ignore", "pipe"] }
-      );
+      const child = spawnStoreWriter(childScript, [storeDir]);
       let stderr = "";
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk) => {
@@ -2098,18 +2096,7 @@ test("concurrent appenders serialize complete NDJSON records", async () => {
       { mode: 0o600 }
     );
     await Promise.all(Array.from({ length: writerCount }, (_, writer) => new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        [
-          "--input-type=module",
-          "--eval",
-          childScript,
-          logPath,
-          String(writer),
-          String(eventsPerWriter)
-        ],
-        { stdio: ["ignore", "ignore", "pipe"] }
-      );
+      const child = spawnStoreWriter(childScript, [logPath, String(writer), String(eventsPerWriter)]);
       let stderr = "";
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk) => {

@@ -69,6 +69,7 @@ import {
 } from "./terminal-watch-terminal-identity.js";
 import { observeTerminalWatch } from "./terminal-watch-observation-adapter.js";
 import { approvalFingerprint } from "./terminal-watch-observation-evidence.js";
+import { withNativeAuthorityWatchOwner } from "./native-store-authority-watch.js";
 
 export function createTerminalWatchCliAdapter(
   dependencies: TerminalWatchCliDependencies
@@ -453,25 +454,25 @@ export function createTerminalWatchCliAdapter(
         openclawBin
       )
     );
-    const watch = existing ?? watchService.create({
-      agent,
-      terminal: terminalIdentity,
-      anchor,
-      warnings,
-      ...(callbackRoute === undefined
-        ? {}
-        : { callback_route: callbackRoute }),
-      openclaw_session: openclawSession,
-      openclaw_bin: openclawBin,
-      timeout_ms: monitorMinutesToMs(positiveMinutes(
-        options.hardTimeoutMinutes,
-        DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES
-      )),
-      approval_fingerprint: approvalFingerprint(projectedTerminal),
-      approval_reason_code: approvalFingerprint(projectedTerminal)
-        ? "terminal_waiting_for_approval"
-        : undefined
-    });
+    const watch = existing ?? withNativeAuthorityWatchOwner(dependencies.storeDirFromOptions(options), () => watchService.create({
+        agent,
+        terminal: terminalIdentity,
+        anchor,
+        warnings,
+        ...(callbackRoute === undefined
+          ? {}
+          : { callback_route: callbackRoute }),
+        openclaw_session: openclawSession,
+        openclaw_bin: openclawBin,
+        timeout_ms: monitorMinutesToMs(positiveMinutes(
+          options.hardTimeoutMinutes,
+          DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES
+        )),
+        approval_fingerprint: approvalFingerprint(projectedTerminal),
+        approval_reason_code: approvalFingerprint(projectedTerminal)
+          ? "terminal_waiting_for_approval"
+          : undefined
+    }));
     dependencies.printJson({
       watch: publicTerminalWatch(watch, existing ? discoveryWarnings : [])
     });

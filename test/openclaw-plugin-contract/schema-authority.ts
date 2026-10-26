@@ -103,10 +103,8 @@ test("OpenClaw model-facing mutation schemas contain only semantic targets", () 
     /regression-tested[\s\S]*another complete x\.y\.z version remains callable[\s\S]*compatibility warning/u
   );
   assert.deepEqual(newThreadParameters.required, ["terminal_id"]);
-  assert.deepEqual(reconcileBindingParameters.required, [
-    "terminal_id",
-    "conflicting_session_id"
-  ]);
+  assert.deepEqual(reconcileBindingParameters.required, ["terminal_id"]);
+  assert.deepEqual(reconcileBindingParameters.properties.operation.enum, ["transfer_store_authority"]);
   assert.deepEqual(resumeThreadParameters.required, [
     "terminal_id",
     "native_thread_id"

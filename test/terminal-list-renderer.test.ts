@@ -319,9 +319,9 @@ test("managed Turn action projection preserves exact JSON bytes across eligibili
   }
 });
 
-test("the public action contract v32 exposes semantic arguments only", () => {
+test("the public action contract v33 exposes semantic arguments only", () => {
   const contracts = listActionContracts();
-  assert.equal(contracts.version, 32);
+  assert.equal(contracts.version, 33);
   assert.deepEqual(
     Object.keys(contracts.actions as object),
     [
@@ -341,6 +341,7 @@ test("the public action contract v32 exposes semantic arguments only", () => {
       "identify_and_send",
       "resume_thread",
       "reconcile_binding",
+      "transfer_store_authority",
       "respond",
       "respond_interaction",
       "status",
@@ -474,6 +475,12 @@ test("the public action contract v32 exposes semantic arguments only", () => {
     "terminal_id",
     "conflicting_session_id"
   ]);
+  assert.equal(actions.transfer_store_authority.tool, "agent_knock_knock_reconcile_binding");
+  assert.equal(actions.transfer_store_authority.operation, "transfer_store_authority");
+  assert.deepEqual(actions.transfer_store_authority.required, ["operation", "terminal_id"]);
+  assert.deepEqual(actions.transfer_store_authority.optional, ["maintenance_acknowledgement"]);
+  assert.equal(actions.transfer_store_authority.sends_terminal_input, false);
+  assert.equal(actions.transfer_store_authority.requires_user_intent, true);
   assert.deepEqual(actions.approve.target_arguments, {
     exactly_one_of: ["turn_id", "terminal_id"]
   });

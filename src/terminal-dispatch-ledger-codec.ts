@@ -413,6 +413,8 @@ export function terminalDispatchReceiptCandidate(
   }
   const {
     terminal_submission_receipts: _history,
+    store_authority: _storeAuthority,
+    store_authority_transfer: _storeAuthorityTransfer,
     terminal_key: _terminalKey,
     version: _version,
     ...receipt

@@ -28,7 +28,7 @@ import {
   createTerminalControlProviderRegistry,
   StaticTerminalControlProvider
 } from "../src/terminal-control-provider.js";
-import { createTerminalMutationCliRuntime } from
+import { createTerminalMutationCliRuntime, withTerminalMutationCliOptions } from
   "../src/terminal-mutation-cli-runtime.js";
 import type { TerminalProcessSource } from "../src/terminal-process-source.js";
 import {
@@ -480,6 +480,10 @@ test("terminal mutation CLI forwards work between terminal and writer locks", as
     terminalBridgeRuntimeKey() {
       return "terminal:test:0.0";
     },
+    async beforeStoreWriter() {
+      await Promise.resolve();
+      effects.push("authority-recovery");
+    },
     async withStoreWriterLeaseAsync(_storeDir, operation) {
       effects.push("writer-lock");
       try {
@@ -504,6 +508,7 @@ test("terminal mutation CLI forwards work between terminal and writer locks", as
     assert.deepEqual(effects, [
       "terminal-lock",
       "after-terminal",
+      "authority-recovery",
       "writer-lock",
       "operation",
       "writer-unlock",
@@ -512,6 +517,30 @@ test("terminal mutation CLI forwards work between terminal and writer locks", as
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("terminal authority recovery retains each concurrent command's native discovery options", async () => {
+  const observed: Array<{ target: string; options: Readonly<Record<string, unknown>> }> = [];
+  const runtime = createTerminalMutationCliRuntime({
+    acquireFileLock: () => () => {},
+    acquireTerminalBridgeSendLock: () => () => {},
+    terminalBridgeRuntimeKey: control => control.target,
+    async beforeStoreWriter(_store, control, options) {
+      await Promise.resolve();
+      observed.push({ target: control.target, options });
+    },
+    withStoreWriterLeaseAsync: async (_store, operation) => operation()
+  });
+  const cases = [
+    { target: "first:0.0", options: { codexHome: "/fixture/first-codex", claudeHome: "/fixture/first-claude" } },
+    { target: "second:0.0", options: { codexHome: "/fixture/second-codex", claudeHome: "/fixture/second-claude" } }
+  ];
+  await Promise.all(cases.map(({ target, options }) => withTerminalMutationCliOptions(options, async () => {
+    await Promise.resolve();
+    const control = { kind: "tmux", target } as TerminalControlRef;
+    await withCanonicalMutationLocks(runtime.terminalWriterMutationLocks("/fixture/store", control), async () => {});
+  })));
+  assert.deepEqual(observed.sort((left, right) => left.target.localeCompare(right.target)), cases);
 });
 
 test("cli-core AST remains a stable facade without owned state machines", () => {

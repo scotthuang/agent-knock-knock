@@ -4,6 +4,7 @@ import type {
 import { isFinalDeferredForegroundTransferStatus } from
   "./deferred-foreground-transfer-policy.js";
 import type { ManagedSessionState } from "./managed-session.js";
+import { projectNativeStoreAuthority } from "./native-store-authority-projection.js";
 import {
   executorForConversation,
   sessionIdForConversation,
@@ -674,7 +675,7 @@ function projectTerminalFirstList(
         context
       );
       const authorityTerminal = binding.authorityTerminal;
-      return renderTerminalFirstListEntry(
+      return projectNativeStoreAuthority(renderTerminalFirstListEntry(
         ports,
         authorityTerminal,
         context,
@@ -683,7 +684,7 @@ function projectTerminalFirstList(
           context,
           binding
         )
-      );
+      ), binding.nativeStoreAuthority, context.mutationsAllowed);
     }),
     unavailableManagedTurns: unavailableManagedTurns(ports, request, context)
   };

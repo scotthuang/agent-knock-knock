@@ -45,6 +45,7 @@ import {
 
 const HANDOFF_AUTHORITY_KIND = "handoff";
 export const RECONCILE_BINDING_AUTHORITY_KIND = "reconcile_binding";
+const TRANSFER_STORE_AUTHORITY_KIND = "transfer_store_authority";
 const MODEL_OPTIONS_AUTHORITY_KIND = "model_options";
 
 interface DisplayedModelOptionsOfferPayload
@@ -426,13 +427,14 @@ function rememberDisplayedReconcileActions(
   )) {
     const terminalId = stringValue(args.terminal_id);
     const conflictingSessionId = stringValue(args.conflicting_session_id);
-    if (!terminalId || !conflictingSessionId) continue;
+    const transfer = args.operation === TRANSFER_STORE_AUTHORITY_KIND;
+    if (!terminalId || (!transfer && !conflictingSessionId)) continue;
     rememberSemanticPrivateAuthorityOffer(
       api,
       privateAuthorityOfferKey(
         sessionKey,
         sessionId,
-        RECONCILE_BINDING_AUTHORITY_KIND,
+        transfer ? TRANSFER_STORE_AUTHORITY_KIND : RECONCILE_BINDING_AUTHORITY_KIND,
         { type: "terminal_id", id: terminalId }
       ),
       { args }
@@ -656,6 +658,60 @@ function privateAuthorityOfferKey(
   return { sessionKey, sessionId, kind, target };
 }
 
+/** Both recovery operations consume one displayed offer and refresh it before building CLI authority. */
+export async function buildPrivateReconcileBindingArgs(
+  api,
+  params: Record<string, unknown>,
+  context: { sessionKey: string; sessionId: string }
+): Promise<string[]> {
+  const transfer = params.operation === TRANSFER_STORE_AUTHORITY_KIND;
+  assertOnlyModelControlParameters(params, transfer
+    ? ["operation", "terminal_id", "maintenance_acknowledgement"]
+    : ["terminal_id", "conflicting_session_id"], "reconcile_binding");
+  if (params.maintenance_acknowledgement !== undefined && params.maintenance_acknowledgement !== true) {
+    throw new Error("maintenance_acknowledgement must be an explicit true confirmation that all associated Hosts and old writers have stopped");
+  }
+  const terminalId = requiredString(params.terminal_id, "terminal_id");
+  const conflictingSessionId = transfer ? undefined : requiredString(params.conflicting_session_id, "conflicting_session_id");
+  const action = await consumeDisplayedPrivateAction(api, {
+    ...context,
+    kind: transfer ? TRANSFER_STORE_AUTHORITY_KIND : RECONCILE_BINDING_AUTHORITY_KIND,
+    target: { type: "terminal_id", id: terminalId },
+    tool: "agent_knock_knock_reconcile_binding", terminalId,
+    matches: (args) => stringValue(args.terminal_id) === terminalId && (transfer
+      ? args.operation === TRANSFER_STORE_AUTHORITY_KIND
+      : args.operation === undefined && stringValue(args.conflicting_session_id) === conflictingSessionId)
+  });
+  const args = transfer
+    ? transferStoreAuthorityArgs(params, terminalId, action)
+    : detachBindingArgs(terminalId, conflictingSessionId!, action);
+  const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
+  pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
+  pushOptional(args, "--codex-home", stringValue(config.codexHome));
+  pushOptional(args, "--claude-home", stringValue(config.claudeHome));
+  return args;
+}
+
+function transferStoreAuthorityArgs(params: Record<string, unknown>, terminalId: string, action: Record<string, unknown>): string[] {
+  if (action.maintenance_acknowledgement_required === true && params.maintenance_acknowledgement !== true) {
+    throw new Error("legacy Store authority requires explicit maintenance_acknowledgement after stopping every associated Host and old writer; refresh List and confirm again");
+  }
+  return ["transfer-store-authority", "--terminal", terminalId,
+    "--expected-authority-token", requiredString(action.expected_authority_token, "current internal Store authority"),
+    ...(params.maintenance_acknowledgement === true ? ["--maintenance-acknowledgement"] : [])];
+}
+
+function detachBindingArgs(terminalId: string, conflictingSessionId: string, action: Record<string, unknown>): string[] {
+  const revision = Number(action.expected_session_revision);
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error("expected_session_revision must be a positive safe integer");
+  }
+  return ["reconcile-binding", "--terminal", terminalId, "--conflicting-session", conflictingSessionId,
+    "--expected-session-revision", String(revision),
+    "--expected-binding-token", requiredString(action.expected_binding_token, "current internal conflicting binding authority"),
+    "--expected-terminal-token", requiredString(action.expected_terminal_token, "current internal terminal authority")];
+}
+
 export async function consumeDisplayedPrivateAction(
   api: object,
   input: {
@@ -704,7 +760,10 @@ function authoritativeTerminalActionArguments(
   if (!availableActions) return [];
   return Object.values(availableActions).flatMap((action) =>
     isRecord(action) && action.tool === tool && isRecord(action.arguments)
-      ? [action.arguments]
+      ? [{ ...action.arguments,
+          ...(tool === "agent_knock_knock_reconcile_binding" && action.arguments.operation === TRANSFER_STORE_AUTHORITY_KIND
+            ? { maintenance_acknowledgement_required: Array.isArray(action.missing_required)
+                && action.missing_required.includes("maintenance_acknowledgement") } : {}) }]
       : []
   );
 }

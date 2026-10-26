@@ -519,7 +519,7 @@ test("prepared owner mismatch observes neither clock nor Store binding facts", a
   assert.equal(repositoryWrites, 0);
 });
 
-test("prepared recovery replaces the prior durable generation with parent-exact bytes", async (t) => {
+test("prepared recovery restores exact dispatch bytes while advancing independent Store owner authority", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-prepared-replace-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const { storeDir, statePath, logPath } = conversationPaths(root);
@@ -656,7 +656,8 @@ test("prepared recovery replaces the prior durable generation with parent-exact 
       callback_expected: true,
       callback_route_fingerprint: callbackRouteFingerprint,
       reason:
-        "restored the prior durable generation after a pre-submit dispatcher exit"
+        "restored the prior durable generation after a pre-submit dispatcher exit",
+      store_authority: { ...(previousLedger!.store_authority as Record<string, unknown>), generation: 2 }
     };
     const expected = constructTerminalDispatchLedgerDocument({
       previousLedger,

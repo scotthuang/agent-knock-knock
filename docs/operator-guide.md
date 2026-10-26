@@ -168,7 +168,9 @@ The user-priority `terminal_user_explicit` path requires one exact live
 physical terminal/process, a scanned non-blocked approval state, and no proven
 input-owning questionnaire, editor, menu, or read-only viewer. Broken AKK Turn,
 Session, transfer, transition, ledger, or Store state cannot veto the user's
-explicit Send. Neither can parsed working activity, an existing draft, or
+explicit Send within the same Store authority. A conflicting or unfinished
+cross-Store authority transfer still blocks input, including physical fallback.
+Neither can parsed working activity, an existing draft, or
 ordinary Composer visibility, stability, or exactness. Codex physical fallback
 sends `C-u` once. Claude Code physical fallback uses a sentinel-backed native
 `C-s` stash-clear transaction that is independent of the cursor position and
@@ -329,6 +331,11 @@ stale metadata.
 
 Send preserves the selected conversation's existing permission mode. Use an
 explicit advertised permission action to change it before sending a task.
+Claude Code's `default` mode (`⏸ manual mode on`), plan, accept-edits, and
+bypass modes do not prohibit submitting user task text. Managed Send injects
+the task and dispatches Enter without changing that mode; any subsequent tool
+approval remains a separate interaction. A real approval dialog or changed
+terminal identity still requires the corresponding interaction or recovery.
 The [CLI backend](codex-cli-native-compatibility.md) and
 [Desktop](codex-desktop-compatibility.md#settings-and-cancellation) adapters
 apply and verify the selected conversation's native settings. For a Codex
@@ -340,6 +347,13 @@ Claude Code currently has no AKK `permission_options` or `set_permissions`
 operation. Supported managed approvals decide one current request; they do not
 change the session's permission mode. The native sender's `bypass` or
 `prompting` declaration is message metadata, not a permission-setting API.
+
+Host Send uses the dispatch stages' own lock, transport, and acceptance
+timeouts instead of the relay's generic 90-second deadline. Slow discovery
+must not kill the dispatcher between text injection and Enter. Explicit Host
+cancellation and explicitly supplied relay deadlines still apply. If a sender
+is interrupted, inspect its durable submission receipt before deciding what
+to do; an unproven receipt never authorizes an automatic resend or Enter.
 
 ## Safe model control
 
@@ -558,6 +572,47 @@ The following terminal controls remain available when the corresponding
 state makes them meaningful. `reconcile_binding`, `identify_foreground`, and
 `repair_model_control` retain their physical-terminal requirements; backend
 Recover does not replace them.
+
+An idle coding-agent terminal can still belong to another AKK Store. A resolved
+dispatch means its task settled; it does not release that Store's native-thread
+authority. List reports this conflict and withholds managed Send. An exactly
+associated Claude native conversation can carry its terminal's recovery action;
+use that action's physical `terminal_id`, while retaining the native
+`conversation_id` for the later ordinary Send.
+
+The shared runtime stays at its existing configured location; recovery does not
+move the runtime or delete temporary Stores. Automatic recovery is limited to
+Stores explicitly created with `AKK_EPHEMERAL_STORE=1`, under a private, owned,
+non-symlink `akk-*` directory inside the system temporary directory. Every
+registered owner must be proven dead by its exact process incarnation, and the
+native session, physical terminal, idle state, and settled work must still be
+verified. A temporary pathname, elapsed time, or dead PID alone is insufficient.
+Persistent Stores require the advertised explicit transfer. A newer writer
+recording legacy authority preserves its incomplete owner coverage; later writes
+cannot make that legacy authority eligible for automatic recovery.
+
+There are two distinct binding-recovery operations:
+
+- `agent_knock_knock_reconcile_binding({terminal_id,conflicting_session_id})`
+  detaches one advertised stale binding in the current Store. It does not move
+  another Store's authority or adopt the live thread.
+- An advertised `transfer_store_authority` action uses
+  `agent_knock_knock_reconcile_binding({operation:"transfer_store_authority",terminal_id})`.
+  After explicit user confirmation, AKK rechecks the displayed authority and
+  transfers eligible settled native-thread authority to this Host's Store.
+  No coding-agent input is sent and no Turn is created. Refresh List before
+  continuing with the original native conversation's newly advertised Send.
+
+For legacy records whose previous Host/writer ownership cannot be proven, the
+action requires `maintenance_acknowledgement`. Stop every Host and old writer
+using the **source Store**, then explicitly confirm that condition and include
+`maintenance_acknowledgement:true`. The controller must never prefill this
+acknowledgement. An idle Claude/Codex prompt, completed task, resolved ledger, or
+elapsed timeout is insufficient evidence that those writers have stopped.
+Any observed live or unverifiable owner, unresolved work, or changed authority
+still prevents transfer. If no transfer action is advertised, use the reported
+owner/conflict diagnostics to resolve the source Host; do not delete a ledger,
+clear Store files, guess a Session ID, or supply a private authority token.
 
 | Command | Use |
 | --- | --- |

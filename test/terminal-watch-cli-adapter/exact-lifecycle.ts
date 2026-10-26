@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { readStoreOwnerInventory, probeStoreOwnerInventory } from "../../src/store-owner-registry.js";
 import {
   createTerminalWatchCliAdapter
 } from "../../src/terminal-watch-cli-adapter.js";
@@ -67,6 +68,9 @@ test("Terminal Watch CLI observes one exact human-started Codex task and deliver
   const created = record(record(printed.at(-1)).watch);
   const watchId = String(created.watch_id);
   const persisted = loadTerminalWatch(fixture.storeDir, watchId);
+  const owners = readStoreOwnerInventory(fixture.storeDir);
+  assert.equal(owners.complete, true, "new manual Watch registers its durable Host/CLI owner");
+  assert.equal(probeStoreOwnerInventory(owners).state, "alive");
   assert.equal(Date.parse(persisted.deadline_at) - Date.parse(persisted.created_at), 10 * 60_000);
   assert.match(watchId, /^terminal-watch-/u);
   assert.equal(created.status, "active");

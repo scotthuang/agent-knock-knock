@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import { createTerminalDispatchRepositoryCliAdapter } from "../src/terminal-dispatch-repository-cli-adapter.js";
+import { ensureStoreWritable } from "../src/store.js";
 import {
   createTerminalPermissionControlCliAdapter,
   type TerminalPermissionControlCliPorts
@@ -119,7 +125,7 @@ function fixture() {
     output: { print: (value) => output.push(value) }
   };
   return {
-    app: createTerminalPermissionControlCliAdapter(ports), events, output,
+    app: createTerminalPermissionControlCliAdapter(ports), ports, events, output,
     mutateBeforeInput: (callback: () => void) => { beforeDomainInput = callback; },
     replaceProcess: () => { processBirth = "replacement-process"; },
     replaceVersion: () => { currentVersion = "0.159.3"; },
@@ -232,4 +238,37 @@ test("permission discovery requires exact physical and UI authority on Herdr and
   assert.ok(actions.permission_options);
   assert.equal(actions.set_permissions, undefined);
   assert.equal(withoutInspectionActionsDuringNativeTransition(actions).permission_options, undefined);
+});
+
+test("permission catalogs and changes cannot reuse physical authority across a foreign Store ledger", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-permission-authority-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "local"), source = path.join(root, "source");
+  ensureStoreWritable(storeDir);
+  ensureStoreWritable(source);
+  await runCliCommandExecution("permission-authority-test", {}, {
+    env: { ...process.env, AKK_RUNTIME_DIR: path.join(root, "runtime") }, runtimeLog: () => undefined
+  }, async () => {
+    const repository = createTerminalDispatchRepositoryCliAdapter();
+    for (const operation of ["catalog", "set"] as const) {
+      for (const late of [false, true]) {
+        const subject = fixture();
+        subject.ports.state.storeDir = () => storeDir;
+        subject.ports.state.acquireTerminal = (store, terminalControl) => repository.acquire(store, terminalControl);
+        const local = { status: "resolved", store_dir: storeDir, session_id: "old-session",
+          native_thread_id: "44444444-4444-4444-8444-444444444444" };
+        const foreign = { ...local, store_dir: source };
+        repository.save(control, late ? local : foreign, { authorityTransfer: true });
+        if (late) subject.mutateBeforeInput(() => repository.save(control, foreign, { authorityTransfer: true }));
+        const request = { terminal: terminalId, expectedBindingToken: bindingToken(),
+          expectedCatalogFingerprint: fingerprint, mode: "full-access" };
+        await assert.rejects(operation === "set" ? subject.app.runSetPermissions(request)
+          : subject.app.runPermissionOptions({ terminal: terminalId, expectedBindingToken: bindingToken() }),
+        /authoritative in another Store/u, `${operation}/${late ? "before input" : "entry"}`);
+        assert.equal(subject.events.filter(event => event === "query-input" || event === "set-input").length, 0);
+        assert.deepEqual(subject.output, []);
+        assert.deepEqual(repository.load(control)?.store_dir, source);
+      }
+    }
+  });
 });

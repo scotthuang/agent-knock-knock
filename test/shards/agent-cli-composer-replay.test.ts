@@ -1136,7 +1136,7 @@ test("a released Turn replays one stable dispatch while a new id starts a new Tu
     assert.notEqual(historicalCrossStore.status, 0);
     assert.match(
       historicalCrossStore.stderr,
-      /durable terminal receipt|idempotency key/iu
+      /authoritative in another Store .*authority_has_unresolved_work/iu
     );
     assert.equal(
       readJsonLines(tmuxCallsPath)

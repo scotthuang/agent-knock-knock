@@ -11,7 +11,7 @@ import {
   createTerminalListOwnershipService,
   type TerminalListOwnershipServicePorts
 } from "../src/terminal-list-ownership-service.js";
-import type { TerminalControlRef } from
+import { terminalControlEvidence, type TerminalControlRef } from
   "../src/terminal-control-ref.js";
 
 const nativeSessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0201";
@@ -230,4 +230,20 @@ test("unreadable dispatch ledger preserves the fail-closed conflict", () => {
         "inspect the shared terminal pane before performing a side effect"
     }
   });
+  assert.equal(service.nativeStoreAuthority(terminalRow(), "/tmp/current-store").state, "conflict");
+});
+
+test("resolved foreign native authority remains visible after ordinary dispatch ownership has ended", () => {
+  const service = createTerminalListOwnershipService(ports({ loadTerminalBridgeDispatchLedger: () => ({
+    status: "resolved", dispatcher_pid: null, native_thread_id: nativeSessionId,
+    store_dir: "/tmp/previous-store", terminal_endpoint: terminalControlEvidence(control)
+  }) }));
+  assert.deepEqual(service.terminalDispatchOwnership(control), { state: "none" });
+  const authority = service.nativeStoreAuthority(terminalRow(), "/tmp/current-store");
+  assert.equal(authority.state, "conflict");
+  assert.equal(authority.sourceStoreDir, "/tmp/previous-store");
+  assert.equal(authority.transferEligible, false, "Missing source Session authority must not mint a transfer offer");
+  assert.equal(service.nativeStoreAuthority(terminalRow(), "/tmp/previous-store").state, "current");
+  assert.equal(service.nativeStoreAuthority({ ...terminalRow(), native_agent_session_id:
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }, "/tmp/current-store").state, "none");
 });

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { withStoreOwnerHostEnvironment } from "./store-owner-identity.js";
 
 import { packageRootDir } from "./cli-command-runtime.js";
 import {
@@ -180,7 +181,7 @@ export function createHostAdapter(options: CreateHostAdapterOptions): HostAdapte
   bindSemanticToolRelayPath(lifecycleApi, relayPath);
   bindSemanticToolRelayEnvironment(
     lifecycleApi,
-    options.lifecycleEnvironment ?? process.env
+    withStoreOwnerHostEnvironment(options.lifecycleEnvironment ?? process.env, "host-adapter")
   );
   const lifecycle = createHostMonitorReconciliationService(
     lifecycleApi,
@@ -209,7 +210,7 @@ export function createHostAdapter(options: CreateHostAdapterOptions): HostAdapte
     }
     const registry = createHostBridgeToolRegistry({
       relayPath,
-      relayEnvironment: environment,
+      relayEnvironment: withStoreOwnerHostEnvironment(environment, "host-adapter"),
       pluginConfig,
       logger: options.logger,
       context: trusted

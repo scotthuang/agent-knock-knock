@@ -1311,6 +1311,34 @@
       "owner": "mutation-transaction"
     },
     {
+      "path": "src/native-store-authority-cli-adapter.ts",
+      "owner": "binding-reconciliation"
+    },
+    {
+      "path": "src/native-store-authority-ledger.ts",
+      "owner": "terminal-dispatch-recovery"
+    },
+    {
+      "path": "src/native-store-authority-projection.ts",
+      "owner": "terminal-list-renderer"
+    },
+    {
+      "path": "src/native-store-authority-runtime.ts",
+      "owner": "binding-reconciliation"
+    },
+    {
+      "path": "src/native-store-authority-transfer.ts",
+      "owner": "binding-reconciliation"
+    },
+    {
+      "path": "src/native-store-authority-watch.ts",
+      "owner": "binding-reconciliation"
+    },
+    {
+      "path": "src/native-store-authority.ts",
+      "owner": "binding-reconciliation"
+    },
+    {
       "path": "src/native-thread-lifecycle-cli-adapter.ts",
       "owner": "native-thread-lifecycle-cli"
     },
@@ -1504,6 +1532,18 @@
     },
     {
       "path": "src/store-event-presentation.ts",
+      "owner": "store-protocol"
+    },
+    {
+      "path": "src/store-owner-identity.ts",
+      "owner": "store-protocol"
+    },
+    {
+      "path": "src/store-owner-process.ts",
+      "owner": "store-protocol"
+    },
+    {
+      "path": "src/store-owner-registry.ts",
       "owner": "store-protocol"
     },
     {

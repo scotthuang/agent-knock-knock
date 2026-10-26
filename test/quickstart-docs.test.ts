@@ -351,14 +351,14 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     interactionDesign,
     /not a published package contract|local POC implemented/u
   );
-  assert.match(storageContract, /current writer protocol is 10/u);
+  assert.match(storageContract, /current writer protocol is 11/u);
   assert.match(
     storageContract,
-    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 10/u
+    /Upgrading protocol 1 or 2[\s\S]*atomically publishing protocol 11/u
   );
   assert.match(
     storageContract,
-    /Protocols 3 through 9 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
+    /Protocols 3 through 10 already have Session authority[\s\S]*manifest-only writer fence with no data migration/u
   );
   assert.match(
     operatorContract,

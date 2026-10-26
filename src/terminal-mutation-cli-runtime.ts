@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import type { FileLockAcquisitionOptions } from
   "./file-lock-cli-adapter.js";
@@ -16,6 +17,17 @@ import {
   terminalDispatchStateResourceForStore
 } from "./terminal-dispatch-capability.js";
 
+type TerminalMutationCliOptions = Readonly<Record<string, unknown>>;
+const terminalMutationCliOptions = new AsyncLocalStorage<TerminalMutationCliOptions>();
+
+/** Keep native discovery configuration local to this command, including concurrent Hosts. */
+export function withTerminalMutationCliOptions<Result>(
+  options: TerminalMutationCliOptions,
+  operation: () => Result
+): Result {
+  return terminalMutationCliOptions.run(Object.freeze({ ...options }), operation);
+}
+
 export interface TerminalMutationCliRuntimePorts {
   acquireFileLock(
     lockPath: string,
@@ -27,6 +39,8 @@ export interface TerminalMutationCliRuntimePorts {
     options?: FileLockAcquisitionOptions
   ): () => void;
   terminalBridgeRuntimeKey(terminalControl: TerminalControlRef): string;
+  beforeStoreWriter?(storeDir: string, terminalControl: TerminalControlRef,
+    options: TerminalMutationCliOptions): void | Promise<void>;
   withStoreWriterLeaseAsync<Result>(
     storeDir: string,
     operation: () => Promise<Result>,
@@ -50,6 +64,7 @@ export function createTerminalMutationCliRuntime(
     options: TerminalWriterMutationLockOptions = {}
   ) {
     const canonicalStoreDir = path.resolve(storeDir);
+    const nativeOptions = terminalMutationCliOptions.getStore() ?? {};
     return {
       resources: {
         terminal: canonicalMutationResource(
@@ -70,9 +85,10 @@ export function createTerminalMutationCliRuntime(
           retryMs: options.retryMs
         }
       ),
-      ...(options.afterTerminalAcquired
-        ? { afterTerminalAcquired: options.afterTerminalAcquired }
-        : {}),
+      afterTerminalAcquired: async () => {
+        await options.afterTerminalAcquired?.();
+        await ports.beforeStoreWriter?.(canonicalStoreDir, terminalControl, nativeOptions);
+      },
       withStoreWriter: <Result>(operation: () => Promise<Result>) =>
         ports.withStoreWriterLeaseAsync(canonicalStoreDir, operation, {
           timeoutMs: options.storeWriterTimeoutMs ?? options.timeoutMs

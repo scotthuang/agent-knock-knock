@@ -56,7 +56,12 @@ function fixture(t: { after(fn: () => void): void }) {
             row.native_agent_status_card_session_id = uuid;
             return { native_thread_id: uuid, status: "observed", inspection: "status", agent: "codex", terminal_id: terminalId };
           }
-          return { delivered: true, callback_expected: false, watch_id: "exact-watch", conversation_id: selectedOptions.conversation };
+          return { delivered: true, callback_expected: false, watch_id: "exact-watch", conversation_id: selectedOptions.conversation,
+            ...(selectedCommand === "status" && selectedOptions.conversation === nativeId ? {
+              source: "codex_cli", agent: "codex", capabilities: { status: true, send: true, watch: true, approve: true },
+              available_actions: { status: { tool: "agent_knock_knock_status" }, send: { tool: "agent_knock_knock_send" },
+                watch: { tool: "agent_knock_knock_watch" }, approve: { tool: "agent_knock_knock_approve" } }
+            } : {}) };
         }
       }), true);
     });
@@ -77,6 +82,39 @@ test("backend-first sends and reads a proven terminal alias without terminal inp
     assert.equal(result.routing.transport, "codex_backend");
   }
   assert.equal(f.calls.length, 3);
+});
+
+test("native Status carries the exact terminal Store conflict and recovery using the same inventory", async t => {
+  for (const target of ["native", "terminal"] as const) {
+    const f = fixture(t);
+    const transfer = { tool: "agent_knock_knock_reconcile_binding", arguments: { operation: "transfer_store_authority",
+      terminal_id: f.terminalId, expected_authority_token: "private-authority" }, requires_user_intent: true };
+    f.row.native_store_authority = { state: "conflict", owner_status: "legacy", transfer_eligible: true, automatic_eligible: false, send_after_transfer: false };
+    f.row.available_actions = { transfer_store_authority: transfer };
+    const result = await f.run("status", target === "native" ? f.nativeId : f.terminalId);
+    assert.equal(f.scans, 1, "A proven terminal alias reuses the selection scan");
+    assert.deepEqual(result.native_store_authority, f.row.native_store_authority);
+    assert.equal(result.capabilities.send, false);
+    assert.equal(result.capabilities.approve, false);
+    assert.equal(result.capabilities.watch, true);
+    assert.equal(result.available_actions.send, undefined);
+    assert.equal(result.available_actions.approve, undefined);
+    assert.deepEqual(result.available_actions.transfer_store_authority, transfer);
+    assert.equal(result.terminal_controls, undefined);
+    assert.deepEqual(f.calls.map(call => call.command), ["status"]);
+  }
+});
+
+test("native mutations cannot bypass a foreign or transferring Store through their backend", async t => {
+  for (const command of ["send", "set-permissions", "approve", "respond-interaction"]) {
+    const f = fixture(t);
+    f.row.native_store_authority = { state: command === "respond-interaction" ? "transferring" : "conflict",
+      automatic_eligible: true, owner_status: "dead" };
+    await assert.rejects(f.run(command, f.nativeId, { mode: "full-access",
+      interaction: `codex-native-interaction:${"a".repeat(64)}` }), /transfer_store_authority recovery/u);
+    assert.deepEqual(f.calls, [], command);
+    assert.equal(f.scans, 1, command);
+  }
 });
 
 test("legacy exact session selector also enters backend-first routing", async t => {
@@ -180,7 +218,7 @@ test("native target unavailable before dispatch uses exact terminal and persists
 test("backend callback failure never selects terminal, and busy backend is left to the native operation", async t => {
   const f = fixture(t); f.snapshot.canSend = false; f.snapshot.thread.status = { type: "active", activeFlags: [] };
   const result = await f.run("send", f.nativeId);
-  assert.equal(result.callback_expected, false); assert.equal(f.scans, 0);
+  assert.equal(result.callback_expected, false); assert.equal(f.scans, 1, "Native mutation reads Store authority without selecting terminal fallback");
   assert.equal(f.calls[0].options.conversation, f.nativeId);
 });
 
@@ -189,7 +227,7 @@ test("unknown native mutation pins backend and cannot fall back on a later retry
   await assert.rejects(f.run("send", f.nativeId), /lost acknowledgement/);
   f.failure = Object.assign(new Error("offline"), { code: "ENOENT" });
   await assert.rejects(f.run("send", f.nativeId), /lost acknowledgement/);
-  assert.equal(f.scans, 0); assert.deepEqual(f.calls.map(call => call.options.conversation), [f.nativeId, f.nativeId]);
+  assert.equal(f.scans, 2); assert.deepEqual(f.calls.map(call => call.options.conversation), [f.nativeId, f.nativeId]);
 });
 
 test("same cwd and old startup UUID do not authorize native-offline terminal fallback", async t => {

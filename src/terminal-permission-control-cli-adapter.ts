@@ -18,6 +18,8 @@ import {
   type TerminalPermissionControlProfile
 } from "./terminal-permission-control.js";
 import { nonBlankString } from "./value-guards.js";
+import { assertNativeStoreAuthorityCurrent } from "./native-store-authority.js";
+import { createTerminalDispatchRepositoryCliAdapter } from "./terminal-dispatch-repository-cli-adapter.js";
 
 export interface TerminalPermissionControlCliPorts {
   readonly runtime: {
@@ -196,6 +198,11 @@ class TerminalPermissionControlCliApplication {
     this.ports.lifecycle.assertSameInspectionTerminal(
       context.terminal, terminal, "before permission-control input"
     );
+    // Permission modes belong to this physical process. A catalog or binding
+    // token does not authorize changing a different Store's native context.
+    assertNativeStoreAuthorityCurrent({ storeDir: this.ports.state.storeDir(context.options),
+      terminalControl: terminal.terminalControl,
+      ledger: createTerminalDispatchRepositoryCliAdapter().load(terminal.terminalControl) });
     const version = this.ports.runtime.forOptions(context.options)
       .agentVersionForRunningProcess("codex", terminal.pid);
     const incarnation = this.ports.runtime.physicalProcessIncarnation(terminal.pid);

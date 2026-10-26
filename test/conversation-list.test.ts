@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { unifiedConversationList } from "../src/conversation-list.js";
+import { unifiedConversationList, withExactTerminalActions } from "../src/conversation-list.js";
 import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
 import { createClaudeNativeConversationId } from "../src/claude-native-identity.js";
 import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
@@ -92,6 +92,59 @@ test("exact aliases advertise the selected backend Send and Watch while preservi
   const separate = unavailable.conversations[1].available_actions as Record<string, any>;
   assert.equal(separate.send.input.conversation_id, terminalId);
   assert.ok(separate.permission_options);
+});
+
+test("exact native aliases preserve Store conflict recovery without reviving native or physical writes", () => {
+  const claude = claudePair();
+  for (const pair of [{ physical: terminal(), backend: native() }, claude]) {
+    const id = String(pair.physical.id);
+    const recovery = { tool: "agent_knock_knock_reconcile_binding", requires_user_intent: true,
+      missing_required: ["maintenance_acknowledgement"], arguments: {
+        operation: "transfer_store_authority", terminal_id: id, expected_authority_token: "secret-authority"
+      } };
+    const authority = { state: "conflict", reason: "native_thread_authoritative_in_another_store",
+      source_store_dir: "/tmp/previous-store", owner_status: "legacy", transfer_eligible: true, automatic_eligible: false, send_after_transfer: false };
+    const projected = { ...pair.physical, management_state: "conflict", native_store_authority: authority,
+      capabilities: { status: true, send: false, cancel: false }, available_actions: {
+        status: { tool: "agent_knock_knock_status", arguments: { terminal_id: id } }, transfer_store_authority: recovery
+      } };
+    const backend = { ...pair.backend, interaction_state: [{ kind: "command_approval", available_actions: {
+      approve: { tool: "agent_knock_knock_approve" }
+    } }], capabilities: { status: true, send: true, watch: true, interaction_notify: true,
+      approve: true, set_permissions: true }, available_actions: { ...pair.backend.available_actions,
+      status: { tool: "agent_knock_knock_status", input: { conversation_id: pair.backend.conversation_id } },
+      watch: { tool: "agent_knock_knock_watch", input: { conversation_id: pair.backend.conversation_id } },
+      approve: { tool: "agent_knock_knock_approve" }, set_permissions: { tool: "agent_knock_knock_set_permissions" }
+    } };
+    const result = unifiedConversationList({ terminals: [projected],
+      [backend.agent === "claude" ? "claude_cli_sessions" : "codex_cli_sessions"]: [backend] }, [pair.physical]);
+    const row = result.conversations[0] as Record<string, any>;
+    assert.deepEqual(row.native_store_authority, authority);
+    assert.equal(row.capabilities.send, false);
+    assert.equal(row.capabilities.approve, false);
+    assert.equal(row.capabilities.set_permissions, false);
+    assert.equal(row.capabilities.interaction_notify, true);
+    assert.equal(row.available_actions.send, undefined);
+    assert.equal(row.available_actions.approve, undefined);
+    assert.equal(row.available_actions.set_permissions, undefined);
+    assert.deepEqual(row.interaction_state[0].available_actions, {});
+    assert.ok(row.available_actions.watch);
+    assert.equal(row.available_actions.transfer_store_authority, recovery);
+    assert.equal(row.terminal_controls[0].available_actions.send, undefined);
+    const status = withExactTerminalActions({ ...backend, terminal_controls: [projected] });
+    assert.equal((status.available_actions as Record<string, unknown>).send, undefined,
+      "Status consumes the same exact conflict projection");
+    const compact = compactAkkListModelProjection(result) as Record<string, any>;
+    const shown = compact.conversations[0];
+    assert.equal(shown.available_actions.send, undefined);
+    assert.equal(shown.available_actions.transfer_store_authority, true);
+    assert.equal(shown.action_inputs.transfer_store_authority.tool, "agent_knock_knock_reconcile_binding");
+    assert.equal(shown.action_inputs.transfer_store_authority.arguments.operation, "transfer_store_authority");
+    assert.equal(shown.action_inputs.transfer_store_authority.arguments.terminal_id, id);
+    assert.equal(shown.action_inputs.transfer_store_authority.requires_user_intent, true);
+    assert.deepEqual(shown.action_inputs.transfer_store_authority.missing_required, ["maintenance_acknowledgement"]);
+    assert.equal(JSON.stringify(compact).includes("secret-authority"), false);
+  }
 });
 
 test("default List prefers the original verified backend without inventing a terminal alias", () => {
@@ -444,6 +497,11 @@ test("Claude List follows managed Send eligibility while preserving canonical se
     { name: "Store read-only", physical: [physical], writable: false, route: "managed_terminal", send: false },
     { name: "Store unavailable", physical: [physical], projected: changed({ management_state: "unavailable" }), route: "managed_terminal", send: false },
     { name: "management conflict", physical: [physical], projected: changed({ management_state: "conflict" }), route: "managed_terminal", send: false },
+    { name: "automatic transfer before managed Send", physical: [physical], projected: changed({ management_state: "conflict",
+      native_store_authority: { state: "conflict", automatic_eligible: true, send_after_transfer: true } }), route: "managed_terminal", send: true },
+    { name: "automatic transfer retains composer fence", physical: changed({ _claude_managed_send_eligible: false }),
+      projected: changed({ management_state: "conflict", native_store_authority: { state: "conflict", automatic_eligible: true,
+        send_after_transfer: true } }), route: "managed_terminal", send: false },
     { name: "session conflict", physical: changed({ native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }), route: "managed_terminal", send: false },
     { name: "birth conflict", physical: changed({ native_agent_process_birth: "Mon Oct 12 01:02:04 2026" }), route: "managed_terminal", send: false },
     { name: "ambiguous", physical: [physical, { ...physical, id: "terminal:v2:tmux:claude:akk:0.1:123" }], route: "managed_terminal", send: false },

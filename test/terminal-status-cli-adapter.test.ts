@@ -23,6 +23,7 @@ import type {
 } from "../src/terminal-agent-bridge.js";
 import { terminalWatchDiscoveryHint } from
   "../src/terminal-list-renderer.js";
+import { terminalStatusListObservationFromProjection } from "../src/terminal-status-facts.js";
 import {
   appendEvent,
   loadState,
@@ -438,6 +439,10 @@ test("raw status uses one durable list observation for activity and Watch discov
   };
   const authorityEvents: string[] = [];
   const events: string[] = [];
+  const storeAuthority = { state: "conflict", reason: "native_thread_authoritative_in_another_store", owner_status: "legacy" };
+  const transferAction = { tool: "agent_knock_knock_reconcile_binding", requires_user_intent: true,
+    missing_required: ["maintenance_acknowledgement"], arguments: { operation: "transfer_store_authority",
+      terminal_id: canonicalTerminalId, expected_authority_token: "private-authority" } };
   const durableStatus: TerminalBridgeStatus = {
     ...terminalStatus(),
     activity_state: "working",
@@ -458,19 +463,13 @@ test("raw status uses one durable list observation for activity and Watch discov
     terminalListObservation: async (options, terminalId) => {
       assert.equal(options.conversation, terminal.conversationId);
       assert.equal(terminalId, canonicalTerminalId);
-      return {
-        activityState: "working",
-        activityReason:
-          "Codex rollout contains an exact unfinished human-started task",
-        screenState: "idle",
-        screenReason: "visible composer looked idle",
-        nativeIdentityState: "resolved",
-        durableActivityState: "working",
-        durableActivityReason:
-          "Codex rollout contains an exact unfinished human-started task",
-        watchActionAvailable: true,
-        terminalStatus: durableStatus
-      };
+      return terminalStatusListObservationFromProjection({ terminal: {
+        native_store_authority: storeAuthority, management_state: "conflict", capabilities: { send: false },
+        available_actions: { transfer_store_authority: transferAction },
+        activity_state: "working", activity_reason: durableStatus.activity_reason,
+        screen_state: "idle", screen_reason: "visible composer looked idle",
+        native_identity_state: "resolved", durable_activity_state: "working", durable_activity_reason: durableStatus.activity_reason
+      }, rawTerminal: { _terminal_status_snapshot: durableStatus }, watchActionAvailable: true });
     }
   }));
 
@@ -479,6 +478,10 @@ test("raw status uses one durable list observation for activity and Watch discov
   });
   const output = JSON.parse(result.stdout);
 
+  assert.deepEqual(output.native_store_authority, storeAuthority);
+  assert.equal(output.capabilities.send, false);
+  assert.equal(output.available_actions.send, undefined);
+  assert.deepEqual(output.available_actions.transfer_store_authority, transferAction);
   assert.equal(output.terminal_status.activity_state, "working");
   assert.equal(
     output.terminal_status.activity_reason,

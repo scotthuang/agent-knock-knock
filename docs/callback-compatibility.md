@@ -42,7 +42,8 @@ they are not converted into a permissive activity fallback.
 Ordinary List/Status remains observation-only and does not create either Watch.
 Existing managed tasks and user terminals are not restarted by this policy.
 
-The store writer protocol is 10. Outer Terminal Watch schema remains 3; new
+The store writer protocol is 11. It additionally protects retired Session
+authority after Store transfer from predecessor writers. Outer Terminal Watch schema remains 3; new
 paginated anchors and request-correlated activity anchors use version 2. Earlier
 anchors remain readable. The store upgrade changes the writer fence without
 rewriting existing private Watch records, and older writers cannot mutate the

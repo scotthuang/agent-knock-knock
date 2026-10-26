@@ -34,6 +34,7 @@ import {
   nativeThreadTransitionsDir
 } from "./session-store.js";
 import { listConversations } from "./store.js";
+import { inspectNativeStoreAuthority } from "./native-store-authority.js";
 import {
   applySessionAuthorityToDispatch,
   compareManagedConversationRecency,
@@ -197,6 +198,7 @@ type TerminalDispatchOwnershipResult =
   | { state: "conflict"; conflict: Record<string, any> };
 
 export interface TerminalListOwnershipService {
+  nativeStoreAuthority(terminal: Record<string, any>, storeDir: string): Record<string, any>;
   assertTerminalIncarnationCanStartTurn(
     storeDir: string,
     terminalControl: TerminalControlRef
@@ -523,6 +525,7 @@ function observeBindingAuthority(
       : undefined;
     return {
       authorityTerminal: terminal,
+      nativeStoreAuthority: nativeStoreAuthority(ports, terminal, storeDir),
       automatedInputComposerReady,
       codexOpenRootRolloutInventory,
       codexLatentClearResumeValue,
@@ -1096,6 +1099,27 @@ function observeTerminalScopedApprovalAuthority(
       rolloutBackedCodexSession
     };
   }
+
+function nativeStoreAuthority(
+  ports: TerminalListOwnershipServicePorts,
+  terminal: Record<string, any>,
+  storeDir: string
+): Record<string, any> {
+  const terminalControl = isRecord(terminal.terminal_control)
+    ? terminal.terminal_control as unknown as TerminalControlRef : undefined;
+  if (!terminalControl) return { state: "none" };
+  try {
+    return inspectNativeStoreAuthority({
+      ledger: ports.loadTerminalBridgeDispatchLedger(terminalControl),
+      terminalControl,
+      nativeThreadId: stringValue(terminal.native_agent_session_id),
+      storeDir
+    });
+  } catch (error) {
+    return { state: "conflict", reason: error instanceof Error ? error.message : String(error),
+      transferEligible: false, automaticEligible: false, ownerStatus: "unknown" };
+  }
+}
 
 function observeActionAuthority(
     ports: TerminalListOwnershipServicePorts,
@@ -1725,6 +1749,7 @@ export function createTerminalListOwnershipService(
   ports: TerminalListOwnershipServicePorts
 ): TerminalListOwnershipService {
   return Object.freeze({
+    nativeStoreAuthority: (terminal, storeDir) => nativeStoreAuthority(ports, terminal, storeDir),
     assertTerminalIncarnationCanStartTurn: (storeDir, terminalControl) =>
       assertTerminalIncarnationCanStartTurn(ports, storeDir, terminalControl),
     managedSessionHasAnyNativeTransition,

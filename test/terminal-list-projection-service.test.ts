@@ -24,12 +24,15 @@ function projectionService(input: {
   ownershipService?: TerminalListOwnershipService;
   nowMs?: number;
   bridgeEnabled?: boolean;
+  nativeStoreAuthority?: Record<string, unknown>;
+  terminalActions?: Record<string, unknown>;
+  physicalSend?: Record<string, unknown>;
 } = {}) {
   const events = input.events ?? [];
   const ownershipService = input.ownershipService ?? ({
     observeBindingAuthority: (terminal: Record<string, any>) => {
       events.push("binding");
-      return { authorityTerminal: terminal };
+      return { authorityTerminal: terminal, nativeStoreAuthority: input.nativeStoreAuthority };
     },
     observeActionAuthority: () => {
       events.push("action");
@@ -46,7 +49,8 @@ function projectionService(input: {
         relatedSessions: [],
         ownership: { state: "none" },
         rawSendAction: {},
-        sessionAwareRawActions: { status: statusAction },
+        sessionAwareRawActions: input.terminalActions ?? { status: statusAction },
+        terminalUserExplicitSendAction: input.physicalSend,
         externalHandoffDetected: false,
         handoffSourceBlockingTurns: [],
         externalHandoffAdoptable: false,
@@ -139,6 +143,47 @@ test("terminal-first projection samples ownership once and preserves public orde
     },
     available_actions: { status: statusAction }
   }));
+});
+
+test("Store authority fences physical Send and publishes only its eligible transfer recovery", () => {
+  const send = { tool: "agent_knock_knock_send", arguments: { terminal_id: terminalId, expected_terminal_token: "physical" } };
+  const actions = { status: statusAction, send,
+    cancel: { tool: "agent_knock_knock_cancel", arguments: { terminal_id: terminalId } },
+    set_model: { tool: "agent_knock_knock_set_model", arguments: { terminal_id: terminalId } } };
+  for (const scenario of [
+    { ownerStatus: "legacy", transferEligible: true, automaticEligible: false, writable: true, state: "conflict" },
+    { ownerStatus: "alive", transferEligible: false, automaticEligible: false, writable: true, state: "conflict" },
+    { ownerStatus: "unknown", transferEligible: false, automaticEligible: false, writable: true, state: "conflict" },
+    { ownerStatus: "dead", transferEligible: true, automaticEligible: true, writable: true, state: "conflict" },
+    { ownerStatus: "legacy", transferEligible: true, automaticEligible: false, writable: false, state: "conflict" },
+    { ownerStatus: "legacy", transferEligible: true, automaticEligible: false, writable: true, state: "transferring" }
+  ]) {
+    const service = projectionService({ terminalActions: actions, physicalSend: send, nativeStoreAuthority: {
+      ...scenario, sourceStoreDir: "/tmp/previous-store", sessionId: "previous-session", generation: 2,
+      reason: "native_thread_authoritative_in_another_store", fingerprint: "private-authority-fingerprint"
+    } });
+    const result = service.projectTerminalFirstList({ storeDir: "/tmp/current-store",
+      terminals: [{ id: terminalId }], managedSessions: [], sessionAuthorityRequired: true,
+      allConversations: [], displayedConversations: [], includeAll: false, managedOnly: false,
+      mutationsAllowed: scenario.writable }).terminals[0];
+    assert.equal(result.management_state, "conflict");
+    assert.equal(result.native_store_authority.state, scenario.state);
+    assert.equal(result.native_store_authority.fingerprint, undefined);
+    assert.equal(result.capabilities.send, scenario.automaticEligible && scenario.writable);
+    assert.equal(result.available_actions.send, scenario.automaticEligible && scenario.writable ? send : undefined);
+    assert.equal(result.available_actions.cancel, undefined);
+    assert.equal(result.available_actions.set_model, undefined);
+    assert.deepEqual(result.available_actions.status, statusAction);
+    const recovery = result.available_actions.transfer_store_authority;
+    assert.equal(Boolean(recovery), scenario.transferEligible && scenario.writable);
+    if (recovery) {
+      assert.equal(recovery.tool, "agent_knock_knock_reconcile_binding");
+      assert.equal(recovery.requires_user_intent, true);
+      assert.deepEqual(recovery.arguments, { operation: "transfer_store_authority", terminal_id: terminalId,
+        expected_authority_token: "private-authority-fingerprint" });
+      assert.deepEqual(recovery.missing_required, scenario.ownerStatus === "legacy" ? ["maintenance_acknowledgement"] : undefined);
+    }
+  }
 });
 
 test("unavailable managed Turn keeps its exact public recovery envelope", () => {

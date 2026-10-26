@@ -5,6 +5,8 @@ import { listManagedMonitoringRecords } from "./managed-monitoring-list.js";
 import { unifiedConversationList, withoutListHistory } from "./conversation-list.js";
 import { withClaudeManagedSendAuthority } from "./claude-managed-send-route.js";
 import { withConversationRoutingHome } from "./conversation-routing-home.js";
+import { projectNativeStoreAuthority } from "./native-store-authority-projection.js";
+import { assertNativeStoreAuthorityCurrent } from "./native-store-authority.js";
 import type { CodexOpenRootRolloutInventory } from "./agent-session-provider.js";
 import { listDeferredForegroundTransfers } from
   "./deferred-foreground-transfer.js";
@@ -656,7 +658,7 @@ function inspectStoreCompatibilityForTerminalList(
   }
 }
 
-function physicalOnlyTerminalProjection(terminals: TerminalListScanEntry[], reason: string): TerminalFirstListProjection {
+function physicalOnlyTerminalProjection(terminals: TerminalListScanEntry[], reason: string, storeDir: string): TerminalFirstListProjection {
   return {
     terminals: terminals.map((terminal) => {
       const {
@@ -676,7 +678,7 @@ function physicalOnlyTerminalProjection(terminals: TerminalListScanEntry[], reas
         ? terminalUserExplicitSendAction
         : undefined;
       const status = isRecord(actions.status) ? actions.status : undefined;
-      return {
+      return projectNativeStoreAuthority({
         ...publicTerminal,
         management_state: "unavailable",
         management_unavailable: { reason },
@@ -693,7 +695,7 @@ function physicalOnlyTerminalProjection(terminals: TerminalListScanEntry[], reas
           ...(status ? { status } : {}),
           ...(send ? { send } : {})
         }
-      };
+      }, terminalListOwnershipService().nativeStoreAuthority(terminal, storeDir), false);
     }),
     unavailableManagedTurns: []
   };
@@ -792,13 +794,13 @@ function projectTerminalListScan(input: {
       );
       projection = physicalOnlyTerminalProjection(
         physicalTerminals,
-        managementErrors.join("; ")
+        managementErrors.join("; "), storeDir
       );
     }
   } else {
     projection = physicalOnlyTerminalProjection(
       physicalTerminals,
-      managementErrors.join("; ")
+      managementErrors.join("; "), storeDir
     );
   }
   return {
@@ -2069,6 +2071,7 @@ async function resolveTerminalScopedCodexApproval({
   let ledger: Record<string, any> | undefined;
   try {
     ledger = terminalListRuntime().loadTerminalBridgeDispatchLedger(terminal.terminalControl);
+    assertNativeStoreAuthorityCurrent({ storeDir, terminalControl: terminal.terminalControl, ledger });
   } catch (error) {
     return {
       state: "blocked",

@@ -68,6 +68,18 @@ Native Send and explicit native Watch share the **720-minute default hard deadli
 
 For a native Watch, use an explicit renewal only when the same native input is still active. A completed, failed, interrupted, or exited native task cannot renew. `recover` reconciles saved state; it neither resends the prompt nor extends the deadline. `close` ends AKK's management of a native Send, while `unwatch` stops observation. Neither cancels Claude. Managed terminal tasks retain their existing Turn-specific approval, renewal, cancellation and close actions. Callback retry is restricted to a known retryable delivery failure; accepted or uncertain notifications are not blindly replayed. See [Backend Recovery](backend-task-recovery.md) for the native concepts.
 
+If the native conversation's exact terminal is owned by another AKK Store, idle
+Claude does not authorize a managed Send or native fallback. Use only its fresh
+`transfer_store_authority` action when offered: the tool is
+`agent_knock_knock_reconcile_binding` with `operation:"transfer_store_authority"`
+and the action's physical `terminal_id`. This explicitly transfers settled Store
+authority without sending Claude input or creating a Turn. Legacy records may
+require the user to stop all source-Store Hosts and old writers and explicitly
+set `maintenance_acknowledgement:true`; the agent cannot infer that condition.
+Afterward refresh List and keep the original native `conversation_id` for Send.
+Ordinary binding reconciliation only detaches a local Session and cannot replace
+this transfer. See [terminal recovery](operator-guide.md#terminal-recovery-and-diagnostics).
+
 AKK persists the exact acceptance anchor, monitor deadline and callback outbox. It polls the native records instead of relying on Claude's session-level idle notification, whose subscriptions can replace one another and which does not identify an independently completed task.
 
 ## Protocol and verification boundary

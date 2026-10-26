@@ -1190,10 +1190,7 @@ test("OpenClaw native-thread tools keep CLI fences private while semantic calls 
       "terminal_id",
       "native_thread_id"
     ]);
-    assert.deepEqual(reconcileTool.parameters?.required, [
-      "terminal_id",
-      "conflicting_session_id"
-    ]);
+    assert.deepEqual(reconcileTool.parameters?.required, ["terminal_id"]);
     assert.equal(listTool.parameters?.additionalProperties, false);
     assert.equal(newTool.parameters?.additionalProperties, false);
     assert.equal(reconcileTool.parameters?.additionalProperties, false);

@@ -233,8 +233,10 @@ replays terminal input while resolving that identity.
 The semantic
 `native_thread_id` remains public for resume. The plugin/CLI still derives and
 revalidates those private fences under lock. Store format remains 1 and the
-Terminal Watch schema is 3; writer protocol 10 fences capability-checked paginated task
-bindings, private native-question checkpoints and Watch deletion receipts from older writers. It retains
+Terminal Watch schema is 3; writer protocol 11 additionally fences retired Session
+authority after Store transfer so predecessor writers cannot revive the source
+Session. Earlier protocols fence capability-checked paginated task bindings,
+private native-question checkpoints and Watch deletion receipts from older writers. It retains
 the manual-interaction notification state and bounded callback metadata introduced
 in writer protocol 7. The Watch schema version fences the response aggregate.
 

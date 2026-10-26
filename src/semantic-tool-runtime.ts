@@ -118,7 +118,7 @@ import {
   buildPrivateInteractionResponseArgs,
   buildPrivateSetModelArgs,
   assertOnlyModelControlParameters,
-  consumeDisplayedPrivateAction,
+  buildPrivateReconcileBindingArgs,
   invalidateRequestedInteractionOffers,
   privateActionArguments,
   privateTerminalActionArguments,
@@ -126,8 +126,7 @@ import {
   rememberDisplayedApprovalOffer,
   rememberDisplayedInteractionOffer,
   rememberDisplayedModelOptionsOffer,
-  rememberDisplayedPrivateAuthorityOffers,
-  RECONCILE_BINDING_AUTHORITY_KIND
+  rememberDisplayedPrivateAuthorityOffers
 } from "./semantic-tool-private-authority.js";
 
 import { registerPermissionControlTools, handleAkkPermissionCommand } from
@@ -341,57 +340,10 @@ export function createAkkSemanticToolCatalog(
       semanticToolDescriptions.reconcile_binding,
     parameters: reconcileBindingParameters,
     normalizeTurnIdentity: false,
-    buildArgs: async (params, toolContext) => {
-      const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-      const terminalId = requiredString(params.terminal_id, "terminal_id");
-      const conflictingSessionId = requiredString(
-        params.conflicting_session_id,
-        "conflicting_session_id"
-      );
-      const action = await consumeDisplayedPrivateAction(api, {
-        sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
-        sessionId: requiredControllerSessionId(toolContext?.sessionId),
-        kind: RECONCILE_BINDING_AUTHORITY_KIND,
-        target: { type: "terminal_id", id: terminalId },
-        tool: "agent_knock_knock_reconcile_binding",
-        terminalId,
-        matches: (argumentsValue) =>
-          stringValue(argumentsValue.terminal_id) === terminalId &&
-          stringValue(argumentsValue.conflicting_session_id) ===
-            conflictingSessionId
-      });
-      const revision = Number(action.expected_session_revision);
-      if (!Number.isSafeInteger(revision) || revision < 1) {
-        throw new Error(
-          "expected_session_revision must be a positive safe integer"
-        );
-      }
-      const args = [
-        "reconcile-binding",
-        "--terminal",
-        terminalId,
-        "--conflicting-session",
-        requiredString(
-          conflictingSessionId,
-          "conflicting_session_id"
-        ),
-        "--expected-session-revision",
-        String(revision),
-        "--expected-binding-token",
-        requiredString(
-          action.expected_binding_token,
-          "current internal conflicting binding authority"
-        ),
-        "--expected-terminal-token",
-        requiredString(
-          action.expected_terminal_token,
-          "current internal terminal authority"
-        )
-      ];
-      pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
-      pushOptional(args, "--codex-home", stringValue(config.codexHome));
-      return args;
-    }
+    buildArgs: (params, toolContext) => buildPrivateReconcileBindingArgs(api, params, {
+      sessionKey: requiredControllerSessionKey(toolContext?.sessionKey),
+      sessionId: requiredControllerSessionId(toolContext?.sessionId)
+    })
   });
 
   registerCliTool(api, {

@@ -1,4 +1,5 @@
 import { unsafeFallbackWatchPreparation } from "./terminal-watch-send-activity.js";
+import { assertNativeStoreAuthorityCurrent } from "./native-store-authority.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
@@ -1044,6 +1045,8 @@ async function runUserExplicitTerminalFallback(
         );
       }
       fresh = resolved;
+      assertNativeStoreAuthorityCurrent({ storeDir, terminalControl: fresh.terminalControl,
+        ledger: loadTerminalBridgeDispatchLedger(fresh.terminalControl) });
       if (!hasFreshExplicitTerminalSendToken(options, fresh)) {
         throw new Error(
           "the explicit terminal send token is stale; refresh AKK list"
