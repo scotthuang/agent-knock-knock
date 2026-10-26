@@ -18,10 +18,8 @@ that runtime's 27 semantic tools, including Codex CLI backend and Desktop
 operations when the selected conversation advertises them. `list` returns
 current discoverable conversations; `watches` separately returns recent
 monitoring records (24 hours by default), plus active or unresolved records.
-A newer root checkout does not silently replace this pinned dependency. This
-checkout prepares connector `0.1.0-rc.11` with core `0.16.0`; publication is a
-separate step. Until then, `@next` continues to resolve the registry's
-previously published release.
+A newer root checkout does not silently replace this pinned dependency.
+Connector `0.1.0-rc.11` pins core `0.16.0` and uses the `next` dist-tag.
 
 The development baseline is DeepSeek Harness **0.2.1-rc.2** with Cordis
 **4.0.5**. This is a release candidate, not a stable release; as checked on
@@ -78,7 +76,7 @@ can select an older `latest` build.
 
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
-Use `next`, or after publication pin
+Use `next`, or pin
 `@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.11`.
 
 ```sh
@@ -363,7 +361,7 @@ npm view @scotthuang/agent-knock-knock-deepseek-harness versions --json
 npm view @scotthuang/agent-knock-knock-deepseek-harness dist-tags --json
 ```
 
-Update to the registry's current prerelease, or after publication pin this
+Update to the registry's current prerelease, or pin this
 exact reviewed version:
 
 ```sh
@@ -407,7 +405,7 @@ compatibility review rather than an implicit local link.
 
 ## Tests and release status
 
-Connector **`0.1.0-rc.11`** is prepared with exact AKK **`0.16.0`** and
+Connector **`0.1.0-rc.11`** pins exact AKK **`0.16.0`** and bundles
 its synchronized Skill. Core separates managed binding reconciliation from
 native Store authority transfer, records Store owner process identities, and
 uses a durable transfer journal with evidence-based automatic recovery. Store
@@ -423,8 +421,8 @@ managed Sends in `permissionMode=default` (`manual mode`) proved text injection,
 Enter dispatch, and agent acceptance; the second also completed callback
 delivery. Permission mode is not an input-delivery gate. This does not claim
 native Claude approval/question responses, permission-mode switching, or new
-Host-version compatibility. The prepared connector retains the existing DSH
-Host/peer policy and is intended for `next`; publication is still pending.
+Host-version compatibility. The connector retains the existing DSH
+Host/peer policy and is distributed through `next`.
 
 Connector **`0.1.0-rc.10`** pins AKK **`0.15.0`** and bundles its updated
 Skill. Claude Code and configured wrappers such as `tclaude` share the same

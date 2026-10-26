@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.16.0 / DeepSeek Harness 0.1.0-rc.11 — 2026-10-26
+## 0.16.0 / Pi 0.1.0-poc.8 / DeepSeek Harness 0.1.0-rc.11 — 2026-10-26
 
 - Separate native-thread Store authority recovery (`transfer_store_authority`) from managed Session binding reconciliation (`reconcile_binding`), and expose the applicable recovery action consistently on native and terminal rows. Keep the runtime ledger globally shared so different Hosts cannot independently claim the same native thread; record absolute Store identity, Host identity, owner PID, process start identity and instance nonce.
 - Transfer authority through a durable journal (`prepared → source_retired → target_created → committed`), retiring the source before creating the target. Validate Store owner identity against the registry and live process generation; retain active-owner rejection, crash recovery, concurrent-claim exclusion and stale-writer fencing. Recovery itself sends no terminal input. Offer automatic recovery only with positive evidence for an eligible abandoned ephemeral Store; legacy or ambiguous ownership requires explicit recovery. Set `send_after_transfer` only when `automaticEligible` is true, and never infer `maintenance_acknowledgement`.
