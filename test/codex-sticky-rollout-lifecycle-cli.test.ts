@@ -84,6 +84,11 @@ const successful = (stdout) => ({
 });
 childProcess.spawnSync = (command, args = [], options) => {
   const commandName = String(command).slice(String(command).lastIndexOf("/") + 1);
+  // Isolate socket discovery at its transport boundary. Keep the real UID so
+  // the CLI still proves ownership of the private Store owner registry.
+  if (commandName === "tmux" && args[0] === "-S") {
+    return { ...successful(""), status: 1, stderr: "fixture has no named socket" };
+  }
   if (commandName === "tmux" && args[0] === "list-panes") {
     return successful(${JSON.stringify(
       `tmux-sticky-bin\t0\t0\t${panePid}\tcodex\t${workspace}\t\t%42\n`
@@ -124,7 +129,6 @@ childProcess.spawnSync = (command, args = [], options) => {
   }
   return spawnSync(command, args, options);
 };
-process.getuid = undefined;
 delete process.env.AKK_TMUX_SOCKET;
 delete process.env.TMUX;
 syncBuiltinESMExports();

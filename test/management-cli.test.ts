@@ -345,6 +345,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
         "identify_and_send",
         "resume_thread",
         "reconcile_binding",
+        "transfer_store_authority",
         "respond",
         "respond_interaction",
         "status",
@@ -454,6 +455,14 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       listed.action_contracts.actions.reconcile_binding.sends_terminal_input,
       false
     );
+    const transfer = listed.action_contracts.actions.transfer_store_authority;
+    assert.equal(transfer.tool, "agent_knock_knock_reconcile_binding");
+    assert.equal(transfer.operation, "transfer_store_authority");
+    assert.deepEqual(transfer.required, ["operation", "terminal_id"]);
+    assert.deepEqual(transfer.optional, ["maintenance_acknowledgement"]);
+    assert.equal(transfer.requires_user_intent, true);
+    assert.equal(transfer.creates_turn, false);
+    assert.equal(transfer.sends_terminal_input, false);
     assert.deepEqual(
       listed.action_contracts.actions.native_inspect.required,
       ["terminal_id", "inspection"]

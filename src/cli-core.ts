@@ -182,7 +182,7 @@ import {
 import {
   createTerminalDispatchRepositoryCliAdapter
 } from "./terminal-dispatch-repository-cli-adapter.js";
-import { createTerminalMutationCliRuntime } from
+import { createTerminalMutationCliRuntime, withTerminalMutationCliOptions } from
   "./terminal-mutation-cli-runtime.js";
 import {
   createTerminalDispatchRecoveryCliAdapter
@@ -251,7 +251,7 @@ const {
 } = createTerminalMutationCliRuntime({
   acquireFileLock,
   acquireTerminalBridgeSendLock,
-  beforeStoreWriter: (storeDir, terminalControl) => recoverNativeStoreAuthorityForCli({ storeDir, terminalControl }, { createBridge: createTerminalAgentBridge, identity: resolveCurrentNativeAgentSessionIdentity, repository: terminalDispatchRepository }),
+  beforeStoreWriter: (storeDir, terminalControl, options) => recoverNativeStoreAuthorityForCli({ storeDir, terminalControl, options }, { createBridge: createTerminalAgentBridge, identity: resolveCurrentNativeAgentSessionIdentity, repository: terminalDispatchRepository }),
   terminalBridgeRuntimeKey, withStoreWriterLeaseAsync
 });
 const loadTerminalBridgeDispatchLedger = terminalDispatchRepository.load;
@@ -468,12 +468,12 @@ export async function executeCliCommand(
     () => {
       const scopedOptions = applyTrustedHostProfileCliOptions(commandName, options, cliEnv(), cliCwd());
       assertBackendRecoveryCliTarget(commandName, scopedOptions);
-      return executeConversationCommand(
+      return withTerminalMutationCliOptions(scopedOptions, () => executeConversationCommand(
         commandName,
         scopedOptions,
         (request, terminalId) => conversationTerminals(commandName, request, terminalId),
         dispatchCliCommand
-      );
+      ));
     }
   );
 }

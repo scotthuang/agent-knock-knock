@@ -417,6 +417,7 @@ try {
 
 test("automatic Store authority recovery proves the live native identity and idle approval surface before retiring a Session", async (t) => {
   const f = fixture(t), owner = retiredProcessOwner(f.source, true);
+  const options = { claudeHome: path.join(f.root, "custom-claude"), codexHome: path.join(f.root, "custom-codex") };
   await f.context(async () => {
     f.initialize(owner);
     const source = loadManagedSession(f.source, SESSION), ledger = f.repository.load(f.control);
@@ -429,10 +430,13 @@ test("automatic Store authority recovery proves the live native identity and idl
           status: async () => ({ reachable: true, activity_state: condition === "working" ? "working" : "idle",
             approval_state: { scanned: condition !== "approval_unscanned", blocked: condition === "approval_blocked" } })
         } as unknown as TerminalAgentBridge;
-        await assert.rejects(recoverNativeStoreAuthorityForCli({ storeDir: f.target, terminalControl: f.control }, {
-          repository: f.repository, createBridge: () => bridge,
-          identity: async () => ({ sessionId: condition === "identity_changed_after_capture" && ++captures > 2 ? "changed-thread" : THREAD,
-            processUuid: condition === "uuid_missing" ? undefined : "fixture-process", evidence: "fixture" })
+        await assert.rejects(recoverNativeStoreAuthorityForCli({ storeDir: f.target, terminalControl: f.control, options }, {
+          repository: f.repository, createBridge: actual => { assert.deepEqual(actual, options); return bridge; },
+          identity: async request => {
+            assert.deepEqual(request.options, options, "every fresh native identity check uses the selected homes");
+            return { sessionId: condition === "identity_changed_after_capture" && ++captures > 2 ? "changed-thread" : THREAD,
+              processUuid: condition === "uuid_missing" ? undefined : "fixture-process", evidence: "fixture" };
+          }
         }), /cannot be verified|reachable, idle/u, condition);
         assert.deepEqual(loadManagedSession(f.source, SESSION), source, condition);
         assert.deepEqual(f.repository.load(f.control), ledger, condition);
@@ -442,10 +446,16 @@ test("automatic Store authority recovery proves the live native identity and idl
         resolveStoredTerminal: async () => ({ agent: "claude", pid: 42301, terminalControl: f.control }),
         status: async () => ({ reachable: true, activity_state: "idle", approval_state: { scanned: true, blocked: false } })
       } as unknown as TerminalAgentBridge;
-      await recoverNativeStoreAuthorityForCli({ storeDir: f.target, terminalControl: f.control }, {
-        repository: f.repository, createBridge: () => bridge,
-        identity: async () => ({ sessionId: THREAD, processUuid: "fixture-process", evidence: "fixture" })
+      let identityChecks = 0;
+      await recoverNativeStoreAuthorityForCli({ storeDir: f.target, terminalControl: f.control, options }, {
+        repository: f.repository, createBridge: actual => { assert.deepEqual(actual, options); return bridge; },
+        identity: async request => {
+          assert.deepEqual(request.options, options);
+          identityChecks += 1;
+          return { sessionId: THREAD, processUuid: "fixture-process", evidence: "fixture" };
+        }
       });
+      assert.equal(identityChecks, 3, "discovery and both sides of the screen read retain exact identity verification");
       assert.equal(f.inspect().state, "current");
       assert.equal(loadManagedSession(f.source, SESSION).status, "quarantined");
       assert.equal(listManagedSessions(f.target).length, 1);

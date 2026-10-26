@@ -959,7 +959,7 @@ test("a canonical managed owner survives a tmux route rename without rebinding",
   }
 });
 
-test("a cross-store terminal owner stays conflicted while exposing only fresh physical Send authority", async () => {
+test("a cross-store terminal owner stays read-only in List and Status until authority recovery", async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "akk-selector-cli-cross-store-owner-")
   );
@@ -1009,21 +1009,15 @@ test("a cross-store terminal owner stays conflicted while exposing only fresh ph
     assert.equal(listed.terminals.length, 1);
     const terminal = listed.terminals[0];
     assert.equal(terminal.management_state, "conflict");
-    assert.equal(
-      terminal.management_conflict.owner_conversation_id,
-      ownerId
-    );
+    assert.equal(terminal.management_conflict.code, "native_thread_store_authority");
+    assert.equal(terminal.native_store_authority.source_store_dir, fs.realpathSync(ownerStoreDir));
+    assert.equal(terminal.native_store_authority.session_id, sent.conversation.session_id);
+    assert.equal(terminal.native_store_authority.transfer_eligible, false);
+    assert.equal(terminal.native_store_authority.send_after_transfer, false);
     assert.equal(terminal.managed.current_turn, null);
-    assert.deepEqual(Object.keys(terminal.available_actions), ["status", "send"]);
-    const sendAction = terminal.available_actions.send;
-    assert.equal(sendAction.scope, "terminal_user_explicit");
-    assert.equal(sendAction.composer_policy, "replace_current_composer_and_submit");
-    assert.equal(sendAction.arguments.selector, terminal.id);
-    assert.equal(typeof sendAction.arguments.expected_terminal_token, "string");
-    assert.ok(sendAction.arguments.expected_terminal_token.length > 0);
-    assert.equal(sendAction.arguments.expected_managed_terminal_token, undefined);
-    assert.equal(sendAction.arguments.session_id, undefined);
-    assert.equal(sendAction.arguments.turn_id, undefined);
+    assert.equal(terminal.capabilities.send, false);
+    assert.equal(terminal.next_action, "inspect_store_authority");
+    assert.deepEqual(Object.keys(terminal.available_actions), ["status"]);
     assert.deepEqual(
       terminal.available_actions.status.arguments,
       { conversation_id: terminal.id }
@@ -1039,6 +1033,9 @@ test("a cross-store terminal owner stays conflicted while exposing only fresh ph
     ], dependencies);
     assert.equal(status.source, "terminal_control");
     assert.equal(status.conversation_id, terminal.id);
+    assert.equal(status.management_conflict.code, "native_thread_store_authority");
+    assert.equal(status.capabilities.send, false);
+    assert.equal(status.available_actions.send, undefined);
     assert.equal(fs.readFileSync(ownerStatePath, "utf8"), ownerStateBefore);
     assert.ok(physicalIdentityProbes > 0);
     const warnings: Array<{ event: string; fields: Record<string, unknown> }> = [];

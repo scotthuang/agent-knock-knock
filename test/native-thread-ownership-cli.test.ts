@@ -240,7 +240,8 @@ test("resolved pane authority prevents the same native thread from crossing Stor
 
     const sent = await fixture.send("store B must not steal store A authority");
     assert.equal(sent.status, 1, String(sent.stderr || sent.stdout));
-    assert.match(String(sent.stderr), /authoritative in another Store/u);
+    // The legacy ledger names a foreign Store but has no verifiable Session.
+    assert.match(String(sent.stderr), /authority_store_or_session_unverified; no input sent/u);
     assert.equal(listManagedSessions(fixture.storeDir).length, 0);
     assert.equal(listConversations(fixture.storeDir).length, 0);
   } finally {

@@ -13,6 +13,12 @@ interface NativeStoreAuthorityCliPorts {
   repository: TerminalDispatchRepositoryCliAdapter;
 }
 
+interface NativeStoreAuthorityCliRequest {
+  storeDir: string;
+  terminalControl: TerminalControlRef;
+  options?: Readonly<Record<string, unknown>>;
+}
+
 function assertLiveNativeIdentity(identity: TerminalNativeIdentity | undefined,
   inspected: NativeStoreAuthorityInspection): void {
   const binding = inspected.session?.binding;
@@ -39,19 +45,20 @@ async function proveLiveTransferTerminal(options: Record<string, any>, current: 
   assertLiveNativeIdentity(await ports.identity(request), inspected);
 }
 
-async function observeLiveStoreAuthority(input: { storeDir: string; terminalControl: TerminalControlRef },
+async function observeLiveStoreAuthority(input: NativeStoreAuthorityCliRequest,
   initial: NativeStoreAuthorityInspection, ports: NativeStoreAuthorityCliPorts) {
   if (!initial.session?.binding) {
     throw new Error(`Store authority cannot be verified: ${initial.reason ?? initial.state}; no input sent`);
   }
-  const bridge = ports.createBridge({});
+  const options = input.options ?? {};
+  const bridge = ports.createBridge(options);
   const current = await bridge.resolveStoredTerminal(initial.session.agent,
     initial.session.binding.native_process.pid, input.terminalControl);
   if (current.agent !== initial.session.agent || current.pid !== initial.session.binding.native_process.pid ||
     !sameTerminalControlIncarnation(current.terminalControl, input.terminalControl)) {
     throw new Error("terminal incarnation changed before Store authority verification; no input sent");
   }
-  const identity = await ports.identity({ options: {}, agent: current.agent, pid: current.pid,
+  const identity = await ports.identity({ options, agent: current.agent, pid: current.pid,
     cwd: current.terminalControl.currentPath });
   if (!nonBlankString(identity?.sessionId) || !nonBlankString(identity?.processUuid)) {
     throw new Error("native thread process incarnation cannot be verified; no input sent");
@@ -61,7 +68,7 @@ async function observeLiveStoreAuthority(input: { storeDir: string; terminalCont
 }
 
 /** The caller holds the physical terminal lock; stale action tokens cannot bypass Store ownership. */
-export async function recoverNativeStoreAuthorityForCli(input: { storeDir: string; terminalControl: TerminalControlRef },
+export async function recoverNativeStoreAuthorityForCli(input: NativeStoreAuthorityCliRequest,
   ports: NativeStoreAuthorityCliPorts): Promise<void> {
   const initial = inspectNativeStoreAuthority({ ...input, ledger: ports.repository.load(input.terminalControl) });
   if (initial.state === "none" || initial.state === "current") return;
@@ -75,7 +82,7 @@ export async function recoverNativeStoreAuthorityForCli(input: { storeDir: strin
   if (!inspected.transferEligible) {
     throw new Error(`automatic Store authority recovery refused: ${inspected.reason ?? inspected.state}; no input sent`);
   }
-  await proveLiveTransferTerminal({}, current, inspected, bridge, ports);
+  await proveLiveTransferTerminal(input.options ?? {}, current, inspected, bridge, ports);
   recoverNativeStoreAuthorityWhileLocked(input, ports.repository);
   assertNativeStoreAuthorityCurrent({ ...freshInput, ledger: ports.repository.load(input.terminalControl) });
 }
