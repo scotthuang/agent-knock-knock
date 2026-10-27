@@ -1,4 +1,4 @@
-import { claudeTerminalObservationFailure, normalizeClaudeAgentRows, readClaudeTerminalAgents } from "./claude-terminal-agent-observation.js";
+import { claudeTerminalObservationFailure, claudeTerminalWindowRole, normalizeClaudeAgentRows, readClaudeTerminalAgents } from "./claude-terminal-agent-observation.js";
 import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
 import { spawnSync } from "node:child_process";
 import { assertCodexPaginatedProcess } from "./codex-paginated-thread-binding.js";
@@ -106,6 +106,7 @@ export interface TerminalRuntimeCliAdapter {
   createControlProvider(registry?: TerminalControlProviderRegistry): TerminalControlProvider;
   createProcessSource(): TerminalProcessSource;
   loadClaudeAgentRows(observation?: { required?: boolean }): ClaudeAgentRow[];
+  observeClaudeWindowRole(pid: number, cwd?: string): "background_view" | undefined;
   createAgentRegistry(): TerminalAgentAdapterRegistry;
   createBridge(provider?: TerminalControlProvider,
     registry?: TerminalAgentAdapterRegistry): TerminalAgentBridge;
@@ -158,6 +159,9 @@ export function createTerminalRuntimeCliAdapter(
   return Object.freeze({
     createControlProviderRegistry, createControlProvider, createProcessSource,
     loadClaudeAgentRows, createAgentRegistry, createBridge,
+    observeClaudeWindowRole: (pid: number, cwd?: string) => input.dependencies.loadClaudeAgentRows ||
+      input.dependencies.terminalProcessSource || input.dependencies.terminalControlProviderRegistry
+      ? undefined : claudeTerminalWindowRole(input.options, pid, cwd),
     createAgentSessionProvider, createThreadLifecycleCandidateProvider,
     listActiveSessionsWithTerminalControl,
     agentVersionForRunningProcess: (agent: ExecutorKind, pid: number) =>

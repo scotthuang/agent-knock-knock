@@ -368,7 +368,7 @@ test("user-explicit input-owner detection blocks proven UI owners, not drafts", 
   assert.equal(terminalUserExplicitInputOwnerBlocked(undefined), false);
 });
 
-test("Claude stash-clear proof accepts known footers and rejects unknown overlays", () => {
+test("Claude input proof distinguishes occupied stashes from known footer syntax", () => {
   const control = {
     kind: "tmux" as const,
     target: "claude:0.0",
@@ -380,11 +380,16 @@ test("Claude stash-clear proof accepts known footers and rejects unknown overlay
     currentPath: "/repo",
     capabilities: ["screen_status" as const, "send_keys" as const]
   };
-  const failure = (trailing: readonly string[]) =>
+  const failure = (trailing: readonly string[], proof: {
+    screen?: string;
+    requireExactEmptyClaudeComposer?: boolean;
+    requireEmptyClaudeStash?: boolean;
+  } = {}) =>
     terminalUserExplicitInputSafetyFailure({
       agent: "claude",
       displayName: "Claude Code",
       screen: [
+        "✻ Brewed for 43s · done 1:37", "",
         "────────────────────────────────────────────────",
         "❯ ",
         "────────────────────────────────────────────────",
@@ -395,24 +400,154 @@ test("Claude stash-clear proof accepts known footers and rejects unknown overlay
       awaitingApproval: false,
       interactionActive: false,
       modelControlSurface: false,
-      requireExactEmptyClaudeComposer: true
+      requireExactEmptyClaudeComposer: true,
+      requireEmptyClaudeStash: true,
+      ...proof
     });
-  assert.equal(failure([
+  assert.match(failure([
     "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
     "  › stashed"
-  ]), undefined);
+  ]) ?? "", /stash/iu);
   assert.equal(failure([
     "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to",
     "  interrupt · ← for ag…"
   ]), undefined);
   for (const footer of ["  ⏸ manual mode on", "  ⏸ manual mode on       › stashed"]) {
-    assert.equal(failure([footer]), undefined);
-    assert.match(failure([`${footer} unexpected overlay`]) ?? "", /did not prove/u);
+    if (footer.includes("› stashed")) assert.match(failure([footer]) ?? "", /stash/iu);
+    else assert.equal(failure([footer]), undefined);
+    assert.match(failure([`${footer} unexpected overlay`]) ?? "", /footer/iu);
   }
   assert.match(
     failure(["  Unknown overlay still owns input"]) ?? "",
-    /did not prove/u
+    /footer/iu
   );
+  const dynamicFooter = "  ⏵⏵ auto mode on · 1 shell · esc to interrupt · ← for agents · ↓ to manage          Debug";
+  for (const nativeFooter of [
+    [dynamicFooter],
+    [dynamicFooter, "                                       › stashed"],
+    [dynamicFooter.replace("1 shell", "2 shells")],
+    ["  ⏵⏵ auto mode on · 1 shell · esc to", "  interrupt · ← for agents · ↓ to manage          Debug",
+      "                                       › stashed"],
+    ["  ⏵⏵ auto mode on · 1 shell · esc to interrupt · ← for agents", "  · ↓ to manage          Debug"],
+    [dynamicFooter, "                             Draft restored · › stashed", "  ● high · /effort"]
+  ]) {
+    if (nativeFooter.some(line => line.includes("› stashed"))) {
+      assert.match(failure(nativeFooter) ?? "", /stash/iu,
+        "known wrapped footer syntax does not permit consuming an occupied stash");
+    } else assert.equal(failure(nativeFooter), undefined, "closed native components survive wrapping and right alignment");
+  }
+  for (const unsupported of [
+    dynamicFooter.replace("auto mode on", "auto mode on arbitrary text"),
+    dynamicFooter.replace("1 shell", "1 shell · unfamiliar shortcut"),
+    dynamicFooter.replace("← for agents", "← for agents unrelated overlay"),
+    dynamicFooter + " unexpected overlay",
+    dynamicFooter.replace("Debug", "Debugger"),
+    dynamicFooter.replace("↓ to manage", "↓ to manage secrets"),
+    dynamicFooter.replace("1 shell", "some shells")
+  ]) assert.match(failure([unsupported]) ?? "", /footer/iu,
+    "an unknown token anywhere in the footer cannot be swallowed by wildcard matching");
+  assert.match(failure([dynamicFooter, "                              › stashed"], { requireEmptyClaudeStash: true }) ?? "",
+    /stash/iu, "right-aligned multiline stash blocks before cleanup begins");
+  const footer = ["  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"];
+  const currentBlock = (history: readonly string[], trailing = footer) => failure(trailing, {
+    screen: [...history, "────────────────────────────────────────────────", "❯ ",
+      "────────────────────────────────────────────────", ...trailing].join("\n")
+  });
+  assert.equal(currentBlock([
+    "✽ Working… (8s · ↓ 123 tokens)", "", "⏺ The requested read-only check is complete.",
+    "  Current branch: feature/example", ""
+  ]), undefined, "a historical spinner above a later assistant reply does not claim current input");
+  // Actual 2.1.295 layouts place the notification row above the Composer's
+  // upper border. It may contain either a standalone badge or native /clear advice.
+  const capturedStashAboveComposer = [
+    "✻ Brewed for 1m 0s · done 3:19 · 1 shell still running",
+    "                                                                                 › stashed",
+    "────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯",
+    "────────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ auto mode on · 1 shell · ← for agents · ↓ to manage                             Debug"
+  ].join("\n");
+  assert.match(failure([], { screen: capturedStashAboveComposer }) ?? "", /stash/iu,
+    "a native badge immediately above the input border refuses before a restore key");
+  const clearHint = "new task? /clear to save 337.6k tokens";
+  const capturedInlineStashAboveComposer = [
+    `                                       ${clearHint} · › stashed`,
+    "──────────────────────────── example-feature-branch-20261027示例开发                      ─",
+    "❯",
+    "───────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ].join("\n");
+  assert.match(failure([], { screen: capturedInlineStashAboveComposer }) ?? "", /stash/iu,
+    "the actual /clear notification plus suffix badge refuses before any restore probe");
+  assert.equal(failure([], { screen: capturedInlineStashAboveComposer.replace(" · › stashed", "") }), undefined,
+    "/clear advice above the input is not an unknown footer component");
+  for (const prefix of ["", "Draft restored · ", `${clearHint} · `,
+    "/clear to save 1k tokens · ", `Draft restored · ${clearHint} · `]) {
+    assert.match(currentBlock([
+      "✻ Brewed for 1m 0s · done 3:19 · 1 shell still running",
+      `                          ${prefix}› stashed`, ""
+    ]) ?? "", /stash/iu, "the nearest nonempty native badge belongs to the current input");
+    assert.equal(currentBlock([
+      `                          ${prefix}› stashed`, "",
+      "⏺ A newer normal reply has completed the current work.", ""
+    ]), undefined, "an older badge above a newer reply is history, not current stash evidence");
+    assert.match(failure([...footer, `                          ${prefix}›\tstashed  `]) ?? "", /stash/iu,
+      "the trailing path recognizes the same suffix badge independently of its prefix");
+  }
+  assert.equal(currentBlock([clearHint]), undefined, "native /clear advice alone does not block an empty prompt");
+  for (const amount of ["337.6k", "999", "1m", "1.2b", "1t"]) {
+    assert.equal(currentBlock(["✻ Brewed for 43s · done 1:37", clearHint.replace("337.6k", amount)], [dynamicFooter]), undefined,
+      "the native compact-number /clear notification does not hide the last foreground completion");
+  }
+  assert.match(currentBlock(["✻ Brewed for 43s · done 1:37", "✽ Working… (8s · thinking)", clearHint],
+    [dynamicFooter]) ?? "", /foreground.*(?:running|turn)|still running/iu,
+    "ignoring native /clear advice cannot hide an active foreground spinner");
+  for (const unknownHint of [`${clearHint} unexpected overlay`, clearHint.replace("337.6k", "337.65k")]) {
+    assert.match(currentBlock(["✻ Brewed for 43s · done 1:37", unknownHint],
+      [dynamicFooter]) ?? "", /foreground.*(?:running|turn)|still running/iu,
+      "unknown notification text or non-native numeric format cannot manufacture foreground completion proof");
+  }
+  assert.match(failure([...footer, clearHint]) ?? "", /footer/iu,
+    "supporting advice above the input does not whitelist arbitrary components below it");
+  assert.match(failure([...footer, `${clearHint} · › stashed unexpected overlay`]) ?? "", /footer/iu,
+    "non-suffix badge text cannot swallow an unknown trailing component");
+  for (const glyph of ["✽", "·", "●", "✳", "✶"]) {
+    assert.match(currentBlock([
+      "✻ Brewed for 43s · done 1:37", "",
+      `${glyph} Thinking… (8s · ↓ 123 tokens)`,
+      "  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's",
+      "     current work", ""
+    ], [dynamicFooter]) ?? "", /foreground.*(?:running|turn)|still running/iu,
+    "the current spinner and wrapped native tip override an earlier completion summary");
+  }
+  assert.equal(currentBlock(["✻ Sautéed for 16s · done 1:35 PM", ""], [dynamicFooter]), undefined,
+    "native localized completion time permits a remaining background shell");
+  assert.match(failure([...footer, "  › stashed"], { requireEmptyClaudeStash: true }) ?? "",
+    /stash/iu, "an occupied native stash is rejected before any input");
+  assert.equal(failure(footer, { requireEmptyClaudeStash: true }), undefined);
+  for (const prefix of ["", "Draft restored · "]) {
+    const reason = failure([...footer, `                            ${prefix}› stashed`]);
+    assert.match(reason ?? "", /stash/iu, "the restored toast does not mean the current stash is consumed");
+    assert.match(reason ?? "", /Ctrl\+S|C-s/iu, "recovery explains the native restore key");
+    assert.match(reason ?? "", /AKK/iu, "legacy marker recovery is explained without erasing hidden text");
+  }
+  const marker = " [AKK replacing current draft 12345678-abcd-4abc-9abc-1234567890ab]";
+  const draftFailure = (draft: string, history: readonly string[] = []) => failure(footer, {
+    screen: [...history, "────────────────────────────────────────────────", `❯ ${draft}`,
+      "────────────────────────────────────────────────", ...footer].join("\n")
+  });
+  for (const draft of [marker, " [AKK replacing current draft]"]) {
+    assert.match(draftFailure(draft) ?? "", /AKK/iu);
+    assert.match(draftFailure(draft) ?? "", /(?:clear|remove|delete)/iu,
+      "an exact visible legacy marker has actionable manual recovery");
+  }
+  assert.match(draftFailure("my own text") ?? "", /draft/iu);
+  assert.doesNotMatch(draftFailure("my own text", [`⏺ ${marker}`]) ?? "", /(?:leftover|legacy) AKK/iu,
+    "a historical marker cannot establish ownership of the current user draft");
+  assert.match(failure(["Unknown overlay", "  › stashed"]) ?? "", /stash/iu,
+    "positive stash evidence gives the actionable refusal even with another unknown component");
+  assert.match(failure(["Unknown overlay"]) ?? "", /footer/iu,
+    "without a stash badge the same unknown component still fails the closed footer whitelist");
 });
 
 

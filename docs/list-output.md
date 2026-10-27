@@ -11,6 +11,100 @@ Use `agent_knock_knock_watches`, `/akk watches` or CLI `watches` to inspect
 monitoring. This is a read-only Store query: it does not create or renew a Watch,
 reconcile callbacks, reconnect a native session or send notifications.
 
+## Understanding a conversation row
+
+Each conversation includes `usage`, a bounded explanation derived from its
+current offered actions, activity, capabilities and blockers:
+
+| Field | Meaning |
+| --- | --- |
+| `summary` | Whether the conversation can receive work or currently needs attention |
+| `available` | What the user can do now |
+| `limitations` | Why a relevant operation is unavailable, including uncertainty |
+| `next_steps` | Concrete actions the user or controller can take next |
+
+Controllers should present this guidance in the user's language, beside the
+conversation title and project. A list of missing switches or internal reason
+codes is not a substitute for explaining what to do. Guidance is regenerated
+from each observation; it does not grant authority, add an action, or change
+existing action eligibility. The current `available_actions` and their input
+contracts remain authoritative. `usage` is an additive field within Host List
+projection v4. Action contract v35 adds a no-existing-stash prerequisite to Claude physical Send. This narrows eligibility for an empty input box with a stashed draft, so the action contract increases from v34; it is not only a wording change. The per-agent Composer policy names and public Send parameters remain unchanged. Readiness diagnostics are additive, and compact projection remains v4.
+The shared List projection adds this guidance to Codex CLI, Codex Desktop,
+Claude and terminal-only rows. Existing identities, capabilities and action
+offers retain their meanings; consumers may ignore the new display field.
+The additional identity recheck and background-view diagnosis described below
+apply only to Claude terminals, not to Codex discovery or dispatch.
+
+Different rows can legitimately offer different next steps. An idle native
+Claude conversation may accept Send without offering Watch: there is no active
+task to attach that Watch to. Send starts monitoring for its new task, so keep
+the returned Turn or Watch identity. A working native conversation can offer
+Watch, with the exact active input revalidated when observation starts. A
+terminal-only Watch can observe terminal activity; it does not establish an
+exact native task or prove that task succeeded.
+
+For an unresolved Claude terminal identity, List makes one additional fresh
+reader check, shared across the unresolved Claude terminals in that scan. It
+does not send terminal input or trust a registry file alone. If native identity
+remains unproven, List retains that uncertainty and explains the currently
+offered operations. A separately verified physical terminal Send can remain
+available; a failed native identity check does not establish native acceptance
+or completion, and does not by itself prove that terminal input is unsafe.
+
+A Claude window can display a background conversation while its own foreground
+conversation is parked. When a read-only check of that foreground process's
+owned registry and current process incarnation verifies this state, guidance
+explains that this window is in the background-session interface. This does not
+make the window read-only. When its real `terminal_user_explicit` Send action
+is offered, explicitly selecting that physical terminal lets AKK enter the
+requested text and submit Enter. The guidance distinguishes input dispatch
+from unproven native acceptance and completion, and asks the user to inspect
+the execution result in the window. Without that physical action, the user can
+continue manually or start an ordinary foreground conversation and refresh
+List. Reopening the same background conversation does not make it an ordinary
+foreground conversation.
+The raw observation adds
+`native_agent_identity_observation.window_role: "background_view"` only for
+that positive diagnosis; compact Host output carries its explanation in `usage`.
+This diagnosis does not identify or bind the background worker, inspect daemon
+or claim sockets, or grant physical Send authority or exact-task monitoring.
+Physical authority comes only from the current terminal action and its input
+safety checks, not from the background-view marker.
+
+If the registry check is missing, malformed, unsafe, stale or unavailable, List
+does not infer a background session. It retains the generic explanation that
+the native conversation identity could not be confirmed, together with the
+actual physical Send option when offered, or instructions to inspect the pane,
+use it manually, and retry ordinary startup and List refresh if appropriate.
+Failure to diagnose never removes the guidance.
+Relaunching is a recovery attempt, not a guaranteed repair.
+
+Claude physical rows additionally expose `physical_send_readiness` from the
+same current screen evidence used before input. An unsent user draft blocks
+Send and tells the user to send, save or clear it manually. A running foreground
+turn blocks Send until completion; an unproven running state asks the user to
+wait and refresh. Background shells alone do not block Send when the main
+Composer is empty and foreground completion can be verified. Unknown footer
+controls or an unrecognized input box stop automatic input and explain what
+AKK could not verify. These explanations take precedence over native-identity
+uncertainty. Codex readiness and managed Send rules are unchanged.
+
+To use an offered physical Send, select its displayed `terminal_id` and the
+existing Send tool's semantic inputs. No new public scope or token parameter
+is required. An ordinary managed Send does not silently switch to this route
+after an identity, ownership, Store or submission failure; uncertain input must
+never be replayed through a second route. A physical dispatch receipt proves
+only the stages it reports. Terminal activity observation is not native task
+acceptance or completion proof.
+
+`managed.session_count` counts distinct related Sessions found through current
+or historical managed records. It does not count valid current bindings. A
+positive count with null `session_id` and `session_short_ref`, and no
+`binding_status`, means no current authoritative Session was selected; it is not
+evidence that List lost a binding. These historical associations do not authorize
+Send or ownership recovery.
+
 ## Conversation selection
 
 Since 0.14.12 the default view prefers a verified backend as the project's CLI
@@ -63,7 +157,9 @@ Each Host page is capped at 24 KiB of UTF-8 JSON and 12,000 weighted characters
 (ASCII 1, other code points 16), including metadata. This is not a token budget.
 Oversized rows retain exact IDs and a Status entry point; omitted actions do not
 mean unsupported capabilities. Read exact Status for current questions, approvals
-and bounded public progress. List contains no progress body.
+and bounded public progress. Their guidance explains that details were omitted
+and directs the user to Status instead of claiming those operations are
+unsupported. List contains no progress body.
 
 Desktop catalog pagination remains separate: finish Host pages for one catalog
 page, then pass `desktop_scan.next_cursor` as `desktopCursor` with the same filters

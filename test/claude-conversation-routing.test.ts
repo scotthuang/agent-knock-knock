@@ -201,7 +201,9 @@ test("ordinary Claude Send prefers a managed terminal independently of native he
 
 test("explicit physical Claude Send retains its token and original executor semantics", async t => {
   const f = fixture(t);
-  f.terminals([{ ...terminal, _claude_managed_send_eligible: false,
+  f.terminals([{ ...terminal, native_agent_session_id: undefined,
+    native_agent_identity_observation: { status: "unknown", window_role: "background_view" },
+    _claude_managed_send_eligible: false,
     available_actions: {} }]);
   const input = { conversation: terminalId, message: "Replace the explicitly selected draft",
     messageId: "physical-claude", expectedTerminalToken: "caller-physical-authority" };

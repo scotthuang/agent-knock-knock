@@ -58,6 +58,7 @@ export interface TerminalListInventoryPorts<
   projectTerminal(input: {
     session: ActiveTerminalProcess;
     activeSessions: ActiveTerminalProcess[];
+    selectedSessions: ActiveTerminalProcess[];
     options: Options;
     bridge: TerminalAgentBridge;
   }): Promise<TerminalListInventoryEntry>;
@@ -166,6 +167,7 @@ export async function collectTerminalListInventory<
         terminalControlled.push(await ports.projectTerminal({
           session,
           activeSessions,
+          selectedSessions,
           options,
           bridge
         }));

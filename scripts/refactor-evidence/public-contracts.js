@@ -405,8 +405,8 @@ function validateListActionContract(contracts, { repoRoot, witnesses, usedWitnes
     "version",
     "witnesses"
   ], "list action contract");
-  if (actions.version !== 33) {
-    fail("list action contract version must remain 33");
+  if (actions.version !== 35) {
+    fail("list action contract version must remain 35");
   }
   assertExactArray(actions.actions, PUBLIC_ACTIONS, "list action names");
   validateAuthorityPaths(
@@ -423,8 +423,8 @@ function validateListActionContract(contracts, { repoRoot, witnesses, usedWitnes
   assertSourcePattern(
     repoRoot,
     "src/terminal-action-contracts.ts",
-    /version:\s*33\b/u,
-    "list action contract version 33"
+    /version:\s*35\b/u,
+    "list action contract version 35"
   );
   assertSourcePattern(
     repoRoot,

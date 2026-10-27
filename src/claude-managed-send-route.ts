@@ -25,6 +25,20 @@ function controlledClaudeTerminal(row: Row): boolean {
     && Array.isArray(control?.capabilities) && control.capabilities.includes("send_keys");
 }
 
+/** A current physical offer already includes process, input-owner and questionnaire checks. */
+export function claudeUserExplicitTerminalSendOffer(row: Row): Row | undefined {
+  const approval = recordValue(row.approval_state);
+  const authority = recordValue(row.native_store_authority);
+  if (!controlledClaudeTerminal(row) || approval?.scanned !== true || approval.blocked !== false
+    || recordValue(row.physical_send_readiness)?.ready === false
+    || ["conflict", "transferring"].includes(String(authority?.state))) return undefined;
+  const send = recordValue(recordValue(row.available_actions)?.send);
+  const args = recordValue(send?.arguments);
+  return send?.tool === "agent_knock_knock_send" && send.scope === "terminal_user_explicit"
+    && (args?.selector ?? args?.terminal_id) === row.id && nonBlankString(args?.expected_terminal_token)
+    ? send : undefined;
+}
+
 /** The physical Send token remains required; managed execution must never fall back to an unmanaged send. */
 export function claudeManagedTerminalSendBlockReason(row: Row): string | undefined {
   if (!controlledClaudeTerminal(row)) return "terminal_control_unavailable";

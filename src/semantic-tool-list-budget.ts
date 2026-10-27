@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { arrayValue } from "./semantic-tool-value-helpers.js";
 import { recordValue } from "./value-guards.js";
+import { withConversationUsage } from "./conversation-usage-guidance.js";
 
 // A byte budget also bounds UTF-16 output and leaves room for Host envelopes.
 // It is not a token budget, and does not reduce the native discovery/read cost.
@@ -152,7 +153,7 @@ function statusReference(row: Row): Row {
   const id = row.watch_id ? { watch_id: row.watch_id } : row.turn_id ? { turn_id: row.turn_id } : { conversation_id: row.conversation_id ?? row.id };
   result.action_inputs = { status: { arguments: id } };
   result.next_action = "Read exact Status for current actions and interaction/callback details; omitted actions are not unsupported.";
-  return result;
+  return withConversationUsage(result);
 }
 function digest(text: string): string { return createHash("sha256").update(text).digest("hex"); }
 function bytes(value: unknown): number { return Buffer.byteLength(JSON.stringify(value) ?? "null", "utf8"); }

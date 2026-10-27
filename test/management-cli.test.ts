@@ -157,7 +157,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
       current_turn: null,
       session_count: 0
     });
-    assert.equal(listed.action_contracts.version, 33);
+    assert.equal(listed.action_contracts.version, 35);
     assert.match(
       listed.action_contracts.instructions.join("\n"),
       /Treat terminals\[\] as the primary resource/u
@@ -168,7 +168,11 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
-      /parsed working activity(?: does not veto| and Codex rollout ambiguity do not veto)/u
+      /For Codex, parsed working activity and rollout ambiguity do not veto/u
+    );
+    assert.match(
+      listed.action_contracts.instructions.join("\n"),
+      /Claude additionally requires a recognized empty main Composer,[\s\S]*no existing stashed draft,[\s\S]*no running or unproven foreground turn[\s\S]*refuses a visible stash before input[\s\S]*one C-s[\s\S]*Restored content stops task submission[\s\S]*uncertain probe is not automatically retried/u
     );
     assert.match(
       listed.action_contracts.instructions.join("\n"),
@@ -417,7 +421,14 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     assert.equal(
       listed.action_contracts.actions.send
         .terminal_user_explicit_composer_policy,
-      "replace_current_composer_and_submit"
+      "per_agent"
+    );
+    assert.deepEqual(
+      listed.action_contracts.actions.send.terminal_user_explicit_composer_policies,
+      {
+        codex: "replace_current_composer_and_submit",
+        claude: "require_empty_composer_and_submit"
+      }
     );
     assert.equal(
       listed.action_contracts.actions.send
@@ -984,7 +995,12 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
       "--terminal-screens-json",
       JSON.stringify({
         "codex-work:0.0": "› ",
-        "claude-work:1.0": "❯ "
+        "claude-work:1.0": [
+          "────────────────────────────────────────────────",
+          "❯ ",
+          "────────────────────────────────────────────────",
+          "  ⏸ manual mode on"
+        ].join("\n")
       }),
       "--claude-agents-json",
       JSON.stringify([{
@@ -1031,6 +1047,7 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     assert.equal(claude.source, "terminal");
     assert.equal(claude.process_state, "active");
     assert.equal("commands" in claude, false);
+    assert.deepEqual(claude.physical_send_readiness, { ready: true });
     assert.equal(
       claude.available_actions.send.arguments.selector,
       claude.id

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.1 / Pi 0.1.0-poc.9 / DeepSeek Harness 0.1.0-rc.12 — 2026-10-27
+
+- Explain what each List entry can do, why input or monitoring is unavailable, and the applicable next step. Derive bounded usage guidance from current action offers, capabilities, activity and blockers; preserve it in compact and shortened rows without changing the overall Host response budget.
+- Recheck unresolved Claude native identities once per List scan with a fresh reader snapshot. Explain verified foreground-window evidence separately from background workers and independently offered physical terminal input. Matching project directories or registry entries do not establish native task ownership or authorize input.
+- Preserve an executable `terminal_user_explicit` Send on an explicitly selected terminal even when native identity is unresolved. Keep private authority, process identity and Store fences internal; native acceptance and completion remain unproven on this route. Ordinary managed failures never silently downgrade, and uncertain input is not replayed.
+- Refuse Claude physical Send before input when a visible draft, occupied native stash, active foreground turn or unrecognized footer makes the Composer unsafe. Recognize the Claude 2.1.295 footer and inline `new task? /clear … · › stashed` notification. A shell count or empty prompt alone does not prove foreground completion.
+- Remove the destructive sentinel/stash/erase preparation. After a fresh empty-Composer check, use at most one non-destructive `Ctrl+S` restore probe; stop without task text or Enter if content appears or the probe is uncertain, leaving the restored draft for manual handling. Do not clean up after task text or Enter. This is not an atomic keyboard lock or a guarantee against simultaneous human input or an unprocessed restore key; see the Claude compatibility notes.
+- Advance the action contract to **35**; retain compact List projection **v4**, Store writer protocol **11**, public request parameters and ordinary managed Send behavior. Update recovery guidance and synchronized Skills.
+- Release Pi **0.1.0-poc.9** and DeepSeek Harness **0.1.0-rc.12** with exact core **0.16.1** dependencies. Core remains on `latest`; both connectors remain on `next`, with unchanged Host compatibility requirements.
+
 ## 0.16.0 / Pi 0.1.0-poc.8 / DeepSeek Harness 0.1.0-rc.11 — 2026-10-26
 
 - Separate native-thread Store authority recovery (`transfer_store_authority`) from managed Session binding reconciliation (`reconcile_binding`), and expose the applicable recovery action consistently on native and terminal rows. Keep the runtime ledger globally shared so different Hosts cannot independently claim the same native thread; record absolute Store identity, Host identity, owner PID, process start identity and instance nonce.

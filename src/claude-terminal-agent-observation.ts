@@ -7,7 +7,7 @@ import { resolveExecutable } from "./cli-command-runtime.js";
 import { cliEnv, cliRuntimeLog } from "./cli-runtime-context.js";
 import { claudeReaderConfiguration, claudeReaderDiagnostic, claudeReaderNextAction,
   type ClaudeReaderDiagnostic } from "./claude-reader-configuration.js";
-import { observeClaudeTerminalRegistry } from "./claude-terminal-registry-observation.js";
+import { observeClaudeTerminalRegistry, observeClaudeTerminalWindow } from "./claude-terminal-registry-observation.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
 
 export interface ClaudeTerminalAgentObservation {
@@ -37,6 +37,19 @@ export function normalizeClaudeAgentRows(rows: readonly unknown[]): ClaudeAgentR
 }
 function canonicalRoot(root: string): string {
   try { return fs.realpathSync(root); } catch { return root; }
+}
+/** Unknown and conflicting roots keep generic guidance; this never bypasses reader authority. */
+export function claudeTerminalWindowRole(options: Readonly<Record<string, unknown>>, pid: number,
+  cwd?: string): "background_view" | undefined {
+  if (["processesJson", "terminalsJson", "terminalScreensJson", "claudeAgentsJson"]
+    .some(key => options[key] !== undefined)) return undefined;
+  try {
+    const roots = [...new Set(claudeReaderConfiguration(options).configDirs.map(canonicalRoot))];
+    const observations = roots.map(configDir => observeClaudeTerminalWindow({ configDir, pid, cwd }));
+    if (observations.some(observation => observation.state === "invalid")) return undefined;
+    const verified = observations.filter(observation => observation.state === "verified");
+    return verified.length === 1 && verified[0].role === "background_view" ? "background_view" : undefined;
+  } catch { return undefined; }
 }
 function resolveReader(reader: string): string {
   try {

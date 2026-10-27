@@ -1,3 +1,4 @@
+import type { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
 import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
 import { isExactNativeThreadId } from "./managed-session.js";
@@ -27,6 +28,7 @@ import type {
 } from "./terminal-binding-authority.js";
 import type { TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
+import type { TerminalListIdentityRecheck } from "./terminal-list-native-identity-recheck.js";
 
 export interface TerminalListState {
   readonly approval_state: TerminalBridgeStatus["approval_state"] & {
@@ -51,6 +53,8 @@ export interface EffectiveTerminalListState extends TerminalListState {
 export interface TerminalNativeListIdentityFacts {
   readonly orphanedDispatch?: TerminalDispatchLedgerDocument;
   readonly nativeIdentityObservation: TerminalNativeIdentityObservation;
+  readonly nativeIdentityRecheck?: TerminalListIdentityRecheck;
+  readonly nativeWindowRole?: "background_view";
   readonly nativeAgentIdentity?: TerminalNativeIdentity;
   readonly authorityNativeIdentityObservation:
     TerminalNativeIdentityObservation;
@@ -64,6 +68,7 @@ export interface TerminalNativeListIdentityFacts {
 export interface TerminalListComposerFacts {
   readonly automatedInputComposerReady: boolean;
   readonly userExplicitComposerReady: boolean;
+  readonly claudeUserExplicitReadiness?: ReturnType<typeof claudeUserExplicitReadiness>;
   /** Positive evidence that a non-Composer UI surface owns terminal input. */
   readonly inputOwnerBlocked: boolean;
 }

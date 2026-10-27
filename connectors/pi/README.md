@@ -12,13 +12,13 @@ socket.
 
 ## Status and compatibility
 
-This connector pins AKK **0.16.0**, including CLI direct connections, Codex
-Desktop, and Recovery. Its generated Skill and registered tools are verified
+Connector **0.1.0-poc.9** pins AKK **0.16.1**, including CLI direct
+connections, Codex Desktop, Recovery, state-derived List guidance and a bounded
+Claude identity recheck. Its generated Skill and registered tools are verified
 against that exact core package at startup. See the [root compatibility
 summary](../../README.md#compatibility) for the coding-agent versions and
 operation-specific limits. Updating AKK core elsewhere does not update this
-connector's pinned dependency. Connector `0.1.0-poc.8` pins core `0.16.0`
-and uses the `next` dist-tag.
+connector's pinned dependency. This prerelease uses the `next` dist-tag.
 
 This is a POC prerelease distributed on npm as
 `@scotthuang/agent-knock-knock-pi`. Prereleases use the `next` dist-tag;
@@ -34,8 +34,7 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.16.0`, pinned by this connector's package and lockfile. Running
-  `npm ci` in `connectors/pi` installs that exact AKK runtime; a different
+- AKK `0.16.1`, pinned by this connector's package and lockfile. A different
   version at the repository root is not substituted automatically. Before core
   publication, test its candidate tarball in isolation under the
   [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases).
@@ -87,8 +86,8 @@ pi list
 ```
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
-build, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.8`; exact versions are pinned
+core `0.16.1` connector, install
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.9`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -453,7 +452,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.8
+npm run release:check -- --publish --confirm-version 0.1.0-poc.9
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -503,6 +502,18 @@ a presentation change, not evidence that a candidate is disconnected, and it
 does not change Send routing or callback ownership. Sole empty conversations
 and exact frontend associations remain visible.
 
+Connector **`0.1.0-poc.9`** pins AKK **`0.16.1`** and its synchronized Skill.
+List adds bounded guidance derived from each conversation's current state and
+a single read-only recheck for unresolved Claude identity. Claude physical
+fallback requires an empty recognized Composer, no visible stash and no active
+or unproven foreground turn. A single empty-Composer restore probe stops if it
+reveals content; no sentinel or draft-deletion transaction runs. Shared
+notification/footer stash layouts are covered by fixtures, not a new live Pi
+acceptance claim. Managed Send, Codex routing, Store writer protocol **11** and
+List projection **v4** remain unchanged; action contract advances to **35**.
+Pi Host compatibility and callback ownership are unchanged. No new live-model
+or external-channel delivery result is claimed; this connector remains on `next`.
+
 Connector **`0.1.0-poc.8`** pins exact AKK **`0.16.0`** and bundles
 its synchronized Skill. Core separates managed binding reconciliation from
 native Store authority transfer, records Store owner process identities, and
@@ -536,8 +547,8 @@ or external-channel delivery run.
 
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.8` is an npm prerelease distributed through the `next` dist-tag;
-its publication is coordinated with core `0.16.0` and the DSH connector.
+`0.1.0-poc.9` is an npm prerelease distributed through the `next` dist-tag;
+its publication is coordinated with core `0.16.1` and the DSH connector.
 ClawHub publication remains a separate channel.
 
 ## Deliberate POC limits

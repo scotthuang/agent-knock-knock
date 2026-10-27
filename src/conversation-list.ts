@@ -1,8 +1,9 @@
 import { associateClaudeConversationRoutes } from "./claude-conversation-routing-identity.js";
 import { claudeNativeControlCapabilities } from "./claude-native-public-projection.js";
-import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason, withClaudeManagedSendAuthority } from "./claude-managed-send-route.js";
+import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason, claudeUserExplicitTerminalSendOffer, withClaudeManagedSendAuthority } from "./claude-managed-send-route.js";
 import { associateConversationRoutes, type ConversationRoutingIdentityOptions } from "./conversation-routing-identity.js";
 import { presentConversationList, type ConversationListPresentationOptions } from "./conversation-list-presentation.js";
+import { withConversationUsage } from "./conversation-usage-guidance.js";
 import { recordValue } from "./value-guards.js";
 import { withNativeStoreAuthorityConflict } from "./native-store-authority-projection.js";
 
@@ -39,20 +40,31 @@ function claudeSendTerminals(physical: readonly Row[], projected: readonly Row[]
   });
 }
 
-function standaloneConversation(terminal: Row, physical?: Row): Row {
+function standaloneActions(terminal: Row, physicalSend: Row | undefined, blocked: string | undefined): Row {
   const actions = { ...recordValue(terminal.available_actions) };
-  const claude = terminal.agent === "claude", codex = terminal.agent === "codex";
-  const blocked = claude ? claudeManagedTerminalSendBlockReason({ ...(physical ?? terminal),
-    available_actions: terminal.available_actions }) : undefined;
   if (blocked) delete actions.send;
   for (const name of ["send", "status", "watch", "native_inspect", "permission_options", "model_options"]) {
     const action = recordValue(actions[name]);
     if (action) actions[name] = { tool: action.tool, input: { conversation_id: terminal.id,
       ...(name === "native_inspect" ? { inspection: "status" } : {}) } };
   }
-  return { ...terminal, conversation_id: terminal.id, title: terminal.workspace ?? terminal.cwd ?? terminal.id,
-    route_preference: codex ? "codex_backend" : claude ? "managed_terminal" : "terminal",
-    route_status: codex ? "identity_unresolved" : "terminal_only", available_actions: actions,
+  if (physicalSend) actions.send = { tool: physicalSend.tool, arguments: { terminal_id: terminal.id },
+    missing_required: ["request"], scope: "terminal_user_explicit", requires_user_intent: true,
+    ...(physicalSend.composer_policy ? { composer_policy: physicalSend.composer_policy } : {}) };
+  return actions;
+}
+
+function standaloneConversation(terminal: Row, physical?: Row): Row {
+  const claude = terminal.agent === "claude", codex = terminal.agent === "codex";
+  const sendFacts = { ...(physical ?? terminal), available_actions: terminal.available_actions };
+  const physicalSend = claude ? claudeUserExplicitTerminalSendOffer(sendFacts) : undefined;
+  const readiness = recordValue(terminal.physical_send_readiness);
+  const blocked = claude && !physicalSend ? readiness?.ready === false && typeof readiness.reason === "string"
+    ? `terminal_${readiness.reason}` : claudeManagedTerminalSendBlockReason(sendFacts) : undefined;
+  const { send_blocked_reason: _terminalBlocked, ...unblockedTerminal } = terminal;
+  return { ...(physicalSend ? unblockedTerminal : terminal), conversation_id: terminal.id, title: terminal.workspace ?? terminal.cwd ?? terminal.id,
+    route_preference: codex ? "codex_backend" : claude && !physicalSend ? "managed_terminal" : "terminal",
+    route_status: codex ? "identity_unresolved" : "terminal_only", available_actions: standaloneActions(terminal, physicalSend, blocked),
     ...(claude ? { capabilities: { ...recordValue(terminal.capabilities), send: !blocked } } : {}),
     ...(blocked ? { send_blocked_reason: blocked } : {}) };
 }
@@ -133,7 +145,8 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
     conversations.push(standaloneConversation(terminal, claudeSendTargets.find(row => row.id === terminal.id)));
   }
   conversations.push(...rows(result.desktop_sessions).map(row => ({ ...row, route_preference: "desktop_ipc" })));
-  return { ...result, ...presentConversationList(conversations.map(withExactTerminalActions), terminals, presentationOptions),
+  const presentation = presentConversationList(conversations.map(withExactTerminalActions), terminals, presentationOptions);
+  return { ...result, ...presentation, conversations: presentation.conversations.map(row => withConversationUsage(row)),
     conversation_routing: { policy: "agent_specific", codex: "backend_first", claude: "managed_terminal_first",
     exact_associations: association.associations.length + claudeAssociations.length,
     unresolved_terminals: association.unassociated.filter(item => terminals.some(t => t.id === item.terminalId && t.agent === "codex")).length } };

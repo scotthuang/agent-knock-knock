@@ -13,13 +13,14 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-This connector pins AKK **0.16.0** in its package and lockfile. It exposes
-that runtime's 27 semantic tools, including Codex CLI backend and Desktop
-operations when the selected conversation advertises them. `list` returns
-current discoverable conversations; `watches` separately returns recent
+Connector **0.1.0-rc.12** pins AKK **0.16.1** in its package and lockfile,
+adding state-derived List guidance and a bounded Claude identity recheck. It
+exposes that runtime's 27 semantic tools, including Codex CLI backend and
+Desktop operations when the selected conversation advertises them. `list`
+returns current discoverable conversations; `watches` separately returns recent
 monitoring records (24 hours by default), plus active or unresolved records.
-A newer root checkout does not silently replace this pinned dependency.
-Connector `0.1.0-rc.11` pins core `0.16.0` and uses the `next` dist-tag.
+A newer root checkout does not silently replace this pinned dependency. This
+prerelease uses the `next` dist-tag.
 
 The development baseline is DeepSeek Harness **0.2.1-rc.2** with Cordis
 **4.0.5**. This is a release candidate, not a stable release; as checked on
@@ -77,7 +78,7 @@ can select an older `latest` build.
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
 Use `next`, or pin
-`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.11`.
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.12`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -366,7 +367,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.11
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.12
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -394,7 +395,7 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned AKK runtime `0.16.0`; building the current repository
+tests against its pinned AKK runtime `0.16.1`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
 [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases);
@@ -404,6 +405,19 @@ dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.12`** pins AKK **`0.16.1`** and its synchronized Skill.
+List adds bounded guidance derived from each conversation's current state and
+a single read-only recheck for unresolved Claude identity. Claude physical
+fallback requires an empty recognized Composer, no visible stash and no active
+or unproven foreground turn. A single empty-Composer restore probe stops if it
+reveals content; no sentinel or draft-deletion transaction runs. Shared
+notification/footer stash layouts are covered by fixtures, not a new live DSH
+acceptance claim. Managed Send, Codex routing, Store writer protocol **11** and
+List projection **v4** remain unchanged; action contract advances to **35**.
+The DSH Host/peer policy, independent Store and callback ownership remain
+unchanged. This dependency refresh does not repeat the historical live-model
+or external-channel delivery acceptance below. It remains on npm `next`.
 
 Connector **`0.1.0-rc.11`** pins exact AKK **`0.16.0`** and bundles
 its synchronized Skill. Core separates managed binding reconciliation from
@@ -467,7 +481,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.11` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.12` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -512,7 +526,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.11
+npm run release:check -- --publish --confirm-version 0.1.0-rc.12
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags

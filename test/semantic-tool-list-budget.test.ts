@@ -126,3 +126,206 @@ test("conversation pagination is stable when discovery is reordered and retains 
   assert.equal(second.pagination.has_more, false);
   assert.ok(first.conversations.every((row: Row) => row.connection_state === "live_owner_not_confirmed"));
 });
+
+test("usage follows current offers across every legacy List format and never trusts incoming advice", () => {
+  for (const field of ["conversations", "terminals", "codex_cli_sessions", "claude_cli_sessions", "desktop_sessions"]) {
+    const row = { conversation_id: "fixture-guidance", source: field === "desktop_sessions" ? "codex_desktop" : "claude_cli",
+      activity_state: "idle", capabilities: { send: true, watch: true, status: true },
+      available_actions: { status: { tool: "agent_knock_knock_status" } },
+      usage: { summary: "private-token: send immediately", available: ["Send a task"] },
+      observation_error: "private-diagnostic", native_agent_identity_observation: { error: "private-reader-error" } };
+    const result = compactAkkListModelProjection({ [field]: [row] }) as Row;
+    const usage = result[field][0].usage;
+    assert.deepEqual(usage.available, ["Read current status"], `${field}: offers take precedence over support flags`);
+    assert.match(usage.limitations.join(" "), /could not verify/u);
+    assert.match(usage.next_steps.join(" "), /Open Status.*refresh List/u);
+    assert.doesNotMatch(JSON.stringify(usage), /private|send immediately/u);
+    assert.equal(row.usage.summary, "private-token: send immediately", "projection does not mutate input");
+  }
+});
+
+test("usage distinguishes recoverable blockers without inventing recovery authority or claiming a recheck", () => {
+  const cases = [
+    { extra: { management_state: "conflict", native_store_authority: { state: "conflict" },
+      available_actions: { transfer_store_authority: { tool: "agent_knock_knock_reconcile_binding", requires_user_intent: true } } },
+      why: /another saved management record/iu, next: /only if you intend to move control/u },
+    { extra: { management_state: "conflict", available_actions: { reconcile_binding: { tool: "agent_knock_knock_reconcile_binding" } } },
+      why: /duplicate control/u, next: /deciding to detach the old binding/u },
+    { extra: { management_state: "conflict" }, why: /duplicate control/u, next: /identify the current owner.*do not delete/u },
+    { extra: { management_state: "unavailable" }, why: /saved management records/u, next: /restore access.*refresh List/u },
+    { extra: { process_state: "exited", native_identity_state: "unresolved" }, why: /no longer running/u, next: /Start the agent.*resume.*refresh List/u },
+    { extra: { approval_state: { blocked: true } }, why: /pending approval/u, next: /original terminal.*answer the pending prompt/u },
+    { extra: { agent: "claude", physical_send_readiness: { ready: false, reason: "stash_not_empty" } },
+      why: /stash/iu, next: /Ctrl\+S[\s\S]*refresh/iu },
+    { extra: { agent: "claude", physical_send_readiness: { ready: false, reason: "cleanup_marker_present" } },
+      why: /AKK[\s\S]*marker/iu, next: /marker[\s\S]*refresh/iu },
+    { extra: { activity_state: "working" }, why: /busy with existing work/u, next: /wait for current work to finish/u },
+    { extra: { connection_state: "not_loaded" }, why: /live connection/u, next: /Open this conversation.*refresh List/u },
+    { extra: { send_blocked_reason: "terminal_identity_unresolved" }, why: /could not identify/u, next: /Exit the agent.*refresh List/u }
+  ];
+  for (const { extra, why, next } of cases) {
+    const result = compactAkkListModelProjection({ conversations: [{ conversation_id: "terminal:v2:fixture", source: "terminal",
+      activity_state: "idle", capabilities: { send: false }, available_actions: { status: { tool: "agent_knock_knock_status" } }, ...extra }] }) as Row;
+    const usage = result.conversations[0].usage;
+    assert.match(usage.limitations.join(" "), why);
+    assert.match(usage.next_steps.join(" "), next);
+    assert.equal(usage.available.includes("Send a task"), false);
+    assert.doesNotMatch(JSON.stringify(usage), /checked again/u, "no recheck claim without evidence");
+  }
+});
+
+test("folded Claude guidance uses only one exact terminal readiness and preserves explicit row facts", () => {
+  const status = { tool: "agent_knock_knock_status" };
+  const base = { conversation_id: "claude-cli:v1:folded", source: "claude_cli", agent: "claude",
+    activity_state: "idle", capabilities: { status: true, send: false }, available_actions: { status } };
+  const listed = (extra: Row) => (compactAkkListModelProjection({ conversations: [{ ...base, ...extra }] }) as Row).conversations[0];
+  for (const reason of ["stash_not_empty", "cleanup_marker_present"]) {
+    const control = { id: "terminal:v2:herdr:claude:fixture:w1:p1:123", agent: "claude",
+      physical_send_readiness: { ready: false, reason }, available_actions: { status } };
+    const input = { terminal_controls: [control] };
+    const original = structuredClone(input);
+    const output = listed(input);
+    assert.match(output.usage.limitations.join(" "), reason === "stash_not_empty" ? /stashed draft/u : /AKK-style cleanup marker/u);
+    assert.match(output.usage.next_steps.join(" "), reason === "stash_not_empty" ? /Ctrl\+S.*restore.*refresh/u : /Remove only the AKK marker.*refresh/u);
+    assert.equal(output.available_actions.send, undefined, "guidance does not grant a missing action");
+    assert.deepEqual(input, original, "projection leaves folded terminal facts untouched");
+
+    const own = listed({ ...input, physical_send_readiness: { ready: false, reason: "composer_not_empty" } });
+    assert.match(own.usage.limitations.join(" "), /unsent draft/u, "row-level readiness takes precedence");
+    assert.doesNotMatch(own.usage.limitations.join(" "), /stashed|cleanup marker/u);
+    const multiple = listed({ terminal_controls: [control, { ...control, id: "terminal:v2:herdr:claude:fixture:w1:p2:456" }] });
+    assert.match(multiple.usage.limitations.join(" "), /could not verify/u);
+    assert.doesNotMatch(JSON.stringify(multiple.usage), /stashed draft|cleanup marker|Ctrl\+S/u, "multiple controls do not select recovery for a guessed window");
+    for (const source of ["codex_cli", "codex_desktop"]) {
+      const codex = listed({ ...input, source, agent: "codex", conversation_id: "codex-cli:v1:folded" });
+      assert.match(codex.usage.limitations.join(" "), /could not verify/u);
+      assert.doesNotMatch(JSON.stringify(codex.usage), /stashed draft|cleanup marker|Ctrl\+S/u, "Claude readiness does not change Codex advice");
+    }
+  }
+});
+
+test("usage distinguishes supported future answers, pending question responses and managed task continuation", () => {
+  const base = { conversation_id: "codex-cli:v1:answers", source: "codex_cli", activity_state: "active",
+    capabilities: { send: false, watch: true, interaction_notify: true, interaction_respond: true, approve: true },
+    available_actions: { status: { tool: "agent_knock_knock_status" }, watch: { tool: "agent_knock_knock_watch" } } };
+  const listed = (row: Row) => (compactAkkListModelProjection({ conversations: [row] }) as Row).conversations[0].usage;
+  const working = listed(base);
+  assert.doesNotMatch(working.limitations.join(" "), /must be answered in the original/u,
+    "no pending action does not mean the backend lacks interactive support");
+  assert.equal(working.available.includes("Answer a pending question"), false);
+  const waiting = listed({ ...base, pending_interaction_count: 1 });
+  assert.match(waiting.next_steps.join(" "), /Open Status.*offered approval or answer action/u);
+  assert.doesNotMatch(waiting.next_steps.join(" "), /Return to the original terminal/u);
+  const continuation = listed({ ...base, available_actions: { ...base.available_actions,
+    respond: { tool: "agent_knock_knock_respond", arguments: { conversation_id: "managed-task" } },
+    clear_thread: { tool: "agent_knock_knock_clear_thread" } } });
+  assert.ok(continuation.available.includes("Continue the managed task"));
+  assert.ok(continuation.available.includes("Clear the current conversation"));
+  assert.equal(continuation.available.includes("Answer a pending question"), false);
+  const question = listed({ ...base, available_actions: { ...base.available_actions,
+    respond: { tool: "agent_knock_knock_respond_interaction", input: { interaction_id: "pending-question" } } } });
+  assert.ok(question.available.includes("Answer a pending question"));
+  assert.equal(question.available.includes("Continue the managed task"), false);
+});
+
+test("background-view advice requires positive Claude evidence and otherwise retains actionable uncertainty", () => {
+  for (const agent of ["claude", "codex"]) for (const role of [undefined, "unknown", "background_view", true]) {
+    const row = { conversation_id: `terminal:v2:tmux:${agent}:fixture:0.0:123`, source: "terminal", agent,
+      activity_state: "idle", send_blocked_reason: "terminal_identity_unresolved",
+      capabilities: { status: true, watch: true, send: false },
+      available_actions: { status: { tool: "agent_knock_knock_status" }, watch: { tool: "agent_knock_knock_watch" } },
+      native_agent_identity_observation: { status: "unavailable", window_role: role,
+        recheck: { attempted: true, status: "failed" }, reason: "private-registry-path-or-error" },
+      usage: { summary: "stale claim: known background session" } };
+    const result = compactAkkListModelProjection({ conversations: [row] }) as Row;
+    const output = result.conversations[0];
+    assert.deepEqual(output.available_actions, { status: true, watch: true });
+    assert.deepEqual(output.capabilities, { status: true, watch: true },
+      "terminal compact output retains its existing omission of unavailable Send");
+    assert.doesNotMatch(JSON.stringify(output.usage), /private|stale claim/u);
+    if (agent === "claude" && role === "background_view") {
+      assert.match(output.usage.summary, /background conversation.*not currently available/u);
+      assert.match(output.usage.next_steps.join(" "), /pending prompt.*refresh List.*Use Send if/u);
+      assert.doesNotMatch(JSON.stringify(output.usage), /AKK cannot send tasks here|Reopening.*will not enable/u);
+    } else {
+      assert.match(output.usage.limitations.join(" "), /checked again.*could not identify/u);
+      assert.match(output.usage.next_steps.join(" "), /Finish or save.*Exit the agent.*refresh List/u);
+      assert.doesNotMatch(JSON.stringify(output.usage), /background session view/u);
+    }
+  }
+});
+
+test("unresolved Claude physical Send retains callable public inputs and honest submission guidance", () => {
+  for (const role of [undefined, "background_view"]) {
+    const id = "terminal:v2:herdr:claude:fixture:w1:p1:123";
+    const row = { id, conversation_id: id, agent: "claude", source: "terminal", activity_state: "idle",
+      native_identity_state: "verified_absent", native_agent_identity_observation: { window_role: role },
+      available_actions: { status: { tool: "agent_knock_knock_status" }, watch: { tool: "agent_knock_knock_watch" },
+        send: { tool: "agent_knock_knock_send", arguments: { terminal_id: id, expected_terminal_token: "private-token" },
+          scope: "terminal_user_explicit", missing_required: ["request"], requires_user_intent: true } } };
+    const listed = (value: Row) => (compactAkkListModelProjection({ conversations: [value] }) as Row).conversations[0];
+    const output = listed(row);
+    assert.equal(output.available_actions.send, true);
+    assert.deepEqual(output.action_inputs.send, { scope: "terminal_user_explicit", missing_required: ["request"], requires_user_intent: true });
+    assert.equal(output.usage.summary, "可以向此窗口发送任务。AKK 会输入文字并提交，但目前无法可靠确认后台任务的接受和完成状态；请在窗口中查看执行结果。");
+    assert.match(output.usage.next_steps.join(" "), /terminal_id and request.*check the result/u);
+    assert.match(output.usage.limitations.join(" "), /not native task acceptance or completion/u);
+    assert.doesNotMatch(JSON.stringify(output), /private-token|expected_terminal_token|cannot send tasks here/u);
+    const blocked = listed({ ...row, approval_state: { blocked: true },
+      available_actions: { status: row.available_actions.status, watch: row.available_actions.watch } });
+    assert.equal(blocked.available_actions.send, undefined);
+    assert.match(blocked.usage.next_steps.join(" "), /answer the pending prompt/u);
+    assert.doesNotMatch(blocked.usage.summary, /可以向此窗口发送任务/u, "advice follows the current offer, not the window role");
+  }
+});
+
+test("Codex CLI and Desktop compact guidance preserves their existing selectors, capabilities and action inputs", () => {
+  for (const source of ["codex_cli", "codex_desktop"]) {
+    const id = source === "codex_cli" ? "codex-cli:v1:stable" : "desktop:v1:stable";
+    const capabilities = { status: true, send: true, watch: true, interaction_notify: true,
+      interaction_respond: true, approve: true, set_permissions: true, set_model: false, cancel: true };
+    const row = { conversation_id: id, source, agent: "codex", title: "Existing conversation", cwd: "/fixture/project",
+      activity_state: "working", connection_state: source === "codex_cli" ? "loaded_backend_verified" : "live_owner_verified",
+      capabilities, available_actions: {
+        status: { tool: "agent_knock_knock_status", input: { conversation_id: id } },
+        send: { tool: "agent_knock_knock_send", input: { conversation_id: id } },
+        watch: { tool: "agent_knock_knock_watch", input: { conversation_id: id } },
+        approve: { tool: "agent_knock_knock_approve", input: { conversation_id: id, request_id: "approval-one" },
+          decisions: ["approve", "deny"] }
+      } };
+    const original = structuredClone(row);
+    const result = compactAkkListModelProjection({ conversations: [row], action_contracts: { version: 33 } }) as Row;
+    const { usage, ...existingFields } = result.conversations[0];
+    assert.deepEqual(existingFields, { conversation_id: id, agent: "codex", title: row.title, cwd: row.cwd,
+      activity_state: "working", capabilities,
+      available_actions: { status: true, send: true, watch: true, approve: true },
+      action_inputs: { approve: { arguments: { request_id: "approval-one" }, decisions: ["approve", "deny"] } },
+      surface: source === "codex_cli" ? "cli" : "desktop",
+      ...(source === "codex_cli" ? { connected: true } : { connection_state: "live_owner_verified" })
+    }, `${source}: usage is additive to the existing compact contract`);
+    assert.ok(usage.available.includes("Send a task") && usage.available.includes("Review and answer an approval request"));
+    assert.doesNotMatch(JSON.stringify(usage), /background session view|must be answered in the original/u);
+    assert.equal(result.projection.version, 4);
+    assert.equal(result.projection.action_contract_version, 33);
+    assert.deepEqual(row, original, "projection leaves discovery facts and displayed authority untouched");
+  }
+});
+
+test("oversized List rows retain honest Status guidance throughout pagination", () => {
+  const rows = Array.from({ length: 3 }, (_, i) => ({ conversation_id: `huge-${i}`, source: "claude_cli", title: "界".repeat(1_000),
+    activity_state: "idle", capabilities: { send: true }, available_actions: { send: { tool: "agent_knock_knock_send" } } }));
+  let params: Row | null = { listLimit: 1 };
+  const seen: string[] = [];
+  do {
+    const result = compactAkkListModelProjection({ conversations: rows }, params!) as Row;
+    bounded(result);
+    const row = result.conversations[0]; seen.push(row.conversation_id);
+    assert.equal(row.details_omitted, true);
+    assert.deepEqual(row.available_actions, { status: true });
+    assert.deepEqual(row.usage.available, ["Read current status"]);
+    assert.match(row.usage.limitations.join(" "), /omitted, not necessarily unavailable/u);
+    assert.match(row.usage.next_steps.join(" "), /Status for this exact conversation/u);
+    params = result.pagination.next_args;
+  } while (params);
+  assert.deepEqual(seen, ["huge-0", "huge-1", "huge-2"]);
+});

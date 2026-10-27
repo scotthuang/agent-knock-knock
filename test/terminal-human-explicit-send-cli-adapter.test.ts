@@ -221,9 +221,19 @@ for (const scenario of [
   }
 );
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1.0.0"] as const) {
-  test(`Codex ${version} physical Send prepares paginated Watch before input and never attempts managed Send`, async (t) => {
-    for (const callbackKind of ["exact", "activity", "unavailable", "unsafe"] as const) {
+for (const scenario of [
+  ...["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1.0.0"].map(version => ({
+    agent: "codex" as const, version,
+    name: `Codex ${version} physical Send prepares paginated Watch before input and never attempts managed Send`
+  })),
+  { agent: "claude" as const, version: "2.1.295",
+    name: "explicit Claude physical Send without native identity survives zero-input managed failure and reports only physical delivery" }
+]) {
+  const { agent, version } = scenario;
+  test(scenario.name, async (t) => {
+    const callbackKinds = agent === "claude" ? ["activity", "unavailable", "unsafe"] as const
+      : ["exact", "activity", "unavailable", "unsafe"] as const;
+    for (const callbackKind of callbackKinds) {
       const callbackAvailable = callbackKind === "exact" || callbackKind === "activity";
       await t.test(`${callbackKind} callback and same-ID replay safety`, async (nested) => {
         const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "akk-paginated-physical-send-"));
@@ -239,13 +249,13 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1
           capabilities: ["screen_status" as const, "send_keys" as const]
         };
         const terminal: TerminalCommandTarget = {
-          conversationId: "terminal:v2:tmux:codex:paginated:0.0:4242",
-          agent: "codex", pid: 4242, terminalControl
+          conversationId: `terminal:v2:tmux:${agent}:paginated:0.0:4242`,
+          agent, pid: 4242, terminalControl
         };
-        const processUuid = "codex-pid:4242:birth:exact-birth";
+        const processUuid = `${agent}-pid:4242:birth:exact-birth`;
         const processBirth = "exact-birth";
         const expectedTerminalToken = unmanagedTerminalBindingToken({
-          terminalId: terminal.conversationId, terminalControl, agent: "codex",
+          terminalId: terminal.conversationId, terminalControl, agent,
           pid: 4242, workspace, processUuid, processBirth
         });
         const events: string[] = [];
@@ -290,7 +300,8 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1
             return { processUuid, processBirth, evidence: "process_birth" as const };
           },
           terminalBridgeRuntimeKey() { return "tmux:paginated:0.0:4242"; },
-          terminalRuntimeForLiveIdentity() {
+          terminalRuntimeForLiveIdentity(input) {
+            assert.equal(input.physicalOnly, true);
             return { agentVersion: version, pid: 4242 };
           },
           storeDirFromOptions() { return storeDir; },
@@ -303,14 +314,14 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1
             events.push("prepare_watch");
             assert.equal(input.requestText, payload);
             if (callbackKind === "unsafe") throw Object.assign(new Error("Native status Enter outcome uncertain"), { doNotRetry: true });
-            if (!callbackAvailable) throw new Error("Exact paginated reader unavailable");
+            if (!callbackAvailable) throw new Error("Exact native reader unavailable");
             watchId = terminalUserExplicitFallbackWatchId({
               messageId: input.messageId, physicalToken: input.physicalToken,
               requestHash: input.requestHash
             });
             const terminalEndpoint = terminalControlEvidence(terminalControl);
             return {
-              watchId, terminalId: terminal.conversationId, agent: "codex" as const,
+              watchId, terminalId: terminal.conversationId, agent,
               pid: 4242, terminalEndpoint,
               terminalIdentity: {
                 terminal_id: terminal.conversationId, terminal_endpoint: terminalEndpoint,
@@ -364,6 +375,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1
           },
           managedSendAttempt: async () => {
             managedAttempts += 1;
+            if (agent === "claude") throw new Error("Claude native session identity unresolved");
             assert.fail("Paginated physical Send cannot enter the legacy managed path");
           }
         };
@@ -376,9 +388,13 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1
           return;
         }
         await runHumanExplicitTerminalSend(dependencies, options, payload, terminal);
-        assert.equal(managedAttempts, 0);
+        assert.equal(managedAttempts, agent === "claude" ? 1 : 0);
         assert.equal(sends, 1);
         assert.equal(printed[0]?.delivered, true);
+        assert.equal(printed[0]?.delivery_receipt, "enter_dispatched");
+        assert.equal(printed[0]?.agent_acceptance, "unproven");
+        assert.equal(printed[0]?.scope, "terminal_user_explicit");
+        assert.equal(printed[0]?.management_mode, "unmanaged");
         assert.equal(printed[0]?.callback_expected, callbackAvailable);
         assert.equal(events[0], "prepare_watch");
         assert.equal(events[1], "physical_send");
@@ -399,7 +415,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1
         assert.equal(printed[1]?.replayed, true);
         assert.equal(printed[1]?.callback_expected, callbackAvailable);
         assert.equal(sends, 1);
-        assert.equal(managedAttempts, 0);
+        assert.equal(managedAttempts, agent === "claude" ? 1 : 0);
       });
     }
   });

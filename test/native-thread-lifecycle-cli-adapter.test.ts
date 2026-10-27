@@ -170,6 +170,7 @@ function runtime(
     createControlProvider: unexpected,
     createProcessSource: unexpected,
     loadClaudeAgentRows: () => [],
+    observeClaudeWindowRole: unexpected,
     createAgentRegistry: () => ({
       require: () => {
         events.push("runtime:registry");

@@ -40,6 +40,7 @@ function claudePair() {
 
 test("unified List coalesces exact terminal/backend identity and preserves every Desktop sidebar row", () => {
   const physical = terminal();
+  const codex = native();
   const desktops = [
     { conversation_id: "desktop:v1:one", title: "Project one", source: "codex_desktop", sidebar_section: "project",
       sidebar_project_id: "project-one", connection_state: "live_owner_verified", capabilities: { send: true } },
@@ -49,7 +50,7 @@ test("unified List coalesces exact terminal/backend identity and preserves every
       available_actions: { status: { tool: "agent_knock_knock_status", input: { conversation_id: "desktop:v1:two" } } } }
   ];
   const result = unifiedConversationList({ terminals: [{ id: terminalId, agent: "codex" }],
-    codex_cli_sessions: [native()], desktop_sessions: desktops }, [physical]);
+    codex_cli_sessions: [codex], desktop_sessions: desktops }, [physical]);
   assert.equal(result.conversations.length, 3);
   assert.deepEqual(result.conversations[0].terminal_aliases, [terminalId]);
   assert.equal(result.conversations[0].conversation_id, nativeId);
@@ -57,10 +58,68 @@ test("unified List coalesces exact terminal/backend identity and preserves every
   assert.equal(result.conversation_routing.policy, "agent_specific");
   assert.equal(result.conversation_routing.codex, "backend_first");
   assert.equal(result.conversation_routing.claude, "managed_terminal_first");
-  assert.deepEqual(result.conversations.slice(1), desktops.map(row => ({ ...row, route_preference: "desktop_ipc", surface: "desktop" })));
+  assert.deepEqual(result.conversations.slice(1).map(({ usage: _usage, ...row }) => row),
+    desktops.map(row => ({ ...row, route_preference: "desktop_ipc", surface: "desktop" })));
   assert.equal(result.conversations[0].surface, "cli");
   assert.equal(result.conversation_routing.exact_associations, 1);
   assert.equal(result.conversation_routing.unresolved_terminals, 0);
+  for (const [key, value] of Object.entries(codex)) {
+    assert.deepEqual(result.conversations[0][key], value, `Codex CLI retains its existing ${key}`);
+  }
+  for (const row of result.conversations) {
+    const usage = row.usage as Record<string, any>;
+    assert.ok(usage.summary && usage.next_steps.length, "CLI and Desktop both receive actionable display guidance");
+    assert.equal(usage.available.includes("Send a task"), (row.capabilities as Record<string, unknown>).send === true);
+  }
+});
+
+test("List explains idle, working and unidentified Claude rows without changing their controls", () => {
+  const { physical, backend } = claudePair();
+  const list = (entry: Record<string, unknown>, control = physical) => unifiedConversationList({
+    claude_cli_sessions: [entry], terminals: [control]
+  }, [control]);
+  const idle = list({ ...backend, activity_state: "idle" });
+  const idleRow = idle.conversations[0] as Record<string, any>;
+  assert.equal(idleRow.capabilities.send, true);
+  assert.equal(idleRow.capabilities.watch, false);
+  assert.ok(idleRow.usage.available.includes("Send a task"));
+  assert.match(idleRow.usage.limitations.join(" "), /no active task.*idle/u);
+  assert.match(idleRow.usage.next_steps.join(" "), /Send a task.*Status/u);
+  const working = list({ ...backend, activity_state: "working",
+    capabilities: { ...backend.capabilities, watch: true, interaction_notify: true },
+    available_actions: { ...backend.available_actions, watch: { tool: "agent_knock_knock_watch", input: { conversation_id: backend.id } } } });
+  const workingRow = working.conversations[0] as Record<string, any>;
+  assert.ok(workingRow.usage.available.includes("Watch the current task"));
+  assert.doesNotMatch(JSON.stringify(workingRow.usage), /no active task/u);
+  assert.match(workingRow.usage.limitations.join(" "), /answered in the original terminal/u);
+  const unidentified = { ...physical, native_agent_session_id: undefined,
+    native_agent_identity_observation: { status: "unresolved", recheck: { attempted: true, status: "unresolved" } },
+    available_actions: { status: { tool: "agent_knock_knock_status" }, watch: { tool: "agent_knock_knock_watch" } } };
+  const unresolved = unifiedConversationList({ terminals: [unidentified] }, [unidentified]);
+  const row = unresolved.conversations[0] as Record<string, any>;
+  assert.equal(row.send_blocked_reason, "terminal_identity_unresolved");
+  assert.ok(row.usage.available.includes("Observe terminal activity"));
+  assert.equal(row.usage.available.includes("Send a task"), false);
+  assert.match(row.usage.limitations.join(" "), /checked again.*could not identify/u);
+  assert.match(row.usage.next_steps.join(" "), /Finish or save.*Exit the agent.*resume.*refresh List/u);
+  assert.match(row.usage.next_steps.join(" "), /not a guaranteed repair/u);
+  const background = unifiedConversationList({ terminals: [{ ...unidentified,
+    native_agent_identity_observation: { ...unidentified.native_agent_identity_observation, window_role: "background_view" }
+  }] }, [unidentified]);
+  const backgroundRow = background.conversations[0] as Record<string, any>;
+  assert.match(backgroundRow.usage.summary, /background conversation.*not currently available/u);
+  assert.match(backgroundRow.usage.limitations.join(" "), /cannot currently verify safe input.*cannot prove native background task acceptance or completion/u);
+  assert.match(backgroundRow.usage.next_steps.join(" "), /pending prompt.*refresh List.*Use Send if/u);
+  assert.match(backgroundRow.usage.next_steps.join(" "), /keep existing background work running/u);
+  assert.doesNotMatch(backgroundRow.usage.next_steps.join(" "), /Exit the agent|resume the conversation/u);
+  const { usage: _unknownUsage, native_agent_identity_observation: _unknownObservation, ...unknownFields } = row;
+  const { usage: _backgroundUsage, native_agent_identity_observation: _backgroundObservation, ...backgroundFields } = backgroundRow;
+  assert.deepEqual(backgroundFields, unknownFields, "diagnostic role changes advice, never actions, identity or capabilities");
+  for (const result of [idle, working, unresolved, background]) {
+    const compact = compactAkkListModelProjection(result) as Record<string, any>;
+    assert.deepEqual(compact.conversations[0].usage, result.conversations[0].usage,
+      "the Host preserves advice after compacting capabilities and terminal controls");
+  }
 });
 
 test("exact aliases advertise the selected backend Send and Watch while preserving terminal-only actions", () => {
@@ -532,24 +591,95 @@ test("Claude List follows managed Send eligibility while preserving canonical se
   assert.equal(backend.capabilities.send, true, "Projection must not rewrite native diagnostics");
 });
 
-test("Claude terminal-only Send uses the same managed guard and retains approval Turn targets", () => {
+test("Claude terminal-only List retains verified explicit physical Send independently of managed eligibility", () => {
   const { physical } = claudePair();
   const approve = { tool: "agent_knock_knock_approve", arguments: { turn_id: "existing-claude-turn" } };
-  for (const activity_state of ["idle", "working"]) {
-    const row = { ...physical, activity_state,
-      available_actions: { ...(physical.available_actions as Record<string, unknown>), approve } };
-    const listed = unifiedConversationList({ terminals: [row] }, [row], {}, { diagnostics: true });
+  const physicalSend = (physical.available_actions as Record<string, any>).send;
+  const base = { ...physical, native_agent_session_id: undefined, _claude_managed_send_eligible: false,
+    native_agent_identity_observation: { status: "verified_absent", window_role: "background_view" },
+    available_actions: { send: physicalSend, approve } };
+  const cases: { name: string; values?: Record<string, unknown>; send: boolean; writable?: boolean }[] = [
+    { name: "unresolved identity", send: true },
+    { name: "physical selector from real terminal projection", values: { available_actions: { approve,
+      send: { ...physicalSend, arguments: { selector: physical.id, expected_terminal_token: "physical-authority" } } } }, send: true },
+    { name: "background activity label does not override verified physical readiness", values: { activity_state: "working",
+      physical_send_readiness: { ready: true } }, send: true },
+    { name: "foreground readiness invalidates a stale physical offer", values: {
+      physical_send_readiness: { ready: false, reason: "foreground_running" } }, send: false },
+    { name: "Store read-only does not veto explicit input", writable: false, send: true },
+    { name: "unavailable managed records", values: { management_state: "unavailable" }, send: true },
+    { name: "resolved identity still honors explicit selection", values: {
+      native_agent_session_id: thread, native_agent_identity_observation: { status: "resolved" } }, send: true },
+    { name: "missing physical offer", values: { available_actions: { approve } }, send: false },
+    { name: "ordinary offer is not a physical opt-in", values: { available_actions: {
+      approve, send: { ...physicalSend, scope: undefined } } }, send: false },
+    { name: "missing authority", values: { available_actions: {
+      approve, send: { ...physicalSend, arguments: { terminal_id: physical.id } } } }, send: false },
+    { name: "different physical target", values: { available_actions: { approve, send: { ...physicalSend,
+      arguments: { terminal_id: "terminal:v2:tmux:claude:akk:0.1:999", expected_terminal_token: "other-authority" } } } }, send: false },
+    { name: "approval blocked", values: { approval_state: { scanned: true, blocked: true } }, send: false },
+    { name: "approval not scanned", values: { approval_state: { scanned: false, blocked: false } }, send: false },
+    { name: "process no longer active", values: { process_state: "exited" }, send: false },
+    { name: "terminal cannot input", values: { terminal_control: { capabilities: ["screen_status"] } }, send: false },
+    { name: "cross-Store conflict", values: { native_store_authority: { state: "conflict" } }, send: false },
+    { name: "unfinished transfer", values: { native_store_authority: { state: "transferring" } }, send: false },
+    { name: "automatic transfer is not a direct physical offer", values: {
+      native_store_authority: { state: "conflict", send_after_transfer: true } }, send: false }
+  ];
+  for (const scenario of cases) {
+    const row = { ...base, ...scenario.values };
+    const listed = unifiedConversationList({ terminals: [row], store: { writable: scenario.writable ?? true } },
+      [row], {}, { diagnostics: true });
     const conversation = listed.conversations[0];
-    assert.equal(conversation.route_preference, "managed_terminal");
+    assert.equal(conversation.route_preference, scenario.send ? "terminal" : "managed_terminal", scenario.name);
     assert.equal(conversation.route_status, "terminal_only");
-    assert.equal((conversation.capabilities as Record<string, unknown>).send, activity_state === "idle");
+    assert.equal((conversation.capabilities as Record<string, unknown>).send, scenario.send, scenario.name);
     const actions = conversation.available_actions as Record<string, any>;
     assert.equal(actions.approve, approve);
-    if (activity_state === "idle") assert.deepEqual(actions.send.input, { conversation_id: physical.id });
-    else assert.equal(actions.send, undefined);
+    if (scenario.send) {
+      assert.deepEqual(actions.send.arguments, { terminal_id: physical.id }, scenario.name);
+      assert.deepEqual(actions.send.missing_required, ["request"]);
+      assert.equal(actions.send.scope, "terminal_user_explicit");
+      assert.equal(actions.send.requires_user_intent, true);
+      assert.equal(conversation.send_blocked_reason, undefined);
+    } else assert.equal(actions.send, undefined, scenario.name);
+    assert.doesNotMatch(JSON.stringify(actions), /physical-authority|other-authority|expected_terminal_token/u);
     const compact = compactAkkListModelProjection(listed) as Record<string, any>;
     assert.equal(compact.conversations[0].action_inputs.approve.arguments.turn_id, "existing-claude-turn");
-    assert.equal(compact.conversations[0].available_actions.send, activity_state === "idle" ? true : undefined);
+    assert.equal(compact.conversations[0].conversation_id, physical.id);
+    assert.equal(compact.conversations[0].available_actions.send, scenario.send ? true : undefined, scenario.name);
+    if (scenario.send) {
+      assert.equal(compact.conversations[0].action_inputs.send.scope, "terminal_user_explicit");
+      assert.equal(compact.conversations[0].action_inputs.send.requires_user_intent, true);
+    }
+    assert.doesNotMatch(JSON.stringify(compact), /physical-authority|other-authority|expected_terminal_token/u);
+  }
+  assert.equal(physicalSend.arguments.expected_terminal_token, "physical-authority", "Private offers remain intact for execution");
+});
+
+test("Claude physical readiness explains draft and foreground blockers before missing native identity", () => {
+  const reasons = [
+    ["composer_not_empty", /unsent draft/u, /Send, save, or clear/u],
+    ["foreground_running", /still executing its current turn/u, /Wait.*finish/u],
+    ["foreground_unproven", /cannot verify.*foreground turn has finished/u, /Wait.*done/u],
+    ["footer_unrecognized", /cannot recognize the controls/u, /close any menu or overlay/u],
+    ["composer_unrecognized", /cannot verify an empty main input box/u, /Return to Claude/u]
+  ] as const;
+  for (const [reason, limitation, nextStep] of reasons) {
+    const row = terminal({ id: "terminal:v2:herdr:claude:default:w1:p4:999", agent: "claude", pid: 999,
+      native_agent_identity_observation: { status: "verified_absent", window_role: "background_view" },
+      physical_send_readiness: { ready: false, reason },
+      available_actions: { status: true, watch: true } });
+    const result = unifiedConversationList({ terminals: [row] }, [row], {}, { diagnostics: true });
+    const output = result.conversations[0] as Record<string, any>;
+    assert.equal(output.send_blocked_reason, `terminal_${reason}`);
+    assert.equal(output.capabilities.send, false);
+    assert.match(output.usage.limitations.join(" "), limitation);
+    assert.match(output.usage.next_steps.join(" "), nextStep);
+    assert.doesNotMatch(output.usage.next_steps.join(" "), /Exit the agent|restart/u);
+    const compact = compactAkkListModelProjection(result) as Record<string, any>;
+    assert.deepEqual(compact.conversations[0].physical_send_readiness, { ready: false, reason });
+    assert.deepEqual(compact.conversations[0].usage, output.usage);
   }
 });
 

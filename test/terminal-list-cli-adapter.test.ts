@@ -44,7 +44,9 @@ import type { TerminalDispatchLedgerDocument } from
   "../src/terminal-dispatch-ledger-codec.js";
 import * as terminalCommandCliAdapter from
   "../src/terminal-command-cli-adapter.js";
-import { terminalSubmissionPayload } from
+import { terminalSubmissionPayload, TerminalDispatchExecutionService,
+  type ClaudeIdentityRow, type NativeIdentityResolutionRequest,
+  type TerminalDispatchExecutionPorts } from
   "../src/terminal-dispatch-execution.js";
 import { createTerminalUserSendIntentRepository } from
   "../src/terminal-user-send-intent.js";
@@ -2480,6 +2482,67 @@ test("Claude list exposes verified physical birth for native routing without inv
   }
 });
 
+test("Claude List rechecks one shared fresh reader snapshot before leaving exact terminal identities unresolved", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-list-recheck-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const rows = [4241, 4242].map(pid => ({ pid, kind: "interactive",
+    sessionId: `019f0000-0000-7000-8000-${String(pid).padStart(12, "0")}`,
+    startedAt: 1789000000000 }));
+  const scenarios: Array<{ name: string; scans: Array<readonly ClaudeIdentityRow[] | Error>;
+    result: "resolved" | "verified_absent" | "unavailable";
+    recheck?: "resolved" | "unresolved" | "failed"; role?: "background_view"; roleFails?: boolean }> = [
+    { name: "already resolved", scans: [rows], result: "resolved" },
+    { name: "transient omission", scans: [[], rows], result: "resolved", recheck: "resolved" },
+    { name: "persistent omission", scans: [[], []], result: "verified_absent", recheck: "unresolved" },
+    { name: "parked frontend", scans: [[], []], result: "verified_absent", recheck: "unresolved", role: "background_view" },
+    { name: "failed role diagnostic", scans: [[], []], result: "verified_absent", recheck: "unresolved", roleFails: true },
+    { name: "wrong PID and background", scans: [[], [
+      { ...rows[0], pid: 9999 }, ...rows.map(row => ({ ...row, kind: "background" }))
+    ]], result: "verified_absent", recheck: "unresolved" },
+    { name: "conflicting identities", scans: [[], rows.flatMap(row => [row,
+      { ...row, sessionId: "019f0000-0000-7000-8000-000000999999" }])],
+      result: "unavailable", recheck: "unresolved" },
+    { name: "missing process incarnation", scans: [[], rows.map(row => ({ ...row, startedAt: undefined }))],
+      result: "unavailable", recheck: "unresolved" },
+    { name: "reader fails twice", scans: [new Error("reader unavailable"), new Error("reader timed out")],
+      result: "unavailable", recheck: "failed" }
+  ];
+  for (const scenario of scenarios) {
+    let reads = 0, roleReads = 0;
+    const f = await createCodexRolloutListFixture(path.join(root, scenario.name), "pending", true,
+      {}, "human-only", false, false, "❯ ", { agent: "claude", agentVersion: "2.1.296",
+        claudeReader: () => {
+          const snapshot = scenario.scans[reads++];
+          assert.ok(snapshot, `${scenario.name}: no unbounded additional reader calls`);
+          if (snapshot instanceof Error) throw snapshot;
+          return snapshot;
+        }, claudeWindowRole: () => {
+          roleReads += 1;
+          assert.equal(reads, 2, "display evidence follows the fresh retry");
+          if (scenario.roleFails) throw new Error("diagnostic unavailable");
+          return scenario.role;
+        } });
+    assert.equal(f.scan.summary.error, undefined, scenario.name);
+    assert.equal(f.scan.terminalControlled.length, 2, scenario.name);
+    assert.equal(reads, scenario.scans.length, `${scenario.name}: two panes share one retry`);
+    assert.equal(roleReads, scenario.result === "resolved" ? 0 : 2, scenario.name);
+    for (const terminal of f.scan.terminalControlled) {
+      const observed = terminal.native_agent_identity_observation as Record<string, unknown>;
+      assert.equal(observed.status, scenario.result, scenario.name);
+      assert.deepEqual(observed.recheck, scenario.recheck
+        ? { attempted: true, status: scenario.recheck } : undefined, scenario.name);
+      assert.equal(observed.window_role, scenario.role, scenario.name);
+      assert.equal(terminal.native_agent_session_id,
+        scenario.result === "resolved" ? rows.find(row => row.pid === terminal.pid)?.sessionId : undefined,
+        `${scenario.name}: only the fresh exact interactive identity can restore controls`);
+    }
+  }
+  let codexRoleReads = 0;
+  await createCodexRolloutListFixture(path.join(root, "codex"), "pending", true,
+    {}, "human-only", false, false, "❯ ", { claudeWindowRole: () => { codexRoleReads += 1; return "background_view"; } });
+  assert.equal(codexRoleReads, 0, "Codex never probes Claude foreground metadata");
+});
+
 test("Claude managed Send eligibility uses the observed empty composer and remains private", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-managed-send-facts-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -2517,6 +2580,8 @@ async function createCodexRolloutListFixture(
     agentVersion?: string;
     nativeIdentityObservation?: "resolved" | "verified_absent";
     modelControlResidual?: "popup" | "bare" | "surface" | "unsafe";
+    claudeReader?: () => readonly ClaudeIdentityRow[];
+    claudeWindowRole?: () => "background_view" | undefined;
   } = {}
 ) {
   const agent = fixtureOptions.agent ?? "codex";
@@ -2785,7 +2850,7 @@ async function createCodexRolloutListFixture(
         ? [nestedSession, session]
         : [session],
     terminalConversationId: (value: { pid: number }) => value.pid === 4241
-      ? "terminal:v2:tmux:codex:durable:0.1:4241"
+      ? `terminal:v2:tmux:${agent}:durable:0.1:4241`
       : `terminal:v2:tmux:${agent}:durable:0.0:${value.pid}`,
     status: async () => {
       observationCounts.status += 1;
@@ -2842,6 +2907,8 @@ async function createCodexRolloutListFixture(
   const dependencies: TerminalListCliDependencies = {
     ...base,
     discovery: {
+      ...(fixtureOptions.claudeReader ? { loadClaudeAgentRows: fixtureOptions.claudeReader } : {}),
+      ...(fixtureOptions.claudeWindowRole ? { observeClaudeWindowRole: fixtureOptions.claudeWindowRole } : {}),
       createRuntimeTerminalAgentRegistry: () => registry,
       createTerminalControlProvider: () => provider,
       createTerminalAgentBridge: () => bridge,
@@ -2878,9 +2945,15 @@ async function createCodexRolloutListFixture(
       nativeInspectionComposerEmpty: () =>
         fixtureOptions.modelControlResidual === undefined,
       observeCurrentNativeAgentSessionIdentity: async (
-        request: { pid: number; preferredSessionId?: string }
+        request: NativeIdentityResolutionRequest
       ) => {
         observationCounts.nativeIdentity += 1;
+        if (fixtureOptions.claudeReader) {
+          const identity = new TerminalDispatchExecutionService(undefined, {
+            native: { claudeRows: () => { throw new Error("List must reuse its validated reader snapshot"); } }
+          } as unknown as TerminalDispatchExecutionPorts);
+          return identity.observeCurrentNativeIdentity(request);
+        }
         if (request.pid === 4241) {
           throw new Error("broken sibling identity probe");
         }

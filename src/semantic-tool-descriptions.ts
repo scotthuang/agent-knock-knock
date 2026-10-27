@@ -89,17 +89,21 @@ export const semanticToolDescriptions = {
     "request and may use session_id or terminal_id exactly as advertised. " +
     "The physical fallback rules below apply to retained legacy routes/receipts and other explicitly advertised terminal_user_explicit paths; " +
     "new ordinary Claude sends require managed terminal delivery and cannot degrade to unmanaged work after a Store or ownership failure. " +
+    "When List advertises a physical Send for a window whose native session is unresolved, use its exact terminal_id; " +
+    "AKK can submit through that interactive window, including one displaying a background session, without claiming background-task acceptance or completion. " +
     "terminal_user_explicit requires one exact live physical terminal/process, a " +
     "scanned non-blocked approval state, and no input-owning native " +
-    "questionnaire/editor, menu, or read-only viewer; parsed working activity, " +
-    "Codex rollout ambiguity, AKK management state, ordinary main-Composer " +
+    "questionnaire/editor, menu, or read-only viewer. Codex parsed working activity, " +
+    "rollout ambiguity, AKK management state, ordinary main-Composer " +
     "visibility, stability, exactness, and existing draft contents do not veto " +
-    "physical delivery. Profiled Codex 0.154.0/0.155.1 exact collapsed " +
+    "Codex physical delivery. Claude requires an empty recognized main Composer, a known native footer, " +
+    "and no running or unproven foreground turn; background shells alone do not block Send. Profiled Codex 0.154.0/0.155.1 exact collapsed " +
     "async-question summaries remain sendable, while expanded, clipped, or " +
     "ambiguous editors receive zero input. Codex sends C-u once to replace the " +
-    "current Composer; Claude Code uses a sentinel-backed native C-s stash-clear " +
-    "transaction that is independent of the cursor position and does not " +
-    "interrupt an active turn, then proves the main Composer empty. Each injects " +
+    "current Composer. Claude refuses an existing stashed draft before input, then uses one C-s on a freshly empty Composer " +
+    "to check for a hidden stash. Restored content stops task submission and remains for the user; AKK writes no sentinel " +
+    "and deletes no draft. An uncertain probe is not automatically retried. Failure gives manual recovery instructions; " +
+    "no cleanup runs after Enter. Each injects " +
     "the request, waits through the paste window, and dispatches Enter exactly " +
     "once without a post-text Composer veto. A source-less Codex terminal freezes " +
     "all current rollout roots before input, then promotes a provisional " +
@@ -270,16 +274,18 @@ export const semanticCommandGuidance = [
     "mode. An uncertain result must not be retried automatically.",
   "Use /akk <task> when exactly one send-ready coding-agent terminal pane " +
     "should receive new work. Send-ready means an exact live process and terminal " +
-    "plus a scanned, non-blocked approval state. Parsed working activity and " +
+    "plus a scanned, non-blocked approval state. For Codex, parsed working activity and " +
     "ordinary main-Composer visibility, stability, exactness, or existing draft " +
-    "contents do not veto this user-priority path. A proven input-owning native " +
+    "contents do not veto this user-priority path. Claude requires an empty recognized main Composer, " +
+    "a known native footer, and no running or unproven foreground turn; background shells alone do not block Send. A proven input-owning native " +
     "approval, questionnaire/editor, menu, or read-only viewer remains a " +
     "zero-input boundary; profiled Codex 0.154.0/0.155.1 exact collapsed " +
     "async-question summaries remain sendable, while expanded, clipped, or " +
     "ambiguous editors do not. Codex sends C-u once to replace the current " +
-    "Composer; Claude Code uses a sentinel-backed native C-s stash-clear " +
-    "transaction that is independent of the cursor position and does not " +
-    "interrupt an active turn, then proves the main Composer empty. Each injects " +
+    "Composer. Claude refuses an existing stashed draft before input, then uses one C-s on a freshly empty Composer " +
+    "to check for a hidden stash. Restored content stops task submission and remains for the user; AKK writes no sentinel " +
+    "and deletes no draft. An uncertain probe is not automatically retried. Failure gives manual recovery instructions; " +
+    "no cleanup runs after Enter. Each injects " +
     "the request, waits through the paste window, and dispatches Enter exactly " +
     "once; after text injection, no Composer observation may veto Enter. Managed " +
     "Send may still require exact empty before input, while native inspection and " +

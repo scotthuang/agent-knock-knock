@@ -351,9 +351,17 @@ test("transport and Composer boundaries preserve user-explicit Send policy", () 
       userExplicitComposerReady: false
     })
   });
-  assert.equal(claudeUnknownComposer.terminalUserExplicitSend.eligible, true);
+  assert.equal(claudeUnknownComposer.terminalUserExplicitSend.eligible, false);
   assert.equal(claudeUnknownComposer.commands.native_inspect, false);
   assert.equal(claudeUnknownComposer.commands.new_thread, false);
+
+  const claudeBackgroundOnly = decideTerminalListActions({
+    subject: subject({ agent: "claude", terminalControl: { ...control, currentCommand: "claude" } }),
+    facts: facts({ state: { activity_state: "working" }, userExplicitComposerReady: true })
+  });
+  assert.equal(claudeBackgroundOnly.terminalUserExplicitSend.eligible, true,
+    "the dedicated screen proof may establish idle foreground despite a background-shell activity label");
+  assert.equal(claudeBackgroundOnly.commands.send, false, "managed readiness remains unchanged");
 
   const claudeExternalEditor = decideTerminalListActions({
     subject: subject({

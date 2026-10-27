@@ -1260,6 +1260,7 @@ const terminalListCliFacade = createTerminalListCliFacade({
   },
   discovery: {
     localCodexList: localCodexListForCli,
+    loadClaudeAgentRows, observeClaudeWindowRole: (options, pid, cwd) => terminalRuntime(options).observeClaudeWindowRole(pid, cwd),
     agentVersionForRunningProcess,
     codexLatentClearResumeObservation,
     codexManagedIdentityResolutionContext,

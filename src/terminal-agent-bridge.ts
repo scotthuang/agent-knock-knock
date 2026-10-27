@@ -1230,7 +1230,7 @@ export class TerminalAgentBridge {
       !isCodexPaginatedVersion(options.runtime?.agentVersion);
     const captureSafePrompt = async (
       control: TerminalControlRef,
-      requireExactEmptyClaudeComposer = false,
+      claudeProof: { empty?: boolean; emptyStash?: boolean } = {},
       requireExactEmptyCodexComposer = false
     ): Promise<TerminalControlRef> => {
       try {
@@ -1276,16 +1276,8 @@ export class TerminalAgentBridge {
               : "Codex shows an async-question surface but AKK cannot prove that the main prompt owns terminal input; return to a complete main prompt before retrying the explicit user Send"
           );
         }
-        const status = statusFromInspection(
-          adapter,
-          captured.terminalControl,
-          captured.inspection,
-          {
-            screen: captured.screen,
-            runtime: options.runtime,
-            now: this.now()
-          }
-        );
+        const status = statusFromInspection(adapter, captured.terminalControl,
+          captured.inspection, { screen: captured.screen, runtime: options.runtime, now: this.now() });
         const safetyFailure = terminalUserExplicitInputSafetyFailure({
           agent: adapter.agent, displayName: adapter.displayName,
           screen: captured.screen, terminalControl: captured.terminalControl,
@@ -1297,7 +1289,8 @@ export class TerminalAgentBridge {
           modelControlSurface: Boolean(exactCurrentModelControlSurface(
             adapter.agent, options.runtime?.agentVersion, captured.screen
           )),
-          requireExactEmptyClaudeComposer
+          requireExactEmptyClaudeComposer: claudeProof.empty === true,
+          requireEmptyClaudeStash: claudeProof.emptyStash
         });
         if (safetyFailure) throw new Error(safetyFailure);
         const verified = await this.verifyTerminalIdentity(
@@ -1316,7 +1309,7 @@ export class TerminalAgentBridge {
       }
     };
 
-    const initiallySafe = await captureSafePrompt(terminalControl);
+    const initiallySafe = await captureSafePrompt(terminalControl, { empty: adapter.agent === "claude" });
     const reservationContext:
       UserExplicitSendContract.TerminalUserExplicitSendReservationContext = {
       terminalControl: initiallySafe,
@@ -1329,7 +1322,7 @@ export class TerminalAgentBridge {
     }
 
     // Recapture approval/modal and identity authority before mutation.
-    const verifiedForClear = await captureSafePrompt(initiallySafe);
+    const verifiedForClear = await captureSafePrompt(initiallySafe, { empty: adapter.agent === "claude" });
     let clearedForText: TerminalControlRef;
     try {
       clearedForText = await dispatchTerminalUserExplicitComposerClear({
@@ -1337,9 +1330,7 @@ export class TerminalAgentBridge {
         provider: this.terminalProvider, sleep: this.sleep,
         verifyIdentity: () => this.verifyTerminalIdentity(adapter.agent, verifiedForClear, options.runtime),
         terminalInputOwnerBlocked: terminalUserExplicitTerminalInputOwnerBlocked,
-        verifyClaudeComposerCleared: () => captureSafePrompt(
-          verifiedForClear, true
-        )
+        verifyClaudeComposerCleared: (emptyStash = false) => captureSafePrompt(verifiedForClear, { empty: true, emptyStash }),
       });
     } catch (error) {
       if (error instanceof TerminalUserExplicitClearNotStartedError) {
@@ -1366,7 +1357,7 @@ export class TerminalAgentBridge {
     try {
       if (requireObservedFullscreenComposer) {
         try {
-          clearedForText = await captureSafePrompt(clearedForText, false, true);
+          clearedForText = await captureSafePrompt(clearedForText, {}, true);
         } catch (error) {
           throw new TerminalUserExplicitClearUncertainError(
             "Codex Composer clear could not be revalidated; task text was not sent: " +

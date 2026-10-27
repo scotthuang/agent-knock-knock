@@ -41,8 +41,6 @@ import {
   type TerminalControlRef
 } from "../src/terminal-agent-adapter.js";
 import { TerminalAgentBridge } from "../src/terminal-agent-bridge.js";
-import { CLAUDE_DRAFT_REPLACEMENT_SENTINEL } from
-  "../src/terminal-user-explicit-send-clear.js";
 import {
   captureCodexRolloutAcceptanceAnchor,
   detectCodexRolloutAcceptance
@@ -120,7 +118,7 @@ function assertTerminalUserExplicitSendAction(
   assert.equal(action.scope, "terminal_user_explicit");
   assert.equal(
     action.composer_policy,
-    "replace_current_composer_and_submit"
+    terminal.agent === "claude" ? "require_empty_composer_and_submit" : "replace_current_composer_and_submit"
   );
   assert.equal(action.arguments?.selector, terminal.id);
   assert.equal(typeof action.arguments?.expected_terminal_token, "string");
@@ -275,20 +273,33 @@ test("a no-token exact terminal-scoped Claude send freshly adopts an unknown hum
   }
 });
 
-test("an explicit Claude Send replaces a nonempty draft and submits once", async () => {
+test("an explicit Claude Send protects an existing draft and submits once after the user clears it", async () => {
   const fixture = createHandoffFixture({ agent: "claude" });
-  const request = "Replace the old Claude draft with this explicit request.";
+  const request = "Submit this explicit request after the user clears the Composer.";
   try {
-    fixture.persistSession({
+    const source = fixture.persistSession({
       sessionId: "session-claude-nonempty-draft-source",
       nativeThreadId: NATIVE_A,
       status: "bound",
       generation: 1
     });
-    fixture.setComposerText("Preserve this only until the user explicitly sends.");
+    const oldDraft = "Preserve this user-authored draft.";
+    fixture.setComposerText(oldDraft);
+    const draftListed = await fixture.listTerminal();
+    assert.equal(draftListed.handoff_state, "external_handoff_blocked");
+    assert.equal(draftListed.available_actions?.send, undefined);
+    assert.equal(draftListed.physical_send_readiness?.reason, "composer_not_empty");
+    const blocked = await fixture.sendToTerminal(request);
+    assert.ok(blocked.status !== 0 || JSON.parse(blocked.stdout).delivered === false, fixture.debug(blocked));
+    assert.deepEqual(fixture.literalInputs(), []);
+    assert.deepEqual(fixture.keyDispatches(), []);
+    assert.deepEqual(fixture.composerState(), { text: oldDraft, stash: undefined });
 
+    // A stale AKK Turn prevents managed adoption, while the now-empty live
+    // Composer still admits the separately chosen physical input path.
+    fixture.setComposerText("");
+    fixture.persistBlockingTurn(source);
     const listed = await fixture.listTerminal();
-    assert.equal(listed.handoff_state, "external_handoff_blocked");
     const action = assertTerminalUserExplicitSendAction(listed);
     const expectedTerminalToken = String(
       action.arguments?.expected_terminal_token ?? ""
@@ -307,30 +318,31 @@ test("an explicit Claude Send replaces a nonempty draft and submits once", async
     assert.equal(output.management_mode, "unmanaged");
     assert.equal(output.composer_disposition, "replaced_current_composer");
     assert.equal(output.composer_cleared_before_send, true);
-    assert.deepEqual(fixture.literalInputs(), [
-      CLAUDE_DRAFT_REPLACEMENT_SENTINEL,
-      request
-    ]);
-    assert.deepEqual(fixture.keyDispatches(), [["C-s"], ["C-m"]]);
+    const inputs = fixture.literalInputs();
+    assert.deepEqual(inputs, [request], "the empty Composer probe must not write a marker");
+    const keys = fixture.keyDispatches().flat();
+    assert.deepEqual(keys, ["C-s", "C-m"]);
     assert.equal(fixture.enterCount(), 1);
+    assert.deepEqual(fixture.composerState(), { text: "", stash: undefined });
   } finally {
     fixture.cleanup();
   }
 });
 
-test("an uncertain Claude stash-clear returns structured do-not-retry evidence", async () => {
+test("capture failure after a Claude restore probe returns structured do-not-retry evidence", async () => {
   const fixture = createHandoffFixture({ agent: "claude" });
   const request = "Do not replay this request after an uncertain draft clear.";
   const messageId = "message-claude-clear-uncertain";
   try {
-    fixture.persistSession({
+    const source = fixture.persistSession({
       sessionId: "session-claude-clear-uncertain-source",
       nativeThreadId: NATIVE_A,
       status: "bound",
       generation: 1
     });
-    fixture.setComposerText("A prior draft that must not be mixed in.");
-    fixture.setClaudeClearUncertain(true);
+    fixture.setComposerText("");
+    fixture.persistBlockingTurn(source);
+    fixture.setClaudeRestoreProbeCaptureUncertain(true);
     const listed = await fixture.listTerminal();
     const action = assertTerminalUserExplicitSendAction(listed);
     const expectedTerminalToken = String(
@@ -355,11 +367,13 @@ test("an uncertain Claude stash-clear returns structured do-not-retry evidence",
     assert.equal(output.do_not_retry, true);
     assert.equal(output.stage, "composer_clear_uncertain");
     assert.equal(output.message_id, messageId);
-    assert.deepEqual(fixture.literalInputs(), [
-      CLAUDE_DRAFT_REPLACEMENT_SENTINEL
-    ]);
+    assert.deepEqual(fixture.literalInputs(), []);
     assert.deepEqual(fixture.keyDispatches(), [["C-s"]]);
+    assert.deepEqual(fixture.composerState(), { text: "", stash: undefined });
 
+    // Once the provider recovers, replay still returns the stored uncertainty;
+    // it must not repeat a probe that may already have restored a user's draft.
+    fixture.setClaudeRestoreProbeCaptureUncertain(false);
     const inputsBeforeReplay = fixture.literalInputs().length;
     const keysBeforeReplay = fixture.keyDispatches().length;
     const replay = await fixture.sendToTerminal(
@@ -383,7 +397,7 @@ test("an uncertain Claude stash-clear returns structured do-not-retry evidence",
   }
 });
 
-test("Herdr Claude explicit Send replaces a draft while exact-empty handoff preserves input", async () => {
+test("Herdr Claude explicit Send protects drafts and uses an empty Composer while exact-empty handoff preserves input", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-human-herdr-claude-"));
   const storeDir = path.join(root, "store");
   const runtimeDir = path.join(root, "runtime");
@@ -412,6 +426,7 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
   }> = [];
   let screen = claudeHerdrClearedComposerScreen();
   let pendingText = "";
+  let stashedText: string | undefined;
   let revision = 0;
   const processBirthProbePids: number[] = [];
 
@@ -512,20 +527,18 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
           });
         case "pane.send_input": {
           if (typeof wireRequest.params.text === "string") {
-            pendingText = wireRequest.params.text;
+            pendingText += wireRequest.params.text;
             screen = claudeComposerScreen(pendingText);
-          } else if (
-            Array.isArray(wireRequest.params.keys) &&
-            wireRequest.params.keys.includes("ctrl+s")
-          ) {
-            pendingText = "";
-            screen = claudeComposerScreen();
-          } else if (
-            Array.isArray(wireRequest.params.keys) &&
-            wireRequest.params.keys.includes("enter")
-          ) {
-            pendingText = "";
-            screen = "Working\n";
+          } else if (Array.isArray(wireRequest.params.keys)) {
+            for (const key of wireRequest.params.keys) {
+              if (key === "ctrl+s") {
+                if (pendingText) { stashedText = pendingText; pendingText = ""; }
+                else { pendingText = stashedText ?? ""; stashedText = undefined; }
+              } else if (key === "ctrl+u") pendingText = "";
+              else if (key === "enter") { pendingText = stashedText ?? ""; stashedText = undefined; }
+            }
+            screen = (wireRequest.params.keys.includes("enter") ? "Working\n" : "") +
+              claudeComposerScreen(pendingText) + (stashedText === undefined ? "" : "\n  › stashed");
           }
           revision += 1;
           return envelope(wireRequest, { type: "ok" });
@@ -630,7 +643,7 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
 
     const oldDraft = "Preserve this human-authored draft.";
     const replacementRequest =
-      "Replace the human-authored draft with this explicit request.";
+      "Submit this request after the user has cleared the Composer.";
     pendingText = oldDraft;
     screen = claudeComposerScreen(oldDraft);
     const draftListedResult = await runInProcessCli(
@@ -643,7 +656,8 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
     );
     assert.ok(draftListed, draftListedResult.stdout);
     assert.equal(draftListed.handoff_state, "external_handoff_blocked");
-    assertTerminalUserExplicitSendAction(draftListed);
+    assert.equal(draftListed.available_actions?.send, undefined);
+    assert.equal(draftListed.physical_send_readiness?.reason, "composer_not_empty");
     assert.match(
       String(draftListed.handoff_blocked_reason),
       /composer is not an exact empty idle frame/iu
@@ -664,7 +678,8 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
     assert.ok(unframedListed, unframedListedResult.stdout);
     assert.equal(unframedListed.activity_state, "idle");
     assert.equal(unframedListed.handoff_state, "external_handoff_blocked");
-    assertTerminalUserExplicitSendAction(unframedListed);
+    assert.equal(unframedListed.available_actions?.send, undefined);
+    assert.equal(unframedListed.physical_send_readiness?.reason, "composer_unrecognized");
 
     screen = claudeHerdrClearedComposerScreen();
     const listedResult = await runInProcessCli(
@@ -755,8 +770,8 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
       "handoff must preserve human input instead of clearing the composer"
     );
 
-    pendingText = oldDraft;
-    screen = claudeComposerScreen(oldDraft);
+    pendingText = "";
+    screen = claudeComposerScreen();
     const replacementListedResult = await runInProcessCli(
       ["list", ...storeArgs],
       dependencies
@@ -809,17 +824,15 @@ test("Herdr Claude explicit Send replaces a draft while exact-empty handoff pres
       "replaced_current_composer"
     );
     assert.equal(replacementOutput.composer_cleared_before_send, true);
-    assert.deepEqual(
-      wireRequests.filter((entry) =>
-        entry.request.method === "pane.send_input"
-      ).map((entry) => entry.request.params),
-      [
-        { pane_id: paneId, text: CLAUDE_DRAFT_REPLACEMENT_SENTINEL },
-        { pane_id: paneId, keys: ["ctrl+s"] },
-        { pane_id: paneId, text: replacementRequest },
-        { pane_id: paneId, keys: ["enter"] }
-      ]
-    );
+    const replacementInputs = wireRequests.filter(entry =>
+      entry.request.method === "pane.send_input").map(entry => entry.request.params);
+    assert.deepEqual(replacementInputs.filter(input => typeof input.text === "string"),
+      [{ pane_id: paneId, text: replacementRequest }]);
+    const replacementKeys = replacementInputs.flatMap(input => Array.isArray(input.keys) ? input.keys : []);
+    assert.deepEqual(replacementKeys, ["ctrl+s", "enter"]);
+    assert.equal(replacementKeys.filter(key => key === "enter").length, 1);
+    assert.equal(pendingText, "");
+    assert.equal(stashedText, undefined);
     assert.deepEqual(
       [...new Set(processBirthProbePids)],
       [agentPid],
@@ -3127,7 +3140,8 @@ interface HandoffFixture {
   setAgentProcessIntegrityDrift(): void;
   setProcessProbeFailure(error: Error | undefined): void;
   setComposerText(text: string): void;
-  setClaudeClearUncertain(value: boolean): void;
+  setClaudeRestoreProbeCaptureUncertain(value: boolean): void;
+  composerState(): { text: string; stash: string | undefined };
   literalInputs(): string[];
   keyDispatches(): string[][];
   enterCount(): number;
@@ -3294,10 +3308,12 @@ function createHandoffFixture({
   );
   let openRootNativeThreadId = codexInitialNativeThreadId ?? NATIVE_B;
   let pendingText = "";
+  let stashedText: string | undefined;
   let statusProbeCount = 0;
   let driftTriggered = false;
   let operationIndexAtDrift: number | undefined;
-  let claudeClearUncertain = false;
+  let claudeRestoreProbeCaptureUncertain = false;
+  let claudeRestoreProbeDispatched = false;
   const codexStatusScreen = (nativeThreadId: string, marker: string) =>
     `/status\n╭────────────────────────────────────────────╮\n` +
     `│ OpenAI Codex (v${version})                 │\n` +
@@ -3327,6 +3343,9 @@ function createHandoffFixture({
     screens: { [target]: initialScreen },
     hooks: {
       capture(_operation, mutable) {
+        if (claudeRestoreProbeCaptureUncertain && claudeRestoreProbeDispatched) {
+          throw new Error("Claude viewport capture failed after the restore probe was dispatched");
+        }
         if (
           codexTaskDrift === "before_task_text" &&
           !driftTriggered &&
@@ -3344,12 +3363,12 @@ function createHandoffFixture({
         return undefined;
       },
       sendText(operation, mutable) {
-        pendingText = operation.text;
+        pendingText = agent === "claude" ? pendingText + operation.text : operation.text;
         mutable.setScreen(
           target,
           agent === "codex"
             ? codexComposerScreen(operation.text)
-            : claudeComposerScreen(operation.text)
+            : claudeComposerScreen(pendingText)
         );
         if (
           codexTaskDrift === "after_task_text" &&
@@ -3367,16 +3386,21 @@ function createHandoffFixture({
         }
       },
       sendKeys(operation, mutable) {
-        if (
-          operation.keys.includes("C-u") ||
-          (agent === "claude" && operation.keys.includes("C-s"))
-        ) {
-          if (agent === "claude" && claudeClearUncertain) return;
+        if (agent === "claude" && operation.keys.some(key => ["C-u", "C-k", "C-s"].includes(key))) {
+          for (const key of operation.keys) {
+            if (key === "C-s") {
+              claudeRestoreProbeDispatched = true;
+              if (pendingText) { stashedText = pendingText; pendingText = ""; }
+              else { pendingText = stashedText ?? ""; stashedText = undefined; }
+            } else if (key === "C-u") pendingText = "";
+          }
+          mutable.setScreen(target, claudeComposerScreen(pendingText) +
+            (stashedText === undefined ? "" : "\n  › stashed"));
+          return;
+        }
+        if (operation.keys.includes("C-u")) {
           pendingText = "";
-          mutable.setScreen(
-            target,
-            agent === "codex" ? codexComposerScreen() : claudeComposerScreen()
-          );
+          mutable.setScreen(target, codexComposerScreen());
           return;
         }
         if (operation.keys.includes("C-m")) {
@@ -3388,12 +3412,13 @@ function createHandoffFixture({
           ) {
             resolverNativeThreadId = NATIVE_B;
           }
-          pendingText = "";
+          pendingText = agent === "claude" ? stashedText ?? "" : "";
+          stashedText = undefined;
           mutable.setScreen(
             target,
             agent === "codex" && submittedText === "/status"
               ? codexStatusScreen(NATIVE_B, String(++statusProbeCount))
-              : "Working\n"
+              : "Working\n" + (agent === "claude" ? claudeComposerScreen(pendingText) : "")
           );
         }
       }
@@ -3931,9 +3956,10 @@ function createHandoffFixture({
           : claudeComposerScreen(text)
       );
     },
-    setClaudeClearUncertain(value) {
-      claudeClearUncertain = value;
+    setClaudeRestoreProbeCaptureUncertain(value) {
+      claudeRestoreProbeCaptureUncertain = value;
     },
+    composerState: () => ({ text: pendingText, stash: stashedText }),
     literalInputs: () => provider.literalInputs(),
     keyDispatches: () => provider.keyDispatches(),
     enterCount: () => provider.keyDispatches().filter((keys) =>

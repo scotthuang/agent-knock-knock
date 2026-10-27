@@ -19,6 +19,10 @@ export type ClaudeTerminalRegistryObservation =
   | { state: "invalid"; reason: "invalid_identity" | "unsafe_metadata" | "invalid_registry"
       | "conflicting_rows" | "registry_mismatch" | "process_changed" | "registry_unavailable" };
 
+export type ClaudeTerminalWindowObservation =
+  | { state: "verified"; role: "background_view" | "ordinary" }
+  | Exclude<ClaudeTerminalRegistryObservation, { state: "verified" }>;
+
 const MAX_REGISTRY_BYTES = 64 * 1024;
 class RegistryError extends Error {
   constructor(readonly reason: Extract<ClaudeTerminalRegistryObservation, { state: "invalid" }>["reason"]) {
@@ -101,6 +105,37 @@ function assertCurrentProcess(identity: Pick<VerifiedObservation, "pid" | "proce
   const processInfo = result.stdout?.trim().replace(/\s+/gu, " ");
   if (result.error || result.status !== 0 || processInfo !== `${process.getuid?.()} ${identity.processStart}`) {
     throw new RegistryError("process_changed");
+  }
+}
+
+function verifiedWindowRole(registry: Record<string, unknown>, pid: number, cwd: string): "background_view" | "ordinary" {
+  if (registry.pid !== pid || registry.kind !== "interactive" || !absolute(registry.cwd)
+    || realpathSync(registry.cwd) !== realpathSync(cwd)
+    || (registry.pidDomain !== undefined && registry.pidDomain !== process.platform)) {
+    throw new RegistryError("registry_mismatch");
+  }
+  const processStart = typeof registry.procStart === "string" ? registry.procStart.trim().replace(/\s+/gu, " ") : "";
+  assertCurrentProcess({ pid, processStart });
+  if (registry.parkedJobId !== undefined && (!statusShape(registry.parkedJobId)
+    || !registry.parkedJobId.trim())) throw new RegistryError("invalid_registry");
+  return registry.parkedJobId === undefined ? "ordinary" : "background_view";
+}
+
+/** Foreground display evidence only: never returns a session, job, socket or send authority. */
+export function observeClaudeTerminalWindow(input: {
+  configDir: string; pid: number; cwd?: string;
+}): ClaudeTerminalWindowObservation {
+  if (!absolute(input.configDir) || !Number.isSafeInteger(input.pid) || input.pid < 1 || !absolute(input.cwd)) {
+    return { state: "invalid", reason: "invalid_identity" };
+  }
+  try {
+    const registry = readRegistry(realpathSync(input.configDir), input.pid);
+    return { state: "verified", role: verifiedWindowRole(registry, input.pid, input.cwd) };
+  } catch (error) {
+    if (error instanceof RegistryError) return { state: "invalid", reason: error.reason };
+    if (error instanceof SyntaxError) return { state: "invalid", reason: "invalid_registry" };
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { state: "absent" };
+    return { state: "invalid", reason: "registry_unavailable" };
   }
 }
 
