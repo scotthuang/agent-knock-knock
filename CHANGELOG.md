@@ -1,38 +1,14 @@
 # Changelog
 
-## Local preview 0.16.1-list-guidance.6 — 2026-10-27
+## 0.16.1 / Pi 0.1.0-poc.9 / DeepSeek Harness 0.1.0-rc.12 — 2026-10-27
 
-- Recognize the native `› stashed` badge as a line-ending suffix both immediately above the Claude Composer and in its trailing controls. A shared `new task? /clear to save … tokens · › stashed` row, including a preceding `Draft restored` notification, now refuses physical Send before any terminal input.
-- Cover the shared `/clear` notification row in native-editor fixtures instead of assuming the stash badge occupies a separate row. A `/clear` hint without a stash does not itself prevent Send; unknown footer components still fail closed.
-- Keep action contract **35**, compact projection **v4**, public request parameters, managed Send, and Store writer protocol **11** unchanged. This repairs a bypass of the existing no-stash requirement; it does not introduce a new input policy. The earlier .5 live evidence did not cover the shared notification row and was insufficient for that layout.
-- Local packages only: core **0.16.1-list-guidance.6**, DeepSeek Harness **0.1.0-rc.12.list-guidance.6**, Pi **0.1.0-poc.9.list-guidance.6**. Not published.
-
-## Local preview 0.16.1-list-guidance.5 — 2026-10-27
-
-- Refuse Claude physical Send when a native stashed draft is visible, before any terminal input. If a single restore probe on a freshly empty Composer reveals hidden content, stop without task text or Enter and leave the restored draft for the user.
-- Remove the destructive sentinel/stash/erase transaction from Claude physical preparation. No new AKK marker or draft-deletion keys are sent; uncertain restore probes are not automatically repeated. Report concrete recovery steps for a user stash or a legacy AKK marker without claiming ownership of unknown hidden content.
-- Treat `Draft restored` as a notification and the accompanying `› stashed` as an occupied-slot indicator. Keep the closed footer whitelist, foreground-work checks, native/process identity checks, managed Send behavior, and the no-post-text-Composer-veto rule.
-- Increase action contract 34 to **35** because an empty Composer with an existing stash now refuses Send. Keep the public request parameters, Composer policy names, compact projection **v4**, and Store writer protocol **11** unchanged. Refusal/manual recovery is not a guarantee against concurrent human input.
-- Local packages only: core **0.16.1-list-guidance.5**, DeepSeek Harness **0.1.0-rc.12.list-guidance.5**, Pi **0.1.0-poc.9.list-guidance.5**. Not published.
-
-## Local preview 0.16.1-list-guidance.4 — 2026-10-27
-
-- Accept the closed Claude 2.1.295 physical-input footer vocabulary, including background shell counts, management hints, right-aligned Debug, wrapped rows, and separate stash indicators. Unknown components still prevent task input with an explicit footer diagnostic.
-- Protect visible Claude drafts and active foreground turns before physical input. An empty prompt below a spinner is not idle evidence; shell counts do not override an active turn, and interrupt hints without current completion proof fail closed. Background shells may remain active after a proven foreground completion.
-- Share these physical readiness facts with List and its actionable usage guidance. Action contract 34 documents the Claude empty-Composer policy; Codex, managed sending, public request parameters, projection v4, and Store writer protocol 11 remain unchanged.
-- Keep stash consumption and bounded cleanup entirely before task text and Enter. No post-submission Composer inspection, veto, or cleanup is introduced.
-- Local packages only: core 0.16.1-list-guidance.4, DeepSeek Harness 0.1.0-rc.12.list-guidance.4, Pi 0.1.0-poc.9.list-guidance.4. Not published.
-
-## 0.16.1-list-guidance.3 / Pi 0.1.0-poc.9.list-guidance.3 / DeepSeek Harness 0.1.0-rc.12.list-guidance.3 — 2026-10-27
-
-- Explain what each List entry can do, why input or monitoring is unavailable, and which concrete next steps apply. Derive bounded plain-language guidance from current action offers, capabilities, activity and blockers; preserve useful instructions when a row is shortened for the Host output budget.
-- Recheck unresolved Claude terminal identities once using a fresh reader snapshot shared across the List scan. Preserve exact process identity, interactive-only filtering and fixture isolation; do not treat registry files or matching working directories as permission to send. Explain unresolved native proof separately from an independently offered physical terminal input action, without promising that a restart repairs discovery.
-- Explain positively verified Claude foreground windows in the background-session interface using read-only owned-registry and process-incarnation evidence. Correct the initial reader-omission diagnosis: the inspected runtime intentionally omits parked frontends. This display role does not veto terminal input. Retain actionable uncertainty when diagnosis fails; do not identify or bind background workers, add their protocol delivery/tracking, or access daemon or claim sockets.
-- Preserve a real `terminal_user_explicit` Send offer on an explicitly selected physical terminal even when native identity is unresolved. Input dispatch may enter text and submit Enter, but native acceptance and completion remain unproven; tell users to inspect the result in the window. Ordinary managed failures never silently downgrade to this route, and uncertain input is never replayed. Reuse the existing `terminal_id` operation without new public scope or token parameters.
-- Prevent Claude's draft-replacement marker from returning after submission by completing stash consumption and clearing before task text or Enter. Use a unique per-Send marker, prove an empty Composer after the first `C-s`, restore that same marker with the second `C-s` to prove the one-entry stash consumed, then use bounded `C-u`/`C-k` clearing and prove empty again. An unproven step stops before task delivery. Perform no post-Enter Composer observation or cleanup and do not interrupt a running task; ordinary managed Sends, Codex and independent Watch monitoring are unchanged. Live validation of this local preview is reported separately.
-- Document idle native task monitoring, terminal observation, historical Session counts and the distinction between binding recovery and Store authority transfer. Teach Hosts to explain these states in the user's language.
-- Add optional usage, recheck and display-role evidence without redefining existing action or field meanings. Usage applies to the shared Codex CLI, Codex Desktop and Claude projections; extra reader/foreground-role checks apply only to Claude. Compact List remains v4, action contract remains 33 and Store writer protocol remains 11.
-- Prepare coordinated local preview packages with exact core dependencies. These versions are for local validation only; no npm or ClawHub publication is part of this change.
+- Explain what each List entry can do, why input or monitoring is unavailable, and the applicable next step. Derive bounded usage guidance from current action offers, capabilities, activity and blockers; preserve it in compact and shortened rows without changing the overall Host response budget.
+- Recheck unresolved Claude native identities once per List scan with a fresh reader snapshot. Explain verified foreground-window evidence separately from background workers and independently offered physical terminal input. Matching project directories or registry entries do not establish native task ownership or authorize input.
+- Preserve an executable `terminal_user_explicit` Send on an explicitly selected terminal even when native identity is unresolved. Keep private authority, process identity and Store fences internal; native acceptance and completion remain unproven on this route. Ordinary managed failures never silently downgrade, and uncertain input is not replayed.
+- Refuse Claude physical Send before input when a visible draft, occupied native stash, active foreground turn or unrecognized footer makes the Composer unsafe. Recognize the Claude 2.1.295 footer and inline `new task? /clear … · › stashed` notification. A shell count or empty prompt alone does not prove foreground completion.
+- Remove the destructive sentinel/stash/erase preparation. After a fresh empty-Composer check, use at most one non-destructive `Ctrl+S` restore probe; stop without task text or Enter if content appears or the probe is uncertain, leaving the restored draft for manual handling. Do not clean up after task text or Enter. This is not an atomic keyboard lock or a guarantee against simultaneous human input or an unprocessed restore key; see the Claude compatibility notes.
+- Advance the action contract to **35**; retain compact List projection **v4**, Store writer protocol **11**, public request parameters and ordinary managed Send behavior. Update recovery guidance and synchronized Skills.
+- Release Pi **0.1.0-poc.9** and DeepSeek Harness **0.1.0-rc.12** with exact core **0.16.1** dependencies. Core remains on `latest`; both connectors remain on `next`, with unchanged Host compatibility requirements.
 
 ## 0.16.0 / Pi 0.1.0-poc.8 / DeepSeek Harness 0.1.0-rc.11 — 2026-10-26
 

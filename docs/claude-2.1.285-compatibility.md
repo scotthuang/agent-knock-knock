@@ -126,16 +126,11 @@ clearing transaction. The lifecycle observations above start with an empty
 Composer after explicitly clearing only the owned probe's sentinel; they do not
 prove automatic recovery from this residue.
 
-Local preview `0.16.1-list-guidance.3` changes the Claude physical-input clearing
-transaction entirely before task text or Enter. A unique marker and the first
-`C-s` prove an empty Composer; the second `C-s` must restore that same marker to
-prove the one-entry stash has been popped and consumed. Bounded `C-u`/`C-k`
-clearing then proves the Composer empty again with no hidden stash remaining.
-An unproven step stops without task text or Enter. There is no post-Enter
-Composer observation or cleanup and no interruption of a running task, so this
-does not asynchronously erase text entered after submission. Ordinary managed
-Sends, Codex and independent Watch monitoring are unchanged. This documents the
-local fix; it does not claim a new live validation result for this preview.
+AKK 0.16.1 replaces the former marker/stash/erase transaction with existing-stash
+refusal and one non-destructive restore probe, described below. The abandoned
+local preview that attempted to consume and delete its own sentinel is not the
+released implementation. Ordinary managed Sends, Codex and independent Watch
+monitoring retain their existing behavior.
 
 Full, integration, and release suites were excluded from the initial local
 task under `AGENTS.md`. After the user successfully tested the installed
@@ -159,16 +154,16 @@ remain eligible. These checks apply before task text; there is no Composer
 observation, cleanup, or delivery veto after Enter.
 
 
-### Existing-stash refusal in local preview .5
+### Existing-stash refusal in AKK 0.16.1
 
 Claude physical-input preparation finishes before task text or Enter. A visible `› stashed` indicator refuses the attempt before any terminal input. When no stash is shown, AKK rechecks the empty main Composer and uses `C-s` once to restore any hidden stash. If content appears, it stops and leaves that content in the input box for the user; it does not re-stash or delete it. If the probe or final empty check is uncertain, it stops without task text or Enter and does not retry the key. This replaces the former sentinel transaction: no new marker is written and no editing keys delete a draft. There is no Composer observation or cleanup after task text or Enter. Ordinary managed Sends, Codex clearing and independent Watch monitoring are unchanged. This is refusal with manual recovery, not a guarantee of protecting drafts against simultaneous human input; avoid typing in the pane during an attempt. Screen capture and key delivery are not an atomic keyboard lock. A transport acknowledgement cannot prove that Claude processed `Ctrl+S`; ignored keys or cropped native indicators can leave stash occupancy unproven. AKK does not overwrite that unknown slot with a marker.
 
 If List or Send reports a stashed draft, open that exact window and wait for the foreground turn to finish. Preserve any visible draft first. With the main input box empty, press `Ctrl+S` once to restore the stash, then save, send, or clear it yourself before refreshing List. AKK cannot identify hidden content just from the stash label. If restoration reveals `[AKK replacing current draft ...]`, it may be residue from an older failed AKK cleanup: remove only that marker after checking the text, preserve any other content, and do not press Enter on the marker. `Draft restored` is a transient restore notification; an accompanying `› stashed` still reports an occupied slot and remains a refusal condition. Do not repeatedly toggle `Ctrl+S` or retry an uncertain AKK attempt automatically.
 
 
-### Shared notification-row correction in local preview .6
+### Shared notification-row correction in AKK 0.16.1
 
-The .5 validation covered separate stash-badge rows, but a later native
+The earlier local preview validation covered separate stash-badge rows, but a later native
 2.1.295 observation showed the badge appended to another notification immediately
 above the Composer:
 
@@ -180,9 +175,9 @@ new task? /clear to save 337.6k tokens · › stashed
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 ```
 
-The whole-line badge matcher in .5 missed that occupied stash. Its passing fast
-suite and prior live checks were insufficient for this real layout. Local
-preview .6 matches the badge at the end of the nearest notification row above
+The earlier whole-line badge matcher missed that occupied stash. Its passing fast
+suite and prior live checks were insufficient for this real layout. AKK
+0.16.1 matches the badge at the end of the nearest notification row above
 the current Composer, or at the end of a trailing row, rather than requiring
 that the badge occupy the whole row. `Draft restored · new task? /clear to save
 337.6k tokens · › stashed` also refuses before input. The `/clear` hint without a
@@ -192,6 +187,9 @@ stash evidence when a newer reply intervenes.
 
 Action contract 35 and projection v4 remain unchanged: this is an implementation
 fix for the already documented no-stash precondition. It does not remove the
-concurrent-input or native-key acknowledgement limits described above. The
-new local package requires fresh native stash-and-restore verification; a
-synthetic fixture alone is not evidence of a successful live check.
+concurrent-input or native-key acknowledgement limits described above. The native stash-and-restore sequence was verified on the office Claude 2.1.295 /
+Herdr test setup and independently repeated by the user; transformed-screen
+and zero-input Bridge cases are regression evidence, not additional live
+sessions. See [PR #464](https://github.com/scotthuang/agent-knock-knock/pull/464).
+The publishing machine runs the separate release gate; it does not repeat
+those live actions in existing user sessions.
