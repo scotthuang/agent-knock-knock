@@ -140,6 +140,21 @@ Copy the row's complete `terminal_id`. An advertised `available_actions.watch` i
 
 Watch follows the exact terminal selected by the user. Codex 0.158.0/0.159.0/0.159.2 exact Watch creation types a closed `/status` command into an available main Composer to bind its foreground task; later observation is read-only. See the [compatibility boundaries](codex-0.159.2-compatibility.md). Agent-version or artifact uncertainty, missing binding metadata, existing AKK-managed ownership, and missing action advertisement produce warnings rather than blocking creation. AKK fails only when the exact terminal is absent, its endpoint/process cannot be identified, neither an exact durable task anchor nor a read-only screen-status path exists, or its durable Store record cannot be created. Prefer an existing managed monitor when its exact Turn attribution is what you need, but Watch can coexist without adopting or mutating it. New exact-task Watches and accepted exact-request fallback Watches default to `respond_when_exact`; a supported native interaction emits `interaction_required`, and the owning controller must call Status before it receives a single-use response offer. Terminal-activity/best-effort Watches and manual-only shapes emit `interaction_manual_required` with `capabilities.interaction_respond=false`.
 
+Starting with AKK 0.16.2, a degraded activity Watch can omit optional native
+UUID/birth metadata while retaining every process fence that was observed. A
+missing process directory may fall back to the same selected terminal's absolute
+path; if neither source supplies one, no new Watch is saved. Refresh discovery
+and retry observation after the directory is available; do not resend an already
+dispatched task to repair monitoring.
+
+During fallback observation, temporarily unreadable identity or workspace
+metadata leaves the Watch pending so a later sweep can retry. A proven terminal,
+PID, endpoint, incarnation or directory difference still terminates observation.
+An unavailable fact cannot hide a separately proven mismatch and does not
+authorize approval or question input. This change does not repair the separate
+Host-restart recovery paths for already-existing exact Watches or notification
+outboxes, and does not turn stable terminal idle into exact task success.
+
 The result contains a durable `watch_id`. Use that ID—not a `session_id`, `turn_id`, terminal selector, or short reference—to inspect or stop observation:
 
 ```text

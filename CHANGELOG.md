@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.2 / Pi 0.1.0-poc.10 / DeepSeek Harness 0.1.0-rc.13 — 2026-10-27
+
+- Allow degraded terminal-activity Watch creation without optional native process UUID or birth metadata. Reuse Claude's independently observed physical OS birth when available, retain every captured process fence, and report incomplete evidence instead of claiming exact task completion. Do not mix OS birth with Claude's UTC process-start value or substitute UUID namespaces.
+- Recover missing process workspace metadata from the selected terminal's absolute directory. Relative paths remain invalid, and a new Watch is still refused when neither source supplies an absolute workspace; no placeholder directory or new nullable persisted record is introduced.
+- Distinguish matching identity, proven mismatch and temporarily unavailable evidence during fallback observation. Missing or throwing reads keep pending observation retryable; independently proven terminal, PID, endpoint, process-incarnation or directory changes still terminate it. Unknown evidence does not authorize interaction input.
+- Preserve exact durable-completion precedence, task/request attribution, Store and callback ownership, deadlines and notification deduplication. Best-effort terminal activity remains notification-only. This release does not change recovery of already-existing exact Watches after a Host restart or notification outbox recovery.
+- Retain action contract **35**, compact List **v4**, Watch schema **3**, Store writer protocol **11** and public tool parameter shapes.
+- Release Pi **0.1.0-poc.10** and DeepSeek Harness **0.1.0-rc.13** with exact core **0.16.2** dependencies and synchronized Skills. Core uses `latest`; connectors remain prereleases on `next`, with unchanged Host compatibility requirements.
+
 ## 0.16.1 / Pi 0.1.0-poc.9 / DeepSeek Harness 0.1.0-rc.12 — 2026-10-27
 
 - Explain what each List entry can do, why input or monitoring is unavailable, and the applicable next step. Derive bounded usage guidance from current action offers, capabilities, activity and blockers; preserve it in compact and shortened rows without changing the overall Host response budget.

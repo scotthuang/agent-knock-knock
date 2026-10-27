@@ -13,8 +13,9 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.12** pins AKK **0.16.1** in its package and lockfile,
-adding state-derived List guidance and a bounded Claude identity recheck. It
+Connector **0.1.0-rc.13** pins AKK **0.16.2** in its package and lockfile,
+including state-derived List guidance and degraded terminal-activity Watch
+identity handling. It
 exposes that runtime's 27 semantic tools, including Codex CLI backend and
 Desktop operations when the selected conversation advertises them. `list`
 returns current discoverable conversations; `watches` separately returns recent
@@ -78,7 +79,7 @@ can select an older `latest` build.
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
 Use `next`, or pin
-`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.12`.
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.13`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -367,7 +368,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.12
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.13
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -395,7 +396,7 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned AKK runtime `0.16.1`; building the current repository
+tests against its pinned AKK runtime `0.16.2`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
 [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases);
@@ -405,6 +406,17 @@ dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.13`** pins AKK **`0.16.2`** and its synchronized Skill.
+Degraded terminal-activity Watches tolerate absent optional process UUID/birth
+metadata. A proven identity change still invalidates the observation; temporarily
+unavailable evidence remains unknown and retryable. A missing process working
+directory may use the absolute path from the same selected terminal, never a
+same-project candidate. These changes preserve exact-task, Store, input and
+callback ownership boundaries. They do not fix exact-Watch recovery after a Host
+restart, callback outbox recovery, or persistence when no workspace is known.
+DSH Host compatibility is unchanged. This dependency refresh adds no new live
+model or external-channel acceptance claim and remains on npm `next`.
 
 Connector **`0.1.0-rc.12`** pins AKK **`0.16.1`** and its synchronized Skill.
 List adds bounded guidance derived from each conversation's current state and
@@ -481,7 +493,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.12` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.13` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -526,7 +538,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.12
+npm run release:check -- --publish --confirm-version 0.1.0-rc.13
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
