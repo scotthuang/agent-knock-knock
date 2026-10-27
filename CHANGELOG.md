@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.3 / Pi 0.1.0-poc.11 / DeepSeek Harness 0.1.0-rc.14 — 2026-10-28
+
+- Identify the exact running Codex native executable behind a verified npm Node launcher. Check process generation, forwarded arguments and mapped file identity before using its reported version; never substitute an unrelated executable from PATH. Fresh observations can recover existing versionless activity Watches without changing their saved anchors.
+- Recover DSH callbacks across supported Web Host restarts within the same canonical Profile/Store scope. Persist controller ownership and prepared/accepted receipts; resolve and verify the original persisted Session, use the current trusted helper/socket/token, and acknowledge only after Session flush. Keep command identity separate from recovered callback aliases.
+- Add an internal opt-in callback recovery catalogue with exact authorized route identities. Skip unowned routes before claiming delivery; explicitly adopt pre-fix Watch IDs and verified historical Profiles rather than scanning temporary files or inferring authorization from a session ID.
+- Preserve process/input fences, Store authority, exact task attribution, original envelopes, deadlines and deduplication. Do not reset permanent or uncertain delivery outcomes. Older Hosts without the required Session restore/flush APIs retain live-session-only behavior; OpenClaw's default transport is unchanged.
+- Keep action contract **35**, compact List **v4**, Watch schema **3**, Store writer protocol **11** and public tool parameters. Recovery does not turn stable idle into exact task success or solve reconciliation latency. The upstream live restart evidence covers Codex terminal activity; other producers have automated regression coverage, not new live-channel validation.
+- Release Pi **0.1.0-poc.11** and DeepSeek Harness **0.1.0-rc.14**, both pinning core **0.16.3** with synchronized Skills. Core remains on `latest`; both connectors remain prereleases on `next`, with unchanged Host version ranges.
+
 ## 0.16.2 / Pi 0.1.0-poc.10 / DeepSeek Harness 0.1.0-rc.13 — 2026-10-27
 
 - Allow degraded terminal-activity Watch creation without optional native process UUID or birth metadata. Reuse Claude's independently observed physical OS birth when available, retain every captured process fence, and report incomplete evidence instead of claiming exact task completion. Do not mix OS birth with Claude's UTC process-start value or substitute UUID namespaces.

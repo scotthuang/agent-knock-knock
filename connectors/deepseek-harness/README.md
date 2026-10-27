@@ -13,10 +13,9 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.13** pins AKK **0.16.2** in its package and lockfile,
-including state-derived List guidance and degraded terminal-activity Watch
-identity handling. It
-exposes that runtime's 27 semantic tools, including Codex CLI backend and
+Connector **0.1.0-rc.14** pins AKK **0.16.3** in its package and lockfile,
+including scoped persistent callback recovery and verified running-process
+Codex version discovery. It exposes that runtime's 27 semantic tools, including Codex CLI backend and
 Desktop operations when the selected conversation advertises them. `list`
 returns current discoverable conversations; `watches` separately returns recent
 monitoring records (24 hours by default), plus active or unresolved records.
@@ -38,16 +37,18 @@ split runtime sets fail before mounting. The Host's own plugin peer preflight
 must also pass without a version-risk exemption. Message and schema helpers
 come from that verified Host tree, not checkout development dependencies.
 
-Callbacks use AKK's producer-specific message source and the same live Agent's
+Callbacks use AKK's producer-specific message source and the exact live Agent's
 Inbox. Idle Agents receive a waking `followup`; running Agents receive
-`inject` context at a later step. Acceptance means Inbox admission, not proof
-that a model has consumed it or a user has seen it. Host exit or plugin unload
-invalidates that Host instance's routes; callbacks do not migrate to a new
-Agent merely because it has the same session ID.
+`inject` context at a later step. Acceptance does not prove that a model has
+consumed the message or a user has seen it. Hosts with the required persistent
+Session resolver, event inventory and flush barrier can restore the original
+Session after restart within the same Web Profile and AKK Store. Earlier
+process-private Watches require explicit operator adoption; a matching session
+ID alone is never recovery authority. Older Hosts without these APIs retain
+live-session delivery only. See [Callback delivery and recovery](#callback-delivery-and-recovery).
 
-Headless/one-shot Harness processes, Host-exit callback continuity, Windows
-named pipes, and DSH Desktop's embedded launcher are outside this connector's
-validated scope. Existing Codex CLI backend and Desktop connections need no
+Headless/one-shot Harness processes, Windows named pipes, and DSH Desktop's
+embedded launcher are outside this connector's validated scope. Existing Codex CLI backend and Desktop connections need no
 terminal container when their advertised capability is available. Claude Code
 and terminal-specific operations retain their documented transport conditions;
 see [core compatibility](../../README.md#compatibility) and the
@@ -79,7 +80,7 @@ can select an older `latest` build.
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
 Use `next`, or pin
-`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.13`.
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.14`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -389,7 +390,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.13
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.14
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -417,7 +418,7 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned AKK runtime `0.16.2`; building the current repository
+tests against its pinned AKK runtime `0.16.3`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
 [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases);
@@ -427,6 +428,21 @@ dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.14`** pins AKK **`0.16.3`** and its synchronized Skill.
+Hosts with the required persistent Session resolver, event inventory and flush
+barrier can recover callback ownership within the same Web Profile and AKK
+Store. Durable message IDs, admission journals and exact Session/Agent checks
+preserve deduplication across restarts; restored callback aliases do not change
+the tools' current action authority. Earlier process-private Watches require
+explicit operator adoption, and older Hosts without these APIs remain live-only.
+A callback acknowledgement proves durable Host admission, not model consumption
+or delivery to an external channel. Codex version discovery also verifies the
+selected process's mapped executable instead of borrowing an installed version.
+The supported DSH/Cordis version set is unchanged. This release does not extend
+restart recovery to Pi/OpenClaw or claim acceptance for every Host/native task;
+see [Callback delivery and recovery](#callback-delivery-and-recovery) for the
+scope and evidence requirements. The connector remains on npm `next`.
 
 Connector **`0.1.0-rc.13`** pins AKK **`0.16.2`** and its synchronized Skill.
 Degraded terminal-activity Watches tolerate absent optional process UUID/birth
@@ -514,7 +530,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.13` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.14` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -559,7 +575,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.13
+npm run release:check -- --publish --confirm-version 0.1.0-rc.14
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
