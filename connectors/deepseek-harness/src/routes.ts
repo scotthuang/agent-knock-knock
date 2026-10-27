@@ -68,6 +68,8 @@ interface AcceptedDelivery {
  * replacement Agent with the same Session id must never inherit an old route.
  */
 export class AgentRouteTable {
+  // bind() alone owns the stable command controller for each live Agent.
+  // Several historical callback controllers may resolve to that same Agent.
   private readonly routeByAgent = new WeakMap<Agent, AgentRoute>();
   private readonly disposedAgents = new WeakSet<Agent>();
   private readonly routeByControllerId = new Map<string, AgentRoute>();
@@ -96,9 +98,8 @@ export class AgentRouteTable {
     }
     const existing = this.routeByAgent.get(agent);
     if (existing) {
-      // Restoring an older callback may populate this cache before a tool
-      // binds. New tool Watches use the current Profile contract, which must
-      // also survive the next package/Profile revision.
+      // Commands keep their controller while registering the current Profile
+      // contract for future recovery. Callback aliases never change this key.
       if (this.recovery?.callbackRoute) this.recovery.authority.registerCallbackRoute(
         existing.controllerId, this.recovery.callbackRoute(existing.controllerId),
       );
@@ -289,7 +290,6 @@ export class AgentRouteTable {
       if (claimed && claimed !== agent) throw new Error("Callback Agent was replaced during recovery");
       this.claimedControllers.set(persisted.controllerId, agent);
       this.routeByControllerId.set(persisted.controllerId, route);
-      this.routeByAgent.set(agent, route);
       return route;
     })();
     this.restoring.set(persisted.controllerId, pending);
