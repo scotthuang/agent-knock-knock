@@ -248,6 +248,9 @@ export const testSupportImpactByPath = Object.freeze({
   "test/terminal-watch-cli-adapter/claude-fallback.ts": [
     "test/terminal-watch-cli-adapter.test.ts"
   ],
+  "test/terminal-watch-cli-adapter/degraded-identity.ts": [
+    "test/terminal-watch-cli-adapter.test.ts"
+  ],
   "test/terminal-watch-cli-adapter/exact-lifecycle.ts": [
     "test/terminal-watch-cli-adapter.test.ts"
   ],
@@ -259,6 +262,7 @@ export const testSupportImpactByPath = Object.freeze({
     "test/terminal-watch-cli-adapter/accepted-fallback-interactions.ts",
     "test/terminal-watch-cli-adapter/activity-fallback.ts",
     "test/terminal-watch-cli-adapter/claude-fallback.ts",
+    "test/terminal-watch-cli-adapter/degraded-identity.ts",
     "test/terminal-watch-cli-adapter/exact-lifecycle.ts",
     "test/terminal-watch-cli-adapter/fallback-callbacks.ts",
     "test/terminal-watch-cli-adapter/interaction-observation.ts",

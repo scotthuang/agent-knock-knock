@@ -1,3 +1,4 @@
+import { knownIdentityDifference, terminalWatchProcessEvidence } from "./terminal-watch-identity-evidence.js";
 import type { TerminalControlRef } from "./terminal-control-ref.js";
 import {
   createTerminalActivityWatchAnchor,
@@ -48,15 +49,15 @@ export function createAutomaticActivityWatchAnchor(input: {
   capturedAt: Date;
   before: Record<string, unknown>;
   current: Record<string, unknown>;
-  previousWorkspace: string;
-  currentWorkspace: string;
+  previousWorkspace?: string;
+  currentWorkspace?: string;
   control: TerminalControlRef;
 }): TerminalActivityWatchAnchor {
-  const uuid = requiredProcessField(input.before.native_agent_process_uuid, "UUID");
-  const birth = requiredProcessField(input.before.native_agent_process_birth, "birth");
-  if (uuid !== requiredProcessField(input.current.native_agent_process_uuid, "UUID") ||
-      birth !== requiredProcessField(input.current.native_agent_process_birth, "birth") ||
-      input.previousWorkspace !== input.currentWorkspace) {
+  const before = terminalWatchProcessEvidence(input.before);
+  const current = terminalWatchProcessEvidence(input.current);
+  if (knownIdentityDifference(before.uuid, current.uuid) ||
+      knownIdentityDifference(before.birth, current.birth) ||
+      knownIdentityDifference(input.previousWorkspace, input.currentWorkspace)) {
     throw new Error("terminal process changed before the automatic activity Watch was prepared");
   }
   if (!input.control.capabilities.includes("screen_status")) {
@@ -69,8 +70,8 @@ export function createAutomaticActivityWatchAnchor(input: {
     // Earlier pane activity does not prove this Send ran. Arm before dispatch
     // and require post-Send activity before stable idle can settle the Watch.
     initialActivityState: "unknown",
-    nativeProcessUuid: uuid,
-    nativeProcessBirth: birth,
+    nativeProcessUuid: before.uuid ?? current.uuid,
+    nativeProcessBirth: before.birth ?? current.birth,
     agentVersion: nonBlankString(input.current.agent_version),
     origin: "user_explicit_send",
     requestHash: input.requestHash
@@ -81,20 +82,13 @@ export function createAutomaticActivityWatchAnchor(input: {
 export function assertAutomaticActivityWatchIdentity(
   anchor: TerminalActivityWatchAnchor,
   observed: Record<string, unknown>,
-  actualWorkspace: string,
+  actualWorkspace: string | undefined,
   expectedWorkspace: string
 ): void {
-  const uuid = nonBlankString(observed.native_agent_process_uuid);
-  const birth = nonBlankString(observed.native_agent_process_birth);
-  if ((uuid !== undefined && uuid !== anchor.native_process_uuid) ||
-      (birth !== undefined && birth !== anchor.native_process_birth) ||
-      actualWorkspace !== expectedWorkspace) {
+  const { uuid, birth } = terminalWatchProcessEvidence(observed);
+  if (knownIdentityDifference(uuid, anchor.native_process_uuid) ||
+      knownIdentityDifference(birth, anchor.native_process_birth) ||
+      knownIdentityDifference(actualWorkspace, expectedWorkspace)) {
     throw new Error("terminal process changed before the automatic activity Watch was attached");
   }
-}
-
-function requiredProcessField(value: unknown, field: string): string {
-  const result = nonBlankString(value);
-  if (!result) throw new Error(`native process ${field} is required`);
-  return result;
 }

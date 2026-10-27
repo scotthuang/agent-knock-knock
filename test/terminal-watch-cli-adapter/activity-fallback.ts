@@ -29,13 +29,16 @@ import {
   CODEX_FALLBACK_QUESTION_TWO,
   exactTerminalObservation,
   withTerminalWatchScreen,
+  createClaudeQuestionnaireFixture,
   createFixture,
   record
 } from "./fixtures.js";
 
 for (const agent of ["codex", "claude"] as const) {
   test(`${agent} automatic Send falls back to a post-dispatch activity epoch without exact task or answer authority`, async (t) => {
-    const fixture = createFixture(t, "human-only", "0.159.2");
+    const fixture = agent === "claude"
+      ? createClaudeQuestionnaireFixture(t)
+      : createFixture(t, "human-only", "0.159.2");
     const callbacks: TerminalWatchCallbackInput[] = [];
     let terminal: Record<string, any> = {
       ...fixture.terminal, agent,
@@ -43,6 +46,11 @@ for (const agent of ["codex", "claude"] as const) {
       native_agent_session_id: undefined, native_agent_rollout: undefined,
       activity_state: "working"
     };
+    if (agent === "claude") {
+      assert.equal(Object.hasOwn(terminal, "native_agent_process_birth"), false,
+        "the Claude fixture must not invent a native birth absent from List");
+      assert.equal(typeof terminal._physical_agent_process_birth, "string");
+    }
     let exactAttempts = 0;
     const facade = createTerminalWatchCliAdapter({
       acquireFileLock: () => () => {}, acquireTerminalLock: () => () => {},
@@ -67,6 +75,10 @@ for (const agent of ["codex", "claude"] as const) {
     assert.equal(prepared.timeoutMs, 43_200_000, "automatic terminal Watch shares the 12-hour hard default");
     assert.equal(exactAttempts, agent === "codex" ? 1 : 0, "provider-specific exact observation is attempted first");
     assert.equal(prepared.anchor.schema, "agent-knock-knock/terminal-activity-watch-anchor");
+    if (agent === "claude" && prepared.anchor.schema === "agent-knock-knock/terminal-activity-watch-anchor") {
+      assert.equal(prepared.anchor.native_process_birth, terminal._physical_agent_process_birth,
+        "activity observation must retain the already verified OS process birth");
+    }
     assert.deepEqual(facade.listPublicWatches(fixture.storeDir), [], "capture cannot attach a callback before task dispatch");
     assert.match(prepared.warnings!.join("\n"), /exact_task_anchor_unavailable[\s\S]*terminal_activity_fallback/u);
     assert.equal(prepared.callbackRoute.capabilities?.respond, false);
@@ -111,13 +123,12 @@ for (const agent of ["codex", "claude"] as const) {
   });
 }
 
-test("automatic activity fallback refuses missing or changed physical identity and uncertain native probes", async (t) => {
-  for (const failure of ["no-process", "observation-unavailable", "changed-process", "changed-endpoint", "no-screen", "uncertain-probe", "unsafe-composer"]) {
+test("automatic activity fallback refuses changed physical identity and uncertain native probes", async (t) => {
+  for (const failure of ["changed-pid", "observation-unavailable", "changed-process", "changed-endpoint", "no-screen", "uncertain-probe", "unsafe-composer"]) {
     await t.test(failure, async (nested) => {
       const fixture = createFixture(nested, "human-only", "0.159.2");
       let observations = 0;
       const terminal: Record<string, any> = { ...fixture.terminal, native_agent_rollout: undefined,
-        ...(failure === "no-process" ? { native_agent_process_uuid: undefined } : {}),
         ...(failure === "no-screen" ? { terminal_control: { ...fixture.terminal.terminal_control, capabilities: [] } } : {}) };
       const facade = createTerminalWatchCliAdapter({
         acquireFileLock: () => () => {}, acquireTerminalLock: () => () => {},
@@ -126,6 +137,8 @@ test("automatic activity fallback refuses missing or changed physical identity a
           if (observations > 1 && failure === "observation-unavailable") return { state: "unavailable", summary: {} };
           const current = observations > 1 && failure === "changed-process"
             ? { ...terminal, native_agent_process_birth: "different birth" }
+            : observations > 1 && failure === "changed-pid"
+              ? { ...terminal, pid: terminal.pid + 1 }
             : observations > 1 && failure === "changed-endpoint"
               ? { ...terminal, terminal_control: { ...terminal.terminal_control, panePid: 7777 } }
               : terminal;

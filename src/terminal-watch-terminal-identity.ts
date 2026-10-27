@@ -2,6 +2,9 @@
 import { assertAutomaticActivityWatchIdentity } from "./terminal-watch-send-activity.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { parseTerminalConversationId } from "./terminal-agent-adapter.js";
+import { knownIdentityDifference, optionalObservation, optionalTerminalWorkspace, terminalWatchProcessEvidence } from "./terminal-watch-identity-evidence.js";
+export { optionalTerminalWorkspace } from "./terminal-watch-identity-evidence.js";
 import type { CodexPaginatedTaskAnchor } from "./codex-paginated-task.js";
 import { paginatedWatchProcessMatches } from "./codex-paginated-watch.js";
 import type { ExecutorKind } from "./executors.js";
@@ -70,7 +73,7 @@ export function assertPreparedFallbackTerminal(
   }
   if (isTerminalActivityWatch(prepared)) {
     assertAutomaticActivityWatchIdentity(prepared.anchor, observed,
-      terminalWorkspace(observed), prepared.terminalIdentity.workspace);
+      optionalTerminalWorkspace(observed), prepared.terminalIdentity.workspace);
   }
 }
 
@@ -324,102 +327,88 @@ export type TerminalActivityWatchIdentityMatch =
   | "mismatch"
   | "unavailable";
 
+/** Compare known facts first; an unreadable fact is never evidence of replacement. */
+function observedTerminalIdentityMatch(terminal: Record<string, unknown>,
+  watch: TerminalWatch, expectedPid: number | undefined): TerminalActivityWatchIdentityMatch {
+  const agent = optionalObservation(() => stringValue(terminal.agent));
+  const id = optionalObservation(() => stringValue(terminal.id));
+  const pid = optionalObservation(() => positiveInteger(terminal.pid, "terminal PID"));
+  if (knownIdentityDifference(agent, watch.agent) ||
+      knownIdentityDifference(id, watch.terminal.terminal_id) ||
+      (expectedPid !== undefined && pid !== undefined && pid !== expectedPid)) return "mismatch";
+  const workspace = optionalObservation(() => optionalTerminalWorkspace(terminal));
+  if (knownIdentityDifference(workspace, watch.terminal.workspace)) return "mismatch";
+  // Validate shape before interpreting a failed comparison as a different pane.
+  const evidence = optionalObservation(() => terminalControlEvidence(terminalControlForWatch(terminal)));
+  if (!evidence || evidence.process_anchor_pid == null) return "unavailable";
+  if (!sameTerminalControlEvidenceIncarnation(evidence, watch.terminal.terminal_endpoint)) return "mismatch";
+  return !agent || !id || pid === undefined || expectedPid === undefined ||
+    workspace === undefined ? "unavailable" : "match";
+}
+
+function observedProcessIdentityMatch(terminal: Record<string, unknown>,
+  expected: { uuid?: string; birth?: string },
+  terminalMatch: TerminalActivityWatchIdentityMatch): TerminalActivityWatchIdentityMatch {
+  if (terminalMatch === "mismatch") return "mismatch";
+  const current = terminalWatchProcessEvidence(terminal);
+  if (knownIdentityDifference(current.uuid, expected.uuid) ||
+      knownIdentityDifference(current.birth, expected.birth)) return "mismatch";
+  return terminalMatch === "unavailable" ||
+    (expected.uuid !== undefined && current.uuid === undefined) ||
+    (expected.birth !== undefined && current.birth === undefined) ? "unavailable" : "match";
+}
+
 export function terminalActivityWatchIdentityMatch(
-  terminal: Record<string, unknown>,
-  watch: TerminalWatch
+  terminal: Record<string, unknown>, watch: TerminalWatch
 ): TerminalActivityWatchIdentityMatch {
   try {
-    if (
-      !isTerminalActivityWatch(watch) ||
-      terminalAgent(terminal) !== watch.agent ||
-      requiredString(terminal.id, "terminal id") !==
-        watch.terminal.terminal_id ||
-      terminalWorkspace(terminal) !== watch.terminal.workspace ||
-      positiveInteger(terminal.pid, "terminal PID") !== watch.anchor.pid
-    ) {
-      return "mismatch";
-    }
-    if (!isRecord(terminal.terminal_control)) {
-      return "unavailable";
-    }
-    if (!sameTerminalControlEvidenceIncarnation(
-      terminal.terminal_control as unknown as TerminalControlRef,
-      watch.terminal.terminal_endpoint
-    )) {
-      return "mismatch";
-    }
-    const processUuid = stringValue(terminal.native_agent_process_uuid);
-    const processBirth = stringValue(terminal.native_agent_process_birth);
-    if (
-      (watch.anchor.native_process_uuid !== undefined && !processUuid) ||
-      (watch.anchor.native_process_birth !== undefined && !processBirth)
-    ) {
-      return "unavailable";
-    }
-    return (
-      watch.anchor.native_process_uuid !== undefined &&
-      processUuid !== watch.anchor.native_process_uuid
-    ) || (
-      watch.anchor.native_process_birth !== undefined &&
-      processBirth !== watch.anchor.native_process_birth
-    )
-      ? "mismatch"
-      : "match";
+    if (!isTerminalActivityWatch(watch)) return "unavailable";
+    return observedProcessIdentityMatch(terminal, {
+      uuid: watch.anchor.native_process_uuid, birth: watch.anchor.native_process_birth
+    }, observedTerminalIdentityMatch(terminal, watch, watch.anchor.pid));
   } catch {
     return "unavailable";
   }
 }
 
 export function terminalMatchesUserExplicitFallbackWatch(
-  terminal: Record<string, unknown>,
-  watch: TerminalWatch
-): boolean {
+  terminal: Record<string, unknown>, watch: TerminalWatch
+): TerminalActivityWatchIdentityMatch {
   try {
-    if (
-      !isUserExplicitFallbackWatch(watch) ||
-      terminalAgent(terminal) !== watch.agent ||
-      requiredString(terminal.id, "terminal id") !==
-        watch.terminal.terminal_id ||
-      terminalWorkspace(terminal) !== watch.terminal.workspace ||
-      !isRecord(terminal.terminal_control) ||
-      !sameTerminalControlEvidenceIncarnation(
-        terminal.terminal_control as unknown as TerminalControlRef,
-        watch.terminal.terminal_endpoint
-      )
-    ) {
-      return false;
-    }
-    if (
-      watch.anchor.schema ===
-        "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
-    ) {
-      return requiredString(
-        terminal.native_agent_process_uuid,
-        "Codex process UUID"
-      ) === watch.anchor.acceptance_anchor.process_uuid &&
-        requiredString(
-          terminal.native_agent_process_birth,
-          "Codex process birth"
-        ) === watch.anchor.acceptance_anchor.process_birth;
-    }
-    return watch.anchor.schema ===
-        "agent-knock-knock/claude-user-explicit-fallback-watch-anchor" &&
-      positiveInteger(terminal.pid, "Claude PID") ===
-        watch.anchor.transcript_anchor.pid;
+    if (!isUserExplicitFallbackWatch(watch)) return "unavailable";
+    const pid = watch.anchor.schema === "agent-knock-knock/claude-user-explicit-fallback-watch-anchor"
+      ? watch.anchor.transcript_anchor.pid : parseTerminalConversationId(watch.terminal.terminal_id)?.pid;
+    const match = observedTerminalIdentityMatch(terminal, watch, pid);
+    return watch.anchor.schema === "agent-knock-knock/codex-user-explicit-fallback-watch-anchor"
+      ? observedProcessIdentityMatch(terminal, { uuid: watch.anchor.acceptance_anchor.process_uuid,
+          birth: watch.anchor.acceptance_anchor.process_birth }, match)
+      : match;
   } catch {
-    return false;
+    return "unavailable";
   }
 }
 
 export function terminalWatchIdentity(
   terminal: Record<string, unknown>,
-  bindingToken: string
+  bindingToken: string,
+  anchor?: TerminalWatchAnchor,
+  warnings?: string[]
 ): TerminalWatchTerminalIdentity {
   const terminalControl = terminal.terminal_control as TerminalControlRef;
+  const activity = anchor?.schema === "agent-knock-knock/terminal-activity-watch-anchor";
+  const workspace = activity ? optionalTerminalWorkspace(terminal) : terminalWorkspace(terminal);
+  if (workspace === undefined) throw new Error(
+    "terminal workspace unavailable: neither the agent process nor its terminal reports an absolute directory. " +
+    "No Watch was saved; refresh AKK list and retry Watch after the selected terminal's directory is available. " +
+    "If a task was already sent, inspect that window instead of resending the task."
+  );
+  if (activity && (!anchor.native_process_uuid || !anchor.native_process_birth)) warnings?.push(
+    "process_incarnation_partially_unavailable: activity observation has incomplete process-generation evidence; exact task completion is not proven"
+  );
   return {
     terminal_id: requiredString(terminal.id, "terminal id"),
     terminal_endpoint: terminalControlEvidence(terminalControl),
-    workspace: terminalWorkspace(terminal),
+    workspace,
     binding_token: bindingToken
   };
 }

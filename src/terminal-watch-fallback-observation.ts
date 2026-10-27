@@ -33,14 +33,17 @@ import {
   fallbackCompletionObservation,
   invalidatedObservation
 } from "./terminal-watch-observation-evidence.js";
-import { codexIdentity } from "./terminal-watch-terminal-identity.js";
+import {
+  codexIdentity,
+  type TerminalActivityWatchIdentityMatch
+} from "./terminal-watch-terminal-identity.js";
 
 interface FallbackObservationInput {
   watch: TerminalWatch;
   exactTerminal: ExactTerminalWatchObservation;
   rawTerminal?: Record<string, unknown>;
   projectedTerminal?: Record<string, unknown>;
-  terminalMatches: boolean;
+  terminalIdentityMatch: TerminalActivityWatchIdentityMatch;
   observedAt: string;
   options: TerminalWatchCliOptions;
   dependencies: TerminalWatchCliDependencies;
@@ -57,13 +60,21 @@ export async function observeUserExplicitFallbackTerminalWatch(
   input: FallbackObservationInput
 ): Promise<TerminalWatchObservation> {
   const anchor = input.watch.anchor;
+  let observation: TerminalWatchObservation;
   if (anchor.schema === "agent-knock-knock/codex-user-explicit-fallback-watch-anchor") {
-    return observeCodexFallback(input, anchor);
+    observation = observeCodexFallback(input, anchor);
+  } else if (anchor.schema === "agent-knock-knock/claude-user-explicit-fallback-watch-anchor") {
+    observation = observeClaudeFallback(input, anchor);
+  } else {
+    throw new Error("user-explicit fallback Watch anchor is unsupported");
   }
-  if (anchor.schema === "agent-knock-knock/claude-user-explicit-fallback-watch-anchor") {
-    return observeClaudeFallback(input, anchor);
+  // Exact durable completion remains recoverable after terminal loss. Without
+  // that result, unavailable provider data cannot hide a proven identity change.
+  if (input.terminalIdentityMatch === "mismatch" &&
+      (observation.kind === "pending" || observation.kind === "unavailable")) {
+    return invalidatedObservation(input.watch, input.observedAt, "terminal_identity_changed");
   }
-  throw new Error("user-explicit fallback Watch anchor is unsupported");
+  return observation;
 }
 
 function resolveCodexFallbackAcceptance(
@@ -79,7 +90,7 @@ function resolveCodexFallbackAcceptance(
     exactTerminal,
     rawTerminal,
     projectedTerminal,
-    terminalMatches,
+    terminalIdentityMatch,
     observedAt,
     options,
     dependencies
@@ -110,7 +121,7 @@ function resolveCodexFallbackAcceptance(
         watch,
         exactTerminal,
         rawTerminal,
-        terminalMatches,
+        terminalIdentityMatch,
         observedAt,
         reasonCode: "codex_rollout_inventory_unavailable"
       });
@@ -141,7 +152,7 @@ function resolveCodexFallbackAcceptance(
         watch,
         exactTerminal,
         rawTerminal,
-        terminalMatches,
+        terminalIdentityMatch,
         observedAt
       });
     }
@@ -153,21 +164,32 @@ function resolveCodexFallbackAcceptance(
       currentIdentity
     );
   } else {
+    if (anchor.version === 1) {
+      currentIdentity = {
+        sessionId: anchor.native_thread_id,
+        processUuid: anchor.process_uuid,
+        processBirth: anchor.process_birth,
+        rollout: anchor.rollout
+      };
+    } else {
+      // A legacy pre-materialization anchor needs live rollout details. Missing
+      // details are not evidence that the anchored process or task changed.
+      if (!rawTerminal || terminalIdentityMatch !== "match") {
+        return fallbackPendingOrTerminalObservation({
+          watch, exactTerminal, rawTerminal, terminalIdentityMatch, observedAt,
+          reasonCode: "native_acceptance_identity_unavailable"
+        });
+      }
+      try {
+        currentIdentity = codexIdentity(rawTerminal);
+      } catch {
+        return fallbackPendingOrTerminalObservation({
+          watch, exactTerminal, rawTerminal, terminalIdentityMatch, observedAt,
+          reasonCode: "native_acceptance_identity_unavailable"
+        });
+      }
+    }
     try {
-      currentIdentity = anchor.version === 1
-        ? {
-            sessionId: anchor.native_thread_id,
-            processUuid: anchor.process_uuid,
-            processBirth: anchor.process_birth,
-            rollout: anchor.rollout
-          }
-        : rawTerminal
-          ? codexIdentity(rawTerminal)
-          : (() => {
-              throw new Error(
-                "Codex pre-materialization identity is unavailable"
-              );
-            })();
       acceptance = detectCodexRolloutAcceptance({
         anchor,
         currentIdentity,
@@ -193,7 +215,7 @@ function resolveCodexFallbackAcceptance(
         watch,
         exactTerminal,
         rawTerminal,
-        terminalMatches,
+        terminalIdentityMatch,
         observedAt
       });
     }
@@ -218,7 +240,7 @@ function observeCodexFallback(
     exactTerminal,
     rawTerminal,
     projectedTerminal,
-    terminalMatches,
+    terminalIdentityMatch,
     observedAt,
     options,
     dependencies
@@ -270,7 +292,7 @@ function observeCodexFallback(
     exactTerminal,
     rawTerminal,
     projectedTerminal,
-    terminalMatches,
+    terminalMatches: terminalIdentityMatch === "match",
     observedAt,
     observationCheckpoint: codexFallbackAcceptedCheckpoint(
       watch,
@@ -285,7 +307,7 @@ function observeCodexFallback(
     watch,
     exactTerminal,
     rawTerminal,
-    terminalMatches,
+    terminalIdentityMatch,
     observedAt,
     observedEndOffsetBytes:
       completion.diagnostics.observed_end_offset_bytes,
@@ -306,7 +328,7 @@ function observeClaudeFallback(
     exactTerminal,
     rawTerminal,
     projectedTerminal,
-    terminalMatches,
+    terminalIdentityMatch,
     observedAt,
     options,
     dependencies
@@ -346,7 +368,7 @@ function observeClaudeFallback(
       watch,
       exactTerminal,
       rawTerminal,
-      terminalMatches,
+      terminalIdentityMatch,
       observedAt
     });
   }
@@ -368,7 +390,7 @@ function observeClaudeFallback(
     exactTerminal,
     rawTerminal,
     projectedTerminal,
-    terminalMatches,
+    terminalMatches: terminalIdentityMatch === "match",
     observedAt,
     observationCheckpoint: acceptedCheckpoint,
     options,
@@ -379,7 +401,7 @@ function observeClaudeFallback(
     watch,
     exactTerminal,
     rawTerminal,
-    terminalMatches,
+    terminalIdentityMatch,
     observedAt,
     observedEndOffsetBytes: observation.observedEndOffsetBytes,
     observationCheckpoint: acceptedCheckpoint

@@ -17,13 +17,17 @@ import type {
 } from "./terminal-watch-store.js";
 import { isRecord, nonBlankString as stringValue } from "./value-guards.js";
 import type { ExactTerminalWatchObservation } from "./terminal-watch-cli-contract.js";
-import { requiredString, sha256 } from "./terminal-watch-terminal-identity.js";
+import {
+  requiredString,
+  sha256,
+  type TerminalActivityWatchIdentityMatch
+} from "./terminal-watch-terminal-identity.js";
 
 export function fallbackPendingOrTerminalObservation(input: {
   watch: TerminalWatch;
   exactTerminal: ExactTerminalWatchObservation;
   rawTerminal?: Record<string, unknown>;
-  terminalMatches: boolean;
+  terminalIdentityMatch: TerminalActivityWatchIdentityMatch;
   observedAt: string;
   observedEndOffsetBytes?: number;
   observationCheckpoint?: TerminalWatchObservationCheckpoint;
@@ -37,19 +41,27 @@ export function fallbackPendingOrTerminalObservation(input: {
       reason_code: input.reasonCode ?? "terminal_observation_unavailable"
     };
   }
-  if (input.exactTerminal.state === "absent" || !input.rawTerminal) {
+  if (input.exactTerminal.state === "absent") {
     return invalidatedObservation(
       input.watch,
       input.observedAt,
       "terminal_process_unavailable"
     );
   }
-  if (!input.terminalMatches) {
+  if (input.terminalIdentityMatch === "mismatch") {
     return invalidatedObservation(
       input.watch,
       input.observedAt,
       "terminal_identity_changed"
     );
+  }
+  if (!input.rawTerminal || input.terminalIdentityMatch === "unavailable") {
+    return {
+      ...terminalWatchObservationFence(input.watch),
+      kind: "unavailable",
+      observed_at: input.observedAt,
+      reason_code: input.reasonCode ?? "terminal_identity_unavailable"
+    };
   }
   if (input.reasonCode) {
     return {
